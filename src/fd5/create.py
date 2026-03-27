@@ -82,11 +82,33 @@ class _HashTrackingGroup:
     def __setattr__(self, name: str, value: Any) -> None:
         setattr(self._group, name, value)
 
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._group[key] = value
+
     def __contains__(self, item: str) -> bool:
         return item in self._group
 
     def __getitem__(self, key: str) -> Any:
         return self._group[key]
+
+    def __iter__(self):
+        return iter(self._group)
+
+    def __len__(self) -> int:
+        return len(self._group)
+
+    def keys(self):  # noqa: D102 — delegates to h5py.Group
+        return self._group.keys()
+
+    def values(self):  # noqa: D102
+        return self._group.values()
+
+    def items(self):  # noqa: D102
+        return self._group.items()
+
+    def require_group(self, name: str) -> "_HashTrackingGroup":
+        grp = self._group.require_group(name)
+        return _HashTrackingGroup(grp, self._data_hash_cache, self._chunk_digest_cache)
 
 
 def _iter_chunks(
@@ -188,6 +210,25 @@ class Fd5Builder:
             "Unvalidated, vendor-specific, or experimental metadata"
         )
         dict_to_h5(grp, data)
+
+    def write_dataset(self, path: str, data: Any, **kwargs: Any) -> h5py.Dataset:
+        """Write a dataset with inline hash tracking.
+
+        Convenience for writing individual datasets outside of
+        ``ProductSchema.write()``.  The dataset data is hashed inline
+        for the Merkle tree.
+        """
+        tracking = _HashTrackingGroup(
+            self._file, self._data_hash_cache, self._chunk_digest_cache
+        )
+        parts = path.strip("/").split("/")
+        target = tracking
+        for part in parts[:-1]:
+            if part not in target:
+                target = target.create_group(part)
+            else:
+                target = target.require_group(part)
+        return target.create_dataset(parts[-1], data=data, **kwargs)
 
     def write_product(self, data: Any) -> None:
         """Delegate product-specific writes to the registered ProductSchema.

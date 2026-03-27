@@ -101,7 +101,12 @@ def out_dir(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-from fd5.create import Fd5Builder, Fd5ValidationError, create  # noqa: E402
+from fd5.create import (  # noqa: E402
+    Fd5Builder,
+    Fd5ValidationError,
+    _HashTrackingGroup,
+    create,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +793,174 @@ class TestInlineVsSecondPassHashIdentity:
             stored = f.attrs["content_hash"]
             second_pass = compute_content_hash(f, data_hash_cache=None)
             assert stored == second_pass
+
+
+# ---------------------------------------------------------------------------
+# write_dataset() convenience method
+# ---------------------------------------------------------------------------
+
+
+class TestWriteDataset:
+    def test_write_dataset_creates_dataset(self, out_dir: Path):
+        """write_dataset() creates datasets with inline hashing."""
+        with create(
+            out_dir,
+            product="test/product",
+            name="conv",
+            description="Test",
+            timestamp="2026-01-01T00:00:00Z",
+        ) as b:
+            b.write_product(np.arange(10, dtype=np.float32))
+            ds = b.write_dataset(
+                "extra_data",
+                data=np.ones((50, 50), dtype=np.float32),
+                chunks=(10, 10),
+            )
+            assert ds.shape == (50, 50)
+
+        files = list(out_dir.glob("*.h5"))
+        assert len(files) == 1
+        assert verify(str(files[0])) is True
+
+    def test_write_dataset_nested_path(self, out_dir: Path):
+        """write_dataset() creates intermediate groups for nested paths."""
+        with create(
+            out_dir,
+            product="test/product",
+            name="nested",
+            description="Test nested",
+            timestamp="2026-01-01T00:00:00Z",
+        ) as b:
+            b.write_product(np.arange(10, dtype=np.float32))
+            ds = b.write_dataset(
+                "group_a/group_b/values",
+                data=np.zeros((20,), dtype=np.float64),
+                chunks=(5,),
+            )
+            assert ds.shape == (20,)
+            assert "group_a" in b.file
+            assert "group_b" in b.file["group_a"]
+            assert "values" in b.file["group_a/group_b"]
+
+        files = list(out_dir.glob("*.h5"))
+        assert len(files) == 1
+        assert verify(str(files[0])) is True
+
+    def test_write_dataset_into_existing_group(self, out_dir: Path):
+        """write_dataset() reuses existing intermediate groups."""
+        with create(
+            out_dir,
+            product="test/product",
+            name="existing",
+            description="Test",
+            timestamp="2026-01-01T00:00:00Z",
+        ) as b:
+            b.write_product(np.arange(10, dtype=np.float32))
+            b.file.create_group("mygroup")
+            ds = b.write_dataset(
+                "mygroup/data",
+                data=np.array([1, 2, 3], dtype=np.int32),
+                chunks=(3,),
+            )
+            assert ds.shape == (3,)
+
+        files = list(out_dir.glob("*.h5"))
+        assert len(files) == 1
+        assert verify(str(files[0])) is True
+
+
+# ---------------------------------------------------------------------------
+# Full round-trip: create -> verify -> validate
+# ---------------------------------------------------------------------------
+
+
+class TestCreateVerifyValidateRoundtrip:
+    def test_create_verify_validate_roundtrip(self, out_dir: Path):
+        """Full round-trip: create -> verify -> validate."""
+        import fd5
+
+        with fd5.create(
+            out_dir,
+            product="test/product",
+            name="roundtrip",
+            description="Integration test",
+            timestamp="2026-01-01T00:00:00Z",
+        ) as b:
+            b.write_product(np.arange(100, dtype=np.float32))
+
+        files = list(out_dir.glob("*.h5"))
+        assert len(files) == 1
+        path = files[0]
+
+        # Verify integrity
+        assert fd5.verify(str(path))
+
+        # Validate schema
+        errors = fd5.validate(str(path))
+        assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# _HashTrackingGroup proxy methods
+# ---------------------------------------------------------------------------
+
+
+class TestHashTrackingGroupProxy:
+    def test_setitem(self, out_dir: Path):
+        with create(
+            out_dir,
+            product="test/product",
+            name="proxy",
+            description="Test",
+            timestamp="2026-01-01T00:00:00Z",
+        ) as b:
+            b.write_product(np.arange(10, dtype=np.float32))
+            tracking = _HashTrackingGroup(b.file, {}, {})
+            tracking["scalar_ds"] = np.float32(42.0)
+            assert "scalar_ds" in b.file
+
+    def test_iter_and_len(self, out_dir: Path):
+        with create(
+            out_dir,
+            product="test/product",
+            name="proxy",
+            description="Test",
+            timestamp="2026-01-01T00:00:00Z",
+        ) as b:
+            tracking = _HashTrackingGroup(b.file, {}, {})
+            initial_len = len(tracking)
+            tracking.create_group("test_g")
+            assert len(tracking) == initial_len + 1
+            assert "test_g" in list(tracking)
+
+    def test_keys_values_items(self, out_dir: Path):
+        with create(
+            out_dir,
+            product="test/product",
+            name="proxy",
+            description="Test",
+            timestamp="2026-01-01T00:00:00Z",
+        ) as b:
+            tracking = _HashTrackingGroup(b.file, {}, {})
+            tracking.create_group("grp1")
+            assert "grp1" in tracking.keys()
+            assert len(list(tracking.values())) > 0
+            assert len(list(tracking.items())) > 0
+
+    def test_require_group(self, out_dir: Path):
+        with create(
+            out_dir,
+            product="test/product",
+            name="proxy",
+            description="Test",
+            timestamp="2026-01-01T00:00:00Z",
+        ) as b:
+            tracking = _HashTrackingGroup(b.file, {}, {})
+            grp = tracking.require_group("new_grp")
+            assert isinstance(grp, _HashTrackingGroup)
+            # Calling again should return the same group, not raise
+            grp2 = tracking.require_group("new_grp")
+            assert isinstance(grp2, _HashTrackingGroup)
 
 
 # ---------------------------------------------------------------------------
