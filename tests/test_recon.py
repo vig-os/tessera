@@ -372,128 +372,146 @@ class TestWritePyramid:
 
 
 class TestWriteMIP:
+    def test_mips_group_created(self, schema, h5file):
+        data = _minimal_3d_data()
+        schema.write(h5file, data)
+        assert "mips" in h5file
+        assert isinstance(h5file["mips"], h5py.Group)
+
     def test_mip_coronal_created(self, schema, h5file):
         data = _minimal_3d_data()
         schema.write(h5file, data)
-        assert "mip_coronal" in h5file
+        assert "mips/coronal" in h5file
 
     def test_mip_sagittal_created(self, schema, h5file):
         data = _minimal_3d_data()
         schema.write(h5file, data)
-        assert "mip_sagittal" in h5file
+        assert "mips/sagittal" in h5file
 
-    def test_mip_coronal_shape(self, schema, h5file):
+    def test_mip_axial_created(self, schema, h5file):
         data = _minimal_3d_data()
         schema.write(h5file, data)
-        ds = h5file["mip_coronal"]
-        assert ds.shape == (16, 32)
+        assert "mips/axial" in h5file
 
-    def test_mip_sagittal_shape(self, schema, h5file):
+    def test_mip_coronal_shape_3d(self, schema, h5file):
         data = _minimal_3d_data()
         schema.write(h5file, data)
-        ds = h5file["mip_sagittal"]
+        ds = h5file["mips/coronal"]
+        # 3D (16, 32, 32) → coronal collapses Y (axis 1) → (16, 32)
         assert ds.shape == (16, 32)
+
+    def test_mip_sagittal_shape_3d(self, schema, h5file):
+        data = _minimal_3d_data()
+        schema.write(h5file, data)
+        ds = h5file["mips/sagittal"]
+        # 3D (16, 32, 32) → sagittal collapses X (axis 2) → (16, 32)
+        assert ds.shape == (16, 32)
+
+    def test_mip_axial_shape_3d(self, schema, h5file):
+        data = _minimal_3d_data()
+        schema.write(h5file, data)
+        ds = h5file["mips/axial"]
+        # 3D (16, 32, 32) → axial collapses Z (axis 0) → (32, 32)
+        assert ds.shape == (32, 32)
 
     def test_mip_coronal_attrs(self, schema, h5file):
         data = _minimal_3d_data()
         schema.write(h5file, data)
-        ds = h5file["mip_coronal"]
+        ds = h5file["mips/coronal"]
         assert ds.attrs["projection_type"] == "mip"
-        assert ds.attrs["axis"] == 1
         assert "description" in ds.attrs
 
     def test_mip_sagittal_attrs(self, schema, h5file):
         data = _minimal_3d_data()
         schema.write(h5file, data)
-        ds = h5file["mip_sagittal"]
+        ds = h5file["mips/sagittal"]
         assert ds.attrs["projection_type"] == "mip"
-        assert ds.attrs["axis"] == 2
+        assert "description" in ds.attrs
+
+    def test_mip_axial_attrs(self, schema, h5file):
+        data = _minimal_3d_data()
+        schema.write(h5file, data)
+        ds = h5file["mips/axial"]
+        assert ds.attrs["projection_type"] == "mip"
         assert "description" in ds.attrs
 
     def test_mip_dtype_float32(self, schema, h5file):
         data = _minimal_3d_data()
         schema.write(h5file, data)
-        assert h5file["mip_coronal"].dtype == np.float32
-        assert h5file["mip_sagittal"].dtype == np.float32
+        assert h5file["mips/coronal"].dtype == np.float32
+        assert h5file["mips/sagittal"].dtype == np.float32
+        assert h5file["mips/axial"].dtype == np.float32
 
-    def test_mip_4d_uses_summed_volume(self, schema, h5file):
-        data = _minimal_4d_data()
+    def test_mip_3d_coronal_values(self, schema, h5file):
+        data = _minimal_3d_data()
         schema.write(h5file, data)
         vol = data["volume"]
-        summed = vol.sum(axis=0)
-        expected_coronal = summed.max(axis=1)
-        np.testing.assert_array_almost_equal(h5file["mip_coronal"][:], expected_coronal)
+        expected = vol.max(axis=1).astype(np.float32)
+        np.testing.assert_array_almost_equal(h5file["mips/coronal"][:], expected)
+
+    def test_mip_3d_axial_values(self, schema, h5file):
+        data = _minimal_3d_data()
+        schema.write(h5file, data)
+        vol = data["volume"]
+        expected = vol.max(axis=0).astype(np.float32)
+        np.testing.assert_array_almost_equal(h5file["mips/axial"][:], expected)
 
 
 # ---------------------------------------------------------------------------
-# write() — mips_per_frame (optional, 4D+ only)
+# write() — MIP N-D arrays for 4D+ data
 # ---------------------------------------------------------------------------
 
 
-class TestWriteMipsPerFrame:
-    def test_mips_per_frame_created_for_4d(self, schema, h5file):
+class TestWriteMIP4D:
+    def test_mip_4d_coronal_shape(self, schema, h5file):
         data = _minimal_4d_data()
-        data["mips_per_frame"] = True
         schema.write(h5file, data)
-        assert "mips_per_frame" in h5file
-        assert isinstance(h5file["mips_per_frame"], h5py.Group)
-
-    def test_mips_per_frame_coronal_shape(self, schema, h5file):
-        data = _minimal_4d_data()
-        data["mips_per_frame"] = True
-        schema.write(h5file, data)
-        ds = h5file["mips_per_frame/coronal"]
+        ds = h5file["mips/coronal"]
         n_frames, z, y, x = data["volume"].shape
+        # 4D: coronal collapses Y (axis 2) → (T, Z, X)
         assert ds.shape == (n_frames, z, x)
         assert ds.dtype == np.float32
 
-    def test_mips_per_frame_sagittal_shape(self, schema, h5file):
+    def test_mip_4d_sagittal_shape(self, schema, h5file):
         data = _minimal_4d_data()
-        data["mips_per_frame"] = True
         schema.write(h5file, data)
-        ds = h5file["mips_per_frame/sagittal"]
+        ds = h5file["mips/sagittal"]
         n_frames, z, y, x = data["volume"].shape
+        # 4D: sagittal collapses X (axis 3) → (T, Z, Y)
         assert ds.shape == (n_frames, z, y)
         assert ds.dtype == np.float32
 
-    def test_mips_per_frame_coronal_attrs(self, schema, h5file):
-        data = _minimal_4d_data()
-        data["mips_per_frame"] = True
-        schema.write(h5file, data)
-        ds = h5file["mips_per_frame/coronal"]
-        assert ds.attrs["projection_type"] == "mip"
-        assert ds.attrs["axis"] == 1
-        assert ds.attrs["description"] == "Per-frame coronal MIPs"
-
-    def test_mips_per_frame_sagittal_attrs(self, schema, h5file):
-        data = _minimal_4d_data()
-        data["mips_per_frame"] = True
-        schema.write(h5file, data)
-        ds = h5file["mips_per_frame/sagittal"]
-        assert ds.attrs["projection_type"] == "mip"
-        assert ds.attrs["axis"] == 2
-        assert ds.attrs["description"] == "Per-frame sagittal MIPs"
-
-    def test_mips_per_frame_not_created_for_3d(self, schema, h5file):
-        data = _minimal_3d_data()
-        data["mips_per_frame"] = True
-        schema.write(h5file, data)
-        assert "mips_per_frame" not in h5file
-
-    def test_mips_per_frame_absent_when_not_requested(self, schema, h5file):
+    def test_mip_4d_axial_shape(self, schema, h5file):
         data = _minimal_4d_data()
         schema.write(h5file, data)
-        assert "mips_per_frame" not in h5file
+        ds = h5file["mips/axial"]
+        n_frames, z, y, x = data["volume"].shape
+        # 4D: axial collapses Z (axis 1) → (T, Y, X)
+        assert ds.shape == (n_frames, y, x)
+        assert ds.dtype == np.float32
 
-    def test_mips_per_frame_values_match_manual(self, schema, h5file):
+    def test_mip_4d_coronal_values(self, schema, h5file):
         data = _minimal_4d_data()
-        data["mips_per_frame"] = True
         schema.write(h5file, data)
         vol = data["volume"]
+        # Coronal = max along Y (axis 2)
+        expected = vol.max(axis=2).astype(np.float32)
+        np.testing.assert_array_almost_equal(h5file["mips/coronal"][:], expected)
+
+    def test_mip_4d_per_frame_coronal_matches(self, schema, h5file):
+        data = _minimal_4d_data()
+        schema.write(h5file, data)
+        vol = data["volume"]
+        # Frame 0 coronal should match vol[0].max(axis=1)
         expected_cor_0 = vol[0].max(axis=1).astype(np.float32)
-        np.testing.assert_array_almost_equal(
-            h5file["mips_per_frame/coronal"][0], expected_cor_0
-        )
+        np.testing.assert_array_almost_equal(h5file["mips/coronal"][0], expected_cor_0)
+
+    def test_mip_4d_axial_values(self, schema, h5file):
+        data = _minimal_4d_data()
+        schema.write(h5file, data)
+        vol = data["volume"]
+        expected = vol.max(axis=1).astype(np.float32)
+        np.testing.assert_array_almost_equal(h5file["mips/axial"][:], expected)
 
 
 # ---------------------------------------------------------------------------
@@ -779,9 +797,9 @@ class TestWriteProvenance:
 
 
 class TestJsonSchemaOptionalProperties:
-    def test_has_mips_per_frame_property(self, schema):
+    def test_has_mips_property(self, schema):
         result = schema.json_schema()
-        assert "mips_per_frame" in result["properties"]
+        assert "mips" in result["properties"]
 
     def test_has_frames_property(self, schema):
         result = schema.json_schema()
@@ -798,7 +816,7 @@ class TestJsonSchemaOptionalProperties:
     def test_optional_properties_not_required(self, schema):
         result = schema.json_schema()
         required = result.get("required", [])
-        for prop in ("mips_per_frame", "frames", "device_data", "provenance"):
+        for prop in ("mips", "frames", "device_data", "provenance"):
             assert prop not in required
 
 

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "_schema_version": {
+      "type": "integer"
+    },
+    "product": {
+      "type": "string",
+      "const": "device_data"
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "domain": {
+      "type": "string"
+    },
+    "device_type": {
+      "type": "string",
+      "enum": [
+        "blood_sampler",
+        "environmental_sensor",
+        "infusion_pump",
+        "motion_tracker",
+        "physiological_monitor"
+      ]
+    },
+    "device_model": {
+      "type": "string"
+    },
+    "recording_start": {
+      "type": "string"
+    },
+    "recording_duration": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "number"
+        },
+        "units": {
+          "type": "string",
+          "const": "s"
+        },
+        "unitSI": {
+          "type": "number"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "channels": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "_schema_version",
+    "product",
+    "name",
+    "description",
+    "device_type",
+    "device_model",
+    "recording_start"
+  ]
+}

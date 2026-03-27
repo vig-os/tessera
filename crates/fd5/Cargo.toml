@@ -1,0 +1,17 @@
+[package]
+name = "fd5"
+version = "0.1.0"
+edition = "2021"
+description = "Rust implementation of fd5 Merkle-tree hashing, verification, and editing"
+license = "Apache-2.0"
+
+[dependencies]
+hdf5-metno = { workspace = true }
+hdf5-metno-sys = "0.10.1"
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

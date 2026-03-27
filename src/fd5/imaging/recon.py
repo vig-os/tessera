@@ -20,7 +20,7 @@ from typing import Any
 import h5py
 import numpy as np
 
-_SCHEMA_VERSION = "1.0.0"
+_SCHEMA_VERSION = "1.1.0"
 
 _GZIP_LEVEL = 4
 
@@ -47,9 +47,9 @@ class ReconSchema:
                     "type": "object",
                     "description": "Root-level volume dataset (represented as attrs in h5_to_dict)",
                 },
-                "mips_per_frame": {
+                "mips": {
                     "type": "object",
-                    "description": "Per-frame MIP projections for dynamic (4D+) data",
+                    "description": "MIP projections (coronal, sagittal, axial); N-D for dynamic data",
                 },
                 "frames": {
                     "type": "object",
@@ -106,10 +106,7 @@ class ReconSchema:
         if "pyramid" in data:
             self._write_pyramid(target, spatial_vol, data)
 
-        self._write_mips(target, spatial_vol)
-
-        if data.get("mips_per_frame") and volume.ndim >= 4:
-            self._write_mips_per_frame(target, volume)
+        self._write_mips(target, volume)
 
         if "device_data" in data:
             self._write_device_data(target, data["device_data"])
@@ -260,58 +257,45 @@ class ReconSchema:
             ds.attrs["description"] = f"{factor}x downsampled volume"
 
     # ------------------------------------------------------------------
-    # MIP projections
+    # MIP projections (nested under /mips/ group)
     # ------------------------------------------------------------------
 
     def _write_mips(
         self,
         target: h5py.File | h5py.Group,
-        spatial_vol: np.ndarray,
-    ) -> None:
-        mip_cor = spatial_vol.max(axis=1).astype(np.float32)
-        ds_cor = target.create_dataset("mip_coronal", data=mip_cor)
-        ds_cor.attrs["projection_type"] = "mip"
-        ds_cor.attrs["axis"] = np.int64(1)
-        ds_cor.attrs["description"] = "Coronal MIP (summed over all frames if dynamic)"
-
-        mip_sag = spatial_vol.max(axis=2).astype(np.float32)
-        ds_sag = target.create_dataset("mip_sagittal", data=mip_sag)
-        ds_sag.attrs["projection_type"] = "mip"
-        ds_sag.attrs["axis"] = np.int64(2)
-        ds_sag.attrs["description"] = "Sagittal MIP (summed over all frames if dynamic)"
-
-    # ------------------------------------------------------------------
-    # Per-frame MIPs (optional, 4D+ only)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _write_mips_per_frame(
-        target: h5py.File | h5py.Group,
         volume: np.ndarray,
     ) -> None:
-        n_frames = volume.shape[0]
-        z, y, x = volume.shape[-3], volume.shape[-2], volume.shape[-1]
+        """Write MIP projections under ``/mips/`` group.
 
-        cor_stack = np.empty((n_frames, z, x), dtype=np.float32)
-        sag_stack = np.empty((n_frames, z, y), dtype=np.float32)
-        for i in range(n_frames):
-            frame_3d = volume[i]
-            while frame_3d.ndim > 3:
-                frame_3d = frame_3d.sum(axis=0)
-            cor_stack[i] = frame_3d.max(axis=1).astype(np.float32)
-            sag_stack[i] = frame_3d.max(axis=2).astype(np.float32)
+        For 3D volumes, MIPs are 2D arrays. For 4D+ volumes, MIPs are
+        N-D arrays preserving all leading (non-spatial) dimensions.
+        Spatial axes are assumed to be the last three dimensions (Z, Y, X).
+        """
+        ndim = volume.ndim
+        grp = target.create_group("mips")
 
-        grp = target.create_group("mips_per_frame")
+        # Spatial axis indices (last 3 dims)
+        ax_z = ndim - 3  # axial collapses Z
+        ax_y = ndim - 2  # coronal collapses Y
+        ax_x = ndim - 1  # sagittal collapses X
 
-        ds_cor = grp.create_dataset("coronal", data=cor_stack)
+        mip_cor = volume.max(axis=ax_y).astype(np.float32)
+        ds_cor = grp.create_dataset("coronal", data=mip_cor)
         ds_cor.attrs["projection_type"] = "mip"
-        ds_cor.attrs["axis"] = np.int64(1)
-        ds_cor.attrs["description"] = "Per-frame coronal MIPs"
+        ds_cor.attrs["axis"] = np.int64(ax_y)
+        ds_cor.attrs["description"] = "Coronal MIP (max along Y)"
 
-        ds_sag = grp.create_dataset("sagittal", data=sag_stack)
+        mip_sag = volume.max(axis=ax_x).astype(np.float32)
+        ds_sag = grp.create_dataset("sagittal", data=mip_sag)
         ds_sag.attrs["projection_type"] = "mip"
-        ds_sag.attrs["axis"] = np.int64(2)
-        ds_sag.attrs["description"] = "Per-frame sagittal MIPs"
+        ds_sag.attrs["axis"] = np.int64(ax_x)
+        ds_sag.attrs["description"] = "Sagittal MIP (max along X)"
+
+        mip_ax = volume.max(axis=ax_z).astype(np.float32)
+        ds_ax = grp.create_dataset("axial", data=mip_ax)
+        ds_ax.attrs["projection_type"] = "mip"
+        ds_ax.attrs["axis"] = np.int64(ax_z)
+        ds_ax.attrs["description"] = "Axial MIP (max along Z)"
 
     # ------------------------------------------------------------------
     # Embedded device_data (optional, NXlog pattern)

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "_schema_version": {
+      "type": "integer"
+    },
+    "product": {
+      "type": "string",
+      "const": "listmode"
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "domain": {
+      "type": "string"
+    },
+    "mode": {
+      "type": "string"
+    },
+    "table_pos": {
+      "type": "object",
+      "description": "Table position with units"
+    },
+    "duration": {
+      "type": "object",
+      "description": "Acquisition duration with units"
+    },
+    "z_min": {
+      "type": "object",
+      "description": "Axial FOV minimum with units"
+    },
+    "z_max": {
+      "type": "object",
+      "description": "Axial FOV maximum with units"
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "daq": {
+          "type": "object",
+          "description": "Data acquisition system parameters"
+        }
+      }
+    },
+    "raw_data": {
+      "type": "object",
+      "description": "Raw detector event datasets (compound)"
+    },
+    "proc_data": {
+      "type": "object",
+      "description": "Processed event datasets (compound)"
+    },
+    "device_data": {
+      "type": "object",
+      "description": "Embedded device streams (ECG, bellows) following NXlog pattern"
+    }
+  },
+  "required": [
+    "_schema_version",
+    "product",
+    "name",
+    "description"
+  ]
+}

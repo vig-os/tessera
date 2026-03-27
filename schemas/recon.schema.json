@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "_schema_version": {
+      "type": "integer"
+    },
+    "product": {
+      "type": "string",
+      "const": "recon"
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "domain": {
+      "type": "string"
+    },
+    "volume": {
+      "type": "object",
+      "description": "Root-level volume dataset (represented as attrs in h5_to_dict)"
+    },
+    "mips": {
+      "type": "object",
+      "description": "MIP projections (coronal, sagittal, axial); N-D for dynamic data"
+    },
+    "frames": {
+      "type": "object",
+      "description": "Frame timing, gating phase, and trigger data for 4D+ volumes"
+    },
+    "device_data": {
+      "type": "object",
+      "description": "Embedded device streams (ECG, bellows) following NXlog pattern"
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Original file provenance, DICOM header, per-slice metadata"
+    }
+  },
+  "required": [
+    "_schema_version",
+    "product",
+    "name",
+    "description"
+  ]
+}

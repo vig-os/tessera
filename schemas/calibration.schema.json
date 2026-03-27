@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "_schema_version": {
+      "type": "integer"
+    },
+    "product": {
+      "type": "string",
+      "const": "calibration"
+    },
+    "calibration_type": {
+      "type": "string",
+      "enum": [
+        "cross_calibration",
+        "crystal_map",
+        "dead_time",
+        "energy_calibration",
+        "gain_map",
+        "normalization",
+        "sensitivity",
+        "timing_calibration"
+      ]
+    },
+    "scanner_model": {
+      "type": "string"
+    },
+    "scanner_serial": {
+      "type": "string"
+    },
+    "valid_from": {
+      "type": "string"
+    },
+    "valid_until": {
+      "type": "string"
+    },
+    "default": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "domain": {
+      "type": "string"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Calibration metadata including type-specific parameters and conditions"
+    },
+    "data": {
+      "type": "object",
+      "description": "Calibration datasets \u2014 structure depends on calibration_type"
+    }
+  },
+  "required": [
+    "_schema_version",
+    "product",
+    "calibration_type",
+    "scanner_model",
+    "scanner_serial",
+    "valid_from",
+    "valid_until"
+  ]
+}

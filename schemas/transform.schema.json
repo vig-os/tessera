@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "_schema_version": {
+      "type": "integer"
+    },
+    "product": {
+      "type": "string",
+      "const": "transform"
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "transform_type": {
+      "type": "string",
+      "enum": [
+        "affine",
+        "bspline",
+        "deformable",
+        "rigid"
+      ]
+    },
+    "direction": {
+      "type": "string",
+      "enum": [
+        "source_to_target",
+        "target_to_source"
+      ]
+    }
+  },
+  "required": [
+    "_schema_version",
+    "product",
+    "name",
+    "description",
+    "transform_type",
+    "direction"
+  ]
+}

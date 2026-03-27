@@ -1,0 +1,120 @@
+{
+  "calibration": {
+    "id_inputs": [
+      "calibration_type",
+      "scanner_model",
+      "scanner_serial",
+      "valid_from"
+    ],
+    "required_root_attrs": {
+      "domain": "medical_imaging",
+      "product": "calibration"
+    },
+    "schema_file": "calibration.schema.json",
+    "schema_version": "1.0.0"
+  },
+  "device_data": {
+    "id_inputs": [
+      "timestamp",
+      "scanner",
+      "device_type"
+    ],
+    "required_root_attrs": {
+      "domain": "medical_imaging",
+      "product": "device_data"
+    },
+    "schema_file": "device_data.schema.json",
+    "schema_version": "1.0.0"
+  },
+  "listmode": {
+    "id_inputs": [
+      "timestamp",
+      "scanner",
+      "vendor_series_id"
+    ],
+    "required_root_attrs": {
+      "domain": "medical_imaging",
+      "product": "listmode"
+    },
+    "schema_file": "listmode.schema.json",
+    "schema_version": "1.0.0"
+  },
+  "recon": {
+    "id_inputs": [
+      "timestamp",
+      "scanner",
+      "vendor_series_id"
+    ],
+    "required_root_attrs": {
+      "domain": "medical_imaging",
+      "product": "recon"
+    },
+    "schema_file": "recon.schema.json",
+    "schema_version": "1.1.0"
+  },
+  "roi": {
+    "id_inputs": [
+      "timestamp",
+      "scanner",
+      "vendor_series_id"
+    ],
+    "required_root_attrs": {
+      "domain": "medical_imaging",
+      "product": "roi"
+    },
+    "schema_file": "roi.schema.json",
+    "schema_version": "1.0.0"
+  },
+  "sim": {
+    "id_inputs": [
+      "simulator",
+      "phantom",
+      "random_seed"
+    ],
+    "required_root_attrs": {
+      "domain": "medical_imaging",
+      "product": "sim"
+    },
+    "schema_file": "sim.schema.json",
+    "schema_version": "1.0.0"
+  },
+  "sinogram": {
+    "id_inputs": [
+      "timestamp",
+      "scanner",
+      "vendor_series_id"
+    ],
+    "required_root_attrs": {
+      "domain": "medical_imaging",
+      "product": "sinogram"
+    },
+    "schema_file": "sinogram.schema.json",
+    "schema_version": "1.0.0"
+  },
+  "spectrum": {
+    "id_inputs": [
+      "timestamp",
+      "scanner",
+      "measurement_id"
+    ],
+    "required_root_attrs": {
+      "domain": "medical_imaging",
+      "product": "spectrum"
+    },
+    "schema_file": "spectrum.schema.json",
+    "schema_version": "1.0.0"
+  },
+  "transform": {
+    "id_inputs": [
+      "timestamp",
+      "source_image_id",
+      "target_image_id"
+    ],
+    "required_root_attrs": {
+      "domain": "medical_imaging",
+      "product": "transform"
+    },
+    "schema_file": "transform.schema.json",
+    "schema_version": "1.0.0"
+  }
+}

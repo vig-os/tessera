@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "_schema_version": {
+      "type": "integer"
+    },
+    "product": {
+      "type": "string",
+      "const": "sim"
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "domain": {
+      "type": "string"
+    },
+    "ground_truth": {
+      "type": "object",
+      "description": "Ground truth distributions (activity, attenuation)"
+    }
+  },
+  "required": [
+    "_schema_version",
+    "product",
+    "name",
+    "description"
+  ]
+}

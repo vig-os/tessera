@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "_schema_version": {
+      "type": "integer"
+    },
+    "product": {
+      "type": "string",
+      "const": "sinogram"
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "domain": {
+      "type": "string"
+    },
+    "n_radial": {
+      "type": "integer"
+    },
+    "n_angular": {
+      "type": "integer"
+    },
+    "n_planes": {
+      "type": "integer"
+    },
+    "span": {
+      "type": "integer"
+    },
+    "max_ring_diff": {
+      "type": "integer"
+    },
+    "tof_bins": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "_schema_version",
+    "product",
+    "name",
+    "description",
+    "n_radial",
+    "n_angular",
+    "n_planes",
+    "span",
+    "max_ring_diff",
+    "tof_bins"
+  ]
+}

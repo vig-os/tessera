@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/fd5"]
+resolver = "2"
+
+[workspace.dependencies]
+hdf5-metno = { version = "0.11.0", features = ["blosc-all", "lzf", "static", "zlib"] }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
