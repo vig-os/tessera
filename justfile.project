@@ -58,14 +58,38 @@ bench-one name:
     uv run python -m benchmarks.bench_{{ name }}
 
 # ===============================================================================
-# PROJECT-SPECIFIC RECIPES
+# EXAMPLES — try fd5 in any language
 # ===============================================================================
-# Uncomment and customize for your project:
-# # Run the application
-# [group('app')]
-# run *args:
-#     uv run python -m {{project}} {{args}}
-# # Run database migrations (if using sidecar)
-# [group('app')]
-# migrate:
-#     just sidecar postgres migrate
+
+# Run the Python example (create + verify a sealed fd5 file)
+[group('examples')]
+try-python:
+    uv run python examples/python/create_fd5.py
+
+# Run the Rust example (create + verify a sealed fd5 file)
+[group('examples')]
+try-rust:
+    cargo run --manifest-path examples/rust/Cargo.toml
+
+# Build and run the C example (create + verify a sealed fd5 file)
+[group('examples')]
+try-c:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p examples/c/build
+    cd examples/c/build
+    cmake .. -DCMAKE_BUILD_TYPE=Release
+    make --no-print-directory
+    ./create_fd5
+
+# Run all 3 language examples
+[group('examples')]
+try-all:
+    @echo "=== Python ==="
+    just try-python
+    @echo ""
+    @echo "=== Rust ==="
+    just try-rust
+    @echo ""
+    @echo "=== C ==="
+    just try-c

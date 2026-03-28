@@ -30,4 +30,10 @@
 #   volumes:
 #     postgres-data:
 
-services: {}
+services:
+  devcontainer:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Containerfile.fd5
+      args:
+        DEVCONTAINER_VERSION: ${DEVCONTAINER_VERSION:-latest}

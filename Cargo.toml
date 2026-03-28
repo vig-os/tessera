@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/fd5"]
+members = ["crates/fd5", "examples/rust"]
 resolver = "2"
 
 [workspace.dependencies]

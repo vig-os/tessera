@@ -1,0 +1,9 @@
+[package]
+name = "fd5-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fd5 = { path = "../../crates/fd5" }
+hdf5-metno = { version = "0.11.0", features = ["blosc-all", "lzf", "static", "zlib"] }
+serde_json = "1.0"
