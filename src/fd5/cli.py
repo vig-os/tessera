@@ -494,6 +494,64 @@ def ingest_parquet(
 
 
 # ---------------------------------------------------------------------------
+# fd5 export — subcommand group
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def export() -> None:
+    """Export fd5 files to standard formats."""
+
+
+@export.command("nifti")
+@click.argument("fd5_file", type=click.Path(exists=True))
+@click.option("-o", "--output", required=True, type=click.Path())
+@click.option("--dataset", default="volume", help="Dataset path to export.")
+def export_nifti_cmd(fd5_file: str, output: str, dataset: str) -> None:
+    """Export volume data to NIfTI (.nii.gz)."""
+    from fd5.export.nifti import export_nifti
+
+    try:
+        path = export_nifti(fd5_file, output, dataset=dataset)
+        click.echo(f"Exported: {path}")
+    except (ImportError, KeyError, ValueError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@export.command("csv")
+@click.argument("fd5_file", type=click.Path(exists=True))
+@click.option("-o", "--output", required=True, type=click.Path())
+@click.option("--group", default=None, help="HDF5 group path to export from.")
+def export_csv_cmd(fd5_file: str, output: str, group: str | None) -> None:
+    """Export tabular/timeseries/spectrum data to CSV."""
+    from fd5.export.csv import export_csv
+
+    try:
+        path = export_csv(fd5_file, output, group=group)
+        click.echo(f"Exported: {path}")
+    except (KeyError, ValueError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@export.command("parquet")
+@click.argument("fd5_file", type=click.Path(exists=True))
+@click.option("-o", "--output", required=True, type=click.Path())
+@click.option("--group", default=None, help="HDF5 group path to export from.")
+def export_parquet_cmd(fd5_file: str, output: str, group: str | None) -> None:
+    """Export tabular/timeseries data to Parquet."""
+    from fd5.export.parquet import export_parquet
+
+    try:
+        path = export_parquet(fd5_file, output, group=group)
+        click.echo(f"Exported: {path}")
+    except (ImportError, KeyError, ValueError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
