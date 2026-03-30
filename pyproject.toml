@@ -40,8 +40,12 @@ nifti = [
 parquet = [
     "pyarrow>=14.0",
 ]
+export = [
+    "nibabel>=4.0",
+    "pyarrow>=14.0",
+]
 all = [
-    "fd5[dev,science,dicom,nifti,parquet]",
+    "fd5[dev,science,dicom,nifti,parquet,export]",
 ]
 
 [build-system]
