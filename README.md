@@ -1,152 +1,205 @@
 # fd5 — FAIR Data on HDF5
 
-`fd5` is a self-describing, FAIR-principled data format for scientific data products built on HDF5. It defines conventions for storing N-dimensional arrays, tabular event data, time series, histograms, and arbitrary scientific measurements alongside their full metadata, provenance, and schema — all inside a single, immutable HDF5 file per data product.
+`fd5` is a self-describing, FAIR-principled data format for scientific data products
+built on HDF5. Each file is sealed with a Merkle-tree content hash at creation time,
+making it immutable and verifiable. The format is **domain-agnostic**: core conventions
+(schema, provenance, units, hashing) apply to any scientific domain. Domain-specific
+**product schemas** are layered on top.
 
-The format is **domain-agnostic by design**: the core conventions (schema, provenance DAG, units, hashing, metadata structure) apply to any domain that produces immutable data products. Domain-specific **product schemas** are layered on top.
+Implementations exist for **Python** (reference), **Rust**, and **C/C++**.
 
-See [`white-paper.md`](white-paper.md) for the full specification.
+## Quick start
 
-## Features
-
-- **Self-describing files** — embedded JSON Schema, `description` attributes on every group/dataset, units convention (`@units` / `@unitSI`) for AI and human readability
-- **Immutable, write-once** — files are sealed with a Merkle-tree content hash at creation time; integrity is verifiable at any point
-- **FAIR compliance** — persistent identifiers, structured metadata, open format, full provenance chain
-- **Context-manager API** — `fd5.create()` orchestrates file creation, schema embedding, hashing, and atomic rename in one call
-- **Product schema registry** — extensible via Python entry points (`fd5.schemas` group); ships with `recon` (reconstructed image volumes)
-- **Lossless dict ↔ HDF5 round-trip** — `dict_to_h5` / `h5_to_dict` for nested metadata
-- **Physical units helpers** — `write_quantity` / `read_quantity` and `set_dataset_units` following NeXus/OpenPMD conventions
-- **Provenance tracking** — `sources/` group with external links, `provenance/original_files` compound dataset, ingest metadata
-- **TOML manifest** — scan a directory of `.h5` files and generate a `manifest.toml` index
-- **Deterministic filenames** — `YYYY-MM-DD_HH-MM-SS_<product>-<id8>.h5`
-- **CLI toolkit** — `fd5 validate`, `fd5 info`, `fd5 schema-dump`, `fd5 manifest`
-
-## Installation
+### 1. Install
 
 ```bash
-pip install fd5
+# from source (PyPI publishing coming soon)
+git clone https://github.com/vig-os/fd5.git && cd fd5
+pip install -e "."
+
+# with optional extras
+pip install -e ".[science,nifti,dicom,parquet]"
 ```
 
-With optional scientific extras:
-
-```bash
-pip install "fd5[science]"
-```
-
-For development:
-
-```bash
-pip install "fd5[dev]"
-```
-
-## Quickstart
-
-### Python API
+### 2. Create a sealed file
 
 ```python
 import numpy as np
-from fd5.create import create
+import fd5
 
-with create(
+with fd5.create(
     "output/",
-    product="recon",
-    name="patient-001-brain-pet",
-    description="FDG-PET brain reconstruction",
-    timestamp="2025-06-15T10:30:00+00:00",
-) as builder:
-    # Write product-specific data
-    builder.write_product({
-        "volume": np.random.rand(128, 128, 128).astype(np.float32),
-        "affine": np.eye(4),
-        "dimension_order": "ZYX",
-        "reference_frame": "LPS",
-        "description": "Reconstructed PET volume",
+    product="timeseries",
+    name="sensor-log-001",
+    description="Temperature and humidity readings from lab sensor",
+    timestamp="2026-03-30T10:00:00Z",
+) as b:
+    b.write_product({
+        "signals": {
+            "temperature": np.array([22.1, 22.3, 22.5, 22.2]),
+            "humidity": np.array([45.0, 44.8, 44.5, 45.2]),
+        },
+        "time": np.array([0.0, 60.0, 120.0, 180.0]),
+        "sampling_rate": 1/60,
+        "description": "Lab environment monitoring",
     })
-
-    # Write metadata, provenance, study info
-    builder.write_metadata({"scanner": "Siemens Biograph", "tracer": "FDG"})
-    builder.write_provenance(
-        original_files=[{"path": "raw/pet.dcm", "sha256": "abc...", "size_bytes": 1024}],
-        ingest_tool="my-pipeline",
-        ingest_version="1.0.0",
-        ingest_timestamp="2025-06-15T10:30:00+00:00",
-    )
-
-# File is automatically sealed: schema embedded, content_hash computed, renamed
 ```
 
-### CLI
+The file is now sealed — schema embedded, content hash computed, atomically renamed.
+
+### 3. Verify and inspect
 
 ```bash
-# Validate schema + integrity
-fd5 validate output/2025-06-15_10-30-00_recon-a1b2c3d4.h5
-
-# Print root attributes and dataset shapes
-fd5 info output/2025-06-15_10-30-00_recon-a1b2c3d4.h5
-
-# Extract embedded JSON Schema
-fd5 schema-dump output/2025-06-15_10-30-00_recon-a1b2c3d4.h5
-
-# Generate manifest.toml for a directory of fd5 files
-fd5 manifest output/
+fd5 validate output/*.h5      # schema + integrity check
+fd5 info output/*.h5           # print root attrs and dataset shapes
+fd5 schema-dump output/*.h5    # extract embedded JSON Schema
 ```
 
-## Architecture
+### 4. Export back to standard formats
 
-The architecture is defined in the [white paper](white-paper.md). Key design decisions:
+```bash
+fd5 export csv output/*.h5 -o data.csv
+fd5 export parquet output/*.h5 -o data.parquet
+fd5 export nifti output/*.h5 -o volume.nii.gz   # for volume data
+```
 
-- **HDF5 is the single source of truth** — all other representations (TOML, YAML, JSON-LD) are derived dumps
-- **One file = one data product** — each gets its own sealed `.h5` file
-- **`_type` + `_version`** for forward-compatible extensibility
-- **Merkle-tree hashing** for file-level integrity verification
-- **Entry-point registry** for pluggable product schemas
+### 5. Try all 3 languages (inside the devcontainer)
 
-### Module layout
+```bash
+just try-python    # Python — uses uv
+just try-rust      # Rust   — uses cargo
+just try-c         # C      — uses cmake
+just try-all       # all 3
+```
+
+See [`examples/`](examples/) for complete working examples in each language.
+
+## Product schemas
+
+fd5 ships with 12 product schemas. Use the one that fits your data:
+
+| Schema | Domain | Use case |
+|--------|--------|----------|
+| `timeseries` | Generic | Sensor streams, IoT, physiological monitoring |
+| `tabular` | Generic | Lab measurements, parameter tables, clinical records |
+| `ndarray` | Generic | Arbitrary N-D arrays, simulation grids, image stacks |
+| `recon` | Imaging | Reconstructed 3D/4D/5D volumes (PET, CT, MRI) |
+| `listmode` | Imaging | Detector event tables |
+| `sinogram` | Imaging | Projection / Radon data |
+| `spectrum` | Imaging | Energy/lifetime histograms |
+| `transform` | Imaging | Spatial transforms, registrations |
+| `calibration` | Imaging | Gain maps, LUTs, normalization |
+| `roi` | Imaging | Segmentations, masks, contours |
+| `device_data` | Imaging | Embedded sensor streams (ECG, bellows) |
+| `sim` | Imaging | Monte Carlo simulation output |
+
+Need a schema for your domain? See the
+[custom schema tutorial](docs/tutorials/custom-schema.md).
+
+## Ingest from existing formats
+
+```bash
+fd5 ingest csv    data.csv     -o output/ --product tabular --name my-data
+fd5 ingest nifti  brain.nii.gz -o output/ --product recon   --name scan-001
+fd5 ingest dicom  series_dir/  -o output/ --name patient-001
+fd5 ingest parquet events.pq   -o output/ --product tabular --name events
+fd5 ingest raw    blob.bin     -o output/ --product ndarray --name raw-001 \
+    --shape 128,128,64 --dtype float32
+```
+
+## CLI reference
 
 ```
-src/fd5/
-├── __init__.py          # Package root
-├── create.py            # fd5.create() builder / context manager
-├── h5io.py              # dict ↔ HDF5 round-trip helpers
-├── hash.py              # Merkle tree hashing, id computation, verify()
-├── units.py             # Physical units convention helpers
-├── schema.py            # JSON Schema embed / validate / dump / generate
-├── registry.py          # Product schema registry (entry-point discovery)
-├── provenance.py        # sources/ and provenance/ group writers
-├── manifest.py          # TOML manifest generation and parsing
-├── naming.py            # Deterministic filename generation
-├── cli.py               # Click CLI (validate, info, schema-dump, manifest)
-└── imaging/
-    ├── __init__.py      # Medical imaging domain schemas
-    └── recon.py         # Recon product schema (3D/4D/5D volumes)
+fd5 validate           Check schema + content_hash integrity
+fd5 info               Print root attrs and dataset shapes
+fd5 schema-dump        Extract embedded JSON Schema
+fd5 manifest           Generate manifest.toml from a directory of fd5 files
+fd5 check-descriptions Validate description quality for AI-readability
+fd5 migrate            Migrate file to newer schema version
+fd5 datacite           Generate DataCite YAML for DOI registration
+fd5 rocrate            Generate RO-Crate JSON-LD
+fd5 ingest <format>    Convert external formats to sealed fd5 files
+fd5 export <format>    Export fd5 files back to standard formats
 ```
+
+## Multi-language support
+
+fd5 has implementations in Python (reference), Rust, and C/C++. All produce
+interoperable files validated by the cross-language conformance test suite.
+
+| Language | Location | What it provides |
+|----------|----------|-----------------|
+| Python | `src/fd5/` | Full library: create, verify, validate, ingest, export, CLI |
+| Rust | `crates/fd5/` | Builder, hash, verify, edit, product schema trait |
+| C/C++ | `lib/c/` | Builder, hash, verify + C++17 RAII wrapper |
+
+## Key design principles
+
+- **HDF5 is the single source of truth** — TOML, YAML, JSON-LD are derived exports
+- **One file = one data product** — sealed with `content_hash` at creation
+- **Write-once, read-many** — immutable after sealing
+- **Merkle-tree integrity** — tamper-evident, verifiable at any time
+- **Self-describing** — embedded JSON Schema + description attrs on every group/dataset
+- **Extensible** — custom product schemas via Python entry points
+- **Pre-seal validation** — schema compliance + description quality checked before sealing
+
+## Documentation
+
+| Doc | Description |
+|-----|-------------|
+| [White paper](white-paper.md) | Full format specification |
+| [Custom schema tutorial](docs/tutorials/custom-schema.md) | How to create your own product schema |
+| [Migration guide](docs/tutorials/migration-guide.md) | Schema versioning and migration |
+| [Compatibility policy](docs/COMPATIBILITY.md) | Backwards compatibility guarantees |
+| [Examples](examples/) | Working examples in Python, Rust, and C |
 
 ## Development
 
 ### Prerequisites
 
-- Python ≥ 3.12
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- Python >= 3.12 + [uv](https://docs.astral.sh/uv/)
+- Rust toolchain (for `crates/fd5/`)
+- CMake + libhdf5-dev (for `lib/c/`)
 
-### Setup
+Or use the **devcontainer** — all toolchains pre-installed:
 
 ```bash
-git clone https://github.com/vig-os/fd5.git
-cd fd5
-pip install -e ".[dev]"
+# open in VS Code, it will offer to reopen in container
+code .
 ```
 
 ### Running tests
 
 ```bash
-pytest
+# Python
+uv run pytest tests/ -x
+
+# Rust
+cargo test -p fd5
+
+# C
+cd lib/c && mkdir -p build && cd build && cmake .. && make && ctest
 ```
 
-### Project dependencies
+### Project layout
 
-Core: `h5py`, `numpy`, `jsonschema`, `tomli-w`, `click`
+```
+src/fd5/              Python library (reference implementation)
+├── generic/          Domain-agnostic schemas (timeseries, tabular, ndarray)
+├── imaging/          Medical imaging schemas (recon, listmode, spectrum, ...)
+├── ingest/           Format converters (DICOM, NIfTI, CSV, Parquet, raw)
+├── export/           Export to standard formats (NIfTI, CSV, Parquet)
+├── create.py         Fd5Builder context manager
+├── hash.py           Merkle-tree hashing and verification
+├── cli.py            Click CLI
+└── ...
 
-See [`pyproject.toml`](pyproject.toml) for the full dependency specification.
+crates/fd5/           Rust implementation (hash, verify, edit, builder)
+lib/c/                C/C++ implementation (builder, hash, verify)
+examples/             Working examples in Python, Rust, and C
+docs/                 Tutorials and specifications
+```
 
 ## License
 
-See the project repository for license details.
+Apache-2.0. See [LICENSE](LICENSE).
