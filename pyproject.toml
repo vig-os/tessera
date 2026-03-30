@@ -61,6 +61,9 @@ calibration = "fd5.imaging.calibration:CalibrationSchema"
 spectrum = "fd5.imaging.spectrum:SpectrumSchema"
 roi = "fd5.imaging.roi:RoiSchema"
 device_data = "fd5.imaging.device_data:DeviceDataSchema"
+timeseries = "fd5.generic.timeseries:TimeseriesSchema"
+tabular = "fd5.generic.tabular:TabularSchema"
+ndarray = "fd5.generic.ndarray:NdarraySchema"
 
 [tool.coverage.run]
 source = ["src/fd5"]
