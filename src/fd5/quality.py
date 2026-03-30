@@ -33,6 +33,15 @@ class Warning:
     severity: str  # "error" | "warning"
 
 
+def check_descriptions_file(f: h5py.File) -> list[str]:
+    """Check description quality on an open HDF5 file. Returns list of warning messages."""
+    warns: list[Warning] = []
+    _check_root(f, warns)
+    seen: dict[str, str] = {}
+    _walk(f, "/", warns, seen)
+    return [f"{w.path}: {w.message}" for w in warns]
+
+
 def check_descriptions(path: Path) -> list[Warning]:
     """Validate description attributes in an fd5 HDF5 file.
 
@@ -71,7 +80,10 @@ def _walk(
     seen: dict[str, str],
 ) -> None:
     for key in sorted(group.keys()):
-        item = group[key]
+        try:
+            item = group[key]
+        except (KeyError, OSError):
+            continue  # skip external links or broken references
         full_path = f"{prefix}{key}" if prefix == "/" else f"{prefix}/{key}"
         desc = item.attrs.get("description")
 
