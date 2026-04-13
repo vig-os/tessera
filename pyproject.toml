@@ -35,13 +35,13 @@ dicom = [
     "pydicom>=2.4",
 ]
 nifti = [
-    "nibabel>=5.0",
+    "nibabel>=5.4.2",
 ]
 parquet = [
     "pyarrow>=14.0",
 ]
 export = [
-    "nibabel>=4.0",
+    "nibabel>=5.4.2",
     "pyarrow>=14.0",
 ]
 all = [
