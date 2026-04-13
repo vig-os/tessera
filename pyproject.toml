@@ -27,7 +27,7 @@ dev = [
 ]
 science = [
     "numpy>=2.0",
-    "scipy>=1.14",
+    "scipy>=1.17.1",
     "pandas>=2.2",
     "matplotlib>=3.9",
 ]
