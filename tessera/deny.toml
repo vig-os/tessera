@@ -6,7 +6,12 @@
 [advisories]
 version = 2
 yanked = "warn"
-ignore = []   # add RUSTSEC-IDs here with a comment when you accept a transitive advisory
+ignore = [
+    # paste v1.0.15 — UNMAINTAINED (not a vulnerability). A compile-time-only proc-macro pulled
+    # transitively by zarrs/pcodec (zarrs_plugin/_data_type/_codec); "no safe upgrade available"
+    # since zarrs depends on it. No runtime attack surface. Revisit when zarrs drops paste.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 version = 2
