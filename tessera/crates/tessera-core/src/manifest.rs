@@ -47,6 +47,19 @@ pub struct Manifest {
     /// Provenance DAG: where this product came from.
     #[serde(default)]
     pub sources: Vec<Source>,
+    /// Optional study/grouping id (fd5 `study`) — ties together the products of one exam
+    /// (a study's CT + PET + listmode share a `study`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub study: Option<String>,
+    /// Values for the product schema's declared metadata fields (fd5 field model), keyed by each
+    /// field's stable `id`. Schema-governed — distinct from `extra` (non-standard).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, serde_json::Value>,
+    /// Extension namespace (fd5 `extra/`) for non-standard / vendor metadata. Preserved through
+    /// round-trips and covered by `manifest_hash`, but never schema-validated and never allowed
+    /// to collide with core keys (it is a nested object).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
     /// Merkle root over block digests; `Some` once sealed, `None` while building.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
@@ -83,6 +96,9 @@ impl Manifest {
             schema: None,
             blocks: Vec::new(),
             sources: Vec::new(),
+            study: None,
+            metadata: BTreeMap::new(),
+            extra: BTreeMap::new(),
             content_hash: None,
             manifest_hash: None,
         }

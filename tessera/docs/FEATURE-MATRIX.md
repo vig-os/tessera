@@ -60,11 +60,11 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | Feature | Status | Gate | Evidence |
 |---|:--:|---|---|
 | blake3 Merkle integrity | ✓ | any byte change → root change; tamper-evident | `tamper_*` tests |
-| `sources[]` DAG (typed roles + resolve) | ○ | content_hash required; resolve() fallback | #19 |
+| `sources[]` DAG (typed roles) | ◑ | typed role + content_hash on each edge | `provenance::Source` (resolve() pending) |
 | Source-rooted signing + chain verify | ○ | sign-at-source; walk DAG to scanner-signed root | S16 |
 | WORM (Object-Lock) | ○ | overwrite/delete refused in retention | S16 |
-| Units / descriptions / `_type`·`_vocabulary`·`default`·`extra/` | ○ | FAIR I1/I2 + AI-readable; fail-strict | #19 |
-| Versioned schema registry (embedded) | ○ | additive evolution, stable ids, offline-valid | #19/#20 |
+| Units / descriptions / `_vocabulary`·`_code`·`default`·`extra/`·`study`·axes | ✓ | FAIR I1/I2 + AI-readable; fail-strict on missing required | `schema::FieldSpec`/`Coded`, `metadata`/`extra`/`study`, ArraySpec axes/unit/fill |
+| Versioned product-schema registry (embedded, 9 schemas) | ✓ | additive evolution, stable ids, offline-valid, domain-agnostic | `SchemaRegistry::builtin`, `validate` tests |
 | RO-Crate / DataCite export | ○ | conformant JSON-LD / DataCite | #19 |
 
 ## G. Layout, distribution, ingest, read

@@ -15,11 +15,20 @@ pub struct ArraySpec {
     pub dtype: String,
     /// Cubic chunks by default — 18–24× faster orthogonal-plane access than slice chunks.
     pub chunks: Vec<u64>,
+    /// Named axes in storage order (fd5 convention) — e.g. `["z","y","x"]`. Length == rank.
+    /// Carries the meaning of each dimension so a reader/AI never has to guess axis order.
+    pub axes: Vec<String>,
     /// Shard shape; `Some` collapses thousands of chunk objects into a few shard files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shards: Option<Vec<u64>>,
     /// Compression codec; zstd by default (smaller AND faster than gzip).
     pub codec: String,
+    /// No-data / fill value (fd5 `fill_value`) for sparse or masked regions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_value: Option<serde_json::Value>,
+    /// UCUM physical unit of the (rescaled) sample values, e.g. "HU", "Bq/mL", "1/cm".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
     /// Physical-unit recovery for native-int storage (CT → HU, PET → Bq/mL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rescale_slope: Option<f64>,
@@ -27,24 +36,52 @@ pub struct ArraySpec {
     pub rescale_intercept: Option<f64>,
 }
 
+/// Default axis names for a given rank: 3-D → `[z,y,x]`, 2-D → `[y,x]`, else `[dim0,dim1,…]`.
+pub fn default_axes(rank: usize) -> Vec<String> {
+    match rank {
+        2 => vec!["y".into(), "x".into()],
+        3 => vec!["z".into(), "y".into(), "x".into()],
+        4 => vec!["t".into(), "z".into(), "y".into(), "x".into()],
+        n => (0..n).map(|i| format!("dim{i}")).collect(),
+    }
+}
+
 impl ArraySpec {
-    /// Construct with benchmark-backed defaults: cubic 64³ chunks, zstd, no rescale.
+    /// Construct with benchmark-backed defaults: cubic 64³ chunks, zstd, named axes per rank,
+    /// no rescale. Axes default to `[z,y,x]` for the common 3-D volume.
     pub fn new(shape: Vec<u64>, dtype: impl Into<String>) -> Self {
+        let rank = shape.len();
         ArraySpec {
             shape,
             dtype: dtype.into(),
-            chunks: vec![64, 64, 64],
+            chunks: vec![64; rank.max(1)],
+            axes: default_axes(rank),
             shards: None,
             codec: "zstd".into(),
+            fill_value: None,
+            unit: None,
             rescale_slope: None,
             rescale_intercept: None,
         }
     }
 
-    /// Record the DICOM rescale so physical units are recoverable from native ints.
+    /// Record the DICOM rescale so physical units are recoverable from native ints. `unit` is
+    /// the UCUM unit of the rescaled values (e.g. "HU" for CT, "Bq/mL" for PET activity).
     pub fn with_rescale(mut self, slope: f64, intercept: f64) -> Self {
         self.rescale_slope = Some(slope);
         self.rescale_intercept = Some(intercept);
+        self
+    }
+
+    /// Set the UCUM physical unit of the (rescaled) values.
+    pub fn with_unit(mut self, unit: impl Into<String>) -> Self {
+        self.unit = Some(unit.into());
+        self
+    }
+
+    /// Override the default axis names (must match the array rank).
+    pub fn with_axes(mut self, axes: Vec<String>) -> Self {
+        self.axes = axes;
         self
     }
 
@@ -63,6 +100,13 @@ impl ArraySpec {
             return Err(crate::Error::Invalid(format!(
                 "chunk rank {} != array rank {}",
                 self.chunks.len(),
+                self.shape.len()
+            )));
+        }
+        if self.axes.len() != self.shape.len() {
+            return Err(crate::Error::Invalid(format!(
+                "axes rank {} != array rank {}",
+                self.axes.len(),
                 self.shape.len()
             )));
         }

@@ -18,10 +18,12 @@ pub mod identity;
 pub mod manifest;
 pub mod product;
 pub mod provenance;
+pub mod schema;
 
 pub use error::{Error, Result};
 pub use manifest::Manifest;
 pub use product::ProductBuilder;
+pub use schema::SchemaRegistry;
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,428 @@
+//! Product-schema registry + the fd5 field model (issues #199, #200).
+//!
+//! The engine is **schema-driven and domain-agnostic**: product schemas are *embedded data*
+//! (these structs), not engine code. A [`ProductSchema`] declares the blocks and metadata
+//! fields a product of that kind must carry; [`SchemaRegistry::validate`] checks a manifest
+//! against its declared schema. Unknown products are permitted (open-world) so custom domains
+//! work without forking the engine; a product that *claims* a known schema must satisfy it.
+//!
+//! ## The fd5 field model (carried once, in the schema — never per value)
+//! Each [`FieldSpec`] pairs a short **stable id** (the storage key + rename-safe evolution
+//! anchor, Iceberg-style) with a human/AI-readable **description**, a **dtype**, an optional
+//! **unit** (UCUM), an optional controlled **vocabulary**, a **default**, and whether it is
+//! **required**. Coded values use the fd5 [`Coded`] (`_vocabulary`/`_code`) convention.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::block::BlockKind;
+use crate::manifest::Manifest;
+
+/// A field's self-description — carried once, in the schema, so values stay lean and a reader
+/// (or an AI) always has the field's meaning, unit, and dtype without external context (FAIR I1/I2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FieldSpec {
+    /// Short, stable storage id (the key). Renaming the human label never changes this — it is
+    /// the rename-safe evolution anchor.
+    pub id: String,
+    /// Human + AI-readable description.
+    pub description: String,
+    /// Value dtype: a [`crate::dtype::DType`] name, or `"string"` / `"coded"` / `"json"` for metadata.
+    pub dtype: String,
+    /// UCUM physical unit, if any (e.g. "HU", "Bq/mL", "ps", "keV", "mm").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// Controlled vocabulary the value is drawn from (e.g. "DICOM", "RadLex", "SNOMED", "UCUM").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocabulary: Option<String>,
+    /// Default value used when the field is absent (satisfies a `required` field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    /// Whether a valid product of the owning schema must carry this field.
+    #[serde(default)]
+    pub required: bool,
+}
+
+impl FieldSpec {
+    /// A required, undimensioned metadata field.
+    pub fn required(id: &str, description: &str, dtype: &str) -> Self {
+        FieldSpec {
+            id: id.into(),
+            description: description.into(),
+            dtype: dtype.into(),
+            unit: None,
+            vocabulary: None,
+            default: None,
+            required: true,
+        }
+    }
+
+    /// An optional metadata field.
+    pub fn optional(id: &str, description: &str, dtype: &str) -> Self {
+        FieldSpec {
+            required: false,
+            ..FieldSpec::required(id, description, dtype)
+        }
+    }
+
+    /// Builder: attach a UCUM unit.
+    pub fn unit(mut self, unit: &str) -> Self {
+        self.unit = Some(unit.into());
+        self
+    }
+
+    /// Builder: attach a controlled vocabulary.
+    pub fn vocabulary(mut self, vocab: &str) -> Self {
+        self.vocabulary = Some(vocab.into());
+        self
+    }
+}
+
+/// A coded value drawn from a controlled vocabulary (fd5 `_vocabulary`/`_code`). e.g. a CT
+/// modality `{ _vocabulary: "DICOM", _code: "CT", label: "Computed Tomography" }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Coded {
+    #[serde(rename = "_vocabulary")]
+    pub vocabulary: String,
+    #[serde(rename = "_code")]
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl Coded {
+    pub fn new(vocabulary: &str, code: &str) -> Self {
+        Coded {
+            vocabulary: vocabulary.into(),
+            code: code.into(),
+            label: None,
+        }
+    }
+}
+
+/// A block a schema expects: a logical `role`, the required shape (`kind`, `None` = either), and
+/// how many are required (`0` = optional).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlockRequirement {
+    pub role: String,
+    /// Required block shape; `None` accepts either array or table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<BlockKind>,
+    /// Minimum number of matching blocks (0 = optional).
+    pub min_count: u32,
+    pub description: String,
+}
+
+impl BlockRequirement {
+    fn matches(&self, b: &crate::block::BlockRef) -> bool {
+        self.kind.is_none_or(|k| k == b.kind)
+    }
+}
+
+/// One product schema — the contract for a `product` kind. Versioned for additive evolution
+/// (adding optional fields/blocks bumps the minor; ids never change).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProductSchema {
+    pub product: String,
+    pub version: String,
+    pub description: String,
+    #[serde(default)]
+    pub fields: Vec<FieldSpec>,
+    #[serde(default)]
+    pub blocks: Vec<BlockRequirement>,
+}
+
+impl ProductSchema {
+    /// Validate a manifest against this schema: every required block role must have enough
+    /// matching blocks, and every required field must be present in `metadata` (or carry a
+    /// default). Returns a typed [`crate::Error::Invalid`] naming the first violation.
+    pub fn validate(&self, m: &Manifest) -> crate::Result<()> {
+        for req in &self.blocks {
+            if req.min_count == 0 {
+                continue;
+            }
+            let count = m.blocks.iter().filter(|b| req.matches(b)).count();
+            if count < req.min_count as usize {
+                return Err(crate::Error::Invalid(format!(
+                    "schema '{}' requires {}× block role '{}' ({}), found {count}",
+                    self.product,
+                    req.min_count,
+                    req.role,
+                    req.kind
+                        .map(|k| format!("{k:?}"))
+                        .unwrap_or_else(|| "any".into()),
+                )));
+            }
+        }
+        for f in &self.fields {
+            if f.required && f.default.is_none() && !m.metadata.contains_key(&f.id) {
+                return Err(crate::Error::Invalid(format!(
+                    "schema '{}' requires metadata field '{}' ({})",
+                    self.product, f.id, f.description
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The registry of built-in product schemas. Domain-agnostic: lookups for unknown products
+/// return `None` and validation is then permissive (custom/extension products are allowed).
+#[derive(Debug, Clone)]
+pub struct SchemaRegistry {
+    schemas: BTreeMap<String, ProductSchema>,
+}
+
+impl SchemaRegistry {
+    /// The built-in Tessera product schemas (medical imaging + simulation lineage).
+    pub fn builtin() -> Self {
+        let mut schemas = BTreeMap::new();
+        for s in builtin_schemas() {
+            schemas.insert(s.product.clone(), s);
+        }
+        SchemaRegistry { schemas }
+    }
+
+    pub fn get(&self, product: &str) -> Option<&ProductSchema> {
+        self.schemas.get(product)
+    }
+
+    pub fn products(&self) -> impl Iterator<Item = &str> {
+        self.schemas.keys().map(String::as_str)
+    }
+
+    /// Validate a manifest against its declared product schema. Unknown product → `Ok` (a
+    /// custom/extension product is permitted). A known product must satisfy its schema.
+    pub fn validate(&self, m: &Manifest) -> crate::Result<()> {
+        match self.get(&m.product) {
+            Some(schema) => schema.validate(m),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Default for SchemaRegistry {
+    fn default() -> Self {
+        Self::builtin()
+    }
+}
+
+/// Convenience: one required block of a given role/kind.
+fn one(role: &str, kind: Option<BlockKind>, description: &str) -> BlockRequirement {
+    BlockRequirement {
+        role: role.into(),
+        kind,
+        min_count: 1,
+        description: description.into(),
+    }
+}
+
+fn schema(product: &str, version: &str, description: &str) -> ProductSchema {
+    ProductSchema {
+        product: product.into(),
+        version: version.into(),
+        description: description.into(),
+        fields: Vec::new(),
+        blocks: Vec::new(),
+    }
+}
+
+/// The nine built-in product schemas. Each declares its required block(s) + key fields; all are
+/// versioned `1.0` and evolve additively (new optional fields/blocks only). See ROADMAP P1.
+fn builtin_schemas() -> Vec<ProductSchema> {
+    use BlockKind::{Array, Table};
+    vec![
+        ProductSchema {
+            fields: vec![
+                FieldSpec::required("modality", "Imaging modality", "coded").vocabulary("DICOM"),
+                FieldSpec::optional("rescale_slope", "Native→physical slope", "float64"),
+                FieldSpec::optional("rescale_intercept", "Native→physical intercept", "float64"),
+            ],
+            blocks: vec![one(
+                "volume",
+                Some(Array),
+                "Reconstructed image volume (z,y,x), native dtype",
+            )],
+            ..schema(
+                "recon",
+                "1.0",
+                "A reconstructed image volume (CT/PET/μ-map).",
+            )
+        },
+        ProductSchema {
+            fields: vec![FieldSpec::required(
+                "coincidence_mode",
+                "Acquisition mode (singles / prompt-coincidence / extended-coincidence)",
+                "string",
+            )],
+            blocks: vec![one(
+                "events",
+                Some(Table),
+                "Per-event columnar table (timestamps, energies, positions)",
+            )],
+            ..schema(
+                "listmode",
+                "1.0",
+                "Raw per-event list-mode acquisition data.",
+            )
+        },
+        ProductSchema {
+            blocks: vec![one(
+                "sinogram",
+                Some(Array),
+                "Projection / sinogram array (angle, radial, plane)",
+            )],
+            ..schema("sinogram", "1.0", "Projection-space (sinogram) data.")
+        },
+        ProductSchema {
+            fields: vec![FieldSpec::optional(
+                "domain",
+                "Histogram domain (energy / lifetime / time-of-flight)",
+                "string",
+            )],
+            blocks: vec![one(
+                "spectrum",
+                None,
+                "Histogram of an energy/lifetime/TOF quantity",
+            )],
+            ..schema(
+                "spectrum",
+                "1.0",
+                "An energy / positronium-lifetime / TOF histogram.",
+            )
+        },
+        ProductSchema {
+            blocks: vec![one(
+                "roi",
+                Some(Table),
+                "Regions of interest (labels, geometry, statistics)",
+            )],
+            ..schema("roi", "1.0", "Regions of interest over an image product.")
+        },
+        ProductSchema {
+            blocks: vec![one(
+                "transform",
+                None,
+                "Spatial transform: affine (table) or deformation field (array)",
+            )],
+            ..schema(
+                "transform",
+                "1.0",
+                "A spatial transform / registration result.",
+            )
+        },
+        ProductSchema {
+            blocks: vec![one(
+                "calibration",
+                None,
+                "Calibration coefficients / lookup (normalization, attenuation, dead-time)",
+            )],
+            ..schema("calibration", "1.0", "Scanner calibration data.")
+        },
+        ProductSchema {
+            fields: vec![
+                FieldSpec::optional(
+                    "simulator",
+                    "Simulation toolkit (e.g. GATE/Geant4)",
+                    "string",
+                ),
+                FieldSpec::optional("seed", "RNG seed for reproducibility", "int64"),
+            ],
+            blocks: vec![one(
+                "output",
+                None,
+                "Simulation output (hits table or scored volume)",
+            )],
+            ..schema("sim", "1.0", "Monte-Carlo simulation output.")
+        },
+        ProductSchema {
+            fields: vec![
+                FieldSpec::optional("vendor", "Device vendor", "string"),
+                FieldSpec::optional("model", "Device model", "string"),
+            ],
+            blocks: vec![one(
+                "raw",
+                None,
+                "Raw vendor/device payload (normalized at ingest, preserved verbatim)",
+            )],
+            ..schema(
+                "device_data",
+                "1.0",
+                "Raw device data from an existing system (GE/Siemens/…).",
+            )
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::array::{ArrayBlock, ArraySpec};
+    use crate::ProductBuilder;
+
+    #[test]
+    fn registry_has_all_nine_builtins() {
+        let r = SchemaRegistry::builtin();
+        for p in [
+            "recon",
+            "listmode",
+            "sinogram",
+            "spectrum",
+            "roi",
+            "transform",
+            "calibration",
+            "sim",
+            "device_data",
+        ] {
+            assert!(r.get(p).is_some(), "missing built-in schema '{p}'");
+        }
+        assert_eq!(r.products().count(), 9);
+    }
+
+    #[test]
+    fn recon_validates_with_volume_and_required_field() {
+        let r = SchemaRegistry::builtin();
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![64, 64, 64], "int16"));
+        let mut b = ProductBuilder::new("recon", "DP06", "d", "2024-01-01T00:00:00Z");
+        b.add_block(&vol).unwrap();
+        b.with_field(
+            "modality",
+            serde_json::json!({"_vocabulary": "DICOM", "_code": "CT"}),
+        );
+        let m = b.seal().unwrap();
+        r.validate(&m).unwrap();
+    }
+
+    #[test]
+    fn recon_without_volume_block_is_rejected() {
+        let r = SchemaRegistry::builtin();
+        let mut b = ProductBuilder::new("recon", "DP06", "d", "2024-01-01T00:00:00Z");
+        b.with_field("modality", serde_json::json!("CT"));
+        // a recon needs a table? no — it needs an *array* volume; add a table instead → fail
+        let m = b.seal().unwrap();
+        assert!(r.validate(&m).is_err(), "recon with no volume must fail");
+    }
+
+    #[test]
+    fn recon_missing_required_field_is_rejected() {
+        let r = SchemaRegistry::builtin();
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![64, 64, 64], "int16"));
+        let mut b = ProductBuilder::new("recon", "DP06", "d", "2024-01-01T00:00:00Z");
+        b.add_block(&vol).unwrap();
+        let m = b.seal().unwrap(); // no `modality`
+        match r.validate(&m) {
+            Err(crate::Error::Invalid(msg)) => assert!(msg.contains("modality"), "{msg}"),
+            other => panic!("expected missing-field error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_product_is_permitted_open_world() {
+        let r = SchemaRegistry::builtin();
+        let m = ProductBuilder::new("my_custom_domain", "x", "d", "2024-01-01T00:00:00Z")
+            .seal()
+            .unwrap();
+        r.validate(&m).unwrap();
+    }
+}

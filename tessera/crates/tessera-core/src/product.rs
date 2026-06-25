@@ -45,6 +45,25 @@ impl ProductBuilder {
         self
     }
 
+    /// Set the study/grouping id (ties this product to the others of the same exam).
+    pub fn with_study(&mut self, study: impl Into<String>) -> &mut Self {
+        self.manifest.study = Some(study.into());
+        self
+    }
+
+    /// Set a schema-defined metadata field value (keyed by the field's stable `id`).
+    pub fn with_field(&mut self, id: impl Into<String>, value: serde_json::Value) -> &mut Self {
+        self.manifest.metadata.insert(id.into(), value);
+        self
+    }
+
+    /// Add an extension (`extra/`) field — non-standard / vendor metadata, preserved + hashed
+    /// but not schema-validated.
+    pub fn with_extra(&mut self, key: impl Into<String>, value: serde_json::Value) -> &mut Self {
+        self.manifest.extra.insert(key.into(), value);
+        self
+    }
+
     /// Attach the product's embedded JSON Schema.
     pub fn with_schema(&mut self, schema: serde_json::Value) -> &mut Self {
         self.manifest.schema = Some(schema);
