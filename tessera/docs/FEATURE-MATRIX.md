@@ -70,7 +70,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 ## G. Layout, distribution, ingest, read
 | Feature | Status | Gate | Evidence |
 |---|:--:|---|---|
-| Sealed `.tsra` (zip64, range-readable) | ✓ | STORED zip64, mimetype-first magic, central-dir index | `tessera-io::container::pack`, roundtrip test |
+| Sealed `.tsra` (zip64, range-readable) | ✓ | STORED zip64, mimetype-first magic, central-dir index; 1-block read ≪ whole archive | `container::pack`, `range::CountingReader` (S6 proof) |
 | OCI artifact / exploded prefix | ○ | push/pull; range-read; CoW versioning | #22 (P6) |
 | Ingest: DICOM | ○ | lossless tags, PS3.15 verify, rescale/units | S9 |
 | Ingest: GE-HDF5 · Siemens · raw · NIfTI | ○ | decode→re-encode open; lossless | S9 (GE transform benched) |
