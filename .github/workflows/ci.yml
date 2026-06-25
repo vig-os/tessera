@@ -8,7 +8,7 @@
 # guardrails-gates · dev-shell. cargo-deny + the full pre-commit gate set run via `prek`
 # locally (they need network / the working tree).
 #
-# vig-os/fd5 is PUBLIC → GitHub-hosted runner. Never self-hosted on a public repo (untrusted
+# vig-os/tessera is PUBLIC → GitHub-hosted runner. Never self-hosted on a public repo (untrusted
 # PRs = arbitrary code execution on your hardware). See guardrails docs/CONVENTIONS.md.
 
 name: CI

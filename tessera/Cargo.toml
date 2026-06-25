@@ -6,7 +6,7 @@ members = ["crates/tessera-core"]
 edition = "2021"
 license = "Apache-2.0"
 version = "0.0.0"
-repository = "https://github.com/vig-os/fd5"
+repository = "https://github.com/vig-os/tessera"
 authors = ["vig-os"]
 
 [workspace.dependencies]

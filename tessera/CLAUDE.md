@@ -4,7 +4,7 @@
 Keeps fd5's model (one immutable, content-hashed, self-describing FAIR product) but generalises
 the substrate from a single HDF5 file → manifest + shape-dispatched storage blocks.
 
-**Where:** repo `vig-os/fd5`, branch **`spike/tessera-core`** (worktree `~/worktrees/tessera-core`).
+**Where:** repo `vig-os/tessera`, branch **`spike/tessera-core`** (worktree `~/worktrees/tessera-core`).
 fd5 white-paper (the founding vision): `~/Projects/fd5/white-paper.md`.
 
 **Read in this order:**

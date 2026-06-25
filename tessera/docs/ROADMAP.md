@@ -47,7 +47,7 @@ Per `FEATURE-MATRIX.md §H`: **shippable = ① conformance corpus · ② bit-exa
 ## Open gating decisions (register — decide by the listed phase)
 | id | decision | options | by |
 |---|---|---|---|
-| D1 | fd5 supersession | **DECIDED → supersede.** fd5 is being dumped in favour of Tessera; the fd5 Python app is legacy. Rename `vig-os/fd5`→`tessera` (keep history). CI already swapped to the `nix flake check` shim; old fd5 Python CI dropped. P0 = execute the repo rename + update branch-protection required checks. | P0 |
+| D1 | fd5 supersession | **DONE.** fd5 superseded by Tessera. Repo renamed `vig-os/fd5`→**`vig-os/tessera`** (history kept; GitHub redirects active). fd5 Python CI dropped for the `nix flake check` shim; `main` branch protection requires the `nix flake check` status check. fd5 Python app remains as legacy until removed. | ✓ |
 | D2 | concurrency model | sync `core` / async `io` (tokio + `object_store`) + `rayon` encode pool, `spawn_blocking` boundary | P0 |
 | D3 | schema-id allocation | per-schema monotonic + `<plugin>:<id>` namespacing + reserved ranges | P0/P1 |
 | D4 | canonical encoding for hashing | RFC 8785 JCS-JSON **vs** deterministic CBOR | P0 |
@@ -61,7 +61,7 @@ F integrity/FAIR→P1(FAIR fields)+P6(signing/WORM/exports) · G layout→P0/P2/
 H bindings→P7 · release gates→P4(v0.1)…P8(v1.0). **No feature is unslotted.**
 
 ## Tracking
-GitHub Issues + Milestones on `vig-os/fd5` are the durable tracker. Milestones = the release gates
+GitHub Issues + Milestones on `vig-os/tessera` are the durable tracker. Milestones = the release gates
 (**v0.1 · v0.2 · v0.3 · v0.5 · v1.0**); the old fd5 "Phase 1–5" milestones are closed as superseded.
 Issues carry `priority:` + `area:` labels (no `effort:` — meaningless for agent-executed work). P0 ADRs
 and Phase-1 work are filed per-task; later phases (P5–P8) as one epic issue each.
