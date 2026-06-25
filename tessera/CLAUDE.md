@@ -5,7 +5,7 @@ Keeps fd5's model (one immutable, content-hashed, self-describing FAIR product) 
 the substrate from a single HDF5 file → manifest + shape-dispatched storage blocks.
 
 **Where:** repo `vig-os/tessera`, branch **`spike/tessera-core`** (worktree `~/worktrees/tessera-core`).
-fd5 white-paper (the founding vision): `~/Projects/fd5/white-paper.md`.
+fd5 white-paper (the founding vision): `~/Projects/tessera/white-paper.md`.
 
 **Read in this order:**
 1. `docs/rfc-tessera.md` — the design (§0 capstone = the decisions; §13 fd5 conventions; §14 impl-readiness).
@@ -59,7 +59,7 @@ build is ~link time.
 ## Working rules (this project)
 - **Bench/verify empirically before claiming** — real DUPLET data at
   `/mnt/HDD/data/sdsc_dump/GEDiscoveryMIGen2/Projects/DUPLET-Patients/` and per-date studies under
-  `…/GEDiscoveryMIGen2/2023|2024/<date>/<examid>/`. The `~/Projects/fd5` uv env has
+  `…/GEDiscoveryMIGen2/2023|2024/<date>/<examid>/`. The `~/Projects/tessera` uv env has
   pcodec/vortex/zarr/duckdb/blake3/pydicom/hdf5plugin/numcodecs installed (`uv run python …`).
   Bench scratch: `…/processed/_bench/` (kept: `fd5_product/`, `h5_int16_slice_gzip4.h5`).
 - **ALOCA** — concise, decision-line-per-item; lead with the verdict + the number that drives it.
