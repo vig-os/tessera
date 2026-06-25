@@ -9,7 +9,9 @@ pub mod array;
 pub mod conformance;
 pub mod container;
 pub mod table;
+pub mod write;
 
 pub use array::{decode, decode_subset, encode, ArrayData};
 pub use container::{pack, pack_dir, unpack, BlockPayload, Reader, MIMETYPE};
 pub use table::{ColumnData, TableData};
+pub use write::WriteSession;
