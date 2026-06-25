@@ -145,6 +145,27 @@ fn unknown_tessera_version_errors_cleanly() {
     assert!(Manifest::from_json(&sample_product().to_json().unwrap()).is_ok());
 }
 
+// ---- dtype allowlist (int16 recommended, not required) -----------------------------------
+
+#[test]
+fn array_dtype_allowlist_not_int16_only() {
+    use tessera_core::dtype::DType;
+    assert!(DType::is_supported("int16")); // recommended for CT/PET
+    assert!(DType::is_supported("float32")); // computed maps (SUV/parametric/lifetime/μ-map)
+    assert!(DType::is_supported("uint32")); // counts/labels
+    assert!(!DType::is_supported("float24")); // junk
+
+    // a non-int16 (float32) array is perfectly valid
+    let mu = ArrayBlock::new("mu_map", ArraySpec::new(vec![2, 2, 2], "float32"));
+    let mut ok = ProductBuilder::new("recon", "x", "d", "2023-12-08T00:00:00Z");
+    assert!(ok.add_block(&mu).is_ok());
+
+    // an unsupported dtype is rejected at add time (validated in digest)
+    let bad = ArrayBlock::new("v", ArraySpec::new(vec![2, 2, 2], "float24"));
+    let mut nope = ProductBuilder::new("recon", "x", "d", "2023-12-08T00:00:00Z");
+    assert!(nope.add_block(&bad).is_err());
+}
+
 // ---- serde roundtrip (property) ----------------------------------------------------------
 
 proptest! {

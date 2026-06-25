@@ -47,6 +47,27 @@ impl ArraySpec {
         self.rescale_intercept = Some(intercept);
         self
     }
+
+    /// Validate the spec: dtype must be in the supported allowlist (int16 is *recommended*
+    /// for CT/PET, not required — any [`crate::dtype::DType`] is allowed), and the chunk
+    /// grid must match the array rank.
+    pub fn validate(&self) -> crate::Result<()> {
+        if !crate::dtype::DType::is_supported(&self.dtype) {
+            return Err(crate::Error::Invalid(format!(
+                "unsupported array dtype '{}' (allowed: {:?})",
+                self.dtype,
+                crate::dtype::DType::ALL.map(|d| d.as_str())
+            )));
+        }
+        if self.chunks.len() != self.shape.len() {
+            return Err(crate::Error::Invalid(format!(
+                "chunk rank {} != array rank {}",
+                self.chunks.len(),
+                self.shape.len()
+            )));
+        }
+        Ok(())
+    }
 }
 
 pub struct ArrayBlock {
@@ -71,6 +92,7 @@ impl Block for ArrayBlock {
         Ok(serde_json::to_value(&self.spec)?)
     }
     fn digest(&self) -> crate::Result<String> {
+        self.spec.validate()?;
         // Spike: digest the spec. Real impl digests the encoded zarrs shards (Merkle of chunks).
         Ok(crate::hash::digest(&serde_json::to_vec(&self.spec)?))
     }

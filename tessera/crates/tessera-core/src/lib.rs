@@ -10,6 +10,7 @@
 //! rationale, and fd5 issues #192/#193/#194 for the evidence.
 
 pub mod block;
+pub mod dtype;
 pub mod error;
 pub mod hash;
 pub mod identity;

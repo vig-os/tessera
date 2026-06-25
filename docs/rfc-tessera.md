@@ -25,6 +25,9 @@ optimal for both. Benchmarks on real data (see §7) show the axes are in tension
 2. Self-describing: embedded schema, `description`, units (`@units`/`@unitSI`).
 3. Provenance as a DAG (`sources/`), not a string.
 4. Store at the source's **native precision** (CT/PET = int16 + rescale, not float32).
+   *Any* dtype is supported (int8/16/32/64, uint8/16/32/64, float16/32/64) — **int16 is a
+   recommendation for scanner-reconstructed CT/PET, not a constraint**; computed float
+   products (SUV/parametric/TOFPET-lifetime/μ-maps) use float32/64.
 5. **Substrate-agnostic**: the product model does not assume HDF5.
 6. FAIR-first; AI-retrievable; offline-self-contained.
 
@@ -79,6 +82,34 @@ PRODUCT  =  manifest  +  N typed blocks
 - **ARRAY block backend → zarrs.** **TABLE block backend → Parquet/Arrow default, Lance option.**
 - Lance is *not* a Parquet superset (separate format/ecosystem); it adds random-row `take` + versioning. Use Parquet for interop, Lance for random-access/versioned event data.
 - Cross-cutting: `zstd`/`blosc2` (MT compress), `blake3` (hash), `object_store` (cloud), `dicom-rs` (ingest), `pyo3` (bindings).
+
+### 5.2 Table backends & the random-access axis
+
+Parquet and Lance sit at opposite ends of one axis: Parquet wins interop + projection +
+ecosystem; Lance wins random per-event `take` + versioning (bench: 16× on random row).
+Tessera resolves this with **flavors, not runtime conversion**:
+
+- The `TableSpec` declares the data + an optional `row_index` (random-access *intent*) and a
+  future `encoding` field naming the chosen backend. **The flavor is picked at *write time*
+  by the dominant access pattern**, recorded in the manifest:
+  - scan / project / feed Spark·DuckDB → **Parquet** flavor (default).
+  - random per-event fetch · versioning · ML sampling → **Lance** flavor.
+- **Both decode into Arrow**, so downstream code is backend-agnostic and zero-copy either way.
+  The cheap "adaptor" is the *in-memory Arrow* handoff — not an on-disk transcode.
+- **A pq↔lance on-disk adaptor is a full rewrite** (different byte layouts encode different
+  tradeoffs — Lance uses small/indexed blocks for O(1) take, Parquet uses big compressed
+  pages). That is minutes for GB-scale tables → **never on the read path**. Use it once to
+  *materialize* a flavor, not per query.
+- **Parquet already has a partial answer**: Page Index (ColumnIndex+OffsetIndex) + Bloom
+  filters give fast *predicate point-lookups on a sorted key*. Arbitrary positional `take`
+  needs a sidecar `rowid → page-offset` index (the "addon") + range read — buildable, but it
+  still pays per-page decompression, so it *approximates* Lance, not equals it.
+- **Dual-hot tables** (genuinely hot on both axes) store **two blocks** in one product (a
+  Parquet block for scans + a Lance block or sidecar index for take) — a deliberate *storage*
+  cost, not a *latency* one. Rare; not the default.
+
+Net: support the axis **backend-agnostically** (flavors chosen per workload), never transcode
+on read, and let emerging both-axes formats (Vortex, Nimble) slot in as additional flavors.
 
 ## 6. Rust crate layout (this spike)
 
