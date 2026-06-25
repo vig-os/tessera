@@ -52,7 +52,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 |---|:--:|---|---|
 | No-encode-on-hot-path rule | ✓ | never stream DAQ into a single sealed file | S17 (footer=total-loss) |
 | Fragment-append + atomic commit | ○ | crash-tolerant to last committed fragment | S17 |
-| Hash-on-write incremental Merkle | ○ | valid root at every commit watermark | S17 |
+| Hash-on-write incremental Merkle | ◑ | valid root at every commit watermark | `hash::MerkleAccumulator` (root==batch at each watermark); engine wiring pending |
 | Crash recovery (replay to watermark) | ○ | resume from registry C; ignore >C | S17 |
 | Unified Source/WriteSession surface | ○ | push/from/seal/recover; schema-dispatch | S17 |
 
