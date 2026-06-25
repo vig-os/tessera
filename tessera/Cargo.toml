@@ -14,5 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
 thiserror = "2"
+time = { version = "0.3", features = ["parsing", "formatting"] }
+proptest = "1"
 # storage-backend crates (zarrs / arrow / parquet / lance) get added to the workspace
 # when the array/table block payloads are actually implemented — see docs/rfc-tessera.md §6.

@@ -11,6 +11,22 @@ pub fn compute_id(inputs: &[&str]) -> String {
     crate::hash::digest(joined.as_bytes())
 }
 
+/// Normalise an RFC 3339 timestamp to UTC (`...Z`) so that the *same instant* written in
+/// different offsets yields one id. Non-RFC3339 input is returned unchanged (lenient).
+///
+/// Without this, `2023-12-08T00:00:00Z` and `2023-12-08T01:00:00+01:00` — the same moment —
+/// would produce two different product ids.
+pub fn normalize_timestamp(ts: &str) -> String {
+    use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
+    match OffsetDateTime::parse(ts, &Rfc3339) {
+        Ok(dt) => dt
+            .to_offset(UtcOffset::UTC)
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| ts.to_string()),
+        Err(_) => ts.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

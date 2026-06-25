@@ -12,6 +12,10 @@ serde.workspace = true
 serde_json.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 # The core (manifest, identity, hash, provenance, block descriptors) compiles and tests
 # with NO storage-backend deps. The features below are placeholders that gate the

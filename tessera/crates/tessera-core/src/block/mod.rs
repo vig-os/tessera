@@ -23,7 +23,7 @@ pub enum BlockKind {
 }
 
 /// A reference to a block, as recorded in the manifest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockRef {
     pub name: String,
     pub kind: BlockKind,
