@@ -313,6 +313,66 @@ Clients keep speaking DICOM (DIMSE/DICOMweb); storage becomes Tessera/MinIO unde
 study-by-study. **Research/novel-acquisition can go Tessera-native now** (skip DICOM); clinical
 scanners follow, with DICOM persisting only at **egress**. (Generalises spike **S9**.)
 
+## 12. Write engine (`tessera-io`) — streaming, Rust-native, hash-on-write
+
+The write/read engine ships **outside core** as `tessera-io`. Its job is **parallel encode +
+durable staged commit + first-moment integrity** — forced by the durability finding (Vortex is
+footer-at-end; a crash before close loses the whole file) and by the throughput finding (the
+*encoder*, not the disk, is the bottleneck).
+
+### Throughput (benched, real CT int16, 88 cores)
+| step | rate | implication |
+|---|---:|---|
+| encode — pcodec (best) | **71 MB/s/core** | ≪ NVMe; **cannot** run on the real-time path single-threaded |
+| encode — zstd-1 (fast) | 239 MB/s/core | fallback when cores can't keep up |
+| encode — parallel (rayon/blosc, 88t) | **4.3 GB/s** | parallelism is *the* mechanism to reach GB/s |
+| seal — blake3 hash | **4.1 GB/s** | hashing is ~free vs encode |
+| raw capture | memory/disk-bound (NVMe GB/s) | the DAQ never stalls |
+
+### Streaming model (Rust: `rayon` encode pool + `crossbeam` fan-out, `Send`/`Sync` = race-free)
+```
+acq → bounded RAM ring (backpressure)
+    → rayon worker:  pcodec-encode(chunk)  +  blake3(chunk)     ← FUSED, in RAM, hash ~free
+    → commit:        fsync(encoded chunk + hash) ; fold hash into INCREMENTAL Merkle ;
+                     advance registry watermark (acquired M / encoded E / committed C)
+    → burst spill:   if ring fills, spill RAW overflow to disk; drain when caught up
+    → seal:          root = merkle(chunk_hashes)   ← microseconds, NO second data pass
+                     + manifest + sign(root) at source
+```
+- **No mandatory raw-first pass.** If `parallel-encode-rate ≥ DAQ-rate`, encode live in RAM
+  (avoids the double-RAM/double-I/O of raw→disk→read-back). Durable commits of *encoded*
+  fragments stay mandatory for irreplaceable data; commit cadence = max-loss window (s–min).
+- **Disk spill is for *bursts only*.** Sustained `DAQ > encode` fills the spill → OOD regardless
+  → you must **provision the encode pool ≥ sustained DAQ rate** (else drop to zstd-1, or
+  raw-archive + offline encode). Spill buffer ≈ `burst_dur × (daq − encode)`.
+- **Capture-form spectrum:** *direct-to-final* (Zarr-chunk+pcodec / Vortex-fragment, 1 pass) when
+  rate fits cores; *Arrow-staged* (capture Arrow → encode, cheap 2nd pass, no re-parse) for low
+  capture latency; *raw* only for vendor ingest (re-parse fuses with reconstruction).
+
+### Hash-on-write → integrity + trivial seal (unifies S3 + S16)
+- **Hash each chunk at encode, in RAM, before it touches disk/network** (BLAKE3, fused). Chunks
+  are *born with their hash* → **first-moment, source-rooted integrity** (detects downstream
+  disk/transit/bitrot corruption) and the natural place to **sign the root at the source** (§10,
+  S16).
+- **Merkle leaves = the encoded chunks** → the hash-on-write tree *is* the **chunk-Merkle index**
+  (S3): integrity + content-addressing (+ per-leaf stats for pruning), built **incrementally**
+  as chunks commit (Bao/BLAKE3 verified streaming).
+- **Sealing = hash of hashes** — `merkle_root(chunk_hashes)`, microseconds, no second pass over
+  the data. A valid Merkle root exists at *every* commit watermark, so a crash mid-acquisition
+  leaves a **hash-verified, integrity-sealed partial product** up to `C`.
+
+### Lifecycle — where the column forms / where it seals
+```
+ACQUIRE  → durable Vortex/Zarr FRAGMENTS (committed, registry watermark, raw-spill on burst)
+COMPACT  → merge fragments → ONE FULL VORTEX COLUMN   ← full column forms here (bg or post-acq)
+            recon: raw listmode → volume → Zarr 64³+pcodec
+SEAL     → blake3 hash-of-hashes + manifest + pack .tessera / commit + sign  ← seals here
+            (per product: raw acq seals post-compact; derived seal post-processing → provenance→parent)
+```
+
+`tessera-core` = format/spine (no I/O). **`tessera-io`** = this engine. `tessera-ingest` = vendor
+decoders feeding capture.
+
 ## 9. Non-goals
 
 - A novel byte-level codec/container that out-competes zarrs/arrow/lance on their home turf.
