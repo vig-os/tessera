@@ -1,0 +1,24 @@
+[package]
+name = "tessera-core"
+description = "Core library for the Tessera FAIR data product format (spike)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
+
+# The core (manifest, identity, hash, provenance, block descriptors) compiles and tests
+# with NO storage-backend deps. The features below are placeholders that gate the
+# (currently stub) payload read/write paths; enabling them will pull zarrs / arrow once
+# those backends are implemented. See docs/rfc-tessera.md §6.
+[features]
+default = []
+array-zarr = []   # N-D chunked array block payloads (zarrs)
+table-arrow = []  # columnar table block payloads (arrow/parquet)
+full = ["array-zarr", "table-arrow"]
