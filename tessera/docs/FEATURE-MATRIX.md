@@ -30,8 +30,8 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | Gate | Status | Pass condition | Evidence |
 |---|:--:|---|---|
 | **Bit-exact lossless** (arrays+tables) | ✓ | `bytes ==` incl NaN/±inf/−0.0/denormal/int-limits | **S13 PASS** |
-| **Writer determinism** (same-ver) | ✓ | same input→byte-identical output | **S15 PASS** |
-| Cross-version / cross-arch determinism | ○ | byte-identical across releases/arch | hedge: pin+vendor (S15 remain) |
+| **Writer determinism** (same-ver) | ✓ | same input→byte-identical output (manifest + .tsra) | **S15** + `corpus_packs_deterministically` |
+| Cross-version / cross-arch determinism | ◑ | golden hashes locked in `corpus.json`; drift fails CI | conformance gate (multi-release CI pending, S15 remain) |
 | Pruning never lies | ○ | predicate-match chunk never skipped | TEST-PLAN |
 
 ## D. Performance SLA gates (regression floors — benched, 88-core box)
@@ -75,7 +75,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | Ingest: DICOM | ○ | lossless tags, PS3.15 verify, rescale/units | S9 |
 | Ingest: GE-HDF5 · Siemens · raw · NIfTI | ○ | decode→re-encode open; lossless | S9 (GE transform benched) |
 | Reader API (open/verify/block read) | ✓ | magic+seal verify on open; per-block read verified vs digest; partial-product; generic Read+Seek | `tessera-io::Reader`, container tests |
-| Conformance corpus + SPEC.md | ○ | golden roots; CI gate; 2nd-impl passes | #21 |
+| Conformance corpus + SPEC.md | ✓ | 6 golden fixtures (id/content/manifest hashes) locked in CI; `docs/SPEC.md` | `corpus/corpus.json`, `tests/conformance.rs` |
 | Bindings (pyo3 → C-ABI → WASM) | ○ | Python parity; zero-copy Arrow | — |
 
 ## H. Release gates (definition of shippable)

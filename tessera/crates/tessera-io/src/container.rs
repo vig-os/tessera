@@ -13,7 +13,7 @@ use std::path::Path;
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipArchive, ZipWriter};
+use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 /// Container MIME magic — the first, uncompressed entry (EPUB/ODF trick) so `file(1)` and magic
 /// sniffers identify a `.tsra` without unzipping.
@@ -51,8 +51,11 @@ pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Resu
     }
     let mut zw = ZipWriter::new(File::create(path)?);
     // STORED + force zip64 so a large study is never silently truncated at 4 GiB / 65 k entries.
+    // Pin the entry mtime to the zip epoch (1980-01-01) so the same product packs to byte-identical
+    // bytes — writer-determinism is a release gate (FEATURE-MATRIX §C); a wall-clock mtime breaks it.
     let stored = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Stored)
+        .last_modified_time(DateTime::default())
         .large_file(true);
 
     zw.start_file(MIMETYPE_ENTRY, stored).map_err(cz)?; // first + uncompressed = magic

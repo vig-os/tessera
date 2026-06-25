@@ -1,0 +1,44 @@
+[
+  {
+    "name": "recon_int16",
+    "product": "recon",
+    "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
+    "content_hash": "blake3:9b3ced0309d201b84d13f15aaf219c7872890d6b3bcbc436f2f76f1b5c72249d",
+    "manifest_hash": "blake3:690476118789eefb3c98cf743eeca8561e4e0cebe7d28b6efce4f177f40dae13"
+  },
+  {
+    "name": "recon_float32_mumap",
+    "product": "recon",
+    "id": "blake3:529bb3fc4cb032cbb45917558b52fb6b81448a1cb574b3282336ce9a39b84149",
+    "content_hash": "blake3:3b1cdfb5e9cd8b43c4a048481a8efed67d62a5ae0fe6a2769709b03d5f09e197",
+    "manifest_hash": "blake3:0f5e4af61c6d949cfd256978ab189b32c816e9e7892202688956b0f7e870f9bd"
+  },
+  {
+    "name": "listmode_events",
+    "product": "listmode",
+    "id": "blake3:55b8eac168d668c6e15ab3bdd1d78c0494384dbc6941ad48f9ee7237cf6e9457",
+    "content_hash": "blake3:e677efbd0dfb8686eca277f138a84df5db875e577ba27d83797a59ffd6b7c6a1",
+    "manifest_hash": "blake3:51df1c9c804f271c94edeafa632acaf01db1cf60661cfd9c77ba97e24ce8ebd3"
+  },
+  {
+    "name": "spectrum_lifetime",
+    "product": "spectrum",
+    "id": "blake3:765aa27dcf8732157230f947de95866cc88f720691a30ca8dba03ccd81964f0e",
+    "content_hash": "blake3:430d7cd7c04f54ebed89a612bf88e88323a67f2a8db0a1aa6831e94dda970020",
+    "manifest_hash": "blake3:6022f3d7d85a10235cbbfa9b7d5a5c6ef65930d790a5cd004d3bfc22a3c3235d"
+  },
+  {
+    "name": "multiblock_study",
+    "product": "recon",
+    "id": "blake3:216739168370b68f066c955f6c613839f5a8f2c62c4aad5af656c23909f55a2a",
+    "content_hash": "blake3:74ff8f527f544b0f028d7e35af2dd2509bcc057ba77e2a5fe9d5149c90790987",
+    "manifest_hash": "blake3:825656dee1b9cb88c5aca76915f2230f0e313e7174761ccd2c03f6dea6eb8dce"
+  },
+  {
+    "name": "empty_no_blocks",
+    "product": "marker",
+    "id": "blake3:682ff1f8841db94254ae9cc8f912824d2b31f51584cba5f43f65375840a3701b",
+    "content_hash": "blake3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+    "manifest_hash": "blake3:5c84e9db400d4474485132b14e2582dbd2d932c15829e2011f9bfbd70f01f69f"
+  }
+]
