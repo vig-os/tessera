@@ -274,8 +274,48 @@ control, fed by the derived **RO-Crate/DataCite** exports. **DataLad (git + git-
 *optional* bridge for git-native workflows — not the audit backbone (it duplicates OCI digests,
 cosign/Rekor, and InvenioRDM versioning with a git-centric paradigm).
 
+## 11. Ingest adaptor layer (`tessera-ingest` — companion crate, not core)
+
+The **Layer-0 ↔ Layer-1 boundary**, kept *out of core* (so the format stays substrate-agnostic,
+§9). A **per-vendor reader-plugin layer** that normalises vendor-proprietary raw into open,
+content-addressed Tessera **at the door** — the single biggest interop *and* archive-de-risking
+win (you stop being hostage to any vendor's format *or codec*).
+
+### Reader plugins (feature-gated)
+
+| Source (Layer 0) | Reality | → Tessera mapping |
+|---|---|---|
+| **DICOM** (files · DICOMweb · DIMSE) | clinical lingua franca | series → `recon` array block; tags → manifest/units; verify PS3.15 + keep headers as provenance |
+| **GE listmode — HDF5 + *proprietary* compression** | already chunked-array (validates the model) but codec-locked | decode via GE filter → re-encode **pcodec/Vortex**; transpose compound events → **columnar** (#193); HDF5 datasets → blocks ~1:1 |
+| **GE/raw `.dat`/`.BLF`** | append-only raw log (crash-tolerant) | the durable DAQ capture → offline-convert to `listmode`/`recon` blocks |
+| **Siemens — binary + padded ASCII footer** | bespoke, footer-at-end (fragile), undocumented | seek/parse trailing KV metadata → decode binary body → blocks; replace ad-hoc text with the embedded manifest |
+| **NIfTI / others** | neuro interchange | `recon` array block + affine |
+
+### Design principles
+
+- **Normalise at the door** — escape per-vendor formats **and their proprietary codecs** (GE's
+  HDF5 filter, Siemens' binary) → open pcodec/Zarr/Vortex. *Archive de-risking:* never hostage
+  to a vendor codec in 2045. (GE already picked the chunked-array model — Tessera is that
+  instinct done *open + unified + signed*.)
+- **Verify-at-door + re-attest** — verify incoming PS3.15 / vendor signatures; preserve the
+  originals **hashed as the Layer-0 provenance root**; re-attest in the modern stack (§10).
+- **Lossless** — preserve *all* metadata (private DICOM tags, vendor headers) so egress is faithful.
+- **Native dtype** — int16 + rescale, not float32.
+- **Bidirectional** — ingest (in) · **egress** (Tessera → DICOM via DICOMweb, on demand, for
+  FDA-cleared viewers) · **serve** (DICOMweb STOW/QIDO/WADO face on the Tessera/MinIO archive =
+  the object-backed **VNA** bridge).
+- **Adaptor interface** — each vendor decoder is a plugin (`dicom-rs`; HDF5+GE-filter reader;
+  Siemens-footer parser; …). DICOM is plugin #1; the GE/Siemens raw readers are what let a
+  pipeline **skip DICOM entirely** *and* escape the proprietary trap.
+
+### Transition role
+Clients keep speaking DICOM (DIMSE/DICOMweb); storage becomes Tessera/MinIO underneath; migrate
+study-by-study. **Research/novel-acquisition can go Tessera-native now** (skip DICOM); clinical
+scanners follow, with DICOM persisting only at **egress**. (Generalises spike **S9**.)
+
 ## 9. Non-goals
 
 - A novel byte-level codec/container that out-competes zarrs/arrow/lance on their home turf.
-- Parsing vendor formats (DICOM, GE `.dat`/`.BLF`) — that is ingest, a separate package.
+- Parsing vendor formats (DICOM, GE-HDF5, Siemens-binary, `.dat`/`.BLF`, NIfTI) — that is the
+  **ingest adaptor layer**, a companion crate (§11), not the core.
 - Interactive web tile streaming (export to sharded OME-Zarr as a derived render layer).
