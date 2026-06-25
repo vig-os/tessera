@@ -1,0 +1,26 @@
+# guardrails perf budgets — checked-in ceilings the `perf-budget` gate enforces.
+#
+# Workflow: run benches (`cd tessera && cargo criterion`), then `guardrails-perf-budget`. It reads
+# each benchmark's measured median from target/criterion and compares it here. Per guardrails
+# docs/CONVENTIONS.md: GATE big regressions on value-path metrics, NUDGE the rest.
+#
+# These mirror the measured floors in tessera/docs/FEATURE-MATRIX.md §D (the benchable SLA). Fill
+# in budget_ns once the Rust benches exist (currently the numbers are from the Python spikes).
+
+default_tolerance = 0.20   # 20% headroom — gate big regressions, not measurement noise
+
+# ── Value-path metrics (gate) — uncomment as the cargo-criterion benches land (ROADMAP P3/P4) ──
+#
+# [bench."codec/pcodec_encode_per_core"]   # FEATURE-MATRIX §D floor: ≥ 60 MB/s  (measured 71)
+# budget = 60000000
+# direction = "higher"
+# mode = "gate"
+#
+# [bench."seal/blake3_hash"]               # FEATURE-MATRIX §D floor: ≥ 4 GB/s   (measured 4.1)
+# budget = 4000000000
+# direction = "higher"
+# mode = "gate"
+#
+# [bench."read/orthogonal_coronal_64cube"] # FEATURE-MATRIX §D floor: ≤ 0.05 s   (measured 0.039)
+# budget_ns = 50000000
+# mode = "gate"

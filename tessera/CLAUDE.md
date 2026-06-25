@@ -42,6 +42,20 @@ schema · #22 versioning-DAG+`.tessera` container spec · #19 restore fd5 conven
 read-path/Reader-API+error-taxonomy+conformance-corpus. Then S5 (zarrs backend), S17 (write engine),
 S9 (DICOM ingest), S16 (signing). Track everything against `FEATURE-MATRIX.md` gates.
 
+## Dev environment (Nix + guardrails)
+The whole repo is Nix-managed. **`direnv allow`** (or `nix develop`) at the repo root loads the
+`tessera-dev` devShell — pinned Rust toolchain (`tessera/rust-toolchain.toml` via rust-overlay),
+Python 3.12 + `uv` (bench deps live in `uv.lock`, not Nix), native build deps (openssl/cmake/clang/
+hdf5/zstd), and the **guardrails** toolbelt. Inputs come from the shared `/nix/store` (hot cache);
+`sccache` (`RUSTC_WRAPPER`) shares compiled crates across every worktree — a fresh worktree's first
+build is ~link time.
+- **Governance = [gerchowl/guardrails](https://github.com/gerchowl/guardrails)** via `flake.nix`.
+  `prek` (Rust pre-commit runner) auto-installs commit + push hooks on shell entry. Agent-drift gates:
+  `no-fake-impl`, `no-debug-leftovers`, `no-commented-code`, `no-conflict-markers`, `derived-docs`,
+  `gitleaks`, plus `rustfmt`/`clippy -D warnings`/`cargo-deny` (scoped to `tessera/`). Tune via
+  `.pre-commit-config.yaml` · `tessera/deny.toml` · `tessera/perf-budgets.toml`. **`guardrails info`**
+  lists every gate + knob. Escape one line with a trailing `guardrails-ok`.
+
 ## Working rules (this project)
 - **Bench/verify empirically before claiming** — real DUPLET data at
   `/mnt/HDD/data/sdsc_dump/GEDiscoveryMIGen2/Projects/DUPLET-Patients/` and per-date studies under
@@ -49,5 +63,8 @@ S9 (DICOM ingest), S16 (signing). Track everything against `FEATURE-MATRIX.md` g
   pcodec/vortex/zarr/duckdb/blake3/pydicom/hdf5plugin/numcodecs installed (`uv run python …`).
   Bench scratch: `…/processed/_bench/` (kept: `fd5_product/`, `h5_int16_slice_gzip4.h5`).
 - **ALOCA** — concise, decision-line-per-item; lead with the verdict + the number that drives it.
-- **Tests:** `cd tessera && cargo test` (17 pass). **Commits need** `--no-verify` (pre-commit hook
-  wants the `pre-commit` tool, absent here) **and** `-c commit.gpgsign=false` (signing key absent).
+- **Tests:** `cd tessera && cargo test` (17 pass) — or `cargo nextest run`.
+- **Commits:** inside the devShell, `prek` gates run (the intended path). From raw agent Bash
+  (no devShell), the installed hook can't find `prek`/the gates, so commit with
+  `git -c commit.gpgsign=false commit --no-verify` (signing key also absent here). Prefer running
+  commits from within `nix develop` so the gates actually fire.

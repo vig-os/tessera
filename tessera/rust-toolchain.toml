@@ -1,0 +1,8 @@
+# Canonical Rust toolchain for the Tessera workspace.
+# Read by both rustup (if used directly) and the Nix flake (rust-overlay
+# fromRustupToolchainFile). Pinning here = one source of truth for the
+# compiler + components across every machine and every subagent shell.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
