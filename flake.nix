@@ -9,6 +9,9 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
 
+    # Hermetic Rust builds for the flake checks (vendored deps → offline build/test).
+    crane.url = "github:ipetkov/crane";
+
     # Shared code-quality / agent-drift governance: prek (Rust pre-commit), the gate
     # toolbelt, and sccache. The devShell is built through its mkDevShell.
     guardrails.url = "github:gerchowl/guardrails";
@@ -16,7 +19,7 @@
     guardrails.inputs.flake-utils.follows = "flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, guardrails }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, guardrails }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
@@ -25,6 +28,19 @@
         };
         # One source of truth for the compiler + components — see tessera/rust-toolchain.toml.
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./tessera/rust-toolchain.toml;
+
+        # crane, pinned to our toolchain. The Rust workspace lives in ./tessera; deps are
+        # vendored once (buildDepsOnly) so clippy/test/fmt run hermetically & offline in CI.
+        craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+        src = craneLib.cleanCargoSource ./tessera;
+        commonArgs = {
+          inherit src;
+          strictDeps = true;
+          pname = "tessera";
+          version = "0.0.0";
+          # tessera-core is pure-Rust today; add native libs here when storage/ingest crates land.
+        };
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
       in
       {
         # guardrails.mkDevShell brings the governance toolbelt (prek + gates + gitleaks +
@@ -74,9 +90,37 @@
           '';
         };
 
-        # CI = a shim over `nix flake check`: the dev shell must build. (Existing project
-        # workflows in .github/workflows/ remain authoritative for language-specific CI.)
-        checks.default = self.devShells.${system}.default;
+        # ── CI = a shim over `nix flake check`. The logic lives HERE so the exact same command
+        #    runs on a dev's machine and in CI — no "passes locally / fails in CI" drift. ──
+        checks = {
+          # Hermetic Rust gates over the tessera workspace.
+          workspace-clippy = craneLib.cargoClippy (commonArgs // {
+            inherit cargoArtifacts;
+            cargoClippyExtraArgs = "--all-targets --all-features -- -D warnings";
+          });
+          workspace-test = craneLib.cargoNextest (commonArgs // {
+            inherit cargoArtifacts;
+            partitions = 1;
+            partitionType = "count";
+          });
+          workspace-fmt = craneLib.cargoFmt { inherit src; };
+
+          # guardrails agent-drift gates over the Rust source (code gates) + repo-wide structural
+          # gates. cargo-deny stays a pre-commit gate (needs network for the advisory DB).
+          guardrails-gates = pkgs.runCommand "guardrails-gates"
+            { nativeBuildInputs = [ guardrails.lib.${system}.gates ]; } ''
+            cd ${./.}
+            guardrails-no-fake-impl tessera/crates \
+              && guardrails-no-debug-leftovers tessera/crates \
+              && guardrails-no-commented-code tessera/crates \
+              && guardrails-no-conflict-markers . \
+              && guardrails-derived-docs . \
+              && touch $out
+          '';
+
+          # The dev shell itself must build (toolbelt + toolchain resolve).
+          dev-shell = self.devShells.${system}.default;
+        };
 
         formatter = pkgs.nixpkgs-fmt;
       });

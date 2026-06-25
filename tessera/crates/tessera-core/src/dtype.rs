@@ -77,7 +77,11 @@ impl DType {
 impl FromStr for DType {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, ()> {
-        DType::ALL.iter().copied().find(|d| d.as_str() == s).ok_or(())
+        DType::ALL
+            .iter()
+            .copied()
+            .find(|d| d.as_str() == s)
+            .ok_or(())
     }
 }
 

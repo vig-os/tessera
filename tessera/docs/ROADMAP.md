@@ -20,7 +20,7 @@ conformance corpus (#21c) gates v1.0.
 |---|---|---|---|
 | **P0** | De-risk & ADRs | **S13 ✓**, **S15 remainder** (cross-ver/arch + vendored-reader prototype); ADRs: D4 canonical-encoding, D5 identity, #22 versioning-DAG+container, D3 schema-id allocator, D2 sync/async, D1 fd5 repo | ADRs accepted; vendored reader decodes a pinned-version file |
 | **P1** | `tessera-core` finish | #20 manifest+BlockRef schema; #19 restore fd5 conventions+fields (id_inputs · `_type`/`_version` · `_vocabulary`/`_code` · `default` · `extra/` · `sources` roles+resolve · `study` · units · axes · `fill_value` · descriptions); #21a error taxonomy; product schemas (recon/listmode/sinogram/spectrum/roi/transform/calibration/sim/device_data) + required-field tables; D7 encryption non-goal | all §C correctness + spine tests green incl canonical-hash + validation |
-| **P2** | Read path **first** | #21b Reader API (`open`/range-read/block-handle/partial-product) + `object_store` backend | reads a hand-built `.tessera`; range-read a chunk |
+| **P2** | Read path **first** | #21b Reader API (`open`/range-read/block-handle/partial-product) + `object_store` backend | reads a hand-built `.tsra`; range-read a chunk |
 | **P3** | `tessera-io` write engine | S5 zarrs backend; S17 streaming (fragment-append · hash-on-write · incremental Merkle · crash-recovery to watermark); S3 chunk-Merkle integrity tree; container writer; observability (`tracing` on watermarks) | acq→sealed roundtrip; crash-recovery resumes; §D perf-SLA met |
 | **P4** | Conformance + CLI → **v0.1** | #21c conformance corpus + `SPEC.md`; `tessera-cli` (pack/unpack/verify/inspect); perf-SLA CI gates; S6 object-store range-read | 4 release gates green (conformance · roundtrip · SLA · determinism) |
 | **P5** | Ingest → **v0.2/v0.3** | S9 DICOM (files/DICOMweb/DIMSE, PS3.15 verify, lossless tags, rescale/units, egress); then GE-HDF5 · Siemens · raw `.dat`/`.BLF` · NIfTI; S14 cross-shape query demo | lossless DICOM roundtrip + egress; golden DICOM corpus |
@@ -47,7 +47,7 @@ Per `FEATURE-MATRIX.md §H`: **shippable = ① conformance corpus · ② bit-exa
 ## Open gating decisions (register — decide by the listed phase)
 | id | decision | options | by |
 |---|---|---|---|
-| D1 | fd5 supersession vs sibling repo | rename `vig-os/fd5`→`tessera` (keep history) **vs** subtree split | P0 |
+| D1 | fd5 supersession | **DECIDED → supersede.** fd5 is being dumped in favour of Tessera; the fd5 Python app is legacy. Rename `vig-os/fd5`→`tessera` (keep history). CI already swapped to the `nix flake check` shim; old fd5 Python CI dropped. P0 = execute the repo rename + update branch-protection required checks. | P0 |
 | D2 | concurrency model | sync `core` / async `io` (tokio + `object_store`) + `rayon` encode pool, `spawn_blocking` boundary | P0 |
 | D3 | schema-id allocation | per-schema monotonic + `<plugin>:<id>` namespacing + reserved ranges | P0/P1 |
 | D4 | canonical encoding for hashing | RFC 8785 JCS-JSON **vs** deterministic CBOR | P0 |

@@ -19,6 +19,10 @@ pub struct Source {
 
 impl Source {
     pub fn new(role: impl Into<String>, reference: impl Into<String>) -> Self {
-        Source { role: role.into(), reference: reference.into(), content_hash: None }
+        Source {
+            role: role.into(),
+            reference: reference.into(),
+            content_hash: None,
+        }
     }
 }

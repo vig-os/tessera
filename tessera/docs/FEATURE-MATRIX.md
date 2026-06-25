@@ -69,7 +69,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 ## G. Layout, distribution, ingest, read
 | Feature | Status | Gate | Evidence |
 |---|:--:|---|---|
-| Sealed `.tessera` (zip64, range-readable) | ○ | manifest discoverable; cloud range-read | #22 |
+| Sealed `.tsra` (zip64, range-readable) | ○ | manifest discoverable; cloud range-read | #22 |
 | OCI artifact / exploded prefix | ○ | push/pull; range-read; CoW versioning | #22 |
 | Ingest: DICOM | ○ | lossless tags, PS3.15 verify, rescale/units | S9 |
 | Ingest: GE-HDF5 · Siemens · raw · NIfTI | ○ | decode→re-encode open; lossless | S9 (GE transform benched) |

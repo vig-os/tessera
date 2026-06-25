@@ -18,9 +18,9 @@ time.workspace = true
 proptest.workspace = true
 
 # The core (manifest, identity, hash, provenance, block descriptors) compiles and tests
-# with NO storage-backend deps. The features below are placeholders that gate the
-# (currently stub) payload read/write paths; enabling them will pull zarrs / arrow once
-# those backends are implemented. See docs/rfc-tessera.md §6.
+# with NO storage-backend deps. The feature flags below gate the payload read/write paths;
+# enabling them will pull zarrs / arrow once those backends are implemented (ROADMAP P3).
+# See docs/rfc-tessera.md §6.
 [features]
 default = []
 array-zarr = []   # N-D chunked array block payloads (zarrs)

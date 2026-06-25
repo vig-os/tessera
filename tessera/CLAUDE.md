@@ -18,7 +18,7 @@ fd5 white-paper (the founding vision): `~/Projects/fd5/white-paper.md`.
 - **Codec = pcodec** universal (zstd = decades-stable fallback). Container irrelevant (Zarr ≡ HDF5).
 - **Identity/integrity:** blake3 Merkle, **hash-on-write** (chunks born with hash → first-moment
   integrity), seal = hash-of-hashes. Merkle is **integrity-only** (Vortex owns random-access).
-- **Layout:** canonical **single sealed `.tessera` (STORED zip64, range-readable)**; opt-in exploded
+- **Layout:** canonical **single sealed `.tsra` (STORED zip64, range-readable)**; opt-in exploded
   S3 prefix (parallel-write/CoW); **OCI artifact** distribution; RO-Crate/DataCite/InvenioRDM discovery.
 - **Write engine (`tessera-io`):** streaming — bounded RAM ring → rayon encode pool → durable
   fragment commits + incremental Merkle + registry watermark; spill on burst; **never encode on the
@@ -38,7 +38,7 @@ fd5 white-paper (the founding vision): `~/Projects/fd5/white-paper.md`.
 ## Phase & next steps
 Spike phase **done** (S0–S15 + 3 fresh-agent reviews + corrections). **Build phase next** — do the
 **P0 ADRs before code** (they poison fixtures if deferred): #20 canonical-JSON(JCS)+identity-reconciliation+manifest/BlockRef
-schema · #22 versioning-DAG+`.tessera` container spec · #19 restore fd5 conventions+fields · #21
+schema · #22 versioning-DAG+`.tsra` container spec · #19 restore fd5 conventions+fields · #21
 read-path/Reader-API+error-taxonomy+conformance-corpus. Then S5 (zarrs backend), S17 (write engine),
 S9 (DICOM ingest), S16 (signing). Track everything against `FEATURE-MATRIX.md` gates.
 

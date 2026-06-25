@@ -50,7 +50,8 @@ impl Manifest {
         let description = description.into();
         // Normalise to UTC so equivalent instants in different offsets share one id.
         let timestamp = crate::identity::normalize_timestamp(&timestamp.into());
-        let id = crate::identity::compute_id(&[product.as_str(), name.as_str(), timestamp.as_str()]);
+        let id =
+            crate::identity::compute_id(&[product.as_str(), name.as_str(), timestamp.as_str()]);
         Manifest {
             tessera_version: TESSERA_VERSION.to_string(),
             id,

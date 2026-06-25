@@ -1,2 +1,3 @@
 target/
-Cargo.lock
+# Cargo.lock IS committed — Tessera is an application/format project (not a library), so we
+# pin the exact dependency graph for reproducible builds + hermetic Nix flake checks (crane).

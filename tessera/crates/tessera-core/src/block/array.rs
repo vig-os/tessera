@@ -77,7 +77,10 @@ pub struct ArrayBlock {
 
 impl ArrayBlock {
     pub fn new(name: impl Into<String>, spec: ArraySpec) -> Self {
-        ArrayBlock { name: name.into(), spec }
+        ArrayBlock {
+            name: name.into(),
+            spec,
+        }
     }
 }
 
@@ -102,6 +105,8 @@ impl Block for ArrayBlock {
 impl ArrayBlock {
     /// Write the array payload via zarrs (sharded, cubic-chunked, zstd). Not yet implemented.
     pub fn write_zarr(&self, _store_path: &std::path::Path) -> crate::Result<()> {
-        Err(crate::Error::Unimplemented("ArrayBlock::write_zarr (zarrs backend)"))
+        Err(crate::Error::Unimplemented(
+            "ArrayBlock::write_zarr (zarrs backend)",
+        ))
     }
 }

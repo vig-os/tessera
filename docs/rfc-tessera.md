@@ -34,7 +34,7 @@ The spike campaign converged on a clear, evidence-backed architecture. Headlines
    reduces to "chunk grid + a good codec" = **Zarr+pcodec** (already available).
 
 5. **Layout (resolves §8):** a product is a **content-addressed collection** with one identity
-   (Merkle root). Its **canonical serialization is a single sealed `.tessera` file** — a
+   (Merkle root). Its **canonical serialization is a single sealed `.tsra` file** — a
    **STORED zip64** (no recompression; central directory = internal index → **cloud range-reads
    into the one file**, à la Zarr ZipStore). This preserves fd5's **inseparability** (one file,
    can't orphan a block by accident) *and* partial reads. An **exploded S3 prefix** is an
@@ -190,7 +190,7 @@ Full benchmark tables and method: fd5 issues #192 (recon), #193 (listmode), #194
 
 ## 8. Container & layout (resolved) + remaining open questions
 
-**Resolved (see §0.5–0.6):** the canonical serialization is a **single sealed `.tessera`
+**Resolved (see §0.5–0.6):** the canonical serialization is a **single sealed `.tsra`
 file** — a **STORED zip64** holding `manifest.json` + `*.zarr/` array blocks + `*.vortex`
 table blocks. Its central directory is the internal index → **cloud range-reads into the one
 file** (Zarr `ZipStore` proves the pattern), so the single file is *both* inseparable (fd5's
@@ -220,13 +220,13 @@ its product id.
 Vortex/columnar files are **footer-at-end**: a writer that dies before close → the *whole file
 is unreadable* (tested: truncation at even 99.9% = 0 rows recovered). Write ~48 MB/s / 1.3 M
 rows/s — not streaming-optimised. Therefore:
-- **Never stream a DAQ into a single Vortex/`.tessera`** — a crash loses the whole run.
+- **Never stream a DAQ into a single Vortex/`.tsra`** — a crash loses the whole run.
 - **Ingest = fragment-append**: finalise small fragments (footer written) per time-window / N
   events, each committed by an **atomic manifest pointer update** → crash-tolerant **up to the
   last committed fragment** (bound loss by the fragment interval). Or **raw WAL** (the vendor
   `.dat`/`.BLF` append log) → **offline convert** to Tessera (what the DUPLET pipeline does).
 - **Parallel write** = N writers → N fragments → one manifest (not concurrent writers to one
-  file). The sealed single `.tessera` is the **archival** form only.
+  file). The sealed single `.tsra` is the **archival** form only.
 
 ### Integrity & tamper-evidence
 **Tamper-*proof* is impossible for data you hold** (you can always rehash). Design for
@@ -354,7 +354,7 @@ acq → bounded RAM ring (backpressure)
 ACQUIRE  → durable Vortex/Zarr FRAGMENTS (committed, registry watermark, raw-spill on burst)
 COMPACT  → merge fragments → ONE FULL VORTEX COLUMN   ← full column forms here (bg or post-acq)
             recon: raw listmode → volume → Zarr 64³+pcodec
-SEAL     → blake3 hash-of-hashes + manifest + pack .tessera / commit + sign  ← seals here
+SEAL     → blake3 hash-of-hashes + manifest + pack .tsra / commit + sign  ← seals here
             (per product: raw acq seals post-compact; derived seal post-processing → provenance→parent)
 ```
 
@@ -440,7 +440,7 @@ the organic spike narrative omitted them — they are normative, not optional.
   root + first-level blocks, recommended deeper (boilerplate-rejection is an SDK lint, fd5 P3).
 - **Additive-only evolution + bidirectional read** (fd5 P8): never remove/rename; vN reads
   v(N−1); v(N−1) warns + reads-what-it-can on vN; future *major* → refused. Stable field-ids.
-- **Filename**: `YYYY-MM-DD_HH-MM-SS_<product>-<id8>_<descriptors>.tessera`, mtime = acq time.
+- **Filename**: `YYYY-MM-DD_HH-MM-SS_<product>-<id8>_<descriptors>.tsra`, mtime = acq time.
 - **Concurrency**: a sealed product is **single-writer-during-creation, lock-free for N
   readers**, infinite cache validity (fd5 P13); the exploded prefix is *unsealed working state*.
 - **`errors_of: <block>`** companion blocks for per-element uncertainty (NeXus `_errors`).
@@ -471,7 +471,7 @@ Layer-0 hashes preserved; declare→stream→seal with Merkle root + signature).
   table: columns{id,name,desc,dtype,units,codec}/row_index) — both currently undefined.
 - **Missing struct fields**: `ArraySpec.fill_value` (CT air −1024 ≠ 0), `ArraySpec.axes`
   (ZYX, OME-NGFF), `Column.units`/`description`.
-- **`.tessera` container spec**: `mimetype` magic first entry; `manifest.json` discoverable;
+- **`.tsra` container spec**: `mimetype` magic first entry; `manifest.json` discoverable;
   block path convention; path-traversal hardening; zip64 tail rules.
 - **Read path / `Reader` API** — entirely unspecified (the RFC is writer-shaped); sketch it
   *before* `tessera-io` so the layout isn't reader-hostile.

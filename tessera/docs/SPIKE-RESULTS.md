@@ -89,7 +89,7 @@ projection 3× + filter pushdown + zero-copy Arrow→DuckDB. **Tables keep Vorte
   access pattern. zstd = decades-stable fallback codec.
 
 ## Layout
-- Canonical: **single sealed `.tessera`** = STORED zip64 (central-dir index → cloud range-reads
+- Canonical: **single sealed `.tsra`** = STORED zip64 (central-dir index → cloud range-reads
   into one file; inseparable). Opt-in **exploded S3 prefix** (≈ OCI image-layout) for parallel
   write / CoW versioning. **OCI artifact** (zot/registry:2 on MinIO, or bare OCI-layout objects)
   for registry distribution. **RO-Crate** derived for discovery. One Merkle root across all forms.

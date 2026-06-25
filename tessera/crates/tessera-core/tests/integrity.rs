@@ -17,7 +17,11 @@ fn sample_product() -> Manifest {
         ArraySpec::new(vec![487, 512, 512], "int16").with_rescale(1.0, -1024.0),
     );
     let spec = TableSpec {
-        columns: vec![Column { name: "lt".into(), dtype: "f4".into(), codec: Some("zstd".into()) }],
+        columns: vec![Column {
+            name: "lt".into(),
+            dtype: "f4".into(),
+            codec: Some("zstd".into()),
+        }],
         rows: 2_696_935,
         row_index: Some("ms".into()),
     };
@@ -46,7 +50,11 @@ fn merkle_root_deterministic_and_order_sensitive() {
     let r1 = tessera_core::hash::merkle_root(&[a.clone(), b.clone()]);
     let r2 = tessera_core::hash::merkle_root(&[a.clone(), b.clone()]);
     assert_eq!(r1, r2, "same ordered digests must give the same root");
-    assert_ne!(r1, tessera_core::hash::merkle_root(&[b, a]), "order is semantic");
+    assert_ne!(
+        r1,
+        tessera_core::hash::merkle_root(&[b, a]),
+        "order is semantic"
+    );
 }
 
 #[test]
@@ -80,7 +88,10 @@ fn seal_immutability_invariants() {
     assert!(m.is_sealed());
     assert!(m.content_hash.as_deref().unwrap().starts_with("blake3:"));
     assert_eq!(m.blocks.len(), 2);
-    assert!(m.blocks.iter().all(|b| b.digest.is_some()), "no block may lack a digest");
+    assert!(
+        m.blocks.iter().all(|b| b.digest.is_some()),
+        "no block may lack a digest"
+    );
 }
 
 #[test]
@@ -108,7 +119,11 @@ fn tamper_one_block_changes_content_hash() {
     let events = TableBlock::new(
         "events_3p",
         TableSpec {
-            columns: vec![Column { name: "lt".into(), dtype: "f4".into(), codec: Some("zstd".into()) }],
+            columns: vec![Column {
+                name: "lt".into(),
+                dtype: "f4".into(),
+                codec: Some("zstd".into()),
+            }],
             rows: 2_696_935,
             row_index: Some("ms".into()),
         },
@@ -123,7 +138,15 @@ fn block_reorder_changes_content_hash() {
     let vol = ArrayBlock::new("volume", ArraySpec::new(vec![4, 4, 4], "int16"));
     let tbl = TableBlock::new(
         "events",
-        TableSpec { columns: vec![Column { name: "lt".into(), dtype: "f4".into(), codec: None }], rows: 1, row_index: None },
+        TableSpec {
+            columns: vec![Column {
+                name: "lt".into(),
+                dtype: "f4".into(),
+                codec: None,
+            }],
+            rows: 1,
+            row_index: None,
+        },
     );
     let mut a = ProductBuilder::new("p", "n", "d", "2023-12-08T00:00:00Z");
     a.add_block(&vol).unwrap();
@@ -131,16 +154,25 @@ fn block_reorder_changes_content_hash() {
     let mut b = ProductBuilder::new("p", "n", "d", "2023-12-08T00:00:00Z");
     b.add_block(&tbl).unwrap();
     b.add_block(&vol).unwrap();
-    assert_ne!(a.seal().unwrap().content_hash, b.seal().unwrap().content_hash);
+    assert_ne!(
+        a.seal().unwrap().content_hash,
+        b.seal().unwrap().content_hash
+    );
 }
 
 // ---- version handling --------------------------------------------------------------------
 
 #[test]
 fn unknown_tessera_version_errors_cleanly() {
-    let json = sample_product().to_json().unwrap().replace("\"0.0.0\"", "\"9.9.9\"");
+    let json = sample_product()
+        .to_json()
+        .unwrap()
+        .replace("\"0.0.0\"", "\"9.9.9\"");
     let err = Manifest::from_json(&json);
-    assert!(err.is_err(), "a future major version must be refused, not silently accepted");
+    assert!(
+        err.is_err(),
+        "a future major version must be refused, not silently accepted"
+    );
     // a manifest at the supported version still parses
     assert!(Manifest::from_json(&sample_product().to_json().unwrap()).is_ok());
 }

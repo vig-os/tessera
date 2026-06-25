@@ -46,7 +46,12 @@ mod tests {
         assert_eq!(m.blocks.len(), 1);
         assert_eq!(m.blocks[0].kind, BlockKind::Array);
         // identity is stable for identical inputs
-        let again = Manifest::new("recon", "DP06-CT-Standard-3.75", "x", "2023-12-08T00:00:00+00:00");
+        let again = Manifest::new(
+            "recon",
+            "DP06-CT-Standard-3.75",
+            "x",
+            "2023-12-08T00:00:00+00:00",
+        );
         assert_eq!(m.id, again.id);
     }
 
@@ -54,8 +59,16 @@ mod tests {
     fn build_listmode_table_product() {
         let spec = TableSpec {
             columns: vec![
-                Column { name: "lt".into(), dtype: "f4".into(), codec: Some("zstd".into()) },
-                Column { name: "en0".into(), dtype: "f4".into(), codec: Some("zstd".into()) },
+                Column {
+                    name: "lt".into(),
+                    dtype: "f4".into(),
+                    codec: Some("zstd".into()),
+                },
+                Column {
+                    name: "en0".into(),
+                    dtype: "f4".into(),
+                    codec: Some("zstd".into()),
+                },
             ],
             rows: 2_696_935,
             row_index: Some("ms".into()),

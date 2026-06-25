@@ -34,7 +34,10 @@ pub struct TableBlock {
 
 impl TableBlock {
     pub fn new(name: impl Into<String>, spec: TableSpec) -> Self {
-        TableBlock { name: name.into(), spec }
+        TableBlock {
+            name: name.into(),
+            spec,
+        }
     }
 }
 
@@ -58,6 +61,8 @@ impl Block for TableBlock {
 impl TableBlock {
     /// Write the columnar payload via arrow/parquet. Not yet implemented.
     pub fn write_parquet(&self, _path: &std::path::Path) -> crate::Result<()> {
-        Err(crate::Error::Unimplemented("TableBlock::write_parquet (arrow backend)"))
+        Err(crate::Error::Unimplemented(
+            "TableBlock::write_parquet (arrow backend)",
+        ))
     }
 }
