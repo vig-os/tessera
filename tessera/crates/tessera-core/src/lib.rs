@@ -10,6 +10,7 @@
 //! rationale, and fd5 issues #192/#193/#194 for the evidence.
 
 pub mod block;
+pub mod canonical;
 pub mod dtype;
 pub mod error;
 pub mod hash;
@@ -43,16 +44,48 @@ mod tests {
         let m = b.seal().unwrap();
         assert!(m.id.starts_with("blake3:"));
         assert!(m.content_hash.is_some());
+        assert!(m.manifest_hash.is_some());
+        assert!(m.is_sealed());
         assert_eq!(m.blocks.len(), 1);
         assert_eq!(m.blocks[0].kind, BlockKind::Array);
-        // identity is stable for identical inputs
+        // a freshly sealed product verifies all three hashes
+        m.verify().unwrap();
+        // identity is stable for identical id_inputs (description is NOT identity-bearing)
         let again = Manifest::new(
             "recon",
             "DP06-CT-Standard-3.75",
-            "x",
+            "different description",
             "2023-12-08T00:00:00+00:00",
         );
         assert_eq!(m.id, again.id);
+    }
+
+    #[test]
+    fn seal_round_trips_through_canonical_json_and_verifies() {
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![64, 64, 64], "int16"));
+        let mut b = ProductBuilder::new("recon", "rt", "round-trip", "2024-01-01T00:00:00Z");
+        b.add_block(&vol).unwrap();
+        let m = b.seal().unwrap();
+        // Persisted as JSON, re-read, the seal must reproduce byte-for-byte and verify.
+        let parsed = Manifest::from_json_verified(&m.to_json().unwrap()).unwrap();
+        assert_eq!(parsed.manifest_hash, m.manifest_hash);
+        assert_eq!(
+            parsed.compute_manifest_hash().unwrap(),
+            m.manifest_hash.unwrap()
+        );
+    }
+
+    #[test]
+    fn tampering_with_a_block_digest_fails_verification() {
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![64, 64, 64], "int16"));
+        let mut b = ProductBuilder::new("recon", "t", "tamper", "2024-01-01T00:00:00Z");
+        b.add_block(&vol).unwrap();
+        let mut m = b.seal().unwrap();
+        m.blocks[0].digest = Some("blake3:deadbeef".into());
+        match m.verify() {
+            Err(crate::Error::Integrity { what, .. }) => assert_eq!(what, "content_hash"),
+            other => panic!("expected content_hash integrity error, got {other:?}"),
+        }
     }
 
     #[test]

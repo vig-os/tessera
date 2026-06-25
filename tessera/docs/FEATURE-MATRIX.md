@@ -9,13 +9,14 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 ## A. Format core
 | Feature | Status | Gate (pass condition) | Evidence |
 |---|:--:|---|---|
-| Manifest spine (build/seal) | ✓ | seals, Merkle root set, blocks==refs | 17 tests green |
+| Manifest spine (build/seal) | ✓ | seals, Merkle root set, blocks==refs | 22 tests green |
 | Identity `id` (stable) | ✓ | same inputs→same id; rename≠new-content | `id_stable_and_distinct` |
-| `id` vs `content_hash` + `id_inputs` | ○ | id stable across re-ingest; content_hash=Merkle; reconciled | #20 |
-| Canonical manifest encoding (JCS) | ○ | re-serialize → identical hash (RFC 8785) | #20 |
+| `id` vs `content_hash` + `id_inputs` | ✓ | id=blake3(JCS(id_inputs)) logical; content_hash=Merkle; reconciled | **ADR-0020**, `id_*` tests |
+| Canonical manifest encoding (JCS) | ✓ | re-serialize → identical hash (RFC 8785, `serde_jcs`) | `canonical::*`, `seal_round_trips_*` |
+| `manifest_hash` seal (whole-manifest tamper-evident) | ✓ | blake3 over JCS(manifest); covers meta+sources+digests | `tampering_*`, `verify()` |
 | Block dispatch (schema→array/table) | ○ | tensor col→Zarr; scalar cols→Vortex | #19/#20 |
 | Seal = hash-of-hashes | ✓ | µs seal, no 2nd data pass, valid partial root | design+tests |
-| Error taxonomy | ◑ | typed, `#[non_exhaustive]`, never panic | 5-variant stub → #21 |
+| Error taxonomy | ✓ | typed `#[non_exhaustive]`, `Integrity{what,exp,act}`, never panic | `error.rs`, `verify()` |
 
 ## B. Codec & storage (decided, proven)
 | Feature | Status | Gate | Evidence |

@@ -51,7 +51,8 @@ impl ProductBuilder {
         self
     }
 
-    /// Seal: roll block digests into a Merkle root, freeze the manifest, return it.
+    /// Seal: roll block digests into the content Merkle root, then hash the whole manifest into
+    /// the `manifest_hash` seal, freeze, and return it.
     ///
     /// Every block MUST carry a digest — a missing digest is a hard error, never silently
     /// dropped (otherwise a block would be invisible to the content hash yet present in the
@@ -61,16 +62,15 @@ impl ProductBuilder {
         for r in &self.refs {
             match &r.digest {
                 Some(d) => digests.push(d.clone()),
-                None => {
-                    return Err(crate::Error::Invalid(format!(
-                        "block '{}' has no digest; cannot seal",
-                        r.name
-                    )))
-                }
+                None => return Err(crate::Error::MissingDigest(r.name.clone())),
             }
         }
         self.manifest.blocks = self.refs;
         self.manifest.content_hash = Some(crate::hash::merkle_root(&digests));
+        // The seal is computed last, over the manifest with `manifest_hash` excluded, so it
+        // transitively commits to id_inputs, sources, and every block digest.
+        self.manifest.manifest_hash = None;
+        self.manifest.manifest_hash = Some(self.manifest.compute_manifest_hash()?);
         Ok(self.manifest)
     }
 }
