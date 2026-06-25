@@ -228,6 +228,52 @@ its product id.
 - Supersession vs sibling of fd5 (decides repo: rename vs new repo).
 - Bit-exact roundtrip of `pcodec`/Vortex on int16 + float32 (spike **S13**) before clinical use.
 
+## 10. Durability, integrity & audit (spikes S16–S17)
+
+### Durability & DAQ ingest
+Vortex/columnar files are **footer-at-end**: a writer that dies before close → the *whole file
+is unreadable* (tested: truncation at even 99.9% = 0 rows recovered). Write ~48 MB/s / 1.3 M
+rows/s — not streaming-optimised. Therefore:
+- **Never stream a DAQ into a single Vortex/`.tessera`** — a crash loses the whole run.
+- **Ingest = fragment-append**: finalise small fragments (footer written) per time-window / N
+  events, each committed by an **atomic manifest pointer update** → crash-tolerant **up to the
+  last committed fragment** (bound loss by the fragment interval). Or **raw WAL** (the vendor
+  `.dat`/`.BLF` append log) → **offline convert** to Tessera (what the DUPLET pipeline does).
+- **Parallel write** = N writers → N fragments → one manifest (not concurrent writers to one
+  file). The sealed single `.tessera` is the **archival** form only.
+
+### Integrity & tamper-evidence
+**Tamper-*proof* is impossible for data you hold** (you can always rehash). Design for
+**tamper-evident + signed + externally-anchored**:
+1. **In-product integrity** — native **Merkle root** (self-verifying offline).
+2. **History** — append-only manifest/hash chain (audit-trail #167–170).
+3. **Source-rooted signing** (defends against *injection*): sign the acquisition Merkle root
+   **at the scanner**, with a **hardware-rooted key (TPM/HSM)**, leveraging the existing
+   **DICOM PS3.15 Digital Signatures** standard. Trust must originate at the source, or you
+   only prove a downstream signer touched it.
+4. **Chain of custody** — every transform (raw→events→recon) is a signed Tessera product whose
+   `sources` references the parent hash. Verify = walk the DAG to the scanner-signed root,
+   checking signature + signer identity + content hash + timestamp at each hop.
+5. **Anchoring** — **private Sigstore (Fulcio + Rekor) on hospital infra**, or X.509 + an
+   internal **RFC-3161 timestamp authority**. **Not the *public* Sigstore** — it leaks
+   operational metadata + (GDPR) signer identity; only hashes/signatures are logged, never PHI,
+   but hospitals won't egress. Private instance = same guarantees, internal trust boundary.
+6. **Immutability** — **WORM** (S3 Object Lock, compliance mode).
+
+**Regulatory fit:** FDA 21 CFR Part 11 (attributable e-signatures + audit + integrity), DICOM
+PS3.15 (signatures + TLS), GDPR/HIPAA (no PHI in logs; internal infra; device/role identities).
+**Limit:** proves *genuine, unaltered device output* — not *medical* correctness; a fully
+compromised scanner is the root-of-trust boundary (mitigate: device attestation, physical
+security, audit).
+
+### Distribution / RDM (corrected — DataLad is not the backbone)
+Cloud-native stack: **OCI artifact** (`zot`/`registry:2` on **MinIO**) for addressing +
+distribution; **cosign (private Sigstore)** for sign + tamper-evident anchor; **S3 Object Lock**
+for WORM; **InvenioRDM** (Zenodo's engine) for DOI · versioning · FAIR landing pages · access
+control, fed by the derived **RO-Crate/DataCite** exports. **DataLad (git + git-annex)** is an
+*optional* bridge for git-native workflows — not the audit backbone (it duplicates OCI digests,
+cosign/Rekor, and InvenioRDM versioning with a git-centric paradigm).
+
 ## 9. Non-goals
 
 - A novel byte-level codec/container that out-competes zarrs/arrow/lance on their home turf.
