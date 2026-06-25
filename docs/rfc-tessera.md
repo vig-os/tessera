@@ -370,6 +370,54 @@ SEAL     → blake3 hash-of-hashes + manifest + pack .tessera / commit + sign  �
             (per product: raw acq seals post-compact; derived seal post-processing → provenance→parent)
 ```
 
+### Write contract, schema & self-description (declare → stream → seal)
+
+The declared manifest **is the contract** — provided *up front*, before data, because it drives
+encode/dispatch and lets validation **fail fast** (don't waste a multi-GB acquisition on a
+product that won't validate). The *final content-hashed JSON* is written at **seal**; an
+*open/working manifest* is persisted during the stream for crash recovery.
+
+**Schema = an ordered list of fields** (and, for arrays, **axes**), each carrying fd5-style
+self-description as **short id + description**:
+
+```
+field { id: u16 (stable),  name: "lt",  desc: "per-event positronium lifetime",
+        dtype: "f4",  units: "ns",  codec: "pcodec" }
+axis  { name: "z", desc: "slice (cranio-caudal)", unit: "mm", type: "space" }   # OME-NGFF
+```
+- **Short stable `id` = the storage key** — compact (a small int per column/chunk, *not* a
+  repeated string) **and** the schema-evolution anchor: readers bind by `id`, so **renaming a
+  field never breaks them**; drop-then-re-add-same-name allocates a **new id** (Iceberg lesson —
+  never resurrect old data under a reused name).
+- **`description` on every field/axis/block** (fd5 "description on everything") → **AI-retrievable**;
+  carried **once** in the manifest, so self-description costs ~nothing at billions of rows.
+- **`units`/`unitSI` on every quantity** (FAIR I1).
+
+**Validation strictness:**
+- **required** (id, dtype, units-on-quantities, product/identity) → **fail** — *fail-fast* at
+  declare (the contract), *fail-closed* at seal (completeness, incl. data-derived shape/hash).
+- **descriptions** → **fail in FAIR-strict mode, warn otherwise** (description-on-everything is
+  the FAIR target; configurable).
+- recommended/optional → **warn**.
+
+**Stats:** per-chunk **min/max/null + running histograms are fused at write** (free — you touch
+every value to encode it; immediate pruning via the chunk-Merkle leaves). **Reductive products**
+(multiscale **pyramids**, global histograms, MIPs, derived recons) are **post-hoc, lazy,
+provenanced sibling blocks** (OME-Zarr multiscale pattern) — `sources → parent`, materialised on
+demand. The pyramid is a *sibling block*, not an append to the array.
+
+**Versioned, extensible schema registry.** The required-field contract is a **product schema**
+(`recon`, `listmode`, `spectrum`, `roi`, `calibration`, …), **versioned** (`product` +
+`schema_version`) with **additive-only evolution** + stable field ids. Schemas are **embedded in
+the product** (self-validating *offline* — decades-archival) and **registered + extensible**:
+core schemas ship in `tessera`; **domain/device schemas are plugins** (entry points) — a generic
+`listmode` base + **device profiles** (`ge-petct`, `siemens-…`) or domain packages
+(`genomics-alignment`, …). The **engine is schema-*driven*, domain-*agnostic***: `tessera-core`/`io`
+carry the *mechanism* (embed · validate · version); the *schemas* are registered data — so one
+engine validates any device/domain by loading the declared schema. (= fd5's product-schema
+registry + embedded-schema + ingest-contract, carried forward; reader is back-compatible, a
+future major `schema_version` is refused not mis-read.)
+
 `tessera-core` = format/spine (no I/O). **`tessera-io`** = this engine. `tessera-ingest` = vendor
 decoders feeding capture.
 
