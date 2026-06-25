@@ -21,7 +21,8 @@ pub struct ArraySpec {
     /// Shard shape; `Some` collapses thousands of chunk objects into a few shard files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shards: Option<Vec<u64>>,
-    /// Compression codec; zstd by default (smaller AND faster than gzip).
+    /// Compression codec; **pcodec** by default — the settled volume codec (lossless, −21% CT /
+    /// −33% PET vs zstd). `zstd` remains a decades-stable fallback name. See `tessera-io::array`.
     pub codec: String,
     /// No-data / fill value (fd5 `fill_value`) for sparse or masked regions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,8 +48,8 @@ pub fn default_axes(rank: usize) -> Vec<String> {
 }
 
 impl ArraySpec {
-    /// Construct with benchmark-backed defaults: cubic 64³ chunks, zstd, named axes per rank,
-    /// no rescale. Axes default to `[z,y,x]` for the common 3-D volume.
+    /// Construct with benchmark-backed defaults: cubic 64³ chunks, **pcodec**, named axes per
+    /// rank, no rescale. Axes default to `[z,y,x]` for the common 3-D volume.
     pub fn new(shape: Vec<u64>, dtype: impl Into<String>) -> Self {
         let rank = shape.len();
         ArraySpec {
@@ -57,7 +58,7 @@ impl ArraySpec {
             chunks: vec![64; rank.max(1)],
             axes: default_axes(rank),
             shards: None,
-            codec: "zstd".into(),
+            codec: "pcodec".into(),
             fill_value: None,
             unit: None,
             rescale_slope: None,
@@ -140,17 +141,10 @@ impl Block for ArrayBlock {
     }
     fn digest(&self) -> crate::Result<String> {
         self.spec.validate()?;
-        // Spike: digest the spec. Real impl digests the encoded zarrs shards (Merkle of chunks).
+        // A *spec-only* digest: an `ArrayBlock` carries no samples, so this hashes the canonical
+        // spec — the digest for a block whose data is not yet attached. A real array product is
+        // built via `tessera_io::array::array_block`, which digests the encoded payload bytes
+        // (Zarr v3 + pcodec) and supplies the `BlockRef` through `ProductBuilder::add_block_ref`.
         Ok(crate::hash::digest(&serde_json::to_vec(&self.spec)?))
-    }
-}
-
-#[cfg(feature = "array-zarr")]
-impl ArrayBlock {
-    /// Write the array payload via zarrs (sharded, cubic-chunked, zstd). Not yet implemented.
-    pub fn write_zarr(&self, _store_path: &std::path::Path) -> crate::Result<()> {
-        Err(crate::Error::Unimplemented(
-            "ArrayBlock::write_zarr (zarrs backend)",
-        ))
     }
 }

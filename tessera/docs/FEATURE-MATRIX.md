@@ -14,7 +14,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | `id` vs `content_hash` + `id_inputs` | ✓ | id=blake3(JCS(id_inputs)) logical; content_hash=Merkle; reconciled | **ADR-0020**, `id_*` tests |
 | Canonical manifest encoding (JCS) | ✓ | re-serialize → identical hash (RFC 8785, `serde_jcs`) | `canonical::*`, `seal_round_trips_*` |
 | `manifest_hash` seal (whole-manifest tamper-evident) | ✓ | blake3 over JCS(manifest); covers meta+sources+digests | `tampering_*`, `verify()` |
-| Block dispatch (schema→array/table) | ○ | tensor col→Zarr; scalar cols→Vortex | #19/#20 |
+| Block dispatch (schema→array/table) | ◑ | array→Zarr v3+pcodec **done**; table→Vortex pending | `tessera-io::array`, ADR-0023, #203 |
 | Seal = hash-of-hashes | ✓ | µs seal, no 2nd data pass, valid partial root | design+tests |
 | Error taxonomy | ✓ | typed `#[non_exhaustive]`, `Integrity{what,exp,act}`, never panic | `error.rs`, `verify()` |
 
@@ -29,7 +29,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 ## C. Correctness gates (REQUIRED — binary)
 | Gate | Status | Pass condition | Evidence |
 |---|:--:|---|---|
-| **Bit-exact lossless** (arrays+tables) | ✓ | `bytes ==` incl NaN/±inf/−0.0/denormal/int-limits | **S13 PASS** |
+| **Bit-exact lossless** (arrays+tables) | ✓ | `bytes ==` incl NaN/±inf/−0.0/denormal/int-limits | **S13 PASS** + Rust `array::tests` (8 dtypes, pcodec) |
 | **Writer determinism** (same-ver) | ✓ | same input→byte-identical output (manifest + .tsra) | **S15** + `corpus_packs_deterministically` |
 | Cross-version / cross-arch determinism | ◑ | golden hashes locked in `corpus.json`; drift fails CI | conformance gate (multi-release CI pending, S15 remain) |
 | Pruning never lies | ○ | predicate-match chunk never skipped | TEST-PLAN |

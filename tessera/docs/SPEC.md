@@ -56,6 +56,24 @@ MUST be present in a sealed product. `spec` is shape-specific and opaque to the 
 carries `shape`/`dtype`/`chunks`/`axes`/`codec`/…; a table spec carries `columns`/`rows`/…).
 **Source** = `{ role: string, reference: string, content_hash✱: string }`.
 
+## 5a. Array block payload (Zarr v3 + pcodec)
+A block with `kind == "array"` stores its samples as a **single serialized Zarr v3 store** (ADR-0023).
+The array spec carries `shape` (per-axis element counts, C order), `dtype`, `chunks` (cubic chunk
+shape, default 64³), `axes`, and `codec` (`"pcodec"`).
+
+- **Codec.** The Zarr array uses the **pcodec** array→bytes codec (lossless). pcodec operates on
+  ≥16-bit numbers: supported dtypes are `int16/32/64`, `uint16/32/64`, `float32/64`. Floating-point
+  bit patterns (incl `NaN`, `±inf`, `−0.0`, denormals) MUST be preserved exactly.
+- **Store serialization.** The Zarr store (its `zarr.json` metadata entry + chunk entries) is
+  serialized into one byte string: collect all store keys, **sort by UTF-8 byte order**, then for each
+  emit `u32_le key_len · key_utf8 · u64_le value_len · value`. The block payload is exactly this byte
+  string; its `digest` (§3) is computed over it. Decoding reverses the framing to rebuild the store.
+- **Determinism.** Sorted keys + fixed framing + deterministic pcodec/Zarr-v3 metadata ⇒ the same
+  array always serializes to byte-identical payload bytes (the writer-determinism gate).
+
+A reader MAY decode only a sub-region by reconstructing the store and reading the intersecting chunks.
+(Table-block payloads — `kind == "table"` — are not yet frozen; the Vortex encoding lands later.)
+
 ## 6. Container `.tsra`
 A ZIP archive (zip64). Entries, in order:
 1. **`mimetype`** — STORED (uncompressed), first entry, content exactly `application/vnd.tessera`

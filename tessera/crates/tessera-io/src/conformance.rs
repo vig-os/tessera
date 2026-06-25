@@ -5,14 +5,19 @@
 //! `id`/`content_hash`/`manifest_hash` exactly — the writer-determinism + cross-version-drift gate;
 //! and (2) the recorded hashes are the contract a second, independent implementation (the v1.0
 //! pure-Python reader) must reproduce from `SPEC.md` alone. Every input here is a fixed constant.
+//!
+//! Array blocks carry **real** payloads now (Zarr v3 + pcodec, via [`crate::array`]); table blocks
+//! still carry their canonical spec JSON until the Vortex backend lands, at which point the table
+//! goldens regenerate (run `cargo run -p tessera-io --example gen_corpus`).
 
 use serde::{Deserialize, Serialize};
-use tessera_core::block::array::{ArrayBlock, ArraySpec};
+use tessera_core::block::array::ArraySpec;
 use tessera_core::block::table::{Column, TableBlock, TableSpec};
 use tessera_core::manifest::Manifest;
 use tessera_core::provenance::Source;
 use tessera_core::ProductBuilder;
 
+use crate::array::{self, ArrayData};
 use crate::BlockPayload;
 
 /// One corpus fixture: a deterministic product + the payloads to pack into its `.tsra`.
@@ -45,9 +50,21 @@ impl Fixture {
     }
 }
 
-fn array_payload(b: &ArrayBlock) -> BlockPayload {
-    BlockPayload::new(b.name.clone(), serde_json::to_vec(&b.spec).unwrap())
+/// Encode a real array block (Zarr v3 + pcodec), register its digested ref on the builder, and
+/// return the payload to pack. The digest is over the encoded bytes (not the spec).
+fn push_array(
+    b: &mut ProductBuilder,
+    name: &str,
+    spec: &ArraySpec,
+    data: ArrayData,
+) -> BlockPayload {
+    let (block_ref, payload) =
+        array::array_block(name, spec, &data).expect("fixture array encodes");
+    b.add_block_ref(block_ref);
+    payload
 }
+
+/// A table block still uses its canonical spec JSON as the payload (stub until Vortex).
 fn table_payload(b: &TableBlock) -> BlockPayload {
     BlockPayload::new(b.name.clone(), serde_json::to_vec(&b.spec).unwrap())
 }
@@ -60,6 +77,14 @@ fn col(name: &str, dtype: &str, codec: Option<&str>) -> Column {
     }
 }
 
+// ── deterministic sample generators (fixed → reproducible hashes) ───────────────────────────────
+fn ramp_i16(n: usize) -> ArrayData {
+    ArrayData::I16((0..n).map(|k| (k % 4096) as i16 - 1024).collect())
+}
+fn ramp_f32(n: usize) -> ArrayData {
+    ArrayData::F32((0..n).map(|k| k as f32 * 0.001).collect())
+}
+
 /// Build the deterministic conformance corpus (fixed inputs → reproducible hashes).
 pub fn fixtures() -> Vec<Fixture> {
     const TS: &str = "2024-01-01T00:00:00Z";
@@ -67,15 +92,11 @@ pub fn fixtures() -> Vec<Fixture> {
 
     // 1 — recon, native int16 volume with modality + rescale + unit (the canonical CT product).
     {
-        let vol = ArrayBlock::new(
-            "volume",
-            ArraySpec::new(vec![64, 64, 64], "int16")
-                .with_rescale(1.0, -1024.0)
-                .with_unit("HU"),
-        );
-        let pl = array_payload(&vol);
+        let spec = ArraySpec::new(vec![64, 64, 64], "int16")
+            .with_rescale(1.0, -1024.0)
+            .with_unit("HU");
         let mut b = ProductBuilder::new("recon", "recon-int16", "int16 CT volume", TS);
-        b.add_block(&vol).unwrap();
+        let pl = push_array(&mut b, "volume", &spec, ramp_i16(64 * 64 * 64));
         b.with_field(
             "modality",
             serde_json::json!({"_vocabulary": "DICOM", "_code": "CT"}),
@@ -89,13 +110,9 @@ pub fn fixtures() -> Vec<Fixture> {
 
     // 2 — recon, float32 attenuation (μ-) map.
     {
-        let mu = ArrayBlock::new(
-            "volume",
-            ArraySpec::new(vec![32, 32, 32], "float32").with_unit("1/cm"),
-        );
-        let pl = array_payload(&mu);
+        let spec = ArraySpec::new(vec![32, 32, 32], "float32").with_unit("1/cm");
         let mut b = ProductBuilder::new("recon", "recon-mumap", "float32 μ-map", TS);
-        b.add_block(&mu).unwrap();
+        let pl = push_array(&mut b, "volume", &spec, ramp_f32(32 * 32 * 32));
         b.with_field(
             "modality",
             serde_json::json!({"_vocabulary": "DICOM", "_code": "OT"}),
@@ -107,7 +124,7 @@ pub fn fixtures() -> Vec<Fixture> {
         });
     }
 
-    // 3 — listmode, columnar event table.
+    // 3 — listmode, columnar event table (table backend still stubbed → spec-JSON payload).
     {
         let events = TableBlock::new(
             "events",
@@ -137,15 +154,16 @@ pub fn fixtures() -> Vec<Fixture> {
 
     // 4 — spectrum, a 1-D positronium-lifetime histogram (named axis).
     {
-        let spec = ArrayBlock::new(
-            "spectrum",
-            ArraySpec::new(vec![512], "float32")
-                .with_axes(vec!["lifetime".into()])
-                .with_unit("counts"),
+        let spec = ArraySpec::new(vec![512], "float32")
+            .with_axes(vec!["lifetime".into()])
+            .with_unit("counts");
+        let data = ArrayData::F32(
+            (0..512)
+                .map(|k| 1000.0 * (-(k as f32) / 64.0).exp())
+                .collect(),
         );
-        let pl = array_payload(&spec);
         let mut b = ProductBuilder::new("spectrum", "ps-lifetime", "o-Ps lifetime histogram", TS);
-        b.add_block(&spec).unwrap();
+        let pl = push_array(&mut b, "spectrum", &spec, data);
         b.with_field("domain", serde_json::json!("lifetime"));
         out.push(Fixture {
             name: "spectrum_lifetime",
@@ -156,7 +174,7 @@ pub fn fixtures() -> Vec<Fixture> {
 
     // 5 — multi-block product with study + provenance edge + extension field.
     {
-        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![16, 16, 16], "int16"));
+        let vol_spec = ArraySpec::new(vec![16, 16, 16], "int16");
         let roi = TableBlock::new(
             "roi",
             TableSpec {
@@ -165,9 +183,8 @@ pub fn fixtures() -> Vec<Fixture> {
                 row_index: None,
             },
         );
-        let payloads = vec![array_payload(&vol), table_payload(&roi)];
         let mut b = ProductBuilder::new("recon", "recon-with-roi", "volume + ROIs", TS);
-        b.add_block(&vol).unwrap();
+        let vol_pl = push_array(&mut b, "volume", &vol_spec, ramp_i16(16 * 16 * 16));
         b.add_block(&roi).unwrap();
         b.with_field("modality", serde_json::json!("CT"));
         b.with_study("DUPLET-DP06-exam");
@@ -176,7 +193,7 @@ pub fn fixtures() -> Vec<Fixture> {
         out.push(Fixture {
             name: "multiblock_study",
             manifest: b.seal().unwrap(),
-            payloads,
+            payloads: vec![vol_pl, table_payload(&roi)],
         });
     }
 
