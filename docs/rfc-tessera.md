@@ -75,12 +75,11 @@ PRODUCT  =  manifest  +  N typed blocks
 |---|---|---|---|
 | dense volume (CT/PET/sinogram) | full-load · orthogonal · ROI | **zarrs** (sharded, cubic, zstd, native int) | cubic 18–24× orthogonal; sharded 5 vs 513 files |
 | dense volume | web tiles | OME-Zarr (derived export) | viewers only, not archival |
-| event table | projection · vectorized per-event | **Parquet/Arrow** (default) | fastest projection + MT + lakehouse ecosystem |
-| event table | projection **+** random per-event `take` | **Lance** (option) | random `take` 16× vs columnar HDF5 |
-| event table | smallest, single-file-in-product | HDF5-columnar | 84 vs 99 MB |
+| event table | size · projection · random `take` · vectorized | **Vortex** (decided, spikes S0–S11) | smallest + O(1) random take + ALP floats + filter pushdown |
+| event table | external interop / lakehouse query | Parquet (derived export) | DuckDB/Spark; but Vortex→Arrow already gives this zero-copy |
 
-- **ARRAY block backend → zarrs.** **TABLE block backend → Parquet/Arrow default, Lance option.**
-- Lance is *not* a Parquet superset (separate format/ecosystem); it adds random-row `take` + versioning. Use Parquet for interop, Lance for random-access/versioned event data.
+- **ARRAY block backend → zarrs.** **TABLE block backend → Vortex** (see `tessera/docs/SPIKE-RESULTS.md`).
+- Vortex (Rust + Arrow-native, FastLanes/ALP/FSST addressable encodings) won every measured axis vs Parquet and Lance: **smallest** (21% < Parquet on events, 23% on pure floats), **random `take` ~0.3–0.5 ms and flat to 100M rows** (Lance degrades to 0.9 s), **filter pushdown**, and **zero-copy into DuckDB**. It slots *under* the Tessera spine (encoding layer) — so the **Merkle tree stays integrity-only**, not a random-access index. Lance is not needed (it bundles a competing dataset/version layer and lost on size + scale).
 - Cross-cutting: `zstd`/`blosc2` (MT compress), `blake3` (hash), `object_store` (cloud), `dicom-rs` (ingest), `pyo3` (bindings).
 
 ### 5.2 Table backends & the random-access axis
