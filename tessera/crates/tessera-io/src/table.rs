@@ -17,8 +17,12 @@ use vortex_array::arrays::{PrimitiveArray, StructArray};
 use vortex_array::scalar_fn::session::ScalarFnSession;
 use vortex_array::session::ArraySession;
 use vortex_array::{ArrayRef, IntoArray, VortexSessionExecute};
+use vortex_btrblocks::schemes::float::{ALPRDScheme, ALPScheme};
+use vortex_btrblocks::{BtrBlocksCompressorBuilder, SchemeExt};
 use vortex_buffer::{Buffer, ByteBuffer, ByteBufferMut};
-use vortex_file::{register_default_encodings, OpenOptionsSessionExt, WriteOptionsSessionExt};
+use vortex_file::{
+    register_default_encodings, OpenOptionsSessionExt, WriteOptionsSessionExt, WriteStrategyBuilder,
+};
 use vortex_io::runtime::current::CurrentThreadRuntime;
 use vortex_io::runtime::BlockingRuntime;
 use vortex_io::session::{RuntimeSession, RuntimeSessionExt};
@@ -174,6 +178,14 @@ fn validate(spec: &TableSpec, data: &TableData) -> Result<()> {
 }
 
 /// Encode columns into the deterministic table-block payload bytes for `spec`.
+///
+/// **ALP float-encoding is excluded** from the write strategy: Vortex's ALP codec searches for a
+/// float exponent via float arithmetic, whose result varies with the *build profile's* float codegen
+/// (opt-level / FMA contraction), so the same float columns would encode to different bytes under
+/// different compilers — fatal for a content-addressed format. With ALP excluded, floats fall back to
+/// flat `Primitive` (raw little-endian, codegen-independent) while integer encodings (Sequence/FoR/…,
+/// chosen by exact integer math) remain. The payload is then a pure function of the logical data
+/// (cross-environment deterministic).
 pub fn encode(spec: &TableSpec, data: &TableData) -> Result<Vec<u8>> {
     validate(spec, data)?;
     let (rt, s) = runtime_session();
@@ -182,9 +194,17 @@ pub fn encode(spec: &TableSpec, data: &TableData) -> Result<Vec<u8>> {
         .map(|(name, cd)| (name.as_str(), cd.to_vortex()))
         .collect();
     let st = StructArray::from_fields(&fields).map_err(ze)?;
+    // Exclude the ALP float schemes from the compressor so it never *chooses* them; floats then use
+    // the deterministic Pco/flat schemes. Integer schemes (chosen by exact integer math) are kept.
+    let compressor =
+        BtrBlocksCompressorBuilder::default().exclude_schemes([ALPScheme.id(), ALPRDScheme.id()]);
+    let strategy = WriteStrategyBuilder::default()
+        .with_btrblocks_builder(compressor)
+        .build();
     let mut buf = ByteBufferMut::empty();
     rt.block_on(
         s.write_options()
+            .with_strategy(strategy)
             .write(&mut buf, st.into_array().to_array_stream()),
     )
     .map_err(ze)?;

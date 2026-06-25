@@ -14,7 +14,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | `id` vs `content_hash` + `id_inputs` | ✓ | id=blake3(JCS(id_inputs)) logical; content_hash=Merkle; reconciled | **ADR-0020**, `id_*` tests |
 | Canonical manifest encoding (JCS) | ✓ | re-serialize → identical hash (RFC 8785, `serde_jcs`) | `canonical::*`, `seal_round_trips_*` |
 | `manifest_hash` seal (whole-manifest tamper-evident) | ✓ | blake3 over JCS(manifest); covers meta+sources+digests | `tampering_*`, `verify()` |
-| Block dispatch (schema→array/table) | ◑ | array→Zarr v3+pcodec **done**; table→Vortex pending | `tessera-io::array`, ADR-0023, #203 |
+| Block dispatch (schema→array/table) | ✓ | array→Zarr v3+pcodec · table→Vortex — both real, bit-exact, deterministic | `tessera-io::{array,table}`, ADR-0023/0024 |
 | Seal = hash-of-hashes | ✓ | µs seal, no 2nd data pass, valid partial root | design+tests |
 | Error taxonomy | ✓ | typed `#[non_exhaustive]`, `Integrity{what,exp,act}`, never panic | `error.rs`, `verify()` |
 
@@ -22,14 +22,14 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | Feature | Status | Gate | Evidence |
 |---|:--:|---|---|
 | Volume codec = **pcodec** | ✓ | smallest lossless; ≤ best competitor | CT 74.3 vs zstd 94.5 (−21%), PET −33% |
-| Table backend = **Vortex** | ✓ | smallest + fastest random-take + pushdown | S0/S4/S7/S10/S11 |
+| Table backend = **Vortex** | ✓ | smallest + fastest random-take + pushdown; real Rust codec | S0/S4/S7/S10/S11 + `tessera-io::table` |
 | Cubic 64³ chunking | ✓ | isotropic reads; size/read sweet spot | chunk sweep |
 | zstd fallback codec | ✓ | decades-stable alt at ≤+27% size | codec sweep |
 
 ## C. Correctness gates (REQUIRED — binary)
 | Gate | Status | Pass condition | Evidence |
 |---|:--:|---|---|
-| **Bit-exact lossless** (arrays+tables) | ✓ | `bytes ==` incl NaN/±inf/−0.0/denormal/int-limits | **S13 PASS** + Rust `array::tests` (8 dtypes, pcodec) |
+| **Bit-exact lossless** (arrays+tables) | ✓ | `bytes ==` incl NaN/±inf/−0.0/denormal/int-limits | **S13** + Rust `array::tests` (pcodec) + `table::tests` (Vortex, 10 dtypes) |
 | **Writer determinism** (same-ver) | ✓ | same input→byte-identical output (manifest + .tsra) | **S15** + `corpus_packs_deterministically` |
 | Cross-version / cross-arch determinism | ◑ | golden hashes locked in `corpus.json`; drift fails CI | conformance gate (multi-release CI pending, S15 remain) |
 | Pruning never lies | ○ | predicate-match chunk never skipped | TEST-PLAN |

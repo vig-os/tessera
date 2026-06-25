@@ -6,18 +6,19 @@
 //! and (2) the recorded hashes are the contract a second, independent implementation (the v1.0
 //! pure-Python reader) must reproduce from `SPEC.md` alone. Every input here is a fixed constant.
 //!
-//! Array blocks carry **real** payloads now (Zarr v3 + pcodec, via [`crate::array`]); table blocks
-//! still carry their canonical spec JSON until the Vortex backend lands, at which point the table
-//! goldens regenerate (run `cargo run -p tessera-io --example gen_corpus`).
+//! Array blocks use Zarr v3 + pcodec ([`crate::array`]); table blocks use Vortex ([`crate::table`]).
+//! Both carry real, byte-deterministic payloads. Regenerate after an intended format change with
+//! `cargo run -p tessera-io --example gen_corpus`.
 
 use serde::{Deserialize, Serialize};
 use tessera_core::block::array::ArraySpec;
-use tessera_core::block::table::{Column, TableBlock, TableSpec};
+use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::manifest::Manifest;
 use tessera_core::provenance::Source;
 use tessera_core::ProductBuilder;
 
 use crate::array::{self, ArrayData};
+use crate::table::{self, ColumnData, TableData};
 use crate::BlockPayload;
 
 /// One corpus fixture: a deterministic product + the payloads to pack into its `.tsra`.
@@ -64,9 +65,18 @@ fn push_array(
     payload
 }
 
-/// A table block still uses its canonical spec JSON as the payload (stub until Vortex).
-fn table_payload(b: &TableBlock) -> BlockPayload {
-    BlockPayload::new(b.name.clone(), serde_json::to_vec(&b.spec).unwrap())
+/// Encode a real table block (Vortex), register its digested ref on the builder, and return the
+/// payload to pack. The digest is over the encoded bytes (not the spec).
+fn push_table(
+    b: &mut ProductBuilder,
+    name: &str,
+    spec: &TableSpec,
+    data: TableData,
+) -> BlockPayload {
+    let (block_ref, payload) =
+        table::table_block(name, spec, &data).expect("fixture table encodes");
+    b.add_block_ref(block_ref);
+    payload
 }
 
 fn col(name: &str, dtype: &str, codec: Option<&str>) -> Column {
@@ -124,23 +134,32 @@ pub fn fixtures() -> Vec<Fixture> {
         });
     }
 
-    // 3 — listmode, columnar event table (table backend still stubbed → spec-JSON payload).
+    // 3 — listmode, columnar event table (real Vortex payload). Row count is kept small — a
+    // conformance fixture tests determinism/correctness, not scale (scale is the bench's job, #206).
     {
-        let events = TableBlock::new(
-            "events",
-            TableSpec {
-                columns: vec![
-                    col("t", "u8", Some("zstd")),
-                    col("e0", "f4", Some("zstd")),
-                    col("e1", "f4", Some("zstd")),
-                ],
-                rows: 1_000_000,
-                row_index: Some("t".into()),
-            },
-        );
-        let pl = table_payload(&events);
+        const N: usize = 4096;
+        let spec = TableSpec {
+            columns: vec![
+                col("t", "u8", Some("zstd")),
+                col("e0", "f4", Some("zstd")),
+                col("e1", "f4", Some("zstd")),
+            ],
+            rows: N as u64,
+            row_index: Some("t".into()),
+        };
+        let data: TableData = vec![
+            ("t".into(), ColumnData::U64((0..N as u64).collect())),
+            (
+                "e0".into(),
+                ColumnData::F32((0..N).map(|k| k as f32 * 0.01).collect()),
+            ),
+            (
+                "e1".into(),
+                ColumnData::F32((0..N).map(|k| k as f32 * 0.02 - 5.0).collect()),
+            ),
+        ];
         let mut b = ProductBuilder::new("listmode", "lm-3p", "extended-coincidence events", TS);
-        b.add_block(&events).unwrap();
+        let pl = push_table(&mut b, "events", &spec, data);
         b.with_field(
             "coincidence_mode",
             serde_json::json!("extended-coincidence"),
@@ -175,17 +194,21 @@ pub fn fixtures() -> Vec<Fixture> {
     // 5 — multi-block product with study + provenance edge + extension field.
     {
         let vol_spec = ArraySpec::new(vec![16, 16, 16], "int16");
-        let roi = TableBlock::new(
-            "roi",
-            TableSpec {
-                columns: vec![col("label", "u4", None), col("volume_ml", "f4", None)],
-                rows: 8,
-                row_index: None,
-            },
-        );
+        let roi_spec = TableSpec {
+            columns: vec![col("label", "u4", None), col("volume_ml", "f4", None)],
+            rows: 8,
+            row_index: None,
+        };
+        let roi_data: TableData = vec![
+            ("label".into(), ColumnData::U32((0..8u32).collect())),
+            (
+                "volume_ml".into(),
+                ColumnData::F32((0..8).map(|k| k as f32 * 1.25 + 0.5).collect()),
+            ),
+        ];
         let mut b = ProductBuilder::new("recon", "recon-with-roi", "volume + ROIs", TS);
         let vol_pl = push_array(&mut b, "volume", &vol_spec, ramp_i16(16 * 16 * 16));
-        b.add_block(&roi).unwrap();
+        let roi_pl = push_table(&mut b, "roi", &roi_spec, roi_data);
         b.with_field("modality", serde_json::json!("CT"));
         b.with_study("DUPLET-DP06-exam");
         b.add_source(Source::new("derived_from", "recon-int16"));
@@ -193,7 +216,7 @@ pub fn fixtures() -> Vec<Fixture> {
         out.push(Fixture {
             name: "multiblock_study",
             manifest: b.seal().unwrap(),
-            payloads: vec![vol_pl, table_payload(&roi)],
+            payloads: vec![vol_pl, roi_pl],
         });
     }
 

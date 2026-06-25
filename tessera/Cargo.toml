@@ -27,6 +27,7 @@ bytes = "1"                                          # zarrs store value type
 # exact import paths the probe verified. CurrentThreadRuntime drives the async write/read (no tokio).
 vortex-file = "0.75"
 vortex-array = "0.75"
+vortex-btrblocks = "0.75"   # compressor builder — exclude ALP float scheme for cross-env determinism
 vortex-buffer = "0.75"
 vortex-io = "0.75"
 vortex-layout = "0.75"

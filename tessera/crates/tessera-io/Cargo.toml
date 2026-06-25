@@ -16,6 +16,7 @@ zarrs.workspace = true
 bytes.workspace = true
 vortex-file.workspace = true
 vortex-array.workspace = true
+vortex-btrblocks.workspace = true
 vortex-buffer.workspace = true
 vortex-io.workspace = true
 vortex-layout.workspace = true

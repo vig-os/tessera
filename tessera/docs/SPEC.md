@@ -72,7 +72,26 @@ shape, default 64³), `axes`, and `codec` (`"pcodec"`).
   array always serializes to byte-identical payload bytes (the writer-determinism gate).
 
 A reader MAY decode only a sub-region by reconstructing the store and reading the intersecting chunks.
-(Table-block payloads — `kind == "table"` — are not yet frozen; the Vortex encoding lands later.)
+
+## 5b. Table block payload (Vortex)
+A block with `kind == "table"` stores its columns as a **single Vortex file** (ADR-0024) — the exact
+bytes a [Vortex](https://github.com/spiraldb/vortex) reader opens. The table spec carries an ordered
+`columns` list (`name`, `dtype`, optional `codec`), a `rows` count, and an optional `row_index`.
+
+- **Dtypes.** Columns use the fd5 numpy-style codes: `i1/i2/i4/i8` (signed), `u1/u2/u4/u8` (unsigned),
+  `f4/f8` (float). Each column is a Vortex primitive array; the columns form a `struct` in declared
+  order, every column of length `rows`. Float bit patterns (`NaN`, `±inf`, `−0.0`, denormals) MUST be
+  preserved exactly.
+- **Payload.** The block payload is exactly the serialized Vortex file (data arrays + per-column
+  statistics + a flatbuffer footer); its `digest` (§3) is computed over those bytes.
+- **Determinism.** The Vortex writer is byte-deterministic for fixed input + version, **with the ALP
+  float schemes excluded** from the compressor (`vortex.float.alp` / `vortex.float.alprd`): ALP's
+  exponent search is float-codegen-sensitive and otherwise makes the bytes depend on the writer's
+  build profile. Excluding it makes the payload a pure function of the logical data (floats store
+  flat/Pco). Cross-*version* stability is still not guaranteed pre-1.0 — pin the Vortex version
+  (recorded in the corpus provenance).
+
+A reader MAY project a subset of columns or random-`take` rows; the format supports O(1) random access.
 
 ## 6. Container `.tsra`
 A ZIP archive (zip64). Entries, in order:

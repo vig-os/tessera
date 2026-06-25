@@ -9,6 +9,7 @@ Accepted / Superseded.
 | [0020](0020-canonical-encoding-and-identity.md) | **D4** canonical encoding (RFC 8785 JCS) + **D5** identity model (id / content_hash / manifest_hash) + manifest & BlockRef schema | **Accepted** |
 | [0022](0022-versioning-and-container.md) | **D1** fd5 supersession (done) · versioning DAG · `.tsra` container spec | **Accepted** |
 | [0023](0023-array-block-payload.md) | Array block payload — Zarr v3 + pcodec, serialized as one deterministic blob (P3/S5) | **Accepted** |
+| [0024](0024-table-block-payload.md) | Table block payload — a single deterministic Vortex file (P3/S5) | **Accepted** |
 | 0002 | **D2** concurrency model — sync `core` / async `io` (tokio + `object_store`) + rayon encode pool; `spawn_blocking` boundary | Proposed (decide by P3) |
 | 0003 | **D3** schema-id allocation — per-schema monotonic ids + `<plugin>:<id>` namespacing + reserved ranges | Proposed (decide by P1) |
 | 0007 | **D7** encryption-at-rest — **non-goal**: delegate to storage-layer SSE / dm-crypt; no per-block envelope in the format | Proposed (decide by P1) |
