@@ -14,6 +14,13 @@ serde_json.workspace = true
 zip.workspace = true
 zarrs.workspace = true
 bytes.workspace = true
+vortex-file.workspace = true
+vortex-array.workspace = true
+vortex-buffer.workspace = true
+vortex-io.workspace = true
+vortex-layout.workspace = true
+vortex-session.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -22,7 +22,16 @@ zip = { version = "2", default-features = false }   # STORED zip64 `.tsra` conta
 # (no C/zstd): we use the in-memory store + the pcodec array→bytes codec only.
 zarrs = { version = "0.23", default-features = false, features = ["pcodec"] }
 bytes = "1"                                          # zarrs store value type
+# Table block backend: Vortex (the settled columnar backend) — deterministic single-file writer +
+# reader. vortex-file pulls the default encoding crates (pco/alp/fsst/…); the sub-crates give the
+# exact import paths the probe verified. CurrentThreadRuntime drives the async write/read (no tokio).
+vortex-file = "0.75"
+vortex-array = "0.75"
+vortex-buffer = "0.75"
+vortex-io = "0.75"
+vortex-layout = "0.75"
+vortex-session = "0.75"
+futures = "0.3"
 clap = { version = "4", features = ["derive"] }     # tessera-cli
 tessera-core = { path = "crates/tessera-core" }
 tessera-io = { path = "crates/tessera-io" }
-# table-backend crate (Vortex) gets added when the table block payload is implemented (S5 part 2).

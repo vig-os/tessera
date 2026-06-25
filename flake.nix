@@ -45,7 +45,12 @@
           strictDeps = true;
           pname = "tessera";
           version = "0.0.0";
-          # tessera-core is pure-Rust today; add native libs here when storage/ingest crates land.
+          # The Vortex table backend pulls a transitive dep (`custom-labels`) whose build script
+          # runs bindgen (needs libclang) and links libstdc++. Provide them to every crane
+          # derivation (deps/clippy/test) so the hermetic build matches the devShell env.
+          nativeBuildInputs = with pkgs; [ clang ];
+          buildInputs = with pkgs; [ stdenv.cc.cc.lib ];
+          LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
       in
