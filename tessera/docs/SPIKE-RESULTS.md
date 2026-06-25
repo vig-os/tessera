@@ -93,3 +93,29 @@ projection 3× + filter pushdown + zero-copy Arrow→DuckDB. **Tables keep Vorte
   into one file; inseparable). Opt-in **exploded S3 prefix** (≈ OCI image-layout) for parallel
   write / CoW versioning. **OCI artifact** (zot/registry:2 on MinIO, or bare OCI-layout objects)
   for registry distribution. **RO-Crate** derived for discovery. One Merkle root across all forms.
+
+---
+
+# S13 (bit-exact roundtrip) + S15 (writer determinism) — the existential gates, PASSED
+
+Run before first push (pcodec 0.3.6, vortex 0.75.0).
+
+## S13 — lossless to the bit (medical/quantitative gate)
+| case | pcodec | Vortex |
+|---|---|---|
+| CT int16 | ✓ bit-exact | — |
+| PET float32 (SUV) | ✓ bit-exact | — |
+| float edge (NaN/±inf/−0.0/denormal) | ✓ bit-exact | ✓ |
+| int16 limits | ✓ bit-exact | ✓ |
+| events_3p mixed columns | — | ✓ bit-exact |
+
+pcodec (arrays) + Vortex (tables) are lossless to the byte incl. float corner cases — no ULP
+drift on SUV, no HU clipping. Clears the clinical/regulatory gate for the codec choice.
+
+## S15 — writer determinism (content_hash = identity REQUIRES this)
+pcodec CT int16 · pcodec PET f32 · Vortex events → all **byte-identical across 3 runs** ⇒
+same input → same bytes ⇒ reproducible `content_hash`/identity. PASS.
+
+**Caveat / remaining S15:** proven *same-version, same-machine*. Cross-version is NOT guaranteed
+(pcodec/Vortex pre-1.0 — a release could change bytes) and cross-arch (x86/ARM/macOS) is untested.
+Hedge = pin codec versions in the manifest + ship vendored pure-Rust readers (RFC §8/§14).
