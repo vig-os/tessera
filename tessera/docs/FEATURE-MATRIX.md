@@ -70,11 +70,11 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 ## G. Layout, distribution, ingest, read
 | Feature | Status | Gate | Evidence |
 |---|:--:|---|---|
-| Sealed `.tsra` (zip64, range-readable) | ○ | manifest discoverable; cloud range-read | #22 |
-| OCI artifact / exploded prefix | ○ | push/pull; range-read; CoW versioning | #22 |
+| Sealed `.tsra` (zip64, range-readable) | ✓ | STORED zip64, mimetype-first magic, central-dir index | `tessera-io::container::pack`, roundtrip test |
+| OCI artifact / exploded prefix | ○ | push/pull; range-read; CoW versioning | #22 (P6) |
 | Ingest: DICOM | ○ | lossless tags, PS3.15 verify, rescale/units | S9 |
 | Ingest: GE-HDF5 · Siemens · raw · NIfTI | ○ | decode→re-encode open; lossless | S9 (GE transform benched) |
-| Reader API (open/range/block-handle) | ○ | partial-product semantics; range backend | #21 |
+| Reader API (open/verify/block read) | ✓ | magic+seal verify on open; per-block read verified vs digest; partial-product; generic Read+Seek | `tessera-io::Reader`, container tests |
 | Conformance corpus + SPEC.md | ○ | golden roots; CI gate; 2nd-impl passes | #21 |
 | Bindings (pyo3 → C-ABI → WASM) | ○ | Python parity; zero-copy Arrow | — |
 

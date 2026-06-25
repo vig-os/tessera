@@ -40,6 +40,11 @@ pub enum Error {
     #[error("block '{0}' has no digest")]
     MissingDigest(String),
 
+    /// A `.tsra` container (zip) could not be read or written, or is malformed (bad magic,
+    /// missing manifest, truncated central directory).
+    #[error("container: {0}")]
+    Container(String),
+
     /// A code path not implemented yet (e.g. a storage backend behind a feature flag).
     #[error("not yet implemented: {0}")]
     Unimplemented(&'static str),
