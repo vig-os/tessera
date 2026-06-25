@@ -45,6 +45,11 @@ pub enum Error {
     #[error("container: {0}")]
     Container(String),
 
+    /// A storage-block codec (array pcodec/zarr, table Vortex) failed to encode or decode a
+    /// payload, or was asked for an unsupported dtype/codec combination.
+    #[error("codec: {0}")]
+    Codec(String),
+
     /// A code path not implemented yet (e.g. a storage backend behind a feature flag).
     #[error("not yet implemented: {0}")]
     Unimplemented(&'static str),
