@@ -157,6 +157,34 @@ impl<R: Read + Seek> Reader<R> {
     }
 }
 
+/// Explode a `.tsra` into a directory: `manifest.json` + `blocks/<name>` (the opt-in exploded
+/// form of ADR-0022). Verifies the seal on open and each block against its digest. Returns the
+/// verified manifest.
+pub fn unpack(path: &Path, outdir: &Path) -> Result<Manifest> {
+    let mut r = Reader::open(path)?;
+    let manifest = r.manifest().clone();
+    std::fs::create_dir_all(outdir.join("blocks"))?;
+    std::fs::write(outdir.join("manifest.json"), manifest.to_json()?)?;
+    for name in manifest.blocks.iter().map(|b| b.name.clone()) {
+        let bytes = r.read_block(&name)?;
+        std::fs::write(outdir.join("blocks").join(&name), bytes)?;
+    }
+    Ok(manifest)
+}
+
+/// Pack an exploded directory (`manifest.json` + `blocks/<name>`) back into a sealed `.tsra`.
+/// The manifest is seal-verified before packing; each block's payload is read from `blocks/`.
+pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
+    let mj = std::fs::read_to_string(dir.join("manifest.json"))?;
+    let manifest = Manifest::from_json_verified(&mj)?;
+    let mut payloads = Vec::with_capacity(manifest.blocks.len());
+    for b in &manifest.blocks {
+        let bytes = std::fs::read(dir.join("blocks").join(&b.name))?;
+        payloads.push(BlockPayload::new(b.name.clone(), bytes));
+    }
+    pack(&manifest, &payloads, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

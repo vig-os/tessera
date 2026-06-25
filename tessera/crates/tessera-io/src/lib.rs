@@ -7,4 +7,4 @@
 
 pub mod container;
 
-pub use container::{pack, BlockPayload, Reader, MIMETYPE};
+pub use container::{pack, pack_dir, unpack, BlockPayload, Reader, MIMETYPE};

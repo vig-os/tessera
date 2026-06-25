@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tessera-core", "crates/tessera-io"]
+members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-cli"]
 
 [workspace.package]
 edition = "2021"
@@ -18,6 +18,8 @@ thiserror = "2"
 time = { version = "0.3", features = ["parsing", "formatting"] }
 proptest = "1"
 zip = { version = "2", default-features = false }   # STORED zip64 `.tsra` container (no compression deps)
+clap = { version = "4", features = ["derive"] }     # tessera-cli
 tessera-core = { path = "crates/tessera-core" }
+tessera-io = { path = "crates/tessera-io" }
 # storage-backend crates (zarrs / arrow / parquet / lance) get added to the workspace
 # when the array/table block payloads are actually implemented — see docs/rfc-tessera.md §6.
