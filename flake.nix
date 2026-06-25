@@ -32,7 +32,14 @@
         # crane, pinned to our toolchain. The Rust workspace lives in ./tessera; deps are
         # vendored once (buildDepsOnly) so clippy/test/fmt run hermetically & offline in CI.
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-        src = craneLib.cleanCargoSource ./tessera;
+        # Cargo sources + the conformance corpus (tests/conformance.rs reads corpus/corpus.json,
+        # which cleanCargoSource would otherwise strip → the hermetic test can't find it).
+        src = pkgs.lib.cleanSourceWith {
+          src = ./tessera;
+          filter = path: type:
+            (craneLib.filterCargoSources path type) || (pkgs.lib.hasInfix "/corpus/" path);
+          name = "source";
+        };
         commonArgs = {
           inherit src;
           strictDeps = true;
