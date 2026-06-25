@@ -51,3 +51,45 @@ Compute axis works via pyarrow.dataset Expression in the scanner.
 - **S5 zarrs array backend** — perf pre-validated by the earlier Zarr-vs-HDF5 bench (sharded Zarr
   competitive/faster, codec-dominated); remaining work is the Rust `write_zarr` impl.
 - **S6 object-store range-read** — needs MinIO/S3 infra; pending.
+
+---
+
+# Capstone: volume codec, chunk size, and the access-pattern split
+
+## Volumes — container is irrelevant, codec + chunking is everything
+- **Zarr ≡ HDF5** byte-for-byte at equal codec+chunking (CT 94.5 = 94.5 MB).
+- **Wide codec sweep (lossless):** CT int16 — zstd-3 94.5, gzip 96.6, zstd-9 90.6, delta+zstd
+  88.6, blosc-lz4 159.8, **pcodec 74.3 MB**. PET float32 — zstd 0.9, **pcodec 0.6**;
+  bitround+zstd 0.7 (lossy, *worse*), zfp 3.7 (lossy, far worse). **pcodec wins both, losslessly.**
+- **Chunk-shape sweep (Zarr+pcodec, CT):** slice(1,Y,X) 80.5 MB (axial 0.017s but coronal/
+  sagittal 0.24–0.25s = 6–7× worse, anisotropic); cube 32³ 71.5 (reads ~0.12s, overhead);
+  **cube 64³ 74.3 (reads ~0.03s isotropic, ROI 0.008s — sweet spot)**; 128³ 76.3; 256³ 81.4
+  (amplification, 0.12–0.15s). → **64³ cubic** = smallest-within-4% + fastest balanced + best ROI.
+- **Why flat/Morton-Vortex loses (171/163 MB vs 74):** un-chunked = one global encoding model
+  (no per-region adaptivity) + 1D-x-only locality + read amplification. Chunking fixes all
+  three — and "chunked Vortex" = Zarr. "Zarr-on-Vortex" reduces to "chunk grid + a good codec"
+  = Zarr+pcodec.
+
+## Tables — Zarr+pcodec matches size but loses access
+events_3p (2.7M rows), columnar Zarr+pcodec vs Vortex:
+| | size | projection | random take×500 |
+|---|---:|---:|---:|
+| Zarr+pcodec (chunk 65536) | **73.3 MB** | 0.023 s | 0.168 s |
+| Zarr+pcodec (chunk 4096) | 73.7 MB | 0.190 s | 0.986 s |
+| Vortex | 77.7 MB | **0.0076 s** | **0.0233 s** |
+
+pcodec *equalises (beats) Vortex on table size*, but Vortex wins **random take 7–42×** +
+projection 3× + filter pushdown + zero-copy Arrow→DuckDB. **Tables keep Vortex for the
+*engine*, not compression.**
+
+## The split (final)
+- **Volumes** = bulk-decode local N-D regions → **Zarr/OME-Zarr · 64³ cubic · pcodec**.
+- **Tables** = project · filter · random-access · join → **Vortex engine**.
+- **pcodec** is the universal *codec* (shared plumbing); the *container/engine* is chosen by
+  access pattern. zstd = decades-stable fallback codec.
+
+## Layout
+- Canonical: **single sealed `.tessera`** = STORED zip64 (central-dir index → cloud range-reads
+  into one file; inseparable). Opt-in **exploded S3 prefix** (≈ OCI image-layout) for parallel
+  write / CoW versioning. **OCI artifact** (zot/registry:2 on MinIO, or bare OCI-layout objects)
+  for registry distribution. **RO-Crate** derived for discovery. One Merkle root across all forms.

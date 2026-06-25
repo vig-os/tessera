@@ -5,6 +5,48 @@
 > *model* (one self-describing, immutable, hashed FAIR **data product**) and generalises the
 > *substrate* from a single HDF5 file to a manifest + shape-dispatched storage blocks.
 
+## 0. Capstone decisions (settled by spikes S0–S15, on real DUPLET data)
+
+The spike campaign converged on a clear, evidence-backed architecture. Headlines:
+
+1. **Codec is universal; the container is chosen by *access pattern*.** A single codec —
+   **`pcodec`** (lossless, FastLanes/ALP lineage) — is the compression winner for *both*
+   shapes: it beat zstd by **21% on int16 CT (74.3 vs 94.5 MB)** and **33% on float PET
+   (0.6 vs 0.9 MB)**, beat Vortex's own encodings on tables (73.3 vs 77.7 MB), and beat the
+   lossy float codecs (zfp/bitround don't pay off on sparse medical data). **pcodec is shared
+   plumbing, not the differentiator.** Keep **zstd** as the decades-stable fallback (~25%
+   larger) for archival risk-aversion (pcodec is young — see §8 maturity note).
+
+2. **Volumes → Zarr/OME-Zarr chunk grid · 64³ cubic chunks · pcodec.** Cubic chunks give
+   **axis-independent (isotropic)** orthogonal access; 64³ is the size sweet spot (smallest-
+   within-4% + fastest balanced reads + best ROI; 32³ smaller-but-slower, 256³ bigger+slower).
+   "Container vs HDF5" is irrelevant — **Zarr ≡ HDF5** byte-for-byte at equal codec+chunking.
+
+3. **Tables → Vortex engine** — kept for the **engine**, not compression. pcodec *matches*
+   Vortex on table size, but Vortex wins **access**: random `take` **7–42× faster** than
+   Zarr+pcodec, 3× projection, plus filter pushdown + zero-copy Arrow→DuckDB. A table format
+   is about *how you access* (project/filter/random/join) → an engine problem Zarr isn't.
+
+4. **The split, stated once:** *bulk-decode-local-N-D-region* (volumes) → **Zarr** (opaque
+   cubic chunk + pcodec; Vortex's addressability wasted); *project · filter · random-access ·
+   join* (tables) → **Vortex** (addressable encodings + scanner + Arrow). "Flat/Morton Vortex
+   for volumes" was tested and loses (1.7–2× bigger; un-chunked = un-adaptive); "Zarr-on-Vortex"
+   reduces to "chunk grid + a good codec" = **Zarr+pcodec** (already available).
+
+5. **Layout (resolves §8):** a product is a **content-addressed collection** with one identity
+   (Merkle root). Its **canonical serialization is a single sealed `.tessera` file** — a
+   **STORED zip64** (no recompression; central directory = internal index → **cloud range-reads
+   into the one file**, à la Zarr ZipStore). This preserves fd5's **inseparability** (one file,
+   can't orphan a block by accident) *and* partial reads. An **exploded S3 prefix** is an
+   opt-in working form only for concurrent-writer ingest / copy-on-write versioning. `pack`/
+   `open` preserve the Merkle root → all forms are the same product.
+
+6. **Three manifests, three layers** (don't conflate): **Tessera manifest** = *what it is*
+   (id/schema/units/provenance/Merkle root, Layer 1); **OCI manifest** = *how it ships*
+   (blobs+digests; registry distribution via `zot`/`registry:2` on MinIO, or an OCI-layout of
+   objects ≈ the exploded prefix); **`ro-crate-metadata.json`** = *what it means* (Schema.org
+   JSON-LD discovery, Layer 2, derived export).
+
 ## 1. Motivation
 
 fd5 is "FAIR Data on HDF5". Real medical-imaging data (DUPLET-Patients: CT/PET volumes,
@@ -37,17 +79,17 @@ optimal for both. Benchmarks on real data (see §7) show the axes are in tension
 PRODUCT  =  manifest  +  N typed blocks
               │                  │
    identity / Merkle hash /   shape-dispatched:
-   provenance DAG / schema /   ├── ARRAY block  (chunked, sharded, zstd, cubic)
-   units / version chain       └── TABLE block  (columnar, per-col codec, row-index)
+   provenance DAG / schema /   ├── ARRAY block  (Zarr grid, 64³ cubic, pcodec)
+   units / version chain       └── TABLE block  (Vortex engine, addressable, row-index)
 ```
 
 - **Manifest** (the novel IP): identity, schema, units, provenance, and a list of block refs;
   Merkle-hashed for immutability + integrity. Generalises fd5's root attrs to span arrays,
   tables, *and* a version chain.
-- **Array block**: N-D chunked storage with sharding (Zarr v3 semantics). Volumes, sinograms,
-  μ-maps. Default: native dtype, cubic chunks, zstd.
-- **Table block**: columnar with per-column codecs + optional secondary index. Listmode
-  events, spectra, ROIs. Projection + (via index) fast random per-event `take`.
+- **Array block**: N-D chunked, sharded Zarr/OME-Zarr grid. Volumes, sinograms, μ-maps.
+  Native dtype, **cubic 64³ chunks**, **pcodec** codec, multiscale pyramid (OME-NGFF → viewers).
+- **Table block**: **Vortex** columnar engine — addressable encodings + filter pushdown +
+  optional row index; decode zero-copy to Arrow. Listmode events, spectra, ROIs, calibration.
 - **Version chain**: append-only manifest chain (audit-trail; cf. fd5 issues #167–170)
   reconciled with content-addressing.
 
@@ -55,19 +97,39 @@ PRODUCT  =  manifest  +  N typed blocks
 
 | Product / dataset | Block | Backend (engine) |
 |---|---|---|
-| CT / PET / μ-map / parametric volume | array | zarrs (chunked, sharded) |
-| sinogram / michelogram | array | zarrs |
-| listmode events / coincidences | table | arrow/parquet (+ index) or lance |
-| lifetime / energy spectra (histograms) | table or small array | arrow / zarrs |
-| ROI definitions, calibration tables | table | arrow |
+| CT / PET / μ-map / parametric volume | array | **zarrs** (cubic 64³, pcodec, sharded) |
+| sinogram / michelogram | array | **zarrs** |
+| listmode events / coincidences | table | **Vortex** (addressable, filter pushdown) |
+| lifetime / energy spectra (histograms) | table or small array | Vortex / zarrs |
+| ROI definitions, calibration tables | table | **Vortex** |
 
 ## 5. Storage & encoding defaults (from benchmarks)
 
-- Arrays: **native integer dtype** + `rescale_slope`/`rescale_intercept`; **cubic chunks**
-  (e.g. 64³); **zstd** codec; sharding for cloud range-reads.
-- Tables: **columnar** (never row-major compound); per-column codec; optional row index.
-- Compression: zstd (multithreaded via rayon over chunks/shards, or blosc2).
+- Arrays: **native integer dtype** + `rescale_slope`/`rescale_intercept`; **cubic 64³ chunks**
+  (isotropic access); **`pcodec`** codec (lossless; zstd fallback for archival risk-aversion);
+  sharding for cloud range-reads.
+- Tables: **columnar** (never row-major compound) via the **Vortex** engine; addressable
+  encodings + filter pushdown + optional row index; decode zero-copy to Arrow.
+- Compression: **pcodec** (lossless winner on both shapes); **zstd** stable fallback;
+  blosc2/rayon where MT compress matters.
 - Hash: **blake3** Merkle tree (faster than SHA-256, Merkle-friendly).
+
+### 5.3 Codec selection — `pcodec` (with `zstd` fallback)
+
+Wide Zarr codec sweep (lossless unless noted), real DUPLET data:
+
+| | CT int16 | PET float32 | notes |
+|---|---:|---:|---|
+| zstd-3 / gzip | 94.5 / 96.6 MB | 0.9 MB | the stable baseline |
+| zstd-9 / delta+zstd | 90.6 / 88.6 MB | — | best zstd-family |
+| blosc-lz4 | 159.8 MB | — | speed-not-size |
+| **pcodec** | **74.3 MB** | **0.6 MB** | **lossless winner, both shapes** |
+| bitround+zstd | — | 0.7 MB (lossy) | *worse* than lossless pcodec |
+| zfp fixed-accuracy | — | 3.7 MB (lossy) | far worse on sparse PET |
+
+`pcodec` wins losslessly by 16–21% (CT) and 33% (PET); lossy codecs don't pay off on sparse
+medical data and carry quantitative/regulatory risk. The codec is a per-block field in the
+manifest, so swapping pcodec↔zstd needs no format change.
 
 ### 5.1 Engine selection (decided from benchmarks)
 
@@ -140,13 +202,31 @@ Reuse, do not reinvent: `zarrs`, `arrow`/`parquet`, `lance`, `zstd` (`multithrea
 
 Full benchmark tables and method: fd5 issues #192 (recon), #193 (listmode), #194 (codec).
 
-## 8. Open questions
+## 8. Container & layout (resolved) + remaining open questions
 
-- Single sealed file (sharded container / `.tess`) vs directory-of-shards — must preserve
-  the "offline, self-contained, inspectable" property.
-- Reconcile content-addressing (immutability) with append-only versioning.
+**Resolved (see §0.5–0.6):** the canonical serialization is a **single sealed `.tessera`
+file** — a **STORED zip64** holding `manifest.json` + `*.zarr/` array blocks + `*.vortex`
+table blocks. Its central directory is the internal index → **cloud range-reads into the one
+file** (Zarr `ZipStore` proves the pattern), so the single file is *both* inseparable (fd5's
+promise) *and* partial-readable. An **exploded S3 prefix** (≈ an OCI image-layout of
+content-addressed objects) is an opt-in working form for concurrent-writer ingest and CoW
+versioning. **Distribution** via OCI artifacts (`zot`/`registry:2` backed by MinIO, or a bare
+OCI-layout in a bucket). **Discovery** via a derived `ro-crate-metadata.json`. `tar` is
+cold-archive only (no random index). All forms share one **Merkle root** = identity.
+
+Accidental separation is prevented by: (a) the share op produces one file; (b) the reader
+validates the Merkle root and refuses orphaned/partial blocks; (c) each block self-references
+its product id.
+
+**Still open:**
+- Reconcile content-addressing (immutability) with append-only versioning (the CoW manifest
+  chain on the exploded prefix; cf. fd5 audit-trail #167–170).
+- Maturity hedge: `pcodec` and `vortex` are young; pin spec versions + ship vendored readers
+  in the Tessera crate so archives stay readable for decades (spike **S15**). zstd is the
+  conservative fallback codec.
 - Multi-language readers + a conformance suite (a format with one reader is a liability).
 - Supersession vs sibling of fd5 (decides repo: rename vs new repo).
+- Bit-exact roundtrip of `pcodec`/Vortex on int16 + float32 (spike **S13**) before clinical use.
 
 ## 9. Non-goals
 
