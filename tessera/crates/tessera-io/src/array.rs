@@ -420,6 +420,29 @@ mod tests {
     }
 
     #[test]
+    fn pcodec_compresses_smooth_int16_volume() {
+        // perf-SLA §D, machine-INDEPENDENT floor: pcodec must shrink a CT-like smooth int16 volume
+        // well below raw (the wall-clock floors are benched separately, not gated). Deterministic.
+        let spec = pcodec_spec(vec![64, 64, 64], "int16");
+        let data = ArrayData::I16(
+            (0..64 * 64 * 64)
+                .map(|k| {
+                    let z = k / (64 * 64);
+                    let y = (k / 64) % 64;
+                    (z * 16 + y * 2 - 1024) as i16
+                })
+                .collect(),
+        );
+        let raw = 64 * 64 * 64 * 2;
+        let blob = encode(&spec, &data).unwrap();
+        assert!(
+            blob.len() * 4 < raw,
+            "pcodec should achieve >4x on smooth int16: {} vs raw {raw}",
+            blob.len()
+        );
+    }
+
+    #[test]
     fn array_block_digest_is_over_real_payload() {
         let spec = pcodec_spec(vec![8, 8, 8], "int16");
         let data = ArrayData::I16((0..512).map(|k| (k % 4096) as i16 - 1024).collect());

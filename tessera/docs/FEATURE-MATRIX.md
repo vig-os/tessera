@@ -35,17 +35,24 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | Pruning never lies | ○ | predicate-match chunk never skipped | TEST-PLAN |
 
 ## D. Performance SLA gates (regression floors — benched, 88-core box)
+Rust benches: `cargo bench -p tessera-io` (`benches/codec.rs`). Wall-clock floors are machine-dependent
+(measured below, **not** CI-gated); the machine-independent compression-ratio floor **is** gated
+(`array::tests::pcodec_compresses_smooth_int16_volume`). Python-spike numbers retained where the bench
+needs real CT/DICOM.
+
 | Metric | Floor (don't regress) | Measured |
 |---|---|---|
-| Volume size (CT) | ≤ 0.80× zstd · ≤ 0.40× DICOM | 74.3 MB (0.79× / 0.29×) |
-| Orthogonal/ROI read (cube 64³) | ≤ 0.05 s coronal · ≤ 0.02 s ROI | 0.039 / 0.008 s |
-| Full-volume load vs DICOM | ≥ 4× faster | 5.2× |
-| Table random take ×500 (Vortex) | ≤ 30 ms | 23 ms |
-| Table projection (Vortex) | ≤ 15 ms | 7.6 ms |
-| Encode (pcodec, /core) | ≥ 60 MB/s | 71 MB/s |
-| Encode (parallel) | ≥ 3 GB/s | 4.3 GB/s |
-| Seal/hash (blake3) | ≥ 4 GB/s | 4.1 GB/s |
-| DuckDB-over-Vortex query | works, zero-copy | S7 ✓ (0.035 s) |
+| Volume size (CT) | ≤ 0.80× zstd · ≤ 0.40× DICOM | 74.3 MB (0.79× / 0.29×) — spike |
+| Orthogonal/ROI read (cube 64³) | ≤ 0.05 s coronal · ≤ 0.02 s ROI | 0.039 / 0.008 s — spike |
+| Full-volume load vs DICOM | ≥ 4× faster | 5.2× — spike |
+| Table random take ×500 (Vortex) | ≤ 30 ms | 23 ms — spike |
+| Table projection (Vortex) | ≤ 15 ms | 7.6 ms — spike |
+| Encode (pcodec, /core) | ≥ 60 MB/s | **Rust 113 MiB/s** (int16 64³, gated bench) |
+| Decode (pcodec, /core) | — | **Rust 1.02 GiB/s** |
+| Seal/hash (blake3) | ≥ 4 GB/s | **Rust 6.0 GiB/s** (8 MiB) |
+| Table encode/decode (Vortex) | — | **Rust 214 MiB/s / 4.4 GiB/s** (100k×3 cols) |
+| pcodec ratio, smooth int16 | > 4× (gated) | **107×** (gradient); 2.0× table |
+| DuckDB-over-Vortex query | works, zero-copy | S7 ✓ (0.035 s) — spike |
 
 ## E. Durability & write engine
 | Feature | Status | Gate | Evidence |
