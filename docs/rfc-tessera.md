@@ -10,7 +10,7 @@
 The spike campaign converged on a clear, evidence-backed architecture. Headlines:
 
 1. **Codec is universal; the container is chosen by *access pattern*.** A single codec —
-   **`pcodec`** (lossless, FastLanes/ALP lineage) — is the compression winner for *both*
+   **`pcodec`** (lossless; Quantile-Compression lineage — *not* ALP, which is Vortex's) — is the compression winner for *both*
    shapes: it beat zstd by **21% on int16 CT (74.3 vs 94.5 MB)** and **33% on float PET
    (0.6 vs 0.9 MB)**, beat Vortex's own encodings on tables (73.3 vs 77.7 MB), and beat the
    lossy float codecs (zfp/bitround don't pay off on sparse medical data). **pcodec is shared
@@ -135,7 +135,7 @@ manifest, so swapping pcodec↔zstd needs no format change.
 
 | Shape | Access pattern | Engine | Bench evidence |
 |---|---|---|---|
-| dense volume (CT/PET/sinogram) | full-load · orthogonal · ROI | **zarrs** (sharded, cubic, zstd, native int) | cubic 18–24× orthogonal; sharded 5 vs 513 files |
+| dense volume (CT/PET/sinogram) | full-load · orthogonal · ROI | **zarrs** (sharded, cubic, **pcodec**, native int) | cubic 18–24× orthogonal; sharded 5 vs 513 files |
 | dense volume | web tiles | OME-Zarr (derived export) | viewers only, not archival |
 | event table | size · projection · random `take` · vectorized | **Vortex** (decided, spikes S0–S11) | smallest + O(1) random take + ALP floats + filter pushdown |
 | event table | external interop / lakehouse query | Parquet (derived export) | DuckDB/Spark; but Vortex→Arrow already gives this zero-copy |
@@ -144,33 +144,17 @@ manifest, so swapping pcodec↔zstd needs no format change.
 - Vortex (Rust + Arrow-native, FastLanes/ALP/FSST addressable encodings) won every measured axis vs Parquet and Lance: **smallest** (21% < Parquet on events, 23% on pure floats), **random `take` ~0.3–0.5 ms and flat to 100M rows** (Lance degrades to 0.9 s), **filter pushdown**, and **zero-copy into DuckDB**. It slots *under* the Tessera spine (encoding layer) — so the **Merkle tree stays integrity-only**, not a random-access index. Lance is not needed (it bundles a competing dataset/version layer and lost on size + scale).
 - Cross-cutting: `zstd`/`blosc2` (MT compress), `blake3` (hash), `object_store` (cloud), `dicom-rs` (ingest), `pyo3` (bindings).
 
-### 5.2 Table backends & the random-access axis
+### 5.2 Table backend — Vortex absorbs both axes (no flavors)
 
-Parquet and Lance sit at opposite ends of one axis: Parquet wins interop + projection +
-ecosystem; Lance wins random per-event `take` + versioning (bench: 16× on random row).
-Tessera resolves this with **flavors, not runtime conversion**:
+> *(Superseded design note: an earlier draft proposed Parquet/Lance "flavors" chosen at write
+> time. Spikes S0/S4/S7/S10 retired that — Vortex wins size **and** random `take` **and**
+> projection/pushdown **and** zero-copy DuckDB, at scale (§5.1). No flavor selection is needed.)*
 
-- The `TableSpec` declares the data + an optional `row_index` (random-access *intent*) and a
-  future `encoding` field naming the chosen backend. **The flavor is picked at *write time*
-  by the dominant access pattern**, recorded in the manifest:
-  - scan / project / feed Spark·DuckDB → **Parquet** flavor (default).
-  - random per-event fetch · versioning · ML sampling → **Lance** flavor.
-- **Both decode into Arrow**, so downstream code is backend-agnostic and zero-copy either way.
-  The cheap "adaptor" is the *in-memory Arrow* handoff — not an on-disk transcode.
-- **A pq↔lance on-disk adaptor is a full rewrite** (different byte layouts encode different
-  tradeoffs — Lance uses small/indexed blocks for O(1) take, Parquet uses big compressed
-  pages). That is minutes for GB-scale tables → **never on the read path**. Use it once to
-  *materialize* a flavor, not per query.
-- **Parquet already has a partial answer**: Page Index (ColumnIndex+OffsetIndex) + Bloom
-  filters give fast *predicate point-lookups on a sorted key*. Arbitrary positional `take`
-  needs a sidecar `rowid → page-offset` index (the "addon") + range read — buildable, but it
-  still pays per-page decompression, so it *approximates* Lance, not equals it.
-- **Dual-hot tables** (genuinely hot on both axes) store **two blocks** in one product (a
-  Parquet block for scans + a Lance block or sidecar index for take) — a deliberate *storage*
-  cost, not a *latency* one. Rare; not the default.
-
-Net: support the axis **backend-agnostically** (flavors chosen per workload), never transcode
-on read, and let emerging both-axes formats (Vortex, Nimble) slot in as additional flavors.
+**TABLE block backend = Vortex, single.** Parquet and Lance are kept **only as derived-export
+targets**: Parquet for lakehouse interop (though Vortex→Arrow→DuckDB is already zero-copy, §S7),
+not as a storage flavor. Vortex provides the random-access index natively; the Merkle tree is
+**integrity-only** (§5.1). Emerging both-axes formats (Vortex's own lineage, Nimble) can replace
+the backend later without changing the manifest contract.
 
 ## 6. Rust crate layout (this spike)
 
@@ -180,25 +164,27 @@ tessera/crates/tessera-core
   identity.rs     id = algo-prefixed blake3 over identity inputs
   hash.rs         blake3 Merkle over blocks -> content_hash
   provenance.rs   sources/ DAG
-  block/array.rs  N-D chunked array block (zarrs backend, feature-gated)
-  block/table.rs  columnar table block (arrow backend, feature-gated)
+  block/array.rs  N-D chunked array block (zarrs backend + pcodec, feature-gated)
+  block/table.rs  columnar table block (vortex backend, feature-gated)
   product.rs      Product = manifest + blocks; create()/seal()
 ```
 
-Reuse, do not reinvent: `zarrs`, `arrow`/`parquet`, `lance`, `zstd` (`multithread`),
-`blosc2`, `blake3`, `object_store`, `dicom-rs` (ingest), `pyo3` (Python parity).
+Reuse, do not reinvent: `zarrs` + **`pcodec`** (arrays), **`vortex`** (tables), `blake3` (hash),
+`object_store` (cloud), `dicom-rs` (ingest), `pyo3` (Python). `zstd`/`blosc2` = fallback/MT codec;
+`arrow`/`parquet`/`lance` = optional *derived-export* targets only (not storage backends).
 
 ## 7. Evidence (real DUPLET data; cold cache via `posix_fadvise`)
 
 | Finding | Implication for Tessera |
 |---|---|
 | int16 vs float32: 2.6× smaller, lossless | native-dtype arrays |
-| cubic vs slice chunks: 18–24× faster orthogonal | cubic chunk default |
-| zstd-9 vs gzip-4: 5% smaller **and** ~2× faster | zstd default |
-| compound HDF5 can't project (0.62 ≈ full read) | columnar tables |
-| Lance `take` 16× faster random row | optional row index |
+| cubic vs slice chunks: 18–24× faster orthogonal | cubic 64³ chunk default |
+| **pcodec vs zstd: 21% smaller CT / 33% PET, lossless** | **pcodec default** (zstd = stable fallback) |
+| compound HDF5 can't project (0.62 ≈ full read) | columnar Vortex tables |
+| **Vortex `take` 7–42× vs Zarr+pcodec, flat to 100M rows** | Vortex native random-access index |
 | Zarr sharded: 5 files vs 513 unsharded | shard array blocks |
-| plain HDF5 zstd filter single-threaded on write | rayon/blosc2 parallel compress |
+| flat/Morton-Vortex volumes 1.7–2× bigger than chunked | volumes = chunked Zarr, not flat |
+| encode 71 MB/s/core (pcodec) → 4.3 GB/s parallel | rayon-parallel encode (the GB/s mechanism) |
 
 Full benchmark tables and method: fd5 issues #192 (recon), #193 (listmode), #194 (codec).
 
@@ -354,9 +340,11 @@ acq → bounded RAM ring (backpressure)
   are *born with their hash* → **first-moment, source-rooted integrity** (detects downstream
   disk/transit/bitrot corruption) and the natural place to **sign the root at the source** (§10,
   S16).
-- **Merkle leaves = the encoded chunks** → the hash-on-write tree *is* the **chunk-Merkle index**
-  (S3): integrity + content-addressing (+ per-leaf stats for pruning), built **incrementally**
-  as chunks commit (Bao/BLAKE3 verified streaming).
+- **Merkle leaves = the encoded chunks** → the hash-on-write tree is the **chunk-Merkle
+  *integrity* tree** (content-addressing + tamper-evidence + per-leaf stats for pruning), built
+  **incrementally** as chunks commit (Bao/BLAKE3 verified streaming). *It is integrity-only —
+  the random-access index is Vortex's job, not the Merkle's (§5.1).* (Was framed as a
+  random-access index in an earlier draft, spike S3; retracted.)
 - **Sealing = hash of hashes** — `merkle_root(chunk_hashes)`, microseconds, no second pass over
   the data. A valid Merkle root exists at *every* commit watermark, so a crash mid-acquisition
   leaves a **hash-verified, integrity-sealed partial product** up to `C`.
@@ -420,6 +408,87 @@ future major `schema_version` is refused not mis-read.)
 
 `tessera-core` = format/spine (no I/O). **`tessera-io`** = this engine. `tessera-ingest` = vendor
 decoders feeding capture.
+
+## 13. FAIR conventions carried from fd5 (restored — were dropped in drafting)
+
+These are fd5 white-paper conventions Tessera **inherits verbatim** (adapted to manifest+blocks);
+the organic spike narrative omitted them — they are normative, not optional.
+
+- **Two hashes, two purposes** (fd5 P12): **`id`** = algorithm-prefixed BLAKE3 over *identity
+  inputs*, **stable across re-ingests** (same logical product, new codec → same `id`, new
+  `content_hash`); **`content_hash`** = Merkle root over block digests. Require an **`id_inputs`**
+  field documenting what `id` was hashed from; publish per-schema identity recipes (e.g. `recon`:
+  `scanner_uuid + acq_timestamp + vendor_series_id`). *(Reconcile with §0.5 before impl — see §14.)*
+- **`_type` + `_version`** (fd5 P6) on any polymorphic sub-object (reconstruction method, fit
+  model, correction) → new algorithms with **zero schema-registry bump**. Orthogonal to field-ids
+  (id = storage key; `_type` = interpretation).
+- **`_vocabulary` + `_code`** on enum fields (fd5 FAIR I2): bind `scan_type="pet"` →
+  `{vocabulary: "DICOM Modality", code: "PT"}` (SNOMED CT, Sequence Ontology, …).
+- **`default`** root field → the headline block/level for visualization/agents (fd5 P3).
+- **`extra/`** unvalidated free-form block (NXcollection) for vendor/experimental data + NXnote
+  binary attachments (MIME-typed) — the destination for §11's "preserve everything" promise.
+- **`sources[]`** typed-role DAG (fd5 I3): `{name, id, content_hash (required for Tessera
+  parents), product, role (emission_data|mu_map|reference|calibration|…), description, hint_uri}`
+  + reader **`resolve(id)→URI`** fallback chain (link → manifest → hook → `SourceNotFound`).
+- **`provenance`**: `original_files: [{path, hash, size, mime}]` (Layer-0 source hashing — what
+  §10/§11 verify-at-door records) + `ingest: {tool, tool_version, timestamp, description}`.
+- **`study`**: `{license (SPDX), license_url, creators: [{name, affiliation, orcid, role}]}` —
+  required to emit conformant RO-Crate/DataCite (FAIR R1.1).
+- **Units** (fd5 P7): bare field names (`z_min`, not `z_min_mm`) + `unitSI` factor; `{value,
+  units, unitSI}` sub-group for scalar attrs, `units`/`unitSI` attrs on array datasets.
+- **Timestamps**: ISO 8601 with **explicit timezone** (fd5 P10). **Descriptions** required on
+  root + first-level blocks, recommended deeper (boilerplate-rejection is an SDK lint, fd5 P3).
+- **Additive-only evolution + bidirectional read** (fd5 P8): never remove/rename; vN reads
+  v(N−1); v(N−1) warns + reads-what-it-can on vN; future *major* → refused. Stable field-ids.
+- **Filename**: `YYYY-MM-DD_HH-MM-SS_<product>-<id8>_<descriptors>.tessera`, mtime = acq time.
+- **Concurrency**: a sealed product is **single-writer-during-creation, lock-free for N
+  readers**, infinite cache validity (fd5 P13); the exploded prefix is *unsealed working state*.
+- **`errors_of: <block>`** companion blocks for per-element uncertainty (NeXus `_errors`).
+- **Derived outputs (Layer 2/3)**: `tessera-index.{toml,json}` dataset index (fd5 `manifest.toml`,
+  local-first F4); `datacite.yml`; `ro-crate-metadata.json` (Schema.org map: `id`→`identifier`,
+  `study.license`→`license`, `creators`→`author`, `provenance.ingest`→`CreateAction`,
+  `sources`→`isBasedOn`, block→`File`); `tessera schema-dump`. **Layer model**: L0 vendor raw →
+  L1 Tessera product → L2 RO-Crate/DataCite discovery → **L3 RDF/SPARQL** (via L2 JSON-LD bridge).
+- **Product schemas to carry forward from fd5** (only `recon`/`listmode` sketched so far):
+  `recon` (incl. `pyramid`, `mip_coronal/sagittal`, frames), `listmode`, `sinogram`, `spectrum`,
+  `roi` (mask/geometry/contours), `transform` (matrix/displacement/landmarks), `calibration`
+  (valid_from/valid_until), `sim` (ground_truth), `device_data` (NXlog time+signal). Each needs
+  its required/optional field table (fd5 §"Required vs optional").
+
+## 14. Impl-readiness — specify before / early in build (from pre-impl review)
+
+**Normative vs informative:** §0–§5, §13 = the *format spec* (normative). §10 (distribution/RDM
+products), §11 (ingest plugins), §12 (write-engine throughput/streaming) are *informative
+companion-crate designs* — the format only mandates their **contracts** (valid product out;
+Layer-0 hashes preserved; declare→stream→seal with Merkle root + signature).
+
+**P0 — resolve before leaving spike (ADRs / spikes, mostly not weeks):**
+- **Canonical manifest encoding** for reproducible `content_hash` — adopt **RFC 8785 JCS** (or
+  deterministic CBOR). Current `to_string_pretty` is not canonical → cross-impl hash divergence.
+- **Identity reconciliation** — `id` (over `id_inputs`, logical/stable) vs `content_hash` (Merkle).
+  Pick + document; today's `compute_id` and §0.5 "identity = Merkle root" conflict.
+- **Manifest JSON-Schema** + **`BlockRef` schema** (array: shape/chunks/codec/axes/fill_value;
+  table: columns{id,name,desc,dtype,units,codec}/row_index) — both currently undefined.
+- **Missing struct fields**: `ArraySpec.fill_value` (CT air −1024 ≠ 0), `ArraySpec.axes`
+  (ZYX, OME-NGFF), `Column.units`/`description`.
+- **`.tessera` container spec**: `mimetype` magic first entry; `manifest.json` discoverable;
+  block path convention; path-traversal hardening; zip64 tail rules.
+- **Read path / `Reader` API** — entirely unspecified (the RFC is writer-shaped); sketch it
+  *before* `tessera-io` so the layout isn't reader-hostile.
+- **Error taxonomy** — expand beyond the 5-variant stub (typed, `#[non_exhaustive]`, recoverable
+  vs fatal) per the P0 "never panic" tests.
+- **Versioning DAG ADR** — `parents: [content_hash]` immutable DAG + a mutable signed ref
+  (`product_id → latest`), S3 CAS strategy; resolves §8's open question.
+- **Run S13 (bit-exact pcodec roundtrip) + S15 (pcodec/Vortex spec-pin + vendored reader)
+  THIS WEEK** — cheap spikes that can invalidate the codec choice; existential archival risk.
+- **Conformance corpus + `SPEC.md`** — golden manifests/products/roots; a format with one reader
+  is a liability (§8); make it a v0.1 deliverable, not an open question.
+
+**P1:** concurrency model (sync core / async `tessera-io` + tokio↔rayon boundary); schema-id
+allocator + namespacing; OCI media-type mapping; observability (`tracing` spans on
+acquired/encoded/committed watermarks); perf-SLA CI gates; `tessera-cli` (pack/unpack/verify/
+inspect); language bindings tier (pyo3 → C-ABI → WASM); format-spec semver policy; fd5
+supersession-vs-sibling repo decision.
 
 ## 9. Non-goals
 
