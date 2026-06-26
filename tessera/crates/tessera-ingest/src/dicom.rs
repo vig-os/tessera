@@ -17,6 +17,7 @@ const ROWS: Tag = Tag(0x0028, 0x0010);
 const COLUMNS: Tag = Tag(0x0028, 0x0011);
 const RESCALE_INTERCEPT: Tag = Tag(0x0028, 0x1052);
 const RESCALE_SLOPE: Tag = Tag(0x0028, 0x1053);
+const INSTANCE_NUMBER: Tag = Tag(0x0020, 0x0013);
 
 /// A DICOM image decoded for Tessera: native int16 samples (C order, `[rows, cols]`) plus the
 /// metadata needed to recover physical units. The rescale is **not** applied to `voxels`.
@@ -84,6 +85,50 @@ pub fn read_object(obj: &FileDicomObject<InMemDicomObject>) -> Result<DicomImage
         modality,
         rescale_slope,
         rescale_intercept,
+    })
+}
+
+/// Read and stack a multi-slice DICOM series into a 3-D `[z, rows, cols]` volume, ordered by
+/// InstanceNumber (geometric ImagePositionPatient ordering is a later refinement). Every slice must
+/// share rows/cols/modality/rescale, else the series is rejected as non-uniform.
+pub fn read_series(paths: &[std::path::PathBuf]) -> Result<DicomImage> {
+    if paths.is_empty() {
+        return Err(Error::Invalid("dicom: empty series".into()));
+    }
+    let mut slices: Vec<(i64, DicomImage)> = Vec::with_capacity(paths.len());
+    for p in paths {
+        let obj = dicom::object::open_file(p).map_err(de)?;
+        let instance = obj
+            .element(INSTANCE_NUMBER)
+            .ok()
+            .and_then(|e| e.to_int::<i64>().ok())
+            .unwrap_or(0);
+        slices.push((instance, read_object(&obj)?));
+    }
+    slices.sort_by_key(|(k, _)| *k);
+
+    let first = slices[0].1.clone();
+    for (_, s) in &slices {
+        if s.shape != first.shape
+            || s.modality != first.modality
+            || s.rescale_slope != first.rescale_slope
+            || s.rescale_intercept != first.rescale_intercept
+        {
+            return Err(Error::Invalid(
+                "dicom: non-uniform series (shape/modality/rescale differ between slices)".into(),
+            ));
+        }
+    }
+    let mut voxels = Vec::with_capacity(slices.len() * first.voxels.len());
+    for (_, s) in &slices {
+        voxels.extend_from_slice(&s.voxels);
+    }
+    Ok(DicomImage {
+        shape: vec![slices.len() as u64, first.shape[0], first.shape[1]],
+        voxels,
+        modality: first.modality,
+        rescale_slope: first.rescale_slope,
+        rescale_intercept: first.rescale_intercept,
     })
 }
 
@@ -216,5 +261,64 @@ mod tests {
         assert_eq!(img.rescale_slope, 1.0);
         let expected: Vec<i16> = (0..n).map(|k| (k as u16 * 7) as i16).collect();
         assert_eq!(img.voxels, expected);
+    }
+
+    /// Write a minimal CT slice with a given InstanceNumber and pixel base value.
+    fn write_slice(path: &std::path::Path, instance: i32, base: u16) {
+        let pixels: Vec<u16> = (0..64).map(|k| base + k as u16).collect();
+        let obj = InMemDicomObject::from_element_iter([
+            DataElement::new(MODALITY, VR::CS, PrimitiveValue::from("CT")),
+            DataElement::new(ROWS, VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(COLUMNS, VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(
+                INSTANCE_NUMBER,
+                VR::IS,
+                PrimitiveValue::from(instance.to_string()),
+            ),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(
+                Tag(0x0028, 0x0004),
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2"),
+            ),
+            DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(16u16)),
+            DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(16u16)),
+            DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(15u16)),
+            DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(RESCALE_INTERCEPT, VR::DS, PrimitiveValue::from("-1024")),
+            DataElement::new(RESCALE_SLOPE, VR::DS, PrimitiveValue::from("1")),
+            DataElement::new(
+                Tag(0x7FE0, 0x0010),
+                VR::OW,
+                PrimitiveValue::U16(pixels.into()),
+            ),
+        ]);
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax("1.2.840.10008.1.2.1")
+            .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.2")
+            .media_storage_sop_instance_uid(format!("1.2.3.{instance}"))
+            .implementation_class_uid("1.2.826.0.1.3680043.tessera")
+            .build()
+            .unwrap();
+        obj.with_exact_meta(meta).write_to_file(path).unwrap();
+    }
+
+    #[test]
+    fn series_stacks_in_instance_order() {
+        let dir = tempfile::tempdir().unwrap();
+        // write three slices out of order; distinct pixel bases identify them
+        let p3 = dir.path().join("s3.dcm");
+        let p1 = dir.path().join("s1.dcm");
+        let p2 = dir.path().join("s2.dcm");
+        write_slice(&p3, 3, 3000);
+        write_slice(&p1, 1, 1000);
+        write_slice(&p2, 2, 2000);
+
+        let vol = read_series(&[p3, p1, p2]).unwrap();
+        assert_eq!(vol.shape, vec![3, 8, 8]); // [z, rows, cols]
+                                              // sorted by InstanceNumber 1,2,3 regardless of input order
+        assert_eq!(vol.voxels[0], 1000);
+        assert_eq!(vol.voxels[64], 2000);
+        assert_eq!(vol.voxels[128], 3000);
     }
 }
