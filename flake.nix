@@ -114,6 +114,10 @@
             UV_PYTHON_DOWNLOADS = "never";
           };
           hook = ''
+            # uv-installed manylinux wheels (numpy/h5py/pyarrow/...) dlopen libstdc++.so.6
+            # and libz.so.1 at runtime; the pure devShell doesn't expose them on the loader
+            # path, so prepend the C++ runtime + zlib without clobbering whatever's already set.
+            export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.zlib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             echo "[tessera] rust $(rustc --version 2>/dev/null | cut -d' ' -f2) · python ${pkgs.python312.version} · uv $(uv --version 2>/dev/null | cut -d' ' -f2)"
             echo "[tessera] cargo workspace lives in ./tessera  (cd tessera && cargo test)"
           '';
