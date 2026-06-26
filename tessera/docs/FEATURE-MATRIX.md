@@ -67,8 +67,9 @@ needs real CT/DICOM.
 | Feature | Status | Gate | Evidence |
 |---|:--:|---|---|
 | blake3 Merkle integrity | ✓ | any byte change → root change; tamper-evident | `tamper_*` tests |
-| `sources[]` DAG (typed roles) | ◑ | typed role + content_hash on each edge | `provenance::Source` (resolve() pending) |
-| Source-rooted signing + chain verify | ○ | sign-at-source; walk DAG to scanner-signed root | S16 |
+| `sources[]` DAG (typed roles) | ✓ | typed role + content_hash on each edge; resolve + walk | `provenance::{Source,Resolver,verify_chain}` |
+| Source-rooted chain verify | ✓ | walk DAG, each edge's hash == parent seal; cycles rejected | `provenance::verify_chain`, 2 tests |
+| Source-rooted **signing** | ○ | sign-at-source (cosign); needs signing keys | S16 (external key → P6) |
 | WORM (Object-Lock) | ○ | overwrite/delete refused in retention | S16 |
 | Units / descriptions / `_vocabulary`·`_code`·`default`·`extra/`·`study`·axes | ✓ | FAIR I1/I2 + AI-readable; fail-strict on missing required | `schema::FieldSpec`/`Coded`, `metadata`/`extra`/`study`, ArraySpec axes/unit/fill |
 | Versioned product-schema registry (embedded, 9 schemas) | ✓ | additive evolution, stable ids, offline-valid, domain-agnostic | `SchemaRegistry::builtin`, `validate` tests |
