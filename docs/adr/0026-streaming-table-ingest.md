@@ -58,7 +58,25 @@ nondeterminism excluded in ADR-0024) are taken per chunk. Naively adding a strea
   cheaper row-range reads — closing the last functional gap in the ingest path. Until validated, the
   whole-file path stays correct for moderate files; `read_events_2p` documents the RAM ceiling.
 
+## Revision (SSoT/DRY — ingest rides the DAQ write engine, not a second encoder)
+The >RAM ingest problem is **the same surface as the streaming DAQ write** (`#203`: bounded RAM ring →
+A/B/C fragment registry → rayon encode pool → compaction → seal). So the right design is NOT a separate
+chunked table encoder bolted onto ingest — it is: **ingest is a throttled *producer* into the one
+`WriteSession`.** Reading the HDF5 in row-slabs and pushing them through the streaming engine with
+backpressure means we never hold the whole file, and DAQ capture + file ingest + batch authoring all go
+through a **single write path** (SOLID: ingest depends on the `WriteSession` abstraction; DRY: one
+encoder; SSoT: one place decides bytes).
+
+Consequence: the "always-chunked encoder" becomes a property of the streaming engine's compaction, not
+an ingest-specific fork. Batch encode = streaming with one fragment; >RAM ingest = streaming with N. The
+determinism re-validation + golden regen still gate it — but there is now exactly **one** encoder to
+validate, which is the whole point.
+
+**Sequencing:** finish `#203` (streaming write engine — `WriteSession` currently appends whole blocks;
+sub-block row-group compaction is the missing piece) FIRST; then ingest is a thin producer into it. Do
+NOT build a standalone chunked table encoder.
+
 ## Status note
-Deferred for **alignment + cross-env determinism re-validation** before implementation — it rewrites
-the determinism-critical encode path and regenerates the conformance goldens. Tracked as the
-streaming half of `#208`.
+Deferred for **alignment + cross-env determinism re-validation**, and **resequenced behind `#203`** (the
+streaming write engine is the SSoT; ingest rides it). It rewrites the determinism-critical encode path
+and regenerates the conformance goldens.

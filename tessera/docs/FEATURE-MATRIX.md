@@ -94,7 +94,7 @@ data) is the remaining dedicated harness (#143).
 | Reader API (open/verify/block read) | ✓ | magic+seal verify on open; per-block read verified vs digest; partial-product; generic Read+Seek | `tessera-io::Reader`, container tests |
 | Conformance corpus + SPEC.md | ✓ | 6 golden fixtures + `.tsra` test vectors locked in CI; `docs/SPEC.md` | `corpus/corpus.json`, `corpus/files/`, `tests/conformance.rs` |
 | **Independent reader passes corpus** (v1.0 gate) | ✓ | a 2nd impl, from SPEC.md alone, reproduces all 6 goldens | `corpus/reference_reader/` (pure-Python, 6/6 first try) |
-| Bindings (pyo3 → C-ABI → WASM) | ◑ | Python read+verify+decode+**write** shipped (abi3 `import tessera`: `Reader` open/manifest/blocks/read_block/read_array→numpy/read_array_subset (ROI)/read_table→numpy/verify + `Builder` add_array/add_table/set_field/add_source/pack + typed `TesseraError`); hermetic check does a full numpy write→read→verify round-trip over the corpus. Arrow zero-copy + WASM pending | `tessera-py` (#210) |
+| Bindings (pyo3 → C-ABI → WASM) | ◑ | Python read+verify+decode+**write** shipped (abi3 `import tessera`: `Reader` open/manifest/blocks/read_block/read_array→numpy/read_array_subset (ROI)/read_table→numpy/verify + `Builder` add_array/add_table/set_field/add_source/pack + typed `TesseraError`); hermetic check does a full numpy write→read→verify round-trip over the corpus. **Table column projection** (Vortex supports it; #143 showed it ≈ full-read today), Arrow zero-copy + WASM pending | `tessera-py` (#210) |
 
 ## H. Release gates (definition of shippable)
 **Shippable = all four green on the supported matrix: ① conformance corpus · ② bit-exact roundtrip · ③ perf-SLA (§D) · ④ writer-determinism.**

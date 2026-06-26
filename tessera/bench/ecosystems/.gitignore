@@ -1,0 +1,5 @@
+# Build artifact — copy from `cargo build -p tessera-py --release` (target/release/libtessera.so)
+tessera.so
+# uv-managed virtualenv + run outputs
+.venv/
+results.json

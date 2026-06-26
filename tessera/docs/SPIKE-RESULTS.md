@@ -151,3 +151,50 @@ findings are the **ratios, container overhead %, and partial-read speedups**.
   128³–256³. This is the chunk-granularity lever (S2) realized through the `.tsra` read path.
 - **Net:** Tessera's FAIR envelope (content-addressing, self-description, range-readable container)
   costs essentially nothing over the raw codec at real data sizes, while adding addressable partial reads.
+
+## #143 (cont.) — cross-ecosystem comparison: `.tsra` vs HDF5 / Zarr / NeXus / NIfTI / DICOM / Parquet / ROOT
+
+Tool: `tessera/bench/ecosystems/` (`uv run python run.py`, pinned `taskset -c 10-39 nice -n19`, min-of-5,
+warm reads). Same synthetic volume (int16 256³, 32 MiB) + table (u8+2×f4, 1M rows, 15 MiB) through every
+format's real Python writer/reader, each bit-exact-asserted. Each format uses a sensible lossless codec.
+
+### Volume (32 MiB int16, 64³ chunks where supported)
+| format | codec | ratio | write MB/s | read MB/s | **z-slice MB/s** | content-addr/sealed |
+|---|---|--:|--:|--:|--:|:--:|
+| **Tessera .tsra** | pcodec/Vortex | 130× | 393 | 357 | **16246** | ✓ |
+| HDF5 (h5py) | gzip-4 | 47× | 172 | 445 | 2611 | — |
+| Zarr (zarr-python) | zstd-3 | 246× | 490 | 621 | 3285 | — |
+| NeXus (h5py/NXdata) | gzip-4 | 47× | 170 | 449 | 2635 | — |
+| NIfTI (nibabel) | gzip | 18× | 117 | 452 | 146 | — |
+| DICOM (pydicom) | uncompressed | 1.0× | 472 | 1043 | 1015 | — |
+
+### Table (15 MiB, u8 + 2×f4, 1M rows)
+| format | codec | ratio | write MB/s | read MB/s | **column MB/s** | content-addr/sealed |
+|---|---|--:|--:|--:|--:|:--:|
+| **Tessera .tsra** | Vortex | **21×** | 114 | **1180** | 1336 | ✓ |
+| HDF5 (h5py) | gzip-4 | 10× | 101 | 468 | 2765 | — |
+| Zarr (zarr-python) | zstd-3 | 15× | 246 | 489 | 1505 | — |
+| NeXus (h5py) | gzip-4 | 10× | 101 | 466 | 2818 | — |
+| Parquet (pyarrow) | zstd | 12× | 170 | 657 | 2344 | — |
+| ROOT (uproot/TTree) | zstd-3 | 15× | 334 | 389 | 2343 | — |
+
+SWMR / concurrent-reader: HDF5, Zarr, NeXus (yes). Tessera = immutable-sealed (versioned CoW, not live append).
+
+### Reading (ALOCA)
+- **Compression — Tessera is competitive, and wins on *real* data.** On this **smooth synthetic** gradient,
+  zstd over-compresses (Zarr 246×) and beats pcodec (Tessera 130×) on the volume. **Caveat that flips the
+  ranking:** on REAL noisy CT/PET the codec spike measured **pcodec −21% CT / −33% PET vs zstd** — the
+  synthetic favors entropy coders, real medical data favors pcodec. On the table, Tessera (Vortex, **21×**)
+  beats every columnar format incl. Parquet (12×) and ROOT (15×).
+- **Partial reads = Tessera's structural win.** Volume z-slice: **~16 GB/s effective, 5–6× HDF5/Zarr/NeXus,
+  ~110× NIfTI** — the chunked addressable read the others can't match (NIfTI's gzip stream forces a near-full
+  decompress: 146 MB/s). 
+- **Full-volume decode is Tessera's honest cost.** 357 MB/s — mid-pack (DICOM's raw memcpy is 1043); pcodec
+  decode is heavier than gzip/zstd. The tradeoff buys 130× compression + addressable slices.
+- **One gap, actionable:** Tessera's **table column read ≈ full read** (1336 vs 1180) because the *bindings*
+  don't expose column projection — Parquet/ROOT/HDF5 do real per-column reads (2300–2800 MB/s). The Vortex
+  backend *can* project; `tessera-py` should expose `read_table_column`. (Filed as a follow-up.)
+- **The envelope is unique.** Tessera is the **only** format here that is content-addressed + sealed +
+  self-describing FAIR, and the **only** one that holds volume *and* table in one product with one API.
+  HDF5/Zarr/NeXus are bare containers (no identity/integrity); NIfTI/DICOM are volume-only; Parquet/ROOT
+  are table-only. Tessera's overhead for that envelope is ≪1% at these sizes (see the `.tsra`-vs-bare run).
