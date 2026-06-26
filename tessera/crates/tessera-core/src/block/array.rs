@@ -357,6 +357,21 @@ impl ArraySpec {
                     self.shape.len()
                 )));
             }
+            // ADR-0032 §gate: a `lookup` axis descriptor carries one explicit value per index, so its
+            // table length must equal that axis's extent — else some index has no coordinate.
+            for (axis, entry) in axref.iter().enumerate() {
+                if let Some(r) = entry {
+                    if let crate::referencing::Transform::Lookup { values } = &r.transform {
+                        if values.len() as u64 != self.shape[axis] {
+                            return Err(crate::Error::Invalid(format!(
+                                "axis {axis} lookup descriptor has {} values != axis extent {}",
+                                values.len(),
+                                self.shape[axis]
+                            )));
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -524,6 +539,26 @@ mod tests {
         assert!(
             bad.validate().is_err(),
             "axis_referencing rank mismatch must be rejected"
+        );
+
+        // ADR-0032 §gate: a `lookup` axis descriptor's length must equal its axis extent.
+        use crate::referencing::Referenced;
+        ArraySpec::new(vec![4, 8, 8], "int16")
+            .with_axis_referencing(vec![
+                Some(Referenced::time_irregular(vec![0.0, 30.0, 90.0, 180.0])), // 4 == extent 4
+                None,
+                None,
+            ])
+            .validate()
+            .unwrap();
+        let bad_lut = ArraySpec::new(vec![4, 8, 8], "int16").with_axis_referencing(vec![
+            Some(Referenced::time_irregular(vec![0.0, 30.0])), // 2 != extent 4
+            None,
+            None,
+        ]);
+        assert!(
+            bad_lut.validate().is_err(),
+            "lookup length != axis extent must be rejected"
         );
     }
 
