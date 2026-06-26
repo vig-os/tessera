@@ -11,7 +11,8 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 |---|:--:|---|---|
 | Manifest spine (build/seal) | ✓ | seals, Merkle root set, blocks==refs | 22 tests green |
 | Identity `id` (stable) | ✓ | same inputs→same id; rename≠new-content | `id_stable_and_distinct` |
-| `id` vs `content_hash` + `id_inputs` | ✓ | id=blake3(JCS(id_inputs)) logical; content_hash=Merkle; reconciled | **ADR-0020**, `id_*` tests |
+| `id` vs `content_hash` + `id_inputs` | ✓ | id=blake3(JCS(id_inputs)) logical; **content_hash = recursive MMR root** (domain-separated leaves/nodes; supersedes the flat root, ADR-0028 §1–2; cross-validated by the SPEC-only Python reader); reconciled | **ADR-0020**+**0028**, `id_*`, `hash::tests::{root_is_a_recursive_tree_not_a_flat_concat,watermark_root_is_consistent_at_each_step}` |
+| Spatial referencing (`world_frame`: affine + LPS + named space) | ✓ | optional voxel→world 3×4 affine on `ArraySpec` (ADR-0030 §1); spacing **derived** from affine columns (§2); additive (skip-if-none → corpus unchanged) | `tessera_core::block::array::tests::{world_frame_spacing_is_derived_from_affine_columns,array_spec_world_frame_is_additive_and_optional}` |
 | Canonical manifest encoding (JCS) | ✓ | re-serialize → identical hash (RFC 8785, `serde_jcs`) | `canonical::*`, `seal_round_trips_*` |
 | `manifest_hash` seal (whole-manifest tamper-evident) | ✓ | blake3 over JCS(manifest); covers meta+sources+digests | `tampering_*`, `verify()` |
 | Block dispatch (schema→array/table) | ✓ | array→Zarr v3+pcodec · table→Vortex — both real, bit-exact, deterministic | `tessera-io::{array,table}`, ADR-0023/0024 |
@@ -33,7 +34,8 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | **Bit-exact lossless** (arrays+tables) | ✓ | `bytes ==` incl NaN/±inf/−0.0/denormal/int-limits | **S13** + Rust `array::tests` (pcodec) + `table::tests` (Vortex, 10 dtypes) |
 | **Writer determinism** (same-ver) | ✓ | same input→byte-identical output (manifest + .tsra) | **S15** + `corpus_packs_deterministically` |
 | Cross-version / cross-arch determinism | ◑ | golden hashes locked in `corpus.json`; drift fails CI | conformance gate (multi-release CI pending, S15 remain) |
-| Pruning never lies | ○ | predicate-match chunk never skipped | TEST-PLAN |
+| Pruning never lies | ✓ | conservative min/max overlap → a chunk that *could* match a range is never skipped (no false negatives); proven exhaustively | `chunk_index::tests::pruning_keeps_overlapping_chunks_only_and_never_drops_a_hit`, `array_chunk_index_*` |
+| Docs-as-tests (3 layers gated) | ✓ | every public-API example + CLI transcript + book runs in CI, so docs can't drift from behaviour | `workspace-doctest` (4 doctests) · `tessera-cli/tests/cli.rs` trycmd (5 cases incl. real corpus inspect) · `mdbook-build` (book `{{#include}}`s the trycmd files) |
 
 ## D. Performance SLA gates (regression floors — benched, 88-core box)
 Rust benches: `cargo bench -p tessera-io` (`benches/codec.rs`). Wall-clock floors are machine-dependent
@@ -74,7 +76,7 @@ data) is the remaining dedicated harness (#143).
 | Unified Source/WriteSession surface | ✓ | push/from/seal/recover; one write path | `WriteSession` create/append/recover/seal + `StreamWriter` front |
 | Streaming table accumulator (>RAM, bounded) | ✓ | push arbitrary batches → fixed 2¹⁶ fragments → lazy compact == batch; RAM ~2 row-groups | `TableStreamWriter` (#203, ADR-0026), `accumulator_equals_batch_over_odd_batches` |
 | Metadata-first durable header | ◑ | `header.json` (product/name/metadata/study/extra) written at `create`, persisted on set, replayed by `recover` — before any data block | `WriteSession` (header.json); **gaps:** header not fsync'd, no `StreamWriter.with_field` passthrough |
-| Sub-block Merkle + chunk-index (per-chunk confirm + pruning) | ○ | per-chunk leaves; Vortex `{hash, monoid-stats}` index; live row-group integrity | ADR-0027, #214 (after the accumulator) |
+| Sub-block Merkle + chunk-index (`{hash, stats}`, pruning, sub-block MMR root, additive block) | ✓ | `chunk_index` = monoid stats (count/min/max/sum) + `prune` + sub-block MMR root; wired into both encoders (`table_chunk_index`/`array_chunk_index`); emitted as the additive `BlockKind::ChunkIndex` companion block (digest rolls into `content_hash`, `verify()` passes); #221-B measured leaf granularity (knee ≈2¹⁴) | **ADR-0028 §3** (#214 superseded into it); `tessera_core::chunk_index::tests::*`, `table_chunk_index_groups_stats_and_prunes`, `array_chunk_index_*`, `tessera_io::chunk_index::tests::*` |
 
 ## F. Integrity, provenance & FAIR
 | Feature | Status | Gate | Evidence |
