@@ -83,6 +83,24 @@ impl ColumnData {
         self.len() == 0
     }
 
+    /// Flatten the column to little-endian bytes for zero-copy reconstruction in another runtime —
+    /// e.g. `numpy.frombuffer(buf, "<" + numpy_code)`.
+    pub fn to_le_bytes(&self) -> Vec<u8> {
+        use crate::array::le_bytes;
+        match self {
+            ColumnData::I8(v) => v.iter().map(|x| *x as u8).collect(),
+            ColumnData::I16(v) => le_bytes(v, i16::to_le_bytes),
+            ColumnData::I32(v) => le_bytes(v, i32::to_le_bytes),
+            ColumnData::I64(v) => le_bytes(v, i64::to_le_bytes),
+            ColumnData::U8(v) => v.clone(),
+            ColumnData::U16(v) => le_bytes(v, u16::to_le_bytes),
+            ColumnData::U32(v) => le_bytes(v, u32::to_le_bytes),
+            ColumnData::U64(v) => le_bytes(v, u64::to_le_bytes),
+            ColumnData::F32(v) => le_bytes(v, f32::to_le_bytes),
+            ColumnData::F64(v) => le_bytes(v, f64::to_le_bytes),
+        }
+    }
+
     fn to_vortex(&self) -> ArrayRef {
         match self {
             ColumnData::I8(v) => Buffer::copy_from(v.as_slice()).into_array(),

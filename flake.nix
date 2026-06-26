@@ -150,7 +150,7 @@
           # The Python bindings import + verify the committed corpus through the real .so (#210):
           # proves the abi3 extension loads on CPython and the read/verify surface works end-to-end.
           tessera-py-import = pkgs.runCommand "tessera-py-import"
-            { nativeBuildInputs = [ pkgs.python312 ]; } ''
+            { nativeBuildInputs = [ (pkgs.python312.withPackages (ps: [ ps.numpy ])) ]; } ''
             cp ${tessera-py-lib}/lib/tessera.so ./tessera.so
             export PYTHONPATH=$PWD
             python3 ${./tessera/crates/tessera-py/tests/smoke.py} ${./tessera/corpus/files}

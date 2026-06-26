@@ -80,6 +80,45 @@ impl ArrayData {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// The numpy-style dtype code (no byte-order prefix), matching the fd5 table codes
+    /// (`i2/i4/i8`, `u2/u4/u8`, `f4/f8`). Pair with little-endian [`Self::to_le_bytes`].
+    pub fn numpy_code(&self) -> &'static str {
+        match self {
+            ArrayData::I16(_) => "i2",
+            ArrayData::I32(_) => "i4",
+            ArrayData::I64(_) => "i8",
+            ArrayData::U16(_) => "u2",
+            ArrayData::U32(_) => "u4",
+            ArrayData::U64(_) => "u8",
+            ArrayData::F32(_) => "f4",
+            ArrayData::F64(_) => "f8",
+        }
+    }
+
+    /// Flatten the samples to little-endian bytes (C-order) for zero-copy reconstruction in another
+    /// runtime — e.g. `numpy.frombuffer(buf, "<" + numpy_code).reshape(shape)`.
+    pub fn to_le_bytes(&self) -> Vec<u8> {
+        match self {
+            ArrayData::I16(v) => le_bytes(v, i16::to_le_bytes),
+            ArrayData::I32(v) => le_bytes(v, i32::to_le_bytes),
+            ArrayData::I64(v) => le_bytes(v, i64::to_le_bytes),
+            ArrayData::U16(v) => le_bytes(v, u16::to_le_bytes),
+            ArrayData::U32(v) => le_bytes(v, u32::to_le_bytes),
+            ArrayData::U64(v) => le_bytes(v, u64::to_le_bytes),
+            ArrayData::F32(v) => le_bytes(v, f32::to_le_bytes),
+            ArrayData::F64(v) => le_bytes(v, f64::to_le_bytes),
+        }
+    }
+}
+
+/// Pack a typed slice into little-endian bytes via the element's `to_le_bytes`.
+pub(crate) fn le_bytes<T: Copy, const N: usize>(v: &[T], f: fn(T) -> [u8; N]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len() * N);
+    for &x in v {
+        out.extend_from_slice(&f(x));
+    }
+    out
 }
 
 fn ze(e: impl std::fmt::Display) -> Error {
@@ -306,6 +345,24 @@ mod tests {
         let mut s = ArraySpec::new(shape, dtype);
         s.codec = "pcodec".into();
         s
+    }
+
+    #[test]
+    fn le_bytes_match_numpy_code_layout() {
+        // i2 little-endian: 1, -2 → [01 00, fe ff]; numpy_code drives element width.
+        let d = ArrayData::I16(vec![1, -2, 256]);
+        assert_eq!(d.numpy_code(), "i2");
+        assert_eq!(d.to_le_bytes(), vec![0x01, 0x00, 0xfe, 0xff, 0x00, 0x01]);
+        // f4 round-trips bit-exactly through the LE byte view.
+        let f = ArrayData::F32(vec![1.5, -0.0, f32::INFINITY]);
+        assert_eq!(f.numpy_code(), "f4");
+        let bytes = f.to_le_bytes();
+        assert_eq!(bytes.len(), 3 * 4);
+        let mut chunks = bytes.chunks_exact(4);
+        assert_eq!(
+            f32::from_le_bytes(chunks.next().unwrap().try_into().unwrap()),
+            1.5
+        );
     }
 
     #[test]

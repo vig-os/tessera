@@ -10,6 +10,9 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::path::PathBuf;
+use tessera_core::block::array::ArraySpec;
+use tessera_core::block::table::TableSpec;
+use tessera_core::block::{BlockKind, BlockRef};
 
 create_exception!(
     tessera,
@@ -67,6 +70,45 @@ impl Reader {
         Ok(PyBytes::new(py, &bytes))
     }
 
+    /// Decode an **array** block to `(le_bytes, shape, numpy_code)`. Reconstruct in Python with
+    /// `numpy.frombuffer(le_bytes, "<" + numpy_code).reshape(shape)` (C-order, little-endian).
+    fn read_array<'py>(
+        &mut self,
+        py: Python<'py>,
+        name: &str,
+    ) -> PyResult<(Bound<'py, PyBytes>, Vec<u64>, String)> {
+        let spec = self.array_spec(name)?;
+        let blob = self.inner.read_block(name).map_err(err)?;
+        let data = tessera_io::array::decode(&spec, &blob).map_err(err)?;
+        Ok((
+            PyBytes::new(py, &data.to_le_bytes()),
+            spec.shape,
+            data.numpy_code().to_string(),
+        ))
+    }
+
+    /// Decode a **table** block to an ordered list of `(column_name, le_bytes, numpy_code)`.
+    /// Reconstruct each column with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
+    fn read_table<'py>(
+        &mut self,
+        py: Python<'py>,
+        name: &str,
+    ) -> PyResult<Vec<(String, Bound<'py, PyBytes>, String)>> {
+        let spec = self.table_spec(name)?;
+        let blob = self.inner.read_block(name).map_err(err)?;
+        let data = tessera_io::table::decode(&spec, &blob).map_err(err)?;
+        Ok(data
+            .iter()
+            .map(|(n, c)| {
+                (
+                    n.clone(),
+                    PyBytes::new(py, &c.to_le_bytes()),
+                    c.numpy_code().to_string(),
+                )
+            })
+            .collect())
+    }
+
     /// Full integrity pass: recompute the three-hash seal and every block digest. Raises
     /// `TesseraError` on any mismatch. Mirrors `tessera verify`.
     fn verify(&mut self) -> PyResult<()> {
@@ -85,6 +127,37 @@ impl Reader {
             m.name,
             self.inner.block_names().len()
         )
+    }
+}
+
+impl Reader {
+    fn blockref(&self, name: &str) -> PyResult<&BlockRef> {
+        self.inner
+            .manifest()
+            .blocks
+            .iter()
+            .find(|b| b.name == name)
+            .ok_or_else(|| TesseraError::new_err(format!("no block named '{name}'")))
+    }
+
+    fn array_spec(&self, name: &str) -> PyResult<ArraySpec> {
+        let br = self.blockref(name)?;
+        if !matches!(br.kind, BlockKind::Array) {
+            return Err(TesseraError::new_err(format!(
+                "block '{name}' is not an array (use read_table / read_block)"
+            )));
+        }
+        serde_json::from_value(br.spec.clone()).map_err(err)
+    }
+
+    fn table_spec(&self, name: &str) -> PyResult<TableSpec> {
+        let br = self.blockref(name)?;
+        if !matches!(br.kind, BlockKind::Table) {
+            return Err(TesseraError::new_err(format!(
+                "block '{name}' is not a table (use read_array / read_block)"
+            )));
+        }
+        serde_json::from_value(br.spec.clone()).map_err(err)
     }
 }
 

@@ -5,9 +5,13 @@ Exercises the read+verify surface against the committed conformance corpus and a
 error path. Driven by the `tessera-py-import` flake check (the .so on PYTHONPATH).
 """
 
+import functools
 import json
+import operator
 import sys
 import pathlib
+
+import numpy as np
 
 import tessera
 
@@ -34,6 +38,19 @@ for f in files:
     # every declared block is digest-verified-readable
     for name in r.block_names():
         assert isinstance(r.read_block(name), (bytes, bytearray))
+
+    # decode each block to numpy via the typed accessors and check it materialises with the
+    # shape/dtype the manifest declares (the actual "Python can read the data" parity check)
+    for b in m["blocks"]:
+        if b["kind"] == "array":
+            buf, shape, code = r.read_array(b["name"])
+            arr = np.frombuffer(buf, "<" + code).reshape(tuple(shape))
+            assert arr.size == functools.reduce(operator.mul, shape, 1)
+        elif b["kind"] == "table":
+            cols = r.read_table(b["name"])
+            assert cols, f"{f.name}: empty table {b['name']}"
+            lengths = {np.frombuffer(buf, "<" + code).shape[0] for _, buf, code in cols}
+            assert len(lengths) == 1, f"{f.name}: ragged columns {lengths}"
     verified += 1
 
 # typed-error path: bad path and unknown block both raise TesseraError (not a bare RuntimeError)
