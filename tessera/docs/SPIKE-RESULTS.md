@@ -199,3 +199,25 @@ SWMR / concurrent-reader: HDF5, Zarr, NeXus (yes). Tessera = immutable-sealed (v
   self-describing FAIR, and the **only** one that holds volume *and* table in one product with one API.
   HDF5/Zarr/NeXus are bare containers (no identity/integrity); NIfTI/DICOM are volume-only; Parquet/ROOT
   are table-only. Tessera's overhead for that envelope is ≪1% at these sizes (see the `.tsra`-vs-bare run).
+
+### Real data — full-body CT (the synthetic ranking flips)
+Same harness, `--real-dicom <series>` on a real 176-slice onco attenuation-CT (176×512×512 int16,
+**88 MiB**; raw stored values, no rescale). Patient arrays are never committed — only these aggregate
+numbers. Volume only (the table stays synthetic).
+
+| format | codec | ratio | size MiB | write | read | z-slice |
+|---|---|--:|--:|--:|--:|--:|
+| **Tessera .tsra** | pcodec | **3.8×** | **23.1** | 239 | 284 | **3460** |
+| HDF5 | gzip-4 | 3.3× | 26.5 | 59 | 201 | 710 |
+| Zarr | zstd-3 | 3.3× | 27.0 | 428 | 585 | 2390 |
+| NeXus | gzip-4 | 3.3× | 26.5 | 46 | 201 | 715 |
+| NIfTI | gzip | 3.0× | 29.4 | 45 | 179 | 68 |
+| DICOM | uncompressed | 1.0× | 88.0 | 336 | 651 | 630 |
+
+**The flip:** on the smooth synthetic, zstd over-compressed (Zarr 246× vs Tessera-pcodec 130×). On
+**real noisy CT, that inverts** — compression collapses to 3–4× for all, and **pcodec is now the
+smallest (3.8×, 23.1 MiB)**, beating zstd/gzip — exactly the codec spike's −21% CT. So the synthetic
+compression lead was a gradient artifact; real medical data favors pcodec, which is why it's the
+default. Tessera also keeps the **fastest slice read (3460 MB/s, ~5× HDF5/NeXus, ~50× NIfTI)** and
+its self-describing + content-addressed + sealed envelope, at the smallest size on disk.
+(Full-volume decode 284 MB/s stays the honest pcodec cost — Zarr's zstd decodes faster at 585.)

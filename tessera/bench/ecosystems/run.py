@@ -75,16 +75,42 @@ def _resolve(mod, base, modality):
     return base
 
 
+def load_dicom_volume(dirpath: str) -> np.ndarray:
+    """Stack a real DICOM CT series into a (D,H,W) int16 volume (raw stored values, no rescale).
+    Sorted by ImagePositionPatient-z when present, else InstanceNumber. PHI is never printed/stored —
+    only the pixel array is used; the bench reports aggregate throughput/size, never identifiers.
+    """
+    import pydicom
+
+    metas = []
+    for name in os.listdir(dirpath):
+        p = os.path.join(dirpath, name)
+        if not os.path.isfile(p):
+            continue
+        ds = pydicom.dcmread(p, defer_size="1 KB")
+        if "PixelData" not in ds:
+            continue
+        try:
+            z = float(ds.ImagePositionPatient[2])
+        except Exception:  # noqa: BLE001
+            z = float(getattr(ds, "InstanceNumber", len(metas)))
+        metas.append((z, p))
+    metas.sort()
+    slices = [pydicom.dcmread(p).pixel_array.astype("<i2") for _z, p in metas]
+    return np.ascontiguousarray(np.stack(slices))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vol-iters", type=int, default=3)
     ap.add_argument("--tab-iters", type=int, default=3)
     ap.add_argument("--only", default="", help="comma list to restrict adapters")
     ap.add_argument("--out", default="results.json")
+    ap.add_argument("--real-dicom", default="", help="path to a DICOM series dir → use as the volume (real data)")
     args = ap.parse_args()
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    vol = common.make_volume()
+    vol = load_dicom_volume(args.real_dicom) if args.real_dicom else common.make_volume()
     table = common.make_table()
     want = set(args.only.split(",")) if args.only else None
 
