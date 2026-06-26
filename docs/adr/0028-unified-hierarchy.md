@@ -48,6 +48,16 @@ concept**:
 So a reader asks for the product at **level L** uniformly across zarr and vortex; spatial downsample
 (arrays) and value aggregation (tables) are the same hierarchy.
 
+> **MEASURED (#221-B, `examples/spike_chunk_index`, SPIKE-RESULTS.md):** the leaf granularity of the
+> `{hash, stats}` index. Index overhead is **negligible at every size** (<0.9 % of payload even at
+> 1024-row leaves; 0.014 % at 65536), so overhead is *not* the constraint — pruning power is. For
+> locality-bearing columns the pruning knee is **~2¹⁴ (16384) rows**: scan-fraction for a 1 % ranged
+> query falls 6.25 % → 3.1 % → 1.2 % as leaves shrink 65536 → 16384 → 4096, then flattens. So the
+> **index leaf size is decoupled from the byte-payload row-group size** (`ROWS_PER_GROUP = 2¹⁶`, frozen
+> for format compat) — default the *index* leaf to **~2¹⁴** for sortable/clustered columns. Random /
+> non-local columns can't be pruned at any granularity (min/max ≈ global span) → emit a **hash-only**
+> index (integrity without stat cost), chosen at encode time from the column's min/max-vs-global spread.
+
 ### 4. Derived-sidecar block class — accelerators that float on top of the identity
 Pyramids, **projections** (MIP / average / MPR; group-bys, sort-indexes, materialized views), indexes,
 thumbnails, format-views share one shape: **a pure function of the canonical data, costly to recompute,

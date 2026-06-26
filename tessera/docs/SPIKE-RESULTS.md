@@ -316,3 +316,38 @@ rule**: *dense+pcodec by default whenever the dense grid is materializable* (≈
 — it wins on disk AND block-prune handles clusters); *COO only when (a) the ambient grid is unstorable
 (high-D histograms — dense impossible), or (b) the access pattern is selective point-reads where
 nnz-bounded RAM/latency matters.* The lever is materializability + access pattern, not occupancy %.
+
+# #221-B — chunk-index leaf granularity: index overhead vs pruning selectivity
+
+Harness: `cargo run -p tessera-io --example spike_chunk_index --release` (uses the real
+`tessera_core::chunk_index`). 1,048,576 i64 (8 MiB), ranged query = ~1 % of the value range. Index size =
+conservative `(32-byte digest + 40-byte stat)·nchunks` (the real index is a compressed Vortex column, so
+this over-states). `scan %` = rows in non-pruned chunks ÷ total (lower = better).
+
+| pattern | leaf | nchunks | index % | scan % |
+|---|--:|--:|--:|--:|
+| sorted/clustered | 1024 | 1024 | 0.879 % | 1.1 % |
+| sorted/clustered | 4096 | 256 | 0.220 % | 1.2 % |
+| sorted/clustered | 16384 | 64 | 0.055 % | 3.1 % |
+| sorted/clustered | 65536 | 16 | 0.014 % | 6.25 % |
+| sorted/clustered | 262144 | 4 | 0.003 % | 25 % |
+| **random** (any) | — | — | (same) | **100 %** |
+
+**Findings:**
+1. **Index overhead is negligible at every granularity** — <0.9 % of payload even at 1024-row leaves,
+   0.014 % at 65536. So overhead is **not** the binding constraint; pruning effectiveness is.
+2. **Pruning knee ≈ 4096–16384 rows** for locality-bearing columns: scan% falls 6.25 % → 3.1 % → 1.2 %
+   as leaves shrink 65536 → 16384 → 4096, approaching the query selectivity (~1 %). Below ~4096 the
+   gain flattens (4096→1024 only 1.17 %→1.07 %) while index % climbs — diminishing returns. There is no
+   single sharp inflection: **16384** is the *conservative* default (halves scan vs 65536 at 0.055 %
+   index); **4096** is equally defensible (near-ideal 1.2 % scan, still 0.22 % index) where pruning
+   matters more than index size. (Sorted and clustered track within ~0.1 pt — both columns have locality.)
+3. **Random / non-local columns can't be pruned at any granularity** (100 % scan) — min/max spans the
+   global range, so the stats add nothing. Emit a **hash-only** index for such columns (integrity without
+   the stat cost); detect via the column's own min/max-vs-global spread at encode time.
+
+**→ Recommendation (ADR-0028 §3 / ADR-0027):** the chunk-index leaf granularity should be **decoupled
+from the table payload's `ROWS_PER_GROUP` (2¹⁶)** — a finer index leaf of **~2¹⁴ (16384)** roughly halves
+rows-scanned (6.25 % → 3.1 %) at trivial index cost (0.055 %), and is the recommended default for
+sortable/clustered columns. Index leaves are an *index* concern, free to differ from the byte-payload
+row-group size (which is frozen at 2¹⁶ for format compat). Hash-only fallback for non-prunable columns.
