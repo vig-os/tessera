@@ -160,6 +160,16 @@ impl ChunkIndex {
         merkle_root(&digests)
     }
 
+    /// An inclusion proof that the sub-block at position `i` is committed under this index's
+    /// [`Self::root`] — the **per-chunk confirmation** of ADR-0028 §3, built on the §6 MMR inclusion
+    /// proofs. Verify the returned path with [`crate::hash::verify_inclusion`] against the chunk's
+    /// `digest` and `root()`. `None` if `i` is out of range. Lets a reader confirm a single chunk
+    /// against the seal without re-reading the whole block.
+    pub fn chunk_proof(&self, i: usize) -> Option<Vec<crate::hash::ProofStep>> {
+        let digests: Vec<String> = self.entries.iter().map(|e| e.digest.clone()).collect();
+        crate::hash::inclusion_proof(&digests, i)
+    }
+
     /// The block-level aggregate stat (the level-0 pyramid root) = `combine` of every chunk stat.
     pub fn aggregate(&self) -> ChunkStats {
         self.entries
@@ -316,6 +326,24 @@ mod tests {
         assert_eq!(idx.aggregate().count, 5);
         assert_eq!(idx.aggregate().min, Some(1));
         assert_eq!(idx.aggregate().max, Some(5));
+    }
+
+    #[test]
+    fn each_chunk_has_an_inclusion_proof_under_the_root() {
+        use crate::hash::verify_inclusion;
+        let mut idx = ChunkIndex::new();
+        for k in 0..6u8 {
+            idx.push(digest(&[k, 7]), &[k as i64]);
+        }
+        let root = idx.root();
+        for i in 0..idx.len() {
+            let proof = idx.chunk_proof(i).unwrap();
+            assert!(
+                verify_inclusion(&idx.entries[i].digest, &proof, &root),
+                "chunk {i} must prove inclusion under the index root"
+            );
+        }
+        assert!(idx.chunk_proof(idx.len()).is_none());
     }
 
     #[test]
