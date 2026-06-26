@@ -76,6 +76,19 @@ fn bag(peaks: &[(u32, [u8; 32])]) -> [u8; 32] {
 
 /// Roll an *ordered* list of per-block digests into the product **MMR root**.
 /// Order-sensitive: the manifest fixes block order, so the root is reproducible.
+///
+/// ```
+/// use tessera_core::hash::{digest, merkle_root};
+///
+/// let root = merkle_root(&[digest(b"block-0"), digest(b"block-1")]);
+/// assert!(root.starts_with("blake3:"));
+///
+/// // order matters (the manifest fixes block order), and the root is reproducible:
+/// let a = digest(b"a");
+/// let b = digest(b"b");
+/// assert_ne!(merkle_root(&[a.clone(), b.clone()]), merkle_root(&[b.clone(), a.clone()]));
+/// assert_eq!(merkle_root(&[a.clone(), b.clone()]), merkle_root(&[a, b]));
+/// ```
 pub fn merkle_root(block_digests: &[String]) -> String {
     let mut peaks = Vec::new();
     for d in block_digests {

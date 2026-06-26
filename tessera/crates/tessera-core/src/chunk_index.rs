@@ -96,6 +96,25 @@ pub struct ChunkEntry {
 }
 
 /// The ordered `{hash, stats}` index over a block's sub-blocks (ADR-0028 §3).
+///
+/// ```
+/// use tessera_core::chunk_index::ChunkIndex;
+///
+/// let mut idx = ChunkIndex::new();
+/// idx.push("blake3:chunk-a", &[1, 2, 3]); //   values in [1, 3]
+/// idx.push("blake3:chunk-b", &[10, 20, 30]); // values in [10, 30]
+///
+/// // a ranged read for [5, 15] provably skips chunk-a (its max 3 < 5) and keeps only chunk-b:
+/// assert_eq!(idx.prune(5, 15), vec![1]);
+///
+/// // the block's content digest is the MMR root over the per-chunk digests (ADR-0028 §1):
+/// assert!(idx.root().starts_with("blake3:"));
+///
+/// // stats roll up: the block aggregate is the combine of every chunk's stats.
+/// assert_eq!(idx.aggregate().count, 6);
+/// assert_eq!(idx.aggregate().min, Some(1));
+/// assert_eq!(idx.aggregate().max, Some(30));
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChunkIndex {
     pub entries: Vec<ChunkEntry>,

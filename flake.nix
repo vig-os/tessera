@@ -136,6 +136,12 @@
             partitions = 1;
             partitionType = "count";
           });
+          # nextest does NOT run doctests, so gate them separately — the "docs-as-tests" layer: every
+          # `///` example compiles + runs, so public-API docs can never drift from behaviour.
+          workspace-doctest = craneLib.cargoTest (commonArgs // {
+            inherit cargoArtifacts;
+            cargoTestExtraArgs = "--doc";
+          });
           workspace-fmt = craneLib.cargoFmt { inherit src; };
 
           # guardrails agent-drift gates over the Rust source (code gates) + repo-wide structural
