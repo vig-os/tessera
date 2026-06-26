@@ -140,6 +140,25 @@ impl ArrayData {
         self.len() == 0
     }
 
+    /// The array's values as `i64` for chunk-statistics (ADR-0028 §3), if it is an integer array that
+    /// fits losslessly: `int16/int32/int64`, `uint16/uint32` always, and `uint64` only when every value
+    /// ≤ `i64::MAX` (a monotonic cast → `min`/`max` stay exact). Float arrays return `None` (they need
+    /// canonical reduction before stats — ADR-0024). Mirrors [`crate::table::ColumnData::as_i64`].
+    pub fn as_i64(&self) -> Option<Vec<i64>> {
+        match self {
+            ArrayData::I16(v) => Some(v.iter().map(|&x| x as i64).collect()),
+            ArrayData::I32(v) => Some(v.iter().map(|&x| x as i64).collect()),
+            ArrayData::I64(v) => Some(v.clone()),
+            ArrayData::U16(v) => Some(v.iter().map(|&x| x as i64).collect()),
+            ArrayData::U32(v) => Some(v.iter().map(|&x| x as i64).collect()),
+            ArrayData::U64(v) => v
+                .iter()
+                .all(|&x| x <= i64::MAX as u64)
+                .then(|| v.iter().map(|&x| x as i64).collect()),
+            ArrayData::F32(_) | ArrayData::F64(_) => None,
+        }
+    }
+
     /// The numpy-style dtype code (no byte-order prefix), matching the fd5 table codes
     /// (`i2/i4/i8`, `u2/u4/u8`, `f4/f8`). Pair with little-endian [`Self::to_le_bytes`].
     pub fn numpy_code(&self) -> &'static str {
@@ -950,5 +969,24 @@ mod tests {
         );
         // And the stored bytes decode back to the input — the decode path is codec-agnostic.
         assert_eq!(decode(&spec, payload.bytes.as_slice()).unwrap(), data);
+    }
+
+    #[test]
+    fn as_i64_lossless_integer_else_none() {
+        // integer dtypes lift to i64 (monotonic → min/max exact)
+        assert_eq!(
+            ArrayData::I16(vec![-3, 0, 7]).as_i64(),
+            Some(vec![-3i64, 0, 7])
+        );
+        assert_eq!(
+            ArrayData::U32(vec![1, 2, 3]).as_i64(),
+            Some(vec![1i64, 2, 3])
+        );
+        // u64 within i64 range lifts; beyond i64::MAX returns None (avoids a wrapping sign flip)
+        assert_eq!(ArrayData::U64(vec![5, 9]).as_i64(), Some(vec![5i64, 9]));
+        assert_eq!(ArrayData::U64(vec![u64::MAX]).as_i64(), None);
+        // floats need canonical reduction first (ADR-0024) → not offered here
+        assert_eq!(ArrayData::F32(vec![1.0, 2.0]).as_i64(), None);
+        assert_eq!(ArrayData::F64(vec![1.0]).as_i64(), None);
     }
 }
