@@ -17,9 +17,10 @@ signal per row-group that reconciles with the sealed identity.
    65536 rows) makes the leaves a pure function of the data, so the *live* per-row-group root during
    capture and the *sealed* identity reconcile exactly.
 2. **Leaves live in a dedicated Vortex *chunk-index* block — not the manifest, not the data table.**
-   The index is tabular: `(block, chunk_idx, offset, n_rows, per-col min/max, blake3)`. Store it in
-   Vortex (reuse the table substrate; **no third storage kind**). It is referenced in the manifest, and
-   **its own digest is folded under the top-level Merkle** — so the index is itself tamper-protected.
+   The index is tabular: `(block, chunk_idx, offset, n_rows, blake3, …stats…)` where the per-chunk stats
+   are a registry-extensible set of mergeable monoids (see *Statistics* below). Store it in Vortex
+   (reuse the table substrate; **no third storage kind**). It is referenced in the manifest, and **its
+   own digest is folded under the top-level Merkle** — so the index is itself tamper-protected.
    - NOT the manifest JSON: at scale this is MBs of hashes; the manifest must stay a small,
      range-readable spine you fetch before any block.
    - NOT a column on the data table: that is **circular** (the table's hash would depend on a column
@@ -38,6 +39,36 @@ signal per row-group that reconciles with the sealed identity.
    digest) but confirms byte ranges at blake3's internal granularity, not semantic chunks, and gives no
    live per-row-group identity. Use it for "verify a range I range-read"; use design-2 for the streaming
    identity story.
+
+## Statistics — each index node carries `{ hash, stats }`, stats are mergeable monoids
+The index node is `{ blake3, stats }`, and the **same tree** carries the aggregation hierarchy: a leaf
+(row-group/cube), a super-chunk (interior node), the block (root). For the roll-up to be automatic and
+correct at every level, **every stat is modeled as a mergeable monoid** — it defines `identity`,
+`compute(chunk)`, and an **associative `merge(a, b)`**; interior nodes are just the merge of their
+children. So the Merkle doubles as a **zone-map + multiscale aggregation tree** (DB zone maps /
+OME-Zarr multiscale, but content-addressed): descend it to prune whole subtrees by `min/max`, or read
+the coarse levels for an overview/preview without touching data.
+
+- **Store algebraic components, derive views.** `mean` isn't a monoid; `(sum, count)` is → store the
+  components, derive `mean`. Same for variance (`count, sum, sum_sq` or Welford `M2`, parallel-mergeable),
+  histograms (bin-wise add), distinct-count HLL (register-max) — all monoids, all drop-in *later*.
+- **Core set now:** `min, max, count, null_count, sum` — pruning (`min/max/null`) + overview
+  (`count/sum`→`mean`) at ~0 % cost.
+- **Extensible via a versioned stat registry** — the *same* pattern as the product-schema registry
+  (stable string ids, additive evolution, offline-valid). A new stat = register a `StatDef { id,
+  new_accumulator() -> impl { update, merge, finalize } }`; no core change. *Build this abstraction now;
+  ship only the core set.*
+- **Determinism is a hard gate** (the index is content-addressed). `min/max/count/null_count` are exact
+  → safe. Float `sum`/`M2` are summation-order/SIMD-sensitive (the **ALP class** of nondeterminism) → a
+  float stat MUST use a **canonical reduction** (fixed order, no FMA) or be barred from the hashed index
+  (a non-deterministic stat may only live in a *non-hashed* sidecar).
+- **Forward-compatible + still verifiable.** Each stat is self-describing (`id` + type + length). An old
+  reader **verifies** the whole index via blake3 regardless (hashing needn't understand a stat's meaning)
+  and **interprets** the ids it knows, skipping unknown ones. New stats are purely additive; the
+  independent-reader-from-SPEC story holds (SPEC pins the framing + core ids + the registry).
+- **Identity implication.** The set of stats is part of the product's recipe (recorded in the manifest),
+  so adding a stat to existing data is a new **version** (CoW), never a mutation — consistent with the
+  immutable model.
 
 ## Durability vs the canonical bytes (the time/size-flush rule)
 A low-rate acquisition may **flush partial fragments on a timer** (bounded durability latency), not only
