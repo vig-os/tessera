@@ -14,7 +14,8 @@ Accepted / Superseded.
 | [0026](0026-streaming-table-ingest.md) | Streaming chunked table writes for >RAM ingest — one always-chunked deterministic encoder (#208) | **Proposed** |
 | [0027](0027-sub-block-merkle-chunk-index.md) | Sub-block Merkle + content-addressed chunk-index block — per-chunk confirmation + pruning (#214) | **Proposed** (absorbed by 0028) |
 | [0028](0028-unified-hierarchy.md) | The unified hierarchy — recursive MMR Merkle + multiscale `{hash,stats}` pyramid + derived sidecars + fused streaming (#215); supersedes ADR-0020 flat root | **Proposed** |
-| [0029](0029-data-model-composition.md) | Data model — composition over inheritance · N-D blocks · multi-dimensional acquisitions (A vs B) · ROI representation (#216) | **Proposed** |
+| [0029](0029-data-model-composition.md) | Data model — composition over inheritance · N-D blocks · multi-dimensional acquisitions (A vs B) · ROI representation · substrate-by-nature (#216) | **Proposed** |
+| [0030](0030-spatial-referencing.md) | Spatial referencing — one voxel→world affine + named frame; spacing & OME-Zarr per-level transforms derived; registration = provenance edge; LPS canonical (#217) | **Proposed** |
 | [0002](0002-concurrency-model.md) | **D2** concurrency — synchronous API; async kept dependency-internal (no tokio); object_store deferred | **Accepted** (as-built) |
 | [0003](0003-schema-identification.md) | **D3** schema id — string product names, open-world (no numeric allocator) | **Accepted** (as-built) |
 | 0007 | **D7** encryption-at-rest — **non-goal**: delegate to storage-layer SSE / dm-crypt; no per-block envelope in the format | Proposed (decide by P1) |
