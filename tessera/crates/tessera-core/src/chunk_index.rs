@@ -347,6 +347,25 @@ mod tests {
     }
 
     #[test]
+    fn incremental_push_entry_matches_batch_index() {
+        // ADR-0028 §5 streaming property: building the index entry-by-entry as fragments stream
+        // (`push_entry` with each chunk's already-computed `{digest, stats}`) yields the SAME root +
+        // aggregate + entries as building it from values in one go — so a >RAM streaming write can
+        // accumulate the chunk-index without a second pass over the data.
+        let chunks: [&[i64]; 3] = [&[1, 2, 3], &[10, 20], &[-5, 0, 7, 7]];
+        let mut batch = ChunkIndex::new();
+        let mut incr = ChunkIndex::new();
+        for (i, c) in chunks.iter().enumerate() {
+            let d = digest(&[i as u8]);
+            batch.push(d.clone(), c); // folds values now
+            incr.push_entry(d, ChunkStats::from_values(c)); // stats arrived with the fragment
+        }
+        assert_eq!(incr.root(), batch.root());
+        assert_eq!(incr.aggregate(), batch.aggregate());
+        assert_eq!(incr.entries, batch.entries);
+    }
+
+    #[test]
     fn stat_pyramid_rolls_up_to_the_aggregate() {
         let mut idx = ChunkIndex::new();
         for k in 0..5u8 {
