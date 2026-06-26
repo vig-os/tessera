@@ -123,6 +123,13 @@ impl Transform {
 /// are **UCUM** unless [`Referenced::vocabulary`] names another controlled vocabulary (the §3 escape).
 pub const CANONICAL_FRAMES: &[&str] = &["physical", "epoch", "patient", "scanner", "aligned"];
 
+/// ADR-0032 §Status-note: the **pinned UCUM subset** the format validates — the physical units that
+/// actually appear across Tessera products (CT Hounsfield, PET activity, spatial mm, time s, attenuation
+/// 1/cm, energy keV/ps, dimensionless `1`). A descriptor's `unit` must be one of these **unless** a
+/// [`Referenced::vocabulary`] escape names a non-UCUM controlled vocabulary (then the code is that
+/// vocabulary's, not UCUM-checked). Extends additively as new modalities land.
+pub const CANONICAL_UNITS: &[&str] = &["HU", "Bq/mL", "mm", "s", "1/cm", "keV", "ps", "1"];
+
 /// ADR-0032 referenced-coordinate descriptor: a `transform` plus the `unit` of its output quantity and
 /// the named `frame` it lands in. One type for sample-value rescaling, spatial referencing, and
 /// irregular axes alike — so referencing is described, serialized, and extended in a single place.
@@ -241,6 +248,24 @@ impl Referenced {
             None => true,
             Some(f) => CANONICAL_FRAMES.contains(&f) || f.starts_with("atlas:"),
         }
+    }
+
+    /// Whether `unit` is drawn from the pinned UCUM subset ([`CANONICAL_UNITS`]) — or is exempt because a
+    /// [`Self::vocabulary`] escape names a non-UCUM source, or no unit is set. The unit-side counterpart
+    /// to [`Self::frame_is_canonical`] (the ADR-0032 "UCUM subset we validate" promotion precondition).
+    pub fn unit_is_canonical(&self) -> bool {
+        if self.vocabulary.is_some() {
+            return true; // coded by another controlled vocabulary — not UCUM-checked
+        }
+        match self.unit.as_deref() {
+            None => true,
+            Some(u) => CANONICAL_UNITS.contains(&u),
+        }
+    }
+
+    /// Whether both vocabularies are pinned — the combined ADR-0032 promotion check for a descriptor.
+    pub fn vocabularies_pinned(&self) -> bool {
+        self.frame_is_canonical() && self.unit_is_canonical()
     }
 }
 
@@ -392,6 +417,33 @@ mod tests {
             frame: Some("whatever".into()),
         };
         assert!(!bogus.frame_is_canonical());
+    }
+
+    #[test]
+    fn every_constructor_uses_pinned_unit_vocabulary() {
+        // every built-in instance's unit is in the pinned UCUM subset (ADR-0032 promotion precondition).
+        for r in [
+            Referenced::from_rescale(Some(1.0), Some(-1024.0), Some("HU".into())),
+            Referenced::time_regular(0.0, 30.0), // s
+            Referenced::time_ticks(1e-12, 0.0),  // s
+            Referenced::identity(Some("Bq/mL".into())),
+        ] {
+            assert!(r.unit_is_canonical(), "{:?} must use a pinned unit", r.unit);
+            assert!(r.vocabularies_pinned());
+        }
+        // a vocabulary escape exempts a non-UCUM code from the UCUM check
+        assert!(Referenced::identity(Some("CT".into()))
+            .with_vocabulary("DICOM")
+            .unit_is_canonical());
+        // a free-text unit with no escape is rejected
+        let bogus = Referenced {
+            transform: Transform::Identity,
+            unit: Some("furlongs".into()),
+            vocabulary: None,
+            frame: None,
+        };
+        assert!(!bogus.unit_is_canonical());
+        assert!(!bogus.vocabularies_pinned());
     }
 
     #[test]

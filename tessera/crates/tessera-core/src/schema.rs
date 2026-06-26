@@ -590,6 +590,52 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_pet_carries_optional_decay_correction_reference() {
+        use crate::block::array::{ArrayBlock, ArraySpec};
+        use crate::block::table::{Column, TableBlock, TableSpec};
+        let r = SchemaRegistry::builtin();
+        // the schema declares the ADR-0032 §6 decay-correction reference as an optional field.
+        let s = r.get("dynamic_pet").unwrap();
+        let f = s
+            .fields
+            .iter()
+            .find(|f| f.id == "decay_correction_reference")
+            .expect("dynamic_pet declares decay_correction_reference");
+        assert!(
+            !f.required,
+            "decay-correction reference is optional (feature-by-presence)"
+        );
+        // a product that sets it validates (the named instant activity is corrected to).
+        let vol = ArrayBlock::new("vol", ArraySpec::new(vec![4, 8, 8, 8], "int16"));
+        let timing = TableBlock::new(
+            "frame_timing",
+            TableSpec {
+                columns: vec![Column {
+                    name: "start_s".into(),
+                    dtype: "f8".into(),
+                    codec: None,
+                }],
+                rows: 4,
+                row_index: None,
+            },
+        );
+        let mut b = ProductBuilder::new("dynamic_pet", "DP", "d", "2024-01-01T00:00:00Z");
+        b.add_block(&vol).unwrap();
+        b.add_block(&timing).unwrap();
+        b.with_field(
+            "modality",
+            serde_json::json!({"_vocabulary": "DICOM", "_code": "PT"}),
+        );
+        b.with_field("decay_correction_reference", serde_json::json!("injection"));
+        let m = b.seal().unwrap();
+        r.validate(&m).unwrap();
+        assert_eq!(
+            m.metadata.get("decay_correction_reference"),
+            Some(&serde_json::json!("injection"))
+        );
+    }
+
+    #[test]
     fn imaging_base_trait_set_is_shared_across_modality_schemas() {
         // ADR-0029 §5: the `modality` requirement is defined ONCE in `imaging_base()` and composed
         // into every modality-bearing schema — DRY trait/mixin. Assert every such schema carries the
