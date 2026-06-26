@@ -13,7 +13,7 @@ use tessera_core::block::table::TableSpec;
 use tessera_core::block::{BlockKind, BlockRef};
 use tessera_core::{Error, Result};
 use vortex_array::arrays::struct_::StructArrayExt;
-use vortex_array::arrays::{PrimitiveArray, StructArray};
+use vortex_array::arrays::{ChunkedArray, PrimitiveArray, StructArray};
 use vortex_array::expr::{root, select};
 use vortex_array::scalar_fn::session::ScalarFnSession;
 use vortex_array::session::ArraySession;
@@ -219,7 +219,17 @@ fn validate(spec: &TableSpec, data: &TableData) -> Result<()> {
     Ok(())
 }
 
+/// The fixed table row-group size: a table block is **always** written as a chunked Vortex file with
+/// this many rows per group (the last group is the remainder). A power-of-two constant so it's part
+/// of the format contract, never a writer knob — one encoder serves batch *and* streaming, and a
+/// >RAM producer can flush one row-group at a time (ADR-0026).
+pub const ROWS_PER_GROUP: usize = 1 << 16; // 65_536
+
 /// Encode columns into the deterministic table-block payload bytes for `spec`.
+///
+/// The table is written as a **chunked** Vortex file: the columns are sliced into fixed
+/// [`ROWS_PER_GROUP`] row-groups and streamed as chunks. The grid is fixed, so the bytes are a pure
+/// function of the data (batch and streaming produce the *same* bytes — there is one encoder).
 ///
 /// **ALP float-encoding is excluded** from the write strategy: Vortex's ALP codec searches for a
 /// float exponent via float arithmetic, whose result varies with the *build profile's* float codegen
@@ -235,7 +245,18 @@ pub fn encode(spec: &TableSpec, data: &TableData) -> Result<Vec<u8>> {
         .iter()
         .map(|(name, cd)| (name.as_str(), cd.to_vortex()))
         .collect();
-    let st = StructArray::from_fields(&fields).map_err(ze)?;
+    let full = StructArray::from_fields(&fields).map_err(ze)?.into_array();
+    // Slice into fixed row-groups (≥ 1 chunk even when empty) → a chunked Vortex layout.
+    let rows = spec.rows as usize;
+    let n_groups = rows.div_ceil(ROWS_PER_GROUP).max(1);
+    let chunks: Vec<ArrayRef> = (0..n_groups)
+        .map(|g| {
+            let start = g * ROWS_PER_GROUP;
+            let end = ((g + 1) * ROWS_PER_GROUP).min(rows);
+            full.slice(start..end).map_err(ze)
+        })
+        .collect::<Result<_>>()?;
+    let chunked = ChunkedArray::from_iter(chunks).into_array();
     // Exclude the ALP float schemes from the compressor so it never *chooses* them; floats then use
     // the deterministic Pco/flat schemes. Integer schemes (chosen by exact integer math) are kept.
     let compressor =
@@ -247,7 +268,7 @@ pub fn encode(spec: &TableSpec, data: &TableData) -> Result<Vec<u8>> {
     rt.block_on(
         s.write_options()
             .with_strategy(strategy)
-            .write(&mut buf, st.into_array().to_array_stream()),
+            .write(&mut buf, chunked.to_array_stream()),
     )
     .map_err(ze)?;
     Ok(buf.freeze().to_vec())
@@ -442,6 +463,36 @@ mod tests {
             assert_eq!(back, c);
         }
         assert!(ColumnData::from_le_bytes("f4", &[0u8; 3]).is_err()); // not a multiple of width
+    }
+
+    #[test]
+    fn multi_rowgroup_roundtrips_and_is_deterministic() {
+        // > ROWS_PER_GROUP forces several chunks (here 2 groups + remainder).
+        let rows = ROWS_PER_GROUP + 4242;
+        let spec = TableSpec {
+            columns: vec![col("t", "u8"), col("e", "f4")],
+            rows: rows as u64,
+            row_index: Some("t".into()),
+        };
+        let data: TableData = vec![
+            ("t".into(), ColumnData::U64((0..rows as u64).collect())),
+            (
+                "e".into(),
+                ColumnData::F32((0..rows).map(|k| 511.0 + (k % 13) as f32).collect()),
+            ),
+        ];
+        let blob = encode(&spec, &data).unwrap();
+        assert_eq!(decode(&spec, &blob).unwrap(), data, "multi-chunk roundtrip");
+        assert_eq!(
+            encode(&spec, &data).unwrap(),
+            blob,
+            "multi-chunk non-deterministic"
+        );
+        // projection still works across chunks
+        let ColumnData::F32(e) = &decode_column(&spec, &blob, "e").unwrap() else {
+            panic!()
+        };
+        assert_eq!(e.len(), rows);
     }
 
     #[test]

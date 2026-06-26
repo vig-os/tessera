@@ -111,9 +111,18 @@ A reader MAY decode only a sub-region by reconstructing the store and reading th
 — independent of the codec.
 
 ## 5b. Table block payload (Vortex)
-A block with `kind == "table"` stores its columns as a **single Vortex file** (ADR-0024) — the exact
-bytes a [Vortex](https://github.com/spiraldb/vortex) reader opens. The table spec carries an ordered
-`columns` list (`name`, `dtype`, optional `codec`), a `rows` count, and an optional `row_index`.
+A block with `kind == "table"` stores its columns as a **single chunked Vortex file** (ADR-0024,
+ADR-0026) — the exact bytes a [Vortex](https://github.com/spiraldb/vortex) reader opens. The table
+spec carries an ordered `columns` list (`name`, `dtype`, optional `codec`), a `rows` count, and an
+optional `row_index`.
+
+- **Row groups.** The table is **always** written as a chunked Vortex array with a fixed
+  **`ROWS_PER_GROUP = 65536`** rows per chunk (the last chunk is the remainder; an empty table is one
+  empty chunk). The fixed grid makes the layout a pure function of the data — so the **batch** writer
+  and a **streaming/>RAM** writer that flushes one row-group at a time produce *identical* bytes (one
+  encoder). A table with ≤ 65536 rows is a single row-group, whose bytes are **identical to the prior
+  single-array layout** — so this is backward-compatible (existing products unchanged); only larger
+  tables gain extra chunks.
 
 - **Dtypes.** Columns use the fd5 numpy-style codes: `i1/i2/i4/i8` (signed), `u1/u2/u4/u8` (unsigned),
   `f4/f8` (float). Each column is a Vortex primitive array; the columns form a `struct` in declared
