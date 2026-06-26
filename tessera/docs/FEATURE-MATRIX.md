@@ -73,7 +73,7 @@ needs real CT/DICOM.
 | WORM (Object-Lock) | ○ | overwrite/delete refused in retention | S16 |
 | Units / descriptions / `_vocabulary`·`_code`·`default`·`extra/`·`study`·axes | ✓ | FAIR I1/I2 + AI-readable; fail-strict on missing required | `schema::FieldSpec`/`Coded`, `metadata`/`extra`/`study`, ArraySpec axes/unit/fill |
 | Versioned product-schema registry (embedded, 9 schemas) | ✓ | additive evolution, stable ids, offline-valid, domain-agnostic | `SchemaRegistry::builtin`, `validate` tests |
-| RO-Crate / DataCite export | ○ | conformant JSON-LD / DataCite | #19 |
+| RO-Crate / DataCite export | ◑ | RO-Crate 1.1 JSON-LD + DataCite `dois` from the manifest | `export::{ro_crate,datacite}`, 3 tests (InvenioRDM/validation pending) |
 
 ## G. Layout, distribution, ingest, read
 | Feature | Status | Gate | Evidence |

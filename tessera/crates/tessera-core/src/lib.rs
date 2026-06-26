@@ -13,6 +13,7 @@ pub mod block;
 pub mod canonical;
 pub mod dtype;
 pub mod error;
+pub mod export;
 pub mod hash;
 pub mod identity;
 pub mod manifest;
