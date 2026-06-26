@@ -669,6 +669,100 @@ pub fn to_coo(data: &ArrayData, fill: i64) -> Option<(TableSpec, TableData)> {
 }
 
 /// Downsample a dense **3-D integer** array by 2× per axis via **max** reduction over each (up-to)
+/// Rebuild an integer fold result in the same dtype as `like` — the max/min of in-range values stays in
+/// range, so the narrowing cast back to the base dtype is lossless. `None` for float arrays (their
+/// reduction needs ADR-0024 canonicalisation). Shared by the downsample and projection folds (DRY).
+fn rebuild_int_like(like: &ArrayData, out: Vec<i64>) -> Option<ArrayData> {
+    Some(match like {
+        ArrayData::I16(_) => ArrayData::I16(out.iter().map(|&x| x as i16).collect()),
+        ArrayData::I32(_) => ArrayData::I32(out.iter().map(|&x| x as i32).collect()),
+        ArrayData::I64(_) => ArrayData::I64(out),
+        ArrayData::U16(_) => ArrayData::U16(out.iter().map(|&x| x as u16).collect()),
+        ArrayData::U32(_) => ArrayData::U32(out.iter().map(|&x| x as u32).collect()),
+        ArrayData::U64(_) => ArrayData::U64(out.iter().map(|&x| x as u64).collect()),
+        ArrayData::F32(_) | ArrayData::F64(_) => return None,
+    })
+}
+
+/// Maximum-intensity **projection** (ADR-0028 — the "fold one axis fully" case of the one array-fold
+/// abstraction that also builds pyramids): collapse `axis` (0/1/2) by `max`, yielding the 2-D MIP image
+/// of the other two axes (kept in ascending order). This is the *true* level-0 projection — coarser
+/// previews are 2-D downsamples of it (§4 "projection placement"), never re-projections of pyramid
+/// levels. A `derived` sidecar; bit-exact, deterministic. `None` for non-3-D / float arrays or an
+/// out-of-range axis. The 2-D result carries **no** `world_frame` (the projected axis is gone; in-plane
+/// geometry would be a separate 2-D frame).
+///
+/// ```
+/// use tessera_core::block::array::ArraySpec;
+/// use tessera_io::array::{project_max_3d, ArrayData};
+///
+/// // a 2×2×2 ramp 0..8; MIP along axis 0 keeps the max over z at each (y,x).
+/// let spec = ArraySpec::new(vec![2, 2, 2], "int16");
+/// let base = ArrayData::I16((0..8).map(|k| k as i16).collect());
+/// let (img, data) = project_max_3d(&spec, &base, 0).unwrap();
+/// assert_eq!(img.shape, vec![2, 2]); // the (y,x) plane
+/// assert!(matches!(data, ArrayData::I16(ref v) if *v == vec![4, 5, 6, 7]));
+/// ```
+pub fn project_max_3d(
+    spec: &ArraySpec,
+    data: &ArrayData,
+    axis: usize,
+) -> Option<(ArraySpec, ArrayData)> {
+    if spec.shape.len() != 3 || axis > 2 {
+        return None;
+    }
+    let vals = data.as_i64()?;
+    let (d0, d1, d2) = (
+        spec.shape[0] as usize,
+        spec.shape[1] as usize,
+        spec.shape[2] as usize,
+    );
+    if vals.len() != d0 * d1 * d2 {
+        return None;
+    }
+    let at = |z: usize, y: usize, x: usize| vals[(z * d1 + y) * d2 + x];
+    // output axes are the two != `axis`; fold the chosen axis by max into that plane.
+    let (out_dims, w) = match axis {
+        0 => (vec![d1 as u64, d2 as u64], d2),
+        1 => (vec![d0 as u64, d2 as u64], d2),
+        _ => (vec![d0 as u64, d1 as u64], d1),
+    };
+    let plane = (out_dims[0] * out_dims[1]) as usize;
+    let mut out = vec![i64::MIN; plane];
+    for z in 0..d0 {
+        for y in 0..d1 {
+            for x in 0..d2 {
+                let o = match axis {
+                    0 => y * w + x,
+                    1 => z * w + x,
+                    _ => z * w + y,
+                };
+                out[o] = out[o].max(at(z, y, x));
+            }
+        }
+    }
+    let data_out = rebuild_int_like(data, out)?;
+    let mut out_spec = spec.clone();
+    out_spec.shape = out_dims;
+    // keep the two surviving axis names (drop the projected one).
+    out_spec.axes = spec
+        .axes
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != axis)
+        .map(|(_, n)| n.clone())
+        .collect();
+    out_spec.chunks = out_spec
+        .chunks
+        .iter()
+        .take(2)
+        .zip(&out_spec.shape)
+        .map(|(&c, &d)| c.min(d).max(1))
+        .collect();
+    out_spec.world_frame = None; // a dimensionally-reduced projection has no 3-D frame
+    Some((out_spec, data_out))
+}
+
 /// 2×2×2 block — one multiscale pyramid level (ADR-0028 §7, the array overview; MIP-style max preserves
 /// "is anything here", and pairs with [`tessera_core::block::array::WorldFrame::at_level`] for the
 /// level's geometry). Output shape is `ceil(d/2)` per axis (edge blocks clamp); the level keeps the base
@@ -719,15 +813,7 @@ pub fn downsample_max_3d(spec: &ArraySpec, data: &ArrayData) -> Option<(ArraySpe
         }
     }
     // rebuild in the base dtype — max of in-range values is in-range, so the cast is lossless.
-    let data_out = match data {
-        ArrayData::I16(_) => ArrayData::I16(out.iter().map(|&x| x as i16).collect()),
-        ArrayData::I32(_) => ArrayData::I32(out.iter().map(|&x| x as i32).collect()),
-        ArrayData::I64(_) => ArrayData::I64(out),
-        ArrayData::U16(_) => ArrayData::U16(out.iter().map(|&x| x as u16).collect()),
-        ArrayData::U32(_) => ArrayData::U32(out.iter().map(|&x| x as u32).collect()),
-        ArrayData::U64(_) => ArrayData::U64(out.iter().map(|&x| x as u64).collect()),
-        ArrayData::F32(_) | ArrayData::F64(_) => return None, // unreachable: as_i64 already returned None
-    };
+    let data_out = rebuild_int_like(data, out)?;
     let mut out_spec = spec.clone();
     out_spec.shape = vec![o0 as u64, o1 as u64, o2 as u64];
     out_spec.chunks = out_spec
@@ -1318,6 +1404,41 @@ mod tests {
         )
         .is_none());
         assert!(downsample_max_3d(&spec, &ArrayData::F32(vec![0.0; 64])).is_none());
+    }
+
+    #[test]
+    fn project_max_3d_folds_one_axis_bit_exact() {
+        // 2×2×2 ramp, v[z][y][x] = (z*2+y)*2+x = 0..8.
+        let spec = ArraySpec::new(vec![2, 2, 2], "int16"); // default axes [z,y,x]
+        let data = ArrayData::I16((0..8).map(|k| k as i16).collect());
+        let max_i16 = |s, d, ax| {
+            let (sp, da) = project_max_3d(s, d, ax).unwrap();
+            let ArrayData::I16(v) = da else {
+                panic!("keeps base dtype")
+            };
+            (sp, v)
+        };
+        // MIP along each axis vs hand-computed references (the surviving plane in ascending axis order).
+        let (s0, p0) = max_i16(&spec, &data, 0);
+        assert_eq!(s0.shape, vec![2, 2]);
+        assert_eq!(s0.axes, vec!["y", "x"]); // projected axis dropped
+        assert!(s0.world_frame.is_none()); // dimensionally-reduced → no 3-D frame
+        assert_eq!(p0, vec![4, 5, 6, 7]); // max over z
+        assert_eq!(max_i16(&spec, &data, 1).1, vec![2, 3, 6, 7]); // max over y, plane (z,x)
+        assert_eq!(max_i16(&spec, &data, 2).1, vec![1, 3, 5, 7]); // max over x, plane (z,y)
+        assert_eq!(max_i16(&spec, &data, 2).0.axes, vec!["z", "y"]);
+
+        // §4 "projection placement": coarser preview = 2-D downsample of the level-0 projection, not a
+        // re-projection — here the level-0 MIP is the source for any 2-D pyramid (max commutes with max).
+        // out-of-range axis, non-3-D, and float → None.
+        assert!(project_max_3d(&spec, &data, 3).is_none());
+        assert!(project_max_3d(
+            &ArraySpec::new(vec![8], "int16"),
+            &ArrayData::I16(vec![0; 8]),
+            0
+        )
+        .is_none());
+        assert!(project_max_3d(&spec, &ArrayData::F32(vec![0.0; 8]), 0).is_none());
     }
 
     #[test]
