@@ -446,6 +446,53 @@ mod tests {
     }
 
     #[test]
+    fn registration_is_a_transform_product_with_new_frame_and_provenance() {
+        // ADR-0030 §5: a registration is a `transform` product whose array carries the **new** (target)
+        // world_frame, with a provenance edge recording source→target + the recipe. No new mechanism —
+        // it composes the `transform` schema + `world_frame` + the `sources` DAG.
+        use crate::block::array::{ArrayBlock, ArraySpec, WorldFrame};
+        use crate::provenance::Source;
+        let r = SchemaRegistry::builtin();
+        let mut spec = ArraySpec::new(vec![8, 8, 8], "int16");
+        spec.world_frame = Some(WorldFrame {
+            affine: [
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0,
+            ],
+            convention: "LPS".into(),
+            unit: "mm".into(),
+            space: "atlas:mni152".into(), // the TARGET frame the registration resampled into
+        });
+        let vol = ArrayBlock::new("registered", spec);
+        let mut b = ProductBuilder::new(
+            "transform",
+            "reg-01",
+            "rigid reg → MNI",
+            "2024-01-01T00:00:00Z",
+        );
+        b.add_block(&vol).unwrap();
+        b.add_source(Source::new(
+            "registered_from",
+            "blake3:source-manifest-hash",
+        ));
+        b.with_field(
+            "recipe",
+            serde_json::json!({"kind": "rigid", "to_space": "atlas:mni152"}),
+        );
+        let m = b.seal().unwrap();
+
+        // valid `transform`; carries the target frame + the typed provenance edge; verifies.
+        r.validate(&m).unwrap();
+        assert_eq!(m.product, "transform");
+        assert_eq!(m.sources.len(), 1);
+        assert_eq!(m.sources[0].role, "registered_from");
+        let stored: ArraySpec = serde_json::from_value(m.blocks[0].spec.clone()).unwrap();
+        assert_eq!(stored.world_frame.unwrap().space, "atlas:mni152");
+        assert!(m.verify().is_ok());
+    }
+
+    #[test]
     fn dynamic_pet_requires_volume_and_frame_timing() {
         use crate::block::array::{ArrayBlock, ArraySpec};
         use crate::block::table::{Column, TableBlock, TableSpec};

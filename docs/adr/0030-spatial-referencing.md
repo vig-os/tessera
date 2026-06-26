@@ -1,6 +1,6 @@
 # ADR-0030 — Spatial referencing: voxel→world affine + named frame, OME-Zarr transforms derived
 
-Status: **Proposed** (2026-06-26) · Tracks `#217` · Relates to ADR-0025 (ingest normalise-at-the-door),
+Status: **Accepted** (2026-06-26, as-built) · Tracks `#217` · Relates to ADR-0025 (ingest normalise-at-the-door),
 ADR-0028 (multiscale pyramid — per-level transforms are *derived* here), ADR-0029 (composition,
 feature-by-presence, rank-agnostic N-D axes), and the product-schema registry. **Generalised by ADR-0032**
 — this spatial affine is the `affine_nd` instance of the one `(transform, unit, frame)` descriptor; the
