@@ -21,3 +21,6 @@ clap.workspace = true
 [dev-dependencies]
 tempfile = "3"
 hdf5-metno.workspace = true
+# docs-as-tests: CLI walkthroughs in tests/cmd/*.trycmd run against the real `tessera` bin (resolved via
+# CARGO_BIN_EXE_tessera — no cargo invocation at test time, so it works in the hermetic flake check).
+trycmd = "0.15"
