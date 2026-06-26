@@ -80,15 +80,18 @@ provenance edge recording **source `space` → target `space`** and the registra
 This makes "which space is this in, and how did it get there" a first-class, verifiable edge rather than
 buried metadata.
 
-### 6. World-frame handedness — **LPS canonical**, recorded explicitly
-The one genuine sub-fork. Medical ingest is DICOM-dominated (LPS); neuroimaging tools are RAS. We pick
-**LPS as the canonical world convention** (DICOM-native → the common path is a no-op) and **normalise RAS
-sources at the door** (ADR-0025) — a lossless sign-flip on two axes, recorded so nothing is silent. The
-`convention` field is stored regardless, so an affine is **never** ambiguous and a future RAS-canonical
-choice stays a pure relabelling. (Alternative considered: store whatever the source used + always carry
-`convention`. Rejected as the default — it pushes frame-reconciliation onto every consumer; normalise-at-
-the-door keeps one interpretation in the archive. The field remains, so mixed-convention reads are still
-unambiguous if a downstream ingest opts out.)
+### 6. World-frame handedness — **LPS canonical** (decided)
+Medical ingest is DICOM-dominated (LPS); neuroimaging tools are RAS. The two differ only by a **lossless
+sign-flip on the first two world axes** (`A_RAS = diag(−1,−1,1,1)·A_LPS`) — they label the *same* physical
+points, so this is a normalisation, not a loss. **Decision: LPS is the canonical world convention.** RAS
+sources are **normalised at the door** (ADR-0025) — the common DICOM path is then a no-op; only the rarer
+RAS source flips. This pays the conversion **once at ingest** instead of pushing a check-and-reconcile
+onto every consumer of every array pair (the N² burden the format exists to delete). The `convention`
+field is stored regardless, so an affine is **never** ambiguous, the source frame is trivially
+reconstructible (flip back), and a future RAS-canonical choice would be a pure relabelling, not a
+migration. (Alternative B — store the source's convention verbatim — is rejected as the default; it suits
+only a "preserve source geometry byte-for-byte" stance, and an ingest may still opt out per-array since
+`convention` keeps such reads unambiguous.)
 
 ### 7. Presence = referenced; absence = index-space (ADR-0029 feature-by-presence)
 `world_frame` is **optional**. An array without it is **unreferenced** (valid — a sinogram, a raw
@@ -114,6 +117,7 @@ type. Adding geometry to an existing array is an **additive** schema change — 
   axis units, and that the affine is non-degenerate (non-zero column norms).
 
 ## Status note
-Proposed. Lands with the imaging-base trait-set + new schemas (ADR-0029 post-accumulator work); the
-OME-Zarr per-level derivation rides the ADR-0028 pyramid. The §6 LPS-canonical choice is the one point
-worth an explicit confirm before Accept.
+Proposed; all decision points settled (§6 LPS-canonical confirmed by the user 2026-06-26). Lands with the
+imaging-base trait-set + new schemas (ADR-0029 post-accumulator work); the OME-Zarr per-level derivation
+rides the ADR-0028 pyramid. Moves to **Accepted** with the empirical-overhead spike that promotes the
+0026–0029 design set (at which point `world_frame` must be cited in FEATURE-MATRIX per the matrix gate).
