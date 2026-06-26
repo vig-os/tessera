@@ -228,6 +228,17 @@ fn schema(product: &str, version: &str, description: &str) -> ProductSchema {
     }
 }
 
+/// A composable **requirement-set** (ADR-0029 §5 trait/mixin): the shared imaging metadata every
+/// modality-bearing product carries — defined **once** here and composed into `recon` / `dynamic_pet` /
+/// `diffusion_mri` / `multicontrast_mri` rather than repeated per schema (DRY). `with` appends the
+/// schema's own extra fields.
+fn imaging_base(with: Vec<FieldSpec>) -> Vec<FieldSpec> {
+    let mut fields =
+        vec![FieldSpec::required("modality", "Imaging modality", "coded").vocabulary("DICOM")];
+    fields.extend(with);
+    fields
+}
+
 /// The built-in product schemas. Each declares its required block(s) + key fields; all are
 /// versioned `1.0` and evolve additively (new optional fields/blocks only). See ROADMAP P1 +
 /// ADR-0029 §5 (the multi-dimensional `dynamic_pet`/`diffusion_mri`/`multicontrast_mri` set).
@@ -235,11 +246,10 @@ fn builtin_schemas() -> Vec<ProductSchema> {
     use BlockKind::{Array, Table};
     vec![
         ProductSchema {
-            fields: vec![
-                FieldSpec::required("modality", "Imaging modality", "coded").vocabulary("DICOM"),
+            fields: imaging_base(vec![
                 FieldSpec::optional("rescale_slope", "Native→physical slope", "float64"),
                 FieldSpec::optional("rescale_intercept", "Native→physical intercept", "float64"),
-            ],
+            ]),
             blocks: vec![one(
                 "volume",
                 Some(Array),
@@ -359,9 +369,7 @@ fn builtin_schemas() -> Vec<ProductSchema> {
         },
         // ── ADR-0029 §5 multi-dimensional acquisition schemas (additive) ──
         ProductSchema {
-            fields: vec![
-                FieldSpec::required("modality", "Imaging modality", "coded").vocabulary("DICOM")
-            ],
+            fields: imaging_base(vec![]),
             blocks: vec![
                 one(
                     "volume",
@@ -381,9 +389,7 @@ fn builtin_schemas() -> Vec<ProductSchema> {
             )
         },
         ProductSchema {
-            fields: vec![
-                FieldSpec::required("modality", "Imaging modality", "coded").vocabulary("DICOM")
-            ],
+            fields: imaging_base(vec![]),
             blocks: vec![
                 one(
                     "volume",
@@ -403,9 +409,7 @@ fn builtin_schemas() -> Vec<ProductSchema> {
             )
         },
         ProductSchema {
-            fields: vec![
-                FieldSpec::required("modality", "Imaging modality", "coded").vocabulary("DICOM")
-            ],
+            fields: imaging_base(vec![]),
             blocks: vec![one(
                 "volume",
                 Some(Array),
@@ -577,6 +581,41 @@ mod tests {
         );
         let m = b.seal().unwrap();
         r.validate(&m).unwrap();
+    }
+
+    #[test]
+    fn imaging_base_trait_set_is_shared_across_modality_schemas() {
+        // ADR-0029 §5: the `modality` requirement is defined ONCE in `imaging_base()` and composed
+        // into every modality-bearing schema — DRY trait/mixin. Assert every such schema carries the
+        // identical shared field, and that `recon` additionally composes its own rescale fields on top.
+        let r = SchemaRegistry::builtin();
+        let shared = imaging_base(vec![]);
+        assert_eq!(
+            shared.len(),
+            1,
+            "imaging_base is exactly the shared modality field"
+        );
+        let modality = &shared[0];
+        for product in ["recon", "dynamic_pet", "diffusion_mri", "multicontrast_mri"] {
+            let s = r.get(product).expect("schema present");
+            let f = s
+                .fields
+                .iter()
+                .find(|f| f.id == "modality")
+                .unwrap_or_else(|| panic!("{product} carries the shared modality field"));
+            assert_eq!(
+                f, modality,
+                "{product}'s modality is the shared trait-set field, byte-for-byte"
+            );
+        }
+        // recon = imaging_base + its own extras (composition appends, does not replace).
+        let recon = r.get("recon").unwrap();
+        assert_eq!(
+            recon.fields.first().map(|f| f.id.as_str()),
+            Some("modality")
+        );
+        assert!(recon.fields.iter().any(|f| f.id == "rescale_slope"));
+        assert!(recon.fields.iter().any(|f| f.id == "rescale_intercept"));
     }
 
     #[test]
