@@ -115,6 +115,18 @@ a MIP-z projection in a single chunk-traversal, **both bit-exact** vs whole-arra
 projection falls out of the same per-chunk fold that builds the pyramid, and the `max`-reduction is
 dwarfed by the per-chunk encode/blake3.
 
+**Projection placement.** A projection is computed **once at level 0** (the *true* projection) during
+the fold; coarser versions are **2-D downsamples of that level-0 image** — its own small 2-D pyramid —
+**not** a re-projection of each 3-D pyramid level. Why: if the projection monoid equals the pyramid
+reduction (both `max`/both `mean`) they commute, so a per-level projection is *identical* to
+downsampling the level-0 one (per-level is redundant); if they differ (the common `mean`-pool pyramid +
+`max` MIP) the true MIP is level-0 and coarse previews must be downsamples of it, not the mean-then-max
+artifact of re-projecting mean levels. Cost splits by kind: **orthogonal** projections (MIP/avg along
+x/y/z) are a **cheap fold byproduct** — one running 2-D image per axis, merged per chunk; **MPR/oblique**
+reformats need interpolation off the chunk grid → **on-demand** (or precompute specific requested planes
+as sidecars), never pretended to be free. All projections are **`derived` sidecar blocks in the same
+product** (`from`/`recipe` stamped), never separate products, never re-projected per 3-D level.
+
 ## Consequences
 - **`content_hash` changes** (flat list → recursive root) → a deliberate **v0.2 identity revision** +
   golden regen. The independent reader is digest/Merkle-based, so it follows the SPEC's node-hash rule
