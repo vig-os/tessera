@@ -724,6 +724,27 @@ pub fn downsample_max_3d(spec: &ArraySpec, data: &ArrayData) -> Option<(ArraySpe
     Some((out_spec, data_out))
 }
 
+/// Build the full array **multiscale pyramid** (ADR-0028 §7): level 0 is the base array, each higher
+/// level is the 2×-max-downsample of the previous ([`downsample_max_3d`]), until every axis has reached
+/// 1 (a single summary voxel). Returns one `(spec, data)` per level, level 0 first. `None` for non-3-D /
+/// float arrays. Each level's geometry is `WorldFrame::at_level(L)` (ADR-0030 §3).
+pub fn array_pyramid(spec: &ArraySpec, data: &ArrayData) -> Option<Vec<(ArraySpec, ArrayData)>> {
+    if spec.shape.len() != 3 || data.as_i64().is_none() {
+        return None;
+    }
+    let mut levels = vec![(spec.clone(), data.clone())];
+    while let Some((s, d)) = levels.last() {
+        if s.shape.iter().all(|&x| x <= 1) {
+            break;
+        }
+        match downsample_max_3d(s, d) {
+            Some(next) => levels.push(next),
+            None => break,
+        }
+    }
+    Some(levels)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1196,6 +1217,29 @@ mod tests {
         // floats need canonical reduction first (ADR-0024) → not offered here
         assert_eq!(ArrayData::F32(vec![1.0, 2.0]).as_i64(), None);
         assert_eq!(ArrayData::F64(vec![1.0]).as_i64(), None);
+    }
+
+    #[test]
+    fn array_pyramid_halves_until_a_single_summit_voxel() {
+        let spec = ArraySpec::new(vec![4, 4, 4], "int16");
+        let base = ArrayData::I16((0..64).map(|k| k as i16).collect());
+        let p = array_pyramid(&spec, &base).unwrap();
+        // 4³ → 2³ → 1³
+        assert_eq!(
+            p.iter().map(|(s, _)| s.shape.clone()).collect::<Vec<_>>(),
+            vec![vec![4, 4, 4], vec![2, 2, 2], vec![1, 1, 1]]
+        );
+        // the summit is one voxel = the global max = 63
+        let ArrayData::I16(top) = &p.last().unwrap().1 else {
+            panic!()
+        };
+        assert_eq!(top, &[63]);
+        // non-3-D → None
+        assert!(array_pyramid(
+            &ArraySpec::new(vec![8], "int16"),
+            &ArrayData::I16(vec![0; 8])
+        )
+        .is_none());
     }
 
     #[test]
