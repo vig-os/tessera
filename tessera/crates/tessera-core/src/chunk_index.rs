@@ -182,6 +182,19 @@ impl ChunkIndex {
             .map(|(i, _)| i)
             .collect()
     }
+
+    /// Serialize to **deterministic** bytes (compact JSON; the struct's field order is fixed and there
+    /// are no maps, so the bytes are a pure function of the index). This is the payload an emitted
+    /// chunk-index block carries; its digest is `digest(to_bytes())` and feeds the product's content
+    /// hash like any other block (ADR-0028 §3/§4).
+    pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
+        Ok(serde_json::to_vec(self)?)
+    }
+
+    /// Reconstruct an index from [`Self::to_bytes`] output.
+    pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +284,20 @@ mod tests {
         assert_eq!(idx.aggregate().count, 5);
         assert_eq!(idx.aggregate().min, Some(1));
         assert_eq!(idx.aggregate().max, Some(5));
+    }
+
+    #[test]
+    fn index_to_bytes_is_deterministic_and_roundtrips() {
+        let mut idx = ChunkIndex::new();
+        idx.push(digest(b"c0"), &[1, 2, 3]);
+        idx.push(digest(b"c1"), &[-5, 9]);
+        let bytes = idx.to_bytes().unwrap();
+        // same index → identical bytes (the block-digest determinism requirement)
+        assert_eq!(idx.to_bytes().unwrap(), bytes);
+        // roundtrip preserves entries and the MMR root
+        let back = ChunkIndex::from_bytes(&bytes).unwrap();
+        assert_eq!(back.entries, idx.entries);
+        assert_eq!(back.root(), idx.root());
     }
 
     #[test]
