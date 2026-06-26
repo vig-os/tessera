@@ -119,6 +119,13 @@ type. Adding geometry to an existing array is an **additive** schema change — 
   axis units, and that the affine is non-degenerate (non-zero column norms).
 
 ## Status note
+**Implementation status:** §1 `world_frame` descriptor (3×4 affine + convention + unit + space) on
+`ArraySpec`, §2 spacing-derived-from-affine (`WorldFrame::spacing` = column norms), and §6 LPS-canonical
+convention field are **implemented** (2026-06-26, `tessera_core::block::array`; additive — `Option`,
+skip-if-none → existing corpus unchanged; tests `world_frame_spacing_is_derived_from_affine_columns`,
+`array_spec_world_frame_is_additive_and_optional`). **Pending:** §3 OME-Zarr per-level transform
+derivation (rides the ADR-0028 pyramid), §5 registration-as-`transform`-product + deformation-field block.
+
 Proposed; all decision points settled (§6 LPS-canonical confirmed by the user 2026-06-26). Lands with the
 imaging-base trait-set + new schemas (ADR-0029 post-accumulator work); the OME-Zarr per-level derivation
 rides the ADR-0028 pyramid. Moves to **Accepted** with the empirical-overhead spike that promotes the
