@@ -3,7 +3,7 @@
 //! intercept, modality, and physical unit are carried as metadata so a reader recovers HU / Bq·mL⁻¹.
 //! Uncompressed and RLE transfer syntaxes decode pure-Rust (no C++ codecs).
 
-use dicom::core::Tag;
+use dicom::core::{DataElement, PrimitiveValue, Tag, VR};
 use dicom::object::{FileDicomObject, InMemDicomObject};
 use dicom::pixeldata::{ConvertOptions, ModalityLutOption, PixelDecoder};
 use tessera_core::block::array::ArraySpec;
@@ -132,6 +132,47 @@ pub fn read_series(paths: &[std::path::PathBuf]) -> Result<DicomImage> {
     })
 }
 
+/// PS3.15 Basic Application Level Confidentiality — the core direct-identifier (PHI) tags Tessera
+/// removes and checks. A pragmatic high-risk subset of the standard's list; extend as needed.
+pub const PHI_TAGS: &[Tag] = &[
+    Tag(0x0008, 0x0050), // AccessionNumber
+    Tag(0x0008, 0x0080), // InstitutionName
+    Tag(0x0008, 0x0090), // ReferringPhysicianName
+    Tag(0x0008, 0x1030), // StudyDescription (free text — may carry PHI)
+    Tag(0x0008, 0x103E), // SeriesDescription
+    Tag(0x0010, 0x0010), // PatientName
+    Tag(0x0010, 0x0020), // PatientID
+    Tag(0x0010, 0x0030), // PatientBirthDate
+    Tag(0x0010, 0x1000), // OtherPatientIDs
+    Tag(0x0010, 0x1010), // PatientAge
+    Tag(0x0010, 0x2160), // EthnicGroup
+    Tag(0x0010, 0x4000), // PatientComments
+];
+const PATIENT_IDENTITY_REMOVED: Tag = Tag(0x0012, 0x0062);
+
+/// The PHI tags still present in `obj` (a compliance gate before ingest/egress); empty == clean.
+/// Note: Tessera's `read_*` ingest never reads PHI, so ingested products are PHI-free regardless —
+/// this checks the *source* object / supports a de-identified egress path.
+pub fn phi_present(obj: &FileDicomObject<InMemDicomObject>) -> Vec<Tag> {
+    PHI_TAGS
+        .iter()
+        .copied()
+        .filter(|&t| obj.element(t).is_ok())
+        .collect()
+}
+
+/// Remove the PHI tags ([`PHI_TAGS`]) from `obj` in place and set `PatientIdentityRemoved = "YES"`
+/// (PS3.15). Returns how many PHI elements were removed.
+pub fn deidentify(obj: &mut FileDicomObject<InMemDicomObject>) -> usize {
+    let removed = PHI_TAGS.iter().filter(|&&t| obj.remove_element(t)).count();
+    obj.put(DataElement::new(
+        PATIENT_IDENTITY_REMOVED,
+        VR::CS,
+        PrimitiveValue::from("YES"),
+    ));
+    removed
+}
+
 /// The UCUM unit implied by a DICOM modality (the rescaled value's unit), if known.
 fn unit_for(modality: &str) -> Option<&'static str> {
     match modality {
@@ -175,7 +216,6 @@ pub fn to_recon_product(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dicom::core::{DataElement, PrimitiveValue, VR};
     use dicom::object::meta::FileMetaTableBuilder;
 
     fn sample_image() -> DicomImage {
@@ -320,5 +360,49 @@ mod tests {
         assert_eq!(vol.voxels[0], 1000);
         assert_eq!(vol.voxels[64], 2000);
         assert_eq!(vol.voxels[128], 3000);
+    }
+
+    #[test]
+    fn deidentify_strips_phi_and_sets_marker() {
+        let obj = InMemDicomObject::from_element_iter([
+            DataElement::new(
+                Tag(0x0010, 0x0010),
+                VR::PN,
+                PrimitiveValue::from("DOE^JANE"),
+            ),
+            DataElement::new(
+                Tag(0x0010, 0x0020),
+                VR::LO,
+                PrimitiveValue::from("PID-12345"),
+            ),
+            DataElement::new(
+                Tag(0x0008, 0x0080),
+                VR::LO,
+                PrimitiveValue::from("ACME Hospital"),
+            ),
+            DataElement::new(MODALITY, VR::CS, PrimitiveValue::from("CT")),
+        ]);
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax("1.2.840.10008.1.2.1")
+            .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.2")
+            .media_storage_sop_instance_uid("1.2.3.deid")
+            .implementation_class_uid("1.2.826.0.1.3680043.tessera")
+            .build()
+            .unwrap();
+        let mut obj = obj.with_exact_meta(meta);
+
+        assert_eq!(phi_present(&obj).len(), 3); // name + id + institution
+        let removed = deidentify(&mut obj);
+        assert_eq!(removed, 3);
+        assert!(phi_present(&obj).is_empty());
+        assert!(obj.element(MODALITY).is_ok()); // non-PHI survives
+        assert_eq!(
+            obj.element(PATIENT_IDENTITY_REMOVED)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .trim(),
+            "YES"
+        );
     }
 }

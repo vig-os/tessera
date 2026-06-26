@@ -79,7 +79,7 @@ needs real CT/DICOM.
 |---|:--:|---|---|
 | Sealed `.tsra` (zip64, range-readable) | ✓ | STORED zip64, mimetype-first magic, central-dir index; 1-block read ≪ whole archive | `container::pack`, `range::CountingReader` (S6 proof) |
 | OCI artifact / exploded prefix | ○ | push/pull; range-read; CoW versioning | #22 (P6) |
-| Ingest: DICOM | ◑ | lossless native int16 + rescale/units/modality + provenance + 3-D series-stack; PS3.15 + golden corpus pending | `tessera-ingest::dicom`, ADR-0025 |
+| Ingest: DICOM | ◑ | lossless int16 + rescale/units/modality + provenance + 3-D series-stack + PS3.15 de-id; golden corpus + JPEG transfer-syntaxes pending | `tessera-ingest::dicom`, ADR-0025 |
 | Ingest: GE-HDF5 · Siemens · raw · NIfTI | ○ | decode→re-encode open; lossless | S9 (GE transform benched) |
 | Reader API (open/verify/block read) | ✓ | magic+seal verify on open; per-block read verified vs digest; partial-product; generic Read+Seek | `tessera-io::Reader`, container tests |
 | Conformance corpus + SPEC.md | ✓ | 6 golden fixtures (id/content/manifest hashes) locked in CI; `docs/SPEC.md` | `corpus/corpus.json`, `tests/conformance.rs` |
