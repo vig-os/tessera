@@ -254,3 +254,23 @@ pinned `taskset -c 10-39 nice -n19`, 256 × 64³ int16 blocks (128 MiB raw).
 - **Out of scope (ADR-0026):** sub-block chunked compaction for a single >RAM block — the only part
   that would change bytes (and the path that unifies >RAM ingest + live per-chunk Merkle). The multi-
   block streaming + live block-level Merkle land here; the huge-single-block case rides the same engine.
+
+# #215 — array fold: pyramid + projection are one monoid-fold-over-axes (ADR-0028)
+
+Claim: an array's multiscale pyramid AND its projections (MIP/MPR) are the *same* operation — a
+mergeable monoid folded over a chosen subset of the chunk-grid axes to a chosen depth — so they fall
+out of one per-chunk pass (the streaming committer already touches each chunk to encode/hash).
+
+Spike (`/tmp/array_fold_spike.py`, real 128×512×512 CT, 64 MiB, 128 × 64³ chunks): one traversal of the
+64³ grid, folding with `max`, accumulated **both**:
+- **pyramid L1** = local 2³ max-pool → (64,256,256), and
+- **MIP-z** = full-z max → (512,512),
+
+**both bit-exact** vs `vol.reshape(...).max((1,3,5))` and `vol.max(0)`. So `max` folded *locally 2×* =
+the OME-Zarr pyramid level, and `max` folded *fully along z* = the MIP — one monoid, parameterized by
+`(axes, depth)`. mean/avg-projection are the same with `sum`+`count` (float canonical-reduction guard).
+The fold is a SIMD `max`-reduction, ≪ the per-chunk pcodec encode + blake3 → ~free in the committer.
+
+**Conclusion:** the factory generalizes from tables (1-D, axis=rows) to arrays (N-D): pyramids,
+projections, profiles, and scalar stats are one `(monoid, axes, depth)` abstraction, materialized live
+in the same fold that builds the integrity tree.

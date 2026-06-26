@@ -109,9 +109,11 @@ So pyramids, MIP/MPR projections, profiles, and scalar stats are **one abstracti
 `(monoid, axes, depth)` — and a projection **appears at every pyramid level** because it's the same
 monoid folded along the projection axis at each level, so it falls out of the *same* per-chunk fold that
 builds the pyramid. Tables are the degenerate 1-D case (the only axis is `rows`). `max`/`min`/MIP are
-exact; `mean`/`sum` carry the float canonical-reduction guard. **Status: to be validated by the
-array-fold spike (#215)** — does one monoid-fold-over-axes pass really yield a correct pyramid level
-*and* a correct MIP, cheaply, on a real volume.
+exact; `mean`/`sum` carry the float canonical-reduction guard. **Validated** (#215, SPIKE-RESULTS): on a
+real 128×512×512 CT, one `max`-fold over the 64³ chunk grid produced a 2× max-pool pyramid level **and**
+a MIP-z projection in a single chunk-traversal, **both bit-exact** vs whole-array references — the
+projection falls out of the same per-chunk fold that builds the pyramid, and the `max`-reduction is
+dwarfed by the per-chunk encode/blake3.
 
 ## Consequences
 - **`content_hash` changes** (flat list → recursive root) → a deliberate **v0.2 identity revision** +
