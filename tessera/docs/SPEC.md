@@ -121,5 +121,10 @@ forming a tamper-evident Merkle DAG.
 
 ## 9. Conformance
 `tessera/corpus/corpus.json` lists golden `{name, product, id, content_hash, manifest_hash}` for the
-reference fixtures (`tessera-io::conformance::fixtures`). A conformant implementation MUST reproduce
-every golden triple. Regenerate (and bump the spec version) only on an intended format change.
+reference fixtures, and `tessera/corpus/files/<name>.tsra` holds the corresponding **concrete `.tsra`
+test vectors** an independent implementation reads directly. A conformant implementation MUST, for
+each test vector: open it, recompute `id` / `content_hash` / `manifest_hash` per §2–§7, and match the
+golden triple. Reproducing the triple needs only the container (§6) + canonical hashing (§2–§4) —
+**not** block-payload decoding — so a reader can be validated without the array/table codecs. Both are
+regenerated (and the spec version bumped) only on an intended format change:
+`cargo run -p tessera-io --example gen_corpus` / `--example gen_corpus_files`.

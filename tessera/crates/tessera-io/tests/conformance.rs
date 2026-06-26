@@ -58,3 +58,37 @@ fn corpus_packs_deterministically_and_verifies() {
         }
     }
 }
+
+/// The committed `corpus/files/<name>.tsra` test vectors (what an independent v1.0 reader consumes)
+/// must reproduce the golden triple and verify on open. Regenerate after an intended format change:
+/// `cargo run -p tessera-io --example gen_corpus_files`.
+#[test]
+fn committed_corpus_files_reproduce_goldens() {
+    let golden = golden_index();
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/files");
+    for f in fixtures() {
+        let path = std::path::Path::new(dir).join(format!("{}.tsra", f.name));
+        let mut r = tessera_io::Reader::open(&path)
+            .unwrap_or_else(|e| panic!("open committed corpus file '{}': {e}", f.name));
+        let m = r.manifest().clone();
+        let g = golden
+            .get(f.name)
+            .unwrap_or_else(|| panic!("no golden for '{}'", f.name));
+        assert_eq!(m.id, g.id, "{} id", f.name);
+        assert_eq!(
+            m.content_hash.as_deref().unwrap_or_default(),
+            g.content_hash,
+            "{} content_hash",
+            f.name
+        );
+        assert_eq!(
+            m.manifest_hash.as_deref().unwrap_or_default(),
+            g.manifest_hash,
+            "{} manifest_hash",
+            f.name
+        );
+        for n in r.block_names() {
+            r.read_block(&n).unwrap(); // each stored block verifies against its digest
+        }
+    }
+}
