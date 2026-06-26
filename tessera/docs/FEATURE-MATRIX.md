@@ -21,10 +21,10 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 ## B. Codec & storage (decided, proven)
 | Feature | Status | Gate | Evidence |
 |---|:--:|---|---|
-| Volume codec = **pcodec** | ✓ | smallest lossless; ≤ best competitor | CT 74.3 vs zstd 94.5 (−21%), PET −33% |
+| Volume codec = **pcodec** (default) | ✓ | smallest lossless on real CT/PET; ≤ best competitor | CT 74.3 vs zstd 94.5 (−21%), PET −33% |
 | Table backend = **Vortex** | ✓ | smallest + fastest random-take + pushdown; real Rust codec | S0/S4/S7/S10/S11 + `tessera-io::table` |
-| Cubic 64³ chunking | ✓ | isotropic reads; size/read sweet spot | chunk sweep |
-| zstd fallback codec | ✓ | decades-stable alt at ≤+27% size | codec sweep |
+| Cubic 64³ chunking | ✓ | isotropic reads; size/read sweet spot — codec-independent | chunk sweep |
+| Per-block selectable codec (`ArraySpec.codec`) | ✓ | `"pcodec"` (default) · `"zstd"` (fixed level 3) · `"auto"` (writer picks smaller, records concrete codec) — slice/ROI access unchanged across codecs (chunk grid owns locality) | #213 + `tessera-io::array::tests::{zstd_*,auto_*}` |
 
 ## C. Correctness gates (REQUIRED — binary)
 | Gate | Status | Pass condition | Evidence |

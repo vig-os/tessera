@@ -64,22 +64,51 @@ MUST be present in a sealed product. `spec` is shape-specific and opaque to the 
 carries `shape`/`dtype`/`chunks`/`axes`/`codec`/…; a table spec carries `columns`/`rows`/…).
 **Source** = `{ role: string, reference: string, content_hash✱: string }`.
 
-## 5a. Array block payload (Zarr v3 + pcodec)
+## 5a. Array block payload (Zarr v3 + pluggable codec)
 A block with `kind == "array"` stores its samples as a **single serialized Zarr v3 store** (ADR-0023).
 The array spec carries `shape` (per-axis element counts, C order), `dtype`, `chunks` (cubic chunk
-shape, default 64³), `axes`, and `codec` (`"pcodec"`).
+shape, default 64³), `axes`, and `codec` (one of `"pcodec"`, `"zstd"`, `"auto"`).
 
-- **Codec.** The Zarr array uses the **pcodec** array→bytes codec (lossless). pcodec operates on
-  ≥16-bit numbers: supported dtypes are `int16/32/64`, `uint16/32/64`, `float32/64`. Floating-point
-  bit patterns (incl `NaN`, `±inf`, `−0.0`, denormals) MUST be preserved exactly.
+- **Codec.** The Zarr array uses one of:
+  - `"pcodec"` (**default**, the settled imaging-volume codec — lossless, smallest on real CT/PET) —
+    the pcodec array→bytes codec.
+  - `"zstd"` — the Zarr v3 `bytes` array→bytes codec with the `zstd` bytes-to-bytes codec applied,
+    at a **fixed level (3 = the zstd library default)**. The level is hard-coded so the bytes are a
+    pure function of the data — never a writer knob or build profile.
+  - `"auto"` — a **write-time selector**: the writer encodes the block with BOTH `"pcodec"` and
+    `"zstd"`, keeps the smaller payload, and records the *concrete* codec in the manifest's
+    `BlockRef.spec`. Ties resolve to `"pcodec"` (the project default). The selection is therefore a
+    pure function of the data, so writer-determinism still holds. **Readers never see `"auto"`** in
+    a sealed manifest — `BlockRef.spec.codec` is always a concrete codec id.
+
+  Supported dtypes are `int16/32/64`, `uint16/32/64`, `float32/64` for every codec (8-bit and
+  `float16` are intentionally out of scope so the dtype envelope does not depend on the codec). Float
+  bit patterns (incl `NaN`, `±inf`, `−0.0`, denormals) MUST be preserved exactly for all three codec
+  ids — bit-exact lossless is a property of the format, not of the codec choice.
+- **Codec choice does NOT affect slice/ROI access.** Slice / sub-cube locality is a property of the
+  64³ **chunk grid**, not of the codec: both `"pcodec"` and `"zstd"` operate per chunk, so a z-slice
+  or 3-D sub-region decodes only the intersecting chunks regardless of which codec is in use. Picking
+  `"zstd"` or `"auto"` for a dense / high-entropy auxiliary array does NOT penalise main-volume
+  slice-viewing performance.
+- **Guidance.** `"pcodec"` is the default and the right choice for real imaging volumes (CT/PET);
+  `"zstd"` and `"auto"` are opt-in for dense / high-entropy tabular or auxiliary arrays where
+  pcodec's numerical-pattern heuristics gain little. On real CT/PET, `"auto"` naturally picks
+  `"pcodec"` (pcodec compresses real medical volumes smaller — CT ~3.8× vs zstd ~3.3×), so `"auto"`
+  will not silently degrade an imaging volume.
 - **Store serialization.** The Zarr store (its `zarr.json` metadata entry + chunk entries) is
   serialized into one byte string: collect all store keys, **sort by UTF-8 byte order**, then for each
   emit `u32_le key_len · key_utf8 · u64_le value_len · value`. The block payload is exactly this byte
   string; its `digest` (§3) is computed over it. Decoding reverses the framing to rebuild the store.
-- **Determinism.** Sorted keys + fixed framing + deterministic pcodec/Zarr-v3 metadata ⇒ the same
-  array always serializes to byte-identical payload bytes (the writer-determinism gate).
+  Decode is **codec-agnostic**: the store's `zarr.json` declares its codec chain, so a reader needs
+  no codec dispatch — only the relevant codec features compiled in (the reference reader bundles
+  both pcodec and zstd).
+- **Determinism.** Sorted keys + fixed framing + deterministic Zarr-v3 metadata + deterministic
+  codec (pcodec is deterministic; zstd at a fixed level is deterministic; `auto`'s pick-smaller is a
+  pure function of the resulting byte lengths) ⇒ the same array always serializes to byte-identical
+  payload bytes (the writer-determinism gate).
 
-A reader MAY decode only a sub-region by reconstructing the store and reading the intersecting chunks.
+A reader MAY decode only a sub-region by reconstructing the store and reading the intersecting chunks
+— independent of the codec.
 
 ## 5b. Table block payload (Vortex)
 A block with `kind == "table"` stores its columns as a **single Vortex file** (ADR-0024) — the exact

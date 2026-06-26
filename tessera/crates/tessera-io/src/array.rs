@@ -1,20 +1,54 @@
 //! Array block backend — dense N-D arrays as a deterministic single-blob Zarr v3 store
-//! (zarrs + **pcodec**). This is the real codec behind an [`ArraySpec`] block: it turns a typed
-//! buffer of samples into the exact bytes stored at `blocks/<name>` in a `.tsra`, and back.
+//! (zarrs + selectable per-block codec). This is the real codec behind an [`ArraySpec`] block:
+//! it turns a typed buffer of samples into the exact bytes stored at `blocks/<name>` in a
+//! `.tsra`, and back.
 //!
 //! ## Why a serialized store, not loose Zarr files
 //! A Zarr array is a *set* of keys (`zarr.json` + chunk objects). The `.tsra` container stores one
 //! payload per block, so we serialize the whole store into ONE deterministic blob: keys sorted,
 //! each framed `len|key|len|value`. Reconstructing the store and decoding is lossless, and because
-//! the framing is canonical and pcodec + the Zarr metadata are themselves deterministic, the same
-//! array always encodes to byte-identical bytes — the writer-determinism release gate. The blob is
-//! a faithful Zarr store, so the exploded form can later materialize it as real OME-Zarr files.
+//! the framing is canonical and the chosen codec + the Zarr v3 metadata are themselves
+//! deterministic, the same array always encodes to byte-identical bytes — the writer-determinism
+//! release gate. The blob is a faithful Zarr store, so the exploded form can later materialize it
+//! as real OME-Zarr files.
 //!
 //! ## Dtypes
 //! pcodec operates on ≥16-bit numbers, which covers every dtype real imaging volumes use (int16
 //! CT/PET, float32 µ-maps/SUV, uint16/32 counts). The eight pcodec-native dtypes are supported via
-//! [`ArrayData`]; 8-bit (`int8`/`uint8`) and `float16` are intentionally out of scope for the
-//! pcodec backend (a zstd fallback can be added later without changing the container contract).
+//! [`ArrayData`]; 8-bit (`int8`/`uint8`) and `float16` are intentionally out of scope (the zstd
+//! backend uses the same [`ArrayData`] surface, so its dtype envelope matches pcodec's).
+//!
+//! ## Codecs (`ArraySpec.codec`)
+//! Three values are accepted on encode:
+//! - `"pcodec"` (**default**) — the settled imaging-volume codec (lossless, −21% CT / −33% PET
+//!   vs zstd). Recon/imaging/volume products default here and **stay** here unless a caller
+//!   explicitly opts a block into a different codec.
+//! - `"zstd"` — Zarr v3 `bytes` + `zstd` bytes-to-bytes codec, at the FIXED level
+//!   [`ZSTD_LEVEL`] = 3 (deterministic; level is hard-coded so the bytes are a pure function of
+//!   the data — never the build profile or a writer knob).
+//! - `"auto"` — a *write-time selector*: encode with both pcodec and zstd, keep the smaller
+//!   payload, and record the **concrete** codec in the produced [`BlockRef`]/spec. The
+//!   manifest thus declares `"pcodec"` or `"zstd"`, never `"auto"`; readers never see `"auto"`.
+//!
+//! Decode is **codec-agnostic** — zarrs reads the codec chain from the array's `zarr.json` — so
+//! [`decode`] and [`decode_subset`] need no dispatch; the only requirement is that the relevant
+//! codec features are compiled in (they are, see workspace `Cargo.toml`).
+//!
+//! ### Codec choice does NOT affect slice / ROI access
+//! Slice and sub-cube locality come from the **64³ chunk grid** that `chunks` defines, not from
+//! the codec: both `"pcodec"` and `"zstd"` are per-chunk codecs, so [`decode_subset`] (and any
+//! z-slice / ROI read above it) decodes only the intersecting chunks regardless of which codec
+//! was used to write them. This is the reason `"zstd"` / `"auto"` are safe to expose for
+//! dense / high-entropy auxiliary arrays without harming main-volume slice-viewing performance.
+//!
+//! ### When to reach for which codec
+//! - **Recon / imaging / volume blocks** → leave as `"pcodec"` (the default). On real CT/PET it
+//!   compresses ~3.8× vs zstd ~3.3× — pcodec wins, so `"auto"` would naturally land on `"pcodec"`
+//!   for an imaging volume anyway; there's no reason to pay `"auto"`'s double-encode cost there.
+//! - **Dense / high-entropy tabular or auxiliary arrays** (lookup tables, sinogram-like noise,
+//!   packed bitfields) → consider `"zstd"` explicitly, or `"auto"` if you want the writer to pick
+//!   per block — these are the workloads where pcodec's numerical-pattern heuristics gain little
+//!   and zstd's LZ + entropy coding wins.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -25,6 +59,7 @@ use tessera_core::block::{BlockKind, BlockRef};
 use tessera_core::{Error, Result};
 use zarrs::array::builder::ArrayBuilderFillValue;
 use zarrs::array::codec::array_to_bytes::pcodec::{PcodecCodec, PcodecCodecConfiguration};
+use zarrs::array::codec::ZstdCodec;
 use zarrs::array::{data_type, Array, ArrayBuilder, DataType, Element, ElementOwned};
 use zarrs::storage::store::MemoryStore;
 use zarrs::storage::{ReadableWritableListableStorage, StoreKey};
@@ -33,6 +68,30 @@ use crate::BlockPayload;
 
 /// The single array's node path inside the (block-private) Zarr store.
 const ARRAY_PATH: &str = "/array";
+
+/// Fixed zstd compression level for the `"zstd"` codec path. Hard-coded so the encoded bytes are
+/// a pure function of the input data — never the writer's build profile, host, or a runtime knob
+/// — which is what `auto`-selection's "pick smaller of pcodec/zstd" + the writer-determinism gate
+/// rely on. Level 3 = zstd's library default: strong ratio at low CPU cost (fine for the dense
+/// medical-volume regime where zstd is only a fallback to pcodec).
+pub const ZSTD_LEVEL: i32 = 3;
+
+/// The set of array codec ids understood by the encoder. `"auto"` is a write-time selector that
+/// resolves at [`array_block`] time; the stored manifest only ever records a *concrete* codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Codec {
+    Pcodec,
+    Zstd,
+}
+
+impl Codec {
+    fn as_str(self) -> &'static str {
+        match self {
+            Codec::Pcodec => "pcodec",
+            Codec::Zstd => "zstd",
+        }
+    }
+}
 
 /// A typed, in-memory array buffer — the decoded form of an array block's samples, in C
 /// (row-major) order matching the spec's `shape`/`axes`. One variant per pcodec-native dtype.
@@ -169,6 +228,12 @@ fn pcodec() -> Arc<PcodecCodec> {
     Arc::new(PcodecCodec::new_with_configuration(&cfg).expect("default pcodec config is valid"))
 }
 
+fn zstd_codec() -> Arc<ZstdCodec> {
+    // checksum=false → no trailing zstd checksum frame (the BlockRef digest already covers
+    // payload integrity end-to-end). Fixed level keeps bytes a pure function of the data.
+    Arc::new(ZstdCodec::new(ZSTD_LEVEL, false))
+}
+
 /// Serialize an entire Zarr store into one deterministic blob: keys sorted, `u32 len | key | u64
 /// len | value`. Sorting + fixed framing makes the bytes a pure function of the store contents.
 fn serialize_store(store: &ReadableWritableListableStorage) -> Result<Vec<u8>> {
@@ -214,18 +279,29 @@ fn deserialize_store(blob: &[u8]) -> Result<ReadableWritableListableStorage> {
     Ok(store)
 }
 
-/// Build a pcodec-coded Zarr array in `store` and write `data` into it (the whole array).
+/// Build a Zarr array in `store` with the chosen codec and write `data` into it (the whole array).
+/// `pcodec` is plugged as the `array_to_bytes` codec (it produces bytes directly); `zstd` rides on
+/// top of zarrs' default `bytes` array_to_bytes codec as a `bytes_to_bytes` step.
 fn build_filled<T: Element, F: Into<ArrayBuilderFillValue>>(
     store: &ReadableWritableListableStorage,
     spec: &ArraySpec,
     dt: DataType,
     fill: F,
     data: &[T],
+    codec: Codec,
 ) -> Result<()> {
-    let array = ArrayBuilder::new(spec.shape.clone(), spec.chunks.clone(), dt, fill)
-        .array_to_bytes_codec(pcodec())
-        .build(store.clone(), ARRAY_PATH)
-        .map_err(ze)?;
+    let mut builder = ArrayBuilder::new(spec.shape.clone(), spec.chunks.clone(), dt, fill);
+    match codec {
+        Codec::Pcodec => {
+            builder.array_to_bytes_codec(pcodec());
+        }
+        Codec::Zstd => {
+            // Leave array_to_bytes as the zarrs default (`bytes` codec) and add zstd as the
+            // bytes_to_bytes step. Cf. zarrs ArrayBuilder docstring example.
+            builder.bytes_to_bytes_codecs(vec![zstd_codec()]);
+        }
+    }
+    let array = builder.build(store.clone(), ARRAY_PATH).map_err(ze)?;
     array.store_metadata().map_err(ze)?;
     array
         .store_array_subset(&array.subset_all(), data)
@@ -257,13 +333,17 @@ fn retrieve_region<T: ElementOwned>(
 }
 
 /// Validate that `data` is encodable under `spec` (codec, dtype, and element count all agree).
+/// The encoder accepts the three documented codec ids: `"pcodec"`, `"zstd"`, `"auto"`. Any other
+/// value is a writer-side bug and is rejected here, before any encode work happens.
 fn validate(spec: &ArraySpec, data: &ArrayData) -> Result<()> {
     spec.validate()?;
-    if spec.codec != "pcodec" {
-        return Err(Error::Codec(format!(
-            "array codec '{}' is not supported by the pcodec backend",
-            spec.codec
-        )));
+    match spec.codec.as_str() {
+        "pcodec" | "zstd" | "auto" => {}
+        other => {
+            return Err(Error::Codec(format!(
+                "array codec '{other}' is not supported (expected 'pcodec', 'zstd', or 'auto')"
+            )))
+        }
     }
     if spec.dtype != data.dtype() {
         return Err(Error::Codec(format!(
@@ -283,21 +363,57 @@ fn validate(spec: &ArraySpec, data: &ArrayData) -> Result<()> {
     Ok(())
 }
 
-/// Encode `data` into the deterministic array-block payload bytes for `spec`.
-pub fn encode(spec: &ArraySpec, data: &ArrayData) -> Result<Vec<u8>> {
-    validate(spec, data)?;
+/// Encode `data` under one *concrete* codec (no `"auto"` resolution here). Internal helper —
+/// callers go through [`encode`] or [`encode_resolved`].
+fn encode_with(spec: &ArraySpec, data: &ArrayData, codec: Codec) -> Result<Vec<u8>> {
     let store: ReadableWritableListableStorage = Arc::new(MemoryStore::new());
     match data {
-        ArrayData::I16(v) => build_filled(&store, spec, data_type::int16(), 0i16, v)?,
-        ArrayData::I32(v) => build_filled(&store, spec, data_type::int32(), 0i32, v)?,
-        ArrayData::I64(v) => build_filled(&store, spec, data_type::int64(), 0i64, v)?,
-        ArrayData::U16(v) => build_filled(&store, spec, data_type::uint16(), 0u16, v)?,
-        ArrayData::U32(v) => build_filled(&store, spec, data_type::uint32(), 0u32, v)?,
-        ArrayData::U64(v) => build_filled(&store, spec, data_type::uint64(), 0u64, v)?,
-        ArrayData::F32(v) => build_filled(&store, spec, data_type::float32(), 0.0f32, v)?,
-        ArrayData::F64(v) => build_filled(&store, spec, data_type::float64(), 0.0f64, v)?,
+        ArrayData::I16(v) => build_filled(&store, spec, data_type::int16(), 0i16, v, codec)?,
+        ArrayData::I32(v) => build_filled(&store, spec, data_type::int32(), 0i32, v, codec)?,
+        ArrayData::I64(v) => build_filled(&store, spec, data_type::int64(), 0i64, v, codec)?,
+        ArrayData::U16(v) => build_filled(&store, spec, data_type::uint16(), 0u16, v, codec)?,
+        ArrayData::U32(v) => build_filled(&store, spec, data_type::uint32(), 0u32, v, codec)?,
+        ArrayData::U64(v) => build_filled(&store, spec, data_type::uint64(), 0u64, v, codec)?,
+        ArrayData::F32(v) => build_filled(&store, spec, data_type::float32(), 0.0f32, v, codec)?,
+        ArrayData::F64(v) => build_filled(&store, spec, data_type::float64(), 0.0f64, v, codec)?,
     }
     serialize_store(&store)
+}
+
+/// Encode `data` into the deterministic array-block payload bytes for `spec` and report the
+/// *concrete* codec the bytes were produced with. For `spec.codec ∈ {"pcodec","zstd"}` this is a
+/// straight passthrough; for `spec.codec == "auto"` the encoder runs both codecs and keeps the
+/// smaller payload (ties resolve to `"pcodec"`, the project default) — a pure function of the
+/// data, so writer-determinism is preserved.
+pub fn encode_resolved(spec: &ArraySpec, data: &ArrayData) -> Result<(&'static str, Vec<u8>)> {
+    validate(spec, data)?;
+    match spec.codec.as_str() {
+        "pcodec" => Ok((
+            Codec::Pcodec.as_str(),
+            encode_with(spec, data, Codec::Pcodec)?,
+        )),
+        "zstd" => Ok((Codec::Zstd.as_str(), encode_with(spec, data, Codec::Zstd)?)),
+        "auto" => {
+            let p = encode_with(spec, data, Codec::Pcodec)?;
+            let z = encode_with(spec, data, Codec::Zstd)?;
+            // strict `<` → on tie, pcodec wins (the deterministic, documented default).
+            if z.len() < p.len() {
+                Ok((Codec::Zstd.as_str(), z))
+            } else {
+                Ok((Codec::Pcodec.as_str(), p))
+            }
+        }
+        // unreachable: `validate` already rejected anything else.
+        other => Err(Error::Codec(format!("unsupported array codec '{other}'"))),
+    }
+}
+
+/// Encode `data` into the deterministic array-block payload bytes for `spec`. Thin wrapper
+/// around [`encode_resolved`] for callers that only need the payload bytes (e.g. determinism
+/// re-encodes in tests). The full pipeline goes through [`array_block`] so the resolved-codec
+/// name lands in the [`BlockRef`].
+pub fn encode(spec: &ArraySpec, data: &ArrayData) -> Result<Vec<u8>> {
+    Ok(encode_resolved(spec, data)?.1)
 }
 
 /// Decode the whole array from a block payload (inverse of [`encode`]).
@@ -358,18 +474,25 @@ pub fn decode_subset(
 /// Encode an array block and produce both the sealed-manifest [`BlockRef`] (digest over the real
 /// payload bytes) and the [`BlockPayload`] to pack. The digest property the container relies on —
 /// `payload bytes == what the digest was computed over` — holds by construction.
+///
+/// If `spec.codec == "auto"`, the resolved concrete codec (`"pcodec"` or `"zstd"`) is written
+/// back into the `BlockRef`'s stored spec so the manifest never declares `"auto"` (readers see a
+/// concrete codec and the conformance contract holds). The caller's input `spec` is not mutated.
 pub fn array_block(
     name: &str,
     spec: &ArraySpec,
     data: &ArrayData,
 ) -> Result<(BlockRef, BlockPayload)> {
-    let payload = encode(spec, data)?;
+    let (resolved, payload) = encode_resolved(spec, data)?;
     let digest = tessera_core::hash::digest(&payload);
+    // Record the concrete codec in the manifest's BlockRef.spec — readers never see "auto".
+    let mut stored_spec = spec.clone();
+    stored_spec.codec = resolved.to_string();
     let block_ref = BlockRef {
         name: name.to_string(),
         kind: BlockKind::Array,
         digest: Some(digest),
-        spec: serde_json::to_value(spec)?,
+        spec: serde_json::to_value(&stored_spec)?,
     };
     Ok((block_ref, BlockPayload::new(name, payload)))
 }
@@ -379,9 +502,16 @@ mod tests {
     use super::*;
 
     fn pcodec_spec(shape: Vec<u64>, dtype: &str) -> ArraySpec {
-        // The backend speaks pcodec; ArraySpec::new still defaults codec to zstd in core, so set it.
+        // `ArraySpec::new` already defaults `codec` to "pcodec" (the volume-codec winner); spell
+        // it out here so the test's intent is explicit independent of the core default.
         let mut s = ArraySpec::new(shape, dtype);
         s.codec = "pcodec".into();
+        s
+    }
+
+    fn spec_with(shape: Vec<u64>, dtype: &str, codec: &str) -> ArraySpec {
+        let mut s = ArraySpec::new(shape, dtype);
+        s.codec = codec.into();
         s
     }
 
@@ -576,11 +706,249 @@ mod tests {
             encode(&spec, &ArrayData::I16(vec![0; 7])),
             Err(Error::Codec(_))
         )); // wrong length
-        let mut zstd_spec = ArraySpec::new(vec![2, 2, 2], "int16"); // codec defaults to zstd
-        zstd_spec.codec = "zstd".into();
+        let mut bogus_spec = ArraySpec::new(vec![2, 2, 2], "int16");
+        bogus_spec.codec = "lz4hc-experimental".into(); // not in {pcodec,zstd,auto}
         assert!(matches!(
-            encode(&zstd_spec, &ArrayData::I16(vec![0; 8])),
+            encode(&bogus_spec, &ArrayData::I16(vec![0; 8])),
             Err(Error::Codec(_))
-        )); // unsupported codec
+        )); // unsupported codec id is rejected
+    }
+
+    // ── zstd codec (parity with pcodec on the eight supported dtypes) ──────────────────────────
+
+    #[test]
+    fn zstd_roundtrip_every_dtype() {
+        // Same shape/data shape as the pcodec roundtrip test; if zstd is plumbed correctly the
+        // decode is fully codec-agnostic (zarrs reads the codec from zarr.json) so the back-side
+        // is identical to the pcodec path.
+        let shape = vec![4u64, 4, 4];
+        let n = 64usize;
+        let cases = [
+            ArrayData::I16((0..n).map(|k| k as i16 - 32).collect()),
+            ArrayData::I32((0..n).map(|k| k as i32 * 7 - 100).collect()),
+            ArrayData::I64((0..n).map(|k| k as i64 * 1_000_003 - 5).collect()),
+            ArrayData::U16((0..n).map(|k| (k * 513) as u16).collect()),
+            ArrayData::U32((0..n).map(|k| (k * 999) as u32).collect()),
+            ArrayData::U64((0..n).map(|k| (k as u64) << 40).collect()),
+            ArrayData::F32((0..n).map(|k| k as f32 * 0.25 - 8.0).collect()),
+            ArrayData::F64((0..n).map(|k| k as f64 * 1.5 - 48.0).collect()),
+        ];
+        for data in cases {
+            let spec = spec_with(shape.clone(), data.dtype(), "zstd");
+            let blob = encode(&spec, &data).unwrap();
+            let back = decode(&spec, &blob).unwrap();
+            assert_eq!(back, data, "zstd roundtrip mismatch for {}", data.dtype());
+            assert_eq!(
+                encode(&spec, &data).unwrap(),
+                blob,
+                "zstd non-deterministic for {}",
+                data.dtype()
+            );
+        }
+    }
+
+    #[test]
+    fn zstd_float_bit_patterns_survive_exactly() {
+        // Clinical-grade float-edge gate, mirroring `float_bit_patterns_survive_exactly` but for
+        // the zstd codec. `bytes` array_to_bytes is byte-exact; zstd is lossless byte-to-byte.
+        let mut f32v: Vec<f32> = (0..64).map(|k| k as f32 * 0.5 - 8.0).collect();
+        for (j, v) in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.0,
+            0.0,
+            f32::MIN_POSITIVE,
+            f32::MIN_POSITIVE / 2.0,
+            f32::MIN,
+            f32::MAX,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            f32v[j] = v;
+        }
+        let spec = spec_with(vec![4, 4, 4], "float32", "zstd");
+        let data = ArrayData::F32(f32v.clone());
+        let back = decode(&spec, &encode(&spec, &data).unwrap()).unwrap();
+        let ArrayData::F32(got) = back else {
+            panic!("dtype")
+        };
+        for (a, b) in got.iter().zip(&f32v) {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "zstd f32 bit pattern diverged: {a} vs {b}"
+            );
+        }
+
+        let mut f64v: Vec<f64> = (0..64).map(|k| k as f64).collect();
+        for (j, v) in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -0.0,
+            f64::MIN_POSITIVE / 2.0,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            f64v[j] = v;
+        }
+        let spec = spec_with(vec![4, 4, 4], "float64", "zstd");
+        let data = ArrayData::F64(f64v.clone());
+        let back = decode(&spec, &encode(&spec, &data).unwrap()).unwrap();
+        let ArrayData::F64(got) = back else {
+            panic!("dtype")
+        };
+        for (a, b) in got.iter().zip(&f64v) {
+            assert_eq!(a.to_bits(), b.to_bits(), "zstd f64 bit pattern diverged");
+        }
+    }
+
+    // ── auto codec (write-time selector; records a concrete codec) ─────────────────────────────
+
+    #[test]
+    fn auto_picks_zstd_for_high_entropy_data() {
+        // Random-looking int32 noise: pcodec's delta/numerical-pattern heuristics gain ~nothing,
+        // while zstd's LZ + entropy coding still finds short repeats — zstd should win. The
+        // exact winner doesn't matter for correctness, only that `auto` records a concrete codec
+        // AND the recorded codec equals whichever path actually produced the stored bytes.
+        let shape = vec![8u64, 8, 8];
+        let data = ArrayData::I32(
+            (0..512)
+                .map(|k| {
+                    // splitmix64-style PRNG, deterministic
+                    let mut z = (k as u64).wrapping_mul(0x9E3779B97F4A7C15);
+                    z ^= z >> 30;
+                    z = z.wrapping_mul(0xBF58476D1CE4E5B9);
+                    z ^= z >> 27;
+                    (z & 0xFFFF_FFFF) as i32
+                })
+                .collect(),
+        );
+        let auto_spec = spec_with(shape.clone(), "int32", "auto");
+        let (block_ref, payload) = array_block("noisy", &auto_spec, &data).unwrap();
+        let recorded = block_ref
+            .spec
+            .get("codec")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert!(
+            recorded == "pcodec" || recorded == "zstd",
+            "auto must resolve to a concrete codec, got {recorded:?}"
+        );
+        // The recorded codec must be the one whose bytes were actually stored.
+        let p_spec = spec_with(shape.clone(), "int32", "pcodec");
+        let z_spec = spec_with(shape.clone(), "int32", "zstd");
+        let p_bytes = encode(&p_spec, &data).unwrap();
+        let z_bytes = encode(&z_spec, &data).unwrap();
+        let winner = if z_bytes.len() < p_bytes.len() {
+            "zstd"
+        } else {
+            "pcodec"
+        };
+        assert_eq!(recorded, winner, "auto recorded the wrong codec");
+        assert_eq!(
+            payload.bytes.as_slice(),
+            if winner == "zstd" {
+                z_bytes.as_slice()
+            } else {
+                p_bytes.as_slice()
+            },
+            "auto must store the bytes of the winning codec"
+        );
+        // And whatever it picked must decode back to the input.
+        let decoded = decode(
+            &spec_with(shape.clone(), "int32", recorded),
+            payload.bytes.as_slice(),
+        )
+        .unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn auto_picks_pcodec_for_smooth_data() {
+        // Smooth-gradient int16: pcodec's delta encoding crushes it well below what zstd can do
+        // on the raw little-endian bytes. `auto` should record `"pcodec"` here — the same
+        // workload `pcodec_compresses_smooth_int16_volume` exercises.
+        let shape = vec![64u64, 64, 64];
+        let data = ArrayData::I16(
+            (0..64 * 64 * 64)
+                .map(|k| {
+                    let z = k / (64 * 64);
+                    let y = (k / 64) % 64;
+                    (z * 16 + y * 2 - 1024) as i16
+                })
+                .collect(),
+        );
+        let auto_spec = spec_with(shape, "int16", "auto");
+        let (block_ref, _payload) = array_block("smooth", &auto_spec, &data).unwrap();
+        let recorded = block_ref
+            .spec
+            .get("codec")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(
+            recorded, "pcodec",
+            "auto should pick pcodec on smooth int16; got {recorded:?}"
+        );
+        // `auto` is never the recorded codec — readers always see a concrete one.
+        assert_ne!(recorded, "auto");
+    }
+
+    #[test]
+    fn auto_resolution_is_deterministic_across_runs() {
+        // Two independent `array_block` runs over the same input must produce the SAME concrete
+        // codec AND byte-identical payloads. This is the writer-determinism gate for `auto`.
+        let shape = vec![8u64, 8, 8];
+        let data = ArrayData::I32((0..512i32).map(|k| (k * 17) ^ 0x12345).collect());
+        let auto_spec = spec_with(shape, "int32", "auto");
+        let (r1, p1) = array_block("v", &auto_spec, &data).unwrap();
+        let (r2, p2) = array_block("v", &auto_spec, &data).unwrap();
+        assert_eq!(r1.spec.get("codec"), r2.spec.get("codec"));
+        assert_eq!(p1.bytes.as_slice(), p2.bytes.as_slice());
+        assert_eq!(r1.digest, r2.digest);
+    }
+
+    #[test]
+    fn zstd_encode_is_byte_deterministic() {
+        // Direct byte-determinism check on the zstd path (independent of `auto`). Same input →
+        // same payload twice in a row.
+        let spec = spec_with(vec![16, 16, 16], "int16", "zstd");
+        let data = ArrayData::I16(
+            (0..16 * 16 * 16)
+                .map(|k| (k as i16).wrapping_mul(7))
+                .collect(),
+        );
+        let a = encode(&spec, &data).unwrap();
+        let b = encode(&spec, &data).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn array_block_pcodec_does_not_rewrite_codec() {
+        // Explicit `"pcodec"` must round-trip through `array_block` unchanged (regression guard
+        // against accidentally re-resolving non-auto codecs).
+        let spec = pcodec_spec(vec![4, 4, 4], "int16");
+        let data = ArrayData::I16((0..64).map(|k| k as i16).collect());
+        let (block_ref, _) = array_block("vol", &spec, &data).unwrap();
+        assert_eq!(
+            block_ref.spec.get("codec").and_then(|v| v.as_str()),
+            Some("pcodec")
+        );
+    }
+
+    #[test]
+    fn array_block_zstd_does_not_rewrite_codec() {
+        let spec = spec_with(vec![4, 4, 4], "int16", "zstd");
+        let data = ArrayData::I16((0..64).map(|k| k as i16).collect());
+        let (block_ref, payload) = array_block("vol", &spec, &data).unwrap();
+        assert_eq!(
+            block_ref.spec.get("codec").and_then(|v| v.as_str()),
+            Some("zstd")
+        );
+        // And the stored bytes decode back to the input — the decode path is codec-agnostic.
+        assert_eq!(decode(&spec, payload.bytes.as_slice()).unwrap(), data);
     }
 }
