@@ -20,6 +20,10 @@ pub enum BlockKind {
     Array,
     /// Columnar table (arrow/parquet). Events, spectra, ROIs.
     Table,
+    /// A `{hash, stats}` chunk-index over another block's sub-blocks (ADR-0028 §3) — an **additive**
+    /// companion block (per-chunk confirmation + pruning) that floats on top of the data block it
+    /// indexes without changing that block's digest.
+    ChunkIndex,
 }
 
 /// A reference to a block, as recorded in the manifest.

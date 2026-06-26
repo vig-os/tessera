@@ -7,6 +7,7 @@
 
 pub mod accumulate;
 pub mod array;
+pub mod chunk_index;
 pub mod conformance;
 pub mod container;
 pub mod range;
