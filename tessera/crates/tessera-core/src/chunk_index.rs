@@ -270,6 +270,76 @@ impl ChunkIndex {
     }
 }
 
+/// ADR-0028 §5 — the **fused streaming fold**: the committer's single serial pass that folds **both**
+/// the integrity hash (the MMR) and the rolled-up monoid stats up the tree as each leaf is appended, so a
+/// **live root** and a **live aggregate** advance per row-group without a second pass. It pairs the hash
+/// [`crate::hash::MerkleAccumulator`] (peaks binary-carry) with a parallel stat peak-carry keyed on the
+/// **same** leaf sequence, so the two stay in lockstep and the streamed result is **byte-identical to a
+/// batch [`ChunkIndex`]** over the same leaves (the determinism guarantee — the fold is push-ordered and
+/// reconciles with the sealed identity). Pure and order-faithful; no I/O — the streaming engine
+/// (`tessera-io`) drives it from the ordered committer.
+///
+/// Each appended leaf builds `popcount-carry(k)` interior `{hash, stats}` merges (the trailing-1-bits of
+/// the prior leaf count) — amortized O(1), worst-case O(log n). Trace for 4 leaves: L1→peak P0; L2 merges
+/// →P01; L3→peak P2; L4 merges →P23 then →P0123 (the root). The peaks are exactly the roots of the
+/// complete perfect subtrees (sizes = the set bits of the leaf count).
+#[derive(Debug, Default)]
+pub struct MerkleStatsAccumulator {
+    hash: crate::hash::MerkleAccumulator,
+    /// Stat peaks, one per complete perfect subtree — mirrors the hash peaks (each covers `2^k` leaves).
+    stat_peaks: Vec<ChunkStats>,
+    leaves: u64,
+}
+
+impl MerkleStatsAccumulator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append one leaf `{digest, stats}` (a per-chunk hash + its monoid stats), folding both up the tree.
+    /// The stat carry mirrors the MMR hash carry exactly (same merges on the same leaf count), so the
+    /// peaks stay in lockstep.
+    pub fn push(&mut self, digest: &str, stats: ChunkStats) {
+        self.hash.push(digest);
+        // binary-carry the stat peaks: merge equal-height peaks while the prior count's low bits are set.
+        let mut carry = stats;
+        let mut k = self.leaves;
+        while k & 1 == 1 {
+            let left = self
+                .stat_peaks
+                .pop()
+                .expect("a peak exists for each set bit");
+            carry = left.combine(&carry);
+            k >>= 1;
+        }
+        self.stat_peaks.push(carry);
+        self.leaves += 1;
+    }
+
+    /// The **live** integrity root over every leaf appended so far — identical to the sealed MMR root and
+    /// to [`ChunkIndex::root`] over the same leaves.
+    pub fn root(&self) -> String {
+        self.hash.root()
+    }
+
+    /// The **live** aggregate stats over every leaf so far — bag the stat peaks (monoid-combine),
+    /// matching [`ChunkIndex::aggregate`]. Order-independent: the stats monoid is commutative.
+    pub fn aggregate(&self) -> ChunkStats {
+        self.stat_peaks
+            .iter()
+            .fold(ChunkStats::identity(), |acc, p| acc.combine(p))
+    }
+
+    /// Number of leaves folded so far.
+    pub fn leaves(&self) -> u64 {
+        self.leaves
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.leaves == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +347,56 @@ mod tests {
 
     fn stats(vs: &[i64]) -> ChunkStats {
         ChunkStats::from_values(vs)
+    }
+
+    #[test]
+    fn fused_streaming_fold_matches_batch_for_root_and_aggregate() {
+        // ADR-0028 §5: streaming the leaves through MerkleStatsAccumulator must reconcile EXACTLY with a
+        // batch ChunkIndex over the same leaves — for BOTH the integrity root and the aggregate stats.
+        let leaves: Vec<(String, Vec<i64>)> = (0..13)
+            .map(|i| {
+                (
+                    digest(format!("chunk{i}").as_bytes()),
+                    vec![i, i * 2, -i, 100 - i],
+                )
+            })
+            .collect();
+
+        let mut batch = ChunkIndex::new();
+        let mut acc = MerkleStatsAccumulator::new();
+        assert!(acc.is_empty());
+        for (i, (d, vs)) in leaves.iter().enumerate() {
+            batch.push(d.clone(), vs);
+            acc.push(d, stats(vs));
+            // the live values advance per leaf and always equal a batch index over the prefix so far.
+            let prefix = {
+                let mut b = ChunkIndex::new();
+                for (pd, pvs) in &leaves[..=i] {
+                    b.push(pd.clone(), pvs);
+                }
+                b
+            };
+            assert_eq!(
+                acc.root(),
+                prefix.root(),
+                "live root after {} leaves",
+                i + 1
+            );
+            assert_eq!(
+                acc.aggregate(),
+                prefix.aggregate(),
+                "live aggregate after {} leaves",
+                i + 1
+            );
+        }
+        assert_eq!(acc.leaves(), 13);
+        // and the final streamed result equals the full batch.
+        assert_eq!(acc.root(), batch.root());
+        assert_eq!(acc.aggregate(), batch.aggregate());
+        // empty fold is the identity stats + the empty MMR root.
+        let empty = MerkleStatsAccumulator::new();
+        assert_eq!(empty.aggregate(), ChunkStats::identity());
+        assert_eq!(empty.root(), merkle_root(&[]));
     }
 
     #[test]

@@ -229,7 +229,7 @@ pub fn verify_inclusion(block_digest: &str, proof: &[ProofStep], root: &str) -> 
 ///
 /// This is the integrity core of the streaming write engine (ROADMAP P3 / S17): a crash leaves the
 /// store consistent up to the last committed watermark, and recovery replays to it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MerkleAccumulator {
     /// MMR peaks `(height, hash)`, low→high index = left→right (older→newer) subtrees.
     peaks: Vec<(u32, [u8; 32])>,
