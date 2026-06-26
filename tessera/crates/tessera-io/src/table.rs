@@ -11,6 +11,8 @@
 use futures::StreamExt;
 use tessera_core::block::table::TableSpec;
 use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
+use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
 use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::arrays::{ChunkedArray, PrimitiveArray, StructArray};
@@ -83,6 +85,27 @@ impl ColumnData {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The column's values as `i64` for chunk-statistics (ADR-0028 §3), if it is an integer column that
+    /// fits losslessly: `i1/i2/i4/i8`, `u1/u2/u4` always, and `u8` (u64) only when every value ≤
+    /// `i64::MAX` (a monotonic cast → `min`/`max` stay exact). Float columns return `None` (they need
+    /// canonical reduction before stats — ADR-0024).
+    pub fn as_i64(&self) -> Option<Vec<i64>> {
+        match self {
+            ColumnData::I8(v) => Some(v.iter().map(|&x| x as i64).collect()),
+            ColumnData::I16(v) => Some(v.iter().map(|&x| x as i64).collect()),
+            ColumnData::I32(v) => Some(v.iter().map(|&x| x as i64).collect()),
+            ColumnData::I64(v) => Some(v.clone()),
+            ColumnData::U8(v) => Some(v.iter().map(|&x| x as i64).collect()),
+            ColumnData::U16(v) => Some(v.iter().map(|&x| x as i64).collect()),
+            ColumnData::U32(v) => Some(v.iter().map(|&x| x as i64).collect()),
+            ColumnData::U64(v) => v
+                .iter()
+                .all(|&x| x <= i64::MAX as u64)
+                .then(|| v.iter().map(|&x| x as i64).collect()),
+            ColumnData::F32(_) | ColumnData::F64(_) => None,
+        }
     }
 
     /// Flatten the column to little-endian bytes for zero-copy reconstruction in another runtime —
@@ -484,6 +507,50 @@ pub fn decode_column(spec: &TableSpec, blob: &[u8], name: &str) -> Result<Column
     Ok(out)
 }
 
+/// Build the `{hash, stats}` chunk-index (ADR-0028 §3) for a table block, splitting on the **same**
+/// fixed [`ROWS_PER_GROUP`] row-groups [`encode`] uses. Each entry carries the row-group's content digest
+/// (BLAKE3 over the group's little-endian column bytes — recomputable from the decoded group, independent
+/// of the Vortex byte layout) and the chunk statistics of `stat_column` (which must be an integer column,
+/// see [`ColumnData::as_i64`]). Other columns still feed each group's digest; only the stats come from
+/// `stat_column`. `index.root()` is the block's sub-block Merkle root (ADR-0028 §1), and `index.prune()`
+/// skips row-groups a ranged read can't hit. Per #221-B, the *index* leaf may later be finer than
+/// `ROWS_PER_GROUP`; this first wiring uses the encoder's row-groups 1:1.
+pub fn table_chunk_index(
+    spec: &TableSpec,
+    data: &TableData,
+    stat_column: &str,
+) -> Result<ChunkIndex> {
+    validate(spec, data)?;
+    let stat_vals = data
+        .iter()
+        .find(|(name, _)| name == stat_column)
+        .ok_or_else(|| Error::Codec(format!("table has no column '{stat_column}'")))?
+        .1
+        .as_i64()
+        .ok_or_else(|| {
+            Error::Codec(format!(
+                "column '{stat_column}' is not an integer column for stats"
+            ))
+        })?;
+    let rows = data.first().map(|(_, c)| c.len()).unwrap_or(0);
+    let n_groups = rows.div_ceil(ROWS_PER_GROUP).max(1);
+    let mut idx = ChunkIndex::new();
+    for g in 0..n_groups {
+        let start = g * ROWS_PER_GROUP;
+        let end = ((g + 1) * ROWS_PER_GROUP).min(rows);
+        // group content digest = every column's LE bytes for [start, end), in column order.
+        let mut bytes = Vec::new();
+        for (_, col) in data.iter() {
+            bytes.extend_from_slice(&col.slice(start, end).to_le_bytes());
+        }
+        idx.push_entry(
+            digest(&bytes),
+            ChunkStats::from_values(&stat_vals[start..end]),
+        );
+    }
+    Ok(idx)
+}
+
 /// Encode a table block and produce both the digested [`BlockRef`] (digest over the real Vortex
 /// payload bytes) and the [`BlockPayload`] to pack.
 pub fn table_block(
@@ -651,6 +718,43 @@ mod tests {
             panic!()
         };
         assert_eq!(e.len(), rows);
+    }
+
+    #[test]
+    fn table_chunk_index_groups_stats_and_prunes() {
+        let rows = ROWS_PER_GROUP + 4242; // 2 row-groups (one full + a remainder)
+        let spec = TableSpec {
+            columns: vec![col("t", "u8"), col("e", "f4")],
+            rows: rows as u64,
+            row_index: Some("t".into()),
+        };
+        let data: TableData = vec![
+            ("t".into(), ColumnData::U64((0..rows as u64).collect())), // monotonic → prunable
+            (
+                "e".into(),
+                ColumnData::F32((0..rows).map(|k| (k % 7) as f32).collect()),
+            ),
+        ];
+        let idx = table_chunk_index(&spec, &data, "t").unwrap();
+        // one entry per encoder row-group
+        assert_eq!(idx.len(), rows.div_ceil(ROWS_PER_GROUP));
+        // stats roll up to the whole monotonic column [0, rows)
+        let agg = idx.aggregate();
+        assert_eq!(agg.count, rows as u64);
+        assert_eq!(agg.min, Some(0));
+        assert_eq!(agg.max, Some(rows as i64 - 1));
+        // 't' is sorted, so a low/high value range keeps only the first/last group
+        assert_eq!(idx.prune(0, 10), vec![0]);
+        let last = idx.len() - 1;
+        assert_eq!(idx.prune(rows as i64 - 1, rows as i64 - 1), vec![last]);
+        // root = the sub-block MMR over the per-group digests; deterministic
+        assert!(idx.root().starts_with("blake3:"));
+        assert_eq!(
+            table_chunk_index(&spec, &data, "t").unwrap().root(),
+            idx.root()
+        );
+        // a float column can't supply integer stats
+        assert!(table_chunk_index(&spec, &data, "e").is_err());
     }
 
     #[test]
