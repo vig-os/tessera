@@ -73,6 +73,33 @@ impl WorldFrame {
     pub fn is_nondegenerate(&self) -> bool {
         self.spacing().iter().all(|&s| s > 0.0)
     }
+
+    /// The voxel→world affine for multiscale pyramid **level `level`** (a `2^level` downsample),
+    /// **derived** from the base (level-0) affine — never stored per-level (ADR-0030 §3, SSoT; the
+    /// OME-Zarr per-level `coordinateTransformations`). A level-`L` voxel spans `2^L` base voxels and its
+    /// centre sits at that block's centroid, so the rotation/scale columns scale by `2^L` and the origin
+    /// shifts by `R · ((2^L − 1)/2)` along each axis. Level 0 returns the base frame unchanged.
+    pub fn at_level(&self, level: u32) -> WorldFrame {
+        let s = (1u64 << level) as f64;
+        let shift = (s - 1.0) / 2.0;
+        let a = &self.affine;
+        let mut out = [0.0f64; 12];
+        for row in 0..3 {
+            // scale the 3×3 rotation/scale columns by 2^L
+            for col in 0..3 {
+                out[row * 4 + col] = a[row * 4 + col] * s;
+            }
+            // origin: t + R · (shift, shift, shift) — the half-block-centre offset
+            out[row * 4 + 3] =
+                a[row * 4 + 3] + (a[row * 4] + a[row * 4 + 1] + a[row * 4 + 2]) * shift;
+        }
+        WorldFrame {
+            affine: out,
+            convention: self.convention.clone(),
+            unit: self.unit.clone(),
+            space: self.space.clone(),
+        }
+    }
 }
 
 /// Default axis names for a given rank: 3-D → `[z,y,x]`, 2-D → `[y,x]`, else `[dim0,dim1,…]`.
@@ -212,6 +239,34 @@ mod tests {
         bad.affine[0] = 0.0;
         assert_eq!(bad.spacing()[0], 0.0);
         assert!(!bad.is_nondegenerate());
+    }
+
+    #[test]
+    fn world_frame_at_level_derives_per_level_transform() {
+        let wf = WorldFrame {
+            affine: [
+                2.0, 0.0, 0.0, 10.0, //
+                0.0, 3.0, 0.0, 20.0, //
+                0.0, 0.0, 4.0, 30.0,
+            ],
+            convention: "LPS".into(),
+            unit: "mm".into(),
+            space: "patient".into(),
+        };
+        // level 0 is the base frame unchanged.
+        assert_eq!(wf.at_level(0).affine, wf.affine);
+        // level 1: spacing doubles; origin shifts by half a base voxel along each axis.
+        let l1 = wf.at_level(1);
+        assert_eq!(l1.spacing(), [4.0, 6.0, 8.0]);
+        assert_eq!(l1.affine[3], 10.0 + 2.0 * 0.5); // t0 + sx·0.5
+        assert_eq!(l1.affine[7], 20.0 + 3.0 * 0.5);
+        assert_eq!(l1.affine[11], 30.0 + 4.0 * 0.5);
+        // level 2: spacing ×4; shift = (4-1)/2 = 1.5 base voxels.
+        assert_eq!(wf.at_level(2).spacing(), [8.0, 12.0, 16.0]);
+        assert_eq!(wf.at_level(2).affine[3], 10.0 + 2.0 * 1.5);
+        // metadata preserved.
+        assert_eq!(l1.convention, "LPS");
+        assert_eq!(l1.space, "patient");
     }
 
     #[test]
