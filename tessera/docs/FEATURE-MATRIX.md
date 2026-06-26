@@ -40,6 +40,13 @@ Rust benches: `cargo bench -p tessera-io` (`benches/codec.rs`). Wall-clock floor
 (`array::tests::pcodec_compresses_smooth_int16_volume`). Python-spike numbers retained where the bench
 needs real CT/DICOM.
 
+**`.tsra` container tax vs the bare codec** (same 128³ int16, 8× 64³ chunks, same run — `tsra_vs_bare`):
+size = bare codec bytes + ~320–600 B zip + ~1 KB FAIR manifest (≪1% at scale); **write +0.7%** (zip
+STORE + blake3 seal); **read +11%** (the seal + per-block digest *verification* vanilla skips — the
+integrity it buys); **3-D ROI 32³-of-128³ ≈ 2.3× faster than full decode** (cubic chunks; only the
+intersecting chunk is read). A timed cross-*ecosystem* run (vs zarr-python/vortex-python on DUPLET
+data) is the remaining dedicated harness (#143).
+
 | Metric | Floor (don't regress) | Measured |
 |---|---|---|
 | Volume size (CT) | ≤ 0.80× zstd · ≤ 0.40× DICOM | 74.3 MB (0.79× / 0.29×) — spike |
