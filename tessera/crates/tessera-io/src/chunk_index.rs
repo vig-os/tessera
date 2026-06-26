@@ -36,6 +36,11 @@ pub fn chunk_index_block(data_name: &str, index: &ChunkIndex) -> Result<(BlockRe
         kind: BlockKind::ChunkIndex,
         digest: Some(dg),
         spec: serde_json::json!({
+            // ADR-0028 §4 derived-sidecar tag: this block is **regenerable** from the data block it
+            // indexes (via table_chunk_index / array_chunk_index), so it is `class: "derived"` with a
+            // versioned `recipe`. A consumer may drop + rebuild it; it is not canonical source data.
+            "class": "derived",
+            "recipe": "chunk_index@1",
             "indexes": data_name,        // the data block this is the chunk-index of
             "entries": index.len(),       // number of sub-block entries
             "root": index.root(),         // sub-block Merkle (MMR) root, ADR-0028 §1
@@ -64,9 +69,11 @@ mod tests {
         assert_eq!(br.kind, BlockKind::ChunkIndex);
         // digest is over the exact payload bytes
         assert_eq!(br.digest.as_deref(), Some(digest(&payload.bytes).as_str()));
-        // spec self-describes the index
+        // spec self-describes the index + carries the ADR-0028 §4 derived-sidecar tag
         assert_eq!(br.spec["indexes"], "volume");
         assert_eq!(br.spec["root"], idx.root());
+        assert_eq!(br.spec["class"], "derived");
+        assert_eq!(br.spec["recipe"], "chunk_index@1");
         // the payload reconstructs the index (same root + entries)
         let back = ChunkIndex::from_bytes(&payload.bytes).unwrap();
         assert_eq!(back.root(), idx.root());
