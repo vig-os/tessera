@@ -240,6 +240,22 @@ pub struct ConsistencyProof {
 
 /// Build a [`ConsistencyProof`] that the first `m` of the ordered `block_digests` form an append-only
 /// prefix of the whole list. `None` if `m > n`. `m == n` yields an empty `appended` (the trees are equal).
+///
+/// ```
+/// use tessera_core::hash::{digest, merkle_root, consistency_proof, verify_consistency};
+///
+/// // an earlier revision's 2 blocks, then a later revision that appends a 3rd.
+/// let blocks = [digest(b"a"), digest(b"b"), digest(b"c")];
+/// let old_root = merkle_root(&blocks[..2]);
+/// let new_root = merkle_root(&blocks);
+///
+/// // prove the old root is an append-only prefix of the new one.
+/// let proof = consistency_proof(&blocks, 2).unwrap();
+/// assert!(verify_consistency(&proof, &old_root, &new_root));
+///
+/// // a forged "old root" (history rewrite) is rejected.
+/// assert!(!verify_consistency(&proof, &merkle_root(&[digest(b"x")]), &new_root));
+/// ```
 pub fn consistency_proof(block_digests: &[String], m: usize) -> Option<ConsistencyProof> {
     if m > block_digests.len() {
         return None;
