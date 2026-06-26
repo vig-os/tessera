@@ -121,6 +121,44 @@ pub(crate) fn le_bytes<T: Copy, const N: usize>(v: &[T], f: fn(T) -> [u8; N]) ->
     out
 }
 
+/// Inverse of [`le_bytes`] — parse a little-endian byte buffer into a typed `Vec` (errors if the
+/// length isn't a multiple of the element width).
+pub(crate) fn from_le<T, const N: usize>(bytes: &[u8], f: fn([u8; N]) -> T) -> Result<Vec<T>> {
+    if !bytes.len().is_multiple_of(N) {
+        return Err(Error::Codec(format!(
+            "buffer of {} bytes is not a multiple of the {N}-byte element width",
+            bytes.len()
+        )));
+    }
+    Ok(bytes
+        .chunks_exact(N)
+        .map(|c| f(c.try_into().unwrap()))
+        .collect())
+}
+
+impl ArrayData {
+    /// Build an [`ArrayData`] from a little-endian buffer + numpy code (`i2/u4/f4/…`) — the inverse
+    /// of [`Self::to_le_bytes`] + [`Self::numpy_code`]. Used by writers that receive raw buffers
+    /// (e.g. the Python bindings packing a numpy array).
+    pub fn from_le_bytes(numpy_code: &str, bytes: &[u8]) -> Result<ArrayData> {
+        Ok(match numpy_code {
+            "i2" => ArrayData::I16(from_le(bytes, i16::from_le_bytes)?),
+            "i4" => ArrayData::I32(from_le(bytes, i32::from_le_bytes)?),
+            "i8" => ArrayData::I64(from_le(bytes, i64::from_le_bytes)?),
+            "u2" => ArrayData::U16(from_le(bytes, u16::from_le_bytes)?),
+            "u4" => ArrayData::U32(from_le(bytes, u32::from_le_bytes)?),
+            "u8" => ArrayData::U64(from_le(bytes, u64::from_le_bytes)?),
+            "f4" => ArrayData::F32(from_le(bytes, f32::from_le_bytes)?),
+            "f8" => ArrayData::F64(from_le(bytes, f64::from_le_bytes)?),
+            other => {
+                return Err(Error::Codec(format!(
+                    "unsupported array dtype code '{other}' (pcodec backend needs ≥16-bit: i2/i4/i8, u2/u4/u8, f4/f8)"
+                )))
+            }
+        })
+    }
+}
+
 fn ze(e: impl std::fmt::Display) -> Error {
     Error::Codec(e.to_string())
 }
@@ -363,6 +401,21 @@ mod tests {
             f32::from_le_bytes(chunks.next().unwrap().try_into().unwrap()),
             1.5
         );
+    }
+
+    #[test]
+    fn from_le_bytes_inverts_to_le_bytes() {
+        let cases = [
+            ArrayData::I16(vec![1, -2, 300]),
+            ArrayData::U32(vec![0, 7, 4_000_000_000]),
+            ArrayData::F64(vec![1.5, -0.0, 1e300]),
+        ];
+        for d in cases {
+            let back = ArrayData::from_le_bytes(d.numpy_code(), &d.to_le_bytes()).unwrap();
+            assert_eq!(back, d);
+        }
+        assert!(ArrayData::from_le_bytes("u1", &[1, 2, 3]).is_err()); // 8-bit out of pcodec scope
+        assert!(ArrayData::from_le_bytes("i2", &[1, 2, 3]).is_err()); // not a multiple of width
     }
 
     #[test]

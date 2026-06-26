@@ -67,4 +67,31 @@ try:
 except tessera.TesseraError:
     pass
 
-print(f"tessera-py smoke OK: {verified} corpus archives verified via the Python bindings")
+# write path: build a product from numpy, pack, read it back, assert bit-exact round-trip
+import tempfile  # noqa: E402
+
+vol = np.arange(2 * 3 * 4, dtype="<i2").reshape(2, 3, 4)
+idx = np.arange(5, dtype="<u4")
+en = np.array([0.5, 1.5, 2.5, 3.5, 4.5], dtype="<f4")
+
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "roundtrip.tsra"
+    b = tessera.Builder("recon", "rt", "py write roundtrip", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.add_table("events", [("idx", "u4", idx.tobytes()), ("en", "f4", en.tobytes())], "idx")
+    b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "PT"}')
+    b.add_source("ingested_from", "src.dat")
+    cid = b.pack(str(out))
+    assert cid.startswith("blake3:")
+
+    rr = tessera.open(str(out))
+    rr.verify()
+    buf, shape, code = rr.read_array("volume")
+    got = np.frombuffer(buf, "<" + code).reshape(tuple(shape))
+    assert np.array_equal(got, vol), "array write→read mismatch"
+    cols = {n: np.frombuffer(buf, "<" + code) for n, buf, code in rr.read_table("events")}
+    assert np.array_equal(cols["idx"], idx) and np.array_equal(cols["en"], en)
+    m = json.loads(rr.manifest_json())
+    assert m["sources"][0]["reference"] == "src.dat"
+
+print(f"tessera-py smoke OK: {verified} corpus archives verified + write→read roundtrip via the Python bindings")

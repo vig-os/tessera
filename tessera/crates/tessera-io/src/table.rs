@@ -101,6 +101,29 @@ impl ColumnData {
         }
     }
 
+    /// Build a [`ColumnData`] from a little-endian buffer + numpy code (`i1/i2/i4/i8`, `u1/u2/u4/u8`,
+    /// `f4/f8`) — the inverse of [`Self::to_le_bytes`] + [`Self::numpy_code`].
+    pub fn from_le_bytes(numpy_code: &str, bytes: &[u8]) -> Result<ColumnData> {
+        use crate::array::from_le;
+        Ok(match numpy_code {
+            "i1" => ColumnData::I8(bytes.iter().map(|&b| b as i8).collect()),
+            "i2" => ColumnData::I16(from_le(bytes, i16::from_le_bytes)?),
+            "i4" => ColumnData::I32(from_le(bytes, i32::from_le_bytes)?),
+            "i8" => ColumnData::I64(from_le(bytes, i64::from_le_bytes)?),
+            "u1" => ColumnData::U8(bytes.to_vec()),
+            "u2" => ColumnData::U16(from_le(bytes, u16::from_le_bytes)?),
+            "u4" => ColumnData::U32(from_le(bytes, u32::from_le_bytes)?),
+            "u8" => ColumnData::U64(from_le(bytes, u64::from_le_bytes)?),
+            "f4" => ColumnData::F32(from_le(bytes, f32::from_le_bytes)?),
+            "f8" => ColumnData::F64(from_le(bytes, f64::from_le_bytes)?),
+            other => {
+                return Err(Error::Codec(format!(
+                    "unsupported column dtype code '{other}'"
+                )))
+            }
+        })
+    }
+
     fn to_vortex(&self) -> ArrayRef {
         match self {
             ColumnData::I8(v) => Buffer::copy_from(v.as_slice()).into_array(),
@@ -367,6 +390,22 @@ mod tests {
             row_index: None,
         };
         (spec, data)
+    }
+
+    #[test]
+    fn column_from_le_bytes_inverts_to_le_bytes() {
+        let cases = [
+            ColumnData::I8(vec![-1, 0, 127]),
+            ColumnData::U8(vec![1, 2, 255]),
+            ColumnData::U16(vec![0, 513, 65535]),
+            ColumnData::F32(vec![0.5, -0.0, f32::INFINITY]),
+            ColumnData::I64(vec![-1, 1_000_003, i64::MIN]),
+        ];
+        for c in cases {
+            let back = ColumnData::from_le_bytes(c.numpy_code(), &c.to_le_bytes()).unwrap();
+            assert_eq!(back, c);
+        }
+        assert!(ColumnData::from_le_bytes("f4", &[0u8; 3]).is_err()); // not a multiple of width
     }
 
     #[test]

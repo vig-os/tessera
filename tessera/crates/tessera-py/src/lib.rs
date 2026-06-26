@@ -11,8 +11,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::path::PathBuf;
 use tessera_core::block::array::ArraySpec;
-use tessera_core::block::table::TableSpec;
+use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::ProductBuilder;
+use tessera_io::{ArrayData, ColumnData, TableData};
 
 create_exception!(
     tessera,
@@ -161,6 +163,125 @@ impl Reader {
     }
 }
 
+/// Builds a sealed `.tsra` from Python: add array/table blocks (from numpy buffers) + metadata +
+/// provenance, then `pack(path)`. The mirror of [`Reader`] — together they make `tessera` a
+/// round-trippable read+write library.
+#[pyclass(module = "tessera")]
+struct Builder {
+    inner: Option<ProductBuilder>,
+    payloads: Vec<tessera_io::BlockPayload>,
+}
+
+#[pymethods]
+impl Builder {
+    /// Start a product: `product` type, `name`, `description`, ISO-8601 `timestamp`.
+    #[new]
+    fn new(product: String, name: String, description: String, timestamp: String) -> Self {
+        Builder {
+            inner: Some(ProductBuilder::new(product, name, description, timestamp)),
+            payloads: Vec::new(),
+        }
+    }
+
+    /// Add an N-D **array** block from a little-endian C-order buffer (e.g.
+    /// `arr.astype(arr.dtype.newbyteorder("<")).tobytes()`), its `shape`, and the numpy `code`
+    /// (`i2/i4/i8`, `u2/u4/u8`, `f4/f8`).
+    fn add_array(&mut self, name: &str, code: &str, shape: Vec<u64>, data: &[u8]) -> PyResult<()> {
+        let arr = ArrayData::from_le_bytes(code, data).map_err(err)?;
+        let n: u64 = shape.iter().product();
+        if arr.len() as u64 != n {
+            return Err(TesseraError::new_err(format!(
+                "array '{name}': {} elements != shape product {n}",
+                arr.len()
+            )));
+        }
+        let mut spec = ArraySpec::new(shape, arr.dtype());
+        spec.codec = "pcodec".into(); // the array backend speaks pcodec (ArraySpec defaults to zstd)
+        let (block_ref, payload) =
+            tessera_io::array::array_block(name, &spec, &arr).map_err(err)?;
+        self.builder()?.add_block_ref(block_ref);
+        self.payloads.push(payload);
+        Ok(())
+    }
+
+    /// Add a **table** block from ordered `columns` of `(name, code, le_bytes)`. All columns must
+    /// have equal length. `row_index` (optional) names the O(1)-take index column.
+    #[pyo3(signature = (name, columns, row_index=None))]
+    fn add_table(
+        &mut self,
+        name: &str,
+        columns: Vec<(String, String, Vec<u8>)>,
+        row_index: Option<String>,
+    ) -> PyResult<()> {
+        let mut data: TableData = Vec::with_capacity(columns.len());
+        for (col, code, bytes) in &columns {
+            data.push((
+                col.clone(),
+                ColumnData::from_le_bytes(code, bytes).map_err(err)?,
+            ));
+        }
+        let rows = data.first().map(|(_, c)| c.len()).unwrap_or(0) as u64;
+        if let Some((bad, c)) = data.iter().find(|(_, c)| c.len() as u64 != rows) {
+            return Err(TesseraError::new_err(format!(
+                "table '{name}': column '{bad}' has {} rows, expected {rows}",
+                c.len()
+            )));
+        }
+        let cols = data
+            .iter()
+            .map(|(n, c)| Column {
+                name: n.clone(),
+                dtype: c.numpy_code().into(),
+                codec: None,
+            })
+            .collect();
+        let spec = TableSpec {
+            columns: cols,
+            rows,
+            row_index,
+        };
+        let (block_ref, payload) =
+            tessera_io::table::table_block(name, &spec, &data).map_err(err)?;
+        self.builder()?.add_block_ref(block_ref);
+        self.payloads.push(payload);
+        Ok(())
+    }
+
+    /// Set a schema metadata field; `value_json` is parsed as JSON.
+    fn set_field(&mut self, key: &str, value_json: &str) -> PyResult<()> {
+        let value: serde_json::Value = serde_json::from_str(value_json).map_err(err)?;
+        self.builder()?.with_field(key, value);
+        Ok(())
+    }
+
+    /// Record a provenance edge (`relation`, e.g. `"ingested_from"`, → `reference`).
+    fn add_source(&mut self, relation: &str, reference: &str) -> PyResult<()> {
+        self.builder()?
+            .add_source(tessera_core::provenance::Source::new(relation, reference));
+        Ok(())
+    }
+
+    /// Seal (compute the three hashes) and write the sealed `.tsra` to `path`. Returns the content
+    /// `id`. Consumes the builder — a second call raises `TesseraError`.
+    fn pack(&mut self, path: PathBuf) -> PyResult<String> {
+        let builder = self
+            .inner
+            .take()
+            .ok_or_else(|| TesseraError::new_err("builder already packed"))?;
+        let manifest = builder.seal().map_err(err)?;
+        tessera_io::pack(&manifest, &self.payloads, &path).map_err(err)?;
+        Ok(manifest.id)
+    }
+}
+
+impl Builder {
+    fn builder(&mut self) -> PyResult<&mut ProductBuilder> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| TesseraError::new_err("builder already packed"))
+    }
+}
+
 /// Open a sealed `.tsra` (convenience for `Reader(path)`).
 #[pyfunction]
 fn open(path: PathBuf) -> PyResult<Reader> {
@@ -178,6 +299,7 @@ fn tessera(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("TesseraError", m.py().get_type::<TesseraError>())?;
     m.add_class::<Reader>()?;
+    m.add_class::<Builder>()?;
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(verify, m)?)?;
     Ok(())
