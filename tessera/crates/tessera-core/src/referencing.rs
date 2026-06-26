@@ -240,13 +240,31 @@ impl Referenced {
         self
     }
 
-    /// Whether `frame` is drawn from the pinned [`CANONICAL_FRAMES`] vocabulary (or is an `"atlas:<id>"`
-    /// reference, or absent — an unframed value rescale is legal). The ADR-0032 promotion precondition
-    /// that frames stay interoperable codes rather than free text.
+    /// Builder: refine an `epoch` time frame with its named instant (ADR-0032 §4) — `epoch` →
+    /// `epoch:<instant>` (e.g. `injection`, `acquisition_start`, `unix`). An absolute instant = an
+    /// elapsed quantity **+** its epoch. No-op unless the frame is the bare `epoch` bucket.
+    pub fn with_epoch(mut self, instant: &str) -> Self {
+        if self.frame.as_deref() == Some("epoch") {
+            self.frame = Some(format!("epoch:{instant}"));
+        }
+        self
+    }
+
+    /// Whether `frame` is drawn from the pinned vocabulary (ADR-0032 §4): a bare bucket from
+    /// [`CANONICAL_FRAMES`], or a bucket **refined** with a `:<detail>` suffix mirroring the spatial
+    /// `atlas:<id>` convention — `atlas:<id>` (space), `epoch:<instant>` (`unix`/`acquisition_start`/
+    /// `injection`/…), `baseline:<name>` (`hounsfield`/`decay_corrected@<instant>` for intensity). A
+    /// bare bucket is the minimal valid frame; `None` (an unframed value rescale) is legal. The
+    /// promotion precondition that frames stay interoperable codes rather than free text.
     pub fn frame_is_canonical(&self) -> bool {
         match self.frame.as_deref() {
             None => true,
-            Some(f) => CANONICAL_FRAMES.contains(&f) || f.starts_with("atlas:"),
+            Some(f) => {
+                CANONICAL_FRAMES.contains(&f)
+                    || ["atlas:", "epoch:", "baseline:"]
+                        .iter()
+                        .any(|p| f.starts_with(p) && f.len() > p.len())
+            }
         }
     }
 
@@ -409,14 +427,44 @@ mod tests {
             space: "atlas:mni152".into(),
         };
         assert!(Referenced::from_world_frame(&wf).frame_is_canonical());
-        // free-text frames are rejected
-        let bogus = Referenced {
-            transform: Transform::Identity,
-            unit: None,
-            vocabulary: None,
-            frame: Some("whatever".into()),
-        };
-        assert!(!bogus.frame_is_canonical());
+        // refined frames (the §4 `:<detail>` convention) are pinned too.
+        assert!(Referenced::time_regular(0.0, 30.0)
+            .with_epoch("injection")
+            .frame_is_canonical());
+        for refined in [
+            "epoch:acquisition_start",
+            "baseline:hounsfield",
+            "baseline:decay_corrected@scan",
+        ] {
+            let r = Referenced {
+                transform: Transform::Identity,
+                unit: None,
+                vocabulary: None,
+                frame: Some(refined.into()),
+            };
+            assert!(
+                r.frame_is_canonical(),
+                "{refined} is a pinned refined frame"
+            );
+        }
+        // the named instant rides the frame string; the bare prefix with no detail is NOT valid.
+        assert_eq!(
+            Referenced::time_regular(0.0, 30.0)
+                .with_epoch("injection")
+                .frame
+                .as_deref(),
+            Some("epoch:injection")
+        );
+        // free-text frames (and bare prefixes) are rejected
+        for bad in ["whatever", "epoch:", "atlas:"] {
+            let r = Referenced {
+                transform: Transform::Identity,
+                unit: None,
+                vocabulary: None,
+                frame: Some(bad.into()),
+            };
+            assert!(!r.frame_is_canonical(), "{bad} must be rejected");
+        }
     }
 
     #[test]
@@ -461,6 +509,23 @@ mod tests {
                 .apply_scalar(0.0),
             Some(5.0)
         );
+    }
+
+    #[test]
+    fn wall_clock_and_elapsed_time_are_kept_apart() {
+        // ADR-0032 §6: elapsed/relative time is a quantity on a monotonic scale (frame `epoch`, unit
+        // `s`); wall-clock absolute time is a SEPARATE RFC 3339 string in metadata (Manifest.timestamp).
+        // A bare elapsed descriptor is RELATIVE — it becomes an absolute instant only paired with an epoch.
+        let elapsed = Referenced::time_regular(0.0, 30.0);
+        assert_eq!(elapsed.unit.as_deref(), Some("s"));
+        assert_eq!(elapsed.frame.as_deref(), Some("epoch")); // relative — no named instant yet
+        let absolute = elapsed.clone().with_epoch("acquisition_start");
+        assert_eq!(absolute.frame.as_deref(), Some("epoch:acquisition_start"));
+        // wall-clock is NOT a descriptor — it is an RFC 3339 string (the shape stored in metadata).
+        let wall_clock = "2024-01-01T00:00:00Z";
+        assert!(wall_clock.contains('T') && wall_clock.ends_with('Z'));
+        // the two representations never collapse into each other.
+        assert!(elapsed.frame.as_deref() != Some(wall_clock));
     }
 
     #[test]

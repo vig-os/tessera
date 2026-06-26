@@ -58,6 +58,15 @@ Generalises ADR-0030's `space`. It answers "what does coordinate 0 / value 0 *me
 A `frame` without a transform is just a label; a transform without a frame is a relative quantity. Both
 optional, composable.
 
+**Encoding (as-built).** A `frame` is a **bucket** from the pinned set `{physical, epoch, patient,
+scanner, aligned}` (`CANONICAL_FRAMES`), optionally **refined** with a `:<detail>` suffix mirroring the
+spatial `atlas:<id>` convention: `epoch:<instant>` (`unix`/`acquisition_start`/`injection`/…),
+`baseline:<name>` (`hounsfield`, `decay_corrected@<instant>`), `atlas:<id>` (space). The bare bucket is
+the minimal valid frame; the specific named instant rides the suffix (and, for PET, is **also** recorded
+as the `decay_correction_reference` metadata field on the `dynamic_pet` schema, so a reader has it
+without parsing the frame string). `Referenced::frame_is_canonical()` enforces this vocabulary; the
+intensity bucket is spelled `physical` (a `baseline:` suffix names the specific zero).
+
 ### 5. Instances (the whole point — no bespoke per-domain fields)
 | domain | transform | unit | frame |
 |---|---|---|---|

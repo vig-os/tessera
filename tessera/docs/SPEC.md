@@ -150,6 +150,46 @@ optional `row_index`.
 
 A reader MAY project a subset of columns or random-`take` rows; the format supports O(1) random access.
 
+## 5c. Referenced coordinates & quantities (ADR-0032)
+How a stored index or sample value maps to a *physical* coordinate or quantity is described by **one**
+optional descriptor — `referencing = (transform, unit, frame)` — never by bespoke per-domain fields.
+It is **optional → feature-by-presence**: no descriptor means index/raw space (a sinogram axis, a
+unitless count), not "unknown". The descriptor is **meaning-bearing**, so it lives in the manifest under
+`manifest_hash`; the stored bytes stay raw and lossless (the transform is applied **downstream at read**,
+store-don't-compute).
+
+- **`transform`** — a closed, self-describing (`kind`-tagged) taxonomy, the case chosen by an axis's
+  *coupling* and *regularity*, not its position:
+  - `identity` — the index *is* the coordinate.
+  - `affine_1d` — `physical = scale·stored + offset` (intensity rescale HU/Bq·mL⁻¹, a regular time axis,
+    regular bins, integer-tick→seconds).
+  - `affine_nd` — a coupled `dims × (dims+1)` row-major matrix `[R | t]` (the spatial voxel→world affine
+    of §5a's `world_frame`; implicit last row `[0…0 1]`).
+  - `lookup` — explicit per-index values (irregular bins/b-values/PET frame mid-times).
+
+  `affine_1d` and `affine_nd` are **one operator at different rank** — a scalar rescale is the 1-D case
+  of the spatial matrix; the format implements affine-apply once.
+- **`unit`** — a **UCUM** code (`mm`, `s`, `Bq/mL`, `keV`, `1`); the dimension is derivable. A
+  `vocabulary` escape (fd5 `_vocabulary`/`_code`) carries a non-UCUM domain code. The validated UCUM
+  subset is pinned (`CANONICAL_UNITS`); the format stores the code and runs **no** units engine.
+- **`frame`** — the named reference for the origin/zero, from the pinned vocabulary (`CANONICAL_FRAMES`)
+  optionally refined with a `:<detail>` suffix: spatial `patient | scanner | aligned | atlas:<id>`
+  (+ LPS convention, §5a); temporal `epoch` / `epoch:<instant>` (`unix`/`acquisition_start`/`injection`);
+  intensity `physical` / `baseline:<name>` (`hounsfield`, `decay_corrected@<instant>`).
+- **Instances** — spatial geometry = `affine_nd`/`mm`/`space`; regular time = `affine_1d`/`s`/`epoch`;
+  irregular time or event times = `lookup`/`s`/`epoch`; intensity = `affine_1d`/UCUM/baseline; parametric
+  = `affine_1d`|`lookup`/UCUM/named. Quantities needing *other* data (SUV, ADC) are **derived products**,
+  not descriptors.
+- **Time split (#220).** Wall-clock absolute time (acquisition datetime, provenance) is a **UTC RFC 3339**
+  string in metadata; elapsed/relative time (durations, frame offsets, event times) is a **quantity on a
+  monotonic scale** (`affine_1d`/`lookup`, unit `s`, an `epoch` frame). High-rate event timestamps are
+  **integer ticks + scale** (`tick→s`), lossless and compact — never floats. An absolute instant = an
+  elapsed quantity **+** its `epoch`.
+- **Placement.** A per-**value** descriptor and per-**axis** descriptors attach to the array spec (the
+  value/spatial ones are *derived* from §5a's `rescale_*`/`world_frame` — single source of truth, not
+  duplicated; per-axis descriptors are stored explicitly). All are serialized inside the block spec, so
+  they are covered by `manifest_hash` and deterministic (`f64`/`int+scale`/canonical RFC 3339).
+
 ## 6. Container `.tsra`
 A ZIP archive (zip64). Entries, in order:
 1. **`mimetype`** — STORED (uncompressed), first entry, content exactly `application/vnd.tessera`
