@@ -587,6 +587,31 @@ pub fn table_block(
     Ok((block_ref, BlockPayload::new(name, payload)))
 }
 
+/// A committed block: its manifest reference paired with its payload bytes.
+type EncodedBlock = (BlockRef, BlockPayload);
+
+/// Fused table block emit (ADR-0028 §5): encode the table block **and** build its `{hash, stats}`
+/// chunk-index sidecar over `stat_column` in one call — the table counterpart to
+/// [`crate::array::array_block_with_index`]. The sidecar is built only when `stat_column` names an
+/// **integer** column present in the data (else `None`: the row-group digests still roll up through the
+/// data block, but there are no prunable stats). Real encode/index errors propagate.
+pub fn table_block_with_index(
+    name: &str,
+    spec: &TableSpec,
+    data: &TableData,
+    stat_column: Option<&str>,
+) -> Result<(EncodedBlock, Option<EncodedBlock>)> {
+    let block = table_block(name, spec, data)?;
+    let sidecar = match stat_column {
+        Some(col) if data.iter().any(|(n, c)| n == col && c.as_i64().is_some()) => {
+            let index = table_chunk_index(spec, data, col)?;
+            Some(crate::chunk_index::chunk_index_block(name, &index)?)
+        }
+        _ => None, // no integer stat column → no prunable-stats sidecar (ADR-0028 §3 integer core)
+    };
+    Ok((block, sidecar))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,6 +676,34 @@ mod tests {
             row_index: None,
         };
         (spec, data)
+    }
+
+    #[test]
+    fn table_block_with_index_emits_block_plus_optional_sidecar() {
+        // ADR-0028 §5 fused emit (table counterpart): data block + optional chunk-index sidecar.
+        let (spec, data) = all_dtype_table(10);
+        // an integer stat column → block + sidecar; the sidecar == the separate composition.
+        let ((blk, _), sidecar) = table_block_with_index("t", &spec, &data, Some("i8")).unwrap();
+        let (blk_ref, _) = table_block("t", &spec, &data).unwrap();
+        assert_eq!(blk.digest, blk_ref.digest);
+        let (scar, _) = sidecar.expect("integer stat column yields a sidecar");
+        let idx = table_chunk_index(&spec, &data, "i8").unwrap();
+        let (expect, _) = crate::chunk_index::chunk_index_block("t", &idx).unwrap();
+        assert_eq!(scar.digest, expect.digest);
+        assert_eq!(scar.name, expect.name);
+        // None, a float column, or an absent column → no prunable-stats sidecar.
+        assert!(table_block_with_index("t", &spec, &data, None)
+            .unwrap()
+            .1
+            .is_none());
+        assert!(table_block_with_index("t", &spec, &data, Some("f8"))
+            .unwrap()
+            .1
+            .is_none());
+        assert!(table_block_with_index("t", &spec, &data, Some("nope"))
+            .unwrap()
+            .1
+            .is_none());
     }
 
     #[test]
