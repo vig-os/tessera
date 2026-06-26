@@ -46,6 +46,13 @@ for f in files:
             buf, shape, code = r.read_array(b["name"])
             arr = np.frombuffer(buf, "<" + code).reshape(tuple(shape))
             assert arr.size == functools.reduce(operator.mul, shape, 1)
+            # ROI sub-cube must equal the full array's corresponding slice
+            if all(d >= 2 for d in shape):
+                half = [max(1, d // 2) for d in shape]
+                sbuf, sshape, scode = r.read_array_subset(b["name"], [0] * len(shape), half)
+                sub = np.frombuffer(sbuf, "<" + scode).reshape(tuple(sshape))
+                expected = arr[tuple(slice(0, h) for h in half)]
+                assert np.array_equal(sub, expected), f"{f.name}: ROI subset mismatch"
         elif b["kind"] == "table":
             cols = r.read_table(b["name"])
             assert cols, f"{f.name}: empty table {b['name']}"

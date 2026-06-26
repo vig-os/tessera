@@ -17,6 +17,10 @@ r.verify()                               # full pass: seal + every block digest
 buf, shape, code = r.read_array("volume")
 vol = np.frombuffer(buf, "<" + code).reshape(shape)
 
+# or a 3-D ROI sub-cube — only the intersecting 64³ chunks are read (7–26× faster)
+buf, shape, code = r.read_array_subset("volume", origin=[0, 0, 0], shape=[64, 64, 64])
+roi = np.frombuffer(buf, "<" + code).reshape(shape)
+
 # decode a table block, column by column
 cols = {name: np.frombuffer(buf, "<" + code)
         for name, buf, code in r.read_table("events")}
