@@ -100,6 +100,26 @@ impl WorldFrame {
             space: self.space.clone(),
         }
     }
+
+    /// The voxel→world frame for a **sub-array / crop** whose first voxel sits at base-voxel `offset`
+    /// (a ROI or `decode_subset` region): the rotation/scale is unchanged (same spacing/orientation),
+    /// the origin re-anchors to `t + R · offset` so the cropped region keeps the parent geometry
+    /// (ADR-0030 — a crop is the same frame, just relocated). Counterpart to [`Self::at_level`].
+    pub fn at_offset(&self, offset: [u64; 3]) -> WorldFrame {
+        let a = &self.affine;
+        let o = [offset[0] as f64, offset[1] as f64, offset[2] as f64];
+        let mut out = *a;
+        for row in 0..3 {
+            out[row * 4 + 3] =
+                a[row * 4 + 3] + a[row * 4] * o[0] + a[row * 4 + 1] * o[1] + a[row * 4 + 2] * o[2];
+        }
+        WorldFrame {
+            affine: out,
+            convention: self.convention.clone(),
+            unit: self.unit.clone(),
+            space: self.space.clone(),
+        }
+    }
 }
 
 /// Default axis names for a given rank: 3-D → `[z,y,x]`, 2-D → `[y,x]`, else `[dim0,dim1,…]`.
@@ -282,6 +302,27 @@ mod tests {
         bad.affine[0] = 0.0;
         assert_eq!(bad.spacing()[0], 0.0);
         assert!(!bad.is_nondegenerate());
+    }
+
+    #[test]
+    fn world_frame_at_offset_re_anchors_a_crop() {
+        let wf = WorldFrame {
+            affine: [
+                2.0, 0.0, 0.0, 10.0, //
+                0.0, 3.0, 0.0, 20.0, //
+                0.0, 0.0, 4.0, 30.0,
+            ],
+            convention: "LPS".into(),
+            unit: "mm".into(),
+            space: "patient".into(),
+        };
+        // crop origin at voxel (2,0,0): origin shifts by R·(2,0,0) = (4,0,0) mm; spacing unchanged.
+        let sub = wf.at_offset([2, 0, 0]);
+        assert_eq!(sub.affine[3], 10.0 + 2.0 * 2.0); // t0 + sx·2 = 14
+        assert_eq!(sub.affine[7], 20.0); // y origin unchanged
+        assert_eq!(sub.spacing(), [2.0, 3.0, 4.0]);
+        // zero offset is a no-op.
+        assert_eq!(wf.at_offset([0, 0, 0]).affine, wf.affine);
     }
 
     #[test]
