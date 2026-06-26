@@ -36,6 +36,19 @@ enum Cmd {
         #[command(subcommand)]
         src: IngestSrc,
     },
+    /// Emit a FAIR discovery record for a `.tsra` (prints JSON to stdout).
+    Export {
+        #[command(subcommand)]
+        fmt: ExportFmt,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExportFmt {
+    /// RO-Crate metadata descriptor (`ro-crate-metadata.json` shape).
+    RoCrate { file: PathBuf },
+    /// DataCite metadata record (for DOI minting / InvenioRDM).
+    Datacite { file: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -161,6 +174,21 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             Ok(())
         }
         Cmd::Ingest { src } => run_ingest(src),
+        Cmd::Export { fmt } => {
+            let record = match fmt {
+                ExportFmt::RoCrate { file } => {
+                    tessera_core::export::ro_crate(Reader::open(&file)?.manifest())
+                }
+                ExportFmt::Datacite { file } => {
+                    tessera_core::export::datacite(Reader::open(&file)?.manifest())
+                }
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&record).map_err(tessera_core::Error::from)?
+            );
+            Ok(())
+        }
     }
 }
 
@@ -317,5 +345,20 @@ mod tests {
         let r = Reader::open(&out).unwrap();
         assert_eq!(r.manifest().product, "listmode");
         assert_eq!(r.manifest().sources.len(), 1);
+    }
+
+    #[test]
+    fn export_ro_crate_and_datacite_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let tsra = dir.path().join("p.tsra");
+        sample_tsra(&tsra);
+        run(Cmd::Export {
+            fmt: ExportFmt::RoCrate { file: tsra.clone() },
+        })
+        .unwrap();
+        run(Cmd::Export {
+            fmt: ExportFmt::Datacite { file: tsra },
+        })
+        .unwrap();
     }
 }
