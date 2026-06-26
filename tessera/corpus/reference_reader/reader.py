@@ -10,8 +10,8 @@ Spec notes used here (only):
       manifest.json (any valid JSON),
       blocks/<name>... (one per block, payload bytes).
   - Hashing: digest(b) = "blake3:" + hex(blake3(b))    (256-bit, lowercase)
-  - merkle_root(digests) = "blake3:" + hex(blake3(concat utf-8(d_i)))
-    Empty list hashes the empty input.
+  - merkle_root(digests) = the Merkle Mountain Range (MMR) root, domain-separated
+    leaf(d)=blake3(0x00++utf8(d)) / node(l,r)=blake3(0x01++l++r); empty = blake3(b"").
   - All hashing inputs derived from JSON are RFC 8785 (JCS) canonical bytes.
   - id            = digest(JCS(id_inputs))
   - content_hash  = merkle_root([block.digest for block in manifest.blocks])
@@ -42,17 +42,37 @@ def digest(b: bytes) -> str:
     return "blake3:" + blake3.blake3(b).hexdigest()
 
 
+def _leaf_hash(d: str) -> bytes:
+    """Domain-separated leaf: blake3(0x00 ++ utf8(d))."""
+    return blake3.blake3(b"\x00" + d.encode("utf-8")).digest()
+
+
+def _node_hash(left: bytes, right: bytes) -> bytes:
+    """Domain-separated interior node: blake3(0x01 ++ left ++ right)."""
+    return blake3.blake3(b"\x01" + left + right).digest()
+
+
 def merkle_root(digest_strings: list[str]) -> str:
     """
-    merkle_root over an ordered list of digest strings d[0..n]:
-        "blake3:" + hex(blake3(d[0] ++ d[1] ++ ... ++ d[n-1]))
-    where each d[i] is hashed as its UTF-8 string bytes, concatenated in order.
-    The empty list hashes the empty input.
+    Product content_hash = the Merkle Mountain Range (MMR) root over the ordered block
+    digest strings (ADR-0028). Leaves and interior nodes are domain-separated (see helpers).
+    Leaves fold into a list of `peaks` (perfect-subtree roots) on a binary carry; the root
+    "bags" the peaks right-to-left with node(). A single leaf returns its leaf hash; the empty
+    product returns blake3(b"") — identical to the Rust `tessera_core::hash::merkle_root`.
     """
-    h = blake3.blake3()
+    peaks: list[tuple[int, bytes]] = []  # (height, hash), left -> right (older -> newer)
     for d in digest_strings:
-        h.update(d.encode("utf-8"))
-    return "blake3:" + h.hexdigest()
+        node = (0, _leaf_hash(d))
+        while peaks and peaks[-1][0] == node[0]:
+            _, left = peaks.pop()
+            node = (node[0] + 1, _node_hash(left, node[1]))
+        peaks.append(node)
+    if not peaks:
+        return "blake3:" + blake3.blake3(b"").hexdigest()
+    acc = peaks[-1][1]
+    for _, p in reversed(peaks[:-1]):
+        acc = _node_hash(p, acc)
+    return "blake3:" + acc.hex()
 
 
 def jcs_bytes(obj: Any) -> bytes:

@@ -4,6 +4,12 @@ Status: **Proposed** (2026-06-26) · Tracks `#215` · **Supersedes** the flat-li
 ADR-0020 · **Absorbs** ADR-0027 (sub-block Merkle + chunk-index) · Rides ADR-0026 (streaming
 compaction). A deliberate **pre-1.0 (v0.2)** identity revision.
 
+**Implementation status:** §1 recursive node-hash + §2 MMR/incremental root **DONE** (2026-06-26,
+`tessera_core::hash` — domain-separated `0x00`/`0x01`, peaks-carry; `content_hash` is the MMR root;
+corpus + SPEC §3 + pure-Python reference reader regenerated; conformance 3/3, reference reader 6/6).
+**Pending** (keeps this ADR Proposed): the `{hash, stats}` chunk-index block (§3, was ADR-0027),
+inclusion/consistency proofs, the multiscale pyramid, derived sidecars, and the fused streaming pass.
+
 ## Context
 Tessera currently has two *separate* hierarchies that should be one. The block-level integrity is a
 **flat list** — `content_hash = blake3(concat(block_digests))`, one level, no tree — while ADR-0027

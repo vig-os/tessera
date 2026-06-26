@@ -21,9 +21,20 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
 ## 3. Hashes
 - Algorithm: **BLAKE3**, 256-bit, output as lowercase hex with the prefix `blake3:`.
   `digest(bytes) = "blake3:" + hex(blake3(bytes))`.
-- **Merkle root** over an *ordered* list of digest strings `d[0..n]`:
-  `merkle_root = "blake3:" + hex(blake3(d[0] ++ d[1] ++ … ++ d[n-1]))` where each `d[i]` is hashed as
-  its UTF-8 string bytes, concatenated in order. The empty list hashes the empty input.
+- **Merkle root** over an *ordered* list of digest strings `d[0..n]` is the **Merkle Mountain Range
+  (MMR)** root, with **domain-separated** leaves and interior nodes:
+  - `leaf(d) = blake3(0x00 ++ utf8(d))` — one prefix byte `0x00`, then the **full digest string** `d`'s
+    UTF-8 bytes. Note `d` is the prefixed string `"blake3:<hex>"` *as text* (e.g. `"blake3:9f86d0…"`),
+    **not** the raw 32 decoded hash bytes — hash the string verbatim.
+  - `node(l, r) = blake3(0x01 ++ l ++ r)` — prefix byte `0x01`, then the two 32-byte child hashes
+    (raw `blake3` output bytes, not hex).
+  - Build: fold each leaf into a list of **peaks** (roots of complete perfect subtrees). To append a
+    leaf, make a height-0 node; while the last peak has the *same* height, pop it (the left sibling) and
+    replace with `node(left, new)` at height+1. The **root** "bags" the peaks right-to-left:
+    `acc = peaks[-1]`, then `acc = node(p, acc)` for each remaining peak `p` from right to left.
+  - A single leaf returns its `leaf(d)`; the empty list returns `blake3("")` (blake3 of zero input bytes).
+  - Output is `"blake3:" + hex(root)`. (This is ADR-0028's recursive MMR root; it supersedes the earlier
+    flat `blake3(d[0] ++ … ++ d[n-1])` construction — a v0.2 identity revision.)
 
 ## 4. Identity model (three hashes)
 - **`id`** (logical identity): `id = digest(JCS(id_inputs))`, where `id_inputs` is a JSON object of

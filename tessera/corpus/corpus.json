@@ -3,36 +3,36 @@
     "name": "recon_int16",
     "product": "recon",
     "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
-    "content_hash": "blake3:c23bd285d5bd7d2a82423be06825206ffa0a45795aefdc6148c98c377c22e66b",
-    "manifest_hash": "blake3:6310702b438a96bb0d4a02f5f2655f94ae13cd454da26cf4b81d1368803b43af"
+    "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
+    "manifest_hash": "blake3:7c9f7bd9feaff32279c0c5bc582d8913e52fd2a022c4a38f00c4f588f6066e57"
   },
   {
     "name": "recon_float32_mumap",
     "product": "recon",
     "id": "blake3:529bb3fc4cb032cbb45917558b52fb6b81448a1cb574b3282336ce9a39b84149",
-    "content_hash": "blake3:227adcead6c439827ce7740ab2bfa48fdfbb6e0b2181081566722e1911852043",
-    "manifest_hash": "blake3:cf088ad5f3f1038ab0a3d7b171b30e84086396831e45f3dbb440d64329b5e193"
+    "content_hash": "blake3:ea3843267ea4bc54cb38d1090918da34ab9f37dffff2ce1e61e3ec478e479d9d",
+    "manifest_hash": "blake3:2c3ba3d9a5e1555a8c2c96a5b9e257adadffada6209e2295338d476f07c82ea0"
   },
   {
     "name": "listmode_events",
     "product": "listmode",
     "id": "blake3:55b8eac168d668c6e15ab3bdd1d78c0494384dbc6941ad48f9ee7237cf6e9457",
-    "content_hash": "blake3:3ae4f862f9b7429682ed7495419e478113a233406ebd40f3e3c58f0a149fa0d4",
-    "manifest_hash": "blake3:73377e8102d8036101e6acba490e38a822d2945e5e9ca70fe1fa15614c1570a5"
+    "content_hash": "blake3:b7b6eea7d59629c1275a7de0080525bf92d7f034facb061b673a57e9d431e9ac",
+    "manifest_hash": "blake3:7eb5c91f208f67cf6cdf871f30a99946fdb62b03120c85680b0c822068d5f6c2"
   },
   {
     "name": "spectrum_lifetime",
     "product": "spectrum",
     "id": "blake3:765aa27dcf8732157230f947de95866cc88f720691a30ca8dba03ccd81964f0e",
-    "content_hash": "blake3:6914c2a16f227095fb1c81ed8ce8d71c5b37f8684b0bae83e7ef9aa1053b75e6",
-    "manifest_hash": "blake3:7673b63daf4af72282f45efac2937fc0a9b22418ecaf384a1aae148ccc9b1613"
+    "content_hash": "blake3:0ea11b7ec858fb44aa4a111b4bc5c466f45ff7def961aad07901a21dfba4a60a",
+    "manifest_hash": "blake3:79ce9bc94e06554fb7d239b135539ddd018c499fa2eae70d38a9ba448ea5b6b7"
   },
   {
     "name": "multiblock_study",
     "product": "recon",
     "id": "blake3:216739168370b68f066c955f6c613839f5a8f2c62c4aad5af656c23909f55a2a",
-    "content_hash": "blake3:a719af95f743a17b04659d18eb3405d711aeb028fd4429fb05a019b72a29fe9e",
-    "manifest_hash": "blake3:2855152c41872bf01961726804ae2aff66003baabbb178eac9dd4a29bb075fa3"
+    "content_hash": "blake3:3b5d271b91ed2793445b561a709e38a469c7a73bdcd8ef8331e41ad7639498b8",
+    "manifest_hash": "blake3:1958ca6baf55c7b718a48d332c34f758b1195b81f72f2e5e725926638223a599"
   },
   {
     "name": "empty_no_blocks",

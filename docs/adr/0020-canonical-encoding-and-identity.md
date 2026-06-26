@@ -65,5 +65,10 @@ construction** with a **recursive MMR** root (a node-hash applied at every level
 history tree). That is a deliberate **v0.2 identity revision** — `content_hash` values change and the
 golden corpus regenerates with it. Scope of the supersession is **only the `content_hash` construction**:
 this ADR's `id` (logical identity), `manifest_hash` (seal), JCS canonicalisation, BlockRef/Manifest
-schema, and error taxonomy are **unaffected and remain Accepted**. The status change lands **when ADR-0028
-is implemented**, not before — until then the flat root is the as-built truth. See ADR-0028 §1/Consequences.
+schema, and error taxonomy are **unaffected and remain Accepted**.
+
+**As-built (2026-06-26):** the MMR root (ADR-0028 §1–2) is now implemented in `tessera_core::hash`
+(domain-separated leaf `0x00` / node `0x01`, peaks-carry, bag-the-peaks; incremental == batch). The flat
+construction is **superseded** — `content_hash` is the recursive MMR root, and the golden corpus, SPEC §3,
+and the pure-Python reference reader were regenerated to it (conformance 3/3 + reference reader 6/6).
+(ADR-0028 remains **Proposed** for its further parts — chunk-index, pyramid, sidecars, fused pass.)
