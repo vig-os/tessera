@@ -57,3 +57,13 @@ name the field, expected, and actual values. Re-serializing a parsed manifest th
 - The whole manifest is now tamper-evident (closes the metadata/sources gap).
 - Pre-1.0, so changing the `id`/seal derivation now (no persisted products yet) is free.
 - `serde_jcs` is the one new core dependency (pure Rust; `itoa`/`ryu` for canonical numbers).
+
+## Reconciliation — `content_hash` construction superseded by ADR-0028
+The `content_hash` defined here is the **single-level / flat** root over the ordered block digests
+(`blake3` of the concatenated digests — one level, no interior tree). **ADR-0028 supersedes this
+construction** with a **recursive MMR** root (a node-hash applied at every level + an append-friendly
+history tree). That is a deliberate **v0.2 identity revision** — `content_hash` values change and the
+golden corpus regenerates with it. Scope of the supersession is **only the `content_hash` construction**:
+this ADR's `id` (logical identity), `manifest_hash` (seal), JCS canonicalisation, BlockRef/Manifest
+schema, and error taxonomy are **unaffected and remain Accepted**. The status change lands **when ADR-0028
+is implemented**, not before — until then the flat root is the as-built truth. See ADR-0028 §1/Consequences.

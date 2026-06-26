@@ -55,3 +55,12 @@ as one byte string. So we must decide how a multi-key Zarr store maps onto one b
   toolchain added. `Error::Codec` added to the taxonomy for backend failures.
 - Table blocks remain spec-JSON stubs until the Vortex backend (S5 part 2); their goldens will
   regenerate then.
+
+## Reconciliation — block-level digest refined by ADR-0028 sub-block Merkle
+This ADR hashes the array block as **one digest over the whole serialized blob** (`add_block_ref`). That
+single digest is **not contradicted** by ADR-0028 — it is **refined**: 0028 adds an *optional, opt-in*
+**sub-block Merkle** + `{hash, stats}` chunk-index over the block's chunks (per-chunk confirmation +
+pruning), of which the whole-block digest is the **root**. A block without a chunk-index keeps exactly
+this single-digest behaviour (additive, backward-compatible). The deterministic single-blob **payload
+encoding** here (sorted-key framing, pcodec, cubic chunks) is unchanged; 0028 only adds an integrity/stats
+*overlay*. The §"multi-entry blocks deferred to S3 chunk-Merkle" note above is precisely that 0028 layer.

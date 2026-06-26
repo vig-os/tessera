@@ -99,5 +99,11 @@ blocks, packed as-is), sub-block/row-group streaming **compacts** at seal — fr
   (block-level Merkle). The sub-block tree is opt-in per block.
 
 ## Status note
-Proposed; sequence after the streaming **accumulator** (ADR-0026) so the row-group fragments it produces
-become the leaves. Gated on the same cross-env determinism the rest of the format carries (#198).
+**Proposed → folded into / superseded by ADR-0028.** This ADR's design (sub-block Merkle + content-
+addressed `{hash, stats}` chunk-index) is **absorbed verbatim** into ADR-0028's unified hierarchy, which
+generalises it (recursive MMR at every level, the multiscale pyramid, derived sidecars, the fused pass).
+**ADR-0028 is the single carrier going forward** — this ADR is **not advanced independently to Accepted**;
+it becomes **Superseded** when 0028 is accepted, and stands as the focused record of the chunk-index
+rationale. Sequencing/determinism notes below are inherited by 0028: sequence after the streaming
+**accumulator** (ADR-0026) so the row-group fragments become the leaves; gated on the same cross-env
+determinism the rest of the format carries (#198).
