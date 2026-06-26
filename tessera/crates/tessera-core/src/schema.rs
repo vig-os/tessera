@@ -369,7 +369,13 @@ fn builtin_schemas() -> Vec<ProductSchema> {
         },
         // ── ADR-0029 §5 multi-dimensional acquisition schemas (additive) ──
         ProductSchema {
-            fields: imaging_base(vec![]),
+            // ADR-0032 §6: the PET decay-correction reference — the named instant activity is
+            // decay-corrected to (so a reader can recompute or un-correct). Optional metadata.
+            fields: imaging_base(vec![FieldSpec::optional(
+                "decay_correction_reference",
+                "Named instant PET activity is decay-corrected to (e.g. injection / scan-start / acquisition-start)",
+                "string",
+            )]),
             blocks: vec![
                 one(
                     "volume",

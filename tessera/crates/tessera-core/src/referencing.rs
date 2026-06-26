@@ -116,6 +116,13 @@ impl Transform {
     }
 }
 
+/// ADR-0032 §Status-note: the **pinned** closed vocabulary of named reference frames (an Accepted
+/// precondition — frames are interoperable codes, not free text). A descriptor's `frame` must be one of
+/// these or an `"atlas:<id>"` prefix: `physical` (rescaled intensity / quantity), `epoch` (elapsed time
+/// since a recorded instant), and the ADR-0030 spatial spaces `patient` / `scanner` / `aligned`. Units
+/// are **UCUM** unless [`Referenced::vocabulary`] names another controlled vocabulary (the §3 escape).
+pub const CANONICAL_FRAMES: &[&str] = &["physical", "epoch", "patient", "scanner", "aligned"];
+
 /// ADR-0032 referenced-coordinate descriptor: a `transform` plus the `unit` of its output quantity and
 /// the named `frame` it lands in. One type for sample-value rescaling, spatial referencing, and
 /// irregular axes alike — so referencing is described, serialized, and extended in a single place.
@@ -224,6 +231,16 @@ impl Referenced {
     pub fn with_vocabulary(mut self, vocabulary: &str) -> Self {
         self.vocabulary = Some(vocabulary.into());
         self
+    }
+
+    /// Whether `frame` is drawn from the pinned [`CANONICAL_FRAMES`] vocabulary (or is an `"atlas:<id>"`
+    /// reference, or absent — an unframed value rescale is legal). The ADR-0032 promotion precondition
+    /// that frames stay interoperable codes rather than free text.
+    pub fn frame_is_canonical(&self) -> bool {
+        match self.frame.as_deref() {
+            None => true,
+            Some(f) => CANONICAL_FRAMES.contains(&f) || f.starts_with("atlas:"),
+        }
     }
 }
 
@@ -341,6 +358,40 @@ mod tests {
         assert_eq!(t.transform.apply_scalar(3.0), Some(60.0));
         assert_eq!(t.transform.apply_scalar(5.0), None); // past the last frame
         assert_eq!(t.transform.invert_scalar(150.0), Some(4.0));
+    }
+
+    #[test]
+    fn every_constructor_lands_in_a_pinned_frame() {
+        // every built-in instance must use the pinned vocabulary (ADR-0032 promotion precondition).
+        for r in [
+            Referenced::from_rescale(Some(1.0), Some(-1024.0), Some("HU".into())), // physical
+            Referenced::time_regular(0.0, 30.0),                                   // epoch
+            Referenced::time_irregular(vec![5.0, 15.0]),                           // epoch
+            Referenced::time_ticks(1e-12, 0.0),                                    // epoch
+            Referenced::identity(Some("HU".into())),                               // no frame
+        ] {
+            assert!(
+                r.frame_is_canonical(),
+                "{:?} must use a pinned frame",
+                r.frame
+            );
+        }
+        // a spatial descriptor's frame comes from WorldFrame.space — patient/scanner/aligned/atlas are pinned.
+        let wf = WorldFrame {
+            affine: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            convention: "LPS".into(),
+            unit: "mm".into(),
+            space: "atlas:mni152".into(),
+        };
+        assert!(Referenced::from_world_frame(&wf).frame_is_canonical());
+        // free-text frames are rejected
+        let bogus = Referenced {
+            transform: Transform::Identity,
+            unit: None,
+            vocabulary: None,
+            frame: Some("whatever".into()),
+        };
+        assert!(!bogus.frame_is_canonical());
     }
 
     #[test]
