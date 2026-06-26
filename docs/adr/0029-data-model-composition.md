@@ -66,13 +66,46 @@ Add to the registry (additive): `dynamic_pet` (4-D volume `(t_c,64³)` + frame-t
 metadata). Pin the ROI dual-representation in the `roi` schema. Introduce composable trait/mixin
 requirement-sets so shared imaging fields are defined once.
 
+### 6. Substrate selection — by **nature**, not **rank**
+Which of the two primitives a datum lands in is **not** a function of dimensionality. The discriminator is
+the datum's *shape of access*:
+
+- **dense regular N-D grid** (indexed by coordinate/region; a value exists at every cell) →
+  **N-D array block** (zarr+pcodec), *at any rank* — a 1-D spectrum/waveform, a 2-D image, a 3-D volume,
+  an N-D histogram, a matrix. **A 1-D dense signal is an array, not a table.**
+- **rows of typed fields** (indexed by column/predicate/row; each row is a heterogeneous tuple) →
+  **table block** (Vortex), *at any length* — listmode events, catalogs, point sets, the chunk-index,
+  parameter/timing/bval tables.
+
+So the naïve "1-D→table, 3-D→array" rank rule is wrong: a 1-D thing can be **either** (a dense spectrum →
+array; an event list → table), and the choice is always grid-vs-rows. The registry already reflects this
+(`spectrum` = 1-D dense → array; `listmode` = rows → table).
+
+**Density is the second lever, for grids that are mostly empty:**
+- a **dense** N-D histogram (ROOT `TH1/TH2/TH3/THn`) → an **N-D array of bin counts** + a tiny
+  **binning-metadata** table/fields (`nbins/lo/hi` or variable edges) — the *same* array+parameter-table
+  pattern as `dynamic_pet`;
+- a **sparse** high-D histogram (mostly-zero, common in HEP) → a **table of `(bin_coords…, count)`** (a
+  COO coordinate list) — a dense grid would be almost all zeros, so density *flips* it back to the table
+  substrate.
+
+The cross-ecosystem mapping then falls out by object nature, not source format — e.g. **ROOT** spans both
+substrates: `TTree` → table (Vortex), `TH*` → array (+binning), `TGraph`/`TGraphErrors` → table (columns
+`x,y,ex,ey`). "ROOT's n-dims are just zarr" holds for its histograms/dense arrays; its TTrees are tables.
+The substrate is chosen by *what the data is*, never by which tool emitted it.
+
+> **Open follow-on (not decided here):** the *sparse* representation itself (a COO table convention vs a
+> sparse array codec) is its own choice — tracked in `#218`. Likewise **spatial referencing** (voxel→world
+> affine + orientation) is an orthogonal open area with its own ADR — tracked in `#217`.
+
 ## Consequences
 - **No new primitives** — composition reuses the N-D array block + table block + fields we already have;
   the change is *schemas + conventions*, not the substrate. `ArraySpec` is already rank-agnostic.
 - **Unified access for regular N-D** falls out of treating the extra dimension as an array **axis** (so
   the ADR-0028 fold/pyramid/projection + the streaming MMR append all apply unchanged in 4-D).
 - **SPEC additions:** the composition model + feature-by-presence rule; the homogeneous-vs-heterogeneous
-  + `t_c` rule; the ROI representation matrix; the new schemas + trait-composition.
+  + `t_c` rule; the ROI representation matrix; the new schemas + trait-composition; the **substrate-by-
+  nature** rule (grid→array / rows→table, density-flip for sparse, the histogram + ROOT mapping).
 - **Backward-compatible / additive** — existing `recon`/`listmode`/`roi` products are unchanged; the new
   schemas and the N-D usage are additions.
 
