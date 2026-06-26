@@ -6,6 +6,11 @@
 //! The 3-photon record layout (verified via `h5ls -v` on real DUPLET data): `ms` u32 (timestamp),
 //! `id[3]` u16 (crystal ids), `en[3]` f32 (energies), `vtx[3]` f32 (vertex), `lt` f32 (o-Ps
 //! lifetime) — 38 B/record. libhdf5 is found via pkg-config (see flake.nix; HDF5_DIR unset).
+//!
+//! **Memory ceiling:** these readers `read_raw` the *whole* compound dataset into RAM, then encode
+//! one table block — fine for moderate acquisitions, but a multi-GB `events_2p` (~10⁸ rows) needs a
+//! bounded-memory, row-group-streaming path. That requires a deterministic chunked table encoder;
+//! the design + the determinism re-validation it gates on are in **ADR-0026**.
 
 use hdf5::H5Type;
 use hdf5_metno as hdf5;

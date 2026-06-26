@@ -11,6 +11,7 @@ Accepted / Superseded.
 | [0023](0023-array-block-payload.md) | Array block payload — Zarr v3 + pcodec, serialized as one deterministic blob (P3/S5) | **Accepted** |
 | [0024](0024-table-block-payload.md) | Table block payload — a single deterministic Vortex file (P3/S5) | **Accepted** |
 | [0025](0025-ingest-model.md) | Ingest model — normalise at the door, lossless native dtype, provenance-rooted (P5) | **Accepted** |
+| [0026](0026-streaming-table-ingest.md) | Streaming chunked table writes for >RAM ingest — one always-chunked deterministic encoder (#208) | **Proposed** |
 | [0002](0002-concurrency-model.md) | **D2** concurrency — synchronous API; async kept dependency-internal (no tokio); object_store deferred | **Accepted** (as-built) |
 | [0003](0003-schema-identification.md) | **D3** schema id — string product names, open-world (no numeric allocator) | **Accepted** (as-built) |
 | 0007 | **D7** encryption-at-rest — **non-goal**: delegate to storage-layer SSE / dm-crypt; no per-block envelope in the format | Proposed (decide by P1) |
