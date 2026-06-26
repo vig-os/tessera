@@ -1,12 +1,13 @@
 # ADR-0030 — Spatial referencing: voxel→world affine + named frame, OME-Zarr transforms derived
 
-Status: **Proposed** (updated 2026-06-27; an earlier premature "Accepted" flip was reverted, so this
-stays Proposed pending a fresh-context re-audit — never flip on self-report). The prior gaps are now
-closed: as-built = §1/§2/§4/§6/§7 + §3 `at_level` derivation + **§3 OME-Zarr `multiscales` export**
+Status: **Accepted** (2026-06-27, as-built — a fresh-context re-audit confirmed §1–§7 are all built +
+tested, closing the §3 OME-Zarr export / §5 deformable gaps that caused the earlier premature-flip
+revert). As-built = §1/§2/§4/§6/§7 + §3 `at_level` derivation + **§3 OME-Zarr `multiscales` export**
 (`ArraySpec::ome_zarr_multiscales`) + §5 *rigid* registration (transform product + provenance) + the
-`deformation_field` schema + **§5 *deformable* warp apply** (`deformation_displacement` / `warp_world`,
-store-don't-compute point resolve; full volume resampling is a downstream consumer step). · Tracks `#217`
-· Relates to ADR-0025 (ingest normalise-at-the-door),
+`deformation_field` schema + **§5 *deformable* warp apply** (`deformation_displacement` / `warp_world` /
+`WorldFrame::voxel_to_world`, store-don't-compute point resolve; full volume resampling is a downstream
+consumer step). The non-degenerate/unit-agreement validation gate is explicitly post-Accept (§Consequences).
+· Tracks `#217` · Relates to ADR-0025 (ingest normalise-at-the-door),
 ADR-0028 (multiscale pyramid — per-level transforms are *derived* here), ADR-0029 (composition,
 feature-by-presence, rank-agnostic N-D axes), and the product-schema registry. **Generalised by ADR-0032**
 — this spatial affine is the `affine_nd` instance of the one `(transform, unit, frame)` descriptor; the
