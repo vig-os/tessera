@@ -25,26 +25,32 @@ pub trait Monoid: Sized {
     fn combine(&self, other: &Self) -> Self;
 }
 
-/// The built-in numeric chunk statistics over `i64` samples: `count`, `min`, `max`, `sum` (`i128` sum so
-/// it never overflows). `min`/`max` are `None` only for an empty chunk. Float columns reduce canonically
-/// before lifting (ADR-0024 determinism) — out of scope for this integer core.
+/// The built-in numeric chunk statistics over `i64` samples: `count`, `min`, `max`, `sum`, `sum_sq`
+/// (`i128` sums so they never overflow). `min`/`max` are `None` only for an empty chunk. Float columns
+/// reduce canonically before lifting (ADR-0024 determinism) — out of scope for this integer core.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkStats {
     pub count: u64,
     pub min: Option<i64>,
     pub max: Option<i64>,
     pub sum: i128,
+    /// Sum of squares — an associative monoid field, so adding it costs nothing in the roll-up but
+    /// unlocks `variance`/`std_dev` (ADR-0028 §3: extend the factory by adding a monoid).
+    #[serde(default)]
+    pub sum_sq: i128,
 }
 
 impl ChunkStats {
     /// Fold a chunk's samples into its statistics (the leaf stat).
     pub fn from_values(values: &[i64]) -> Self {
         values.iter().fold(Self::identity(), |acc, &v| {
+            let v128 = v as i128;
             acc.combine(&ChunkStats {
                 count: 1,
                 min: Some(v),
                 max: Some(v),
-                sum: v as i128,
+                sum: v128,
+                sum_sq: v128 * v128,
             })
         })
     }
@@ -54,6 +60,22 @@ impl ChunkStats {
     /// extensible-stats factory: new statistics that are functions of the monoids cost nothing to add.
     pub fn mean(&self) -> Option<f64> {
         (self.count > 0).then(|| self.sum as f64 / self.count as f64)
+    }
+
+    /// Population variance `E[x²] − E[x]²`, or `None` for an empty chunk — **derived** from the `sum_sq`,
+    /// `sum`, `count` monoids (the other half of the §3 factory: a *new monoid* `sum_sq` unlocks new
+    /// stats). Clamped at 0 to absorb floating-point round-off near zero.
+    pub fn variance(&self) -> Option<f64> {
+        (self.count > 0).then(|| {
+            let n = self.count as f64;
+            let mean = self.sum as f64 / n;
+            (self.sum_sq as f64 / n - mean * mean).max(0.0)
+        })
+    }
+
+    /// Population standard deviation = `sqrt(variance)`; `None` for an empty chunk.
+    pub fn std_dev(&self) -> Option<f64> {
+        self.variance().map(f64::sqrt)
     }
 
     /// True if some sample in the chunk *could* lie in the inclusive range `[lo, hi]` — i.e. the chunk
@@ -74,6 +96,7 @@ impl Monoid for ChunkStats {
             min: None,
             max: None,
             sum: 0,
+            sum_sq: 0,
         }
     }
 
@@ -91,6 +114,7 @@ impl Monoid for ChunkStats {
             min,
             max,
             sum: self.sum + other.sum,
+            sum_sq: self.sum_sq + other.sum_sq,
         }
     }
 }
@@ -274,6 +298,19 @@ mod tests {
                                                          // derived stat respects the roll-up: mean over the combine == mean over the concatenation
         let agg = stats(&[1, 2, 3]).combine(&stats(&[10, 20]));
         assert_eq!(agg.mean(), stats(&[1, 2, 3, 10, 20]).mean());
+    }
+
+    #[test]
+    fn variance_and_stddev_extend_via_the_sum_sq_monoid() {
+        // [2,4,6]: mean 4, population variance = (4+0+4)/3 = 8/3.
+        let s = stats(&[2, 4, 6]);
+        assert!((s.variance().unwrap() - 8.0 / 3.0).abs() < 1e-9);
+        assert!((s.std_dev().unwrap() - (8.0_f64 / 3.0).sqrt()).abs() < 1e-9);
+        assert_eq!(ChunkStats::identity().variance(), None);
+        // sum_sq is associative → variance survives the roll-up (combine == recompute over concat).
+        let agg = stats(&[1, 2, 3]).combine(&stats(&[10, 20]));
+        let direct = stats(&[1, 2, 3, 10, 20]);
+        assert!((agg.variance().unwrap() - direct.variance().unwrap()).abs() < 1e-9);
     }
 
     #[test]
