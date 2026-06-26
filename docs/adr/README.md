@@ -17,6 +17,7 @@ Accepted / Superseded.
 | [0029](0029-data-model-composition.md) | Data model — composition over inheritance · N-D blocks · multi-dimensional acquisitions (A vs B) · ROI representation · substrate-by-nature (#216) | **Proposed** |
 | [0030](0030-spatial-referencing.md) | Spatial referencing — one voxel→world affine + named frame; spacing & OME-Zarr per-level transforms derived; registration = provenance edge; LPS canonical (#217) | **Proposed** |
 | [0031](0031-sparse-representation.md) | Sparse data — COO table for scatter (reuses Merkle/stats/pushdown) · dense-chunked + stat-prune for block sparsity · threshold measured · materialize-don't-densify (#218) | **Proposed** |
+| [0032](0032-referenced-coordinates-and-quantities.md) | Referenced coordinates & quantities — one `(transform, unit, frame)` descriptor unifying space/time/intensity/parametric; UCUM units; store-don't-compute; generalises ADR-0030 (#219, #220) | **Proposed** |
 | [0002](0002-concurrency-model.md) | **D2** concurrency — synchronous API; async kept dependency-internal (no tokio); object_store deferred | **Accepted** (as-built) |
 | [0003](0003-schema-identification.md) | **D3** schema id — string product names, open-world (no numeric allocator) | **Accepted** (as-built) |
 | 0007 | **D7** encryption-at-rest — **non-goal**: delegate to storage-layer SSE / dm-crypt; no per-block envelope in the format | Proposed (decide by P1) |

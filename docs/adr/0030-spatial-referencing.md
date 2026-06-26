@@ -2,7 +2,9 @@
 
 Status: **Proposed** (2026-06-26) · Tracks `#217` · Relates to ADR-0025 (ingest normalise-at-the-door),
 ADR-0028 (multiscale pyramid — per-level transforms are *derived* here), ADR-0029 (composition,
-feature-by-presence, rank-agnostic N-D axes), and the product-schema registry.
+feature-by-presence, rank-agnostic N-D axes), and the product-schema registry. **Generalised by ADR-0032**
+— this spatial affine is the `affine_nd` instance of the one `(transform, unit, frame)` descriptor; the
+specifics here (LPS, OME-Zarr derivation, registration provenance) stand unchanged.
 
 ## Context
 A Tessera array block currently carries **axes + units** (`ArraySpec`), but not the **geometry** that
