@@ -1,6 +1,9 @@
 # ADR-0030 — Spatial referencing: voxel→world affine + named frame, OME-Zarr transforms derived
 
-Status: **Accepted** (2026-06-26, as-built) · Tracks `#217` · Relates to ADR-0025 (ingest normalise-at-the-door),
+Status: **Proposed** (2026-06-26 — a fresh-context audit caught a premature "Accepted" flip and reverted
+it: §1/§2/§4/§6/§7 + the §3 `at_level` *derivation* primitive + §5 *rigid* registration are as-built, but
+§3 OME-Zarr *export* and §5 *deformable* warps + the `deformation_field` schema are **not** — see Status
+note) · Tracks `#217` · Relates to ADR-0025 (ingest normalise-at-the-door),
 ADR-0028 (multiscale pyramid — per-level transforms are *derived* here), ADR-0029 (composition,
 feature-by-presence, rank-agnostic N-D axes), and the product-schema registry. **Generalised by ADR-0032**
 — this spatial affine is the `affine_nd` instance of the one `(transform, unit, frame)` descriptor; the

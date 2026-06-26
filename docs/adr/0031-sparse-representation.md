@@ -6,13 +6,16 @@ ADR-0024 (table payload), and the #213 codec-`auto` "decide once, store the conc
 
 > **As-built (2026-06-26):** the decision is final and evidence-backed, with every mechanism in the
 > codebase: **block-sparse** → dense+pcodec with `count=0` chunk-pruning (`chunk_index::prune`);
-> **scatter-sparse** → a COO `(idx, v)` table via `tessera_io::array::to_coo` riding the ordinary Vortex
-> encoder (no new primitive); stats are the `ChunkStats` monoids (§4); the threshold is **measured**
-> (#221-A — dense+pcodec wins on disk at storable scales, so COO is reserved for unstorable-ambient /
-> selective-nnz access); and the read path delivers columns without forcing densification (§6,
-> materialize-don't-densify). The selector is **explicit producer metadata** (§5), not an automated guess.
-> Cited in FEATURE-MATRIX (matrix gate). Follow-on (not blocking): a sparse codec is *rejected* (§3); a
-> higher-rank coordinate variant `(i0..in, v)` is a trivial extension of `to_coo` when a use-case needs it.
+> **scatter-sparse** → a COO table via `tessera_io::array::to_coo` riding the ordinary Vortex encoder
+> (no new primitive); stats are the `ChunkStats` monoids (§4); the threshold is **measured** (#221-A —
+> dense+pcodec wins on disk at storable scales, so COO is reserved for unstorable-ambient / selective-nnz
+> access); and the read path delivers columns without forcing densification (§6, materialize-don't-densify).
+> The selector is **explicit producer metadata** (§5), not an automated guess. Cited in FEATURE-MATRIX
+> (matrix gate). **Scope of the as-built COO encoder (honest, per the 2026-06-26 audit):** `to_coo` emits
+> the **single linear-index** `(idx: u64 C-order, v: i64)` form with **implicit `fill = 0`** — the
+> scatter-sparse common case. The §2-spec multi-axis form `(i0…i_{n-1}, v)` and an **arbitrary
+> `fill_value`** (§4 — part of identity) are *documented extensions* of the same convention, not yet
+> emitted; a sparse codec is *rejected* (§3). These extensions do not change the decision, only its reach.
 
 ## Context
 ADR-0029 §6 sends **mostly-empty grids** (sparse high-D histograms, sparse masks/labels, sparse matrices,
