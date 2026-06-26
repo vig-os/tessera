@@ -67,9 +67,10 @@ data) is the remaining dedicated harness (#143).
 |---|:--:|---|---|
 | No-encode-on-hot-path rule | ✓ | never stream DAQ into a single sealed file | S17 (footer=total-loss) |
 | Fragment-append + atomic commit | ✓ | crash-tolerant to last committed fragment | `WriteSession` (fsync fragment→journal commit), `write::tests` |
-| Hash-on-write incremental Merkle | ◑ | valid root at every commit watermark | `hash::MerkleAccumulator` (root==batch at each watermark); engine wiring pending |
+| Hash-on-write incremental Merkle | ✓ | valid root at every commit watermark, wired into the streaming path | `hash::MerkleAccumulator` folded per `append_block`; `StreamWriter` commits in push order → root==batch (#203) |
 | Crash recovery (replay to watermark) | ✓ | resume from registry C; ignore >C | `WriteSession::recover` (drops torn tail), `write::tests` |
-| Unified Source/WriteSession surface | ◑ | push/from/seal/recover; schema-dispatch | `WriteSession` create/append/recover/seal; bounded-ring + rayon pool pending |
+| Bounded-memory streaming write (parallel encode) | ✓ | producer decoupled from encode; RAM capped under burst; byte-identical to batch | `StreamWriter` (bounded `sync_channel` + N-thread encode pool + ordered committer); **6.2× vs synchronous**, cap=2 holds RAM flat (#203, `examples/stream_write`) |
+| Unified Source/WriteSession surface | ✓ | push/from/seal/recover; one write path | `WriteSession` create/append/recover/seal + `StreamWriter` front; >RAM single-block chunked compaction = ADR-0026 |
 
 ## F. Integrity, provenance & FAIR
 | Feature | Status | Gate | Evidence |

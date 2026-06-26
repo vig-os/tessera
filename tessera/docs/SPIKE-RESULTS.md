@@ -221,3 +221,36 @@ compression lead was a gradient artifact; real medical data favors pcodec, which
 default. Tessera also keeps the **fastest slice read (3460 MB/s, ~5× HDF5/NeXus, ~50× NIfTI)** and
 its self-describing + content-addressed + sealed envelope, at the smallest size on disk.
 (Full-volume decode 284 MB/s stays the honest pcodec cost — Zarr's zstd decodes faster at 585.)
+
+# #203 — streaming write engine (bounded memory, parallel encode)
+
+`StreamWriter` (`crates/tessera-io/src/stream.rs`) is the DAQ-facing front of `WriteSession`:
+producer `push` → bounded `sync_channel` (backpressure = RAM cap) → N encode worker threads (parallel
+pcodec/Vortex) → an **ordered committer** (reorder-buffers by sequence, calls `append_block` in push
+order) → `WriteSession` (durable fragment + journal commit + hash-on-write Merkle) → `finish` seals.
+Std-only (no rayon/tokio dep). Tool: `cargo run -p tessera-io --example stream_write --release`,
+pinned `taskset -c 10-39 nice -n19`, 256 × 64³ int16 blocks (128 MiB raw).
+
+| mode | wall s | blocks/s | MB/s | speedup |
+|---|--:|--:|--:|--:|
+| synchronous (encode on hot path) | 3.67 | 70 | 37 | 1.00× |
+| stream w=1 | 2.28 | 112 | 59 | 1.61× |
+| stream w=2 | 1.19 | 216 | 113 | 3.09× |
+| stream w=4 | 0.60 | 427 | 224 | **6.13×** |
+| stream w=8 | 0.59 | 432 | 227 | 6.20× |
+
+### Reading (ALOCA)
+- **6.2× throughput over synchronous**, saturating ~4 workers (encode-bound on this box). Even 1 worker
+  gives 1.6× — encode now overlaps the committer's fsync+journal instead of blocking the producer.
+- **Bounded RAM proven:** cap=2 with 4 workers completed (0.57 s) — peak in-flight ≤ ~cap blocks
+  (≈1 MiB), not the full 128 MiB. Backpressure (`push` blocks on a full channel) holds memory flat no
+  matter how fast the producer runs — the DAQ requirement.
+- **Byte-identical to batch:** the committer commits in **push order**, so the running Merkle and the
+  sealed `id`/`content_hash`/`manifest_hash` match a batch writer exactly (test
+  `stream::tests::streamed_equals_batch_for_many_blocks`). Streaming changes *how* the bytes are
+  produced, never *which* bytes — so it does NOT touch the v1.0 frozen format or the determinism gate.
+- **Crash-safety inherited:** each committed block is a durable fragment + journal line; `recover`
+  replays to the last watermark (existing `WriteSession` guarantees, unchanged).
+- **Out of scope (ADR-0026):** sub-block chunked compaction for a single >RAM block — the only part
+  that would change bytes (and the path that unifies >RAM ingest + live per-chunk Merkle). The multi-
+  block streaming + live block-level Merkle land here; the huge-single-block case rides the same engine.
