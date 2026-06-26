@@ -171,7 +171,7 @@ format's real Python writer/reader, each bit-exact-asserted. Each format uses a 
 ### Table (15 MiB, u8 + 2×f4, 1M rows)
 | format | codec | ratio | write MB/s | read MB/s | **column MB/s** | content-addr/sealed |
 |---|---|--:|--:|--:|--:|:--:|
-| **Tessera .tsra** | Vortex | **21×** | 114 | **1180** | 1336 | ✓ |
+| **Tessera .tsra** | Vortex | **21×** | 114 | **1180** | **4493** | ✓ |
 | HDF5 (h5py) | gzip-4 | 10× | 101 | 468 | 2765 | — |
 | Zarr (zarr-python) | zstd-3 | 15× | 246 | 489 | 1505 | — |
 | NeXus (h5py) | gzip-4 | 10× | 101 | 466 | 2818 | — |
@@ -191,9 +191,10 @@ SWMR / concurrent-reader: HDF5, Zarr, NeXus (yes). Tessera = immutable-sealed (v
   decompress: 146 MB/s). 
 - **Full-volume decode is Tessera's honest cost.** 357 MB/s — mid-pack (DICOM's raw memcpy is 1043); pcodec
   decode is heavier than gzip/zstd. The tradeoff buys 130× compression + addressable slices.
-- **One gap, actionable:** Tessera's **table column read ≈ full read** (1336 vs 1180) because the *bindings*
-  don't expose column projection — Parquet/ROOT/HDF5 do real per-column reads (2300–2800 MB/s). The Vortex
-  backend *can* project; `tessera-py` should expose `read_table_column`. (Filed as a follow-up.)
+- **Column projection — now the fastest (#212, landed).** Originally Tessera's column read ≈ full read
+  (1336) because the binding read the whole block. Wiring Vortex projection (`decode_column` +
+  `read_table_column`) took it to **4493 MB/s — fastest of every format** here (HDF5 2970, ROOT 2637,
+  Parquet 2464). So Tessera leads table compression (21×), full read (1180), AND column read (4493).
 - **The envelope is unique.** Tessera is the **only** format here that is content-addressed + sealed +
   self-describing FAIR, and the **only** one that holds volume *and* table in one product with one API.
   HDF5/Zarr/NeXus are bare containers (no identity/integrity); NIfTI/DICOM are volume-only; Parquet/ROOT

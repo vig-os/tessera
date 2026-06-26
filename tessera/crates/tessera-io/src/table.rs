@@ -14,6 +14,7 @@ use tessera_core::block::{BlockKind, BlockRef};
 use tessera_core::{Error, Result};
 use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::arrays::{PrimitiveArray, StructArray};
+use vortex_array::expr::{root, select};
 use vortex_array::scalar_fn::session::ScalarFnSession;
 use vortex_array::session::ArraySession;
 use vortex_array::{ArrayRef, IntoArray, VortexSessionExecute};
@@ -308,6 +309,41 @@ pub fn decode(spec: &TableSpec, blob: &[u8]) -> Result<TableData> {
         .collect())
 }
 
+/// Decode a SINGLE column from a table block via Vortex **projection** — the scan reads only that
+/// column's layout segments, so it doesn't materialise the whole table (the columnar-take win;
+/// cf. Parquet/ROOT column projection in the #143 ecosystem bench). Bit-exact with [`decode`]'s
+/// matching column.
+pub fn decode_column(spec: &TableSpec, blob: &[u8], name: &str) -> Result<ColumnData> {
+    let col = spec
+        .columns
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| Error::Codec(format!("table has no column '{name}'")))?;
+    let (rt, s) = runtime_session();
+    let mut out = empty_column(&col.dtype)?;
+    let mut ctx = s.create_execution_ctx();
+    rt.block_on(async {
+        let stream = s
+            .open_options()
+            .open_buffer(ByteBuffer::copy_from(blob))
+            .map_err(ze)?
+            .scan()
+            .map_err(ze)?
+            .with_projection(select([name], root())) // only this field is scanned
+            .into_array_stream()
+            .map_err(ze)?;
+        futures::pin_mut!(stream);
+        while let Some(chunk) = stream.next().await {
+            let st: StructArray = chunk.map_err(ze)?.execute(&mut ctx).map_err(ze)?;
+            let prim: PrimitiveArray =
+                st.unmasked_field(0).clone().execute(&mut ctx).map_err(ze)?;
+            extend_column(&mut out, &prim);
+        }
+        Ok::<(), Error>(())
+    })?;
+    Ok(out)
+}
+
 /// Encode a table block and produce both the digested [`BlockRef`] (digest over the real Vortex
 /// payload bytes) and the [`BlockPayload`] to pack.
 pub fn table_block(
@@ -406,6 +442,22 @@ mod tests {
             assert_eq!(back, c);
         }
         assert!(ColumnData::from_le_bytes("f4", &[0u8; 3]).is_err()); // not a multiple of width
+    }
+
+    #[test]
+    fn decode_column_projection_matches_full_decode() {
+        let (spec, data) = all_dtype_table(257);
+        let blob = encode(&spec, &data).unwrap();
+        let full = decode(&spec, &blob).unwrap();
+        // every column read via projection equals the same column from the full decode
+        for (name, col) in &full {
+            assert_eq!(
+                &decode_column(&spec, &blob, name).unwrap(),
+                col,
+                "projection mismatch for column {name}"
+            );
+        }
+        assert!(decode_column(&spec, &blob, "nope").is_err());
     }
 
     #[test]

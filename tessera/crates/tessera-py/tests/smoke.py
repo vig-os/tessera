@@ -58,6 +58,12 @@ for f in files:
             assert cols, f"{f.name}: empty table {b['name']}"
             lengths = {np.frombuffer(buf, "<" + code).shape[0] for _, buf, code in cols}
             assert len(lengths) == 1, f"{f.name}: ragged columns {lengths}"
+            # column projection must equal the same column from the full read
+            cname, cbuf, ccode = cols[0]
+            pbuf, pcode = r.read_table_column(b["name"], cname)
+            assert pcode == ccode and np.array_equal(
+                np.frombuffer(pbuf, "<" + pcode), np.frombuffer(cbuf, "<" + ccode)
+            ), f"{f.name}: projection != full read for {cname}"
     verified += 1
 
 # typed-error path: bad path and unknown block both raise TesseraError (not a bare RuntimeError)

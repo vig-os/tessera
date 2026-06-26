@@ -132,6 +132,24 @@ impl Reader {
             .collect())
     }
 
+    /// Decode a **single column** `column` of table block `name` via Vortex projection — reads only
+    /// that column's segments, not the whole table. Returns `(le_bytes, numpy_code)`; reconstruct
+    /// with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
+    fn read_table_column<'py>(
+        &mut self,
+        py: Python<'py>,
+        name: &str,
+        column: &str,
+    ) -> PyResult<(Bound<'py, PyBytes>, String)> {
+        let spec = self.table_spec(name)?;
+        let blob = self.inner.read_block(name).map_err(err)?;
+        let c = tessera_io::table::decode_column(&spec, &blob, column).map_err(err)?;
+        Ok((
+            PyBytes::new(py, &c.to_le_bytes()),
+            c.numpy_code().to_string(),
+        ))
+    }
+
     /// Full integrity pass: recompute the three-hash seal and every block digest. Raises
     /// `TesseraError` on any mismatch. Mirrors `tessera verify`.
     fn verify(&mut self) -> PyResult<()> {

@@ -66,5 +66,6 @@ def read_table(base: str) -> dict:
 
 
 def read_table_column(base: str, name: str) -> np.ndarray:
-    # bindings read the whole table block (no single-column projection exposed yet)
-    return read_table(base)[name]
+    # Vortex projection — reads only this column's segments (read_table_column binding)
+    buf, code = tessera.open(path_for(base, "table")).read_table_column("events", name)
+    return np.frombuffer(buf, "<" + code)
