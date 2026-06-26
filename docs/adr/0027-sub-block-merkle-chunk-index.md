@@ -1,7 +1,16 @@
 # ADR-0027 — Sub-block Merkle + content-addressed chunk-index block (per-chunk confirmation + pruning)
 
-Status: **Proposed** (2026-06-26) · Tracks `#214` · Builds on ADR-0020 (identity/Merkle), ADR-0024
-(table payload), ADR-0026 (streaming compaction); realizes S2 (granularity) + S3 (Merkle-chunk index).
+Status: **Superseded by ADR-0028** (2026-06-26) · Tracks `#214` · Builds on ADR-0020 (identity/Merkle),
+ADR-0024 (table payload), ADR-0026 (streaming compaction); realizes S2 (granularity) + S3 (Merkle-chunk
+index).
+
+> **Superseded — its design shipped as ADR-0028 §3.** The sub-block Merkle + `{hash, stats}` chunk-index
+> described here is implemented as `tessera_core::chunk_index` (monoid stats + pruning + sub-block MMR
+> root), wired into both encoders (`tessera_io::{table::table_chunk_index, array::array_chunk_index}`) and
+> emitted as the additive `BlockKind::ChunkIndex` companion block (`tessera_io::chunk_index::
+> chunk_index_block`). #221-B measured the leaf-granularity trade-off (knee ≈ 2¹⁴). ADR-0028 is the single
+> carrier; this ADR stands as the focused record of the chunk-index rationale. This is a **terminal**
+> status (not Accepted) — the *generalised* form lives in ADR-0028, not as an independent decision.
 
 ## Context
 Today the Merkle is **one level deep**: `content_hash = merkle_root([block.digest])`, and a block's

@@ -12,7 +12,7 @@ Accepted / Superseded.
 | [0024](0024-table-block-payload.md) | Table block payload — a single deterministic Vortex file (P3/S5) | **Accepted** |
 | [0025](0025-ingest-model.md) | Ingest model — normalise at the door, lossless native dtype, provenance-rooted (P5) | **Accepted** |
 | [0026](0026-streaming-table-ingest.md) | Streaming chunked table writes for >RAM ingest — one always-chunked deterministic encoder (#208) | **Proposed** |
-| [0027](0027-sub-block-merkle-chunk-index.md) | Sub-block Merkle + content-addressed chunk-index block — per-chunk confirmation + pruning (#214) | **Proposed** (absorbed by 0028) |
+| [0027](0027-sub-block-merkle-chunk-index.md) | Sub-block Merkle + content-addressed chunk-index block — per-chunk confirmation + pruning (#214) | **Superseded by 0028** (design shipped as 0028 §3) |
 | [0028](0028-unified-hierarchy.md) | The unified hierarchy — recursive MMR Merkle + multiscale `{hash,stats}` pyramid + derived sidecars + fused streaming (#215); supersedes ADR-0020 flat root | **Proposed** |
 | [0029](0029-data-model-composition.md) | Data model — composition over inheritance · N-D blocks · multi-dimensional acquisitions (A vs B) · ROI representation · substrate-by-nature (#216) | **Proposed** |
 | [0030](0030-spatial-referencing.md) | Spatial referencing — one voxel→world affine + named frame; spacing & OME-Zarr per-level transforms derived; registration = provenance edge; LPS canonical (#217) | **Proposed** |
