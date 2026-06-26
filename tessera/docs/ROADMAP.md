@@ -48,8 +48,8 @@ Per `FEATURE-MATRIX.md §H`: **shippable = ① conformance corpus · ② bit-exa
 | id | decision | options | by |
 |---|---|---|---|
 | D1 | fd5 supersession | **DONE.** fd5 superseded by Tessera. Repo renamed `vig-os/fd5`→**`vig-os/tessera`** (history kept; GitHub redirects active). fd5 Python CI dropped for the `nix flake check` shim; `main` branch protection requires the `nix flake check` status check. fd5 Python app remains as legacy until removed. | ✓ |
-| D2 | concurrency model | sync `core` / async `io` (tokio + `object_store`) + `rayon` encode pool, `spawn_blocking` boundary | P0 |
-| D3 | schema-id allocation | per-schema monotonic + `<plugin>:<id>` namespacing + reserved ranges | P0/P1 |
+| D2 | concurrency model | **DONE (ADR-0002, as-built):** synchronous public API; async kept dependency-internal (no tokio); object_store deferred | ✓ |
+| D3 | schema-id allocation | **DONE (ADR-0003, as-built):** string product names, open-world (no numeric allocator) | ✓ |
 | D4 | canonical encoding for hashing | RFC 8785 JCS-JSON **vs** deterministic CBOR | P0 |
 | D5 | identity definition | `id` = logical (over id_inputs, stable) + `content_hash` = Merkle **vs** id = Merkle root | P0 |
 | D6 | bindings vs validation | reach = `tessera-py` (pyo3-wrap) + `tessera-wasm` (Rust→WASM, TS); spec-validation = separate pure-Python reader (P8 gate, not a binding) | P7 |

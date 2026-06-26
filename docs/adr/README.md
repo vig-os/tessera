@@ -11,8 +11,8 @@ Accepted / Superseded.
 | [0023](0023-array-block-payload.md) | Array block payload — Zarr v3 + pcodec, serialized as one deterministic blob (P3/S5) | **Accepted** |
 | [0024](0024-table-block-payload.md) | Table block payload — a single deterministic Vortex file (P3/S5) | **Accepted** |
 | [0025](0025-ingest-model.md) | Ingest model — normalise at the door, lossless native dtype, provenance-rooted (P5) | **Accepted** |
-| 0002 | **D2** concurrency model — sync `core` / async `io` (tokio + `object_store`) + rayon encode pool; `spawn_blocking` boundary | Proposed (decide by P3) |
-| 0003 | **D3** schema-id allocation — per-schema monotonic ids + `<plugin>:<id>` namespacing + reserved ranges | Proposed (decide by P1) |
+| [0002](0002-concurrency-model.md) | **D2** concurrency — synchronous API; async kept dependency-internal (no tokio); object_store deferred | **Accepted** (as-built) |
+| [0003](0003-schema-identification.md) | **D3** schema id — string product names, open-world (no numeric allocator) | **Accepted** (as-built) |
 | 0007 | **D7** encryption-at-rest — **non-goal**: delegate to storage-layer SSE / dm-crypt; no per-block envelope in the format | Proposed (decide by P1) |
 
 D6 (bindings vs validation) is settled in the ROADMAP itself (P7/P8) and needs no separate ADR.
