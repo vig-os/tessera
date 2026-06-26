@@ -220,6 +220,56 @@ pub fn verify_inclusion(block_digest: &str, proof: &[ProofStep], root: &str) -> 
     fmt_root(acc) == root
 }
 
+/// An append-only **consistency proof** (ADR-0028 §2): evidence that the MMR over the first `m` leaves
+/// (`old_root`, the live root at watermark `m`) is an exact **prefix** of the MMR over all `n` leaves
+/// (`new_root`) — i.e. the later tree only *appended*, never rewrote history. It carries the MMR peaks at
+/// watermark `m` plus the leaf digests appended since. Verify with [`verify_consistency`].
+///
+/// Soundness is self-evident: bagging `old_peaks` is exactly `merkle_root(first m)`, and pushing the
+/// appended digests onto those peaks is exactly how [`merkle_root`] would have folded leaves `m..n` — so
+/// re-running that fold reproduces `new_root` iff the old peaks are genuine and the appended digests are
+/// as claimed. (Proof size is `O(log m + (n − m))`: it reveals the appended digests rather than the
+/// minimal RFC-6962 node set — the format already records every block digest in the manifest.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsistencyProof {
+    /// The MMR peaks `(height, hash)` over the first `m` leaves — bag to `old_root`.
+    pub old_peaks: Vec<(u32, [u8; 32])>,
+    /// The leaf digests appended after watermark `m` (positions `[m, n)`), in order.
+    pub appended: Vec<String>,
+}
+
+/// Build a [`ConsistencyProof`] that the first `m` of the ordered `block_digests` form an append-only
+/// prefix of the whole list. `None` if `m > n`. `m == n` yields an empty `appended` (the trees are equal).
+pub fn consistency_proof(block_digests: &[String], m: usize) -> Option<ConsistencyProof> {
+    if m > block_digests.len() {
+        return None;
+    }
+    let mut old_peaks = Vec::new();
+    for d in &block_digests[..m] {
+        push_peak(&mut old_peaks, d);
+    }
+    Some(ConsistencyProof {
+        old_peaks,
+        appended: block_digests[m..].to_vec(),
+    })
+}
+
+/// Verify a [`ConsistencyProof`] against the claimed `old_root` (watermark `m`) and `new_root` (the full
+/// tree): the peaks must bag to `old_root`, and extending them with the appended digests must reproduce
+/// `new_root`. Any tampering — a rewritten old peak, a forged appended digest, a wrong root — fails.
+pub fn verify_consistency(proof: &ConsistencyProof, old_root: &str, new_root: &str) -> bool {
+    // 1. the old peaks compose the old root (proves the prefix's integrity).
+    if fmt_root(bag(&proof.old_peaks)) != old_root {
+        return false;
+    }
+    // 2. appending the claimed digests onto those peaks reproduces the new root (same fold as merkle_root).
+    let mut peaks = proof.old_peaks.clone();
+    for d in &proof.appended {
+        push_peak(&mut peaks, d);
+    }
+    fmt_root(bag(&peaks)) == new_root
+}
+
 /// Incremental **hash-on-write** MMR accumulator — the streaming-write counterpart of
 /// [`merkle_root`]. A write engine pushes each block's digest the moment that block is durably
 /// committed and reads the running content root at any **watermark** (the number of blocks folded
@@ -377,6 +427,57 @@ mod tests {
                 "out-of-range → None"
             );
         }
+    }
+
+    #[test]
+    fn consistency_proofs_verify_every_append_only_prefix() {
+        // for every n and every prefix m ≤ n, the proof must reconcile old_root(m) with new_root(n).
+        for n in [0usize, 1, 2, 3, 4, 5, 7, 8, 11, 13, 16] {
+            let digests: Vec<String> = (0..n as u8).map(|k| digest(&[k, n as u8])).collect();
+            let new_root = merkle_root(&digests);
+            for m in 0..=n {
+                let old_root = merkle_root(&digests[..m]);
+                let proof = consistency_proof(&digests, m).unwrap();
+                assert!(
+                    verify_consistency(&proof, &old_root, &new_root),
+                    "n={n} m={m}: a genuine append-only prefix must verify"
+                );
+                assert_eq!(proof.appended.len(), n - m);
+            }
+            // m > n → no proof.
+            assert!(consistency_proof(&digests, n + 1).is_none());
+        }
+    }
+
+    #[test]
+    fn consistency_proof_rejects_tampering_and_non_prefixes() {
+        let digests: Vec<String> = (0..11u8).map(|k| digest(&[k])).collect();
+        let new_root = merkle_root(&digests);
+        let m = 6;
+        let old_root = merkle_root(&digests[..m]);
+        let good = consistency_proof(&digests, m).unwrap();
+        assert!(verify_consistency(&good, &old_root, &new_root));
+
+        // a wrong old_root (claiming a prefix that isn't this tree's) fails.
+        assert!(!verify_consistency(
+            &good,
+            &merkle_root(&[digest(b"x")]),
+            &new_root
+        ));
+        // a wrong new_root fails.
+        assert!(!verify_consistency(
+            &good,
+            &old_root,
+            &merkle_root(&digests[..10])
+        ));
+        // forging an appended digest (history rewrite of the tail) fails to reach new_root.
+        let mut forged = good.clone();
+        forged.appended[0] = digest(b"tampered");
+        assert!(!verify_consistency(&forged, &old_root, &new_root));
+        // rewriting an old peak (history rewrite of the prefix) breaks the old_root check.
+        let mut forged2 = good.clone();
+        forged2.old_peaks[0].1[0] ^= 0xff;
+        assert!(!verify_consistency(&forged2, &old_root, &new_root));
     }
 
     #[test]
