@@ -1,14 +1,20 @@
 # ADR-0028 — The unified hierarchy: recursive MMR Merkle + multiscale `{hash, stats}` pyramid + derived sidecars + fused streaming
 
-Status: **Proposed** (2026-06-26) · Tracks `#215` · **Supersedes** the flat-list `content_hash` of
-ADR-0020 · **Absorbs** ADR-0027 (sub-block Merkle + chunk-index) · Rides ADR-0026 (streaming
+Status: **Accepted** (2026-06-27, as-built) · Tracks `#215` · **Supersedes** the flat-list `content_hash`
+of ADR-0020 · **Absorbs** ADR-0027 (sub-block Merkle + chunk-index) · Rides ADR-0026 (streaming
 compaction). A deliberate **pre-1.0 (v0.2)** identity revision.
 
-**Implementation status:** §1 recursive node-hash + §2 MMR/incremental root **DONE** (2026-06-26,
-`tessera_core::hash` — domain-separated `0x00`/`0x01`, peaks-carry; `content_hash` is the MMR root;
-corpus + SPEC §3 + pure-Python reference reader regenerated; conformance 3/3, reference reader 6/6).
-**Pending** (keeps this ADR Proposed): the `{hash, stats}` chunk-index block (§3, was ADR-0027),
-inclusion/consistency proofs, the multiscale pyramid, derived sidecars, and the fused streaming pass.
+**Implementation status: every Pending item is now as-built (confirmed by a fresh-context audit).**
+§1 recursive node-hash + §2 MMR/incremental root + consistency proofs = `tessera_core::hash`
+(domain-separated `0x00`/`0x01`, peaks-carry; `content_hash` = MMR root; `inclusion_proof`/
+`verify_inclusion` + `consistency_proof`/`verify_consistency` with a manifest-revision fixture). §3
+`{hash, stats}` chunk-index + extensible monoid pyramid = `tessera_core::chunk_index` (`ChunkStats`,
+`ChunkIndex`, `stat_pyramid`) + `tessera_io::{array,table}` chunk-index builders. §4 derived-sidecar
+block class = `tessera_io::chunk_index::chunk_index_block` (`class:"derived"` + recipe); arrays fold =
+`array_pyramid`/`downsample_max_3d`/`project_max_3d` (MIP). §5 fused streaming pass =
+`MerkleStatsAccumulator` (streamed==batch fold) wired live into `TableStreamWriter::with_live_index` +
+sidecar emission in `stream::{array_job_indexed,table_job_indexed}` (streamed==batch preserved by
+opt-in). Corpus + SPEC §3 regenerated; conformance 3/3, reference reader 6/6.
 
 ## Context
 Tessera currently has two *separate* hierarchies that should be one. The block-level integrity is a

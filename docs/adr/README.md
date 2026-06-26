@@ -13,7 +13,7 @@ Accepted / Superseded.
 | [0025](0025-ingest-model.md) | Ingest model — normalise at the door, lossless native dtype, provenance-rooted (P5) | **Accepted** |
 | [0026](0026-streaming-table-ingest.md) | Streaming chunked table writes for >RAM ingest — one always-chunked deterministic encoder (#208) | **Proposed** |
 | [0027](0027-sub-block-merkle-chunk-index.md) | Sub-block Merkle + content-addressed chunk-index block — per-chunk confirmation + pruning (#214) | **Superseded by 0028** (design shipped as 0028 §3) |
-| [0028](0028-unified-hierarchy.md) | The unified hierarchy — recursive MMR Merkle + multiscale `{hash,stats}` pyramid + derived sidecars + fused streaming (#215); supersedes ADR-0020 flat root | **Proposed** |
+| [0028](0028-unified-hierarchy.md) | The unified hierarchy — recursive MMR Merkle + multiscale `{hash,stats}` pyramid + derived sidecars + fused streaming (#215); supersedes ADR-0020 flat root | **Accepted** |
 | [0029](0029-data-model-composition.md) | Data model — composition over inheritance · N-D blocks · multi-dimensional acquisitions (A vs B) · ROI representation · substrate-by-nature (#216) | **Accepted** |
 | [0030](0030-spatial-referencing.md) | Spatial referencing — one voxel→world affine + named frame; spacing & OME-Zarr per-level transforms derived; registration = provenance edge; LPS canonical (#217) | **Proposed** (§3 export + §5 deformable pending — audit-reverted) |
 | [0031](0031-sparse-representation.md) | Sparse data — COO table for scatter (reuses Merkle/stats/pushdown) · dense-chunked + stat-prune for block sparsity · threshold measured · materialize-don't-densify (#218) | **Accepted** (as-built) |
