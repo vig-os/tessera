@@ -515,6 +515,24 @@ pub fn decode_column(spec: &TableSpec, blob: &[u8], name: &str) -> Result<Column
 /// `stat_column`. `index.root()` is the block's sub-block Merkle root (ADR-0028 §1), and `index.prune()`
 /// skips row-groups a ranged read can't hit. Per #221-B, the *index* leaf may later be finer than
 /// `ROWS_PER_GROUP`; this first wiring uses the encoder's row-groups 1:1.
+///
+/// ```
+/// use tessera_core::block::table::{Column, TableSpec};
+/// use tessera_io::table::{table_chunk_index, ColumnData, TableData};
+///
+/// let spec = TableSpec {
+///     columns: vec![Column { name: "t".into(), dtype: "u8".into(), codec: None }],
+///     rows: 3,
+///     row_index: None,
+/// };
+/// let data: TableData = vec![("t".into(), ColumnData::U64(vec![10, 20, 30]))];
+/// let idx = table_chunk_index(&spec, &data, "t").unwrap();
+///
+/// assert_eq!(idx.len(), 1); // 3 rows <= ROWS_PER_GROUP -> a single row-group
+/// assert_eq!(idx.aggregate().max, Some(30)); // stats over the column
+/// assert_eq!(idx.prune(0, 15), vec![0]); // the group spans [10, 30] -> overlaps [0, 15]
+/// assert!(idx.root().starts_with("blake3:")); // sub-block MMR root
+/// ```
 pub fn table_chunk_index(
     spec: &TableSpec,
     data: &TableData,
