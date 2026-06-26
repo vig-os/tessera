@@ -242,6 +242,61 @@ impl ArraySpec {
         self
     }
 
+    /// Emit the **OME-Zarr `multiscales`** metadata (v0.4) for an `levels`-deep pyramid of this array
+    /// (ADR-0030 §3): one `dataset` per level carrying its `coordinateTransformations` — a `scale`
+    /// (per-axis voxel spacing) and `translation` (world origin) **derived** from the per-level
+    /// [`WorldFrame::at_level`] (single source of truth — geometry is never stored per level). `None`
+    /// unless this is a 3-D array with a `world_frame` (the spatial multiscale case).
+    ///
+    /// **Limitation (OME-Zarr, not Tessera):** the 0.4 `multiscales` schema expresses only `scale` +
+    /// `translation`, so an **oblique** orientation (off-diagonal affine) is not representable — the
+    /// `scale` is the column-norm spacing and the rotation is dropped. Tessera's own `world_frame`
+    /// keeps the full affine; this export is the lossy-on-orientation interop view.
+    pub fn ome_zarr_multiscales(&self, levels: u32) -> Option<serde_json::Value> {
+        if self.shape.len() != 3 {
+            return None;
+        }
+        let wf = self.world_frame.as_ref()?;
+        let axis_type = |name: &str| match name {
+            "t" | "time" => "time",
+            "c" | "channel" => "channel",
+            _ => "space",
+        };
+        let axes: Vec<serde_json::Value> = self
+            .axes
+            .iter()
+            .map(|n| {
+                let t = axis_type(n);
+                if t == "space" {
+                    serde_json::json!({ "name": n, "type": t, "unit": wf.unit })
+                } else {
+                    serde_json::json!({ "name": n, "type": t })
+                }
+            })
+            .collect();
+        let datasets: Vec<serde_json::Value> = (0..levels.max(1))
+            .map(|l| {
+                let lf = wf.at_level(l);
+                let scale = lf.spacing();
+                let translation = [lf.affine[3], lf.affine[7], lf.affine[11]];
+                serde_json::json!({
+                    "path": l.to_string(),
+                    "coordinateTransformations": [
+                        { "type": "scale", "scale": scale.to_vec() },
+                        { "type": "translation", "translation": translation.to_vec() },
+                    ]
+                })
+            })
+            .collect();
+        Some(serde_json::json!({
+            "multiscales": [{
+                "version": "0.4",
+                "axes": axes,
+                "datasets": datasets,
+            }]
+        }))
+    }
+
     /// Validate the spec: dtype must be in the supported allowlist (int16 is *recommended*
     /// for CT/PET, not required — any [`crate::dtype::DType`] is allowed), and the chunk
     /// grid must match the array rank.
@@ -332,6 +387,53 @@ mod tests {
         assert!(ArraySpec::new(vec![8], "int16")
             .with_rescale(0.0, 3.0)
             .from_physical(1.0)
+            .is_none());
+    }
+
+    #[test]
+    fn ome_zarr_multiscales_export_derives_per_level_transforms() {
+        // 2 mm iso, origin (-100,-100,-50), LPS — a 3-level pyramid export (ADR-0030 §3).
+        let mut spec = ArraySpec::new(vec![64, 64, 64], "int16");
+        spec.world_frame = Some(WorldFrame {
+            affine: [
+                2.0, 0.0, 0.0, -100.0, 0.0, 2.0, 0.0, -100.0, 0.0, 0.0, 2.0, -50.0,
+            ],
+            convention: "LPS".into(),
+            unit: "mm".into(),
+            space: "patient".into(),
+        });
+        let ms = spec.ome_zarr_multiscales(3).unwrap();
+        let m0 = &ms["multiscales"][0];
+        assert_eq!(m0["version"], "0.4");
+        // 3 space axes carrying the world unit.
+        assert_eq!(m0["axes"].as_array().unwrap().len(), 3);
+        assert_eq!(m0["axes"][0]["type"], "space");
+        assert_eq!(m0["axes"][0]["unit"], "mm");
+        let ds = m0["datasets"].as_array().unwrap();
+        assert_eq!(ds.len(), 3);
+        // level 0: base spacing + origin.
+        assert_eq!(ds[0]["path"], "0");
+        assert_eq!(ds[0]["coordinateTransformations"][0]["scale"][0], 2.0);
+        assert_eq!(
+            ds[0]["coordinateTransformations"][1]["translation"][2],
+            -50.0
+        );
+        // level 1: 2× spacing, origin shifted by R·0.5 (half-block-centre).
+        assert_eq!(ds[1]["coordinateTransformations"][0]["scale"][0], 4.0);
+        assert_eq!(
+            ds[1]["coordinateTransformations"][1]["translation"][0],
+            -99.0
+        );
+        assert_eq!(
+            ds[1]["coordinateTransformations"][1]["translation"][2],
+            -49.0
+        );
+        // index-space array (no world_frame) and non-3-D arrays have no spatial multiscale export.
+        assert!(ArraySpec::new(vec![64, 64, 64], "int16")
+            .ome_zarr_multiscales(2)
+            .is_none());
+        assert!(ArraySpec::new(vec![8, 8], "int16")
+            .ome_zarr_multiscales(2)
             .is_none());
     }
 
