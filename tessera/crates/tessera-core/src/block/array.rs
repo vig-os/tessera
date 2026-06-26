@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Block, BlockKind};
+use crate::referencing::Referenced;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArraySpec {
@@ -40,6 +41,15 @@ pub struct ArraySpec {
     /// instance of the general `(transform, unit, frame)` descriptor (ADR-0032).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub world_frame: Option<WorldFrame>,
+    /// ADR-0032 per-**axis** referenced-coordinate descriptors (length == rank when present): how each
+    /// axis *index* maps to a physical coordinate — e.g. a dynamic series' time axis carrying
+    /// [`Referenced::time_regular`]/[`Referenced::time_irregular`], a non-uniform energy axis carrying a
+    /// `lookup`. `None` ⇒ every axis is a bare storage index (feature-by-presence). The per-**value** and
+    /// **spatial** descriptors are *derived* from the `rescale_*`/`world_frame` fields via
+    /// [`Self::value_referencing`]/[`Self::spatial_referencing`] — stored once, never duplicated here
+    /// (single source of truth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis_referencing: Option<Vec<Option<Referenced>>>,
 }
 
 /// A voxel→world spatial frame (ADR-0030). The affine maps an index vector **in declared-axis order**
@@ -149,6 +159,7 @@ impl ArraySpec {
             rescale_slope: None,
             rescale_intercept: None,
             world_frame: None,
+            axis_referencing: None,
         }
     }
 
@@ -181,6 +192,39 @@ impl ArraySpec {
     pub fn from_physical(&self, physical: f64) -> Option<f64> {
         let slope = self.rescale_slope.unwrap_or(1.0);
         (slope != 0.0).then(|| (physical - self.rescale_intercept.unwrap_or(0.0)) / slope)
+    }
+
+    /// The unified **value** descriptor (ADR-0032): the `affine_1d` intensity rescale + its unit,
+    /// projected into the one `(transform, unit, frame)` type. *Derived* from the `rescale_*`/`unit`
+    /// fields — the single source of truth — so there is one descriptor type to reason about across
+    /// value, spatial, and axis referencing. Identity when no rescale is set (feature-by-presence).
+    pub fn value_referencing(&self) -> Referenced {
+        Referenced::from_rescale(
+            self.rescale_slope,
+            self.rescale_intercept,
+            self.unit.clone(),
+        )
+    }
+
+    /// The unified **spatial** descriptor (ADR-0032): the `affine_nd` voxel→world frame projected into
+    /// the one descriptor type. `None` when the array is in index space (no `world_frame`). Derived from
+    /// `world_frame` — never stored twice.
+    pub fn spatial_referencing(&self) -> Option<Referenced> {
+        self.world_frame.as_ref().map(Referenced::from_world_frame)
+    }
+
+    /// The per-axis descriptor for `axis`, if one is set (e.g. a dynamic series' time axis). `None` when
+    /// the array carries no per-axis referencing or that axis is a bare index.
+    pub fn axis_referencing(&self, axis: usize) -> Option<&Referenced> {
+        self.axis_referencing.as_ref()?.get(axis)?.as_ref()
+    }
+
+    /// Attach per-axis referenced-coordinate descriptors (length should equal the array rank; `None`
+    /// entries leave that axis a bare index). E.g. set axis 0 of a `[t,z,y,x]` series to
+    /// [`Referenced::time_regular`].
+    pub fn with_axis_referencing(mut self, per_axis: Vec<Option<Referenced>>) -> Self {
+        self.axis_referencing = Some(per_axis);
+        self
     }
 
     /// Override the default axis names (must match the array rank).
@@ -374,5 +418,81 @@ mod tests {
         });
         let back: ArraySpec = serde_json::from_value(serde_json::to_value(&spec).unwrap()).unwrap();
         assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn value_and_spatial_referencing_derive_the_unified_descriptor() {
+        use crate::referencing::Transform;
+        // value: a CT rescale projects into the affine_1d instance, frame "physical", unit "HU".
+        let spec = ArraySpec::new(vec![64, 64, 64], "int16")
+            .with_rescale(1.0, -1024.0)
+            .with_unit("HU");
+        let v = spec.value_referencing();
+        assert_eq!(
+            v.transform,
+            Transform::Affine1d {
+                slope: 1.0,
+                intercept: -1024.0
+            }
+        );
+        assert_eq!(v.unit.as_deref(), Some("HU"));
+        assert_eq!(v.frame.as_deref(), Some("physical"));
+        // no rescale ⇒ identity value descriptor (feature-by-presence)
+        assert_eq!(
+            ArraySpec::new(vec![8], "int16")
+                .value_referencing()
+                .transform,
+            Transform::Identity
+        );
+        // spatial: present only with a world_frame; matches from_world_frame.
+        assert!(spec.spatial_referencing().is_none());
+        let with_frame = ArraySpec::new(vec![64, 64, 64], "int16").with_axes(vec![
+            "z".into(),
+            "y".into(),
+            "x".into(),
+        ]);
+        let mut wf = with_frame.clone();
+        wf.world_frame = Some(WorldFrame {
+            affine: [
+                2.0, 0.0, 0.0, -100.0, 0.0, 2.0, 0.0, -100.0, 0.0, 0.0, 2.0, -50.0,
+            ],
+            convention: "LPS".into(),
+            unit: "mm".into(),
+            space: "patient".into(),
+        });
+        let s = wf.spatial_referencing().unwrap();
+        assert_eq!(s.unit.as_deref(), Some("mm"));
+        assert_eq!(s.frame.as_deref(), Some("patient"));
+        assert_eq!(
+            s.transform.apply_point(&[10.0, 20.0, 5.0]),
+            Some(vec![-80.0, -60.0, -40.0])
+        );
+    }
+
+    #[test]
+    fn per_axis_referencing_is_additive_optional_and_reachable() {
+        // a dynamic [t,z,y,x] series: axis 0 carries a 30 s regular time axis, others are bare indices.
+        let spec = ArraySpec::new(vec![6, 64, 64, 64], "int16");
+        assert!(spec.axis_referencing.is_none());
+        // omitted from JSON by default ⇒ existing arrays serialize byte-identically (no corpus regen).
+        assert!(serde_json::to_value(&spec)
+            .unwrap()
+            .get("axis_referencing")
+            .is_none());
+        let dyn_spec = spec.with_axis_referencing(vec![
+            Some(Referenced::time_regular(0.0, 30.0)),
+            None,
+            None,
+            None,
+        ]);
+        // reachable through the accessor, and maps frame index → elapsed seconds.
+        let t = dyn_spec.axis_referencing(0).expect("time axis present");
+        assert_eq!(t.transform.apply_scalar(4.0), Some(120.0));
+        assert_eq!(t.unit.as_deref(), Some("s"));
+        assert!(dyn_spec.axis_referencing(1).is_none());
+        // serializes through the manifest's block spec and round-trips.
+        let back: ArraySpec =
+            serde_json::from_value(serde_json::to_value(&dyn_spec).unwrap()).unwrap();
+        assert_eq!(back, dyn_spec);
     }
 }
