@@ -168,6 +168,13 @@
             touch $out
           '';
 
+          # The mdBook how-to must build (docs-as-tests layer 3). Its CLI transcripts are `{{#include}}`d
+          # from the trycmd files the test suite runs, so the published docs can't drift from behaviour.
+          mdbook-build = pkgs.runCommand "mdbook-build"
+            { nativeBuildInputs = [ pkgs.mdbook ]; } ''
+            mdbook build ${./.}/docs/book -d $out
+          '';
+
           # The dev shell itself must build (toolbelt + toolchain resolve).
           dev-shell = self.devShells.${system}.default;
         };

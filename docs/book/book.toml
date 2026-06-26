@@ -1,0 +1,7 @@
+[book]
+title = "Tessera — the FAIR data-product format"
+authors = ["Tessera"]
+description = "The how-to for the Tessera (.tsra) FAIR data-product format and its CLI."
+src = "src"
+
+[output.html]
