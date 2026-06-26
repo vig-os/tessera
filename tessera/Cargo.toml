@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-cli"]
+members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-cli", "crates/tessera-ingest"]
 
 [workspace.package]
 edition = "2021"
@@ -34,5 +34,8 @@ vortex-layout = "0.75"
 vortex-session = "0.75"
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }     # tessera-cli
+# DICOM ingest (tessera-ingest, P5/#207). default-features=false drops the `ul` network stack and the
+# C++ codecs (charls/gdcm); pure-Rust pixel decode covers uncompressed/RLE transfer syntaxes.
+dicom = { version = "0.9", default-features = false, features = ["pixeldata", "inventory-registry"] }
 tessera-core = { path = "crates/tessera-core" }
 tessera-io = { path = "crates/tessera-io" }
