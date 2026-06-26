@@ -25,6 +25,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | Table backend = **Vortex** | ✓ | smallest + fastest random-take + pushdown; real Rust codec | S0/S4/S7/S10/S11 + `tessera-io::table` |
 | Cubic 64³ chunking | ✓ | isotropic reads; size/read sweet spot — codec-independent | chunk sweep |
 | Per-block selectable codec (`ArraySpec.codec`) | ✓ | `"pcodec"` (default) · `"zstd"` (fixed level 3) · `"auto"` (writer picks smaller, records concrete codec) — slice/ROI access unchanged across codecs (chunk grid owns locality) | #213 + `tessera-io::array::tests::{zstd_*,auto_*}` |
+| Table row-groups (fixed 2¹⁶) — one encoder, batch == stream | ✓ | always-chunked Vortex; `encode_streaming` (lazy/bounded) byte-identical to `encode`; ≤2¹⁶-row tables unchanged (backward-compat) | `tessera-io::table::{encode,encode_streaming}` (#203, ADR-0026), `multi_rowgroup_*`, `encode_streaming_matches_batch_encode` |
 
 ## C. Correctness gates (REQUIRED — binary)
 | Gate | Status | Pass condition | Evidence |
@@ -70,7 +71,10 @@ data) is the remaining dedicated harness (#143).
 | Hash-on-write incremental Merkle | ✓ | valid root at every commit watermark, wired into the streaming path | `hash::MerkleAccumulator` folded per `append_block`; `StreamWriter` commits in push order → root==batch (#203) |
 | Crash recovery (replay to watermark) | ✓ | resume from registry C; ignore >C | `WriteSession::recover` (drops torn tail), `write::tests` |
 | Bounded-memory streaming write (parallel encode) | ✓ | producer decoupled from encode; RAM capped under burst; byte-identical to batch | `StreamWriter` (bounded `sync_channel` + N-thread encode pool + ordered committer); **6.2× vs synchronous**, cap=2 holds RAM flat (#203, `examples/stream_write`) |
-| Unified Source/WriteSession surface | ✓ | push/from/seal/recover; one write path | `WriteSession` create/append/recover/seal + `StreamWriter` front; >RAM single-block chunked compaction = ADR-0026 |
+| Unified Source/WriteSession surface | ✓ | push/from/seal/recover; one write path | `WriteSession` create/append/recover/seal + `StreamWriter` front |
+| Streaming table accumulator (>RAM, bounded) | ✓ | push arbitrary batches → fixed 2¹⁶ fragments → lazy compact == batch; RAM ~2 row-groups | `TableStreamWriter` (#203, ADR-0026), `accumulator_equals_batch_over_odd_batches` |
+| Metadata-first durable header | ◑ | `header.json` (product/name/metadata/study/extra) written at `create`, persisted on set, replayed by `recover` — before any data block | `WriteSession` (header.json); **gaps:** header not fsync'd, no `StreamWriter.with_field` passthrough |
+| Sub-block Merkle + chunk-index (per-chunk confirm + pruning) | ○ | per-chunk leaves; Vortex `{hash, monoid-stats}` index; live row-group integrity | ADR-0027, #214 (after the accumulator) |
 
 ## F. Integrity, provenance & FAIR
 | Feature | Status | Gate | Evidence |
@@ -106,7 +110,7 @@ data) is the remaining dedicated harness (#143).
 | **v0.2 — DICOM ingest** | `tessera-ingest::dicom` lossless + PS3.15 verify + golden DICOM corpus |
 | **v0.3 — vendor raw + integrity** | GE-HDF5/Siemens/raw plugins; minimal cosign signing; WORM on MinIO |
 | **v0.5 — Python + ops** | pyo3 parity; reference podman-compose stack; perf-SLA CI gates; migration CLI |
-| **v1.0 — spec stabilized** ✓ | 2nd independent reader passes conformance ✓ (#211); spec frozen ✓; all 4 gates green ✓ — **`tessera-1.0` tagged 2026-06-26**. (12-mo zero-breaking = the forward commitment from here.) |
+| **v1.0 — spec stabilized** ○ | 2nd independent reader passes conformance ✓ (#211); 4 gates green ✓ — but the **format is still maturing** (chunked tables, streaming, sub-block Merkle), so spec is NOT yet frozen. SPEC self-designates **"v0, pre-1.0"**; the premature `tessera-1.0` tag was **dropped** → versioning on the **v0.2** line. v1.0 = spec frozen + 12-mo zero-breaking, not yet. |
 
 ## How to use as the baseline
 - **Regression:** re-run the benches; any §D row below its floor = fail the build.

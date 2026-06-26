@@ -147,6 +147,48 @@ impl ColumnData {
         }
     }
 
+    /// Append another column's values onto this one (dtypes must match).
+    pub fn extend(&mut self, other: &ColumnData) -> Result<()> {
+        macro_rules! ext {
+            ($v:expr, $variant:ident) => {
+                match other {
+                    ColumnData::$variant(o) => $v.extend_from_slice(o),
+                    _ => {
+                        return Err(Error::Codec(format!(
+                            "extend: dtype {} != {}",
+                            other.numpy_code(),
+                            self.numpy_code()
+                        )))
+                    }
+                }
+            };
+        }
+        match self {
+            ColumnData::I8(v) => ext!(v, I8),
+            ColumnData::I16(v) => ext!(v, I16),
+            ColumnData::I32(v) => ext!(v, I32),
+            ColumnData::I64(v) => ext!(v, I64),
+            ColumnData::U8(v) => ext!(v, U8),
+            ColumnData::U16(v) => ext!(v, U16),
+            ColumnData::U32(v) => ext!(v, U32),
+            ColumnData::U64(v) => ext!(v, U64),
+            ColumnData::F32(v) => ext!(v, F32),
+            ColumnData::F64(v) => ext!(v, F64),
+        }
+        Ok(())
+    }
+
+    /// Bytes per element of the numpy dtype code (`i1`=1 … `f8`=8).
+    pub fn dtype_size(code: &str) -> Result<usize> {
+        Ok(match code {
+            "i1" | "u1" => 1,
+            "i2" | "u2" => 2,
+            "i4" | "u4" | "f4" => 4,
+            "i8" | "u8" | "f8" => 8,
+            other => return Err(Error::Codec(format!("unknown dtype code '{other}'"))),
+        })
+    }
+
     fn to_vortex(&self) -> ArrayRef {
         match self {
             ColumnData::I8(v) => Buffer::copy_from(v.as_slice()).into_array(),
