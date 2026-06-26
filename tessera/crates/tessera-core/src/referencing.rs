@@ -122,11 +122,19 @@ impl Transform {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Referenced {
     pub transform: Transform,
-    /// UCUM unit of the transform's *output* (e.g. `"HU"`, `"Bq/mL"`, `"mm"`, `"s"`).
+    /// UCUM unit of the transform's *output* (e.g. `"HU"`, `"Bq/mL"`, `"mm"`, `"s"`). When the quantity
+    /// has no UCUM unit, leave this as the bare domain code and name the controlled vocabulary in
+    /// [`Self::vocabulary`] (the §3 escape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    /// ADR-0032 §3 **vocabulary escape**: the controlled vocabulary the `unit` code is drawn from when it
+    /// is *not* UCUM (reusing the fd5 `_vocabulary`/`_code` convention — e.g. `"DICOM"`, `"SNOMED"`,
+    /// `"UCUM"` made explicit). `None` ⇒ `unit` is a plain UCUM symbol. This keeps non-physical/coded
+    /// quantities (modality codes, categorical axes) expressible without a separate type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocabulary: Option<String>,
     /// Named reference frame the output lands in (e.g. `"physical"`, `"patient"`, `"scanner"`,
-    /// `"atlas:<id>"`). `None` for a bare value rescale with no spatial frame.
+    /// `"atlas:<id>"`, `"epoch"`). `None` for a bare value rescale with no spatial frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<String>,
 }
@@ -137,6 +145,7 @@ impl Referenced {
         Referenced {
             transform: Transform::Identity,
             unit,
+            vocabulary: None,
             frame: None,
         }
     }
@@ -149,6 +158,7 @@ impl Referenced {
         Referenced {
             transform,
             unit,
+            vocabulary: None,
             frame,
         }
     }
@@ -159,8 +169,44 @@ impl Referenced {
         Referenced {
             transform: Transform::from_world_frame(frame),
             unit: Some(frame.unit.clone()),
+            vocabulary: None,
             frame: Some(frame.space.clone()),
         }
+    }
+
+    /// ADR-0032 §5/§6 **regular time-axis** instance: frame index → elapsed seconds since the frame's
+    /// `epoch`, `seconds = index * step_s + start_s`. A 1-D affine; unit `"s"`, frame `"epoch"`. The
+    /// common fixed-cadence dynamic series (e.g. uniform PET frames, a regular gate).
+    pub fn time_regular(start_s: f64, step_s: f64) -> Self {
+        Referenced {
+            transform: Transform::Affine1d {
+                slope: step_s,
+                intercept: start_s,
+            },
+            unit: Some("s".into()),
+            vocabulary: None,
+            frame: Some("epoch".into()),
+        }
+    }
+
+    /// ADR-0032 §5/§6 **irregular time-axis** instance: frame index → an explicit mid-time table (s)
+    /// since `epoch`, for variable-duration frames (the classic non-uniform PET protocol). A lookup;
+    /// unit `"s"`, frame `"epoch"`. Store-don't-compute — the per-frame times are data, not re-derived.
+    pub fn time_irregular(mid_times_s: Vec<f64>) -> Self {
+        Referenced {
+            transform: Transform::Lookup {
+                values: mid_times_s,
+            },
+            unit: Some("s".into()),
+            vocabulary: None,
+            frame: Some("epoch".into()),
+        }
+    }
+
+    /// Builder: attach the §3 vocabulary escape naming the controlled vocabulary `unit` is drawn from.
+    pub fn with_vocabulary(mut self, vocabulary: &str) -> Self {
+        self.vocabulary = Some(vocabulary.into());
+        self
     }
 }
 
@@ -249,6 +295,54 @@ mod tests {
         let r = Referenced::from_rescale(Some(2.0), Some(0.0), Some("Bq/mL".into()));
         assert_eq!(r.frame.as_deref(), Some("physical"));
         assert_eq!(r.unit.as_deref(), Some("Bq/mL"));
+    }
+
+    #[test]
+    fn regular_time_axis_maps_frame_index_to_elapsed_seconds() {
+        // 30 s frames starting at t=0: frame 0 → 0 s, frame 4 → 120 s; inverse recovers the index.
+        let t = Referenced::time_regular(0.0, 30.0);
+        assert_eq!(t.unit.as_deref(), Some("s"));
+        assert_eq!(t.frame.as_deref(), Some("epoch"));
+        assert_eq!(t.transform.apply_scalar(0.0), Some(0.0));
+        assert_eq!(t.transform.apply_scalar(4.0), Some(120.0));
+        assert_eq!(t.transform.invert_scalar(120.0), Some(4.0));
+        // a non-zero start offsets the epoch
+        assert_eq!(
+            Referenced::time_regular(15.0, 30.0)
+                .transform
+                .apply_scalar(0.0),
+            Some(15.0)
+        );
+    }
+
+    #[test]
+    fn irregular_time_axis_indexes_variable_frame_midtimes() {
+        // a classic non-uniform PET protocol: short early frames, long late frames
+        let t = Referenced::time_irregular(vec![5.0, 15.0, 30.0, 60.0, 150.0]);
+        assert_eq!(t.unit.as_deref(), Some("s"));
+        assert_eq!(t.frame.as_deref(), Some("epoch"));
+        assert_eq!(t.transform.apply_scalar(3.0), Some(60.0));
+        assert_eq!(t.transform.apply_scalar(5.0), None); // past the last frame
+        assert_eq!(t.transform.invert_scalar(150.0), Some(4.0));
+    }
+
+    #[test]
+    fn vocabulary_escape_carries_non_ucum_codes() {
+        // a coded (non-UCUM) quantity: the unit is a domain code, the vocab names its source
+        let r = Referenced::identity(Some("CT".into())).with_vocabulary("DICOM");
+        assert_eq!(r.unit.as_deref(), Some("CT"));
+        assert_eq!(r.vocabulary.as_deref(), Some("DICOM"));
+        // plain UCUM units leave the escape empty (skipped on the wire)
+        let u = Referenced::from_rescale(Some(1.0), Some(0.0), Some("HU".into()));
+        assert_eq!(u.vocabulary, None);
+        let j = serde_json::to_value(&u).unwrap();
+        assert!(
+            j.get("vocabulary").is_none(),
+            "UCUM unit omits the vocabulary escape"
+        );
+        // the escape roundtrips when present
+        let back: Referenced = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
     }
 
     #[test]
