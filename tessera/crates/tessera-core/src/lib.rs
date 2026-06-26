@@ -20,6 +20,7 @@ pub mod identity;
 pub mod manifest;
 pub mod product;
 pub mod provenance;
+pub mod referencing;
 pub mod schema;
 
 pub use error::{Error, Result};
