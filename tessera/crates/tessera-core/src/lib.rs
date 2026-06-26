@@ -94,6 +94,66 @@ mod tests {
     }
 
     #[test]
+    fn consistency_proof_links_an_append_only_product_revision() {
+        // A proof fixture at the manifest level (ADR-0028 §2 + ADR-0022 versioning): one product
+        // revision is an append-only extension of a prior one iff its content_hash is a proven MMR
+        // prefix of the new content_hash.
+        use crate::hash::{consistency_proof, verify_consistency};
+        let blocks: Vec<ArrayBlock> = (0..5)
+            .map(|i| {
+                ArrayBlock::new(
+                    format!("b{i}"),
+                    ArraySpec::new(vec![8 + i as u64, 8, 8], "int16"),
+                )
+            })
+            .collect();
+        let seal = |k: usize| {
+            let mut b = ProductBuilder::new(
+                "recon",
+                "rev",
+                "append-only revision",
+                "2024-01-01T00:00:00Z",
+            );
+            for blk in &blocks[..k] {
+                b.add_block(blk).unwrap();
+            }
+            b.seal().unwrap()
+        };
+        let v1 = seal(3); // earlier revision: first three blocks
+        let v2 = seal(5); // later revision: the same three + two appended
+
+        // the ordered block digests of v2; v1's are the length-3 prefix (same blocks, same order).
+        let digests: Vec<String> = v2
+            .blocks
+            .iter()
+            .map(|r| r.digest.clone().unwrap())
+            .collect();
+        let proof = consistency_proof(&digests, 3).unwrap();
+        assert!(
+            verify_consistency(
+                &proof,
+                v1.content_hash.as_deref().unwrap(),
+                v2.content_hash.as_deref().unwrap(),
+            ),
+            "v1 must be a proven append-only prefix of v2"
+        );
+        // a divergent product (different first block) is NOT a consistent prefix of v2.
+        let mut other = ProductBuilder::new("recon", "rev", "divergent", "2024-01-01T00:00:00Z");
+        other
+            .add_block(&ArrayBlock::new(
+                "different",
+                ArraySpec::new(vec![9, 9, 9], "int16"),
+            ))
+            .unwrap();
+        let od = other.seal().unwrap();
+        assert!(!verify_consistency(
+            &proof,
+            od.content_hash.as_deref().unwrap(),
+            v2.content_hash.as_deref().unwrap(),
+        ));
+    }
+
+    #[test]
     fn build_listmode_table_product() {
         let spec = TableSpec {
             columns: vec![
