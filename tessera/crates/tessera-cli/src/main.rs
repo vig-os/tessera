@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use tessera_core::SchemaRegistry;
 use tessera_io::{pack_dir, unpack, Reader};
 
 #[derive(Parser)]
@@ -27,6 +28,8 @@ enum Cmd {
     Unpack { file: PathBuf, outdir: PathBuf },
     /// Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`.
     Pack { dir: PathBuf, out: PathBuf },
+    /// Validate a `.tsra`'s manifest against its declared product schema (required fields/blocks).
+    Schema { file: PathBuf },
 }
 
 fn main() -> ExitCode {
@@ -97,6 +100,24 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             println!("packed {} -> {}", dir.display(), out.display());
             Ok(())
         }
+        Cmd::Schema { file } => {
+            let r = Reader::open(&file)?;
+            let m = r.manifest();
+            let reg = SchemaRegistry::builtin();
+            match reg.get(&m.product) {
+                Some(s) => println!(
+                    "product '{}' — built-in schema v{} ({})",
+                    m.product, s.version, s.description
+                ),
+                None => println!(
+                    "product '{}' — unknown schema (open-world: validation is permissive)",
+                    m.product
+                ),
+            }
+            reg.validate(m)?; // typed Invalid error naming the first missing required field/block
+            println!("OK  schema-valid: {}", file.display());
+            Ok(())
+        }
     }
 }
 
@@ -125,6 +146,7 @@ mod tests {
 
         run(Cmd::Verify { file: tsra.clone() }).unwrap();
         run(Cmd::Inspect { file: tsra.clone() }).unwrap();
+        run(Cmd::Schema { file: tsra.clone() }).unwrap();
 
         let exploded = dir.path().join("exploded");
         run(Cmd::Unpack {
