@@ -83,7 +83,8 @@ needs real CT/DICOM.
 | Ingest: DICOM | ◑ | lossless int16 + rescale/units/modality + provenance + 3-D series-stack + PS3.15 de-id; golden corpus + JPEG transfer-syntaxes pending | `tessera-ingest::dicom`, ADR-0025 |
 | Ingest: GE-HDF5 · Siemens · raw · NIfTI | ○ | decode→re-encode open; lossless | S9 (GE transform benched) |
 | Reader API (open/verify/block read) | ✓ | magic+seal verify on open; per-block read verified vs digest; partial-product; generic Read+Seek | `tessera-io::Reader`, container tests |
-| Conformance corpus + SPEC.md | ✓ | 6 golden fixtures (id/content/manifest hashes) locked in CI; `docs/SPEC.md` | `corpus/corpus.json`, `tests/conformance.rs` |
+| Conformance corpus + SPEC.md | ✓ | 6 golden fixtures + `.tsra` test vectors locked in CI; `docs/SPEC.md` | `corpus/corpus.json`, `corpus/files/`, `tests/conformance.rs` |
+| **Independent reader passes corpus** (v1.0 gate) | ✓ | a 2nd impl, from SPEC.md alone, reproduces all 6 goldens | `corpus/reference_reader/` (pure-Python, 6/6 first try) |
 | Bindings (pyo3 → C-ABI → WASM) | ○ | Python parity; zero-copy Arrow | — |
 
 ## H. Release gates (definition of shippable)

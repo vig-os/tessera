@@ -14,6 +14,9 @@ All hashing is over **RFC 8785 JSON Canonicalization Scheme (JCS)** bytes: objec
 UTF-16 code unit, no insignificant whitespace, ECMAScript-canonical number forms, UTF-8 output. A
 conformant implementation MUST use a JCS encoder. Non-hashed serializations (e.g. the pretty
 `manifest.json` stored in the container) MAY be any valid JSON — verification re-canonicalizes.
+**Number forms** are the classic pitfall: `1`, `1.0`, and `1e0` MUST all canonicalize to `1` (and
+e.g. `-1024.0` → `-1024`); implementations SHOULD use a tested JCS library, not a hand-rolled JSON
+serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping rules verbatim.
 
 ## 3. Hashes
 - Algorithm: **BLAKE3**, 256-bit, output as lowercase hex with the prefix `blake3:`.
@@ -24,15 +27,20 @@ conformant implementation MUST use a JCS encoder. Non-hashed serializations (e.g
 
 ## 4. Identity model (three hashes)
 - **`id`** (logical identity): `id = digest(JCS(id_inputs))`, where `id_inputs` is a JSON object of
-  string→string. Default keys: `product`, `name`, `timestamp`. Stable across rename / byte re-encode.
+  string→string, hashed verbatim under JCS. The keys `product`, `name`, `timestamp` are the writer's
+  recommended default — **not** a reader-enforced requirement; any string→string mapping is valid.
+  Stable across rename / byte re-encode.
 - **`content_hash`** (data fingerprint): `merkle_root([block.digest for block in blocks])`, blocks in
   manifest order. Each block's `digest` is `digest(<the block's stored payload bytes>)`.
 - **`manifest_hash`** (the seal): `digest(JCS(manifest_without_manifest_hash))` — the manifest object
-  with the `manifest_hash` key omitted (all other fields, including `content_hash`, present). It
+  with **exactly one key deleted** (`manifest_hash`); no other normalization, key insertion, or
+  empty-stripping is applied beyond JCS. All other fields, including `content_hash`, stay present. It
   transitively commits to every block digest and all metadata.
 
 ## 5. Manifest schema
-A JSON object. Fields (✱ = omitted when empty/None):
+A JSON object. Fields (✱ = omitted from the JSON when the writer's value is absent/null). Note `[]`
+and `{}` are **present** values, not omissions: e.g. `sources: []` stays in the manifest and hashes
+differently from its absence — only the null/absent sentinel is dropped.
 | key | type | notes |
 |---|---|---|
 | `tessera_version` | string | spec version, `MAJOR.MINOR.PATCH`. Reader MUST refuse `MAJOR` > supported. |
