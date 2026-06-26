@@ -267,6 +267,22 @@ impl ArraySpec {
     /// `translation`, so an **oblique** orientation (off-diagonal affine) is not representable — the
     /// `scale` is the column-norm spacing and the rotation is dropped. Tessera's own `world_frame`
     /// keeps the full affine; this export is the lossy-on-orientation interop view.
+    ///
+    /// ```
+    /// use tessera_core::block::array::{ArraySpec, WorldFrame};
+    ///
+    /// let mut spec = ArraySpec::new(vec![64, 64, 64], "int16");
+    /// spec.world_frame = Some(WorldFrame {
+    ///     affine: [2.0, 0.0, 0.0, -100.0, 0.0, 2.0, 0.0, -100.0, 0.0, 0.0, 2.0, -50.0],
+    ///     convention: "LPS".into(), unit: "mm".into(), space: "patient".into(),
+    /// });
+    /// let ms = spec.ome_zarr_multiscales(2).unwrap();
+    /// // level 0 keeps the base 2 mm spacing; level 1 doubles it (a 2× max-pool level).
+    /// assert_eq!(ms["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][0], 2.0);
+    /// assert_eq!(ms["multiscales"][0]["datasets"][1]["coordinateTransformations"][0]["scale"][0], 4.0);
+    /// // an index-space array (no world_frame) has no spatial multiscale export.
+    /// assert!(ArraySpec::new(vec![64, 64, 64], "int16").ome_zarr_multiscales(2).is_none());
+    /// ```
     pub fn ome_zarr_multiscales(&self, levels: u32) -> Option<serde_json::Value> {
         if self.shape.len() != 3 {
             return None;
