@@ -97,6 +97,129 @@ pub fn merkle_root(block_digests: &[String]) -> String {
     fmt_root(bag(&peaks))
 }
 
+/// One step of an inclusion proof: a sibling hash and which side it sits on relative to the running
+/// accumulator. `left == true` → the sibling is the **left** child, so combine as `node(sibling, acc)`;
+/// `false` → `node(acc, sibling)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofStep {
+    pub sibling: [u8; 32],
+    pub left: bool,
+}
+
+/// Root of the perfect subtree over leaf-hashes `[lo, hi)` (`hi - lo` is a power of two).
+fn subtree_root(lh: &[[u8; 32]], lo: usize, hi: usize) -> [u8; 32] {
+    if hi - lo == 1 {
+        lh[lo]
+    } else {
+        let mid = lo + (hi - lo) / 2;
+        node_hash(&subtree_root(lh, lo, mid), &subtree_root(lh, mid, hi))
+    }
+}
+
+/// Push the audit path for `target` within the perfect subtree `[lo, hi)` into `out`, **bottom-up**
+/// (the recurse-then-push order yields leaf→root, which is the verification order).
+fn subtree_path(lh: &[[u8; 32]], lo: usize, hi: usize, target: usize, out: &mut Vec<ProofStep>) {
+    if hi - lo == 1 {
+        return;
+    }
+    let mid = lo + (hi - lo) / 2;
+    if target < mid {
+        subtree_path(lh, lo, mid, target, out);
+        out.push(ProofStep {
+            sibling: subtree_root(lh, mid, hi),
+            left: false,
+        });
+    } else {
+        subtree_path(lh, mid, hi, target, out);
+        out.push(ProofStep {
+            sibling: subtree_root(lh, lo, mid),
+            left: true,
+        });
+    }
+}
+
+/// The MMR peak leaf-ranges for `n` leaves, left→right (largest/oldest first) — the set bits of `n`,
+/// matching [`push_peak`]'s carry.
+fn peak_ranges(n: usize) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut pos = 0;
+    for bit in (0..usize::BITS).rev() {
+        let size = 1usize << bit;
+        if n & size != 0 {
+            ranges.push((pos, pos + size));
+            pos += size;
+        }
+    }
+    ranges
+}
+
+/// Build an **inclusion proof** that the leaf at `index` is in the MMR over the ordered `block_digests`
+/// — the audit path from `leaf(index)` up to `content_hash` (ADR-0028 §6). `None` if `index` is out of
+/// range. Verify with [`verify_inclusion`]. The proof is the within-peak Merkle path, then the bagging
+/// path (the peak to the right bagged as one sibling, then each peak to the left).
+pub fn inclusion_proof(block_digests: &[String], index: usize) -> Option<Vec<ProofStep>> {
+    let n = block_digests.len();
+    if index >= n {
+        return None;
+    }
+    let lh: Vec<[u8; 32]> = block_digests.iter().map(|d| leaf_hash(d)).collect();
+    let peaks = peak_ranges(n);
+    let k = peaks
+        .iter()
+        .position(|&(lo, hi)| index >= lo && index < hi)
+        .expect("index in range → some peak contains it");
+    let (lo, hi) = peaks[k];
+
+    let mut proof = Vec::new();
+    // 1. within-peak audit path (bottom-up) → leaf rises to its peak's root.
+    subtree_path(&lh, lo, hi, index, &mut proof);
+
+    // 2. bagging. Peak roots, left→right.
+    let peak_roots: Vec<[u8; 32]> = peaks
+        .iter()
+        .map(|&(l, h)| subtree_root(&lh, l, h))
+        .collect();
+    let m = peaks.len();
+    // The bag of all peaks to the RIGHT of k is one sibling (on the right), if any exist.
+    if k + 1 < m {
+        let mut acc = peak_roots[m - 1];
+        for j in (k + 1..m - 1).rev() {
+            acc = node_hash(&peak_roots[j], &acc);
+        }
+        proof.push(ProofStep {
+            sibling: acc,
+            left: false,
+        });
+    }
+    // Each peak to the LEFT of k wraps the accumulator as the left sibling, nearest-first.
+    for j in (0..k).rev() {
+        proof.push(ProofStep {
+            sibling: peak_roots[j],
+            left: true,
+        });
+    }
+    Some(proof)
+}
+
+/// Verify an [`inclusion_proof`]: fold `block_digest`'s leaf up through the proof and check it
+/// reproduces `root` (a `content_hash`). Tampering with the leaf, any sibling, or any side fails.
+///
+/// This proves **membership** (the leaf is *somewhere* in the tree with this root), not membership *at a
+/// specific index* — the proof's side-pattern fixes the position, but this function does not take an
+/// `index`/`n` to cross-check it. A caller that needs position-binding should regenerate the proof for
+/// the expected `index` via [`inclusion_proof`] and compare, or carry the index alongside.
+pub fn verify_inclusion(block_digest: &str, proof: &[ProofStep], root: &str) -> bool {
+    let mut acc = leaf_hash(block_digest);
+    for step in proof {
+        acc = if step.left {
+            node_hash(&step.sibling, &acc)
+        } else {
+            node_hash(&acc, &step.sibling)
+        };
+    }
+    fmt_root(acc) == root
+}
+
 /// Incremental **hash-on-write** MMR accumulator — the streaming-write counterpart of
 /// [`merkle_root`]. A write engine pushes each block's digest the moment that block is durably
 /// committed and reads the running content root at any **watermark** (the number of blocks folded
@@ -229,6 +352,46 @@ mod tests {
         assert_eq!(acc.watermark(), 3);
         // empty accumulator == empty-list root (a 0-block product)
         assert_eq!(MerkleAccumulator::new().root(), merkle_root(&[]));
+    }
+
+    #[test]
+    fn inclusion_proofs_verify_for_every_leaf() {
+        // Sizes spanning several peak structures: 11 = 8+2+1, 7 = 4+2+1, 5 = 4+1, 13 = 8+4+1, …
+        for n in [1usize, 2, 3, 4, 5, 6, 7, 8, 11, 13, 16] {
+            let digests: Vec<String> = (0..n as u8).map(|k| digest(&[k, n as u8])).collect();
+            let root = merkle_root(&digests);
+            for i in 0..n {
+                let proof = inclusion_proof(&digests, i).unwrap();
+                assert!(
+                    verify_inclusion(&digests[i], &proof, &root),
+                    "n={n} i={i}: valid proof must verify against the content_hash"
+                );
+                // the same proof must NOT verify a different leaf at that position
+                assert!(
+                    !verify_inclusion(&digest(b"not-the-leaf"), &proof, &root),
+                    "n={n} i={i}: a wrong leaf must not verify"
+                );
+            }
+            assert!(
+                inclusion_proof(&digests, n).is_none(),
+                "out-of-range → None"
+            );
+        }
+    }
+
+    #[test]
+    fn tampering_with_a_proof_step_fails_verification() {
+        let digests: Vec<String> = (0..7u8).map(|k| digest(&[k])).collect();
+        let root = merkle_root(&digests);
+        let mut proof = inclusion_proof(&digests, 3).unwrap();
+        assert!(verify_inclusion(&digests[3], &proof, &root));
+        // corrupt a sibling hash → must fail
+        proof[0].sibling[0] ^= 0xff;
+        assert!(!verify_inclusion(&digests[3], &proof, &root));
+        // flipping a side also breaks it (restore the hash first)
+        proof[0].sibling[0] ^= 0xff;
+        proof[0].left = !proof[0].left;
+        assert!(!verify_inclusion(&digests[3], &proof, &root));
     }
 
     #[test]
