@@ -1,0 +1,12 @@
+```
+$ tessera inspect ../../corpus/files/listmode_events.tsra
+tessera [..] · product=listmode
+id            [..]
+name          lm-3p
+timestamp     2024-01-01T00:00:00Z
+content_hash  [..]
+manifest_hash [..]
+blocks        1
+  - events               Table [..]
+
+```
