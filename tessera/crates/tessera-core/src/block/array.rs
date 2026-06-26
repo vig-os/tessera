@@ -155,6 +155,14 @@ impl ArraySpec {
         stored * self.rescale_slope.unwrap_or(1.0) + self.rescale_intercept.unwrap_or(0.0)
     }
 
+    /// The inverse of [`Self::to_physical`]: `stored = (physical − intercept) / slope` — used at
+    /// **ingest** to map a physical value back into the native-int storage domain before encoding.
+    /// `None` for a degenerate `slope == 0`.
+    pub fn from_physical(&self, physical: f64) -> Option<f64> {
+        let slope = self.rescale_slope.unwrap_or(1.0);
+        (slope != 0.0).then(|| (physical - self.rescale_intercept.unwrap_or(0.0)) / slope)
+    }
+
     /// Override the default axis names (must match the array rank).
     pub fn with_axes(mut self, axes: Vec<String>) -> Self {
         self.axes = axes;
@@ -241,6 +249,17 @@ mod tests {
         assert_eq!(pet.to_physical(20.0), 10.0);
         // no rescale → identity.
         assert_eq!(ArraySpec::new(vec![8], "int16").to_physical(5.0), 5.0);
+
+        // inverse roundtrips: stored → physical → stored (within fp tolerance).
+        for &s in &[0.0, 7.0, -42.0, 2048.0] {
+            assert!((ct.from_physical(ct.to_physical(s)).unwrap() - s).abs() < 1e-9);
+            assert!((pet.from_physical(pet.to_physical(s)).unwrap() - s).abs() < 1e-9);
+        }
+        // degenerate slope 0 → no inverse.
+        assert!(ArraySpec::new(vec![8], "int16")
+            .with_rescale(0.0, 3.0)
+            .from_physical(1.0)
+            .is_none());
     }
 
     #[test]
