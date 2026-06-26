@@ -296,10 +296,14 @@ fn builtin_schemas() -> Vec<ProductSchema> {
         ProductSchema {
             blocks: vec![one(
                 "roi",
-                Some(Table),
-                "Regions of interest (labels, geometry, statistics)",
+                None, // representation by nature (ADR-0029 §4): raster label N-D **array** OR a
+                "Region(s) of interest — a raster label array, or a parametric / contour / stats table",
             )],
-            ..schema("roi", "1.0", "Regions of interest over an image product.")
+            ..schema(
+                "roi",
+                "1.0",
+                "Regions of interest over an image product (representation chosen by the ROI's nature).",
+            )
         },
         ProductSchema {
             blocks: vec![one(
@@ -443,6 +447,36 @@ mod tests {
             assert!(r.get(p).is_some(), "missing built-in schema '{p}'");
         }
         assert_eq!(r.products().count(), 12);
+    }
+
+    #[test]
+    fn roi_accepts_representation_by_nature_array_or_table() {
+        // ADR-0029 §4: an ROI's representation is chosen by its nature — irregular → a raster label
+        // **array**; primitive/contour/stats → a **table**. The `roi` schema accepts either.
+        use crate::block::array::{ArrayBlock, ArraySpec};
+        use crate::block::table::{Column, TableBlock, TableSpec};
+        let r = SchemaRegistry::builtin();
+        // irregular ROI → a raster uint16 label-map array
+        let mask = ArrayBlock::new("mask", ArraySpec::new(vec![8, 8, 8], "uint16"));
+        let mut b = ProductBuilder::new("roi", "roi-a", "tumour mask", "2024-01-01T00:00:00Z");
+        b.add_block(&mask).unwrap();
+        r.validate(&b.seal().unwrap()).unwrap();
+        // primitive ROI → a parametric table (type + params)
+        let params = TableBlock::new(
+            "rois",
+            TableSpec {
+                columns: vec![Column {
+                    name: "radius".into(),
+                    dtype: "f4".into(),
+                    codec: None,
+                }],
+                rows: 1,
+                row_index: None,
+            },
+        );
+        let mut b = ProductBuilder::new("roi", "roi-b", "sphere ROI", "2024-01-01T00:00:00Z");
+        b.add_block(&params).unwrap();
+        r.validate(&b.seal().unwrap()).unwrap();
     }
 
     #[test]
