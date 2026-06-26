@@ -9,7 +9,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use tessera_core::SchemaRegistry;
-use tessera_io::{pack_dir, unpack, Reader};
+use tessera_ingest::{dicom, ge_hdf5};
+use tessera_io::{pack, pack_dir, unpack, Reader};
 
 #[derive(Parser)]
 #[command(name = "tessera", version, about = "Tessera FAIR data-product CLI")]
@@ -30,6 +31,47 @@ enum Cmd {
     Pack { dir: PathBuf, out: PathBuf },
     /// Validate a `.tsra`'s manifest against its declared product schema (required fields/blocks).
     Schema { file: PathBuf },
+    /// Ingest a vendor acquisition file into a sealed `.tsra` product (normalise at the door).
+    Ingest {
+        #[command(subcommand)]
+        src: IngestSrc,
+    },
+}
+
+#[derive(Subcommand)]
+enum IngestSrc {
+    /// DICOM image/series → `recon` product (lossless int16 + rescale/units/modality + provenance).
+    Dicom {
+        /// Source `.dcm` file.
+        input: PathBuf,
+        /// Output `.tsra`.
+        out: PathBuf,
+        /// Product name (the human handle in the manifest).
+        #[arg(long)]
+        name: String,
+        /// Acquisition timestamp (ISO-8601), recorded verbatim in the manifest.
+        #[arg(long)]
+        timestamp: String,
+        /// Apply PS3.15 de-identification (drop PHI tags) before encoding.
+        #[arg(long)]
+        deidentify: bool,
+    },
+    /// GE listmode HDF5 → `listmode` product (compound events → columnar; the #193 transpose).
+    GeHdf5 {
+        /// Source `.h5` file.
+        input: PathBuf,
+        /// Output `.tsra`.
+        out: PathBuf,
+        /// Product name.
+        #[arg(long)]
+        name: String,
+        /// Acquisition timestamp (ISO-8601).
+        #[arg(long)]
+        timestamp: String,
+        /// Compound dataset to read: `events_3p` (default) or `events_2p`.
+        #[arg(long, default_value = "events_3p")]
+        dataset: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -118,7 +160,57 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             println!("OK  schema-valid: {}", file.display());
             Ok(())
         }
+        Cmd::Ingest { src } => run_ingest(src),
     }
+}
+
+fn run_ingest(src: IngestSrc) -> tessera_core::Result<()> {
+    let (manifest, payloads, out) = match src {
+        IngestSrc::Dicom {
+            input,
+            out,
+            name,
+            timestamp,
+            deidentify,
+        } => {
+            let img = if deidentify {
+                dicom::read_image_deidentified(&input)?
+            } else {
+                dicom::read_image(&input)?
+            };
+            let source = input.to_string_lossy();
+            let (m, p) = dicom::to_recon_product(&img, &name, &timestamp, &source)?;
+            (m, p, out)
+        }
+        IngestSrc::GeHdf5 {
+            input,
+            out,
+            name,
+            timestamp,
+            dataset,
+        } => {
+            let cols = match dataset.as_str() {
+                "events_3p" => ge_hdf5::read_events_3p(&input, &dataset)?,
+                "events_2p" => ge_hdf5::read_events_2p(&input, &dataset)?,
+                other => {
+                    return Err(tessera_core::Error::Invalid(format!(
+                        "unknown GE dataset '{other}' (expected events_2p or events_3p)"
+                    )))
+                }
+            };
+            let source = input.to_string_lossy();
+            let (m, p) = ge_hdf5::to_listmode_product(&cols, &name, &timestamp, &source)?;
+            (m, p, out)
+        }
+    };
+    pack(&manifest, &payloads, &out)?;
+    println!(
+        "ingested {} ({} blocks) -> {}",
+        manifest.id,
+        manifest.blocks.len(),
+        out.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -172,5 +264,58 @@ mod tests {
         let bad = dir.path().join("bad.tsra");
         std::fs::write(&bad, b"not a zip at all").unwrap();
         assert!(run(Cmd::Verify { file: bad }).is_err());
+    }
+
+    // Mirrors the GE 3-photon compound record (HDF5 maps by member name on read).
+    #[repr(C)]
+    #[derive(hdf5_metno::H5Type, Clone, Copy)]
+    struct Rec3p {
+        ms: u32,
+        id: [u16; 3],
+        en: [f32; 3],
+        vtx: [f32; 3],
+        lt: f32,
+    }
+
+    #[test]
+    fn ingest_ge_hdf5_then_verify_and_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let h5 = dir.path().join("LIST.h5");
+        let recs: Vec<Rec3p> = (0..50)
+            .map(|k| Rec3p {
+                ms: k,
+                id: [k as u16, 1, 2],
+                en: [511.0, 511.0, 511.0],
+                vtx: [0.0, 0.0, 0.0],
+                lt: 1.0,
+            })
+            .collect();
+        let f = hdf5_metno::File::create(&h5).unwrap();
+        f.new_dataset::<Rec3p>()
+            .shape(recs.len())
+            .create("events_3p")
+            .unwrap()
+            .write(&recs)
+            .unwrap();
+        drop(f);
+
+        let out = dir.path().join("lm.tsra");
+        run(Cmd::Ingest {
+            src: IngestSrc::GeHdf5 {
+                input: h5,
+                out: out.clone(),
+                name: "DP06-lm".into(),
+                timestamp: "2024-01-01T00:00:00Z".into(),
+                dataset: "events_3p".into(),
+            },
+        })
+        .unwrap();
+
+        // the ingested product verifies (seal + block digest) and is schema-valid
+        run(Cmd::Verify { file: out.clone() }).unwrap();
+        run(Cmd::Inspect { file: out.clone() }).unwrap();
+        let r = Reader::open(&out).unwrap();
+        assert_eq!(r.manifest().product, "listmode");
+        assert_eq!(r.manifest().sources.len(), 1);
     }
 }

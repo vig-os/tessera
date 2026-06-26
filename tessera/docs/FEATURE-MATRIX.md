@@ -88,8 +88,8 @@ data) is the remaining dedicated harness (#143).
 |---|:--:|---|---|
 | Sealed `.tsra` (zip64, range-readable) | ✓ | STORED zip64, mimetype-first magic, central-dir index; 1-block read ≪ whole archive | `container::pack`, `range::CountingReader` (S6 proof) |
 | OCI artifact / exploded prefix | ○ | push/pull; range-read; CoW versioning | #22 (P6) |
-| Ingest: DICOM | ◑ | lossless int16 + rescale/units/modality + provenance + 3-D series-stack + PS3.15 de-id; golden corpus + JPEG transfer-syntaxes pending | `tessera-ingest::dicom`, ADR-0025 |
-| Ingest: GE-HDF5 (listmode) | ◑ | lossless 2p+3p compound→columnar transpose (row-major #193 fix) + `ingested_from` provenance; chunked-stream for 7 GB files pending | `tessera-ingest::ge_hdf5` (#208) |
+| Ingest: DICOM | ◑ | lossless int16 + rescale/units/modality + provenance + 3-D series-stack + PS3.15 de-id; CLI `tessera ingest dicom [--deidentify]`; golden corpus + JPEG transfer-syntaxes pending | `tessera-ingest::dicom`, ADR-0025 |
+| Ingest: GE-HDF5 (listmode) | ◑ | lossless 2p+3p compound→columnar transpose (row-major #193 fix) + `ingested_from` provenance; CLI `tessera ingest ge-hdf5 --dataset`; chunked-stream for 7 GB files pending | `tessera-ingest::ge_hdf5` (#208) |
 | Ingest: Siemens · raw · NIfTI | ○ | decode→re-encode open; lossless | S9 |
 | Reader API (open/verify/block read) | ✓ | magic+seal verify on open; per-block read verified vs digest; partial-product; generic Read+Seek | `tessera-io::Reader`, container tests |
 | Conformance corpus + SPEC.md | ✓ | 6 golden fixtures + `.tsra` test vectors locked in CI; `docs/SPEC.md` | `corpus/corpus.json`, `corpus/files/`, `tests/conformance.rs` |
@@ -101,7 +101,7 @@ data) is the remaining dedicated harness (#143).
 
 | Milestone | Done-when |
 |---|---|
-| **v0.1 — format frozen** | core + io (write+read), conformance corpus, §C+§D gates green, zip layout, CLI (pack/unpack/verify/inspect) |
+| **v0.1 — format frozen** | core + io (write+read), conformance corpus, §C+§D gates green, zip layout, CLI (pack/unpack/verify/inspect/schema/ingest) |
 | **v0.2 — DICOM ingest** | `tessera-ingest::dicom` lossless + PS3.15 verify + golden DICOM corpus |
 | **v0.3 — vendor raw + integrity** | GE-HDF5/Siemens/raw plugins; minimal cosign signing; WORM on MinIO |
 | **v0.5 — Python + ops** | pyo3 parity; reference podman-compose stack; perf-SLA CI gates; migration CLI |

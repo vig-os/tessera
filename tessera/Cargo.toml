@@ -44,3 +44,4 @@ hdf5-metno = "0.12"
 pyo3 = { version = "0.27", features = ["extension-module", "abi3-py39"] }
 tessera-core = { path = "crates/tessera-core" }
 tessera-io = { path = "crates/tessera-io" }
+tessera-ingest = { path = "crates/tessera-ingest" }

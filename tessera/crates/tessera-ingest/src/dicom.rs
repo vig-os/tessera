@@ -40,6 +40,14 @@ pub fn read_image(path: &std::path::Path) -> Result<DicomImage> {
     read_object(&obj)
 }
 
+/// Open a DICOM file, apply PS3.15 de-identification (drop PHI tags) in memory, then decode the
+/// pixels. The image content is unchanged; the PHI never reaches the Tessera product.
+pub fn read_image_deidentified(path: &std::path::Path) -> Result<DicomImage> {
+    let mut obj = dicom::object::open_file(path).map_err(de)?;
+    deidentify(&mut obj);
+    read_object(&obj)
+}
+
 /// Decode an already-parsed DICOM object (testable without touching the filesystem).
 pub fn read_object(obj: &FileDicomObject<InMemDicomObject>) -> Result<DicomImage> {
     let modality = obj

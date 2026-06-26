@@ -3709,9 +3709,11 @@ name = "tessera-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "hdf5-metno",
  "serde_json",
  "tempfile",
  "tessera-core",
+ "tessera-ingest",
  "tessera-io",
 ]
 
