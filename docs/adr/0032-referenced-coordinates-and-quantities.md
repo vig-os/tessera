@@ -1,9 +1,20 @@
 # ADR-0032 — Referenced coordinates & quantities: one `(transform, unit, frame)` descriptor
 
-Status: **Proposed** (2026-06-26) · Tracks `#219` (units/quantities) + `#220` (time) · **Generalises**
-ADR-0030 (spatial referencing = the coupled-ND instance) · Relates to ADR-0028 (derived per-level
-transforms), ADR-0029 (composition · feature-by-presence · nature-not-rank), the fd5 field model
+Status: **Accepted** (2026-06-26, as-built) · Tracks `#219` (units/quantities) + `#220` (time) ·
+**Generalises** ADR-0030 (spatial referencing = the coupled-ND instance) · Relates to ADR-0028 (derived
+per-level transforms), ADR-0029 (composition · feature-by-presence · nature-not-rank), the fd5 field model
 (`unit`/`_vocabulary`/`_code`).
+
+**As-built** (every §§ + Status-note precondition has tested code, confirmed by a fresh-context audit):
+§1 descriptor + §2 taxonomy = `tessera_core::referencing::{Referenced, Transform}` (`identity`/`affine_1d`/
+`affine_nd`/`lookup`, `apply_scalar`/`invert_scalar`/`apply_point`). §3 UCUM + `_vocabulary` escape =
+`Referenced.vocabulary` + pinned `CANONICAL_UNITS` + `unit_is_canonical`. §4 frame = pinned
+`CANONICAL_FRAMES` + `:<detail>` suffixes (`epoch:`/`baseline:`/`atlas:`) + `frame_is_canonical` +
+`with_epoch`. §5 instances = `from_rescale`/`from_world_frame` bridges + `time_regular`/`time_irregular`/
+`time_ticks`. §6 time-split (wall-clock RFC 3339 in metadata vs elapsed `epoch`/`s` quantity, integer
+ticks, PET `decay_correction_reference` on `dynamic_pet`). §7 manifest placement = `ArraySpec.axis_
+referencing` + derived `value_referencing`/`spatial_referencing`, in `manifest_hash`, deterministic. SPEC
+§5c documents it. The "Gate (future)" bullet is post-flip activation, not a precondition.
 
 ## Context
 Three "physical meaning" needs were on the table as separate designs: **units/quantities** (#219),
