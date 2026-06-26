@@ -27,6 +27,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | Cubic 64³ chunking | ✓ | isotropic reads; size/read sweet spot — codec-independent | chunk sweep |
 | Per-block selectable codec (`ArraySpec.codec`) | ✓ | `"pcodec"` (default) · `"zstd"` (fixed level 3) · `"auto"` (writer picks smaller, records concrete codec) — slice/ROI access unchanged across codecs (chunk grid owns locality) | #213 + `tessera-io::array::tests::{zstd_*,auto_*}` |
 | Table row-groups (fixed 2¹⁶) — one encoder, batch == stream | ✓ | always-chunked Vortex; `encode_streaming` (lazy/bounded) byte-identical to `encode`; ≤2¹⁶-row tables unchanged (backward-compat) | `tessera-io::table::{encode,encode_streaming}` (#203, ADR-0026), `multi_rowgroup_*`, `encode_streaming_matches_batch_encode` |
+| Sparse representation (substrate by nature) | ✓ | scatter-sparse → **COO table** `(idx,v)` via the Vortex encoder (no new primitive); block-sparse → dense+pcodec with `count=0` chunk-prune; crossover **measured** (#221-A: dense+pcodec wins on disk at storable scales → COO only for unstorable-ambient / selective-nnz) | **ADR-0031**; `array::to_coo` (`to_coo_emits_one_row_per_nonzero`), `chunk_index::prune`, #221-A (SPIKE-RESULTS) |
 
 ## C. Correctness gates (REQUIRED — binary)
 | Gate | Status | Pass condition | Evidence |

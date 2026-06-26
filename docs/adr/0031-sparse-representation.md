@@ -1,8 +1,18 @@
 # ADR-0031 — Sparse data representation: COO table convention (scatter), chunk-prune (block)
 
-Status: **Proposed** (2026-06-26) · Tracks `#218` · Relates to ADR-0028 (chunk grid / stats / pruning),
-ADR-0027 (chunk-index stats), ADR-0029 §6 (substrate-by-nature — density flip), ADR-0023 (array payload),
+Status: **Accepted** (2026-06-26, as-built) · Tracks `#218` · Relates to ADR-0028 (chunk grid / stats /
+pruning), ADR-0027 (chunk-index stats), ADR-0029 §6 (substrate-by-nature — density flip), ADR-0023 (array payload),
 ADR-0024 (table payload), and the #213 codec-`auto` "decide once, store the concrete encoding" rule.
+
+> **As-built (2026-06-26):** the decision is final and evidence-backed, with every mechanism in the
+> codebase: **block-sparse** → dense+pcodec with `count=0` chunk-pruning (`chunk_index::prune`);
+> **scatter-sparse** → a COO `(idx, v)` table via `tessera_io::array::to_coo` riding the ordinary Vortex
+> encoder (no new primitive); stats are the `ChunkStats` monoids (§4); the threshold is **measured**
+> (#221-A — dense+pcodec wins on disk at storable scales, so COO is reserved for unstorable-ambient /
+> selective-nnz access); and the read path delivers columns without forcing densification (§6,
+> materialize-don't-densify). The selector is **explicit producer metadata** (§5), not an automated guess.
+> Cited in FEATURE-MATRIX (matrix gate). Follow-on (not blocking): a sparse codec is *rejected* (§3); a
+> higher-rank coordinate variant `(i0..in, v)` is a trivial extension of `to_coo` when a use-case needs it.
 
 ## Context
 ADR-0029 §6 sends **mostly-empty grids** (sparse high-D histograms, sparse masks/labels, sparse matrices,
