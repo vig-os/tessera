@@ -78,6 +78,41 @@ pass, and — because the fold is **push-ordered** — it is deterministic and r
 sealed identity. Only the float `sum` needs a **canonical reduction** guard; blake3 / min / max / count
 are exact.
 
+**Where the interior levels are built — the committer's MMR carry.** The pool builds *leaves only*
+(per atomic chunk: `blake3` + the factory fields). The committer builds **every interior level**
+incrementally as the MMR "carry": it keeps the **peaks** (roots of complete perfect subtrees, sizes
+1,2,4,8… like the set bits of a counter); appending leaf *k* merges colliding peaks → each merge **is**
+an interior node `{H(left,right), merge(stats)}`, so leaf *k* builds `popcount-carry(k)` =
+(trailing-1-bits of *k*) interior nodes — amortized **O(1)**, worst-case O(log n). Trace for 4 leaves:
+append L1 builds P01 (+1); append L3 builds P23 (+1) then P0123 (+2 = root). No seal-time pass ever
+re-folds: sealing snapshots the peaks into the final root, and the interior `{hash,stats}` nodes are
+**persisted as they finalize** into the chunk-index/sidecar block (persist-all = the "materialize the
+pyramid" knob; keep-only-peaks = integrity root only). **The fold is NOT rayon'd** — it's nanoseconds
+per leaf vs a millisecond encode, and order-dependent; one committer keeps up trivially (its only
+possible bottleneck is durable fragment I/O, fixed by fsync-batching, not by parallelizing the fold).
+
+**Table vs array.** This live **append-MMR** is the *table/DAQ* case (row-groups arrive in time order).
+Arrays are usually batch-written, so their tree is the *same* `{hash,stats}` construction over the 64³
+chunks in a **canonical order** (Morton/raster), built at write — the carries still apply if streamed
+slice-by-slice. The **multiscale/pyramid + projection** generalization for arrays (next section) shares
+the node structure; only the *liveness* is table-centric.
+
+## Arrays — one fold abstraction for pyramids *and* projections (the factory, generalized)
+The factory "field" is a **mergeable monoid** (`max`, `mean=sum/count`, `min`, `sum`, …). An array
+derived view is that monoid **folded over a chosen *subset* of the chunk-grid axes, to a chosen depth**:
+- fold all axes hierarchically (2× per level) → the **OME-Zarr multiscale pyramid** (3-D coarsening);
+- fold **one axis fully** → a **projection** (`max` ⇒ **MIP**, `mean` ⇒ average projection; an oblique
+  fold ⇒ **MPR**) → an (N−1)-D image;
+- fold two axes → a 1-D profile; fold all axes → the scalar block stat (== the table's block stat).
+
+So pyramids, MIP/MPR projections, profiles, and scalar stats are **one abstraction** parameterized by
+`(monoid, axes, depth)` — and a projection **appears at every pyramid level** because it's the same
+monoid folded along the projection axis at each level, so it falls out of the *same* per-chunk fold that
+builds the pyramid. Tables are the degenerate 1-D case (the only axis is `rows`). `max`/`min`/MIP are
+exact; `mean`/`sum` carry the float canonical-reduction guard. **Status: to be validated by the
+array-fold spike (#215)** — does one monoid-fold-over-axes pass really yield a correct pyramid level
+*and* a correct MIP, cheaply, on a real volume.
+
 ## Consequences
 - **`content_hash` changes** (flat list → recursive root) → a deliberate **v0.2 identity revision** +
   golden regen. The independent reader is digest/Merkle-based, so it follows the SPEC's node-hash rule
