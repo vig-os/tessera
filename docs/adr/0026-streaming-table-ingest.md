@@ -77,6 +77,19 @@ sub-block row-group compaction is the missing piece) FIRST; then ingest is a thi
 NOT build a standalone chunked table encoder.
 
 ## Status note
-Deferred for **alignment + cross-env determinism re-validation**, and **resequenced behind `#203`** (the
-streaming write engine is the SSoT; ingest rides it). It rewrites the determinism-critical encode path
-and regenerates the conformance goldens.
+**As-built (2026-06-27):** §1 **always-chunked encoder DONE** — `tessera_io::table::encode` always slices
+into fixed `ROWS_PER_GROUP = 2¹⁶` row-groups (`table.rs`), so the batch and streaming paths are the *same*
+code producing the *same* bytes (`encode_streaming_matches_batch_encode`, `accumulator_equals_batch_over_
+odd_batches`). §2 deterministic strategy (ALP excluded, fixed knobs) + §4 `row_index` are in that encoder.
+The bounded-memory streaming engine + journal/recover/seal (`WriteSession`, `TableStreamWriter`) is built
++ tested, incl. the ADR-0028 §5 live fold (`with_live_index`).
+
+**Remaining before an Accepted flip (genuinely needs externals — NOT autonomously closable):**
+(a) §3 **streaming HDF5 ingest reader** `ge_hdf5::stream_events_2p/3p` (read the compound dataset in
+row-slabs → push through the streaming engine) — *buildable* as code with a synthetic HDF5 fixture, but
+(b) the Accept gate proper requires **real >RAM ingest validation** (the GE listmode `events_2p` ≈5–7 GB,
+manual-bench-only, no PHI committed) and **cross-env / cross-arch determinism re-validation**
+(dev==release==hermetic, x86==ARM — the ADR-0024 caveat; needs ARM CI), plus the **golden-corpus regen**
+for any encode-path change. These are the determinism-critical, externally-gated steps the ADR was
+written to force. Until then the whole-file `read_events_2p` path stays correct for moderate files and
+documents its RAM ceiling.
