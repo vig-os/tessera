@@ -924,6 +924,21 @@ pub fn deformation_displacement(
 /// the field (a `[3,z,y,x]` array block, the `deformation_field` schema) + this point-resolve; full
 /// volume resampling/interpolation is a downstream consumer step (like SUV is a derived product, not a
 /// descriptor). `None` on a field/voxel mismatch.
+///
+/// ```
+/// use tessera_core::block::array::{ArraySpec, WorldFrame};
+/// use tessera_io::array::{warp_world, ArrayData};
+///
+/// // a [3, z=1, y=1, x=1] field: a single voxel displaced by (5, -5, 10) world units.
+/// let spec = ArraySpec::new(vec![3, 1, 1, 1], "float32");
+/// let field = ArrayData::F32(vec![5.0, -5.0, 10.0]);
+/// let frame = WorldFrame {
+///     affine: [2.0, 0.0, 0.0, -100.0, 0.0, 2.0, 0.0, -100.0, 0.0, 0.0, 2.0, -50.0],
+///     convention: "LPS".into(), unit: "mm".into(), space: "patient".into(),
+/// };
+/// // voxel (0,0,0) → world (-100,-100,-50); + displacement → (-95,-105,-40).
+/// assert_eq!(warp_world(&spec, &field, &frame, [0, 0, 0]), Some([-95.0, -105.0, -40.0]));
+/// ```
 pub fn warp_world(
     spec: &ArraySpec,
     field: &ArrayData,
