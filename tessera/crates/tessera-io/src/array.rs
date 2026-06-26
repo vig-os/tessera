@@ -653,6 +653,63 @@ pub fn to_coo(data: &ArrayData, fill: i64) -> Option<(TableSpec, TableData)> {
     Some((spec, tdata))
 }
 
+/// Downsample a dense **3-D integer** array by 2× per axis via **max** reduction over each (up-to)
+/// 2×2×2 block — one multiscale pyramid level (ADR-0028 §7, the array overview; MIP-style max preserves
+/// "is anything here", and pairs with [`tessera_core::block::array::WorldFrame::at_level`] for the
+/// level's geometry). Output shape is `ceil(d/2)` per axis (edge blocks clamp); the level keeps the base
+/// dtype (max stays in range). `None` for non-3-D or float arrays (float reduction needs ADR-0024
+/// canonicalisation). Deterministic.
+pub fn downsample_max_3d(spec: &ArraySpec, data: &ArrayData) -> Option<(ArraySpec, ArrayData)> {
+    if spec.shape.len() != 3 {
+        return None;
+    }
+    let vals = data.as_i64()?;
+    let (d0, d1, d2) = (
+        spec.shape[0] as usize,
+        spec.shape[1] as usize,
+        spec.shape[2] as usize,
+    );
+    if vals.len() != d0 * d1 * d2 {
+        return None;
+    }
+    let (o0, o1, o2) = (d0.div_ceil(2), d1.div_ceil(2), d2.div_ceil(2));
+    let mut out = Vec::with_capacity(o0 * o1 * o2);
+    for oz in 0..o0 {
+        for oy in 0..o1 {
+            for ox in 0..o2 {
+                let mut m = i64::MIN;
+                for z in (2 * oz)..(2 * oz + 2).min(d0) {
+                    for y in (2 * oy)..(2 * oy + 2).min(d1) {
+                        for x in (2 * ox)..(2 * ox + 2).min(d2) {
+                            m = m.max(vals[(z * d1 + y) * d2 + x]);
+                        }
+                    }
+                }
+                out.push(m);
+            }
+        }
+    }
+    // rebuild in the base dtype — max of in-range values is in-range, so the cast is lossless.
+    let data_out = match data {
+        ArrayData::I16(_) => ArrayData::I16(out.iter().map(|&x| x as i16).collect()),
+        ArrayData::I32(_) => ArrayData::I32(out.iter().map(|&x| x as i32).collect()),
+        ArrayData::I64(_) => ArrayData::I64(out),
+        ArrayData::U16(_) => ArrayData::U16(out.iter().map(|&x| x as u16).collect()),
+        ArrayData::U32(_) => ArrayData::U32(out.iter().map(|&x| x as u32).collect()),
+        ArrayData::U64(_) => ArrayData::U64(out.iter().map(|&x| x as u64).collect()),
+        ArrayData::F32(_) | ArrayData::F64(_) => return None, // unreachable: as_i64 already returned None
+    };
+    let mut out_spec = spec.clone();
+    out_spec.shape = vec![o0 as u64, o1 as u64, o2 as u64];
+    out_spec.chunks = out_spec
+        .chunks
+        .iter()
+        .zip(&out_spec.shape)
+        .map(|(&c, &d)| c.min(d).max(1))
+        .collect();
+    Some((out_spec, data_out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1125,6 +1182,38 @@ mod tests {
         // floats need canonical reduction first (ADR-0024) → not offered here
         assert_eq!(ArrayData::F32(vec![1.0, 2.0]).as_i64(), None);
         assert_eq!(ArrayData::F64(vec![1.0]).as_i64(), None);
+    }
+
+    #[test]
+    fn downsample_max_3d_halves_and_maxes() {
+        // 4×4×4, value = flat C-order index 0..63 → max-downsample 2× → 2×2×2.
+        let spec = ArraySpec::new(vec![4, 4, 4], "int16");
+        let data = ArrayData::I16((0..64).map(|k| k as i16).collect());
+        let (s2, d2) = downsample_max_3d(&spec, &data).unwrap();
+        assert_eq!(s2.shape, vec![2, 2, 2]);
+        let ArrayData::I16(out) = d2 else {
+            panic!("level keeps base dtype")
+        };
+        // output (0,0,0) = max over input block {0,1,4,5,16,17,20,21} = 21
+        assert_eq!(out[0], 21);
+        // output (1,1,1) = max over [2,4)³, which includes flat 63 = 63
+        assert_eq!(out[7], 63);
+
+        // odd shape 5×5×5 → 3×3×3 (edge blocks clamp), no panic.
+        let (s3, _) = downsample_max_3d(
+            &ArraySpec::new(vec![5, 5, 5], "int16"),
+            &ArrayData::I16(vec![1; 125]),
+        )
+        .unwrap();
+        assert_eq!(s3.shape, vec![3, 3, 3]);
+
+        // non-3-D and float → None.
+        assert!(downsample_max_3d(
+            &ArraySpec::new(vec![8], "int16"),
+            &ArrayData::I16(vec![0; 8])
+        )
+        .is_none());
+        assert!(downsample_max_3d(&spec, &ArrayData::F32(vec![0.0; 64])).is_none());
     }
 
     #[test]
