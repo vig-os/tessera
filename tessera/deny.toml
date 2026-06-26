@@ -11,6 +11,10 @@ ignore = [
     # transitively by zarrs/pcodec (zarrs_plugin/_data_type/_codec); "no safe upgrade available"
     # since zarrs depends on it. No runtime attack surface. Revisit when zarrs drops paste.
     "RUSTSEC-2024-0436",
+    # encoding v0.2.33 — UNMAINTAINED (not a vulnerability). A legacy text-codec crate pulled
+    # transitively by dicom-encoding (charset decoding of DICOM string VRs). No safe upgrade
+    # while dicom 0.9 depends on it. Revisit when dicom migrates to `encoding_rs`.
+    "RUSTSEC-2021-0153",
 ]
 
 [licenses]
@@ -30,6 +34,9 @@ allow = [
   "CC0-1.0",
   "0BSD",
   "BSL-1.0",
+  # jpeg-encoder (via dicom-transfer-syntax-registry) — the Independent JPEG Group license,
+  # classified FSF Free/Libre. Standard JPEG reference license; acceptable for an OSI/FAIR stack.
+  "IJG",
 ]
 
 [bans]

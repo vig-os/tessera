@@ -46,10 +46,11 @@
           pname = "tessera";
           version = "0.0.0";
           # The Vortex table backend pulls a transitive dep (`custom-labels`) whose build script
-          # runs bindgen (needs libclang) and links libstdc++. Provide them to every crane
-          # derivation (deps/clippy/test) so the hermetic build matches the devShell env.
-          nativeBuildInputs = with pkgs; [ clang ];
-          buildInputs = with pkgs; [ stdenv.cc.cc.lib ];
+          # runs bindgen (needs libclang) and links libstdc++. The tessera-ingest GE-HDF5 reader
+          # links libhdf5 (found via pkg-config — `hdf5-metno-sys` reads PKG_CONFIG_PATH when
+          # HDF5_DIR is unset). Provide all to every crane derivation (deps/clippy/test).
+          nativeBuildInputs = with pkgs; [ clang pkg-config ];
+          buildInputs = with pkgs; [ stdenv.cc.cc.lib hdf5 ];
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -89,9 +90,11 @@
             hdf5
           ]);
           env = {
-            # bindgen (hdf5-sys / dicom-rs) needs libclang
+            # bindgen (dicom-rs) needs libclang.
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
-            HDF5_DIR = "${pkgs.hdf5}";
+            # NOTE: do NOT set HDF5_DIR — nix splits hdf5 headers into a separate `dev` output, so a
+            # single root lacks include/; `hdf5-metno-sys` finds hdf5 via pkg-config instead (the
+            # hdf5 dev pkgconfig is on PKG_CONFIG_PATH from buildInputs).
             # uv uses the Nix python and never downloads its own → reproducible
             UV_PYTHON = "${pkgs.python312}/bin/python3.12";
             UV_PYTHON_DOWNLOADS = "never";

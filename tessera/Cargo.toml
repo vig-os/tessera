@@ -37,5 +37,7 @@ clap = { version = "4", features = ["derive"] }     # tessera-cli
 # DICOM ingest (tessera-ingest, P5/#207). default-features=false drops the `ul` network stack and the
 # C++ codecs (charls/gdcm); pure-Rust pixel decode covers uncompressed/RLE transfer syntaxes.
 dicom = { version = "0.9", default-features = false, features = ["pixeldata", "inventory-registry"] }
+# GE/vendor HDF5 listmode ingest (#208). Native libhdf5 found via pkg-config (HDF5_DIR unset — see flake.nix).
+hdf5-metno = "0.12"
 tessera-core = { path = "crates/tessera-core" }
 tessera-io = { path = "crates/tessera-io" }
