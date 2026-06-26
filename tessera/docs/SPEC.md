@@ -70,9 +70,10 @@ differently from its absence — only the null/absent sentinel is dropped.
 | `content_hash` ✱ | string | §4; present once sealed |
 | `manifest_hash` ✱ | string | §4; present once sealed |
 
-**BlockRef** = `{ name: string, kind: "array"|"table", digest✱: string, spec: object }`. `digest`
-MUST be present in a sealed product. `spec` is shape-specific and opaque to the spine (an array spec
-carries `shape`/`dtype`/`chunks`/`axes`/`codec`/…; a table spec carries `columns`/`rows`/…).
+**BlockRef** = `{ name: string, kind: "array"|"table"|"chunk_index", digest✱: string, spec: object }`.
+`digest` MUST be present in a sealed product. `spec` is shape-specific and opaque to the spine (an array
+spec carries `shape`/`dtype`/`chunks`/`axes`/`codec`/…; a table spec carries `columns`/`rows`/…; a
+`chunk_index` sidecar spec carries `class`/`recipe`/`indexes`/`entries`/`root` — see §5d).
 **Source** = `{ role: string, reference: string, content_hash✱: string }`.
 
 ## 5a. Array block payload (Zarr v3 + pluggable codec)
@@ -189,6 +190,26 @@ store-don't-compute).
   value/spatial ones are *derived* from §5a's `rescale_*`/`world_frame` — single source of truth, not
   duplicated; per-axis descriptors are stored explicitly). All are serialized inside the block spec, so
   they are covered by `manifest_hash` and deterministic (`f64`/`int+scale`/canonical RFC 3339).
+
+## 5d. Chunk-index sidecar block (ADR-0028 §3/§4)
+A block with `kind == "chunk_index"` is an **additive, derived companion** to a data block: the
+`{hash, stats}` index over that block's ordered sub-blocks (array chunks in C-order over the chunk grid,
+or table row-groups). It is **optional** — present only when a writer chooses to emit it (e.g. the
+`*_indexed` streaming path); absent for a plain product, which is byte-identical without it.
+
+- **Naming.** The sidecar for a data block `<name>` is the sibling block `<name>.cidx`.
+- **Payload.** Canonical JSON of the index: `{ "entries": [ { "digest": string, "stats": { "count": u64,
+  "min": i64|null, "max": i64|null, "sum": i128, "sum_sq": i128 } }, … ] }` — one entry per sub-block, in
+  storage order. The block `digest` is `digest(payload)` like any block, so it rolls into `content_hash`
+  (the sidecar is integrity-covered, not free-floating).
+- **Spec (self-description).** `{ "class": "derived", "recipe": "chunk_index@1", "indexes": "<name>",
+  "entries": <count>, "root": "blake3:…" }`. `class:"derived"` + `recipe` mark it **regenerable** from the
+  indexed data block (a consumer MAY drop and rebuild it). `root` is the sub-block MMR root over the
+  per-entry digests (the §3 construction), i.e. the data block's per-chunk confirmable Merkle root.
+- **Use.** A consumer reads the sidecar for **per-chunk inclusion proofs** and **predicate pruning**
+  (skip a sub-block whose `[min,max]` cannot match a query) without re-reading the data; the rolled-up
+  `stats` are the leaves of the multiscale aggregate pyramid (ADR-0028 §3). A consumer that doesn't need
+  these ignores the block — `kind`-dispatch makes it inert to a spine-only reader.
 
 ## 6. Container `.tsra`
 A ZIP archive (zip64). Entries, in order:
