@@ -1,9 +1,12 @@
 # ADR-0030 — Spatial referencing: voxel→world affine + named frame, OME-Zarr transforms derived
 
-Status: **Proposed** (2026-06-26 — a fresh-context audit caught a premature "Accepted" flip and reverted
-it: §1/§2/§4/§6/§7 + the §3 `at_level` *derivation* primitive + §5 *rigid* registration are as-built, but
-§3 OME-Zarr *export* and §5 *deformable* warps + the `deformation_field` schema are **not** — see Status
-note) · Tracks `#217` · Relates to ADR-0025 (ingest normalise-at-the-door),
+Status: **Proposed** (updated 2026-06-27; an earlier premature "Accepted" flip was reverted, so this
+stays Proposed pending a fresh-context re-audit — never flip on self-report). The prior gaps are now
+closed: as-built = §1/§2/§4/§6/§7 + §3 `at_level` derivation + **§3 OME-Zarr `multiscales` export**
+(`ArraySpec::ome_zarr_multiscales`) + §5 *rigid* registration (transform product + provenance) + the
+`deformation_field` schema + **§5 *deformable* warp apply** (`deformation_displacement` / `warp_world`,
+store-don't-compute point resolve; full volume resampling is a downstream consumer step). · Tracks `#217`
+· Relates to ADR-0025 (ingest normalise-at-the-door),
 ADR-0028 (multiscale pyramid — per-level transforms are *derived* here), ADR-0029 (composition,
 feature-by-presence, rank-agnostic N-D axes), and the product-schema registry. **Generalised by ADR-0032**
 — this spatial affine is the `affine_nd` instance of the one `(transform, unit, frame)` descriptor; the
@@ -126,8 +129,12 @@ type. Adding geometry to an existing array is an **additive** schema change — 
 `ArraySpec`, §2 spacing-derived-from-affine (`WorldFrame::spacing` = column norms), and §6 LPS-canonical
 convention field are **implemented** (2026-06-26, `tessera_core::block::array`; additive — `Option`,
 skip-if-none → existing corpus unchanged; tests `world_frame_spacing_is_derived_from_affine_columns`,
-`array_spec_world_frame_is_additive_and_optional`). **Pending:** §3 OME-Zarr per-level transform
-derivation (rides the ADR-0028 pyramid), §5 registration-as-`transform`-product + deformation-field block.
+`array_spec_world_frame_is_additive_and_optional`). §3 `at_level` per-level derivation + the **OME-Zarr
+`multiscales` export** (`ome_zarr_multiscales`, `ome_zarr_multiscales_export_derives_per_level_transforms`)
++ §5 registration-as-`transform`-product (`registration_is_a_transform_product_with_new_frame_and_provenance`)
++ the `deformation_field` schema + the **deformable warp apply** (`deformation_displacement`/`warp_world` +
+`WorldFrame::voxel_to_world`; `deformable_warp_resolves_source_world_coordinate`) are now **as-built**.
+**No Pending items remain** — a fresh-context re-audit gates the Accepted flip.
 
 Proposed; all decision points settled (§6 LPS-canonical confirmed by the user 2026-06-26). Lands with the
 imaging-base trait-set + new schemas (ADR-0029 post-accumulator work); the OME-Zarr per-level derivation
