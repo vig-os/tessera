@@ -1,7 +1,16 @@
 # ADR-0029 — Data model: composition over inheritance · N-D blocks · multi-dimensional acquisitions · ROI
 
-Status: **Proposed** (2026-06-26) · Tracks `#216` · Relates to ADR-0025 (ingest), ADR-0028 (N-D
-fold / pyramid / projection), and the product-schema registry.
+Status: **Accepted** (2026-06-26, as-built) · Tracks `#216` · Relates to ADR-0025 (ingest), ADR-0028
+(N-D fold / pyramid / projection), and the product-schema registry.
+
+**As-built** (every section has tested code): §1 composition-over-inheritance + §2 rank-agnostic =
+`ArraySpec.shape: Vec<u64>` (no class hierarchy; schemas are embedded data, `schema.rs`). §3 model-A-vs-B
+acquisitions = `dynamic_pet` / `diffusion_mri` / `multicontrast_mri` in `builtin_schemas()`
+(`dynamic_pet_requires_volume_and_frame_timing`). §4 ROI dual-representation = `roi` schema `kind: None`
+(array OR table by nature; `roi_accepts_representation_by_nature_array_or_table`). §5 trait/mixin
+requirement-set = `schema::imaging_base()` composed into the imaging schemas, modality defined once
+(`imaging_base_trait_set_is_shared_across_modality_schemas`). §6 substrate-by-nature = `BlockKind`
+dispatch (1-D dense `spectrum` → array, `listmode` rows → table). Verified by a fresh-context audit.
 
 ## Context
 Real acquisitions are multi-dimensional and varied: static and dynamic PET, diffusion MRI (per-direction

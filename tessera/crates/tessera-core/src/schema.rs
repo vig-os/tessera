@@ -294,8 +294,8 @@ fn builtin_schemas() -> Vec<ProductSchema> {
             )],
             blocks: vec![one(
                 "spectrum",
-                None,
-                "Histogram of an energy/lifetime/TOF quantity",
+                Some(Array),
+                "Histogram of an energy/lifetime/TOF quantity — a dense 1-D array by nature (ADR-0029 §6)",
             )],
             ..schema(
                 "spectrum",
