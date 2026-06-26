@@ -167,6 +167,38 @@ impl ChunkIndex {
             .fold(ChunkStats::identity(), |acc, e| acc.combine(&e.stats))
     }
 
+    /// The **aggregate stat pyramid** (ADR-0028 §3, the table multiscale overview): level 0 is each
+    /// chunk's stats; each higher level `combine`s adjacent pairs (an odd trailing node carries up
+    /// unchanged) until a single summary node. A reader can answer a coarse query at level *L* without
+    /// touching the data. The top node equals [`Self::aggregate`]; an empty index yields no levels. This
+    /// is the *stats* overview (the integrity hash tree is the sub-block MMR, [`Self::root`]).
+    pub fn stat_pyramid(&self) -> Vec<Vec<ChunkStats>> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let mut levels = vec![self
+            .entries
+            .iter()
+            .map(|e| e.stats.clone())
+            .collect::<Vec<_>>()];
+        while levels.last().unwrap().len() > 1 {
+            let prev = levels.last().unwrap();
+            let mut next = Vec::with_capacity(prev.len().div_ceil(2));
+            let mut i = 0;
+            while i < prev.len() {
+                if i + 1 < prev.len() {
+                    next.push(prev[i].combine(&prev[i + 1]));
+                    i += 2;
+                } else {
+                    next.push(prev[i].clone());
+                    i += 1;
+                }
+            }
+            levels.push(next);
+        }
+        levels
+    }
+
     /// Pruning: the indices of the chunks that *could* contain a value in the inclusive range
     /// `[lo, hi]`; every other chunk is provably skippable. No false negatives (see [`ChunkStats::overlaps`]).
     /// `lo <= hi` is required (an empty/inverted range matches nothing) — debug-asserted to catch caller bugs.
@@ -284,6 +316,25 @@ mod tests {
         assert_eq!(idx.aggregate().count, 5);
         assert_eq!(idx.aggregate().min, Some(1));
         assert_eq!(idx.aggregate().max, Some(5));
+    }
+
+    #[test]
+    fn stat_pyramid_rolls_up_to_the_aggregate() {
+        let mut idx = ChunkIndex::new();
+        for k in 0..5u8 {
+            idx.push(digest(&[k]), &[k as i64, k as i64 + 10]);
+        }
+        let p = idx.stat_pyramid();
+        // level 0 = per-chunk stats; levels halve (ceil) down to one summary node.
+        assert_eq!(
+            p.iter().map(|l| l.len()).collect::<Vec<_>>(),
+            vec![5, 3, 2, 1]
+        );
+        assert_eq!(p[0][0], ChunkStats::from_values(&[0, 10]));
+        // the summit equals the flat aggregate (the monoid law: combine is associative).
+        assert_eq!(p.last().unwrap()[0], idx.aggregate());
+        // empty index → no levels.
+        assert!(ChunkIndex::new().stat_pyramid().is_empty());
     }
 
     #[test]
