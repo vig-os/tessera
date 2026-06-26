@@ -75,6 +75,20 @@ overhead spike):
 The threshold ships as a documented default an ingest *may* override per-array (the encoding is explicit
 regardless), not a hard rule baked into the engine.
 
+> **MEASURED (#221-A, `examples/spike_sparse`, see SPIKE-RESULTS.md):** the posited *occupancy crossover
+> does not exist in COO's favour*. Across 0.01 %→50 % × {scatter, banded, block} on a 128³ int16 grid,
+> **dense+pcodec wins on-disk at every point** (even 0.01 % scatter: 2.8 KiB dense vs 4.7 KiB best-COO) —
+> pcodec's zero-run compression + the small dynamic range of coordinates means neither a 3-column nor a
+> fair single-linear-index COO ever wins on bytes at materializable scales. Block/banded confirm §1
+> emphatically. **COO's real wins are read-RAM/latency** (decode `0.05–0.15×` at low occupancy; RAM ∝
+> nnz) and the **forced** case of an *unstorable* ambient grid (high-D histograms — dense impossible;
+> asserted by construction, not benched). **Revised rule (replaces the occupancy threshold):**
+> **dense+pcodec by default whenever the dense grid is materializable** (≈ all imaging masks/volumes —
+> wins on disk *and* block-prune handles clusters); **COO only when (a) the ambient grid is unstorable,
+> or (b) access is selective point-reads where nnz-bounded RAM/latency matters.** The lever is
+> *materializability + access pattern*, not occupancy %. The `scipy.save_npz`/`numpy.memmap` baselines
+> remain a follow-up cross-check; they do not change this conclusion.
+
 ### 6. Materialize, don't densify (the handoff contract)
 Tessera delivers the **coordinate + value columns** zero-copy to Arrow → a `scipy.sparse.coo_matrix`
 (or CSR via one downstream conversion) is near-zero-copy. Producing a **dense** numpy array is an

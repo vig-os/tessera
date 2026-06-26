@@ -274,3 +274,45 @@ The fold is a SIMD `max`-reduction, ≪ the per-chunk pcodec encode + blake3 →
 **Conclusion:** the factory generalizes from tables (1-D, axis=rows) to arrays (N-D): pyramids,
 projections, profiles, and scalar stats are one `(monoid, axes, depth)` abstraction, materialized live
 in the same fold that builds the integrity tree.
+
+# #221-A — sparse representation: dense (zarr+pcodec) vs COO (Vortex), crossover
+
+Harness: `cargo run -p tessera-io --example spike_sparse --release` (deterministic splitmix64 masks).
+128³ int16 volume (4 MiB raw), occupancy 0.01 %→50 %, structure {scatter · banded · block}. Two COO
+forms tested so the comparison isn't a strawman: **3c** = `(z,y,x,v)` columns; **lin** = single ascending
+linear-index `(idx,v)` (the *fair*, best-compressible coordinate). On-disk KiB + relative materialize.
+
+| structure | occ | nnz | dense | coo-3c | coo-lin | winner | mat × (COO÷dense) |
+|---|--:|--:|--:|--:|--:|---|--:|
+| scatter | 0.01 % | 225 | **2.8** | 8.1 | 4.7 | dense | 0.05× |
+| scatter | 1 % | 21 250 | **50.8** | 71.6 | 87.6 | dense | 0.05× |
+| scatter | 10 % | 210 127 | **401.5** | 521.0 | 828.3 | dense | 0.12× |
+| scatter | 50 % | 1 048 572 | **1636** | 2371 | 3884 | dense | 0.89× |
+| banded  | 1 % | 16 384 | **3.0** | 41.4 | 25.5 | dense | 0.10× |
+| banded  | 50 % | 1 048 576 | **21.7** | 2321 | 1413 | dense | 0.73× |
+| block   | 1 % | 21 952 | **8.7** | 50.6 | 86.1 | dense | 0.12× |
+| block   | 50 % | 1 061 208 | **118** | 2387 | 3890 | dense | 1.06× |
+
+Sizes are exactly deterministic (splitmix masks); `mat ×` is best-of-15 decode (timing is noisy — read
+the low-occupancy rows as the robust signal, the ~parity high-occupancy cells as "no decode advantage").
+**Caveat (banded):** the slice count is `clamp(1, n)`, so every banded occ < 1/n (here < 0.78 %) collapses
+to the *same* 1-slice datapoint (0.78 % nnz) — the three banded sub-1 % rows in the raw run are one
+measurement, not three (the run's `nnz%` column shows this).
+
+**Result — dense+pcodec wins on-disk at EVERY occupancy and structure, even 0.01 % scatter.** pcodec's
+zero-run compression + the tiny dynamic range of coordinates means neither COO form ever wins on bytes at
+storable grid sizes. Block/banded confirm ADR-0031 §1 emphatically (dense + stat-prune crushes clustered
+sparsity: 21 KiB for a 50 %-banded 4 MiB grid). So **there is no on-disk occupancy crossover in COO's
+favour** at materializable scales — the ADR-0031 §5 "occupancy threshold" does not exist as posited.
+
+**But COO's genuine win is read-RAM / latency, not disk:** `mat ×` is **0.05–0.15× at low occupancy**
+(COO decodes 7–20× faster, RAM ∝ nnz, not grid volume). And the *forced* COO regime is **an ambient
+dense grid too large to materialize** (high-D sparse histograms — e.g. a 6-D 10¹² -cell grid with 10⁶
+nonzeros) where dense is not an option at all. That regime is asserted by construction, **not benched**
+(you cannot allocate the dense grid — which is the point).
+
+**Conclusion → ADR-0031 reframe:** replace "dense-vs-COO by an occupancy threshold" with a **decision
+rule**: *dense+pcodec by default whenever the dense grid is materializable* (≈ all imaging masks/volumes
+— it wins on disk AND block-prune handles clusters); *COO only when (a) the ambient grid is unstorable
+(high-D histograms — dense impossible), or (b) the access pattern is selective point-reads where
+nnz-bounded RAM/latency matters.* The lever is materializability + access pattern, not occupancy %.
