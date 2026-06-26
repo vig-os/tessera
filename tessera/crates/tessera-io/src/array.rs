@@ -620,16 +620,18 @@ pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkInde
 }
 
 /// Convert a dense **integer** array to its **COO** (coordinate-list) table form (ADR-0031 §2): one row
-/// per nonzero voxel, columns `idx` (linear C-order index, `u64`) + `v` (value, `i64`). `None` for a
-/// float array (needs canonical reduction, ADR-0024). This is the *scatter*-sparse substrate-by-nature
-/// path — chosen only when the ambient grid is unstorable or access is selective-nnz (per #221-A,
-/// dense+pcodec wins on disk at storable scales, so this is **not** the default). The resulting columns
-/// ride the ordinary Vortex table encoder (no new primitive); `fill` is implied 0.
-pub fn to_coo(data: &ArrayData) -> Option<(TableSpec, TableData)> {
+/// per voxel whose value differs from `fill`, columns `idx` (linear C-order index, `u64`) + `v` (value,
+/// `i64`). The absent (un-stored) voxels are the `fill` value, so the dense array reconstructs from
+/// `(shape, fill, rows)` — `fill` is part of identity (ADR-0031 §4), hence an explicit argument rather
+/// than a hard-coded 0. `None` for a float array (needs canonical reduction, ADR-0024). The *scatter*-
+/// sparse substrate-by-nature path — chosen only when the ambient grid is unstorable or access is
+/// selective-nnz (per #221-A, dense+pcodec wins on disk at storable scales, so this is **not** the
+/// default). The columns ride the ordinary Vortex table encoder (no new primitive).
+pub fn to_coo(data: &ArrayData, fill: i64) -> Option<(TableSpec, TableData)> {
     let vals = data.as_i64()?;
     let (mut idx, mut v) = (Vec::new(), Vec::new());
     for (k, &x) in vals.iter().enumerate() {
-        if x != 0 {
+        if x != fill {
             idx.push(k as u64);
             v.push(x);
         }
@@ -1126,12 +1128,12 @@ mod tests {
     }
 
     #[test]
-    fn to_coo_emits_one_row_per_nonzero() {
-        // 2×2×2 with nonzeros at flat indices 0 and 5
+    fn to_coo_emits_one_row_per_non_fill_value() {
+        // 2×2×2, fill = 0: non-fill voxels at flat indices 0 and 5.
         let mut v = vec![0i16; 8];
         v[0] = 3;
         v[5] = -7;
-        let (spec, data) = to_coo(&ArrayData::I16(v)).unwrap();
+        let (spec, data) = to_coo(&ArrayData::I16(v), 0).unwrap();
         assert_eq!(spec.rows, 2);
         assert_eq!(spec.row_index.as_deref(), Some("idx"));
         let ColumnData::U64(idx) = &data[0].1 else {
@@ -1142,8 +1144,23 @@ mod tests {
         };
         assert_eq!(idx, &[0, 5]);
         assert_eq!(val, &[3, -7]);
-        // a float array can't supply integer COO (needs canonical reduction)
-        assert!(to_coo(&ArrayData::F32(vec![1.0, 0.0])).is_none());
+
+        // non-zero fill (audit fix): a grid that is mostly `5` stores only the voxels that differ.
+        let mut w = vec![5i16; 8];
+        w[2] = 9;
+        let (spec5, data5) = to_coo(&ArrayData::I16(w), 5).unwrap();
+        assert_eq!(spec5.rows, 1);
+        let ColumnData::U64(i5) = &data5[0].1 else {
+            panic!()
+        };
+        let ColumnData::I64(v5) = &data5[1].1 else {
+            panic!()
+        };
+        assert_eq!(i5, &[2]);
+        assert_eq!(v5, &[9]);
+
+        // a float array can't supply integer COO (needs canonical reduction).
+        assert!(to_coo(&ArrayData::F32(vec![1.0, 0.0]), 0).is_none());
     }
 
     #[test]

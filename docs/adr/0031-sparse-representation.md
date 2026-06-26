@@ -11,11 +11,12 @@ ADR-0024 (table payload), and the #213 codec-`auto` "decide once, store the conc
 > dense+pcodec wins on disk at storable scales, so COO is reserved for unstorable-ambient / selective-nnz
 > access); and the read path delivers columns without forcing densification (§6, materialize-don't-densify).
 > The selector is **explicit producer metadata** (§5), not an automated guess. Cited in FEATURE-MATRIX
-> (matrix gate). **Scope of the as-built COO encoder (honest, per the 2026-06-26 audit):** `to_coo` emits
-> the **single linear-index** `(idx: u64 C-order, v: i64)` form with **implicit `fill = 0`** — the
-> scatter-sparse common case. The §2-spec multi-axis form `(i0…i_{n-1}, v)` and an **arbitrary
-> `fill_value`** (§4 — part of identity) are *documented extensions* of the same convention, not yet
-> emitted; a sparse codec is *rejected* (§3). These extensions do not change the decision, only its reach.
+> (matrix gate). **Scope of the as-built COO encoder (honest, per the 2026-06-26 audit + fix):**
+> `to_coo(data, fill)` emits the **single linear-index** `(idx: u64 C-order, v: i64)` form, honouring an
+> **explicit `fill`** (§4 — part of identity; absent voxels reconstruct as `fill`). The §2-spec multi-axis
+> form `(i0…i_{n-1}, v)` is a *documented extension* of the same convention, not yet emitted (a producer
+> carries the n-D `shape` to densify); a sparse codec is *rejected* (§3). The extension changes only the
+> coordinate width, not the decision.
 
 ## Context
 ADR-0029 §6 sends **mostly-empty grids** (sparse high-D histograms, sparse masks/labels, sparse matrices,
