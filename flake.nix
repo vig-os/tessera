@@ -148,6 +148,7 @@
               && guardrails-no-commented-code tessera/crates \
               && guardrails-no-conflict-markers . \
               && guardrails-derived-docs . \
+              && bash scripts/check-adr-matrix.sh \
               && touch $out
           '';
 

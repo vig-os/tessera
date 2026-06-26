@@ -22,7 +22,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | Feature | Status | Gate | Evidence |
 |---|:--:|---|---|
 | Volume codec = **pcodec** (default) | ✓ | smallest lossless on real CT/PET; ≤ best competitor | CT 74.3 vs zstd 94.5 (−21%), PET −33% |
-| Table backend = **Vortex** | ✓ | smallest + fastest random-take + pushdown; real Rust codec | S0/S4/S7/S10/S11 + `tessera-io::table` |
+| Table backend = **Vortex** | ✓ | smallest + fastest random-take + pushdown; real Rust codec | S0/S4/S7/S10/S11 + `tessera-io::table`, **ADR-0024** |
 | Cubic 64³ chunking | ✓ | isotropic reads; size/read sweet spot — codec-independent | chunk sweep |
 | Per-block selectable codec (`ArraySpec.codec`) | ✓ | `"pcodec"` (default) · `"zstd"` (fixed level 3) · `"auto"` (writer picks smaller, records concrete codec) — slice/ROI access unchanged across codecs (chunk grid owns locality) | #213 + `tessera-io::array::tests::{zstd_*,auto_*}` |
 | Table row-groups (fixed 2¹⁶) — one encoder, batch == stream | ✓ | always-chunked Vortex; `encode_streaming` (lazy/bounded) byte-identical to `encode`; ≤2¹⁶-row tables unchanged (backward-compat) | `tessera-io::table::{encode,encode_streaming}` (#203, ADR-0026), `multi_rowgroup_*`, `encode_streaming_matches_batch_encode` |
@@ -91,7 +91,7 @@ data) is the remaining dedicated harness (#143).
 ## G. Layout, distribution, ingest, read
 | Feature | Status | Gate | Evidence |
 |---|:--:|---|---|
-| Sealed `.tsra` (zip64, range-readable) | ✓ | STORED zip64, mimetype-first magic, central-dir index; 1-block read ≪ whole archive | `container::pack`, `range::CountingReader` (S6 proof) |
+| Sealed `.tsra` (zip64, range-readable) | ✓ | STORED zip64, mimetype-first magic, central-dir index; 1-block read ≪ whole archive | `container::pack`, `range::CountingReader` (S6 proof), **ADR-0022** |
 | OCI artifact / exploded prefix | ○ | push/pull; range-read; CoW versioning | #22 (P6) |
 | Ingest: DICOM | ◑ | lossless int16 + rescale/units/modality + provenance + 3-D series-stack + PS3.15 de-id; CLI `tessera ingest dicom [--deidentify]`; golden corpus + JPEG transfer-syntaxes pending | `tessera-ingest::dicom`, ADR-0025 |
 | Ingest: GE-HDF5 (listmode) | ◑ | lossless 2p+3p compound→columnar transpose (row-major #193 fix) + `ingested_from` provenance; CLI `tessera ingest ge-hdf5 --dataset`; chunked-stream for 7 GB files pending | `tessera-ingest::ge_hdf5` (#208) |
