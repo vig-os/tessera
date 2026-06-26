@@ -206,6 +206,15 @@ impl ArraySpec {
         )
     }
 
+    /// Like [`Self::value_referencing`] but **presence-preserving** (ADR-0032 §1 feature-by-presence):
+    /// `None` when the array declares no intensity rescale or unit (a bare-index array), `Some` only when
+    /// one is actually set — so a tool can distinguish "explicitly identity" from "absent". Use this when
+    /// the absent-vs-identity distinction matters; [`Self::value_referencing`] is the total convenience.
+    pub fn value_referencing_opt(&self) -> Option<Referenced> {
+        (self.rescale_slope.is_some() || self.rescale_intercept.is_some() || self.unit.is_some())
+            .then(|| self.value_referencing())
+    }
+
     /// The unified **spatial** descriptor (ADR-0032): the `affine_nd` voxel→world frame projected into
     /// the one descriptor type. `None` when the array is in index space (no `world_frame`). Derived from
     /// `world_frame` — never stored twice.
@@ -444,6 +453,15 @@ mod tests {
                 .transform,
             Transform::Identity
         );
+        // …but the presence-preserving accessor distinguishes "absent" (None) from "explicitly identity".
+        assert!(ArraySpec::new(vec![8], "int16")
+            .value_referencing_opt()
+            .is_none());
+        assert!(spec.value_referencing_opt().is_some());
+        assert!(ArraySpec::new(vec![8], "int16")
+            .with_unit("HU")
+            .value_referencing_opt()
+            .is_some());
         // spatial: present only with a world_frame; matches from_world_frame.
         assert!(spec.spatial_referencing().is_none());
         let with_frame = ArraySpec::new(vec![64, 64, 64], "int16").with_axes(vec![
@@ -494,5 +512,41 @@ mod tests {
         let back: ArraySpec =
             serde_json::from_value(serde_json::to_value(&dyn_spec).unwrap()).unwrap();
         assert_eq!(back, dyn_spec);
+    }
+
+    #[test]
+    fn axis_referencing_survives_manifest_seal_and_is_in_manifest_hash() {
+        use crate::manifest::Manifest;
+        use crate::product::ProductBuilder;
+        let mk = || {
+            ArraySpec::new(vec![6, 64, 64, 64], "int16").with_axis_referencing(vec![
+                Some(Referenced::time_regular(0.0, 30.0)),
+                None,
+                None,
+                None,
+            ])
+        };
+        let mut b = ProductBuilder::new("dynamic_pet", "DP", "d", "2024-01-01T00:00:00Z");
+        b.add_block(&ArrayBlock::new("volume", mk())).unwrap();
+        let m = b.seal().unwrap();
+        // the per-axis descriptor travels through manifest JSON and verifies under its manifest_hash.
+        let back = Manifest::from_json_verified(&m.to_json().unwrap()).unwrap();
+        let blk = back
+            .blocks
+            .iter()
+            .find(|r| r.name == "volume")
+            .expect("volume block");
+        let rt: ArraySpec = serde_json::from_value(blk.spec.clone()).unwrap();
+        let t = rt
+            .axis_referencing(0)
+            .expect("time axis survived seal + verify");
+        assert_eq!(t.transform.apply_scalar(4.0), Some(120.0));
+        // sealing the same input twice yields the same manifest_hash — the descriptor is IN the hash
+        // and deterministic (ADR-0032 §7: the descriptor lives in the manifest under manifest_hash).
+        let mut b2 = ProductBuilder::new("dynamic_pet", "DP", "d", "2024-01-01T00:00:00Z");
+        b2.add_block(&ArrayBlock::new("volume", mk())).unwrap();
+        let m2 = b2.seal().unwrap();
+        assert_eq!(m.manifest_hash, m2.manifest_hash);
+        assert!(m.manifest_hash.is_some());
     }
 }

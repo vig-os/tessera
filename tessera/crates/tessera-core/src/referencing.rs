@@ -203,6 +203,23 @@ impl Referenced {
         }
     }
 
+    /// ADR-0032 §6 high-rate **integer-tick** event timestamps: an event's integer tick count → elapsed
+    /// seconds since `epoch`, `seconds = tick * period_s + start_s`. Storing integer ticks + a scale
+    /// (rather than float seconds) avoids float-accumulation drift over long high-rate streams — e.g.
+    /// ps-resolution coincidence timestamps in listmode PET. A 1-D affine; unit `"s"`, frame `"epoch"`.
+    /// The integer tick is the *stored* value; the period carries the resolution.
+    pub fn time_ticks(period_s: f64, start_s: f64) -> Self {
+        Referenced {
+            transform: Transform::Affine1d {
+                slope: period_s,
+                intercept: start_s,
+            },
+            unit: Some("s".into()),
+            vocabulary: None,
+            frame: Some("epoch".into()),
+        }
+    }
+
     /// Builder: attach the §3 vocabulary escape naming the controlled vocabulary `unit` is drawn from.
     pub fn with_vocabulary(mut self, vocabulary: &str) -> Self {
         self.vocabulary = Some(vocabulary.into());
@@ -324,6 +341,23 @@ mod tests {
         assert_eq!(t.transform.apply_scalar(3.0), Some(60.0));
         assert_eq!(t.transform.apply_scalar(5.0), None); // past the last frame
         assert_eq!(t.transform.invert_scalar(150.0), Some(4.0));
+    }
+
+    #[test]
+    fn integer_tick_event_times_avoid_float_drift() {
+        // ps-resolution coincidence ticks: integer tick 1_000_000 at 1 ps period → 1 µs since epoch.
+        let t = Referenced::time_ticks(1e-12, 0.0);
+        assert_eq!(t.unit.as_deref(), Some("s"));
+        assert_eq!(t.frame.as_deref(), Some("epoch"));
+        // the stored value is an exact integer; only the scale carries resolution.
+        assert_eq!(t.transform.apply_scalar(1_000_000.0), Some(1e-6));
+        // a start offset shifts the epoch origin.
+        assert_eq!(
+            Referenced::time_ticks(1e-9, 5.0)
+                .transform
+                .apply_scalar(0.0),
+            Some(5.0)
+        );
     }
 
     #[test]
