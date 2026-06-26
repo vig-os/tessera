@@ -521,6 +521,33 @@ pub fn array_block(
     Ok((block_ref, BlockPayload::new(name, payload)))
 }
 
+/// A committed block: its manifest reference paired with its payload bytes.
+type EncodedBlock = (BlockRef, BlockPayload);
+
+/// Fused block emit (ADR-0028 §5): encode the array block **and** build its `{hash, stats}` chunk-index
+/// sidecar in one call — the per-block primitive the streaming committer emits (the data block plus its
+/// additive companion `<name>.cidx`, whose digest rolls into `content_hash`). Integer arrays get a
+/// sidecar; float arrays (no integer chunk stats yet — ADR-0024 canonicalisation pending) return `None`
+/// for it. Real encode/index errors propagate; only the "not an integer array" case yields `None`.
+///
+/// The sidecar is identical to `chunk_index_block(name, &array_chunk_index(spec, data))` — this is the
+/// one-call composition the committer needs; folding the per-chunk stats *during* the encode pass (one
+/// data touch) is an internal optimisation that leaves the result byte-identical.
+pub fn array_block_with_index(
+    name: &str,
+    spec: &ArraySpec,
+    data: &ArrayData,
+) -> Result<(EncodedBlock, Option<EncodedBlock>)> {
+    let block = array_block(name, spec, data)?;
+    let sidecar = if data.as_i64().is_some() {
+        let index = array_chunk_index(spec, data)?;
+        Some(crate::chunk_index::chunk_index_block(name, &index)?)
+    } else {
+        None // non-integer array → no integer chunk stats (ADR-0028 §3 integer core)
+    };
+    Ok((block, sidecar))
+}
+
 /// Build the `{hash, stats}` chunk-index (ADR-0028 §3) for an array block over its **N-D chunk grid**
 /// (`spec.chunks`, default 64³). Each entry is one chunk: a content digest (BLAKE3 over the chunk's
 /// C-order little-endian `i64` values — recomputable from the decoded array, independent of the Zarr
@@ -1439,6 +1466,32 @@ mod tests {
         )
         .is_none());
         assert!(project_max_3d(&spec, &ArrayData::F32(vec![0.0; 8]), 0).is_none());
+    }
+
+    #[test]
+    fn array_block_with_index_emits_block_plus_sidecar() {
+        // ADR-0028 §5 fused emit: the data block + its chunk-index sidecar from one call.
+        let spec = ArraySpec::new(vec![4, 4, 4], "int16");
+        let data = ArrayData::I16((0..64).map(|k| k as i16).collect());
+        let ((blk, _bp), sidecar) = array_block_with_index("vol", &spec, &data).unwrap();
+        // the data block is exactly array_block's output.
+        let (blk_ref, _) = array_block("vol", &spec, &data).unwrap();
+        assert_eq!(blk.digest, blk_ref.digest);
+        assert_eq!(blk.name, "vol");
+        // the sidecar == the separate composition chunk_index_block(name, &array_chunk_index(..)).
+        let (scar, _) = sidecar.expect("integer array gets a chunk-index sidecar");
+        let idx = array_chunk_index(&spec, &data).unwrap();
+        let (expect_ref, _) = crate::chunk_index::chunk_index_block("vol", &idx).unwrap();
+        assert_eq!(scar.digest, expect_ref.digest);
+        assert_eq!(scar.name, expect_ref.name); // the "<name>.cidx" companion
+                                                // a float array gets the data block but no integer chunk-index sidecar.
+        let (_b, none) = array_block_with_index(
+            "f",
+            &ArraySpec::new(vec![8], "float32"),
+            &ArrayData::F32(vec![1.0; 8]),
+        )
+        .unwrap();
+        assert!(none.is_none());
     }
 
     #[test]
