@@ -659,6 +659,20 @@ pub fn to_coo(data: &ArrayData, fill: i64) -> Option<(TableSpec, TableData)> {
 /// level's geometry). Output shape is `ceil(d/2)` per axis (edge blocks clamp); the level keeps the base
 /// dtype (max stays in range). `None` for non-3-D or float arrays (float reduction needs ADR-0024
 /// canonicalisation). Deterministic.
+///
+/// ```
+/// use tessera_core::block::array::ArraySpec;
+/// use tessera_io::array::{downsample_max_3d, ArrayData};
+///
+/// let spec = ArraySpec::new(vec![4, 4, 4], "int16");
+/// let base = ArrayData::I16((0..64).map(|k| k as i16).collect());
+/// let (level, data) = downsample_max_3d(&spec, &base).unwrap();
+///
+/// assert_eq!(level.shape, vec![2, 2, 2]); // 2× per axis
+/// assert!(matches!(data, ArrayData::I16(_))); // the level keeps the base dtype
+/// // a non-3-D array has no 3-D pyramid level:
+/// assert!(downsample_max_3d(&ArraySpec::new(vec![16], "int16"), &ArrayData::I16(vec![0; 16])).is_none());
+/// ```
 pub fn downsample_max_3d(spec: &ArraySpec, data: &ArrayData) -> Option<(ArraySpec, ArrayData)> {
     if spec.shape.len() != 3 {
         return None;
