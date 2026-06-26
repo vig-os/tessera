@@ -93,7 +93,7 @@ data) is the remaining dedicated harness (#143).
 | Reader API (open/verify/block read) | ✓ | magic+seal verify on open; per-block read verified vs digest; partial-product; generic Read+Seek | `tessera-io::Reader`, container tests |
 | Conformance corpus + SPEC.md | ✓ | 6 golden fixtures + `.tsra` test vectors locked in CI; `docs/SPEC.md` | `corpus/corpus.json`, `corpus/files/`, `tests/conformance.rs` |
 | **Independent reader passes corpus** (v1.0 gate) | ✓ | a 2nd impl, from SPEC.md alone, reproduces all 6 goldens | `corpus/reference_reader/` (pure-Python, 6/6 first try) |
-| Bindings (pyo3 → C-ABI → WASM) | ○ | Python parity; zero-copy Arrow | — |
+| Bindings (pyo3 → C-ABI → WASM) | ◑ | Python read+verify shipped (abi3 `import tessera`: open/manifest/blocks/read_block/verify + typed `TesseraError`); hermetic corpus import-check in CI. Write path + numpy/Arrow zero-copy + WASM pending | `tessera-py` (#210) |
 
 ## H. Release gates (definition of shippable)
 **Shippable = all four green on the supported matrix: ① conformance corpus · ② bit-exact roundtrip · ③ perf-SLA (§D) · ④ writer-determinism.**

@@ -54,6 +54,20 @@
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        # The Python extension module (#210). crane doesn't install cdylibs by default, so copy the
+        # built `libtessera.so` → `tessera.so` (the abi3 import name) into $out/lib. pyo3's abi3
+        # feature builds without a runtime interpreter, so no python is needed at compile time.
+        tessera-py-lib = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "tessera-py";
+          cargoExtraArgs = "-p tessera-py";
+          doCheck = false;
+          postInstall = ''
+            mkdir -p $out/lib
+            cp target/release/libtessera.so $out/lib/tessera.so
+          '';
+        });
       in
       {
         # guardrails.mkDevShell brings the governance toolbelt (prek + gates + gitleaks +
@@ -131,6 +145,16 @@
               && guardrails-no-conflict-markers . \
               && guardrails-derived-docs . \
               && touch $out
+          '';
+
+          # The Python bindings import + verify the committed corpus through the real .so (#210):
+          # proves the abi3 extension loads on CPython and the read/verify surface works end-to-end.
+          tessera-py-import = pkgs.runCommand "tessera-py-import"
+            { nativeBuildInputs = [ pkgs.python312 ]; } ''
+            cp ${tessera-py-lib}/lib/tessera.so ./tessera.so
+            export PYTHONPATH=$PWD
+            python3 ${./tessera/crates/tessera-py/tests/smoke.py} ${./tessera/corpus/files}
+            touch $out
           '';
 
           # The dev shell itself must build (toolbelt + toolchain resolve).

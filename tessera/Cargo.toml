@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-cli", "crates/tessera-ingest"]
+members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-cli", "crates/tessera-ingest", "crates/tessera-py"]
 
 [workspace.package]
 edition = "2021"
@@ -39,5 +39,8 @@ clap = { version = "4", features = ["derive"] }     # tessera-cli
 dicom = { version = "0.9", default-features = false, features = ["pixeldata", "inventory-registry"] }
 # GE/vendor HDF5 listmode ingest (#208). Native libhdf5 found via pkg-config (HDF5_DIR unset — see flake.nix).
 hdf5-metno = "0.12"
+# Python bindings (tessera-py). abi3 → one .so works across CPython ≥3.9; extension-module → no
+# libpython link (the build needs only the abi3 minimum, not a runtime interpreter).
+pyo3 = { version = "0.27", features = ["extension-module", "abi3-py39"] }
 tessera-core = { path = "crates/tessera-core" }
 tessera-io = { path = "crates/tessera-io" }
