@@ -82,6 +82,8 @@ data) is the remaining dedicated harness (#143).
 | Feature | Status | Gate | Evidence |
 |---|:--:|---|---|
 | blake3 Merkle integrity | ✓ | any byte change → root change; tamper-evident | `tamper_*` tests |
+| Inclusion proofs (per-block + per-chunk confirmation) | ✓ | audit path from a block/chunk leaf up to `content_hash`; confirm one item against the seal without re-reading; forgery/tamper fail | **ADR-0028 §6**; `hash::inclusion_proof`/`verify_inclusion` (`inclusion_proofs_verify_for_every_leaf`, `tampering_with_a_proof_step_fails_verification`), `chunk_index::tests::each_chunk_has_an_inclusion_proof_under_the_root` |
+| Multiscale overview (aggregate stat-pyramid) | ✓ | coarse query at level *L* without touching data; summit == block aggregate | **ADR-0028 §3/§7**; `chunk_index::tests::stat_pyramid_rolls_up_to_the_aggregate` |
 | `sources[]` DAG (typed roles) | ✓ | typed role + content_hash on each edge; resolve + walk | `provenance::{Source,Resolver,verify_chain}` |
 | Source-rooted chain verify | ✓ | walk DAG, each edge's hash == parent seal; cycles rejected | `provenance::verify_chain`, 2 tests |
 | Source-rooted **signing** | ○ | sign-at-source (cosign); needs signing keys | S16 (external key → P6) |
