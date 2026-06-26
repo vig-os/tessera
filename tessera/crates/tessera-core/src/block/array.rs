@@ -111,6 +111,21 @@ impl WorldFrame {
         }
     }
 
+    /// Map a voxel index (in declared-axis order) to its **world coordinate** via the affine:
+    /// `world[r] = Σ_c affine[r,c]·voxel[c] + t[r]`. The forward voxel→world apply (ADR-0030 §1; the
+    /// `affine_nd` instance of ADR-0032). Used by the deformable-warp apply (§5) and any geometry query.
+    pub fn voxel_to_world(&self, voxel: [f64; 3]) -> [f64; 3] {
+        let a = &self.affine;
+        let mut out = [0.0f64; 3];
+        for (r, slot) in out.iter_mut().enumerate() {
+            *slot = a[r * 4] * voxel[0]
+                + a[r * 4 + 1] * voxel[1]
+                + a[r * 4 + 2] * voxel[2]
+                + a[r * 4 + 3];
+        }
+        out
+    }
+
     /// The voxel→world frame for a **sub-array / crop** whose first voxel sits at base-voxel `offset`
     /// (a ROI or `decode_subset` region): the rotation/scale is unchanged (same spacing/orientation),
     /// the origin re-anchors to `t + R · offset` so the cropped region keeps the parent geometry
@@ -457,6 +472,28 @@ mod tests {
         bad.affine[0] = 0.0;
         assert_eq!(bad.spacing()[0], 0.0);
         assert!(!bad.is_nondegenerate());
+    }
+
+    #[test]
+    fn voxel_to_world_applies_the_affine() {
+        // 2 mm iso, origin (-100,-100,-50): voxel (10,20,5) → world (-80,-60,-40).
+        let wf = WorldFrame {
+            affine: [
+                2.0, 0.0, 0.0, -100.0, 0.0, 2.0, 0.0, -100.0, 0.0, 0.0, 2.0, -50.0,
+            ],
+            convention: "LPS".into(),
+            unit: "mm".into(),
+            space: "patient".into(),
+        };
+        assert_eq!(wf.voxel_to_world([10.0, 20.0, 5.0]), [-80.0, -60.0, -40.0]);
+        // origin voxel maps to the translation column.
+        assert_eq!(wf.voxel_to_world([0.0, 0.0, 0.0]), [-100.0, -100.0, -50.0]);
+        // agrees with the ADR-0032 affine_nd apply (single operator, two call sites).
+        let r = crate::referencing::Referenced::from_world_frame(&wf);
+        assert_eq!(
+            r.transform.apply_point(&[10.0, 20.0, 5.0]).unwrap(),
+            wf.voxel_to_world([10.0, 20.0, 5.0]).to_vec()
+        );
     }
 
     #[test]

@@ -54,7 +54,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tessera_core::block::array::ArraySpec;
+use tessera_core::block::array::{ArraySpec, WorldFrame};
 use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::block::{BlockKind, BlockRef};
 use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
@@ -161,6 +161,22 @@ impl ArrayData {
                 .all(|&x| x <= i64::MAX as u64)
                 .then(|| v.iter().map(|&x| x as i64).collect()),
             ArrayData::F32(_) | ArrayData::F64(_) => None,
+        }
+    }
+
+    /// The array's values as `f64` — for continuous/geometric reads such as a deformation field's
+    /// displacements (ADR-0030 §5). Integer variants widen; `f32` widens exactly; `f64` passes through.
+    /// Always succeeds (every variant is numeric).
+    pub fn as_f64(&self) -> Vec<f64> {
+        match self {
+            ArrayData::I16(v) => v.iter().map(|&x| x as f64).collect(),
+            ArrayData::I32(v) => v.iter().map(|&x| x as f64).collect(),
+            ArrayData::I64(v) => v.iter().map(|&x| x as f64).collect(),
+            ArrayData::U16(v) => v.iter().map(|&x| x as f64).collect(),
+            ArrayData::U32(v) => v.iter().map(|&x| x as f64).collect(),
+            ArrayData::U64(v) => v.iter().map(|&x| x as f64).collect(),
+            ArrayData::F32(v) => v.iter().map(|&x| x as f64).collect(),
+            ArrayData::F64(v) => v.clone(),
         }
     }
 
@@ -878,6 +894,47 @@ pub fn array_pyramid(spec: &ArraySpec, data: &ArrayData) -> Option<Vec<(ArraySpe
     Some(levels)
 }
 
+/// Look up the **displacement 3-vector** at a target `voxel` of a `[3, z, y, x]` deformation field
+/// (ADR-0030 §5): component `c` is `field[c, z, y, x]`, the displacement along world axis `c` (in the
+/// frame's unit). `None` unless the field is 4-D with a leading 3, the voxel is in range, and the buffer
+/// length matches `3·z·y·x`.
+pub fn deformation_displacement(
+    spec: &ArraySpec,
+    field: &ArrayData,
+    voxel: [u64; 3],
+) -> Option<[f64; 3]> {
+    if spec.shape.len() != 4 || spec.shape[0] != 3 {
+        return None;
+    }
+    let (nz, ny, nx) = (spec.shape[1], spec.shape[2], spec.shape[3]);
+    if voxel[0] >= nz || voxel[1] >= ny || voxel[2] >= nx {
+        return None;
+    }
+    let plane = (nz * ny * nx) as usize;
+    let vals = field.as_f64();
+    if vals.len() != 3 * plane {
+        return None;
+    }
+    let off = ((voxel[0] * ny + voxel[1]) * nx + voxel[2]) as usize;
+    Some([vals[off], vals[plane + off], vals[2 * plane + off]])
+}
+
+/// Apply a **deformable warp** (ADR-0030 §5): the source world coordinate a target `voxel` samples from
+/// = `target_frame.voxel_to_world(voxel) + displacement(voxel)`. Store-don't-compute — Tessera carries
+/// the field (a `[3,z,y,x]` array block, the `deformation_field` schema) + this point-resolve; full
+/// volume resampling/interpolation is a downstream consumer step (like SUV is a derived product, not a
+/// descriptor). `None` on a field/voxel mismatch.
+pub fn warp_world(
+    spec: &ArraySpec,
+    field: &ArrayData,
+    target_frame: &WorldFrame,
+    voxel: [u64; 3],
+) -> Option<[f64; 3]> {
+    let d = deformation_displacement(spec, field, voxel)?;
+    let w = target_frame.voxel_to_world([voxel[0] as f64, voxel[1] as f64, voxel[2] as f64]);
+    Some([w[0] + d[0], w[1] + d[1], w[2] + d[2]])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1431,6 +1488,45 @@ mod tests {
         )
         .is_none());
         assert!(downsample_max_3d(&spec, &ArrayData::F32(vec![0.0; 64])).is_none());
+    }
+
+    #[test]
+    fn deformable_warp_resolves_source_world_coordinate() {
+        // [3, z=1, y=2, x=2] deformation field — 3 components × 4 voxels.
+        let spec = ArraySpec::new(vec![3, 1, 2, 2], "float32");
+        let field = ArrayData::F32(vec![
+            10.0, 20.0, 30.0,
+            40.0, // component 0 (world-axis-0 displacement) over voxels off 0..4
+            1.0, 2.0, 3.0, 4.0, // component 1
+            100.0, 200.0, 300.0, 400.0, // component 2
+        ]);
+        // voxel (0,1,1) has plane offset y*2+x = 3 → displacement [comp0[3], comp1[3], comp2[3]].
+        assert_eq!(
+            deformation_displacement(&spec, &field, [0, 1, 1]),
+            Some([40.0, 4.0, 400.0])
+        );
+        // out-of-range voxel and a non-[3,..] field → None.
+        assert!(deformation_displacement(&spec, &field, [1, 0, 0]).is_none());
+        assert!(deformation_displacement(
+            &ArraySpec::new(vec![64, 64, 64], "float32"),
+            &field,
+            [0, 0, 0]
+        )
+        .is_none());
+        // warp: source world = target_world(voxel) + displacement.
+        let frame = WorldFrame {
+            affine: [
+                2.0, 0.0, 0.0, -100.0, 0.0, 2.0, 0.0, -100.0, 0.0, 0.0, 2.0, -50.0,
+            ],
+            convention: "LPS".into(),
+            unit: "mm".into(),
+            space: "patient".into(),
+        };
+        // voxel_to_world([0,1,1]) = [-100,-98,-48]; + [40,4,400] = [-60,-94,352].
+        assert_eq!(
+            warp_world(&spec, &field, &frame, [0, 1, 1]),
+            Some([-60.0, -94.0, 352.0])
+        );
     }
 
     #[test]
