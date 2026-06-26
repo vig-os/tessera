@@ -49,6 +49,13 @@ impl ChunkStats {
         })
     }
 
+    /// The arithmetic mean of the chunk's samples, or `None` for an empty chunk. **Derived** from the
+    /// `sum`/`count` base monoids with no extra state — the canonical example of the ADR-0028 §3
+    /// extensible-stats factory: new statistics that are functions of the monoids cost nothing to add.
+    pub fn mean(&self) -> Option<f64> {
+        (self.count > 0).then(|| self.sum as f64 / self.count as f64)
+    }
+
     /// True if some sample in the chunk *could* lie in the inclusive range `[lo, hi]` — i.e. the chunk
     /// cannot be pruned for that range. Exact for min/max pruning: never a false negative (it only ever
     /// *keeps* a chunk that might match), so pruning can never drop a real hit.
@@ -257,6 +264,16 @@ mod tests {
         assert_eq!(s.sum, 16);
         // empty chunk → identity
         assert_eq!(stats(&[]), ChunkStats::identity());
+    }
+
+    #[test]
+    fn mean_is_derived_from_sum_and_count() {
+        assert_eq!(stats(&[2, 4, 6]).mean(), Some(4.0));
+        assert_eq!(stats(&[-5, 5]).mean(), Some(0.0));
+        assert_eq!(ChunkStats::identity().mean(), None); // empty chunk
+                                                         // derived stat respects the roll-up: mean over the combine == mean over the concatenation
+        let agg = stats(&[1, 2, 3]).combine(&stats(&[10, 20]));
+        assert_eq!(agg.mean(), stats(&[1, 2, 3, 10, 20]).mean());
     }
 
     #[test]
