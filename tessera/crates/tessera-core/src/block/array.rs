@@ -337,6 +337,27 @@ impl ArraySpec {
                 self.shape.len()
             )));
         }
+        // ADR-0030 post-Accept gate: a present `world_frame` must be **non-degenerate** — every axis
+        // needs non-zero spacing, else the voxel→world affine is singular (no invertible geometry).
+        if let Some(wf) = &self.world_frame {
+            if !wf.is_nondegenerate() {
+                return Err(crate::Error::Invalid(format!(
+                    "degenerate world_frame: an axis has zero spacing (spacing = {:?})",
+                    wf.spacing()
+                )));
+            }
+        }
+        // ADR-0032 post-Accept gate: per-axis referencing, when present, carries exactly one entry per
+        // axis (a descriptor or `None`), so the axis↔descriptor correspondence is unambiguous.
+        if let Some(axref) = &self.axis_referencing {
+            if axref.len() != self.shape.len() {
+                return Err(crate::Error::Invalid(format!(
+                    "axis_referencing length {} != array rank {}",
+                    axref.len(),
+                    self.shape.len()
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -472,6 +493,38 @@ mod tests {
         bad.affine[0] = 0.0;
         assert_eq!(bad.spacing()[0], 0.0);
         assert!(!bad.is_nondegenerate());
+    }
+
+    #[test]
+    fn validate_enforces_post_accept_geometry_gates() {
+        // ADR-0030: a non-degenerate world_frame passes; a degenerate one (zero-spacing axis) is rejected.
+        let mut spec = ArraySpec::new(vec![8, 8, 8], "int16");
+        spec.world_frame = Some(WorldFrame {
+            affine: [2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0],
+            convention: "LPS".into(),
+            unit: "mm".into(),
+            space: "patient".into(),
+        });
+        spec.validate().unwrap();
+        let mut degenerate = spec.clone();
+        // zero the last axis's column → spacing 0 on that axis → singular affine.
+        degenerate.world_frame.as_mut().unwrap().affine[2] = 0.0;
+        degenerate.world_frame.as_mut().unwrap().affine[6] = 0.0;
+        degenerate.world_frame.as_mut().unwrap().affine[10] = 0.0;
+        assert!(
+            degenerate.validate().is_err(),
+            "degenerate world_frame must be rejected"
+        );
+
+        // ADR-0032: axis_referencing must have one entry per axis.
+        let ok =
+            ArraySpec::new(vec![4, 8, 8], "int16").with_axis_referencing(vec![None, None, None]);
+        ok.validate().unwrap();
+        let bad = ArraySpec::new(vec![4, 8, 8], "int16").with_axis_referencing(vec![None, None]);
+        assert!(
+            bad.validate().is_err(),
+            "axis_referencing rank mismatch must be rejected"
+        );
     }
 
     #[test]
