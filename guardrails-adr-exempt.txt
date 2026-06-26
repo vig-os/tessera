@@ -1,0 +1,4 @@
+# ADRs exempt from the guardrails-adr-matrix gate — Accepted decisions that are NOT feature rows.
+# 0002 = concurrency model · 0003 = schema-id (both recorded as-built decisions).
+0002
+0003
