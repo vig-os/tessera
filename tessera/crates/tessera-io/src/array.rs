@@ -56,6 +56,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tessera_core::block::array::ArraySpec;
 use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
+use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
 use zarrs::array::builder::ArrayBuilderFillValue;
 use zarrs::array::codec::array_to_bytes::pcodec::{PcodecCodec, PcodecCodecConfiguration};
@@ -514,6 +516,90 @@ pub fn array_block(
         spec: serde_json::to_value(&stored_spec)?,
     };
     Ok((block_ref, BlockPayload::new(name, payload)))
+}
+
+/// Build the `{hash, stats}` chunk-index (ADR-0028 §3) for an array block over its **N-D chunk grid**
+/// (`spec.chunks`, default 64³). Each entry is one chunk: a content digest (BLAKE3 over the chunk's
+/// C-order little-endian `i64` values — recomputable from the decoded array, independent of the Zarr
+/// byte layout) and the chunk's [`ChunkStats`]. `index.root()` is the block's sub-block Merkle root and
+/// `index.prune()` skips chunks a ranged read can't hit. Integer arrays only (see [`ArrayData::as_i64`]).
+///
+/// Chunks are visited in **C-order over the chunk grid** (last axis fastest), matching the array's
+/// storage order, so the index entry order is deterministic and reproducible.
+pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkIndex> {
+    let vals = data
+        .as_i64()
+        .ok_or_else(|| Error::Codec("array dtype is not integer for chunk stats".into()))?;
+    let shape: Vec<usize> = spec.shape.iter().map(|&d| d as usize).collect();
+    let chunks: Vec<usize> = spec.chunks.iter().map(|&c| (c as usize).max(1)).collect();
+    if shape.len() != chunks.len() {
+        return Err(Error::Codec(format!(
+            "array rank mismatch: shape rank {} != chunks rank {}",
+            shape.len(),
+            chunks.len()
+        )));
+    }
+    let total: usize = shape.iter().product();
+    if vals.len() != total {
+        return Err(Error::Codec(format!(
+            "array has {} values, shape implies {total}",
+            vals.len()
+        )));
+    }
+    let rank = shape.len();
+    // C-order strides: stride[i] = product of trailing dims.
+    let mut strides = vec![1usize; rank];
+    for i in (0..rank.saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * shape[i + 1];
+    }
+    let nchunks: Vec<usize> = shape
+        .iter()
+        .zip(&chunks)
+        .map(|(&d, &c)| d.div_ceil(c).max(1))
+        .collect();
+    let total_chunks: usize = nchunks.iter().product();
+
+    let mut idx = ChunkIndex::new();
+    let mut cidx = vec![0usize; rank]; // chunk multi-index
+    for _ in 0..total_chunks {
+        let lo: Vec<usize> = cidx.iter().zip(&chunks).map(|(&g, &c)| g * c).collect();
+        let hi: Vec<usize> = lo
+            .iter()
+            .zip(&chunks)
+            .zip(&shape)
+            .map(|((&l, &c), &d)| (l + c).min(d))
+            .collect();
+        let count: usize = lo.iter().zip(&hi).map(|(&l, &h)| h - l).product();
+
+        // gather this chunk's values by an odometer over voxel coords in [lo, hi) (last axis fastest).
+        let mut bytes = Vec::with_capacity(count * 8);
+        let mut chunk_vals = Vec::with_capacity(count);
+        let mut v = lo.clone();
+        for _ in 0..count {
+            let flat: usize = v.iter().zip(&strides).map(|(&x, &s)| x * s).sum();
+            let val = vals[flat];
+            bytes.extend_from_slice(&val.to_le_bytes());
+            chunk_vals.push(val);
+            for ax in (0..rank).rev() {
+                v[ax] += 1;
+                if v[ax] < hi[ax] {
+                    break;
+                }
+                v[ax] = lo[ax];
+            }
+        }
+        idx.push_entry(digest(&bytes), ChunkStats::from_values(&chunk_vals));
+
+        // advance the chunk multi-index in C-order (last axis fastest).
+        for ax in (0..rank).rev() {
+            cidx[ax] += 1;
+            if cidx[ax] < nchunks[ax] {
+                break;
+            }
+            cidx[ax] = 0;
+        }
+    }
+    Ok(idx)
 }
 
 #[cfg(test)]
@@ -988,5 +1074,33 @@ mod tests {
         // floats need canonical reduction first (ADR-0024) → not offered here
         assert_eq!(ArrayData::F32(vec![1.0, 2.0]).as_i64(), None);
         assert_eq!(ArrayData::F64(vec![1.0]).as_i64(), None);
+    }
+
+    #[test]
+    fn array_chunk_index_walks_the_3d_chunk_grid() {
+        // 4×4×4 C-order 0..63, chunks 2×2×2 → 8 chunks of 8 voxels each.
+        let mut spec = ArraySpec::new(vec![4, 4, 4], "int16");
+        spec.chunks = vec![2, 2, 2];
+        let data = ArrayData::I16((0..64).map(|k| k as i16).collect());
+        let idx = array_chunk_index(&spec, &data).unwrap();
+
+        assert_eq!(idx.len(), 8);
+        // stats roll up to the whole array [0, 63]
+        let agg = idx.aggregate();
+        assert_eq!(agg.count, 64);
+        assert_eq!(agg.min, Some(0));
+        assert_eq!(agg.max, Some(63));
+        // first chunk (z,y,x ∈ [0,2)) holds {0,1,4,5,16,17,20,21}: count 8, min 0, max 21
+        assert_eq!(idx.entries[0].stats.count, 8);
+        assert_eq!(idx.entries[0].stats.min, Some(0));
+        assert_eq!(idx.entries[0].stats.max, Some(21));
+        // value 0 lives only in the first chunk; 63 only in the last (C-order chunk 7)
+        assert_eq!(idx.prune(0, 0), vec![0]);
+        assert_eq!(idx.prune(63, 63), vec![7]);
+        // deterministic sub-block MMR root over the per-chunk digests
+        assert!(idx.root().starts_with("blake3:"));
+        assert_eq!(array_chunk_index(&spec, &data).unwrap().root(), idx.root());
+        // a float array can't supply integer stats
+        assert!(array_chunk_index(&spec, &ArrayData::F32(vec![0.0; 64])).is_err());
     }
 }
