@@ -417,6 +417,19 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                 "A multi-contrast MRI study: N separately-acquired contrast volumes (model B).",
             )
         },
+        // ADR-0030 §5 — the non-linear (deformable) registration carrier.
+        ProductSchema {
+            blocks: vec![one(
+                "field",
+                Some(Array),
+                "A dense displacement/deformation vector field, e.g. `[3, z, y, x]` (one array block)",
+            )],
+            ..schema(
+                "deformation_field",
+                "1.0",
+                "A non-linear (deformable) spatial transform — a per-voxel displacement field (ADR-0030 §5).",
+            )
+        },
     ]
 }
 
@@ -443,10 +456,11 @@ mod tests {
             "dynamic_pet",
             "diffusion_mri",
             "multicontrast_mri",
+            "deformation_field", // ADR-0030 §5 deformable registration carrier
         ] {
             assert!(r.get(p).is_some(), "missing built-in schema '{p}'");
         }
-        assert_eq!(r.products().count(), 12);
+        assert_eq!(r.products().count(), 13);
     }
 
     #[test]
