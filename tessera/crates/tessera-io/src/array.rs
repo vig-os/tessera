@@ -55,10 +55,13 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use tessera_core::block::array::ArraySpec;
+use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::block::{BlockKind, BlockRef};
 use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
 use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
+
+use crate::table::{ColumnData, TableData};
 use zarrs::array::builder::ArrayBuilderFillValue;
 use zarrs::array::codec::array_to_bytes::pcodec::{PcodecCodec, PcodecCodecConfiguration};
 use zarrs::array::codec::ZstdCodec;
@@ -616,6 +619,38 @@ pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkInde
     Ok(idx)
 }
 
+/// Convert a dense **integer** array to its **COO** (coordinate-list) table form (ADR-0031 §2): one row
+/// per nonzero voxel, columns `idx` (linear C-order index, `u64`) + `v` (value, `i64`). `None` for a
+/// float array (needs canonical reduction, ADR-0024). This is the *scatter*-sparse substrate-by-nature
+/// path — chosen only when the ambient grid is unstorable or access is selective-nnz (per #221-A,
+/// dense+pcodec wins on disk at storable scales, so this is **not** the default). The resulting columns
+/// ride the ordinary Vortex table encoder (no new primitive); `fill` is implied 0.
+pub fn to_coo(data: &ArrayData) -> Option<(TableSpec, TableData)> {
+    let vals = data.as_i64()?;
+    let (mut idx, mut v) = (Vec::new(), Vec::new());
+    for (k, &x) in vals.iter().enumerate() {
+        if x != 0 {
+            idx.push(k as u64);
+            v.push(x);
+        }
+    }
+    let col = |name: &str, dt: &str| Column {
+        name: name.into(),
+        dtype: dt.into(),
+        codec: None,
+    };
+    let spec = TableSpec {
+        columns: vec![col("idx", "u8"), col("v", "i8")],
+        rows: v.len() as u64,
+        row_index: Some("idx".into()),
+    };
+    let tdata: TableData = vec![
+        ("idx".into(), ColumnData::U64(idx)),
+        ("v".into(), ColumnData::I64(v)),
+    ];
+    Some((spec, tdata))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1088,6 +1123,27 @@ mod tests {
         // floats need canonical reduction first (ADR-0024) → not offered here
         assert_eq!(ArrayData::F32(vec![1.0, 2.0]).as_i64(), None);
         assert_eq!(ArrayData::F64(vec![1.0]).as_i64(), None);
+    }
+
+    #[test]
+    fn to_coo_emits_one_row_per_nonzero() {
+        // 2×2×2 with nonzeros at flat indices 0 and 5
+        let mut v = vec![0i16; 8];
+        v[0] = 3;
+        v[5] = -7;
+        let (spec, data) = to_coo(&ArrayData::I16(v)).unwrap();
+        assert_eq!(spec.rows, 2);
+        assert_eq!(spec.row_index.as_deref(), Some("idx"));
+        let ColumnData::U64(idx) = &data[0].1 else {
+            panic!("idx column should be u64")
+        };
+        let ColumnData::I64(val) = &data[1].1 else {
+            panic!("v column should be i64")
+        };
+        assert_eq!(idx, &[0, 5]);
+        assert_eq!(val, &[3, -7]);
+        // a float array can't supply integer COO (needs canonical reduction)
+        assert!(to_coo(&ArrayData::F32(vec![1.0, 0.0])).is_none());
     }
 
     #[test]
