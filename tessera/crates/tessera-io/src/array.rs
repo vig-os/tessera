@@ -627,6 +627,21 @@ pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkInde
 /// sparse substrate-by-nature path — chosen only when the ambient grid is unstorable or access is
 /// selective-nnz (per #221-A, dense+pcodec wins on disk at storable scales, so this is **not** the
 /// default). The columns ride the ordinary Vortex table encoder (no new primitive).
+///
+/// ```
+/// use tessera_io::array::{to_coo, ArrayData};
+///
+/// // a mostly-zero 2×2×2 grid with two non-fill voxels (fill = 0)
+/// let mut v = vec![0i16; 8];
+/// v[0] = 7;
+/// v[5] = -3;
+/// let (spec, _cols) = to_coo(&ArrayData::I16(v), 0).unwrap();
+/// assert_eq!(spec.rows, 2); // one row per voxel that differs from `fill`
+/// assert_eq!(spec.row_index.as_deref(), Some("idx"));
+///
+/// // a float array can't supply integer COO (needs canonical reduction first)
+/// assert!(to_coo(&ArrayData::F32(vec![1.0, 0.0]), 0).is_none());
+/// ```
 pub fn to_coo(data: &ArrayData, fill: i64) -> Option<(TableSpec, TableData)> {
     let vals = data.as_i64()?;
     let (mut idx, mut v) = (Vec::new(), Vec::new());
