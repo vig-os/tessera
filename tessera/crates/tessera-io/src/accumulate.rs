@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tessera_core::block::table::{Column, TableSpec};
+use tessera_core::chunk_index::{ChunkStats, MerkleStatsAccumulator, Monoid};
+use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
 
 use crate::table::{self, ColumnData, TableData, ROWS_PER_GROUP};
@@ -74,6 +76,10 @@ pub struct TableStreamWriter {
     buf: TableData,
     buf_rows: usize,
     n_frags: usize,
+    /// Optional ADR-0028 §5 live `{hash, stats}` fold over the streamed row-groups: column to take stats
+    /// over (must be an integer column), and the running accumulator folded once per flushed group.
+    stat_column: Option<String>,
+    fold: MerkleStatsAccumulator,
 }
 
 impl TableStreamWriter {
@@ -91,7 +97,31 @@ impl TableStreamWriter {
             buf,
             buf_rows: 0,
             n_frags: 0,
+            stat_column: None,
+            fold: MerkleStatsAccumulator::new(),
         })
+    }
+
+    /// Opt into the ADR-0028 §5 **fused fold** (bounded-memory live integrity + overview): as each
+    /// canonical row-group is flushed, its `{digest, stats(over stat_column)}` leaf is folded up the MMR,
+    /// so [`Self::live_root`] / [`Self::live_aggregate`] advance per row-group **without** retaining the
+    /// data — and reconcile exactly with a batch [`crate::table::table_chunk_index`] over the same rows.
+    pub fn with_live_index(mut self, stat_column: impl Into<String>) -> Self {
+        self.stat_column = Some(stat_column.into());
+        self
+    }
+
+    /// The live sub-block MMR root over the row-groups flushed so far (ADR-0028 §5) — `None` unless
+    /// [`Self::with_live_index`] was set. Complete once every group is flushed (at a group boundary or
+    /// after the trailing flush in [`Self::finish`]).
+    pub fn live_root(&self) -> Option<String> {
+        self.stat_column.as_ref().map(|_| self.fold.root())
+    }
+
+    /// The live rolled-up [`ChunkStats`] over the flushed groups' `stat_column` (ADR-0028 §5) — `None`
+    /// unless [`Self::with_live_index`] was set.
+    pub fn live_aggregate(&self) -> Option<ChunkStats> {
+        self.stat_column.as_ref().map(|_| self.fold.aggregate())
     }
 
     fn frag_path(&self, i: usize) -> PathBuf {
@@ -133,6 +163,22 @@ impl TableStreamWriter {
             .collect();
         write_fragment(&self.frag_path(self.n_frags), &group)?;
         self.n_frags += 1;
+        // ADR-0028 §5: fold this group's {digest, stats} into the live MMR (bounded memory — the group
+        // is folded then dropped). The per-group digest matches `table_chunk_index` (every column's LE
+        // bytes for the group, in column order), so the live root reconciles with the batch index.
+        if let Some(col) = &self.stat_column {
+            let mut bytes = Vec::new();
+            for (_, c) in &group {
+                bytes.extend_from_slice(&c.to_le_bytes());
+            }
+            let stats = group
+                .iter()
+                .find(|(n, _)| n == col)
+                .and_then(|(_, c)| c.as_i64())
+                .map(|v| ChunkStats::from_values(&v))
+                .unwrap_or_else(ChunkStats::identity);
+            self.fold.push(&digest(&bytes), stats);
+        }
         // keep the remainder
         self.buf = self
             .buf
@@ -224,5 +270,54 @@ mod tests {
         assert_eq!(streamed, batch, "accumulator output != batch encode");
         // and it decodes back to the original rows
         assert_eq!(table::decode(&spec, &streamed).unwrap(), full);
+    }
+
+    #[test]
+    fn live_index_fold_matches_batch_chunk_index() {
+        // ADR-0028 §5: the bounded-memory live {hash,stats} fold over the streamed row-groups must
+        // reconcile with a batch table_chunk_index over the same rows — root AND aggregate.
+        let dir = tempfile::tempdir().unwrap();
+        let rows = ROWS_PER_GROUP * 2; // exactly two canonical groups (no trailing remainder)
+        let spec = TableSpec {
+            columns: vec![col("k", "i8"), col("v", "f4")],
+            rows: rows as u64,
+            row_index: None,
+        };
+        let full: TableData = vec![
+            (
+                "k".into(),
+                ColumnData::I64((0..rows as i64).map(|k| k * 3 - 7).collect()),
+            ),
+            (
+                "v".into(),
+                ColumnData::F32((0..rows).map(|k| (k % 17) as f32).collect()),
+            ),
+        ];
+        let mut w = TableStreamWriter::new(spec.clone(), &dir.path().join("stage"))
+            .unwrap()
+            .with_live_index("k");
+        // push in 9999-row batches (NOT grid-aligned); full groups flush inside push().
+        let mut pushed = 0usize;
+        while pushed < rows {
+            let n = 9999.min(rows - pushed);
+            let batch: TableData = full
+                .iter()
+                .map(|(name, c)| (name.clone(), c.slice(pushed, pushed + n)))
+                .collect();
+            w.push(batch).unwrap();
+            pushed += n;
+        }
+        // both groups flushed at the grid boundary → the live fold is complete (no finish needed).
+        let batch_idx = table::table_chunk_index(&spec, &full, "k").unwrap();
+        assert_eq!(
+            w.live_root().unwrap(),
+            batch_idx.root(),
+            "live MMR root != batch chunk-index root"
+        );
+        assert_eq!(w.live_aggregate().unwrap(), batch_idx.aggregate());
+        assert_eq!(w.live_aggregate().unwrap().count, rows as u64);
+        // a writer without with_live_index exposes no live index.
+        let plain = TableStreamWriter::new(spec, &dir.path().join("stage2")).unwrap();
+        assert!(plain.live_root().is_none());
     }
 }
