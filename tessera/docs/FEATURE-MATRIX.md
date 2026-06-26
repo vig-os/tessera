@@ -38,7 +38,8 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 Rust benches: `cargo bench -p tessera-io` (`benches/codec.rs`). Wall-clock floors are machine-dependent
 (measured below, **not** CI-gated); the machine-independent compression-ratio floor **is** gated
 (`array::tests::pcodec_compresses_smooth_int16_volume`). Python-spike numbers retained where the bench
-needs real CT/DICOM.
+needs real CT/DICOM. Cross-substrate comparison vs the bare backends (`.tsra` overhead, size ladder,
+ROI/slice speedups): `cargo run -p tessera-io --example bench_compare --release` → SPIKE-RESULTS.md #143.
 
 **`.tsra` container tax vs the bare codec** (same 128³ int16, 8× 64³ chunks, same run — `tsra_vs_bare`):
 size = bare codec bytes + ~320–600 B zip + ~1 KB FAIR manifest (≪1% at scale); **write +0.7%** (zip

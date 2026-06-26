@@ -119,3 +119,35 @@ same input → same bytes ⇒ reproducible `content_hash`/identity. PASS.
 **Caveat / remaining S15:** proven *same-version, same-machine*. Cross-version is NOT guaranteed
 (pcodec/Vortex pre-1.0 — a release could change bytes) and cross-arch (x86/ARM/macOS) is untested.
 Hedge = pin codec versions in the manifest + ship vendored pure-Rust readers (RFC §8/§14).
+
+# #143 — `.tsra` vs the bare substrate (cross-substrate comparison)
+
+Tool: `cargo run -p tessera-io --example bench_compare --release`. `.tsra` = sealed zip64 (manifest
++ blake3) over the **same** bare codec blob; "bare" = vanilla Zarr+pcodec (arrays) / Vortex (tables)
+— the substrate Tessera wraps. Absolute MB/s is dev-box (not the §D 88-core box); the portable
+findings are the **ratios, container overhead %, and partial-read speedups**.
+
+## Arrays — int16 CT-like, 64³ chunks
+| n³ | raw | pcodec ratio | `.tsra` size tax | ROI sub-cube | Z-slice |
+|---|---|---|---|---|---|
+| 32³ | 0.06 MiB | 11.5× | +25.3% | 1.0× | 1.1× |
+| 64³ | 0.50 MiB | 107× | +29.7% | 1.0× | 1.0× |
+| 128³ | 4.0 MiB | 128× | +4.4% | 7.7× | 6.8× |
+| 256³ | 32 MiB | 131× | +0.6% | 7.4× | 25.9× |
+
+## Tables — u64 + 2×f32 listmode (Vortex)
+| rows | raw | ratio | `.tsra` size tax |
+|---|---|---|---|
+| 10K | 0.15 MiB | 12.6× | +11.8% |
+| 100K | 1.5 MiB | 19.8× | +1.9% |
+| 1M | 15.3 MiB | 21.0× | +0.2% |
+
+**Reading:**
+- **Container tax amortizes to ~zero.** The manifest + zip central-dir is a fixed cost: 25–30% on a
+  sub-MiB toy, **0.2–0.6% at realistic sizes** (≥4 MiB array / ≥100K-row table). `.tsra` is free at scale.
+- **Write/read throughput ≈ bare** (within a few % — the pack/unzip step is cheap vs the codec).
+- **Partial reads scale with chunking.** ROI sub-cube and slicing only beat a full decode once the
+  volume spans multiple 64³ chunks: 1.0× at ≤64³ (one chunk), **7–8× (ROI) and up to 26× (slice)** at
+  128³–256³. This is the chunk-granularity lever (S2) realized through the `.tsra` read path.
+- **Net:** Tessera's FAIR envelope (content-addressing, self-description, range-readable container)
+  costs essentially nothing over the raw codec at real data sizes, while adding addressable partial reads.
