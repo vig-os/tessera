@@ -228,8 +228,9 @@ fn schema(product: &str, version: &str, description: &str) -> ProductSchema {
     }
 }
 
-/// The nine built-in product schemas. Each declares its required block(s) + key fields; all are
-/// versioned `1.0` and evolve additively (new optional fields/blocks only). See ROADMAP P1.
+/// The built-in product schemas. Each declares its required block(s) + key fields; all are
+/// versioned `1.0` and evolve additively (new optional fields/blocks only). See ROADMAP P1 +
+/// ADR-0029 §5 (the multi-dimensional `dynamic_pet`/`diffusion_mri`/`multicontrast_mri` set).
 fn builtin_schemas() -> Vec<ProductSchema> {
     use BlockKind::{Array, Table};
     vec![
@@ -352,6 +353,66 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                 "Raw device data from an existing system (GE/Siemens/…).",
             )
         },
+        // ── ADR-0029 §5 multi-dimensional acquisition schemas (additive) ──
+        ProductSchema {
+            fields: vec![
+                FieldSpec::required("modality", "Imaging modality", "coded").vocabulary("DICOM")
+            ],
+            blocks: vec![
+                one(
+                    "volume",
+                    Some(Array),
+                    "4-D dynamic volume (t,z,y,x), native dtype — one N-D array, the t_c lever sets per-frame↔TAC locality",
+                ),
+                one(
+                    "frame_timing",
+                    Some(Table),
+                    "Per-frame start + duration (s, monotonic) and decay-correction reference",
+                ),
+            ],
+            ..schema(
+                "dynamic_pet",
+                "1.0",
+                "A dynamic (4-D) PET acquisition: one time-series volume + a frame-timing table.",
+            )
+        },
+        ProductSchema {
+            fields: vec![
+                FieldSpec::required("modality", "Imaging modality", "coded").vocabulary("DICOM")
+            ],
+            blocks: vec![
+                one(
+                    "volume",
+                    Some(Array),
+                    "4-D diffusion volume (dir,z,y,x), native dtype",
+                ),
+                one(
+                    "gradients",
+                    Some(Table),
+                    "Per-direction b-value (s/mm²) + unit b-vector (bval/bvec)",
+                ),
+            ],
+            ..schema(
+                "diffusion_mri",
+                "1.0",
+                "A diffusion MRI acquisition: per-direction volumes + b-values/vectors.",
+            )
+        },
+        ProductSchema {
+            fields: vec![
+                FieldSpec::required("modality", "Imaging modality", "coded").vocabulary("DICOM")
+            ],
+            blocks: vec![one(
+                "volume",
+                Some(Array),
+                "One image volume per contrast (≥1 — heterogeneous matrix/voxel, e.g. T1/T2/FLAIR)",
+            )],
+            ..schema(
+                "multicontrast_mri",
+                "1.0",
+                "A multi-contrast MRI study: N separately-acquired contrast volumes (model B).",
+            )
+        },
     ]
 }
 
@@ -362,7 +423,7 @@ mod tests {
     use crate::ProductBuilder;
 
     #[test]
-    fn registry_has_all_nine_builtins() {
+    fn registry_has_all_builtins() {
         let r = SchemaRegistry::builtin();
         for p in [
             "recon",
@@ -374,10 +435,53 @@ mod tests {
             "calibration",
             "sim",
             "device_data",
+            // ADR-0029 §5 multi-dimensional acquisitions
+            "dynamic_pet",
+            "diffusion_mri",
+            "multicontrast_mri",
         ] {
             assert!(r.get(p).is_some(), "missing built-in schema '{p}'");
         }
-        assert_eq!(r.products().count(), 9);
+        assert_eq!(r.products().count(), 12);
+    }
+
+    #[test]
+    fn dynamic_pet_requires_volume_and_frame_timing() {
+        use crate::block::array::{ArrayBlock, ArraySpec};
+        use crate::block::table::{Column, TableBlock, TableSpec};
+        let r = SchemaRegistry::builtin();
+        let vol = ArrayBlock::new("vol", ArraySpec::new(vec![4, 8, 8, 8], "int16"));
+        let timing = TableBlock::new(
+            "frame_timing",
+            TableSpec {
+                columns: vec![Column {
+                    name: "start_s".into(),
+                    dtype: "f8".into(),
+                    codec: None,
+                }],
+                rows: 4,
+                row_index: None,
+            },
+        );
+        // volume alone → rejected (frame_timing table required)
+        let mut b = ProductBuilder::new("dynamic_pet", "DP", "d", "2024-01-01T00:00:00Z");
+        b.add_block(&vol).unwrap();
+        b.with_field(
+            "modality",
+            serde_json::json!({"_vocabulary": "DICOM", "_code": "PT"}),
+        );
+        let m = b.seal().unwrap();
+        assert!(r.validate(&m).is_err());
+        // volume + frame_timing → valid
+        let mut b = ProductBuilder::new("dynamic_pet", "DP", "d", "2024-01-01T00:00:00Z");
+        b.add_block(&vol).unwrap();
+        b.add_block(&timing).unwrap();
+        b.with_field(
+            "modality",
+            serde_json::json!({"_vocabulary": "DICOM", "_code": "PT"}),
+        );
+        let m = b.seal().unwrap();
+        r.validate(&m).unwrap();
     }
 
     #[test]

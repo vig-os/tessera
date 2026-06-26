@@ -66,6 +66,12 @@ Add to the registry (additive): `dynamic_pet` (4-D volume `(t_c,64³)` + frame-t
 metadata). Pin the ROI dual-representation in the `roi` schema. Introduce composable trait/mixin
 requirement-sets so shared imaging fields are defined once.
 
+> **IMPLEMENTED (2026-06-26):** the three schemas are in `SchemaRegistry::builtin()` (registry 9→12),
+> each requiring its blocks (`dynamic_pet`/`diffusion_mri` = Array volume + Table timing/gradients;
+> `multicontrast_mri` = ≥1 Array volume) + a `modality` coded field. Additive — no corpus regen; tests
+> `registry_has_all_builtins`, `dynamic_pet_requires_volume_and_frame_timing`. Still pending for this
+> §: the ROI dual-representation pin and the trait/mixin requirement-sets (composition DRY).
+
 ### 6. Substrate selection — by **nature**, not **rank**
 Which of the two primitives a datum lands in is **not** a function of dimensionality. The discriminator is
 the datum's *shape of access*:

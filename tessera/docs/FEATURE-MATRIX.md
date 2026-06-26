@@ -85,7 +85,7 @@ data) is the remaining dedicated harness (#143).
 | Source-rooted **signing** | ○ | sign-at-source (cosign); needs signing keys | S16 (external key → P6) |
 | WORM (Object-Lock) | ○ | overwrite/delete refused in retention | S16 |
 | Units / descriptions / `_vocabulary`·`_code`·`default`·`extra/`·`study`·axes | ✓ | FAIR I1/I2 + AI-readable; fail-strict on missing required | `schema::FieldSpec`/`Coded`, `metadata`/`extra`/`study`, ArraySpec axes/unit/fill |
-| Versioned product-schema registry (embedded, 9 schemas) | ✓ | additive evolution, stable ids, offline-valid, domain-agnostic | `SchemaRegistry::builtin`, `validate` tests |
+| Versioned product-schema registry (embedded, 12 schemas) | ✓ | additive evolution, stable ids, offline-valid, domain-agnostic; +ADR-0029 §5 multi-dim set (`dynamic_pet`/`diffusion_mri`/`multicontrast_mri`) | `SchemaRegistry::builtin`, `registry_has_all_builtins`, `dynamic_pet_requires_volume_and_frame_timing` |
 | RO-Crate / DataCite export | ◑ | RO-Crate 1.1 JSON-LD + DataCite `dois` from the manifest; CLI `tessera export ro-crate\|datacite` | `export::{ro_crate,datacite}`, 4 tests (InvenioRDM/validation pending) |
 
 ## G. Layout, distribution, ingest, read
