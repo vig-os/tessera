@@ -146,6 +146,15 @@ impl ArraySpec {
         self
     }
 
+    /// Recover the **physical** value from a stored sample via the affine intensity rescale
+    /// `physical = stored·slope + intercept` (the `affine_1d` instance of the ADR-0032
+    /// `(transform, unit, frame)` descriptor — CT→HU, PET→Bq/mL). Identity (`slope 1, intercept 0`)
+    /// when no rescale is set. Storage stays lossless native ints; this is applied **downstream at read**
+    /// (store-don't-compute), so it never affects the stored bytes or the `content_hash`.
+    pub fn to_physical(&self, stored: f64) -> f64 {
+        stored * self.rescale_slope.unwrap_or(1.0) + self.rescale_intercept.unwrap_or(0.0)
+    }
+
     /// Override the default axis names (must match the array rank).
     pub fn with_axes(mut self, axes: Vec<String>) -> Self {
         self.axes = axes;
@@ -218,6 +227,21 @@ impl Block for ArrayBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_physical_applies_the_affine_1d_rescale() {
+        // CT: HU = stored·1 − 1024 (water at 1024 → 0 HU); the affine_1d intensity instance (ADR-0032).
+        let ct = ArraySpec::new(vec![64, 64, 64], "int16")
+            .with_rescale(1.0, -1024.0)
+            .with_unit("HU");
+        assert_eq!(ct.to_physical(2048.0), 1024.0);
+        assert_eq!(ct.to_physical(1024.0), 0.0);
+        // PET activity: Bq/mL = stored·0.5 (no offset).
+        let pet = ArraySpec::new(vec![64, 64, 64], "uint16").with_rescale(0.5, 0.0);
+        assert_eq!(pet.to_physical(20.0), 10.0);
+        // no rescale → identity.
+        assert_eq!(ArraySpec::new(vec![8], "int16").to_physical(5.0), 5.0);
+    }
 
     #[test]
     fn world_frame_spacing_is_derived_from_affine_columns() {
