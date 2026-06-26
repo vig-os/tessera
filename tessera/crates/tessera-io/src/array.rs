@@ -526,6 +526,20 @@ pub fn array_block(
 ///
 /// Chunks are visited in **C-order over the chunk grid** (last axis fastest), matching the array's
 /// storage order, so the index entry order is deterministic and reproducible.
+///
+/// ```
+/// use tessera_core::block::array::ArraySpec;
+/// use tessera_io::array::{array_chunk_index, ArrayData};
+///
+/// let mut spec = ArraySpec::new(vec![4, 4, 4], "int16");
+/// spec.chunks = vec![2, 2, 2]; // 8 chunks of 2³ over a 4³ volume
+/// let idx = array_chunk_index(&spec, &ArrayData::I16((0..64).map(|k| k as i16).collect())).unwrap();
+///
+/// assert_eq!(idx.len(), 8);
+/// assert_eq!(idx.aggregate().max, Some(63)); // stats roll up to the whole array
+/// assert_eq!(idx.prune(0, 0), vec![0]); // value 0 lives only in the first chunk
+/// assert!(idx.root().starts_with("blake3:")); // sub-block MMR root (ADR-0028 §1)
+/// ```
 pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkIndex> {
     let vals = data
         .as_i64()
