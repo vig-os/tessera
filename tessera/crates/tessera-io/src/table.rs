@@ -15,6 +15,7 @@ use tessera_core::{Error, Result};
 use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::arrays::{ChunkedArray, PrimitiveArray, StructArray};
 use vortex_array::expr::{root, select};
+use vortex_array::iter::{ArrayIteratorAdapter, ArrayIteratorExt};
 use vortex_array::scalar_fn::session::ScalarFnSession;
 use vortex_array::session::ArraySession;
 use vortex_array::{ArrayRef, IntoArray, VortexSessionExecute};
@@ -123,6 +124,27 @@ impl ColumnData {
                 )))
             }
         })
+    }
+
+    /// The `[start, end)` row sub-range of this column — used to slice a table into row-groups.
+    pub fn slice(&self, start: usize, end: usize) -> ColumnData {
+        macro_rules! sl {
+            ($v:expr, $variant:ident) => {
+                ColumnData::$variant($v[start..end].to_vec())
+            };
+        }
+        match self {
+            ColumnData::I8(v) => sl!(v, I8),
+            ColumnData::I16(v) => sl!(v, I16),
+            ColumnData::I32(v) => sl!(v, I32),
+            ColumnData::I64(v) => sl!(v, I64),
+            ColumnData::U8(v) => sl!(v, U8),
+            ColumnData::U16(v) => sl!(v, U16),
+            ColumnData::U32(v) => sl!(v, U32),
+            ColumnData::U64(v) => sl!(v, U64),
+            ColumnData::F32(v) => sl!(v, F32),
+            ColumnData::F64(v) => sl!(v, F64),
+        }
     }
 
     fn to_vortex(&self) -> ArrayRef {
@@ -269,6 +291,61 @@ pub fn encode(spec: &TableSpec, data: &TableData) -> Result<Vec<u8>> {
         s.write_options()
             .with_strategy(strategy)
             .write(&mut buf, chunked.to_array_stream()),
+    )
+    .map_err(ze)?;
+    Ok(buf.freeze().to_vec())
+}
+
+/// **Bounded-memory / >RAM variant of [`encode`]**: consume row-group [`TableData`] chunks from a
+/// *lazy* iterator (each ≤ [`ROWS_PER_GROUP`] rows) and write the chunked Vortex bytes **without ever
+/// holding the whole table** — the DAQ / streaming-compaction path. The iterator is pulled one chunk
+/// at a time as the writer consumes it (`ArrayIteratorAdapter` → `into_array_stream`), so a producer
+/// that reads one row-group fragment at a time stays at ~one-group RAM.
+///
+/// Feeding the row-groups in fixed-grid order yields bytes **byte-identical to [`encode`]** of the
+/// concatenation — there is one logical encoder, so streaming-then-compact == batch (tested by
+/// `encode_streaming_matches_batch_encode`).
+pub fn encode_streaming<I>(spec: &TableSpec, groups: I) -> Result<Vec<u8>>
+where
+    I: IntoIterator<Item = TableData>,
+    I::IntoIter: Send + 'static,
+{
+    let (rt, s) = runtime_session();
+    // The struct dtype, taken from an empty struct of the declared columns.
+    let mut empty: TableData = Vec::with_capacity(spec.columns.len());
+    for c in &spec.columns {
+        empty.push((c.name.clone(), empty_column(&c.dtype)?));
+    }
+    let efields: Vec<(&str, ArrayRef)> = empty
+        .iter()
+        .map(|(n, c)| (n.as_str(), c.to_vortex()))
+        .collect();
+    let dtype = StructArray::from_fields(&efields)
+        .map_err(ze)?
+        .into_array()
+        .dtype()
+        .clone();
+
+    // Lazily turn each row-group into a Vortex StructArray chunk (one in flight at a time).
+    let chunk_iter = groups.into_iter().map(|td| {
+        let fields: Vec<(&str, ArrayRef)> = td
+            .iter()
+            .map(|(n, c)| (n.as_str(), c.to_vortex()))
+            .collect();
+        StructArray::from_fields(&fields).map(|s| s.into_array())
+    });
+    let array_iter = ArrayIteratorAdapter::new(dtype, chunk_iter);
+
+    let compressor =
+        BtrBlocksCompressorBuilder::default().exclude_schemes([ALPScheme.id(), ALPRDScheme.id()]);
+    let strategy = WriteStrategyBuilder::default()
+        .with_btrblocks_builder(compressor)
+        .build();
+    let mut buf = ByteBufferMut::empty();
+    rt.block_on(
+        s.write_options()
+            .with_strategy(strategy)
+            .write(&mut buf, array_iter.into_array_stream()),
     )
     .map_err(ze)?;
     Ok(buf.freeze().to_vec())
@@ -463,6 +540,45 @@ mod tests {
             assert_eq!(back, c);
         }
         assert!(ColumnData::from_le_bytes("f4", &[0u8; 3]).is_err()); // not a multiple of width
+    }
+
+    #[test]
+    fn encode_streaming_matches_batch_encode() {
+        // The SSoT proof: feeding row-groups through the lazy streaming encoder produces bytes
+        // byte-identical to a batch encode of the whole table → one encoder, streaming == batch.
+        let rows = ROWS_PER_GROUP + 9000; // 2 groups + remainder
+        let spec = TableSpec {
+            columns: vec![col("t", "u8"), col("e", "f4")],
+            rows: rows as u64,
+            row_index: Some("t".into()),
+        };
+        let full: TableData = vec![
+            ("t".into(), ColumnData::U64((0..rows as u64).collect())),
+            (
+                "e".into(),
+                ColumnData::F32((0..rows).map(|k| 511.0 + (k % 13) as f32).collect()),
+            ),
+        ];
+        let n = rows.div_ceil(ROWS_PER_GROUP);
+        let groups: Vec<TableData> = (0..n)
+            .map(|g| {
+                let (st, en) = (g * ROWS_PER_GROUP, ((g + 1) * ROWS_PER_GROUP).min(rows));
+                full.iter()
+                    .map(|(name, c)| (name.clone(), c.slice(st, en)))
+                    .collect()
+            })
+            .collect();
+        let streamed = encode_streaming(&spec, groups).unwrap();
+        let batch = encode(&spec, &full).unwrap();
+        assert_eq!(
+            streamed, batch,
+            "streaming-then-compact != batch — SSoT broken"
+        );
+        assert_eq!(
+            decode(&spec, &streamed).unwrap(),
+            full,
+            "streamed bytes must decode"
+        );
     }
 
     #[test]
