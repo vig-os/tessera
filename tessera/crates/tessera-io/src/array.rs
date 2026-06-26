@@ -1103,4 +1103,28 @@ mod tests {
         // a float array can't supply integer stats
         assert!(array_chunk_index(&spec, &ArrayData::F32(vec![0.0; 64])).is_err());
     }
+
+    #[test]
+    fn array_chunk_index_handles_non_divisible_edge_chunks() {
+        // 5×5×5 with 2×2×2 chunks → 3³ = 27 chunks, the edge ones only 1 voxel wide. Exercises the
+        // partial-chunk odometer path (hi-lo < chunk_size) the divisible 4³/2³ case never hits.
+        let mut spec = ArraySpec::new(vec![5, 5, 5], "int32");
+        spec.chunks = vec![2, 2, 2];
+        let data = ArrayData::I32((0..125).collect());
+        let idx = array_chunk_index(&spec, &data).unwrap();
+        assert_eq!(idx.len(), 27);
+        // every voxel is gathered exactly once → counts sum to 125, stats span the whole array.
+        let agg = idx.aggregate();
+        assert_eq!(agg.count, 125);
+        assert_eq!(agg.min, Some(0));
+        assert_eq!(agg.max, Some(124));
+        assert_eq!(idx.entries.iter().map(|e| e.stats.count).sum::<u64>(), 125);
+        // the far-corner chunk is a 1³ edge chunk holding only voxel (4,4,4) = flat 124.
+        let last = idx.entries.last().unwrap();
+        assert_eq!(last.stats.count, 1);
+        assert_eq!(last.stats.min, Some(124));
+        assert_eq!(last.stats.max, Some(124));
+        // value 124 lives only in that corner chunk.
+        assert_eq!(idx.prune(124, 124), vec![26]);
+    }
 }
