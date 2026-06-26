@@ -105,7 +105,7 @@ data) is the remaining dedicated harness (#143).
 | **v0.2 — DICOM ingest** | `tessera-ingest::dicom` lossless + PS3.15 verify + golden DICOM corpus |
 | **v0.3 — vendor raw + integrity** | GE-HDF5/Siemens/raw plugins; minimal cosign signing; WORM on MinIO |
 | **v0.5 — Python + ops** | pyo3 parity; reference podman-compose stack; perf-SLA CI gates; migration CLI |
-| **v1.0 — spec stabilized** | 2nd independent reader passes conformance; spec frozen; 12 mo zero-breaking |
+| **v1.0 — spec stabilized** ✓ | 2nd independent reader passes conformance ✓ (#211); spec frozen ✓; all 4 gates green ✓ — **`tessera-1.0` tagged 2026-06-26**. (12-mo zero-breaking = the forward commitment from here.) |
 
 ## How to use as the baseline
 - **Regression:** re-run the benches; any §D row below its floor = fail the build.
