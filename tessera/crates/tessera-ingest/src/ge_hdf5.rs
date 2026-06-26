@@ -63,22 +63,17 @@ fn flatten<const N: usize, T>(
     }
 }
 
-/// Read a GE listmode 3-photon dataset (default name `events_3p`) and **transpose** it to flat
-/// Tessera columns: `ms` (u4) · `id_0..2` (u2) · `en_0..2` (f4) · `vtx_0..2` (f4) · `lt` (f4).
-pub fn read_events_3p(path: &std::path::Path, dataset: &str) -> Result<TableData> {
-    let file = hdf5::File::open(path).map_err(he)?;
-    let recs: Vec<Rec3p> = file
-        .dataset(dataset)
-        .map_err(he)?
-        .read_raw::<Rec3p>()
-        .map_err(he)?;
+/// Transpose a **slab** of 3-photon records (row-major) to flat Tessera columns: `ms` (u4) · `id_0..2`
+/// (u2) · `en_0..2` (f4) · `vtx_0..2` (f4) · `lt` (f4). Shared by the whole-file [`read_events_3p`] and
+/// the bounded-memory row-group streaming path (ADR-0026 §3) — one transpose, two readers (DRY/SSoT).
+fn transpose_3p(recs: &[Rec3p]) -> TableData {
     let n = recs.len();
     let mut ms = Vec::with_capacity(n);
     let mut id: [Vec<u16>; 3] = Default::default();
     let mut en: [Vec<f32>; 3] = Default::default();
     let mut vtx: [Vec<f32>; 3] = Default::default();
     let mut lt = Vec::with_capacity(n);
-    for r in &recs {
+    for r in recs {
         ms.push(r.ms);
         lt.push(r.lt);
         for k in 0..3 {
@@ -92,25 +87,32 @@ pub fn read_events_3p(path: &std::path::Path, dataset: &str) -> Result<TableData
     flatten(&mut cols, "en", en, ColumnData::F32);
     flatten(&mut cols, "vtx", vtx, ColumnData::F32);
     cols.push(("lt".into(), ColumnData::F32(lt)));
-    Ok(cols)
+    cols
 }
 
-/// Read a GE listmode 2-photon dataset (default name `events_2p`) and **transpose** it to flat
-/// Tessera columns: `ms` (u4) · `en_0..1` (f4) · `ax_0..1` (u1) · `tx_0..1` (u2) · `vtx_0..2` (f4).
-pub fn read_events_2p(path: &std::path::Path, dataset: &str) -> Result<TableData> {
+/// Read a GE listmode 3-photon dataset (default name `events_3p`) and **transpose** it to flat
+/// Tessera columns: `ms` (u4) · `id_0..2` (u2) · `en_0..2` (f4) · `vtx_0..2` (f4) · `lt` (f4).
+pub fn read_events_3p(path: &std::path::Path, dataset: &str) -> Result<TableData> {
     let file = hdf5::File::open(path).map_err(he)?;
-    let recs: Vec<Rec2p> = file
+    let recs: Vec<Rec3p> = file
         .dataset(dataset)
         .map_err(he)?
-        .read_raw::<Rec2p>()
+        .read_raw::<Rec3p>()
         .map_err(he)?;
+    Ok(transpose_3p(&recs))
+}
+
+/// Transpose a **slab** of 2-photon records (row-major) to flat Tessera columns: `ms` (u4) · `en_0..1`
+/// (f4) · `ax_0..1` (u1) · `tx_0..1` (u2) · `vtx_0..2` (f4). Shared by the whole-file [`read_events_2p`]
+/// and the bounded-memory row-group streaming path (ADR-0026 §3) — one transpose, two readers (DRY/SSoT).
+fn transpose_2p(recs: &[Rec2p]) -> TableData {
     let n = recs.len();
     let mut ms = Vec::with_capacity(n);
     let mut en: [Vec<f32>; 2] = Default::default();
     let mut ax: [Vec<u8>; 2] = Default::default();
     let mut tx: [Vec<u16>; 2] = Default::default();
     let mut vtx: [Vec<f32>; 3] = Default::default();
-    for r in &recs {
+    for r in recs {
         ms.push(r.ms);
         for k in 0..2 {
             en[k].push(r.en[k]);
@@ -126,7 +128,19 @@ pub fn read_events_2p(path: &std::path::Path, dataset: &str) -> Result<TableData
     flatten(&mut cols, "ax", ax, ColumnData::U8);
     flatten(&mut cols, "tx", tx, ColumnData::U16);
     flatten(&mut cols, "vtx", vtx, ColumnData::F32);
-    Ok(cols)
+    cols
+}
+
+/// Read a GE listmode 2-photon dataset (default name `events_2p`) and **transpose** it to flat
+/// Tessera columns: `ms` (u4) · `en_0..1` (f4) · `ax_0..1` (u1) · `tx_0..1` (u2) · `vtx_0..2` (f4).
+pub fn read_events_2p(path: &std::path::Path, dataset: &str) -> Result<TableData> {
+    let file = hdf5::File::open(path).map_err(he)?;
+    let recs: Vec<Rec2p> = file
+        .dataset(dataset)
+        .map_err(he)?
+        .read_raw::<Rec2p>()
+        .map_err(he)?;
+    Ok(transpose_2p(&recs))
 }
 
 /// Build a sealed Tessera `listmode` product (Vortex table) from flattened GE columns, with an
