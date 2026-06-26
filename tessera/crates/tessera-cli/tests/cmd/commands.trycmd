@@ -1,0 +1,15 @@
+```
+$ tessera --version
+tessera [..]
+
+$ tessera inspect --help
+Print a human summary of a `.tsra`'s manifest (id, product, blocks, hashes)
+
+Usage: tessera inspect <FILE>
+...
+
+$ tessera verify --help
+Open + fully verify a `.tsra` (magic, manifest seal, every block digest). Exit 0 if valid
+...
+
+```
