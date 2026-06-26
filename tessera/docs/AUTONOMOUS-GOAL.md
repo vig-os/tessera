@@ -76,3 +76,21 @@ LEGIBILITY: self-pace; one-line status at each milestone; end EVERY turn with th
   index, FEATURE-MATRIX, SPEC, ROADMAP, the open issues, and memory — so it is self-bootstrapping.
 - The run is **append-only on `spike/tessera-core`** and never merges to `main`; external-blocked items
   (#209 signing/OCI/WORM, WASM, real-PHI data) are surfaced, not forced.
+
+## ⚠ Known structural blocker (discovered during the run — needs a user decision)
+The DONE definition above is **internally inconsistent** and, as written, **cannot be satisfied by
+autonomous work alone**. Criterion (2) requires *every* FEATURE-MATRIX row `✓`, but several rows are
+exactly the **external blockers** the "STOP ONLY FOR" clause says to surface-and-skip:
+- **signing** (#209 — needs cosign keys), **WORM** (object-lock storage), **OCI artifact** (a registry),
+  **WASM bindings** (vortex/hdf5 don't target wasm32).
+
+So the conjunction "every row ✓ **and** keep-working-not-blocking" can't both hold. **This is a fork only
+the user can resolve** (surfaced repeatedly in the run; recorded in memory):
+- **(a)** provide the externals (creds/registry/WORM/WASM toolchain) → those rows become buildable; or
+- **(b)** rescope DONE criterion (2) to *every **autonomously-achievable** row* (mark signing/WORM/OCI/
+  WASM "out of scope, pending creds") → the run can then converge.
+
+Until (a) or (b), an honest run **cannot report all five criteria met**, no matter how much it builds.
+The buildable remainder (ADR-0028 §5 fused pass · 0030 §3 export + §5 deformable pipeline · 0029 trait/
+mixin sets · 0032 unified descriptor · large vendor ingest) continues toward the achievable subset. This
+note changes **no** criteria — it only records the conflict at its source so it isn't re-discovered.
