@@ -736,6 +736,11 @@ pub fn downsample_max_3d(spec: &ArraySpec, data: &ArrayData) -> Option<(ArraySpe
         .zip(&out_spec.shape)
         .map(|(&c, &d)| c.min(d).max(1))
         .collect();
+    // the level's voxels are 2× the base, so its geometry is the level-1 derived frame — otherwise the
+    // downsampled array would keep the *base* spacing and be spatially wrong (ADR-0030 §3 + ADR-0028 §7).
+    if let Some(wf) = &out_spec.world_frame {
+        out_spec.world_frame = Some(wf.at_level(1));
+    }
     Some((out_spec, data_out))
 }
 
@@ -1232,6 +1237,32 @@ mod tests {
         // floats need canonical reduction first (ADR-0024) → not offered here
         assert_eq!(ArrayData::F32(vec![1.0, 2.0]).as_i64(), None);
         assert_eq!(ArrayData::F64(vec![1.0]).as_i64(), None);
+    }
+
+    #[test]
+    fn downsample_derives_the_level_world_frame() {
+        use tessera_core::block::array::WorldFrame;
+        let mut spec = ArraySpec::new(vec![4, 4, 4], "int16");
+        spec.world_frame = Some(WorldFrame {
+            affine: [
+                2.0, 0.0, 0.0, 0.0, //
+                0.0, 2.0, 0.0, 0.0, //
+                0.0, 0.0, 2.0, 0.0,
+            ],
+            convention: "LPS".into(),
+            unit: "mm".into(),
+            space: "patient".into(),
+        });
+        let (lvl, _) = downsample_max_3d(&spec, &ArrayData::I16(vec![0; 64])).unwrap();
+        // level-1 spacing doubles (2 → 4 mm) — geometry stays coherent (ADR-0030 §3 ∘ ADR-0028 §7).
+        assert_eq!(lvl.world_frame.as_ref().unwrap().spacing(), [4.0, 4.0, 4.0]);
+        // a frameless array stays frameless.
+        let (lvl2, _) = downsample_max_3d(
+            &ArraySpec::new(vec![4, 4, 4], "int16"),
+            &ArrayData::I16(vec![0; 64]),
+        )
+        .unwrap();
+        assert!(lvl2.world_frame.is_none());
     }
 
     #[test]
