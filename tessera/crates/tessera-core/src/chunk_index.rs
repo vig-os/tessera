@@ -283,6 +283,24 @@ impl ChunkIndex {
 /// the prior leaf count) — amortized O(1), worst-case O(log n). Trace for 4 leaves: L1→peak P0; L2 merges
 /// →P01; L3→peak P2; L4 merges →P23 then →P0123 (the root). The peaks are exactly the roots of the
 /// complete perfect subtrees (sizes = the set bits of the leaf count).
+///
+/// ```
+/// use tessera_core::chunk_index::{ChunkIndex, ChunkStats, MerkleStatsAccumulator};
+/// use tessera_core::hash::digest;
+///
+/// // stream five leaves through the fused fold while a batch index sees the same leaves.
+/// let mut acc = MerkleStatsAccumulator::new();
+/// let mut batch = ChunkIndex::new();
+/// for i in 0..5i64 {
+///     let d = digest(format!("chunk{i}").as_bytes());
+///     acc.push(&d, ChunkStats::from_values(&[i, i * 2])); // live: hash + stats fold up the tree
+///     batch.push(d, &[i, i * 2]);
+/// }
+/// // the live streamed root + aggregate equal the batch index over the same leaves (§5 determinism).
+/// assert_eq!(acc.leaves(), 5);
+/// assert_eq!(acc.root(), batch.root());
+/// assert_eq!(acc.aggregate(), batch.aggregate());
+/// ```
 #[derive(Debug, Default)]
 pub struct MerkleStatsAccumulator {
     hash: crate::hash::MerkleAccumulator,
