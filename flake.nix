@@ -144,6 +144,27 @@
           });
           workspace-fmt = craneLib.cargoFmt { inherit src; };
 
+          # `tessera-core` must stay **wasm32-compatible** (#210): the pure-Rust spine — manifest /
+          # identity / hash / inclusion+consistency proofs / referencing / ed25519 *verify* — has zero
+          # C deps and no getrandom in its production graph (getrandom enters only via the proptest
+          # dev-dep), so it compiles to wasm for in-browser verification. Arrow-JS is the RS↔TS boundary
+          # for the columnar data the (non-wasm) Vortex/zarrs backends own. Builds the lib only, no test
+          # run (wasm can't execute natively here); deps are scoped to tessera-core's subtree.
+          wasm-core = let
+            wasmArgs = {
+              inherit src;
+              strictDeps = true;
+              pname = "tessera-core-wasm";
+              version = "0.0.0";
+              cargoExtraArgs = "--package tessera-core --lib";
+              CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+              doCheck = false;
+            };
+          in
+          craneLib.buildPackage (wasmArgs // {
+            cargoArtifacts = craneLib.buildDepsOnly wasmArgs;
+          });
+
           # guardrails agent-drift gates over the Rust source (code gates) + repo-wide structural
           # gates. cargo-deny stays a pre-commit gate (needs network for the advisory DB).
           guardrails-gates = pkgs.runCommand "guardrails-gates"

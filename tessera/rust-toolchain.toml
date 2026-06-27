@@ -6,3 +6,8 @@
 channel = "stable"
 profile = "minimal"
 components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
+# wasm32 is a build target for `tessera-core` only (the pure-Rust spine: manifest/identity/hash/
+# inclusion+consistency proofs/referencing/ed25519 *verify*) — it has zero C deps and no getrandom in
+# its production graph (getrandom enters only via the proptest dev-dep), so the lib compiles to wasm for
+# in-browser verification (#210; Arrow-JS is the RS↔TS boundary for columnar data).
+targets = ["wasm32-unknown-unknown"]
