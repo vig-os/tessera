@@ -63,10 +63,18 @@ pub fn datacite(m: &Manifest) -> Value {
             })
         })
         .collect();
+    // DataCite-mandatory `creators`: use the manifest's `creator` metadata field if recorded, else the
+    // DataCite-sanctioned `(:unav)` ("value unavailable") placeholder — schema-valid + honest when the
+    // product carries no author (a deposit overrides it with the depositing institution).
+    let creators: Vec<Value> = match m.metadata.get("creator").and_then(|v| v.as_str()) {
+        Some(name) => vec![json!({ "name": name })],
+        None => vec![json!({ "name": "(:unav)", "nameType": "Organizational" })],
+    };
     json!({
         "data": {
             "type": "dois",
             "attributes": {
+                "creators": creators,
                 "titles": [{ "title": m.name }],
                 "descriptions": [{ "description": m.description, "descriptionType": "Abstract" }],
                 "publisher": "Tessera",
@@ -121,6 +129,34 @@ mod tests {
         assert_eq!(a["types"]["resourceType"], "recon");
         assert_eq!(a["identifiers"][0]["identifier"], m.id);
         assert_eq!(a["relatedIdentifiers"][0]["relationType"], "IsDerivedFrom");
+    }
+
+    #[test]
+    fn datacite_has_all_mandatory_fields_for_doi_minting() {
+        // DataCite 4.x requires Identifier, Creator, Title, Publisher, PublicationYear, ResourceType —
+        // all must be present + non-empty for InvenioRDM/DataCite to mint a DOI.
+        let a = datacite(&product())["data"]["attributes"].clone();
+        assert!(a["identifiers"].as_array().is_some_and(|v| !v.is_empty()));
+        assert!(a["creators"].as_array().is_some_and(|v| !v.is_empty()));
+        assert!(a["titles"].as_array().is_some_and(|v| !v.is_empty()));
+        assert!(a["publisher"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(a["publicationYear"].as_i64().is_some_and(|y| y > 0));
+        assert!(a["types"]["resourceTypeGeneral"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()));
+        // no recorded author → the DataCite `(:unav)` unavailable convention (schema-valid + honest).
+        assert_eq!(a["creators"][0]["name"], "(:unav)");
+    }
+
+    #[test]
+    fn datacite_creator_comes_from_manifest_metadata_when_present() {
+        let mut b = ProductBuilder::new("recon", "n", "d", "2024-01-01T00:00:00Z");
+        b.with_field("creator", serde_json::json!("Dr. A. Researcher"));
+        let m = b.seal().unwrap();
+        assert_eq!(
+            datacite(&m)["data"]["attributes"]["creators"][0]["name"],
+            "Dr. A. Researcher"
+        );
     }
 
     #[test]
