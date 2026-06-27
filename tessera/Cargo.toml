@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-cli", "crates/tessera-ingest", "crates/tessera-py"]
+members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-cli", "crates/tessera-ingest", "crates/tessera-py", "crates/tessera-wasm"]
 
 [workspace.package]
 edition = "2021"

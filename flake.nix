@@ -165,6 +165,36 @@
             cargoArtifacts = craneLib.buildDepsOnly wasmArgs;
           });
 
+          # The **wasm-bindgen JS bindings** (`tessera-wasm`, #210) must build to wasm AND load + execute
+          # in a JS runtime: build the cdylib for wasm32, generate the Node bindings with `wasm-bindgen`
+          # (pinned to the same 0.2.121 as the crate — they MUST match), then run the Node smoke test
+          # (functions callable, panic-safe boundary). Proves in-browser verification end-to-end.
+          wasm-bindgen-smoke = let
+            wasmArgs = {
+              inherit src;
+              strictDeps = true;
+              pname = "tessera-wasm-bindings";
+              version = "0.0.0";
+              cargoExtraArgs = "--package tessera-wasm --lib";
+              CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+              doCheck = false;
+            };
+            wasmLib = craneLib.buildPackage (wasmArgs // {
+              cargoArtifacts = craneLib.buildDepsOnly wasmArgs;
+              # crane doesn't install a cdylib's `.wasm` by default — copy it out for wasm-bindgen.
+              postInstall = ''
+                mkdir -p $out/wasm
+                find target -name 'tessera_wasm.wasm' -exec cp {} $out/wasm/ \;
+              '';
+            });
+          in
+          pkgs.runCommand "wasm-bindgen-smoke"
+            { nativeBuildInputs = [ pkgs.wasm-bindgen-cli pkgs.nodejs ]; } ''
+            wasm-bindgen --target nodejs --out-dir "$PWD/glue" ${wasmLib}/wasm/tessera_wasm.wasm
+            node ${./tessera/crates/tessera-wasm/tests/smoke.cjs} "$PWD/glue/tessera_wasm.js"
+            touch $out
+          '';
+
           # guardrails agent-drift gates over the Rust source (code gates) + repo-wide structural
           # gates. cargo-deny stays a pre-commit gate (needs network for the advisory DB).
           guardrails-gates = pkgs.runCommand "guardrails-gates"
