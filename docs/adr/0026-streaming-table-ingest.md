@@ -84,10 +84,16 @@ odd_batches`). §2 deterministic strategy (ALP excluded, fixed knobs) + §4 `row
 The bounded-memory streaming engine + journal/recover/seal (`WriteSession`, `TableStreamWriter`) is built
 + tested, incl. the ADR-0028 §5 live fold (`with_live_index`).
 
+**§3 streaming HDF5 ingest reader — DONE (2026-06-27):** `ge_hdf5::stream_events_2p` reads the compound
+dataset in HDF5 row-slabs (hyperslab `read_slice_1d(start..end)`) → `transpose_2p` → `TableStreamWriter`
+→ seal; `stream_to_listmode_product_2p` is the bounded-memory >RAM ingest. Test
+`streamed_2p_ingest_is_byte_identical_to_whole_file_read` proves a 5000-row synthetic `.h5` streamed in
+non-aligned 999-row slabs seals to the **same `content_hash`** as the whole-file read (slab size never
+changes the canonical bytes). So §1 always-chunked + §2 deterministic + §3 streaming reader + §4
+`row_index` are all as-built.
+
 **Remaining before an Accepted flip (genuinely needs externals — NOT autonomously closable):**
-(a) §3 **streaming HDF5 ingest reader** `ge_hdf5::stream_events_2p/3p` (read the compound dataset in
-row-slabs → push through the streaming engine) — *buildable* as code with a synthetic HDF5 fixture, but
-(b) the Accept gate proper requires **real >RAM ingest validation** (the GE listmode `events_2p` ≈5–7 GB,
+the Accept gate proper requires **real >RAM ingest validation** (the GE listmode `events_2p` ≈5–7 GB,
 manual-bench-only, no PHI committed) and **cross-env / cross-arch determinism re-validation**
 (dev==release==hermetic, x86==ARM — the ADR-0024 caveat; needs ARM CI), plus the **golden-corpus regen**
 for any encode-path change. These are the determinism-critical, externally-gated steps the ADR was
