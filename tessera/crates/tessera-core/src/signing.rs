@@ -14,10 +14,14 @@
 //! attribution is FAIR metadata, not the crypto. Key material may be held at rest under age/sops; that
 //! is a host-side loader concern, not part of this verify-able core.
 
-use ed25519_dalek::{Signature as Ed25519Sig, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature as Ed25519Sig, Signer, Verifier};
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::Manifest;
+
+/// Re-exported Ed25519 key types so downstream crates sign/verify without a direct `ed25519-dalek`
+/// dependency (the crypto boundary lives here, in the core).
+pub use ed25519_dalek::{SigningKey, VerifyingKey};
 
 /// The `alg` tag for the Ed25519 backend.
 pub const ALG_ED25519: &str = "ed25519";
