@@ -14,6 +14,7 @@ pub mod range;
 pub mod sign;
 pub mod stream;
 pub mod table;
+pub mod worm;
 pub mod write;
 
 pub use accumulate::TableStreamWriter;

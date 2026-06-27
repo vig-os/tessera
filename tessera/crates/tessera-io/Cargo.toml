@@ -23,6 +23,7 @@ vortex-layout.workspace = true
 vortex-session.workspace = true
 futures.workspace = true
 tracing.workspace = true
+time.workspace = true   # RFC-3339 retain-until comparison for WORM retention (tessera_io::worm)
 
 [dev-dependencies]
 tempfile = "3"

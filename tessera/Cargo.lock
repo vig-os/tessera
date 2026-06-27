@@ -4084,6 +4084,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tessera-core",
+ "time",
  "tracing",
  "tracing-subscriber",
  "vortex-array",
