@@ -35,7 +35,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 |---|:--:|---|---|
 | **Bit-exact lossless** (arrays+tables) | ✓ | `bytes ==` incl NaN/±inf/−0.0/denormal/int-limits | **S13** + Rust `array::tests` (pcodec) + `table::tests` (Vortex, 10 dtypes) |
 | **Writer determinism** (same-ver) | ✓ | same input→byte-identical output (manifest + .tsra) | **S15** + `corpus_packs_deterministically` |
-| Cross-version / cross-arch determinism | ◑ | golden hashes locked in `corpus.json`; drift fails CI | conformance gate (multi-release CI pending, S15 remain) |
+| Cross-version / cross-arch determinism | ◑ | golden hashes locked in `corpus.json`; the **cross-arch gate is now wired** — CI runs `nix flake check` on x86_64-linux **and** aarch64-linux (`ubuntu-24.04-arm`, GitHub-hosted), so the conformance gate re-derives the goldens on each arch; green-on-both = byte-reproducible x86==ARM. Flips ✓ on the first green ARM run (or a `nix flake check` on Apple-Silicon `aarch64-darwin`). Cross-*version* (multi-release) still pending | `.github/workflows/ci.yml` arch matrix · `tessera-io/tests/conformance.rs` · S15 |
 | Pruning never lies | ✓ | conservative min/max overlap → a chunk that *could* match a range is never skipped (no false negatives); proven exhaustively | `chunk_index::tests::pruning_keeps_overlapping_chunks_only_and_never_drops_a_hit`, `array_chunk_index_*` |
 | Docs-as-tests (3 layers gated) | ✓ | every public-API example + CLI transcript + book runs in CI, so docs can't drift from behaviour | `workspace-doctest` (4 doctests) · `tessera-cli/tests/cli.rs` trycmd (5 cases incl. real corpus inspect) · `mdbook-build` (book `{{#include}}`s the trycmd files) |
 

@@ -10,6 +10,15 @@
 #
 # vig-os/tessera is PUBLIC → GitHub-hosted runner. Never self-hosted on a public repo (untrusted
 # PRs = arbitrary code execution on your hardware). See guardrails docs/CONVENTIONS.md.
+#
+# CROSS-ARCH DETERMINISM GATE (ADR-0020/0024 release gate). The flake is `eachDefaultSystem`, so the
+# checks already exist for aarch64-linux. Running `nix flake check` on BOTH `ubuntu-latest`
+# (x86_64-linux) and `ubuntu-24.04-arm` (aarch64-linux — a GitHub-HOSTED ARM64 runner, free for public
+# repos, so the no-self-hosted rule holds) makes the conformance gate
+# (`tessera-io/tests/conformance.rs`) re-derive the golden id/content_hash/manifest_hash and the
+# byte-identical `.tsra` on EACH arch. Green on both = the content-addressing is byte-reproducible
+# x86==ARM — the writer-determinism property the spec stakes identity on, validated not assumed.
+# `fail-fast: false` so a drift on one arch still reports the other.
 
 name: CI
 
@@ -29,9 +38,17 @@ permissions:
 
 jobs:
   check:
-    name: nix flake check
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: nix flake check (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60  # a cold aarch64 build of the vortex/zarrs stack runs longer than x86
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64-linux
+            runner: ubuntu-latest
+          - arch: aarch64-linux
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
