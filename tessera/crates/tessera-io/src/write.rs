@@ -56,6 +56,25 @@ fn cz(e: impl std::fmt::Display) -> Error {
     Error::Container(e.to_string())
 }
 
+/// Write `bytes` to `path` **durably + atomically**: write a temp file, fsync it, atomically rename it
+/// over `path`, then fsync the directory so the rename itself is on disk. A crash therefore never leaves
+/// a torn or lost header — the metadata-first durability guarantee (the reader sees either the old header
+/// or the complete new one, never a partial write).
+fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        // fsync the directory entry so the rename survives a crash (Linux durability).
+        File::open(dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
 impl WriteSession {
     /// Start a new session in `dir` (created if absent): writes the header and an empty journal.
     pub fn create(
@@ -75,7 +94,7 @@ impl WriteSession {
             metadata: BTreeMap::new(),
             extra: BTreeMap::new(),
         };
-        fs::write(dir.join(HEADER), serde_json::to_vec_pretty(&header)?)?;
+        write_durable(&dir.join(HEADER), &serde_json::to_vec_pretty(&header)?)?;
         let journal = OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -113,9 +132,9 @@ impl WriteSession {
     }
 
     fn persist_header(&self) -> Result<()> {
-        fs::write(
-            self.dir.join(HEADER),
-            serde_json::to_vec_pretty(&self.header)?,
+        write_durable(
+            &self.dir.join(HEADER),
+            &serde_json::to_vec_pretty(&self.header)?,
         )?;
         Ok(())
     }
@@ -329,6 +348,38 @@ mod tests {
         let batch = bb.seal().unwrap();
         assert_eq!(sealed.manifest_hash, batch.manifest_hash);
         Reader::open(&out).unwrap();
+    }
+
+    #[test]
+    fn durable_header_persists_metadata_atomically_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let mut ws = WriteSession::create(&stage, "recon", "DP", "d", TS).unwrap();
+        ws.with_study("study-7").unwrap();
+        ws.with_field(
+            "modality",
+            serde_json::json!({"_vocabulary": "DICOM", "_code": "CT"}),
+        )
+        .unwrap();
+        ws.with_extra("operator", serde_json::json!("ct-tech-1"))
+            .unwrap();
+
+        // the durable write leaves no torn temp file behind, and the header is on disk.
+        assert!(stage.join(HEADER).exists());
+        assert!(
+            !stage.join("header.json.tmp").exists(),
+            "atomic write must not leave a temp"
+        );
+
+        // recover reads the persisted header (metadata survived the fsync'd writes) and seals it through.
+        let recovered = WriteSession::recover(&stage).unwrap();
+        let out = dir.path().join("r.tsra");
+        let sealed = recovered.seal(&out).unwrap();
+        assert_eq!(sealed.study.as_deref(), Some("study-7"));
+        assert_eq!(
+            sealed.metadata.get("modality"),
+            Some(&serde_json::json!({"_vocabulary": "DICOM", "_code": "CT"}))
+        );
     }
 
     #[test]

@@ -267,6 +267,31 @@ mod tests {
     }
 
     #[test]
+    fn streamed_product_carries_session_metadata() {
+        // metadata-first durability through the streaming path: fields set on the WriteSession (persisted
+        // to the durable header) flow through StreamWriter to the sealed product — so a DAQ writer can set
+        // modality/study up front and they survive the stream → seal.
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws =
+            WriteSession::create(&dir.path().join("stage"), "recon", "p", "d", TS).unwrap();
+        ws.with_study("study-9").unwrap();
+        ws.with_field(
+            "modality",
+            serde_json::json!({"_vocabulary": "DICOM", "_code": "PT"}),
+        )
+        .unwrap();
+        let mut sw = StreamWriter::new(ws, 2, 2);
+        let (_, spec, data) = ablock("b000", 0);
+        sw.push(array_job("b000", spec, data)).unwrap();
+        let sealed = sw.finish(&dir.path().join("s.tsra")).unwrap();
+        assert_eq!(sealed.study.as_deref(), Some("study-9"));
+        assert_eq!(
+            sealed.metadata.get("modality"),
+            Some(&serde_json::json!({"_vocabulary": "DICOM", "_code": "PT"}))
+        );
+    }
+
+    #[test]
     fn indexed_jobs_emit_chunk_index_sidecars_matching_batch() {
         // ADR-0028 §5 — an indexed job emits each block's chunk-index sidecar during streaming, so the
         // sealed result must equal a batch that adds block then sidecar interleaved in push order.
