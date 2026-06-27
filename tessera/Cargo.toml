@@ -45,8 +45,12 @@ vortex-session = "0.75"
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }     # tessera-cli
 # DICOM ingest (tessera-ingest, P5/#207). default-features=false drops the `ul` network stack and the
-# C++ codecs (charls/gdcm); pure-Rust pixel decode covers uncompressed/RLE transfer syntaxes.
+# C++ codecs (charls/gdcm/openjpeg-sys); pure-Rust pixel decode covers uncompressed/RLE.
 dicom = { version = "0.9", default-features = false, features = ["pixeldata", "inventory-registry"] }
+# JPEG transfer-syntax adapters — JPEG Baseline (Process 1, 8-bit) + JPEG Lossless (Process 14) decode
+# pure-Rust via jpeg-decoder/jpeg-encoder (NO charls/gdcm/openjpeg). Feature-unifies with `dicom` above so
+# `decode_pixel_data()` dispatches to the registered JpegAdapter. Hermetic — builds in the nix gate.
+dicom-transfer-syntax-registry = { version = "0.9", features = ["jpeg"] }
 # GE/vendor HDF5 listmode ingest (#208). Native libhdf5 found via pkg-config (HDF5_DIR unset — see flake.nix).
 hdf5-metno = "0.12"
 # Python bindings (tessera-py). abi3 → one .so works across CPython ≥3.9; extension-module → no

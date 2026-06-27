@@ -4067,6 +4067,7 @@ name = "tessera-ingest"
 version = "0.0.0"
 dependencies = [
  "dicom",
+ "dicom-transfer-syntax-registry",
  "hdf5-metno",
  "serde_json",
  "tempfile",

@@ -11,6 +11,9 @@ authors.workspace = true
 tessera-core.workspace = true
 tessera-io.workspace = true
 dicom.workspace = true
+# Enables the pure-Rust JPEG Baseline/Lossless adapters in the transfer-syntax registry (feature-unifies
+# with `dicom`); used through the `dicom::transfer_syntax` umbrella re-export.
+dicom-transfer-syntax-registry.workspace = true
 hdf5-metno.workspace = true
 serde_json.workspace = true
 

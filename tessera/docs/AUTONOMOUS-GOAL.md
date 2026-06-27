@@ -118,9 +118,13 @@ loopback — was established for OCI and is reusable for MinIO). **Precise resid
   0021 doesn't exist). 0026's Accept gate is the determinism-critical external set: **cross-arch x86==ARM
   determinism re-validation + real >RAM listmode + golden regen**. Its §3 streaming-reader *mechanism* is
   buildable (transpose_2p/3p prepped) but the **flip** needs the ARM runner.
-- **(2) Matrix:** 3 rows remain, **all externally/tradeoff-gated** — DICOM-JPEG (needs the C++ codecs
-  charls/gdcm the flake deliberately disabled for hermeticity) · cross-arch determinism (ARM runner) ·
-  GE-HDF5 7GB stream (= 0026 + cross-arch).
+- **(2) Matrix:** DICOM-JPEG **CLOSED** (2026-06-27) — JPEG Baseline (Process 1, 8-bit) decodes
+  **pure-Rust** via `jpeg-decoder`/`jpeg-encoder` (the `jpeg` registry feature, no charls/gdcm/openjpeg),
+  proven end-to-end + golden-hash-pinned; the earlier "needs C++ codecs" framing was wrong for the
+  baseline family (JPEG Lossless/.57/.70 routes through the same pure-Rust adapter but is untested; only
+  JPEG-LS/.80-.81, JPEG 2000/.90-.91, and 12-bit Extended actually need the disabled C libs). 2 rows
+  remain, **genuinely external** — cross-arch determinism (ARM runner) · GE-HDF5 7GB stream (= 0026 +
+  cross-arch).
 - **(5) final audit:** gated on (1)+(2).
 **So criteria 1, 2, 5 now converge on the SAME irreducible externals:** an **ARM CI runner** (the big one —
 unblocks 0026 + the cross-arch row + the GE-HDF5 stream flip), the **deliberately-disabled C++ DICOM

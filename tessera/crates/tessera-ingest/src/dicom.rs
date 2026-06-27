@@ -1,7 +1,14 @@
 //! DICOM ingest (#207) — read a DICOM image into a Tessera `recon` product, **losslessly**: the
 //! native integer samples are preserved as-is (no rescale baked in); the DICOM rescale slope/
 //! intercept, modality, and physical unit are carried as metadata so a reader recovers HU / Bq·mL⁻¹.
-//! Uncompressed and RLE transfer syntaxes decode pure-Rust (no C++ codecs).
+//! Transfer syntaxes decode **pure-Rust, no C++ codecs**: uncompressed (tested), plus JPEG Baseline
+//! (Process 1, 8-bit) via `jpeg-decoder`/`jpeg-encoder` (the `jpeg` feature on the transfer-syntax
+//! registry) — proven end-to-end by `ingests_a_jpeg_baseline_encapsulated_dicom_pure_rust`. JPEG Lossless
+//! (Process 14) routes through the same `JpegAdapter` (`jpeg-decoder` supports the SOF3 lossless path),
+//! but Tessera has no fixture exercising it yet, so it is not claimed proven. JPEG-LS (.80/.81 — charls),
+//! JPEG 2000 (.90/.91 — openjpeg-sys), and 12-bit Extended need the deliberately-excluded C libraries and
+//! stay unsupported. Decode dispatch is the same `decode_pixel_data()` call for every syntax — the
+//! registry picks the adapter by UID.
 
 use dicom::core::{DataElement, PrimitiveValue, Tag, VR};
 use dicom::object::{FileDicomObject, InMemDicomObject};
@@ -309,6 +316,143 @@ mod tests {
         assert_eq!(img.rescale_slope, 1.0);
         let expected: Vec<i16> = (0..n).map(|k| (k as u16 * 7) as i16).collect();
         assert_eq!(img.voxels, expected);
+    }
+
+    /// Build a deterministic uncompressed CT DICOM in memory (no PHI, no external fixture) and write it.
+    fn write_golden_ct(path: &std::path::Path) {
+        let (rows, cols) = (16u16, 16u16);
+        let n = rows as usize * cols as usize;
+        let pixels: Vec<u16> = (0..n).map(|k| (k as u16).wrapping_mul(11) % 4096).collect();
+        let obj = InMemDicomObject::from_element_iter([
+            DataElement::new(MODALITY, VR::CS, PrimitiveValue::from("CT")),
+            DataElement::new(ROWS, VR::US, PrimitiveValue::from(rows)),
+            DataElement::new(COLUMNS, VR::US, PrimitiveValue::from(cols)),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(
+                Tag(0x0028, 0x0004),
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2"),
+            ),
+            DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(16u16)),
+            DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(12u16)),
+            DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(11u16)),
+            DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(0u16)),
+            DataElement::new(RESCALE_INTERCEPT, VR::DS, PrimitiveValue::from("-1024")),
+            DataElement::new(RESCALE_SLOPE, VR::DS, PrimitiveValue::from("1")),
+            DataElement::new(
+                Tag(0x7FE0, 0x0010),
+                VR::OW,
+                PrimitiveValue::U16(pixels.into()),
+            ),
+        ]);
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax("1.2.840.10008.1.2.1")
+            .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.2")
+            .media_storage_sop_instance_uid("1.2.3.4.5.6.7.8.9.2")
+            .implementation_class_uid("1.2.826.0.1.3680043.tessera")
+            .build()
+            .unwrap();
+        obj.with_exact_meta(meta).write_to_file(path).unwrap();
+    }
+
+    /// Golden DICOM conformance: a fixed synthetic CT must always ingest to the same `content_hash`
+    /// (the MMR root over the decoded voxels), independent of the manifest timestamp/SOP — the same
+    /// content-addressing guarantee the `.tsra` corpus locks, now anchored at the DICOM door. Drift here
+    /// means the decode or the array encode changed bytes.
+    #[test]
+    fn golden_dicom_ingest_is_deterministic_and_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("golden.dcm");
+        write_golden_ct(&path);
+
+        let img = read_image(&path).unwrap();
+        let (a, _) = to_recon_product(&img, "golden-ct", "2024-01-01T00:00:00Z", "sop-a").unwrap();
+        // a different timestamp + source must NOT change the content hash (content-addressing)
+        let (b, _) = to_recon_product(&img, "golden-ct", "2099-12-31T23:59:59Z", "sop-b").unwrap();
+        let ha = a.content_hash.as_deref().unwrap();
+        let hb = b.content_hash.as_deref().unwrap();
+        assert_eq!(
+            ha, hb,
+            "content_hash must be independent of manifest metadata"
+        );
+        assert_eq!(
+            ha, "blake3:b11c199ce147cf505159ddeff94ebda4c4861cb4a1ca3a124ec11f7aa8215627",
+            "golden DICOM content_hash drifted (decode/encode bytes changed): {ha}"
+        );
+    }
+
+    /// Synthesize an 8-bit CT slice, transcode it to **JPEG Baseline (Process 1)** with the pure-Rust
+    /// `jpeg-encoder`, write it, then ingest it back through `read_image` — proving the JPEG-encapsulated
+    /// decode path (`jpeg-decoder`, no C++ codec) works end-to-end under the hermetic gate. JPEG Baseline
+    /// is lossy, so the smooth gradient is asserted within a tolerance (and its monotonic structure must
+    /// survive); the point is that a compressed transfer syntax decodes at all, purely in Rust.
+    #[test]
+    fn ingests_a_jpeg_baseline_encapsulated_dicom_pure_rust() {
+        use dicom::pixeldata::Transcode;
+        use dicom_transfer_syntax_registry::entries::JPEG_BASELINE;
+
+        let (rows, cols) = (16u16, 16u16);
+        let n = rows as usize * cols as usize;
+        // smooth horizontal gradient (0..240) — JPEG handles low-frequency content with minimal loss
+        let pixels: Vec<u8> = (0..n).map(|k| ((k % cols as usize) * 16) as u8).collect();
+
+        let obj = InMemDicomObject::from_element_iter([
+            DataElement::new(MODALITY, VR::CS, PrimitiveValue::from("CT")),
+            DataElement::new(ROWS, VR::US, PrimitiveValue::from(rows)),
+            DataElement::new(COLUMNS, VR::US, PrimitiveValue::from(cols)),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)), // SamplesPerPixel
+            DataElement::new(
+                Tag(0x0028, 0x0004),
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2"),
+            ), // PhotometricInterpretation
+            DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(8u16)), // BitsAllocated
+            DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(8u16)), // BitsStored
+            DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(7u16)), // HighBit
+            DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(0u16)), // PixelRepresentation=unsigned
+            DataElement::new(
+                Tag(0x7FE0, 0x0010),
+                VR::OB,
+                PrimitiveValue::U8(pixels.clone().into()),
+            ),
+        ]);
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax("1.2.840.10008.1.2.1") // start native (Explicit VR LE)
+            .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.2")
+            .media_storage_sop_instance_uid("1.2.3.4.5.6.7.8.9.1")
+            .implementation_class_uid("1.2.826.0.1.3680043.tessera")
+            .build()
+            .unwrap();
+        let mut file_obj = obj.with_exact_meta(meta);
+
+        // pure-Rust JPEG Baseline ENCODE (jpeg-encoder), producing encapsulated fragments
+        file_obj.transcode(&JPEG_BASELINE.erased()).unwrap();
+        assert_eq!(file_obj.meta().transfer_syntax(), "1.2.840.10008.1.2.4.50");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jpeg_baseline.dcm");
+        file_obj.write_to_file(&path).unwrap();
+
+        // pure-Rust JPEG DECODE through our ingest (jpeg-decoder via the registry adapter)
+        let img = read_image(&path).unwrap();
+        assert_eq!(img.shape, vec![16, 16]);
+        assert_eq!(img.voxels.len(), n);
+
+        // lossy but faithful: bounded per-pixel error, and the gradient's structure survives
+        let max_err = img
+            .voxels
+            .iter()
+            .zip(&pixels)
+            .map(|(d, o)| (*d as i32 - i32::from(*o)).abs())
+            .max()
+            .unwrap();
+        assert!(max_err <= 24, "JPEG round-trip error too large: {max_err}");
+        // the row-0 horizontal gradient (0 → 240 left-to-right) must survive the lossy round-trip
+        let (leftmost, rightmost) = (img.voxels[0], img.voxels[cols as usize - 1]);
+        assert!(
+            rightmost - leftmost > 100,
+            "horizontal gradient lost after JPEG round-trip: {leftmost} → {rightmost}"
+        );
     }
 
     /// Write a minimal CT slice with a given InstanceNumber and pixel base value.
