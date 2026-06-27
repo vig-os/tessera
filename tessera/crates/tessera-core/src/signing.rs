@@ -17,6 +17,8 @@
 use ed25519_dalek::{Signature as Ed25519Sig, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+use crate::manifest::Manifest;
+
 /// The `alg` tag for the Ed25519 backend.
 pub const ALG_ED25519: &str = "ed25519";
 
@@ -100,6 +102,30 @@ pub fn verify(manifest_hash: &str, env: &Signature, key: &VerifyingKey) -> bool 
     key.verify(manifest_hash.as_bytes(), &sig).is_ok()
 }
 
+/// Sign a **sealed product**: attest its `manifest_hash` with an Ed25519 key + optional `signer`
+/// identity. Errors if the manifest is unsealed (no `manifest_hash`). The product-level entry point —
+/// a verifier needs only the manifest and the public key.
+pub fn sign_manifest(
+    m: &Manifest,
+    key: &SigningKey,
+    signer: Option<String>,
+) -> crate::Result<Signature> {
+    let mh = m.manifest_hash.as_deref().ok_or_else(|| {
+        crate::Error::Invalid("cannot sign an unsealed manifest (no manifest_hash)".into())
+    })?;
+    Ok(sign_ed25519(mh, key, signer))
+}
+
+/// Verify a [`Signature`] against a sealed product (its `manifest_hash`) + the Ed25519 public key.
+/// `false` for an unsealed manifest or any signature/identity mismatch. Because `manifest_hash`
+/// transitively commits to every block digest + all metadata, a valid signature here attests that the
+/// **entire** product is unaltered since signing.
+pub fn verify_manifest(m: &Manifest, env: &Signature, key: &VerifyingKey) -> bool {
+    m.manifest_hash
+        .as_deref()
+        .is_some_and(|mh| verify(mh, env, key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +189,45 @@ mod tests {
         let back: Signature = serde_json::from_value(j).unwrap();
         assert_eq!(back, env);
         assert!(verify("blake3:cccc", &back, &key.verifying_key()));
+    }
+
+    #[test]
+    fn sign_and_verify_a_sealed_product_end_to_end() {
+        use crate::block::array::{ArrayBlock, ArraySpec};
+        use crate::ProductBuilder;
+        let key = test_key(9);
+
+        let mut b = ProductBuilder::new("recon", "DP", "signed product", "2024-01-01T00:00:00Z");
+        b.add_block(&ArrayBlock::new(
+            "volume",
+            ArraySpec::new(vec![64, 64, 64], "int16"),
+        ))
+        .unwrap();
+        let m = b.seal().unwrap();
+
+        let env = sign_manifest(
+            &m,
+            &key,
+            Some("https://orcid.org/0000-0002-1825-0097".into()),
+        )
+        .unwrap();
+        assert!(verify_manifest(&m, &env, &key.verifying_key()));
+
+        // tamper the product (a different block) → new manifest_hash → the old signature no longer verifies.
+        let mut b2 = ProductBuilder::new("recon", "DP", "signed product", "2024-01-01T00:00:00Z");
+        b2.add_block(&ArrayBlock::new(
+            "volume",
+            ArraySpec::new(vec![64, 64, 32], "int16"),
+        ))
+        .unwrap();
+        let tampered = b2.seal().unwrap();
+        assert_ne!(m.manifest_hash, tampered.manifest_hash);
+        assert!(!verify_manifest(&tampered, &env, &key.verifying_key()));
+
+        // an unsealed manifest cannot be signed.
+        let unsealed = Manifest::new("recon", "x", "d", "2024-01-01T00:00:00Z");
+        assert!(sign_manifest(&unsealed, &key, None).is_err());
+        assert!(!verify_manifest(&unsealed, &env, &key.verifying_key()));
     }
 
     #[test]
