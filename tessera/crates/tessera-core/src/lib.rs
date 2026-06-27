@@ -22,6 +22,7 @@ pub mod product;
 pub mod provenance;
 pub mod referencing;
 pub mod schema;
+pub mod signing;
 
 pub use error::{Error, Result};
 pub use manifest::Manifest;

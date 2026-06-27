@@ -19,6 +19,9 @@ thiserror = "2"
 # name·kind·bytes·digest·watermark). Zero-cost when no subscriber is attached; wasm-compatible.
 tracing = "0.1"
 tracing-subscriber = "0.3"   # test-side event capture + an opt-in human/JSON subscriber for consumers
+# Detached signatures over `manifest_hash` (S16 / #209). Pure-Rust ed25519 → sign/verify work in the
+# wasm core (browser verification); keys-from-bytes need no rng, so the verify path stays lean.
+ed25519-dalek = "2"
 time = { version = "0.3", features = ["parsing", "formatting"] }
 proptest = "1"
 zip = { version = "2", default-features = false }   # STORED zip64 `.tsra` container (no compression deps)

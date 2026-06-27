@@ -94,3 +94,17 @@ Until (a) or (b), an honest run **cannot report all five criteria met**, no matt
 The buildable remainder (ADR-0028 §5 fused pass · 0030 §3 export + §5 deformable pipeline · 0029 trait/
 mixin sets · 0032 unified descriptor · large vendor ingest) continues toward the achievable subset. This
 note changes **no** criteria — it only records the conflict at its source so it isn't re-discovered.
+
+## ✅ RESOLUTION (2026-06-27, user chose HYBRID of (a)+(b))
+The user re-scoped after auditing my "external-blocked" framing as too conservative — most of it is
+nix-CI-mockable. **Decisions:** signing = scheme-agnostic envelope over `manifest_hash` with **ed25519 +
+ssh-ed25519** backends + **ORCID** as `signer_identity` + **age/sops** key-at-rest (in-test keypairs;
+only a *production trust identity* is external). WASM = **`tessera-core`→wasm32** (zero C deps — spine/
+verify/proofs/referencing) + **Arrow-JS as the RS↔TS boundary** for columnar data. WORM/OCI = build the
+**mechanism + nix-CI service mocks** (MinIO object-lock · zot registry); only *production* bucket/registry
+external. ADR-0026 = **MC-synthetic listmode + shrink the ring below the file** (no PHI needed for
+bounded-memory + determinism); only *cross-arch x86==ARM CI* external. Plus: **structured `tracing`
+write-path observability** (guardrails logging/trace style — SSoT on `append_block`, then encoders).
+**The irreducible externals shrank to four:** a production signing identity · a production WORM bucket ·
+a production registry · an ARM CI runner. Everything functional is now autonomously buildable + nix-tested.
+Program tracked as tasks #26–30; first landing `52133c7` (write-path tracing).
