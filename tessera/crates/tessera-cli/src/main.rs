@@ -226,15 +226,22 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
         Cmd::VerifySig { file, pubkey } => {
             let pub_hex = std::fs::read_to_string(&pubkey).map_err(tessera_core::Error::from)?;
             let vk = tessera_core::signing::verifying_key_from_hex(&pub_hex)?;
-            if tessera_io::verify_tsra(&file, &vk)? {
-                println!("OK  {} signature valid", file.display());
-                Ok(())
-            } else {
-                Err(tessera_core::Error::Invalid(format!(
+            // 1. the signature attests the manifest (and thus every recorded block digest + metadata).
+            if !tessera_io::verify_tsra(&file, &vk)? {
+                return Err(tessera_core::Error::Invalid(format!(
                     "signature INVALID for {}",
                     file.display()
-                )))
+                )));
             }
+            // 2. also re-read every block's payload vs its recorded digest, so a payload swap that left
+            //    the manifest untouched is still caught — verify-sig answers "authentic AND intact".
+            let mut r = Reader::open(&file)?;
+            let n = r.manifest().blocks.len();
+            for name in r.block_names() {
+                r.read_block(&name)?;
+            }
+            println!("OK  {} signature valid + {n} blocks intact", file.display());
+            Ok(())
         }
     }
 }
