@@ -358,7 +358,25 @@ pub fn encode(spec: &TableSpec, data: &TableData) -> Result<Vec<u8>> {
             .write(&mut buf, chunked.to_array_stream()),
     )
     .map_err(ze)?;
-    Ok(buf.freeze().to_vec())
+    let payload = buf.freeze().to_vec();
+    // Encode-path observability (SSoT for table bytes): raw→encoded size + ratio, so devs see the
+    // achieved columnar compression on write. raw = Σ column widths × rows. Zero-cost when no subscriber.
+    let raw: usize = data
+        .iter()
+        .map(|(_, c)| c.len() * ColumnData::dtype_size(c.numpy_code()).unwrap_or(0))
+        .sum();
+    let ratio = (raw as f64) / (payload.len().max(1) as f64);
+    tracing::debug!(
+        target: "tessera::encode",
+        kind = "table",
+        rows = spec.rows,
+        columns = spec.columns.len(),
+        raw_bytes = raw,
+        encoded_bytes = payload.len(),
+        ratio = ratio,
+        "encoded table block"
+    );
+    Ok(payload)
 }
 
 /// **Bounded-memory / >RAM variant of [`encode`]**: consume row-group [`TableData`] chunks from a

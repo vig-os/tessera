@@ -145,6 +145,17 @@ impl ArrayData {
         self.len() == 0
     }
 
+    /// Raw uncompressed size in bytes (element count × dtype width) — the *input* size, for the
+    /// encode-path compression-ratio trace (no allocation, unlike [`Self::to_le_bytes`]).
+    pub fn byte_len(&self) -> usize {
+        let width = match self {
+            ArrayData::I16(_) | ArrayData::U16(_) => 2,
+            ArrayData::I32(_) | ArrayData::U32(_) | ArrayData::F32(_) => 4,
+            ArrayData::I64(_) | ArrayData::U64(_) | ArrayData::F64(_) => 8,
+        };
+        self.len() * width
+    }
+
     /// The array's values as `i64` for chunk-statistics (ADR-0028 §3), if it is an integer array that
     /// fits losslessly: `int16/int32/int64`, `uint16/uint32` always, and `uint64` only when every value
     /// ≤ `i64::MAX` (a monotonic cast → `min`/`max` stay exact). Float arrays return `None` (they need
@@ -427,25 +438,41 @@ fn encode_with(spec: &ArraySpec, data: &ArrayData, codec: Codec) -> Result<Vec<u
 /// data, so writer-determinism is preserved.
 pub fn encode_resolved(spec: &ArraySpec, data: &ArrayData) -> Result<(&'static str, Vec<u8>)> {
     validate(spec, data)?;
-    match spec.codec.as_str() {
-        "pcodec" => Ok((
+    let (codec, bytes) = match spec.codec.as_str() {
+        "pcodec" => (
             Codec::Pcodec.as_str(),
             encode_with(spec, data, Codec::Pcodec)?,
-        )),
-        "zstd" => Ok((Codec::Zstd.as_str(), encode_with(spec, data, Codec::Zstd)?)),
+        ),
+        "zstd" => (Codec::Zstd.as_str(), encode_with(spec, data, Codec::Zstd)?),
         "auto" => {
             let p = encode_with(spec, data, Codec::Pcodec)?;
             let z = encode_with(spec, data, Codec::Zstd)?;
             // strict `<` → on tie, pcodec wins (the deterministic, documented default).
             if z.len() < p.len() {
-                Ok((Codec::Zstd.as_str(), z))
+                (Codec::Zstd.as_str(), z)
             } else {
-                Ok((Codec::Pcodec.as_str(), p))
+                (Codec::Pcodec.as_str(), p)
             }
         }
         // unreachable: `validate` already rejected anything else.
-        other => Err(Error::Codec(format!("unsupported array codec '{other}'"))),
-    }
+        other => return Err(Error::Codec(format!("unsupported array codec '{other}'"))),
+    };
+    // Encode-path observability (SSoT for array bytes): raw→encoded size + the resolved codec, so devs
+    // see the achieved compression on write. Zero-cost when no subscriber.
+    let raw = data.byte_len();
+    let ratio = (raw as f64) / (bytes.len().max(1) as f64);
+    tracing::debug!(
+        target: "tessera::encode",
+        kind = "array",
+        dtype = %data.dtype(),
+        elements = data.len(),
+        raw_bytes = raw,
+        encoded_bytes = bytes.len(),
+        ratio = ratio,
+        codec = %codec,
+        "encoded array block"
+    );
+    Ok((codec, bytes))
 }
 
 /// Encode `data` into the deterministic array-block payload bytes for `spec`. Thin wrapper
@@ -966,6 +993,67 @@ mod tests {
         let mut s = ArraySpec::new(shape, dtype);
         s.codec = codec.into();
         s
+    }
+
+    #[test]
+    fn byte_len_is_elements_times_width() {
+        assert_eq!(ArrayData::I16(vec![0; 10]).byte_len(), 20);
+        assert_eq!(ArrayData::F32(vec![0.0; 10]).byte_len(), 40);
+        assert_eq!(ArrayData::U64(vec![0; 3]).byte_len(), 24);
+    }
+
+    /// A `MakeWriter` over a shared buffer — captures tracing fmt output for assertions.
+    #[derive(Clone)]
+    struct CapWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for CapWriter {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapWriter {
+        type Writer = CapWriter;
+        fn make_writer(&'a self) -> CapWriter {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn encode_emits_a_structured_compression_trace() {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::fmt()
+            .with_writer(CapWriter(buf.clone()))
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .finish();
+        let spec = pcodec_spec(vec![8, 8, 8], "int16");
+        let data = ArrayData::I16((0..512).map(|k| (k % 97) as i16).collect());
+        tracing::subscriber::with_default(sub, || {
+            encode(&spec, &data).unwrap();
+        });
+        let log = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        // the encode event fired with the codec + raw/encoded sizes (full I/O info on write).
+        assert!(
+            log.contains("encoded array block"),
+            "missing encode event: {log}"
+        );
+        assert!(
+            log.contains("tessera::encode"),
+            "missing encode target: {log}"
+        );
+        assert!(log.contains("codec=pcodec"), "missing codec: {log}");
+        assert!(
+            log.contains("raw_bytes=1024"),
+            "missing raw bytes (512×2): {log}"
+        );
+        assert!(
+            log.contains("encoded_bytes="),
+            "missing encoded bytes: {log}"
+        );
+        assert!(log.contains("ratio="), "missing ratio: {log}");
     }
 
     #[test]
