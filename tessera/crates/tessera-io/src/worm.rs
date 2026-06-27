@@ -14,6 +14,8 @@
 //! bypass the hold) and **governance** (a specially-authorized caller may bypass). Both refuse mutation
 //! while retained; only governance honours an explicit authorized `bypass`.
 
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -92,6 +94,69 @@ pub fn guard_mutation(policy: &RetentionPolicy, now: &str, governance_bypass: bo
     Ok(())
 }
 
+/// The retention-record sidecar path for a product file (`<file>` → `<file>.retention.json`).
+pub fn retention_path(product: &Path) -> PathBuf {
+    let mut s = product.as_os_str().to_os_string();
+    s.push(".retention.json");
+    PathBuf::from(s)
+}
+
+/// Place a WORM **hold** on a product: persist its [`RetentionPolicy`] beside it (`<file>.retention.json`).
+/// The local-filesystem WORM backend; on S3/MinIO the same policy is written as Object-Lock retention,
+/// which the bucket enforces natively. Additive — the product bytes are untouched.
+pub fn write_retention(product: &Path, policy: &RetentionPolicy) -> Result<()> {
+    let json = serde_json::to_vec_pretty(policy).map_err(|e| Error::Container(e.to_string()))?;
+    std::fs::write(retention_path(product), json)?;
+    Ok(())
+}
+
+/// Read a product's persisted retention policy, or `None` if it has no WORM hold.
+pub fn read_retention(product: &Path) -> Result<Option<RetentionPolicy>> {
+    let p = retention_path(product);
+    if !p.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(p)?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| Error::Container(e.to_string()))
+}
+
+/// **WORM-guarded delete** of a product on the local filesystem: consults the persisted retention policy
+/// and **refuses** (errors, leaving the file) while the product is under retention; otherwise removes the
+/// product **and** its retention record. `now` is RFC 3339; `governance_bypass` is honoured only in
+/// governance mode. A product with no hold deletes normally. This is the enforcement the format owns for
+/// the local backend — the cloud backend delegates to Object-Lock.
+pub fn worm_remove(product: &Path, now: &str, governance_bypass: bool) -> Result<()> {
+    if let Some(policy) = read_retention(product)? {
+        guard_mutation(&policy, now, governance_bypass)?; // refuses while retained
+    }
+    std::fs::remove_file(product)?;
+    let r = retention_path(product);
+    if r.exists() {
+        std::fs::remove_file(r)?;
+    }
+    Ok(())
+}
+
+/// **WORM-guarded overwrite** of a product on the local filesystem: refuses to replace the bytes of a
+/// retained product (the WORM "write-once" guarantee), otherwise writes `bytes`. The hold (if any) is
+/// preserved across a permitted overwrite.
+pub fn worm_overwrite(
+    product: &Path,
+    bytes: &[u8],
+    now: &str,
+    governance_bypass: bool,
+) -> Result<()> {
+    if product.exists() {
+        if let Some(policy) = read_retention(product)? {
+            guard_mutation(&policy, now, governance_bypass)?;
+        }
+    }
+    std::fs::write(product, bytes)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +196,36 @@ mod tests {
             .is_retained(BEFORE)
             .is_err());
         assert!(p.is_retained("not-a-date").is_err());
+    }
+
+    #[test]
+    fn local_worm_store_refuses_mutation_until_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let prod = dir.path().join("data.tsra");
+        std::fs::write(&prod, b"sealed product bytes").unwrap();
+
+        // place a compliance hold; the record is readable back.
+        write_retention(&prod, &RetentionPolicy::compliance(UNTIL)).unwrap();
+        assert_eq!(read_retention(&prod).unwrap().unwrap().retain_until, UNTIL);
+
+        // under retention: delete + overwrite are both refused, and the file is untouched.
+        assert!(worm_remove(&prod, BEFORE, false).is_err());
+        assert!(worm_remove(&prod, BEFORE, true).is_err()); // compliance ignores bypass
+        assert!(worm_overwrite(&prod, b"tampered", BEFORE, false).is_err());
+        assert_eq!(std::fs::read(&prod).unwrap(), b"sealed product bytes");
+
+        // after expiry: overwrite then delete succeed.
+        worm_overwrite(&prod, b"v2", AFTER, false).unwrap();
+        assert_eq!(std::fs::read(&prod).unwrap(), b"v2");
+        worm_remove(&prod, AFTER, false).unwrap();
+        assert!(!prod.exists());
+        assert!(!retention_path(&prod).exists()); // the hold record is cleaned up too
+
+        // a product with no hold deletes normally.
+        let unheld = dir.path().join("free.tsra");
+        std::fs::write(&unheld, b"x").unwrap();
+        worm_remove(&unheld, BEFORE, false).unwrap();
+        assert!(!unheld.exists());
     }
 
     #[test]
