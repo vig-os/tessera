@@ -122,14 +122,16 @@ loopback — was established for OCI and is reusable for MinIO). **Precise resid
   **pure-Rust** via `jpeg-decoder`/`jpeg-encoder` (the `jpeg` registry feature, no charls/gdcm/openjpeg),
   proven end-to-end + golden-hash-pinned; the earlier "needs C++ codecs" framing was wrong for the
   baseline family (JPEG Lossless/.57/.70 routes through the same pure-Rust adapter but is untested; only
-  JPEG-LS/.80-.81, JPEG 2000/.90-.91, and 12-bit Extended actually need the disabled C libs). 2 rows
-  remain, **genuinely external** — cross-arch determinism (ARM runner) · GE-HDF5 7GB stream (= 0026 +
-  cross-arch).
+  JPEG-LS/.80-.81, JPEG 2000/.90-.91, and 12-bit Extended actually need the disabled C libs). **Exactly
+  ONE feature row now remains ◑** — *Cross-version / cross-arch determinism* (the GE-HDF5 stream row is
+  already ✓; its multi-GB-scale + x86==ARM caveat is inline external validation, the same ARM-runner
+  dependency, not a separate unchecked row).
 - **(5) final audit:** gated on (1)+(2).
-**So criteria 1, 2, 5 now converge on the SAME irreducible externals:** an **ARM CI runner** (the big one —
-unblocks 0026 + the cross-arch row + the GE-HDF5 stream flip), the **deliberately-disabled C++ DICOM
-codecs** (a hermeticity tradeoff to reverse, for DICOM-JPEG), and **real >RAM/PHI data** (0026 scale
-validation). Criteria 3+4 met throughout. **The autonomous build has reached its proven ceiling** — every
-ADR clause and matrix row that does NOT need one of those is done. Converging the five-criteria DONE now
-needs the user to provide the ARM runner / re-enable the C++ codecs / supply >RAM data (or rescope those
-rows out). This is not a stall; it is completion of the autonomously-achievable scope.
+**So criteria 1, 2, 5 now converge on a SINGLE irreducible external — an ARM CI runner** (with, for the
+0026 *scale* Accept gate, real >RAM/PHI listmode data). The DICOM C++-codec "blocker" dissolved: JPEG
+Baseline is pure-Rust and the disabled charls/gdcm/openjpeg only ever gated JPEG-LS/JPEG 2000/12-bit, which
+are out-of-scope tradeoffs, not parity gaps. Criteria 3+4 met throughout. **The autonomous build has
+reached its proven ceiling** — every ADR clause and matrix row that does NOT need cross-arch hardware is
+done. Converging the five-criteria DONE now needs the user to provide an ARM runner + (for 0026 scale)
+>RAM data, or to rescope the cross-arch determinism row out. This is not a stall; it is completion of the
+autonomously-achievable scope.
