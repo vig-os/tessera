@@ -5,14 +5,16 @@ Tessera FAIR data-product CLI
 Usage: tessera <COMMAND>
 
 Commands:
-  inspect  Print a human summary of a `.tsra`'s manifest (id, product, blocks, hashes)
-  verify   Open + fully verify a `.tsra` (magic, manifest seal, every block digest). Exit 0 if valid
-  unpack   Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`)
-  pack     Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`
-  schema   Validate a `.tsra`'s manifest against its declared product schema (required fields/blocks)
-  ingest   Ingest a vendor acquisition file into a sealed `.tsra` product (normalise at the door)
-  export   Emit a FAIR discovery record for a `.tsra` (prints JSON to stdout)
-  help     Print this message or the help of the given subcommand(s)
+  inspect[..]Print a human summary of a `.tsra`'s manifest (id, product, blocks, hashes)
+  verify[..]Open + fully verify a `.tsra` (magic, manifest seal, every block digest). Exit 0 if valid
+  unpack[..]Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`)
+  pack[..]Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`
+  schema[..]Validate a `.tsra`'s manifest against its declared product schema (required fields/blocks)
+  ingest[..]Ingest a vendor acquisition file into a sealed `.tsra` product (normalise at the door)
+  export[..]Emit a FAIR discovery record for a `.tsra` (prints JSON to stdout)
+  sign[..]Sign a sealed `.tsra` → writes a `<file>.sig.json` sidecar (ed25519 over `manifest_hash`)
+  verify-sig[..]Verify a sealed `.tsra` against its `<file>.sig.json` sidecar + a trusted public key. Exit 0 if valid
+  help[..]Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help

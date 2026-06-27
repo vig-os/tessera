@@ -41,6 +41,25 @@ enum Cmd {
         #[command(subcommand)]
         fmt: ExportFmt,
     },
+    /// Sign a sealed `.tsra` → writes a `<file>.sig.json` sidecar (ed25519 over `manifest_hash`).
+    Sign {
+        /// The sealed `.tsra` to sign.
+        file: PathBuf,
+        /// Hex-encoded 32-byte ed25519 signing-key (seed) file.
+        #[arg(long)]
+        key: PathBuf,
+        /// Optional signer identity recorded in the signature (e.g. an ORCID iD URL).
+        #[arg(long)]
+        signer: Option<String>,
+    },
+    /// Verify a sealed `.tsra` against its `<file>.sig.json` sidecar + a trusted public key. Exit 0 if valid.
+    VerifySig {
+        /// The sealed `.tsra` to verify.
+        file: PathBuf,
+        /// Hex-encoded 32-byte ed25519 public-key file (obtained out-of-band from the signer).
+        #[arg(long)]
+        pubkey: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -188,6 +207,34 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 serde_json::to_string_pretty(&record).map_err(tessera_core::Error::from)?
             );
             Ok(())
+        }
+        Cmd::Sign { file, key, signer } => {
+            let key_hex = std::fs::read_to_string(&key).map_err(tessera_core::Error::from)?;
+            let sk = tessera_core::signing::signing_key_from_hex(&key_hex)?;
+            let env = tessera_io::sign_tsra(&file, &sk, signer)?;
+            println!("OK  signed {}", file.display());
+            println!(
+                "  sidecar   {}",
+                tessera_io::sign::sidecar_path(&file).display()
+            );
+            println!("  key_id    {}", env.key_id);
+            if let Some(s) = &env.signer {
+                println!("  signer    {s}");
+            }
+            Ok(())
+        }
+        Cmd::VerifySig { file, pubkey } => {
+            let pub_hex = std::fs::read_to_string(&pubkey).map_err(tessera_core::Error::from)?;
+            let vk = tessera_core::signing::verifying_key_from_hex(&pub_hex)?;
+            if tessera_io::verify_tsra(&file, &vk)? {
+                println!("OK  {} signature valid", file.display());
+                Ok(())
+            } else {
+                Err(tessera_core::Error::Invalid(format!(
+                    "signature INVALID for {}",
+                    file.display()
+                )))
+            }
         }
     }
 }

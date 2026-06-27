@@ -72,6 +72,31 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The hex of an Ed25519 **public** key — the `key_id` and the contents of a `.pub` key file.
+pub fn verifying_key_hex(key: &VerifyingKey) -> String {
+    hex(key.as_bytes())
+}
+
+/// Load an Ed25519 **signing** key from a 64-char hex 32-byte seed (leading/trailing whitespace
+/// tolerated). Interoperable with any tool that emits the raw 32-byte ed25519 private scalar as hex.
+pub fn signing_key_from_hex(s: &str) -> crate::Result<SigningKey> {
+    let raw = unhex(s.trim())
+        .ok_or_else(|| crate::Error::Invalid("signing key is not valid hex".into()))?;
+    let bytes = <[u8; 32]>::try_from(raw.as_slice())
+        .map_err(|_| crate::Error::Invalid("signing key must be 32 bytes".into()))?;
+    Ok(SigningKey::from_bytes(&bytes))
+}
+
+/// Load an Ed25519 **verifying** (public) key from a 64-char hex 32-byte key. Validates the point.
+pub fn verifying_key_from_hex(s: &str) -> crate::Result<VerifyingKey> {
+    let raw = unhex(s.trim())
+        .ok_or_else(|| crate::Error::Invalid("public key is not valid hex".into()))?;
+    let bytes = <[u8; 32]>::try_from(raw.as_slice())
+        .map_err(|_| crate::Error::Invalid("public key must be 32 bytes".into()))?;
+    VerifyingKey::from_bytes(&bytes)
+        .map_err(|e| crate::Error::Invalid(format!("invalid ed25519 public key: {e}")))
+}
+
 /// Sign a `manifest_hash` with an Ed25519 key, attaching an optional `signer` identity (e.g. an ORCID
 /// iD). The signature is over the `manifest_hash` **string bytes** verbatim (the seal — so it attests the
 /// whole product). Pair with [`verify`].
@@ -232,6 +257,25 @@ mod tests {
         let unsealed = Manifest::new("recon", "x", "d", "2024-01-01T00:00:00Z");
         assert!(sign_manifest(&unsealed, &key, None).is_err());
         assert!(!verify_manifest(&unsealed, &env, &key.verifying_key()));
+    }
+
+    #[test]
+    fn hex_key_loaders_roundtrip_and_reject_bad_input() {
+        let key = test_key(5);
+        let seed_hex = hex(key.as_bytes()); // the 32-byte seed as hex
+        let loaded = signing_key_from_hex(&format!("  {seed_hex}\n")).unwrap(); // whitespace tolerated
+        assert_eq!(loaded.to_bytes(), key.to_bytes());
+        // public-key load + the `.pub`/key_id hex roundtrip.
+        let pub_hex = verifying_key_hex(&key.verifying_key());
+        let vk = verifying_key_from_hex(&pub_hex).unwrap();
+        assert_eq!(vk.to_bytes(), key.verifying_key().to_bytes());
+        // a signature made with the loaded key verifies under the loaded public key.
+        let env = sign_ed25519("blake3:dddd", &loaded, None);
+        assert!(verify("blake3:dddd", &env, &vk));
+        // bad inputs are rejected, not panicked.
+        assert!(signing_key_from_hex("nothex").is_err());
+        assert!(signing_key_from_hex("abcd").is_err()); // wrong length
+        assert!(verifying_key_from_hex("00").is_err());
     }
 
     #[test]
