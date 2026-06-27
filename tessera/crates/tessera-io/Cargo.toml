@@ -24,6 +24,7 @@ vortex-session.workspace = true
 futures.workspace = true
 tracing.workspace = true
 time.workspace = true   # RFC-3339 retain-until comparison for WORM retention (tessera_io::worm)
+sha2.workspace = true   # sha256 digests for OCI artifact descriptors (tessera_io::oci)
 
 [dev-dependencies]
 tempfile = "3"

@@ -10,6 +10,7 @@ pub mod array;
 pub mod chunk_index;
 pub mod conformance;
 pub mod container;
+pub mod oci;
 pub mod range;
 pub mod sign;
 pub mod stream;
