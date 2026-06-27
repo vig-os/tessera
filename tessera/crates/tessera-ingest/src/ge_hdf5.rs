@@ -143,6 +143,97 @@ pub fn read_events_2p(path: &std::path::Path, dataset: &str) -> Result<TableData
     Ok(transpose_2p(&recs))
 }
 
+/// Default row-slab for streaming reads — rows pulled per HDF5 hyperslab (the bounded-memory unit).
+pub const STREAM_SLAB_ROWS: usize = 1 << 16;
+
+/// Stream a GE 2-photon dataset in bounded-memory **row-slabs** (ADR-0026 §3): read `slab_rows` records
+/// at a time via an HDF5 hyperslab, transpose each slab to columns, and feed `sink` — never holding more
+/// than one slab in RAM (vs [`read_events_2p`], which reads the whole compound dataset). `slab_rows`
+/// clamps to ≥ 1. The same [`transpose_2p`] as the whole-file path → identical columns.
+pub fn stream_events_2p(
+    path: &std::path::Path,
+    dataset: &str,
+    slab_rows: usize,
+    mut sink: impl FnMut(TableData) -> Result<()>,
+) -> Result<()> {
+    let file = hdf5::File::open(path).map_err(he)?;
+    let ds = file.dataset(dataset).map_err(he)?;
+    let n = ds.shape().first().copied().unwrap_or(0);
+    let slab = slab_rows.max(1);
+    let mut start = 0;
+    while start < n {
+        let end = (start + slab).min(n);
+        let recs = ds.read_slice_1d::<Rec2p, _>(start..end).map_err(he)?;
+        let recs = recs
+            .as_slice()
+            .ok_or_else(|| he("non-contiguous HDF5 slab"))?;
+        sink(transpose_2p(recs))?;
+        start = end;
+    }
+    Ok(())
+}
+
+/// Bounded-memory ingest of a GE 2-photon dataset → sealed `listmode` product (ADR-0026 §3): stream the
+/// HDF5 in row-slabs through the [`tessera_io::TableStreamWriter`] (≈ one slab on read + ≈ one row-group
+/// on encode), staging fragments under `stage`, then seal. **Byte-identical** to the whole-file
+/// [`read_events_2p`] → [`to_listmode_product`] path (the canonical row-group grid is independent of the
+/// slab size), but never materialises the whole acquisition — the >RAM path.
+pub fn stream_to_listmode_product_2p(
+    path: &std::path::Path,
+    dataset: &str,
+    name: &str,
+    timestamp: &str,
+    slab_rows: usize,
+    stage: &std::path::Path,
+) -> Result<(Manifest, Vec<BlockPayload>)> {
+    let file = hdf5::File::open(path).map_err(he)?;
+    let n = file
+        .dataset(dataset)
+        .map_err(he)?
+        .shape()
+        .first()
+        .copied()
+        .unwrap_or(0) as u64;
+    // the events_2p column schema (names/dtypes) from an empty transpose — matches the streamed columns.
+    let columns: Vec<Column> = transpose_2p(&[])
+        .iter()
+        .map(|(nm, c)| Column {
+            name: nm.clone(),
+            dtype: c.numpy_code().into(),
+            codec: None,
+        })
+        .collect();
+    let spec = TableSpec {
+        columns,
+        rows: n,
+        row_index: Some("ms".into()),
+    };
+    let mut w = tessera_io::TableStreamWriter::new(spec.clone(), stage)?;
+    stream_events_2p(path, dataset, slab_rows, |slab| w.push(slab))?;
+    let bytes = w.finish()?;
+
+    let digest = tessera_core::hash::digest(&bytes);
+    let block_ref = tessera_core::block::BlockRef {
+        name: "events".into(),
+        kind: tessera_core::block::BlockKind::Table,
+        digest: Some(digest),
+        spec: serde_json::to_value(&spec).map_err(he)?,
+    };
+    let mut b = ProductBuilder::new(
+        "listmode",
+        name,
+        "GE listmode coincidence events (streamed)",
+        timestamp,
+    );
+    b.add_block_ref(block_ref);
+    b.add_source(tessera_core::provenance::Source::new(
+        "ingested_from",
+        path.display().to_string(),
+    ));
+    let sealed = b.seal()?;
+    Ok((sealed, vec![BlockPayload::new("events", bytes)]))
+}
+
 /// Build a sealed Tessera `listmode` product (Vortex table) from flattened GE columns, with an
 /// `ingested_from` provenance edge to the source `.h5`. `row_index` is `ms`.
 pub fn to_listmode_product(
@@ -330,5 +421,39 @@ mod tests {
             row_index: Some("ms".into()),
         };
         assert_eq!(table::decode(&spec, &bytes).unwrap(), cols);
+    }
+
+    #[test]
+    fn streamed_2p_ingest_is_byte_identical_to_whole_file_read() {
+        // ADR-0026 §3: bounded-memory row-slab streaming → the SAME sealed product as the whole-file read.
+        let dir = tempfile::tempdir().unwrap();
+        let h5 = dir.path().join("LIST_2p.h5");
+        write_synth_2p(&h5, 5000); // > one slab below
+
+        // streamed: a deliberately small 999-row slab (NOT aligned to the 65536 row-group grid) so
+        // multiple hyperslab reads + spill + compaction all run — the bounded-memory path.
+        let (streamed, _p) = stream_to_listmode_product_2p(
+            &h5,
+            "events_2p",
+            "DP06-2p",
+            "2024-01-01T00:00:00Z",
+            999,
+            &dir.path().join("stage"),
+        )
+        .unwrap();
+        streamed.verify().unwrap();
+
+        // whole-file batch path over the same data.
+        let cols = read_events_2p(&h5, "events_2p").unwrap();
+        let (batch, _p) = to_listmode_product(
+            &cols,
+            "DP06-2p",
+            "2024-01-01T00:00:00Z",
+            &h5.display().to_string(),
+        )
+        .unwrap();
+
+        // byte-identical content: the slab size never changes the canonical row-group bytes.
+        assert_eq!(streamed.content_hash, batch.content_hash);
     }
 }
