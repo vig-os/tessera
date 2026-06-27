@@ -195,6 +195,39 @@
             touch $out
           '';
 
+          # **OCI artifact distribution** (#209): a sealed `.tsra` round-trips through a real OCI registry
+          # — push it as an artifact (Tessera `artifactType` + `.tsra` layer media type), confirm the
+          # registry-stored manifest matches the `tessera_io::oci` constants (artifactType · layer media
+          # type · the OCI empty-config digest), then pull it back byte-for-byte. Spins up a local
+          # `distribution` registry on loopback (the nix-CI service mock — only a *production* registry is
+          # external), so the OCI push/pull capability is gated, not just the manifest-construction unit.
+          oci-roundtrip = pkgs.runCommand "oci-roundtrip"
+            { nativeBuildInputs = [ pkgs.distribution pkgs.oras pkgs.curl ]; } ''
+            export HOME=$TMPDIR
+            cat > $TMPDIR/config.yml <<EOF
+            version: 0.1
+            storage:
+              filesystem:
+                rootdirectory: $TMPDIR/data
+            http:
+              addr: 127.0.0.1:5050
+            EOF
+            registry serve $TMPDIR/config.yml > $TMPDIR/reg.log 2>&1 &
+            for i in $(seq 1 80); do curl -sf http://127.0.0.1:5050/v2/ > /dev/null && break; sleep 0.25; done
+            cp ${./tessera/corpus/files}/recon_int16.tsra $TMPDIR/p.tsra
+            cd $TMPDIR
+            oras push --plain-http 127.0.0.1:5050/tessera/recon:v1 \
+              --artifact-type application/vnd.tessera.product.v1+json \
+              p.tsra:application/vnd.tessera.tsra.v1
+            M=$(oras manifest fetch --plain-http 127.0.0.1:5050/tessera/recon:v1)
+            echo "$M" | grep -q 'application/vnd.tessera.product.v1+json'   # ARTIFACT_TYPE
+            echo "$M" | grep -q 'application/vnd.tessera.tsra.v1'           # TSRA_MEDIA_TYPE
+            echo "$M" | grep -q 'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'  # OCI empty config
+            mkdir out && oras pull --plain-http 127.0.0.1:5050/tessera/recon:v1 -o out
+            cmp p.tsra out/p.tsra
+            touch $out
+          '';
+
           # guardrails agent-drift gates over the Rust source (code gates) + repo-wide structural
           # gates. cargo-deny stays a pre-commit gate (needs network for the advisory DB).
           guardrails-gates = pkgs.runCommand "guardrails-gates"
