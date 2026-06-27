@@ -108,3 +108,24 @@ write-path observability** (guardrails logging/trace style — SSoT on `append_b
 **The irreducible externals shrank to four:** a production signing identity · a production WORM bucket ·
 a production registry · an ARM CI runner. Everything functional is now autonomously buildable + nix-tested.
 Program tracked as tasks #26–30; first landing `52133c7` (write-path tracing).
+
+## ✅ TERMINAL AUTONOMOUS STATE (2026-06-27, ~100 increments) — criteria 1+2 at their autonomous max
+The hybrid program shipped. **7 FEATURE-MATRIX rows flipped ✓ this run** (signing · pyo3+WASM bindings ·
+WORM · OCI · metadata-first durable header · RO-Crate/DataCite · Ingest NIfTI+raw), each via
+verify-before-build + audit-before-flip (the nix-service-mock pattern — a real `distribution` registry on
+loopback — was established for OCI and is reusable for MinIO). **Precise residual, all five criteria:**
+- **(1) ADRs:** of 0020–0032, **only ADR-0026 is non-terminal** (all others Accepted; 0027 Superseded;
+  0021 doesn't exist). 0026's Accept gate is the determinism-critical external set: **cross-arch x86==ARM
+  determinism re-validation + real >RAM listmode + golden regen**. Its §3 streaming-reader *mechanism* is
+  buildable (transpose_2p/3p prepped) but the **flip** needs the ARM runner.
+- **(2) Matrix:** 3 rows remain, **all externally/tradeoff-gated** — DICOM-JPEG (needs the C++ codecs
+  charls/gdcm the flake deliberately disabled for hermeticity) · cross-arch determinism (ARM runner) ·
+  GE-HDF5 7GB stream (= 0026 + cross-arch).
+- **(5) final audit:** gated on (1)+(2).
+**So criteria 1, 2, 5 now converge on the SAME irreducible externals:** an **ARM CI runner** (the big one —
+unblocks 0026 + the cross-arch row + the GE-HDF5 stream flip), the **deliberately-disabled C++ DICOM
+codecs** (a hermeticity tradeoff to reverse, for DICOM-JPEG), and **real >RAM/PHI data** (0026 scale
+validation). Criteria 3+4 met throughout. **The autonomous build has reached its proven ceiling** — every
+ADR clause and matrix row that does NOT need one of those is done. Converging the five-criteria DONE now
+needs the user to provide the ARM runner / re-enable the C++ codecs / supply >RAM data (or rescope those
+rows out). This is not a stall; it is completion of the autonomously-achievable scope.
