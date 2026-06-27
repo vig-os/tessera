@@ -15,6 +15,10 @@ serde_json = "1"
 serde_jcs = "0.2"          # RFC 8785 JSON Canonicalization Scheme — reproducible hashing
 blake3 = "1"
 thiserror = "2"
+# Structured logging/trace — full write-path I/O observability (devs/users see every block written:
+# name·kind·bytes·digest·watermark). Zero-cost when no subscriber is attached; wasm-compatible.
+tracing = "0.1"
+tracing-subscriber = "0.3"   # test-side event capture + an opt-in human/JSON subscriber for consumers
 time = { version = "0.3", features = ["parsing", "formatting"] }
 proptest = "1"
 zip = { version = "2", default-features = false }   # STORED zip64 `.tsra` container (no compression deps)

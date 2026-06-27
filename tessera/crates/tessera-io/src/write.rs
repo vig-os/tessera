@@ -140,6 +140,19 @@ impl WriteSession {
         self.journal.sync_all()?;
         // 3. running integrity root
         self.merkle.push(&digest);
+        // Write-path observability (SSoT): every durably-committed block — batch, stream, or ingest —
+        // flows through here, so one structured event gives devs/users full I/O info on write (name,
+        // kind, bytes, content digest, and the new integrity watermark). Zero-cost when no subscriber.
+        let kind = format!("{:?}", block_ref.kind);
+        tracing::info!(
+            target: "tessera::write",
+            name = %block_ref.name,
+            kind = %kind,
+            bytes = payload.len(),
+            digest = %digest,
+            watermark = self.merkle.watermark(),
+            "committed block"
+        );
         self.blocks.push(block_ref);
         Ok(())
     }
@@ -334,5 +347,75 @@ mod tests {
         // seal() self-checks root == content_hash; assert it here too for clarity
         let sealed = ws.seal(&dir.path().join("s.tsra")).unwrap();
         assert_eq!(sealed.content_hash.as_deref(), Some(final_root.as_str()));
+    }
+
+    /// A `MakeWriter` over a shared buffer — captures the tracing fmt output for assertions.
+    #[derive(Clone)]
+    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn append_block_emits_a_structured_write_trace() {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .finish();
+
+        let dir = tempfile::tempdir().unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut ws =
+                WriteSession::create(&dir.path().join("stage"), "recon", "p", "d", TS).unwrap();
+            let (r, p) = block("volume", 0);
+            ws.append_block(r, &p).unwrap();
+        });
+
+        let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        // the write-path event fired with full I/O info: message + every structured field.
+        assert!(
+            logged.contains("committed block"),
+            "missing event message: {logged}"
+        );
+        assert!(
+            logged.contains("tessera::write"),
+            "missing the write target: {logged}"
+        );
+        assert!(
+            logged.contains("name=volume"),
+            "missing block name: {logged}"
+        );
+        assert!(
+            logged.contains("kind=Array"),
+            "missing block kind: {logged}"
+        );
+        assert!(
+            logged.contains("watermark=1"),
+            "missing watermark: {logged}"
+        );
+        assert!(
+            logged.contains("digest=blake3:"),
+            "missing content digest: {logged}"
+        );
+        assert!(logged.contains("bytes="), "missing byte count: {logged}");
+        // sanity: a writer with no subscriber installed still works (zero-cost path) — separate session.
+        let mut ws2 =
+            WriteSession::create(&dir.path().join("stage2"), "recon", "p", "d", TS).unwrap();
+        let (r2, p2) = block("v2", 1);
+        ws2.append_block(r2, &p2).unwrap();
     }
 }
