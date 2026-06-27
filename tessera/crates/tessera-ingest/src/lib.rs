@@ -8,3 +8,4 @@
 
 pub mod dicom;
 pub mod ge_hdf5;
+pub mod nifti;
