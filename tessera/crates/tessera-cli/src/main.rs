@@ -4,6 +4,8 @@
 //! that opens a `.tsra` verifies its magic + manifest seal; `verify` additionally checks every
 //! block's stored bytes against its recorded digest.
 
+mod bench;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -59,6 +61,46 @@ enum Cmd {
         /// Hex-encoded 32-byte ed25519 public-key file (obtained out-of-band from the signer).
         #[arg(long)]
         pubkey: PathBuf,
+    },
+    /// Bench the write engine on this host — drives the real `StreamWriter`/`TableStreamWriter`,
+    /// reports throughput + peak RSS so an operator can size RAM/threads for their acquisition rate.
+    Bench {
+        #[command(subcommand)]
+        action: BenchAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum BenchAction {
+    /// Bench the streaming write engine (events/s + MB/s + peak RAM) — synthetic or real `.h5`.
+    Write {
+        /// Schema to drive: `listmode` (single-thread encode) or `blocks` (parallelizes).
+        #[arg(long, default_value = "listmode")]
+        schema: String,
+        /// Synthetic event/block count (ignored when --input is given). ~1M is the throughput.rs default.
+        #[arg(long, default_value_t = 1_048_576)]
+        rows: usize,
+        /// RAM ceiling for the in-flight encode ring (accepts `512M` / `1G` / `8GiB`). Defaults to 1 GiB.
+        #[arg(long)]
+        ram_budget: Option<String>,
+        /// Encode-thread pool (single run). Mutually advisory with `--sweep`; without either,
+        /// defaults to `available_parallelism()`.
+        #[arg(long, conflicts_with = "sweep")]
+        workers: Option<usize>,
+        /// Sweep workers 1,2,4,8,… up to `available_parallelism` and print a table — the
+        /// "size your system" mode.
+        #[arg(long, conflicts_with = "workers")]
+        sweep: bool,
+        /// Real listmode `.h5` to ingest (overrides synthetic data). Drives the production
+        /// `stream_to_listmode_product_2p` path.
+        #[arg(long)]
+        input: Option<PathBuf>,
+        /// HDF5 dataset name to read from `--input` (default: `events_2p`).
+        #[arg(long, default_value = "events_2p")]
+        dataset: String,
+        /// Seed for the MC sampler (deterministic synthetic data).
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
     },
 }
 
@@ -243,6 +285,27 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             println!("OK  {} signature valid + {n} blocks intact", file.display());
             Ok(())
         }
+        Cmd::Bench { action } => match action {
+            BenchAction::Write {
+                schema,
+                rows,
+                ram_budget,
+                workers,
+                sweep,
+                input,
+                dataset,
+                seed,
+            } => bench::run(bench::BenchOpts {
+                schema,
+                rows,
+                ram_budget,
+                workers,
+                sweep,
+                input,
+                dataset,
+                seed,
+            }),
+        },
     }
 }
 

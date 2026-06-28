@@ -148,6 +148,12 @@ impl StreamWriter {
         }
     }
 
+    /// The encode-thread pool size this writer was built with — for observability (bench output,
+    /// tracing). The committer and the producer thread run outside this count.
+    pub fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
     /// Enqueue a block for encode+commit. Blocks (backpressure) when `capacity` blocks are in flight.
     /// Blocks are committed in call order, so push in the order you want the manifest to record them.
     pub fn push(&mut self, job: EncodeJob) -> Result<()> {

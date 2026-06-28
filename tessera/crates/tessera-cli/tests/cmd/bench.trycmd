@@ -1,0 +1,7 @@
+```
+$ tessera bench write --schema listmode --rows 5000 --workers 1
+tessera bench write — schema=listmode[..]
+...
+  saturation: ~[..] events/s @ 1 worker[..]
+
+```

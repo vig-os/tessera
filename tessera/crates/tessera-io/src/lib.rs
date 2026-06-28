@@ -11,6 +11,7 @@ pub mod chunk_index;
 #[cfg(feature = "cloud")]
 pub(crate) mod cloud;
 pub mod collection;
+pub mod config;
 pub mod conformance;
 pub mod container;
 pub mod oci;
@@ -26,6 +27,7 @@ pub use array::{decode, decode_subset, encode, ArrayData};
 pub use collection::{
     prefix_layout, retention_mode, to_oci_index, to_rocrate, OCI_INDEX_MEDIA_TYPE,
 };
+pub use config::{parse_byte_size, WriteConfig, DEFAULT_RAM_BUDGET};
 pub use container::{pack, pack_dir, unpack, BlockPayload, Reader, MIMETYPE};
 pub use range::CountingReader;
 pub use sign::{sign_tsra, verify_tsra};
