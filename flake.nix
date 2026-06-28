@@ -231,6 +231,59 @@
             touch $out
           '';
 
+          # **Cloud range-read** (#225 SPIKE): a sealed `.tsra` is range-readable directly from
+          # object storage — prune-before-fetch over the wire, not a full download. Spins up a local
+          # MinIO on loopback (S3-compatible; same "real service mock" pattern as `oci-roundtrip`
+          # above), creates a bucket, then runs the `cloud` unit test in `tessera-io` which uploads
+          # an 8-block .tsra and proves the same three properties as the local range test
+          # (range.rs:120-128), now over S3. Mirrors the `oci-roundtrip` idle-wait loop verbatim.
+          #
+          # NB: nixpkgs marks `minio` insecure (abandoned upstream); we whitelist *just here* by
+          # stripping `knownVulnerabilities`. The test mock isn't network-reachable — it binds
+          # 127.0.0.1 inside the nix sandbox — so the upstream-CVE exposure surface is nil.
+          minio-range-read = let
+            minio = pkgs.minio.overrideAttrs (old: {
+              meta = (old.meta or { }) // { knownVulnerabilities = [ ]; };
+            });
+          in
+          craneLib.cargoNextest (commonArgs // {
+            inherit cargoArtifacts;
+            # The cloud unit test lives in `tessera-io::cloud::tests` (kept crate-internal — the
+            # spike must NOT widen the public read-API surface). Restrict nextest to just that
+            # module so we don't re-run unrelated tests in this gate.
+            cargoExtraArgs = "-p tessera-io --features cloud --lib cloud::";
+            # Top-level env vars become derivation env vars (Nixpkgs stdenv default) — propagate to
+            # `cargo nextest run`, which the test reads via `std::env::var`.
+            TESSERA_S3_ENDPOINT = "http://127.0.0.1:9101";
+            TESSERA_S3_BUCKET = "tessera-test";
+            AWS_ACCESS_KEY_ID = "minioadmin";
+            AWS_SECRET_ACCESS_KEY = "minioadmin";
+            AWS_REGION = "us-east-1";
+            # object_store/aws is reqwest-backed; reqwest's client builder loads the system CA trust
+            # store even for a plain-http (allow_http) loopback target, and the hermetic sandbox has
+            # none → "No CA certificates were loaded". Point it at the nixpkgs CA bundle.
+            SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+            # Start MinIO right before `cargo nextest run` (build doesn't need it). Same loopback +
+            # idle-wait pattern as `oci-roundtrip` above. Bucket creation via awscli2's `s3 mb` —
+            # MinIO requires the bucket to exist before `PutObject`.
+            preCheck = ''
+              export HOME=$TMPDIR
+              export MINIO_ROOT_USER=minioadmin
+              export MINIO_ROOT_PASSWORD=minioadmin
+              mkdir -p $TMPDIR/miniodata
+              ${minio}/bin/minio server $TMPDIR/miniodata --address 127.0.0.1:9101 \
+                > $TMPDIR/minio.log 2>&1 &
+              for i in $(seq 1 80); do
+                ${pkgs.curl}/bin/curl -sf http://127.0.0.1:9101/minio/health/ready && break
+                sleep 0.25
+              done
+              ${pkgs.awscli2}/bin/aws --endpoint-url http://127.0.0.1:9101 \
+                s3 mb s3://tessera-test
+            '';
+            nativeBuildInputs = commonArgs.nativeBuildInputs
+              ++ [ minio pkgs.awscli2 pkgs.curl pkgs.cacert ];
+          });
+
           # guardrails agent-drift gates over the Rust source (code gates) + repo-wide structural
           # gates. cargo-deny stays a pre-commit gate (needs network for the advisory DB).
           guardrails-gates = pkgs.runCommand "guardrails-gates"

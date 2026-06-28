@@ -26,6 +26,16 @@ tracing.workspace = true
 time.workspace = true   # RFC-3339 retain-until comparison for WORM retention (tessera_io::worm)
 sha2.workspace = true   # sha256 digests for OCI artifact descriptors (tessera_io::oci)
 
+# `cloud` feature (#225 spike): proves a sealed `.tsra` range-reads directly from S3 — prune-before-fetch
+# over the network. Default build/test and the wasm-core gate are unaffected; tessera-core gains nothing.
+# object_store/aws pulls reqwest (rustls), which REQUIRES a tokio runtime — `futures::executor::block_on`
+# isn't enough. `tokio` here is just the driver the per-reader current-thread runtime uses.
+object_store = { version = "0.14", default-features = false, features = ["aws"], optional = true }
+tokio = { version = "1", features = ["rt", "net", "time"], optional = true }
+
+[features]
+cloud = ["dep:object_store", "dep:tokio"]
+
 [dev-dependencies]
 tempfile = "3"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

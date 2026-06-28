@@ -8,6 +8,8 @@
 pub mod accumulate;
 pub mod array;
 pub mod chunk_index;
+#[cfg(feature = "cloud")]
+pub(crate) mod cloud;
 pub mod conformance;
 pub mod container;
 pub mod oci;
