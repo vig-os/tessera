@@ -53,6 +53,11 @@ dicom = { version = "0.9", default-features = false, features = ["pixeldata", "i
 dicom-transfer-syntax-registry = { version = "0.9", features = ["jpeg"] }
 # GE/vendor HDF5 listmode ingest (#208). Native libhdf5 found via pkg-config (HDF5_DIR unset — see flake.nix).
 hdf5-metno = "0.12"
+# Raw libhdf5 C API used by the **generic** compound reader (#222) for the identity (file-type == memory-type)
+# H5Dread that hdf5-metno's typed `read_raw::<T>()` can't do — the file-type hid_t isn't reachable through
+# any public hdf5-metno surface. Caret (not a hard pin) so cargo unifies it with the exact `hdf5-metno-sys`
+# version `hdf5-metno` already pulls transitively (one shared build of libhdf5's bindings; currently 0.12.0).
+hdf5-metno-sys = "0.12"
 # Python bindings (tessera-py). abi3 → one .so works across CPython ≥3.9; extension-module → no
 # libpython link (the build needs only the abi3 minimum, not a runtime interpreter).
 pyo3 = { version = "0.27", features = ["extension-module", "abi3-py39"] }
