@@ -255,6 +255,36 @@ pinned `taskset -c 10-39 nice -n19`, 256 × 64³ int16 blocks (128 MiB raw).
   that would change bytes (and the path that unifies >RAM ingest + live per-chunk Merkle). The multi-
   block streaming + live block-level Merkle land here; the huge-single-block case rides the same engine.
 
+## DUPLET real-listmode scale run (`tessera bench write --input`, 88-core box, 2026-06-29)
+
+Drove the **real** streaming ingest (`ge_hdf5::stream_to_listmode_product_2p` → `TableStreamWriter`)
+over a 3.2 GB GE `.h5`, varying dataset size to isolate the memory behaviour. Manual bench — no PHI,
+no data committed; only the aggregate throughput / peak-RSS (`VmHWM`) recorded.
+
+| dataset | rows | events/s | raw MB/s\* | peak RSS |
+|---|--:|--:|--:|--:|
+| `events_2p` | 9.4 M | 0.94 M | 16.0 | 605 MiB |
+| `coin_2p` | 37.4 M | 2.61 M | 44.3 | 647 MiB |
+| `singles` | 294 M | 4.91 M | 83.5 | **3.63 GiB** |
+
+\* MB/s uses a fixed 17 B/row estimate (the 2p width), so it's a proxy across datasets with different
+record widths; **events/s is exact** (rows from the sealed manifest).
+
+### Reading (ALOCA)
+- **Real GE listmode ingests at scale, single-thread encode** — 294 M events seal without error via the
+  generic compound reader (#222). Rate varies with record width/compressibility (0.94–4.9 M events/s);
+  this is the honest single-thread-encode number ADR-0034 predicts (no core-scaling on one table block).
+- **Input is bounded; output is NOT.** Peak ≈ **~600 MiB fixed baseline + the compressed block size**:
+  flat across events_2p→coin_2p (605→647 MiB; the block is small vs the baseline), then **3.63 GiB at
+  singles** because `table::encode_streaming` returns the whole compressed Vortex block as one in-RAM
+  `Vec<u8>`. So HDF5 slab-streaming + row-group spill keep the *source file* off-RAM (a 3.2 GB file
+  ingests in <4 GB), but a single canonical block must fit its *compressed self* in RAM.
+- **Precise restatement of ADR-0026's "RAM ceiling":** the ceiling is the **compressed output block**,
+  not the input. True constant-memory >RAM (output exceeding RAM) needs the deferred **sub-block output
+  streaming** — write the Vortex file to disk incrementally instead of materialising `Vec<u8>` — which is
+  the same sub-block-compaction work ADR-0026 already defers (and which the multi-block decomposition in
+  ADR-0034 §3 would also resolve). Until then: ingestible iff the *compressed* product fits in RAM.
+
 # #215 — array fold: pyramid + projection are one monoid-fold-over-axes (ADR-0028)
 
 Claim: an array's multiscale pyramid AND its projections (MIP/MPR) are the *same* operation — a

@@ -92,10 +92,20 @@ non-aligned 999-row slabs seals to the **same `content_hash`** as the whole-file
 changes the canonical bytes). So §1 always-chunked + §2 deterministic + §3 streaming reader + §4
 `row_index` are all as-built.
 
-**Remaining before an Accepted flip (genuinely needs externals — NOT autonomously closable):**
-the Accept gate proper requires **real >RAM ingest validation** (the GE listmode `events_2p` ≈5–7 GB,
-manual-bench-only, no PHI committed) and **cross-env / cross-arch determinism re-validation**
-(dev==release==hermetic, x86==ARM — the ADR-0024 caveat; needs ARM CI), plus the **golden-corpus regen**
-for any encode-path change. These are the determinism-critical, externally-gated steps the ADR was
-written to force. Until then the whole-file `read_events_2p` path stays correct for moderate files and
-documents its RAM ceiling.
+**Real-scale measurement (2026-06-29, `tessera bench write --input` on real DUPLET GE `.h5`, no PHI):**
+streaming ingest of `singles` (294 M rows), `coin_2p` (37.4 M), `events_2p` (9.4 M) seals without error
+at 0.9–4.9 M events/s (single-thread encode). **The memory behaviour is now precisely characterised:
+input-bounded, output-materialised.** HDF5 slab reads + row-group spill keep the *source file* off-RAM,
+but `table::encode_streaming` returns the whole compressed Vortex block as one in-RAM `Vec<u8>`, so peak
+RSS ≈ ~600 MiB baseline + the compressed block (flat 605→647 MiB for events_2p/coin_2p, **3.63 GiB for
+singles**). So the "RAM ceiling" this ADR named is the **compressed output block**, not the input — a
+file far larger than RAM ingests fine *iff its compressed product fits in RAM*. Evidence + table:
+`tessera/docs/SPIKE-RESULTS.md` (#203 → DUPLET scale run).
+
+**Remaining before an Accepted flip:** (1) **true constant-memory >RAM** = the deferred **sub-block output
+streaming** (write the Vortex file to disk incrementally instead of materialising `Vec<u8>`; the same
+sub-block compaction this ADR defers, also resolved by the multi-block decomposition in ADR-0034 §3) —
+autonomously buildable but a determinism-gated encode-path change (golden-corpus regen); (2) **cross-env /
+cross-arch determinism re-validation** (dev==release==hermetic, x86==ARM — the ADR-0024 caveat; the
+x86+aarch64-linux CI matrix is now wired, needs a green ARM run). Until (1), ingest is correct +
+input-bounded and documents the compressed-output ceiling.
