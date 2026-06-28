@@ -14,7 +14,7 @@ actually built (P1–P6), a simpler model proved sufficient and was adopted.
    functions. No `async fn` in the public surface, no executor in the caller's face.
 2. **Async stays a dependency-internal detail.** The only async is inside Vortex (the table codec);
    it is bridged with a **per-call `CurrentThreadRuntime`** (from `vortex-io`, a `smol` executor) —
-   **no global tokio runtime**, no tokio dependency in the tree.
+   **no tokio runtime is ever instantiated**.
 3. **Durability is fsync-based**, not an async write pool: `WriteSession` writes each fragment +
    journal line with `sync_all()` (ADR-0023/0024 + S17). Determinism, not throughput, is the gate.
 4. **Deferred:** an async `object_store`/HTTP range-read backend (S6/distribution). The `Reader` is
@@ -31,7 +31,12 @@ actually built (P1–P6), a simpler model proved sufficient and was adopted.
   and sidesteps coloring the whole API async for a benefit only the cloud-range-read layer needs.
 
 ## Consequences
-- No tokio in the workspace; the one async dependency (Vortex) is contained behind a blocking bridge.
+- No tokio *runtime* is instantiated; the one async dependency (Vortex) is contained behind a blocking
+  `smol` bridge. **Correction (as-built, 2026-06-28):** tokio the *crate* IS compiled — `vortex-io`'s
+  default features pull `tokio` with `rt`/`sync`/`io-util`/`bytes` — so "no tokio in the tree" was
+  inaccurate. We never create a tokio runtime and `rt-multi-thread` is not enabled; the public API stays
+  sync. Enabling `vortex-io`'s `tokio` feature (multi-thread) is the only route to single-block parallel
+  encode — deferred to the ADR-0026 fork and the runtime/parallel/wasm definition in **ADR-0034** (#224).
 - Cloud/object-store range-reads remain a future additive layer (the property is already validated
   synchronously via `range::CountingReader`).
 - Rayon-based parallel encode (a perf optimization) can be added inside the codecs later without

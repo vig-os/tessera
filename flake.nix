@@ -147,9 +147,12 @@
           # `tessera-core` must stay **wasm32-compatible** (#210): the pure-Rust spine — manifest /
           # identity / hash / inclusion+consistency proofs / referencing / ed25519 *verify* — has zero
           # C deps and no getrandom in its production graph (getrandom enters only via the proptest
-          # dev-dep), so it compiles to wasm for in-browser verification. Arrow-JS is the RS↔TS boundary
-          # for the columnar data the (non-wasm) Vortex/zarrs backends own. Builds the lib only, no test
-          # run (wasm can't execute natively here); deps are scoped to tessera-core's subtree.
+          # dev-dep), so it compiles to wasm for in-browser verification. We build the spine ONLY here as
+          # the minimal verified boundary; today's RS↔TS data hop is Arrow-JS. NB: Vortex itself IS
+          # wasm-capable (`vortex-io` ships a `WasmRuntime`); the real wasm blockers live in the *zarrs
+          # array* path (`zstd-sys` C + `linux-raw-sys` filesystem) + `getrandom` (needs `wasm_js`), not in
+          # Vortex — so a richer core+Vortex-table-decode wasm build is reachable (tracked in #224).
+          # Builds the lib only, no test run (wasm can't execute natively here); deps scoped to the subtree.
           wasm-core = let
             wasmArgs = {
               inherit src;
