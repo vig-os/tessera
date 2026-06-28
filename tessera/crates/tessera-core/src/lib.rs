@@ -12,6 +12,7 @@
 pub mod block;
 pub mod canonical;
 pub mod chunk_index;
+pub mod collection;
 pub mod dtype;
 pub mod error;
 pub mod export;
@@ -24,6 +25,7 @@ pub mod referencing;
 pub mod schema;
 pub mod signing;
 
+pub use collection::{Collection, CollectionBuilder, CollectionMember, Role};
 pub use error::{Error, Result};
 pub use manifest::Manifest;
 pub use product::ProductBuilder;

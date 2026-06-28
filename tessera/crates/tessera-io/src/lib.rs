@@ -10,6 +10,7 @@ pub mod array;
 pub mod chunk_index;
 #[cfg(feature = "cloud")]
 pub(crate) mod cloud;
+pub mod collection;
 pub mod conformance;
 pub mod container;
 pub mod oci;
@@ -22,6 +23,9 @@ pub mod write;
 
 pub use accumulate::TableStreamWriter;
 pub use array::{decode, decode_subset, encode, ArrayData};
+pub use collection::{
+    prefix_layout, retention_mode, to_oci_index, to_rocrate, OCI_INDEX_MEDIA_TYPE,
+};
 pub use container::{pack, pack_dir, unpack, BlockPayload, Reader, MIMETYPE};
 pub use range::CountingReader;
 pub use sign::{sign_tsra, verify_tsra};

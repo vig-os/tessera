@@ -16,35 +16,47 @@ fn year_of(timestamp: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// Render an [RO-Crate 1.1](https://www.researchobject.org/ro-crate/) metadata document (the
-/// `ro-crate-metadata.json` JSON-LD) describing this product as a `Dataset`. Provenance `sources`
-/// become `isBasedOn` references; the product schema is a keyword.
-pub fn ro_crate(m: &Manifest) -> Value {
+/// The RO-Crate `ro-crate-metadata.json` descriptor entity — the standard header pointing at the
+/// root dataset (`./`). Stable for any document this module produces.
+pub fn ro_crate_descriptor() -> Value {
+    json!({
+        "@type": "CreativeWork",
+        "@id": "ro-crate-metadata.json",
+        "conformsTo": { "@id": "https://w3id.org/ro/crate/1.1" },
+        "about": { "@id": "./" }
+    })
+}
+
+/// Render a single product manifest as an RO-Crate `Dataset` entity at the given `@id`. Provenance
+/// `sources` become `isBasedOn` references; the product schema is a keyword. Reusable for both the
+/// single-product `ro_crate` document (where `id = "./"` marks the root) and for member entities
+/// inside a collection's RO-Crate (where `id` is the member's reference — see
+/// `tessera_io::collection::to_rocrate`).
+pub fn dataset_entity(m: &Manifest, id: &str) -> Value {
     let based_on: Vec<Value> = m
         .sources
         .iter()
         .map(|s| json!({ "@id": s.reference }))
         .collect();
     json!({
+        "@type": "Dataset",
+        "@id": id,
+        "identifier": m.id,
+        "name": m.name,
+        "description": m.description,
+        "datePublished": m.timestamp,
+        "keywords": [m.product],
+        "isBasedOn": based_on
+    })
+}
+
+/// Render an [RO-Crate 1.1](https://www.researchobject.org/ro-crate/) metadata document (the
+/// `ro-crate-metadata.json` JSON-LD) describing this product as a `Dataset`. Provenance `sources`
+/// become `isBasedOn` references; the product schema is a keyword.
+pub fn ro_crate(m: &Manifest) -> Value {
+    json!({
         "@context": "https://w3id.org/ro/crate/1.1/context",
-        "@graph": [
-            {
-                "@type": "CreativeWork",
-                "@id": "ro-crate-metadata.json",
-                "conformsTo": { "@id": "https://w3id.org/ro/crate/1.1" },
-                "about": { "@id": "./" }
-            },
-            {
-                "@type": "Dataset",
-                "@id": "./",
-                "identifier": m.id,
-                "name": m.name,
-                "description": m.description,
-                "datePublished": m.timestamp,
-                "keywords": [m.product],
-                "isBasedOn": based_on
-            }
-        ]
+        "@graph": [ro_crate_descriptor(), dataset_entity(m, "./")]
     })
 }
 
