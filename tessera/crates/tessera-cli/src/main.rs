@@ -314,6 +314,23 @@ enum IngestSrc {
         #[arg(long)]
         deidentify: bool,
     },
+    /// DICOM **series** (a multi-file CT/PET slice stack) → one 3-D `recon` product.
+    DicomSeries {
+        /// The `.dcm` slice files of the series (uniform shape/modality/rescale; else rejected).
+        inputs: Vec<PathBuf>,
+        /// Output `.tsra`.
+        #[arg(long)]
+        out: PathBuf,
+        /// Product name (the human handle in the manifest).
+        #[arg(long)]
+        name: String,
+        /// Acquisition timestamp (ISO-8601).
+        #[arg(long)]
+        timestamp: String,
+        /// Apply PS3.15 de-identification (NOTE: series de-id is not yet supported and will error).
+        #[arg(long)]
+        deidentify: bool,
+    },
     /// GE listmode HDF5 → `listmode` product (compound events → columnar; the #193 transpose).
     GeHdf5 {
         /// Source `.h5` file.
@@ -738,6 +755,33 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             },
             out,
         ),
+        IngestSrc::DicomSeries {
+            inputs,
+            out,
+            name,
+            timestamp,
+            deidentify,
+        } => (
+            IngestSpec {
+                collection: CollectionMeta {
+                    name: name.clone(),
+                    description: None,
+                    timestamp: timestamp.clone(),
+                    study: None,
+                },
+                spec: SpecMeta::default(),
+                products: vec![ProductSpec {
+                    name,
+                    role: Role::Raw,
+                    schema: "recon".into(),
+                    description: None,
+                    derived_from: Vec::new(),
+                    metadata: std::collections::BTreeMap::new(),
+                    options: FormatOptions::DicomSeries { inputs, deidentify },
+                }],
+            },
+            out,
+        ),
         IngestSrc::GeHdf5 {
             input,
             out,
@@ -1098,6 +1142,34 @@ streaming = "batch"
         assert!(
             format!("{err}").contains("mutually exclusive"),
             "expected mutual-exclusion error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ingest_dicom_series_wires_through_and_rejects_series_deid() {
+        // The happy path (real slices → recon) is covered by dicom::read_series; here we assert the
+        // CLI `dicom-series` variant reaches the engine dispatch, which rejects series de-id before
+        // touching any file — so the wiring is exercised without DICOM fixtures.
+        let dir = tempfile::tempdir().unwrap();
+        let err = run(Cmd::Ingest {
+            spec: None,
+            out: None,
+            workers: None,
+            ram_budget: None,
+            auto: false,
+            stream_threshold: None,
+            src: Some(IngestSrc::DicomSeries {
+                inputs: vec![dir.path().join("a.dcm"), dir.path().join("b.dcm")],
+                out: dir.path().join("series.tsra"),
+                name: "DP06-ct".into(),
+                timestamp: "2024-01-01T00:00:00Z".into(),
+                deidentify: true,
+            }),
+        })
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("not yet supported"),
+            "expected the series-deid rejection, got: {err}"
         );
     }
 
