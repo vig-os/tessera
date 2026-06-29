@@ -247,7 +247,8 @@ fn run_listmode_synthetic(
 }
 
 /// Run the listmode bench once against a real `.h5` (the `--input` path) — drives the **real**
-/// [`ge_hdf5::stream_to_listmode_product_2p`] (which uses the production [`TableStreamWriter`]).
+/// production multi-block streaming ingest (`ge_hdf5::stream_to_listmode_product_2p_to_file` →
+/// `TableMultiBlockSink` + `StreamWriter`), so the bench measures the same encode path users hit.
 fn run_listmode_real(
     input: &std::path::Path,
     dataset: &str,
@@ -259,22 +260,28 @@ fn run_listmode_real(
     let slab_rows = cfg
         .ring_depth(u64::try_from(LISTMODE_ROW_BYTES).unwrap_or(LISTMODE_ROW_BYTES as u64))
         .clamp(1 << 14, 1 << 18);
+    let out = dir.path().join("bench.tsra");
     let t = Instant::now();
-    let (m, _payloads) = ge_hdf5::stream_to_listmode_product_2p(
+    // The STREAMING multi-block path: seals each block to disk as it's encoded (constant memory,
+    // bounded by ram_budget) and parallel-encodes across `cfg.workers` — the path whose peak RAM the
+    // bench is here to measure. (Not the old payload-returning `stream_to_listmode_product_2p`.)
+    let m = ge_hdf5::stream_to_listmode_product_2p_to_file(
         input,
         dataset,
         "bench",
         "2024-01-01T00:00:00Z",
         slab_rows,
         &dir.path().join("stage"),
+        &out,
+        cfg,
     )?;
     let wall_s = t.elapsed().as_secs_f64();
-    // Approximate raw bytes: row count × LISTMODE_ROW_BYTES (the 2p schema is similar in width).
-    let rows = m
+    // Total rows = sum over all event blocks (multi-block products split at BLOCK_ROWS).
+    let rows: u64 = m
         .blocks
         .iter()
-        .find_map(|b| b.spec.get("rows").and_then(|r| r.as_u64()))
-        .unwrap_or(0);
+        .filter_map(|b| b.spec.get("rows").and_then(|r| r.as_u64()))
+        .sum();
     Ok(Measurement {
         workers: cfg.worker_count(),
         wall_s,

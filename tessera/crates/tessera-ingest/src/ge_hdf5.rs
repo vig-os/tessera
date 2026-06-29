@@ -442,11 +442,136 @@ pub fn stream_events_2p(
     stream_compound(path, dataset, slab_rows, sink)
 }
 
-/// Bounded-memory ingest of a GE 2-photon dataset → sealed `listmode` product (ADR-0026 §3): stream
-/// the HDF5 in row-slabs through the [`tessera_io::TableStreamWriter`] (≈ one slab on read + ≈ one
-/// row-group on encode), staging fragments under `stage`, then seal. **Byte-identical** to the
-/// whole-file [`read_events_2p`] → [`to_listmode_product`] path (the canonical row-group grid is
-/// independent of the slab size), but never materialises the whole acquisition.
+/// Bounded-memory, **multi-block** ingest of a GE 2-photon dataset → sealed `listmode` product
+/// (ADR-0026 §3/§4): stream the HDF5 in row-slabs through a [`tessera_io::TableMultiBlockSink`]
+/// (≈ one slab on read + ≈ one row-group of buffered rows + per-block worker encode RAM), staging
+/// row-group fragments under `stage` and dispatching one parallel encode job per
+/// [`tessera_io::BLOCK_ROWS`]-sized block through a [`tessera_io::StreamWriter`] before sealing the
+/// final `.tsra` directly to `out`.
+///
+/// **Determinism gates this satisfies**:
+/// - **Worker-count independence**: `workers` affects only encode parallelism; the StreamWriter's
+///   ordered committer commits per-block bytes in push order → same data → same `content_hash`.
+/// - **Partition-stability**: the per-block split is `BLOCK_ROWS`-sized via the format-SSoT
+///   helpers, independent of `slab_rows` / `ram_budget` / `workers`.
+/// - **Small-stays-single corpus invariant**: rows ≤ `BLOCK_ROWS` → exactly ONE block named
+///   `events`, byte-identical to the pre-multi-block layout (no corpus regen).
+///
+/// `cfg` controls worker count + RAM budget for the encode pipeline. `slab_rows` is the HDF5
+/// hyperslab read unit (the bounded-memory unit for the READ side, independent of the block
+/// partition). Returns the sealed manifest.
+#[allow(clippy::too_many_arguments)] // each argument is a distinct, load-bearing piece of context
+pub fn stream_to_listmode_product_2p_to_file(
+    path: &std::path::Path,
+    dataset: &str,
+    name: &str,
+    timestamp: &str,
+    slab_rows: usize,
+    stage: &std::path::Path,
+    out: &std::path::Path,
+    cfg: &tessera_io::WriteConfig,
+) -> Result<Manifest> {
+    stream_to_listmode_product_2p_to_file_inner(
+        path,
+        dataset,
+        name,
+        timestamp,
+        slab_rows,
+        stage,
+        out,
+        cfg,
+        tessera_io::BLOCK_ROWS as u64,
+    )
+}
+
+/// Test-only seam for [`stream_to_listmode_product_2p_to_file`] — same multi-block pipeline, but
+/// `block_rows` is configurable so the multi-block partition path can be exercised at small block
+/// sizes (production goes through [`stream_to_listmode_product_2p_to_file`], pinned at
+/// `BLOCK_ROWS`). `block_rows` MUST be a positive multiple of `ROWS_PER_GROUP` (the sink validates
+/// this).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)] // test seam mirrors the production fn + block_rows knob
+pub fn stream_to_listmode_product_2p_to_file_with_block_rows(
+    path: &std::path::Path,
+    dataset: &str,
+    name: &str,
+    timestamp: &str,
+    slab_rows: usize,
+    stage: &std::path::Path,
+    out: &std::path::Path,
+    cfg: &tessera_io::WriteConfig,
+    block_rows: u64,
+) -> Result<Manifest> {
+    stream_to_listmode_product_2p_to_file_inner(
+        path, dataset, name, timestamp, slab_rows, stage, out, cfg, block_rows,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // inner mirror of the two public APIs above
+fn stream_to_listmode_product_2p_to_file_inner(
+    path: &std::path::Path,
+    dataset: &str,
+    name: &str,
+    timestamp: &str,
+    slab_rows: usize,
+    stage: &std::path::Path,
+    out: &std::path::Path,
+    cfg: &tessera_io::WriteConfig,
+    block_rows: u64,
+) -> Result<Manifest> {
+    let columns = compound_columns(path, dataset)?;
+    // Per-row width × BLOCK_ROWS = the encode-side per-block estimate; feed it to the StreamWriter's
+    // ring-depth sizing so the in-flight RAM ceiling tracks `cfg.ram_budget` on wide schemas.
+    let row_bytes: u64 = columns
+        .iter()
+        .map(|c| {
+            u64::try_from(tessera_io::ColumnData::dtype_size(&c.dtype).unwrap_or(0)).unwrap_or(0)
+        })
+        .sum();
+    let unit_bytes = block_rows.saturating_mul(row_bytes.max(1));
+    let mut ws = tessera_io::WriteSession::create(
+        stage,
+        "listmode",
+        name,
+        "GE listmode coincidence events (streamed, multi-block)",
+        timestamp,
+    )?;
+    // Provenance edge is declared on the session before any blocks commit, so it flows into the
+    // sealed manifest's hash directly — no post-seal re-build needed.
+    ws.add_source(tessera_core::provenance::Source::new(
+        "ingested_from",
+        path.display().to_string(),
+    ))?;
+    let mut sw = tessera_io::StreamWriter::with_config(ws, cfg, unit_bytes);
+    {
+        let sink_stage = stage.join("sink");
+        let mut sink = tessera_io::TableMultiBlockSink::with_block_rows(
+            columns.clone(),
+            "events",
+            &sink_stage,
+            &mut sw,
+            block_rows,
+        )?
+        .with_row_index("ms");
+        // The producer: stream HDF5 hyperslabs into the sink. Each slab is one bounded read; full
+        // row-groups spill to durable fragments; per-block partition + dispatch happen at finish().
+        stream_compound(path, dataset, slab_rows, |slab| sink.push(slab))?;
+        sink.finish()?;
+    }
+    sw.finish(out)
+}
+
+/// Bounded-memory ingest of a GE 2-photon dataset → sealed `listmode` product, returning the
+/// in-memory `(Manifest, Vec<BlockPayload>)` pair for callers that prefer the legacy `pack()` flow.
+/// Back-compat wrapper around the multi-block streaming path
+/// ([`stream_to_listmode_product_2p_to_file`]): seals to a temp `.tsra` under `stage`, opens the
+/// result and re-reads every block's bytes via the [`tessera_io::Reader`], then returns the
+/// (manifest, payloads) pair. The bytes are identical either way — the only difference is whether
+/// you keep them on disk or in RAM.
+///
+/// **Byte-identical** to the whole-file [`read_events_2p`] → [`to_listmode_product`] path (the
+/// canonical row-group grid + multi-block partition are independent of the slab size), but never
+/// materialises the whole acquisition during the read.
 pub fn stream_to_listmode_product_2p(
     path: &std::path::Path,
     dataset: &str,
@@ -455,60 +580,60 @@ pub fn stream_to_listmode_product_2p(
     slab_rows: usize,
     stage: &std::path::Path,
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
-    // Schema is one cheap HDF5 open; the streaming pass below opens the file again to read the data.
-    let columns = compound_columns(path, dataset)?;
-    let n = {
-        let file = hdf5::File::open(path).map_err(he)?;
-        u64::try_from(
-            file.dataset(dataset)
-                .map_err(he)?
-                .shape()
-                .first()
-                .copied()
-                .unwrap_or(0),
-        )
-        .map_err(he)?
-    };
-    let spec = TableSpec {
-        columns,
-        rows: n,
-        row_index: Some("ms".into()),
-    };
-    let mut w = tessera_io::TableStreamWriter::new(spec.clone(), stage)?;
-    stream_compound(path, dataset, slab_rows, |slab| w.push(slab))?;
-    let bytes = w.finish()?;
-
-    let digest = tessera_core::hash::digest(&bytes);
-    let block_ref = tessera_core::block::BlockRef {
-        name: "events".into(),
-        kind: tessera_core::block::BlockKind::Table,
-        digest: Some(digest),
-        spec: serde_json::to_value(&spec).map_err(he)?,
-    };
-    let mut b = ProductBuilder::new(
-        "listmode",
-        name,
-        "GE listmode coincidence events (streamed)",
-        timestamp,
-    );
-    b.add_block_ref(block_ref);
-    b.add_source(tessera_core::provenance::Source::new(
-        "ingested_from",
-        path.display().to_string(),
-    ));
-    let sealed = b.seal()?;
-    Ok((sealed, vec![BlockPayload::new("events", bytes)]))
+    let cfg = tessera_io::WriteConfig::for_system();
+    let temp = stage.join("__streamed_listmode_2p.tsra");
+    let sealed = stream_to_listmode_product_2p_to_file(
+        path, dataset, name, timestamp, slab_rows, stage, &temp, &cfg,
+    )?;
+    // Re-read block bytes from the temp .tsra so callers get the in-memory pair their API expects.
+    // Multi-block products may not fit in RAM — callers needing constant-memory should use
+    // [`stream_to_listmode_product_2p_to_file`] directly.
+    let mut rdr = tessera_io::Reader::open(&temp)?;
+    let mut payloads = Vec::with_capacity(sealed.blocks.len());
+    for r in &sealed.blocks {
+        let bytes = rdr.read_block(&r.name)?;
+        payloads.push(BlockPayload::new(r.name.clone(), bytes));
+    }
+    Ok((sealed, payloads))
 }
 
 /// Build a sealed Tessera `listmode` product (Vortex table) from flattened GE columns, with an
 /// `ingested_from` provenance edge to the source `.h5`. `row_index` is `ms`.
+///
+/// Partitions `cols` into [`tessera_io::BLOCK_ROWS`]-sized blocks via the format-SSoT helpers
+/// ([`tessera_io::block_count`] + [`tessera_io::block_name`]) — so the per-block split (and
+/// therefore `content_hash`) matches the [`stream_to_listmode_product_2p`] path exactly. Small
+/// acquisitions (≤ `BLOCK_ROWS`) stay a single `events` block, byte-identical to the pre-partition
+/// layout (no corpus regen).
 pub fn to_listmode_product(
     cols: &TableData,
     name: &str,
     timestamp: &str,
     source: &str,
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
-    let rows = u64::try_from(cols.first().map(|(_, c)| c.len()).unwrap_or(0)).map_err(he)?;
+    to_listmode_product_partitioned(cols, name, timestamp, source, tessera_io::BLOCK_ROWS as u64)
+}
+
+/// Inner partitioned encoder for [`to_listmode_product`] — same logic, but `block_rows` is
+/// explicit so unit tests can drive the multi-block path at a small block size (production goes
+/// through [`to_listmode_product`], which pins `block_rows = BLOCK_ROWS`).
+///
+/// Partition is via [`tessera_io::partition_blocks`] + [`tessera_io::block_name`] (the format
+/// SSoT): every block carries `block_rows` rows except the trailing one (which may be partial).
+/// `block_rows == BLOCK_ROWS` is the format invariant — overriding it produces test products,
+/// **not** corpus-compatible bytes. `pub(crate)` so no external caller can pass a non-canonical
+/// `block_rows`; production goes through [`to_listmode_product`] (pins `BLOCK_ROWS`).
+pub(crate) fn to_listmode_product_partitioned(
+    cols: &TableData,
+    name: &str,
+    timestamp: &str,
+    source: &str,
+    block_rows: u64,
+) -> Result<(Manifest, Vec<BlockPayload>)> {
+    if block_rows == 0 {
+        return Err(he("to_listmode_product: block_rows must be positive"));
+    }
+    let total_rows = u64::try_from(cols.first().map(|(_, c)| c.len()).unwrap_or(0)).map_err(he)?;
     let columns: Vec<Column> = cols
         .iter()
         .map(|(n, c)| Column {
@@ -517,25 +642,43 @@ pub fn to_listmode_product(
             codec: None,
         })
         .collect();
-    let spec = TableSpec {
-        columns,
-        rows,
-        row_index: Some("ms".into()),
-    };
-    let (block_ref, payload) = table::table_block("events", &spec, cols)?;
+    // Partition through the format SSoT — every block carries `block_rows` rows except the trailing
+    // one (which may be partial). The same helpers the streamed path uses, so the per-block split
+    // matches → identical content_hash for the same `block_rows`.
+    let total_blocks = tessera_io::partition_blocks(total_rows, block_rows);
+    let block_rows_u = usize::try_from(block_rows)
+        .map_err(|e| he(format!("block_rows does not fit usize: {e}")))?;
     let mut b = ProductBuilder::new(
         "listmode",
         name,
         "GE listmode coincidence events",
         timestamp,
     );
-    b.add_block_ref(block_ref);
+    let mut payloads: Vec<BlockPayload> = Vec::with_capacity(total_blocks as usize);
+    for blk in 0..total_blocks {
+        let start = (blk as usize) * block_rows_u;
+        let end = ((blk as usize + 1) * block_rows_u).min(total_rows as usize);
+        let rows_in_block = u64::try_from(end - start).map_err(he)?;
+        let block_data: TableData = cols
+            .iter()
+            .map(|(name, c)| (name.clone(), c.slice(start, end)))
+            .collect();
+        let spec = TableSpec {
+            columns: columns.clone(),
+            rows: rows_in_block,
+            row_index: Some("ms".into()),
+        };
+        let nm = tessera_io::block_name("events", blk, total_blocks);
+        let (block_ref, payload) = table::table_block(&nm, &spec, &block_data)?;
+        b.add_block_ref(block_ref);
+        payloads.push(payload);
+    }
     b.add_source(tessera_core::provenance::Source::new(
         "ingested_from",
         source,
     ));
     let sealed = b.seal()?;
-    Ok((sealed, vec![payload]))
+    Ok((sealed, payloads))
 }
 
 #[cfg(test)]
@@ -594,7 +737,10 @@ mod tests {
                 ms: k as u32,
                 en: [511.0, 510.0 + k as f32],
                 ax: [(k % 64) as u8, (k % 32) as u8],
-                tx: [k as u16, k as u16 + 7],
+                // wrapping_add keeps the synth fixture safe at large n (the existing tests at
+                // n ≤ 5000 still see identical values — no truncation in that range; the multi-block
+                // test below exercises n > u16::MAX where the naive `+ 7` would overflow).
+                tx: [k as u16, (k as u16).wrapping_add(7)],
                 vtx: [0.1 * k as f32, 0.2, 0.3],
             })
             .collect();
@@ -705,7 +851,8 @@ mod tests {
                 ms: k as u32,
                 en: [511.0, 510.0 + k as f32],
                 ax: [(k % 64) as u8, (k % 32) as u8],
-                tx: [k as u16, k as u16 + 7],
+                // matches write_synth_2p's wrapping_add formula (identical for k ≤ u16::MAX-7).
+                tx: [k as u16, (k as u16).wrapping_add(7)],
                 vtx: [0.1 * k as f32, 0.2, 0.3],
             })
             .collect();
@@ -845,6 +992,70 @@ mod tests {
             row_index: Some("ms".into()),
         };
         assert_eq!(table::decode(&spec, &bytes).unwrap(), cols);
+    }
+
+    #[test]
+    fn whole_file_and_streamed_multi_block_match_at_n_blocks() {
+        // The N-block extension of `streamed_2p_ingest_is_byte_identical_to_whole_file_read`: when
+        // total_rows > block_rows the per-block partition is exercised on BOTH paths, and they MUST
+        // agree on content_hash (= same per-block split + same per-block bytes). Test seam:
+        // `block_rows = ROWS_PER_GROUP` (1 row-group/block) so the multi-block path runs without
+        // having to materialise 4M+ rows. Production paths pin block_rows = BLOCK_ROWS.
+        let dir = tempfile::tempdir().unwrap();
+        let h5 = dir.path().join("LIST_2p.h5");
+        // Pick a row count that produces > 1 block at the test block_rows (1 row-group/block) —
+        // ROWS_PER_GROUP*2 + remainder → 3 blocks at the smallest legal block_rows
+        // (=ROWS_PER_GROUP, since the sink requires a multiple of ROWS_PER_GROUP).
+        let rows = tessera_io::table::ROWS_PER_GROUP * 2 + 1234;
+        write_synth_2p(&h5, rows);
+        let block_rows = tessera_io::table::ROWS_PER_GROUP as u64;
+
+        // streamed multi-block path (test seam: small block_rows).
+        let cfg = tessera_io::WriteConfig::for_system().workers(4);
+        let stream_out = dir.path().join("streamed.tsra");
+        let streamed = stream_to_listmode_product_2p_to_file_with_block_rows(
+            &h5,
+            "events_2p",
+            "DP06-2p",
+            "2024-01-01T00:00:00Z",
+            999, // misaligned slab — exercises slab→row-group→block re-chunking
+            &dir.path().join("stage_stream"),
+            &stream_out,
+            &cfg,
+            block_rows,
+        )
+        .unwrap();
+
+        // whole-file multi-block path (test seam: matching block_rows).
+        let cols = read_events_2p(&h5, "events_2p").unwrap();
+        let (batch, _payloads) = to_listmode_product_partitioned(
+            &cols,
+            "DP06-2p",
+            "2024-01-01T00:00:00Z",
+            &h5.display().to_string(),
+            block_rows,
+        )
+        .unwrap();
+
+        // Both paths must agree on content_hash AND per-block names/order (the partition SSoT). The
+        // multi-block partition produces NNNN names — confirm we don't accidentally hit the single
+        // `events` branch at this row count.
+        assert_eq!(
+            streamed.blocks.len(),
+            batch.blocks.len(),
+            "block count mismatch"
+        );
+        let stream_names: Vec<&str> = streamed.blocks.iter().map(|b| b.name.as_str()).collect();
+        let batch_names: Vec<&str> = batch.blocks.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(stream_names, batch_names, "block names must match in order");
+        assert!(
+            stream_names.iter().all(|n| n.starts_with("events_")),
+            "multi-block expected; got {stream_names:?}"
+        );
+        assert_eq!(
+            streamed.content_hash, batch.content_hash,
+            "whole-file ↔ streamed multi-block content_hash mismatch"
+        );
     }
 
     #[test]

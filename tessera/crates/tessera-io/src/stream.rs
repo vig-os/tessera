@@ -95,6 +95,74 @@ pub fn table_job_indexed(
     })
 }
 
+/// Wrap a table block as an [`EncodeJob`] that **lazily reads fragments from disk** — the
+/// multi-block listmode peer of [`table_job`]. The job closure pulls one row-group fragment at a
+/// time via [`crate::accumulate::read_fragment`] and feeds [`crate::table::encode_streaming`], so the
+/// per-block encode peak ≈ one row-group's RAM (plus Vortex working set), never the whole block. This
+/// is the key piece that lets the multi-block sink dispatch one parallel encode job per block to
+/// [`StreamWriter`] without ever holding a full block payload off-disk.
+///
+/// Inputs:
+/// - `name`: the manifest block name (already chosen via [`crate::table::block_name`]).
+/// - `spec`: the per-block [`TableSpec`] — its `rows` MUST equal the sum of the fragments' rows.
+/// - `frag_paths`: row-group fragment file paths in append order (the order [`encode_streaming`]
+///   consumes them).
+pub fn table_job_from_fragments(
+    name: impl Into<String>,
+    spec: tessera_core::block::table::TableSpec,
+    frag_paths: Vec<std::path::PathBuf>,
+) -> EncodeJob {
+    let name = name.into();
+    Box::new(move || {
+        // The lazy iterator pulled by encode_streaming: one fragment at a time, decoded just before
+        // Vortex consumes it. A read error must surface as an Err, but the iterator side is infallible
+        // (TableData) — stash the first error and feed empties after it, then return Err if set.
+        let columns = spec.columns.clone();
+        let err: std::sync::Arc<std::sync::Mutex<Option<tessera_core::Error>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let slot = std::sync::Arc::clone(&err);
+        let empty_for = |columns: &[tessera_core::block::table::Column]| {
+            columns
+                .iter()
+                .map(|c| {
+                    (
+                        c.name.clone(),
+                        crate::table::ColumnData::from_le_bytes(&c.dtype, &[])
+                            .expect("validated dtype"),
+                    )
+                })
+                .collect::<crate::table::TableData>()
+        };
+        let iter = frag_paths.into_iter().map(move |p| {
+            if slot.lock().expect("err mutex").is_some() {
+                return empty_for(&columns);
+            }
+            match crate::accumulate::read_fragment(&p, &columns) {
+                Ok(td) => td,
+                Err(e) => {
+                    *slot.lock().expect("err mutex") = Some(e);
+                    empty_for(&columns)
+                }
+            }
+        });
+        let bytes = crate::table::encode_streaming(&spec, iter)?;
+        if let Some(e) = err.lock().expect("err mutex").take() {
+            return Err(e);
+        }
+        let digest = tessera_core::hash::digest(&bytes);
+        let block_ref = tessera_core::block::BlockRef {
+            name: name.clone(),
+            kind: tessera_core::block::BlockKind::Table,
+            digest: Some(digest),
+            spec: serde_json::to_value(&spec).map_err(tessera_core::Error::from)?,
+        };
+        Ok((
+            (block_ref, crate::BlockPayload::new(name.clone(), bytes)),
+            Vec::new(),
+        ))
+    })
+}
+
 type Encoded = (usize, Result<(EncodedBlock, Vec<EncodedBlock>)>);
 
 /// A bounded-memory, parallel-encode streaming writer over a [`WriteSession`].

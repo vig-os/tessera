@@ -312,6 +312,59 @@ fn validate(spec: &TableSpec, data: &TableData) -> Result<()> {
 /// >RAM producer can flush one row-group at a time (ADR-0026).
 pub const ROWS_PER_GROUP: usize = 1 << 16; // 65_536
 
+/// **Format-invariant** maximum rows per table block — partitions a >`BLOCK_ROWS` listmode product
+/// across multiple `events_NNNN` blocks (ADR-0026). Picked at 64 × [`ROWS_PER_GROUP`] = `2^22`
+/// (≈ 4.19 M rows ≈ a few hundred MiB encoded for typical PET schemas), big enough that the per-block
+/// Vortex footer overhead stays trivial and small enough that one block fits comfortably in a worker's
+/// RAM. Changing this is a **format-breaking** change (it shifts the per-block partition, which shifts
+/// the per-block bytes, which shifts every `content_hash`). The compile-time assertion below makes
+/// the SSoT explicit: every block is *exactly* 64 row-groups (or fewer for the trailing partial).
+pub const BLOCK_ROWS: usize = 1 << 22; // 4_194_304 = 64 × ROWS_PER_GROUP
+
+// `is_multiple_of` is not yet const-stable on `usize` (1.87 stabilised the method, not the const
+// form), so the const assertion uses the integer `%` operator directly.
+#[allow(clippy::manual_is_multiple_of)]
+const _: () = assert!(
+    BLOCK_ROWS % ROWS_PER_GROUP == 0,
+    "BLOCK_ROWS must be a whole multiple of ROWS_PER_GROUP — one block = N full row-groups"
+);
+
+/// Row-groups per full table block ([`BLOCK_ROWS`] / [`ROWS_PER_GROUP`]) — the canonical fragment
+/// count at which the multi-block sink closes a block. Derived from the format invariants so a
+/// future tuner can never let them drift apart.
+pub const ROW_GROUPS_PER_BLOCK: usize = BLOCK_ROWS / ROWS_PER_GROUP;
+
+/// How many [`BLOCK_ROWS`]-sized blocks `rows` partitions into. A product with `rows == 0` still
+/// yields ONE block (the metadata-bearing single `events` block — an empty table is one empty
+/// row-group, see [`encode`]). For `rows > 0` it's `ceil(rows / BLOCK_ROWS)` — the trailing block
+/// may be partial. **Format invariant**: shared by every ingest path so whole-file and streamed
+/// agree on the partition (and therefore on the `content_hash`).
+pub fn block_count(rows: u64) -> u64 {
+    partition_blocks(rows, BLOCK_ROWS as u64)
+}
+
+/// Partition `rows` into ceil(rows / block_rows) blocks (`max(1)` so an empty table still has one
+/// block). Pure helper extracted from [`block_count`] so the partition logic can be unit-tested at a
+/// **small** `block_rows` (cheap CI) while production stays pinned at the [`BLOCK_ROWS`] format
+/// invariant.
+pub fn partition_blocks(rows: u64, block_rows: u64) -> u64 {
+    let br = block_rows.max(1);
+    rows.div_ceil(br).max(1)
+}
+
+/// Canonical name for the `idx`-th of `total` blocks under `prefix`. `total <= 1` → `prefix` (the
+/// **small-stays-single** invariant — a ≤ [`BLOCK_ROWS`] product writes exactly one `events` block,
+/// byte-identical to today's pre-partition layout). Otherwise `prefix_NNNN` (zero-padded to 4
+/// digits, plenty of headroom for the realistic block-count range — up to 9999 blocks ≈ 41 G rows).
+/// Shared by writer and reader so the manifest order is unambiguous.
+pub fn block_name(prefix: &str, idx: u64, total: u64) -> String {
+    if total <= 1 {
+        prefix.to_string()
+    } else {
+        format!("{prefix}_{idx:04}")
+    }
+}
+
 /// Encode columns into the deterministic table-block payload bytes for `spec`.
 ///
 /// The table is written as a **chunked** Vortex file: the columns are sliced into fixed
@@ -933,6 +986,40 @@ mod tests {
             tessera_core::hash::digest(&payload.bytes)
         );
         assert_eq!(decode(&spec, &payload.bytes).unwrap(), data);
+    }
+
+    #[test]
+    fn partition_blocks_and_block_name_are_the_format_partition_ssot() {
+        // The partition + naming logic is the SSoT both whole-file and streamed ingest call into
+        // (so they cannot disagree on the per-block split / content_hash). Test the partition logic
+        // at a small block size — independent of the production BLOCK_ROWS constant — and check the
+        // small-stays-single naming invariant + the multi-block naming.
+
+        // ── partition logic (worker/RAM-independent: depends ONLY on rows + block size)
+        assert_eq!(partition_blocks(0, 4), 1, "empty → one (empty) block");
+        assert_eq!(partition_blocks(1, 4), 1, "below the ceiling → one block");
+        assert_eq!(partition_blocks(4, 4), 1, "exact == one block, no extra");
+        assert_eq!(partition_blocks(5, 4), 2, "just-over → 2 blocks");
+        assert_eq!(partition_blocks(8, 4), 2, "exact 2x → 2 blocks");
+        assert_eq!(partition_blocks(9, 4), 3, "rolls over by one → 3 blocks");
+        // production helper agrees with the explicit form at the real BLOCK_ROWS.
+        assert_eq!(block_count(BLOCK_ROWS as u64), 1);
+        assert_eq!(block_count((BLOCK_ROWS as u64) + 1), 2);
+
+        // ── naming: small-stays-single (no NNNN suffix), multi-block uses zero-padded 4-digit suffix
+        assert_eq!(
+            block_name("events", 0, 0),
+            "events",
+            "empty product → bare name"
+        );
+        assert_eq!(
+            block_name("events", 0, 1),
+            "events",
+            "single block → bare name"
+        );
+        assert_eq!(block_name("events", 0, 2), "events_0000");
+        assert_eq!(block_name("events", 7, 8), "events_0007");
+        assert_eq!(block_name("events", 1234, 9999), "events_1234");
     }
 
     #[test]

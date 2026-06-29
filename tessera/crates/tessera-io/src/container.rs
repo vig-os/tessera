@@ -42,6 +42,17 @@ fn cz(e: impl std::fmt::Display) -> Error {
     Error::Container(e.to_string())
 }
 
+/// The shared zip-entry options every `.tsra` writer (batch + streaming) uses — STORED + zip64 +
+/// the pinned 1980-01-01 mtime. Extracted as the SSoT so [`pack`] and [`pack_streaming`] cannot
+/// drift: identical options → identical archive bytes for identical inputs (the writer-determinism
+/// release gate).
+fn tsra_entry_options() -> SimpleFileOptions {
+    SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .last_modified_time(DateTime::default())
+        .large_file(true)
+}
+
 /// Pack a **sealed** manifest + its block payloads into a `.tsra` at `path` (STORED zip64).
 pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Result<()> {
     if !manifest.is_sealed() {
@@ -53,10 +64,7 @@ pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Resu
     // STORED + force zip64 so a large study is never silently truncated at 4 GiB / 65 k entries.
     // Pin the entry mtime to the zip epoch (1980-01-01) so the same product packs to byte-identical
     // bytes — writer-determinism is a release gate (FEATURE-MATRIX §C); a wall-clock mtime breaks it.
-    let stored = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Stored)
-        .last_modified_time(DateTime::default())
-        .large_file(true);
+    let stored = tsra_entry_options();
 
     zw.start_file(MIMETYPE_ENTRY, stored).map_err(cz)?; // first + uncompressed = magic
     zw.write_all(MIMETYPE.as_bytes())?;
@@ -68,6 +76,45 @@ pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Resu
         zw.start_file(format!("{BLOCKS_PREFIX}{}", p.name), stored)
             .map_err(cz)?;
         zw.write_all(&p.bytes)?;
+    }
+    zw.finish().map_err(cz)?;
+    Ok(())
+}
+
+/// **Constant-memory peer of [`pack`]**: pack a sealed manifest by **streaming** each block fragment
+/// **from disk** into the zip via [`std::io::copy`], never holding a block payload in RAM. Required
+/// for the multi-block listmode path where a single block can be hundreds of MiB; sealing the whole
+/// product through [`pack`] would defeat the bounded-memory write engine the entire pipeline exists
+/// to provide.
+///
+/// `sources` is the in-order list of `(block-name, fragment-path)` pairs — `name` becomes the zip
+/// entry suffix (`blocks/<name>`), `path` is opened + buffered + streamed. The names + order MUST
+/// match the manifest's `blocks` list (the caller passes them straight from the session's committed
+/// refs). The output is **byte-identical** to `pack(manifest, &Vec<BlockPayload>::from(sources), out)`
+/// — proven by `pack_streaming_equals_pack` below — because both writers share [`tsra_entry_options`]
+/// and emit the mimetype/manifest/blocks in the same order.
+pub fn pack_streaming(manifest: &Manifest, sources: &[(String, &Path)], out: &Path) -> Result<()> {
+    if !manifest.is_sealed() {
+        return Err(Error::Container(
+            "refusing to pack an unsealed manifest".into(),
+        ));
+    }
+    let mut zw = ZipWriter::new(File::create(out)?);
+    let stored = tsra_entry_options();
+
+    zw.start_file(MIMETYPE_ENTRY, stored).map_err(cz)?;
+    zw.write_all(MIMETYPE.as_bytes())?;
+
+    zw.start_file(MANIFEST_ENTRY, stored).map_err(cz)?;
+    zw.write_all(manifest.to_json()?.as_bytes())?;
+
+    for (name, frag) in sources {
+        zw.start_file(format!("{BLOCKS_PREFIX}{name}"), stored)
+            .map_err(cz)?;
+        // Buffered copy: 256 KiB chunks → peak RAM ≈ one buffer (no full-block materialisation).
+        let f = File::open(frag)?;
+        let mut br = std::io::BufReader::with_capacity(256 * 1024, f);
+        std::io::copy(&mut br, &mut zw)?;
     }
     zw.finish().map_err(cz)?;
     Ok(())
@@ -123,6 +170,36 @@ impl<R: Read + Seek> Reader<R> {
             .blocks
             .iter()
             .map(|b| b.name.clone())
+            .collect()
+    }
+
+    /// Names of all blocks in the manifest that belong to `prefix`'s partitioned group, in **manifest
+    /// order** — every block whose name is `prefix` (the single-block case) or `prefix_NNNN` where the
+    /// suffix is a 4-digit zero-padded number (the multi-block case from
+    /// [`crate::table::block_name`]). Used by readers that need to iterate over a logically-split
+    /// table without knowing whether it was partitioned (e.g. `events` vs `events_0000..events_NNNN`).
+    pub fn block_group(&self, prefix: &str) -> Vec<String> {
+        self.manifest
+            .blocks
+            .iter()
+            .filter_map(|b| {
+                if b.name == prefix {
+                    Some(b.name.clone())
+                } else if let Some(rest) = b
+                    .name
+                    .strip_prefix(prefix)
+                    .and_then(|r| r.strip_prefix('_'))
+                {
+                    // a 4-digit numeric suffix marks a partitioned shard (block_name's format).
+                    if rest.len() == 4 && rest.bytes().all(|c| c.is_ascii_digit()) {
+                        Some(b.name.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
@@ -257,5 +334,106 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("u.tsra");
         assert!(pack(&m, &[], &path).is_err());
+        // pack_streaming refuses the same unsealed input — the SSoT options shouldn't bypass the gate.
+        assert!(pack_streaming(&m, &[], &path).is_err());
+    }
+
+    #[test]
+    fn pack_streaming_equals_pack_byte_for_byte() {
+        // Writer-determinism: the streaming-from-disk packer MUST produce byte-identical archives
+        // to the RAM packer over the same inputs (same options, same order, same content). Anything
+        // else breaks the content_hash gate the moment seal() switches from pack to pack_streaming.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bldr = ProductBuilder::new("recon", "DPpack", "d", "2024-01-01T00:00:00Z");
+        // a handful of blocks of varied sizes — including >64 KiB so we cross the buffered-copy chunk
+        // boundary (the streaming path uses a 256 KiB BufReader; mid-block copy boundaries must agree).
+        let payloads: Vec<BlockPayload> = (0..4)
+            .map(|i| {
+                let bytes: Vec<u8> = (0..(300_000 + i * 7))
+                    .map(|k| ((k + i) % 251) as u8)
+                    .collect();
+                let nm = format!("blob_{i}");
+                let digest = tessera_core::hash::digest(&bytes);
+                bldr.add_block_ref(tessera_core::block::BlockRef {
+                    name: nm.clone(),
+                    kind: tessera_core::block::BlockKind::Array,
+                    digest: Some(digest),
+                    spec: serde_json::json!({}),
+                });
+                BlockPayload::new(nm, bytes)
+            })
+            .collect();
+        let sealed = bldr.seal().unwrap();
+
+        // RAM path: pack(...) materialises every block payload as a Vec<u8>.
+        let ram_path = dir.path().join("ram.tsra");
+        pack(&sealed, &payloads, &ram_path).unwrap();
+        let ram_bytes = std::fs::read(&ram_path).unwrap();
+
+        // Streaming path: write each payload to a fragment file, then pack_streaming reads them via
+        // std::io::copy — never holding a payload in RAM.
+        let stage = dir.path().join("frags");
+        std::fs::create_dir_all(&stage).unwrap();
+        let mut frag_paths = Vec::new();
+        for p in &payloads {
+            let fp = stage.join(&p.name);
+            std::fs::write(&fp, &p.bytes).unwrap();
+            frag_paths.push((p.name.clone(), fp));
+        }
+        let sources: Vec<(String, &Path)> = frag_paths
+            .iter()
+            .map(|(n, p)| (n.clone(), p.as_path()))
+            .collect();
+        let stream_path = dir.path().join("stream.tsra");
+        pack_streaming(&sealed, &sources, &stream_path).unwrap();
+        let stream_bytes = std::fs::read(&stream_path).unwrap();
+
+        assert_eq!(
+            ram_bytes, stream_bytes,
+            "pack_streaming and pack must produce byte-identical archives"
+        );
+    }
+
+    #[test]
+    fn block_group_collects_prefix_and_partitioned_shards_in_manifest_order() {
+        // The reader-side counterpart of table::block_name: a single `events` block OR an ordered
+        // sweep of `events_NNNN` blocks. Other names with similar prefixes (`events_index`, etc.)
+        // are NOT matched — only the exact `prefix` or `prefix_<4 digits>` form.
+        let mut b = ProductBuilder::new("listmode", "g", "d", "2024-01-01T00:00:00Z");
+        for name in [
+            "events_0001",
+            "events_0000",
+            "noise",        // unrelated → excluded
+            "events",       // bare prefix → included
+            "events_index", // wrong shape → excluded
+            "events_99",    // wrong digit count → excluded
+            "events_0010",
+        ] {
+            let bytes = name.as_bytes().to_vec();
+            let digest = tessera_core::hash::digest(&bytes);
+            b.add_block_ref(tessera_core::block::BlockRef {
+                name: name.into(),
+                kind: tessera_core::block::BlockKind::Table,
+                digest: Some(digest),
+                spec: serde_json::json!({}),
+            });
+        }
+        let sealed = b.seal().unwrap();
+        let payloads: Vec<BlockPayload> = sealed
+            .blocks
+            .iter()
+            .map(|r| BlockPayload::new(r.name.clone(), r.name.as_bytes().to_vec()))
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.tsra");
+        pack(&sealed, &payloads, &path).unwrap();
+        let r = Reader::open(&path).unwrap();
+        // manifest order (push order) preserved: 0001, 0000, events, 0010.
+        assert_eq!(
+            r.block_group("events"),
+            vec!["events_0001", "events_0000", "events", "events_0010"]
+        );
+        // a prefix with NO matches returns an empty vec (not an error).
+        assert!(r.block_group("missing").is_empty());
     }
 }

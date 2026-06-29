@@ -22,15 +22,15 @@ pub mod table;
 pub mod worm;
 pub mod write;
 
-pub use accumulate::TableStreamWriter;
+pub use accumulate::{TableMultiBlockSink, TableStreamWriter};
 pub use array::{decode, decode_subset, encode, ArrayData};
 pub use collection::{
     prefix_layout, retention_mode, to_oci_index, to_rocrate, OCI_INDEX_MEDIA_TYPE,
 };
 pub use config::{parse_byte_size, WriteConfig, DEFAULT_RAM_BUDGET};
-pub use container::{pack, pack_dir, unpack, BlockPayload, Reader, MIMETYPE};
+pub use container::{pack, pack_dir, pack_streaming, unpack, BlockPayload, Reader, MIMETYPE};
 pub use range::CountingReader;
 pub use sign::{sign_tsra, verify_tsra};
-pub use stream::{array_job, table_job, EncodeJob, StreamWriter};
-pub use table::{ColumnData, TableData};
+pub use stream::{array_job, table_job, table_job_from_fragments, EncodeJob, StreamWriter};
+pub use table::{block_count, block_name, partition_blocks, ColumnData, TableData, BLOCK_ROWS};
 pub use write::WriteSession;

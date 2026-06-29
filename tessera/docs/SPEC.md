@@ -136,6 +136,26 @@ optional `row_index`.
   single-array layout** — so this is backward-compatible (existing products unchanged); only larger
   tables gain extra chunks.
 
+- **Block partition (>RAM tables).** A logical table with more than a fixed
+  **`BLOCK_ROWS = 2^22 = 4_194_304`** rows is partitioned across **multiple blocks** in the manifest:
+  the first `BLOCK_ROWS` rows are one block, the next `BLOCK_ROWS` rows the next block, and so on
+  (the trailing block may be partial). Each block carries one of the chunked Vortex payloads above,
+  with the per-block row count in its `TableSpec.rows`. Naming follows the **small-stays-single**
+  rule:
+  - **One block total** (rows ≤ `BLOCK_ROWS`) — the manifest block is named with the bare prefix
+    (e.g. `events`). This is byte-identical to the pre-partition layout, so existing single-block
+    products are unchanged.
+  - **Two or more blocks total** — blocks are named with a zero-padded 4-digit suffix:
+    `<prefix>_0000`, `<prefix>_0001`, …, `<prefix>_NNNN` (in manifest order).
+  Both whole-file and streaming writers MUST use the same partition function (`ceil(rows / BLOCK_ROWS)`,
+  with `max(1)` so an empty table is still one block) and the same naming function — so streamed and
+  batch ingest of the same rows produce byte-identical per-block bytes and therefore the same
+  `content_hash`, independent of any runtime knob (`workers`, `ram_budget`, slab size).
+  `BLOCK_ROWS` is chosen at exactly 64 × `ROWS_PER_GROUP` so every full block is exactly 64
+  row-groups (whole-multiple invariant). **Changing `BLOCK_ROWS` is a format-breaking change**
+  (different partition → different per-block bytes → different `content_hash` for every product with
+  more than one block).
+
 - **Dtypes.** Columns use the fd5 numpy-style codes: `i1/i2/i4/i8` (signed), `u1/u2/u4/u8` (unsigned),
   `f4/f8` (float). Each column is a Vortex primitive array; the columns form a `struct` in declared
   order, every column of length `rows`. Float bit patterns (`NaN`, `±inf`, `−0.0`, denormals) MUST be
