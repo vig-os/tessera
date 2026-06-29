@@ -5,3 +5,19 @@ tessera bench write — schema=listmode[..]
   saturation: ~[..] events/s @ 1 worker[..]
 
 ```
+
+```
+$ tessera bench write --schema listmode --rows 200000 --auto
+tessera bench write --auto — schema=listmode[..]
+  measured read ≈ [..] MB/s, encode ≈ [..] MB/s/core → recommend [..] worker[..]
+...
+  result: ~[..] events/s @ [..] worker[..]
+
+```
+
+```
+$ tessera bench write --auto --workers 4
+? failed
+error: the argument '--auto' cannot be used with '--workers <WORKERS>'
+...
+```

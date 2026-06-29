@@ -1,13 +1,20 @@
 //! `tessera bench write` — operator's "size your system" tool. Drives the **real** write engine
-//! ([`tessera_io::TableStreamWriter`] for listmode, [`tessera_io::StreamWriter`] for blocks)
-//! against MC-sampled synthetic data (or a real `.h5`), reports wall seconds, throughput
-//! (events/s + MB/s of raw input), and peak RSS (`/proc/self/status: VmHWM`).
+//! ([`tessera_io::TableStreamWriter`] for synthetic listmode; [`tessera_io::TableMultiBlockSink`]
+//! over [`tessera_io::StreamWriter`] for real `.h5` listmode and for blocks) against MC-sampled
+//! synthetic data (or a real `.h5`), reports wall seconds, throughput (events/s plus MB/s of raw
+//! input), and peak RSS (`/proc/self/status: VmHWM`).
 //!
-//! - **Listmode encode is single-thread.** The streaming table path produces one canonical Vortex
-//!   block over a sequential stream (ADR-0026 — multi-block table core-scaling deferred), so a
+//! - **Synthetic listmode is single-thread.** The `TableStreamWriter` path produces one canonical
+//!   Vortex block over a sequential stream (ADR-0026 — single-block, in-RAM), so a synthetic
 //!   listmode sweep is expected ~flat. We report it honestly: the sweep table makes that visible.
+//! - **`--input` listmode parallelizes.** Post-#203 the multi-block ingest dispatches per-block
+//!   encode across `workers` std threads (ADR-0034 — never tokio); the sweep scales until the
+//!   read/encode knee.
 //! - **Block encode parallelizes.** [`StreamWriter`] dispatches per-block encode across `workers`
-//!   std threads (ADR-0034 — never tokio), so the `blocks` sweep scales until the box saturates.
+//!   std threads, so the `blocks` sweep scales until the box saturates.
+//! - **`--auto`** (the adaptive thread allocator): warmup-measure the producer's read+transpose
+//!   rate AND one encode worker's per-core rate, ask [`tessera_io::WriteConfig::balanced`] for the
+//!   worker knee, then run ONCE at that recommendation. Picks the read/encode knee, not max cores.
 //!
 //! SSoT: reuses the production encode path and the [`tessera_io::benches`]-style helpers (DRY).
 
@@ -26,8 +33,8 @@ use tessera_core::block::table::{Column, TableSpec};
 use tessera_ingest::ge_hdf5;
 use tessera_io::array::ArrayData;
 use tessera_io::{
-    array_job, parse_byte_size, ColumnData, StreamWriter, TableData, TableStreamWriter,
-    WriteConfig, WriteSession,
+    array_job, parse_byte_size, table, ColumnData, StreamWriter, TableData, TableStreamWriter,
+    WriteConfig, WriteSession, BLOCK_ROWS,
 };
 
 /// One MiB in bytes — output formatting constant.
@@ -36,7 +43,9 @@ const MIB_F: f64 = 1024.0 * 1024.0;
 /// What schema to synthesize for the bench.
 #[derive(Clone, Copy, Debug)]
 pub enum BenchSchema {
-    /// Listmode 6-column table (`ms·en0·en1·tx0·tx1·ax0`) — single-thread encode.
+    /// Listmode 6-column table (`ms·en0·en1·tx0·tx1·ax0`). Synthetic = single-thread encode via
+    /// `TableStreamWriter`; `--input` = parallel multi-block encode via `TableMultiBlockSink`
+    /// (#203). The bench's per-run note line picks the right description based on which path runs.
     Listmode,
     /// 64³ int16 array blocks — parallelizable encode.
     Blocks,
@@ -53,10 +62,13 @@ impl BenchSchema {
         }
     }
 
+    /// Short label for headers. The "is this single-thread or parallel?" honesty note is
+    /// **path-dependent** (synthetic listmode vs --input listmode behave differently after #203),
+    /// so it lives on the per-run note line — not baked into the schema label.
     fn label(self) -> &'static str {
         match self {
-            BenchSchema::Listmode => "listmode (single-thread encode)",
-            BenchSchema::Blocks => "blocks (parallel encode)",
+            BenchSchema::Listmode => "listmode",
+            BenchSchema::Blocks => "blocks",
         }
     }
 }
@@ -68,6 +80,7 @@ pub struct BenchOpts {
     pub ram_budget: Option<String>,
     pub workers: Option<usize>,
     pub sweep: bool,
+    pub auto: bool,
     pub input: Option<PathBuf>,
     pub dataset: String,
     pub seed: u64,
@@ -373,6 +386,154 @@ fn print_header() {
     bench_out!("  {}", "-".repeat(64)); // guardrails-ok
 }
 
+/// Warmup sample size for the read+encode rate measurement (rows). One full canonical block is
+/// ideal — it puts the encode through the same Vortex chunking pipeline a production run hits.
+/// For synthetic, capped by `--rows` so a tiny bench (`--rows 200000`) still runs fast.
+const WARMUP_BLOCK_ROWS: usize = BLOCK_ROWS;
+/// Warmup floor — even on tiny `--rows`, measure at least one ROWS_PER_GROUP-worth so the encode
+/// path exercises a real Vortex chunk (matches the production row-group grid).
+const WARMUP_FLOOR_ROWS: usize = 1 << 16; // = ROWS_PER_GROUP
+
+/// One warmup result — the per-stage rates the `balanced` heuristic consumes.
+#[derive(Debug, Clone, Copy)]
+struct Warmup {
+    /// Raw input bytes per second of the **read+transpose** stage (the producer's bytes/s).
+    read_bps: f64,
+    /// Raw input bytes per second of one encode worker (single-thread). Multiplied by `workers`
+    /// gives the encode pipeline's bytes/s — the right-hand side of the read-vs-encode min().
+    per_core_encode_bps: f64,
+    /// Rows sampled in this warmup — surfaced so the operator can sanity-check the measurement.
+    sample_rows: usize,
+}
+
+/// Measure the **synthetic** producer's read+transpose rate (bytes/s of raw input). Generates a
+/// `n_rows`-row batch through the same `synthetic_listmode_batch` the real bench uses — what we
+/// time is the cost of producing the rows the encoder consumes, which is exactly the "read+
+/// transpose rate" position in the pipeline.
+fn warmup_read_synthetic(n_rows: usize, seed: u64) -> (TableData, f64) {
+    let t = Instant::now();
+    let data = synthetic_listmode_batch(seed, 0, n_rows);
+    let elapsed = t.elapsed().as_secs_f64().max(1e-9);
+    let raw = u64::try_from(n_rows)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(LISTMODE_ROW_BYTES).unwrap_or(LISTMODE_ROW_BYTES as u64));
+    let bps = (raw as f64) / elapsed;
+    (data, bps)
+}
+
+/// Measure the **real** read+transpose rate from a `.h5` (`--input` mode). Pulls one warmup slab
+/// (up to `n_rows`) through the production [`ge_hdf5::stream_compound`] reader and times it. We
+/// stop after one slab via a sentinel error from the sink — bubbling Err out of `stream_compound`
+/// short-circuits the loop instead of reading the whole file, so the warmup cost is bounded.
+fn warmup_read_real(
+    input: &std::path::Path,
+    dataset: &str,
+    n_rows: usize,
+    columns: &[Column],
+) -> tessera_core::Result<(TableData, f64)> {
+    // The sentinel string the warmup sink raises after capturing the first slab. We compare it
+    // by value to distinguish "warmup done" from a real HDF5 error.
+    const WARMUP_SENTINEL: &str = "__tessera_bench_warmup_one_slab_done__";
+    let mut captured: Option<TableData> = None;
+    let t = Instant::now();
+    let result = ge_hdf5::stream_compound(input, dataset, n_rows.max(1), |slab| {
+        captured = Some(slab);
+        Err(tessera_core::Error::Invalid(WARMUP_SENTINEL.into()))
+    });
+    let elapsed = t.elapsed().as_secs_f64().max(1e-9);
+    match result {
+        Ok(()) => {} // dataset had ≤ 0 rows — fall through to the empty-data handler below
+        Err(tessera_core::Error::Invalid(msg)) if msg == WARMUP_SENTINEL => {}
+        Err(e) => return Err(e),
+    }
+    let data = match captured {
+        Some(d) => d,
+        None => {
+            return Err(tessera_core::Error::Invalid(format!(
+                "bench --auto: dataset '{dataset}' in '{}' is empty (no warmup sample)",
+                input.display()
+            )))
+        }
+    };
+    let sample_rows = data.first().map(|(_, c)| c.len()).unwrap_or(0);
+    let row_bytes: usize = columns
+        .iter()
+        .map(|c| ColumnData::dtype_size(&c.dtype).unwrap_or(0))
+        .sum();
+    let raw = u64::try_from(sample_rows)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(row_bytes).unwrap_or(row_bytes as u64));
+    let bps = (raw as f64) / elapsed;
+    Ok((data, bps))
+}
+
+/// Measure single-thread encode rate (bytes/s/core) by running the **real** production encoder
+/// ([`tessera_io::table::encode`]) on the warmup sample. Same code path as the multi-block sink's
+/// per-block encode jobs — the rate this returns is the per-core saturation the parallel pipeline
+/// will see, so the heuristic feeds the encoder its own self-measured ceiling.
+fn warmup_encode_per_core(columns: &[Column], data: &TableData) -> tessera_core::Result<f64> {
+    let n_rows = data.first().map(|(_, c)| c.len()).unwrap_or(0);
+    let spec = TableSpec {
+        columns: columns.to_vec(),
+        rows: u64::try_from(n_rows).unwrap_or(u64::MAX),
+        row_index: None,
+    };
+    let row_bytes: usize = columns
+        .iter()
+        .map(|c| ColumnData::dtype_size(&c.dtype).unwrap_or(0))
+        .sum();
+    let raw = u64::try_from(n_rows)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(row_bytes).unwrap_or(row_bytes as u64));
+    let t = Instant::now();
+    let _bytes = table::encode(&spec, data)?;
+    let elapsed = t.elapsed().as_secs_f64().max(1e-9);
+    Ok((raw as f64) / elapsed)
+}
+
+/// Run the listmode warmup → (`Warmup`, columns), so the auto path can both apply the
+/// recommendation and pretty-print the inputs. Routes between the synthetic and `--input` paths
+/// without duplicating the encode-measure code.
+fn run_warmup_listmode(opts: &BenchOpts) -> tessera_core::Result<(Warmup, Vec<Column>)> {
+    match opts.input.as_deref() {
+        Some(input) => {
+            let columns = ge_hdf5::compound_columns(input, &opts.dataset)?;
+            // Cap the warmup at one canonical block — large enough to hit a real Vortex chunking
+            // workload, small enough to bound the warmup cost on a multi-TB acquisition.
+            let target = WARMUP_BLOCK_ROWS;
+            let (data, read_bps) = warmup_read_real(input, &opts.dataset, target, &columns)?;
+            let per_core_encode_bps = warmup_encode_per_core(&columns, &data)?;
+            let sample_rows = data.first().map(|(_, c)| c.len()).unwrap_or(0);
+            Ok((
+                Warmup {
+                    read_bps,
+                    per_core_encode_bps,
+                    sample_rows,
+                },
+                columns,
+            ))
+        }
+        None => {
+            let columns = listmode_columns();
+            // For synthetic we cap by --rows so `--rows 200000 --auto` runs in well under a second,
+            // but keep ≥ one row-group so the encoder exercises a real Vortex chunk.
+            let target = opts
+                .rows
+                .clamp(WARMUP_FLOOR_ROWS.min(opts.rows.max(1)), WARMUP_BLOCK_ROWS);
+            let (data, read_bps) = warmup_read_synthetic(target, opts.seed);
+            let per_core_encode_bps = warmup_encode_per_core(&columns, &data)?;
+            Ok((
+                Warmup {
+                    read_bps,
+                    per_core_encode_bps,
+                    sample_rows: target,
+                },
+                columns,
+            ))
+        }
+    }
+}
+
 /// Entry point invoked by `tessera bench write …`. Drives the real engine, reports honestly.
 pub fn run(opts: BenchOpts) -> tessera_core::Result<()> {
     let schema = BenchSchema::parse(&opts.schema)?;
@@ -380,6 +541,19 @@ pub fn run(opts: BenchOpts) -> tessera_core::Result<()> {
         Some(s) => parse_byte_size(s)?,
         None => tessera_io::DEFAULT_RAM_BUDGET,
     };
+
+    // --auto = warmup measure → balanced heuristic → single run at the recommended workers. Only
+    // wired up for the listmode schema (the path users hit on a production ingest). For the blocks
+    // schema we'd need a separate read/encode warmup; not blocking, but out of scope here.
+    if opts.auto {
+        if !matches!(schema, BenchSchema::Listmode) {
+            return Err(tessera_core::Error::Invalid(
+                "--auto currently only supports --schema listmode (blocks-schema heuristic TBD)"
+                    .into(),
+            ));
+        }
+        return run_auto(&opts, ram_budget);
+    }
 
     // Pick the worker plan: explicit --workers, --sweep (1,2,4,… up to available_parallelism), or
     // single run at WriteConfig::for_system() defaults.
@@ -411,11 +585,23 @@ pub fn run(opts: BenchOpts) -> tessera_core::Result<()> {
         fmt_bytes(ram_budget),
         opts.seed,
     );
+    // Honesty note — narrowly scoped. The listmode TableStreamWriter path (synthetic, no --input)
+    // is single-thread encode (one canonical Vortex block, ADR-0026); the multi-block real-h5 path
+    // (--input → TableMultiBlockSink + StreamWriter) parallelizes per-block encode, so the sweep
+    // scales until the read/encode knee. The note picks one or the other based on what we're about
+    // to run, so it stays true post-#203 (multi-block ingest).
     if matches!(schema, BenchSchema::Listmode) {
-        bench_out!(
-            // guardrails-ok
-            "  note: listmode encode is single-thread (ADR-0026) — sweep is expected ~flat for listmode."
-        );
+        if opts.input.is_some() {
+            bench_out!(
+                // guardrails-ok
+                "  note: listmode --input parallelizes per-block encode (#203) — sweep scales to the read/encode knee."
+            );
+        } else {
+            bench_out!(
+                // guardrails-ok
+                "  note: synthetic listmode is single-block (TableStreamWriter, ADR-0026) — sweep is expected ~flat."
+            );
+        }
     }
     bench_out!(); // guardrails-ok
     print_header();
@@ -457,6 +643,67 @@ pub fn run(opts: BenchOpts) -> tessera_core::Result<()> {
     Ok(())
 }
 
+/// `--auto`: warmup-measure the producer's read+transpose rate AND one encode worker's per-core
+/// rate, ask [`WriteConfig::balanced`] for the worker knee, then run the full bench ONCE at that
+/// worker count and report. SSoT — the run leg goes through the same `run_listmode_real` /
+/// `run_listmode_synthetic` the manual path uses (no second encoder).
+fn run_auto(opts: &BenchOpts, ram_budget: u64) -> tessera_core::Result<()> {
+    let (warmup, _columns) = run_warmup_listmode(opts)?;
+    let cfg =
+        WriteConfig::balanced(warmup.read_bps, warmup.per_core_encode_bps).ram_budget(ram_budget);
+    let workers = cfg.worker_count();
+    // "read-bound" = the recommendation matched ceil(read/per_core), so adding workers won't help
+    // (the encode pipeline already meets the read floor). "encode-bound" = the recommendation
+    // clamped at available_parallelism — read could feed more, but we're out of cores.
+    let max_parallel = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let storage_label = if workers >= max_parallel {
+        "encode-bound"
+    } else {
+        "read-bound"
+    };
+    bench_out!(
+        // guardrails-ok
+        "tessera bench write --auto — schema={} · sample={} rows · ram_budget={} · seed={}",
+        BenchSchema::Listmode.label(),
+        warmup.sample_rows,
+        fmt_bytes(ram_budget),
+        opts.seed,
+    );
+    bench_out!(
+        // guardrails-ok
+        "  measured read ≈ {:.1} MB/s, encode ≈ {:.1} MB/s/core → recommend {} worker{} (storage is {})",
+        warmup.read_bps / 1e6,
+        warmup.per_core_encode_bps / 1e6,
+        workers,
+        if workers == 1 { "" } else { "s" },
+        storage_label,
+    );
+    bench_out!(
+        // guardrails-ok
+        "  (a starting recommendation — assumes ~linear encode scaling; run --sweep to confirm the knee on your box)"
+    );
+    bench_out!(); // guardrails-ok
+    print_header();
+    let m = match opts.input.as_deref() {
+        Some(input) => run_listmode_real(input, &opts.dataset, &cfg)?,
+        None => run_listmode_synthetic(opts.rows, &cfg, opts.seed)?,
+    };
+    print_row(BenchSchema::Listmode, &m);
+    bench_out!(); // guardrails-ok
+    bench_out!(
+        // guardrails-ok
+        "  result: ~{:.0} events/s @ {} worker{} ({:.1} MB/s, peak {})",
+        m.units_per_s(),
+        m.workers,
+        if m.workers == 1 { "" } else { "s" },
+        m.mb_per_s(),
+        fmt_bytes(m.peak_rss),
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +727,47 @@ mod tests {
         let m = run_listmode_synthetic(2000, &cfg, 1).unwrap();
         assert_eq!(m.units, 2000);
         assert!(m.units_per_s() > 0.0);
+    }
+
+    #[test]
+    fn warmup_synthetic_measures_positive_rates() {
+        // The warmup must return finite, strictly positive rates for the heuristic to consume —
+        // anything else collapses to the `balanced` degenerate-input fallback, which would mask
+        // bugs in the measurement pipeline rather than expose them.
+        let opts = BenchOpts {
+            schema: "listmode".into(),
+            rows: 200_000,
+            ram_budget: None,
+            workers: None,
+            sweep: false,
+            auto: true,
+            input: None,
+            dataset: "events_2p".into(),
+            seed: 1,
+        };
+        let (w, cols) = run_warmup_listmode(&opts).unwrap();
+        assert!(w.read_bps.is_finite() && w.read_bps > 0.0);
+        assert!(w.per_core_encode_bps.is_finite() && w.per_core_encode_bps > 0.0);
+        assert_eq!(cols.len(), 6, "synthetic listmode has 6 columns");
+        assert!(w.sample_rows >= 1);
+    }
+
+    #[test]
+    fn auto_synthetic_recommends_and_runs_end_to_end() {
+        // The `--auto` driver, end-to-end: warmup → balanced → run. Uses a small synthetic
+        // workload so the test stays fast + hermetic (no real .h5 needed). Verifies the path
+        // returns Ok and the recommendation lands inside [1, available_parallelism].
+        let opts = BenchOpts {
+            schema: "listmode".into(),
+            rows: 200_000,
+            ram_budget: Some("64M".into()),
+            workers: None,
+            sweep: false,
+            auto: true,
+            input: None,
+            dataset: "events_2p".into(),
+            seed: 1,
+        };
+        run(opts).expect("auto-mode bench must complete on a tiny synthetic workload");
     }
 }

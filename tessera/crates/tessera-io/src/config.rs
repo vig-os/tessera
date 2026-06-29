@@ -55,6 +55,49 @@ impl WriteConfig {
         }
     }
 
+    /// Pick a worker count from the **measured** read-side rate (bytes/s producer) vs the
+    /// **measured** per-core encode rate (bytes/s/core). The ingest pipeline is
+    /// `producer(read+transpose) → N encode workers`, so throughput ≈
+    /// `min(read_rate, workers × per_core_encode_rate)`; past
+    /// `workers = ceil(read_rate / per_core_encode_rate)`, extra workers just sit idle (and grow
+    /// the in-flight ring's peak RAM) for zero gain. This computes that knee:
+    /// `workers = clamp(ceil(read / per_core).max(1), 1, available_parallelism())`. The
+    /// `ram_budget` keeps the [`for_system`] default.
+    ///
+    /// Storage tier shapes the answer. Slow read (e.g. cold HDD ~200 MB/s) → **read-bound** → few
+    /// workers, since extra cores would starve at the read floor. Fast/cached read (≫ 1 GB/s) →
+    /// **encode-bound** → workers up to the box's parallelism, where the encode pipeline itself
+    /// saturates.
+    ///
+    /// This is a STARTING recommendation. The model assumes ~linear parallel scaling across
+    /// encode workers; real saturation is usually a bit lower (committer + fragment-I/O overhead),
+    /// so the recommendation may slightly over-provision relative to the empirically observed
+    /// knee. That's honest — better to feed the encode side and let one worker idle than to
+    /// under-provision and leave the read pipe waiting.
+    ///
+    /// Degenerate inputs (`0`, negative, NaN, infinite) fall back to [`for_system`] — the
+    /// pure-defaults answer — so a measurement glitch can't poison the engine.
+    pub fn balanced(read_bytes_per_s: f64, per_core_encode_bytes_per_s: f64) -> WriteConfig {
+        let base = WriteConfig::for_system();
+        if !read_bytes_per_s.is_finite()
+            || !per_core_encode_bytes_per_s.is_finite()
+            || read_bytes_per_s <= 0.0
+            || per_core_encode_bytes_per_s <= 0.0
+        {
+            return base;
+        }
+        let max = base.worker_count();
+        let ratio = read_bytes_per_s / per_core_encode_bytes_per_s;
+        let ceil = ratio.ceil();
+        // Clamp to a safe usize range before casting (ratio could exceed usize::MAX on huge
+        // read rates — saturate rather than wrap).
+        let recommended_f = ceil.clamp(1.0, max as f64);
+        // recommended_f is finite + in [1, max] — `as usize` is well-defined here.
+        let recommended = recommended_f as usize;
+        let workers = recommended.clamp(1, max.max(1));
+        base.workers(workers)
+    }
+
     /// Set the encode-thread pool size (clamped to ≥ 1).
     pub fn workers(mut self, n: usize) -> Self {
         self.workers = n.max(1);
@@ -221,6 +264,92 @@ mod tests {
         assert!(parse_byte_size("abc").is_err());
         assert!(parse_byte_size("12X").is_err());
         assert!(parse_byte_size("-1G").is_err());
+    }
+
+    #[test]
+    fn balanced_slow_read_recommends_few_workers() {
+        // Cold HDD ~200 MB/s, per-core encode ~100 MB/s → ceil(2.0) = 2 workers → "read-bound, few
+        // workers", since extra cores would starve at the 200 MB/s floor.
+        let read = 200.0 * 1e6;
+        let per_core = 100.0 * 1e6;
+        let cfg = WriteConfig::balanced(read, per_core);
+        let max = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let expected = 2usize.min(max).max(1);
+        assert_eq!(cfg.worker_count(), expected);
+        assert_eq!(cfg.ram_budget_bytes(), DEFAULT_RAM_BUDGET);
+    }
+
+    #[test]
+    fn balanced_fast_read_clamps_to_available_parallelism() {
+        // Fast/cached source (≫ all cores × per-core encode rate) → ratio ≫ cores → the
+        // recommendation must clamp to available_parallelism() (the box's encode ceiling). We
+        // pick `read = (max + 100) * per_core` so the unclamped ceil exceeds `max` by a wide
+        // margin on any host the test runs on (laptop or 88-core dev box).
+        let max = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let per_core = 95.0 * 1e6;
+        let read = (max as f64 + 100.0) * per_core;
+        let cfg = WriteConfig::balanced(read, per_core);
+        assert_eq!(cfg.worker_count(), max);
+    }
+
+    #[test]
+    fn balanced_degenerate_inputs_fall_back_to_for_system() {
+        let base = WriteConfig::for_system();
+        // Zero on either side → fall back to defaults (a measurement glitch can't poison config).
+        assert_eq!(
+            WriteConfig::balanced(0.0, 100.0).worker_count(),
+            base.worker_count()
+        );
+        assert_eq!(
+            WriteConfig::balanced(100.0, 0.0).worker_count(),
+            base.worker_count()
+        );
+        // Negative values are nonsensical — same fallback.
+        assert_eq!(
+            WriteConfig::balanced(-1.0, 100.0).worker_count(),
+            base.worker_count()
+        );
+        // NaN / infinities are not finite → fall back.
+        assert_eq!(
+            WriteConfig::balanced(f64::NAN, 100.0).worker_count(),
+            base.worker_count()
+        );
+        assert_eq!(
+            WriteConfig::balanced(100.0, f64::NAN).worker_count(),
+            base.worker_count()
+        );
+        assert_eq!(
+            WriteConfig::balanced(f64::INFINITY, 100.0).worker_count(),
+            base.worker_count()
+        );
+        assert_eq!(
+            WriteConfig::balanced(100.0, f64::INFINITY).worker_count(),
+            base.worker_count()
+        );
+    }
+
+    #[test]
+    fn balanced_ceil_and_floor_at_boundary() {
+        let max = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        // Tiny read rate (1 byte/s) vs huge encode (1 GB/s) → ratio ≪ 1, clamped to floor = 1.
+        let cfg = WriteConfig::balanced(1.0, 1.0e9);
+        assert_eq!(cfg.worker_count(), 1, "floor: workers always ≥ 1");
+        // Just over an integer: 100 + epsilon → ceil = 101 → clamped to max.
+        let cfg = WriteConfig::balanced(100.0 * 1e6 + 1.0, 1e6);
+        assert_eq!(
+            cfg.worker_count(),
+            101usize.min(max),
+            "ceil rounds up; clamps to max"
+        );
+        // Exact integer ratio: 4.0 → ceil = 4 (no extra worker requested).
+        let cfg = WriteConfig::balanced(400.0 * 1e6, 100.0 * 1e6);
+        assert_eq!(cfg.worker_count(), 4usize.min(max));
     }
 
     #[test]

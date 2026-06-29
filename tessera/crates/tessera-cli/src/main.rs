@@ -83,14 +83,19 @@ enum BenchAction {
         /// RAM ceiling for the in-flight encode ring (accepts `512M` / `1G` / `8GiB`). Defaults to 1 GiB.
         #[arg(long)]
         ram_budget: Option<String>,
-        /// Encode-thread pool (single run). Mutually advisory with `--sweep`; without either,
-        /// defaults to `available_parallelism()`.
-        #[arg(long, conflicts_with = "sweep")]
+        /// Encode-thread pool (single run). Mutually advisory with `--sweep`/`--auto`; without
+        /// any of them, defaults to `available_parallelism()`.
+        #[arg(long, conflicts_with_all = ["sweep", "auto"])]
         workers: Option<usize>,
         /// Sweep workers 1,2,4,8,… up to `available_parallelism` and print a table — the
         /// "size your system" mode.
-        #[arg(long, conflicts_with = "workers")]
+        #[arg(long, conflicts_with_all = ["workers", "auto"])]
         sweep: bool,
+        /// Warmup-measure read+transpose vs per-core encode rate, ask the `balanced` heuristic
+        /// (ADR-0034) for the worker knee, then run ONCE at that recommendation. The
+        /// "adaptive thread allocator" mode — picks the knee, not max-cores.
+        #[arg(long, conflicts_with_all = ["workers", "sweep"])]
+        auto: bool,
         /// Real listmode `.h5` to ingest (overrides synthetic data). Drives the production
         /// `stream_to_listmode_product_2p` path.
         #[arg(long)]
@@ -292,6 +297,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 ram_budget,
                 workers,
                 sweep,
+                auto,
                 input,
                 dataset,
                 seed,
@@ -301,6 +307,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 ram_budget,
                 workers,
                 sweep,
+                auto,
                 input,
                 dataset,
                 seed,
