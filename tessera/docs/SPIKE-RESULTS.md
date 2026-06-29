@@ -285,6 +285,23 @@ record widths; **events/s is exact** (rows from the sealed manifest).
   the same sub-block-compaction work ADR-0026 already defers (and which the multi-block decomposition in
   ADR-0034 §3 would also resolve). Until then: ingestible iff the *compressed* product fits in RAM.
 
+### Bottleneck = the encoder, NOT storage (read-floor probe, 2026-06-29)
+- **The wall is single-thread compute, not I/O.** `cat` of the whole 3.2 GB `.h5` = **1.63 s → 1871 MB/s**
+  (page-cached — the box has 2 TB RAM / 717 GB in cache), yet `singles` *ingest* = **54 s → ~38 MB/s**. So
+  ~1 s of the 54 is reading and ~53 s is **transpose + single-thread pcodec/Vortex compaction + the
+  fragment write/read round-trip**. Storage delivers data ~50× faster than the pipeline consumes it.
+- **HDD vs NVMe is irrelevant here, both warm AND cold.** The file lives on `/mnt/HDD` (76 TB spinning,
+  `sda1`); NVMe is available (`/mnt/SSD`, `/tmp`). Warm it's served from RAM cache; cold, even HDD
+  sequential (~200 MB/s) still far exceeds the ~38 MB/s the encoder can absorb — so moving to NVMe does
+  not move the number. **Encode is the bottleneck in every storage scenario** because pcodec/Vortex is
+  single-thread on the one canonical block.
+- **Adaptive-allocation corollary (drives the build):** the optimal `workers` depends on the
+  read:encode ratio, which the storage tier sets — a slow cold HDD (~200 MB/s) needs only ~2 encode
+  cores to keep up, a fast NVMe/cached source (≫1 GB/s) wants many. So the ingestor should *measure*
+  read-rate vs per-core encode-rate and size its encode pool to match (and put spillover cores on the
+  read/transpose front if read-bound). This is only possible once the encode is **parallelisable** — i.e.
+  once listmode is **multi-block** (ADR-0034 §3 / ADR-0026), which is the next build.
+
 # #215 — array fold: pyramid + projection are one monoid-fold-over-axes (ADR-0028)
 
 Claim: an array's multiscale pyramid AND its projections (MIP/MPR) are the *same* operation — a
