@@ -1,0 +1,158 @@
+# ADR-0036 — Versioning & audit: a content-addressed object store + git-shaped verbs
+
+Status: **Proposed** (2026-06-29) · Realizes the copy-on-write half of **ADR-0022** that was specified
+but not built. Relates ADR-0020 (identity / JCS), ADR-0028 (recursive MMR Merkle), ADR-0033
+(collections, raw/derived WORM roles), ADR-0034 (object-store range reads).
+
+## Context
+
+The user story that drives this: **the audit trail must not cost a full copy.** The prevailing
+practice — duplicate the entire dataset for every edit so there's a trail — is intolerable when a
+3 GiB PET acquisition gets a one-field metadata correction. The edit changed kilobytes; the version
+should cost kilobytes. Yet it must still be **audit-trailed and tamper-evident**, and it must still be
+possible to **re-emit a clean, self-contained `.tsra`** for publication or handover.
+
+ADR-0022 already settled the *model*: versioning is an immutable copy-on-write DAG — a new version is a
+new product carrying a `supersedes`/`derived_from` `Source` edge pinning the parent's `manifest_hash`.
+It also named an "opt-in exploded form … a new version shares unchanged block objects." But the
+exploded form as built stores blocks at **`blocks/<name>`** (keyed by *name*), so nothing is actually
+shared across versions — the CoW sharing is unrealized. This ADR pins **how** sharing works, and the
+**verbs** that operate it.
+
+A natural question is "why not just put a `.git` repo (+ git-lfs) inside the `.tsra`?" The data models
+are isomorphic — but embedding git is the wrong call (recorded below). We adopt git's *architecture*,
+not its bytes.
+
+### The four edit shapes (copy is proportional to the delta)
+
+| Edit shape | New objects | Shared | Copy cost |
+|---|---|---|---|
+| Metadata-only (fix a field, add a note) | manifest | every data block | ~KB |
+| Add a block (attach ROI / μ-map) | manifest + 1 block | all prior blocks | the new block |
+| Replace a block (re-encode / re-deidentify one) | manifest + that block | the rest | the changed block |
+| Full re-ingest (source changed) | everything | nothing | full (correct) |
+
+## Decision
+
+### 1. The repository is a content-addressed object store
+
+A Tessera **repository** is a directory or object-store prefix holding:
+
+```
+objects/<alg>/<aa>/<rest-of-hex>   # write-once content-addressed objects (blocks AND manifests)
+refs/<lineage>                     # mutable pointer: the latest version's manifest_hash for a lineage
+log/<lineage>.jsonl                # append-only audit log: one line per commit (manifest_hash, ts, op)
+```
+
+- **Objects are addressed by their existing blake3 digest** — the *same* digest already recorded in
+  `BlockRef.digest` and `manifest_hash`. No second hash is introduced. Block bytes live at
+  `objects/blake3/<first-byte-hex>/<rest>`; a manifest is itself an object (its `manifest_hash`).
+  Two-hex fan-out mirrors git's `objects/ab/cdef…` to keep directory listings bounded.
+- **Dedup is automatic and free:** identical bytes → identical digest → identical path → stored once,
+  across every version *and* every product in the repo (a shared calibration block ingested by two
+  sites is one object). This is git's "only changed blobs are stored," using the blake3 we already
+  computed at hash-on-write.
+- A **version** is a manifest object; the DAG is the `supersedes`/`derived_from` edges already inside
+  each manifest (ADR-0022). `refs/<lineage>` is the only mutable state — a tiny pointer, like git's
+  `HEAD`. `log/<lineage>.jsonl` is a redundant, append-only convenience for fast `log` without walking
+  every manifest.
+
+### 2. `commit` (= evolve) — a new version costs the delta
+
+`commit` writes the new manifest object, reusing every unchanged block by digest (already present in
+`objects/` → never rewritten), records the `supersedes` edge pinning the parent's `manifest_hash`,
+appends a `log` line, and advances `refs/<lineage>` (compare-and-set on the prior value, so concurrent
+commits to one lineage are rejected, not silently lost). A metadata-only commit writes exactly one new
+object: the manifest.
+
+### 3. The verb set — git muscle memory, Tessera semantics
+
+| git / gh | tessera | semantics |
+|---|---|---|
+| `git commit` | `tessera commit` | new version; reuse unchanged blocks by digest; advance the ref |
+| `git log` | `tessera log` | walk `supersedes` from the ref (or read `log/<lineage>.jsonl`) |
+| `git diff` | `tessera diff A B` | **structural** delta: blocks added/removed/digest-changed + metadata fields changed; **plus a lineage verdict** (does B's edge pin A's real `manifest_hash`?) |
+| `git show` | `tessera show` (today's `inspect`) | one version's manifest + blocks |
+| `git status` | `tessera status` | uncommitted changes in the working form (optional — only if staging earns its weight) |
+| `git fsck` | `tessera verify` | integrity over the object/seal DAG (exists) |
+| `git tag -s` | `tessera tag` / `sign` | name + sign a release version |
+| `git push` / `pull` | `tessera push` / `pull` | repository ⇄ OCI registry (ADR-0033 §OCI projection) |
+| `git cat-file` / `ls-tree` | `tessera read` / `ls` / `tree` | inspect objects/columns (landed) |
+| `git blame` | `tessera blame` (future) | which version introduced/changed a metadata field |
+
+### 4. `publish` (= `git archive`) and `seal` (= `git bundle`) — the two re-emit modes
+
+Both collect the blocks **reachable from one manifest** into a single self-contained `.tsra`; they
+differ only in what history travels:
+
+- **`tessera publish`** = `git archive` — **history-free**. The emitted manifest is a **fresh root**:
+  a new `id`, **no** `supersedes`/`derived_from` edges. For DOI minting / clinical handover where the
+  artifact must stand alone. *Stripping history changes identity by design* — the publication is a new
+  root, deliberately decoupled. **Policy knob (the one open decision):** default fully history-free,
+  with `--trace` adding a *single* `snapshot_of: <source manifest_hash>` breadcrumb for traceable (vs
+  blind) handover.
+- **`tessera seal`** = `git bundle` — **history-preserving**. Same self-contained `.tsra`, but it keeps
+  the `supersedes` chain (and, optionally, the ancestor manifests) so lineage travels with the data —
+  for archival where the audit DAG must not be lost.
+
+The sealed `.tsra` remains the distribution/archive unit (ADR-0022 §container, unchanged). The
+repository is the **edit substrate**; `publish`/`seal` are the bridges from one to the other.
+
+### 5. Cloud-native + WORM by construction
+
+`objects/<digest>` maps one-to-one onto an **S3 prefix**, which we already range-read and
+prune-before-fetch (ADR-0034). The repository is therefore git's model but **range-readable and
+cloud-native** — strictly better here than a delta-compressed packfile. Write-once content-addressed
+objects are inherently WORM-friendly: `Role::Raw` objects → Compliance retention, `Role::Derived` →
+Governance (ADR-0033), enforced at the storage layer with no per-block format change.
+
+### 6. Why **not** embed `.git` / git-lfs (the record)
+
+1. **Double-identity shadowing.** Git content-addresses with SHA-1 over its own object format; Tessera's
+   identity is blake3 over raw block bytes + JCS manifest (the seal, the FAIR id). Embedding git gives
+   every byte two addresses, and git's DAG identity ≠ `manifest_hash`. The most load-bearing invariant
+   in the system would fork.
+2. **git-lfs breaks self-containment.** LFS stores large files out-of-band on an LFS server, leaving
+   pointer stubs — a `.tsra` whose blocks live on an LFS server is the opposite of self-contained.
+3. **Packfiles kill range-read.** Git's delta-compressed packs are not randomly range-readable per
+   logical block; the column-level range-read + cohort prune-before-fetch win (ADR-0034) evaporates.
+4. **Archival coupling.** Pinning identity to git's on-disk format + SHA-1 + pack heuristics reintroduces
+   the external-format archival risk we hedged against (ADR-0034 / S15).
+
+The "`.gitignore` the blocks, let git track the manifest" hybrid still loses on (1) — git's SHA-1 of the
+manifest text isn't `manifest_hash` — for `log`/`diff` we can implement natively in ~one module over JCS
+manifests, operating on *real* identity with *structural* diffs. Not worth a git dependency.
+
+## Why
+
+- **Copy ∝ delta** is the whole point; content-addressed objects make a metadata edit a one-object
+  commit while keeping the trail tamper-evident (the edge pins the parent seal).
+- **Reuse, don't reinvent, the proven idea** (git's content-addressed store + commit DAG) while keeping
+  **our** identity, range-readability, and archival guarantees.
+- **Muscle memory:** because the models are isomorphic, `commit`/`log`/`diff`/`archive`/`bundle` teach
+  themselves — and the two re-emit modes you need map *exactly* onto `git archive` (clean) vs
+  `git bundle` (with history).
+- **Almost entirely already built:** BlockRef digests, `manifest_hash`, the `supersedes` DAG, the
+  collection MMR, and the object-store range reader all exist. New machinery = the `objects/<digest>`
+  layout + a ref + the verb shell.
+
+## Consequences
+
+- **No manifest format change.** Versioning rides existing fields (`Source` edges + `manifest_hash`).
+  New is the repository *layout* (`objects/`/`refs/`/`log/`) + the verbs — additive, in `tessera-io`
+  (store) + `tessera-cli` (verbs).
+- **The exploded form of ADR-0022 is refined:** blocks move from `blocks/<name>` → `objects/<digest>`
+  in the *repository* form. The sealed `.tsra` keeps `blocks/<name>` internally (a self-contained
+  archive has no need to dedup across versions); `publish`/`seal` translate between them.
+- **Determinism preserved:** objects are content-addressed, so a repository is reproducible; a re-`seal`
+  of the same version yields byte-identical `.tsra` (S15 determinism extends to the round-trip).
+- **`publish` changes identity** (new root id) — intended; record the trade in operator docs so a
+  history-free publication is never mistaken for the same product as its source.
+- **Branch / merge are explicitly out of scope.** Tessera versioning is linear supersession + the
+  derivation DAG (collections); there is no content merge. `refs` are single-lineage pointers, not
+  branches. Revisit only if a real divergence workflow appears.
+- **Staging (`add`/`status`) is optional** — included only if a working-tree/index step proves it earns
+  its weight; the default path is edit → `commit` directly.
+- **Open:** (1) `publish` default — fully history-free vs the `--trace` `snapshot_of` breadcrumb;
+  (2) garbage collection / retention for unreachable objects (a `tessera gc` walking refs, honoring WORM
+  holds); (3) whether `log/<lineage>.jsonl` is canonical or a pure cache rebuildable from the manifests.

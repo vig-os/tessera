@@ -45,6 +45,13 @@ The same logical tree may live **unzipped as an object-store prefix** (`s3://buc
 unchanged block objects). Sealing/distribution then re-wraps into one `.tsra`, or ships the prefix as an
 **OCI artifact** (manifest.json ≈ the OCI config; blocks ≈ layers) for registry distribution.
 
+> **Extended by [ADR-0036](0036-versioning-audit-object-store.md) (2026-06-29):** the copy-on-write
+> "shares unchanged block objects" claim above is *realized* by making the repository form
+> **content-addressed** — blocks live at `objects/<digest>` (not `blocks/<name>`) so dedup across
+> versions is automatic — plus a `refs` pointer and git-shaped verbs (`commit`/`log`/`diff`, and
+> `publish`=`git archive` history-free vs `seal`=`git bundle` history-preserving). The sealed `.tsra`
+> is unchanged.
+
 ## Consequences
 - Read path (P2) can be specified against a concrete, range-readable layout.
 - Versioning needs no new format field — it rides `sources` + `manifest_hash`, already present.
