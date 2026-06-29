@@ -17,6 +17,8 @@ pub mod container;
 pub mod multiblock;
 pub mod oci;
 pub mod range;
+#[cfg(feature = "cloud")]
+pub mod registry;
 pub mod repo;
 pub mod sign;
 pub mod stream;
@@ -35,6 +37,8 @@ pub use config::{parse_byte_size, WriteConfig, DEFAULT_RAM_BUDGET};
 pub use container::{pack, pack_dir, pack_streaming, unpack, BlockPayload, Reader, MIMETYPE};
 pub use multiblock::{ColumnBlockIter, LogicalTableView};
 pub use range::CountingReader;
+#[cfg(feature = "cloud")]
+pub use registry::{pull as registry_pull, push as registry_push};
 pub use repo::{GcReport, LogEntry, Repository};
 pub use sign::{sign_tsra, verify_tsra};
 pub use stream::{array_job, table_job, table_job_from_fragments, EncodeJob, StreamWriter};

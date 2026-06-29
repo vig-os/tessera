@@ -35,9 +35,12 @@ sha2.workspace = true   # sha256 digests for OCI artifact descriptors (tessera_i
 # legitimate tokio use per ADR-0034 §4: latency-bound network I/O behind the sync surface).
 object_store = { version = "0.14", default-features = false, features = ["aws", "http"], optional = true }
 tokio = { version = "1", features = ["rt", "net", "time"], optional = true }
+# In-Rust OCI distribution client (push/pull a .tsra to/from a registry). `blocking` keeps the CLI
+# verbs synchronous (reqwest spins its own runtime internally — no tokio coloring of our API).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"], optional = true }
 
 [features]
-cloud = ["dep:object_store", "dep:tokio"]
+cloud = ["dep:object_store", "dep:tokio", "dep:reqwest"]
 
 [dev-dependencies]
 tempfile = "3"

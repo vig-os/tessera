@@ -72,6 +72,16 @@
             cp target/release/libtessera.so $out/lib/tessera.so
           '';
         });
+
+        # Cloud-featured `tessera` binary for the registry round-trip check (pulls reqwest — the
+        # in-Rust OCI distribution client). Shares cargoArtifacts; the cloud-only crates build on top
+        # (same pattern as `minio-range-read`).
+        tessera-cli-cloud = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "tessera-cli-cloud";
+          cargoExtraArgs = "-p tessera-cli --features cloud";
+          doCheck = false;
+        });
       in
       {
         # guardrails.mkDevShell brings the governance toolbelt (prek + gates + gitleaks +
@@ -232,6 +242,39 @@
             echo "$M" | grep -q 'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'  # OCI empty config
             mkdir out && oras pull --plain-http 127.0.0.1:5050/tessera/recon:v1 -o out
             cmp p.tsra out/p.tsra
+            touch $out
+          '';
+
+          # **In-Rust OCI registry push/pull** (the `tessera push`/`pull` distribution client — NOT
+          # oras): a cloud-featured `tessera` binary pushes a corpus `.tsra` to a loopback
+          # `distribution` registry as an OCI artifact (reqwest blob-upload + manifest PUT), then
+          # pulls it back (manifest GET → sha256-verified blob GET) byte-for-byte and verifies the
+          # seal. Complements `oci-roundtrip` (which proves the manifest *shape* via oras) by proving
+          # our actual transport client end to end.
+          registry-roundtrip = pkgs.runCommand "registry-roundtrip"
+            {
+              nativeBuildInputs = [ pkgs.distribution pkgs.curl ];
+              # reqwest's client builder loads the system CA store even for a plain-http loopback
+              # target (same as `minio-range-read`); point it at the nixpkgs bundle.
+              SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+            } ''
+            export HOME=$TMPDIR
+            cat > $TMPDIR/config.yml <<EOF
+            version: 0.1
+            storage:
+              filesystem:
+                rootdirectory: $TMPDIR/data
+            http:
+              addr: 127.0.0.1:5055
+            EOF
+            registry serve $TMPDIR/config.yml > $TMPDIR/reg.log 2>&1 &
+            for i in $(seq 1 80); do curl -sf http://127.0.0.1:5055/v2/ > /dev/null && break; sleep 0.25; done
+            cp ${./tessera/corpus/files}/recon_int16.tsra $TMPDIR/p.tsra
+            cd $TMPDIR
+            ${tessera-cli-cloud}/bin/tessera push p.tsra 127.0.0.1:5055/tessera/recon:v1 --plain-http
+            ${tessera-cli-cloud}/bin/tessera pull 127.0.0.1:5055/tessera/recon:v1 out.tsra --plain-http
+            ${tessera-cli-cloud}/bin/tessera verify out.tsra
+            cmp p.tsra out.tsra
             touch $out
           '';
 

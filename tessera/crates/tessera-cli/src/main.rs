@@ -179,6 +179,38 @@ enum Cmd {
     Forget { repo: PathBuf, lineage: String },
     /// Reclaim objects unreachable from any ref (run after `forget`).
     Gc { repo: PathBuf },
+    /// Push a sealed `.tsra` to an OCI registry as an artifact (in-Rust client; needs `--features cloud`).
+    Push {
+        /// The sealed `.tsra` to push.
+        file: PathBuf,
+        /// Registry reference: `[oci://]host[:port]/repo:tag`.
+        reference: String,
+        /// Use plain HTTP (self-hosted / CI registries) instead of HTTPS.
+        #[arg(long)]
+        plain_http: bool,
+        /// Basic-auth username (password via `--password`).
+        #[arg(long)]
+        username: Option<String>,
+        /// Basic-auth password.
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Pull a `.tsra` OCI artifact from a registry (sha256-verified; needs `--features cloud`).
+    Pull {
+        /// Registry reference: `[oci://]host[:port]/repo:tag`.
+        reference: String,
+        /// Output `.tsra` path.
+        out: PathBuf,
+        /// Use plain HTTP instead of HTTPS.
+        #[arg(long)]
+        plain_http: bool,
+        /// Basic-auth username.
+        #[arg(long)]
+        username: Option<String>,
+        /// Basic-auth password.
+        #[arg(long)]
+        password: Option<String>,
+    },
     /// Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`).
     Unpack { file: PathBuf, outdir: PathBuf },
     /// Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`.
@@ -496,6 +528,20 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             let mut w = std::io::stdout().lock();
             version::gc(&repo, &mut w)
         }
+        Cmd::Push {
+            file,
+            reference,
+            plain_http,
+            username,
+            password,
+        } => do_push(&file, &reference, plain_http, username, password),
+        Cmd::Pull {
+            reference,
+            out,
+            plain_http,
+            username,
+            password,
+        } => do_pull(&reference, &out, plain_http, username, password),
         Cmd::Unpack { file, outdir } => {
             let m = unpack(&file, &outdir)?;
             println!(
@@ -663,6 +709,65 @@ fn parse_row_range(s: &str) -> tessera_core::Result<(u64, u64)> {
         )));
     }
     Ok((lo, hi))
+}
+
+/// `tessera push` — with the `cloud` feature, runs the in-Rust OCI distribution client; without it,
+/// a clear "rebuild with --features cloud" error (the registry transport pulls reqwest).
+#[cfg(feature = "cloud")]
+fn do_push(
+    file: &std::path::Path,
+    reference: &str,
+    plain_http: bool,
+    username: Option<String>,
+    password: Option<String>,
+) -> tessera_core::Result<()> {
+    let auth = username.map(|u| (u, password.unwrap_or_default()));
+    let pushed = tessera_io::registry_push(file, reference, plain_http, auth)?;
+    println!("pushed {} -> {pushed}", file.display());
+    Ok(())
+}
+
+#[cfg(not(feature = "cloud"))]
+fn do_push(
+    _file: &std::path::Path,
+    _reference: &str,
+    _plain_http: bool,
+    _username: Option<String>,
+    _password: Option<String>,
+) -> tessera_core::Result<()> {
+    Err(tessera_core::Error::Invalid(
+        "push requires the `cloud` feature — rebuild: cargo build -p tessera-cli --features cloud"
+            .into(),
+    ))
+}
+
+/// `tessera pull` — mirror of [`do_push`] for the pull side.
+#[cfg(feature = "cloud")]
+fn do_pull(
+    reference: &str,
+    out: &std::path::Path,
+    plain_http: bool,
+    username: Option<String>,
+    password: Option<String>,
+) -> tessera_core::Result<()> {
+    let auth = username.map(|u| (u, password.unwrap_or_default()));
+    tessera_io::registry_pull(reference, out, plain_http, auth)?;
+    println!("pulled {reference} -> {}", out.display());
+    Ok(())
+}
+
+#[cfg(not(feature = "cloud"))]
+fn do_pull(
+    _reference: &str,
+    _out: &std::path::Path,
+    _plain_http: bool,
+    _username: Option<String>,
+    _password: Option<String>,
+) -> tessera_core::Result<()> {
+    Err(tessera_core::Error::Invalid(
+        "pull requires the `cloud` feature — rebuild: cargo build -p tessera-cli --features cloud"
+            .into(),
+    ))
 }
 
 /// Build a 1-product [`ingest_spec::IngestSpec`] from a per-format CLI subcommand + run it through
