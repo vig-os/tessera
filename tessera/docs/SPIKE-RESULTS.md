@@ -323,6 +323,23 @@ record widths; **events/s is exact** (rows from the sealed manifest).
   in-flight blocks. So the *right* `workers` is the saturation knee, and that knee moves with the
   read:encode ratio (storage tier). The clever ingestor should pick it, not max out cores. → **Phase C**.
 
+### Phase C — `--auto` adaptive allocator picks the knee on real storage (`541180b`)
+`tessera bench write --input singles --auto` warmup-measures the producer (read+transpose) rate and one
+worker's per-core encode rate, then `WriteConfig::balanced` recommends `ceil(read / per_core)` workers:
+```
+  measured read ≈ 213.9 MB/s, encode ≈ 187.5 MB/s/core → recommend 2 workers (storage is read-bound)
+        2 |     12536523 events/s  |     213.1 MB/s |  257.1 MiB
+```
+- **The allocator sized to the storage tier, not the box.** Measured *producer* rate is **214 MB/s** (the
+  real read+transpose floor — note: NOT the 1871 MB/s cached `cat`, because the producer also transposes
+  AoS→SoA on the CPU), so it picked **2 workers** — `ceil(214 / 187.5)`. More cores would starve at the
+  read floor.
+- **Same throughput, a fraction of the resources.** 2 workers hit **12.5 M events/s @ 257 MiB** — within
+  ~16 % of the 88-worker peak (14.9 M) but with **15× less RAM (257 MiB vs 3.87 GiB) and 2 cores vs 88**.
+  On a faster/cached tier the same heuristic recommends more workers (the synthetic warm path measured
+  ~1185 MB/s → 9 workers). The knee tracks the storage; the operator doesn't guess. **The full program —
+  multi-block (parallel + constant-memory) + adaptive allocation — is delivered and measured on real data.**
+
 # #215 — array fold: pyramid + projection are one monoid-fold-over-axes (ADR-0028)
 
 Claim: an array's multiscale pyramid AND its projections (MIP/MPR) are the *same* operation — a
