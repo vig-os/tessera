@@ -133,6 +133,13 @@ enum Cmd {
         /// Metadata field to set, `key=value` (value parsed as JSON, else a bare string). Repeatable.
         #[arg(long = "set")]
         set: Vec<String>,
+        /// Attach an already-encoded block from another `.tsra`: `[NAME=]SOURCE.tsra:BLOCK`
+        /// (composition, not encoding). Repeatable.
+        #[arg(long = "add-block")]
+        add_block: Vec<String>,
+        /// Remove a block by name (manifest edit; the object stays for other versions). Repeatable.
+        #[arg(long = "remove-block")]
+        remove_block: Vec<String>,
     },
     /// Show a lineage's version history (newest first).
     Log { repo: PathBuf, lineage: String },
@@ -424,9 +431,15 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             let mut out = std::io::stdout().lock();
             version::import(&repo, &file, &mut out)
         }
-        Cmd::Commit { repo, lineage, set } => {
+        Cmd::Commit {
+            repo,
+            lineage,
+            set,
+            add_block,
+            remove_block,
+        } => {
             let mut out = std::io::stdout().lock();
-            version::commit(&repo, &lineage, &set, &mut out)
+            version::commit(&repo, &lineage, &set, &add_block, &remove_block, &mut out)
         }
         Cmd::Log { repo, lineage } => {
             let mut out = std::io::stdout().lock();

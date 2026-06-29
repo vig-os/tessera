@@ -143,6 +143,14 @@ manifests, operating on *real* identity with *structural* diffs. Not worth a git
 
 ## Consequences
 
+- **Two tiers — composition (file i/o) vs encoding (extra handling).** The entire versioning/repo
+  layer is pure object-store + zip file-i/o over **already-encoded, already-digested** blocks — no
+  codec ever runs: `import`/`seal`/`publish` read & pack existing block bytes; `commit --set` and
+  `--remove-block` only write a new manifest object; `commit --add-block [N=]SRC.tsra:BLK` *copies* an
+  encoded block from another `.tsra` (store the object if absent + add a `BlockRef`). **Encoding raw
+  data into a block** (array→zarr/pcodec, table→Vortex, with dtype/shape) is the "extra handling" tier
+  and belongs to `ingest`/`pack`, deliberately kept out of the versioning layer (single responsibility).
+  To version in freshly-computed data, encode it once (build/ingest a `.tsra`) then `--add-block` it.
 - **No manifest format change.** Versioning rides existing fields (`Source` edges + `manifest_hash`).
   New is the repository *layout* (`objects/`/`refs/`/`log/`) + the verbs — additive, in `tessera-io`
   (store) + `tessera-cli` (verbs).

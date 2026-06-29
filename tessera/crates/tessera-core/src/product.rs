@@ -72,6 +72,15 @@ impl ProductBuilder {
         self
     }
 
+    /// Remove a block reference by name (used by `commit --remove-block`). Returns `true` if one was
+    /// removed. This is a manifest edit only — the block's stored object is untouched, since other
+    /// versions may still reference it (a repository `gc` reclaims unreachable objects later).
+    pub fn remove_block(&mut self, name: &str) -> bool {
+        let before = self.refs.len();
+        self.refs.retain(|r| r.name != name);
+        self.refs.len() != before
+    }
+
     /// Record a provenance edge to an upstream artifact.
     pub fn add_source(&mut self, source: Source) -> &mut Self {
         self.manifest.sources.push(source);

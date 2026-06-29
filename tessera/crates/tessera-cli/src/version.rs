@@ -39,12 +39,30 @@ pub fn import(repo: &Path, tsra: &Path, out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
-/// `tessera commit REPO LINEAGE --set k=v …` — mint a new version with a metadata delta, reusing
-/// every unchanged block (copy ∝ delta). The new manifest carries a `supersedes` edge to the prior tip.
-pub fn commit(repo: &Path, lineage: &str, sets: &[String], out: &mut dyn Write) -> Result<()> {
-    if sets.is_empty() {
+/// `tessera commit REPO LINEAGE [--set k=v] [--add-block …] [--remove-block N]` — mint a new version
+/// with a delta, reusing every unchanged block (copy ∝ delta). The new manifest carries a `supersedes`
+/// edge to the prior tip.
+///
+/// All three deltas are **pure object-store + manifest work over already-encoded blocks** — no codec
+/// runs in the versioning layer:
+/// - `--set k=v` — write one new manifest object (metadata).
+/// - `--remove-block N` — drop a `BlockRef` (manifest edit; the object stays for other versions).
+/// - `--add-block [N=]SRC.tsra:BLK` — copy an already-encoded + digested block from another `.tsra`
+///   (store the object if absent + add a `BlockRef`). Composition, **not** encoding.
+///
+/// Encoding *raw* data into a new block (array→zarr/pcodec, table→Vortex) is `ingest`/`pack`'s job —
+/// the "extra handling" tier, deliberately kept out of the versioning layer.
+pub fn commit(
+    repo: &Path,
+    lineage: &str,
+    sets: &[String],
+    adds: &[String],
+    removes: &[String],
+    out: &mut dyn Write,
+) -> Result<()> {
+    if sets.is_empty() && adds.is_empty() && removes.is_empty() {
         return Err(Error::Invalid(
-            "commit: nothing to change — pass at least one --set key=value".into(),
+            "commit: nothing to change — pass --set / --add-block / --remove-block".into(),
         ));
     }
     let repo = Repository::open(repo)?;
@@ -54,26 +72,91 @@ pub fn commit(repo: &Path, lineage: &str, sets: &[String], out: &mut dyn Write) 
         ))
     })?;
     let parent = repo.get_manifest(&tip)?;
-
     let mut b = ProductBuilder::from_manifest(&parent);
+
+    // Track live block names so a duplicate `--add-block` is rejected (start from the parent's blocks).
+    let mut names: std::collections::BTreeSet<String> =
+        parent.blocks.iter().map(|bl| bl.name.clone()).collect();
+
+    // Removes first — manifest edit only; the data object is left for other versions / gc.
+    for name in removes {
+        if !b.remove_block(name) {
+            return Err(Error::Invalid(format!(
+                "--remove-block: no block '{name}' in this version"
+            )));
+        }
+        names.remove(name);
+    }
+
+    // Adds — copy an already-encoded block from another .tsra (file i/o, no re-encode).
+    let mut payloads = Vec::new();
+    for spec in adds {
+        let (new_ref, payload) = load_block(spec)?;
+        if !names.insert(new_ref.name.clone()) {
+            return Err(Error::Invalid(format!(
+                "--add-block: a block named '{}' already exists (rename, or --remove-block it first)",
+                new_ref.name
+            )));
+        }
+        b.add_block_ref(new_ref);
+        payloads.push(payload);
+    }
+
+    // Metadata sets.
     for kv in sets {
         let (k, v) = kv
             .split_once('=')
             .ok_or_else(|| Error::Invalid(format!("--set expects key=value, got '{kv}'")))?;
-        // Parse the value as JSON (numbers/bools/objects), falling back to a bare string.
         let value =
             serde_json::from_str::<Value>(v).unwrap_or_else(|_| Value::String(v.to_string()));
         b.with_field(k, value);
     }
+
     b.add_source(Source::new("supersedes", &tip).with_content_hash(&tip));
     let new_manifest = b.seal()?;
-    // Metadata-only: supply no payloads — every block is already stored from the parent.
-    let mh = repo.commit(lineage, &new_manifest, &[])?;
+    // commit stores the new block payloads content-addressed (dedup if already present) + the manifest.
+    let mh = repo.commit(lineage, &new_manifest, &payloads)?;
 
     writeln!(out, "committed {lineage}").map_err(Error::from)?;
     writeln!(out, "  version    {mh}").map_err(Error::from)?;
     writeln!(out, "  supersedes {tip}").map_err(Error::from)?;
+    if !payloads.is_empty() || !removes.is_empty() {
+        writeln!(out, "  blocks     +{} -{}", payloads.len(), removes.len())
+            .map_err(Error::from)?;
+    }
     Ok(())
+}
+
+/// Load an already-encoded block from another sealed `.tsra` for `--add-block`. `spec` is
+/// `[NEWNAME=]SOURCE.tsra:SRCBLOCK`; the block's bytes (digest-verified on read) and its descriptor
+/// (kind/digest/spec) are copied verbatim — no re-encoding.
+fn load_block(spec: &str) -> Result<(tessera_core::block::BlockRef, BlockPayload)> {
+    let (newname, locator) = match spec.split_once('=') {
+        Some((n, rest)) => (Some(n), rest),
+        None => (None, spec),
+    };
+    let (path, srcblock) = locator.rsplit_once(':').ok_or_else(|| {
+        Error::Invalid(format!(
+            "--add-block expects [NAME=]SOURCE.tsra:BLOCK, got '{spec}'"
+        ))
+    })?;
+    let newname = newname.unwrap_or(srcblock).to_string();
+    let mut r = Reader::open(Path::new(path))?;
+    let src_ref = r
+        .manifest()
+        .blocks
+        .iter()
+        .find(|b| b.name == srcblock)
+        .ok_or_else(|| Error::Invalid(format!("no block '{srcblock}' in {path}")))?
+        .clone();
+    let bytes = r.read_block(srcblock)?; // digest-verified on read
+    let new_ref = tessera_core::block::BlockRef {
+        name: newname.clone(),
+        kind: src_ref.kind,
+        digest: src_ref.digest,
+        spec: src_ref.spec,
+    };
+    Ok((new_ref, BlockPayload::new(newname, bytes)))
 }
 
 /// `tessera log REPO LINEAGE` — the lineage's versions, newest first.
@@ -299,6 +382,25 @@ mod tests {
         pack(&sealed, &[payload], path).unwrap();
     }
 
+    /// A sealed `.tsra` carrying one named table block (a distinct block to compose via --add-block).
+    fn write_block_tsra(path: &Path, block: &str, vals: &[u32]) {
+        let spec = TableSpec {
+            columns: vec![Column {
+                name: "v".into(),
+                dtype: "u4".into(),
+                codec: None,
+            }],
+            rows: u64::try_from(vals.len()).unwrap(),
+            row_index: None,
+        };
+        let data = vec![("v".into(), ColumnData::U32(vals.to_vec()))];
+        let (br, payload) = table_block(block, &spec, &data).unwrap();
+        let mut b = PB::new("recon", "DP06-roi", "roi", "2024-01-01T00:00:00Z");
+        b.add_block_ref(br);
+        let sealed = b.seal().unwrap();
+        pack(&sealed, &[payload], path).unwrap();
+    }
+
     fn count_objects(root: &Path) -> usize {
         fn rec(d: &Path) -> usize {
             let mut n = 0;
@@ -338,7 +440,15 @@ mod tests {
         let after_import = count_objects(&repo); // 1 block + 1 manifest = 2
 
         // metadata-only commit → exactly ONE new object (the manifest); block reused
-        commit(&repo, &lineage, &["tracer=FLT".into()], &mut Vec::new()).unwrap();
+        commit(
+            &repo,
+            &lineage,
+            &["tracer=FLT".into()],
+            &[],
+            &[],
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert_eq!(
             count_objects(&repo),
             after_import + 1,
@@ -365,7 +475,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         init(&repo, &mut Vec::new()).unwrap();
-        let err = commit(&repo, "blake3:nope", &["a=b".into()], &mut Vec::new()).unwrap_err();
+        let err = commit(
+            &repo,
+            "blake3:nope",
+            &["a=b".into()],
+            &[],
+            &[],
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert!(format!("{err}").contains("no lineage"));
     }
 
@@ -384,7 +502,15 @@ mod tests {
             .find_map(|l| l.strip_prefix("imported lineage "))
             .unwrap()
             .to_string();
-        commit(&repo, &lineage, &["tracer=FLT".into()], &mut Vec::new()).unwrap();
+        commit(
+            &repo,
+            &lineage,
+            &["tracer=FLT".into()],
+            &[],
+            &[],
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         let r = Repository::open(&repo).unwrap();
         let tip = r.read_ref(&lineage).unwrap().unwrap();
@@ -421,7 +547,15 @@ mod tests {
             .find_map(|l| l.strip_prefix("imported lineage "))
             .unwrap()
             .to_string();
-        commit(&repo, &lineage, &["tracer=FLT".into()], &mut Vec::new()).unwrap();
+        commit(
+            &repo,
+            &lineage,
+            &["tracer=FLT".into()],
+            &[],
+            &[],
+            &mut Vec::new(),
+        )
+        .unwrap();
         let r = Repository::open(&repo).unwrap();
         let tip = r.read_ref(&lineage).unwrap().unwrap();
 
@@ -467,5 +601,65 @@ mod tests {
             sm.sources.iter().any(|s| s.role == "supersedes"),
             "seal preserves history"
         );
+    }
+
+    #[test]
+    fn commit_add_block_composes_and_remove_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let p1 = dir.path().join("p1.tsra");
+        let p2 = dir.path().join("p2.tsra");
+        write_tsra(&p1); // "listmode" with an "events" block
+        write_block_tsra(&p2, "roi", &[9, 8]); // a distinct "roi" block to attach
+        init(&repo, &mut Vec::new()).unwrap();
+        let mut ibuf = Vec::new();
+        import(&repo, &p1, &mut ibuf).unwrap();
+        let lineage = String::from_utf8(ibuf)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("imported lineage "))
+            .unwrap()
+            .to_string();
+        let before = count_objects(&repo);
+
+        // --add-block roi=<p2>:roi — attach the already-encoded block (file i/o, no re-encode).
+        let add = format!("roi={}:roi", p2.to_str().unwrap());
+        commit(&repo, &lineage, &[], &[add], &[], &mut Vec::new()).unwrap();
+        assert_eq!(
+            count_objects(&repo),
+            before + 2,
+            "the roi block object + the new manifest"
+        );
+
+        let r = Repository::open(&repo).unwrap();
+        let tip = r.read_ref(&lineage).unwrap().unwrap();
+        let m = r.get_manifest(&tip).unwrap();
+        assert!(m.blocks.iter().any(|b| b.name == "events"));
+        let roi = m.blocks.iter().find(|b| b.name == "roi").unwrap();
+        r.read_object(roi.digest.as_deref().unwrap()).unwrap(); // roi data travelled + verifies
+
+        // --remove-block events — manifest edit only; no new data object.
+        let objs = count_objects(&repo);
+        commit(
+            &repo,
+            &lineage,
+            &[],
+            &[],
+            &["events".into()],
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            count_objects(&repo),
+            objs + 1,
+            "remove writes only the new manifest"
+        );
+        let tip2 = r.read_ref(&lineage).unwrap().unwrap();
+        let m2 = r.get_manifest(&tip2).unwrap();
+        assert!(
+            !m2.blocks.iter().any(|b| b.name == "events"),
+            "events dropped"
+        );
+        assert!(m2.blocks.iter().any(|b| b.name == "roi"), "roi remains");
     }
 }
