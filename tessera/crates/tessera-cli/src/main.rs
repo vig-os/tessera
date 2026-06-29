@@ -5,6 +5,7 @@
 //! block's stored bytes against its recorded digest.
 
 mod bench;
+mod nav;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -83,6 +84,39 @@ enum Cmd {
     ///
     /// With the `cloud` feature, `file` also accepts `s3://` / `http(s)://` URLs.
     Verify { file: PathBuf },
+    /// Render a `.tsra` as a navigable hierarchy: root status (product · schema · sealed · signed),
+    /// `meta` fields, every block with its columns / array spec, and `sources`.
+    Tree { file: PathBuf },
+    /// List one node's children. No PATH = top level (`meta`, blocks, `sources`); `PATH=meta` =
+    /// metadata fields; `PATH=<block>` = a table's columns or an array's spec; `PATH=sources` = edges.
+    Ls {
+        file: PathBuf,
+        /// Node to list (a block name, `meta`, or `sources`). Omit for the top level.
+        path: Option<String>,
+    },
+    /// Extract table data over the **logical** (cross-block) view as CSV/TSV/NDJSON — a read of
+    /// `events` spans every `events_NNNN` block, projecting only the requested columns per block.
+    Read {
+        /// The `.tsra` to read.
+        file: PathBuf,
+        /// Table block, or a multi-block prefix like `events`.
+        block: String,
+        /// Column to project (repeatable, `-c ms -c en`). Omit for all columns in schema order.
+        #[arg(long = "column", short = 'c')]
+        column: Vec<String>,
+        /// Global row range `A:B` (half-open). Overrides `--limit`.
+        #[arg(long)]
+        rows: Option<String>,
+        /// Emit every row (overrides `--limit`).
+        #[arg(long)]
+        all: bool,
+        /// Default max rows when neither `--rows` nor `--all` is given.
+        #[arg(long, default_value_t = 20)]
+        limit: u64,
+        /// Output format: `csv` (default) | `tsv` | `ndjson`.
+        #[arg(long, default_value = "csv")]
+        format: String,
+    },
     /// Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`).
     Unpack { file: PathBuf, outdir: PathBuf },
     /// Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`.
@@ -289,6 +323,49 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             println!("OK  {} verified ({n} blocks)", file.display());
             Ok(())
         }
+        Cmd::Tree { file } => {
+            let mut out = std::io::stdout().lock();
+            nav::tree(&file, &mut out)
+        }
+        Cmd::Ls { file, path } => {
+            let mut out = std::io::stdout().lock();
+            nav::ls(&file, path.as_deref(), &mut out)
+        }
+        Cmd::Read {
+            file,
+            block,
+            column,
+            rows,
+            all,
+            limit,
+            format,
+        } => {
+            let fmt = nav::Format::parse(&format)?;
+            let rows = match rows {
+                Some(s) => Some(parse_row_range(&s)?),
+                None => None,
+            };
+            let mut out = std::io::stdout().lock();
+            let res = nav::read(
+                nav::ReadOpts {
+                    file: &file,
+                    block: &block,
+                    columns: column,
+                    rows,
+                    all,
+                    limit,
+                    format: fmt,
+                },
+                &mut out,
+            )?;
+            if res.truncated {
+                eprintln!(
+                    "note: showed {} of {} rows — pass --all or --rows A:B for the rest",
+                    res.shown, res.total
+                );
+            }
+            Ok(())
+        }
         Cmd::Unpack { file, outdir } => {
             let m = unpack(&file, &outdir)?;
             println!(
@@ -435,6 +512,27 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             }),
         },
     }
+}
+
+/// Parse a `--rows A:B` half-open range for `tessera read`. Both bounds are required; `A <= B`.
+fn parse_row_range(s: &str) -> tessera_core::Result<(u64, u64)> {
+    let (a, b) = s.split_once(':').ok_or_else(|| {
+        tessera_core::Error::Invalid(format!("--rows expects A:B (half-open), got '{s}'"))
+    })?;
+    let lo: u64 = a
+        .trim()
+        .parse()
+        .map_err(|_| tessera_core::Error::Invalid(format!("--rows: bad lower bound '{a}'")))?;
+    let hi: u64 = b
+        .trim()
+        .parse()
+        .map_err(|_| tessera_core::Error::Invalid(format!("--rows: bad upper bound '{b}'")))?;
+    if hi < lo {
+        return Err(tessera_core::Error::Invalid(format!(
+            "--rows: A:B requires A <= B, got {lo}:{hi}"
+        )));
+    }
+    Ok((lo, hi))
 }
 
 /// Build a 1-product [`ingest_spec::IngestSpec`] from a per-format CLI subcommand + run it through
