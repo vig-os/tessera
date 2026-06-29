@@ -171,6 +171,15 @@ optional `row_index`.
 
 A reader MAY project a subset of columns or random-`take` rows; the format supports O(1) random access.
 
+- **Logical reads (multi-block).** The ordered sequence of `prefix` / `prefix_NNNN` blocks is one
+  **logical table**: the logical column is the ordered concatenation of the per-block columns; a
+  global row maps to a `(block, local_row)` pair via the cumulative per-block row counts (drawn
+  from each block's `TableSpec.rows` in the manifest, so the mapping needs no block read). A
+  reader MAY answer ranged queries with **block-level pruning** — the per-block `[min, max]`
+  rolled up from the block's chunk-index sidecar (§5d, no data-block bytes read), or from a
+  single column-projection scan when no sidecar is present — and skip the blocks whose
+  `[min, max]` cannot overlap the requested range.
+
 ## 5c. Referenced coordinates & quantities (ADR-0032)
 How a stored index or sample value maps to a *physical* coordinate or quantity is described by **one**
 optional descriptor — `referencing = (transform, unit, frame)` — never by bespoke per-domain fields.

@@ -14,6 +14,7 @@ pub mod collection;
 pub mod config;
 pub mod conformance;
 pub mod container;
+pub mod multiblock;
 pub mod oci;
 pub mod range;
 pub mod sign;
@@ -29,6 +30,7 @@ pub use collection::{
 };
 pub use config::{parse_byte_size, WriteConfig, DEFAULT_RAM_BUDGET};
 pub use container::{pack, pack_dir, pack_streaming, unpack, BlockPayload, Reader, MIMETYPE};
+pub use multiblock::{ColumnBlockIter, LogicalTableView};
 pub use range::CountingReader;
 pub use sign::{sign_tsra, verify_tsra};
 pub use stream::{array_job, table_job, table_job_from_fragments, EncodeJob, StreamWriter};

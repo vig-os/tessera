@@ -150,6 +150,25 @@ impl Reader {
         ))
     }
 
+    /// Decode a **single column** of the *logical* multi-block table named by `prefix`
+    /// (`events` / `events_NNNN`) — the same surface as [`Self::read_table_column`] but spanning
+    /// every block in manifest order. Each per-block read uses Vortex column projection (only the
+    /// requested column's segments), then the per-block columns are concatenated. Returns
+    /// `(le_bytes, numpy_code)`; reconstruct with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
+    fn read_logical_table_column<'py>(
+        &mut self,
+        py: Python<'py>,
+        prefix: &str,
+        column: &str,
+    ) -> PyResult<(Bound<'py, PyBytes>, String)> {
+        let view = self.inner.logical_table(prefix).map_err(err)?;
+        let c = view.column(&mut self.inner, column).map_err(err)?;
+        Ok((
+            PyBytes::new(py, &c.to_le_bytes()),
+            c.numpy_code().to_string(),
+        ))
+    }
+
     /// Full integrity pass: recompute the three-hash seal and every block digest. Raises
     /// `TesseraError` on any mismatch. Mirrors `tessera verify`.
     fn verify(&mut self) -> PyResult<()> {
