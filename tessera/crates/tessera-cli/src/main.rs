@@ -6,6 +6,7 @@
 
 mod bench;
 mod nav;
+mod version;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -117,6 +118,24 @@ enum Cmd {
         #[arg(long, default_value = "csv")]
         format: String,
     },
+    /// Initialize a content-addressed repository (`objects/` + `refs/` + `log/`) for copy-on-write
+    /// versioning (ADR-0036).
+    Init { repo: PathBuf },
+    /// Import a sealed `.tsra` into a repository as the first version of its lineage (its `id`).
+    Import { repo: PathBuf, file: PathBuf },
+    /// Commit a new version of a lineage with a metadata delta — reuses every unchanged block by
+    /// digest, so the copy is proportional to the change (a metadata edit writes one new object).
+    Commit {
+        /// The repository directory.
+        repo: PathBuf,
+        /// The lineage id (printed by `import` / `log`).
+        lineage: String,
+        /// Metadata field to set, `key=value` (value parsed as JSON, else a bare string). Repeatable.
+        #[arg(long = "set")]
+        set: Vec<String>,
+    },
+    /// Show a lineage's version history (newest first).
+    Log { repo: PathBuf, lineage: String },
     /// Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`).
     Unpack { file: PathBuf, outdir: PathBuf },
     /// Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`.
@@ -365,6 +384,22 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 );
             }
             Ok(())
+        }
+        Cmd::Init { repo } => {
+            let mut out = std::io::stdout().lock();
+            version::init(&repo, &mut out)
+        }
+        Cmd::Import { repo, file } => {
+            let mut out = std::io::stdout().lock();
+            version::import(&repo, &file, &mut out)
+        }
+        Cmd::Commit { repo, lineage, set } => {
+            let mut out = std::io::stdout().lock();
+            version::commit(&repo, &lineage, &set, &mut out)
+        }
+        Cmd::Log { repo, lineage } => {
+            let mut out = std::io::stdout().lock();
+            version::log(&repo, &lineage, &mut out)
         }
         Cmd::Unpack { file, outdir } => {
             let m = unpack(&file, &outdir)?;

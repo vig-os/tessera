@@ -14,12 +14,22 @@ fd5 is superseded by Tessera; repo renamed `vig-os/fd5`→`vig-os/tessera` (hist
 app is legacy. Recorded here for completeness; no further format impact.
 
 ### Versioning = an immutable DAG (copy-on-write)
-Products are never mutated in place. A new version is a **new product with a new `id`** carrying a
-`sources` edge to its parent: `Source { role: "supersedes" | "derived_from", reference: <parent id>,
-content_hash: <parent manifest_hash> }`. Because the edge pins the parent's `manifest_hash`, the lineage
-is a tamper-evident Merkle DAG: you can walk from any version back to the scanner-signed root and verify
-every hop. No version numbers in the format — ordering is the DAG; a human-facing `name`/`timestamp`
-disambiguates. This is fd5's `sources/` model; it composes with the integrity chain (S16).
+Products are never mutated in place. A new version carries a `sources` edge to its parent:
+`Source { role: "supersedes" | "derived_from", reference: <parent>, content_hash: <parent manifest_hash> }`.
+Because the edge pins the parent's `manifest_hash`, the lineage is a tamper-evident Merkle DAG: you can
+walk from any version back to the scanner-signed root and verify every hop. No version numbers in the
+format — ordering is the DAG; a human-facing `name`/`timestamp` disambiguates. This is fd5's `sources/`
+model; it composes with the integrity chain (S16).
+
+> **Clarified by [ADR-0036](0036-versioning-audit-object-store.md) (2026-06-29, as-built):** `id` is the
+> **stable lineage handle**, *not* per-version. `id = blake3(JCS({product, name, timestamp}))` does not
+> depend on metadata or content, so every version of a product shares one `id`; the **`manifest_hash` is
+> the version** (a citation `id@manifest_hash` pins an exact version). The original "new product with a
+> new `id`" wording is superseded by this model-A reading — it's git-like (`id`≈repo, `manifest_hash`≈sha)
+> and is what `ProductBuilder::from_manifest` + the repository implement. Accordingly, a **`supersedes`**
+> edge references the parent's `manifest_hash` (the exact prior version), while a **`derived_from`** edge
+> references a different product's `id`; the version DAG (same `id`) is walked by the repository, the
+> derivation DAG (distinct `id`s) by `provenance::verify_chain`.
 
 ### Container = a STORED zip64 archive (`.tsra`)
 The canonical sealed form is a single **ZIP (zip64) archive**, extension `.tsra`:
