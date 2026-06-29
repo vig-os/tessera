@@ -102,10 +102,15 @@ singles**). So the "RAM ceiling" this ADR named is the **compressed output block
 file far larger than RAM ingests fine *iff its compressed product fits in RAM*. Evidence + table:
 `tessera/docs/SPIKE-RESULTS.md` (#203 → DUPLET scale run).
 
-**Remaining before an Accepted flip:** (1) **true constant-memory >RAM** = the deferred **sub-block output
-streaming** (write the Vortex file to disk incrementally instead of materialising `Vec<u8>`; the same
-sub-block compaction this ADR defers, also resolved by the multi-block decomposition in ADR-0034 §3) —
-autonomously buildable but a determinism-gated encode-path change (golden-corpus regen); (2) **cross-env /
-cross-arch determinism re-validation** (dev==release==hermetic, x86==ARM — the ADR-0024 caveat; the
-x86+aarch64-linux CI matrix is now wired, needs a green ARM run). Until (1), ingest is correct +
-input-bounded and documents the compressed-output ceiling.
+**Constant-memory >RAM — DONE (2026-06-29, `c5a48a2`, multi-block decomposition / ADR-0034 §3).** A large
+listmode acquisition is now a deterministic SEQUENCE of `BLOCK_ROWS = 2²²` table blocks, parallel-encoded
+across `workers` and **streamed to disk** (the `WriteSession::seal` MUST-FIX: `pack_streaming` copies each
+block fragment into the `.tsra` via `std::io::copy` instead of `fs::read`-ing all blocks into one
+`Vec<BlockPayload>`). Re-measured DUPLET singles (294 M): **peak RAM 147 MiB @ 1 worker (was 3.63 GiB),
+bounded by workers not dataset; throughput 4.9 M→14.9 M events/s (~3×), saturating ~8 workers**
+(SPIKE-RESULTS #203 → "Multi-block result"). Determinism preserved: `content_hash` worker-count-independent
+(ordered commit), small products (≤ BLOCK_ROWS) stay single-block byte-identical (no corpus regen).
+
+**Remaining before an Accepted flip:** **cross-env / cross-arch determinism re-validation**
+(dev==release==hermetic, x86==ARM — the ADR-0024 caveat; the x86+aarch64-linux CI matrix is wired, needs a
+green ARM run). The functional + memory + parallelism gates are now met.

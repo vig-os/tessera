@@ -302,6 +302,27 @@ record widths; **events/s is exact** (rows from the sealed manifest).
   read/transpose front if read-bound). This is only possible once the encode is **parallelisable** — i.e.
   once listmode is **multi-block** (ADR-0034 §3 / ADR-0026), which is the next build.
 
+### Multi-block result — both goals delivered (DUPLET `singles`, 294 M rows, 2026-06-29)
+`tessera bench write --input … --dataset singles --sweep` after the multi-block landing (`c5a48a2`):
+
+| workers | events/s | peak RAM | | workers | events/s | peak RAM |
+|--:|--:|--:|---|--:|--:|--:|
+| 1 | 5.60 M | **147 MiB** | | 16 | 14.8 M | 1.92 GiB |
+| 2 | 6.80 M | 213 MiB | | 32 | 14.8 M | 2.13 GiB |
+| 4 | 13.4 M | 350 MiB | | 64 | 14.8 M | 3.49 GiB |
+| 8 | 14.7 M | 1.09 GiB | | 88 | 14.9 M | 3.87 GiB |
+
+- **Constant-memory: ACHIEVED.** Peak at w=1 is **147 MiB vs the old 3.63 GiB single-block** (25× less) —
+  and it's bounded by `workers × per-block-working-set`, **not the dataset**: a 10× bigger acquisition
+  has the *same* peak at the same worker count. The streaming `pack_streaming` seal (no `Vec<BlockPayload>`)
+  is what removed the whole-product RAM materialisation.
+- **Throughput: SCALES ~3×.** 4.9 M (old single-thread) → **14.9 M events/s**, saturating at **~8 workers**
+  (encode parallelises across blocks via the std-thread pool — no tokio).
+- **The workers↔RAM tradeoff = the case for adaptive allocation.** Past the ~8-worker knee, throughput is
+  FLAT (14.8 M) but RAM keeps climbing (1.09 → 3.87 GiB) for zero gain — extra workers just hold more
+  in-flight blocks. So the *right* `workers` is the saturation knee, and that knee moves with the
+  read:encode ratio (storage tier). The clever ingestor should pick it, not max out cores. → **Phase C**.
+
 # #215 — array fold: pyramid + projection are one monoid-fold-over-axes (ADR-0028)
 
 Claim: an array's multiscale pyramid AND its projections (MIP/MPR) are the *same* operation — a
