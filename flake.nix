@@ -272,10 +272,17 @@
             for i in $(seq 1 80); do curl -sf http://127.0.0.1:5055/v2/ > /dev/null && break; sleep 0.25; done
             cp ${./tessera/corpus/files}/recon_int16.tsra $TMPDIR/p.tsra
             cd $TMPDIR
+            # Sign first, so push must carry the detached-signature sidecar through the registry (bug #2).
+            printf '0101010101010101010101010101010101010101010101010101010101010101' > key.hex
+            ${tessera-cli-cloud}/bin/tessera sign p.tsra --key key.hex --signer https://orcid.org/0000-0002-1825-0097
+            test -f p.tsra.sig.json
             ${tessera-cli-cloud}/bin/tessera push p.tsra 127.0.0.1:5055/tessera/recon:v1 --plain-http
             ${tessera-cli-cloud}/bin/tessera pull 127.0.0.1:5055/tessera/recon:v1 out.tsra --plain-http
             ${tessera-cli-cloud}/bin/tessera verify out.tsra
             cmp p.tsra out.tsra
+            # The signature sidecar survived the registry hop, byte-identical (bug #2 fixed).
+            test -f out.tsra.sig.json
+            cmp p.tsra.sig.json out.tsra.sig.json
             touch $out
           '';
 

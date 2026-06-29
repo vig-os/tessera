@@ -137,13 +137,28 @@ pub fn push(tsra_path: &Path, reference: &str, plain_http: bool, auth: Auth) -> 
         (m.id.clone(), m.manifest_hash.clone().unwrap_or_default())
     };
 
+    // Carry the detached-signature sidecar (`<file>.tsra.sig.json`) if present, so signing survives the
+    // registry hop (the bug: push used to drop it).
+    let sidecar = crate::sign::sidecar_path(tsra_path);
+    let sig: Option<Vec<u8>> = if sidecar.exists() {
+        Some(std::fs::read(&sidecar)?)
+    } else {
+        None
+    };
+
     let rf = Ref::parse(reference, plain_http)?;
     let cl = Client::builder().build().map_err(http)?;
-    // Referenced blobs must exist before the manifest: the empty config + the .tsra layer.
+    // Referenced blobs must exist before the manifest: the empty config + the .tsra layer (+ the sig).
     upload_blob(&cl, &rf, oci::EMPTY_BLOB, &auth)?;
     upload_blob(&cl, &rf, &bytes, &auth)?;
+    if let Some(s) = &sig {
+        upload_blob(&cl, &rf, s, &auth)?;
+    }
 
-    let manifest = oci::artifact_manifest(&bytes, &product_id, &manifest_hash);
+    let manifest = match &sig {
+        Some(s) => oci::artifact_manifest_signed(&bytes, s, &product_id, &manifest_hash),
+        None => oci::artifact_manifest(&bytes, &product_id, &manifest_hash),
+    };
     let body = serde_json::to_vec(&manifest)?;
     let resp = with_auth(
         cl.put(format!("{}/manifests/{}", rf.base(), rf.tag))
@@ -205,6 +220,36 @@ pub fn pull(reference: &str, out_path: &Path, plain_http: bool, auth: Auth) -> R
         });
     }
     std::fs::write(out_path, &data)?;
+
+    // Recover the detached-signature sidecar if the artifact carried one (push adds it as a 2nd layer).
+    if let Some(sig_digest) = manifest["layers"]
+        .as_array()
+        .and_then(|ls| {
+            ls.iter()
+                .find(|l| l["mediaType"] == oci::SIGNATURE_MEDIA_TYPE)
+        })
+        .and_then(|l| l["digest"].as_str())
+    {
+        let sresp = with_auth(cl.get(format!("{}/blobs/{sig_digest}", rf.base())), &auth)
+            .send()
+            .map_err(http)?;
+        if !sresp.status().is_success() {
+            return Err(Error::Invalid(format!(
+                "oci registry: signature blob GET failed: HTTP {}",
+                sresp.status()
+            )));
+        }
+        let sig = sresp.bytes().map_err(http)?;
+        let actual = oci::sha256_digest(&sig);
+        if actual != sig_digest {
+            return Err(Error::Integrity {
+                what: "oci_signature_layer",
+                expected: sig_digest.to_string(),
+                actual,
+            });
+        }
+        std::fs::write(crate::sign::sidecar_path(out_path), &sig)?;
+    }
     Ok(())
 }
 

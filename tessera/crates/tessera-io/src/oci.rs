@@ -25,6 +25,9 @@ pub const TSRA_MEDIA_TYPE: &str = "application/vnd.tessera.tsra.v1";
 pub const EMPTY_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.empty.v1+json";
 /// The OCI image-manifest media type.
 pub const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+/// The media type of the detached-signature sidecar (`<file>.tsra.sig.json`) carried as a 2nd layer,
+/// so `push`/`pull` keep the signature with the product through a registry.
+pub const SIGNATURE_MEDIA_TYPE: &str = "application/vnd.tessera.signature.v1+json";
 
 /// The OCI empty descriptor blob — the 2 bytes `{}` (sha256 `44136f…aff8a`), referenced by the config.
 pub const EMPTY_BLOB: &[u8] = b"{}";
@@ -65,6 +68,27 @@ pub fn artifact_manifest(tsra: &[u8], product_id: &str, manifest_hash: &str) -> 
             "org.opencontainers.image.title": product_id,
         },
     })
+}
+
+/// Like [`artifact_manifest`] but carrying the detached-signature sidecar as a **second layer**
+/// ([`SIGNATURE_MEDIA_TYPE`]) — so `tessera push` keeps `<file>.tsra.sig.json` with the product through
+/// the registry and `tessera pull` recovers it. Both blobs must be uploaded before this manifest.
+pub fn artifact_manifest_signed(
+    tsra: &[u8],
+    sig: &[u8],
+    product_id: &str,
+    manifest_hash: &str,
+) -> serde_json::Value {
+    let mut m = artifact_manifest(tsra, product_id, manifest_hash);
+    if let Some(layers) = m["layers"].as_array_mut() {
+        layers.push(serde_json::json!({
+            "mediaType": SIGNATURE_MEDIA_TYPE,
+            "digest": sha256_digest(sig),
+            "size": sig.len(),
+            "annotations": { "org.opencontainers.image.title": "product.tsra.sig.json" },
+        }));
+    }
+    m
 }
 
 #[cfg(test)]

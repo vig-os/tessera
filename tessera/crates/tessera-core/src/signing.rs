@@ -2,9 +2,12 @@
 //! source-rooted attestation).
 //!
 //! The seal (`manifest_hash`) transitively commits to `id_inputs`, every block digest, and all metadata
-//! (see [`crate::manifest`]), so a signature over the `manifest_hash` string attests the **whole**
-//! product with one short signature. A signature is **additive** — it lives beside the manifest, never
-//! inside it, so signing (or re-signing) never changes the product's identity.
+//! (see [`crate::manifest`]), so binding it in the signature attests the **whole** product with one
+//! short signature. The signature is over the **envelope** — the JCS-canonical `{alg, key_id,
+//! manifest_hash, signer}` — *not* the bare seal, so the attribution identity (`signer`) and the key
+//! (`key_id`) are cryptographically bound and cannot be rewritten on an otherwise-valid signature. A
+//! signature is **additive** — it lives beside the manifest, never inside it, so signing (or
+//! re-signing) never changes the product's identity.
 //!
 //! ## Scheme-agnostic envelope
 //! [`Signature`] is `(alg, key_id, signer, sig)` — a closed-over-`alg` envelope so new schemes are
@@ -23,8 +26,37 @@ use crate::manifest::Manifest;
 /// dependency (the crypto boundary lives here, in the core).
 pub use ed25519_dalek::{SigningKey, VerifyingKey};
 
-/// The `alg` tag for the Ed25519 backend.
-pub const ALG_ED25519: &str = "ed25519";
+/// The `alg` tag for the Ed25519 backend. **v1** signs the *envelope* (`alg` + `key_id` +
+/// `manifest_hash` + `signer`), not the bare seal — so `signer`/`key_id` are cryptographically bound
+/// and cannot be rewritten on an otherwise-valid signature (false-attribution fix).
+pub const ALG_ED25519_ENV: &str = "ed25519-env-v1";
+
+/// The exact fields a signature binds: the seal **plus** the envelope identity. Signing the
+/// JCS-canonical bytes of this (not the bare `manifest_hash`) is what stops an attacker rewriting
+/// `signer` (false attribution) or `key_id` on an otherwise-valid signature.
+#[derive(Serialize)]
+struct SignedPayload<'a> {
+    alg: &'a str,
+    key_id: &'a str,
+    manifest_hash: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signer: Option<&'a str>,
+}
+
+/// The canonical (RFC 8785 JCS) bytes a signature is computed over — the [`SignedPayload`].
+fn signed_bytes(
+    alg: &str,
+    key_id: &str,
+    manifest_hash: &str,
+    signer: Option<&str>,
+) -> crate::Result<Vec<u8>> {
+    crate::canonical::to_bytes(&SignedPayload {
+        alg,
+        key_id,
+        manifest_hash,
+        signer,
+    })
+}
 
 /// A detached signature envelope over a `manifest_hash`. Scheme-agnostic (`alg`); `key_id` identifies
 /// the verifying key (here, the hex of the 32-byte Ed25519 public key); `signer` is the optional
@@ -98,37 +130,53 @@ pub fn verifying_key_from_hex(s: &str) -> crate::Result<VerifyingKey> {
 }
 
 /// Sign a `manifest_hash` with an Ed25519 key, attaching an optional `signer` identity (e.g. an ORCID
-/// iD). The signature is over the `manifest_hash` **string bytes** verbatim (the seal — so it attests the
-/// whole product). Pair with [`verify`].
-pub fn sign_ed25519(manifest_hash: &str, key: &SigningKey, signer: Option<String>) -> Signature {
-    let sig = key.sign(manifest_hash.as_bytes());
-    Signature {
-        alg: ALG_ED25519.into(),
-        key_id: hex(key.verifying_key().as_bytes()),
+/// iD). The signature is over the **envelope** (`alg` + `key_id` + `manifest_hash` + `signer`), JCS-
+/// canonicalized — so the seal *and* the attribution identity are bound, and neither can be rewritten
+/// on a valid signature. Pair with [`verify`]. Errors only if canonicalization fails (never in practice).
+pub fn sign_ed25519(
+    manifest_hash: &str,
+    key: &SigningKey,
+    signer: Option<String>,
+) -> crate::Result<Signature> {
+    let key_id = hex(key.verifying_key().as_bytes());
+    let bytes = signed_bytes(ALG_ED25519_ENV, &key_id, manifest_hash, signer.as_deref())?;
+    let sig = key.sign(&bytes);
+    Ok(Signature {
+        alg: ALG_ED25519_ENV.into(),
+        key_id,
         signer,
         sig: hex(&sig.to_bytes()),
-    }
+    })
 }
 
 /// Verify a [`Signature`] envelope over `manifest_hash` against an Ed25519 `key`. Returns `false` (never
-/// panics) on any mismatch: wrong `alg`, a `key_id` that doesn't match `key` (so an envelope can't claim
-/// a different key than the one it's checked against), malformed hex/length, or a bad signature. Tamper
-/// with the `manifest_hash`, the `sig`, or the key and verification fails.
+/// panics) on any mismatch: wrong `alg`, a `key_id` that doesn't match `key`, malformed hex/length, or a
+/// bad signature. Because the signature is over the **envelope**, tampering with `manifest_hash`, `sig`,
+/// `key_id`, **or `signer`** all fail verification (the false-attribution fix).
 pub fn verify(manifest_hash: &str, env: &Signature, key: &VerifyingKey) -> bool {
-    if env.alg != ALG_ED25519 {
+    if env.alg != ALG_ED25519_ENV {
         return false;
     }
-    if env.key_id != hex(key.as_bytes()) {
+    let key_id = hex(key.as_bytes());
+    if env.key_id != key_id {
         return false;
     }
+    let Ok(bytes) = signed_bytes(
+        ALG_ED25519_ENV,
+        &key_id,
+        manifest_hash,
+        env.signer.as_deref(),
+    ) else {
+        return false;
+    };
     let Some(raw) = unhex(&env.sig) else {
         return false;
     };
-    let Ok(bytes) = <[u8; 64]>::try_from(raw.as_slice()) else {
+    let Ok(sig_bytes) = <[u8; 64]>::try_from(raw.as_slice()) else {
         return false;
     };
-    let sig = Ed25519Sig::from_bytes(&bytes);
-    key.verify(manifest_hash.as_bytes(), &sig).is_ok()
+    let sig = Ed25519Sig::from_bytes(&sig_bytes);
+    key.verify(&bytes, &sig).is_ok()
 }
 
 /// Sign a **sealed product**: attest its `manifest_hash` with an Ed25519 key + optional `signer`
@@ -142,7 +190,7 @@ pub fn sign_manifest(
     let mh = m.manifest_hash.as_deref().ok_or_else(|| {
         crate::Error::Invalid("cannot sign an unsealed manifest (no manifest_hash)".into())
     })?;
-    Ok(sign_ed25519(mh, key, signer))
+    sign_ed25519(mh, key, signer)
 }
 
 /// Verify a [`Signature`] against a sealed product (its `manifest_hash`) + the Ed25519 public key.
@@ -172,8 +220,9 @@ mod tests {
             mh,
             &key,
             Some("https://orcid.org/0000-0002-1825-0097".into()),
-        );
-        assert_eq!(env.alg, ALG_ED25519);
+        )
+        .unwrap();
+        assert_eq!(env.alg, ALG_ED25519_ENV);
         assert_eq!(
             env.signer.as_deref(),
             Some("https://orcid.org/0000-0002-1825-0097")
@@ -185,7 +234,7 @@ mod tests {
     fn tampering_is_rejected() {
         let key = test_key(3);
         let mh = "blake3:aaaa";
-        let env = sign_ed25519(mh, &key, None);
+        let env = sign_ed25519(mh, &key, None).unwrap();
 
         // a different manifest_hash (the product was altered) → fail.
         assert!(!verify("blake3:bbbb", &env, &key.verifying_key()));
@@ -203,14 +252,19 @@ mod tests {
         let mut malformed = env.clone();
         malformed.sig = "zz".into();
         assert!(!verify(mh, &malformed, &key.verifying_key()));
+        // REWRITING `signer` on an otherwise-valid signature → fail (the false-attribution fix:
+        // the signature binds the envelope identity, not just the seal).
+        let mut relabeled = sign_ed25519(mh, &key, Some("alice".into())).unwrap();
+        relabeled.signer = Some("https://orcid.org/0000-0002-1825-0097".into());
+        assert!(!verify(mh, &relabeled, &key.verifying_key()));
     }
 
     #[test]
     fn envelope_serializes_round_trips_and_omits_absent_signer() {
         let key = test_key(1);
-        let env = sign_ed25519("blake3:cccc", &key, None);
+        let env = sign_ed25519("blake3:cccc", &key, None).unwrap();
         let j = serde_json::to_value(&env).unwrap();
-        assert_eq!(j["alg"], "ed25519");
+        assert_eq!(j["alg"], "ed25519-env-v1");
         assert!(
             j.get("signer").is_none(),
             "absent signer is omitted from JSON"
@@ -270,7 +324,7 @@ mod tests {
         let vk = verifying_key_from_hex(&pub_hex).unwrap();
         assert_eq!(vk.to_bytes(), key.verifying_key().to_bytes());
         // a signature made with the loaded key verifies under the loaded public key.
-        let env = sign_ed25519("blake3:dddd", &loaded, None);
+        let env = sign_ed25519("blake3:dddd", &loaded, None).unwrap();
         assert!(verify("blake3:dddd", &env, &vk));
         // bad inputs are rejected, not panicked.
         assert!(signing_key_from_hex("nothex").is_err());
