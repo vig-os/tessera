@@ -1,47 +1,43 @@
-# Tessera (spike)
+# Tessera — workspace
 
-A substrate-agnostic, Rust-native **FAIR data product** format — the evolution of
-[fd5](../README.md) from "FAIR Data on HDF5" to a manifest + shape-dispatched storage blocks
-(N-D chunked arrays via zarrs, columnar tables via arrow/parquet/lance), unified by one
-identity / provenance / Merkle-hash / version spine.
+The Rust workspace for **Tessera** (`fd5` v2), a substrate-agnostic FAIR data-product format.
+For the project overview, quickstart, and the model, see the [root README](../README.md).
 
-> Status: **spike** on branch `spike/tessera-core`. The manifest/identity/hash/provenance
-> spine and block descriptors are real; block *payload* I/O is stubbed behind the
-> `array-zarr` / `table-arrow` features. Design + benchmark rationale: [`../docs/rfc-tessera.md`](../docs/rfc-tessera.md).
+> ⚠️ **Pre-1.0** on branch `spike/tessera-core`. The manifest/identity/hash/provenance spine, the
+> array (Zarr+pcodec) & table (Vortex) payload codecs, the `.tsra` container, the streaming write
+> engine, the content-addressed versioning repository, ingest, and the CLI are all implemented and
+> gated. The on-disk format is not yet frozen.
 
-## Why
-
-Real medical-imaging data has two shapes — dense N-D arrays (CT/PET volumes) and large event
-tables (listmode coincidences) — and no single byte layout is optimal for both. Tessera does
-not invent a new codec; it composes the proven engine per shape under one FAIR product model.
-Evidence: fd5 issues #192 (recon native-dtype + cubic chunks), #193 (columnar listmode),
-#194 (zstd).
-
-## Layout
+## Crates
 
 ```
-crates/tessera-core
-  manifest.rs     manifest model + (de)serialisation + identity
-  identity.rs     id = blake3 over identity inputs
-  hash.rs         blake3 Merkle over block digests -> content_hash
-  provenance.rs   sources/ DAG
-  block/array.rs  N-D chunked array block (zarrs backend, feature-gated)
-  block/table.rs  columnar table block (arrow backend, feature-gated)
-  product.rs      ProductBuilder: add blocks -> seal()
+crates/tessera-core     format spine — manifest · identity · hash (blake3 MMR) · provenance ·
+                        schema registry · array/table block descriptors (no I/O)
+crates/tessera-io       the engine — array (Zarr v3 + pcodec) & table (Vortex) codecs · the .tsra
+                        container (STORED zip64, range-readable) · streaming write engine ·
+                        content-addressed versioning repository (repo.rs) · cloud range-reads
+crates/tessera-ingest   vendor decoders (DICOM · GE-HDF5 · NIfTI · raw) + declarative ingest engine
+crates/tessera-cli      the `tessera` binary (inspect/verify/tree/ls/read/ingest/sign/bench +
+                        versioning: init/import/commit/log/diff/publish/seal)
+crates/tessera-py       Python bindings (pyo3, abi3) — `import tessera`
+crates/tessera-wasm     wasm32 bindings
 ```
 
-## Build
+## Build & test
 
 ```bash
+# inside the Nix dev shell (direnv allow / nix develop at the repo root)
 cd tessera
-cargo test            # core spine + descriptors (no backend deps)
-cargo check --features full
+cargo test                 # or: cargo nextest run
+cargo build --release -p tessera-cli
 ```
 
-## Next
+The hermetic gate (`nix flake check`, run from the repo root) is the source of truth: workspace
+clippy `--all-features -D warnings`, nextest, doctests, fmt, the wasm build, MinIO range-read, OCI
+round-trip, and the guardrails gates. Conformance fixtures live in `corpus/`.
 
-1. Implement `ArrayBlock::write_zarr` over `zarrs` (sharded, cubic, zstd).
-2. Implement `TableBlock::write_parquet` over `arrow`/`parquet` (+ optional row index).
-3. Single sealed container (`.tess`) vs directory-of-shards (RFC §8).
-4. `pyo3` bindings for Python parity with the fd5 package.
-5. `dicom-rs` ingest: DICOM series → `recon` product.
+## Docs
+
+- `docs/rfc-tessera.md` — design + benchmark rationale.
+- `docs/FEATURE-MATRIX.md` — status + passing gates + perf SLA floors.
+- `docs/SPEC.md` — the `.tsra` byte format · `docs/adr/` (repo root) — decision records.
