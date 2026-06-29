@@ -86,12 +86,16 @@ object: the manifest.
 Both collect the blocks **reachable from one manifest** into a single self-contained `.tsra`; they
 differ only in what history travels:
 
-- **`tessera publish`** = `git archive` — **history-free**. The emitted manifest is a **fresh root**:
-  a new `id`, **no** `supersedes`/`derived_from` chain. *Stripping history changes identity by design* —
-  the publication is a new root, deliberately decoupled. **Decided:** by default it still carries a
-  *single* `snapshot_of: <source manifest_hash>` audit edge — the published file stands alone, but that
-  one pointer leads back to the full-history version in the repository, so the audit trail is never
-  *lost*, only not *carried*. `--anonymous` drops even that pointer for blind / clinical handover.
+- **`tessera publish`** = `git archive` — **history-free**. The emitted manifest **drops the
+  `supersedes` version chain** (so the artifact carries no internal revision history) while **keeping
+  scientific `derived_from` provenance**, metadata, and data — a clean standalone for DOI / handover.
+  Under model A the `id` stays the stable lineage handle (republishing the same logical product keeps
+  its handle); only the seal is fresh. **Decided:** by default it carries a *single*
+  `snapshot_of: <source manifest_hash>` audit edge — the file stands alone, but that one pointer leads
+  back to the full-history version in the repository, so the audit trail is never *lost*, only not
+  *carried*. `--anonymous` drops even that pointer for blind / clinical handover. *(As-built: this is
+  exactly `ProductBuilder::from_manifest` — which keeps id/blocks/metadata/derivation and drops
+  supersedes — plus the optional `snapshot_of` edge, re-sealed.)*
 - **`tessera seal`** = `git bundle` — **history-preserving**. Same self-contained `.tsra`, but it keeps
   the `supersedes` chain (and, optionally, the ancestor manifests) so lineage travels with the data —
   for archival where the audit DAG must not be lost.

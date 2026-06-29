@@ -136,6 +136,37 @@ enum Cmd {
     },
     /// Show a lineage's version history (newest first).
     Log { repo: PathBuf, lineage: String },
+    /// Diff two versions (blocks + metadata) with a lineage verdict. With one ref, diffs that version
+    /// against its `supersedes` parent — "what this version changed".
+    Diff {
+        /// The repository directory.
+        repo: PathBuf,
+        /// Base version `manifest_hash` (or the target, if TARGET is omitted).
+        first: String,
+        /// Target version `manifest_hash` (optional).
+        second: Option<String>,
+    },
+    /// Export a version to a standalone `.tsra` **with history** (`git bundle`): the manifest is emitted
+    /// as stored, supersedes + derivation edges intact — for archival where lineage travels with data.
+    Seal {
+        repo: PathBuf,
+        /// Version `manifest_hash` to export.
+        version: String,
+        /// Output `.tsra` path.
+        out: PathBuf,
+    },
+    /// Export a version to a **history-free** standalone `.tsra` (`git archive`) for publication /
+    /// handover: drops the supersedes chain, keeps derivation provenance + a `snapshot_of` breadcrumb.
+    Publish {
+        repo: PathBuf,
+        /// Version `manifest_hash` to publish.
+        version: String,
+        /// Output `.tsra` path.
+        out: PathBuf,
+        /// Drop even the single `snapshot_of` back-pointer (blind / clinical handover).
+        #[arg(long)]
+        anonymous: bool,
+    },
     /// Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`).
     Unpack { file: PathBuf, outdir: PathBuf },
     /// Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`.
@@ -400,6 +431,27 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
         Cmd::Log { repo, lineage } => {
             let mut out = std::io::stdout().lock();
             version::log(&repo, &lineage, &mut out)
+        }
+        Cmd::Diff {
+            repo,
+            first,
+            second,
+        } => {
+            let mut out = std::io::stdout().lock();
+            version::diff(&repo, &first, second.as_deref(), &mut out)
+        }
+        Cmd::Seal { repo, version, out } => {
+            let mut w = std::io::stdout().lock();
+            version::seal(&repo, &version, &out, &mut w)
+        }
+        Cmd::Publish {
+            repo,
+            version,
+            out,
+            anonymous,
+        } => {
+            let mut w = std::io::stdout().lock();
+            version::publish(&repo, &version, &out, anonymous, &mut w)
         }
         Cmd::Unpack { file, outdir } => {
             let m = unpack(&file, &outdir)?;
