@@ -290,6 +290,7 @@ fn run_listmode_real(
         "events",
         "ms",
         &[],
+        &std::collections::BTreeMap::new(),
     )?;
     let wall_s = t.elapsed().as_secs_f64();
     // Total rows = sum over all event blocks (multi-block products split at BLOCK_ROWS).

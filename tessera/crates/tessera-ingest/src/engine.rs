@@ -209,7 +209,7 @@ fn dispatch(
             let source = input.display().to_string();
             let (m, payloads) =
                 crate::dicom::to_recon_product(&img, name, &timestamp, &source, extra_sources)?;
-            seal_to_tsra(&m, &payloads, out_dir, p, timestamp.as_str())?;
+            let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
             Ok((m, ()))
         }
         FormatOptions::DicomSeries { inputs, deidentify } => {
@@ -234,7 +234,7 @@ fn dispatch(
                 .join(",");
             let (m, payloads) =
                 crate::dicom::to_recon_product(&img, name, &timestamp, &source, extra_sources)?;
-            seal_to_tsra(&m, &payloads, out_dir, p, timestamp.as_str())?;
+            let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
             Ok((m, ()))
         }
         FormatOptions::Nifti { input } => {
@@ -242,7 +242,7 @@ fn dispatch(
             let source = input.display().to_string();
             let (m, payloads) =
                 crate::nifti::to_recon_product(&img, name, &timestamp, &source, extra_sources)?;
-            seal_to_tsra(&m, &payloads, out_dir, p, timestamp.as_str())?;
+            let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
             Ok((m, ()))
         }
         FormatOptions::Raw {
@@ -258,7 +258,7 @@ fn dispatch(
                 &timestamp,
                 extra_sources,
             )?;
-            seal_to_tsra(&m, &payloads, out_dir, p, timestamp.as_str())?;
+            let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
             Ok((m, ()))
         }
         FormatOptions::HdfCompound {
@@ -291,6 +291,7 @@ fn dispatch(
                     block_prefix,
                     row_index,
                     extra_sources,
+                    &p.metadata,
                 )?;
                 // Rename the pending .tsra to its id-named final path. Same filesystem → rename is
                 // atomic, so a crash here leaves either the old or the new file in place.
@@ -322,7 +323,7 @@ fn dispatch(
                     row_index,
                     extra_sources,
                 )?;
-                seal_to_tsra(&m, &payloads, out_dir, p, timestamp.as_str())?;
+                let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
                 Ok((m, ()))
             }
         }
@@ -373,16 +374,41 @@ fn hdf_compound_rows(input: &Path, dataset: &str) -> Result<u64> {
 }
 
 /// Seal one in-memory product to `<out_dir>/<id>.tsra`. Idempotent: the same manifest → same path.
+/// Pack a built (batch-path) product to `<out_dir>/<id>.tsra`, **applying the spec's
+/// `[product.metadata]` overrides first** so they ride the sealed `manifest_hash`. Returns the
+/// manifest actually written (re-sealed if metadata was applied) so the engine validates + records the
+/// SAME manifest it wrote. `id` is unchanged by the override (from_manifest keeps product/name/
+/// timestamp), so the filename is stable; only the metadata + `manifest_hash` change.
 fn seal_to_tsra(
-    m: &Manifest,
+    m: Manifest,
     payloads: &[tessera_io::BlockPayload],
     out_dir: &Path,
-    _p: &crate::spec::ProductSpec,
+    p: &crate::spec::ProductSpec,
     _timestamp: &str,
-) -> Result<()> {
+) -> Result<Manifest> {
+    let m = apply_spec_metadata(m, &p.metadata)?;
     let path = out_dir.join(format!("{}.tsra", sanitize_filename(&m.id)));
-    pack(m, payloads, &path)?;
-    Ok(())
+    pack(&m, payloads, &path)?;
+    Ok(m)
+}
+
+/// If the spec declared `[product.metadata]`, return a manifest re-sealed with those fields applied
+/// (overriding any builder default); else the manifest unchanged. Blocks are reused by digest
+/// (`from_manifest`), so `content_hash`/`id` are stable — only the metadata + `manifest_hash` change.
+/// The streaming path applies its overrides directly on the `WriteSession` (no post-seal re-build);
+/// this is the batch-path counterpart.
+fn apply_spec_metadata(
+    m: Manifest,
+    meta: &BTreeMap<String, serde_json::Value>,
+) -> Result<Manifest> {
+    if meta.is_empty() {
+        return Ok(m);
+    }
+    let mut b = tessera_core::ProductBuilder::from_manifest(&m);
+    for (k, v) in meta {
+        b.with_field(k, v.clone());
+    }
+    b.seal()
 }
 
 /// Strip filesystem-hostile chars (`:` / `/` from the blake3-prefixed id) so the member's id
@@ -605,5 +631,86 @@ streaming = "auto"
             member_path.display()
         );
         tessera_io::Reader::open(&member_path).unwrap();
+    }
+
+    #[test]
+    fn spec_product_metadata_is_applied_and_overrides_defaults() {
+        // A listmode product defaults coincidence_mode to "prompt-coincidence"; the spec's
+        // [product.metadata] must OVERRIDE that and add arbitrary fields — on BOTH the batch and the
+        // streaming path. (Closes the gap where ProductSpec.metadata was parsed but ignored.)
+        let dir = tempfile::tempdir().unwrap();
+        let h5 = dir.path().join("a.h5");
+        write_synth_2p(&h5, 50, "events_2p");
+        let spec_path = dir.path().join("spec.toml");
+        let s = format!(
+            r#"
+[collection]
+name = "DP06-meta"
+timestamp = "2024-01-01T00:00:00Z"
+
+[[product]]
+name = "raw-batch"
+role = "raw"
+schema = "listmode"
+format = "hdf-compound"
+input = "{a}"
+dataset = "events_2p"
+streaming = "batch"
+metadata = {{ coincidence_mode = "extended-coincidence", operator = "DP" }}
+
+[[product]]
+name = "raw-stream"
+role = "raw"
+schema = "listmode"
+format = "hdf-compound"
+input = "{a}"
+dataset = "events_2p"
+streaming = "stream"
+metadata = {{ coincidence_mode = "singles", site = "anvil" }}
+"#,
+            a = h5.display()
+        );
+        std::fs::write(&spec_path, s).unwrap();
+
+        let out = dir.path().join("out");
+        let cfg = tessera_io::WriteConfig::for_system();
+        let parsed = parse_spec(&spec_path).unwrap();
+        let coll = run(
+            &parsed,
+            &spec_path,
+            &out,
+            &cfg,
+            DEFAULT_STREAM_THRESHOLD_BYTES,
+        )
+        .unwrap();
+        assert_eq!(coll.members.len(), 2);
+
+        for member in &coll.members {
+            let p = out.join(format!(
+                "{}.tsra",
+                member.reference.replace([':', '/'], "_")
+            ));
+            let mani = tessera_io::Reader::open(&p).unwrap().manifest().clone();
+            if mani.metadata.contains_key("operator") {
+                // batch product: spec overrode the default + added a field
+                assert_eq!(
+                    mani.metadata.get("coincidence_mode"),
+                    Some(&serde_json::json!("extended-coincidence")),
+                    "batch: spec [product.metadata] must override the default"
+                );
+                assert_eq!(
+                    mani.metadata.get("operator"),
+                    Some(&serde_json::json!("DP"))
+                );
+            } else {
+                // streaming product: same, on the bounded-memory path
+                assert_eq!(
+                    mani.metadata.get("coincidence_mode"),
+                    Some(&serde_json::json!("singles")),
+                    "stream: spec [product.metadata] must override the default"
+                );
+                assert_eq!(mani.metadata.get("site"), Some(&serde_json::json!("anvil")));
+            }
+        }
     }
 }

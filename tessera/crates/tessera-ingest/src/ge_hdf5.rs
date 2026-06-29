@@ -476,6 +476,7 @@ pub fn stream_to_listmode_product_2p_to_file(
     block_prefix: &str,
     row_index: &str,
     extra_sources: &[tessera_core::provenance::Source],
+    extra_metadata: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> Result<Manifest> {
     stream_to_listmode_product_2p_to_file_inner(
         path,
@@ -490,6 +491,7 @@ pub fn stream_to_listmode_product_2p_to_file(
         block_prefix,
         row_index,
         extra_sources,
+        extra_metadata,
     )
 }
 
@@ -524,6 +526,7 @@ pub fn stream_to_listmode_product_2p_to_file_with_block_rows(
         "events",
         "ms",
         &[],
+        &std::collections::BTreeMap::new(),
     )
 }
 
@@ -546,6 +549,7 @@ fn stream_to_listmode_product_2p_to_file_inner(
     block_prefix: &str,
     row_index: &str,
     extra_sources: &[tessera_core::provenance::Source],
+    extra_metadata: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> Result<Manifest> {
     let columns = compound_columns(path, dataset)?;
     // Per-row width × BLOCK_ROWS = the encode-side per-block estimate; feed it to the StreamWriter's
@@ -579,6 +583,11 @@ fn stream_to_listmode_product_2p_to_file_inner(
         "coincidence_mode",
         serde_json::Value::String(DEFAULT_COINCIDENCE_MODE.to_string()),
     )?;
+    // Spec `[product.metadata]` overrides — applied last (so a user value wins over the default)
+    // and before any block commits, so they flow into the sealed manifest_hash with no re-build.
+    for (k, v) in extra_metadata {
+        ws.with_field(k, v.clone())?;
+    }
     let mut sw = tessera_io::StreamWriter::with_config(ws, cfg, unit_bytes);
     {
         let sink_stage = stage.join("sink");
@@ -631,6 +640,7 @@ pub fn stream_to_listmode_product_2p(
         "events",
         "ms",
         &[],
+        &std::collections::BTreeMap::new(),
     )?;
     // Re-read block bytes from the temp .tsra so callers get the in-memory pair their API expects.
     // Multi-block products may not fit in RAM — callers needing constant-memory should use
