@@ -21,9 +21,22 @@ clap.workspace = true
 # real `TableStreamWriter`/`StreamWriter`, which need durable staging dirs).
 tempfile = "3"
 
+[features]
+# `cloud` (#225): lets `tessera inspect`/`tessera verify` accept an `s3://` or `http(s)://` URL
+# (resolved via `tessera_io::open_url`). Strictly additive — without the feature the CLI is the
+# same file-only tool that ships today (no object_store deps, no tokio runtime).
+cloud = ["tessera-io/cloud"]
+
 [dev-dependencies]
 tempfile = "3"
 hdf5-metno.workspace = true
 # docs-as-tests: CLI walkthroughs in tests/cmd/*.trycmd run against the real `tessera` bin (resolved via
 # CARGO_BIN_EXE_tessera — no cargo invocation at test time, so it works in the hermetic flake check).
 trycmd = "0.15"
+# Live-MinIO test seeding for the `cloud` integration test (tests/cloud.rs). Dev-only — the CLI
+# binary itself depends on object_store/tokio only transitively through the `cloud` feature of
+# tessera-io. cargo's `cargo build -p tessera-cli` is unaffected (dev-deps don't enter the runtime
+# graph). The test file is `#![cfg(feature = "cloud")]` so without the feature its contents are
+# elided; the dev-dep crates still build, but they're already cached from tessera-io's graph.
+object_store = { version = "0.14", default-features = false, features = ["aws"] }
+tokio = { version = "1", features = ["rt"] }

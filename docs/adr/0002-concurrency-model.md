@@ -3,6 +3,15 @@
 Status: **Accepted** (2026-06-26, as-built) · Register: D2 · Supersedes the original proposal
 (async `io` on tokio + `object_store` + a rayon encode pool with a `spawn_blocking` boundary).
 
+**Revision (2026-06-29, #225 landed):** §4's deferred async `object_store` read backend has now
+landed as the additive `cloud` variant on `tessera-io` — `cloud::ObjectStoreReader` adapts the
+async store to `Read + Seek` behind a **per-reader current-thread Tokio runtime** (the legitimate
+read-side use carved out in **ADR-0034 §4**), and `cloud::open_url` is the convenience entry
+point. The synchronous public `Reader::from_reader` surface is unchanged — local-file callers
+are bit-identical to before, and cloud callers get the same sync API. `tokio` is instantiated
+only when the `cloud` feature is enabled; default-feature builds + the `wasm-core` gate are
+unaffected.
+
 ## Context
 The original D2 proposal was an async I/O layer (tokio + `object_store`) with a rayon encode pool.
 When `tessera-core`, `tessera-io` (array/table/container/write engine), and `tessera-ingest` were
@@ -17,10 +26,15 @@ actually built (P1–P6), a simpler model proved sufficient and was adopted.
    **no tokio runtime is ever instantiated**.
 3. **Durability is fsync-based**, not an async write pool: `WriteSession` writes each fragment +
    journal line with `sync_all()` (ADR-0023/0024 + S17). Determinism, not throughput, is the gate.
-4. **Deferred:** an async `object_store`/HTTP range-read backend (S6/distribution). The `Reader` is
-   already generic over `Read + Seek`, so that backend slots in later behind the same surface without
-   changing the sync public API; if/when it lands it will be an additive async *variant*, not a
-   rewrite.
+4. **Landed (#225, 2026-06-29):** an async `object_store`/HTTP range-read backend
+   (`tessera_io::cloud`, behind the optional `cloud` feature). `ObjectStoreReader` adapts
+   `object_store::ObjectStore` to `Read + Seek` so the existing `Reader::from_reader` code path
+   serves an S3 / HTTP object as-is; `open_url` is the convenience entry. A 64 KiB **tail
+   prefetch** strips the EOCD/central-directory GETs from open (verified by `get_count`), and a
+   `LogicalTableView::select_blocks_overlapping` query that misses a product's stat range never
+   fetches that product's data block — proven by the cohort test against MinIO. Originally
+   "deferred", as predicted: an additive async **variant** behind the unchanged sync public API,
+   not a rewrite.
 
 ## Why
 - A synchronous API is far simpler to consume, test, and reason about for a data-format library;
@@ -37,7 +51,9 @@ actually built (P1–P6), a simpler model proved sufficient and was adopted.
   inaccurate. We never create a tokio runtime and `rt-multi-thread` is not enabled; the public API stays
   sync. Enabling `vortex-io`'s `tokio` feature (multi-thread) is the only route to single-block parallel
   encode — deferred to the ADR-0026 fork and the runtime/parallel/wasm definition in **ADR-0034** (#224).
-- Cloud/object-store range-reads remain a future additive layer (the property is already validated
-  synchronously via `range::CountingReader`).
+- Cloud/object-store range-reads landed as the additive `cloud` feature (`tessera_io::cloud`),
+  per the revision note above. The local `range::CountingReader` proof carried over to the wire
+  via the `minio-range-read` flake check; the cohort prune-before-fetch extension is the vision
+  capstone (cross-product prune over S3).
 - Rayon-based parallel encode (a perf optimization) can be added inside the codecs later without
   affecting the API.

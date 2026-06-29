@@ -14,6 +14,57 @@ use tessera_core::SchemaRegistry;
 use tessera_ingest::{engine, spec as ingest_spec};
 use tessera_io::{pack_dir, parse_byte_size, unpack, Reader, WriteConfig};
 
+/// Cloud-URL prefixes the `cloud` feature recognises. Used to detect a URL-shaped argument and
+/// route it through `tessera_io::open_url` instead of the local file path.
+#[cfg(feature = "cloud")]
+const CLOUD_SCHEMES: &[&str] = &["s3://", "http://", "https://"];
+
+/// Returns `Some(url_str)` when `arg` looks like a cloud URL handled by `tessera_io::open_url`,
+/// else `None` (caller falls back to local-path `Reader::open`).
+#[cfg(feature = "cloud")]
+fn cloud_url(arg: &std::path::Path) -> Option<String> {
+    let s = arg.to_str()?;
+    if CLOUD_SCHEMES.iter().any(|p| s.starts_with(p)) {
+        Some(s.to_string())
+    } else {
+        None
+    }
+}
+
+/// Open a `.tsra` from either a local file path or — when the `cloud` feature is enabled — an
+/// `s3://` / `http(s)://` URL. Returns a boxed [`tessera_core::Manifest`] reader trampoline: the
+/// callers (`inspect`/`verify`) only need the manifest + per-block reads, both of which the
+/// trampoline forwards without leaking the concrete `Reader<R>` generic parameter to the CLI.
+fn open_local_or_url(arg: &std::path::Path) -> tessera_core::Result<Box<dyn TsraSource>> {
+    #[cfg(feature = "cloud")]
+    if let Some(url) = cloud_url(arg) {
+        let r = tessera_io::open_url(&url)?;
+        return Ok(Box::new(r));
+    }
+    Ok(Box::new(Reader::open(arg)?))
+}
+
+/// CLI-only erased view over a `Reader<R>` — narrows the trait-object surface to the two
+/// methods `inspect` / `verify` actually need (manifest access + per-block read). Hides the
+/// concrete `R` (local `File` vs `ObjectStoreReader`) behind a single boxed handle.
+trait TsraSource {
+    fn manifest(&self) -> &tessera_core::Manifest;
+    fn read_block_by_name(&mut self, name: &str) -> tessera_core::Result<Vec<u8>>;
+    fn block_names(&self) -> Vec<String>;
+}
+
+impl<R: std::io::Read + std::io::Seek> TsraSource for Reader<R> {
+    fn manifest(&self) -> &tessera_core::Manifest {
+        Reader::manifest(self)
+    }
+    fn read_block_by_name(&mut self, name: &str) -> tessera_core::Result<Vec<u8>> {
+        Reader::read_block(self, name)
+    }
+    fn block_names(&self) -> Vec<String> {
+        Reader::block_names(self)
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "tessera", version, about = "Tessera FAIR data-product CLI")]
 struct Cli {
@@ -24,8 +75,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Print a human summary of a `.tsra`'s manifest (id, product, blocks, hashes).
+    ///
+    /// With the `cloud` feature enabled, `file` also accepts `s3://<bucket>/<key>` or
+    /// `http(s)://<host>/<key>` — the manifest is read via range-GET over the wire.
     Inspect { file: PathBuf },
     /// Open + fully verify a `.tsra` (magic, manifest seal, every block digest). Exit 0 if valid.
+    ///
+    /// With the `cloud` feature, `file` also accepts `s3://` / `http(s)://` URLs.
     Verify { file: PathBuf },
     /// Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`).
     Unpack { file: PathBuf, outdir: PathBuf },
@@ -193,7 +249,7 @@ fn main() -> ExitCode {
 fn run(cmd: Cmd) -> tessera_core::Result<()> {
     match cmd {
         Cmd::Inspect { file } => {
-            let r = Reader::open(&file)?;
+            let r = open_local_or_url(&file)?;
             let m = r.manifest();
             println!("tessera {} · product={}", m.tessera_version, m.product);
             println!("id            {}", m.id);
@@ -225,10 +281,10 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             Ok(())
         }
         Cmd::Verify { file } => {
-            let mut r = Reader::open(&file)?; // magic + manifest seal
+            let mut r = open_local_or_url(&file)?; // magic + manifest seal
             let n = r.manifest().blocks.len();
             for name in r.block_names() {
-                r.read_block(&name)?; // payload bytes vs recorded digest
+                r.read_block_by_name(&name)?; // payload bytes vs recorded digest
             }
             println!("OK  {} verified ({n} blocks)", file.display());
             Ok(())

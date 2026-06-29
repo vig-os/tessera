@@ -9,7 +9,7 @@ pub mod accumulate;
 pub mod array;
 pub mod chunk_index;
 #[cfg(feature = "cloud")]
-pub(crate) mod cloud;
+pub mod cloud;
 pub mod collection;
 pub mod config;
 pub mod conformance;
@@ -25,6 +25,8 @@ pub mod write;
 
 pub use accumulate::{TableMultiBlockSink, TableStreamWriter};
 pub use array::{decode, decode_subset, encode, ArrayData};
+#[cfg(feature = "cloud")]
+pub use cloud::{open_url, ObjectStoreReader, TAIL_PREFETCH};
 pub use collection::{
     prefix_layout, retention_mode, to_oci_index, to_rocrate, OCI_INDEX_MEDIA_TYPE,
 };
