@@ -174,6 +174,33 @@ pub fn log(repo: &Path, lineage: &str, out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
+/// `tessera forget REPO LINEAGE` — delete a lineage's ref + log. Its now-unreachable objects are
+/// reclaimed by a subsequent `gc` (shared blocks stay).
+pub fn forget(repo: &Path, lineage: &str, out: &mut dyn Write) -> Result<()> {
+    let repo = Repository::open(repo)?;
+    if repo.forget(lineage)? {
+        writeln!(out, "forgot lineage {lineage}").map_err(Error::from)?;
+        writeln!(out, "  run `tessera gc` to reclaim now-unreachable objects")
+            .map_err(Error::from)?;
+    } else {
+        writeln!(out, "no lineage '{lineage}' to forget").map_err(Error::from)?;
+    }
+    Ok(())
+}
+
+/// `tessera gc REPO` — reclaim objects unreachable from any ref.
+pub fn gc(repo: &Path, out: &mut dyn Write) -> Result<()> {
+    let repo = Repository::open(repo)?;
+    let r = repo.gc()?;
+    writeln!(
+        out,
+        "gc: scanned {} · kept {} · reclaimed {} ({} bytes)",
+        r.scanned, r.kept, r.reclaimed, r.bytes_reclaimed
+    )
+    .map_err(Error::from)?;
+    Ok(())
+}
+
 /// `blake3:<hex>` → a glanceable `blake3:1a2b3c4d…` prefix.
 fn short(addr: &str) -> String {
     match addr.split_once(':') {

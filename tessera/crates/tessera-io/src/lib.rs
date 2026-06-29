@@ -35,7 +35,7 @@ pub use config::{parse_byte_size, WriteConfig, DEFAULT_RAM_BUDGET};
 pub use container::{pack, pack_dir, pack_streaming, unpack, BlockPayload, Reader, MIMETYPE};
 pub use multiblock::{ColumnBlockIter, LogicalTableView};
 pub use range::CountingReader;
-pub use repo::{LogEntry, Repository};
+pub use repo::{GcReport, LogEntry, Repository};
 pub use sign::{sign_tsra, verify_tsra};
 pub use stream::{array_job, table_job, table_job_from_fragments, EncodeJob, StreamWriter};
 pub use table::{block_count, block_name, partition_blocks, ColumnData, TableData, BLOCK_ROWS};

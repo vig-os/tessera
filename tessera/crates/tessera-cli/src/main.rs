@@ -174,6 +174,11 @@ enum Cmd {
         #[arg(long)]
         anonymous: bool,
     },
+    /// Forget a lineage: delete its ref + log. Its now-unreachable objects are reclaimed by `gc`
+    /// (blocks shared with other lineages stay).
+    Forget { repo: PathBuf, lineage: String },
+    /// Reclaim objects unreachable from any ref (run after `forget`).
+    Gc { repo: PathBuf },
     /// Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`).
     Unpack { file: PathBuf, outdir: PathBuf },
     /// Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`.
@@ -465,6 +470,14 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
         } => {
             let mut w = std::io::stdout().lock();
             version::publish(&repo, &version, &out, anonymous, &mut w)
+        }
+        Cmd::Forget { repo, lineage } => {
+            let mut w = std::io::stdout().lock();
+            version::forget(&repo, &lineage, &mut w)
+        }
+        Cmd::Gc { repo } => {
+            let mut w = std::io::stdout().lock();
+            version::gc(&repo, &mut w)
         }
         Cmd::Unpack { file, outdir } => {
             let m = unpack(&file, &outdir)?;

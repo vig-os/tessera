@@ -18,6 +18,7 @@
 //! This module is the store + `commit`/`log` primitives; higher-level verbs (`diff`/`publish`/`seal`)
 //! and the `evolve` delta builder layer on top.
 
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -288,6 +289,137 @@ impl Repository {
         self.append_log(lineage, &mh, parent.as_deref())?;
         Ok(mh)
     }
+
+    /// Delete a lineage's ref + `log` cache. Returns `true` if the lineage existed. The version
+    /// objects are left in place — they may be shared with other lineages; run [`gc`](Self::gc) to
+    /// reclaim whatever is now unreachable.
+    pub fn forget(&self, lineage: &str) -> Result<bool> {
+        let mut existed = false;
+        match std::fs::remove_file(self.ref_path(lineage)) {
+            Ok(()) => existed = true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let lp = self.log_path(lineage);
+        if lp.exists() {
+            std::fs::remove_file(&lp)?;
+        }
+        Ok(existed)
+    }
+
+    /// The current tip of every lineage (`refs/*` contents).
+    fn all_ref_tips(&self) -> Result<Vec<String>> {
+        let mut tips = Vec::new();
+        match std::fs::read_dir(self.root.join("refs")) {
+            Ok(rd) => {
+                for e in rd {
+                    let e = e?;
+                    if e.path().is_file() {
+                        let s = std::fs::read_to_string(e.path())?;
+                        let t = s.trim();
+                        if !t.is_empty() {
+                            tips.push(t.to_string());
+                        }
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(tips)
+    }
+
+    /// Every stored object as `(address, path, size)` by walking `objects/<alg>/<aa>/<rest>`.
+    fn all_objects(&self) -> Result<Vec<(String, PathBuf, u64)>> {
+        let mut out = Vec::new();
+        let objects = self.root.join("objects");
+        let algs = match std::fs::read_dir(&objects) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(e.into()),
+        };
+        for alg_e in algs {
+            let alg_e = alg_e?;
+            if !alg_e.path().is_dir() {
+                continue;
+            }
+            let alg = alg_e.file_name().to_string_lossy().into_owned();
+            for aa_e in std::fs::read_dir(alg_e.path())? {
+                let aa_e = aa_e?;
+                if !aa_e.path().is_dir() {
+                    continue;
+                }
+                let aa = aa_e.file_name().to_string_lossy().into_owned();
+                for f_e in std::fs::read_dir(aa_e.path())? {
+                    let f_e = f_e?;
+                    if !f_e.path().is_file() {
+                        continue;
+                    }
+                    let rest = f_e.file_name().to_string_lossy().into_owned();
+                    out.push((
+                        format!("{alg}:{aa}{rest}"),
+                        f_e.path(),
+                        f_e.metadata()?.len(),
+                    ));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Reclaim objects unreachable from any ref. Reachability: walk the `supersedes`/derivation edges
+    /// (whose `content_hash` names an in-repo manifest) from every ref tip, marking each manifest +
+    /// the blocks it references; anything not marked is deleted. Returns the sweep counts.
+    pub fn gc(&self) -> Result<GcReport> {
+        let mut reachable: BTreeSet<String> = BTreeSet::new();
+        let mut stack = self.all_ref_tips()?;
+        while let Some(mh) = stack.pop() {
+            if !reachable.insert(mh.clone()) {
+                continue; // already visited
+            }
+            let m = match self.get_manifest(&mh) {
+                Ok(m) => m,
+                Err(_) => continue, // not a resolvable manifest object — leave it for the sweep
+            };
+            for b in &m.blocks {
+                if let Some(d) = &b.digest {
+                    reachable.insert(d.clone());
+                }
+            }
+            for s in &m.sources {
+                if let Some(ch) = &s.content_hash {
+                    if self.has_object(ch) {
+                        stack.push(ch.clone());
+                    }
+                }
+            }
+        }
+        let mut report = GcReport::default();
+        for (addr, path, size) in self.all_objects()? {
+            report.scanned += 1;
+            if reachable.contains(&addr) {
+                report.kept += 1;
+            } else {
+                std::fs::remove_file(&path)?;
+                report.reclaimed += 1;
+                report.bytes_reclaimed += size;
+            }
+        }
+        Ok(report)
+    }
+}
+
+/// Counts from a [`Repository::gc`] sweep.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GcReport {
+    /// Objects examined.
+    pub scanned: usize,
+    /// Objects kept (reachable).
+    pub kept: usize,
+    /// Objects deleted (unreachable).
+    pub reclaimed: usize,
+    /// Bytes freed by the reclaimed objects.
+    pub bytes_reclaimed: u64,
 }
 
 #[cfg(test)]
@@ -408,6 +540,38 @@ mod tests {
         assert!(format!("{err}").contains("moved"));
         repo.set_ref("s", Some("blake3:aa"), "blake3:bb").unwrap();
         assert_eq!(repo.read_ref("s").unwrap(), Some("blake3:bb".to_string()));
+    }
+
+    #[test]
+    fn forget_then_gc_reclaims_exclusive_keeps_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let (m1, p1) = sealed_with(1);
+        let (m2, p2) = sealed_with(2); // different metadata, SAME block digest
+        repo.commit("a", &m1, &p1).unwrap();
+        repo.commit("b", &m2, &p2).unwrap();
+        assert_eq!(count_objects(dir.path()), 3, "1 shared block + 2 manifests");
+
+        // nothing to collect while both refs live
+        assert_eq!(repo.gc().unwrap().reclaimed, 0);
+
+        // forget "a" → gc reclaims a's manifest, keeps the shared block (b still references it)
+        assert!(repo.forget("a").unwrap());
+        let rep = repo.gc().unwrap();
+        assert_eq!(rep.reclaimed, 1, "a's now-unreachable manifest");
+        assert_eq!(
+            count_objects(dir.path()),
+            2,
+            "shared block + b's manifest remain"
+        );
+
+        // b is intact + verifiable
+        let tip_b = repo.read_ref("b").unwrap().unwrap();
+        repo.get_manifest(&tip_b).unwrap();
+        assert!(
+            !repo.forget("nope").unwrap(),
+            "forgetting an absent lineage is a no-op"
+        );
     }
 
     #[test]
