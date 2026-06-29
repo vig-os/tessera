@@ -60,8 +60,9 @@
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
         # The Python extension module (#210). crane doesn't install cdylibs by default, so copy the
-        # built `libtessera.so` → `tessera.so` (the abi3 import name) into $out/lib. pyo3's abi3
-        # feature builds without a runtime interpreter, so no python is needed at compile time.
+        # built `lib_native.so` → `_native.so` into $out/lib — the `tessera._native` extension that the
+        # pure-Python `tessera/__init__.py` wraps. pyo3's abi3 feature builds without a runtime
+        # interpreter, so no python is needed at compile time.
         tessera-py-lib = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tessera-py";
@@ -69,7 +70,7 @@
           doCheck = false;
           postInstall = ''
             mkdir -p $out/lib
-            cp target/release/libtessera.so $out/lib/tessera.so
+            cp target/release/lib_native.so $out/lib/_native.so
           '';
         });
 
@@ -358,11 +359,19 @@
               && touch $out
           '';
 
-          # The Python bindings import + verify the committed corpus through the real .so (#210):
-          # proves the abi3 extension loads on CPython and the read/verify surface works end-to-end.
+          # The Python bindings import + verify the committed corpus through the real package (#210):
+          # assembles the `tessera/` package (pure-Python `__init__.py` + the `_native.so` extension),
+          # then runs the smoke test, which exercises the ERGONOMIC surface — numpy ndarrays, polars
+          # DataFrames, pyarrow Tables — proving the abi3 extension loads on CPython AND the wrapper
+          # returns native objects end-to-end.
           tessera-py-import = pkgs.runCommand "tessera-py-import"
-            { nativeBuildInputs = [ (pkgs.python312.withPackages (ps: [ ps.numpy ])) ]; } ''
-            cp ${tessera-py-lib}/lib/tessera.so ./tessera.so
+            {
+              nativeBuildInputs =
+                [ (pkgs.python312.withPackages (ps: [ ps.numpy ps.polars ps.pyarrow ])) ];
+            } ''
+            mkdir -p tessera
+            cp -r ${./tessera/crates/tessera-py/python/tessera}/. tessera/
+            cp ${tessera-py-lib}/lib/_native.so tessera/_native.so
             export PYTHONPATH=$PWD
             python3 ${./tessera/crates/tessera-py/tests/smoke.py} ${./tessera/corpus/files}
             touch $out

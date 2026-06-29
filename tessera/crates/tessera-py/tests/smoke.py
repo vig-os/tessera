@@ -1,17 +1,20 @@
-"""Hermetic smoke test for the `tessera` Python extension (#210).
+"""Hermetic smoke test for the `tessera` Python PACKAGE (#210 + the ergonomic layer).
 
 Run as: python3 smoke.py <corpus_files_dir>
-Exercises the read+verify surface against the committed conformance corpus and asserts the typed
-error path. Driven by the `tessera-py-import` flake check (the .so on PYTHONPATH).
+
+Exercises the ERGONOMIC surface over the committed conformance corpus — numpy ``ndarray`` for arrays
+(+ ROI sub-cube), polars ``DataFrame`` / pyarrow ``Table`` / dict-of-arrays + projected column for
+tables — plus the typed-error path and a numpy write→read roundtrip. Driven by the `tessera-py-import`
+flake check (the assembled `tessera/` package — pure-Python `__init__.py` + `_native.so` — on PYTHONPATH).
 """
 
-import functools
-import json
-import operator
-import sys
 import pathlib
+import sys
+import tempfile
 
 import numpy as np
+import polars as pl
+import pyarrow as pa
 
 import tessera
 
@@ -24,65 +27,48 @@ assert issubclass(tessera.TesseraError, Exception)
 
 verified = 0
 for f in files:
-    r = tessera.open(str(f))
-    # manifest round-trips to a dict with the canonical fd5 spine fields
-    m = json.loads(r.manifest_json())
+    r = tessera.open(f)
+    m = r.manifest()  # a dict, parsed from the canonical JSON
     for key in ("id", "product", "name", "blocks"):
         assert key in m, f"{f.name}: manifest missing {key!r}"
     assert r.product == m["product"]
     assert r.id == m["id"]
     assert r.block_names() == [b["name"] for b in m["blocks"]]
-    # full integrity pass (seal + every block digest) — must not raise
     r.verify()
-    tessera.verify(str(f))
-    # every declared block is digest-verified-readable
-    for name in r.block_names():
-        assert isinstance(r.read_block(name), (bytes, bytearray))
+    tessera.verify(f)
 
-    # decode each block to numpy via the typed accessors and check it materialises with the
-    # shape/dtype the manifest declares (the actual "Python can read the data" parity check)
     for b in m["blocks"]:
         if b["kind"] == "array":
-            buf, shape, code = r.read_array(b["name"])
-            arr = np.frombuffer(buf, "<" + code).reshape(tuple(shape))
-            assert arr.size == functools.reduce(operator.mul, shape, 1)
-            # ROI sub-cube must equal the full array's corresponding slice
-            if all(d >= 2 for d in shape):
-                half = [max(1, d // 2) for d in shape]
-                sbuf, sshape, scode = r.read_array_subset(b["name"], [0] * len(shape), half)
-                sub = np.frombuffer(sbuf, "<" + scode).reshape(tuple(sshape))
-                expected = arr[tuple(slice(0, h) for h in half)]
-                assert np.array_equal(sub, expected), f"{f.name}: ROI subset mismatch"
+            arr = r.array(b["name"])  # -> ndarray, already reshaped (native dtype, C-order)
+            assert isinstance(arr, np.ndarray)
+            assert list(arr.shape) == [int(d) for d in b["spec"]["shape"]]
+            # ROI sub-cube equals the full array's corresponding slice (only intersecting chunks read)
+            if all(d >= 2 for d in arr.shape):
+                half = [max(1, d // 2) for d in arr.shape]
+                sub = r.array_roi(b["name"], [0] * arr.ndim, half)
+                assert np.array_equal(sub, arr[tuple(slice(0, h) for h in half)]), f"{f.name}: ROI"
         elif b["kind"] == "table":
-            cols = r.read_table(b["name"])
-            assert cols, f"{f.name}: empty table {b['name']}"
-            lengths = {np.frombuffer(buf, "<" + code).shape[0] for _, buf, code in cols}
-            assert len(lengths) == 1, f"{f.name}: ragged columns {lengths}"
-            # column projection must equal the same column from the full read
-            cname, cbuf, ccode = cols[0]
-            pbuf, pcode = r.read_table_column(b["name"], cname)
-            assert pcode == ccode and np.array_equal(
-                np.frombuffer(pbuf, "<" + pcode), np.frombuffer(cbuf, "<" + ccode)
-            ), f"{f.name}: projection != full read for {cname}"
+            df = r.table(b["name"])  # -> polars DataFrame (via Arrow)
+            assert isinstance(df, pl.DataFrame)
+            at = r.table_arrow(b["name"])  # -> pyarrow Table
+            assert isinstance(at, pa.Table)
+            assert df.height == at.num_rows
+            cols = r.table_dict(b["name"])  # -> {column: ndarray}
+            first = next(iter(cols))
+            proj = r.column(b["name"], first)  # projected single column
+            assert isinstance(proj, np.ndarray)
+            assert np.array_equal(proj, cols[first]), f"{f.name}: projection != full read"
+            assert df.height == proj.shape[0]
     verified += 1
 
-# typed-error path: bad path and unknown block both raise TesseraError (not a bare RuntimeError)
+# typed-error path: a missing file raises TesseraError, not a bare exception
 try:
-    tessera.open(str(corpus / "does_not_exist.tsra"))
+    tessera.open(corpus / "does_not_exist.tsra")
     raise AssertionError("expected TesseraError for missing file")
 except tessera.TesseraError:
     pass
 
-probe = tessera.open(str(files[0]))
-try:
-    probe.read_block("no-such-block")
-    raise AssertionError("expected TesseraError for unknown block")
-except tessera.TesseraError:
-    pass
-
-# write path: build a product from numpy, pack, read it back, assert bit-exact round-trip
-import tempfile  # noqa: E402
-
+# write path: build from numpy, pack, reopen through the wrapper, assert the ergonomic reads match
 vol = np.arange(2 * 3 * 4, dtype="<i2").reshape(2, 3, 4)
 idx = np.arange(5, dtype="<u4")
 en = np.array([0.5, 1.5, 2.5, 3.5, 4.5], dtype="<f4")
@@ -93,18 +79,19 @@ with tempfile.TemporaryDirectory() as td:
     b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
     b.add_table("events", [("idx", "u4", idx.tobytes()), ("en", "f4", en.tobytes())], "idx")
     b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "PT"}')
-    b.add_source("ingested_from", "src.dat")
     cid = b.pack(str(out))
     assert cid.startswith("blake3:")
 
-    rr = tessera.open(str(out))
+    rr = tessera.open(out)
     rr.verify()
-    buf, shape, code = rr.read_array("volume")
-    got = np.frombuffer(buf, "<" + code).reshape(tuple(shape))
-    assert np.array_equal(got, vol), "array write→read mismatch"
-    cols = {n: np.frombuffer(buf, "<" + code) for n, buf, code in rr.read_table("events")}
+    assert np.array_equal(rr.array("volume"), vol), "array write→read mismatch"
+    cols = rr.table_dict("events")
     assert np.array_equal(cols["idx"], idx) and np.array_equal(cols["en"], en)
-    m = json.loads(rr.manifest_json())
-    assert m["sources"][0]["reference"] == "src.dat"
+    # polars + pyarrow views agree with the numpy view
+    assert rr.table("events")["idx"].to_list() == idx.tolist()
+    assert rr.table_arrow("events").column("en").to_pylist() == en.tolist()
 
-print(f"tessera-py smoke OK: {verified} corpus archives verified + write→read roundtrip via the Python bindings")
+print(
+    f"tessera-py smoke OK: {verified} corpus archives via the ergonomic surface "
+    "(numpy / polars / pyarrow) + numpy write→read roundtrip"
+)

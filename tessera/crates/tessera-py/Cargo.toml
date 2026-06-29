@@ -8,9 +8,10 @@ repository.workspace = true
 authors.workspace = true
 
 [lib]
-# The Python module is `import tessera`; cargo emits `libtessera.so` (renamed to `tessera.so` on
-# install). cdylib = the extension module; no rlib (an extension-module crate can't link `cargo test`).
-name = "tessera"
+# The compiled extension is `tessera._native`; cargo emits `lib_native.so` (installed as `_native.so`
+# inside the `tessera/` package, beside the pure-Python `__init__.py` that adds the numpy/polars/pyarrow
+# ergonomic surface). cdylib = the extension module; no rlib (an extension-module crate can't link tests).
+name = "_native"
 crate-type = ["cdylib"]
 
 [dependencies]

@@ -352,8 +352,10 @@ fn verify(path: PathBuf) -> PyResult<()> {
     Reader::new(path)?.verify()
 }
 
+// The compiled extension is `tessera._native` (the `tessera` package's pure-Python `__init__.py` wraps
+// it with the numpy/polars/pyarrow ergonomic surface). pyo3 ties the module init symbol to this fn name.
 #[pymodule]
-fn tessera(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("TesseraError", m.py().get_type::<TesseraError>())?;
     m.add_class::<Reader>()?;
