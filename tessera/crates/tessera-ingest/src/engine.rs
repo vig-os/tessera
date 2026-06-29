@@ -91,6 +91,16 @@ pub fn run(
         let extra = build_extra_sources(p, &built, &spec_ref, &h)?;
         let (manifest, _payloads_written_in_dispatch) =
             dispatch(p, &extra, out_dir, cfg, stream_threshold, &timestamp)?;
+        // Honor the fd5 schema contract AT INGEST: a product that claims a known schema must satisfy
+        // it now, not only on a later `tessera schema`. Open-world → unknown product names pass.
+        tessera_core::SchemaRegistry::builtin()
+            .validate(&manifest)
+            .map_err(|e| {
+                Error::Invalid(format!(
+                    "ingest-engine: member '{}' fails its declared schema '{}': {e}",
+                    p.name, manifest.product
+                ))
+            })?;
         let id = manifest.id.clone();
         let mh = manifest.manifest_hash.clone().ok_or_else(|| {
             Error::Invalid(format!(

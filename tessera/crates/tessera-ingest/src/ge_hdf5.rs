@@ -527,6 +527,11 @@ pub fn stream_to_listmode_product_2p_to_file_with_block_rows(
     )
 }
 
+/// Default `coincidence_mode` for a GE listmode product (the `listmode` schema requires this field).
+/// Prompt coincidence is the dominant GE acquisition mode; it is a valid, correctable default until a
+/// follow-up refines it per dataset (2p/3p) and applies spec `[product.metadata]` overrides.
+const DEFAULT_COINCIDENCE_MODE: &str = "prompt-coincidence";
+
 #[allow(clippy::too_many_arguments)] // inner mirror of the two public APIs above
 fn stream_to_listmode_product_2p_to_file_inner(
     path: &std::path::Path,
@@ -568,6 +573,12 @@ fn stream_to_listmode_product_2p_to_file_inner(
     for s in extra_sources {
         ws.add_source(s.clone())?;
     }
+    // Same default coincidence_mode as the batch builder — declared before any block commits so it
+    // flows into the sealed manifest_hash (the streaming path has no post-seal re-build).
+    ws.with_field(
+        "coincidence_mode",
+        serde_json::Value::String(DEFAULT_COINCIDENCE_MODE.to_string()),
+    )?;
     let mut sw = tessera_io::StreamWriter::with_config(ws, cfg, unit_bytes);
     {
         let sink_stage = stage.join("sink");
@@ -710,6 +721,14 @@ pub(crate) fn to_listmode_product_partitioned(
         name,
         "GE listmode coincidence events",
         timestamp,
+    );
+    // The `listmode` schema requires `coincidence_mode`. Default to prompt-coincidence — the dominant
+    // GE coincidence-listmode acquisition mode — a sensible, valid, correctable value. (Refining it
+    // per dataset 2p/3p and applying spec `[product.metadata]` overrides before seal is a tracked
+    // follow-up; for now it satisfies the schema contract validate-on-seal now enforces.)
+    b.with_field(
+        "coincidence_mode",
+        serde_json::Value::String(DEFAULT_COINCIDENCE_MODE.to_string()),
     );
     let mut payloads: Vec<BlockPayload> = Vec::with_capacity(total_blocks as usize);
     for blk in 0..total_blocks {
