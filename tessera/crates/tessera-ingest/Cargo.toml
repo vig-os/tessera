@@ -18,7 +18,12 @@ hdf5-metno.workspace = true
 # Raw libhdf5 C API — required by `ge_hdf5::read_compound` / `stream_compound` (#222) for the identity
 # (file-type == memory-type) H5Dread that hdf5-metno's typed `read_raw::<T>()` cannot do generically.
 hdf5-metno-sys.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+# Declarative ingest spec: pure-Rust TOML parser for `tessera-ingest::spec`. The engine canonicalizes
+# the *parsed* model (JCS) before hashing, so whitespace / comments in the source TOML never change
+# the spec hash that flows into each member's `ingested_via_spec` provenance edge.
+toml.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

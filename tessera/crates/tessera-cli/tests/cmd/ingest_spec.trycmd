@@ -1,0 +1,8 @@
+```
+$ tessera ingest --help
+Ingest a vendor acquisition file into a sealed `.tsra` product (normalise at the door), or run a declarative ingest spec (`--spec FILE`) into a sealed collection of `.tsra` products
+
+Usage: tessera ingest [OPTIONS] [COMMAND]
+...
+
+```

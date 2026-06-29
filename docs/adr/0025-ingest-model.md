@@ -32,3 +32,14 @@ Tessera product.
 - **Pending under P5:** multi-slice **series stacking** (sort by ImagePositionPatient / InstanceNumber
   into a 3-D volume), **PS3.15 de-identification** verification, a golden DICOM corpus, then GE-HDF5 /
   Siemens / raw / NIfTI (`#208`). These complete the **v0.2** milestone.
+
+## Revision (2026-06-29) — generalised by ADR-0035
+
+The single-product, hardcoded-callsite shape this ADR sketched ("DICOM → recon → write") has been
+extended to a **declarative, multi-product** shape by [ADR-0035](0035-declarative-ingest-spec.md):
+a TOML spec describes the collection + the derivation DAG; a general engine dispatches each
+product to the existing per-backend readers/builders (DICOM / GE-HDF5 / NIfTI / raw). The
+per-backend `to_*_product` signatures grew an `extra_sources` slice so the engine can thread
+typed `derived_from` (pinned to the parent's `manifest_hash`) + `ingested_via_spec` (pinned to the
+spec's `content_hash`) edges. The format on disk is unchanged — the conformance corpus is
+untouched.

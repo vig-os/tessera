@@ -287,6 +287,9 @@ fn run_listmode_real(
         &dir.path().join("stage"),
         &out,
         cfg,
+        "events",
+        "ms",
+        &[],
     )?;
     let wall_s = t.elapsed().as_secs_f64();
     // Total rows = sum over all event blocks (multi-block products split at BLOCK_ROWS).

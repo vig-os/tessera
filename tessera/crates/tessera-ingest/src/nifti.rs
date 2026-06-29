@@ -152,12 +152,15 @@ pub fn read_nifti(path: &std::path::Path) -> Result<NiftiImage> {
 }
 
 /// Build a sealed Tessera `recon` product from a decoded NIfTI volume, with the `world_frame`/rescale on
-/// the array spec and an `ingested_from` provenance edge to the source `.nii`.
+/// the array spec and an `ingested_from` provenance edge to the source `.nii`. `extra_sources` flow in
+/// AFTER `ingested_from` (the declarative ingest engine threads `derived_from` + `ingested_via_spec`
+/// edges here so the chain verifier picks up the parent's `manifest_hash`).
 pub fn to_recon_product(
     img: &NiftiImage,
     name: &str,
     timestamp: &str,
     source: &str,
+    extra_sources: &[tessera_core::provenance::Source],
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
     let mut spec = ArraySpec::new(img.shape.clone(), img.data.dtype())
         .with_rescale(img.rescale_slope, img.rescale_intercept);
@@ -170,6 +173,9 @@ pub fn to_recon_product(
         "ingested_from",
         source,
     ));
+    for s in extra_sources {
+        b.add_source(s.clone());
+    }
     let sealed = b.seal()?;
     Ok((sealed, vec![payload]))
 }
@@ -239,7 +245,7 @@ mod tests {
 
         // builds a sealed, verifying recon product.
         let (m, _payloads) =
-            to_recon_product(&img, "brain-01", "2024-01-01T00:00:00Z", "brain.nii").unwrap();
+            to_recon_product(&img, "brain-01", "2024-01-01T00:00:00Z", "brain.nii", &[]).unwrap();
         m.verify().unwrap();
         assert_eq!(m.product, "recon");
         assert_eq!(m.sources[0].reference, "brain.nii");

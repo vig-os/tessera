@@ -1,0 +1,79 @@
+# Declarative ingest spec (ADR-0035) — a GE listmode acquisition expressed as config.
+#
+# Run with:
+#   tessera ingest --spec docs/examples/ingest-ge-listmode.toml \
+#                  --out /tmp/dp06 --workers 8 --ram-budget 2G
+#
+# Produces:
+#   /tmp/dp06/<id>.tsra   for each `[[product]]` below
+#   /tmp/dp06/collection.json   (the sealed catalog over those members)
+#
+# The engine adds two provenance edges to every member:
+#   1. an `ingested_from` edge to the source file (the existing per-backend behaviour);
+#   2. an `ingested_via_spec` edge to THIS spec, pinned to the spec's content_hash
+#      (`blake3` over canonical-JSON of the parsed model — whitespace/comments/key-order
+#      in this file CANNOT change identity).
+#
+# `derived_from` resolves spec-locally by `name`. Cycles, dangling references, and
+# duplicate names are parse-time errors.
+
+[collection]
+name = "DP06-2024-01"
+description = "DUPLET DP06 — singles + 2p + 3p coincidences + recon"
+timestamp = "2024-01-01T00:00:00Z"
+study = "DP06-2024-01"
+
+[spec]
+description = "GE Discovery MI Gen2 listmode acquisition, ingested as one collection"
+
+# 1. Raw singles — the photon detections, keyed on a high-resolution `time_ps` index.
+#    Streaming = "auto" lets the engine pick stream-vs-batch from the dataset's
+#    estimated payload (rows × row_bytes) vs `--stream-threshold` (default 256 MiB).
+[[product]]
+name = "DP06-singles"
+role = "raw"
+schema = "listmode"
+description = "GE singles — per-photon detections"
+format = "hdf-compound"
+input = "/mnt/HDD/data/sdsc_dump/GEDiscoveryMIGen2/Projects/DUPLET-Patients/DP06/LIST_singles.h5"
+dataset = "singles"
+row_index = "time_ps"
+block_prefix = "singles"
+streaming = "auto"
+
+# 2. Raw 2-photon coincidences derived from singles.
+[[product]]
+name = "DP06-coin-2p"
+role = "raw"
+schema = "listmode"
+description = "GE 2-photon coincidences (events_2p compound)"
+derived_from = ["DP06-singles"]
+format = "hdf-compound"
+input = "/mnt/HDD/data/sdsc_dump/GEDiscoveryMIGen2/Projects/DUPLET-Patients/DP06/LIST_coin_2p.h5"
+dataset = "events_2p"
+# default block_prefix = "events", default row_index = "ms" — both match the GE corpus.
+streaming = "auto"
+
+# 3. Raw 3-photon coincidences (extended-coinc, the DUPLET use case) — same source as 2p.
+[[product]]
+name = "DP06-coin-3p"
+role = "raw"
+schema = "listmode"
+description = "GE 3-photon coincidences (events_3p compound)"
+derived_from = ["DP06-singles"]
+format = "hdf-compound"
+input = "/mnt/HDD/data/sdsc_dump/GEDiscoveryMIGen2/Projects/DUPLET-Patients/DP06/LIST_coin_3p.h5"
+dataset = "events_3p"
+streaming = "auto"
+
+# 4. Derived recon volume reconstructed FROM the 2p coincidences. NIfTI is the
+#    interchange format the reconstruction toolchain produces; Tessera carries it
+#    losslessly + records the derivation edge to the parent listmode.
+[[product]]
+name = "DP06-recon"
+role = "derived"
+schema = "recon"
+description = "TOF-OSEM recon from 2p coincidences"
+derived_from = ["DP06-coin-2p"]
+format = "nifti"
+input = "/mnt/HDD/data/sdsc_dump/GEDiscoveryMIGen2/Projects/DUPLET-Patients/DP06/processed/recon.nii"

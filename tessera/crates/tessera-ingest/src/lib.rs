@@ -7,6 +7,8 @@
 //! rewriting pixels.
 
 pub mod dicom;
+pub mod engine;
 pub mod ge_hdf5;
 pub mod nifti;
 pub mod raw;
+pub mod spec;

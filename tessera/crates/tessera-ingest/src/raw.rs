@@ -33,13 +33,16 @@ pub fn read_raw(path: &Path, shape: Vec<u64>, numpy_code: &str) -> Result<(Array
 }
 
 /// Read a raw binary volume and seal it as a Tessera `recon` product, with an `ingested_from` provenance
-/// edge to the source file.
+/// edge to the source file. `extra_sources` flow in AFTER `ingested_from` (the declarative ingest engine
+/// threads `derived_from` + `ingested_via_spec` edges here so the chain verifier picks up the parent's
+/// `manifest_hash`).
 pub fn to_recon_product(
     path: &Path,
     shape: Vec<u64>,
     numpy_code: &str,
     name: &str,
     timestamp: &str,
+    extra_sources: &[tessera_core::provenance::Source],
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
     let (spec, data) = read_raw(path, shape, numpy_code)?;
     let (block_ref, payload) = array::array_block("volume", &spec, &data)?;
@@ -49,6 +52,9 @@ pub fn to_recon_product(
         "ingested_from",
         path.display().to_string(),
     ));
+    for s in extra_sources {
+        b.add_source(s.clone());
+    }
     let sealed = b.seal()?;
     Ok((sealed, vec![payload]))
 }
@@ -77,8 +83,15 @@ mod tests {
         assert!(read_raw(&f, vec![2, 2, 2], "i4").is_err());
 
         // seals a verifying recon product.
-        let (m, _p) =
-            to_recon_product(&f, vec![2, 2, 2], "i2", "raw-01", "2024-01-01T00:00:00Z").unwrap();
+        let (m, _p) = to_recon_product(
+            &f,
+            vec![2, 2, 2],
+            "i2",
+            "raw-01",
+            "2024-01-01T00:00:00Z",
+            &[],
+        )
+        .unwrap();
         m.verify().unwrap();
         assert_eq!(m.product, "recon");
     }
