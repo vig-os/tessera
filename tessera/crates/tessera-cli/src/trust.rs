@@ -38,6 +38,48 @@ pub fn keygen(out: &Path, w: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
+/// Load an ed25519 **signing** key from `path`, auto-detecting the encoding, and return it with a
+/// `key_format` tag (recorded in the signature envelope). Two formats:
+///   * **`ssh-ed25519`** — an OpenSSH private key (`-----BEGIN OPENSSH PRIVATE KEY-----`), so a
+///     researcher can sign with the same `~/.ssh/id_ed25519` they already hold. The *crypto* is
+///     identical (ed25519 over the same envelope) — only the key container differs, so `key_id` is the
+///     same raw-pubkey hex either way and any verifier checks the signature unchanged.
+///   * **`raw-hex`** — a 32-byte hex seed (what `tessera keygen` writes).
+pub fn load_signing_key(path: &Path) -> Result<(SigningKey, &'static str)> {
+    let text = std::fs::read_to_string(path).map_err(Error::from)?;
+    if text.contains("OPENSSH PRIVATE KEY") {
+        let ssh = ssh_key::PrivateKey::from_openssh(text.trim())
+            .map_err(|e| Error::Invalid(format!("not a valid OpenSSH private key: {e}")))?;
+        if ssh.is_encrypted() {
+            return Err(Error::Invalid(
+                "the ssh key is passphrase-encrypted; decrypt it first \
+                 (`ssh-keygen -p -N '' -f <key>`) or export a raw hex seed"
+                    .into(),
+            ));
+        }
+        let pair = ssh.key_data().ed25519().ok_or_else(|| {
+            Error::Invalid(
+                "the ssh key is not ed25519 — only ssh-ed25519 keys can sign tessera products"
+                    .into(),
+            )
+        })?;
+        Ok((
+            SigningKey::from_bytes(&pair.private.to_bytes()),
+            "ssh-ed25519",
+        ))
+    } else {
+        Ok((signing::signing_key_from_hex(&text)?, "raw-hex"))
+    }
+}
+
+/// The current instant as an RFC-3339 UTC string — the `signed_at` stamp bound into a signature.
+pub fn now_rfc3339() -> String {
+    use time::format_description::well_known::Rfc3339;
+    time::OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_default()
+}
+
 fn with_suffix(p: &Path, suffix: &str) -> PathBuf {
     let mut s = p.as_os_str().to_os_string();
     s.push(suffix);
@@ -291,11 +333,54 @@ mod tests {
         tessera_io::sign_tsra(
             &tsra,
             &sk,
-            Some("https://orcid.org/0000-0002-1825-0097".into()),
+            &signing::SignOpts {
+                signer: Some("https://orcid.org/0000-0002-1825-0097".into()),
+                ..Default::default()
+            },
         )
         .unwrap();
         let pub_hex = std::fs::read_to_string(with_suffix(&keyfile, ".pub")).unwrap();
         (tsra, pub_hex)
+    }
+
+    /// A throwaway, unencrypted OpenSSH ed25519 private key (generated offline with `ssh-keygen -t
+    /// ed25519 -N ''`). Its raw 32-byte public key is `438ddd…2acf6faf` — the `key_id` the loader
+    /// must derive, identical to a raw-hex key with the same pubkey (only the container differs).
+    const SSH_ED25519_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+        b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n\
+        QyNTUxOQAAACBDjd0RWR+en8LrDAfDQLQB1mZIE5JKxQzen9pLKs9vrwAAAJDCcCx4wnAs\n\
+        eAAAAAtzc2gtZWQyNTUxOQAAACBDjd0RWR+en8LrDAfDQLQB1mZIE5JKxQzen9pLKs9vrw\n\
+        AAAEBe9p6oxAJOzfIpyQL96Ns+SnJxFNKYx5F+xRkgw9lFXUON3RFZH56fwusMB8NAtAHW\n\
+        ZkgTkkrFDN6f2ksqz2+vAAAADHRlc3NlcmEtdGVzdAE=\n\
+        -----END OPENSSH PRIVATE KEY-----\n";
+
+    #[test]
+    fn loads_an_openssh_ed25519_key_and_signs_with_the_same_key_id() {
+        let dir = tempfile::tempdir().unwrap();
+        // an OpenSSH `id_ed25519` loads with key_format = "ssh-ed25519".
+        let sshf = dir.path().join("id_ed25519");
+        std::fs::write(&sshf, SSH_ED25519_KEY).unwrap();
+        let (sk, fmt) = load_signing_key(&sshf).unwrap();
+        assert_eq!(fmt, "ssh-ed25519");
+        // the key_id is the raw ed25519 pubkey hex — container-independent, so any verifier checks it
+        // exactly like a keygen key (the crypto is unchanged; only the on-disk key wrapper differs).
+        assert_eq!(
+            signing::verifying_key_hex(&sk.verifying_key()),
+            "438ddd11591f9e9fc2eb0c07c340b401d6664813924ac50cde9fda4b2acf6faf"
+        );
+        // a signature made with the ssh-loaded key verifies under its public key.
+        let env = signing::sign_ed25519("blake3:abcd", &sk, &signing::SignOpts::default()).unwrap();
+        assert!(signing::verify("blake3:abcd", &env, &sk.verifying_key()));
+
+        // a raw-hex seed (what keygen writes) loads with key_format = "raw-hex".
+        let rawf = dir.path().join("raw.key");
+        keygen(&rawf, &mut Vec::new()).unwrap();
+        assert_eq!(load_signing_key(&rawf).unwrap().1, "raw-hex");
+
+        // a non-ed25519 / malformed key is rejected, not panicked.
+        let badf = dir.path().join("bad");
+        std::fs::write(&badf, "-----BEGIN OPENSSH PRIVATE KEY-----\nnonsense\n").unwrap();
+        assert!(load_signing_key(&badf).is_err());
     }
 
     #[test]

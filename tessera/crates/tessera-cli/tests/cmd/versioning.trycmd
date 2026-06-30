@@ -1,0 +1,80 @@
+How a researcher versions a metadata correction without copying the data — Tessera's content-addressed,
+copy-on-write repository (ADR-0036). The `recon` study has the wrong tracer; the fix is one new version
+whose image block is *shared* with the original (the copy is proportional to the change), then a clean
+history-free artifact for handover. Runs in a sandbox seeded with `study.tsra`; ids are stable because
+they are content hashes of the (fixed) inputs.
+
+# === Initialize a content-addressed repository (objects + refs + log). ===
+
+```
+$ tessera init repo
+initialized tessera repository at repo
+
+```
+
+# === Import the sealed study as the first version of its lineage (its stable `id`). ===
+
+```
+$ tessera import repo study.tsra
+imported lineage blake3:12643649[..]
+  version blake3:7c9f7bd9[..]
+
+```
+
+# === One version so far — the lineage tip. ===
+
+```
+$ tessera log repo blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187
+blake3:7c9f7bd9[..]  (tip)
+
+```
+
+# === Correct the metadata: commit a new version with `tracer=FDG`. The unchanged image block is reused
+#     by digest — the new version writes one small object, not a second copy of the volume. ===
+
+```
+$ tessera commit repo blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187 --set tracer=FDG
+committed blake3:12643649[..]
+  version    blake3:c40501d7[..]
+  supersedes blake3:7c9f7bd9[..]
+
+```
+
+# === History now has two versions, newest first. ===
+
+```
+$ tessera log repo blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187
+blake3:c40501d7[..]  (tip)
+blake3:7c9f7bd9[..]
+
+```
+
+# === What changed? Diff the tip against its parent — 0 blocks re-encoded, one metadata field added. ===
+
+```
+$ tessera diff repo blake3:c40501d7ef97e3aceda7a44273152c48ca23a905aa1c331a92a0eb6959fd2004
+diff blake3:7c9f7bd9[..] → blake3:c40501d7[..]
+lineage: NEW supersedes OLD ✓
+blocks: 0 changed, 1 unchanged
+metadata: 1 changed
+  + tracer  "FDG"
+
+```
+
+# === Publish a history-free standalone `.tsra` for handover (drops the supersedes chain, keeps a
+#     `snapshot_of` breadcrumb). ===
+
+```
+$ tessera publish repo blake3:c40501d7ef97e3aceda7a44273152c48ca23a905aa1c331a92a0eb6959fd2004 published.tsra
+published blake3:c40501d7[..] → published.tsra
+  history-free, snapshot_of blake3:c40501d7[..]
+
+```
+
+# === The published artifact is a self-contained, verifiable product carrying the correction. ===
+
+```
+$ tessera verify published.tsra
+OK  published.tsra verified (1 blocks)
+
+```

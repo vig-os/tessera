@@ -19,6 +19,11 @@ serde_json.workspace = true
 clap.workspace = true
 # OS CSPRNG for `tessera keygen` (32-byte ed25519 seed). Host-only — never in the wasm verify path.
 getrandom = "0.2"
+# RFC-3339 `signed_at` stamp on signatures (host-only — `tessera sign`).
+time.workspace = true
+# Load an OpenSSH `id_ed25519` to sign with (`key_format = "ssh-ed25519"`). Host-only; the crypto is the
+# same ed25519 the wasm verify path uses — this only parses the OpenSSH key container.
+ssh-key = { version = "0.6", default-features = false, features = ["ed25519", "std"] }
 # `tessera bench write` stages encode fragments under a fresh tempdir per run (the bench runs the
 # real `TableStreamWriter`/`StreamWriter`, which need durable staging dirs).
 tempfile = "3"

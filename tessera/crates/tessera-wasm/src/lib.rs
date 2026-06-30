@@ -58,7 +58,7 @@ pub fn version() -> String {
 mod tests {
     use super::*;
     use tessera_core::block::array::{ArrayBlock, ArraySpec};
-    use tessera_core::signing::{sign_manifest, verifying_key_hex, SigningKey};
+    use tessera_core::signing::{sign_manifest, verifying_key_hex, SignOpts, SigningKey};
     use tessera_core::ProductBuilder;
 
     fn sealed_json() -> String {
@@ -87,7 +87,7 @@ mod tests {
         let json = sealed_json();
         let key = SigningKey::from_bytes(&[11; 32]);
         let m = Manifest::from_json(&json).unwrap();
-        let sig = sign_manifest(&m, &key, None).unwrap();
+        let sig = sign_manifest(&m, &key, &SignOpts::default()).unwrap();
         let sig_json = serde_json::to_string(&sig).unwrap();
         let pub_hex = verifying_key_hex(&key.verifying_key());
         assert!(verify_signature(&json, &sig_json, &pub_hex));

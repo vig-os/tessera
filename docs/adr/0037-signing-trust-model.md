@@ -46,9 +46,11 @@ the DOI registry is the anchor).
 ### §0 — Two bugs fixed now (correctness, not scope)
 
 1. **Sign the envelope, not the seal.** The signature now covers the JCS-canonical
-   `{alg, key_id, manifest_hash, signer}` (`alg = ed25519-env-v1`), not the bare `manifest_hash`. This
-   closes a **false-attribution** hole: previously a *valid* signature could be relabeled with any
-   `signer` (e.g. a famous ORCID) and still verify. Regression-tested.
+   `{alg, key_id, manifest_hash, signer, signed_at, key_format}` (`alg = ed25519-env-v1`), not the bare
+   `manifest_hash`. This closes a **false-attribution** hole: previously a *valid* signature could be
+   relabeled with any `signer` (e.g. a famous ORCID) and still verify. Every envelope field — the
+   attribution `signer`, the time-of-signing `signed_at`, and the key encoding `key_format` — is now
+   bound, so none can be rewritten on an otherwise-valid signature. Regression-tested.
 2. **Carry the sidecar through distribution.** `tessera push` now attaches `<file>.tsra.sig.json` as a
    second OCI layer (`application/vnd.tessera.signature.v1+json`) and `tessera pull` recovers it
    (sha256-verified). Signing was previously *operationally unreachable* across the registry hop. The
@@ -69,9 +71,13 @@ sign-time and embedded*. This is the single criterion that ranks the mechanisms 
   - A **file-based trust store** (`~/.config/tessera/trust/` + per-repo `.tessera/trust/`) with
     `tessera trust add/list/remove`; **`verify-sig` defaults to it** (`--require-signer <orcid>`
     optional), instead of requiring `--pubkey`.
-  - `ssh-ed25519` as a second `alg` (sign with an existing `~/.ssh/id_ed25519`).
-  - Two **additive, optional** envelope fields shipped *before any sigs hit production data*:
-    `signed_at` (RFC-3339) and `key_format`.
+  - `ssh-ed25519` (done) — `tessera sign` auto-detects an OpenSSH `~/.ssh/id_ed25519` and signs with it,
+    recording `key_format = "ssh-ed25519"`. It is a host-side key **loader**, *not* a second `alg`: the
+    curve, the signed envelope, and verification are identical, so `key_id` (the raw-pubkey hex) and the
+    wasm verify path are unchanged. A raw-hex `keygen` seed records `key_format = "raw-hex"`.
+  - Two **additive, optional** envelope fields shipped *before any sigs hit production data* (done):
+    `signed_at` (RFC-3339, stamped by `tessera sign`) and `key_format` — both **bound** into the
+    signature (see §0).
   - `signer` stays **attribution-only**; a `verify-orcid` fetch-and-pin probe makes the binding
     *auditable when online* but never a trust anchor.
 - **Archival-grade (feature-gated, post-alpha):**

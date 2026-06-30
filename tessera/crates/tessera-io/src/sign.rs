@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tessera_core::signing::{self, Signature, SigningKey, VerifyingKey};
+use tessera_core::signing::{self, SignOpts, Signature, SigningKey, VerifyingKey};
 use tessera_core::{Error, Result};
 
 use crate::container::Reader;
@@ -22,11 +22,11 @@ pub fn sidecar_path(tsra: &Path) -> PathBuf {
 }
 
 /// Sign a sealed `.tsra` and write the `<file>.tsra.sig.json` sidecar. Reads the container's sealed
-/// manifest, signs its `manifest_hash` (ed25519) with the optional `signer` identity (e.g. an ORCID iD),
-/// and returns the written [`Signature`].
-pub fn sign_tsra(tsra: &Path, key: &SigningKey, signer: Option<String>) -> Result<Signature> {
+/// manifest, signs its `manifest_hash` (ed25519) with the given [`SignOpts`] (signer identity / `signed_at`
+/// / `key_format`, all bound into the signature), and returns the written [`Signature`].
+pub fn sign_tsra(tsra: &Path, key: &SigningKey, opts: &SignOpts) -> Result<Signature> {
     let reader = Reader::open(tsra)?;
-    let env = signing::sign_manifest(reader.manifest(), key, signer)?;
+    let env = signing::sign_manifest(reader.manifest(), key, opts)?;
     let json = serde_json::to_vec_pretty(&env).map_err(|e| Error::Container(e.to_string()))?;
     std::fs::write(sidecar_path(tsra), json)?;
     tracing::info!(
@@ -86,7 +86,10 @@ mod tests {
         let env = sign_tsra(
             &tsra,
             &key,
-            Some("https://orcid.org/0000-0002-1825-0097".into()),
+            &SignOpts {
+                signer: Some("https://orcid.org/0000-0002-1825-0097".into()),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert!(sidecar_path(&tsra).exists());

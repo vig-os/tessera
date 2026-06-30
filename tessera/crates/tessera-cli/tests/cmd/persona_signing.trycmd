@@ -17,6 +17,8 @@ $ tessera sign study.tsra --key instrument.key --signer https://orcid.org/0000-0
 OK  signed study.tsra
   sidecar   study.tsra.sig.json
   key_id    [..]
+  key_fmt   raw-hex
+  signed_at [..]
   signer    https://orcid.org/0000-0002-1825-0097
 
 ```

@@ -667,15 +667,26 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             Ok(())
         }
         Cmd::Sign { file, key, signer } => {
-            let key_hex = std::fs::read_to_string(&key).map_err(tessera_core::Error::from)?;
-            let sk = tessera_core::signing::signing_key_from_hex(&key_hex)?;
-            let env = tessera_io::sign_tsra(&file, &sk, signer)?;
+            // Auto-detect raw-hex (keygen) vs an OpenSSH `~/.ssh/id_ed25519`; stamp the signing time.
+            let (sk, key_format) = trust::load_signing_key(&key)?;
+            let opts = tessera_core::signing::SignOpts {
+                signer,
+                signed_at: Some(trust::now_rfc3339()),
+                key_format: Some(key_format.into()),
+            };
+            let env = tessera_io::sign_tsra(&file, &sk, &opts)?;
             println!("OK  signed {}", file.display());
             println!(
                 "  sidecar   {}",
                 tessera_io::sign::sidecar_path(&file).display()
             );
             println!("  key_id    {}", env.key_id);
+            if let Some(fmt) = &env.key_format {
+                println!("  key_fmt   {fmt}");
+            }
+            if let Some(at) = &env.signed_at {
+                println!("  signed_at {at}");
+            }
             if let Some(s) = &env.signer {
                 println!("  signer    {s}");
             }

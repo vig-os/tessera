@@ -1,0 +1,82 @@
+How a data scientist explores a `.tsra` they received, with no prior knowledge of it — integrity
+first, then structure, then the data itself. Every command is read-only and runs against the
+conformance corpus (`multiblock_study.tsra`: an array `volume`, a table `roi`, and a provenance edge).
+Digests are globbed with `[..]`; everything else is the verbatim transcript.
+
+# === Is it intact? Verify the seal + every block digest before trusting a byte. ===
+
+```
+$ tessera verify ../../corpus/files/multiblock_study.tsra
+OK  ../../corpus/files/multiblock_study.tsra verified (2 blocks)
+
+```
+
+# === Does it conform to its declared product schema (required fields + blocks)? ===
+
+```
+$ tessera schema ../../corpus/files/multiblock_study.tsra
+product 'recon' — built-in schema v1.0 (A reconstructed image volume (CT/PET/μ-map).)
+OK  schema-valid: ../../corpus/files/multiblock_study.tsra
+
+```
+
+# === What's inside? One glance at the whole hierarchy — product, blocks, metadata, provenance. ===
+
+```
+$ tessera tree ../../corpus/files/multiblock_study.tsra
+multiblock_study.tsra  ·  product=recon · schema=recon✓ · sealed
+├── meta
+│   └── modality = "CT"
+├── volume             array  int16  [16, 16, 16]  pcodec   [..]
+│   └── chunks [64, 64, 64]
+├── roi                table  2 cols × 8 rows   [..]
+│   ├── label      u4
+│   └── volume_ml  f4
+└── sources
+    └── derived_from <- recon-int16
+
+```
+
+# === Drill into one node — the columns of the `roi` table. ===
+
+```
+$ tessera ls ../../corpus/files/multiblock_study.tsra roi
+roi   table  2 cols × 8 rows
+  label      u4
+  volume_ml  f4
+
+```
+
+# === Trace provenance — what was this derived from? ===
+
+```
+$ tessera ls ../../corpus/files/multiblock_study.tsra sources
+derived_from <- recon-int16
+
+```
+
+# === Pull the data you came for — just the columns you need, every row, as CSV. ===
+
+```
+$ tessera read ../../corpus/files/multiblock_study.tsra roi --column label --column volume_ml --all
+label,volume_ml
+0,0.5
+1,1.75
+2,3
+3,4.25
+4,5.5
+5,6.75
+6,8
+7,9.25
+
+```
+
+# === Emit a FAIR discovery record (RO-Crate JSON) for your catalog / data portal. ===
+
+```
+$ tessera export ro-crate ../../corpus/files/multiblock_study.tsra
+{
+  "@context": "https://w3id.org/ro/crate/1.1/context",
+  "@graph": [
+...
+```
