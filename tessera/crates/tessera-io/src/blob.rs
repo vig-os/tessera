@@ -37,6 +37,32 @@ pub fn blob_block(
     Ok((block_ref, BlockPayload::new(name, bytes)))
 }
 
+/// Build a blob [`BlockRef`] by **streaming** the file at `path` through blake3 in bounded memory — the
+/// bytes are never loaded into a `Vec`. Pair it with [`crate::pack_streaming`] handing the **same `path`**
+/// as the block's fragment (`(name, path)`), so a multi-GB file seals with bounded RSS. The resulting
+/// `BlockRef` + digest are byte-identical to [`blob_block`] over the same bytes (blake3 is incremental).
+pub fn blob_ref_streaming(
+    name: &str,
+    filename: &str,
+    media_type: Option<&str>,
+    path: &std::path::Path,
+) -> Result<BlockRef> {
+    let file = std::fs::File::open(path).map_err(Error::from)?;
+    let size = file.metadata().map_err(Error::from)?.len();
+    let digest =
+        tessera_core::hash::digest_reader(std::io::BufReader::new(file)).map_err(Error::from)?;
+    let mut spec = BlobSpec::new(filename, size);
+    if let Some(mt) = media_type {
+        spec = spec.with_media_type(mt);
+    }
+    Ok(BlockRef {
+        name: name.to_string(),
+        kind: BlockKind::Blob,
+        digest: Some(digest),
+        spec: serde_json::to_value(&spec)?,
+    })
+}
+
 /// Parse a blob block's [`BlobSpec`] descriptor out of its manifest [`BlockRef`] (e.g. to recover the
 /// original filename for `extract`). Errors if `r` is not a blob block or its spec is malformed.
 pub fn spec_of(r: &BlockRef) -> Result<BlobSpec> {

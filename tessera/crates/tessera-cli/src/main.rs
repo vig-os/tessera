@@ -624,14 +624,14 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             Ok(())
         }
         Cmd::Extract { file, block, out } => {
+            // Stream the block to disk in bounded memory (no whole-block Vec) — a multi-GB blob
+            // extracts without buffering, and over a cloud source the zip read range-GETs just it.
             let mut r = Reader::open(&file)?;
-            let bytes = r.read_block(&block)?;
-            std::fs::write(&out, &bytes).map_err(tessera_core::Error::from)?;
-            println!(
-                "extracted {block} ({} bytes) -> {}",
-                bytes.len(),
-                out.display()
-            );
+            let f = std::fs::File::create(&out).map_err(tessera_core::Error::from)?;
+            let mut w = std::io::BufWriter::new(f);
+            let n = r.stream_block(&block, &mut w)?;
+            std::io::Write::flush(&mut w).map_err(tessera_core::Error::from)?;
+            println!("extracted {block} ({n} bytes) -> {}", out.display());
             Ok(())
         }
         Cmd::Schema { file } => {

@@ -16,6 +16,40 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
+/// Stream a reader through blake3 in bounded memory → the same `"blake3:<hex>"` digest as [`digest`]
+/// over the full bytes (blake3 is incremental, so a streamed hash is bit-identical to the one-shot
+/// hash). The bounded-memory path for hashing a multi-GB blob without holding it in RAM.
+pub fn digest_reader(mut r: impl std::io::Read) -> std::io::Result<String> {
+    let mut h = StreamHasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize())
+}
+
+/// Incremental blake3 hasher — `update` chunks then `finalize` to the `"blake3:<hex>"` digest. Lets a
+/// caller hash a block **while** copying it (one pass, bounded memory) without re-buffering the bytes,
+/// keeping the `blake3` dependency inside the core. Equivalent to [`digest`] over the concatenated chunks.
+#[derive(Default)]
+pub struct StreamHasher(blake3::Hasher);
+
+impl StreamHasher {
+    pub fn new() -> Self {
+        Self(blake3::Hasher::new())
+    }
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+    pub fn finalize(&self) -> String {
+        format!("blake3:{}", self.0.finalize().to_hex())
+    }
+}
+
 /// Domain-separated **leaf** hash of a block digest string (`0x00` prefix).
 fn leaf_hash(block_digest: &str) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
