@@ -119,7 +119,9 @@ pub fn run(
         // the future field-encryption / redact phases replace. Never blocks — the spike only proves
         // the schema-driven tier reaches ingest; encryption/redaction lands in the next phase
         // (#240 / PR #238).
-        for f in registry.fields_by_sensitivity(&manifest, tessera_core::schema::Sensitivity::Identifying) {
+        for f in registry
+            .fields_by_sensitivity(&manifest, tessera_core::schema::Sensitivity::Identifying)
+        {
             if manifest.metadata.contains_key(&f.id) {
                 tracing::warn!(
                     target: "tessera::ingest::phi",

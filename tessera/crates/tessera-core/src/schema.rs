@@ -915,8 +915,8 @@ mod tests {
         assert_eq!(f.sensitivity, Sensitivity::Public);
 
         // …and a FieldSpec round-trips a non-default tier intact through serde.
-        let f = FieldSpec::optional("mrn", "PHI", "string")
-            .with_sensitivity(Sensitivity::Identifying);
+        let f =
+            FieldSpec::optional("mrn", "PHI", "string").with_sensitivity(Sensitivity::Identifying);
         let s = serde_json::to_string(&f).unwrap();
         let back: FieldSpec = serde_json::from_str(&s).unwrap();
         assert_eq!(back.sensitivity, Sensitivity::Identifying);
