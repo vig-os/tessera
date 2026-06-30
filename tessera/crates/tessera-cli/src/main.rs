@@ -47,13 +47,23 @@ fn open_local_or_url(arg: &std::path::Path) -> tessera_core::Result<Box<dyn Tsra
     Ok(Box::new(Reader::open(arg)?))
 }
 
-/// CLI-only erased view over a `Reader<R>` — narrows the trait-object surface to the two
-/// methods `inspect` / `verify` actually need (manifest access + per-block read). Hides the
-/// concrete `R` (local `File` vs `ObjectStoreReader`) behind a single boxed handle.
+/// CLI-only erased view over a `Reader<R>` — narrows the trait-object surface to the few
+/// methods `inspect` / `verify` / `extract` actually need (manifest access, per-block read,
+/// bounded-memory stream). Hides the concrete `R` (local `File` vs `ObjectStoreReader`)
+/// behind a single boxed handle.
 trait TsraSource {
     fn manifest(&self) -> &tessera_core::Manifest;
     fn read_block_by_name(&mut self, name: &str) -> tessera_core::Result<Vec<u8>>;
     fn block_names(&self) -> Vec<String>;
+    /// Bounded-memory copy of a block's bytes into `w`, digest-verified after the last byte.
+    /// Delegates to [`Reader::stream_block`] — preserves the same integrity contract: on
+    /// `Err(Integrity)` the writer already saw the unverified bytes, so callers must stage to
+    /// a temp path and only expose the final destination on `Ok`.
+    fn stream_block_to(
+        &mut self,
+        name: &str,
+        w: &mut dyn std::io::Write,
+    ) -> tessera_core::Result<u64>;
 }
 
 impl<R: std::io::Read + std::io::Seek> TsraSource for Reader<R> {
@@ -65,6 +75,16 @@ impl<R: std::io::Read + std::io::Seek> TsraSource for Reader<R> {
     }
     fn block_names(&self) -> Vec<String> {
         Reader::block_names(self)
+    }
+    fn stream_block_to(
+        &mut self,
+        name: &str,
+        mut w: &mut dyn std::io::Write,
+    ) -> tessera_core::Result<u64> {
+        // `Reader::stream_block` is generic over `W: Write` (implicit `Sized`), so re-borrow the
+        // trait object as `&mut &mut dyn Write` — the mutable-reference impl of `Write` is itself
+        // `Sized`, which keeps the generic happy without changing the underlying writer.
+        Reader::stream_block(self, name, &mut w)
     }
 }
 
@@ -650,14 +670,18 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             // without buffering, and over a cloud source the zip read range-GETs just it. Stage to a
             // sibling `.part` and atomically rename only AFTER the digest verifies, so a corrupt
             // block never leaves unverified bytes at the destination path.
-            let mut r = Reader::open(&file)?;
+            //
+            // Routed through `open_local_or_url` so `s3://…` / `http(s)://…` work transparently when
+            // the `cloud` feature is built; without it, it's a thin wrapper over `Reader::open` so
+            // local extract behaves exactly as before.
+            let mut r = open_local_or_url(&file)?;
             let mut tmp = out.clone().into_os_string();
             tmp.push(".part");
             let tmp = PathBuf::from(tmp);
             let n = {
                 let f = std::fs::File::create(&tmp).map_err(tessera_core::Error::from)?;
                 let mut w = std::io::BufWriter::new(f);
-                match r.stream_block(&block, &mut w).and_then(|n| {
+                match r.stream_block_to(&block, &mut w).and_then(|n| {
                     std::io::Write::flush(&mut w)
                         .map(|()| n)
                         .map_err(Into::into)

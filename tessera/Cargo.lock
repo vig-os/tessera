@@ -681,6 +681,7 @@ dependencies = [
  "cfg-if",
  "constant_time_eq",
  "cpufeatures 0.3.0",
+ "rayon-core",
 ]
 
 [[package]]
@@ -5204,6 +5205,7 @@ dependencies = [
 name = "tessera-io"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "bytes",
  "criterion",
  "futures",

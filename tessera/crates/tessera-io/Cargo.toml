@@ -11,6 +11,15 @@ authors.workspace = true
 tessera-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# blake3 with the **`rayon`** feature — opt-in multi-core hashing for large-file blob ingest via
+# `Hasher::update_rayon` (see [`blob::digest_file_parallel`]). The base `blake3` is already pulled in
+# by `tessera-core`; this line just turns the `rayon` feature on for builds that include `tessera-io`.
+# The wasm-core gate (`--package tessera-core --lib`) does NOT include this crate, so `rayon` never
+# enters the wasm graph — the spine stays single-threaded and wasm-compatible (ADR-0034). NB: a host
+# `cargo build --workspace` DOES feature-unify rayon into blake3 for tessera-core's *host* build (that's
+# fine — rayon is host-portable); the wasm-incompatibility only matters for the wasm32 target, which the
+# isolated `--package tessera-core` gate above never co-builds with tessera-io.
+blake3 = { workspace = true, features = ["rayon"] }
 zip.workspace = true
 zarrs.workspace = true
 bytes.workspace = true

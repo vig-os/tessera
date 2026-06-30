@@ -94,6 +94,74 @@ pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Resu
 /// — proven by `pack_streaming_equals_pack` below — because both writers share [`tsra_entry_options`]
 /// and emit the mimetype/manifest/blocks in the same order.
 pub fn pack_streaming(manifest: &Manifest, sources: &[(String, &Path)], out: &Path) -> Result<()> {
+    pack_streaming_impl(manifest, sources, out, false)
+}
+
+/// **Verifying streaming pack** — identical bytes-on-disk to [`pack_streaming`], with one extra
+/// guarantee: as each fragment is copied into the zip its bytes are fed through a streaming blake3
+/// (one read, no extra buffering) and the resulting digest is compared to the `BlockRef.digest`
+/// recorded in the manifest. A mismatch returns [`Error::Integrity`] with `what = "block_payload"`
+/// **before** the archive finalises, so a fragment that changed between "hash" and "pack" can never
+/// be silently sealed into a `.tsra` whose recorded `digest` no longer matches its packed bytes
+/// (the race the blob streaming ingest opens by hashing the source file first and copying it
+/// second). For a blob block whose fragment is the **original source file**, this turns a concurrent
+/// writer / atomic-replace between the two reads into a loud `Err(Integrity)` instead of a
+/// dead-on-arrival archive that only surfaces on the first read.
+///
+/// **Determinism contract**: the output is byte-identical to [`pack_streaming`] over the same
+/// inputs (same SSoT [`tsra_entry_options`], same entry order, same copy loop — the verify happens
+/// on the bytes already buffered for the write, never reordering anything). The conformance corpus
+/// goldens MUST remain untouched.
+///
+/// Refuses (without writing) any fragment whose name has no matching block in the manifest, and any
+/// matching block whose [`BlockRef::digest`] is `None` (sealed manifests always have one — an absent
+/// digest is a malformed input, not a verify miss).
+pub fn pack_streaming_verified(
+    manifest: &Manifest,
+    sources: &[(String, &Path)],
+    out: &Path,
+) -> Result<()> {
+    pack_streaming_impl(manifest, sources, out, true)
+}
+
+/// Stage-and-rename wrapper for [`pack_streaming`] / [`pack_streaming_verified`]: writes the archive
+/// to a sibling `.part` via [`pack_streaming_to`] and atomically renames it to `out` only on success,
+/// so a failure never leaves a partial / known-bad `.tsra` at the destination.
+fn pack_streaming_impl(
+    manifest: &Manifest,
+    sources: &[(String, &Path)],
+    out: &Path,
+    verify: bool,
+) -> Result<()> {
+    // Stage to a sibling `.part` and atomically rename only on success, so any failure — a write
+    // error or a `verify` mismatch — never leaves a partial / known-bad `.tsra` at `out` (same
+    // crash-safe placement `tessera extract` uses). The bytes written are unchanged, so the
+    // determinism contract / corpus goldens hold.
+    let mut tmp = out.as_os_str().to_os_string();
+    tmp.push(".part");
+    let tmp = std::path::PathBuf::from(tmp);
+    match pack_streaming_to(manifest, sources, &tmp, verify) {
+        Ok(()) => {
+            std::fs::rename(&tmp, out)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Write the `.tsra` to `out` (a staging path) — the body shared by [`pack_streaming`] /
+/// [`pack_streaming_verified`]: identical zip entries + identical copy loop, with `verify` flipping
+/// the per-fragment hash check on. Kept as one function so the two surfaces can't drift in entry
+/// order / options / buffer size (a drift would change the on-disk bytes and break the corpus).
+fn pack_streaming_to(
+    manifest: &Manifest,
+    sources: &[(String, &Path)],
+    out: &Path,
+    verify: bool,
+) -> Result<()> {
     if !manifest.is_sealed() {
         return Err(Error::Container(
             "refusing to pack an unsealed manifest".into(),
@@ -109,12 +177,60 @@ pub fn pack_streaming(manifest: &Manifest, sources: &[(String, &Path)], out: &Pa
     zw.write_all(manifest.to_json()?.as_bytes())?;
 
     for (name, frag) in sources {
+        // Resolve the manifest-recorded digest UP FRONT (only when verifying) so a typo'd name or
+        // a malformed unsealed-style ref fails before we open the file.
+        let expected_digest = if verify {
+            let r = manifest
+                .blocks
+                .iter()
+                .find(|b| &b.name == name)
+                .ok_or_else(|| {
+                    Error::Container(format!(
+                        "pack_streaming_verified: no manifest block named '{name}'"
+                    ))
+                })?;
+            Some(r.digest.clone().ok_or_else(|| {
+                Error::MissingDigest(format!(
+                    "pack_streaming_verified: block '{name}' has no recorded digest"
+                ))
+            })?)
+        } else {
+            None
+        };
+
         zw.start_file(format!("{BLOCKS_PREFIX}{name}"), stored)
             .map_err(cz)?;
         // Buffered copy: 256 KiB chunks → peak RAM ≈ one buffer (no full-block materialisation).
-        let f = File::open(frag)?;
-        let mut br = std::io::BufReader::with_capacity(256 * 1024, f);
-        std::io::copy(&mut br, &mut zw)?;
+        // When verifying, we hash the buffer in the same pass — one read, no extra I/O — so the
+        // on-disk bytes are identical to the non-verifying path (the conformance corpus stays
+        // bit-for-bit stable).
+        // Read full-buffer chunks straight from the file — a BufReader would only add a second
+        // 256 KiB buffer with no benefit at this read size.
+        let mut f = File::open(frag)?;
+        let mut hasher = verify.then(tessera_core::hash::StreamHasher::new);
+        let mut buf = [0u8; 256 * 1024];
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            if let Some(h) = hasher.as_mut() {
+                h.update(&buf[..n]);
+            }
+            zw.write_all(&buf[..n])?;
+        }
+        if let (Some(h), Some(exp)) = (hasher, expected_digest) {
+            let actual = h.finalize();
+            if actual != exp {
+                // The fragment changed between hash and pack. Bail without finalising; the wrapper
+                // discards the staged `.part`, so nothing lands at the destination.
+                return Err(Error::Integrity {
+                    what: "block_payload",
+                    expected: exp,
+                    actual,
+                });
+            }
+        }
     }
     zw.finish().map_err(cz)?;
     Ok(())
@@ -438,6 +554,141 @@ mod tests {
         assert_eq!(
             ram_bytes, stream_bytes,
             "pack_streaming and pack must produce byte-identical archives"
+        );
+    }
+
+    #[test]
+    fn pack_streaming_verified_matches_pack_streaming_byte_for_byte_on_honest_input() {
+        // Determinism gate for the verifying packer: with truthful inputs (the fragment bytes hash
+        // to the digest the manifest records) the bytes on disk are byte-identical to
+        // pack_streaming over the same inputs. The verify happens on the bytes already buffered
+        // for the write — no extra entries, no reordered copy, no perturbation. The conformance
+        // corpus (golden archives) MUST stay untouched after this commit.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bldr = ProductBuilder::new("recon", "DPverify", "d", "2024-01-01T00:00:00Z");
+        let payloads: Vec<BlockPayload> = (0..3)
+            .map(|i| {
+                let bytes: Vec<u8> = (0..(290_000 + i * 11))
+                    .map(|k| ((k + i) % 253) as u8)
+                    .collect();
+                let nm = format!("blob_{i}");
+                let digest = tessera_core::hash::digest(&bytes);
+                bldr.add_block_ref(tessera_core::block::BlockRef {
+                    name: nm.clone(),
+                    kind: tessera_core::block::BlockKind::Array,
+                    digest: Some(digest),
+                    spec: serde_json::json!({}),
+                });
+                BlockPayload::new(nm, bytes)
+            })
+            .collect();
+        let sealed = bldr.seal().unwrap();
+
+        let stage = dir.path().join("frags");
+        std::fs::create_dir_all(&stage).unwrap();
+        let mut frag_paths = Vec::new();
+        for p in &payloads {
+            let fp = stage.join(&p.name);
+            std::fs::write(&fp, &p.bytes).unwrap();
+            frag_paths.push((p.name.clone(), fp));
+        }
+        let sources: Vec<(String, &Path)> = frag_paths
+            .iter()
+            .map(|(n, p)| (n.clone(), p.as_path()))
+            .collect();
+        let unverified = dir.path().join("unverified.tsra");
+        let verified = dir.path().join("verified.tsra");
+        pack_streaming(&sealed, &sources, &unverified).unwrap();
+        pack_streaming_verified(&sealed, &sources, &verified).unwrap();
+        assert_eq!(
+            std::fs::read(&unverified).unwrap(),
+            std::fs::read(&verified).unwrap(),
+            "pack_streaming_verified must be byte-identical to pack_streaming on honest input"
+        );
+    }
+
+    #[test]
+    fn pack_streaming_verified_catches_fragment_mutated_between_hash_and_pack() {
+        // The race this exists to close: blob streaming ingest hashes the source file to seal the
+        // manifest, then the packer copies the same file's bytes into the .tsra. If the file is
+        // replaced between those two reads, pack_streaming would silently seal an archive whose
+        // packed bytes don't match the recorded digest (caught only later, on read). The verifying
+        // packer must catch the mismatch AT PACK TIME with a typed Error::Integrity.
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate the race: hash bytes A, seal the manifest with that digest, then write bytes B
+        // to the fragment path. pack_streaming_verified must reject the mismatch.
+        let bytes_a: Vec<u8> = (0..40_000u32).map(|k| (k % 251) as u8).collect();
+        let bytes_b: Vec<u8> = (0..40_000u32).map(|k| ((k + 7) % 251) as u8).collect();
+        assert_ne!(bytes_a, bytes_b, "test setup: A and B must differ");
+
+        let digest_a = tessera_core::hash::digest(&bytes_a);
+        let mut bldr = ProductBuilder::new("blob", "race", "x", "2024-01-01T00:00:00Z");
+        bldr.add_block_ref(tessera_core::block::BlockRef {
+            name: "data".into(),
+            kind: tessera_core::block::BlockKind::Blob,
+            digest: Some(digest_a.clone()),
+            spec: serde_json::json!({}),
+        });
+        let sealed = bldr.seal().unwrap();
+
+        let frag = dir.path().join("race.bin");
+        std::fs::write(&frag, &bytes_b).unwrap(); // "the file changed between hash and pack"
+        let out = dir.path().join("race.tsra");
+        let err = pack_streaming_verified(&sealed, &[("data".to_string(), frag.as_path())], &out)
+            .expect_err("mismatched fragment must fail the verifying pack");
+        match err {
+            Error::Integrity {
+                what,
+                expected,
+                actual,
+            } => {
+                assert_eq!(what, "block_payload");
+                assert_eq!(
+                    expected, digest_a,
+                    "must surface the manifest-recorded digest"
+                );
+                assert_eq!(actual, tessera_core::hash::digest(&bytes_b));
+            }
+            other => panic!("expected Error::Integrity, got {other:?}"),
+        }
+
+        // Sanity: the non-verifying packer happily seals the same race (proving the gap the
+        // verifying packer closes — and that's the silent bad archive that surfaces only on read).
+        let dead = dir.path().join("dead.tsra");
+        pack_streaming(&sealed, &[("data".to_string(), frag.as_path())], &dead).unwrap();
+        let mut rdr = Reader::open(&dead).unwrap();
+        assert!(matches!(
+            rdr.read_block("data"),
+            Err(Error::Integrity {
+                what: "block_payload",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn pack_streaming_verified_rejects_unknown_block_name() {
+        // A typo'd source name (no matching block in the manifest) is a producer bug, not a verify
+        // miss — fail loudly, before opening the file, with a typed Container error.
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"abcd".to_vec();
+        let digest = tessera_core::hash::digest(&bytes);
+        let mut bldr = ProductBuilder::new("blob", "x", "x", "2024-01-01T00:00:00Z");
+        bldr.add_block_ref(tessera_core::block::BlockRef {
+            name: "data".into(),
+            kind: tessera_core::block::BlockKind::Blob,
+            digest: Some(digest),
+            spec: serde_json::json!({}),
+        });
+        let sealed = bldr.seal().unwrap();
+        let frag = dir.path().join("f.bin");
+        std::fs::write(&frag, &bytes).unwrap();
+        let out = dir.path().join("x.tsra");
+        let err = pack_streaming_verified(&sealed, &[("typo".to_string(), frag.as_path())], &out)
+            .expect_err("unknown block name must be rejected");
+        assert!(
+            matches!(err, Error::Container(ref m) if m.contains("no manifest block named 'typo'")),
+            "expected Container error naming the missing block, got {err:?}"
         );
     }
 
