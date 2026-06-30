@@ -570,4 +570,56 @@ dtype = "i2"
         let h2 = spec_hash(&parse_str(text).unwrap()).unwrap();
         assert_eq!(h1, h2);
     }
+
+    /// The PET/CT migration template (`docs/examples/migrate-petct-study.toml`, spike #235) must
+    /// parse + validate in this build. Same drift-catching guarantee as the GE example test above,
+    /// applied to the canonical migration shape: **blob → recon-ct → recon-pt** with `derived_from`
+    /// edges + `[product.metadata] study=` on every member. The active members in the file are the
+    /// three uncommented ones; the optional `roi-lesion` member is gated behind a real roi backend.
+    #[test]
+    fn committed_petct_migration_toml_parses_and_validates() {
+        let text = include_str!("../../../docs/examples/migrate-petct-study.toml");
+        let parsed = parse_str(text).expect("PET/CT migration template TOML must parse");
+        let order = validate(&parsed).expect("template must validate (topo + uniqueness + DAG)");
+        // Exactly the three active members (vendor-raw blob, recon-ct, recon-pt). If a future
+        // edit adds/removes one, update this number AND the assertions below — the count anchors
+        // the shape.
+        assert_eq!(parsed.products.len(), 3, "active migration members");
+        assert_eq!(order.len(), 3);
+        // The integrity-chain shape: blob is a root (declared first, topo first); recon-ct
+        // derives from blob; recon-pt derives from BOTH blob (raw lineage) AND recon-ct (AC-CT).
+        let pos = |name: &str| -> usize {
+            order
+                .iter()
+                .position(|&i| parsed.products[i].name == name)
+                .unwrap_or_else(|| panic!("{name} in topo order"))
+        };
+        assert!(pos("vendor-raw") < pos("recon-ct"));
+        assert!(pos("vendor-raw") < pos("recon-pt"));
+        assert!(pos("recon-ct") < pos("recon-pt"));
+        // Cohort-pruneability anchor: EVERY active member declares `[product.metadata] study=`
+        // (the contract the spike is built around).
+        for p in &parsed.products {
+            assert_eq!(
+                p.metadata.get("study"),
+                Some(&serde_json::json!("STUDY-EXAMPLE-2024-01")),
+                "member '{}' must declare study= in [product.metadata] (cohort-pruneable)",
+                p.name
+            );
+        }
+        // The blob member's role is `raw` (the source-of-record); recon-pt is `derived` (built
+        // from raw + the CT). Roles drive WORM under the hood (ADR-0028).
+        let by_name: std::collections::BTreeMap<&str, &ProductSpec> = parsed
+            .products
+            .iter()
+            .map(|p| (p.name.as_str(), p))
+            .collect();
+        assert_eq!(by_name["vendor-raw"].role, Role::Raw);
+        assert_eq!(by_name["recon-pt"].role, Role::Derived);
+        // spec_hash deterministic.
+        assert_eq!(
+            spec_hash(&parsed).unwrap(),
+            spec_hash(&parse_str(text).unwrap()).unwrap()
+        );
+    }
 }
