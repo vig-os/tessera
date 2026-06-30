@@ -97,26 +97,47 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Print a human summary of a `.tsra`'s manifest (id, product, blocks, hashes).
+    /// Print a `.tsra` manifest summary (id, product, blocks, hashes).
+    ///
+    /// Prints a human summary of the manifest's identity, product, blocks, and hashes.
     ///
     /// With the `cloud` feature enabled, `file` also accepts `s3://<bucket>/<key>` or
     /// `http(s)://<host>/<key>` — the manifest is read via range-GET over the wire.
-    Inspect { file: PathBuf },
-    /// Open + fully verify a `.tsra` (magic, manifest seal, every block digest). Exit 0 if valid.
+    Inspect {
+        /// The `.tsra` to summarise (or an `s3://` / `http(s)://` URL with the `cloud` feature).
+        file: PathBuf,
+    },
+    /// Verify a `.tsra`'s integrity (magic, seal, every block digest).
+    ///
+    /// Opens + fully verifies the container (magic, manifest seal, every block digest).
+    /// Exits 0 if valid.
     ///
     /// With the `cloud` feature, `file` also accepts `s3://` / `http(s)://` URLs.
-    Verify { file: PathBuf },
-    /// Render a `.tsra` as a navigable hierarchy: root status (product · schema · sealed · signed),
-    /// `meta` fields, every block with its columns / array spec, and `sources`.
-    Tree { file: PathBuf },
-    /// List one node's children. No PATH = top level (`meta`, blocks, `sources`); `PATH=meta` =
-    /// metadata fields; `PATH=<block>` = a table's columns or an array's spec; `PATH=sources` = edges.
+    Verify {
+        /// The `.tsra` to verify (or an `s3://` / `http(s)://` URL with the `cloud` feature).
+        file: PathBuf,
+    },
+    /// Render a `.tsra` as a navigable hierarchy tree.
+    ///
+    /// Renders the root status (product · schema · sealed · signed), `meta` fields, every block
+    /// with its columns / array spec, and `sources`.
+    Tree {
+        /// The `.tsra` to render.
+        file: PathBuf,
+    },
+    /// List one node's children (top level, `meta`, a block, or `sources`).
+    ///
+    /// No PATH = top level (`meta`, blocks, `sources`); `PATH=meta` = metadata fields;
+    /// `PATH=<block>` = a table's columns or an array's spec; `PATH=sources` = edges.
     Ls {
+        /// The `.tsra` to list.
         file: PathBuf,
         /// Node to list (a block name, `meta`, or `sources`). Omit for the top level.
         path: Option<String>,
     },
-    /// Extract table data over the **logical** (cross-block) view as CSV/TSV/NDJSON — a read of
+    /// Read table data as CSV/TSV/NDJSON over the logical cross-block view.
+    ///
+    /// Extracts table data over the **logical** (cross-block) view as CSV/TSV/NDJSON — a read of
     /// `events` spans every `events_NNNN` block, projecting only the requested columns per block.
     Read {
         /// The `.tsra` to read.
@@ -139,12 +160,26 @@ enum Cmd {
         #[arg(long, default_value = "csv")]
         format: String,
     },
-    /// Initialize a content-addressed repository (`objects/` + `refs/` + `log/`) for copy-on-write
+    /// Initialize a content-addressed repository for CoW versioning.
+    ///
+    /// Creates the repository layout (`objects/` + `refs/` + `log/`) used for copy-on-write
     /// versioning (ADR-0036).
-    Init { repo: PathBuf },
-    /// Import a sealed `.tsra` into a repository as the first version of its lineage (its `id`).
-    Import { repo: PathBuf, file: PathBuf },
-    /// Commit a new version of a lineage with a metadata delta — reuses every unchanged block by
+    Init {
+        /// Directory to initialize as a content-addressed repository.
+        repo: PathBuf,
+    },
+    /// Import a sealed `.tsra` as the first version of its lineage.
+    ///
+    /// Imports a sealed `.tsra` into a repository as the first version of its lineage (its `id`).
+    Import {
+        /// The repository directory.
+        repo: PathBuf,
+        /// The sealed `.tsra` to import.
+        file: PathBuf,
+    },
+    /// Commit a new version of a lineage (reuses unchanged blocks by digest).
+    ///
+    /// Commits a new version of a lineage with a metadata delta — reuses every unchanged block by
     /// digest, so the copy is proportional to the change (a metadata edit writes one new object).
     Commit {
         /// The repository directory.
@@ -163,9 +198,16 @@ enum Cmd {
         remove_block: Vec<String>,
     },
     /// Show a lineage's version history (newest first).
-    Log { repo: PathBuf, lineage: String },
-    /// Diff two versions (blocks + metadata) with a lineage verdict. With one ref, diffs that version
-    /// against its `supersedes` parent — "what this version changed".
+    Log {
+        /// The repository directory.
+        repo: PathBuf,
+        /// The lineage id (printed by `import`).
+        lineage: String,
+    },
+    /// Diff two versions (blocks + metadata) with a lineage verdict.
+    ///
+    /// With one ref, diffs that version against its `supersedes` parent — "what this version
+    /// changed".
     Diff {
         /// The repository directory.
         repo: PathBuf,
@@ -174,18 +216,24 @@ enum Cmd {
         /// Target version `manifest_hash` (optional).
         second: Option<String>,
     },
-    /// Export a version to a standalone `.tsra` **with history** (`git bundle`): the manifest is emitted
-    /// as stored, supersedes + derivation edges intact — for archival where lineage travels with data.
+    /// Export a version to a standalone `.tsra` with its history (`git bundle`).
+    ///
+    /// The manifest is emitted as stored, supersedes + derivation edges intact — for archival
+    /// where lineage travels with the data.
     Seal {
+        /// The repository directory.
         repo: PathBuf,
         /// Version `manifest_hash` to export.
         version: String,
         /// Output `.tsra` path.
         out: PathBuf,
     },
-    /// Export a version to a **history-free** standalone `.tsra` (`git archive`) for publication /
-    /// handover: drops the supersedes chain, keeps derivation provenance + a `snapshot_of` breadcrumb.
+    /// Export a history-free standalone `.tsra` for publication (`git archive`).
+    ///
+    /// Drops the supersedes chain, keeps derivation provenance + a `snapshot_of` breadcrumb —
+    /// for publication / handover.
     Publish {
+        /// The repository directory.
         repo: PathBuf,
         /// Version `manifest_hash` to publish.
         version: String,
@@ -195,12 +243,23 @@ enum Cmd {
         #[arg(long)]
         anonymous: bool,
     },
-    /// Forget a lineage: delete its ref + log. Its now-unreachable objects are reclaimed by `gc`
-    /// (blocks shared with other lineages stay).
-    Forget { repo: PathBuf, lineage: String },
+    /// Forget a lineage (deletes its ref + log; objects reclaimed by `gc`).
+    ///
+    /// Now-unreachable objects are reclaimed by `gc` (blocks shared with other lineages stay).
+    Forget {
+        /// The repository directory.
+        repo: PathBuf,
+        /// The lineage id to forget.
+        lineage: String,
+    },
     /// Reclaim objects unreachable from any ref (run after `forget`).
-    Gc { repo: PathBuf },
-    /// Push a sealed `.tsra` to an OCI registry as an artifact (in-Rust client; needs `--features cloud`).
+    Gc {
+        /// The repository directory.
+        repo: PathBuf,
+    },
+    /// Push a sealed `.tsra` to an OCI registry (needs `--features cloud`).
+    ///
+    /// Uses the in-Rust OCI distribution client; needs the `cloud` feature built in.
     Push {
         /// The sealed `.tsra` to push.
         file: PathBuf,
@@ -216,7 +275,9 @@ enum Cmd {
         #[arg(long)]
         password: Option<String>,
     },
-    /// Pull a `.tsra` OCI artifact from a registry (sha256-verified; needs `--features cloud`).
+    /// Pull a `.tsra` OCI artifact from a registry (needs `--features cloud`).
+    ///
+    /// sha256-verified; needs the `cloud` feature built in.
     Pull {
         /// Registry reference: `[oci://]host[:port]/repo:tag`.
         reference: String,
@@ -232,8 +293,10 @@ enum Cmd {
         #[arg(long)]
         password: Option<String>,
     },
-    /// Extract one block's raw bytes to a file — recovers a `blob` (preserved file) **byte-identical**,
-    /// or any block's stored payload. The digest is re-checked on read.
+    /// Extract one block's raw bytes to a file (digest-verified on read).
+    ///
+    /// Recovers a `blob` (preserved file) **byte-identical**, or any block's stored payload. The
+    /// digest is re-checked on read.
     Extract {
         /// The `.tsra` to read.
         file: PathBuf,
@@ -243,13 +306,29 @@ enum Cmd {
         out: PathBuf,
     },
     /// Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`).
-    Unpack { file: PathBuf, outdir: PathBuf },
+    Unpack {
+        /// The `.tsra` to explode.
+        file: PathBuf,
+        /// Output directory to write `manifest.json` + `blocks/<name>`.
+        outdir: PathBuf,
+    },
     /// Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`.
-    Pack { dir: PathBuf, out: PathBuf },
+    Pack {
+        /// Exploded directory containing `manifest.json` + `blocks/`.
+        dir: PathBuf,
+        /// Output `.tsra` path.
+        out: PathBuf,
+    },
     /// Validate a `.tsra`'s manifest against its declared product schema (required fields/blocks).
-    Schema { file: PathBuf },
-    /// Ingest a vendor acquisition file into a sealed `.tsra` product (normalise at the door), or
-    /// run a declarative ingest spec (`--spec FILE`) into a sealed collection of `.tsra` products.
+    Schema {
+        /// The `.tsra` to validate.
+        file: PathBuf,
+    },
+    /// Ingest a vendor file into a sealed `.tsra` (or run a declarative `--spec`).
+    ///
+    /// Ingests a vendor acquisition file into a sealed `.tsra` product (normalise at the door),
+    /// or runs a declarative ingest spec (`--spec FILE`) into a sealed collection of `.tsra`
+    /// products.
     Ingest {
         /// Path to a `.toml` ingest spec (ADR-0035). When given, the per-format subcommand is not
         /// required — the spec describes the whole multi-product acquisition + its derivation DAG.
@@ -285,17 +364,21 @@ enum Cmd {
         #[command(subcommand)]
         fmt: ExportFmt,
     },
-    /// Generate an ed25519 keypair: the private seed (mode 0600) to OUT, the public key to `OUT.pub`.
+    /// Generate an ed25519 keypair (private seed mode 0600; public key to `OUT.pub`).
+    ///
+    /// Writes the private seed (mode 0600) to OUT and the public key to `OUT.pub`.
     Keygen {
         /// Output path for the private key seed (the public key is written to `OUT.pub`).
         out: PathBuf,
     },
-    /// Manage the trust store — the curated set of public keys `verify-sig` accepts.
+    /// Manage the trust store of public keys `verify-sig` accepts.
     Trust {
         #[command(subcommand)]
         action: TrustAction,
     },
-    /// Sign a sealed `.tsra` → writes a `<file>.sig.json` sidecar (ed25519 over the signature envelope).
+    /// Sign a sealed `.tsra` (writes a `<file>.sig.json` sidecar).
+    ///
+    /// ed25519 over the signature envelope; result is written next to the input as a sidecar.
     Sign {
         /// The sealed `.tsra` to sign.
         file: PathBuf,
@@ -306,8 +389,10 @@ enum Cmd {
         #[arg(long)]
         signer: Option<String>,
     },
-    /// Verify a sealed `.tsra` against its `<file>.sig.json` sidecar. Defaults to the **trust store**
-    /// (the sidecar's `key_id` must be a key you trust); `--pubkey` checks against an explicit key.
+    /// Verify a sealed `.tsra` against its `<file>.sig.json` sidecar.
+    ///
+    /// Defaults to the **trust store** (the sidecar's `key_id` must be a key you trust);
+    /// `--pubkey` checks against an explicit key.
     VerifySig {
         /// The sealed `.tsra` to verify.
         file: PathBuf,
@@ -318,8 +403,10 @@ enum Cmd {
         #[arg(long)]
         require_signer: Option<String>,
     },
-    /// Bench the write engine on this host — drives the real `StreamWriter`/`TableStreamWriter`,
-    /// reports throughput + peak RSS so an operator can size RAM/threads for their acquisition rate.
+    /// Bench the write engine on this host (throughput + peak RSS).
+    ///
+    /// Drives the real `StreamWriter`/`TableStreamWriter` and reports throughput + peak RSS so an
+    /// operator can size RAM/threads for their acquisition rate.
     Bench {
         #[command(subcommand)]
         action: BenchAction,
@@ -328,7 +415,9 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum BenchAction {
-    /// Bench the streaming write engine (events/s + MB/s + peak RAM) — synthetic or real `.h5`.
+    /// Bench the streaming write engine (events/s + MB/s + peak RAM).
+    ///
+    /// Drives synthetic data or a real `.h5` through the streaming write engine.
     Write {
         /// Schema to drive: `listmode` (single-thread encode) or `blocks` (parallelizes).
         #[arg(long, default_value = "listmode")]
@@ -368,14 +457,22 @@ enum BenchAction {
 #[derive(Subcommand)]
 enum ExportFmt {
     /// RO-Crate metadata descriptor (`ro-crate-metadata.json` shape).
-    RoCrate { file: PathBuf },
+    RoCrate {
+        /// The `.tsra` to export.
+        file: PathBuf,
+    },
     /// DataCite metadata record (for DOI minting / InvenioRDM).
-    Datacite { file: PathBuf },
+    Datacite {
+        /// The `.tsra` to export.
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
 enum TrustAction {
-    /// Trust a public key under a handle (in the user store, or `--repo` for `.tessera/trust/`).
+    /// Trust a public key under a handle.
+    ///
+    /// Stores it in the user store, or `--repo` for `.tessera/trust/`.
     Add {
         /// Hex ed25519 public-key file (e.g. `key.pub` from `tessera keygen`).
         pubkey: PathBuf,
@@ -392,12 +489,18 @@ enum TrustAction {
     /// List trusted keys.
     List,
     /// Remove a trusted key by handle or `key_id`.
-    Remove { target: String },
+    Remove {
+        /// Handle or `key_id` of the key to remove.
+        target: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum IngestSrc {
-    /// DICOM image/series → `recon` product (lossless int16 + rescale/units/modality + provenance).
+    /// DICOM image → `recon` product (lossless int16 + provenance).
+    ///
+    /// Encodes a DICOM image/series to a `recon` product with lossless int16 + rescale/units/
+    /// modality + provenance.
     Dicom {
         /// Source `.dcm` file.
         input: PathBuf,
@@ -421,7 +524,9 @@ enum IngestSrc {
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
     },
-    /// DICOM **series** (a multi-file CT/PET slice stack) → one 3-D `recon` product.
+    /// DICOM series (multi-file slice stack) → 3-D `recon` product.
+    ///
+    /// Stacks a multi-file CT/PET slice series into one 3-D `recon` product.
     DicomSeries {
         /// The `.dcm` slice files of the series (uniform shape/modality/rescale; else rejected).
         inputs: Vec<PathBuf>,
@@ -446,7 +551,9 @@ enum IngestSrc {
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
     },
-    /// GE listmode HDF5 → `listmode` product (compound events → columnar; the #193 transpose).
+    /// GE listmode HDF5 → `listmode` product (compound → columnar).
+    ///
+    /// Transposes compound events into columnar form (the #193 transpose).
     GeHdf5 {
         /// Source `.h5` file.
         input: PathBuf,
@@ -469,9 +576,11 @@ enum IngestSrc {
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
     },
-    /// Preserve an un-parsed file **bit-faithfully** as an opaque `blob` product (the "junk" tier —
-    /// `.l64`, `.7z`, PDF; bytes stored verbatim, blake3-sealed). Aka `junk`, for when the vendor file
-    /// has earned the name.
+    /// Preserve an un-parsed file as an opaque `blob` product (the "junk" tier).
+    ///
+    /// Preserves an un-parsed file **bit-faithfully** as an opaque `blob` (`.l64`, `.7z`, PDF;
+    /// bytes stored verbatim, blake3-sealed). Aka `junk`, for when the vendor file has earned the
+    /// name.
     #[command(alias = "junk")]
     Blob {
         /// Source file (anything — the engine does not parse it).
