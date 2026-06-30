@@ -101,7 +101,8 @@ mod tests {
             .collect();
         std::fs::write(&src, &bytes).unwrap();
 
-        let (in_ram, _) = to_blob_product(&src, "x", "2024-01-01T00:00:00Z", None, &[]).unwrap();
+        let (in_ram, payloads) =
+            to_blob_product(&src, "x", "2024-01-01T00:00:00Z", None, &[]).unwrap();
         let streamed =
             to_blob_product_streaming(&src, "x", "2024-01-01T00:00:00Z", None, &[]).unwrap();
         // bounded-memory streaming yields the SAME identity, content hash, and seal as the in-RAM path.
@@ -109,5 +110,22 @@ mod tests {
         assert_eq!(in_ram.content_hash, streamed.content_hash);
         assert_eq!(in_ram.manifest_hash, streamed.manifest_hash);
         assert_eq!(in_ram.blocks[0].digest, streamed.blocks[0].digest);
+
+        // …and the packed `.tsra` is byte-identical end to end: in-RAM `pack` vs `pack_streaming` with
+        // the source file as the `data` fragment (closes the inductive gap to the container layer).
+        let ram_tsra = dir.path().join("ram.tsra");
+        let stream_tsra = dir.path().join("stream.tsra");
+        tessera_io::pack(&in_ram, &payloads, &ram_tsra).unwrap();
+        tessera_io::pack_streaming(
+            &streamed,
+            &[("data".to_string(), src.as_path())],
+            &stream_tsra,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&ram_tsra).unwrap(),
+            std::fs::read(&stream_tsra).unwrap(),
+            "streamed .tsra must be byte-identical to the in-RAM packed .tsra"
+        );
     }
 }

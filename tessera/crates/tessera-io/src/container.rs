@@ -241,6 +241,11 @@ impl<R: Read + Seek> Reader<R> {
     /// [`Self::read_block`] for a large blob: over a cloud `Read + Seek` source the underlying zip read
     /// issues range-GETs for just this block, so a multi-GB blob extracts (locally or from S3) without
     /// buffering it. Verifies the block digest after the last byte; returns the number of bytes written.
+    ///
+    /// **Integrity contract:** the digest is checked only *after* the final byte, so on an
+    /// `Err(Integrity)` `w` will already have received the (unverified) bytes. A caller writing to a
+    /// final destination must stage to a temp path and rename only on `Ok` (as `tessera extract` does)
+    /// — never expose `w`'s contents until this returns `Ok`.
     pub fn stream_block(&mut self, name: &str, w: &mut impl Write) -> Result<u64> {
         let expected = self
             .manifest

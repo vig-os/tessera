@@ -41,6 +41,11 @@ pub fn blob_block(
 /// bytes are never loaded into a `Vec`. Pair it with [`crate::pack_streaming`] handing the **same `path`**
 /// as the block's fragment (`(name, path)`), so a multi-GB file seals with bounded RSS. The resulting
 /// `BlockRef` + digest are byte-identical to [`blob_block`] over the same bytes (blake3 is incremental).
+///
+/// **The source file MUST be stable for the duration of the seal.** This hashes the file here, then
+/// `pack_streaming` re-reads it to copy the bytes — a concurrent writer / atomic-replace between the two
+/// reads would seal a `digest` that doesn't match the packed bytes (the `.tsra` would then fail its own
+/// block check on first read — caught, never silent). Ingest a quiescent file (or snapshot it first).
 pub fn blob_ref_streaming(
     name: &str,
     filename: &str,
