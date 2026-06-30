@@ -19,6 +19,38 @@ use serde::{Deserialize, Serialize};
 use crate::block::BlockKind;
 use crate::manifest::Manifest;
 
+/// Schema-driven **sensitivity tier** for a metadata field (ADR-0040 §1 — the spike that
+/// teaches the engine to *reason* about PHI without yet redacting/encrypting). One of four,
+/// in increasing identifiability:
+/// - [`Public`](Sensitivity::Public) — safe in clear (e.g. modality vocab, calibration
+///   coefficients, scan geometry); ships unchanged.
+/// - [`Coded`](Sensitivity::Coded) — a controlled-vocab code, intrinsically non-identifying but
+///   carrying clinical meaning (e.g. DICOM `Modality` = `CT`).
+/// - [`Sensitive`](Sensitivity::Sensitive) — clinical content that is not directly identifying
+///   on its own but is access-controlled (e.g. impression text); the future field-redactor's
+///   default-keep-in-clear tier.
+/// - [`Identifying`](Sensitivity::Identifying) — **direct PHI** (the seed list is DICOM
+///   PS3.15's confidentiality profile — Patient Name, Patient ID, MRN, Birth Date, …,
+///   plus UIDs that bind to the patient/study). The redactor / field-encryption phases
+///   (deferred) operate on the fields the schema marks at this tier.
+///
+/// Pure data (`Copy` + serde) — the wasm-targeted `tessera-core` stays host-free; no PHI logic
+/// lives in this enum, only the classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sensitivity {
+    /// Safe in clear — no clinical or identifying content.
+    #[default]
+    Public,
+    /// A controlled-vocabulary code (e.g. DICOM `Modality`). Not identifying.
+    Coded,
+    /// Clinical content, not directly identifying on its own (access-controlled but not a name).
+    Sensitive,
+    /// Direct PHI — DICOM PS3.15 confidentiality-profile fields (Patient Name/ID/MRN, DOB,
+    /// linking UIDs). The redact / field-encryption phases (deferred) operate on this tier.
+    Identifying,
+}
+
 /// A field's self-description — carried once, in the schema, so values stay lean and a reader
 /// (or an AI) always has the field's meaning, unit, and dtype without external context (FAIR I1/I2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,10 +81,17 @@ pub struct FieldSpec {
     /// the warn tier). Composes through `imaging_base` like every other field.
     #[serde(default)]
     pub recommended: bool,
+    /// Schema-driven PHI classification (ADR-0040 §1). The engine uses this tier to *reason* about
+    /// identifiability — e.g. the ingest warn surfaces an `identifying` field present in
+    /// metadata in the clear, the hook the future field-encryption / redact phases replace.
+    /// `#[serde(default)]` keeps existing on-disk schemas back-compat (absent ⇒ `Public`).
+    #[serde(default)]
+    pub sensitivity: Sensitivity,
 }
 
 impl FieldSpec {
-    /// A required, undimensioned metadata field (absent ⇒ ingest **blocks**).
+    /// A required, undimensioned metadata field (absent ⇒ ingest **blocks**). Defaults to
+    /// [`Sensitivity::Public`]; chain [`Self::with_sensitivity`] to classify PHI.
     pub fn required(id: &str, description: &str, dtype: &str) -> Self {
         FieldSpec {
             id: id.into(),
@@ -63,10 +102,11 @@ impl FieldSpec {
             default: None,
             required: true,
             recommended: false,
+            sensitivity: Sensitivity::Public,
         }
     }
 
-    /// An optional metadata field (absent ⇒ silent).
+    /// An optional metadata field (absent ⇒ silent). Defaults to [`Sensitivity::Public`].
     pub fn optional(id: &str, description: &str, dtype: &str) -> Self {
         FieldSpec {
             required: false,
@@ -93,6 +133,15 @@ impl FieldSpec {
     /// Builder: attach a controlled vocabulary.
     pub fn vocabulary(mut self, vocab: &str) -> Self {
         self.vocabulary = Some(vocab.into());
+        self
+    }
+
+    /// Builder: classify the field's PHI **sensitivity tier** (ADR-0040 §1). Defaults to
+    /// [`Sensitivity::Public`]; mark direct PHI as [`Sensitivity::Identifying`] so the engine's
+    /// schema-driven PHI reasoning (today: ingest warn; future: redact / field encryption) picks
+    /// it up automatically.
+    pub fn with_sensitivity(mut self, s: Sensitivity) -> Self {
+        self.sensitivity = s;
         self
     }
 }
@@ -194,6 +243,16 @@ impl ProductSchema {
             .filter(|f| f.recommended && f.default.is_none() && !m.metadata.contains_key(&f.id))
             .collect()
     }
+
+    /// All fields of this schema classified at the given sensitivity `tier` (ADR-0040 §1). The
+    /// query the redact / field-encryption phases (deferred) consume to know **which fields** to
+    /// touch — pure data, no PHI logic inside the core. Order matches schema declaration.
+    pub fn fields_by_sensitivity(&self, tier: Sensitivity) -> Vec<&FieldSpec> {
+        self.fields
+            .iter()
+            .filter(|f| f.sensitivity == tier)
+            .collect()
+    }
 }
 
 /// The registry of built-in product schemas. Domain-agnostic: lookups for unknown products
@@ -237,6 +296,15 @@ impl SchemaRegistry {
             .map(|s| s.missing_recommended(m))
             .unwrap_or_default()
     }
+
+    /// The fields of `m`'s declared product schema at the given sensitivity `tier` (ADR-0040 §1)
+    /// — the schema-driven query the redact / field-encryption phases (deferred) use to know
+    /// which fields to touch. Empty for an unknown product (open-world).
+    pub fn fields_by_sensitivity(&self, m: &Manifest, tier: Sensitivity) -> Vec<&FieldSpec> {
+        self.get(&m.product)
+            .map(|s| s.fields_by_sensitivity(tier))
+            .unwrap_or_default()
+    }
 }
 
 impl Default for SchemaRegistry {
@@ -270,8 +338,9 @@ fn schema(product: &str, version: &str, description: &str) -> ProductSchema {
 /// `diffusion_mri` / `multicontrast_mri` rather than repeated per schema (DRY). `with` appends the
 /// schema's own extra fields.
 fn imaging_base(with: Vec<FieldSpec>) -> Vec<FieldSpec> {
-    let mut fields =
-        vec![FieldSpec::required("modality", "Imaging modality", "coded").vocabulary("DICOM")];
+    let mut fields = vec![FieldSpec::required("modality", "Imaging modality", "coded")
+        .vocabulary("DICOM")
+        .with_sensitivity(Sensitivity::Coded)];
     fields.extend(with);
     fields
 }
@@ -303,9 +372,29 @@ fn builtin_schemas() -> Vec<ProductSchema> {
             )
         },
         ProductSchema {
+            // `rescale_*` are pure scan geometry → `Public`. The two trailing fields are seeded
+            // from DICOM **PS3.15 Annex E** (Basic Application Confidentiality Profile, the
+            // tag list any de-identifier must touch): a pseudonymised patient handle
+            // (Patient Name / Patient ID family) and a study/series/SOP-instance UID
+            // (UID family — the UIDs bind back to the patient/study, so PS3.15 requires
+            // they be replaced / managed under the profile). Both are **optional** + tagged
+            // `Identifying` so the schema-driven PHI machinery (today: an ingest warn; future:
+            // redact / field encryption) picks them up without any per-product code change.
             fields: imaging_base(vec![
                 FieldSpec::optional("rescale_slope", "Native→physical slope", "float64"),
                 FieldSpec::optional("rescale_intercept", "Native→physical intercept", "float64"),
+                FieldSpec::optional(
+                    "patient_pseudonym",
+                    "Pseudonymised patient handle (DICOM PS3.15 Patient Name / Patient ID family — direct PHI; supply a site-issued pseudonym, never the raw MRN)",
+                    "string",
+                )
+                .with_sensitivity(Sensitivity::Identifying),
+                FieldSpec::optional(
+                    "acquisition_uid",
+                    "Acquisition UID (DICOM PS3.15 UID family — Study/Series/SOPInstance UID; linking PHI under the confidentiality profile)",
+                    "string",
+                )
+                .with_sensitivity(Sensitivity::Identifying),
             ]),
             blocks: vec![one(
                 "volume",
@@ -797,5 +886,116 @@ mod tests {
             .seal()
             .unwrap();
         r.validate(&m).unwrap();
+    }
+
+    // ─── ADR-0040 §1: sensitivity classification — plain-data tier + schema-driven query ───
+
+    #[test]
+    fn sensitivity_defaults_to_public_and_round_trips_through_serde() {
+        // Default is `Public` (so an unannotated schema field — and any deserialized older
+        // FieldSpec with the field absent — classifies as the safest tier, not PHI).
+        assert_eq!(Sensitivity::default(), Sensitivity::Public);
+
+        // snake_case wire form, all four variants round-trip.
+        for (variant, wire) in [
+            (Sensitivity::Public, "\"public\""),
+            (Sensitivity::Coded, "\"coded\""),
+            (Sensitivity::Sensitive, "\"sensitive\""),
+            (Sensitivity::Identifying, "\"identifying\""),
+        ] {
+            let s = serde_json::to_string(&variant).unwrap();
+            assert_eq!(s, wire, "{variant:?} serializes as {wire}");
+            let v: Sensitivity = serde_json::from_str(&s).unwrap();
+            assert_eq!(v, variant, "round-trip");
+        }
+
+        // A FieldSpec with NO `sensitivity` key deserializes (back-compat) → Public.
+        let json = r#"{"id":"x","description":"y","dtype":"string"}"#;
+        let f: FieldSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(f.sensitivity, Sensitivity::Public);
+
+        // …and a FieldSpec round-trips a non-default tier intact through serde.
+        let f = FieldSpec::optional("mrn", "PHI", "string")
+            .with_sensitivity(Sensitivity::Identifying);
+        let s = serde_json::to_string(&f).unwrap();
+        let back: FieldSpec = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.sensitivity, Sensitivity::Identifying);
+    }
+
+    #[test]
+    fn recon_seeds_ps3_15_identifying_fields_and_classifies_them() {
+        // The spike's PS3.15-seeded example fields are present on `recon`, marked Identifying.
+        let r = SchemaRegistry::builtin();
+        let recon = r.get("recon").unwrap();
+        for id in ["patient_pseudonym", "acquisition_uid"] {
+            let f = recon
+                .fields
+                .iter()
+                .find(|f| f.id == id)
+                .unwrap_or_else(|| panic!("recon must seed PS3.15 example field '{id}'"));
+            assert!(
+                !f.required,
+                "PS3.15 example field '{id}' is optional (escape hatch must stay frictionless)"
+            );
+            assert_eq!(
+                f.sensitivity,
+                Sensitivity::Identifying,
+                "PS3.15 example field '{id}' is direct PHI → Identifying"
+            );
+        }
+        // …and the rest of the recon fields are NOT identifying (Public/Coded only).
+        for f in &recon.fields {
+            if f.id == "patient_pseudonym" || f.id == "acquisition_uid" {
+                continue;
+            }
+            assert_ne!(
+                f.sensitivity,
+                Sensitivity::Identifying,
+                "non-seeded recon field '{}' must not classify as Identifying",
+                f.id
+            );
+        }
+    }
+
+    #[test]
+    fn fields_by_sensitivity_returns_the_right_tier() {
+        let r = SchemaRegistry::builtin();
+        // Build a real recon manifest so we can query through SchemaRegistry::fields_by_sensitivity.
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![8, 8, 8], "int16"));
+        let mut b = ProductBuilder::new("recon", "DP", "d", "2024-01-01T00:00:00Z");
+        b.add_block(&vol).unwrap();
+        b.with_field(
+            "modality",
+            serde_json::json!({"_vocabulary": "DICOM", "_code": "CT"}),
+        );
+        let m = b.seal().unwrap();
+
+        // Identifying: exactly the two PS3.15-seeded recon fields.
+        let phi = r.fields_by_sensitivity(&m, Sensitivity::Identifying);
+        let phi_ids: Vec<&str> = phi.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(phi_ids, ["patient_pseudonym", "acquisition_uid"]);
+
+        // Coded: modality (DICOM controlled vocab).
+        let coded = r.fields_by_sensitivity(&m, Sensitivity::Coded);
+        let coded_ids: Vec<&str> = coded.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(coded_ids, ["modality"]);
+
+        // Public: rescale_slope + rescale_intercept (scan geometry, safe in clear).
+        let public = r.fields_by_sensitivity(&m, Sensitivity::Public);
+        let public_ids: Vec<&str> = public.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(public_ids, ["rescale_slope", "rescale_intercept"]);
+
+        // Sensitive: none on recon.
+        assert!(r
+            .fields_by_sensitivity(&m, Sensitivity::Sensitive)
+            .is_empty());
+
+        // Open-world: an unknown product → empty (no schema to classify against).
+        let m = ProductBuilder::new("my_custom", "x", "d", "2024-01-01T00:00:00Z")
+            .seal()
+            .unwrap();
+        assert!(r
+            .fields_by_sensitivity(&m, Sensitivity::Identifying)
+            .is_empty());
     }
 }

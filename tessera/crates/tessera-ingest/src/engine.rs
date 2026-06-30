@@ -114,6 +114,26 @@ pub fn run(
                 f.id
             );
         }
+        // ADR-0040 §1 precursor warn: any field the schema marks `Identifying` (direct PHI per the
+        // DICOM PS3.15 confidentiality profile) **present in metadata in the clear** is the hook
+        // the future field-encryption / redact phases replace. Never blocks — the spike only proves
+        // the schema-driven tier reaches ingest; encryption/redaction lands in the next phase
+        // (#240 / PR #238).
+        for f in registry.fields_by_sensitivity(&manifest, tessera_core::schema::Sensitivity::Identifying) {
+            if manifest.metadata.contains_key(&f.id) {
+                tracing::warn!(
+                    target: "tessera::ingest::phi",
+                    member = %p.name,
+                    product = %manifest.product,
+                    field = %f.id,
+                    sensitivity = "identifying",
+                    "PHI in the clear: identifying field '{}' present unencrypted in metadata — \
+                     {} (ADR-0040: field-encryption / redact lands in a follow-up phase)",
+                    f.id,
+                    f.description,
+                );
+            }
+        }
         let id = manifest.id.clone();
         let mh = manifest.manifest_hash.clone().ok_or_else(|| {
             Error::Invalid(format!(
