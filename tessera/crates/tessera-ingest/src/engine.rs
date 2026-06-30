@@ -35,7 +35,7 @@ use tessera_core::collection::CollectionBuilder;
 use tessera_core::manifest::Manifest;
 use tessera_core::provenance::Source;
 use tessera_core::{Error, Result};
-use tessera_io::pack;
+use tessera_io::{pack, pack_streaming};
 
 use crate::spec::{spec_hash, validate, FormatOptions, IngestSpec, StreamingMode};
 
@@ -201,14 +201,17 @@ fn dispatch(
     let timestamp = timestamp.to_string();
     match &p.options {
         FormatOptions::Blob { input, media_type } => {
-            let (m, payloads) = crate::blob::to_blob_product(
+            // Bounded-memory: stream the file's blake3, then pack_streaming with the source file as the
+            // `data` block's fragment — a multi-GB blob never enters RAM (#231).
+            let m = crate::blob::to_blob_product_streaming(
                 input,
                 name,
                 &timestamp,
                 media_type.as_deref(),
                 extra_sources,
             )?;
-            let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
+            let m =
+                seal_streaming_to_tsra(m, &[("data".to_string(), input.as_path())], out_dir, p)?;
             Ok((m, ()))
         }
         FormatOptions::Dicom { input, deidentify } => {
@@ -400,6 +403,21 @@ fn seal_to_tsra(
     let m = apply_spec_metadata(m, &p.metadata)?;
     let path = out_dir.join(format!("{}.tsra", sanitize_filename(&m.id)));
     pack(&m, payloads, &path)?;
+    Ok(m)
+}
+
+/// Bounded-memory counterpart of [`seal_to_tsra`]: identical metadata + naming, but the block payloads
+/// are **fragment files on disk** copied straight into the `.tsra` by `pack_streaming` (no in-RAM
+/// `BlockPayload`). Used by the blob backend, whose fragment is the un-parsed source file itself.
+fn seal_streaming_to_tsra(
+    m: Manifest,
+    sources: &[(String, &Path)],
+    out_dir: &Path,
+    p: &crate::spec::ProductSpec,
+) -> Result<Manifest> {
+    let m = apply_spec_metadata(m, &p.metadata)?;
+    let path = out_dir.join(format!("{}.tsra", sanitize_filename(&m.id)));
+    pack_streaming(&m, sources, &path)?;
     Ok(m)
 }
 

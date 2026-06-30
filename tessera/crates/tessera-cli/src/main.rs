@@ -624,14 +624,31 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             Ok(())
         }
         Cmd::Extract { file, block, out } => {
+            // Stream the block in bounded memory (no whole-block Vec) — a multi-GB blob extracts
+            // without buffering, and over a cloud source the zip read range-GETs just it. Stage to a
+            // sibling `.part` and atomically rename only AFTER the digest verifies, so a corrupt
+            // block never leaves unverified bytes at the destination path.
             let mut r = Reader::open(&file)?;
-            let bytes = r.read_block(&block)?;
-            std::fs::write(&out, &bytes).map_err(tessera_core::Error::from)?;
-            println!(
-                "extracted {block} ({} bytes) -> {}",
-                bytes.len(),
-                out.display()
-            );
+            let mut tmp = out.clone().into_os_string();
+            tmp.push(".part");
+            let tmp = PathBuf::from(tmp);
+            let n = {
+                let f = std::fs::File::create(&tmp).map_err(tessera_core::Error::from)?;
+                let mut w = std::io::BufWriter::new(f);
+                match r.stream_block(&block, &mut w).and_then(|n| {
+                    std::io::Write::flush(&mut w)
+                        .map(|()| n)
+                        .map_err(Into::into)
+                }) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        return Err(e);
+                    }
+                }
+            };
+            std::fs::rename(&tmp, &out).map_err(tessera_core::Error::from)?;
+            println!("extracted {block} ({n} bytes) -> {}", out.display());
             Ok(())
         }
         Cmd::Schema { file } => {

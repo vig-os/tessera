@@ -14,9 +14,9 @@ use tessera_io::BlockPayload;
 /// basename is preserved in the descriptor (the default `tessera extract` name). `extra_sources` flow in
 /// after the `ingested_from` edge (the declarative engine threads `derived_from` / `ingested_via_spec`).
 ///
-/// **Memory:** reads the whole file into RAM (peak RSS ≈ file size) — fine for the common cases;
-/// bounded-memory streaming for multi-GB `.l64` is the tracked follow-up (#231). The sealed bytes +
-/// digest are identical either way.
+/// **Memory:** reads the whole file into RAM (peak RSS ≈ file size). The in-memory convenience for when
+/// you already hold/produce the bytes; for a large file on disk prefer [`to_blob_product_streaming`]
+/// (what the ingest engine uses) — bounded memory, byte-identical sealed result.
 pub fn to_blob_product(
     path: &Path,
     name: &str,
@@ -38,6 +38,31 @@ pub fn to_blob_product(
     }
     let sealed = b.seal()?;
     Ok((sealed, vec![payload]))
+}
+
+/// Like [`to_blob_product`] but **bounded-memory**: streams the file through blake3 (no whole-file
+/// `Vec`) and returns only the sealed manifest — the caller seals it with [`tessera_io::pack_streaming`]
+/// handing the **same `path`** as the `data` block's fragment, so a multi-GB file never enters RAM. The
+/// sealed bytes + digest are identical to [`to_blob_product`] (blake3 + `pack_streaming` are exact).
+pub fn to_blob_product_streaming(
+    path: &Path,
+    name: &str,
+    timestamp: &str,
+    media_type: Option<&str>,
+    extra_sources: &[tessera_core::provenance::Source],
+) -> Result<Manifest> {
+    let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("blob");
+    let block_ref = tessera_io::blob::blob_ref_streaming("data", filename, media_type, path)?;
+    let mut b = ProductBuilder::new("blob", name, "opaque preserved file", timestamp);
+    b.add_block_ref(block_ref);
+    b.add_source(tessera_core::provenance::Source::new(
+        "ingested_from",
+        path.display().to_string(),
+    ));
+    for s in extra_sources {
+        b.add_source(s.clone());
+    }
+    b.seal()
 }
 
 #[cfg(test)]
@@ -65,5 +90,42 @@ mod tests {
             .sources
             .iter()
             .any(|s| s.reference.contains("testscan.l64")));
+    }
+
+    #[test]
+    fn streaming_seal_is_identical_to_in_ram() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("scan.l64");
+        let bytes: Vec<u8> = (0..70_000u32)
+            .map(|k| (k.wrapping_mul(2_654_435_761) >> 9) as u8)
+            .collect();
+        std::fs::write(&src, &bytes).unwrap();
+
+        let (in_ram, payloads) =
+            to_blob_product(&src, "x", "2024-01-01T00:00:00Z", None, &[]).unwrap();
+        let streamed =
+            to_blob_product_streaming(&src, "x", "2024-01-01T00:00:00Z", None, &[]).unwrap();
+        // bounded-memory streaming yields the SAME identity, content hash, and seal as the in-RAM path.
+        assert_eq!(in_ram.id, streamed.id);
+        assert_eq!(in_ram.content_hash, streamed.content_hash);
+        assert_eq!(in_ram.manifest_hash, streamed.manifest_hash);
+        assert_eq!(in_ram.blocks[0].digest, streamed.blocks[0].digest);
+
+        // …and the packed `.tsra` is byte-identical end to end: in-RAM `pack` vs `pack_streaming` with
+        // the source file as the `data` fragment (closes the inductive gap to the container layer).
+        let ram_tsra = dir.path().join("ram.tsra");
+        let stream_tsra = dir.path().join("stream.tsra");
+        tessera_io::pack(&in_ram, &payloads, &ram_tsra).unwrap();
+        tessera_io::pack_streaming(
+            &streamed,
+            &[("data".to_string(), src.as_path())],
+            &stream_tsra,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&ram_tsra).unwrap(),
+            std::fs::read(&stream_tsra).unwrap(),
+            "streamed .tsra must be byte-identical to the in-RAM packed .tsra"
+        );
     }
 }

@@ -235,6 +235,53 @@ impl<R: Read + Seek> Reader<R> {
         }
         Ok(buf)
     }
+
+    /// Stream a block's bytes to `w` in **bounded memory** — copy a fixed buffer at a time, hashing as
+    /// the bytes flow, never holding the whole block in a `Vec`. The bounded counterpart of
+    /// [`Self::read_block`] for a large blob: over a cloud `Read + Seek` source the underlying zip read
+    /// issues range-GETs for just this block, so a multi-GB blob extracts (locally or from S3) without
+    /// buffering it. Verifies the block digest after the last byte; returns the number of bytes written.
+    ///
+    /// **Integrity contract:** the digest is checked only *after* the final byte, so on an
+    /// `Err(Integrity)` `w` will already have received the (unverified) bytes. A caller writing to a
+    /// final destination must stage to a temp path and rename only on `Ok` (as `tessera extract` does)
+    /// — never expose `w`'s contents until this returns `Ok`.
+    pub fn stream_block(&mut self, name: &str, w: &mut impl Write) -> Result<u64> {
+        let expected = self
+            .manifest
+            .blocks
+            .iter()
+            .find(|b| b.name == name)
+            .and_then(|b| b.digest.clone());
+        let entry = format!("{BLOCKS_PREFIX}{name}");
+        let mut f = self
+            .archive
+            .by_name(&entry)
+            .map_err(|_| Error::Container(format!("no block entry '{entry}'")))?;
+        let mut hasher = tessera_core::hash::StreamHasher::new();
+        let mut buf = [0u8; 64 * 1024];
+        let mut total: u64 = 0;
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            w.write_all(&buf[..n])?;
+            total += n as u64;
+        }
+        if let Some(exp) = expected {
+            let actual = hasher.finalize();
+            if actual != exp {
+                return Err(Error::Integrity {
+                    what: "block_payload",
+                    expected: exp,
+                    actual,
+                });
+            }
+        }
+        Ok(total)
+    }
 }
 
 /// Explode a `.tsra` into a directory: `manifest.json` + `blocks/<name>` (the opt-in exploded
