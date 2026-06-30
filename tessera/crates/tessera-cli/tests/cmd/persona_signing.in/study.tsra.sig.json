@@ -1,0 +1,6 @@
+{
+  "alg": "ed25519-env-v1",
+  "key_id": "6e60e121da0acc12c7d193a2c71292d844aa72db3079ab9bb8f2c61a3a5d34f0",
+  "signer": "https://orcid.org/0000-0002-1825-0097",
+  "sig": "abd50a0d5a1cb5609b76fdc950852640bbfcef283365956b0f369eea67059eb43f0d87b0666a15ea13b16dd5acea95c044fbcc40bed7fed81912569d5ecf7d0a"
+}

@@ -34,14 +34,16 @@
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
         # Cargo sources + the conformance corpus (tests/conformance.rs reads corpus/corpus.json) +
         # docs/examples (tessera-ingest::spec embeds the example ingest TOML via include_str! and a
-        # test validates it) — cleanCargoSource would otherwise strip these non-Rust files so the
-        # hermetic build/test can't find them.
+        # test validates it) + the CLI docs-as-tests (`tests/cmd/*.trycmd` walkthroughs + their `.in/`
+        # fixtures) — cleanCargoSource would otherwise strip these non-Rust files, so the trycmd
+        # docs-as-tests would silently run ZERO cases in the hermetic gate.
         src = pkgs.lib.cleanSourceWith {
           src = ./tessera;
           filter = path: type:
             (craneLib.filterCargoSources path type)
             || (pkgs.lib.hasInfix "/corpus/" path)
-            || (pkgs.lib.hasInfix "/docs/examples/" path);
+            || (pkgs.lib.hasInfix "/docs/examples/" path)
+            || (pkgs.lib.hasInfix "/tests/cmd/" path);
           name = "source";
         };
         commonArgs = {

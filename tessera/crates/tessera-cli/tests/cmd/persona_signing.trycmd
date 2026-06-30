@@ -1,0 +1,61 @@
+A FAIR data product's signing & trust lifecycle, through four hands. Runs the real `tessera` binary
+against a fixture `study.tsra` (a sealed recon product, as if freshly acquired). Random key material is
+globbed with `[..]`; everything else is the verbatim transcript.
+
+# === Instrument scientist — generate a signing key, sign the study at the source (air-gapped OK). ===
+
+```
+$ tessera keygen instrument.key
+wrote private key instrument.key (keep secret — mode 0600)
+wrote public  key instrument.key.pub (share freely)
+  key_id [..]
+
+```
+
+```
+$ tessera sign study.tsra --key instrument.key --signer https://orcid.org/0000-0002-1825-0097
+OK  signed study.tsra
+  sidecar   study.tsra.sig.json
+  key_id    [..]
+  signer    https://orcid.org/0000-0002-1825-0097
+
+```
+
+# === Data scientist — refuses an unknown key: untrusted until the custodian vets it. ===
+
+```
+$ tessera verify-sig study.tsra
+? failed
+error: [..]untrusted: key_id [..]is not in the trust store[..]
+
+```
+
+# === Data custodian — vets + trusts the instrument's key (repo-local store); now it verifies. ===
+
+```
+$ tessera trust add instrument.key.pub --name instrument-lab --signer https://orcid.org/0000-0002-1825-0097 --repo
+trusted 'instrument-lab'  key_id [..]  signer https://orcid.org/0000-0002-1825-0097
+
+```
+
+```
+$ tessera trust list
+instrument-lab   [..]  https://orcid.org/0000-0002-1825-0097
+
+```
+
+```
+$ tessera verify-sig study.tsra
+OK  study.tsra — trusted as 'instrument-lab' + 1 blocks intact
+  signer https://orcid.org/0000-0002-1825-0097 (attribution; not a trust anchor)
+
+```
+
+# === Researcher / auditor — a signer-policy mismatch is rejected (attribution is checked too). ===
+
+```
+$ tessera verify-sig study.tsra --require-signer https://orcid.org/9999-9999-9999-9999
+? failed
+error: [..]signer policy: required 'https://orcid.org/9999-9999-9999-9999'[..]
+
+```
