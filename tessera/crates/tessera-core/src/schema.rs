@@ -39,13 +39,20 @@ pub struct FieldSpec {
     /// Default value used when the field is absent (satisfies a `required` field).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
-    /// Whether a valid product of the owning schema must carry this field.
+    /// Whether a valid product of the owning schema **must** carry this field — absence is a hard
+    /// **block** at ingest ([`SchemaRegistry::validate`]).
     #[serde(default)]
     pub required: bool,
+    /// Field severity below `required`: a **recommended** field's absence is a non-fatal **warn**
+    /// ([`SchemaRegistry::missing_recommended`]) — FAIR-completeness nudge, never a block. Mutually
+    /// meaningful with `required` (a `required` field is implicitly more than recommended; this flags
+    /// the warn tier). Composes through `imaging_base` like every other field.
+    #[serde(default)]
+    pub recommended: bool,
 }
 
 impl FieldSpec {
-    /// A required, undimensioned metadata field.
+    /// A required, undimensioned metadata field (absent ⇒ ingest **blocks**).
     pub fn required(id: &str, description: &str, dtype: &str) -> Self {
         FieldSpec {
             id: id.into(),
@@ -55,13 +62,24 @@ impl FieldSpec {
             vocabulary: None,
             default: None,
             required: true,
+            recommended: false,
         }
     }
 
-    /// An optional metadata field.
+    /// An optional metadata field (absent ⇒ silent).
     pub fn optional(id: &str, description: &str, dtype: &str) -> Self {
         FieldSpec {
             required: false,
+            ..FieldSpec::required(id, description, dtype)
+        }
+    }
+
+    /// A **recommended** metadata field: absent ⇒ a non-fatal warn (FAIR nudge), never a block. The
+    /// middle tier between `required` (block) and `optional` (silent).
+    pub fn recommended(id: &str, description: &str, dtype: &str) -> Self {
+        FieldSpec {
+            required: false,
+            recommended: true,
             ..FieldSpec::required(id, description, dtype)
         }
     }
@@ -165,6 +183,17 @@ impl ProductSchema {
         }
         Ok(())
     }
+
+    /// The schema's **recommended** fields (the warn tier) that this manifest does **not** carry and
+    /// that have no default — the FAIR-completeness nudge the engine surfaces as a non-fatal warning.
+    /// Never blocks (that's [`Self::validate`]'s job for `required`). Domain-agnostic: the policy is
+    /// pure schema data, so it composes through `imaging_base` for every product alike.
+    pub fn missing_recommended<'a>(&'a self, m: &Manifest) -> Vec<&'a FieldSpec> {
+        self.fields
+            .iter()
+            .filter(|f| f.recommended && f.default.is_none() && !m.metadata.contains_key(&f.id))
+            .collect()
+    }
 }
 
 /// The registry of built-in product schemas. Domain-agnostic: lookups for unknown products
@@ -199,6 +228,14 @@ impl SchemaRegistry {
             Some(schema) => schema.validate(m),
             None => Ok(()),
         }
+    }
+
+    /// The recommended-but-absent fields for a manifest's declared schema (warn tier; see
+    /// [`ProductSchema::missing_recommended`]). Empty for an unknown product (open-world).
+    pub fn missing_recommended(&self, m: &Manifest) -> Vec<&FieldSpec> {
+        self.get(&m.product)
+            .map(|s| s.missing_recommended(m))
+            .unwrap_or_default()
     }
 }
 
@@ -246,6 +283,14 @@ fn builtin_schemas() -> Vec<ProductSchema> {
     use BlockKind::{Array, Blob, Table};
     vec![
         ProductSchema {
+            // A blob is opaque (no parsed metadata), so operator-supplied context is what makes a
+            // preserved file Reusable — `study` is *recommended* (a warn nudge), never required (the
+            // escape hatch must stay frictionless): you can always preserve junk now, label it later.
+            fields: vec![FieldSpec::recommended(
+                "study",
+                "Study / exam this preserved file belongs to (FAIR grouping)",
+                "string",
+            )],
             blocks: vec![one(
                 "data",
                 Some(Blob),
@@ -681,6 +726,31 @@ mod tests {
         );
         assert!(recon.fields.iter().any(|f| f.id == "rescale_slope"));
         assert!(recon.fields.iter().any(|f| f.id == "rescale_intercept"));
+    }
+
+    #[test]
+    fn recommended_field_warns_but_never_blocks() {
+        let r = SchemaRegistry::builtin();
+        // a blob with its required `data` block but no `study` → schema-VALID (study is recommended,
+        // not required), yet surfaced as a recommendation (the warn tier).
+        let mut b = ProductBuilder::new("blob", "junk", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(crate::block::BlockRef {
+            name: "data".into(),
+            kind: crate::block::BlockKind::Blob,
+            digest: Some("blake3:00".into()),
+            spec: serde_json::json!({"filename": "x.l64", "size": 1}),
+        });
+        let m = b.seal().unwrap();
+        assert!(r.validate(&m).is_ok(), "recommended-absent must NOT block");
+        let missing = r.missing_recommended(&m);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].id, "study");
+
+        // supplying it (what `--meta study=…` does) clears the recommendation.
+        let mut b2 = ProductBuilder::from_manifest(&m);
+        b2.with_field("study", serde_json::json!("DUPLET-07"));
+        let m2 = b2.seal().unwrap();
+        assert!(r.missing_recommended(&m2).is_empty());
     }
 
     #[test]

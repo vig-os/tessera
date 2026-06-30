@@ -392,6 +392,10 @@ enum IngestSrc {
         /// Apply PS3.15 de-identification (drop PHI tags) before encoding.
         #[arg(long)]
         deidentify: bool,
+        /// Attach metadata `key=value` (value parsed as JSON, else string) — supplies/overrides schema
+        /// fields. Repeatable: `--meta study=DUPLET-07 --meta modality=PT`.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
     },
     /// DICOM **series** (a multi-file CT/PET slice stack) → one 3-D `recon` product.
     DicomSeries {
@@ -409,6 +413,9 @@ enum IngestSrc {
         /// Apply PS3.15 de-identification (NOTE: series de-id is not yet supported and will error).
         #[arg(long)]
         deidentify: bool,
+        /// Attach metadata `key=value` (value parsed as JSON, else string). Repeatable.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
     },
     /// GE listmode HDF5 → `listmode` product (compound events → columnar; the #193 transpose).
     GeHdf5 {
@@ -425,6 +432,9 @@ enum IngestSrc {
         /// Compound dataset to read: `events_3p` (default) or `events_2p`.
         #[arg(long, default_value = "events_3p")]
         dataset: String,
+        /// Attach metadata `key=value` (value parsed as JSON, else string). Repeatable.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
     },
     /// Preserve an un-parsed file **bit-faithfully** as an opaque `blob` product (the "junk" tier —
     /// `.l64`, `.7z`, PDF; bytes stored verbatim, blake3-sealed). Aka `junk`, for when the vendor file
@@ -444,10 +454,22 @@ enum IngestSrc {
         /// IANA media type, if known (e.g. `application/pdf`). Defaults to opaque octet-stream.
         #[arg(long)]
         media_type: Option<String>,
+        /// Attach metadata `key=value` (value parsed as JSON, else string) — e.g. `--meta study=DUPLET-07`
+        /// to satisfy the blob schema's recommended `study`. Repeatable.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
     },
 }
 
 fn main() -> ExitCode {
+    // Surface library WARNs (e.g. the ingest engine's recommended-field nudge) on stderr. Quiet
+    // (warn+ only), compact + timestamp-free so it reads as CLI output rather than a log.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .try_init();
     match run(Cli::parse().cmd) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -820,6 +842,24 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
     }
 }
 
+/// Parse repeatable `--meta key=value` into the product's metadata map (the config-side supply that
+/// satisfies a schema's required/recommended fields). Each `value` is parsed as JSON, falling back to a
+/// bare string — same convention as `commit --set`. Shared by every `tessera ingest` subcommand so
+/// metadata is supplied one generic way, not per-backend flags.
+fn parse_meta(
+    items: &[String],
+) -> tessera_core::Result<std::collections::BTreeMap<String, serde_json::Value>> {
+    let mut out = std::collections::BTreeMap::new();
+    for kv in items {
+        let (k, v) = kv.split_once('=').ok_or_else(|| {
+            tessera_core::Error::Invalid(format!("--meta expects key=value, got '{kv}'"))
+        })?;
+        let value = serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.into()));
+        out.insert(k.to_string(), value);
+    }
+    Ok(out)
+}
+
 /// Parse a `--rows A:B` half-open range for `tessera read`. Both bounds are required; `A <= B`.
 fn parse_row_range(s: &str) -> tessera_core::Result<(u64, u64)> {
     let (a, b) = s.split_once(':').ok_or_else(|| {
@@ -969,6 +1009,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             name,
             timestamp,
             deidentify,
+            meta,
         } => (
             IngestSpec {
                 collection: CollectionMeta {
@@ -984,7 +1025,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     schema: "recon".into(),
                     description: None,
                     derived_from: Vec::new(),
-                    metadata: std::collections::BTreeMap::new(),
+                    metadata: parse_meta(&meta)?,
                     options: FormatOptions::Dicom { input, deidentify },
                 }],
             },
@@ -996,6 +1037,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             name,
             timestamp,
             deidentify,
+            meta,
         } => (
             IngestSpec {
                 collection: CollectionMeta {
@@ -1011,7 +1053,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     schema: "recon".into(),
                     description: None,
                     derived_from: Vec::new(),
-                    metadata: std::collections::BTreeMap::new(),
+                    metadata: parse_meta(&meta)?,
                     options: FormatOptions::DicomSeries { inputs, deidentify },
                 }],
             },
@@ -1023,6 +1065,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             name,
             timestamp,
             dataset,
+            meta,
         } => (
             IngestSpec {
                 collection: CollectionMeta {
@@ -1038,7 +1081,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     schema: "listmode".into(),
                     description: None,
                     derived_from: Vec::new(),
-                    metadata: std::collections::BTreeMap::new(),
+                    metadata: parse_meta(&meta)?,
                     options: FormatOptions::HdfCompound {
                         input,
                         dataset,
@@ -1057,6 +1100,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             name,
             timestamp,
             media_type,
+            meta,
         } => (
             IngestSpec {
                 collection: CollectionMeta {
@@ -1072,7 +1116,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     schema: "blob".into(),
                     description: None,
                     derived_from: Vec::new(),
-                    metadata: std::collections::BTreeMap::new(),
+                    metadata: parse_meta(&meta)?,
                     options: FormatOptions::Blob { input, media_type },
                 }],
             },
@@ -1233,6 +1277,7 @@ mod tests {
                 name: "DP06-lm".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
                 dataset: "events_3p".into(),
+                meta: vec![],
             }),
         })
         .unwrap();
@@ -1398,6 +1443,7 @@ streaming = "batch"
                 name: "x".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
                 deidentify: false,
+                meta: vec![],
             }),
         })
         .unwrap_err();
@@ -1426,6 +1472,7 @@ streaming = "batch"
                 name: "DP06-ct".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
                 deidentify: true,
+                meta: vec![],
             }),
         })
         .unwrap_err();

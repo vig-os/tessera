@@ -17,6 +17,9 @@ tessera-io.workspace = true
 tessera-ingest.workspace = true
 serde_json.workspace = true
 clap.workspace = true
+# Surface library WARNs (e.g. the schema recommended-field nudge from the ingest engine) on stderr.
+tracing.workspace = true
+tracing-subscriber.workspace = true
 # OS CSPRNG for `tessera keygen` (32-byte ed25519 seed). Host-only — never in the wasm verify path.
 getrandom = "0.2"
 # RFC-3339 `signed_at` stamp on signatures (host-only — `tessera sign`).
