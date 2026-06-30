@@ -1,8 +1,8 @@
 ```
 $ tessera ingest --help
-Ingest a vendor acquisition file into a sealed `.tsra` product (normalise at the door), or run a declarative ingest spec (`--spec FILE`) into a sealed collection of `.tsra` products
+Ingest a vendor file into a sealed `.tsra` (or run a declarative `--spec`).
 
-Usage: tessera ingest [OPTIONS] [COMMAND]
+Ingests a vendor acquisition file into a sealed `.tsra` product (normalise at the door), or runs a declarative ingest spec (`--spec FILE`) into a sealed collection of `.tsra` products.
 ...
 
 ```

@@ -3,11 +3,11 @@ $ tessera --version
 tessera [..]
 
 $ tessera inspect --help
-Print a human summary of a `.tsra`'s manifest (id, product, blocks, hashes).
+Print a `.tsra` manifest summary (id, product, blocks, hashes).
 ...
 
 $ tessera verify --help
-Open + fully verify a `.tsra` (magic, manifest seal, every block digest). Exit 0 if valid.
+Verify a `.tsra`'s integrity (magic, seal, every block digest).
 ...
 
 ```
