@@ -43,9 +43,12 @@ pub fn blob_block(
 /// `BlockRef` + digest are byte-identical to [`blob_block`] over the same bytes (blake3 is incremental).
 ///
 /// **The source file MUST be stable for the duration of the seal.** This hashes the file here, then
-/// `pack_streaming` re-reads it to copy the bytes — a concurrent writer / atomic-replace between the two
-/// reads would seal a `digest` that doesn't match the packed bytes (the `.tsra` would then fail its own
-/// block check on first read — caught, never silent). Ingest a quiescent file (or snapshot it first).
+/// the packer re-reads it to copy the bytes — a concurrent writer / atomic-replace between the two
+/// reads would otherwise seal a `digest` that doesn't match the packed bytes. The ingest engine pairs
+/// this builder with [`crate::pack_streaming_verified`], which re-hashes each fragment **as it copies**
+/// and returns [`Error::Integrity`] (`what = "block_payload"`) on a mismatch — so the race is caught at
+/// pack time, not silently produced and only discovered on the first read. Ingest a quiescent file (or
+/// snapshot it first) to avoid that error path entirely.
 pub fn blob_ref_streaming(
     name: &str,
     filename: &str,

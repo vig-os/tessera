@@ -36,7 +36,10 @@ pub use collection::{
     prefix_layout, retention_mode, to_oci_index, to_rocrate, OCI_INDEX_MEDIA_TYPE,
 };
 pub use config::{parse_byte_size, WriteConfig, DEFAULT_RAM_BUDGET};
-pub use container::{pack, pack_dir, pack_streaming, unpack, BlockPayload, Reader, MIMETYPE};
+pub use container::{
+    pack, pack_dir, pack_streaming, pack_streaming_verified, unpack, BlockPayload, Reader,
+    MIMETYPE,
+};
 pub use multiblock::{ColumnBlockIter, LogicalTableView};
 pub use range::CountingReader;
 #[cfg(feature = "cloud")]

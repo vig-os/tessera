@@ -35,7 +35,7 @@ use tessera_core::collection::CollectionBuilder;
 use tessera_core::manifest::Manifest;
 use tessera_core::provenance::Source;
 use tessera_core::{Error, Result};
-use tessera_io::{pack, pack_streaming};
+use tessera_io::{pack, pack_streaming_verified};
 
 use crate::spec::{spec_hash, validate, FormatOptions, IngestSpec, StreamingMode};
 
@@ -420,8 +420,13 @@ fn seal_to_tsra(
 }
 
 /// Bounded-memory counterpart of [`seal_to_tsra`]: identical metadata + naming, but the block payloads
-/// are **fragment files on disk** copied straight into the `.tsra` by `pack_streaming` (no in-RAM
-/// `BlockPayload`). Used by the blob backend, whose fragment is the un-parsed source file itself.
+/// are **fragment files on disk** copied straight into the `.tsra` by `pack_streaming_verified` (no
+/// in-RAM `BlockPayload`). Used by the blob backend, whose fragment is the un-parsed source file
+/// itself — so the verified packer is mandatory here, not optional: the two-read race in
+/// [`crate::blob::to_blob_product_streaming`] (hash the file, then pack copies it) becomes a loud
+/// `Err(Integrity)` instead of a dead-on-arrival `.tsra` if the source file changes between the two
+/// reads. The verify happens on the bytes already buffered for the write, so the on-disk archive is
+/// byte-identical to the unverified path (the conformance corpus is unaffected).
 fn seal_streaming_to_tsra(
     m: Manifest,
     sources: &[(String, &Path)],
@@ -430,7 +435,7 @@ fn seal_streaming_to_tsra(
 ) -> Result<Manifest> {
     let m = apply_spec_metadata(m, &p.metadata)?;
     let path = out_dir.join(format!("{}.tsra", sanitize_filename(&m.id)));
-    pack_streaming(&m, sources, &path)?;
+    pack_streaming_verified(&m, sources, &path)?;
     Ok(m)
 }
 
