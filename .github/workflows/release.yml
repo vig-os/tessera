@@ -298,29 +298,9 @@ jobs:
           echo "finalize_sha=$FINALIZE_SHA" >> $GITHUB_OUTPUT
           echo "Finalized at commit: $FINALIZE_SHA"
 
-  test:
-    name: Test (Finalized)
-    needs: [validate, finalize]
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-
-    steps:
-      - name: Checkout finalized commit
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-        with:
-          ref: ${{ needs.finalize.outputs.finalize_sha }}
-
-      - name: Set up environment
-        uses: ./.github/actions/setup-env
-        with:
-          sync-dependencies: 'true'
-
-      - name: Run tests
-        run: uv run pytest
-
   release:
     name: Create Release
-    needs: [validate, finalize, test]
+    needs: [validate, finalize]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:

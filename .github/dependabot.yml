@@ -21,10 +21,10 @@ updates:
           - "minor"
           - "patch"
 
-  # Python (pip) — monitor pyproject.toml / uv.lock
-  # Includes security updates and dependency vulnerability alerts
+  # Python (pip) — monitor the ecosystem-bench env (the only first-party Python left after the
+  # legacy root `fd5` scaffold + its uv.lock were removed). Security + version updates.
   - package-ecosystem: "pip"
-    directory: "/"
+    directory: "/tessera/bench/ecosystems"
     schedule:
       interval: "weekly"
       day: "monday"
