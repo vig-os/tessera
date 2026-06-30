@@ -13,6 +13,10 @@ use tessera_io::BlockPayload;
 /// Read `path` whole and seal it as a single-blob `blob` product. The block is named `data`; the source
 /// basename is preserved in the descriptor (the default `tessera extract` name). `extra_sources` flow in
 /// after the `ingested_from` edge (the declarative engine threads `derived_from` / `ingested_via_spec`).
+///
+/// **Memory:** reads the whole file into RAM (peak RSS ≈ file size) — fine for the common cases;
+/// bounded-memory streaming for multi-GB `.l64` is the tracked follow-up (#231). The sealed bytes +
+/// digest are identical either way.
 pub fn to_blob_product(
     path: &Path,
     name: &str,

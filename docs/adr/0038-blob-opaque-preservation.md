@@ -42,6 +42,11 @@ scanner today, decode it whenever the parser lands.
   inert to blobs they don't understand; old products are unaffected.
 - **No compression** is intentional — a blob is *faithful*, not *small*. A caller who wants compression
   should normalise into an `array`/`table` block (which is also queryable), or compress out-of-band.
+- **Memory (as-built):** the first cut reads the whole file into RAM (`fs::read` → in-memory `pack`),
+  so peak RSS ≈ file size. Fine for the common cases (DICOM `.IMA`, PDFs, `.cal`, sub-GB listmode);
+  **bounded-memory streaming** for multi-GB `.l64` (stream the `blake3`, hand the source file to
+  `pack_streaming` as its own fragment) is the tracked follow-up **#231**. The on-disk result is
+  identical either way — streaming changes only the writer's memory profile, not the bytes or the digest.
 - **Naming**: the canonical kind/format is `blob`; `junk` is an accepted **alias** (CLI subcommand +
   `format` tag) — same machinery, a cathartic name for vendor files that have earned it. The *stored*
   representation is always `blob` (determinism + a clean corpus).
