@@ -114,6 +114,28 @@ pub fn run(
                 f.id
             );
         }
+        // ADR-0040 §1 precursor warn: any field the schema marks `Identifying` (direct PHI per the
+        // DICOM PS3.15 confidentiality profile) **present in metadata in the clear** is the hook
+        // the future field-encryption / redact phases replace. Never blocks — the spike only proves
+        // the schema-driven tier reaches ingest; encryption/redaction lands in the next phase
+        // (#240 / PR #238).
+        for f in registry
+            .fields_by_sensitivity(&manifest, tessera_core::schema::Sensitivity::Identifying)
+        {
+            if manifest.metadata.contains_key(&f.id) {
+                tracing::warn!(
+                    target: "tessera::ingest::phi",
+                    member = %p.name,
+                    product = %manifest.product,
+                    field = %f.id,
+                    sensitivity = "identifying",
+                    "PHI in the clear: identifying field '{}' present unencrypted in metadata — \
+                     {} (ADR-0040: field-encryption / redact lands in a follow-up phase)",
+                    f.id,
+                    f.description,
+                );
+            }
+        }
         let id = manifest.id.clone();
         let mh = manifest.manifest_hash.clone().ok_or_else(|| {
             Error::Invalid(format!(
@@ -212,6 +234,11 @@ fn dispatch(
     // collection-level timestamp is the per-product timestamp too: the engine takes its identity
     // discipline from the spec, never from `Local::now()` or filesystem mtimes.
     let timestamp = timestamp.to_string();
+    // ADR-0040: a `source_label` (if declared on the spec / `--source-label` on the CLI) REPLACES
+    // the input path in the `ingested_from` reference. The path itself is still used to READ the
+    // bytes — but never appears in the sealed manifest. Computed once here, threaded into every
+    // backend (the seam each backend now exposes as a `source_label: Option<&str>` parameter).
+    let label = p.source_label.as_deref();
     match &p.options {
         FormatOptions::Blob { input, media_type } => {
             // Bounded-memory: stream the file's blake3, then pack_streaming with the source file as the
@@ -221,6 +248,7 @@ fn dispatch(
                 name,
                 &timestamp,
                 media_type.as_deref(),
+                label,
                 extra_sources,
             )?;
             let m =
@@ -233,32 +261,34 @@ fn dispatch(
             } else {
                 crate::dicom::read_image(input)?
             };
-            let source = input.display().to_string();
+            let source = label
+                .map(str::to_string)
+                .unwrap_or_else(|| input.display().to_string());
             let (m, payloads) =
                 crate::dicom::to_recon_product(&img, name, &timestamp, &source, extra_sources)?;
             let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
             Ok((m, ()))
         }
         FormatOptions::DicomSeries { inputs, deidentify } => {
-            // PS3.15 de-id for a series is per-file on the raw object; the in-memory series builder
-            // doesn't carry a "deidentify the series" hook, so we map the request to per-file
-            // de-id by reading each slice through `read_image_deidentified` first and reusing the
-            // single-slice stacker. Reject the request to keep the contract honest until the
-            // dicom-series API grows a de-id seam.
-            if *deidentify {
-                return Err(Error::Invalid(
-                    "ingest-engine: dicom-series with deidentify=true is not yet supported \
-                     (use per-file dicom + a derived recon stage, or pre-de-identify the .dcm \
-                     fixtures)"
-                        .into(),
-                ));
-            }
-            let img = crate::dicom::read_series(inputs)?;
-            let source = inputs
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(",");
+            // PS3.15 de-id for a series is per-file on the raw object; we route to
+            // `read_series_deidentified`, which opens each slice, applies `deidentify` in memory,
+            // then decodes — so PHI never reaches the stacked volume. The pixels are identical to
+            // the non-de-id path (de-id only touches metadata).
+            let img = if *deidentify {
+                crate::dicom::read_series_deidentified(inputs)?
+            } else {
+                crate::dicom::read_series(inputs)?
+            };
+            // With a `source_label`, recording N paths joined with commas is exactly what the label
+            // exists to suppress (an 890-slice series would embed each path verbatim). When no label
+            // is given, the joined paths are kept as the v0 behavior.
+            let source = label.map(str::to_string).unwrap_or_else(|| {
+                inputs
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            });
             let (m, payloads) =
                 crate::dicom::to_recon_product(&img, name, &timestamp, &source, extra_sources)?;
             let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
@@ -266,7 +296,9 @@ fn dispatch(
         }
         FormatOptions::Nifti { input } => {
             let img = crate::nifti::read_nifti(input)?;
-            let source = input.display().to_string();
+            let source = label
+                .map(str::to_string)
+                .unwrap_or_else(|| input.display().to_string());
             let (m, payloads) =
                 crate::nifti::to_recon_product(&img, name, &timestamp, &source, extra_sources)?;
             let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
@@ -283,6 +315,7 @@ fn dispatch(
                 dtype,
                 name,
                 &timestamp,
+                label,
                 extra_sources,
             )?;
             let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
@@ -303,7 +336,6 @@ fn dispatch(
                 // directly; we then re-open the sealed manifest to record its id.
                 let stage = out_dir.join(format!("__stage_{}", sanitize_filename(name)));
                 let tmp_out = out_dir.join(format!("__pending_{}.tsra", sanitize_filename(name)));
-                let source = input.display().to_string();
                 // Build extra_sources with the canonical `ingested_from` flowing through the
                 // streaming session (it adds its own `ingested_from`); pass `extra_sources` as-is.
                 let m = crate::ge_hdf5::stream_to_listmode_product_2p_to_file(
@@ -317,6 +349,7 @@ fn dispatch(
                     cfg,
                     block_prefix,
                     row_index,
+                    label,
                     extra_sources,
                     &p.metadata,
                 )?;
@@ -333,14 +366,13 @@ fn dispatch(
                 // Tidy up the per-product stage dir — best-effort (failure here would not change
                 // the sealed product's correctness, so it's not a hard error).
                 let _ = std::fs::remove_dir_all(&stage);
-                // Mention `source` so the SAFETY/docs trail stays correct even though the streaming
-                // session records `ingested_from` itself.
-                let _ = source;
                 Ok((m, ()))
             } else {
                 // Batch path: read the whole compound, build the in-memory product, pack.
                 let cols = crate::ge_hdf5::read_compound(input, dataset)?;
-                let source = input.display().to_string();
+                let source = label
+                    .map(str::to_string)
+                    .unwrap_or_else(|| input.display().to_string());
                 let (m, payloads) = crate::ge_hdf5::to_listmode_product(
                     &cols,
                     name,
