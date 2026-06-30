@@ -42,6 +42,13 @@ fn junk_alias_seals_a_file_and_extract_is_byte_identical() {
         "ingest junk failed: {}",
         String::from_utf8_lossy(&o.stderr)
     );
+    // schema-driven WARN tier: the `blob` schema marks `study` recommended, so ingesting without it
+    // emits a non-fatal nudge on stderr (never blocks) — the FieldSpec severity + engine warn + CLI
+    // subscriber, end to end.
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("recommended metadata 'study'"),
+        "expected the recommended-field warn on stderr"
+    );
 
     // verify re-hashes every block (the blob's blake3) — a sealed blob is integrity-checked.
     assert!(tessera()

@@ -93,14 +93,27 @@ pub fn run(
             dispatch(p, &extra, out_dir, cfg, stream_threshold, &timestamp)?;
         // Honor the fd5 schema contract AT INGEST: a product that claims a known schema must satisfy
         // it now, not only on a later `tessera schema`. Open-world → unknown product names pass.
-        tessera_core::SchemaRegistry::builtin()
-            .validate(&manifest)
-            .map_err(|e| {
-                Error::Invalid(format!(
-                    "ingest-engine: member '{}' fails its declared schema '{}': {e}",
-                    p.name, manifest.product
-                ))
-            })?;
+        let registry = tessera_core::SchemaRegistry::builtin();
+        registry.validate(&manifest).map_err(|e| {
+            Error::Invalid(format!(
+                "ingest-engine: member '{}' fails its declared schema '{}': {e}",
+                p.name, manifest.product
+            ))
+        })?;
+        // …and surface the WARN tier (recommended-but-absent fields) without blocking — the
+        // schema-driven FAIR-completeness nudge (supply via `[product.metadata]` / `--meta`).
+        for f in registry.missing_recommended(&manifest) {
+            tracing::warn!(
+                target: "tessera::ingest",
+                member = %p.name,
+                product = %manifest.product,
+                field = %f.id,
+                "recommended metadata '{}' absent — {} (supply via --meta {}=…)",
+                f.id,
+                f.description,
+                f.id
+            );
+        }
         let id = manifest.id.clone();
         let mh = manifest.manifest_hash.clone().ok_or_else(|| {
             Error::Invalid(format!(

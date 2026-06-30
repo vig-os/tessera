@@ -10,6 +10,8 @@ authors.workspace = true
 [dependencies]
 tessera-core.workspace = true
 tessera-io.workspace = true
+# Non-fatal ingest WARNs (e.g. recommended-but-absent schema fields) via the workspace tracing facade.
+tracing.workspace = true
 dicom.workspace = true
 # Enables the pure-Rust JPEG Baseline/Lossless adapters in the transfer-syntax registry (feature-unifies
 # with `dicom`); used through the `dicom::transfer_syntax` umbrella re-export.

@@ -5164,6 +5164,8 @@ dependencies = [
  "tessera-io",
  "time",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "trycmd",
 ]
 
@@ -5195,6 +5197,7 @@ dependencies = [
  "tessera-core",
  "tessera-io",
  "toml",
+ "tracing",
 ]
 
 [[package]]
