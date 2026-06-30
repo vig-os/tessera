@@ -109,6 +109,12 @@ pub fn verifying_key_hex(key: &VerifyingKey) -> String {
     hex(key.as_bytes())
 }
 
+/// The hex of an Ed25519 **signing** key's 32-byte seed — the contents of a private key file (the
+/// inverse of [`signing_key_from_hex`]). Used by `tessera keygen` to persist a freshly generated key.
+pub fn signing_key_hex(key: &SigningKey) -> String {
+    hex(&key.to_bytes())
+}
+
 /// Load an Ed25519 **signing** key from a 64-char hex 32-byte seed (leading/trailing whitespace
 /// tolerated). Interoperable with any tool that emits the raw 32-byte ed25519 private scalar as hex.
 pub fn signing_key_from_hex(s: &str) -> crate::Result<SigningKey> {

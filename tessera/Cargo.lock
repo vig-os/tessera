@@ -4870,6 +4870,7 @@ name = "tessera-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "getrandom 0.2.17",
  "hdf5-metno",
  "object_store",
  "serde_json",

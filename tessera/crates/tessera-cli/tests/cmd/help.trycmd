@@ -7,15 +7,31 @@ Usage: tessera <COMMAND>
 Commands:
   inspect[..]Print a human summary of a `.tsra`'s manifest (id, product, blocks, hashes)
   verify[..]Open + fully verify a `.tsra` (magic, manifest seal, every block digest). Exit 0 if valid
-  unpack[..]Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`)
-  pack[..]Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`
-  schema[..]Validate a `.tsra`'s manifest against its declared product schema (required fields/blocks)
-  ingest[..]Ingest a vendor acquisition file into a sealed `.tsra` product (normalise at the door), or run a declarative ingest spec (`--spec FILE`) into a sealed collection of `.tsra` products
-  export[..]Emit a FAIR discovery record for a `.tsra` (prints JSON to stdout)
-  sign[..]Sign a sealed `.tsra` → writes a `<file>.sig.json` sidecar (ed25519 over `manifest_hash`)
-  verify-sig[..]Verify a sealed `.tsra` against its `<file>.sig.json` sidecar + a trusted public key. Exit 0 if valid
-  bench[..]Bench the write engine on this host — drives the real `StreamWriter`/`TableStreamWriter`, reports throughput + peak RSS so an operator can size RAM/threads for their acquisition rate
-  help[..]Print this message or the help of the given subcommand(s)
+  tree        Render a `.tsra` as a navigable hierarchy: root status (product · schema · sealed · signed), `meta` fields, every block with its columns / array spec, and `sources`
+  ls          List one node's children. No PATH = top level (`meta`, blocks, `sources`); `PATH=meta` = metadata fields; `PATH=<block>` = a table's columns or an array's spec; `PATH=sources` = edges
+  read        Extract table data over the **logical** (cross-block) view as CSV/TSV/NDJSON — a read of `events` spans every `events_NNNN` block, projecting only the requested columns per block
+  init        Initialize a content-addressed repository (`objects/` + `refs/` + `log/`) for copy-on-write versioning (ADR-0036)
+  import      Import a sealed `.tsra` into a repository as the first version of its lineage (its `id`)
+  commit      Commit a new version of a lineage with a metadata delta — reuses every unchanged block by digest, so the copy is proportional to the change (a metadata edit writes one new object)
+  log         Show a lineage's version history (newest first)
+  diff        Diff two versions (blocks + metadata) with a lineage verdict. With one ref, diffs that version against its `supersedes` parent — "what this version changed"
+  seal        Export a version to a standalone `.tsra` **with history** (`git bundle`): the manifest is emitted as stored, supersedes + derivation edges intact — for archival where lineage travels with data
+  publish     Export a version to a **history-free** standalone `.tsra` (`git archive`) for publication / handover: drops the supersedes chain, keeps derivation provenance + a `snapshot_of` breadcrumb
+  forget      Forget a lineage: delete its ref + log. Its now-unreachable objects are reclaimed by `gc` (blocks shared with other lineages stay)
+  gc          Reclaim objects unreachable from any ref (run after `forget`)
+  push        Push a sealed `.tsra` to an OCI registry as an artifact (in-Rust client; needs `--features cloud`)
+  pull        Pull a `.tsra` OCI artifact from a registry (sha256-verified; needs `--features cloud`)
+  unpack      Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`)
+  pack        Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`
+  schema      Validate a `.tsra`'s manifest against its declared product schema (required fields/blocks)
+  ingest      Ingest a vendor acquisition file into a sealed `.tsra` product (normalise at the door), or run a declarative ingest spec (`--spec FILE`) into a sealed collection of `.tsra` products
+  export      Emit a FAIR discovery record for a `.tsra` (prints JSON to stdout)
+  keygen      Generate an ed25519 keypair: the private seed (mode 0600) to OUT, the public key to `OUT.pub`
+  trust       Manage the trust store — the curated set of public keys `verify-sig` accepts
+  sign        Sign a sealed `.tsra` → writes a `<file>.sig.json` sidecar (ed25519 over the signature envelope)
+  verify-sig  Verify a sealed `.tsra` against its `<file>.sig.json` sidecar. Defaults to the **trust store** (the sidecar's `key_id` must be a key you trust); `--pubkey` checks against an explicit key
+  bench       Bench the write engine on this host — drives the real `StreamWriter`/`TableStreamWriter`, reports throughput + peak RSS so an operator can size RAM/threads for their acquisition rate
+  help        Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help

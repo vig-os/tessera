@@ -17,6 +17,8 @@ tessera-io.workspace = true
 tessera-ingest.workspace = true
 serde_json.workspace = true
 clap.workspace = true
+# OS CSPRNG for `tessera keygen` (32-byte ed25519 seed). Host-only — never in the wasm verify path.
+getrandom = "0.2"
 # `tessera bench write` stages encode fragments under a fresh tempdir per run (the bench runs the
 # real `TableStreamWriter`/`StreamWriter`, which need durable staging dirs).
 tempfile = "3"

@@ -6,6 +6,7 @@
 
 mod bench;
 mod nav;
+mod trust;
 mod version;
 
 use std::path::PathBuf;
@@ -254,24 +255,38 @@ enum Cmd {
         #[command(subcommand)]
         fmt: ExportFmt,
     },
-    /// Sign a sealed `.tsra` → writes a `<file>.sig.json` sidecar (ed25519 over `manifest_hash`).
+    /// Generate an ed25519 keypair: the private seed (mode 0600) to OUT, the public key to `OUT.pub`.
+    Keygen {
+        /// Output path for the private key seed (the public key is written to `OUT.pub`).
+        out: PathBuf,
+    },
+    /// Manage the trust store — the curated set of public keys `verify-sig` accepts.
+    Trust {
+        #[command(subcommand)]
+        action: TrustAction,
+    },
+    /// Sign a sealed `.tsra` → writes a `<file>.sig.json` sidecar (ed25519 over the signature envelope).
     Sign {
         /// The sealed `.tsra` to sign.
         file: PathBuf,
-        /// Hex-encoded 32-byte ed25519 signing-key (seed) file.
+        /// Hex-encoded 32-byte ed25519 signing-key (seed) file (from `tessera keygen`).
         #[arg(long)]
         key: PathBuf,
         /// Optional signer identity recorded in the signature (e.g. an ORCID iD URL).
         #[arg(long)]
         signer: Option<String>,
     },
-    /// Verify a sealed `.tsra` against its `<file>.sig.json` sidecar + a trusted public key. Exit 0 if valid.
+    /// Verify a sealed `.tsra` against its `<file>.sig.json` sidecar. Defaults to the **trust store**
+    /// (the sidecar's `key_id` must be a key you trust); `--pubkey` checks against an explicit key.
     VerifySig {
         /// The sealed `.tsra` to verify.
         file: PathBuf,
-        /// Hex-encoded 32-byte ed25519 public-key file (obtained out-of-band from the signer).
+        /// Explicit hex ed25519 public-key file (skips the trust store).
         #[arg(long)]
-        pubkey: PathBuf,
+        pubkey: Option<PathBuf>,
+        /// Also require the signature's `signer` to equal this identity (e.g. an ORCID iD URL).
+        #[arg(long)]
+        require_signer: Option<String>,
     },
     /// Bench the write engine on this host — drives the real `StreamWriter`/`TableStreamWriter`,
     /// reports throughput + peak RSS so an operator can size RAM/threads for their acquisition rate.
@@ -326,6 +341,28 @@ enum ExportFmt {
     RoCrate { file: PathBuf },
     /// DataCite metadata record (for DOI minting / InvenioRDM).
     Datacite { file: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum TrustAction {
+    /// Trust a public key under a handle (in the user store, or `--repo` for `.tessera/trust/`).
+    Add {
+        /// Hex ed25519 public-key file (e.g. `key.pub` from `tessera keygen`).
+        pubkey: PathBuf,
+        /// A handle for this key.
+        #[arg(long)]
+        name: String,
+        /// The signer identity to record alongside it (e.g. an ORCID iD URL).
+        #[arg(long)]
+        signer: Option<String>,
+        /// Store in the repo-local `.tessera/trust/` instead of the user store.
+        #[arg(long)]
+        repo: bool,
+    },
+    /// List trusted keys.
+    List,
+    /// Remove a trusted key by handle or `key_id`.
+    Remove { target: String },
 }
 
 #[derive(Subcommand)]
@@ -644,25 +681,50 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             }
             Ok(())
         }
-        Cmd::VerifySig { file, pubkey } => {
-            let pub_hex = std::fs::read_to_string(&pubkey).map_err(tessera_core::Error::from)?;
-            let vk = tessera_core::signing::verifying_key_from_hex(&pub_hex)?;
-            // 1. the signature attests the manifest (and thus every recorded block digest + metadata).
-            if !tessera_io::verify_tsra(&file, &vk)? {
-                return Err(tessera_core::Error::Invalid(format!(
-                    "signature INVALID for {}",
-                    file.display()
-                )));
+        Cmd::Keygen { out } => {
+            let mut w = std::io::stdout().lock();
+            trust::keygen(&out, &mut w)
+        }
+        Cmd::Trust { action } => {
+            let mut w = std::io::stdout().lock();
+            let dirs = trust::trust_dirs();
+            match action {
+                TrustAction::Add {
+                    pubkey,
+                    name,
+                    signer,
+                    repo,
+                } => {
+                    let dir = if repo {
+                        PathBuf::from(".tessera/trust")
+                    } else {
+                        trust::trust_dirs().into_iter().nth(1).ok_or_else(|| {
+                            tessera_core::Error::Invalid(
+                                "no user config dir ($HOME/$XDG_CONFIG_HOME unset) — pass --repo \
+                                 to store in .tessera/trust"
+                                    .into(),
+                            )
+                        })?
+                    };
+                    trust::add(&dir, &pubkey, &name, signer.as_deref(), &mut w)
+                }
+                TrustAction::List => trust::list(&dirs, &mut w),
+                TrustAction::Remove { target } => trust::remove(&dirs, &target, &mut w),
             }
-            // 2. also re-read every block's payload vs its recorded digest, so a payload swap that left
-            //    the manifest untouched is still caught — verify-sig answers "authentic AND intact".
-            let mut r = Reader::open(&file)?;
-            let n = r.manifest().blocks.len();
-            for name in r.block_names() {
-                r.read_block(&name)?;
-            }
-            println!("OK  {} signature valid + {n} blocks intact", file.display());
-            Ok(())
+        }
+        Cmd::VerifySig {
+            file,
+            pubkey,
+            require_signer,
+        } => {
+            let mut w = std::io::stdout().lock();
+            trust::verify_sig(
+                &file,
+                pubkey.as_deref(),
+                require_signer.as_deref(),
+                &trust::trust_dirs(),
+                &mut w,
+            )
         }
         Cmd::Bench { action } => match action {
             BenchAction::Write {
