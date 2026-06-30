@@ -1,0 +1,144 @@
+# Declarative ingest spec (ADR-0035) — **one PET/CT study** migrated as a fine-grained
+# Tessera **collection**: normalized hot-path products (`recon` for CT, `recon` for PET)
+# joined by `derived_from` provenance edges, **with the original vendor file preserved
+# bit-faithfully as a `blob` member** for the archival cold-path. Every member carries
+# `[product.metadata]` `study=` / `modality=` so the whole collection is cohort-pruneable
+# downstream (see `docs/MIGRATION.md` and the `cohort_prune` capstone in #225).
+#
+# This is a TEMPLATE — an operator edits it to point at their real PET/CT acquisition
+# (e.g. `/home/larsgerchow/Data/HDD/data/sdsc_dump/.../DUPLET-Patients/<STUDY-ID>/...`)
+# and runs:
+#
+#   tessera ingest --spec docs/examples/migrate-petct-study.toml \
+#                  --out /home/larsgerchow/Data/HDD/tsra/<STUDY-ID> \
+#                  --workers 8 --ram-budget 2G
+#
+# Produces:
+#   <out>/<member-id>.tsra   — one sealed product per `[[product]]` below
+#   <out>/collection.json    — the sealed catalog (MMR over the members, in TOML order)
+#
+# Tiering note (the WHY):
+#   * **recon-ct / recon-pt**  → *normalized hot tier*: range-readable (Zarr v3 chunks
+#                                 + pcodec), cohort-pruneable on metadata BEFORE any
+#                                 payload byte is fetched. This is what cluster / cloud
+#                                 reads scan.
+#   * **vendor-raw blob**      → *archival cold tier*: bit-faithful preservation of the
+#                                 original vendor file (`.7z` / `.l64` / DICOMDIR tarball
+#                                 — whatever the scanner emitted). Indexed by `study=`
+#                                 so a regulator/auditor finds the source from any
+#                                 hot-tier product's `derived_from` chain.
+#
+# Identity discipline: `name` + `timestamp` are explicit on every member → re-running
+# the same spec on the same data produces byte-identical `.tsra` files + a byte-identical
+# `collection.json` (the engine asserts this in `engine::tests`). Do not edit timestamps
+# casually — they're part of the member id.
+
+[collection]
+name = "STUDY-EXAMPLE-2024-01"
+description = "One PET/CT study migrated as a fine-grained Tessera collection (recon + blob)"
+timestamp = "2024-01-01T00:00:00Z"
+study = "STUDY-EXAMPLE-2024-01"
+
+[spec]
+description = """\
+PET/CT migration template: original vendor file preserved as an opaque `blob` (the cold \
+tier), CT + PET reconstructions as normalized `recon` volumes (the hot tier), every member \
+tagged `[product.metadata] study=` for cohort-pruneable cluster/cloud reads."""
+
+# ── 1. ORIGINAL VENDOR FILE (cold tier) ─────────────────────────────────────────────────
+# The bytes that came off the scanner, sealed verbatim with a blake3 digest. No decode,
+# no transcoding — `tessera extract` recovers byte-identical content. Use this when:
+#   * a regulator/auditor requests the source of record
+#   * a future re-reconstruction needs the raw events / sinograms
+#   * a derived `recon` later turns out to have been built with a buggy toolchain
+# `--meta study=` is REQUIRED for cohort grouping (the `blob` schema marks it
+# `recommended` — present here so the engine's warn-tier nudge stays quiet).
+[[product]]
+name = "vendor-raw"
+role = "raw"
+schema = "blob"
+description = "Original vendor acquisition bundle, bit-faithfully preserved (cold tier)"
+format = "blob"
+input = "/path/to/your/STUDY-EXAMPLE-2024-01/raw/acquisition.7z"
+media_type = "application/x-7z-compressed"   # or "application/octet-stream" if unknown
+
+[product.metadata]
+study = "STUDY-EXAMPLE-2024-01"
+
+# ── 2. CT RECONSTRUCTION (hot tier, raw provenance to the vendor blob) ──────────────────
+# The CT volume → a Tessera `recon` product (lossless int16 + rescale_slope/intercept for
+# Hounsfield reconstruction). Operator picks the right backend for what they have:
+#
+#   * `format = "dicom-series"`  → a stack of per-slice DICOM .dcm files. Most common
+#                                  output of clinical CT scanners.
+#   * `format = "dicom"`         → a single multi-frame DICOM (`.dcm` enhanced CT).
+#   * `format = "nifti"`         → an already-reconstructed NIfTI (`.nii`/`.nii.gz`).
+#   * `format = "raw"`           → a headerless binary; supply `shape` + `dtype`.
+#
+# `derived_from = ["vendor-raw"]` pins this reconstruction to the source-of-record blob;
+# `derived_from` edges carry the parent's `manifest_hash` so `tessera_core::provenance::
+# verify_chain` rejects any tampered chain.
+[[product]]
+name = "recon-ct"
+role = "raw"
+schema = "recon"
+description = "CT reconstruction (lossless int16, Hounsfield via rescale_slope/intercept)"
+derived_from = ["vendor-raw"]
+format = "dicom-series"
+inputs = [
+  "/path/to/your/STUDY-EXAMPLE-2024-01/CT/IM-0001-0001.dcm",
+  "/path/to/your/STUDY-EXAMPLE-2024-01/CT/IM-0001-0002.dcm",
+  # … the rest of the slices (uniform shape/modality/rescale, else the series is rejected)
+]
+
+[product.metadata]
+study = "STUDY-EXAMPLE-2024-01"
+# The DICOM backends auto-populate `modality` from tag (0008,0060); the line is here
+# so an operator using `format = "raw"` (no header) sees the right shape to fill in.
+# modality = { _vocabulary = "DICOM", _code = "CT" }
+
+# ── 3. PET RECONSTRUCTION (hot tier, registered to the CT for AC) ───────────────────────
+# Functional volume; `derived_from = ["vendor-raw", "recon-ct"]` declares that this PET
+# was reconstructed from the raw events AND used the CT for attenuation-correction (the
+# AC-CT lineage that makes it scientifically meaningful). The engine pins BOTH parents'
+# `manifest_hash` on the resulting product's `Source { role: "derived_from", … }` edges.
+[[product]]
+name = "recon-pt"
+role = "derived"
+schema = "recon"
+description = "PET reconstruction (TOF-OSEM, attenuation-corrected with recon-ct)"
+derived_from = ["vendor-raw", "recon-ct"]
+format = "dicom-series"
+inputs = [
+  "/path/to/your/STUDY-EXAMPLE-2024-01/PET/IM-0002-0001.dcm",
+  "/path/to/your/STUDY-EXAMPLE-2024-01/PET/IM-0002-0002.dcm",
+  # … the rest of the PET slices
+]
+
+[product.metadata]
+study = "STUDY-EXAMPLE-2024-01"
+# tracer / decay-correction reference live here when ingesting from PET; the DICOM
+# backend doesn't currently parse RadiopharmaceuticalInformationSequence — supply them
+# explicitly so the manifest is FAIR-complete:
+# tracer = "FDG"
+# decay_correction_reference = "injection"
+
+# ── 4. (PLANNED) ROI ────────────────────────────────────────────────────────────────────
+# A clinician segmentation over the PET (lesion mask / SUV-peak ROI). The `roi` schema
+# accepts EITHER a raster-label array OR a parametric/contour/stats table — see
+# `tessera_core::schema` (ROI representation by-nature, ADR-0029 §4). Currently there is
+# NO dedicated `roi` ingest backend; for an interim, ROI label volumes can be sealed via
+# `format = "nifti"` (the result will be a `recon` product — not strictly correct, but
+# preserves the bytes + derivation edge until a real roi backend lands).
+#
+# [[product]]
+# name = "roi-lesion"
+# role = "derived"
+# schema = "roi"
+# description = "Clinician-drawn lesion ROI on the PET volume"
+# derived_from = ["recon-pt"]
+# format = "nifti"   # interim — see TODO above
+# input = "/path/to/your/STUDY-EXAMPLE-2024-01/ROI/lesion-mask.nii.gz"
+#
+# [product.metadata]
+# study = "STUDY-EXAMPLE-2024-01"
