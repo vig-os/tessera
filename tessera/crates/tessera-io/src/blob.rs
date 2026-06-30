@@ -5,8 +5,6 @@
 //! re-hashes on read), a blob needs no special storage path — only this producer, which pairs
 //! `blake3(bytes)` with the raw bytes and a self-describing [`BlobSpec`]. `tessera verify` then proves the
 //! bytes are unchanged since sealing. The opaque preservation tier behind [`tessera_core::block::blob`].
-
-use std::io::Read;
 use std::path::Path;
 
 use tessera_core::block::blob::BlobSpec;
@@ -14,12 +12,6 @@ use tessera_core::block::{BlockKind, BlockRef};
 use tessera_core::{Error, Result};
 
 use crate::BlockPayload;
-
-/// Chunk size (16 MiB) for [`digest_file_parallel`]'s read → `update_rayon` loop. Sized so each call to
-/// `update_rayon` has enough bytes for blake3's internal tree to split work across many cores (blake3
-/// parallelizes at a 128 KiB internal granularity, so 16 MiB ≈ 128 sub-chunks → cleanly saturates a
-/// 32+ core box), while keeping peak per-call RSS modest (one chunk in RAM at a time).
-const PARALLEL_HASH_CHUNK: usize = 16 * 1024 * 1024;
 
 /// Seal raw `bytes` as an opaque blob block named `name`: digest = `blake3(bytes)`, descriptor records
 /// `filename` / `media_type` / size. The returned payload is the bytes verbatim (stored uncompressed in
@@ -84,42 +76,21 @@ pub fn blob_ref_streaming(
 /// [`tessera_core::hash::digest_reader`] would produce over the same bytes (blake3 guarantees
 /// byte-identical output regardless of how the input is sliced or how the internal tree is parallelized).
 ///
-/// The read loop pulls up to [`PARALLEL_HASH_CHUNK`] (16 MiB) into RAM, then calls
-/// [`blake3::Hasher::update_rayon`] — which fans the chunk out across the global rayon pool. Peak RSS is
-/// one chunk (16 MiB) plus blake3's tiny per-thread state; throughput on a CPU-bound multi-GB hash
-/// scales near-linearly with cores until the disk read rate is the floor. The 16 MiB buffer is
-/// allocated **per call** (not a reused pool) — irrelevant for one-file blob ingest, but if you ever
-/// fan this over thousands of small files, hoist the buffer.
+/// Uses blake3's native [`blake3::Hasher::update_mmap_rayon`] — it memory-maps the **whole file** and
+/// hands the entire mapping to the tree-parallel hasher in one call, so blake3 splits the full Merkle
+/// tree across **all** cores at once (no per-chunk serialization, no read/hash alternation, no manual
+/// buffering). The mapping is **demand-paged**, so peak RSS stays bounded — the OS pages the file in as
+/// blake3 walks it; we never `malloc` the file. blake3 reads small files normally instead of mmapping.
+/// Throughput on a CPU-bound multi-GB hash scales near-linearly with cores until the disk read rate is
+/// the floor.
 ///
 /// **Opt-in**, host-only (this crate is not in the wasm-core build graph — see the crate's `Cargo.toml`
-/// note on the `rayon` feature). The default ingest path stays [`blob_ref_streaming`]'s single-threaded
-/// `digest_reader` — callers that *want* the multi-core hash call this directly or
+/// note on the `rayon`/`mmap` features). The default ingest path stays [`blob_ref_streaming`]'s
+/// single-threaded `digest_reader` — callers that *want* the multi-core hash call this directly or
 /// [`blob_ref_streaming_parallel`]. Identical digest, just faster.
 pub fn digest_file_parallel(path: &Path) -> Result<String> {
-    let file = std::fs::File::open(path).map_err(Error::from)?;
-    let mut reader = std::io::BufReader::with_capacity(PARALLEL_HASH_CHUNK, file);
     let mut hasher = blake3::Hasher::new();
-    let mut buf = vec![0u8; PARALLEL_HASH_CHUNK];
-    loop {
-        // Fill `buf` with one full chunk's worth of bytes (or until EOF) before the parallel `update_rayon`
-        // call — under-filled chunks would just collapse to a single-thread path inside blake3, so we'd
-        // rather pay one extra `Read` than fragment the parallelism.
-        let mut filled = 0usize;
-        while filled < buf.len() {
-            let n = reader.read(&mut buf[filled..]).map_err(Error::from)?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-        if filled == 0 {
-            break;
-        }
-        hasher.update_rayon(&buf[..filled]);
-        if filled < buf.len() {
-            break;
-        }
-    }
+    hasher.update_mmap_rayon(path).map_err(Error::from)?;
     Ok(format!("blake3:{}", hasher.finalize().to_hex()))
 }
 
@@ -130,8 +101,8 @@ pub fn digest_file_parallel(path: &Path) -> Result<String> {
 ///
 /// Use when: hashing a large (≫ 100 MiB) file on a multi-core box and the disk can keep up with parallel
 /// blake3 (i.e. NVMe/cached). For small files, slow storage, or the wasm build, stick with
-/// [`blob_ref_streaming`] — the parallel path adds a 16 MiB RAM bump and some rayon scheduling overhead
-/// that doesn't pay back below a few hundred MiB of input.
+/// [`blob_ref_streaming`] — the mmap + rayon scheduling overhead doesn't pay back below a few hundred MiB
+/// of input (and a non-file/cloud source can't be mmapped at all).
 ///
 /// Same quiescence contract as [`blob_ref_streaming`]: the file MUST be stable from this hash through
 /// the subsequent `pack_streaming` re-read, or the sealed digest will not match the packed bytes.
@@ -221,17 +192,16 @@ mod tests {
     /// internal tree is parallelized — this test pins that guarantee at our API boundary so a future
     /// refactor (chunk size, reader wrapper, etc.) can't silently fork the content-addressed format.
     ///
-    /// The fixture is sized to cross [`PARALLEL_HASH_CHUNK`] (16 MiB) by ~2.5x so the parallel path
-    /// actually exercises the multi-chunk + rayon split — a sub-chunk file would degenerate to a single
-    /// hash call and miss the load-bearing case.
+    /// The fixture is ~40 MiB — comfortably above blake3's internal mmap/parallel thresholds so
+    /// `update_mmap_rayon` actually walks the multi-core tree split (a tiny file would degenerate to a
+    /// single hash call and miss the load-bearing case).
     #[test]
     fn parallel_hash_equals_single_threaded_hash_byte_for_byte() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.bin");
-        // ~40 MiB of pseudo-random bytes: spans 2 full 16 MiB chunks + a partial tail, so the parallel
-        // loop pays the full update_rayon → update_rayon → update_rayon dance the real-world large-blob
-        // path takes.
-        let size: usize = (PARALLEL_HASH_CHUNK * 5) / 2;
+        // ~40 MiB of pseudo-random bytes: large enough for blake3 to mmap + fan the Merkle tree across
+        // cores, so this exercises the real-world large-blob parallel path.
+        let size: usize = 40 * 1024 * 1024;
         let mut bytes = vec![0u8; size];
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = ((i as u32).wrapping_mul(2_654_435_761) >> 13) as u8;
