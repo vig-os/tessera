@@ -40,5 +40,12 @@
     "id": "blake3:682ff1f8841db94254ae9cc8f912824d2b31f51584cba5f43f65375840a3701b",
     "content_hash": "blake3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
     "manifest_hash": "blake3:5c84e9db400d4474485132b14e2582dbd2d932c15829e2011f9bfbd70f01f69f"
+  },
+  {
+    "name": "blob_opaque",
+    "product": "blob",
+    "id": "blake3:1d503e926fc5545579056e075f840777eef545fbb11acc1e59850c55bbed6f58",
+    "content_hash": "blake3:c5b98765e1b869385c89abe64b8e56b2473f868810621bc7b9d6dbe1bc451575",
+    "manifest_hash": "blake3:36d58daa5b6ca4cbd869a9b57a535d0042cfb2eaca4860d7a876c116d7c98452"
   }
 ]

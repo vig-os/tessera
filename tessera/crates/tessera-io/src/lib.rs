@@ -7,6 +7,7 @@
 
 pub mod accumulate;
 pub mod array;
+pub mod blob;
 pub mod chunk_index;
 #[cfg(feature = "cloud")]
 pub mod cloud;
@@ -28,6 +29,7 @@ pub mod write;
 
 pub use accumulate::{TableMultiBlockSink, TableStreamWriter};
 pub use array::{decode, decode_subset, encode, ArrayData};
+pub use blob::{blob_block, spec_of as blob_spec_of};
 #[cfg(feature = "cloud")]
 pub use cloud::{open_url, ObjectStoreReader, TAIL_PREFETCH};
 pub use collection::{

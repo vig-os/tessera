@@ -159,6 +159,15 @@ pub enum FormatOptions {
         shape: Vec<u64>,
         dtype: String,
     },
+    /// Opaque preservation: store the file's bytes **verbatim** (the "junk" tier — no decode). Use
+    /// `format = "blob"`, or the cathartic `format = "junk"` alias when the vendor file has earned it.
+    #[serde(alias = "junk")]
+    Blob {
+        input: PathBuf,
+        /// IANA media type, if known (e.g. `application/pdf`). Defaults to opaque octet-stream.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+    },
 }
 
 fn default_row_index() -> String {

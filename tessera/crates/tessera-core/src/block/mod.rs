@@ -1,13 +1,15 @@
 //! Storage blocks — the shape-dispatched payloads of a product.
 //!
-//! A product holds N blocks. Each block is one of two *shapes*, chosen by the data:
+//! A product holds N blocks. Each block is one *shape*, chosen by the data:
 //! - [`array`] — dense N-D chunked arrays (volumes, sinograms) → zarrs backend.
 //! - [`table`] — columnar tables (events, spectra, ROIs) → arrow/parquet backend.
+//! - [`blob`] — opaque bytes preserved verbatim (un-parsed vendor files) → no codec, `blake3` only.
 //!
 //! The core records each block as a [`BlockRef`] in the manifest and rolls its digest into
 //! the product Merkle root. Payload read/write lives behind the backend features.
 
 pub mod array;
+pub mod blob;
 pub mod table;
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,10 @@ pub enum BlockKind {
     /// companion block (per-chunk confirmation + pruning) that floats on top of the data block it
     /// indexes without changing that block's digest.
     ChunkIndex,
+    /// Opaque bytes preserved **verbatim** — the "junk"/preservation tier (ADR-0038). A vendor file the
+    /// engine does not parse (Siemens `.l64` listmode, GE `.7z`, a PDF): stored bit-faithfully, no codec,
+    /// digest = `blake3(bytes)`. See [`blob`].
+    Blob,
 }
 
 /// A reference to a block, as recorded in the manifest.

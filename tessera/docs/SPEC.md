@@ -70,10 +70,11 @@ differently from its absence — only the null/absent sentinel is dropped.
 | `content_hash` ✱ | string | §4; present once sealed |
 | `manifest_hash` ✱ | string | §4; present once sealed |
 
-**BlockRef** = `{ name: string, kind: "array"|"table"|"chunk_index", digest✱: string, spec: object }`.
+**BlockRef** = `{ name: string, kind: "array"|"table"|"chunk_index"|"blob", digest✱: string, spec: object }`.
 `digest` MUST be present in a sealed product. `spec` is shape-specific and opaque to the spine (an array
 spec carries `shape`/`dtype`/`chunks`/`axes`/`codec`/…; a table spec carries `columns`/`rows`/…; a
-`chunk_index` sidecar spec carries `class`/`recipe`/`indexes`/`entries`/`root` — see §5d).
+`chunk_index` sidecar spec carries `class`/`recipe`/`indexes`/`entries`/`root` — see §5d; a `blob`
+spec carries `filename`/`media_type`/`size` — see §5e).
 **Source** = `{ role: string, reference: string, content_hash✱: string }`.
 
 ## 5a. Array block payload (Zarr v3 + pluggable codec)
@@ -239,6 +240,17 @@ or table row-groups). It is **optional** — present only when a writer chooses 
   (skip a sub-block whose `[min,max]` cannot match a query) without re-reading the data; the rolled-up
   `stats` are the leaves of the multiscale aggregate pyramid (ADR-0028 §3). A consumer that doesn't need
   these ignores the block — `kind`-dispatch makes it inert to a spine-only reader.
+
+## 5e. Blob block payload (opaque preservation tier, ADR-0038)
+A block with `kind == "blob"` stores a file's bytes **verbatim** — no codec, no decode. The payload at
+`blocks/<name>` **is** the original bytes; the `digest` is `blake3(bytes)` like every block, so the same
+seal + signature + reader verification (§7) apply unchanged and prove bit-faithfulness. The spec is
+`{ filename: string, media_type✱: string, size: u64 }`. This is the **preservation tier** for the long
+tail of vendor output the engine does not parse (Siemens `.l64` listmode, GE `.7z`/`.cal`, PDFs, logs):
+a blob is Findable, Accessible, Reusable-as-bytes and integrity-verified, but **not Interoperable** until
+a decoder exists — so it complements, never replaces, the normalised array/table products (a raw blob and
+a derived product may coexist in one product, joined by a `derived_from` edge). Recovered byte-identical
+via `tessera extract <tsra> <block> <out>`.
 
 ## 6. Container `.tsra`
 A ZIP archive (zip64). Entries, in order:

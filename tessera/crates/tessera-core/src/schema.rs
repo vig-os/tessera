@@ -243,8 +243,20 @@ fn imaging_base(with: Vec<FieldSpec>) -> Vec<FieldSpec> {
 /// versioned `1.0` and evolve additively (new optional fields/blocks only). See ROADMAP P1 +
 /// ADR-0029 §5 (the multi-dimensional `dynamic_pet`/`diffusion_mri`/`multicontrast_mri` set).
 fn builtin_schemas() -> Vec<ProductSchema> {
-    use BlockKind::{Array, Table};
+    use BlockKind::{Array, Blob, Table};
     vec![
+        ProductSchema {
+            blocks: vec![one(
+                "data",
+                Some(Blob),
+                "The preserved source file, stored verbatim as opaque bytes (blake3-verified)",
+            )],
+            ..schema(
+                "blob",
+                "1.0",
+                "Opaque preserved file — bytes stored bit-faithfully, not engine-parsed (the \"junk\" tier).",
+            )
+        },
         ProductSchema {
             fields: imaging_base(vec![
                 FieldSpec::optional("rescale_slope", "Native→physical slope", "float64"),
@@ -467,10 +479,11 @@ mod tests {
             "diffusion_mri",
             "multicontrast_mri",
             "deformation_field", // ADR-0030 §5 deformable registration carrier
+            "blob",              // ADR-0038 opaque preservation tier
         ] {
             assert!(r.get(p).is_some(), "missing built-in schema '{p}'");
         }
-        assert_eq!(r.products().count(), 13);
+        assert_eq!(r.products().count(), 14);
     }
 
     #[test]
