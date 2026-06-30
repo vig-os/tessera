@@ -87,7 +87,9 @@ pub fn blob_ref_streaming(
 /// The read loop pulls up to [`PARALLEL_HASH_CHUNK`] (16 MiB) into RAM, then calls
 /// [`blake3::Hasher::update_rayon`] — which fans the chunk out across the global rayon pool. Peak RSS is
 /// one chunk (16 MiB) plus blake3's tiny per-thread state; throughput on a CPU-bound multi-GB hash
-/// scales near-linearly with cores until the disk read rate is the floor.
+/// scales near-linearly with cores until the disk read rate is the floor. The 16 MiB buffer is
+/// allocated **per call** (not a reused pool) — irrelevant for one-file blob ingest, but if you ever
+/// fan this over thousands of small files, hoist the buffer.
 ///
 /// **Opt-in**, host-only (this crate is not in the wasm-core build graph — see the crate's `Cargo.toml`
 /// note on the `rayon` feature). The default ingest path stays [`blob_ref_streaming`]'s single-threaded

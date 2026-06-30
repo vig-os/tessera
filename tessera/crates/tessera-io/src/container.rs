@@ -124,11 +124,39 @@ pub fn pack_streaming_verified(
     pack_streaming_impl(manifest, sources, out, true)
 }
 
-/// Shared body of [`pack_streaming`] / [`pack_streaming_verified`]: identical zip entries +
-/// identical buffered copy loop, with `verify` flipping the per-fragment hash check on. Kept as one
-/// function so the two public surfaces cannot drift in entry order, options, or buffer size — a
-/// drift there would change the on-disk bytes and break the conformance corpus.
+/// Stage-and-rename wrapper for [`pack_streaming`] / [`pack_streaming_verified`]: writes the archive
+/// to a sibling `.part` via [`pack_streaming_to`] and atomically renames it to `out` only on success,
+/// so a failure never leaves a partial / known-bad `.tsra` at the destination.
 fn pack_streaming_impl(
+    manifest: &Manifest,
+    sources: &[(String, &Path)],
+    out: &Path,
+    verify: bool,
+) -> Result<()> {
+    // Stage to a sibling `.part` and atomically rename only on success, so any failure — a write
+    // error or a `verify` mismatch — never leaves a partial / known-bad `.tsra` at `out` (same
+    // crash-safe placement `tessera extract` uses). The bytes written are unchanged, so the
+    // determinism contract / corpus goldens hold.
+    let mut tmp = out.as_os_str().to_os_string();
+    tmp.push(".part");
+    let tmp = std::path::PathBuf::from(tmp);
+    match pack_streaming_to(manifest, sources, &tmp, verify) {
+        Ok(()) => {
+            std::fs::rename(&tmp, out)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Write the `.tsra` to `out` (a staging path) — the body shared by [`pack_streaming`] /
+/// [`pack_streaming_verified`]: identical zip entries + identical copy loop, with `verify` flipping
+/// the per-fragment hash check on. Kept as one function so the two surfaces can't drift in entry
+/// order / options / buffer size (a drift would change the on-disk bytes and break the corpus).
+fn pack_streaming_to(
     manifest: &Manifest,
     sources: &[(String, &Path)],
     out: &Path,
@@ -176,12 +204,13 @@ fn pack_streaming_impl(
         // When verifying, we hash the buffer in the same pass — one read, no extra I/O — so the
         // on-disk bytes are identical to the non-verifying path (the conformance corpus stays
         // bit-for-bit stable).
-        let f = File::open(frag)?;
-        let mut br = std::io::BufReader::with_capacity(256 * 1024, f);
+        // Read full-buffer chunks straight from the file — a BufReader would only add a second
+        // 256 KiB buffer with no benefit at this read size.
+        let mut f = File::open(frag)?;
         let mut hasher = verify.then(tessera_core::hash::StreamHasher::new);
         let mut buf = [0u8; 256 * 1024];
         loop {
-            let n = br.read(&mut buf)?;
+            let n = f.read(&mut buf)?;
             if n == 0 {
                 break;
             }
@@ -193,9 +222,8 @@ fn pack_streaming_impl(
         if let (Some(h), Some(exp)) = (hasher, expected_digest) {
             let actual = h.finalize();
             if actual != exp {
-                // Don't bother finalising the archive — a producer surfacing this error has a
-                // truly bad on-disk state (the fragment changed under us) and a partial `.tsra`
-                // is a clearer signal than a complete one with a known-bad payload.
+                // The fragment changed between hash and pack. Bail without finalising; the wrapper
+                // discards the staged `.part`, so nothing lands at the destination.
                 return Err(Error::Integrity {
                     what: "block_payload",
                     expected: exp,
