@@ -200,6 +200,17 @@ fn dispatch(
     // discipline from the spec, never from `Local::now()` or filesystem mtimes.
     let timestamp = timestamp.to_string();
     match &p.options {
+        FormatOptions::Blob { input, media_type } => {
+            let (m, payloads) = crate::blob::to_blob_product(
+                input,
+                name,
+                &timestamp,
+                media_type.as_deref(),
+                extra_sources,
+            )?;
+            let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
+            Ok((m, ()))
+        }
         FormatOptions::Dicom { input, deidentify } => {
             let img = if *deidentify {
                 crate::dicom::read_image_deidentified(input)?

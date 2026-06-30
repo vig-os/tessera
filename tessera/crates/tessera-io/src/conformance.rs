@@ -79,6 +79,20 @@ fn push_table(
     payload
 }
 
+/// Seal an opaque blob block (bytes verbatim, `blake3` digest), register its ref, return the payload.
+fn push_blob(
+    b: &mut ProductBuilder,
+    name: &str,
+    filename: &str,
+    media_type: Option<&str>,
+    bytes: Vec<u8>,
+) -> BlockPayload {
+    let (block_ref, payload) =
+        crate::blob::blob_block(name, filename, media_type, bytes).expect("fixture blob seals");
+    b.add_block_ref(block_ref);
+    payload
+}
+
 fn col(name: &str, dtype: &str, codec: Option<&str>) -> Column {
     Column {
         name: name.into(),
@@ -229,6 +243,28 @@ pub fn fixtures() -> Vec<Fixture> {
             name: "empty_no_blocks",
             manifest: m,
             payloads: vec![],
+        });
+    }
+
+    // 7 — blob, an opaque preserved file (the "junk" tier): bytes stored verbatim, blake3-sealed.
+    // A deterministic non-trivial byte pattern (high entropy, embedded NULs) stands in for a vendor
+    // listmode dump the engine does not parse.
+    {
+        let bytes: Vec<u8> = (0..2048u32)
+            .map(|k| (k.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        let mut b = ProductBuilder::new("blob", "junk-l64", "opaque preserved file", TS);
+        let pl = push_blob(
+            &mut b,
+            "data",
+            "scan.l64",
+            Some("application/octet-stream"),
+            bytes,
+        );
+        out.push(Fixture {
+            name: "blob_opaque",
+            manifest: b.seal().unwrap(),
+            payloads: vec![pl],
         });
     }
 

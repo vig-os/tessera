@@ -21,6 +21,7 @@ Commands:
   gc          Reclaim objects unreachable from any ref (run after `forget`)
   push        Push a sealed `.tsra` to an OCI registry as an artifact (in-Rust client; needs `--features cloud`)
   pull        Pull a `.tsra` OCI artifact from a registry (sha256-verified; needs `--features cloud`)
+  extract     Extract one block's raw bytes to a file — recovers a `blob` (preserved file) **byte-identical**, or any block's stored payload. The digest is re-checked on read
   unpack      Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`)
   pack        Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`
   schema      Validate a `.tsra`'s manifest against its declared product schema (required fields/blocks)

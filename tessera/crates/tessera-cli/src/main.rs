@@ -212,6 +212,16 @@ enum Cmd {
         #[arg(long)]
         password: Option<String>,
     },
+    /// Extract one block's raw bytes to a file — recovers a `blob` (preserved file) **byte-identical**,
+    /// or any block's stored payload. The digest is re-checked on read.
+    Extract {
+        /// The `.tsra` to read.
+        file: PathBuf,
+        /// Block name (e.g. `data` for a blob product).
+        block: String,
+        /// Output path for the recovered bytes.
+        out: PathBuf,
+    },
     /// Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`).
     Unpack { file: PathBuf, outdir: PathBuf },
     /// Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`.
@@ -416,6 +426,25 @@ enum IngestSrc {
         #[arg(long, default_value = "events_3p")]
         dataset: String,
     },
+    /// Preserve an un-parsed file **bit-faithfully** as an opaque `blob` product (the "junk" tier —
+    /// `.l64`, `.7z`, PDF; bytes stored verbatim, blake3-sealed). Aka `junk`, for when the vendor file
+    /// has earned the name.
+    #[command(alias = "junk")]
+    Blob {
+        /// Source file (anything — the engine does not parse it).
+        input: PathBuf,
+        /// Output `.tsra`.
+        out: PathBuf,
+        /// Product name.
+        #[arg(long)]
+        name: String,
+        /// Acquisition timestamp (ISO-8601).
+        #[arg(long)]
+        timestamp: String,
+        /// IANA media type, if known (e.g. `application/pdf`). Defaults to opaque octet-stream.
+        #[arg(long)]
+        media_type: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -592,6 +621,17 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
         Cmd::Pack { dir, out } => {
             pack_dir(&dir, &out)?;
             println!("packed {} -> {}", dir.display(), out.display());
+            Ok(())
+        }
+        Cmd::Extract { file, block, out } => {
+            let mut r = Reader::open(&file)?;
+            let bytes = r.read_block(&block)?;
+            std::fs::write(&out, &bytes).map_err(tessera_core::Error::from)?;
+            println!(
+                "extracted {block} ({} bytes) -> {}",
+                bytes.len(),
+                out.display()
+            );
             Ok(())
         }
         Cmd::Schema { file } => {
@@ -990,6 +1030,33 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                         streaming: StreamingMode::Auto,
                         slab_rows: DEFAULT_SLAB_ROWS,
                     },
+                }],
+            },
+            out,
+        ),
+        IngestSrc::Blob {
+            input,
+            out,
+            name,
+            timestamp,
+            media_type,
+        } => (
+            IngestSpec {
+                collection: CollectionMeta {
+                    name: name.clone(),
+                    description: None,
+                    timestamp: timestamp.clone(),
+                    study: None,
+                },
+                spec: SpecMeta::default(),
+                products: vec![ProductSpec {
+                    name,
+                    role: Role::Raw,
+                    schema: "blob".into(),
+                    description: None,
+                    derived_from: Vec::new(),
+                    metadata: std::collections::BTreeMap::new(),
+                    options: FormatOptions::Blob { input, media_type },
                 }],
             },
             out,

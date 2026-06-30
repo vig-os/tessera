@@ -17,6 +17,7 @@ are *regression floors* (don't go below), correctness rows are *required* (binar
 | Canonical manifest encoding (JCS) | ✓ | re-serialize → identical hash (RFC 8785, `serde_jcs`) | `canonical::*`, `seal_round_trips_*` |
 | `manifest_hash` seal (whole-manifest tamper-evident) | ✓ | blake3 over JCS(manifest); covers meta+sources+digests | `tampering_*`, `verify()` |
 | Block dispatch (schema→array/table) | ✓ | array→Zarr v3+pcodec · table→Vortex — both real, bit-exact, deterministic | `tessera-io::{array,table}`, ADR-0023/0024 |
+| Blob block — opaque, bit-faithful preservation tier (the "junk" tier) | ✓ | `BlockKind::Blob`: an un-parsed vendor file (Siemens `.l64`, GE `.7z`, PDF) stored **verbatim** (no codec), digest = `blake3(bytes)`, riding the existing seal/signature/`verify` unchanged; `format="blob"` (alias `junk`) ingest + `tessera extract` (byte-identical); built-in `blob` schema; `blob_opaque` corpus fixture; FAIR F/A/R + integrity but **not Interoperable** until decoded — complements normalised products (#229) | **ADR-0038**; `tessera_core::block::blob`, `tessera_io::blob::tests::blob_round_trips_byte_identical_and_digest_is_blake3`, `tessera_ingest::blob::tests::seals_an_arbitrary_file_as_a_verifiable_blob_product`, `tessera-cli/tests/blob.rs::junk_alias_seals_a_file_and_extract_is_byte_identical` |
 | Seal = hash-of-hashes | ✓ | µs seal, no 2nd data pass, valid partial root | design+tests |
 | Error taxonomy | ✓ | typed `#[non_exhaustive]`, `Integrity{what,exp,act}`, never panic | `error.rs`, `verify()` |
 

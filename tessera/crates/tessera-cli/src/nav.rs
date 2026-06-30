@@ -121,6 +121,30 @@ fn block_headline(kind: &BlockKind, spec: &Value) -> String {
             format!("table  {ncols} cols × {} rows", thousands(rows))
         }
         BlockKind::ChunkIndex => "index  (per-chunk hash + stats)".to_string(),
+        BlockKind::Blob => {
+            let mt = spec
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("application/octet-stream");
+            let size = spec.get("size").and_then(Value::as_u64).unwrap_or(0);
+            format!("blob   {} · {mt}", human_bytes(size))
+        }
+    }
+}
+
+/// Human-readable byte size (`3.0 GiB`, `512 KiB`) for blob block display.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
     }
 }
 
@@ -159,6 +183,11 @@ fn block_children(kind: &BlockKind, spec: &Value) -> Vec<String> {
             })
             .unwrap_or_default(),
         BlockKind::ChunkIndex => Vec::new(),
+        BlockKind::Blob => spec
+            .get("filename")
+            .and_then(Value::as_str)
+            .map(|f| vec![format!("file   {f}")])
+            .unwrap_or_default(),
     }
 }
 
