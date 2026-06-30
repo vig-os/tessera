@@ -107,12 +107,30 @@ pub fn read_object(obj: &FileDicomObject<InMemDicomObject>) -> Result<DicomImage
 /// InstanceNumber (geometric ImagePositionPatient ordering is a later refinement). Every slice must
 /// share rows/cols/modality/rescale, else the series is rejected as non-uniform.
 pub fn read_series(paths: &[std::path::PathBuf]) -> Result<DicomImage> {
+    read_series_inner(paths, false)
+}
+
+/// Same as [`read_series`] but applies PS3.15 de-identification ([`deidentify`]) to **every** slice
+/// in memory before decoding — the per-slice analogue of [`read_image_deidentified`]. PHI never
+/// reaches the stacked volume.
+pub fn read_series_deidentified(paths: &[std::path::PathBuf]) -> Result<DicomImage> {
+    read_series_inner(paths, true)
+}
+
+/// Shared series body for [`read_series`] / [`read_series_deidentified`] — opening each slice, then
+/// optionally stripping PHI via [`deidentify`] before [`read_object`] decodes the pixels, then
+/// stacking by `InstanceNumber`. The PHI is gone before the pixels are even decoded; non-uniform
+/// shape/modality/rescale across slices is rejected as in the non-de-id path.
+fn read_series_inner(paths: &[std::path::PathBuf], strip_phi: bool) -> Result<DicomImage> {
     if paths.is_empty() {
         return Err(Error::Invalid("dicom: empty series".into()));
     }
     let mut slices: Vec<(i64, DicomImage)> = Vec::with_capacity(paths.len());
     for p in paths {
-        let obj = dicom::object::open_file(p).map_err(de)?;
+        let mut obj = dicom::object::open_file(p).map_err(de)?;
+        if strip_phi {
+            deidentify(&mut obj);
+        }
         let instance = obj
             .element(INSTANCE_NUMBER)
             .ok()
@@ -138,8 +156,10 @@ pub fn read_series(paths: &[std::path::PathBuf]) -> Result<DicomImage> {
     for (_, s) in &slices {
         voxels.extend_from_slice(&s.voxels);
     }
+    let z = u64::try_from(slices.len())
+        .map_err(|e| Error::Invalid(format!("dicom: series slice count overflow: {e}")))?;
     Ok(DicomImage {
-        shape: vec![slices.len() as u64, first.shape[0], first.shape[1]],
+        shape: vec![z, first.shape[0], first.shape[1]],
         voxels,
         modality: first.modality,
         rescale_slope: first.rescale_slope,
@@ -522,6 +542,89 @@ mod tests {
         assert_eq!(vol.voxels[0], 1000);
         assert_eq!(vol.voxels[64], 2000);
         assert_eq!(vol.voxels[128], 3000);
+    }
+
+    /// Like [`write_slice`] but stamps PHI tags onto the slice — used by the series-de-id test to prove
+    /// PHI is stripped per-slice before the volume is built.
+    fn write_phi_slice(path: &std::path::Path, instance: i32, base: u16, patient: &str) {
+        let pixels: Vec<u16> = (0..64).map(|k| base + k as u16).collect();
+        let obj = InMemDicomObject::from_element_iter([
+            DataElement::new(MODALITY, VR::CS, PrimitiveValue::from("CT")),
+            DataElement::new(ROWS, VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(COLUMNS, VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(
+                INSTANCE_NUMBER,
+                VR::IS,
+                PrimitiveValue::from(instance.to_string()),
+            ),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(
+                Tag(0x0028, 0x0004),
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2"),
+            ),
+            DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(16u16)),
+            DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(16u16)),
+            DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(15u16)),
+            DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(RESCALE_INTERCEPT, VR::DS, PrimitiveValue::from("-1024")),
+            DataElement::new(RESCALE_SLOPE, VR::DS, PrimitiveValue::from("1")),
+            // PHI tags — must NOT survive a `read_series_deidentified`.
+            DataElement::new(
+                Tag(0x0010, 0x0010), // PatientName
+                VR::PN,
+                PrimitiveValue::from(patient),
+            ),
+            DataElement::new(
+                Tag(0x0010, 0x0020), // PatientID
+                VR::LO,
+                PrimitiveValue::from(format!("PID-{instance}")),
+            ),
+            DataElement::new(
+                Tag(0x0008, 0x0080), // InstitutionName
+                VR::LO,
+                PrimitiveValue::from("ACME Hospital"),
+            ),
+            DataElement::new(
+                Tag(0x7FE0, 0x0010),
+                VR::OW,
+                PrimitiveValue::U16(pixels.into()),
+            ),
+        ]);
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax("1.2.840.10008.1.2.1")
+            .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.2")
+            .media_storage_sop_instance_uid(format!("1.2.3.phi.{instance}"))
+            .implementation_class_uid("1.2.826.0.1.3680043.tessera")
+            .build()
+            .unwrap();
+        obj.with_exact_meta(meta).write_to_file(path).unwrap();
+    }
+
+    /// `read_series_deidentified` must yield the SAME pixel stack as `read_series` (de-id touches
+    /// metadata, never voxels) AND its source files must still contain PHI (the function is in-memory
+    /// only — it never writes back to disk). The PHI-vs-clean contrast is the load-bearing assertion.
+    #[test]
+    fn series_deidentified_strips_phi_per_slice_and_preserves_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = dir.path().join("phi1.dcm");
+        let p2 = dir.path().join("phi2.dcm");
+        write_phi_slice(&p1, 1, 1000, "DOE^JOHN");
+        write_phi_slice(&p2, 2, 2000, "DOE^JANE");
+
+        // The non-de-id reader sees the same pixel content (PHI lives in metadata, not pixels).
+        let plain = read_series(&[p1.clone(), p2.clone()]).unwrap();
+        let deid = read_series_deidentified(&[p1.clone(), p2.clone()]).unwrap();
+        assert_eq!(plain.shape, deid.shape);
+        assert_eq!(plain.voxels, deid.voxels);
+
+        // The source files on disk still carry their PHI — de-id is in-memory at ingest, not a
+        // destructive pre-pass on the inputs (a Tessera invariant: never mutate the caller's files).
+        let obj1 = dicom::object::open_file(&p1).unwrap();
+        assert!(
+            !phi_present(&obj1).is_empty(),
+            "source DICOM must still contain PHI; the in-memory de-id only affects the ingested product"
+        );
     }
 
     #[test]

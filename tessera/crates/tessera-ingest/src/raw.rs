@@ -33,24 +33,29 @@ pub fn read_raw(path: &Path, shape: Vec<u64>, numpy_code: &str) -> Result<(Array
 }
 
 /// Read a raw binary volume and seal it as a Tessera `recon` product, with an `ingested_from` provenance
-/// edge to the source file. `extra_sources` flow in AFTER `ingested_from` (the declarative ingest engine
-/// threads `derived_from` + `ingested_via_spec` edges here so the chain verifier picks up the parent's
-/// `manifest_hash`).
+/// edge to the source file. `source_label` overrides the recorded reference (ADR-0040 PHI hygiene); when
+/// `None` the path is recorded as before. `extra_sources` flow in AFTER `ingested_from` (the declarative
+/// ingest engine threads `derived_from` + `ingested_via_spec` edges here so the chain verifier picks up
+/// the parent's `manifest_hash`).
 pub fn to_recon_product(
     path: &Path,
     shape: Vec<u64>,
     numpy_code: &str,
     name: &str,
     timestamp: &str,
+    source_label: Option<&str>,
     extra_sources: &[tessera_core::provenance::Source],
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
     let (spec, data) = read_raw(path, shape, numpy_code)?;
     let (block_ref, payload) = array::array_block("volume", &spec, &data)?;
     let mut b = ProductBuilder::new("recon", name, "raw binary volume", timestamp);
     b.add_block_ref(block_ref);
+    let source_ref = source_label
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string());
     b.add_source(tessera_core::provenance::Source::new(
         "ingested_from",
-        path.display().to_string(),
+        source_ref,
     ));
     for s in extra_sources {
         b.add_source(s.clone());
@@ -89,10 +94,38 @@ mod tests {
             "i2",
             "raw-01",
             "2024-01-01T00:00:00Z",
+            None,
             &[],
         )
         .unwrap();
         m.verify().unwrap();
         assert_eq!(m.product, "recon");
+    }
+
+    /// ADR-0040: `source_label` replaces the PHI-bearing path in the `ingested_from` edge.
+    #[test]
+    fn source_label_replaces_path_in_ingested_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("vol.raw");
+        let voxels: Vec<i16> = (0..8).map(|k| k as i16).collect();
+        let bytes: Vec<u8> = voxels.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(&f, &bytes).unwrap();
+
+        let (m, _) = to_recon_product(
+            &f,
+            vec![2, 2, 2],
+            "i2",
+            "raw-01",
+            "2024-01-01T00:00:00Z",
+            Some("DUPLET-07/raw"),
+            &[],
+        )
+        .unwrap();
+        let ingested_from = m
+            .sources
+            .iter()
+            .find(|s| s.role == "ingested_from")
+            .expect("ingested_from edge");
+        assert_eq!(ingested_from.reference, "DUPLET-07/raw");
     }
 }

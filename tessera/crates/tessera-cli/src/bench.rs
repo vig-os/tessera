@@ -289,6 +289,7 @@ fn run_listmode_real(
         cfg,
         "events",
         "ms",
+        None,
         &[],
         &std::collections::BTreeMap::new(),
     )?;

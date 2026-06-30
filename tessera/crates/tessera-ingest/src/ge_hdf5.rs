@@ -460,9 +460,10 @@ pub fn stream_events_2p(
 /// `cfg` controls worker count + RAM budget for the encode pipeline. `slab_rows` is the HDF5
 /// hyperslab read unit (the bounded-memory unit for the READ side, independent of the block
 /// partition). `block_prefix` names the on-disk block(s) (default `events` — singles/coin layouts
-/// pass their own). `row_index` is the table's `row_index` column (default `ms`). `extra_sources`
-/// are added AFTER the canonical `ingested_from` edge (the declarative ingest engine threads its
-/// `derived_from` + `ingested_via_spec` edges here). Returns the sealed manifest.
+/// pass their own). `row_index` is the table's `row_index` column (default `ms`). `source_label`
+/// overrides the recorded `ingested_from` reference (ADR-0040 PHI hygiene); `None` records the path.
+/// `extra_sources` are added AFTER the canonical `ingested_from` edge (the declarative ingest
+/// engine threads its `derived_from` + `ingested_via_spec` edges here). Returns the sealed manifest.
 #[allow(clippy::too_many_arguments)] // each argument is a distinct, load-bearing piece of context
 pub fn stream_to_listmode_product_2p_to_file(
     path: &std::path::Path,
@@ -475,6 +476,7 @@ pub fn stream_to_listmode_product_2p_to_file(
     cfg: &tessera_io::WriteConfig,
     block_prefix: &str,
     row_index: &str,
+    source_label: Option<&str>,
     extra_sources: &[tessera_core::provenance::Source],
     extra_metadata: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> Result<Manifest> {
@@ -490,6 +492,7 @@ pub fn stream_to_listmode_product_2p_to_file(
         tessera_io::BLOCK_ROWS as u64,
         block_prefix,
         row_index,
+        source_label,
         extra_sources,
         extra_metadata,
     )
@@ -525,6 +528,7 @@ pub fn stream_to_listmode_product_2p_to_file_with_block_rows(
         block_rows,
         "events",
         "ms",
+        None,
         &[],
         &std::collections::BTreeMap::new(),
     )
@@ -548,6 +552,7 @@ fn stream_to_listmode_product_2p_to_file_inner(
     block_rows: u64,
     block_prefix: &str,
     row_index: &str,
+    source_label: Option<&str>,
     extra_sources: &[tessera_core::provenance::Source],
     extra_metadata: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> Result<Manifest> {
@@ -569,10 +574,14 @@ fn stream_to_listmode_product_2p_to_file_inner(
         timestamp,
     )?;
     // Provenance edge is declared on the session before any blocks commit, so it flows into the
-    // sealed manifest's hash directly — no post-seal re-build needed.
+    // sealed manifest's hash directly — no post-seal re-build needed. ADR-0040: `source_label` (when
+    // given) replaces the full path so a PHI-bearing absolute path never enters the sealed manifest.
+    let source_ref = source_label
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string());
     ws.add_source(tessera_core::provenance::Source::new(
         "ingested_from",
-        path.display().to_string(),
+        source_ref,
     ))?;
     for s in extra_sources {
         ws.add_source(s.clone())?;
@@ -639,6 +648,7 @@ pub fn stream_to_listmode_product_2p(
         &cfg,
         "events",
         "ms",
+        None,
         &[],
         &std::collections::BTreeMap::new(),
     )?;

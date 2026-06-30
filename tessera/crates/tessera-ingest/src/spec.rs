@@ -96,6 +96,12 @@ pub struct ProductSpec {
     /// resolved by name at validate time; cycles + dangling refs are rejected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub derived_from: Vec<String>,
+    /// Optional clean label for the `ingested_from` provenance edge — used in place of the input
+    /// path (which on real clinical data is PHI-bearing: e.g. an 890-slice DICOM series embeds the
+    /// patient name 890× into the sealed manifest if the full paths are kept). When `None`, the
+    /// path is recorded verbatim as before (the legacy behavior). ADR-0040.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
     /// Free-form per-product metadata, written into the manifest's `metadata` field map.
     /// Use this for the small handful of fd5 schema fields the engine doesn't compute itself.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

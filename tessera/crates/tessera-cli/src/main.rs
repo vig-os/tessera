@@ -412,6 +412,10 @@ enum IngestSrc {
         /// Apply PS3.15 de-identification (drop PHI tags) before encoding.
         #[arg(long)]
         deidentify: bool,
+        /// Clean label for the `ingested_from` provenance edge — replaces the input PATH in the
+        /// sealed manifest (ADR-0040 PHI hygiene: an absolute path on clinical data is itself PHI).
+        #[arg(long, value_name = "LABEL")]
+        source_label: Option<String>,
         /// Attach metadata `key=value` (value parsed as JSON, else string) — supplies/overrides schema
         /// fields. Repeatable: `--meta study=DUPLET-07 --meta modality=PT`.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
@@ -430,9 +434,14 @@ enum IngestSrc {
         /// Acquisition timestamp (ISO-8601).
         #[arg(long)]
         timestamp: String,
-        /// Apply PS3.15 de-identification (NOTE: series de-id is not yet supported and will error).
+        /// Apply PS3.15 de-identification per-slice (strip PHI tags from each `.dcm` in memory before
+        /// the volume is stacked; source files are NOT mutated).
         #[arg(long)]
         deidentify: bool,
+        /// Clean label for the `ingested_from` provenance edge — replaces the per-slice joined paths
+        /// (an N-slice series would embed N PHI-bearing absolute paths). ADR-0040.
+        #[arg(long, value_name = "LABEL")]
+        source_label: Option<String>,
         /// Attach metadata `key=value` (value parsed as JSON, else string). Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
@@ -452,6 +461,10 @@ enum IngestSrc {
         /// Compound dataset to read: `events_3p` (default) or `events_2p`.
         #[arg(long, default_value = "events_3p")]
         dataset: String,
+        /// Clean label for the `ingested_from` provenance edge — replaces the input PATH in the
+        /// sealed manifest (ADR-0040 PHI hygiene).
+        #[arg(long, value_name = "LABEL")]
+        source_label: Option<String>,
         /// Attach metadata `key=value` (value parsed as JSON, else string). Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
@@ -474,6 +487,10 @@ enum IngestSrc {
         /// IANA media type, if known (e.g. `application/pdf`). Defaults to opaque octet-stream.
         #[arg(long)]
         media_type: Option<String>,
+        /// Clean label for the `ingested_from` provenance edge — replaces the input PATH in the
+        /// sealed manifest (ADR-0040 PHI hygiene; vendor `.l64` filenames often carry patient ids).
+        #[arg(long, value_name = "LABEL")]
+        source_label: Option<String>,
         /// Attach metadata `key=value` (value parsed as JSON, else string) — e.g. `--meta study=DUPLET-07`
         /// to satisfy the blob schema's recommended `study`. Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
@@ -1033,6 +1050,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             name,
             timestamp,
             deidentify,
+            source_label,
             meta,
         } => (
             IngestSpec {
@@ -1049,6 +1067,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     schema: "recon".into(),
                     description: None,
                     derived_from: Vec::new(),
+                    source_label,
                     metadata: parse_meta(&meta)?,
                     options: FormatOptions::Dicom { input, deidentify },
                 }],
@@ -1061,6 +1080,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             name,
             timestamp,
             deidentify,
+            source_label,
             meta,
         } => (
             IngestSpec {
@@ -1077,6 +1097,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     schema: "recon".into(),
                     description: None,
                     derived_from: Vec::new(),
+                    source_label,
                     metadata: parse_meta(&meta)?,
                     options: FormatOptions::DicomSeries { inputs, deidentify },
                 }],
@@ -1089,6 +1110,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             name,
             timestamp,
             dataset,
+            source_label,
             meta,
         } => (
             IngestSpec {
@@ -1105,6 +1127,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     schema: "listmode".into(),
                     description: None,
                     derived_from: Vec::new(),
+                    source_label,
                     metadata: parse_meta(&meta)?,
                     options: FormatOptions::HdfCompound {
                         input,
@@ -1124,6 +1147,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             name,
             timestamp,
             media_type,
+            source_label,
             meta,
         } => (
             IngestSpec {
@@ -1140,6 +1164,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     schema: "blob".into(),
                     description: None,
                     derived_from: Vec::new(),
+                    source_label,
                     metadata: parse_meta(&meta)?,
                     options: FormatOptions::Blob { input, media_type },
                 }],
@@ -1301,6 +1326,7 @@ mod tests {
                 name: "DP06-lm".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
                 dataset: "events_3p".into(),
+                source_label: None,
                 meta: vec![],
             }),
         })
@@ -1467,6 +1493,7 @@ streaming = "batch"
                 name: "x".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
                 deidentify: false,
+                source_label: None,
                 meta: vec![],
             }),
         })
@@ -1478,10 +1505,13 @@ streaming = "batch"
     }
 
     #[test]
-    fn ingest_dicom_series_wires_through_and_rejects_series_deid() {
-        // The happy path (real slices → recon) is covered by dicom::read_series; here we assert the
-        // CLI `dicom-series` variant reaches the engine dispatch, which rejects series de-id before
-        // touching any file — so the wiring is exercised without DICOM fixtures.
+    fn ingest_dicom_series_with_deidentify_reaches_the_de_id_read_path() {
+        // The CLI `dicom-series --deidentify` variant must reach the engine's de-id path (no longer
+        // a hard reject). We give it bogus input paths so the call fails INSIDE the de-id read path
+        // (`read_series_deidentified` → `open_file`) — proving the wiring without DICOM fixtures.
+        // The non-deid path would fail the same way at `read_series`, but with a different error: we
+        // assert the failure is the DICOM open error (i.e. we reached the reader), NOT the previous
+        // hard-reject "not yet supported" string.
         let dir = tempfile::tempdir().unwrap();
         let err = run(Cmd::Ingest {
             spec: None,
@@ -1496,13 +1526,118 @@ streaming = "batch"
                 name: "DP06-ct".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
                 deidentify: true,
+                source_label: None,
                 meta: vec![],
             }),
         })
         .unwrap_err();
+        let msg = format!("{err}");
         assert!(
-            format!("{err}").contains("not yet supported"),
-            "expected the series-deid rejection, got: {err}"
+            !msg.contains("not yet supported"),
+            "series-deid must no longer be rejected up-front, got: {msg}"
+        );
+        assert!(
+            msg.contains("dicom"),
+            "expected the failure to come from inside the DICOM read path, got: {msg}"
+        );
+    }
+
+    /// End-to-end: `dicom-series --deidentify` over real (synthetic) DICOM slices must SEAL a recon
+    /// product whose `ingested_from` reference is the `--source-label` (not the PHI-bearing paths).
+    /// Proves both load-bearing changes — wired de-id AND `--source-label` — work together on the
+    /// production path.
+    #[test]
+    fn ingest_dicom_series_deidentify_with_source_label_seals_product() {
+        use dicom::core::{DataElement, PrimitiveValue, Tag, VR};
+        use dicom::object::meta::FileMetaTableBuilder;
+        use dicom::object::InMemDicomObject;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Two minimal CT slices, each carrying PHI.
+        let write = |path: &std::path::Path, instance: i32, base: u16, patient: &str| {
+            let pixels: Vec<u16> = (0..64).map(|k| base + k as u16).collect();
+            let obj = InMemDicomObject::from_element_iter([
+                DataElement::new(Tag(0x0008, 0x0060), VR::CS, PrimitiveValue::from("CT")),
+                DataElement::new(Tag(0x0028, 0x0010), VR::US, PrimitiveValue::from(8u16)),
+                DataElement::new(Tag(0x0028, 0x0011), VR::US, PrimitiveValue::from(8u16)),
+                DataElement::new(
+                    Tag(0x0020, 0x0013),
+                    VR::IS,
+                    PrimitiveValue::from(instance.to_string()),
+                ),
+                DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+                DataElement::new(
+                    Tag(0x0028, 0x0004),
+                    VR::CS,
+                    PrimitiveValue::from("MONOCHROME2"),
+                ),
+                DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(16u16)),
+                DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(16u16)),
+                DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(15u16)),
+                DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(1u16)),
+                DataElement::new(Tag(0x0028, 0x1052), VR::DS, PrimitiveValue::from("-1024")),
+                DataElement::new(Tag(0x0028, 0x1053), VR::DS, PrimitiveValue::from("1")),
+                DataElement::new(Tag(0x0010, 0x0010), VR::PN, PrimitiveValue::from(patient)),
+                DataElement::new(
+                    Tag(0x0010, 0x0020),
+                    VR::LO,
+                    PrimitiveValue::from(format!("PID-{instance}")),
+                ),
+                DataElement::new(
+                    Tag(0x7FE0, 0x0010),
+                    VR::OW,
+                    PrimitiveValue::U16(pixels.into()),
+                ),
+            ]);
+            let meta = FileMetaTableBuilder::new()
+                .transfer_syntax("1.2.840.10008.1.2.1")
+                .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.2")
+                .media_storage_sop_instance_uid(format!("1.2.3.deid.{instance}"))
+                .implementation_class_uid("1.2.826.0.1.3680043.tessera")
+                .build()
+                .unwrap();
+            obj.with_exact_meta(meta).write_to_file(path).unwrap();
+        };
+        let p1 = dir.path().join("phi1.dcm");
+        let p2 = dir.path().join("phi2.dcm");
+        write(&p1, 1, 1000, "DOE^JOHN");
+        write(&p2, 2, 2000, "DOE^JANE");
+
+        let out = dir.path().join("series.tsra");
+        run(Cmd::Ingest {
+            spec: None,
+            out: None,
+            workers: None,
+            ram_budget: None,
+            auto: false,
+            stream_threshold: None,
+            src: Some(IngestSrc::DicomSeries {
+                inputs: vec![p1.clone(), p2.clone()],
+                out: out.clone(),
+                name: "DP06-ct".into(),
+                timestamp: "2024-01-01T00:00:00Z".into(),
+                deidentify: true,
+                source_label: Some("DUPLET-07/CT".into()),
+                meta: vec![],
+            }),
+        })
+        .unwrap();
+
+        // The sealed product opens + verifies + carries the clean source label (NOT a slice path).
+        run(Cmd::Verify { file: out.clone() }).unwrap();
+        let m = Reader::open(&out).unwrap().manifest().clone();
+        let ingested_from = m
+            .sources
+            .iter()
+            .find(|s| s.role == "ingested_from")
+            .expect("ingested_from edge on sealed manifest");
+        assert_eq!(ingested_from.reference, "DUPLET-07/CT");
+        assert!(
+            !ingested_from
+                .reference
+                .contains(p1.file_name().unwrap().to_str().unwrap()),
+            "PHI-bearing slice path must not appear in the sealed manifest, got: {}",
+            ingested_from.reference
         );
     }
 
