@@ -606,16 +606,19 @@ mod tests {
         let frag = dir.path().join("race.bin");
         std::fs::write(&frag, &bytes_b).unwrap(); // "the file changed between hash and pack"
         let out = dir.path().join("race.tsra");
-        let err = pack_streaming_verified(
-            &sealed,
-            &[("data".to_string(), frag.as_path())],
-            &out,
-        )
-        .expect_err("mismatched fragment must fail the verifying pack");
+        let err = pack_streaming_verified(&sealed, &[("data".to_string(), frag.as_path())], &out)
+            .expect_err("mismatched fragment must fail the verifying pack");
         match err {
-            Error::Integrity { what, expected, actual } => {
+            Error::Integrity {
+                what,
+                expected,
+                actual,
+            } => {
                 assert_eq!(what, "block_payload");
-                assert_eq!(expected, digest_a, "must surface the manifest-recorded digest");
+                assert_eq!(
+                    expected, digest_a,
+                    "must surface the manifest-recorded digest"
+                );
                 assert_eq!(actual, tessera_core::hash::digest(&bytes_b));
             }
             other => panic!("expected Error::Integrity, got {other:?}"),
@@ -628,7 +631,10 @@ mod tests {
         let mut rdr = Reader::open(&dead).unwrap();
         assert!(matches!(
             rdr.read_block("data"),
-            Err(Error::Integrity { what: "block_payload", .. })
+            Err(Error::Integrity {
+                what: "block_payload",
+                ..
+            })
         ));
     }
 
@@ -650,12 +656,8 @@ mod tests {
         let frag = dir.path().join("f.bin");
         std::fs::write(&frag, &bytes).unwrap();
         let out = dir.path().join("x.tsra");
-        let err = pack_streaming_verified(
-            &sealed,
-            &[("typo".to_string(), frag.as_path())],
-            &out,
-        )
-        .expect_err("unknown block name must be rejected");
+        let err = pack_streaming_verified(&sealed, &[("typo".to_string(), frag.as_path())], &out)
+            .expect_err("unknown block name must be rejected");
         assert!(
             matches!(err, Error::Container(ref m) if m.contains("no manifest block named 'typo'")),
             "expected Container error naming the missing block, got {err:?}"

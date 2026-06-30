@@ -37,8 +37,7 @@ pub use collection::{
 };
 pub use config::{parse_byte_size, WriteConfig, DEFAULT_RAM_BUDGET};
 pub use container::{
-    pack, pack_dir, pack_streaming, pack_streaming_verified, unpack, BlockPayload, Reader,
-    MIMETYPE,
+    pack, pack_dir, pack_streaming, pack_streaming_verified, unpack, BlockPayload, Reader, MIMETYPE,
 };
 pub use multiblock::{ColumnBlockIter, LogicalTableView};
 pub use range::CountingReader;

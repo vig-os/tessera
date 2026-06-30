@@ -237,11 +237,10 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         // 1. raw digest helpers: parallel == single-thread streamed == one-shot.
-        let serial =
-            tessera_core::hash::digest_reader(std::io::BufReader::new(
-                std::fs::File::open(&path).unwrap(),
-            ))
-            .unwrap();
+        let serial = tessera_core::hash::digest_reader(std::io::BufReader::new(
+            std::fs::File::open(&path).unwrap(),
+        ))
+        .unwrap();
         let parallel = digest_file_parallel(&path).unwrap();
         let one_shot = tessera_core::hash::digest(&bytes);
         assert_eq!(
@@ -258,13 +257,9 @@ mod tests {
         //    invariant a downstream `verify` will check.
         let serial_ref =
             blob_ref_streaming("data", "big.bin", Some("application/octet-stream"), &path).unwrap();
-        let parallel_ref = blob_ref_streaming_parallel(
-            "data",
-            "big.bin",
-            Some("application/octet-stream"),
-            &path,
-        )
-        .unwrap();
+        let parallel_ref =
+            blob_ref_streaming_parallel("data", "big.bin", Some("application/octet-stream"), &path)
+                .unwrap();
         assert_eq!(serial_ref.name, parallel_ref.name);
         assert_eq!(serial_ref.kind, parallel_ref.kind);
         assert_eq!(serial_ref.digest, parallel_ref.digest);
