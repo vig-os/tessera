@@ -55,7 +55,6 @@ fn open_local_or_url(arg: &std::path::Path) -> tessera_core::Result<Box<dyn Tsra
 /// behind a single boxed handle.
 trait TsraSource {
     fn manifest(&self) -> &tessera_core::Manifest;
-    fn read_block_by_name(&mut self, name: &str) -> tessera_core::Result<Vec<u8>>;
     fn block_names(&self) -> Vec<String>;
     /// Bounded-memory copy of a block's bytes into `w`, digest-verified after the last byte.
     /// Delegates to [`Reader::stream_block`] — preserves the same integrity contract: on
@@ -72,9 +71,6 @@ impl<R: std::io::Read + std::io::Seek> TsraSource for Reader<R> {
     fn manifest(&self) -> &tessera_core::Manifest {
         Reader::manifest(self)
     }
-    fn read_block_by_name(&mut self, name: &str) -> tessera_core::Result<Vec<u8>> {
-        Reader::read_block(self, name)
-    }
     fn block_names(&self) -> Vec<String> {
         Reader::block_names(self)
     }
@@ -88,6 +84,24 @@ impl<R: std::io::Read + std::io::Seek> TsraSource for Reader<R> {
         // `Sized`, which keeps the generic happy without changing the underlying writer.
         Reader::stream_block(self, name, &mut w)
     }
+}
+
+/// Stream every block of a boxed source through its digest in **bounded memory** (`io::sink` discards
+/// the bytes) → the payload-level verdict for `inspect --verify`. Mirrors [`nav::verify_payloads`] but
+/// over the erased [`TsraSource`] (so it also covers cloud `s3://` / `http` sources). A digest mismatch
+/// is a [`nav::IntegrityCheck::Tampered`]; a genuine I/O / container error propagates. #268
+fn verify_payloads_boxed(r: &mut dyn TsraSource) -> tessera_core::Result<nav::IntegrityCheck> {
+    let names = r.block_names();
+    for name in &names {
+        match r.stream_block_to(name, &mut std::io::sink()) {
+            Ok(_) => {}
+            Err(tessera_core::Error::Integrity { .. }) => {
+                return Ok(nav::IntegrityCheck::Tampered(name.clone()))
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(nav::IntegrityCheck::PayloadsOk(names.len()))
 }
 
 /// Grouped top-level help (#249) — clap 4 doesn't group subcommands natively, so we render a
@@ -177,6 +191,11 @@ enum Cmd {
         /// path); default collapses a multi-file edge to `<first> (+N more)`.
         #[arg(long)]
         full: bool,
+        /// Also stream every block through its digest (bounded memory) and report payload
+        /// integrity (`payloads✓` / `payloads✗`). Without this, `seal` reflects only the manifest
+        /// — a payload-tampered file still shows `sealed✓`. Errors (exit 1) on a tampered payload. #268
+        #[arg(long)]
+        verify: bool,
     },
     /// Verify a `.tsra`'s integrity (magic, seal, every block digest).
     ///
@@ -198,6 +217,11 @@ enum Cmd {
         /// Print provenance references in full instead of collapsing a multi-file edge.
         #[arg(long)]
         full: bool,
+        /// Also stream every block through its digest (bounded memory) and report payload
+        /// integrity in the root badge (`payloads✓` / `payloads✗`). Without this, the badge
+        /// reflects only the manifest seal — a payload-tampered file still shows `sealed✓`. #268
+        #[arg(long)]
+        verify: bool,
     },
     /// List one node's children (top level, `meta`, a block, or `sources`).
     ///
@@ -804,8 +828,15 @@ fn main() -> ExitCode {
 
 fn run(cmd: Cmd) -> tessera_core::Result<()> {
     match cmd {
-        Cmd::Inspect { file, full } => {
-            let r = open_local_or_url(&file)?;
+        Cmd::Inspect { file, full, verify } => {
+            let mut r = open_local_or_url(&file)?;
+            // Deep payload check (bounded memory) before borrowing the manifest for the summary. The
+            // cheap default reports only the manifest seal — a payload swap is invisible without it. #268
+            let check = if verify {
+                verify_payloads_boxed(r.as_mut())?
+            } else {
+                nav::IntegrityCheck::SealOnly
+            };
             let m = r.manifest();
             println!("tessera {} · product={}", m.tessera_version, m.product);
             println!("id            {}", m.id);
@@ -822,6 +853,19 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 "manifest_hash {}",
                 m.manifest_hash.as_deref().unwrap_or("-")
             );
+            // The seal badge re-verifies `manifest_hash` (cheap, manifest-only). `--verify` adds the
+            // payload verdict; without it, `seal` says nothing about block payloads — run with
+            // `--verify` or `tessera verify` to prove every block still matches its digest. #268
+            println!("seal          {}", nav::seal_status(m));
+            match &check {
+                nav::IntegrityCheck::SealOnly => {}
+                nav::IntegrityCheck::PayloadsOk(n) => {
+                    println!("integrity     payloads✓ ({n} blocks)")
+                }
+                nav::IntegrityCheck::Tampered(b) => {
+                    println!("integrity     payloads✗ TAMPERED({b})")
+                }
+            }
             println!("blocks        {}", m.blocks.len());
             for b in &m.blocks {
                 println!(
@@ -848,20 +892,32 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                     );
                 }
             }
+            // A `--verify` run that found a payload mismatch prints the summary (an auditor wants to
+            // see what the file *claims*) but exits non-zero — a tampered file must never look OK. #268
+            if let nav::IntegrityCheck::Tampered(b) = &check {
+                return Err(tessera_core::Error::Integrity {
+                    what: "block_payload",
+                    expected: "recorded digest".into(),
+                    actual: format!("mismatch in block '{b}'"),
+                });
+            }
             Ok(())
         }
         Cmd::Verify { file } => {
             let mut r = open_local_or_url(&file)?; // magic + manifest seal
             let n = r.manifest().blocks.len();
             for name in r.block_names() {
-                r.read_block_by_name(&name)?; // payload bytes vs recorded digest
+                // Stream each block through its digest in **bounded memory** (`io::sink` discards the
+                // bytes) — a multi-GB blob verifies at a fixed 64 KiB buffer, not by materializing the
+                // whole payload in RAM. Same integrity contract as `read_block`. #268
+                r.stream_block_to(&name, &mut std::io::sink())?;
             }
             println!("OK  {} verified ({n} blocks)", file.display());
             Ok(())
         }
-        Cmd::Tree { file, full } => {
+        Cmd::Tree { file, full, verify } => {
             let mut out = std::io::stdout().lock();
-            nav::tree(&file, full, &mut out)
+            nav::tree(&file, full, verify, &mut out)
         }
         Cmd::Ls { file, path, full } => {
             let mut out = std::io::stdout().lock();
@@ -1728,6 +1784,7 @@ mod tests {
         run(Cmd::Inspect {
             file: tsra.clone(),
             full: false,
+            verify: false,
         })
         .unwrap();
         run(Cmd::Schema {
@@ -1822,6 +1879,7 @@ mod tests {
         run(Cmd::Inspect {
             file: out.clone(),
             full: false,
+            verify: false,
         })
         .unwrap();
         let r = Reader::open(&out).unwrap();
