@@ -109,6 +109,7 @@ Inspect & navigate:
   stats       Numeric overview of an array block (shape, dtype, value range)
   slice       Pull a plane/line/point of an array block as CSV (--index z,:,:)
   project     Collapse an array along an axis → 2-D image (--mode max|mean|sum)
+  pyramid     Build a multiscale pyramid of an array block → a new .tsra
   export      Emit a FAIR discovery record (JSON to stdout)
 
 Query (needs --features sql):
@@ -302,6 +303,21 @@ enum Cmd {
         /// Output format: `csv` (default) | `tsv`.
         #[arg(long, default_value = "csv")]
         format: String,
+    },
+    /// Build a multiscale pyramid of an array block (full-res + 2× downsampled levels) → a new `.tsra`.
+    ///
+    /// Emits a `recon` product with `<block>`, `<block>/1`, `<block>/2`, … (each a 2× max-downsample
+    /// carrying its `at_level` affine), `derived_from` the source. Coarse levels give fast overviews.
+    Pyramid {
+        /// The source `.tsra`.
+        file: PathBuf,
+        /// The 3-D array block to build a pyramid of (e.g. `volume`).
+        block: String,
+        /// Output `.tsra` path for the pyramid product.
+        out: PathBuf,
+        /// Max downsample levels (default: until the coarsest axis ≤ 64).
+        #[arg(long)]
+        levels: Option<u32>,
     },
     /// Initialize a content-addressed repository for CoW versioning.
     ///
@@ -928,6 +944,16 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             let fmt = nav::Format::parse(&format)?;
             let mut out = std::io::stdout().lock();
             nav::project(&file, &block, &axis, &mode, physical, fmt, &mut out)
+        }
+        Cmd::Pyramid {
+            file,
+            block,
+            out,
+            levels,
+        } => {
+            let n = nav::build_pyramid(&file, &block, levels, &out)?;
+            println!("wrote {} ({n} levels)", out.display());
+            Ok(())
         }
         Cmd::Init { repo } => {
             let mut out = std::io::stdout().lock();

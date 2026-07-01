@@ -14,6 +14,7 @@ Inspect & navigate:
   stats       Numeric overview of an array block (shape, dtype, value range)
   slice       Pull a plane/line/point of an array block as CSV (--index z,:,:)
   project     Collapse an array along an axis → 2-D image (--mode max|mean|sum)
+  pyramid     Build a multiscale pyramid of an array block → a new .tsra
   export      Emit a FAIR discovery record (JSON to stdout)
 
 Query (needs --features sql):
