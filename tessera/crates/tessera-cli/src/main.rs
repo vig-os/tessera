@@ -2339,7 +2339,7 @@ streaming = "batch"
             "patient id leaked into the sealed container"
         );
         // The identity envelope rides in aux/ (outside the seal).
-        let mut r = Reader::open(&shredded).unwrap();
+        let r = Reader::open(&shredded).unwrap();
         assert!(
             r.aux_names()
                 .iter()
