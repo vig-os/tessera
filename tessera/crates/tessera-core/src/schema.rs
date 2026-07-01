@@ -253,6 +253,31 @@ impl ProductSchema {
             .filter(|f| f.sensitivity == tier)
             .collect()
     }
+
+    /// Serialize to the JSON value **embedded in a sealed manifest** (`Manifest.schema`), so the
+    /// `.tsra` carries its own contract (FAIR-Reusable) and the seal commits to it.
+    pub fn to_value(&self) -> crate::Result<serde_json::Value> {
+        serde_json::to_value(self)
+            .map_err(|e| crate::Error::Invalid(format!("schema does not serialize: {e}")))
+    }
+
+    /// Parse an embedded schema JSON (from `Manifest.schema`) back into a typed `ProductSchema`.
+    pub fn from_value(v: &serde_json::Value) -> crate::Result<Self> {
+        serde_json::from_value(v.clone()).map_err(|e| {
+            crate::Error::Invalid(format!("embedded schema is not a ProductSchema: {e}"))
+        })
+    }
+}
+
+/// Validate a manifest against its **embedded** schema (self-describing) when present, else the
+/// built-in registry (legacy / open-world files). The embedded copy is authoritative — a sealed
+/// `.tsra` carries its own contract, so a reader validates what the file *declares*, not whatever
+/// schema version happens to be compiled into this binary.
+pub fn validate_manifest(m: &Manifest) -> crate::Result<()> {
+    match &m.schema {
+        Some(v) => ProductSchema::from_value(v)?.validate(m),
+        None => SchemaRegistry::builtin().validate(m),
+    }
 }
 
 /// The registry of built-in product schemas. Domain-agnostic: lookups for unknown products

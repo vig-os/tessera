@@ -128,8 +128,18 @@ impl ProductBuilder {
         }
         self.manifest.blocks = self.refs;
         self.manifest.content_hash = Some(crate::hash::merkle_root(&digests));
+        // Self-describing (FAIR-Reusable): embed the resolved product schema so the sealed `.tsra`
+        // carries its own contract and the seal commits to it. A caller-supplied schema
+        // (`with_schema`) or an inherited one (`from_manifest`) wins; otherwise embed the built-in
+        // registry's schema for a known product. Open-world products (unknown to the registry) have
+        // no schema to embed — the field stays absent (the permissive escape hatch).
+        if self.manifest.schema.is_none() {
+            if let Some(s) = crate::schema::SchemaRegistry::builtin().get(&self.manifest.product) {
+                self.manifest.schema = Some(s.to_value()?);
+            }
+        }
         // The seal is computed last, over the manifest with `manifest_hash` excluded, so it
-        // transitively commits to id_inputs, sources, and every block digest.
+        // transitively commits to id_inputs, sources, the embedded schema, and every block digest.
         self.manifest.manifest_hash = None;
         self.manifest.manifest_hash = Some(self.manifest.compute_manifest_hash()?);
         Ok(self.manifest)
@@ -191,5 +201,44 @@ mod tests {
             sup[0].reference, v1mh,
             "points at the immediate parent version"
         );
+    }
+
+    #[test]
+    fn seal_embeds_the_product_schema_for_a_known_product() {
+        // A known product's sealed manifest carries its own contract (self-describing, obligatory).
+        let mut b = ProductBuilder::new("recon", "DP06", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(block("v", "blake3:aa"));
+        let m = b.seal().unwrap();
+
+        let embedded = m.schema.as_ref().expect("known product embeds its schema");
+        let parsed = crate::schema::ProductSchema::from_value(embedded).unwrap();
+        let registry = crate::SchemaRegistry::builtin()
+            .get("recon")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            parsed, registry,
+            "embedded schema == the registry schema it resolved"
+        );
+        // Validation routes through the embedded copy; equivalent to the registry path (same
+        // version). This minimal fixture omits required recon fields, so both agree it is NOT valid.
+        assert_eq!(
+            crate::validate_manifest(&m).is_ok(),
+            crate::SchemaRegistry::builtin().validate(&m).is_ok(),
+            "embedded-schema validation matches the registry path"
+        );
+        // The embedded schema is inside the seal → it is covered by manifest_hash.
+        assert!(m.manifest_hash.is_some());
+    }
+
+    #[test]
+    fn seal_leaves_open_world_products_schema_free() {
+        // An unknown (extension) product has no registry schema to embed — the field stays absent,
+        // the permissive open-world escape hatch, and validation is permissive.
+        let mut b = ProductBuilder::new("acme-custom-product", "X", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(block("v", "blake3:aa"));
+        let m = b.seal().unwrap();
+        assert!(m.schema.is_none(), "open-world product embeds no schema");
+        crate::validate_manifest(&m).unwrap();
     }
 }

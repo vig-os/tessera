@@ -333,6 +333,9 @@ enum Cmd {
     Schema {
         /// The `.tsra` to validate.
         file: PathBuf,
+        /// Print the embedded product schema as JSON (the file's own contract) instead of validating.
+        #[arg(long)]
+        json: bool,
     },
     /// Ingest a vendor file into a sealed `.tsra` (or run a declarative `--spec`).
     ///
@@ -837,21 +840,54 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             println!("extracted {block} ({n} bytes) -> {}", out.display());
             Ok(())
         }
-        Cmd::Schema { file } => {
+        Cmd::Schema { file, json } => {
             let r = Reader::open(&file)?;
             let m = r.manifest();
-            let reg = SchemaRegistry::builtin();
-            match reg.get(&m.product) {
-                Some(s) => println!(
-                    "product '{}' — built-in schema v{} ({})",
+            // Prefer the schema **embedded in the file** (self-describing) over the binary's
+            // registry — a sealed `.tsra` carries its own contract (obligatory since the
+            // self-describing batch). `--json` dumps that embedded contract verbatim.
+            let embedded = m
+                .schema
+                .as_ref()
+                .map(tessera_core::ProductSchema::from_value)
+                .transpose()?;
+            if json {
+                let schema = match &embedded {
+                    Some(s) => s.to_value()?,
+                    None => SchemaRegistry::builtin()
+                        .get(&m.product)
+                        .ok_or_else(|| {
+                            tessera_core::Error::Invalid(format!(
+                                "no schema for open-world product '{}'",
+                                m.product
+                            ))
+                        })?
+                        .to_value()?,
+                };
+                println!("{}", serde_json::to_string_pretty(&schema)?);
+                return Ok(());
+            }
+            match (&embedded, SchemaRegistry::builtin().get(&m.product)) {
+                (Some(s), reg) => {
+                    let drift = reg
+                        .filter(|r| r.version != s.version)
+                        .map(|r| format!(" (registry has v{})", r.version))
+                        .unwrap_or_default();
+                    println!(
+                        "product '{}' — embedded schema v{} ({}){drift}",
+                        m.product, s.version, s.description
+                    );
+                }
+                (None, Some(s)) => println!(
+                    "product '{}' — built-in schema v{} ({}); file predates embedded schemas",
                     m.product, s.version, s.description
                 ),
-                None => println!(
+                (None, None) => println!(
                     "product '{}' — unknown schema (open-world: validation is permissive)",
                     m.product
                 ),
             }
-            reg.validate(m)?; // typed Invalid error naming the first missing required field/block
+            tessera_core::validate_manifest(m)?; // typed error naming the first missing field/block
             println!("OK  schema-valid: {}", file.display());
             Ok(())
         }
@@ -1378,7 +1414,11 @@ mod tests {
             full: false,
         })
         .unwrap();
-        run(Cmd::Schema { file: tsra.clone() }).unwrap();
+        run(Cmd::Schema {
+            file: tsra.clone(),
+            json: false,
+        })
+        .unwrap();
 
         let exploded = dir.path().join("exploded");
         run(Cmd::Unpack {
