@@ -267,8 +267,12 @@ enum Cmd {
         /// The array block to slice (e.g. `volume`).
         block: String,
         /// Numpy-style per-axis index, e.g. `445,:,:` or `400:500,:,256`.
-        #[arg(long, allow_hyphen_values = true)]
-        index: String,
+        #[arg(long, allow_hyphen_values = true, required_unless_present = "world")]
+        index: Option<String>,
+        /// World `L,P,S` mm point → nearest voxel via the stored affine (needs a 3-D array with a
+        /// world_frame). E.g. `--world "12.3,-45.6,80.0"`. Mutually exclusive with `--index`.
+        #[arg(long, allow_hyphen_values = true, conflicts_with = "index")]
+        world: Option<String>,
         /// Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples.
         #[arg(long)]
         physical: bool,
@@ -879,12 +883,21 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             file,
             block,
             index,
+            world,
             physical,
             format,
         } => {
             let fmt = nav::Format::parse(&format)?;
             let mut out = std::io::stdout().lock();
-            nav::slice(&file, &block, &index, physical, fmt, &mut out)
+            nav::slice(
+                &file,
+                &block,
+                index.as_deref(),
+                world.as_deref(),
+                physical,
+                fmt,
+                &mut out,
+            )
         }
         Cmd::Init { repo } => {
             let mut out = std::io::stdout().lock();
