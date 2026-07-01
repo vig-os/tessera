@@ -43,8 +43,8 @@ Distribution (needs --features cloud):
 Signing & trust:
   keygen      Generate an ed25519 keypair
   trust       Manage the trust store of public keys verify-sig accepts
-  sign        Sign a sealed .tsra (writes a .sig.json sidecar)
-  verify-sig  Verify a sealed .tsra against its .sig.json sidecar
+  sign        Sign a sealed .tsra (embeds aux/signatures/<key_id>.sig.json; --sidecar for detached)
+  verify-sig  Verify a sealed .tsra against its signature (embedded first, sidecar fallback)
 
 Diagnostics:
   bench       Bench the write engine on this host (throughput + peak RSS)

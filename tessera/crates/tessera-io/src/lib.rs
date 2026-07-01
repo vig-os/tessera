@@ -17,6 +17,7 @@ pub mod conformance;
 pub mod container;
 pub mod multiblock;
 pub mod oci;
+pub mod provenance;
 pub mod range;
 #[cfg(feature = "cloud")]
 pub mod registry;
@@ -37,14 +38,20 @@ pub use collection::{
 };
 pub use config::{parse_byte_size, WriteConfig, DEFAULT_RAM_BUDGET};
 pub use container::{
-    pack, pack_dir, pack_streaming, pack_streaming_verified, unpack, BlockPayload, Reader, MIMETYPE,
+    add_aux_members, pack, pack_dir, pack_streaming, pack_streaming_verified, unpack,
+    write_aux_members, AuxMember, BlockPayload, Reader, AUX_PREFIX, AUX_PROVENANCE_ENTRY,
+    AUX_SIGNATURES_PREFIX, MIMETYPE,
 };
 pub use multiblock::{ColumnBlockIter, LogicalTableView};
+pub use provenance::{
+    read_provenance, stamp_ingest_provenance, IngestProvenance, ProvenanceOptions,
+    ENV_SKIP_PROVENANCE,
+};
 pub use range::CountingReader;
 #[cfg(feature = "cloud")]
 pub use registry::{pull as registry_pull, push as registry_push};
 pub use repo::{GcReport, LogEntry, Repository};
-pub use sign::{sign_tsra, verify_tsra};
+pub use sign::{has_embedded_signature, sign_tsra, sign_tsra_sidecar, verify_tsra};
 pub use stream::{array_job, table_job, table_job_from_fragments, EncodeJob, StreamWriter};
 pub use table::{block_count, block_name, partition_blocks, ColumnData, TableData, BLOCK_ROWS};
 pub use write::WriteSession;

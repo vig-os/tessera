@@ -274,9 +274,12 @@
             for i in $(seq 1 80); do curl -sf http://127.0.0.1:5055/v2/ > /dev/null && break; sleep 0.25; done
             cp ${./tessera/corpus/files}/recon_int16.tsra $TMPDIR/p.tsra
             cd $TMPDIR
-            # Sign first, so push must carry the detached-signature sidecar through the registry (bug #2).
+            # Sign with the LEGACY detached form (`--sidecar`), so push must carry `p.tsra.sig.json`
+            # through the registry as a second layer (ADR-0037 §0 bug #2 regression test). The
+            # embedded default (ADR-0042) rides inside the `.tsra` bytes and is trivially proven
+            # by the `cmp p.tsra out.tsra` line above.
             printf '0101010101010101010101010101010101010101010101010101010101010101' > key.hex
-            ${tessera-cli-cloud}/bin/tessera sign p.tsra --key key.hex --signer https://orcid.org/0000-0002-1825-0097
+            ${tessera-cli-cloud}/bin/tessera sign p.tsra --key key.hex --sidecar --signer https://orcid.org/0000-0002-1825-0097
             test -f p.tsra.sig.json
             ${tessera-cli-cloud}/bin/tessera push p.tsra 127.0.0.1:5055/tessera/recon:v1 --plain-http
             ${tessera-cli-cloud}/bin/tessera pull 127.0.0.1:5055/tessera/recon:v1 out.tsra --plain-http

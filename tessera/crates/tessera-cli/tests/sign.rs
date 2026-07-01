@@ -40,7 +40,17 @@ fn cli_sign_then_verify_sig_roundtrips_and_rejects_wrong_key() {
     std::fs::write(&key_file, hex32(&sk.to_bytes())).unwrap();
     std::fs::write(&pub_file, verifying_key_hex(&sk.verifying_key())).unwrap();
 
-    // sign → exit 0 + sidecar written.
+    // Snapshot the sealed hashes — sign MUST leave them byte-identical (ADR-0042 seal-ignore
+    // invariant), else the whole "signature rides inside the file" trick is broken.
+    let (pre_ch, pre_mh) = {
+        let r = tessera_io::Reader::open(&tsra).unwrap();
+        (
+            r.manifest().content_hash.clone(),
+            r.manifest().manifest_hash.clone(),
+        )
+    };
+
+    // sign → exit 0 + embedded aux signature written (default: ADR-0042).
     let sign = tessera()
         .args(["sign"])
         .arg(&tsra)
@@ -50,10 +60,24 @@ fn cli_sign_then_verify_sig_roundtrips_and_rejects_wrong_key() {
         .status()
         .unwrap();
     assert!(sign.success(), "sign should exit 0");
+    // No detached sidecar in the default path — the signature rides inside the container.
     let sidecar = PathBuf::from(format!("{}.sig.json", tsra.display()));
-    assert!(sidecar.exists(), "sidecar must be written");
+    assert!(
+        !sidecar.exists(),
+        "detached sidecar must NOT be written by default"
+    );
+    // has_embedded_signature confirms the aux/signatures/ member exists.
+    assert!(
+        tessera_io::has_embedded_signature(&tsra).unwrap(),
+        "embedded aux/signatures/<key_id>.sig.json must be present"
+    );
+    // Seal-ignore invariant: sealed hashes are byte-identical to the pre-sign container.
+    let r = tessera_io::Reader::open(&tsra).unwrap();
+    assert_eq!(r.manifest().content_hash, pre_ch);
+    assert_eq!(r.manifest().manifest_hash, pre_mh);
+    drop(r);
 
-    // verify-sig with the right public key → exit 0.
+    // verify-sig with the right public key → exit 0 (reads the embedded signature).
     let ok = tessera()
         .args(["verify-sig"])
         .arg(&tsra)
@@ -63,7 +87,7 @@ fn cli_sign_then_verify_sig_roundtrips_and_rejects_wrong_key() {
         .unwrap();
     assert!(
         ok.success(),
-        "verify-sig should exit 0 for a valid signature"
+        "verify-sig should exit 0 for a valid embedded signature"
     );
 
     // verify-sig with a DIFFERENT public key → non-zero exit (tamper-evident).
@@ -80,6 +104,49 @@ fn cli_sign_then_verify_sig_roundtrips_and_rejects_wrong_key() {
     assert!(
         !bad.success(),
         "verify-sig must fail (non-zero) for the wrong key"
+    );
+}
+
+#[test]
+fn cli_sign_sidecar_flag_writes_detached_and_verify_falls_back() {
+    // `sign --sidecar` writes the legacy detached form; `verify-sig` falls back to it when no
+    // embedded signature is present (ADR-0042). Same crypto, only the location differs.
+    let dir = tempfile::tempdir().unwrap();
+    let tsra = dir.path().join("data.tsra");
+    sealed_tsra(&tsra);
+
+    let sk = SigningKey::from_bytes(&[23u8; 32]);
+    let key_file = dir.path().join("signer.key");
+    let pub_file = dir.path().join("signer.pub");
+    std::fs::write(&key_file, hex32(&sk.to_bytes())).unwrap();
+    std::fs::write(&pub_file, verifying_key_hex(&sk.verifying_key())).unwrap();
+
+    let sign = tessera()
+        .args(["sign"])
+        .arg(&tsra)
+        .arg("--key")
+        .arg(&key_file)
+        .arg("--sidecar")
+        .status()
+        .unwrap();
+    assert!(sign.success());
+    let sidecar = PathBuf::from(format!("{}.sig.json", tsra.display()));
+    assert!(sidecar.exists(), "sidecar must be written under --sidecar");
+    assert!(
+        !tessera_io::has_embedded_signature(&tsra).unwrap(),
+        "no embedded aux member under --sidecar"
+    );
+
+    let ok = tessera()
+        .args(["verify-sig"])
+        .arg(&tsra)
+        .arg("--pubkey")
+        .arg(&pub_file)
+        .status()
+        .unwrap();
+    assert!(
+        ok.success(),
+        "verify-sig should fall back to the detached sidecar"
     );
 }
 
