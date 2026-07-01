@@ -41,13 +41,29 @@ $ tessera tree ../../corpus/files/multiblock_study.tsra
 multiblock_study.tsra  ·  product=recon · schema=recon✓ · sealed
 ├── meta
 │   └── modality = "CT"
-├── volume             array  int16  [16, 16, 16]  pcodec   [..]
+├── schema  (recon v1.0)
+│   ├── modality               required · coded
+│   ├── rescale_slope          optional · public
+│   ├── rescale_intercept      optional · public
+│   ├── patient_pseudonym      optional · identifying
+│   ├── acquisition_uid        optional · identifying
+│   ├── study_instance_uid     recommended · identifying
+│   ├── series_instance_uid    recommended · identifying
+│   ├── study_date             recommended · sensitive
+│   ├── manufacturer           recommended · public
+│   ├── model_name             recommended · public
+│   ├── kvp                    recommended · public
+│   ├── slice_thickness        recommended · public
+│   └── pixel_spacing          recommended · public
+├── volume             array  int16  [16, 16, 16]  pcodec   blake3:6620c9be2959…
 │   └── chunks [64, 64, 64]
-├── roi                table  2 cols × 8 rows   [..]
+├── roi                table  2 cols × 8 rows   blake3:827e49afe82b…
 │   ├── label      u4
 │   └── volume_ml  f4
-└── sources
-    └── derived_from <- recon-int16
+├── sources
+│   └── derived_from <- recon-int16
+└── extra
+    └── vendor_note  (string)
 
 ```
 

@@ -76,6 +76,11 @@ pub(crate) fn short_hash(h: &str) -> String {
     short_digest(Some(h))
 }
 
+/// Parse the embedded schema JSON (`Manifest.schema`) into a typed schema, or `None` if absent/bad.
+fn embedded_schema(v: &Value) -> Option<tessera_core::ProductSchema> {
+    tessera_core::ProductSchema::from_value(v).ok()
+}
+
 /// Group-of-three thousands separators for human row counts (`4194304` → `4,194,304`).
 fn thousands(n: u64) -> String {
     let s = n.to_string();
@@ -234,7 +239,7 @@ pub fn tree(file: &Path, full: bool, out: &mut dyn Write) -> Result<()> {
         .unwrap_or("<tsra>");
     writeln!(out, "{name}  ·  {}", status_line(file, m)).map_err(tessera_core::Error::from)?;
 
-    // Build the node list: (header, children). meta first, then blocks, then sources.
+    // Build the node list: (header, children). meta · schema · blocks · sources · extra.
     let mut nodes: Vec<(String, Vec<String>)> = Vec::new();
     if !m.metadata.is_empty() {
         let kids = m
@@ -243,6 +248,28 @@ pub fn tree(file: &Path, full: bool, out: &mut dyn Write) -> Result<()> {
             .map(|(k, v)| format!("{k} = {}", compact_value(v, full)))
             .collect();
         nodes.push(("meta".to_string(), kids));
+    }
+    // The embedded, self-describing product schema (its declared fields as leaves).
+    if let Some(s) = m.schema.as_ref().and_then(embedded_schema) {
+        let kids = s
+            .fields
+            .iter()
+            .map(|f| {
+                let tier = if f.required {
+                    "required"
+                } else if f.recommended {
+                    "recommended"
+                } else {
+                    "optional"
+                };
+                format!(
+                    "{:<22} {tier} · {}",
+                    f.id,
+                    format!("{:?}", f.sensitivity).to_lowercase()
+                )
+            })
+            .collect();
+        nodes.push((format!("schema  ({} v{})", s.product, s.version), kids));
     }
     for b in &m.blocks {
         let header = format!(
@@ -260,6 +287,42 @@ pub fn tree(file: &Path, full: bool, out: &mut dyn Write) -> Result<()> {
             .map(|s| format!("{} <- {}", s.role, compact_reference(&s.reference, full)))
             .collect();
         nodes.push(("sources".to_string(), kids));
+    }
+    // The extension namespace (fd5 `extra/`) — the full DICOM header + other vendor/provenance blobs.
+    if !m.extra.is_empty() {
+        let kids = m
+            .extra
+            .iter()
+            .map(|(k, v)| {
+                let kind = match v {
+                    Value::Object(o) => format!("object, {} keys", o.len()),
+                    Value::Array(a) => format!("array, {} items", a.len()),
+                    Value::String(_) => "string".into(),
+                    other => other.to_string(),
+                };
+                format!("{k}  ({kind})")
+            })
+            .collect();
+        nodes.push(("extra".to_string(), kids));
+    }
+    // Adjacent sidecar files (outside the seal): the detached signature (ADR-0037), and — when
+    // present — the field-encryption envelope (ADR-0041). The seal itself is in the manifest, not
+    // a sidecar. Shown so `tree` reflects the whole on-disk product, not just the container.
+    let sidecars: Vec<String> = [
+        ("signature", tessera_io::sign::sidecar_path(file)),
+        ("field-encryption", file.with_extension("tsra.fcrypt.json")),
+    ]
+    .into_iter()
+    .filter(|(_, p)| p.exists())
+    .map(|(kind, p)| {
+        format!(
+            "{kind}: {}",
+            p.file_name().and_then(|s| s.to_str()).unwrap_or("?")
+        )
+    })
+    .collect();
+    if !sidecars.is_empty() {
+        nodes.push(("sidecars".to_string(), sidecars));
     }
 
     let last_node = nodes.len().saturating_sub(1);
@@ -410,11 +473,29 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
                 writeln!(out, "meta/  ({} fields)", m.metadata.len())
                     .map_err(tessera_core::Error::from)?;
             }
+            // The embedded product schema (self-describing) — navigable so `ls FILE schema` shows the
+            // declared field roster the file carries its own contract for.
+            if let Some(s) = m.schema.as_ref().and_then(embedded_schema) {
+                writeln!(
+                    out,
+                    "schema/  ({} v{}, {} fields)",
+                    s.product,
+                    s.version,
+                    s.fields.len()
+                )
+                .map_err(tessera_core::Error::from)?;
+            }
             for b in &m.blocks {
                 writeln!(out, "{:<18} {:?}", b.name, b.kind).map_err(tessera_core::Error::from)?;
             }
             if !m.sources.is_empty() {
                 writeln!(out, "sources/  ({} edges)", m.sources.len())
+                    .map_err(tessera_core::Error::from)?;
+            }
+            // The extension namespace (fd5 `extra/`) — vendor/provenance blobs like the full DICOM
+            // header (`dicom_header`) live here; `ls FILE extra/<key>` dumps one.
+            if !m.extra.is_empty() {
+                writeln!(out, "extra/  ({} keys)", m.extra.len())
                     .map_err(tessera_core::Error::from)?;
             }
             Ok(())
@@ -423,6 +504,58 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
             for (k, v) in &m.metadata {
                 writeln!(out, "{k} = {}", compact_value(v, full))
                     .map_err(tessera_core::Error::from)?;
+            }
+            Ok(())
+        }
+        Some("schema") | Some("schema/") => {
+            match m.schema.as_ref().and_then(embedded_schema) {
+                Some(s) => {
+                    writeln!(out, "{} v{} — {}", s.product, s.version, s.description)
+                        .map_err(tessera_core::Error::from)?;
+                    for f in &s.fields {
+                        let tier = if f.required {
+                            "required"
+                        } else if f.recommended {
+                            "recommended"
+                        } else {
+                            "optional"
+                        };
+                        let sens = format!("{:?}", f.sensitivity).to_lowercase();
+                        writeln!(out, "  {:<22} {tier:<12} {sens}", f.id)
+                            .map_err(tessera_core::Error::from)?;
+                    }
+                }
+                None => writeln!(
+                    out,
+                    "no embedded schema (file predates self-describing schemas; `tsra schema` uses the registry)"
+                )
+                .map_err(tessera_core::Error::from)?,
+            }
+            Ok(())
+        }
+        Some(p) if p == "extra" || p == "extra/" => {
+            for (k, v) in &m.extra {
+                let kind = match v {
+                    Value::Object(o) => format!("object, {} keys", o.len()),
+                    Value::Array(a) => format!("array, {} items", a.len()),
+                    Value::String(_) => "string".into(),
+                    other => other.to_string(),
+                };
+                writeln!(out, "{k}  ({kind})").map_err(tessera_core::Error::from)?;
+            }
+            Ok(())
+        }
+        Some(p) if p.starts_with("extra/") => {
+            let key = &p["extra/".len()..];
+            match m.extra.get(key) {
+                Some(v) => writeln!(out, "{}", serde_json::to_string_pretty(v)?)
+                    .map_err(tessera_core::Error::from)?,
+                None => {
+                    return Err(tessera_core::Error::Invalid(format!(
+                        "no extra key '{key}' (keys: {})",
+                        m.extra.keys().cloned().collect::<Vec<_>>().join(", ")
+                    )))
+                }
             }
             Ok(())
         }
@@ -1071,6 +1204,49 @@ mod tests {
         // A single-file edge with no hash stays a bare one-liner.
         let one = source_lines("derived_from", "manifest:blake3:abcd", None, false);
         assert_eq!(one, vec!["derived_from <- manifest:blake3:abcd"]);
+    }
+
+    #[test]
+    fn ls_and_tree_surface_schema_and_extra_nodes() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        use tessera_io::{array::ArrayData, pack};
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("r.tsra");
+        let spec = ArraySpec::new(vec![2, 2], "int16");
+        let (bref, payload) =
+            tessera_io::array::array_block("volume", &spec, &ArrayData::I16(vec![0, 1, 2, 3]))
+                .unwrap();
+        let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        // A representative extra blob (the shape #255 uses for the DICOM header).
+        b.with_extra(
+            "dicom_header",
+            serde_json::json!({"0010,0010": {"vr": "PN", "value": ["X"]}}),
+        );
+        let sealed = b.seal().unwrap(); // seal embeds the recon schema (self-describing)
+        pack(&sealed, &[payload], &p).unwrap();
+
+        // Top-level ls lists the embedded schema + the extra namespace as navigable nodes.
+        let mut top = Vec::new();
+        ls(&p, None, false, &mut top).unwrap();
+        let top = String::from_utf8(top).unwrap();
+        assert!(top.contains("schema/"), "{top}");
+        assert!(top.contains("extra/"), "{top}");
+
+        // `ls FILE schema` shows the declared field roster; `ls FILE extra/<key>` dumps the blob.
+        let mut sc = Vec::new();
+        ls(&p, Some("schema"), false, &mut sc).unwrap();
+        assert!(String::from_utf8(sc).unwrap().contains("modality"));
+        let mut ex = Vec::new();
+        ls(&p, Some("extra/dicom_header"), false, &mut ex).unwrap();
+        assert!(String::from_utf8(ex).unwrap().contains("0010,0010"));
+
+        // tree includes the schema + extra sub-trees.
+        let mut t = Vec::new();
+        tree(&p, false, &mut t).unwrap();
+        let t = String::from_utf8(t).unwrap();
+        assert!(t.contains("schema  (recon") && t.contains("extra"), "{t}");
     }
 
     #[test]
