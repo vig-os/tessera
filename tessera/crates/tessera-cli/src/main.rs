@@ -108,6 +108,7 @@ Inspect & navigate:
   read        Read table data as CSV/TSV/NDJSON (cross-block)
   stats       Numeric overview of an array block (shape, dtype, value range)
   slice       Pull a plane/line/point of an array block as CSV (--index z,:,:)
+  project     Collapse an array along an axis → 2-D image (--mode max|mean|sum)
   export      Emit a FAIR discovery record (JSON to stdout)
 
 Query (needs --features sql):
@@ -273,6 +274,28 @@ enum Cmd {
         /// world_frame). E.g. `--world "12.3,-45.6,80.0"`. Mutually exclusive with `--index`.
         #[arg(long, allow_hyphen_values = true, conflicts_with = "index")]
         world: Option<String>,
+        /// Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples.
+        #[arg(long)]
+        physical: bool,
+        /// Output format: `csv` (default) | `tsv`.
+        #[arg(long, default_value = "csv")]
+        format: String,
+    },
+    /// Collapse an **array** block along one axis into a projection image (MIP / mean / sum).
+    ///
+    /// A 3-D volume → a 2-D image. `--mode max` (MIP) over the z axis is the classic PET/CT overview.
+    /// `--axis` is an axis name (`z`/`y`/`x`) or index. `--physical` applies the rescale.
+    Project {
+        /// The `.tsra` to read.
+        file: PathBuf,
+        /// The array block to project (e.g. `volume`).
+        block: String,
+        /// Axis to collapse: a name from the array's axes (`z`/`y`/`x`) or a 0-based index.
+        #[arg(long)]
+        axis: String,
+        /// Reduction: `max` (MIP, default) | `mean` | `sum`.
+        #[arg(long, default_value = "max")]
+        mode: String,
         /// Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples.
         #[arg(long)]
         physical: bool,
@@ -898,6 +921,18 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 fmt,
                 &mut out,
             )
+        }
+        Cmd::Project {
+            file,
+            block,
+            axis,
+            mode,
+            physical,
+            format,
+        } => {
+            let fmt = nav::Format::parse(&format)?;
+            let mut out = std::io::stdout().lock();
+            nav::project(&file, &block, &axis, &mode, physical, fmt, &mut out)
         }
         Cmd::Init { repo } => {
             let mut out = std::io::stdout().lock();
