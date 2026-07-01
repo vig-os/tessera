@@ -216,7 +216,7 @@ fn status_line(file: &Path, m: &tessera_core::Manifest) -> String {
 
 /// `tessera tree FILE` — the whole hierarchy: root status, `meta` fields, every block (with its
 /// columns / array spec), and `sources`, drawn with box characters.
-pub fn tree(file: &Path, out: &mut dyn Write) -> Result<()> {
+pub fn tree(file: &Path, full: bool, out: &mut dyn Write) -> Result<()> {
     let r = Reader::open(file)?;
     let m = r.manifest();
     let name = file
@@ -231,7 +231,7 @@ pub fn tree(file: &Path, out: &mut dyn Write) -> Result<()> {
         let kids = m
             .metadata
             .iter()
-            .map(|(k, v)| format!("{k} = {}", compact_value(v)))
+            .map(|(k, v)| format!("{k} = {}", compact_value(v, full)))
             .collect();
         nodes.push(("meta".to_string(), kids));
     }
@@ -248,7 +248,7 @@ pub fn tree(file: &Path, out: &mut dyn Write) -> Result<()> {
         let kids = m
             .sources
             .iter()
-            .map(|s| format!("{} <- {}", s.role, s.reference))
+            .map(|s| format!("{} <- {}", s.role, compact_reference(&s.reference, full)))
             .collect();
         nodes.push(("sources".to_string(), kids));
     }
@@ -275,13 +275,13 @@ pub fn tree(file: &Path, out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
-/// Compact one-line render of a metadata JSON value (truncated if long).
-fn compact_value(v: &Value) -> String {
+/// Compact one-line render of a metadata JSON value. Truncated at 60 chars unless `full`.
+fn compact_value(v: &Value, full: bool) -> String {
     let s = match v {
         Value::String(s) => format!("\"{s}\""),
         other => other.to_string(),
     };
-    if s.chars().count() > 60 {
+    if !full && s.chars().count() > 60 {
         let head: String = s.chars().take(57).collect();
         format!("{head}…")
     } else {
@@ -289,10 +289,105 @@ fn compact_value(v: &Value) -> String {
     }
 }
 
+/// Middle-elide a string to `max` chars, keeping the head **and** the (informative) tail — for a
+/// filesystem path that means the filename survives. Returns as-is if already within `max`.
+fn elide(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1); // room for the ellipsis
+    let head = keep / 2;
+    let tail = keep - head;
+    let h: String = s.chars().take(head).collect();
+    let t: String = s.chars().skip(n - tail).collect();
+    format!("{h}…{t}")
+}
+
+/// Longest common **directory** prefix (path-component-wise) of a set of paths — the shared parent
+/// that lets `ls sources` print a group header once and relative filenames under it.
+fn common_dir<'a>(paths: &[&'a str]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    fn dir_of(p: &str) -> &str {
+        p.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
+    }
+    let mut prefix: Vec<&'a str> = dir_of(paths[0]).split('/').collect();
+    for p in &paths[1..] {
+        let comps: Vec<&str> = dir_of(p).split('/').collect();
+        let common = prefix
+            .iter()
+            .zip(comps.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        prefix.truncate(common);
+    }
+    prefix.join("/")
+}
+
+/// Compact one-line render of a provenance-edge reference. A DICOM-series `ingested_from` holds a
+/// **comma-joined list of every slice path** — rendered raw it floods the terminal with hundreds of
+/// KB. Collapse a list to `<first path> (+N more)` and middle-elide a long single path so its
+/// filename tail stays visible. `--full` bypasses this and prints the reference verbatim.
+pub(crate) fn compact_reference(reference: &str, full: bool) -> String {
+    if full {
+        return reference.to_string();
+    }
+    if let Some((first, rest)) = reference.split_once(',') {
+        let more = rest.split(',').filter(|s| !s.trim().is_empty()).count();
+        return format!("{} (+{more} more)", elide(first, 72));
+    }
+    elide(reference, 96)
+}
+
+/// The `ls sources` render of one provenance edge, as output lines. A single-file edge is one line
+/// (`role <- path`); a multi-file edge (a DICOM series) becomes a **group** — a `role <- N files in
+/// <common-dir>/` header, then one relative filename per line. Default caps the body at 8 entries
+/// with a `… (+N more)` footer; `full` lists every file. Pure (returns lines) so it is unit-testable.
+fn source_lines(role: &str, reference: &str, full: bool) -> Vec<String> {
+    let items: Vec<&str> = reference
+        .split(',')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .collect();
+    if items.len() <= 1 {
+        let one = if full {
+            reference.to_string()
+        } else {
+            elide(reference, 96)
+        };
+        return vec![format!("{role} <- {one}")];
+    }
+    let dir = common_dir(&items);
+    let where_ = if dir.is_empty() {
+        String::new()
+    } else {
+        format!(" in {dir}/")
+    };
+    let mut lines = vec![format!("{role} <- {} files{where_}", items.len())];
+    let show = if full {
+        items.len()
+    } else {
+        items.len().min(8)
+    };
+    for it in &items[..show] {
+        let rel = it.strip_prefix(&dir).unwrap_or(it).trim_start_matches('/');
+        lines.push(format!("    {rel}"));
+    }
+    if items.len() > show {
+        lines.push(format!(
+            "    … (+{} more, --full to list all)",
+            items.len() - show
+        ));
+    }
+    lines
+}
+
 /// `tessera ls FILE [PATH]` — list one node's children. No PATH lists the top level (`meta`, each
 /// block, `sources`); `PATH=meta` lists metadata fields; `PATH=<block>` lists a table's columns or
 /// an array's spec; `PATH=sources` lists provenance edges.
-pub fn ls(file: &Path, path: Option<&str>, out: &mut dyn Write) -> Result<()> {
+pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> Result<()> {
     let r = Reader::open(file)?;
     let m = r.manifest();
     match path {
@@ -312,14 +407,19 @@ pub fn ls(file: &Path, path: Option<&str>, out: &mut dyn Write) -> Result<()> {
         }
         Some("meta") | Some("meta/") => {
             for (k, v) in &m.metadata {
-                writeln!(out, "{k} = {}", compact_value(v)).map_err(tessera_core::Error::from)?;
+                writeln!(out, "{k} = {}", compact_value(v, full))
+                    .map_err(tessera_core::Error::from)?;
             }
             Ok(())
         }
         Some("sources") | Some("sources/") => {
+            // `ls sources` is the drill-down: a multi-file edge (a DICOM series' `ingested_from`
+            // holds a comma-joined path list) is exploded and **grouped by common directory** so it
+            // reads as a real listing — count + shared dir header, then relative filenames.
             for s in &m.sources {
-                writeln!(out, "{} <- {}", s.role, s.reference)
-                    .map_err(tessera_core::Error::from)?;
+                for line in source_lines(&s.role, &s.reference, full) {
+                    writeln!(out, "{line}").map_err(tessera_core::Error::from)?;
+                }
             }
             Ok(())
         }
@@ -533,7 +633,7 @@ mod tests {
         let p = dir.path().join("p.tsra");
         sample(&p);
         let mut buf = Vec::new();
-        tree(&p, &mut buf).unwrap();
+        tree(&p, false, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("product=listmode"));
         assert!(s.contains("schema=listmode")); // known schema; ✓/✗ depends on field completeness
@@ -549,12 +649,77 @@ mod tests {
         let p = dir.path().join("p.tsra");
         sample(&p);
         let mut top = Vec::new();
-        ls(&p, None, &mut top).unwrap();
+        ls(&p, None, false, &mut top).unwrap();
         assert!(String::from_utf8(top).unwrap().contains("events"));
         let mut cols = Vec::new();
-        ls(&p, Some("events"), &mut cols).unwrap();
+        ls(&p, Some("events"), false, &mut cols).unwrap();
         let s = String::from_utf8(cols).unwrap();
         assert!(s.contains("ms") && s.contains("en"));
+    }
+
+    #[test]
+    fn compact_reference_collapses_a_dicom_series_list() {
+        // A DICOM-series `ingested_from`: many comma-joined slice paths under one dir.
+        let dir = "/data/KSB/STUDY/VEN_CT_LUNG_0006";
+        let refs: String = (1..=890)
+            .map(|i| format!("{dir}/CT.0006.{i:04}.IMA"))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        // Default: collapse to "<first> (+N more)", and never dump the whole blob.
+        let compact = compact_reference(&refs, false);
+        assert!(compact.contains("(+889 more)"), "got: {compact}");
+        assert!(compact.chars().count() < 120, "still noisy: {compact}");
+        assert!(
+            !compact.contains("0002.IMA"),
+            "leaked the 2nd path: {compact}"
+        );
+
+        // --full is verbatim.
+        assert_eq!(compact_reference(&refs, true), refs);
+
+        // A single long path (>96 chars) middle-elides but keeps the filename tail.
+        let one = format!(
+            "{dir}/DUPLET-FAPI_07_CHERICO.CT.SPECIALS_DUPLET_PETCT.0006.0001.2026.06.24.20.07.21.880659.6623611.IMA"
+        );
+        assert!(one.chars().count() > 96);
+        let e = compact_reference(&one, false);
+        assert!(e.contains('…') && e.ends_with(".IMA"), "got: {e}");
+    }
+
+    #[test]
+    fn common_dir_finds_the_shared_parent() {
+        let paths = ["/a/b/c/one.IMA", "/a/b/c/two.IMA", "/a/b/c/three.IMA"];
+        assert_eq!(common_dir(&paths), "/a/b/c");
+        // Divergent parents collapse to the shared prefix.
+        assert_eq!(common_dir(&["/a/b/x/one", "/a/b/y/two"]), "/a/b");
+        assert_eq!(common_dir(&[]), "");
+    }
+
+    #[test]
+    fn ls_sources_groups_a_multi_file_edge() {
+        // 890 slices under one series dir → a grouped listing, not an 890-path comma blob.
+        let dir = "/data/KSB/STUDY/VEN_CT_LUNG_0006";
+        let refs: String = (1..=890)
+            .map(|i| format!("{dir}/CT.0006.{i:04}.IMA"))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let lines = source_lines("ingested_from", &refs, false);
+        // Header + 8 shown files + a "(+882 more)" footer = 10 lines.
+        assert_eq!(lines.len(), 10, "{lines:#?}");
+        assert_eq!(lines[0], format!("ingested_from <- 890 files in {dir}/"));
+        assert_eq!(lines[1], "    CT.0006.0001.IMA"); // relative to the common dir
+        assert_eq!(lines[9], "    … (+882 more, --full to list all)");
+
+        // --full lists every file: header + 890 files, no footer.
+        let full = source_lines("ingested_from", &refs, true);
+        assert_eq!(full.len(), 891);
+        assert!(full.last().unwrap().ends_with("CT.0006.0890.IMA"));
+
+        // A single-file edge stays a one-liner.
+        let one = source_lines("derived_from", "manifest:blake3:abcd", false);
+        assert_eq!(one, vec!["derived_from <- manifest:blake3:abcd"]);
     }
 
     #[test]

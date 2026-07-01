@@ -106,6 +106,10 @@ enum Cmd {
     Inspect {
         /// The `.tsra` to summarise (or an `s3://` / `http(s)://` URL with the `cloud` feature).
         file: PathBuf,
+        /// Print provenance references in full (a DICOM series' `ingested_from` lists every slice
+        /// path); default collapses a multi-file edge to `<first> (+N more)`.
+        #[arg(long)]
+        full: bool,
     },
     /// Verify a `.tsra`'s integrity (magic, seal, every block digest).
     ///
@@ -124,6 +128,9 @@ enum Cmd {
     Tree {
         /// The `.tsra` to render.
         file: PathBuf,
+        /// Print provenance references in full instead of collapsing a multi-file edge.
+        #[arg(long)]
+        full: bool,
     },
     /// List one node's children (top level, `meta`, a block, or `sources`).
     ///
@@ -134,6 +141,9 @@ enum Cmd {
         file: PathBuf,
         /// Node to list (a block name, `meta`, or `sources`). Omit for the top level.
         path: Option<String>,
+        /// For `sources`: list every file in a multi-file edge instead of the first 8.
+        #[arg(long)]
+        full: bool,
     },
     /// Read table data as CSV/TSV/NDJSON over the logical cross-block view.
     ///
@@ -627,7 +637,7 @@ fn main() -> ExitCode {
 
 fn run(cmd: Cmd) -> tessera_core::Result<()> {
     match cmd {
-        Cmd::Inspect { file } => {
+        Cmd::Inspect { file, full } => {
             let r = open_local_or_url(&file)?;
             let m = r.manifest();
             println!("tessera {} · product={}", m.tessera_version, m.product);
@@ -654,7 +664,11 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             if !m.sources.is_empty() {
                 println!("sources       {}", m.sources.len());
                 for s in &m.sources {
-                    println!("  - {} <- {}", s.role, s.reference);
+                    println!(
+                        "  - {} <- {}",
+                        s.role,
+                        nav::compact_reference(&s.reference, full)
+                    );
                 }
             }
             Ok(())
@@ -668,13 +682,13 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             println!("OK  {} verified ({n} blocks)", file.display());
             Ok(())
         }
-        Cmd::Tree { file } => {
+        Cmd::Tree { file, full } => {
             let mut out = std::io::stdout().lock();
-            nav::tree(&file, &mut out)
+            nav::tree(&file, full, &mut out)
         }
-        Cmd::Ls { file, path } => {
+        Cmd::Ls { file, path, full } => {
             let mut out = std::io::stdout().lock();
-            nav::ls(&file, path.as_deref(), &mut out)
+            nav::ls(&file, path.as_deref(), full, &mut out)
         }
         Cmd::Read {
             file,
@@ -1359,7 +1373,11 @@ mod tests {
         sample_tsra(&tsra);
 
         run(Cmd::Verify { file: tsra.clone() }).unwrap();
-        run(Cmd::Inspect { file: tsra.clone() }).unwrap();
+        run(Cmd::Inspect {
+            file: tsra.clone(),
+            full: false,
+        })
+        .unwrap();
         run(Cmd::Schema { file: tsra.clone() }).unwrap();
 
         let exploded = dir.path().join("exploded");
@@ -1445,7 +1463,11 @@ mod tests {
         // an `ingested_via_spec` edge on every member it produces (including the synthesised
         // 1-product spec the per-format CLI builds), so the source count goes from 1 to 2.
         run(Cmd::Verify { file: out.clone() }).unwrap();
-        run(Cmd::Inspect { file: out.clone() }).unwrap();
+        run(Cmd::Inspect {
+            file: out.clone(),
+            full: false,
+        })
+        .unwrap();
         let r = Reader::open(&out).unwrap();
         assert_eq!(r.manifest().product, "listmode");
         assert_eq!(r.manifest().sources.len(), 2);
