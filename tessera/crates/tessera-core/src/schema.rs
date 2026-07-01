@@ -421,12 +421,12 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                     "string",
                 )
                 .with_sensitivity(Sensitivity::Identifying),
-                // ── DICOM curated-tag port (issue #dicom-metadata) ─────────────────────────
+                // ── DICOM curated-tag port (#253) ──────────────────────────────────────────
                 // Ported straight from the DICOM header at ingest time. Sensitivity tiers
-                // seeded from PS3.15: the UIDs link back to the patient/study (Identifying);
-                // StudyDate is scan context that is not directly identifying on its own but
-                // is access-controlled (Sensitive, per ADR-0040 §1); the vendor + geometry
-                // tags describe the scanner, not the patient (Public).
+                // seeded from PS3.15 — the UIDs link back to the patient/study so they are
+                // Identifying, StudyDate is access-controlled scan context so Sensitive (per
+                // ADR-0040 §1), and the vendor + geometry tags describe the scanner not the
+                // patient so Public.
                 FieldSpec::recommended(
                     "study_instance_uid",
                     "DICOM StudyInstanceUID (0020,000D) — PS3.15 UID family, links back to the patient/study",
