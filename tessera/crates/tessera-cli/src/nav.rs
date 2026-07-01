@@ -192,14 +192,17 @@ fn block_children(kind: &BlockKind, spec: &Value) -> Vec<String> {
 }
 
 /// `product` + schema-validity + seal + signature badges for the tree root / inspect header.
+/// Validation is against the **embedded** schema when the file carries one (self-describing), else
+/// the built-in registry (legacy / open-world) — see [`tessera_core::validate_manifest`].
 fn status_line(file: &Path, m: &tessera_core::Manifest) -> String {
-    let reg = SchemaRegistry::builtin();
-    let schema = match reg.get(&m.product) {
-        Some(_) => match reg.validate(m) {
+    let known = m.schema.is_some() || SchemaRegistry::builtin().get(&m.product).is_some();
+    let schema = if known {
+        match tessera_core::validate_manifest(m) {
             Ok(()) => format!("schema={}✓", m.product),
             Err(_) => format!("schema={}✗", m.product),
-        },
-        None => format!("schema={}(open-world)", m.product),
+        }
+    } else {
+        format!("schema={}(open-world)", m.product)
     };
     let sealed = if m.manifest_hash.is_some() {
         "sealed"

@@ -29,7 +29,7 @@ pub use collection::{Collection, CollectionBuilder, CollectionMember, Role};
 pub use error::{Error, Result};
 pub use manifest::Manifest;
 pub use product::ProductBuilder;
-pub use schema::SchemaRegistry;
+pub use schema::{validate_manifest, ProductSchema, SchemaRegistry};
 
 #[cfg(test)]
 mod tests {

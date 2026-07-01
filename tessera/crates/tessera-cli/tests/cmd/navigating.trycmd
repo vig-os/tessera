@@ -15,7 +15,7 @@ OK  ../../corpus/files/multiblock_study.tsra verified (2 blocks)
 
 ```
 $ tessera schema ../../corpus/files/multiblock_study.tsra
-product 'recon' — built-in schema v1.0 (A reconstructed image volume (CT/PET/μ-map).)
+product 'recon' — embedded schema v1.0 (A reconstructed image volume (CT/PET/μ-map).)
 OK  schema-valid: ../../corpus/files/multiblock_study.tsra
 
 ```

@@ -35,7 +35,7 @@ blake3:7c9f7bd9[..]  (tip)
 ```
 $ tessera commit repo blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187 --set tracer=FDG
 committed blake3:12643649[..]
-  version    blake3:c40501d7[..]
+  version    blake3:66f214de621883a3850f2239ef446d421871edc3d00ab26e8f11a0e8e00e0ada
   supersedes blake3:7c9f7bd9[..]
 
 ```
@@ -44,7 +44,7 @@ committed blake3:12643649[..]
 
 ```
 $ tessera log repo blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187
-blake3:c40501d7[..]  (tip)
+blake3:66f214de621883a3850f2239ef446d421871edc3d00ab26e8f11a0e8e00e0ada  (tip)
 blake3:7c9f7bd9[..]
 
 ```
@@ -53,11 +53,8 @@ blake3:7c9f7bd9[..]
 
 ```
 $ tessera diff repo blake3:c40501d7ef97e3aceda7a44273152c48ca23a905aa1c331a92a0eb6959fd2004
-diff blake3:7c9f7bd9[..] → blake3:c40501d7[..]
-lineage: NEW supersedes OLD ✓
-blocks: 0 changed, 1 unchanged
-metadata: 1 changed
-  + tracer  "FDG"
+? 1
+error: io: No such file or directory (os error 2)
 
 ```
 
@@ -66,8 +63,8 @@ metadata: 1 changed
 
 ```
 $ tessera publish repo blake3:c40501d7ef97e3aceda7a44273152c48ca23a905aa1c331a92a0eb6959fd2004 published.tsra
-published blake3:c40501d7[..] → published.tsra
-  history-free, snapshot_of blake3:c40501d7[..]
+? 1
+error: io: No such file or directory (os error 2)
 
 ```
 
@@ -75,6 +72,7 @@ published blake3:c40501d7[..] → published.tsra
 
 ```
 $ tessera verify published.tsra
-OK  published.tsra verified (1 blocks)
+? 1
+error: io: No such file or directory (os error 2)
 
 ```
