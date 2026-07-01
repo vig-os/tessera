@@ -15,6 +15,9 @@ Inspect & navigate:
   slice       Pull a plane/line/point of an array block as CSV (--index z,:,:)
   export      Emit a FAIR discovery record (JSON to stdout)
 
+Query (needs --features sql):
+  sql         Run SQL (DataFusion) over a table block
+
 Ingest & pack:
   ingest      Ingest a vendor file (or a declarative --spec) into a sealed .tsra
   pack        Pack an exploded dir (manifest.json + blocks/) into a sealed .tsra

@@ -354,6 +354,23 @@
               ++ [ minio pkgs.awscli2 pkgs.curl pkgs.cacert ];
           });
 
+          # **DataFusion SQL surface** (#251 spike): the `sql` feature adds `tessera sql <FILE>
+          # "<QUERY>"` — Vortex → Arrow → DataFusion in-process. The unit tests under `sql::tests`
+          # are `#[cfg(feature = "sql")]`, so the default `workspace-test` gate does NOT run them
+          # (default features exclude the ~200-crate DataFusion tree). This dedicated check runs
+          # the CLI's sql-feature tests only — same pattern as `minio-range-read` for the cloud
+          # feature. Clippy already covers `--all-features` at compile-time, so this test is what
+          # proves the query actually EXECUTES (WHERE + ORDER BY + LIMIT round-trip).
+          sql-tests = craneLib.cargoNextest (commonArgs // {
+            inherit cargoArtifacts;
+            # `sql::tests::*` runs the DataFusion SessionContext path end-to-end (register table,
+            # execute query, collect batches). The positional `sql` filter matches every test
+            # name in the `sql` module — DataFusion 54 pins arrow-58, so cargo unifies with the
+            # arrow-58 the workspace already has (via Vortex 0.75); a version mismatch would
+            # fail to link, not to test.
+            cargoExtraArgs = "-p tessera-cli --features sql sql::";
+          });
+
           # guardrails agent-drift gates over the Rust source (code gates) + repo-wide structural
           # gates. cargo-deny stays a pre-commit gate (needs network for the advisory DB).
           guardrails-gates = pkgs.runCommand "guardrails-gates"
