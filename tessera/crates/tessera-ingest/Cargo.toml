@@ -22,6 +22,9 @@ hdf5-metno.workspace = true
 hdf5-metno-sys.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Offline crypto-shred de-identification (ADR-0047 / #269): encrypt the DICOM identity document to
+# recipient `age` public keys. Host-only encrypt path; the decrypt (`reidentify`) lives in tessera-cli.
+age.workspace = true
 # Declarative ingest spec: pure-Rust TOML parser for `tessera-ingest::spec`. The engine canonicalizes
 # the *parsed* model (JCS) before hashing, so whitespace / comments in the source TOML never change
 # the spec hash that flows into each member's `ingested_via_spec` provenance edge.

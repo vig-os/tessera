@@ -105,6 +105,31 @@ fn write_private(path: &Path, contents: &str) -> Result<()> {
     std::fs::write(path, contents).map_err(Error::from)
 }
 
+/// Generate an `age` X25519 keypair for crypto-shred de-identification (ADR-0047 / `keygen --age`).
+/// The secret (`AGE-SECRET-KEY-1…`, mode 0600) goes to `out` — pass it to `tessera reidentify
+/// --identity`; the recipient public key (`age1…`) goes to `OUT.pub` — pass it to
+/// `tessera ingest … --recipient`. Distinct from the ed25519 **signing** key [`keygen`] writes.
+pub fn keygen_age(out: &Path, w: &mut dyn Write) -> Result<()> {
+    let (secret, public) = tessera_ingest::identity::generate_keypair();
+    let pub_path = with_suffix(out, ".pub");
+    write_private(out, &format!("{secret}\n"))?;
+    std::fs::write(&pub_path, format!("{public}\n")).map_err(Error::from)?;
+    writeln!(
+        w,
+        "wrote age identity {} (keep secret — mode 0600; for `tessera reidentify --identity`)",
+        out.display()
+    )
+    .map_err(Error::from)?;
+    writeln!(
+        w,
+        "wrote age recipient {} (share freely; for `tessera ingest … --recipient`)",
+        pub_path.display()
+    )
+    .map_err(Error::from)?;
+    writeln!(w, "  recipient {public}").map_err(Error::from)?;
+    Ok(())
+}
+
 // ---- trust store ----
 
 /// Search order for trusted keys: a repo-local `.tessera/trust/`, then the user store

@@ -44,15 +44,17 @@ use crate::spec::{spec_hash, validate, FormatOptions, IngestSpec, StreamingMode}
 /// the parsed model).
 pub const SPEC_PROVENANCE_ROLE: &str = "ingested_via_spec";
 
-/// Loud warning when a DICOM ingest seals WITHOUT `--deidentify`: the full header (including PHI —
-/// patient name/ID/DOB) enters `extra/dicom_header` in the clear (#269). De-id is opt-in today; this
-/// makes the omission non-silent so an operator can't ship identifiable data by forgetting a flag.
+/// Loud warning when a DICOM ingest seals WITHOUT any de-identification. The raw header is no longer
+/// embedded on this path (#269 leak fix — [`without_raw_header`]), but the curated `identifying`-tier
+/// fields (patient pseudonym, study/series UIDs) are still sealed in the clear. Non-silent so an
+/// operator can't ship identifiable data by forgetting a flag.
 fn warn_dicom_not_deidentified() {
     tracing::warn!(
         target: "tessera::ingest",
-        "PHI RISK: ingesting DICOM WITHOUT --deidentify — patient identifiers (name/ID/DOB) and the \
-         full header are sealed in the clear. Pass --deidentify to strip PS3.15 tags (see ADR-0040), \
-         and/or --source-label to redact the source path."
+        "PHI RISK: ingesting DICOM without de-identification — curated identifying fields (patient \
+         pseudonym, study/series UIDs) are sealed in the clear. Pass --deidentify to strip PS3.15 \
+         tags (ADR-0040), --recipient <age-pubkey> to crypto-shred (de-identify + keep a recoverable \
+         encrypted copy, ADR-0047), and/or --source-label to redact the source path."
     );
 }
 
@@ -267,12 +269,23 @@ fn dispatch(
                 seal_streaming_to_tsra(m, &[("data".to_string(), input.as_path())], out_dir, p)?;
             Ok((m, ()))
         }
-        FormatOptions::Dicom { input, deidentify } => {
-            let img = if *deidentify {
-                crate::dicom::read_image_deidentified(input)?
+        FormatOptions::Dicom {
+            input,
+            deidentify,
+            recipients,
+        } => {
+            let recips = parse_recipients(recipients)?;
+            // Three modes (ADR-0047): crypto-shred (recipients present) → de-id + recoverable
+            // encrypted identity; destructive de-id (`deidentify`) → PHI dropped; keep-PHI default →
+            // curated fields retained but the raw header is NOT embedded (#269 leak fix).
+            let (img, identity) = if !recips.is_empty() {
+                let (img, id) = crate::dicom::read_image_crypto_shred(input)?;
+                (img, Some(id))
+            } else if *deidentify {
+                (crate::dicom::read_image_deidentified(input)?, None)
             } else {
                 warn_dicom_not_deidentified();
-                crate::dicom::read_image(input)?
+                (without_raw_header(crate::dicom::read_image(input)?), None)
             };
             let source = label
                 .map(str::to_string)
@@ -287,18 +300,28 @@ fn dispatch(
                 extra_sources,
             )?;
             let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
+            attach_identity_envelope(out_dir, &m, identity.as_ref(), &recips)?;
             Ok((m, ()))
         }
-        FormatOptions::DicomSeries { inputs, deidentify } => {
+        FormatOptions::DicomSeries {
+            inputs,
+            deidentify,
+            recipients,
+        } => {
             // PS3.15 de-id for a series is per-file on the raw object; we route to
             // `read_series_deidentified`, which opens each slice, applies `deidentify` in memory,
             // then decodes — so PHI never reaches the stacked volume. The pixels are identical to
-            // the non-de-id path (de-id only touches metadata).
-            let img = if *deidentify {
-                crate::dicom::read_series_deidentified(inputs)?
+            // the non-de-id path (de-id only touches metadata). Crypto-shred (ADR-0047) additionally
+            // captures the identity for an encrypted `aux/identity` envelope.
+            let recips = parse_recipients(recipients)?;
+            let (img, identity) = if !recips.is_empty() {
+                let (img, id) = crate::dicom::read_series_crypto_shred(inputs)?;
+                (img, Some(id))
+            } else if *deidentify {
+                (crate::dicom::read_series_deidentified(inputs)?, None)
             } else {
                 warn_dicom_not_deidentified();
-                crate::dicom::read_series(inputs)?
+                (without_raw_header(crate::dicom::read_series(inputs)?), None)
             };
             // With a `source_label`, recording N paths joined with commas is exactly what the label
             // exists to suppress (an 890-slice series would embed each path verbatim). When no label
@@ -323,6 +346,7 @@ fn dispatch(
                 extra_sources,
             )?;
             let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
+            attach_identity_envelope(out_dir, &m, identity.as_ref(), &recips)?;
             Ok((m, ()))
         }
         FormatOptions::Nifti { input } => {
@@ -496,6 +520,49 @@ fn seal_to_tsra(
     // Silenced under `TESSERA_SKIP_PROVENANCE=1` for the tests that DO compare whole-archive bytes.
     stamp_ingest_provenance(&path, &ProvenanceOptions::default())?;
     Ok(m)
+}
+
+/// Parse the crypto-shred recipient list (ADR-0047) — `age` public-key strings from the spec /
+/// `--recipient` — into typed recipients. An empty list means "not crypto-shred" (the common case),
+/// so this returns an empty `Vec` without error; a malformed key is a hard, typed error.
+fn parse_recipients(recipients: &[String]) -> Result<Vec<age::x25519::Recipient>> {
+    recipients
+        .iter()
+        .map(|s| crate::identity::parse_recipient(s))
+        .collect()
+}
+
+/// #269 raw-header leak fix: on the keep-PHI (non-de-identified, non-crypto-shred) path, blank the
+/// full DICOM header so it is **never** embedded into `extra["dicom_header"]` of a shareable, sealed
+/// product. Identifying material lands in a shared product only via the encrypted crypto-shred
+/// envelope (ADR-0047) or a deliberate de-id — never as a raw plaintext header (user decision).
+fn without_raw_header(mut img: crate::dicom::DicomImage) -> crate::dicom::DicomImage {
+    img.header_json = serde_json::Value::Null;
+    img
+}
+
+/// Attach the crypto-shred identity envelope (ADR-0047) to the just-sealed `.tsra`. Encrypts the
+/// captured [`IdentityDocument`] to `recipients` and writes it as the non-sealed aux member
+/// `aux/identity/identity.age` (outside the seal, so `id`/`content_hash`/`manifest_hash` are
+/// unchanged — a crypto-shred product and a plain de-id product share all three). A no-op when there
+/// is no identity to attach (the non-crypto-shred paths pass `None`).
+fn attach_identity_envelope(
+    out_dir: &Path,
+    m: &Manifest,
+    identity: Option<&crate::identity::IdentityDocument>,
+    recipients: &[age::x25519::Recipient],
+) -> Result<()> {
+    let Some(doc) = identity else { return Ok(()) };
+    let envelope = crate::identity::encrypt_identity(doc, recipients)?;
+    let path = out_dir.join(format!("{}.tsra", sanitize_filename(&m.id)));
+    tessera_io::add_aux_members(
+        &path,
+        &[tessera_io::AuxMember::new(
+            crate::identity::AUX_IDENTITY_NAME,
+            envelope,
+        )],
+    )?;
+    Ok(())
 }
 
 /// Bounded-memory counterpart of [`seal_to_tsra`]: identical metadata + naming, but the block payloads

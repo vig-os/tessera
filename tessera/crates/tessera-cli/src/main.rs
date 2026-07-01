@@ -142,6 +142,10 @@ Signing & trust:
   sign        Sign a sealed .tsra (embeds aux/signatures/<key_id>.sig.json; --sidecar for detached)
   verify-sig  Verify a sealed .tsra against its signature (embedded first, sidecar fallback)
 
+Confidentiality (crypto-shred):
+  reidentify  Recover a crypto-shred product's identity with a recipient private key (ADR-0047)
+  shred       Permanently remove a product's identity envelope (aux/identity)
+
 Diagnostics:
   bench       Bench the write engine on this host (throughput + peak RSS)
 
@@ -535,6 +539,10 @@ enum Cmd {
     Keygen {
         /// Output path for the private key seed (the public key is written to `OUT.pub`).
         out: PathBuf,
+        /// Generate an `age` X25519 keypair for crypto-shred de-identification (ADR-0047) instead of
+        /// the default ed25519 **signing** key. The secret goes to OUT, the recipient to `OUT.pub`.
+        #[arg(long)]
+        age: bool,
     },
     /// Manage the trust store of public keys `verify-sig` accepts.
     Trust {
@@ -573,6 +581,31 @@ enum Cmd {
         /// Also require the signature's `signer` to equal this identity (e.g. an ORCID iD URL).
         #[arg(long)]
         require_signer: Option<String>,
+    },
+    /// Recover a crypto-shred product's identity with a recipient private key (ADR-0047).
+    ///
+    /// Decrypts the `aux/identity/identity.age` envelope carried inside a `--crypto-shred` product
+    /// and prints the recovered identity document (full DICOM header + curated identifying fields).
+    /// The sealed product itself is de-identified; this is the "un-SOP" that a key holder can do.
+    Reidentify {
+        /// The crypto-shred `.tsra` to re-identify.
+        file: PathBuf,
+        /// Recipient `age` identity (private key) file — the `AGE-SECRET-KEY-1…` produced alongside
+        /// the recipient public key given to `ingest --recipient`.
+        #[arg(long)]
+        identity: PathBuf,
+        /// Write the recovered identity JSON here instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Crypto-shred: permanently remove a product's identity envelope (ADR-0047).
+    ///
+    /// Drops `aux/identity/` from the `.tsra` in place. The seal is untouched (the envelope rides
+    /// outside it), so the file still verifies — the identifying material is simply gone from this
+    /// copy. Combined with destroying the recipient private key, it is gone everywhere.
+    Shred {
+        /// The `.tsra` whose identity envelope to remove.
+        file: PathBuf,
     },
     /// Run SQL (DataFusion) over a `.tsra` table block (needs `--features sql`).
     ///
@@ -692,6 +725,12 @@ enum IngestSrc {
         /// Apply PS3.15 de-identification (drop PHI tags) before encoding.
         #[arg(long)]
         deidentify: bool,
+        /// Crypto-shred de-identification (ADR-0047): de-identify AND encrypt the stripped identity to
+        /// this `age` recipient public key (`age1…`), carried as an `aux/identity` envelope inside the
+        /// `.tsra`. Repeatable for multiple recipients. `tessera reidentify` recovers it with the
+        /// matching private key; `tessera shred` (or destroying the key) makes it irrecoverable.
+        #[arg(long = "recipient", value_name = "AGE_PUBKEY")]
+        recipient: Vec<String>,
         /// Clean label for the `ingested_from` provenance edge — replaces the input PATH in the
         /// sealed manifest (ADR-0040 PHI hygiene: an absolute path on clinical data is itself PHI).
         #[arg(long, value_name = "LABEL")]
@@ -720,6 +759,11 @@ enum IngestSrc {
         /// the volume is stacked; source files are NOT mutated).
         #[arg(long)]
         deidentify: bool,
+        /// Crypto-shred de-identification (ADR-0047): de-identify AND encrypt the stripped identity to
+        /// this `age` recipient public key, carried as an `aux/identity` envelope. Repeatable. See
+        /// `tessera reidentify` / `tessera shred`.
+        #[arg(long = "recipient", value_name = "AGE_PUBKEY")]
+        recipient: Vec<String>,
         /// Clean label for the `ingested_from` provenance edge — replaces the per-slice joined paths
         /// (an N-slice series would embed N PHI-bearing absolute paths). ADR-0040.
         #[arg(long, value_name = "LABEL")]
@@ -857,6 +901,40 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 r.read_block_by_name(&name)?; // payload bytes vs recorded digest
             }
             println!("OK  {} verified ({n} blocks)", file.display());
+            Ok(())
+        }
+        Cmd::Reidentify {
+            file,
+            identity,
+            out,
+        } => {
+            // The recipient private key (`AGE-SECRET-KEY-1…`), read from disk and never logged.
+            let key = std::fs::read_to_string(&identity)?;
+            let mut r = Reader::open(&file)?;
+            let envelope = r
+                .read_aux(tessera_ingest::identity::AUX_IDENTITY_NAME)
+                .map_err(|_| {
+                    tessera_core::Error::Invalid(format!(
+                        "{} carries no crypto-shred identity envelope (aux/{}) — was it ingested with --recipient?",
+                        file.display(),
+                        tessera_ingest::identity::AUX_IDENTITY_NAME
+                    ))
+                })?;
+            let doc = tessera_ingest::identity::decrypt_identity(&envelope, &key)?;
+            let json = serde_json::to_string_pretty(&doc)?;
+            match out {
+                Some(p) => {
+                    std::fs::write(&p, json)?;
+                    println!("recovered identity -> {}", p.display());
+                }
+                None => println!("{json}"),
+            }
+            Ok(())
+        }
+        Cmd::Shred { file } => {
+            // Remove aux/identity/* in place; the seal (id/content_hash/manifest_hash) is untouched.
+            tessera_io::write_aux_members(&file, &[], &["identity/"])?;
+            println!("shredded identity envelope from {}", file.display());
             Ok(())
         }
         Cmd::Tree { file, full } => {
@@ -1241,9 +1319,13 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             }
             Ok(())
         }
-        Cmd::Keygen { out } => {
+        Cmd::Keygen { out, age } => {
             let mut w = std::io::stdout().lock();
-            trust::keygen(&out, &mut w)
+            if age {
+                trust::keygen_age(&out, &mut w)
+            } else {
+                trust::keygen(&out, &mut w)
+            }
         }
         Cmd::Trust { action } => {
             let mut w = std::io::stdout().lock();
@@ -1507,6 +1589,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             name,
             timestamp,
             deidentify,
+            recipient,
             source_label,
             meta,
         } => (
@@ -1526,7 +1609,11 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     derived_from: Vec::new(),
                     source_label,
                     metadata: parse_meta(&meta)?,
-                    options: FormatOptions::Dicom { input, deidentify },
+                    options: FormatOptions::Dicom {
+                        input,
+                        deidentify,
+                        recipients: recipient,
+                    },
                 }],
             },
             out,
@@ -1537,6 +1624,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             name,
             timestamp,
             deidentify,
+            recipient,
             source_label,
             meta,
         } => (
@@ -1556,7 +1644,11 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     derived_from: Vec::new(),
                     source_label,
                     metadata: parse_meta(&meta)?,
-                    options: FormatOptions::DicomSeries { inputs, deidentify },
+                    options: FormatOptions::DicomSeries {
+                        inputs,
+                        deidentify,
+                        recipients: recipient,
+                    },
                 }],
             },
             out,
@@ -1980,6 +2072,7 @@ streaming = "batch"
                 name: "x".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
                 deidentify: false,
+                recipient: vec![],
                 source_label: None,
                 meta: vec![],
             }),
@@ -2013,6 +2106,7 @@ streaming = "batch"
                 name: "DP06-ct".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
                 deidentify: true,
+                recipient: vec![],
                 source_label: None,
                 meta: vec![],
             }),
@@ -2104,6 +2198,7 @@ streaming = "batch"
                 name: "DP06-ct".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
                 deidentify: true,
+                recipient: vec![],
                 source_label: Some("DUPLET-07/CT".into()),
                 meta: vec![],
             }),
@@ -2126,6 +2221,251 @@ streaming = "batch"
             "PHI-bearing slice path must not appear in the sealed manifest, got: {}",
             ingested_from.reference
         );
+    }
+
+    /// Write one minimal PHI-bearing CT `.dcm` at `path` (shared by the crypto-shred tests). The
+    /// patient name / id are the sentinels the tests assert never leak into the sealed product.
+    #[cfg(test)]
+    fn write_phi_dcm(path: &std::path::Path, patient: &str, pid: &str) {
+        use dicom::core::{DataElement, PrimitiveValue, Tag, VR};
+        use dicom::object::meta::FileMetaTableBuilder;
+        use dicom::object::InMemDicomObject;
+        let pixels: Vec<u16> = (0..64).map(|k| 1000 + k as u16).collect();
+        let obj = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, PrimitiveValue::from("CT")),
+            DataElement::new(Tag(0x0028, 0x0010), VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(Tag(0x0028, 0x0011), VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(Tag(0x0020, 0x0013), VR::IS, PrimitiveValue::from("1")),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(
+                Tag(0x0028, 0x0004),
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2"),
+            ),
+            DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(16u16)),
+            DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(16u16)),
+            DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(15u16)),
+            DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x1052), VR::DS, PrimitiveValue::from("-1024")),
+            DataElement::new(Tag(0x0028, 0x1053), VR::DS, PrimitiveValue::from("1")),
+            DataElement::new(Tag(0x0010, 0x0010), VR::PN, PrimitiveValue::from(patient)),
+            DataElement::new(Tag(0x0010, 0x0020), VR::LO, PrimitiveValue::from(pid)),
+            DataElement::new(
+                Tag(0x7FE0, 0x0010),
+                VR::OW,
+                PrimitiveValue::U16(pixels.into()),
+            ),
+        ]);
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax("1.2.840.10008.1.2.1")
+            .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.2")
+            .media_storage_sop_instance_uid("1.2.3.cs.1")
+            .implementation_class_uid("1.2.826.0.1.3680043.tessera")
+            .build()
+            .unwrap();
+        obj.with_exact_meta(meta).write_to_file(path).unwrap();
+    }
+
+    /// Naive substring search over bytes (test-only; the `twoway` crate isn't a dep).
+    fn twoway_contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// `path` with an added extension component (`recipient.key` → `recipient.key.pub`).
+    fn with_ext(path: &std::path::Path, ext: &str) -> std::path::PathBuf {
+        let mut s = path.as_os_str().to_os_string();
+        s.push(".");
+        s.push(ext);
+        std::path::PathBuf::from(s)
+    }
+
+    /// ADR-0047 crypto-shred de-identification, end to end: the sealed product is PHI-free, yet a
+    /// recipient private key recovers the full identity — and a wrong key, or a `shred`, cannot.
+    #[test]
+    fn crypto_shred_deidentifies_yet_a_key_holder_can_reidentify() {
+        const PHI_NAME: &str = "SHREDTEST^PATIENT";
+        const PHI_ID: &str = "MRN-SHRED-42";
+        let dir = tempfile::tempdir().unwrap();
+        let dcm = dir.path().join("phi.dcm");
+        write_phi_dcm(&dcm, PHI_NAME, PHI_ID);
+
+        // A recipient age keypair (what `tessera keygen --age` writes).
+        let key = dir.path().join("recipient.key");
+        run(Cmd::Keygen {
+            out: key.clone(),
+            age: true,
+        })
+        .unwrap();
+        let recipient_pub = std::fs::read_to_string(with_ext(&key, "pub"))
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // Crypto-shred ingest.
+        let shredded = dir.path().join("cs.tsra");
+        run(Cmd::Ingest {
+            spec: None,
+            out: None,
+            workers: None,
+            ram_budget: None,
+            auto: false,
+            stream_threshold: None,
+            src: Some(IngestSrc::Dicom {
+                input: dcm.clone(),
+                out: shredded.clone(),
+                name: "cs".into(),
+                timestamp: "2024-01-01T00:00:00Z".into(),
+                deidentify: false,
+                recipient: vec![recipient_pub],
+                source_label: Some("STUDY-1/CT".into()),
+                meta: vec![],
+            }),
+        })
+        .unwrap();
+
+        // The sealed product verifies and is PHI-free: the whole container bytes carry no plaintext
+        // patient name / id (they live only in the encrypted envelope).
+        run(Cmd::Verify {
+            file: shredded.clone(),
+        })
+        .unwrap();
+        let raw = std::fs::read(&shredded).unwrap();
+        assert!(
+            !twoway_contains(&raw, PHI_NAME.as_bytes()),
+            "patient name leaked into the sealed container"
+        );
+        assert!(
+            !twoway_contains(&raw, PHI_ID.as_bytes()),
+            "patient id leaked into the sealed container"
+        );
+        // The identity envelope rides in aux/ (outside the seal).
+        let mut r = Reader::open(&shredded).unwrap();
+        assert!(
+            r.aux_names()
+                .iter()
+                .any(|n| n == tessera_ingest::identity::AUX_IDENTITY_NAME),
+            "aux identity envelope missing"
+        );
+        drop(r);
+
+        // A key holder re-identifies: the recovered header carries the original PHI.
+        let recovered = dir.path().join("recovered.json");
+        run(Cmd::Reidentify {
+            file: shredded.clone(),
+            identity: key.clone(),
+            out: Some(recovered.clone()),
+        })
+        .unwrap();
+        let recovered_json = std::fs::read_to_string(&recovered).unwrap();
+        assert!(
+            recovered_json.contains(PHI_NAME),
+            "re-identify lost the name"
+        );
+        assert!(recovered_json.contains(PHI_ID), "re-identify lost the id");
+
+        // A different key cannot.
+        let wrong = dir.path().join("wrong.key");
+        run(Cmd::Keygen {
+            out: wrong.clone(),
+            age: true,
+        })
+        .unwrap();
+        assert!(run(Cmd::Reidentify {
+            file: shredded.clone(),
+            identity: wrong,
+            out: None,
+        })
+        .is_err());
+
+        // Shred: the envelope is gone, the seal still verifies, and even the right key can't recover.
+        run(Cmd::Shred {
+            file: shredded.clone(),
+        })
+        .unwrap();
+        run(Cmd::Verify {
+            file: shredded.clone(),
+        })
+        .unwrap();
+        let r = Reader::open(&shredded).unwrap();
+        assert!(
+            !r.aux_names()
+                .iter()
+                .any(|n| n == tessera_ingest::identity::AUX_IDENTITY_NAME),
+            "identity envelope survived shred"
+        );
+        drop(r);
+        assert!(run(Cmd::Reidentify {
+            file: shredded,
+            identity: key,
+            out: None,
+        })
+        .is_err());
+    }
+
+    /// ADR-0047 §3: a crypto-shred product's DATA identity (`id` + `content_hash`) is identical to a
+    /// plain `--deidentify` product of the same input — the de-identified pixels + metadata are the
+    /// same, and the encrypted envelope rides outside the seal. The `manifest_hash` may differ by the
+    /// `ingested_via_spec` provenance edge alone: the recipient directive is recorded (auditable) in
+    /// provenance, which is correct — the *data* is identical, the *provenance* honestly is not.
+    #[test]
+    fn crypto_shred_seal_equals_plain_deidentify() {
+        let dir = tempfile::tempdir().unwrap();
+        let dcm = dir.path().join("phi.dcm");
+        write_phi_dcm(&dcm, "EQ^PATIENT", "MRN-EQ-1");
+        let key = dir.path().join("r.key");
+        run(Cmd::Keygen {
+            out: key.clone(),
+            age: true,
+        })
+        .unwrap();
+        let pubkey = std::fs::read_to_string(with_ext(&key, "pub"))
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let ingest = |out: &std::path::Path, deidentify: bool, recipient: Vec<String>| {
+            run(Cmd::Ingest {
+                spec: None,
+                out: None,
+                workers: None,
+                ram_budget: None,
+                auto: false,
+                stream_threshold: None,
+                src: Some(IngestSrc::Dicom {
+                    input: dcm.clone(),
+                    out: out.to_path_buf(),
+                    name: "eq".into(),
+                    timestamp: "2024-01-01T00:00:00Z".into(),
+                    deidentify,
+                    recipient,
+                    source_label: Some("S/CT".into()),
+                    meta: vec![],
+                }),
+            })
+            .unwrap();
+        };
+        let cs = dir.path().join("cs.tsra");
+        let deid = dir.path().join("deid.tsra");
+        ingest(&cs, false, vec![pubkey]);
+        ingest(&deid, true, vec![]);
+
+        let cs_m = Reader::open(&cs).unwrap().manifest().clone();
+        let deid_m = Reader::open(&deid).unwrap().manifest().clone();
+        // The de-identified DATA is identical (same lineage id + same block-merkle content_hash).
+        assert_eq!(cs_m.id, deid_m.id);
+        assert_eq!(cs_m.content_hash, deid_m.content_hash);
+        // The only seal-covered difference is the `ingested_via_spec` provenance edge (the recipient
+        // directive is recorded there) — every OTHER source edge is byte-identical.
+        let strip_spec = |m: &tessera_core::Manifest| {
+            m.sources
+                .iter()
+                .filter(|s| s.role != "ingested_via_spec")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(strip_spec(&cs_m), strip_spec(&deid_m));
+        assert_eq!(cs_m.metadata, deid_m.metadata);
+        assert_eq!(cs_m.extra, deid_m.extra);
     }
 
     #[test]

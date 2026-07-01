@@ -47,6 +47,10 @@ Signing & trust:
   sign        Sign a sealed .tsra (embeds aux/signatures/<key_id>.sig.json; --sidecar for detached)
   verify-sig  Verify a sealed .tsra against its signature (embedded first, sidecar fallback)
 
+Confidentiality (crypto-shred):
+  reidentify  Recover a crypto-shred product's identity with a recipient private key (ADR-0047)
+  shred       Permanently remove a product's identity envelope (aux/identity)
+
 Diagnostics:
   bench       Bench the write engine on this host (throughput + peak RSS)
 

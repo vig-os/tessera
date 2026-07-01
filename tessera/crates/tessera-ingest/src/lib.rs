@@ -10,6 +10,7 @@ pub mod blob;
 pub mod dicom;
 pub mod engine;
 pub mod ge_hdf5;
+pub mod identity;
 pub mod nifti;
 pub mod provenance;
 pub mod raw;
