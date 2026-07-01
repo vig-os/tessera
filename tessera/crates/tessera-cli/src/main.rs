@@ -104,6 +104,8 @@ Inspect & navigate:
   tree        Render the .tsra as a navigable hierarchy
   ls          List one node's children (meta / a block / sources)
   read        Read table data as CSV/TSV/NDJSON (cross-block)
+  stats       Numeric overview of an array block (shape, dtype, value range)
+  slice       Pull a plane/line/point of an array block as CSV (--index z,:,:)
   export      Emit a FAIR discovery record (JSON to stdout)
 
 Ingest & pack:
@@ -236,6 +238,36 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: u64,
         /// Output format: `csv` (default) | `tsv` | `ndjson`.
+        #[arg(long, default_value = "csv")]
+        format: String,
+    },
+    /// Numeric overview of an **array** block (shape, dtype, value range, spatial referencing).
+    ///
+    /// Decodes the array once and reports shape · dtype · chunks · codec · min/max/mean/std (raw,
+    /// plus physical units when a rescale is present) · whether a world affine is carried.
+    Stats {
+        /// The `.tsra` to read.
+        file: PathBuf,
+        /// The array block to summarise (e.g. `volume`).
+        block: String,
+    },
+    /// Pull a rectangular sub-region (2-D plane / 1-D line / point) of an **array** block as CSV.
+    ///
+    /// `--index` is numpy-style, C-order, per axis: `N` (one index, negative from end), `:` (whole
+    /// axis), or `A:B` (half-open). Only intersecting chunks are decoded. Axial CT plane example:
+    /// `tsra slice ct.tsra volume --index "445,:,:"`.
+    Slice {
+        /// The `.tsra` to read.
+        file: PathBuf,
+        /// The array block to slice (e.g. `volume`).
+        block: String,
+        /// Numpy-style per-axis index, e.g. `445,:,:` or `400:500,:,256`.
+        #[arg(long, allow_hyphen_values = true)]
+        index: String,
+        /// Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples.
+        #[arg(long)]
+        physical: bool,
+        /// Output format: `csv` (default) | `tsv`.
         #[arg(long, default_value = "csv")]
         format: String,
     },
@@ -813,6 +845,21 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 );
             }
             Ok(())
+        }
+        Cmd::Stats { file, block } => {
+            let mut out = std::io::stdout().lock();
+            nav::stats(&file, &block, &mut out)
+        }
+        Cmd::Slice {
+            file,
+            block,
+            index,
+            physical,
+            format,
+        } => {
+            let fmt = nav::Format::parse(&format)?;
+            let mut out = std::io::stdout().lock();
+            nav::slice(&file, &block, &index, physical, fmt, &mut out)
         }
         Cmd::Init { repo } => {
             let mut out = std::io::stdout().lock();
