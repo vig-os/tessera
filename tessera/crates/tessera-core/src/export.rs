@@ -27,16 +27,60 @@ pub fn ro_crate_descriptor() -> Value {
     })
 }
 
+/// A **PHI-safe, opaque** identifier for one provenance edge — a `urn:tessera:source:<hash>` anchored
+/// on the edge's `content_hash` (the source-bytes merkle root) when present, else a blake3 of the
+/// reference. This is what goes into a *publishable* FAIR record: it proves + de-duplicates the source
+/// without leaking the absolute filesystem path (which, for clinical DICOM, is PHI). #267
+fn edge_urn(s: &crate::provenance::Source) -> String {
+    let h = match &s.content_hash {
+        Some(ch) => ch.trim_start_matches("blake3:").to_string(),
+        None => crate::hash::digest(s.reference.as_bytes())
+            .trim_start_matches("blake3:")
+            .to_string(),
+    };
+    format!("urn:tessera:source:{h}")
+}
+
+/// Number of underlying source files an edge references (a DICOM series joins N slice paths with
+/// commas). Used only for the human `description` — the paths themselves never leave the manifest.
+fn source_count(s: &crate::provenance::Source) -> usize {
+    s.reference
+        .split(',')
+        .filter(|x| !x.trim().is_empty())
+        .count()
+        .max(1)
+}
+
+/// One RO-Crate/JSON-LD entity per provenance edge — opaque `@id`, role in the description, and the
+/// merkle `content_hash` as `sha256` when present. These are the `@graph` nodes `isBasedOn` points at.
+fn source_entities(m: &Manifest) -> Vec<Value> {
+    m.sources
+        .iter()
+        .map(|s| {
+            let n = source_count(s);
+            let ty = if n > 1 { "Dataset" } else { "File" };
+            let mut e = json!({
+                "@type": ty,
+                "@id": edge_urn(s),
+                "description": format!("{}: {n} source file(s)", s.role),
+            });
+            if let Some(h) = &s.content_hash {
+                e["sha256"] = json!(h);
+            }
+            e
+        })
+        .collect()
+}
+
 /// Render a single product manifest as an RO-Crate `Dataset` entity at the given `@id`. Provenance
-/// `sources` become `isBasedOn` references; the product schema is a keyword. Reusable for both the
-/// single-product `ro_crate` document (where `id = "./"` marks the root) and for member entities
-/// inside a collection's RO-Crate (where `id` is the member's reference — see
-/// `tessera_io::collection::to_rocrate`).
+/// `sources` become `isBasedOn` references to opaque source entities (reusable for the single-product
+/// `ro_crate` document with `id = "./"` and for member entities inside a collection's RO-Crate).
 pub fn dataset_entity(m: &Manifest, id: &str) -> Value {
+    // `isBasedOn` references opaque source entities (see `source_entities`) — never the raw path.
     let based_on: Vec<Value> = m
         .sources
         .iter()
-        .map(|s| json!({ "@id": s.reference }))
+        .map(|s| json!({ "@id": edge_urn(s) }))
         .collect();
     json!({
         "@type": "Dataset",
@@ -54,9 +98,13 @@ pub fn dataset_entity(m: &Manifest, id: &str) -> Value {
 /// `ro-crate-metadata.json` JSON-LD) describing this product as a `Dataset`. Provenance `sources`
 /// become `isBasedOn` references; the product schema is a keyword.
 pub fn ro_crate(m: &Manifest) -> Value {
+    // The referenced source entities live in `@graph` (valid JSON-LD) — one opaque node per edge,
+    // not a single mega-`@id` of comma-joined paths. #267
+    let mut graph = vec![ro_crate_descriptor(), dataset_entity(m, "./")];
+    graph.extend(source_entities(m));
     json!({
         "@context": "https://w3id.org/ro/crate/1.1/context",
-        "@graph": [ro_crate_descriptor(), dataset_entity(m, "./")]
+        "@graph": graph
     })
 }
 
@@ -68,9 +116,10 @@ pub fn datacite(m: &Manifest) -> Value {
         .sources
         .iter()
         .map(|s| {
+            // Opaque URN, not the raw path — a DataCite record is publishable metadata. #267
             json!({
-                "relatedIdentifier": s.reference,
-                "relatedIdentifierType": "URL",
+                "relatedIdentifier": edge_urn(s),
+                "relatedIdentifierType": "URN",
                 "relationType": "IsDerivedFrom"
             })
         })
@@ -127,7 +176,43 @@ mod tests {
         assert_eq!(ds["name"], "DP06-ct");
         assert_eq!(ds["datePublished"], "2024-03-15T00:00:00Z");
         assert_eq!(ds["keywords"][0], "recon");
-        assert_eq!(ds["isBasedOn"][0]["@id"], "1.2.840.sop");
+        // isBasedOn points at an opaque source URN in @graph — NOT the raw reference. #267
+        let based = ds["isBasedOn"][0]["@id"].as_str().unwrap();
+        assert!(based.starts_with("urn:tessera:source:"), "{based}");
+        assert_ne!(based, "1.2.840.sop");
+        assert!(c["@graph"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["@id"] == based && e["@type"] == "File"));
+    }
+
+    #[test]
+    fn export_never_leaks_phi_paths_from_a_dicom_series() {
+        // A DICOM-series `ingested_from` joins slice paths with commas; the paths carry PHI. #267
+        let phi = "/data/DUPLET/PATIENT_SMITH_MRN123/CT.0001.IMA,\
+                   /data/DUPLET/PATIENT_SMITH_MRN123/CT.0002.IMA";
+        let mut b = ProductBuilder::new("recon", "s", "d", "2024-01-01T00:00:00Z");
+        b.add_source(Source::new("ingested_from", phi).with_content_hash("blake3:abcd1234"));
+        let m = b.seal().unwrap();
+        for record in [ro_crate(&m), datacite(&m)] {
+            let s = serde_json::to_string(&record).unwrap();
+            assert!(!s.contains("PATIENT_SMITH"), "PHI leaked: {s}");
+            assert!(!s.contains("/data/DUPLET"), "path leaked: {s}");
+        }
+        // The opaque URN is anchored on the edge's content_hash (integrity preserved).
+        let ro = ro_crate(&m);
+        let based = ro["@graph"][1]["isBasedOn"][0]["@id"].as_str().unwrap();
+        assert_eq!(based, "urn:tessera:source:abcd1234");
+        // The multi-file edge is a Dataset entity carrying the merkle sha256.
+        let ent = ro["@graph"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["@id"] == based)
+            .unwrap();
+        assert_eq!(ent["@type"], "Dataset");
+        assert_eq!(ent["sha256"], "blake3:abcd1234");
     }
 
     #[test]
