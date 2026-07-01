@@ -11,6 +11,8 @@ Inspect & navigate:
   tree        Render the .tsra as a navigable hierarchy
   ls          List one node's children (meta / a block / sources)
   read        Read table data as CSV/TSV/NDJSON (cross-block)
+  stats       Numeric overview of an array block (shape, dtype, value range)
+  slice       Pull a plane/line/point of an array block as CSV (--index z,:,:)
   export      Emit a FAIR discovery record (JSON to stdout)
 
 Ingest & pack:

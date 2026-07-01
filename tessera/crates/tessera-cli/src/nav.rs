@@ -16,6 +16,7 @@ use std::path::Path;
 use serde_json::Value;
 use tessera_core::block::BlockKind;
 use tessera_core::{Result, SchemaRegistry};
+use tessera_io::array::ArrayData;
 use tessera_io::{ColumnData, Reader};
 
 /// Row-delimited output formats for [`read`].
@@ -533,6 +534,7 @@ pub struct ReadOpts<'a> {
 }
 
 /// Summary of what [`read`] emitted, so the caller (`main`) can print a truncation note to stderr.
+#[derive(Debug)]
 pub struct ReadResult {
     /// Rows actually written.
     pub shown: u64,
@@ -639,6 +641,258 @@ pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
         total,
         truncated,
     })
+}
+
+/// Load an **array** block: open the file, confirm the named block is an array (not a table), parse
+/// its `ArraySpec`, and read the raw (encoded) payload. Shared by [`stats`] and [`slice`].
+fn open_array(
+    file: &Path,
+    block: &str,
+) -> Result<(tessera_core::block::array::ArraySpec, Vec<u8>)> {
+    let mut r = Reader::open(file)?;
+    let bref = r
+        .manifest()
+        .blocks
+        .iter()
+        .find(|b| b.name == block)
+        .ok_or_else(|| tessera_core::Error::Invalid(format!("no block '{block}' in this .tsra")))?;
+    if bref.kind != BlockKind::Array {
+        return Err(tessera_core::Error::Invalid(format!(
+            "block '{block}' is a {:?}, not an array — `stats`/`slice` are for array blocks",
+            bref.kind
+        )));
+    }
+    let spec: tessera_core::block::array::ArraySpec = serde_json::from_value(bref.spec.clone())
+        .map_err(|e| tessera_core::Error::Invalid(format!("bad array spec for '{block}': {e}")))?;
+    let blob = r.read_block(block)?;
+    Ok((spec, blob))
+}
+
+/// Min / max / mean / std over an [`ArrayData`], computed in `f64` (one pass). Empty → all zero.
+fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize) {
+    macro_rules! reduce {
+        ($v:expr) => {{
+            let n = $v.len();
+            if n == 0 {
+                (0.0, 0.0, 0.0, 0.0, 0)
+            } else {
+                let mut mn = f64::INFINITY;
+                let mut mx = f64::NEG_INFINITY;
+                let mut sum = 0.0f64;
+                let mut sumsq = 0.0f64;
+                for &x in $v.iter() {
+                    let x = x as f64;
+                    mn = mn.min(x);
+                    mx = mx.max(x);
+                    sum += x;
+                    sumsq += x * x;
+                }
+                let mean = sum / n as f64;
+                let var = (sumsq / n as f64) - mean * mean;
+                (mn, mx, mean, var.max(0.0).sqrt(), n)
+            }
+        }};
+    }
+    match d {
+        ArrayData::I16(v) => reduce!(v),
+        ArrayData::I32(v) => reduce!(v),
+        ArrayData::I64(v) => reduce!(v),
+        ArrayData::U16(v) => reduce!(v),
+        ArrayData::U32(v) => reduce!(v),
+        ArrayData::U64(v) => reduce!(v),
+        ArrayData::F32(v) => reduce!(v),
+        ArrayData::F64(v) => reduce!(v),
+    }
+}
+
+/// `tessera stats FILE BLOCK` — a numeric overview of an **array** block: shape · dtype · chunks ·
+/// codec · value range (min/max/mean/std, raw and — when a rescale is present — physical) · unit ·
+/// spatial referencing. Decodes the block once; the "general looking at it" for a volume.
+pub fn stats(file: &Path, block: &str, out: &mut dyn Write) -> Result<()> {
+    let (spec, blob) = open_array(file, block)?;
+    let data = tessera_io::array::decode(&spec, &blob)?;
+    let (mn, mx, mean, std, n) = array_stats(&data);
+
+    let shape: Vec<String> = spec.shape.iter().map(u64::to_string).collect();
+    let axes = if spec.axes.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", spec.axes.join(","))
+    };
+    writeln!(out, "block     {block}").map_err(tessera_core::Error::from)?;
+    writeln!(out, "shape     [{}]{axes}", shape.join(", ")).map_err(tessera_core::Error::from)?;
+    writeln!(out, "dtype     {}   codec {}", spec.dtype, spec.codec)
+        .map_err(tessera_core::Error::from)?;
+    let chunks: Vec<String> = spec.chunks.iter().map(u64::to_string).collect();
+    writeln!(
+        out,
+        "chunks    [{}]   voxels {}",
+        chunks.join(", "),
+        thousands(n as u64)
+    )
+    .map_err(tessera_core::Error::from)?;
+    writeln!(
+        out,
+        "raw       min {mn}  max {mx}  mean {mean:.3}  std {std:.3}"
+    )
+    .map_err(tessera_core::Error::from)?;
+    // Physical units (CT→HU, PET→Bq/mL) when the array carries a rescale.
+    if let (Some(sl), Some(ic)) = (spec.rescale_slope, spec.rescale_intercept) {
+        let unit = spec.unit.as_deref().unwrap_or("");
+        writeln!(
+            out,
+            "physical  min {}  max {}  ({}·raw + {}) {unit}",
+            sl * mn + ic,
+            sl * mx + ic,
+            sl,
+            ic
+        )
+        .map_err(tessera_core::Error::from)?;
+    }
+    match &spec.world_frame {
+        Some(wf) => writeln!(
+            out,
+            "world     {} affine present ({})",
+            wf.convention, wf.unit
+        )
+        .map_err(tessera_core::Error::from)?,
+        None => writeln!(
+            out,
+            "world     index space (no affine — use --index, not --world)"
+        )
+        .map_err(tessera_core::Error::from)?,
+    }
+    Ok(())
+}
+
+/// Parse a numpy-style index like `445,:,:` or `400:500,:,256` against `shape` into per-axis
+/// `(start, len)` for [`tessera_io::array::decode_subset`]. Each token is `N` (one index, negative
+/// from end), `:` (whole axis), or `A:B` (half-open, optional/negative bounds).
+fn parse_index(index: &str, shape: &[u64]) -> Result<(Vec<u64>, Vec<u64>)> {
+    let toks: Vec<&str> = index.split(',').map(str::trim).collect();
+    if toks.len() != shape.len() {
+        return Err(tessera_core::Error::Invalid(format!(
+            "--index has {} axes but the array has {} (shape [{}])",
+            toks.len(),
+            shape.len(),
+            shape
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let mut start = Vec::with_capacity(shape.len());
+    let mut len = Vec::with_capacity(shape.len());
+    for (tok, &dim) in toks.iter().zip(shape.iter()) {
+        let d = dim as i64;
+        let resolve = |v: i64| -> u64 { (if v < 0 { d + v } else { v }).clamp(0, d) as u64 };
+        if *tok == ":" {
+            start.push(0);
+            len.push(dim);
+        } else if let Some((a, b)) = tok.split_once(':') {
+            let lo = if a.trim().is_empty() {
+                0
+            } else {
+                resolve(a.trim().parse().map_err(|_| {
+                    tessera_core::Error::Invalid(format!("--index: bad range start '{a}'"))
+                })?)
+            };
+            let hi = if b.trim().is_empty() {
+                dim
+            } else {
+                resolve(b.trim().parse().map_err(|_| {
+                    tessera_core::Error::Invalid(format!("--index: bad range end '{b}'"))
+                })?)
+            };
+            start.push(lo);
+            len.push(hi.saturating_sub(lo));
+        } else {
+            let i = resolve(tok.parse().map_err(|_| {
+                tessera_core::Error::Invalid(format!("--index: bad index '{tok}'"))
+            })?);
+            start.push(i.min(dim.saturating_sub(1)));
+            len.push(1);
+        }
+    }
+    Ok((start, len))
+}
+
+/// One decoded region value → an `f64` (for CSV), optionally rescaled to physical units.
+fn region_to_f64(d: &ArrayData, rescale: Option<(f64, f64)>) -> Vec<f64> {
+    macro_rules! conv {
+        ($v:expr) => {
+            $v.iter()
+                .map(|&x| {
+                    let x = x as f64;
+                    match rescale {
+                        Some((s, i)) => s * x + i,
+                        None => x,
+                    }
+                })
+                .collect()
+        };
+    }
+    match d {
+        ArrayData::I16(v) => conv!(v),
+        ArrayData::I32(v) => conv!(v),
+        ArrayData::I64(v) => conv!(v),
+        ArrayData::U16(v) => conv!(v),
+        ArrayData::U32(v) => conv!(v),
+        ArrayData::U64(v) => conv!(v),
+        ArrayData::F32(v) => conv!(v),
+        ArrayData::F64(v) => conv!(v),
+    }
+}
+
+/// `tessera slice FILE BLOCK --index "z,:,:"` — pull a rectangular sub-region of an **array** block
+/// (a 2-D plane, a 1-D line, or a point), decoding only the intersecting chunks. Emits the region as
+/// CSV/TSV (last region axis = columns, the rest flattened to rows). `--physical` applies the
+/// stored rescale (CT→HU, PET→Bq/mL).
+pub fn slice(
+    file: &Path,
+    block: &str,
+    index: &str,
+    physical: bool,
+    format: Format,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let (spec, blob) = open_array(file, block)?;
+    let (start, len) = parse_index(index, &spec.shape)?;
+    let region = tessera_io::array::decode_subset(&spec, &blob, &start, &len)?;
+
+    let rescale = if physical {
+        match (spec.rescale_slope, spec.rescale_intercept) {
+            (Some(s), Some(i)) => Some((s, i)),
+            _ => {
+                return Err(tessera_core::Error::Invalid(
+                    "--physical: this array carries no rescale_slope/intercept".into(),
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    let values = region_to_f64(&region, rescale);
+
+    // Grid: the last region axis is the column count; everything before it flattens to rows.
+    let cols = *len.last().unwrap_or(&1) as usize;
+    let cols = cols.max(1);
+    let sep = format.sep();
+    for row in values.chunks(cols) {
+        let line: Vec<String> = row.iter().map(fmt_f64).collect();
+        writeln!(out, "{}", line.join(&sep.to_string())).map_err(tessera_core::Error::from)?;
+    }
+    Ok(())
+}
+
+/// Compact numeric render for slice CSV: integers without a trailing `.0`, floats to 6 sig-ish.
+fn fmt_f64(v: &f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{}", *v as i64)
+    } else {
+        format!("{v}")
+    }
 }
 
 /// Render a JSON cell for CSV/TSV: numbers bare, JSON-null (e.g. NaN/±inf floats) as `nan`.
@@ -817,6 +1071,76 @@ mod tests {
         // A single-file edge with no hash stays a bare one-liner.
         let one = source_lines("derived_from", "manifest:blake3:abcd", None, false);
         assert_eq!(one, vec!["derived_from <- manifest:blake3:abcd"]);
+    }
+
+    #[test]
+    fn parse_index_and_array_stats() {
+        // Numpy-style index against a [4, 5, 6] array → (start, len) per axis.
+        let shape = [4u64, 5, 6];
+        assert_eq!(
+            parse_index("1,:,:", &shape).unwrap(),
+            (vec![1, 0, 0], vec![1, 5, 6])
+        );
+        assert_eq!(
+            parse_index("0:2,:,3", &shape).unwrap(),
+            (vec![0, 0, 3], vec![2, 5, 1])
+        );
+        // Negative index counts from the end (axis 0 len 4 → -1 = index 3).
+        assert_eq!(
+            parse_index("-1,:,:", &shape).unwrap(),
+            (vec![3, 0, 0], vec![1, 5, 6])
+        );
+        // Wrong rank is a clear error, not a panic.
+        assert!(parse_index("1,:", &shape).is_err());
+
+        let (mn, mx, mean, std, n) = array_stats(&ArrayData::I16(vec![0, 2, 4, 6]));
+        assert_eq!((mn, mx, n), (0.0, 6.0, 4));
+        assert!((mean - 3.0).abs() < 1e-9 && (std - 5f64.sqrt()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn slice_extracts_a_plane_from_a_sealed_array() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        use tessera_io::{array::ArrayData, pack};
+        // A 2×3 int16 array [[0,1,2],[10,11,12]] sealed as a `recon` volume.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("v.tsra");
+        let spec = ArraySpec::new(vec![2, 3], "int16");
+        let data = ArrayData::I16(vec![0, 1, 2, 10, 11, 12]);
+        let (bref, payload) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+        let mut b = ProductBuilder::new("recon", "V", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        let sealed = b.seal().unwrap();
+        pack(&sealed, &[payload], &p).unwrap();
+
+        // Row 1 of the array → `10,11,12`.
+        let mut buf = Vec::new();
+        slice(&p, "volume", "1,:", false, Format::Csv, &mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().trim(), "10,11,12");
+
+        // stats reports the shape + value range.
+        let mut s = Vec::new();
+        stats(&p, "volume", &mut s).unwrap();
+        let s = String::from_utf8(s).unwrap();
+        assert!(s.contains("shape     [2, 3]"), "{s}");
+        assert!(s.contains("min 0  max 12"), "{s}");
+
+        // `read` on the array block is a clear typed error (table-only), not a decode panic.
+        let err = read(
+            ReadOpts {
+                file: &p,
+                block: "volume",
+                columns: vec![],
+                rows: None,
+                all: false,
+                limit: 20,
+                format: Format::Csv,
+            },
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("array block"), "{err}");
     }
 
     #[test]
