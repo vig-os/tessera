@@ -4,9 +4,10 @@ tessera [..] · product=listmode
 id            [..]
 name          lm-3p
 timestamp     2024-01-01T00:00:00Z
-content_hash  [..]
-manifest_hash [..]
+producer      tessera/0.0.0
+content_hash  blake3:b7b6eea7d59629c1275a7de0080525bf92d7f034facb061b673a57e9d431e9ac
+manifest_hash blake3:7de3e9e324280d02b81b0d159d8c76ea45fd7d2e367ef68b7337d0e32c188f37
 blocks        1
-  - events               Table [..]
+  - events               Table blake3:62c517a490e96b23396dd262b97ef4045c4c7cf37d6e5f18b1f3594f396f0d2f
 
 ```

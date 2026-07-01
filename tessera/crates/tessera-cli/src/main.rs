@@ -647,6 +647,9 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             println!("id            {}", m.id);
             println!("name          {}", m.name);
             println!("timestamp     {}", m.timestamp);
+            if let Some(p) = &m.producer {
+                println!("producer      {p}");
+            }
             if let Some(s) = &m.study {
                 println!("study         {s}");
             }
@@ -667,8 +670,15 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             if !m.sources.is_empty() {
                 println!("sources       {}", m.sources.len());
                 for s in &m.sources {
+                    // The edge's `content_hash` is the integrity link (source merkle root for
+                    // `ingested_from`; parent `manifest_hash` / spec_hash for derived/spec edges).
+                    let integrity = s
+                        .content_hash
+                        .as_deref()
+                        .map(|h| format!("  [{}]", nav::short_hash(h)))
+                        .unwrap_or_default();
                     println!(
-                        "  - {} <- {}",
+                        "  - {} <- {}{integrity}",
                         s.role,
                         nav::compact_reference(&s.reference, full)
                     );

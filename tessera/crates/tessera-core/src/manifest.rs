@@ -38,6 +38,10 @@ pub struct Manifest {
     pub description: String,
     /// RFC 3339 timestamp, normalized to UTC.
     pub timestamp: String,
+    /// The tool/build that produced this product (`tessera/<version>`), stamped at seal — sealed
+    /// provenance so a reader knows *what wrote the file*. `None` only for pre-stamp legacy files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer: Option<String>,
     /// Embedded JSON Schema for the product (opaque to the core).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<serde_json::Value>,
@@ -93,6 +97,7 @@ impl Manifest {
             name,
             description,
             timestamp,
+            producer: None,
             schema: None,
             blocks: Vec::new(),
             sources: Vec::new(),

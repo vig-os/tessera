@@ -579,10 +579,7 @@ fn stream_to_listmode_product_2p_to_file_inner(
     let source_ref = source_label
         .map(str::to_string)
         .unwrap_or_else(|| path.display().to_string());
-    ws.add_source(tessera_core::provenance::Source::new(
-        "ingested_from",
-        source_ref,
-    ))?;
+    ws.add_source(crate::provenance::ingested_from(&[path], source_ref)?)?;
     for s in extra_sources {
         ws.add_source(s.clone())?;
     }

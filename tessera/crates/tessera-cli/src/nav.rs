@@ -70,6 +70,11 @@ fn short_digest(d: Option<&str>) -> String {
     }
 }
 
+/// Short form of a single `blake3:<hex>` hash for inline display (`blake3:1a2b3c4d5e6f…`).
+pub(crate) fn short_hash(h: &str) -> String {
+    short_digest(Some(h))
+}
+
 /// Group-of-three thousands separators for human row counts (`4194304` → `4,194,304`).
 fn thousands(n: u64) -> String {
     let s = n.to_string();
@@ -348,7 +353,12 @@ pub(crate) fn compact_reference(reference: &str, full: bool) -> String {
 /// (`role <- path`); a multi-file edge (a DICOM series) becomes a **group** — a `role <- N files in
 /// <common-dir>/` header, then one relative filename per line. Default caps the body at 8 entries
 /// with a `… (+N more)` footer; `full` lists every file. Pure (returns lines) so it is unit-testable.
-fn source_lines(role: &str, reference: &str, full: bool) -> Vec<String> {
+fn source_lines(role: &str, reference: &str, digest: Option<&str>, full: bool) -> Vec<String> {
+    // The `content_hash` on the edge — the integrity link (source merkle root for `ingested_from`,
+    // parent `manifest_hash` / spec_hash for derived/spec edges) — shown after the header.
+    let integ = digest
+        .map(|h| format!("  [{}]", short_hash(h)))
+        .unwrap_or_default();
     let items: Vec<&str> = reference
         .split(',')
         .map(str::trim)
@@ -360,7 +370,7 @@ fn source_lines(role: &str, reference: &str, full: bool) -> Vec<String> {
         } else {
             elide(reference, 96)
         };
-        return vec![format!("{role} <- {one}")];
+        return vec![format!("{role} <- {one}{integ}")];
     }
     let dir = common_dir(&items);
     let where_ = if dir.is_empty() {
@@ -368,7 +378,7 @@ fn source_lines(role: &str, reference: &str, full: bool) -> Vec<String> {
     } else {
         format!(" in {dir}/")
     };
-    let mut lines = vec![format!("{role} <- {} files{where_}", items.len())];
+    let mut lines = vec![format!("{role} <- {} files{where_}{integ}", items.len())];
     let show = if full {
         items.len()
     } else {
@@ -420,7 +430,7 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
             // holds a comma-joined path list) is exploded and **grouped by common directory** so it
             // reads as a real listing — count + shared dir header, then relative filenames.
             for s in &m.sources {
-                for line in source_lines(&s.role, &s.reference, full) {
+                for line in source_lines(&s.role, &s.reference, s.content_hash.as_deref(), full) {
                     writeln!(out, "{line}").map_err(tessera_core::Error::from)?;
                 }
             }
@@ -708,20 +718,29 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
 
-        let lines = source_lines("ingested_from", &refs, false);
+        // The source merkle root shows on the group header (the integrity link).
+        let lines = source_lines(
+            "ingested_from",
+            &refs,
+            Some("blake3:1a2b3c4d5e6f7890"),
+            false,
+        );
         // Header + 8 shown files + a "(+882 more)" footer = 10 lines.
         assert_eq!(lines.len(), 10, "{lines:#?}");
-        assert_eq!(lines[0], format!("ingested_from <- 890 files in {dir}/"));
+        assert_eq!(
+            lines[0],
+            format!("ingested_from <- 890 files in {dir}/  [blake3:1a2b3c4d5e6f…]")
+        );
         assert_eq!(lines[1], "    CT.0006.0001.IMA"); // relative to the common dir
         assert_eq!(lines[9], "    … (+882 more, --full to list all)");
 
         // --full lists every file: header + 890 files, no footer.
-        let full = source_lines("ingested_from", &refs, true);
+        let full = source_lines("ingested_from", &refs, None, true);
         assert_eq!(full.len(), 891);
         assert!(full.last().unwrap().ends_with("CT.0006.0890.IMA"));
 
-        // A single-file edge stays a one-liner.
-        let one = source_lines("derived_from", "manifest:blake3:abcd", false);
+        // A single-file edge with no hash stays a bare one-liner.
+        let one = source_lines("derived_from", "manifest:blake3:abcd", None, false);
         assert_eq!(one, vec!["derived_from <- manifest:blake3:abcd"]);
     }
 

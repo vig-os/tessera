@@ -160,6 +160,7 @@ pub fn to_recon_product(
     name: &str,
     timestamp: &str,
     source: &str,
+    source_digest: Option<&str>,
     extra_sources: &[tessera_core::provenance::Source],
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
     let mut spec = ArraySpec::new(img.shape.clone(), img.data.dtype())
@@ -169,10 +170,13 @@ pub fn to_recon_product(
 
     let mut b = ProductBuilder::new("recon", name, "NIfTI recon volume", timestamp);
     b.add_block_ref(block_ref);
-    b.add_source(tessera_core::provenance::Source::new(
-        "ingested_from",
-        source,
-    ));
+    // `ingested_from` carries a source `content_hash` (blake3 of the `.nii`) when the caller supplies
+    // it — the integrity link to the source-of-record, independent of the `source` reference.
+    let mut edge = tessera_core::provenance::Source::new("ingested_from", source);
+    if let Some(d) = source_digest {
+        edge = edge.with_content_hash(d);
+    }
+    b.add_source(edge);
     for s in extra_sources {
         b.add_source(s.clone());
     }
@@ -244,8 +248,15 @@ mod tests {
         assert_eq!(wf.spacing(), [4.0, 3.0, 2.0]);
 
         // builds a sealed, verifying recon product.
-        let (m, _payloads) =
-            to_recon_product(&img, "brain-01", "2024-01-01T00:00:00Z", "brain.nii", &[]).unwrap();
+        let (m, _payloads) = to_recon_product(
+            &img,
+            "brain-01",
+            "2024-01-01T00:00:00Z",
+            "brain.nii",
+            None,
+            &[],
+        )
+        .unwrap();
         m.verify().unwrap();
         assert_eq!(m.product, "recon");
         assert_eq!(m.sources[0].reference, "brain.nii");

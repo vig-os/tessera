@@ -4,48 +4,48 @@
     "product": "recon",
     "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
     "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
-    "manifest_hash": "blake3:07674cf68f84c1efc77473a182ba10188d60e971ba10f8773c282ebb21817e29"
+    "manifest_hash": "blake3:7df6608d6c5622698574a5cd6a902213b56e6e4dc2e0bae1b7d6a09d7e7f05b9"
   },
   {
     "name": "recon_float32_mumap",
     "product": "recon",
     "id": "blake3:529bb3fc4cb032cbb45917558b52fb6b81448a1cb574b3282336ce9a39b84149",
     "content_hash": "blake3:ea3843267ea4bc54cb38d1090918da34ab9f37dffff2ce1e61e3ec478e479d9d",
-    "manifest_hash": "blake3:1e02365e05dfac7b08ce1846ef36def7901a694224d0e0b807dd0a3c01309d19"
+    "manifest_hash": "blake3:744406cb38e07b5c9e78c2839e0931790dc777c8607c81b7c5cd8fa56a9c4c28"
   },
   {
     "name": "listmode_events",
     "product": "listmode",
     "id": "blake3:55b8eac168d668c6e15ab3bdd1d78c0494384dbc6941ad48f9ee7237cf6e9457",
     "content_hash": "blake3:b7b6eea7d59629c1275a7de0080525bf92d7f034facb061b673a57e9d431e9ac",
-    "manifest_hash": "blake3:78063d47b6953ed500d15c16f24547df9a6991090bd2404e0874972cdb019e76"
+    "manifest_hash": "blake3:7de3e9e324280d02b81b0d159d8c76ea45fd7d2e367ef68b7337d0e32c188f37"
   },
   {
     "name": "spectrum_lifetime",
     "product": "spectrum",
     "id": "blake3:765aa27dcf8732157230f947de95866cc88f720691a30ca8dba03ccd81964f0e",
     "content_hash": "blake3:0ea11b7ec858fb44aa4a111b4bc5c466f45ff7def961aad07901a21dfba4a60a",
-    "manifest_hash": "blake3:16d8a18a6081f5bde624bc463ce1bdae34cd64459f7ea3469f2402a3563ef15a"
+    "manifest_hash": "blake3:fbc485f97428bedb97e353f49e31785d667cd35d9b18f287587d057c6b22018f"
   },
   {
     "name": "multiblock_study",
     "product": "recon",
     "id": "blake3:216739168370b68f066c955f6c613839f5a8f2c62c4aad5af656c23909f55a2a",
     "content_hash": "blake3:3b5d271b91ed2793445b561a709e38a469c7a73bdcd8ef8331e41ad7639498b8",
-    "manifest_hash": "blake3:bfe8e244a0924a9c7d0b87b2c4810d4d82380dc633683556c9546223330fe627"
+    "manifest_hash": "blake3:4ed34baee63242786b6756c9020b81ef1f023265a0f8415ad5d95ad7a8bf481a"
   },
   {
     "name": "empty_no_blocks",
     "product": "marker",
     "id": "blake3:682ff1f8841db94254ae9cc8f912824d2b31f51584cba5f43f65375840a3701b",
     "content_hash": "blake3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
-    "manifest_hash": "blake3:5c84e9db400d4474485132b14e2582dbd2d932c15829e2011f9bfbd70f01f69f"
+    "manifest_hash": "blake3:7383526ae1e685dcab31f9e4bad7c47312c2e197265d70e85aa4ad7c1593b4bf"
   },
   {
     "name": "blob_opaque",
     "product": "blob",
     "id": "blake3:1d503e926fc5545579056e075f840777eef545fbb11acc1e59850c55bbed6f58",
     "content_hash": "blake3:c5b98765e1b869385c89abe64b8e56b2473f868810621bc7b9d6dbe1bc451575",
-    "manifest_hash": "blake3:d6138ae957a402d0e709fb69185bb2fdb766ccb59b94a60e832eb2a1fe024786"
+    "manifest_hash": "blake3:f48926ba7d8c4e5da394132eecc2a673cc52f1db74a4ac9d599736ee91058db9"
   }
 ]

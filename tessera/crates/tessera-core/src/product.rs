@@ -138,8 +138,14 @@ impl ProductBuilder {
                 self.manifest.schema = Some(s.to_value()?);
             }
         }
+        // Sealed provenance: stamp the producing tool/build so a reader knows what wrote the file.
+        // Re-stamped per version (not inherited) — a new version is sealed by *this* tool.
+        if self.manifest.producer.is_none() {
+            self.manifest.producer =
+                Some(concat!("tessera/", env!("CARGO_PKG_VERSION")).to_string());
+        }
         // The seal is computed last, over the manifest with `manifest_hash` excluded, so it
-        // transitively commits to id_inputs, sources, the embedded schema, and every block digest.
+        // transitively commits to id_inputs, sources, the producer, the embedded schema, and blocks.
         self.manifest.manifest_hash = None;
         self.manifest.manifest_hash = Some(self.manifest.compute_manifest_hash()?);
         Ok(self.manifest)

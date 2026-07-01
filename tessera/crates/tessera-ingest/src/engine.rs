@@ -264,8 +264,15 @@ fn dispatch(
             let source = label
                 .map(str::to_string)
                 .unwrap_or_else(|| input.display().to_string());
-            let (m, payloads) =
-                crate::dicom::to_recon_product(&img, name, &timestamp, &source, extra_sources)?;
+            let digest = crate::provenance::source_digest(&[input.as_path()])?;
+            let (m, payloads) = crate::dicom::to_recon_product(
+                &img,
+                name,
+                &timestamp,
+                &source,
+                Some(&digest),
+                extra_sources,
+            )?;
             let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
             Ok((m, ()))
         }
@@ -289,8 +296,18 @@ fn dispatch(
                     .collect::<Vec<_>>()
                     .join(",")
             });
-            let (m, payloads) =
-                crate::dicom::to_recon_product(&img, name, &timestamp, &source, extra_sources)?;
+            // Merkle root over every slice's raw bytes — pins the product to the exact series even
+            // when a `--source-label` replaces the (PHI-bearing) per-slice paths in the reference.
+            let paths: Vec<&std::path::Path> = inputs.iter().map(|p| p.as_path()).collect();
+            let digest = crate::provenance::source_digest(&paths)?;
+            let (m, payloads) = crate::dicom::to_recon_product(
+                &img,
+                name,
+                &timestamp,
+                &source,
+                Some(&digest),
+                extra_sources,
+            )?;
             let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
             Ok((m, ()))
         }
@@ -299,8 +316,15 @@ fn dispatch(
             let source = label
                 .map(str::to_string)
                 .unwrap_or_else(|| input.display().to_string());
-            let (m, payloads) =
-                crate::nifti::to_recon_product(&img, name, &timestamp, &source, extra_sources)?;
+            let digest = crate::provenance::source_digest(&[input.as_path()])?;
+            let (m, payloads) = crate::nifti::to_recon_product(
+                &img,
+                name,
+                &timestamp,
+                &source,
+                Some(&digest),
+                extra_sources,
+            )?;
             let m = seal_to_tsra(m, &payloads, out_dir, p, timestamp.as_str())?;
             Ok((m, ()))
         }
