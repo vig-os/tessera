@@ -557,6 +557,9 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
             Ok(())
         }
         Some(p) if p == "extra" || p == "extra/" => {
+            if m.extra.is_empty() {
+                writeln!(out, "(no extra fields)").map_err(tessera_core::Error::from)?;
+            }
             for (k, v) in &m.extra {
                 let kind = match v {
                     Value::Object(o) => format!("object, {} keys", o.len()),
@@ -728,14 +731,22 @@ pub struct ReadResult {
 /// Columns are projected (only the requested columns' segments are decoded per block).
 pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
     let mut r = Reader::open(opts.file)?;
-    // `read` is table-only. If the target names an **array** block (a volume/μ-map), fail with a
-    // clear pointer instead of the opaque "missing field columns" from the table decoder (#253).
+    // `read` is table-only. If the target names a non-table block (array volume, blob, index), fail
+    // with a clear pointer instead of the opaque "missing field columns" from the table decoder
+    // (#253/#268). Covers Array/Blob/ChunkIndex; a multi-block table prefix like `events` won't
+    // exact-match a single block, so it falls through to the logical-table path.
     if let Some(b) = r.manifest().blocks.iter().find(|b| b.name == opts.block) {
-        if b.kind == BlockKind::Array {
+        if b.kind != BlockKind::Table {
+            let hint = match b.kind {
+                BlockKind::Array => "use `tsra stats` / `tsra slice` / `tsra project`",
+                BlockKind::Blob => "use `tsra extract` for its raw bytes",
+                _ => "use `tsra ls` / `tsra inspect`",
+            };
             return Err(tessera_core::Error::Invalid(format!(
-                "'{}' is an array block ({}), not a table — `read` is for tables. Use \
-                 `tsra ls {} {}` for its spec or `tsra extract` for raw bytes (array slicing/stats: #253).",
+                "'{}' is a {} block ({}), not a table — `read` is for tables. {hint}, or \
+                 `tsra ls {} {}` for its spec.",
                 opts.block,
+                format!("{:?}", b.kind).to_lowercase(),
                 block_headline(&b.kind, &b.spec),
                 opts.file.display(),
                 opts.block,

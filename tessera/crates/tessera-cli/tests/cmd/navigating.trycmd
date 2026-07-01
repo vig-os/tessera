@@ -104,7 +104,7 @@ label,volume_ml
 # === Emit a FAIR discovery record (RO-Crate JSON) for your catalog / data portal. ===
 
 ```
-$ tessera export ro-crate ../../corpus/files/multiblock_study.tsra
+$ tessera export ../../corpus/files/multiblock_study.tsra
 {
   "@context": "https://w3id.org/ro/crate/1.1/context",
   "@graph": [
