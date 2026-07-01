@@ -4,14 +4,14 @@
     "product": "recon",
     "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
     "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
-    "manifest_hash": "blake3:7df6608d6c5622698574a5cd6a902213b56e6e4dc2e0bae1b7d6a09d7e7f05b9"
+    "manifest_hash": "blake3:ca60649bd6846ce1e0e00b97c395ad75fd715e816064237f2d746d07c3a261b3"
   },
   {
     "name": "recon_float32_mumap",
     "product": "recon",
     "id": "blake3:529bb3fc4cb032cbb45917558b52fb6b81448a1cb574b3282336ce9a39b84149",
     "content_hash": "blake3:ea3843267ea4bc54cb38d1090918da34ab9f37dffff2ce1e61e3ec478e479d9d",
-    "manifest_hash": "blake3:744406cb38e07b5c9e78c2839e0931790dc777c8607c81b7c5cd8fa56a9c4c28"
+    "manifest_hash": "blake3:0eb9a9f338c9c0553d240c8c5e1f9448a959e152a0701e8fa43b6f710ba5bbac"
   },
   {
     "name": "listmode_events",
@@ -32,7 +32,7 @@
     "product": "recon",
     "id": "blake3:216739168370b68f066c955f6c613839f5a8f2c62c4aad5af656c23909f55a2a",
     "content_hash": "blake3:3b5d271b91ed2793445b561a709e38a469c7a73bdcd8ef8331e41ad7639498b8",
-    "manifest_hash": "blake3:4ed34baee63242786b6756c9020b81ef1f023265a0f8415ad5d95ad7a8bf481a"
+    "manifest_hash": "blake3:8e18e39448ccf8b19315786a7b268a66a0372218b07ad21898d16ac61cb45042"
   },
   {
     "name": "empty_no_blocks",
