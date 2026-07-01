@@ -16,6 +16,20 @@ OK  ../../corpus/files/multiblock_study.tsra verified (2 blocks)
 ```
 $ tessera schema ../../corpus/files/multiblock_study.tsra
 product 'recon' — embedded schema v1.0 (A reconstructed image volume (CT/PET/μ-map).)
+fields (13 declared):
+  ● modality               required     coded       = "CT"
+  · rescale_slope          optional     public      —
+  · rescale_intercept      optional     public      —
+  · patient_pseudonym      optional     identifying —
+  · acquisition_uid        optional     identifying —
+  ◐ study_instance_uid     recommended  identifying —
+  ◐ series_instance_uid    recommended  identifying —
+  ◐ study_date             recommended  sensitive   —
+  ◐ manufacturer           recommended  public      —
+  ◐ model_name             recommended  public      —
+  ◐ kvp                    recommended  public      —
+  ◐ slice_thickness        recommended  public      —
+  ◐ pixel_spacing          recommended  public      —
 OK  schema-valid: ../../corpus/files/multiblock_study.tsra
 
 ```
