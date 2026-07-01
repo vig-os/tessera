@@ -1,0 +1,22 @@
+The `tessera sql` verb (#251) exposes a DataFusion SQL surface over a table block. It's
+gated by the `sql` feature (pulls DataFusion + arrow-58 + tokio); without it, the command
+still parses so the UX is uniform, and returns a typed rebuild-with-feature message — same
+shape as the `cloud`-gated `push` / `pull` verbs.
+
+Help text always renders (parses without the feature, so `--help` never depends on the
+DataFusion tree being compiled):
+
+```
+$ tessera sql --help
+Run SQL (DataFusion) over a `.tsra` table block (needs `--features sql`).
+...
+```
+
+And the fallback when the binary was built without the feature:
+
+```
+$ tessera sql corpus/files/listmode_events.tsra events "SELECT 1"
+? 1
+error: invalid product: sql requires the `sql` feature (pulls DataFusion) — rebuild: cargo build -p tessera-cli --features sql
+
+```

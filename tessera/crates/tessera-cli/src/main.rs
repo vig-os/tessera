@@ -6,6 +6,8 @@
 
 mod bench;
 mod nav;
+#[cfg(feature = "sql")]
+mod sql;
 mod trust;
 mod version;
 
@@ -107,6 +109,9 @@ Inspect & navigate:
   stats       Numeric overview of an array block (shape, dtype, value range)
   slice       Pull a plane/line/point of an array block as CSV (--index z,:,:)
   export      Emit a FAIR discovery record (JSON to stdout)
+
+Query (needs --features sql):
+  sql         Run SQL (DataFusion) over a table block
 
 Ingest & pack:
   ingest      Ingest a vendor file (or a declarative --spec) into a sealed .tsra
@@ -516,6 +521,26 @@ enum Cmd {
         /// Also require the signature's `signer` to equal this identity (e.g. an ORCID iD URL).
         #[arg(long)]
         require_signer: Option<String>,
+    },
+    /// Run SQL (DataFusion) over a `.tsra` table block (needs `--features sql`).
+    ///
+    /// Registers the block's [`LogicalTableView`] as an Arrow `MemTable` under the block name
+    /// (so `FROM events` transparently spans every `events_NNNN` shard) and hands the query to
+    /// DataFusion. Result is CSV (default) / TSV.
+    ///
+    /// Spike phase (#251): the whole block is materialized in RAM before the query runs —
+    /// streaming + predicate/projection pushdown is #251 phase 2/3. `tessera sql` still parses
+    /// without the feature and returns a clear "rebuild with --features sql" error.
+    Sql {
+        /// The `.tsra` to query.
+        file: PathBuf,
+        /// Table block (or multi-block prefix like `events`) to expose as the SQL table.
+        block: String,
+        /// The SQL query (`FROM <block>`; SELECT/WHERE/ORDER BY/LIMIT are the phase-1 target).
+        query: String,
+        /// Output format: `csv` (default) | `tsv`. `ndjson` is a follow-up.
+        #[arg(long, default_value = "csv")]
+        format: String,
     },
     /// Bench the write engine on this host (throughput + peak RSS).
     ///
@@ -1176,6 +1201,12 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 &mut w,
             )
         }
+        Cmd::Sql {
+            file,
+            block,
+            query,
+            format,
+        } => do_sql(&file, &block, &query, &format),
         Cmd::Bench { action } => match action {
             BenchAction::Write {
                 schema,
@@ -1289,6 +1320,35 @@ fn do_pull(
 ) -> tessera_core::Result<()> {
     Err(tessera_core::Error::Invalid(
         "pull requires the `cloud` feature — rebuild: cargo build -p tessera-cli --features cloud"
+            .into(),
+    ))
+}
+
+/// `tessera sql` — with the `sql` feature, dispatches through [`crate::sql::run`] (DataFusion
+/// over the block's `LogicalTableView`). Without the feature, a typed fallback error mirroring
+/// `do_push` / `do_pull` — the subcommand still parses, so users get the same "rebuild with
+/// --features" affordance the cloud verbs already do.
+#[cfg(feature = "sql")]
+fn do_sql(
+    file: &std::path::Path,
+    block: &str,
+    query: &str,
+    format: &str,
+) -> tessera_core::Result<()> {
+    let fmt = nav::Format::parse(format)?;
+    sql::run(file, block, query, fmt)
+}
+
+#[cfg(not(feature = "sql"))]
+fn do_sql(
+    _file: &std::path::Path,
+    _block: &str,
+    _query: &str,
+    _format: &str,
+) -> tessera_core::Result<()> {
+    Err(tessera_core::Error::Invalid(
+        "sql requires the `sql` feature (pulls DataFusion) — rebuild: cargo build \
+         -p tessera-cli --features sql"
             .into(),
     ))
 }

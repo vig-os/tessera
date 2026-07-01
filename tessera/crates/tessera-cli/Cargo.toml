@@ -31,11 +31,31 @@ ssh-key = { version = "0.6", default-features = false, features = ["ed25519", "s
 # real `TableStreamWriter`/`StreamWriter`, which need durable staging dirs).
 tempfile = "3"
 
+# `sql` feature (#251): `tessera sql <FILE> "<QUERY>"` runs DataFusion in-process over a table
+# block's Arrow projection. DataFusion 54 pins `arrow ^58` — the SAME major the workspace already
+# resolves through Vortex 0.75 (arrow-array 58.3.0), so cargo unifies into one arrow tree. Two
+# arrow majors in one graph would fail to link (`RecordBatch` has the same name but incompatible
+# reprs). Both deps are `optional`, so a default `cargo build -p tessera-cli` does NOT pull them.
+datafusion = { version = "54", default-features = false, features = ["sql", "recursive_protection"], optional = true }
+# DataFusion needs an async runtime to drive `SessionContext::sql().collect()`; we spin a fresh
+# `current_thread` runtime per invocation (the spike phase — no long-lived executor). `rt` covers
+# the scheduler; `macros` is only for local tests that use `#[tokio::test]`. Runtime knob only,
+# never in the write/read spine (ADR-0034 §4 — one legitimate tokio use per surface).
+tokio = { version = "1", features = ["rt", "macros"], optional = true }
+# Arrow's array + record-batch types are the bridge: `ColumnData` → Arrow arrays → DataFusion
+# `MemTable`. `csv` gives us `arrow-csv`'s writer for `--format csv|tsv`. `58` matches DataFusion
+# 54's arrow dep so cargo picks a single arrow tree.
+arrow = { version = "58", default-features = false, features = ["csv"], optional = true }
+
 [features]
 # `cloud` (#225): lets `tessera inspect`/`tessera verify` accept an `s3://` or `http(s)://` URL
 # (resolved via `tessera_io::open_url`). Strictly additive — without the feature the CLI is the
 # same file-only tool that ships today (no object_store deps, no tokio runtime).
 cloud = ["tessera-io/cloud"]
+# `sql` (#251): DataFusion SQL surface over the `LogicalTableView`. Strictly additive — without it
+# `tessera sql` still parses (uniform UX) but returns a typed "rebuild with --features sql" error,
+# same shape as the `cloud`-gated `push`/`pull` fallback.
+sql = ["dep:datafusion", "dep:tokio", "dep:arrow"]
 
 [dev-dependencies]
 tempfile = "3"
