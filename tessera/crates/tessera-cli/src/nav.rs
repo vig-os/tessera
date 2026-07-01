@@ -858,6 +858,64 @@ fn open_array(
     Ok((spec, blob))
 }
 
+/// `tessera pyramid FILE BLOCK --out OUT` — build a **multiscale pyramid** of the array `BLOCK`: the
+/// full-resolution level plus successive 2× max-downsampled levels (`BLOCK/1`, `BLOCK/2`, …, each with
+/// its `WorldFrame::at_level` affine), sealed as a new `recon` product `derived_from` the source. The
+/// coarse levels answer overview/zoom without decoding the full volume (#260 phase 2). Returns the
+/// number of levels written (including L0).
+pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) -> Result<usize> {
+    let (spec, blob) = open_array(file, block)?;
+    if spec.shape.len() != 3 {
+        return Err(tessera_core::Error::Invalid(
+            "pyramid: needs a 3-D array (downsampling is defined for volumes)".into(),
+        ));
+    }
+    // Source identity for the derived_from edge + inherited name/timestamp.
+    let src = Reader::open(file)?;
+    let sm = src.manifest();
+    let parent_hash = sm.manifest_hash.clone().unwrap_or_default();
+    let (name, timestamp) = (sm.name.clone(), sm.timestamp.clone());
+
+    let mut cur_spec = spec.clone();
+    let mut data = tessera_io::array::decode(&spec, &blob)?;
+    let mut blocks: Vec<(tessera_core::block::BlockRef, tessera_io::BlockPayload)> = Vec::new();
+    // Level 0 — the full-resolution volume.
+    blocks.push(tessera_io::array::array_block(block, &cur_spec, &data)?);
+
+    let cap = levels.unwrap_or(8);
+    let mut level = 0u32;
+    while level < cap {
+        let Some((ds_spec, ds_data)) = tessera_io::array::downsample_max_3d(&cur_spec, &data)
+        else {
+            break;
+        };
+        level += 1;
+        let lname = format!("{block}/{level}");
+        blocks.push(tessera_io::array::array_block(&lname, &ds_spec, &ds_data)?);
+        cur_spec = ds_spec;
+        data = ds_data;
+        // Stop once the coarsest level is a single overview tile.
+        if cur_spec.shape.iter().copied().max().unwrap_or(0) <= 64 {
+            break;
+        }
+    }
+
+    let mut b =
+        tessera_core::ProductBuilder::new(&*sm.product, name, "multiscale pyramid", timestamp);
+    let mut payloads = Vec::with_capacity(blocks.len());
+    for (bref, payload) in blocks {
+        b.add_block_ref(bref);
+        payloads.push(payload);
+    }
+    b.add_source(
+        tessera_core::provenance::Source::new("derived_from", &parent_hash)
+            .with_content_hash(&parent_hash),
+    );
+    let sealed = b.seal()?;
+    tessera_io::pack(&sealed, &payloads, out)?;
+    Ok((level + 1) as usize)
+}
+
 /// Min / max / mean / std over an [`ArrayData`], computed in `f64` (one pass). Empty → all zero.
 fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize) {
     macro_rules! reduce {
@@ -1531,6 +1589,53 @@ mod tests {
         tree(&p, false, &mut t).unwrap();
         let t = String::from_utf8(t).unwrap();
         assert!(t.contains("schema  (recon") && t.contains("extra"), "{t}");
+    }
+
+    #[test]
+    fn build_pyramid_writes_downsampled_levels() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        use tessera_io::{array::ArrayData, pack};
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("v.tsra");
+        // An 8×8×8 int16 volume (ramp) → seal.
+        let spec = ArraySpec::new(vec![8, 8, 8], "int16");
+        let data = ArrayData::I16((0..512).map(|k| k as i16).collect());
+        let (bref, payload) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+        let mut b = ProductBuilder::new("recon", "V", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        let sealed = b.seal().unwrap();
+        pack(&sealed, &[payload], &src).unwrap();
+
+        let out = dir.path().join("pyr.tsra");
+        let n = build_pyramid(&src, "volume", None, &out).unwrap();
+        assert!(
+            n >= 2,
+            "expected the full-res level + ≥1 downsample, got {n}"
+        );
+
+        // L0 is the original 8³; L1 is the 4³ 2×-downsample.
+        let r = Reader::open(&out).unwrap();
+        let names: Vec<&str> = r
+            .manifest()
+            .blocks
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"volume") && names.contains(&"volume/1"),
+            "{names:?}"
+        );
+        // derived_from the source is recorded.
+        assert!(r
+            .manifest()
+            .sources
+            .iter()
+            .any(|s| s.role == "derived_from"));
+        // The pyramid product verifies (seal + every block digest).
+        let (s1, blob1) = open_array(&out, "volume/1").unwrap();
+        assert_eq!(s1.shape, vec![4, 4, 4]);
+        let _ = tessera_io::array::decode(&s1, &blob1).unwrap();
     }
 
     #[test]
