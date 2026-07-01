@@ -44,6 +44,18 @@ use crate::spec::{spec_hash, validate, FormatOptions, IngestSpec, StreamingMode}
 /// the parsed model).
 pub const SPEC_PROVENANCE_ROLE: &str = "ingested_via_spec";
 
+/// Loud warning when a DICOM ingest seals WITHOUT `--deidentify`: the full header (including PHI —
+/// patient name/ID/DOB) enters `extra/dicom_header` in the clear (#269). De-id is opt-in today; this
+/// makes the omission non-silent so an operator can't ship identifiable data by forgetting a flag.
+fn warn_dicom_not_deidentified() {
+    tracing::warn!(
+        target: "tessera::ingest",
+        "PHI RISK: ingesting DICOM WITHOUT --deidentify — patient identifiers (name/ID/DOB) and the \
+         full header are sealed in the clear. Pass --deidentify to strip PS3.15 tags (see ADR-0040), \
+         and/or --source-label to redact the source path."
+    );
+}
+
 /// Default stream-vs-batch threshold for `hdf-compound`: a product whose estimated payload (rows ×
 /// row_bytes) exceeds this many bytes streams; below it batches. Picked to keep moderate-sized
 /// acquisitions in the batch path (lower overhead, less staging churn) while real listmode scales
@@ -259,6 +271,7 @@ fn dispatch(
             let img = if *deidentify {
                 crate::dicom::read_image_deidentified(input)?
             } else {
+                warn_dicom_not_deidentified();
                 crate::dicom::read_image(input)?
             };
             let source = label
@@ -284,6 +297,7 @@ fn dispatch(
             let img = if *deidentify {
                 crate::dicom::read_series_deidentified(inputs)?
             } else {
+                warn_dicom_not_deidentified();
                 crate::dicom::read_series(inputs)?
             };
             // With a `source_label`, recording N paths joined with commas is exactly what the label
