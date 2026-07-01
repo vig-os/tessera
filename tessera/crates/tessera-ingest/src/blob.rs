@@ -20,6 +20,20 @@ use tessera_io::BlockPayload;
 /// **Memory:** reads the whole file into RAM (peak RSS ≈ file size). The in-memory convenience for when
 /// you already hold/produce the bytes; for a large file on disk prefer [`to_blob_product_streaming`]
 /// (what the ingest engine uses) — bounded memory, byte-identical sealed result.
+/// The `filename` recorded in a blob's [`tessera_io::blob::BlobSpec`]: the `source_label` when given
+/// (PHI hygiene — #269; directory separators collapsed so it stays a single valid filename for
+/// `extract`), else the input path's own filename (legacy behavior; missing → `"blob"`).
+fn blob_filename(path: &Path, source_label: Option<&str>) -> String {
+    match source_label {
+        Some(label) => label.replace(['/', '\\'], "_"),
+        None => path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("blob")
+            .to_string(),
+    }
+}
+
 pub fn to_blob_product(
     path: &Path,
     name: &str,
@@ -29,8 +43,12 @@ pub fn to_blob_product(
     extra_sources: &[tessera_core::provenance::Source],
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
     let bytes = std::fs::read(path).map_err(Error::from)?;
-    let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("blob");
-    let (block_ref, payload) = blob_block("data", filename, media_type, bytes)?;
+    // PHI hygiene (#269): when a `source_label` is given, it also becomes the blob's stored
+    // `filename` — a vendor filename (`PATIENT_SMITH.l64`) is itself PHI and would otherwise ride in
+    // the sealed `BlobSpec.filename`, a side-channel the redacted `ingested_from` reference wouldn't
+    // catch. Without a label, the real filename is kept (the legacy behavior, needed by `extract`).
+    let filename = blob_filename(path, source_label);
+    let (block_ref, payload) = blob_block("data", &filename, media_type, bytes)?;
     // The blob block's digest already IS blake3(file bytes) — reuse it as the source-of-record hash
     // on the `ingested_from` edge (no second read of a possibly-multi-GB file).
     let src_digest = block_ref.digest.clone();
@@ -64,8 +82,8 @@ pub fn to_blob_product_streaming(
     source_label: Option<&str>,
     extra_sources: &[tessera_core::provenance::Source],
 ) -> Result<Manifest> {
-    let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("blob");
-    let block_ref = tessera_io::blob::blob_ref_streaming("data", filename, media_type, path)?;
+    let filename = blob_filename(path, source_label);
+    let block_ref = tessera_io::blob::blob_ref_streaming("data", &filename, media_type, path)?;
     // The streamed block digest already IS blake3(file bytes) — reuse it, no second pass.
     let src_digest = block_ref.digest.clone();
     let mut b = ProductBuilder::new("blob", name, "opaque preserved file", timestamp);
@@ -162,6 +180,18 @@ mod tests {
                 .map(|s| s.reference.as_str()),
             Some("DUPLET-07/raw"),
         );
+
+        // #269: the label ALSO redacts the sealed `BlobSpec.filename` — the vendor filename
+        // (`scan.l64`) is itself PHI and must not survive as a side-channel. Directory separators in
+        // the label are collapsed so it stays a valid single filename for `extract`.
+        for man in [&m, &m2] {
+            let spec = tessera_io::blob::spec_of(&man.blocks[0]).unwrap();
+            assert_eq!(spec.filename, "DUPLET-07_raw");
+            assert!(
+                !spec.filename.contains("scan.l64"),
+                "PHI-bearing filename leaked into the sealed BlobSpec"
+            );
+        }
     }
 
     #[test]
