@@ -202,13 +202,66 @@ fn block_children(kind: &BlockKind, spec: &Value) -> Vec<String> {
     }
 }
 
-/// `product` + schema-validity + seal + signature badges for the tree root / inspect header.
-/// Validation is against the **embedded** schema when the file carries one (self-describing), else
-/// the built-in registry (legacy / open-world) — see [`tessera_core::validate_manifest`].
+/// How deeply a read-side command checked integrity before rendering its status badge (#268).
+///
+/// The cheap default ([`SealOnly`](IntegrityCheck::SealOnly)) re-verifies only the **manifest seal**
+/// (`manifest_hash`, over the manifest's own canonical bytes). That proves the manifest wasn't edited
+/// — but it does **not** prove the block *payloads* still match their recorded digests: a payload can
+/// be swapped in the zip without touching the manifest, so a `sealed✓` file may still be tampered.
+/// `--verify` streams every block through its digest and upgrades the verdict to
+/// [`PayloadsOk`](IntegrityCheck::PayloadsOk) or, on a mismatch, [`Tampered`](IntegrityCheck::Tampered).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntegrityCheck {
+    /// Manifest seal only — payloads NOT read (the cheap default for `inspect` / `tree`).
+    SealOnly,
+    /// Every block payload streamed + digest-checked: the whole product is intact (`n` blocks).
+    PayloadsOk(usize),
+    /// A block payload failed its digest — the file is tampered. Carries the offending block name.
+    Tampered(String),
+}
+
+/// The seal badge for the status line: `sealed✓` when `manifest_hash` is present **and re-verifies**
+/// over the manifest's canonical bytes, `sealed✗` on a mismatch (a manifest edited without re-sealing),
+/// `unsealed` when the product carries no seal. Cheap — hashes the manifest only, never a payload. #268
+pub fn seal_status(m: &tessera_core::Manifest) -> &'static str {
+    match &m.manifest_hash {
+        None => "unsealed",
+        Some(mh) => match m.compute_manifest_hash() {
+            Ok(got) if &got == mh => "sealed✓",
+            _ => "sealed✗",
+        },
+    }
+}
+
+/// Stream every block through its digest in bounded memory (never materializing a payload `Vec`) →
+/// the payload-level verdict for the status badge. A digest mismatch yields
+/// [`IntegrityCheck::Tampered`]; a genuine I/O / container error propagates. The multi-GB-blob-safe
+/// counterpart of a full `read`: peak RSS is one 64 KiB buffer, not the block. #268
+pub fn verify_payloads<R: std::io::Read + std::io::Seek>(
+    r: &mut Reader<R>,
+) -> Result<IntegrityCheck> {
+    let names = r.block_names();
+    for name in &names {
+        match r.stream_block(name, &mut std::io::sink()) {
+            Ok(_) => {}
+            Err(tessera_core::Error::Integrity { .. }) => {
+                return Ok(IntegrityCheck::Tampered(name.clone()))
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(IntegrityCheck::PayloadsOk(names.len()))
+}
+
+/// `product` + schema-validity + seal + payload-integrity + signature badges for the tree root /
+/// inspect header. Validation is against the **embedded** schema when the file carries one
+/// (self-describing), else the built-in registry (legacy / open-world) — see
+/// [`tessera_core::validate_manifest`]. The `check` reflects how deeply payloads were verified (#268):
+/// without `--verify` the badge is `sealed✓` (manifest only); with it, `· payloads✓` / `· payloads✗`.
 ///
 /// A file is "signed" if it carries **either** an embedded signature (ADR-0042 `aux/signatures/…`)
 /// or a detached `<file>.tsra.sig.json` sidecar.
-fn status_line(file: &Path, m: &tessera_core::Manifest) -> String {
+fn status_line(file: &Path, m: &tessera_core::Manifest, check: &IntegrityCheck) -> String {
     let known = m.schema.is_some() || SchemaRegistry::builtin().get(&m.product).is_some();
     let schema = if known {
         match tessera_core::validate_manifest(m) {
@@ -218,10 +271,13 @@ fn status_line(file: &Path, m: &tessera_core::Manifest) -> String {
     } else {
         format!("schema={}(open-world)", m.product)
     };
-    let sealed = if m.manifest_hash.is_some() {
-        "sealed"
-    } else {
-        "unsealed"
+    let sealed = seal_status(m);
+    // The payload verdict is appended only when a deep check actually ran (`--verify`); the cheap
+    // default stays silent about payloads rather than implying they were checked. #268
+    let integrity = match check {
+        IntegrityCheck::SealOnly => String::new(),
+        IntegrityCheck::PayloadsOk(n) => format!(" · payloads✓ ({n} blocks)"),
+        IntegrityCheck::Tampered(b) => format!(" · payloads✗ TAMPERED({b})"),
     };
     let has_embedded = tessera_io::has_embedded_signature(file).unwrap_or(false);
     let has_detached = tessera_io::sign::sidecar_path(file).exists();
@@ -230,19 +286,31 @@ fn status_line(file: &Path, m: &tessera_core::Manifest) -> String {
     } else {
         ""
     };
-    format!("product={} · {schema} · {sealed}{signed}", m.product)
+    format!(
+        "product={} · {schema} · {sealed}{integrity}{signed}",
+        m.product
+    )
 }
 
 /// `tessera tree FILE` — the whole hierarchy: root status, `meta` fields, every block (with its
-/// columns / array spec), and `sources`, drawn with box characters.
-pub fn tree(file: &Path, full: bool, out: &mut dyn Write) -> Result<()> {
-    let r = Reader::open(file)?;
+/// columns / array spec), and `sources`, drawn with box characters. When `verify` is set, every
+/// block payload is streamed + digest-checked and the root badge reports `payloads✓` / `payloads✗`
+/// (a payload-tampered file no longer reads as intact — #268).
+pub fn tree(file: &Path, full: bool, verify: bool, out: &mut dyn Write) -> Result<()> {
+    let mut r = Reader::open(file)?;
+    // Deep payload check (bounded memory) before borrowing the manifest immutably for rendering.
+    let check = if verify {
+        verify_payloads(&mut r)?
+    } else {
+        IntegrityCheck::SealOnly
+    };
     let m = r.manifest();
     let name = file
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("<tsra>");
-    writeln!(out, "{name}  ·  {}", status_line(file, m)).map_err(tessera_core::Error::from)?;
+    writeln!(out, "{name}  ·  {}", status_line(file, m, &check))
+        .map_err(tessera_core::Error::from)?;
 
     // Build the node list: (header, children). meta · schema · blocks · sources · extra.
     let mut nodes: Vec<(String, Vec<String>)> = Vec::new();
@@ -1450,7 +1518,7 @@ mod tests {
         let p = dir.path().join("p.tsra");
         sample(&p);
         let mut buf = Vec::new();
-        tree(&p, false, &mut buf).unwrap();
+        tree(&p, false, false, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("product=listmode"));
         assert!(s.contains("schema=listmode")); // known schema; ✓/✗ depends on field completeness
@@ -1586,7 +1654,7 @@ mod tests {
 
         // tree includes the schema + extra sub-trees.
         let mut t = Vec::new();
-        tree(&p, false, &mut t).unwrap();
+        tree(&p, false, false, &mut t).unwrap();
         let t = String::from_utf8(t).unwrap();
         assert!(t.contains("schema  (recon") && t.contains("extra"), "{t}");
     }
@@ -1837,5 +1905,87 @@ mod tests {
         assert_eq!(s.lines().count(), 4);
         assert!(s.contains("\"ms\":10"));
         assert!(s.contains("\"en\":0.5"));
+    }
+
+    /// #268: the seal badge distinguishes a present-and-verified seal (`sealed✓`) from a manifest
+    /// that was edited without re-sealing (`sealed✗`) and from an unsealed product.
+    #[test]
+    fn seal_status_reflects_manifest_hash_integrity() {
+        use tessera_core::ProductBuilder;
+        let b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+        let mut sealed = b.seal().unwrap();
+        assert_eq!(seal_status(&sealed), "sealed✓");
+        // Edit a field WITHOUT recomputing manifest_hash → the seal no longer matches its bytes.
+        sealed.name = "tampered".into();
+        assert_eq!(seal_status(&sealed), "sealed✗");
+        // A product with no seal reports `unsealed`, never a false `sealed✓`.
+        sealed.manifest_hash = None;
+        assert_eq!(seal_status(&sealed), "unsealed");
+    }
+
+    /// #268: the auditor's B4 finding — a **payload-tampered** file (block bytes swapped, manifest
+    /// untouched) opens fine and shows `sealed✓`, because the manifest seal only covers the manifest.
+    /// The cheap default must NOT imply payload integrity; `--verify` (deep stream) must catch it.
+    #[test]
+    fn deep_verify_catches_a_payload_tampered_file_that_still_seals() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        use tessera_io::{array::ArrayData, pack};
+        let dir = tempfile::tempdir().unwrap();
+        let spec = ArraySpec::new(vec![2, 2], "int16");
+        let (bref, payload) =
+            tessera_io::array::array_block("volume", &spec, &ArrayData::I16(vec![0, 1, 2, 3]))
+                .unwrap();
+        let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        let sealed = b.seal().unwrap();
+
+        // Clean file → payloads✓.
+        let mut tampered_bytes = payload.bytes.clone();
+        let good = dir.path().join("good.tsra");
+        pack(&sealed, &[payload], &good).unwrap();
+        let mut r = Reader::open(&good).unwrap();
+        assert_eq!(
+            verify_payloads(&mut r).unwrap(),
+            IntegrityCheck::PayloadsOk(1)
+        );
+
+        // Tampered payload: same manifest (same recorded digest), different bytes on disk. `pack`
+        // writes payloads verbatim + a valid zip CRC → this is the real attacker shape, not a
+        // truncation the zip layer would catch first.
+        let mid = tampered_bytes.len() / 2;
+        tampered_bytes[mid] ^= 0xFF;
+        let bad = dir.path().join("bad.tsra");
+        pack(
+            &sealed,
+            &[tessera_io::BlockPayload::new("volume", tampered_bytes)],
+            &bad,
+        )
+        .unwrap();
+
+        // Reader::open still succeeds — the manifest seal is intact.
+        let mut r = Reader::open(&bad).unwrap();
+        assert_eq!(
+            verify_payloads(&mut r).unwrap(),
+            IntegrityCheck::Tampered("volume".into())
+        );
+
+        // Cheap `tree` (no --verify) says `sealed✓` and says NOTHING about payloads (honest scope).
+        let mut cheap = Vec::new();
+        tree(&bad, false, false, &mut cheap).unwrap();
+        let cheap = String::from_utf8(cheap).unwrap();
+        assert!(cheap.contains("sealed✓"), "{cheap}");
+        assert!(!cheap.contains("payloads"), "{cheap}");
+
+        // `tree --verify` makes the tamper loud.
+        let mut deep = Vec::new();
+        tree(&bad, false, true, &mut deep).unwrap();
+        let deep = String::from_utf8(deep).unwrap();
+        assert!(deep.contains("payloads✗ TAMPERED(volume)"), "{deep}");
+
+        // …and on the clean file, `tree --verify` confirms `payloads✓`.
+        let mut ok = Vec::new();
+        tree(&good, false, true, &mut ok).unwrap();
+        assert!(String::from_utf8(ok).unwrap().contains("payloads✓"));
     }
 }

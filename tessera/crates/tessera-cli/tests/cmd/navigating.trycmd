@@ -11,6 +11,30 @@ OK  ../../corpus/files/multiblock_study.tsra verified (2 blocks)
 
 ```
 
+The summary header carries a `seal` badge, but a bare `sealed✓` only proves the *manifest* is
+intact — a block payload could still have been swapped. `inspect --verify` streams every block
+through its digest (bounded memory) and reports the payload verdict too (`payloads✓`):
+
+```
+$ tessera inspect --verify ../../corpus/files/multiblock_study.tsra
+tessera [..] · product=recon
+id            [..]
+name          [..]
+timestamp     2024-01-01T00:00:00Z
+producer      tessera/0.0.0
+study         DUPLET-DP06-exam
+content_hash  blake3:3b5d271b91ed2793445b561a709e38a469c7a73bdcd8ef8331e41ad7639498b8
+manifest_hash blake3:8e18e39448ccf8b19315786a7b268a66a0372218b07ad21898d16ac61cb45042
+seal          sealed✓
+integrity     payloads✓ (2 blocks)
+blocks        2
+  - volume               Array blake3:6620c9be29593a0c4ac3439e420af4bf80866e761b664f1010a549dd70f0e2c9
+  - roi                  Table blake3:827e49afe82ba77057cb4bc991ba53298aa4248315a216930329ee4ab5b28e4e
+sources       1
+  - derived_from <- recon-int16
+
+```
+
 # === Does it conform to its declared product schema (required fields + blocks)? ===
 
 ```
@@ -38,7 +62,7 @@ OK  schema-valid: ../../corpus/files/multiblock_study.tsra
 
 ```
 $ tessera tree ../../corpus/files/multiblock_study.tsra
-multiblock_study.tsra  ·  product=recon · schema=recon✓ · sealed
+multiblock_study.tsra  ·  product=recon · schema=recon✓ · sealed✓
 ├── meta
 │   └── modality = "CT"
 ├── schema  (recon v1.0)
