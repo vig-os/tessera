@@ -35,7 +35,7 @@ use tessera_core::collection::CollectionBuilder;
 use tessera_core::manifest::Manifest;
 use tessera_core::provenance::Source;
 use tessera_core::{Error, Result};
-use tessera_io::{pack, pack_streaming_verified};
+use tessera_io::{pack, pack_streaming_verified, stamp_ingest_provenance, ProvenanceOptions};
 
 use crate::spec::{spec_hash, validate, FormatOptions, IngestSpec, StreamingMode};
 
@@ -387,6 +387,10 @@ fn dispatch(
                         final_path.display()
                     ))
                 })?;
+                // ADR-0042: aux/provenance.json stamp — matches the batch path's seal_to_tsra. The
+                // streaming path only becomes stampable after the atomic rename to the id-named
+                // final path (before that, the file is `__pending_*.tsra` in flux).
+                stamp_ingest_provenance(&final_path, &ProvenanceOptions::default())?;
                 // Tidy up the per-product stage dir — best-effort (failure here would not change
                 // the sealed product's correctness, so it's not a hard error).
                 let _ = std::fs::remove_dir_all(&stage);
@@ -472,6 +476,11 @@ fn seal_to_tsra(
     let m = apply_spec_metadata(m, &p.metadata)?;
     let path = out_dir.join(format!("{}.tsra", sanitize_filename(&m.id)));
     pack(&m, payloads, &path)?;
+    // ADR-0042: stamp `aux/provenance.json` (wall-clock + producer + host) as a non-sealed aux
+    // member. The sealed region is byte-identical afterwards (proven by container tests), so this
+    // NEVER breaks writer-determinism on the seal-covered `id`/`content_hash`/`manifest_hash`.
+    // Silenced under `TESSERA_SKIP_PROVENANCE=1` for the tests that DO compare whole-archive bytes.
+    stamp_ingest_provenance(&path, &ProvenanceOptions::default())?;
     Ok(m)
 }
 
@@ -492,6 +501,8 @@ fn seal_streaming_to_tsra(
     let m = apply_spec_metadata(m, &p.metadata)?;
     let path = out_dir.join(format!("{}.tsra", sanitize_filename(&m.id)));
     pack_streaming_verified(&m, sources, &path)?;
+    // ADR-0042: aux/provenance.json stamp, matching seal_to_tsra above.
+    stamp_ingest_provenance(&path, &ProvenanceOptions::default())?;
     Ok(m)
 }
 

@@ -21,6 +21,19 @@ pub const MIMETYPE: &str = "application/vnd.tessera";
 const MIMETYPE_ENTRY: &str = "mimetype";
 const MANIFEST_ENTRY: &str = "manifest.json";
 const BLOCKS_PREFIX: &str = "blocks/";
+/// Reserved prefix for **non-sealed auxiliary members** (ADR-0042). The manifest lists exactly what
+/// is sealed (its `blocks`); anything under `aux/` is carried inside the one shareable file but
+/// **ignored by the seal** — the `.gitignore` for `content_hash` / `manifest_hash`. Adding or
+/// removing an `aux/` member never changes either sealed hash, so the embedded signature (which must
+/// sit outside the thing it signs) and the ingest-time provenance stamp can ride here without
+/// perturbing writer-determinism or the conformance corpus.
+pub const AUX_PREFIX: &str = "aux/";
+/// The embedded-signature aux path: `aux/signatures/<key_id>.sig.json`. Reader falls back to the
+/// detached `<file>.tsra.sig.json` when the embedded form is absent (ADR-0037 + ADR-0042).
+pub const AUX_SIGNATURES_PREFIX: &str = "aux/signatures/";
+/// The ingest-time provenance stamp path: `aux/provenance.json` (RFC-3339 wall-clock + producer +
+/// host). Determinism-safe by construction — it's an aux member, so it never enters the seal.
+pub const AUX_PROVENANCE_ENTRY: &str = "aux/provenance.json";
 
 /// A block's encoded bytes, to be stored at `blocks/<name>`. `bytes` MUST be the exact bytes the
 /// block's recorded digest was computed over (so the reader can verify integrity on access).
@@ -352,6 +365,35 @@ impl<R: Read + Seek> Reader<R> {
         Ok(buf)
     }
 
+    /// Names of every **auxiliary member** carried inside this `.tsra` (any zip entry under
+    /// [`AUX_PREFIX`], returned WITHOUT the prefix — `aux/signatures/abc.sig.json` → `signatures/abc.sig.json`).
+    /// Aux members ride *inside* the one shareable file but are **outside the seal** (ADR-0042):
+    /// they are not referenced by `manifest.blocks` and therefore do not enter `content_hash` /
+    /// `manifest_hash`. Returned in central-directory order — the same order [`pack`] emits, so a
+    /// caller iterating over `aux_names()` sees a stable listing.
+    pub fn aux_names(&self) -> Vec<String> {
+        (0..self.archive.len())
+            .filter_map(|i| self.archive.name_for_index(i).map(str::to_string))
+            .filter_map(|n| n.strip_prefix(AUX_PREFIX).map(str::to_string))
+            .filter(|n| !n.is_empty()) // the bare `aux/` directory marker, if any, is not a member
+            .collect()
+    }
+
+    /// Read one aux member's bytes verbatim by its name **without** the [`AUX_PREFIX`] (so
+    /// `read_aux("signatures/<key_id>.sig.json")` reads the embedded signature JSON). No digest
+    /// check: aux members are seal-ignored (ADR-0042) — carriage, not integrity-guaranteed. Anything
+    /// that needs tamper-evidence goes in `manifest.blocks` / `extra` (both sealed).
+    pub fn read_aux(&mut self, name: &str) -> Result<Vec<u8>> {
+        let entry = format!("{AUX_PREFIX}{name}");
+        let mut f = self
+            .archive
+            .by_name(&entry)
+            .map_err(|_| Error::Container(format!("no aux entry '{entry}'")))?;
+        let mut b = Vec::with_capacity(f.size() as usize);
+        f.read_to_end(&mut b)?;
+        Ok(b)
+    }
+
     /// Stream a block's bytes to `w` in **bounded memory** — copy a fixed buffer at a time, hashing as
     /// the bytes flow, never holding the whole block in a `Vec`. The bounded counterpart of
     /// [`Self::read_block`] for a large blob: over a cloud `Read + Seek` source the underlying zip read
@@ -400,9 +442,185 @@ impl<R: Read + Seek> Reader<R> {
     }
 }
 
-/// Explode a `.tsra` into a directory: `manifest.json` + `blocks/<name>` (the opt-in exploded
-/// form of ADR-0022). Verifies the seal on open and each block against its digest. Returns the
-/// verified manifest.
+/// One aux member to add to an existing `.tsra` — a name **relative to `aux/`** (so
+/// `"signatures/<key_id>.sig.json"` becomes `aux/signatures/<key_id>.sig.json` inside the archive)
+/// and its bytes. Aux members ride outside the seal (ADR-0042) — the container hashes
+/// `content_hash` / `manifest_hash` remain byte-identical when they are added or removed.
+pub struct AuxMember {
+    /// Path under `aux/` (e.g. `"signatures/<key_id>.sig.json"`, `"provenance.json"`). Must NOT
+    /// itself start with `aux/` — the prefix is added by [`add_aux_members`].
+    pub name: String,
+    /// Verbatim bytes of the member (typically JSON).
+    pub bytes: Vec<u8>,
+}
+
+impl AuxMember {
+    pub fn new(name: impl Into<String>, bytes: Vec<u8>) -> Self {
+        AuxMember {
+            name: name.into(),
+            bytes,
+        }
+    }
+}
+
+/// Add one or more **non-sealed aux members** to an existing sealed `.tsra` **without touching the
+/// sealed region** (ADR-0042). Thin wrapper over [`write_aux_members`] with no removal — an existing
+/// `aux/<name>` collides only when the new `AuxMember` has the same name (last-write-wins).
+pub fn add_aux_members(path: &Path, members: &[AuxMember]) -> Result<()> {
+    write_aux_members(path, members, &[])
+}
+
+/// Add non-sealed aux members AND remove any existing aux members whose sub-path (name below
+/// `aux/`) starts with any prefix in `remove_prefixes` (ADR-0042). Same seal-ignore invariant as
+/// [`add_aux_members`]: the reopened manifest's `content_hash` / `manifest_hash` are byte-identical.
+///
+/// Used by `sign` to cleanly replace ALL prior `aux/signatures/*` entries with a freshly written
+/// one — otherwise a re-sign with a different key would leave the previous signature behind, and
+/// [`crate::sign::read_signature`] (first-in-central-directory-order) would resolve to the stale
+/// entry. Pass `["signatures/"]` to clear the whole signature subtree; the caller adds the new one
+/// through `members`.
+pub fn write_aux_members(
+    path: &Path,
+    members: &[AuxMember],
+    remove_prefixes: &[&str],
+) -> Result<()> {
+    // Read the existing archive once, gather (name → bytes) for every entry. `Reader::open`
+    // verifies magic + manifest seal, so a corrupt input fails before we start rewriting.
+    let mut existing: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut manifest_json_bytes: Option<Vec<u8>> = None;
+    let sealed_manifest = {
+        let mut r = Reader::open(path)?;
+        // Central-directory-ordered pass so the rewritten archive preserves the sealed entry order.
+        for i in 0..r.archive.len() {
+            let mut zf = r
+                .archive
+                .by_index(i)
+                .map_err(|e| Error::Container(format!("read existing entry #{i}: {e}")))?;
+            let name = zf.name().to_string();
+            let mut buf = Vec::with_capacity(zf.size() as usize);
+            zf.read_to_end(&mut buf)?;
+            if name == MANIFEST_ENTRY {
+                manifest_json_bytes = Some(buf.clone());
+            }
+            existing.push((name, buf));
+        }
+        r.manifest().clone()
+    };
+    let manifest_json_bytes = manifest_json_bytes
+        .ok_or_else(|| Error::Container("existing .tsra has no manifest.json".into()))?;
+
+    // Names of aux members being added — for the "overwrite by name" behavior. Compare with the
+    // AUX_PREFIX added, since existing entries carry the full path.
+    let to_add: std::collections::BTreeSet<String> = members
+        .iter()
+        .map(|m| format!("{AUX_PREFIX}{}", m.name))
+        .collect();
+    // Full prefixes (including `aux/`) of entries to remove — turns a caller-facing "signatures/"
+    // into the archive-level "aux/signatures/" so the pass-through filter matches the entry names.
+    let remove_full: Vec<String> = remove_prefixes
+        .iter()
+        .map(|p| format!("{AUX_PREFIX}{p}"))
+        .collect();
+
+    // Stage the rewrite to a `.part`, atomic-rename on success.
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".part");
+    let tmp_path = std::path::PathBuf::from(tmp);
+    let result = write_repacked_archive(&tmp_path, &existing, &to_add, &remove_full, members);
+    match result {
+        Ok(()) => {
+            std::fs::rename(&tmp_path, path)?;
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+    }
+
+    // Seal-ignore invariant: reopen the rewritten archive; the sealed region's serialised
+    // manifest.json bytes and its verified `content_hash` / `manifest_hash` MUST be identical. A
+    // failure here is a bug (an aux write is NEVER allowed to perturb the seal) — surface it as a
+    // typed integrity error instead of silently shipping a mutated seal.
+    let reopened = Reader::open(path)?;
+    let reopened_manifest = reopened.manifest();
+    if reopened_manifest.content_hash != sealed_manifest.content_hash {
+        return Err(Error::Integrity {
+            what: "aux_write_changed_content_hash",
+            expected: sealed_manifest.content_hash.clone().unwrap_or_default(),
+            actual: reopened_manifest.content_hash.clone().unwrap_or_default(),
+        });
+    }
+    if reopened_manifest.manifest_hash != sealed_manifest.manifest_hash {
+        return Err(Error::Integrity {
+            what: "aux_write_changed_manifest_hash",
+            expected: sealed_manifest.manifest_hash.clone().unwrap_or_default(),
+            actual: reopened_manifest.manifest_hash.clone().unwrap_or_default(),
+        });
+    }
+    // Also assert the on-disk `manifest.json` entry itself was preserved byte-for-byte — a hash
+    // match with different bytes would still count as a seal-ignore break (JSON reformatting).
+    let mut reopened_zip = ZipArchive::new(File::open(path)?).map_err(cz)?;
+    let mut got = Vec::new();
+    reopened_zip
+        .by_name(MANIFEST_ENTRY)
+        .map_err(cz)?
+        .read_to_end(&mut got)?;
+    if got != manifest_json_bytes {
+        return Err(Error::Container(
+            "aux write mutated the manifest.json bytes (seal-ignore invariant broken)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Write the repacked archive to `out`: sealed entries first (byte-identical), then the surviving
+/// old aux entries (any name being overwritten OR matching a `remove_full` prefix is dropped here),
+/// then the newly added aux members.
+fn write_repacked_archive(
+    out: &Path,
+    existing: &[(String, Vec<u8>)],
+    to_add: &std::collections::BTreeSet<String>,
+    remove_full: &[String],
+    members: &[AuxMember],
+) -> Result<()> {
+    let mut zw = ZipWriter::new(File::create(out)?);
+    let stored = tsra_entry_options();
+    // Pass 1: copy through every SEALED entry (mimetype, manifest.json, blocks/*), preserving order.
+    for (name, bytes) in existing {
+        if name == MIMETYPE_ENTRY || name == MANIFEST_ENTRY || name.starts_with(BLOCKS_PREFIX) {
+            zw.start_file(name, stored).map_err(cz)?;
+            zw.write_all(bytes)?;
+        }
+    }
+    // Pass 2: copy through every existing aux entry NOT being replaced by name AND NOT covered by
+    // a `remove_full` prefix (the mechanism `sign` uses to clear the prior `aux/signatures/*`).
+    for (name, bytes) in existing {
+        if !name.starts_with(AUX_PREFIX) {
+            continue;
+        }
+        if to_add.contains(name) {
+            continue;
+        }
+        if remove_full.iter().any(|p| name.starts_with(p)) {
+            continue;
+        }
+        zw.start_file(name, stored).map_err(cz)?;
+        zw.write_all(bytes)?;
+    }
+    // Pass 3: append the newly added aux members (in caller order).
+    for m in members {
+        zw.start_file(format!("{AUX_PREFIX}{}", m.name), stored)
+            .map_err(cz)?;
+        zw.write_all(&m.bytes)?;
+    }
+    zw.finish().map_err(cz)?;
+    Ok(())
+}
+
+/// Explode a `.tsra` into a directory: `manifest.json` + `blocks/<name>` + `aux/<name>` (the opt-in
+/// exploded form of ADR-0022; ADR-0042 adds the aux round-trip). Verifies the seal on open and each
+/// block against its digest. Aux members are copied verbatim under `aux/` (they carry no digest —
+/// seal-ignored). Returns the verified manifest.
 pub fn unpack(path: &Path, outdir: &Path) -> Result<Manifest> {
     let mut r = Reader::open(path)?;
     let manifest = r.manifest().clone();
@@ -412,11 +630,29 @@ pub fn unpack(path: &Path, outdir: &Path) -> Result<Manifest> {
         let bytes = r.read_block(&name)?;
         std::fs::write(outdir.join("blocks").join(&name), bytes)?;
     }
+    // ADR-0042: also explode any aux members so `unpack` → `pack` round-trips the whole file
+    // (including the embedded signature + ingest provenance). Aux paths may contain sub-dirs
+    // (`signatures/<key_id>.sig.json`), so we create the parent tree per member.
+    let aux_names = r.aux_names();
+    if !aux_names.is_empty() {
+        std::fs::create_dir_all(outdir.join("aux"))?;
+    }
+    for name in aux_names {
+        let bytes = r.read_aux(&name)?;
+        let out_path = outdir.join("aux").join(&name);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&out_path, bytes)?;
+    }
     Ok(manifest)
 }
 
-/// Pack an exploded directory (`manifest.json` + `blocks/<name>`) back into a sealed `.tsra`.
-/// The manifest is seal-verified before packing; each block's payload is read from `blocks/`.
+/// Pack an exploded directory (`manifest.json` + `blocks/<name>` + optional `aux/<name>`) back into
+/// a sealed `.tsra`. The manifest is seal-verified before packing; each block's payload is read from
+/// `blocks/`. If an `aux/` subtree is present it is appended as non-sealed aux members (ADR-0042) —
+/// round-trip counterpart of [`unpack`], so a `.tsra` that carried an embedded signature + ingest
+/// provenance survives an unpack/repack round with byte-identical seal AND the aux payload intact.
 pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
     let mj = std::fs::read_to_string(dir.join("manifest.json"))?;
     let manifest = Manifest::from_json_verified(&mj)?;
@@ -425,7 +661,47 @@ pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
         let bytes = std::fs::read(dir.join("blocks").join(&b.name))?;
         payloads.push(BlockPayload::new(b.name.clone(), bytes));
     }
-    pack(&manifest, &payloads, out)
+    pack(&manifest, &payloads, out)?;
+    // Re-attach any aux/ subtree. Absent → skip; a file present → embed under its relative path.
+    let aux_dir = dir.join("aux");
+    if aux_dir.is_dir() {
+        let members = collect_aux_members(&aux_dir)?;
+        if !members.is_empty() {
+            add_aux_members(out, &members)?;
+        }
+    }
+    Ok(())
+}
+
+/// Walk `aux_dir` and collect every regular file as an [`AuxMember`] whose `name` is its path
+/// relative to `aux_dir` (forward-slashed). Returns members in sorted order so a `pack_dir` on the
+/// same tree is deterministic. Used only by [`pack_dir`].
+fn collect_aux_members(aux_dir: &Path) -> Result<Vec<AuxMember>> {
+    let mut out = Vec::new();
+    fn walk(dir: &Path, base: &Path, out: &mut Vec<AuxMember>) -> Result<()> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<std::io::Result<_>>()?;
+        entries.sort_by_key(std::fs::DirEntry::path);
+        for e in entries {
+            let p = e.path();
+            let ft = e.file_type()?;
+            if ft.is_dir() {
+                walk(&p, base, out)?;
+            } else if ft.is_file() {
+                let rel = p
+                    .strip_prefix(base)
+                    .map_err(|e| Error::Container(format!("aux dir walk: {e}")))?;
+                let name = rel
+                    .to_str()
+                    .ok_or_else(|| Error::Container("aux member name is not valid UTF-8".into()))?
+                    .replace('\\', "/");
+                let bytes = std::fs::read(&p)?;
+                out.push(AuxMember::new(name, bytes));
+            }
+        }
+        Ok(())
+    }
+    walk(aux_dir, aux_dir, &mut out)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -690,6 +966,157 @@ mod tests {
             matches!(err, Error::Container(ref m) if m.contains("no manifest block named 'typo'")),
             "expected Container error naming the missing block, got {err:?}"
         );
+    }
+
+    #[test]
+    fn aux_members_are_carried_but_ignored_by_the_seal() {
+        // ADR-0042 seal-ignore invariant — the load-bearing guarantee this whole change hangs on.
+        // Adding (or replacing) an `aux/` member MUST leave `content_hash` AND `manifest_hash`
+        // byte-identical, so the existing conformance corpus never needs regeneration.
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![8, 8, 8], "int16"));
+        let payload = serde_json::to_vec(&vol.spec).unwrap();
+        let mut b = ProductBuilder::new("recon", "AUX", "seal-ignore", "2024-01-01T00:00:00Z");
+        b.add_block(&vol).unwrap();
+        b.with_field(
+            "modality",
+            serde_json::json!({"_vocabulary": "DICOM", "_code": "CT"}),
+        );
+        let sealed = b.seal().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aux.tsra");
+        pack(&sealed, &[BlockPayload::new("volume", payload)], &path).unwrap();
+
+        // Snapshot the pre-aux hashes and the on-disk manifest.json bytes — the invariant is that
+        // the SEALED region is byte-preserved, not merely that the hashes happen to match.
+        let (pre_ch, pre_mh, pre_manifest_json) = {
+            let mut zip = ZipArchive::new(File::open(&path).unwrap()).unwrap();
+            let mut mj = Vec::new();
+            zip.by_name(MANIFEST_ENTRY)
+                .unwrap()
+                .read_to_end(&mut mj)
+                .unwrap();
+            let r = Reader::from_reader(File::open(&path).unwrap()).unwrap();
+            (
+                r.manifest().content_hash.clone(),
+                r.manifest().manifest_hash.clone(),
+                mj,
+            )
+        };
+
+        // Add two aux members: an embedded-signature look-alike and a provenance stamp.
+        add_aux_members(
+            &path,
+            &[
+                AuxMember::new("signatures/deadbeef.sig.json", br#"{"stub":true}"#.to_vec()),
+                AuxMember::new(
+                    "provenance.json",
+                    br#"{"ingested_at":"2026-06-25T00:00:00Z","producer":"tessera/x","host":"h"}"#
+                        .to_vec(),
+                ),
+            ],
+        )
+        .unwrap();
+
+        // Reopen: the seal-covered hashes are byte-identical, AND the manifest.json bytes are too.
+        let (post_ch, post_mh, post_manifest_json) = {
+            let mut zip = ZipArchive::new(File::open(&path).unwrap()).unwrap();
+            let mut mj = Vec::new();
+            zip.by_name(MANIFEST_ENTRY)
+                .unwrap()
+                .read_to_end(&mut mj)
+                .unwrap();
+            let r = Reader::from_reader(File::open(&path).unwrap()).unwrap();
+            (
+                r.manifest().content_hash.clone(),
+                r.manifest().manifest_hash.clone(),
+                mj,
+            )
+        };
+        assert_eq!(pre_ch, post_ch, "content_hash MUST be byte-identical");
+        assert_eq!(pre_mh, post_mh, "manifest_hash MUST be byte-identical");
+        assert_eq!(
+            pre_manifest_json, post_manifest_json,
+            "manifest.json bytes MUST be byte-preserved (no JSON reformatting)"
+        );
+
+        // The reader surfaces the aux members and reads them verbatim.
+        let mut r = Reader::open(&path).unwrap();
+        let names = r.aux_names();
+        assert!(names.contains(&"signatures/deadbeef.sig.json".to_string()));
+        assert!(names.contains(&"provenance.json".to_string()));
+        assert_eq!(
+            r.read_aux("signatures/deadbeef.sig.json").unwrap(),
+            br#"{"stub":true}"#
+        );
+        // A block read still passes its digest check (nothing about the seal moved).
+        r.read_block("volume").unwrap();
+
+        // Re-adding the same aux name overwrites it (so re-sign replaces the previous signature).
+        add_aux_members(
+            &path,
+            &[AuxMember::new(
+                "signatures/deadbeef.sig.json",
+                br#"{"stub":"replaced"}"#.to_vec(),
+            )],
+        )
+        .unwrap();
+        let mut r = Reader::open(&path).unwrap();
+        assert_eq!(
+            r.read_aux("signatures/deadbeef.sig.json").unwrap(),
+            br#"{"stub":"replaced"}"#
+        );
+        // The seal-ignore invariant STILL holds after the overwrite.
+        assert_eq!(r.manifest().content_hash, pre_ch);
+        assert_eq!(r.manifest().manifest_hash, pre_mh);
+    }
+
+    #[test]
+    fn unpack_pack_round_trips_the_aux_subtree() {
+        // A `.tsra` that carries embedded aux (signature + provenance) survives unpack→pack: the
+        // sealed hashes are unchanged AND the aux members are recovered under `aux/<name>` in the
+        // exploded dir, then re-embedded by `pack_dir` back into the sealed .tsra.
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![4, 4, 4], "int16"));
+        let payload = serde_json::to_vec(&vol.spec).unwrap();
+        let mut b = ProductBuilder::new("recon", "RTRIP", "d", "2024-01-01T00:00:00Z");
+        b.add_block(&vol).unwrap();
+        b.with_field("modality", serde_json::json!("CT"));
+        let sealed = b.seal().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let orig = dir.path().join("orig.tsra");
+        pack(&sealed, &[BlockPayload::new("volume", payload)], &orig).unwrap();
+        add_aux_members(
+            &orig,
+            &[
+                AuxMember::new("signatures/k.sig.json", br#"{"sig":true}"#.to_vec()),
+                AuxMember::new("provenance.json", br#"{"ingested_at":"t"}"#.to_vec()),
+            ],
+        )
+        .unwrap();
+        let (ch, mh) = {
+            let r = Reader::open(&orig).unwrap();
+            (
+                r.manifest().content_hash.clone(),
+                r.manifest().manifest_hash.clone(),
+            )
+        };
+
+        // unpack lays down `manifest.json` + `blocks/volume` + `aux/signatures/k.sig.json` + `aux/provenance.json`.
+        let exploded = dir.path().join("out");
+        unpack(&orig, &exploded).unwrap();
+        assert!(exploded.join("aux/signatures/k.sig.json").exists());
+        assert!(exploded.join("aux/provenance.json").exists());
+
+        // pack_dir reassembles them; the seal is byte-identical and the aux members are back inside.
+        let repacked = dir.path().join("re.tsra");
+        pack_dir(&exploded, &repacked).unwrap();
+        let r = Reader::open(&repacked).unwrap();
+        assert_eq!(r.manifest().content_hash, ch, "seal must be preserved");
+        assert_eq!(r.manifest().manifest_hash, mh, "seal must be preserved");
+        let names = r.aux_names();
+        assert!(names.contains(&"signatures/k.sig.json".to_string()));
+        assert!(names.contains(&"provenance.json".to_string()));
     }
 
     #[test]

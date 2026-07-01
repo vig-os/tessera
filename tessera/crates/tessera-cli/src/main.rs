@@ -138,8 +138,8 @@ Distribution (needs --features cloud):
 Signing & trust:
   keygen      Generate an ed25519 keypair
   trust       Manage the trust store of public keys verify-sig accepts
-  sign        Sign a sealed .tsra (writes a .sig.json sidecar)
-  verify-sig  Verify a sealed .tsra against its .sig.json sidecar
+  sign        Sign a sealed .tsra (embeds aux/signatures/<key_id>.sig.json; --sidecar for detached)
+  verify-sig  Verify a sealed .tsra against its signature (embedded first, sidecar fallback)
 
 Diagnostics:
   bench       Bench the write engine on this host (throughput + peak RSS)
@@ -522,9 +522,11 @@ enum Cmd {
         #[command(subcommand)]
         action: TrustAction,
     },
-    /// Sign a sealed `.tsra` (writes a `<file>.sig.json` sidecar).
+    /// Sign a sealed `.tsra` (embeds an `aux/signatures/<key_id>.sig.json` member by default).
     ///
-    /// ed25519 over the signature envelope; result is written next to the input as a sidecar.
+    /// ed25519 over the signature envelope; the result rides **inside** the container as a
+    /// non-sealed aux member (ADR-0042), so a `.tsra` shared by itself never loses its signature.
+    /// Pass `--sidecar` to write the legacy detached `<file>.tsra.sig.json` instead.
     Sign {
         /// The sealed `.tsra` to sign.
         file: PathBuf,
@@ -534,10 +536,14 @@ enum Cmd {
         /// Optional signer identity recorded in the signature (e.g. an ORCID iD URL).
         #[arg(long)]
         signer: Option<String>,
+        /// Write the legacy detached `<file>.tsra.sig.json` sidecar instead of embedding the
+        /// signature. Kept for the OCI double-layer distribution path (ADR-0037 §0 bug #2).
+        #[arg(long)]
+        sidecar: bool,
     },
-    /// Verify a sealed `.tsra` against its `<file>.sig.json` sidecar.
+    /// Verify a sealed `.tsra` against its signature (embedded first, `<file>.tsra.sig.json` fallback).
     ///
-    /// Defaults to the **trust store** (the sidecar's `key_id` must be a key you trust);
+    /// Defaults to the **trust store** (the signature's `key_id` must be a key you trust);
     /// `--pubkey` checks against an explicit key.
     VerifySig {
         /// The sealed `.tsra` to verify.
@@ -1178,7 +1184,12 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             );
             Ok(())
         }
-        Cmd::Sign { file, key, signer } => {
+        Cmd::Sign {
+            file,
+            key,
+            signer,
+            sidecar,
+        } => {
             // Auto-detect raw-hex (keygen) vs an OpenSSH `~/.ssh/id_ed25519`; stamp the signing time.
             let (sk, key_format) = trust::load_signing_key(&key)?;
             let opts = tessera_core::signing::SignOpts {
@@ -1186,12 +1197,21 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 signed_at: Some(trust::now_rfc3339()),
                 key_format: Some(key_format.into()),
             };
-            let env = tessera_io::sign_tsra(&file, &sk, &opts)?;
+            let env = if sidecar {
+                tessera_io::sign_tsra_sidecar(&file, &sk, &opts)?
+            } else {
+                tessera_io::sign_tsra(&file, &sk, &opts)?
+            };
             println!("OK  signed {}", file.display());
-            println!(
-                "  sidecar   {}",
-                tessera_io::sign::sidecar_path(&file).display()
-            );
+            if sidecar {
+                println!(
+                    "  sidecar   {}",
+                    tessera_io::sign::sidecar_path(&file).display()
+                );
+            } else {
+                // ADR-0042: the signature is inside the container as `aux/signatures/<key_id>.sig.json`.
+                println!("  embedded  aux/signatures/{}.sig.json", env.key_id);
+            }
             println!("  key_id    {}", env.key_id);
             if let Some(fmt) = &env.key_format {
                 println!("  key_fmt   {fmt}");

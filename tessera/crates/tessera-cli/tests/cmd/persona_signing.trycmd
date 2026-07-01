@@ -15,7 +15,7 @@ wrote public  key instrument.key.pub (share freely)
 ```
 $ tessera sign study.tsra --key instrument.key --signer https://orcid.org/0000-0002-1825-0097
 OK  signed study.tsra
-  sidecar   study.tsra.sig.json
+  embedded  aux/signatures/[..].sig.json
   key_id    [..]
   key_fmt   raw-hex
   signed_at [..]
@@ -58,6 +58,6 @@ OK  study.tsra — trusted as 'instrument-lab' + 1 blocks intact
 ```
 $ tessera verify-sig study.tsra --require-signer https://orcid.org/9999-9999-9999-9999
 ? failed
-error: [..]signer policy: required 'https://orcid.org/9999-9999-9999-9999'[..]
+error: invalid product: signer policy: required 'https://orcid.org/9999-9999-9999-9999', sidecar attributes to Some("https://orcid.org/0000-0002-1825-0097")
 
 ```

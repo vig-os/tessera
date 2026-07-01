@@ -205,6 +205,9 @@ fn block_children(kind: &BlockKind, spec: &Value) -> Vec<String> {
 /// `product` + schema-validity + seal + signature badges for the tree root / inspect header.
 /// Validation is against the **embedded** schema when the file carries one (self-describing), else
 /// the built-in registry (legacy / open-world) — see [`tessera_core::validate_manifest`].
+///
+/// A file is "signed" if it carries **either** an embedded signature (ADR-0042 `aux/signatures/…`)
+/// or a detached `<file>.tsra.sig.json` sidecar.
 fn status_line(file: &Path, m: &tessera_core::Manifest) -> String {
     let known = m.schema.is_some() || SchemaRegistry::builtin().get(&m.product).is_some();
     let schema = if known {
@@ -220,7 +223,9 @@ fn status_line(file: &Path, m: &tessera_core::Manifest) -> String {
     } else {
         "unsealed"
     };
-    let signed = if tessera_io::sign::sidecar_path(file).exists() {
+    let has_embedded = tessera_io::has_embedded_signature(file).unwrap_or(false);
+    let has_detached = tessera_io::sign::sidecar_path(file).exists();
+    let signed = if has_embedded || has_detached {
         " · signed"
     } else {
         ""
@@ -305,9 +310,20 @@ pub fn tree(file: &Path, full: bool, out: &mut dyn Write) -> Result<()> {
             .collect();
         nodes.push(("extra".to_string(), kids));
     }
-    // Adjacent sidecar files (outside the seal): the detached signature (ADR-0037), and — when
-    // present — the field-encryption envelope (ADR-0041). The seal itself is in the manifest, not
-    // a sidecar. Shown so `tree` reflects the whole on-disk product, not just the container.
+    // Non-sealed aux members carried INSIDE the container (ADR-0042): the embedded signature +
+    // `aux/provenance.json` (and anything else future producers stamp). Kept distinct from the
+    // adjacent-sidecars node below so a reader immediately sees what's inside the one shareable
+    // file vs what rides next to it on disk.
+    let aux = r.aux_names();
+    if !aux.is_empty() {
+        let kids = aux.iter().map(|n| format!("aux/{n}")).collect();
+        nodes.push(("aux".to_string(), kids));
+    }
+
+    // Adjacent sidecar files (outside the container AND outside the seal): the detached signature
+    // (ADR-0037), and — when present — the field-encryption envelope (ADR-0041). Left here for the
+    // operator who signed with `--sidecar` or an older Tessera. Shown so `tree` reflects the whole
+    // on-disk product, not just the container.
     let sidecars: Vec<String> = [
         ("signature", tessera_io::sign::sidecar_path(file)),
         ("field-encryption", file.with_extension("tsra.fcrypt.json")),
@@ -465,7 +481,8 @@ fn source_lines(role: &str, reference: &str, digest: Option<&str>, full: bool) -
 /// block, `sources`); `PATH=meta` lists metadata fields; `PATH=<block>` lists a table's columns or
 /// an array's spec; `PATH=sources` lists provenance edges.
 pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> Result<()> {
-    let r = Reader::open(file)?;
+    let mut r = Reader::open(file)?;
+    let aux_names = r.aux_names();
     let m = r.manifest();
     match path {
         None => {
@@ -496,6 +513,12 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
             // header (`dicom_header`) live here; `ls FILE extra/<key>` dumps one.
             if !m.extra.is_empty() {
                 writeln!(out, "extra/  ({} keys)", m.extra.len())
+                    .map_err(tessera_core::Error::from)?;
+            }
+            // Non-sealed aux members carried inside the container (ADR-0042): embedded signature,
+            // ingest provenance, anything future producers stamp. Navigable via `ls FILE aux`.
+            if !aux_names.is_empty() {
+                writeln!(out, "aux/  ({} members)", aux_names.len())
                     .map_err(tessera_core::Error::from)?;
             }
             Ok(())
@@ -555,6 +578,29 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
                         "no extra key '{key}' (keys: {})",
                         m.extra.keys().cloned().collect::<Vec<_>>().join(", ")
                     )))
+                }
+            }
+            Ok(())
+        }
+        Some(p) if p == "aux" || p == "aux/" => {
+            // List the embedded aux members carried inside the container (ADR-0042). No sizes are
+            // shown — an aux member is opaque JSON / arbitrary bytes; `ls FILE aux/<name>` reads it.
+            for n in &aux_names {
+                writeln!(out, "aux/{n}").map_err(tessera_core::Error::from)?;
+            }
+            Ok(())
+        }
+        Some(p) if p.starts_with("aux/") => {
+            let key = &p["aux/".len()..];
+            // read_aux surfaces the exact bytes; for the two canonical members (signature +
+            // provenance) the bytes are JSON — pretty-printed for the reader.
+            let bytes = r.read_aux(key)?;
+            match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(v) => writeln!(out, "{}", serde_json::to_string_pretty(&v)?)
+                    .map_err(tessera_core::Error::from)?,
+                Err(_) => {
+                    // Not JSON — write the raw bytes as-is (a future aux member may be non-JSON).
+                    out.write_all(&bytes).map_err(tessera_core::Error::from)?;
                 }
             }
             Ok(())
