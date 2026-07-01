@@ -1117,6 +1117,135 @@ pub fn slice(
     Ok(())
 }
 
+/// Reduce mode for [`project`].
+#[derive(Clone, Copy)]
+enum ProjMode {
+    /// Maximum-intensity projection (MIP) — the classic PET/CT overview.
+    Max,
+    /// Mean along the axis.
+    Mean,
+    /// Sum along the axis.
+    Sum,
+}
+
+impl ProjMode {
+    fn parse(s: &str) -> Result<ProjMode> {
+        match s {
+            "max" | "mip" => Ok(ProjMode::Max),
+            "mean" | "avg" => Ok(ProjMode::Mean),
+            "sum" => Ok(ProjMode::Sum),
+            other => Err(tessera_core::Error::Invalid(format!(
+                "unknown --mode '{other}' (expected max | mean | sum)"
+            ))),
+        }
+    }
+}
+
+/// Reduce a row-major N-D array `values` (shape `shape`) along `axis` by `mode`, dropping that axis.
+/// Returns `(out_shape, out_values)`.
+fn project_axis(
+    values: &[f64],
+    shape: &[u64],
+    axis: usize,
+    mode: ProjMode,
+) -> (Vec<u64>, Vec<f64>) {
+    let n = shape.len();
+    let mut strides = vec![1usize; n];
+    for i in (0..n.saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * shape[i + 1] as usize;
+    }
+    let ax_len = shape[axis].max(1) as usize;
+    let out_shape: Vec<u64> = shape
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != axis)
+        .map(|(_, &d)| d)
+        .collect();
+    let out_n: usize = out_shape.iter().map(|&d| d as usize).product();
+    let init = match mode {
+        ProjMode::Max => f64::NEG_INFINITY,
+        _ => 0.0,
+    };
+    let mut out = vec![init; out_n.max(1)];
+    for (flat, &v) in values.iter().enumerate() {
+        // Output flat index = input coords with the projected axis removed (row-major).
+        let mut of = 0usize;
+        let mut os = 1usize;
+        for i in (0..n).rev() {
+            if i == axis {
+                continue;
+            }
+            let coord = (flat / strides[i]) % shape[i] as usize;
+            of += coord * os;
+            os *= shape[i] as usize;
+        }
+        match mode {
+            ProjMode::Max => out[of] = out[of].max(v),
+            ProjMode::Mean | ProjMode::Sum => out[of] += v,
+        }
+    }
+    if matches!(mode, ProjMode::Mean) {
+        for o in &mut out {
+            *o /= ax_len as f64;
+        }
+    }
+    (out_shape, out)
+}
+
+/// `tessera project FILE BLOCK --axis <name|idx> --mode max|mean|sum` — collapse an **array** block
+/// along one axis into a lower-D image (a 3-D volume → a 2-D projection). MIP (`max`) over the z axis
+/// is the classic PET/CT overview. Emits the result as CSV/TSV (last surviving axis = columns);
+/// `--physical` applies the rescale.
+pub fn project(
+    file: &Path,
+    block: &str,
+    axis: &str,
+    mode: &str,
+    physical: bool,
+    format: Format,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let (spec, blob) = open_array(file, block)?;
+    let mode = ProjMode::parse(mode)?;
+    // Resolve the axis by name (from `spec.axes`) or by index.
+    let ax = spec
+        .axes
+        .iter()
+        .position(|a| a == axis)
+        .or_else(|| axis.parse::<usize>().ok())
+        .filter(|&a| a < spec.shape.len())
+        .ok_or_else(|| {
+            tessera_core::Error::Invalid(format!(
+                "--axis '{axis}' not found (axes: {}; or 0..{})",
+                spec.axes.join(","),
+                spec.shape.len()
+            ))
+        })?;
+    let data = tessera_io::array::decode(&spec, &blob)?;
+    let rescale = if physical {
+        match (spec.rescale_slope, spec.rescale_intercept) {
+            (Some(s), Some(i)) => Some((s, i)),
+            _ => {
+                return Err(tessera_core::Error::Invalid(
+                    "--physical: this array carries no rescale_slope/intercept".into(),
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    let values = region_to_f64(&data, rescale);
+    let (out_shape, out_vals) = project_axis(&values, &spec.shape, ax, mode);
+
+    let cols = out_shape.last().copied().unwrap_or(1).max(1) as usize;
+    let sep = format.sep();
+    for row in out_vals.chunks(cols) {
+        let line: Vec<String> = row.iter().map(fmt_f64).collect();
+        writeln!(out, "{}", line.join(&sep.to_string())).map_err(tessera_core::Error::from)?;
+    }
+    Ok(())
+}
+
 /// Compact numeric render for slice CSV: integers without a trailing `.0`, floats to 6 sig-ish.
 fn fmt_f64(v: &f64) -> String {
     if v.fract() == 0.0 && v.abs() < 1e15 {
@@ -1345,6 +1474,25 @@ mod tests {
         tree(&p, false, &mut t).unwrap();
         let t = String::from_utf8(t).unwrap();
         assert!(t.contains("schema  (recon") && t.contains("extra"), "{t}");
+    }
+
+    #[test]
+    fn project_axis_reduces_along_an_axis() {
+        // 2×3 array [[0,1,2],[10,11,12]] (row-major, shape [2,3]).
+        let v = vec![0.0, 1.0, 2.0, 10.0, 11.0, 12.0];
+        let shape = [2u64, 3];
+        // Max over axis 0 (rows) → the max of each column: [10,11,12].
+        let (os, out) = project_axis(&v, &shape, 0, ProjMode::Max);
+        assert_eq!(os, vec![3]);
+        assert_eq!(out, vec![10.0, 11.0, 12.0]);
+        // Sum over axis 1 (cols) → row sums: [0+1+2, 10+11+12] = [3, 33].
+        let (os, out) = project_axis(&v, &shape, 1, ProjMode::Sum);
+        assert_eq!(os, vec![2]);
+        assert_eq!(out, vec![3.0, 33.0]);
+        // Mean over axis 1 → [1, 11].
+        let (_, out) = project_axis(&v, &shape, 1, ProjMode::Mean);
+        assert_eq!(out, vec![1.0, 11.0]);
+        assert!(ProjMode::parse("mip").is_ok() && ProjMode::parse("nope").is_err());
     }
 
     #[test]
