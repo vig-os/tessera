@@ -53,10 +53,7 @@ pub fn to_recon_product(
     let source_ref = source_label
         .map(str::to_string)
         .unwrap_or_else(|| path.display().to_string());
-    b.add_source(tessera_core::provenance::Source::new(
-        "ingested_from",
-        source_ref,
-    ));
+    b.add_source(crate::provenance::ingested_from(&[path], source_ref)?);
     for s in extra_sources {
         b.add_source(s.clone());
     }
@@ -127,5 +124,9 @@ mod tests {
             .find(|s| s.role == "ingested_from")
             .expect("ingested_from edge");
         assert_eq!(ingested_from.reference, "DUPLET-07/raw");
+        // The edge carries the source-file integrity hash even though the label hides the path:
+        // the merkle root over the source files' blake3 digests, recomputable from the bytes.
+        let root = crate::provenance::source_digest(&[f.as_path()]).unwrap();
+        assert_eq!(ingested_from.content_hash.as_deref(), Some(root.as_str()));
     }
 }

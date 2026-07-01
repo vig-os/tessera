@@ -31,15 +31,18 @@ pub fn to_blob_product(
     let bytes = std::fs::read(path).map_err(Error::from)?;
     let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("blob");
     let (block_ref, payload) = blob_block("data", filename, media_type, bytes)?;
+    // The blob block's digest already IS blake3(file bytes) — reuse it as the source-of-record hash
+    // on the `ingested_from` edge (no second read of a possibly-multi-GB file).
+    let src_digest = block_ref.digest.clone();
     let mut b = ProductBuilder::new("blob", name, "opaque preserved file", timestamp);
     b.add_block_ref(block_ref);
     let source_ref = source_label
         .map(str::to_string)
         .unwrap_or_else(|| path.display().to_string());
-    b.add_source(tessera_core::provenance::Source::new(
-        "ingested_from",
-        source_ref,
-    ));
+    b.add_source(match src_digest {
+        Some(d) => crate::provenance::ingested_from_digest(source_ref, d),
+        None => crate::provenance::ingested_from(&[path], source_ref)?,
+    });
     for s in extra_sources {
         b.add_source(s.clone());
     }
@@ -63,15 +66,17 @@ pub fn to_blob_product_streaming(
 ) -> Result<Manifest> {
     let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("blob");
     let block_ref = tessera_io::blob::blob_ref_streaming("data", filename, media_type, path)?;
+    // The streamed block digest already IS blake3(file bytes) — reuse it, no second pass.
+    let src_digest = block_ref.digest.clone();
     let mut b = ProductBuilder::new("blob", name, "opaque preserved file", timestamp);
     b.add_block_ref(block_ref);
     let source_ref = source_label
         .map(str::to_string)
         .unwrap_or_else(|| path.display().to_string());
-    b.add_source(tessera_core::provenance::Source::new(
-        "ingested_from",
-        source_ref,
-    ));
+    b.add_source(match src_digest {
+        Some(d) => crate::provenance::ingested_from_digest(source_ref, d),
+        None => crate::provenance::ingested_from(&[path], source_ref)?,
+    });
     for s in extra_sources {
         b.add_source(s.clone());
     }

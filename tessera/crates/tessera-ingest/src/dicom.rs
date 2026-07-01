@@ -229,6 +229,7 @@ pub fn to_recon_product(
     name: &str,
     timestamp: &str,
     source: &str,
+    source_digest: Option<&str>,
     extra_sources: &[tessera_core::provenance::Source],
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
     let mut spec = ArraySpec::new(img.shape.clone(), "int16")
@@ -245,10 +246,14 @@ pub fn to_recon_product(
         "modality",
         serde_json::json!({"_vocabulary": "DICOM", "_code": img.modality}),
     );
-    b.add_source(tessera_core::provenance::Source::new(
-        "ingested_from",
-        source,
-    ));
+    // The `ingested_from` edge carries a `content_hash` (merkle root over the source `.dcm` slices,
+    // computed by the caller which holds the paths) so the product is cryptographically tied to the
+    // exact source bytes — independent of the (possibly PHI-scrubbed) `source` reference.
+    let mut edge = tessera_core::provenance::Source::new("ingested_from", source);
+    if let Some(d) = source_digest {
+        edge = edge.with_content_hash(d);
+    }
+    b.add_source(edge);
     for s in extra_sources {
         b.add_source(s.clone());
     }
@@ -274,8 +279,15 @@ mod tests {
     #[test]
     fn to_recon_product_carries_rescale_modality_and_provenance() {
         let img = sample_image();
-        let (sealed, payloads) =
-            to_recon_product(&img, "DP06-ct", "2024-01-01T00:00:00Z", "1.2.3.sop", &[]).unwrap();
+        let (sealed, payloads) = to_recon_product(
+            &img,
+            "DP06-ct",
+            "2024-01-01T00:00:00Z",
+            "1.2.3.sop",
+            None,
+            &[],
+        )
+        .unwrap();
         assert_eq!(sealed.product, "recon");
         assert!(sealed.is_sealed());
         assert_eq!(sealed.blocks.len(), 1);
@@ -394,11 +406,25 @@ mod tests {
         write_golden_ct(&path);
 
         let img = read_image(&path).unwrap();
-        let (a, _) =
-            to_recon_product(&img, "golden-ct", "2024-01-01T00:00:00Z", "sop-a", &[]).unwrap();
+        let (a, _) = to_recon_product(
+            &img,
+            "golden-ct",
+            "2024-01-01T00:00:00Z",
+            "sop-a",
+            None,
+            &[],
+        )
+        .unwrap();
         // a different timestamp + source must NOT change the content hash (content-addressing)
-        let (b, _) =
-            to_recon_product(&img, "golden-ct", "2099-12-31T23:59:59Z", "sop-b", &[]).unwrap();
+        let (b, _) = to_recon_product(
+            &img,
+            "golden-ct",
+            "2099-12-31T23:59:59Z",
+            "sop-b",
+            None,
+            &[],
+        )
+        .unwrap();
         let ha = a.content_hash.as_deref().unwrap();
         let hb = b.content_hash.as_deref().unwrap();
         assert_eq!(
