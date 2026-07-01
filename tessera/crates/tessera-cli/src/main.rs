@@ -1020,6 +1020,33 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                     m.product
                 ),
             }
+            // Field roster: what the schema *declares* vs what this product *carries* — so a user
+            // sees the available fields (populated + missing) with their tier + PHI sensitivity,
+            // not only whatever happens to be filled in. (Answers "always show the avail fields".)
+            let schema = embedded
+                .clone()
+                .or_else(|| SchemaRegistry::builtin().get(&m.product).cloned());
+            if let Some(s) = schema.filter(|s| !s.fields.is_empty()) {
+                println!("fields ({} declared):", s.fields.len());
+                for f in &s.fields {
+                    let (mark, tier) = if f.required {
+                        ('●', "required")
+                    } else if f.recommended {
+                        ('◐', "recommended")
+                    } else {
+                        ('·', "optional")
+                    };
+                    let sens = format!("{:?}", f.sensitivity).to_lowercase();
+                    let val = match m.metadata.get(&f.id) {
+                        Some(v) => format!("= {}", compact_json(v)),
+                        None => match &f.default {
+                            Some(d) => format!("— (default {})", compact_json(d)),
+                            None => "—".to_string(),
+                        },
+                    };
+                    println!("  {mark} {:<22} {tier:<12} {sens:<11} {val}", f.id);
+                }
+            }
             tessera_core::validate_manifest(m)?; // typed error naming the first missing field/block
             println!("OK  schema-valid: {}", file.display());
             Ok(())
@@ -1191,6 +1218,20 @@ fn parse_meta(
         out.insert(k.to_string(), value);
     }
     Ok(out)
+}
+
+/// Compact one-line JSON render of a metadata value for the `schema` field roster (truncated).
+fn compact_json(v: &serde_json::Value) -> String {
+    let s = match v {
+        serde_json::Value::String(s) => format!("\"{s}\""),
+        other => other.to_string(),
+    };
+    if s.chars().count() > 48 {
+        let head: String = s.chars().take(45).collect();
+        format!("{head}…")
+    } else {
+        s
+    }
 }
 
 /// `tessera push` — with the `cloud` feature, runs the in-Rust OCI distribution client; without it,
