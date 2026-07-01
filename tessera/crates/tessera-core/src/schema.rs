@@ -397,14 +397,15 @@ fn builtin_schemas() -> Vec<ProductSchema> {
             )
         },
         ProductSchema {
-            // `rescale_*` are pure scan geometry → `Public`. The two trailing fields are seeded
+            // `rescale_*` are pure scan geometry → `Public`. The remaining fields are seeded
             // from DICOM **PS3.15 Annex E** (Basic Application Confidentiality Profile, the
-            // tag list any de-identifier must touch): a pseudonymised patient handle
-            // (Patient Name / Patient ID family) and a study/series/SOP-instance UID
-            // (UID family — the UIDs bind back to the patient/study, so PS3.15 requires
-            // they be replaced / managed under the profile). Both are **optional** + tagged
-            // `Identifying` so the schema-driven PHI machinery (today: an ingest warn; future:
-            // redact / field encryption) picks them up without any per-product code change.
+            // tag list any de-identifier must touch) and the DICOM ingest's curated-tag port:
+            // the two `Identifying` handles (patient pseudonym + acquisition UID family)
+            // plus the DICOM Study/Series UIDs (PS3.15 UID family, `Identifying`), the
+            // `StudyDate` (`Sensitive`), and the vendor scan-geometry tags — Manufacturer,
+            // ManufacturerModelName, KVP, SliceThickness, PixelSpacing — that stay `Public`
+            // (device metadata, no PHI). All are **recommended-or-optional**, never required:
+            // a series lacking any single DICOM tag must still ingest (warn tier, not block).
             fields: imaging_base(vec![
                 FieldSpec::optional("rescale_slope", "Native→physical slope", "float64"),
                 FieldSpec::optional("rescale_intercept", "Native→physical intercept", "float64"),
@@ -420,6 +421,54 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                     "string",
                 )
                 .with_sensitivity(Sensitivity::Identifying),
+                // ── DICOM curated-tag port (issue #dicom-metadata) ─────────────────────────
+                // Ported straight from the DICOM header at ingest time. Sensitivity tiers
+                // seeded from PS3.15: the UIDs link back to the patient/study (Identifying);
+                // StudyDate is scan context that is not directly identifying on its own but
+                // is access-controlled (Sensitive, per ADR-0040 §1); the vendor + geometry
+                // tags describe the scanner, not the patient (Public).
+                FieldSpec::recommended(
+                    "study_instance_uid",
+                    "DICOM StudyInstanceUID (0020,000D) — PS3.15 UID family, links back to the patient/study",
+                    "string",
+                )
+                .with_sensitivity(Sensitivity::Identifying),
+                FieldSpec::recommended(
+                    "series_instance_uid",
+                    "DICOM SeriesInstanceUID (0020,000E) — PS3.15 UID family, links back to the series",
+                    "string",
+                )
+                .with_sensitivity(Sensitivity::Identifying),
+                FieldSpec::recommended(
+                    "study_date",
+                    "DICOM StudyDate (0008,0020), YYYYMMDD — scan context, access-controlled",
+                    "string",
+                )
+                .with_sensitivity(Sensitivity::Sensitive),
+                FieldSpec::recommended(
+                    "manufacturer",
+                    "DICOM Manufacturer (0008,0070) — device vendor",
+                    "string",
+                ),
+                FieldSpec::recommended(
+                    "model_name",
+                    "DICOM ManufacturerModelName (0008,1090) — device model",
+                    "string",
+                ),
+                FieldSpec::recommended("kvp", "DICOM KVP (0018,0060), CT peak kilovoltage", "float64")
+                    .unit("kV"),
+                FieldSpec::recommended(
+                    "slice_thickness",
+                    "DICOM SliceThickness (0018,0050), nominal slice thickness",
+                    "float64",
+                )
+                .unit("mm"),
+                FieldSpec::recommended(
+                    "pixel_spacing",
+                    "DICOM PixelSpacing (0028,0030), [row_spacing, col_spacing] in mm",
+                    "json",
+                )
+                .unit("mm"),
             ]),
             blocks: vec![one(
                 "volume",
@@ -949,10 +998,16 @@ mod tests {
 
     #[test]
     fn recon_seeds_ps3_15_identifying_fields_and_classifies_them() {
-        // The spike's PS3.15-seeded example fields are present on `recon`, marked Identifying.
+        // The spike's PS3.15-seeded example fields + the DICOM curated-tag UIDs are all
+        // present on `recon`, marked Identifying.
         let r = SchemaRegistry::builtin();
         let recon = r.get("recon").unwrap();
-        for id in ["patient_pseudonym", "acquisition_uid"] {
+        for id in [
+            "patient_pseudonym",
+            "acquisition_uid",
+            "study_instance_uid",
+            "series_instance_uid",
+        ] {
             let f = recon
                 .fields
                 .iter()
@@ -966,18 +1021,6 @@ mod tests {
                 f.sensitivity,
                 Sensitivity::Identifying,
                 "PS3.15 example field '{id}' is direct PHI → Identifying"
-            );
-        }
-        // …and the rest of the recon fields are NOT identifying (Public/Coded only).
-        for f in &recon.fields {
-            if f.id == "patient_pseudonym" || f.id == "acquisition_uid" {
-                continue;
-            }
-            assert_ne!(
-                f.sensitivity,
-                Sensitivity::Identifying,
-                "non-seeded recon field '{}' must not classify as Identifying",
-                f.id
             );
         }
     }
@@ -995,25 +1038,44 @@ mod tests {
         );
         let m = b.seal().unwrap();
 
-        // Identifying: exactly the two PS3.15-seeded recon fields.
+        // Identifying: the PS3.15-seeded recon fields + the DICOM curated UIDs.
         let phi = r.fields_by_sensitivity(&m, Sensitivity::Identifying);
         let phi_ids: Vec<&str> = phi.iter().map(|f| f.id.as_str()).collect();
-        assert_eq!(phi_ids, ["patient_pseudonym", "acquisition_uid"]);
+        assert_eq!(
+            phi_ids,
+            [
+                "patient_pseudonym",
+                "acquisition_uid",
+                "study_instance_uid",
+                "series_instance_uid",
+            ]
+        );
 
         // Coded: modality (DICOM controlled vocab).
         let coded = r.fields_by_sensitivity(&m, Sensitivity::Coded);
         let coded_ids: Vec<&str> = coded.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(coded_ids, ["modality"]);
 
-        // Public: rescale_slope + rescale_intercept (scan geometry, safe in clear).
+        // Public: rescale + curated DICOM scan-geometry / vendor tags (safe in clear).
         let public = r.fields_by_sensitivity(&m, Sensitivity::Public);
         let public_ids: Vec<&str> = public.iter().map(|f| f.id.as_str()).collect();
-        assert_eq!(public_ids, ["rescale_slope", "rescale_intercept"]);
+        assert_eq!(
+            public_ids,
+            [
+                "rescale_slope",
+                "rescale_intercept",
+                "manufacturer",
+                "model_name",
+                "kvp",
+                "slice_thickness",
+                "pixel_spacing",
+            ]
+        );
 
-        // Sensitive: none on recon.
-        assert!(r
-            .fields_by_sensitivity(&m, Sensitivity::Sensitive)
-            .is_empty());
+        // Sensitive: DICOM StudyDate (scan context, access-controlled).
+        let sensitive = r.fields_by_sensitivity(&m, Sensitivity::Sensitive);
+        let sensitive_ids: Vec<&str> = sensitive.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(sensitive_ids, ["study_date"]);
 
         // Open-world: an unknown product → empty (no schema to classify against).
         let m = ProductBuilder::new("my_custom", "x", "d", "2024-01-01T00:00:00Z")

@@ -35,7 +35,7 @@ blake3:7c9f7bd9[..]  (tip)
 ```
 $ tessera commit repo blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187 --set tracer=FDG
 committed blake3:12643649[..]
-  version    blake3:cb16e3ab2c645331e4f6b57a1b47a3a3654471184a20b3348b89d6adfb9fc1db
+  version    blake3:b34d242bd90dc3cf528202a1281ba633d4a08c363c8a2c88a2c5a070330655ba
   supersedes blake3:7c9f7bd9[..]
 
 ```
@@ -44,7 +44,7 @@ committed blake3:12643649[..]
 
 ```
 $ tessera log repo blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187
-blake3:cb16e3ab2c645331e4f6b57a1b47a3a3654471184a20b3348b89d6adfb9fc1db  (tip)
+blake3:b34d242bd90dc3cf528202a1281ba633d4a08c363c8a2c88a2c5a070330655ba  (tip)
 blake3:7c9f7bd9[..]
 
 ```

@@ -10,6 +10,10 @@
 //! stay unsupported. Decode dispatch is the same `decode_pixel_data()` call for every syntax — the
 //! registry picks the adapter by UID.
 
+use std::collections::BTreeMap;
+
+use dicom::core::header::Header;
+use dicom::core::value::Value;
 use dicom::core::{DataElement, PrimitiveValue, Tag, VR};
 use dicom::object::{FileDicomObject, InMemDicomObject};
 use dicom::pixeldata::{ConvertOptions, ModalityLutOption, PixelDecoder};
@@ -26,8 +30,30 @@ const RESCALE_INTERCEPT: Tag = Tag(0x0028, 0x1052);
 const RESCALE_SLOPE: Tag = Tag(0x0028, 0x1053);
 const INSTANCE_NUMBER: Tag = Tag(0x0020, 0x0013);
 
+// Curated tags ported to the `recon` schema (issue #dicom-metadata / ADR-0040 §1). Every one
+// is *recommended* (not required) so a series missing any single tag still ingests.
+const STUDY_INSTANCE_UID: Tag = Tag(0x0020, 0x000D);
+const SERIES_INSTANCE_UID: Tag = Tag(0x0020, 0x000E);
+const STUDY_DATE: Tag = Tag(0x0008, 0x0020);
+const MANUFACTURER: Tag = Tag(0x0008, 0x0070);
+const MODEL_NAME: Tag = Tag(0x0008, 0x1090);
+const KVP: Tag = Tag(0x0018, 0x0060);
+const SLICE_THICKNESS: Tag = Tag(0x0018, 0x0050);
+const PIXEL_SPACING: Tag = Tag(0x0028, 0x0030);
+
+/// The pixel-data tag — excluded from the `extra["dicom_header"]` dump (the pixels are the
+/// `volume` block; the header is metadata about them, not a redundant copy).
+const PIXEL_DATA: Tag = Tag(0x7FE0, 0x0010);
+
 /// A DICOM image decoded for Tessera: native int16 samples (C order, `[rows, cols]`) plus the
 /// metadata needed to recover physical units. The rescale is **not** applied to `voxels`.
+///
+/// `curated` carries the schema-mapped DICOM tags ported to the `recon` product's metadata
+/// fields (Study/Series UID, StudyDate, Manufacturer, ManufacturerModelName, KVP,
+/// SliceThickness, PixelSpacing — see [`DicomCuratedTags`]). `header_json` is the *full*
+/// DICOM header of the representative (first) slice, minus PixelData, ready to drop into
+/// `manifest.extra["dicom_header"]`. On a de-identified ingest the `header_json` is the
+/// **PS3.15-scrubbed** dump (PHI never reaches this struct).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DicomImage {
     pub shape: Vec<u64>,
@@ -35,6 +61,36 @@ pub struct DicomImage {
     pub modality: String,
     pub rescale_slope: f64,
     pub rescale_intercept: f64,
+    /// Curated DICOM tags → `recon` schema fields (see [`DicomCuratedTags`]). Any absent DICOM
+    /// tag is `None`; the schema marks these `recommended` so absence is a warn, not a block.
+    pub curated: DicomCuratedTags,
+    /// Full DICOM header (minus PixelData) as a deterministically-serialized JSON object,
+    /// destined for `manifest.extra["dicom_header"]`. Deterministic ordering — the underlying
+    /// map is a [`BTreeMap`] keyed by `"GGGG,EEEE"` uppercase hex, so re-ingest is byte-identical.
+    pub header_json: serde_json::Value,
+}
+
+/// Curated DICOM tags carried into the `recon` schema (ADR-0040 §1 / PS3.15 seeding). Every
+/// field is `Option` — the DICOM ingest never blocks on a missing tag, matching the
+/// schema's `recommended` (warn-tier) classification.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DicomCuratedTags {
+    /// DICOM `StudyInstanceUID` (0020,000D) — PS3.15 UID family (Identifying).
+    pub study_instance_uid: Option<String>,
+    /// DICOM `SeriesInstanceUID` (0020,000E) — PS3.15 UID family (Identifying).
+    pub series_instance_uid: Option<String>,
+    /// DICOM `StudyDate` (0008,0020), YYYYMMDD — Sensitive.
+    pub study_date: Option<String>,
+    /// DICOM `Manufacturer` (0008,0070) — Public.
+    pub manufacturer: Option<String>,
+    /// DICOM `ManufacturerModelName` (0008,1090) — Public.
+    pub model_name: Option<String>,
+    /// DICOM `KVP` (0018,0060), kV — Public (CT-specific).
+    pub kvp: Option<f64>,
+    /// DICOM `SliceThickness` (0018,0050), mm — Public.
+    pub slice_thickness: Option<f64>,
+    /// DICOM `PixelSpacing` (0028,0030), `[row_mm, col_mm]` — Public.
+    pub pixel_spacing: Option<[f64; 2]>,
 }
 
 fn de(e: impl std::fmt::Display) -> Error {
@@ -64,12 +120,14 @@ pub fn read_object(obj: &FileDicomObject<InMemDicomObject>) -> Result<DicomImage
         .map_err(de)?
         .trim()
         .to_string();
-    let rows = obj.element(ROWS).map_err(de)?.to_int::<u32>().map_err(de)? as u64;
-    let cols = obj
+    let rows_u32 = obj.element(ROWS).map_err(de)?.to_int::<u32>().map_err(de)?;
+    let cols_u32 = obj
         .element(COLUMNS)
         .map_err(de)?
         .to_int::<u32>()
-        .map_err(de)? as u64;
+        .map_err(de)?;
+    let rows = u64::from(rows_u32);
+    let cols = u64::from(cols_u32);
     let rescale_slope = obj
         .element(RESCALE_SLOPE)
         .ok()
@@ -94,13 +152,145 @@ pub fn read_object(obj: &FileDicomObject<InMemDicomObject>) -> Result<DicomImage
             rows * cols
         )));
     }
+    let curated = extract_curated_tags(obj);
+    let header_json = header_to_json(obj);
     Ok(DicomImage {
         shape: vec![rows, cols],
         voxels,
         modality,
         rescale_slope,
         rescale_intercept,
+        curated,
+        header_json,
     })
+}
+
+/// Extract the schema-mapped [`DicomCuratedTags`] from an already-parsed DICOM object. Any tag
+/// missing from the object is left `None` (never a hard error — the recon schema classifies these
+/// as `recommended`, so absence is a warn tier, not a block).
+fn extract_curated_tags(obj: &FileDicomObject<InMemDicomObject>) -> DicomCuratedTags {
+    fn trimmed_str(obj: &FileDicomObject<InMemDicomObject>, tag: Tag) -> Option<String> {
+        obj.element(tag)
+            .ok()
+            .and_then(|e| e.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+    fn f64_of(obj: &FileDicomObject<InMemDicomObject>, tag: Tag) -> Option<f64> {
+        obj.element(tag).ok().and_then(|e| e.to_float64().ok())
+    }
+    // PixelSpacing (0028,0030) is a DICOM `DS` (decimal string) with 2 values, separated by a
+    // backslash. Real parsers may hand us either a `PrimitiveValue::Strs` (the split-by-parser
+    // form) or a `PrimitiveValue::Str` carrying the raw `"row\\col"` text — try `to_multi_float64`
+    // first, then fall back to splitting the string form on the DICOM value separator.
+    let pixel_spacing = obj.element(PIXEL_SPACING).ok().and_then(|e| {
+        e.to_multi_float64()
+            .ok()
+            .and_then(|v| {
+                if v.len() >= 2 {
+                    Some([v[0], v[1]])
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                let raw = e.to_str().ok()?;
+                let mut parts = raw.trim().split('\\');
+                let a: f64 = parts.next()?.trim().parse().ok()?;
+                let b: f64 = parts.next()?.trim().parse().ok()?;
+                Some([a, b])
+            })
+    });
+    DicomCuratedTags {
+        study_instance_uid: trimmed_str(obj, STUDY_INSTANCE_UID),
+        series_instance_uid: trimmed_str(obj, SERIES_INSTANCE_UID),
+        study_date: trimmed_str(obj, STUDY_DATE),
+        manufacturer: trimmed_str(obj, MANUFACTURER),
+        model_name: trimmed_str(obj, MODEL_NAME),
+        kvp: f64_of(obj, KVP),
+        slice_thickness: f64_of(obj, SLICE_THICKNESS),
+        pixel_spacing,
+    }
+}
+
+/// Serialize the full DICOM header (every top-level element **except** PixelData) into a
+/// deterministic JSON object destined for `manifest.extra["dicom_header"]`.
+///
+/// **Shape:** a JSON object keyed by `"GGGG,EEEE"` (uppercase hex, comma-separated), each value
+/// `{"vr": "<VR>", "value": <JSON>}`. `<JSON>` is a JSON array of the element's multi-string
+/// representation (via [`PrimitiveValue::to_multi_str`]) — every DICOM value type has a
+/// deterministic textual form. Sequences (`VR::SQ`) recurse (nested arrays of objects); pixel
+/// fragments (encapsulated pixel data) collapse to a size marker rather than the fragment bytes.
+///
+/// The container is a [`BTreeMap`] → keys are ordered by string comparison of the hex tag, so the
+/// output is byte-identical across runs (the write-determinism gate).
+///
+/// **PHI safety:** whatever `obj` contains is what serializes here. Callers who want the scrubbed
+/// header ([`read_image_deidentified`] / [`read_series_deidentified`]) must call [`deidentify`]
+/// on `obj` *before* the object reaches this function (which is exactly how the de-id ingest
+/// paths are wired — [`read_object`] runs *after* `deidentify` on the de-id path).
+fn header_to_json(obj: &FileDicomObject<InMemDicomObject>) -> serde_json::Value {
+    let mut out: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    for elem in obj.iter() {
+        let tag = elem.tag();
+        if tag == PIXEL_DATA {
+            continue; // pixels are the volume block, not header metadata
+        }
+        let key = format!("{:04X},{:04X}", tag.group(), tag.element());
+        out.insert(
+            key,
+            serde_json::json!({
+                "vr": elem.vr().to_string(),
+                "value": value_to_json(elem.value()),
+            }),
+        );
+    }
+    serde_json::to_value(out).unwrap_or(serde_json::Value::Null)
+}
+
+/// Render an in-memory DICOM element's value as deterministic JSON (see [`header_to_json`]).
+///
+/// - `Primitive` → array of strings (`to_multi_str`); every primitive has a stable text form.
+/// - `Sequence` → array of nested objects (each item is one recursion of the header dump).
+/// - `PixelSequence` → a `{"fragments": N}` marker rather than fragment bytes (never rehydrated
+///   from the header; the pixel payload is already in the `volume` block, not the header).
+fn value_to_json(
+    value: &Value<InMemDicomObject, dicom::core::value::InMemFragment>,
+) -> serde_json::Value {
+    match value {
+        Value::Primitive(p) => {
+            let strs: Vec<String> = p.to_multi_str().iter().cloned().collect();
+            serde_json::json!(strs)
+        }
+        Value::Sequence(seq) => {
+            let items: Vec<serde_json::Value> =
+                seq.items().iter().map(nested_object_to_json).collect();
+            serde_json::Value::Array(items)
+        }
+        Value::PixelSequence(seq) => serde_json::json!({
+            "fragments": seq.fragments().len(),
+        }),
+    }
+}
+
+/// Recurse a `SQ`-nested `InMemDicomObject` into the same `{ "GGGG,EEEE": {vr, value} }` shape.
+fn nested_object_to_json(item: &InMemDicomObject) -> serde_json::Value {
+    let mut nested: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    for elem in item {
+        let tag = elem.tag();
+        if tag == PIXEL_DATA {
+            continue;
+        }
+        let key = format!("{:04X},{:04X}", tag.group(), tag.element());
+        nested.insert(
+            key,
+            serde_json::json!({
+                "vr": elem.vr().to_string(),
+                "value": value_to_json(elem.value()),
+            }),
+        );
+    }
+    serde_json::to_value(nested).unwrap_or(serde_json::Value::Null)
 }
 
 /// Read and stack a multi-slice DICOM series into a 3-D `[z, rows, cols]` volume, ordered by
@@ -158,12 +348,17 @@ fn read_series_inner(paths: &[std::path::PathBuf], strip_phi: bool) -> Result<Di
     }
     let z = u64::try_from(slices.len())
         .map_err(|e| Error::Invalid(format!("dicom: series slice count overflow: {e}")))?;
+    // Curated tags + header live on the representative (first-by-InstanceNumber) slice — the
+    // series is uniform for study/series-level tags, and the per-slice diff (InstanceNumber,
+    // ImagePositionPatient, …) matters far less than the study/series/manufacturer context.
     Ok(DicomImage {
         shape: vec![z, first.shape[0], first.shape[1]],
         voxels,
         modality: first.modality,
         rescale_slope: first.rescale_slope,
         rescale_intercept: first.rescale_intercept,
+        curated: first.curated,
+        header_json: first.header_json,
     })
 }
 
@@ -246,6 +441,40 @@ pub fn to_recon_product(
         "modality",
         serde_json::json!({"_vocabulary": "DICOM", "_code": img.modality}),
     );
+
+    // Curated DICOM tags → `recon` schema fields (each is `recommended`, so absence is fine).
+    let c = &img.curated;
+    if let Some(v) = &c.study_instance_uid {
+        b.with_field("study_instance_uid", serde_json::json!(v));
+    }
+    if let Some(v) = &c.series_instance_uid {
+        b.with_field("series_instance_uid", serde_json::json!(v));
+    }
+    if let Some(v) = &c.study_date {
+        b.with_field("study_date", serde_json::json!(v));
+    }
+    if let Some(v) = &c.manufacturer {
+        b.with_field("manufacturer", serde_json::json!(v));
+    }
+    if let Some(v) = &c.model_name {
+        b.with_field("model_name", serde_json::json!(v));
+    }
+    if let Some(v) = c.kvp {
+        b.with_field("kvp", serde_json::json!(v));
+    }
+    if let Some(v) = c.slice_thickness {
+        b.with_field("slice_thickness", serde_json::json!(v));
+    }
+    if let Some(v) = c.pixel_spacing {
+        b.with_field("pixel_spacing", serde_json::json!(v));
+    }
+
+    // Full DICOM header → `extra["dicom_header"]` (PHI-scrubbed on the de-id path, since the
+    // header snapshot was taken *after* `deidentify` ran on the source object).
+    if !img.header_json.is_null() {
+        b.with_extra("dicom_header", img.header_json.clone());
+    }
+
     // The `ingested_from` edge carries a `content_hash` (merkle root over the source `.dcm` slices,
     // computed by the caller which holds the paths) so the product is cryptographically tied to the
     // exact source bytes — independent of the (possibly PHI-scrubbed) `source` reference.
@@ -273,6 +502,8 @@ mod tests {
             modality: "CT".into(),
             rescale_slope: 1.0,
             rescale_intercept: -1024.0,
+            curated: DicomCuratedTags::default(),
+            header_json: serde_json::Value::Null,
         }
     }
 
@@ -651,6 +882,348 @@ mod tests {
             !phi_present(&obj1).is_empty(),
             "source DICOM must still contain PHI; the in-memory de-id only affects the ingested product"
         );
+    }
+
+    // ── Curated DICOM tags → `recon` schema fields + full-header dump into `extra/` ────────
+
+    /// Assemble a synthetic CT DICOM carrying the curated tags — plus any extra elements the
+    /// caller wants stamped (PHI, exotic VRs). Returns the [`FileDicomObject`].
+    fn dcm_with_curated_and(
+        rows: u16,
+        cols: u16,
+        instance: i32,
+        extras: Vec<DataElement<InMemDicomObject, dicom::core::value::InMemFragment>>,
+    ) -> FileDicomObject<InMemDicomObject> {
+        let n = rows as usize * cols as usize;
+        let pixels: Vec<u16> = (0..n).map(|k| (k as u16) * 3).collect();
+        let mut elems: Vec<DataElement<InMemDicomObject, dicom::core::value::InMemFragment>> = vec![
+            DataElement::new(MODALITY, VR::CS, PrimitiveValue::from("CT")),
+            DataElement::new(ROWS, VR::US, PrimitiveValue::from(rows)),
+            DataElement::new(COLUMNS, VR::US, PrimitiveValue::from(cols)),
+            DataElement::new(
+                INSTANCE_NUMBER,
+                VR::IS,
+                PrimitiveValue::from(instance.to_string()),
+            ),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(
+                Tag(0x0028, 0x0004),
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2"),
+            ),
+            DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(16u16)),
+            DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(16u16)),
+            DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(15u16)),
+            DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(RESCALE_INTERCEPT, VR::DS, PrimitiveValue::from("-1024")),
+            DataElement::new(RESCALE_SLOPE, VR::DS, PrimitiveValue::from("1")),
+            // Curated tags the schema-driven port must lift into `recon` metadata.
+            DataElement::new(
+                STUDY_INSTANCE_UID,
+                VR::UI,
+                PrimitiveValue::from("1.2.826.0.1.3680043.tessera.study.1"),
+            ),
+            DataElement::new(
+                SERIES_INSTANCE_UID,
+                VR::UI,
+                PrimitiveValue::from("1.2.826.0.1.3680043.tessera.series.1"),
+            ),
+            DataElement::new(STUDY_DATE, VR::DA, PrimitiveValue::from("20240115")),
+            DataElement::new(MANUFACTURER, VR::LO, PrimitiveValue::from("SIEMENS")),
+            DataElement::new(MODEL_NAME, VR::LO, PrimitiveValue::from("Biograph mCT")),
+            DataElement::new(KVP, VR::DS, PrimitiveValue::from("120")),
+            DataElement::new(SLICE_THICKNESS, VR::DS, PrimitiveValue::from("2.5")),
+            DataElement::new(PIXEL_SPACING, VR::DS, PrimitiveValue::from("0.977\\0.977")),
+            DataElement::new(
+                Tag(0x7FE0, 0x0010),
+                VR::OW,
+                PrimitiveValue::U16(pixels.into()),
+            ),
+        ];
+        elems.extend(extras);
+        let obj = InMemDicomObject::from_element_iter(elems);
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax("1.2.840.10008.1.2.1")
+            .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.2")
+            .media_storage_sop_instance_uid("1.2.3.curated")
+            .implementation_class_uid("1.2.826.0.1.3680043.tessera")
+            .build()
+            .unwrap();
+        obj.with_exact_meta(meta)
+    }
+
+    /// The curated tags must land on `DicomImage` (populated in [`read_object`]) and then flow
+    /// through [`to_recon_product`] into the sealed `recon` manifest's metadata — using the
+    /// same field ids the `recon` schema declares (rename-safe, schema-driven).
+    #[test]
+    fn curated_dicom_tags_populate_recon_schema_fields() {
+        let file_obj = dcm_with_curated_and(8, 8, 1, vec![]);
+        let img = read_object(&file_obj).unwrap();
+
+        // The struct carries every curated tag we stamped.
+        let c = &img.curated;
+        assert_eq!(
+            c.study_instance_uid.as_deref(),
+            Some("1.2.826.0.1.3680043.tessera.study.1")
+        );
+        assert_eq!(
+            c.series_instance_uid.as_deref(),
+            Some("1.2.826.0.1.3680043.tessera.series.1")
+        );
+        assert_eq!(c.study_date.as_deref(), Some("20240115"));
+        assert_eq!(c.manufacturer.as_deref(), Some("SIEMENS"));
+        assert_eq!(c.model_name.as_deref(), Some("Biograph mCT"));
+        assert_eq!(c.kvp, Some(120.0));
+        assert_eq!(c.slice_thickness, Some(2.5));
+        assert_eq!(c.pixel_spacing, Some([0.977, 0.977]));
+
+        // And every curated tag lands in the sealed manifest's metadata under the schema id.
+        let (sealed, _) = to_recon_product(
+            &img,
+            "curated-ct",
+            "2024-01-01T00:00:00Z",
+            "1.2.3.sop.curated",
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            sealed.metadata["study_instance_uid"],
+            "1.2.826.0.1.3680043.tessera.study.1"
+        );
+        assert_eq!(
+            sealed.metadata["series_instance_uid"],
+            "1.2.826.0.1.3680043.tessera.series.1"
+        );
+        assert_eq!(sealed.metadata["study_date"], "20240115");
+        assert_eq!(sealed.metadata["manufacturer"], "SIEMENS");
+        assert_eq!(sealed.metadata["model_name"], "Biograph mCT");
+        assert_eq!(sealed.metadata["kvp"], 120.0);
+        assert_eq!(sealed.metadata["slice_thickness"], 2.5);
+        assert_eq!(
+            sealed.metadata["pixel_spacing"],
+            serde_json::json!([0.977, 0.977])
+        );
+
+        // The recon schema classifies these correctly (ADR-0040 §1) — spot-check via the registry
+        // that the tiers used by the DICOM port match what the schema declares.
+        let reg = tessera_core::schema::SchemaRegistry::builtin();
+        let ids_at = |tier| -> Vec<String> {
+            reg.fields_by_sensitivity(&sealed, tier)
+                .into_iter()
+                .map(|f| f.id.clone())
+                .collect()
+        };
+        let identifying = ids_at(tessera_core::schema::Sensitivity::Identifying);
+        assert!(identifying.iter().any(|s| s == "study_instance_uid"));
+        assert!(identifying.iter().any(|s| s == "series_instance_uid"));
+        let sensitive = ids_at(tessera_core::schema::Sensitivity::Sensitive);
+        assert_eq!(sensitive, ["study_date"]);
+        let public = ids_at(tessera_core::schema::Sensitivity::Public);
+        for id in [
+            "manufacturer",
+            "model_name",
+            "kvp",
+            "slice_thickness",
+            "pixel_spacing",
+        ] {
+            assert!(
+                public.iter().any(|s| s == id),
+                "curated field '{id}' must classify Public"
+            );
+        }
+    }
+
+    /// A DICOM ingested with **only** the mandatory shape/modality tags (every curated tag
+    /// absent) must still ingest. The schema declares curated fields as `recommended`, so their
+    /// absence is a warn tier — never a block.
+    #[test]
+    fn missing_curated_tags_do_not_block_ingest() {
+        let (rows, cols) = (8u16, 8u16);
+        let n = rows as usize * cols as usize;
+        let pixels: Vec<u16> = (0..n).map(|k| k as u16).collect();
+        let obj = InMemDicomObject::from_element_iter([
+            DataElement::new(MODALITY, VR::CS, PrimitiveValue::from("CT")),
+            DataElement::new(ROWS, VR::US, PrimitiveValue::from(rows)),
+            DataElement::new(COLUMNS, VR::US, PrimitiveValue::from(cols)),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(
+                Tag(0x0028, 0x0004),
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2"),
+            ),
+            DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(16u16)),
+            DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(16u16)),
+            DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(15u16)),
+            DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(
+                Tag(0x7FE0, 0x0010),
+                VR::OW,
+                PrimitiveValue::U16(pixels.into()),
+            ),
+        ]);
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax("1.2.840.10008.1.2.1")
+            .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.2")
+            .media_storage_sop_instance_uid("1.2.3.min")
+            .implementation_class_uid("1.2.826.0.1.3680043.tessera")
+            .build()
+            .unwrap();
+        let file_obj = obj.with_exact_meta(meta);
+        let img = read_object(&file_obj).unwrap();
+        assert_eq!(img.curated, DicomCuratedTags::default());
+
+        let (sealed, _) = to_recon_product(
+            &img,
+            "minimal-ct",
+            "2024-01-01T00:00:00Z",
+            "1.2.3.min",
+            None,
+            &[],
+        )
+        .unwrap();
+        // Sealed and schema-valid despite every curated tag being absent (recommended, not required).
+        tessera_core::schema::validate_manifest(&sealed).unwrap();
+        for id in [
+            "study_instance_uid",
+            "series_instance_uid",
+            "study_date",
+            "manufacturer",
+            "model_name",
+            "kvp",
+            "slice_thickness",
+            "pixel_spacing",
+        ] {
+            assert!(
+                !sealed.metadata.contains_key(id),
+                "no curated field should be stamped when the DICOM tag is absent: {id}"
+            );
+        }
+    }
+
+    /// `extra["dicom_header"]` must be present, JSON-object-shaped, deterministic (byte-identical
+    /// across two ingests of the same input), and **must exclude** PixelData.
+    #[test]
+    fn full_dicom_header_lands_in_extra_and_is_deterministic() {
+        let file_obj = dcm_with_curated_and(8, 8, 1, vec![]);
+        let img_a = read_object(&file_obj).unwrap();
+        let img_b = read_object(&file_obj).unwrap();
+        let (sealed_a, _) = to_recon_product(
+            &img_a,
+            "hdr-ct",
+            "2024-01-01T00:00:00Z",
+            "1.2.3.hdr",
+            None,
+            &[],
+        )
+        .unwrap();
+        let (sealed_b, _) = to_recon_product(
+            &img_b,
+            "hdr-ct",
+            "2024-01-01T00:00:00Z",
+            "1.2.3.hdr",
+            None,
+            &[],
+        )
+        .unwrap();
+
+        // Present.
+        let hdr_a = sealed_a
+            .extra
+            .get("dicom_header")
+            .expect("extra['dicom_header'] must be present after ingest");
+        let hdr_b = sealed_b.extra.get("dicom_header").unwrap();
+
+        // Deterministic: same input → same bytes (byte-for-byte JSON).
+        assert_eq!(
+            serde_json::to_string(hdr_a).unwrap(),
+            serde_json::to_string(hdr_b).unwrap(),
+            "dicom_header must serialize deterministically across ingests"
+        );
+
+        // Object-shaped, keyed by `GGGG,EEEE` — spot-check a few curated tags are there.
+        let obj = hdr_a
+            .as_object()
+            .expect("dicom_header is a JSON object keyed by 'GGGG,EEEE'");
+        assert!(obj.contains_key("0008,0060"), "Modality present");
+        assert!(obj.contains_key("0020,000D"), "StudyInstanceUID present");
+        assert!(obj.contains_key("0028,0030"), "PixelSpacing present");
+
+        // PixelData is NEVER dumped into the header (it's the volume block's payload).
+        assert!(
+            !obj.contains_key("7FE0,0010"),
+            "PixelData must be excluded from dicom_header"
+        );
+
+        // The seal commits to `extra` — both ingests hash identically (writer-determinism).
+        assert_eq!(sealed_a.manifest_hash, sealed_b.manifest_hash);
+    }
+
+    /// **The load-bearing PHI test.** A DICOM full-header dump destined for `extra/` must not
+    /// leak PHI when the ingest went through the de-identifying path — the `deidentify` call has
+    /// to run BEFORE the header is serialized. When the ingest is NOT de-identifying, the header
+    /// preserves what the source carried (the caller opted out of scrubbing).
+    #[test]
+    fn de_identified_ingest_scrubs_phi_from_dicom_header_extra() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("phi.dcm");
+        // Reuse the PHI-slice writer (it stamps PatientName + PatientID + InstitutionName).
+        write_phi_slice(&p, 1, 1000, "DOE^JOHN");
+
+        // Non-de-id: the header dump reflects the source object — PHI is present.
+        let img_plain = read_image(&p).unwrap();
+        let (sealed_plain, _) = to_recon_product(
+            &img_plain,
+            "hdr-phi",
+            "2024-01-01T00:00:00Z",
+            "1.2.3.phi",
+            None,
+            &[],
+        )
+        .unwrap();
+        let hdr_plain = sealed_plain
+            .extra
+            .get("dicom_header")
+            .and_then(|v| v.as_object())
+            .expect("plain ingest carries dicom_header");
+        assert!(
+            hdr_plain.contains_key("0010,0010"),
+            "non-de-id ingest keeps PatientName in the header dump (source-faithful)"
+        );
+        assert!(hdr_plain.contains_key("0010,0020"), "…and PatientID");
+        assert!(hdr_plain.contains_key("0008,0080"), "…and InstitutionName");
+
+        // De-id: the header dump is the PS3.15-scrubbed object — PHI absent, everyone's marker
+        // set. THIS IS THE LOAD-BEARING ASSERTION (issue #dicom-metadata).
+        let img_deid = read_image_deidentified(&p).unwrap();
+        let (sealed_deid, _) = to_recon_product(
+            &img_deid,
+            "hdr-phi-deid",
+            "2024-01-01T00:00:00Z",
+            "1.2.3.phi",
+            None,
+            &[],
+        )
+        .unwrap();
+        let hdr_deid = sealed_deid
+            .extra
+            .get("dicom_header")
+            .and_then(|v| v.as_object())
+            .expect("de-id ingest still carries dicom_header (scrubbed)");
+        for phi_key in ["0010,0010", "0010,0020", "0008,0080"] {
+            assert!(
+                !hdr_deid.contains_key(phi_key),
+                "de-identified ingest must strip PHI tag {phi_key} from extra['dicom_header']"
+            );
+        }
+        // …and the PS3.15 PatientIdentityRemoved marker (0012,0062) is set to "YES".
+        let marker = hdr_deid
+            .get("0012,0062")
+            .expect("PS3.15 PatientIdentityRemoved marker must be set on de-id");
+        assert_eq!(marker["value"], serde_json::json!(["YES"]));
+
+        // Non-PHI curated tags survive the de-id (modality is not PHI).
+        assert!(hdr_deid.contains_key("0008,0060"));
     }
 
     #[test]
