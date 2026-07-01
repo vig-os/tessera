@@ -507,8 +507,11 @@ enum Cmd {
     },
     /// Emit a FAIR discovery record for a `.tsra` (prints JSON to stdout).
     Export {
-        #[command(subcommand)]
-        fmt: ExportFmt,
+        /// The `.tsra` to export.
+        file: PathBuf,
+        /// Record format: `ro-crate` (default) | `datacite`.
+        #[arg(long, default_value = "ro-crate")]
+        format: String,
     },
     /// Generate an ed25519 keypair (private seed mode 0600; public key to `OUT.pub`).
     ///
@@ -623,20 +626,6 @@ enum BenchAction {
         /// Seed for the MC sampler (deterministic synthetic data).
         #[arg(long, default_value_t = 1)]
         seed: u64,
-    },
-}
-
-#[derive(Subcommand)]
-enum ExportFmt {
-    /// RO-Crate metadata descriptor (`ro-crate-metadata.json` shape).
-    RoCrate {
-        /// The `.tsra` to export.
-        file: PathBuf,
-    },
-    /// DataCite metadata record (for DOI minting / InvenioRDM).
-    Datacite {
-        /// The `.tsra` to export.
-        file: PathBuf,
     },
 }
 
@@ -1091,7 +1080,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                     );
                 }
                 (None, Some(s)) => println!(
-                    "product '{}' — built-in schema v{} ({}); file predates embedded schemas",
+                    "product '{}' — schema v{} ({}) from the built-in registry (not embedded in this file)",
                     m.product, s.version, s.description
                 ),
                 (None, None) => println!(
@@ -1169,13 +1158,15 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 run_ingest(src)
             }
         }
-        Cmd::Export { fmt } => {
-            let record = match fmt {
-                ExportFmt::RoCrate { file } => {
-                    tessera_core::export::ro_crate(Reader::open(&file)?.manifest())
-                }
-                ExportFmt::Datacite { file } => {
-                    tessera_core::export::datacite(Reader::open(&file)?.manifest())
+        Cmd::Export { file, format } => {
+            let m = Reader::open(&file)?;
+            let record = match format.as_str() {
+                "ro-crate" | "rocrate" => tessera_core::export::ro_crate(m.manifest()),
+                "datacite" => tessera_core::export::datacite(m.manifest()),
+                other => {
+                    return Err(tessera_core::Error::Invalid(format!(
+                        "unknown --format '{other}' (expected ro-crate | datacite)"
+                    )))
                 }
             };
             println!(
@@ -2117,11 +2108,13 @@ streaming = "batch"
         let tsra = dir.path().join("p.tsra");
         sample_tsra(&tsra);
         run(Cmd::Export {
-            fmt: ExportFmt::RoCrate { file: tsra.clone() },
+            file: tsra.clone(),
+            format: "ro-crate".into(),
         })
         .unwrap();
         run(Cmd::Export {
-            fmt: ExportFmt::Datacite { file: tsra },
+            file: tsra,
+            format: "datacite".into(),
         })
         .unwrap();
     }
