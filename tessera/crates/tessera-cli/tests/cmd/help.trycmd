@@ -4,35 +4,46 @@ Tessera FAIR data-product CLI
 
 Usage: tessera <COMMAND>
 
-Commands:
-  inspect     Print a `.tsra` manifest summary (id, product, blocks, hashes)
-  verify      Verify a `.tsra`'s integrity (magic, seal, every block digest)
-  tree        Render a `.tsra` as a navigable hierarchy tree
-  ls          List one node's children (top level, `meta`, a block, or `sources`)
-  read        Read table data as CSV/TSV/NDJSON over the logical cross-block view
+Inspect & navigate:
+  inspect     Manifest summary (id, product, blocks, hashes)
+  verify      Verify integrity (magic, seal, every block digest)
+  schema      Validate against the embedded product schema (--json dumps it)
+  tree        Render the .tsra as a navigable hierarchy
+  ls          List one node's children (meta / a block / sources)
+  read        Read table data as CSV/TSV/NDJSON (cross-block)
+  export      Emit a FAIR discovery record (JSON to stdout)
+
+Ingest & pack:
+  ingest      Ingest a vendor file (or a declarative --spec) into a sealed .tsra
+  pack        Pack an exploded dir (manifest.json + blocks/) into a sealed .tsra
+  unpack      Explode a .tsra into a directory
+  extract     Extract one block's raw bytes (digest-verified)
+
+Versioning (content-addressed repo):
   init        Initialize a content-addressed repository for CoW versioning
-  import      Import a sealed `.tsra` as the first version of its lineage
-  commit      Commit a new version of a lineage (reuses unchanged blocks by digest)
-  log         Show a lineage's version history (newest first)
-  diff        Diff two versions (blocks + metadata) with a lineage verdict
-  seal        Export a version to a standalone `.tsra` with its history (`git bundle`)
-  publish     Export a history-free standalone `.tsra` for publication (`git archive`)
-  forget      Forget a lineage (deletes its ref + log; objects reclaimed by `gc`)
-  gc          Reclaim objects unreachable from any ref (run after `forget`)
-  push        Push a sealed `.tsra` to an OCI registry (needs `--features cloud`)
-  pull        Pull a `.tsra` OCI artifact from a registry (needs `--features cloud`)
-  extract     Extract one block's raw bytes to a file (digest-verified on read)
-  unpack      Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`)
-  pack        Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`
-  schema      Validate a `.tsra`'s manifest against its declared product schema (required fields/blocks)
-  ingest      Ingest a vendor file into a sealed `.tsra` (or run a declarative `--spec`)
-  export      Emit a FAIR discovery record for a `.tsra` (prints JSON to stdout)
-  keygen      Generate an ed25519 keypair (private seed mode 0600; public key to `OUT.pub`)
-  trust       Manage the trust store of public keys `verify-sig` accepts
-  sign        Sign a sealed `.tsra` (writes a `<file>.sig.json` sidecar)
-  verify-sig  Verify a sealed `.tsra` against its `<file>.sig.json` sidecar
+  import      Import a sealed .tsra as the first version of its lineage
+  commit      Commit a new version (reuses unchanged blocks by digest)
+  log         Show a lineage's version history
+  diff        Diff two versions (blocks + metadata)
+  seal        Export a version to a standalone .tsra with its history
+  publish     Export a history-free standalone .tsra for publication
+  forget      Forget a lineage (objects reclaimed by gc)
+  gc          Reclaim objects unreachable from any ref
+
+Distribution (needs --features cloud):
+  push        Push a sealed .tsra to an OCI registry
+  pull        Pull a .tsra OCI artifact from a registry
+
+Signing & trust:
+  keygen      Generate an ed25519 keypair
+  trust       Manage the trust store of public keys verify-sig accepts
+  sign        Sign a sealed .tsra (writes a .sig.json sidecar)
+  verify-sig  Verify a sealed .tsra against its .sig.json sidecar
+
+Diagnostics:
   bench       Bench the write engine on this host (throughput + peak RSS)
-  help        Print this message or the help of the given subcommand(s)
+
+Run `tsra help <command>` for details, flags, and what to pass.
 
 Options:
   -h, --help     Print help

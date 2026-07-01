@@ -88,8 +88,66 @@ impl<R: std::io::Read + std::io::Seek> TsraSource for Reader<R> {
     }
 }
 
+/// Grouped top-level help (#249) — clap 4 doesn't group subcommands natively, so we render a
+/// hand-authored command reference by command family via a custom `help_template`. Per-command
+/// detail (`tsra help <cmd>`) still comes from each variant's own `///` doc + positional
+/// descriptions (#243), unchanged. The `every_subcommand_is_grouped_in_help` test guards drift.
+const HELP_TEMPLATE: &str = "\
+{about}
+
+{usage-heading} {usage}
+
+Inspect & navigate:
+  inspect     Manifest summary (id, product, blocks, hashes)
+  verify      Verify integrity (magic, seal, every block digest)
+  schema      Validate against the embedded product schema (--json dumps it)
+  tree        Render the .tsra as a navigable hierarchy
+  ls          List one node's children (meta / a block / sources)
+  read        Read table data as CSV/TSV/NDJSON (cross-block)
+  export      Emit a FAIR discovery record (JSON to stdout)
+
+Ingest & pack:
+  ingest      Ingest a vendor file (or a declarative --spec) into a sealed .tsra
+  pack        Pack an exploded dir (manifest.json + blocks/) into a sealed .tsra
+  unpack      Explode a .tsra into a directory
+  extract     Extract one block's raw bytes (digest-verified)
+
+Versioning (content-addressed repo):
+  init        Initialize a content-addressed repository for CoW versioning
+  import      Import a sealed .tsra as the first version of its lineage
+  commit      Commit a new version (reuses unchanged blocks by digest)
+  log         Show a lineage's version history
+  diff        Diff two versions (blocks + metadata)
+  seal        Export a version to a standalone .tsra with its history
+  publish     Export a history-free standalone .tsra for publication
+  forget      Forget a lineage (objects reclaimed by gc)
+  gc          Reclaim objects unreachable from any ref
+
+Distribution (needs --features cloud):
+  push        Push a sealed .tsra to an OCI registry
+  pull        Pull a .tsra OCI artifact from a registry
+
+Signing & trust:
+  keygen      Generate an ed25519 keypair
+  trust       Manage the trust store of public keys verify-sig accepts
+  sign        Sign a sealed .tsra (writes a .sig.json sidecar)
+  verify-sig  Verify a sealed .tsra against its .sig.json sidecar
+
+Diagnostics:
+  bench       Bench the write engine on this host (throughput + peak RSS)
+
+Run `tsra help <command>` for details, flags, and what to pass.
+
+Options:
+{options}";
+
 #[derive(Parser)]
-#[command(name = "tessera", version, about = "Tessera FAIR data-product CLI")]
+#[command(
+    name = "tessera",
+    version,
+    about = "Tessera FAIR data-product CLI",
+    help_template = HELP_TEMPLATE
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -1401,6 +1459,24 @@ mod tests {
     use tessera_core::block::array::{ArrayBlock, ArraySpec};
     use tessera_core::ProductBuilder;
     use tessera_io::{pack, BlockPayload};
+
+    /// Drift guard for the grouped `--help` (#249): every real subcommand must appear in the
+    /// hand-authored `HELP_TEMPLATE`, so adding a `Cmd` variant without listing it fails CI.
+    #[test]
+    fn every_subcommand_is_grouped_in_help() {
+        use clap::CommandFactory;
+        for sub in Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            if name == "help" {
+                continue; // clap's built-in, intentionally not in the grouped block
+            }
+            // Line-anchored (indent + name) so short names like `ls` can't false-match a substring.
+            assert!(
+                HELP_TEMPLATE.contains(&format!("\n  {name} ")),
+                "subcommand '{name}' is missing from the grouped HELP_TEMPLATE"
+            );
+        }
+    }
 
     fn sample_tsra(path: &std::path::Path) {
         let vol = ArrayBlock::new("volume", ArraySpec::new(vec![16, 16, 16], "int16"));
