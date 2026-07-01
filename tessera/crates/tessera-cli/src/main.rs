@@ -5,6 +5,7 @@
 //! block's stored bytes against its recorded digest.
 
 mod bench;
+mod collection;
 mod nav;
 #[cfg(feature = "sql")]
 mod sql;
@@ -131,6 +132,9 @@ Versioning (content-addressed repo):
   publish     Export a history-free standalone .tsra for publication
   forget      Forget a lineage (objects reclaimed by gc)
   gc          Reclaim objects unreachable from any ref
+
+Collections (catalog of products):
+  collection  Inspect / ls / verify a collection.json + its members
 
 Distribution (needs --features cloud):
   push        Push a sealed .tsra to an OCI registry
@@ -594,6 +598,15 @@ enum Cmd {
         #[arg(long, default_value = "csv")]
         format: String,
     },
+    /// Inspect / list / verify a `collection.json` catalog and its members (ADR-0033).
+    ///
+    /// The consumer verbs over the catalog the declarative ingest engine writes: `inspect` (header +
+    /// seal + members), `ls` (human name + product per member), `verify` (collection seal + every
+    /// member present, intact, and the pinned version).
+    Collection {
+        #[command(subcommand)]
+        action: CollectionAction,
+    },
     /// Bench the write engine on this host (throughput + peak RSS).
     ///
     /// Drives the real `StreamWriter`/`TableStreamWriter` and reports throughput + peak RSS so an
@@ -601,6 +614,28 @@ enum Cmd {
     Bench {
         #[command(subcommand)]
         action: BenchAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum CollectionAction {
+    /// Catalog header: identity, seal badge, and each member's role + reference + pinned hash.
+    Inspect {
+        /// The `collection.json` descriptor.
+        file: PathBuf,
+    },
+    /// One line per member — its human `name` + product (resolved by opening each member `.tsra`).
+    Ls {
+        /// The `collection.json` descriptor.
+        file: PathBuf,
+        /// Print full pinned `manifest_hash`es and in-collection `derived_from` edges.
+        #[arg(long)]
+        full: bool,
+    },
+    /// Verify the collection seal, then that every member is present, intact, and the pinned version.
+    Verify {
+        /// The `collection.json` descriptor.
+        file: PathBuf,
     },
 }
 
@@ -1292,6 +1327,14 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             query,
             format,
         } => do_sql(&file, &block, &query, &format),
+        Cmd::Collection { action } => {
+            let mut out = std::io::stdout().lock();
+            match action {
+                CollectionAction::Inspect { file } => collection::inspect(&file, &mut out),
+                CollectionAction::Ls { file, full } => collection::ls(&file, full, &mut out),
+                CollectionAction::Verify { file } => collection::verify(&file, &mut out),
+            }
+        }
         Cmd::Bench { action } => match action {
             BenchAction::Write {
                 schema,

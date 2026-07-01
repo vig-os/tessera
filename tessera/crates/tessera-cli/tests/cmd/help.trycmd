@@ -37,6 +37,9 @@ Versioning (content-addressed repo):
   forget      Forget a lineage (objects reclaimed by gc)
   gc          Reclaim objects unreachable from any ref
 
+Collections (catalog of products):
+  collection  Inspect / ls / verify a collection.json + its members
+
 Distribution (needs --features cloud):
   push        Push a sealed .tsra to an OCI registry
   pull        Pull a .tsra OCI artifact from a registry
