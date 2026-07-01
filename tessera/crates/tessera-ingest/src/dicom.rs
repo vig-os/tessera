@@ -23,7 +23,11 @@ use tessera_core::{Error, ProductBuilder, Result};
 use tessera_io::array::{self, ArrayData};
 use tessera_io::BlockPayload;
 
+use crate::identity::IdentityDocument;
+
 const MODALITY: Tag = Tag(0x0008, 0x0060);
+const PATIENT_NAME: Tag = Tag(0x0010, 0x0010);
+const PATIENT_ID: Tag = Tag(0x0010, 0x0020);
 const ROWS: Tag = Tag(0x0028, 0x0010);
 const COLUMNS: Tag = Tag(0x0028, 0x0011);
 const RESCALE_INTERCEPT: Tag = Tag(0x0028, 0x1052);
@@ -165,17 +169,20 @@ pub fn read_object(obj: &FileDicomObject<InMemDicomObject>) -> Result<DicomImage
     })
 }
 
+/// The trimmed non-empty string value of a tag, or `None` — shared by curated-tag extraction and
+/// the crypto-shred identity capture ([`capture_identity`]).
+fn trimmed_str(obj: &FileDicomObject<InMemDicomObject>, tag: Tag) -> Option<String> {
+    obj.element(tag)
+        .ok()
+        .and_then(|e| e.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Extract the schema-mapped [`DicomCuratedTags`] from an already-parsed DICOM object. Any tag
 /// missing from the object is left `None` (never a hard error — the recon schema classifies these
 /// as `recommended`, so absence is a warn tier, not a block).
 fn extract_curated_tags(obj: &FileDicomObject<InMemDicomObject>) -> DicomCuratedTags {
-    fn trimmed_str(obj: &FileDicomObject<InMemDicomObject>, tag: Tag) -> Option<String> {
-        obj.element(tag)
-            .ok()
-            .and_then(|e| e.to_str().ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
     fn f64_of(obj: &FileDicomObject<InMemDicomObject>, tag: Tag) -> Option<f64> {
         obj.element(tag).ok().and_then(|e| e.to_float64().ok())
     }
@@ -305,6 +312,53 @@ pub fn read_series(paths: &[std::path::PathBuf]) -> Result<DicomImage> {
 /// reaches the stacked volume.
 pub fn read_series_deidentified(paths: &[std::path::PathBuf]) -> Result<DicomImage> {
     read_series_inner(paths, true)
+}
+
+/// Capture the [`IdentityDocument`] from a **raw** (pre-scrub) DICOM object — the full header plus a
+/// curated echo of the human-meaningful re-link keys. Must be called *before* [`deidentify`]. ADR-0047.
+fn capture_identity(obj: &FileDicomObject<InMemDicomObject>) -> IdentityDocument {
+    let mut curated = serde_json::Map::new();
+    for (key, tag) in [
+        ("patient_name", PATIENT_NAME),
+        ("patient_id", PATIENT_ID),
+        ("study_instance_uid", STUDY_INSTANCE_UID),
+        ("series_instance_uid", SERIES_INSTANCE_UID),
+    ] {
+        if let Some(v) = trimmed_str(obj, tag) {
+            curated.insert(key.to_string(), serde_json::json!(v));
+        }
+    }
+    IdentityDocument {
+        v: IdentityDocument::VERSION,
+        dicom_header: header_to_json(obj),
+        curated_identifying: curated,
+    }
+}
+
+/// Crypto-shred read (ADR-0047 / #269): capture the identifying material into an [`IdentityDocument`],
+/// then de-identify and decode. Returns the **de-identified** image (safe to seal + share) alongside
+/// the identity document (to be `age`-encrypted into an `aux/identity` envelope by the caller). The
+/// sealed image is byte-for-byte what [`read_image_deidentified`] produces; the difference is that the
+/// stripped identity is *recoverable by a key holder* rather than destroyed.
+pub fn read_image_crypto_shred(path: &std::path::Path) -> Result<(DicomImage, IdentityDocument)> {
+    let mut obj = dicom::object::open_file(path).map_err(de)?;
+    let identity = capture_identity(&obj);
+    deidentify(&mut obj);
+    Ok((read_object(&obj)?, identity))
+}
+
+/// Series analogue of [`read_image_crypto_shred`]. The identity is captured from the first slice's
+/// raw header (patient / study / series identifiers are series-uniform); every slice is de-identified
+/// before decoding, exactly as [`read_series_deidentified`].
+pub fn read_series_crypto_shred(
+    paths: &[std::path::PathBuf],
+) -> Result<(DicomImage, IdentityDocument)> {
+    let first = paths
+        .first()
+        .ok_or_else(|| Error::Invalid("dicom: empty series".into()))?;
+    let obj = dicom::object::open_file(first).map_err(de)?;
+    let identity = capture_identity(&obj);
+    Ok((read_series_inner(paths, true)?, identity))
 }
 
 /// Shared series body for [`read_series`] / [`read_series_deidentified`] — opening each slice, then
