@@ -11,6 +11,11 @@ index).
 > chunk_index_block`). #221-B measured the leaf-granularity trade-off (knee ≈ 2¹⁴). ADR-0028 is the single
 > carrier; this ADR stands as the focused record of the chunk-index rationale. This is a **terminal**
 > status (not Accepted) — the *generalised* form lives in ADR-0028, not as an independent decision.
+>
+> **The open "should the block digest *be* the sub-block Merkle root" question (§Context below) is
+> resolved in ADR-0028 §4.1: no.** The block digest stays a flat `blake3` of the whole payload so
+> identity is independent of internal chunk layout (a codec choice); the sub-block Merkle rides as the
+> additive `ChunkIndex` companion and reconciles with the flat digest by covering the same bytes. #214
 
 ## Context
 Today the Merkle is **one level deep**: `content_hash = merkle_root([block.digest])`, and a block's

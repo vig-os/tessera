@@ -83,6 +83,36 @@ The integrity leaves (hashes) are canonical (they *are* the identity); stats/pyr
 derived. The chunk-index straddles — leaf-hashes canonical, stat columns derived — so the manifest tag
 keeps the canonical identity clean while accelerators float above it.
 
+#### 4.1 The block digest stays *flat* — the sub-block Merkle is an additive companion, not the block's identity (#214)
+
+§1 describes the recursive Merkle as the **logical** model (`product → block → chunk → sub-chunk`). The
+**physical identity deliberately does not fold the sub-block tree into the block's own digest.** A
+block's `digest` is a **flat `blake3` of its whole encoded payload**, and `content_hash =
+merkle_root([block.digest, …])` (ADR-0020, one level over blocks). The per-chunk Merkle root + `{hash,
+stats}` leaves live in the **additive `ChunkIndex` companion block** (`tessera_io::chunk_index::
+chunk_index_block`, tagged `derived`), *beside* the data block — never *as* its digest.
+
+Why not make the block digest itself the sub-block MMR root (the seemingly-purer unification)?
+
+- **Identity must be independent of internal chunking.** A block's chunk layout (array 64³ cubes, table
+  2¹⁶-row groups, the #221-B index-leaf size) is a **codec/encoder choice**, not a semantic property of
+  the product. If the block digest were the chunk-tree root, re-chunking the same logical bytes — a
+  legitimate encoder tuning — would change `content_hash` and the product `id`. Keeping the digest a
+  flat hash of the final payload means identity tracks **what the block *is*, not how it was tiled**.
+- **Determinism + corpus stability (S15).** The conformance corpus + writer-determinism gate pin flat
+  block digests. Folding the tree in would couple every golden hash to the chunk-granularity constant,
+  making the frozen `ROWS_PER_GROUP = 2¹⁶` / index-leaf `~2¹⁴` load-bearing for *identity* rather than
+  just for pruning — the exact decoupling #221-B established.
+- **The reconciliation is still exact.** The companion covers the *same bytes* as the data block: a
+  verifier recomputes the flat block digest **and** (optionally) walks the `ChunkIndex` leaves, and the
+  two agree by construction (both hash the block's chunk stream). Per-chunk confirmation + range-read
+  pruning are fully available; they simply ride the additive tier (§4) instead of the identity tier.
+
+So the recursive tree is the **conceptual** unification; the **carried** form is flat-digest + additive
+chunk-index. This is the settled resolution of ADR-0027's "should the block digest be the sub-block
+root" question (its terminal `Superseded` note): **no — identity stays chunk-layout-agnostic, and the
+sub-block Merkle is a first-class *companion*, not the block's name.**
+
 ### 5. The fused streaming pass — encode + hash + tree + stats in one flow
 The hierarchy is **built in the streaming pipeline**, not a separate pass:
 ```
