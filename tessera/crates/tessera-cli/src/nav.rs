@@ -454,6 +454,65 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
     }
 }
 
+/// A row selection for [`read`], resolved against the table's row count **at read time** — so
+/// negative (from-the-end) and open (`N:`, `:N`, `:`) bounds work without the CLI knowing the total
+/// up front. Half-open throughout (`[lo, hi)`), Python-slice semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowSpec {
+    /// `--rows A:B`: each bound optional (open = start/end) and negative = counted from the end.
+    Range { lo: Option<i64>, hi: Option<i64> },
+    /// `--head N`: the first N rows.
+    Head(u64),
+    /// `--tail N`: the last N rows.
+    Tail(u64),
+    /// `--at I`: exactly the one row at index I (negative = from the end).
+    At(i64),
+}
+
+impl RowSpec {
+    /// Parse a `--rows` value: `A:B` with optional/negative bounds (`91500:`, `:100`, `-10:-1`, `:`).
+    pub fn parse_range(s: &str) -> Result<RowSpec> {
+        let (a, b) = s.split_once(':').ok_or_else(|| {
+            tessera_core::Error::Invalid(format!(
+                "--rows expects A:B (half-open); for a single row use --at, got '{s}'"
+            ))
+        })?;
+        let bound = |x: &str, side: &str| -> Result<Option<i64>> {
+            let x = x.trim();
+            if x.is_empty() {
+                return Ok(None);
+            }
+            x.parse::<i64>().map(Some).map_err(|_| {
+                tessera_core::Error::Invalid(format!("--rows: bad {side} bound '{x}'"))
+            })
+        };
+        Ok(RowSpec::Range {
+            lo: bound(a, "lower")?,
+            hi: bound(b, "upper")?,
+        })
+    }
+
+    /// Resolve to a concrete half-open `[lo, hi)` clamped to `[0, total]`. Negative bounds count from
+    /// the end; an inverted range (`lo > hi`) yields an empty window (Python-slice behaviour).
+    pub fn resolve(self, total: u64) -> (u64, u64) {
+        let t = total as i64;
+        let idx = |v: i64| -> u64 { (if v < 0 { t + v } else { v }).clamp(0, t) as u64 };
+        match self {
+            RowSpec::Range { lo, hi } => {
+                let l = lo.map(idx).unwrap_or(0);
+                let h = hi.map(idx).unwrap_or(total);
+                (l, h.max(l))
+            }
+            RowSpec::Head(n) => (0, n.min(total)),
+            RowSpec::Tail(n) => (total.saturating_sub(n), total),
+            RowSpec::At(i) => {
+                let a = idx(i);
+                (a, (a + 1).min(total))
+            }
+        }
+    }
+}
+
 /// Options for [`read`].
 pub struct ReadOpts<'a> {
     /// The `.tsra` to read.
@@ -462,8 +521,9 @@ pub struct ReadOpts<'a> {
     pub block: &'a str,
     /// Columns to project (empty = all columns, in schema order).
     pub columns: Vec<String>,
-    /// Global row range `[lo, hi)` (None = from row 0).
-    pub rows: Option<(u64, u64)>,
+    /// Explicit row selection (`--rows`/`--head`/`--tail`/`--at`), resolved against the row count at
+    /// read time. `None` = fall back to `limit`.
+    pub rows: Option<RowSpec>,
     /// Emit every row (overrides `limit`).
     pub all: bool,
     /// Default row cap when neither `rows` nor `all` is given.
@@ -487,6 +547,20 @@ pub struct ReadResult {
 /// Columns are projected (only the requested columns' segments are decoded per block).
 pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
     let mut r = Reader::open(opts.file)?;
+    // `read` is table-only. If the target names an **array** block (a volume/μ-map), fail with a
+    // clear pointer instead of the opaque "missing field columns" from the table decoder (#253).
+    if let Some(b) = r.manifest().blocks.iter().find(|b| b.name == opts.block) {
+        if b.kind == BlockKind::Array {
+            return Err(tessera_core::Error::Invalid(format!(
+                "'{}' is an array block ({}), not a table — `read` is for tables. Use \
+                 `tsra ls {} {}` for its spec or `tsra extract` for raw bytes (array slicing/stats: #253).",
+                opts.block,
+                block_headline(&b.kind, &b.spec),
+                opts.file.display(),
+                opts.block,
+            )));
+        }
+    }
     let view = r.logical_table(opts.block)?;
     let total = view.row_count();
 
@@ -507,12 +581,13 @@ pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
         opts.columns.clone()
     };
 
-    // Resolve the row window: explicit range, or all, or the default cap.
+    // Resolve the row window: explicit selection (resolved vs the row count), or all, or the cap.
     let (lo, hi) = match opts.rows {
-        Some((a, b)) => (a.min(total), b.min(total)),
+        Some(spec) => spec.resolve(total),
         None if opts.all => (0, total),
         None => (0, opts.limit.min(total)),
     };
+    // Only the default-cap path is a silent truncation worth warning about.
     let truncated = opts.rows.is_none() && !opts.all && hi < total;
     let nrows = hi.saturating_sub(lo);
 
@@ -742,6 +817,30 @@ mod tests {
         // A single-file edge with no hash stays a bare one-liner.
         let one = source_lines("derived_from", "manifest:blake3:abcd", None, false);
         assert_eq!(one, vec!["derived_from <- manifest:blake3:abcd"]);
+    }
+
+    #[test]
+    fn rowspec_resolves_open_negative_and_sugar() {
+        let t = 100u64;
+        // Open bounds: `91500:`-style (to end), `:N`, `:`.
+        assert_eq!(RowSpec::parse_range("40:").unwrap().resolve(t), (40, 100));
+        assert_eq!(RowSpec::parse_range(":40").unwrap().resolve(t), (0, 40));
+        assert_eq!(RowSpec::parse_range(":").unwrap().resolve(t), (0, 100));
+        // Negative-from-end: `-10:-1`, `-20:`.
+        assert_eq!(RowSpec::parse_range("-10:-1").unwrap().resolve(t), (90, 99));
+        assert_eq!(RowSpec::parse_range("-20:").unwrap().resolve(t), (80, 100));
+        // Inverted range → empty window (Python-slice behaviour), never a panic.
+        assert_eq!(RowSpec::parse_range("50:40").unwrap().resolve(t), (50, 50));
+        // head / tail / at.
+        assert_eq!(RowSpec::Head(10).resolve(t), (0, 10));
+        assert_eq!(RowSpec::Tail(10).resolve(t), (90, 100));
+        assert_eq!(RowSpec::At(-1).resolve(t), (99, 100));
+        assert_eq!(RowSpec::At(0).resolve(t), (0, 1));
+        // Clamping past the ends is safe.
+        assert_eq!(RowSpec::parse_range("0:999").unwrap().resolve(t), (0, 100));
+        assert_eq!(RowSpec::Tail(999).resolve(t), (0, 100));
+        // A bare number is not a range (points at --at).
+        assert!(RowSpec::parse_range("91500").is_err());
     }
 
     #[test]

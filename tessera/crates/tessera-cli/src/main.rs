@@ -212,16 +212,27 @@ enum Cmd {
         file: PathBuf,
         /// Table block, or a multi-block prefix like `events`.
         block: String,
-        /// Column to project (repeatable, `-c ms -c en`). Omit for all columns in schema order.
-        #[arg(long = "column", short = 'c')]
+        /// Columns to project (repeatable **or** comma-list: `-c ms -c en` or `-c ms,en`). Omit for
+        /// all columns in schema order.
+        #[arg(long = "column", short = 'c', value_delimiter = ',')]
         column: Vec<String>,
-        /// Global row range `A:B` (half-open). Overrides `--limit`.
-        #[arg(long)]
+        /// Row range `A:B` (half-open); each side optional/negative-from-end: `91500:`, `:100`,
+        /// `-10:-1`, `:`. Overrides `--limit`.
+        #[arg(long, allow_hyphen_values = true, conflicts_with_all = ["head", "tail", "at"])]
         rows: Option<String>,
+        /// The first N rows.
+        #[arg(long, conflicts_with_all = ["rows", "tail", "at"])]
+        head: Option<u64>,
+        /// The last N rows.
+        #[arg(long, conflicts_with_all = ["rows", "head", "at"])]
+        tail: Option<u64>,
+        /// Exactly the one row at index I (negative = from the end, e.g. `--at -1`).
+        #[arg(long, allow_hyphen_values = true, conflicts_with_all = ["rows", "head", "tail"])]
+        at: Option<i64>,
         /// Emit every row (overrides `--limit`).
         #[arg(long)]
         all: bool,
-        /// Default max rows when neither `--rows` nor `--all` is given.
+        /// Default max rows when no `--rows`/`--head`/`--tail`/`--at`/`--all` is given.
         #[arg(long, default_value_t = 20)]
         limit: u64,
         /// Output format: `csv` (default) | `tsv` | `ndjson`.
@@ -766,14 +777,21 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             block,
             column,
             rows,
+            head,
+            tail,
+            at,
             all,
             limit,
             format,
         } => {
             let fmt = nav::Format::parse(&format)?;
-            let rows = match rows {
-                Some(s) => Some(parse_row_range(&s)?),
-                None => None,
+            // clap enforces mutual exclusion; map whichever was given to a RowSpec.
+            let rows = match (rows, head, tail, at) {
+                (Some(s), ..) => Some(nav::RowSpec::parse_range(&s)?),
+                (_, Some(n), ..) => Some(nav::RowSpec::Head(n)),
+                (_, _, Some(n), _) => Some(nav::RowSpec::Tail(n)),
+                (_, _, _, Some(i)) => Some(nav::RowSpec::At(i)),
+                _ => None,
             };
             let mut out = std::io::stdout().lock();
             let res = nav::read(
@@ -1126,27 +1144,6 @@ fn parse_meta(
         out.insert(k.to_string(), value);
     }
     Ok(out)
-}
-
-/// Parse a `--rows A:B` half-open range for `tessera read`. Both bounds are required; `A <= B`.
-fn parse_row_range(s: &str) -> tessera_core::Result<(u64, u64)> {
-    let (a, b) = s.split_once(':').ok_or_else(|| {
-        tessera_core::Error::Invalid(format!("--rows expects A:B (half-open), got '{s}'"))
-    })?;
-    let lo: u64 = a
-        .trim()
-        .parse()
-        .map_err(|_| tessera_core::Error::Invalid(format!("--rows: bad lower bound '{a}'")))?;
-    let hi: u64 = b
-        .trim()
-        .parse()
-        .map_err(|_| tessera_core::Error::Invalid(format!("--rows: bad upper bound '{b}'")))?;
-    if hi < lo {
-        return Err(tessera_core::Error::Invalid(format!(
-            "--rows: A:B requires A <= B, got {lo}:{hi}"
-        )));
-    }
-    Ok((lo, hi))
 }
 
 /// `tessera push` — with the `cloud` feature, runs the in-Rust OCI distribution client; without it,
