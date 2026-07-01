@@ -17,7 +17,7 @@ use dicom::core::value::Value;
 use dicom::core::{DataElement, PrimitiveValue, Tag, VR};
 use dicom::object::{FileDicomObject, InMemDicomObject};
 use dicom::pixeldata::{ConvertOptions, ModalityLutOption, PixelDecoder};
-use tessera_core::block::array::ArraySpec;
+use tessera_core::block::array::{ArraySpec, WorldFrame};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, ProductBuilder, Result};
 use tessera_io::array::{self, ArrayData};
@@ -40,6 +40,11 @@ const MODEL_NAME: Tag = Tag(0x0008, 0x1090);
 const KVP: Tag = Tag(0x0018, 0x0060);
 const SLICE_THICKNESS: Tag = Tag(0x0018, 0x0050);
 const PIXEL_SPACING: Tag = Tag(0x0028, 0x0030);
+/// ImagePositionPatient (0020,0032) — LPS mm coordinate of the first voxel of a slice (the
+/// `world_frame` origin). ImageOrientationPatient (0020,0037) — the 6 direction cosines of the first
+/// row + first column, the in-plane axes of the affine (#271, ADR-0030).
+const IMAGE_POSITION_PATIENT: Tag = Tag(0x0020, 0x0032);
+const IMAGE_ORIENTATION_PATIENT: Tag = Tag(0x0020, 0x0037);
 
 /// The pixel-data tag — excluded from the `extra["dicom_header"]` dump (the pixels are the
 /// `volume` block; the header is metadata about them, not a redundant copy).
@@ -68,6 +73,11 @@ pub struct DicomImage {
     /// destined for `manifest.extra["dicom_header"]`. Deterministic ordering — the underlying
     /// map is a [`BTreeMap`] keyed by `"GGGG,EEEE"` uppercase hex, so re-ingest is byte-identical.
     pub header_json: serde_json::Value,
+    /// The voxel→patient (LPS mm) affine, when the DICOM carried enough geometry (#271, ADR-0030):
+    /// built from ImagePositionPatient (origin) + ImageOrientationPatient (in-plane cosines) +
+    /// PixelSpacing + the inter-slice vector. `None` for a single 2-D slice or an incomplete header —
+    /// then `tessera slice --world` stays index-only. Populated by [`read_series`] for a 3-D stack.
+    pub world_frame: Option<WorldFrame>,
 }
 
 /// Curated DICOM tags carried into the `recon` schema (ADR-0040 §1 / PS3.15 seeding). Every
@@ -162,6 +172,9 @@ pub fn read_object(obj: &FileDicomObject<InMemDicomObject>) -> Result<DicomImage
         rescale_intercept,
         curated,
         header_json,
+        // A single 2-D slice has no stacking axis; the 3-D `world_frame` is a series concern,
+        // built by [`read_series`] from the per-slice ImagePositionPatient (#271).
+        world_frame: None,
     })
 }
 
@@ -211,6 +224,91 @@ fn extract_curated_tags(obj: &FileDicomObject<InMemDicomObject>) -> DicomCurated
         slice_thickness: f64_of(obj, SLICE_THICKNESS),
         pixel_spacing,
     }
+}
+
+/// Parse a multi-valued DICOM decimal-string tag into exactly `N` floats — `to_multi_float64` first,
+/// then split the raw string on the `\` value separator (same dual-form handling as PixelSpacing).
+/// `None` if absent or the wrong arity.
+fn floats_of<const N: usize>(
+    obj: &FileDicomObject<InMemDicomObject>,
+    tag: Tag,
+) -> Option<[f64; N]> {
+    let e = obj.element(tag).ok()?;
+    let vals: Vec<f64> = e
+        .to_multi_float64()
+        .ok()
+        .filter(|v| v.len() == N)
+        .map(|v| v.to_vec())
+        .or_else(|| {
+            e.to_str()
+                .ok()?
+                .trim()
+                .split('\\')
+                .map(|s| s.trim().parse::<f64>().ok())
+                .collect::<Option<Vec<f64>>>()
+        })?;
+    <[f64; N]>::try_from(vals).ok()
+}
+
+/// Build the voxel→patient (LPS mm) [`WorldFrame`] for a **sorted** DICOM series (#271, ADR-0030).
+///
+/// Tessera declares the stacked volume with axes `[z, row, col]` (`[k, j, i]`), so the affine columns
+/// are, in that order: the **inter-slice vector** (k), the **column-cosine × row-spacing** (j), and the
+/// **row-cosine × column-spacing** (i); the translation is the first slice's ImagePositionPatient.
+/// DICOM patient coordinates are already **LPS**, so no RAS→LPS flip (unlike NIfTI).
+///
+/// - `iop` = ImageOrientationPatient `[Rx,Ry,Rz, Cx,Cy,Cz]` — R = first-row cosine (increasing *column*
+///   index i), C = first-column cosine (increasing *row* index j).
+/// - `pixel_spacing` = `[row_spacing, col_spacing]` mm (PixelSpacing order).
+/// - `ipp_first` / `ipp_second` = ImagePositionPatient of the first two slices (post-sort). The k
+///   vector is `ipp_second − ipp_first` (captures spacing, direction, and gantry tilt); with a single
+///   slice it falls back to the unit slice-normal × `slice_thickness`.
+///
+/// Returns `None` unless orientation, spacing, and the first origin are all present and the affine is
+/// non-degenerate — then `slice --world` stays index-only rather than emitting a bogus geometry.
+fn build_series_world_frame(
+    iop: Option<[f64; 6]>,
+    pixel_spacing: Option<[f64; 2]>,
+    ipp_first: Option<[f64; 3]>,
+    ipp_second: Option<[f64; 3]>,
+    slice_thickness: Option<f64>,
+) -> Option<WorldFrame> {
+    let iop = iop?;
+    let [row_spacing, col_spacing] = pixel_spacing?;
+    let origin = ipp_first?;
+    let row_cos = [iop[0], iop[1], iop[2]]; // increasing column index i
+    let col_cos = [iop[3], iop[4], iop[5]]; // increasing row index j
+
+    // k (slice) vector: prefer the measured first→second origin delta; else slice_normal × thickness.
+    let slice_vec = match ipp_second {
+        Some(p2) => [p2[0] - origin[0], p2[1] - origin[1], p2[2] - origin[2]],
+        None => {
+            let t = slice_thickness?;
+            // slice normal = row_cos × col_cos (right-handed), scaled by the slice thickness.
+            let n = [
+                row_cos[1] * col_cos[2] - row_cos[2] * col_cos[1],
+                row_cos[2] * col_cos[0] - row_cos[0] * col_cos[2],
+                row_cos[0] * col_cos[1] - row_cos[1] * col_cos[0],
+            ];
+            [n[0] * t, n[1] * t, n[2] * t]
+        }
+    };
+
+    // Row-major 3×4 affine, columns [k, j, i], translation = origin.
+    let mut affine = [0.0f64; 12];
+    for r in 0..3 {
+        affine[r * 4] = slice_vec[r];
+        affine[r * 4 + 1] = col_cos[r] * row_spacing;
+        affine[r * 4 + 2] = row_cos[r] * col_spacing;
+        affine[r * 4 + 3] = origin[r];
+    }
+    let frame = WorldFrame {
+        affine,
+        convention: "LPS".into(),
+        unit: "mm".into(),
+        space: "patient".into(),
+    };
+    frame.is_nondegenerate().then_some(frame)
 }
 
 /// Serialize the full DICOM header (every top-level element **except** PixelData) into a
@@ -315,7 +413,11 @@ fn read_series_inner(paths: &[std::path::PathBuf], strip_phi: bool) -> Result<Di
     if paths.is_empty() {
         return Err(Error::Invalid("dicom: empty series".into()));
     }
-    let mut slices: Vec<(i64, DicomImage)> = Vec::with_capacity(paths.len());
+    // Each slice keeps its ImagePositionPatient so the stacked volume's `world_frame` can be built
+    // from the real inter-slice geometry after sorting (#271). ImageOrientationPatient + PixelSpacing
+    // are series-uniform; capture orientation from the first slice that carries it.
+    let mut slices: Vec<(i64, Option<[f64; 3]>, DicomImage)> = Vec::with_capacity(paths.len());
+    let mut orientation: Option<[f64; 6]> = None;
     for p in paths {
         let mut obj = dicom::object::open_file(p).map_err(de)?;
         if strip_phi {
@@ -326,12 +428,16 @@ fn read_series_inner(paths: &[std::path::PathBuf], strip_phi: bool) -> Result<Di
             .ok()
             .and_then(|e| e.to_int::<i64>().ok())
             .unwrap_or(0);
-        slices.push((instance, read_object(&obj)?));
+        let ipp = floats_of::<3>(&obj, IMAGE_POSITION_PATIENT);
+        if orientation.is_none() {
+            orientation = floats_of::<6>(&obj, IMAGE_ORIENTATION_PATIENT);
+        }
+        slices.push((instance, ipp, read_object(&obj)?));
     }
-    slices.sort_by_key(|(k, _)| *k);
+    slices.sort_by_key(|(k, _, _)| *k);
 
-    let first = slices[0].1.clone();
-    for (_, s) in &slices {
+    let first = slices[0].2.clone();
+    for (_, _, s) in &slices {
         if s.shape != first.shape
             || s.modality != first.modality
             || s.rescale_slope != first.rescale_slope
@@ -343,14 +449,23 @@ fn read_series_inner(paths: &[std::path::PathBuf], strip_phi: bool) -> Result<Di
         }
     }
     let mut voxels = Vec::with_capacity(slices.len() * first.voxels.len());
-    for (_, s) in &slices {
+    for (_, _, s) in &slices {
         voxels.extend_from_slice(&s.voxels);
     }
     let z = u64::try_from(slices.len())
         .map_err(|e| Error::Invalid(format!("dicom: series slice count overflow: {e}")))?;
+    // The voxel→patient affine, from the first slice's origin + orientation/spacing and the measured
+    // first→second inter-slice vector (handles gantry tilt + real spacing). `None` when the header
+    // lacks the geometry — then `slice --world` stays index-only rather than inventing coordinates.
+    let world_frame = build_series_world_frame(
+        orientation,
+        first.curated.pixel_spacing,
+        slices.first().and_then(|(_, ipp, _)| *ipp),
+        slices.get(1).and_then(|(_, ipp, _)| *ipp),
+        first.curated.slice_thickness,
+    );
     // Curated tags + header live on the representative (first-by-InstanceNumber) slice — the
-    // series is uniform for study/series-level tags, and the per-slice diff (InstanceNumber,
-    // ImagePositionPatient, …) matters far less than the study/series/manufacturer context.
+    // series is uniform for study/series-level tags.
     Ok(DicomImage {
         shape: vec![z, first.shape[0], first.shape[1]],
         voxels,
@@ -359,6 +474,7 @@ fn read_series_inner(paths: &[std::path::PathBuf], strip_phi: bool) -> Result<Di
         rescale_intercept: first.rescale_intercept,
         curated: first.curated,
         header_json: first.header_json,
+        world_frame,
     })
 }
 
@@ -432,6 +548,9 @@ pub fn to_recon_product(
     if let Some(u) = unit_for(&img.modality) {
         spec = spec.with_unit(u);
     }
+    // The voxel→patient (LPS mm) affine, when the series carried the geometry — makes
+    // `tessera slice --world` / `stats` world-aware on real ingests (#271, ADR-0030).
+    spec.world_frame = img.world_frame.clone();
     let data = ArrayData::I16(img.voxels.clone());
     let (block_ref, payload) = array::array_block("volume", &spec, &data)?;
 
@@ -440,6 +559,15 @@ pub fn to_recon_product(
     b.with_field(
         "modality",
         serde_json::json!({"_vocabulary": "DICOM", "_code": img.modality}),
+    );
+    // Surface the rescale on the manifest's `recon` schema fields too (#271): the block spec carries
+    // the operational transform (what `stats --physical` applies), but the schema declares
+    // `rescale_slope`/`rescale_intercept` as discovery fields — a reader querying metadata for the
+    // HU/Bq·mL⁻¹ scaling shouldn't have to open the array block to find it.
+    b.with_field("rescale_slope", serde_json::json!(img.rescale_slope));
+    b.with_field(
+        "rescale_intercept",
+        serde_json::json!(img.rescale_intercept),
     );
 
     // Curated DICOM tags → `recon` schema fields (each is `recommended`, so absence is fine).
@@ -504,6 +632,7 @@ mod tests {
             rescale_intercept: -1024.0,
             curated: DicomCuratedTags::default(),
             header_json: serde_json::Value::Null,
+            world_frame: None,
         }
     }
 
@@ -1268,5 +1397,117 @@ mod tests {
                 .trim(),
             "YES"
         );
+    }
+
+    /// #271: the voxel→patient affine is built correctly from IOP + PixelSpacing + the inter-slice
+    /// vector, columns in Tessera `[k=slice, j=row, i=col]` order, translation = first origin.
+    #[test]
+    fn series_world_frame_maps_voxels_to_lps_mm() {
+        // Standard axial orientation: row cosine +X, column cosine +Y.
+        let iop = Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let ps = Some([2.0, 3.0]); // [row_spacing (Δj), col_spacing (Δi)]
+        let ipp0 = Some([10.0, 20.0, 30.0]);
+        let ipp1 = Some([10.0, 20.0, 35.0]); // +5 mm in Z between slices
+
+        let wf = build_series_world_frame(iop, ps, ipp0, ipp1, None).unwrap();
+        assert_eq!(wf.convention, "LPS");
+        assert_eq!(wf.unit, "mm");
+        assert_eq!(wf.space, "patient");
+        // world(k,j,i) = [10 + 3i, 20 + 2j, 30 + 5k]: columns [k,j,i], translation = origin.
+        assert_eq!(
+            wf.affine,
+            [
+                0.0, 0.0, 3.0, 10.0, // X row
+                0.0, 2.0, 0.0, 20.0, // Y row
+                5.0, 0.0, 0.0, 30.0, // Z row
+            ]
+        );
+        // column-norm spacing = [slice=5, row=2, col=3].
+        assert_eq!(wf.spacing(), [5.0, 2.0, 3.0]);
+
+        // Single-slice fallback: k column = slice normal (+Z here) × SliceThickness.
+        let wf1 = build_series_world_frame(iop, ps, ipp0, None, Some(4.0)).unwrap();
+        assert_eq!(
+            [wf1.affine[0], wf1.affine[4], wf1.affine[8]],
+            [0.0, 0.0, 4.0]
+        );
+
+        // No orientation / no origin / no k-source → index space (None), never a bogus frame.
+        assert!(build_series_world_frame(None, ps, ipp0, ipp1, None).is_none());
+        assert!(build_series_world_frame(iop, ps, None, ipp1, None).is_none());
+        assert!(build_series_world_frame(iop, ps, ipp0, None, None).is_none());
+    }
+
+    /// End-to-end: a 2-slice series carrying IPP/IOP/PixelSpacing → `read_series` populates the
+    /// stacked volume's `world_frame`, and `to_recon_product` seals it into the array block (#271).
+    #[test]
+    fn read_series_populates_world_frame_from_geometry() {
+        fn write_slice(path: &std::path::Path, instance: i32, z: f64) {
+            let pixels: Vec<u16> = (0..64).map(|k| 100 + k as u16).collect();
+            let obj = InMemDicomObject::from_element_iter([
+                DataElement::new(MODALITY, VR::CS, PrimitiveValue::from("CT")),
+                DataElement::new(ROWS, VR::US, PrimitiveValue::from(8u16)),
+                DataElement::new(COLUMNS, VR::US, PrimitiveValue::from(8u16)),
+                DataElement::new(
+                    INSTANCE_NUMBER,
+                    VR::IS,
+                    PrimitiveValue::from(instance.to_string()),
+                ),
+                DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+                DataElement::new(
+                    Tag(0x0028, 0x0004),
+                    VR::CS,
+                    PrimitiveValue::from("MONOCHROME2"),
+                ),
+                DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(16u16)),
+                DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(16u16)),
+                DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(15u16)),
+                DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(1u16)),
+                DataElement::new(PIXEL_SPACING, VR::DS, PrimitiveValue::from("2.0\\3.0")),
+                DataElement::new(
+                    IMAGE_ORIENTATION_PATIENT,
+                    VR::DS,
+                    PrimitiveValue::from("1.0\\0.0\\0.0\\0.0\\1.0\\0.0"),
+                ),
+                DataElement::new(
+                    IMAGE_POSITION_PATIENT,
+                    VR::DS,
+                    PrimitiveValue::from(format!("10.0\\20.0\\{z}")),
+                ),
+                DataElement::new(
+                    Tag(0x7FE0, 0x0010),
+                    VR::OW,
+                    PrimitiveValue::U16(pixels.into()),
+                ),
+            ]);
+            let meta = FileMetaTableBuilder::new()
+                .transfer_syntax("1.2.840.10008.1.2.1")
+                .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.2")
+                .media_storage_sop_instance_uid(format!("1.2.3.wf.{instance}"))
+                .implementation_class_uid("1.2.826.0.1.3680043.tessera")
+                .build()
+                .unwrap();
+            obj.with_exact_meta(meta).write_to_file(path).unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let s1 = dir.path().join("s1.dcm");
+        let s2 = dir.path().join("s2.dcm");
+        // Deliberately pass out of instance order to prove the sort + first→second k vector.
+        write_slice(&s2, 2, 35.0);
+        write_slice(&s1, 1, 30.0);
+
+        let img = read_series(&[s2.clone(), s1.clone()]).unwrap();
+        let wf = img
+            .world_frame
+            .clone()
+            .expect("series world_frame populated from IPP/IOP");
+        assert_eq!(wf.spacing(), [5.0, 2.0, 3.0]);
+        assert_eq!(wf.affine[3], 10.0); // origin X (first slice by InstanceNumber, z=30)
+        assert_eq!(wf.affine[11], 30.0); // origin Z
+
+        // The affine survives into the sealed recon block spec.
+        let (sealed, _) =
+            to_recon_product(&img, "wf", "2024-01-01T00:00:00Z", "s", None, &[]).unwrap();
+        assert!(sealed.blocks[0].spec["world_frame"].is_object());
     }
 }
