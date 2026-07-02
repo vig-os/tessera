@@ -369,6 +369,75 @@ explorer should live in notebook/Python land.
     WebGL2 / a JS-NGFF renderer otherwise). `tessera-wasm` stays the offline verify/sign path, by
     design. Charts on both tiers use `plotters` (`CanvasBackend`) — the same plot code as the TUI.
 
+## Compute & infrastructure topology across scales
+
+The explorer is **one tier** of a larger deployment story. The sealed `.tsra` product is the spine;
+each scale tier is a thin consumer/producer of it, and **compute stays SSOT (`tessera-io`, once) —
+only the orchestration + engine change as you scale up.** Tracked as infra epic #295 with sub-issues
+#296 (T3 K8s fan-out) · #297 (T4 aggregated analysis + engine ladder) · #298 (Ballista spike) · #299
+(T5 unbundled platform).
+
+```text
+   scanner ─► T0 ACQUISITION/EDGE    ingest→normalize→seal(+sign), bounded-mem streaming
+                    │ upload
+              T1 STORAGE / DIST       S3/MinIO + OCI registry (content-addressed) · CoW repo · WORM
+                    │ fetch (local file | S3 range-read, prune-before-fetch)
+              T2 DOCTOR STATION       embedded DataFusion/Vortex · volren/plotters/ratatui-image ·
+                    │                  TUI / tsra serve            [LOCAL-FIRST, cluster-optional]
+              T3 FAN-OUT   (map)       1 worker = 1 product · K8s Jobs/Indexed +
+                    │                  queue(SQS/Redis/RabbitMQ)+KEDA / Argo · node pools · GPU
+                    │ fan-in: PHI-safe summary row per object
+              T4 AGGREGATED (reduce)   Arrow/Parquet → DuckDB/DataFusion → lakehouse ·
+                    │                  Ballista (distributed shuffle) · catalog / vector index
+                    │ publish (PHI-safe metadata only)
+              T5 FEDERATION           InvenioRDM / DOIs · OCI cache-node · OME-Zarr facade ·
+                                       Icechunk bridge · vector similarity
+```
+
+| Tier | Scale / use case | Compute pattern | Engine & render | Infra | Scope |
+|---|---|---|---|---|---|
+| **0 Acquisition** | born-sealed at the equipment | ingest→normalize→seal(+sign), streaming | tessera-io; sign; Blob preserve | scanner ws / edge node | 1 object |
+| **1 Storage** | system of record | content-address, versioned, range-readable | CoW repo; OCI push/pull; WORM | S3/MinIO + OCI registry | all objects, at rest |
+| **2 Doctor station** | 1 user · interactive explore/edit | **embedded**, local-first | DataFusion/Vortex; volren/plotters/ratatui-image | one static binary; *cluster-optional* offload via `serve` | intra-object (+ tiny cohort) |
+| **3 Fan-out** | many products · batch | **map** (1 worker = 1 product), stateless/retriable | embedded DataFusion per pod | K8s Jobs/Indexed + queue+KEDA / Argo; taints/GPU; Karpenter | per-object |
+| **4 Aggregated** | cohort / population analytics | **reduce** over derived table | DuckDB/DataFusion → lakehouse; Ballista (shuffle) | analyst box → cluster / Databricks-Snowflake; + index DBs | inter-object (derived) |
+| **5 Federation** | share · cite · archive · interop | serverless / repo | FAIR export; OME-Zarr facade; Icechunk bridge | InvenioRDM · OCI cache · vector DB | products as citable units |
+
+*(ML training is a T3 variant — object-parallel **bulk read** fan-out over GPU node pools, not a
+distributed join. Cross-institution **federated learning** is the T5 frontier.)*
+
+### Tier-2 is local-first, cluster-optional
+
+*Containerize (package)* ≠ *depend on a K8s cluster (runtime)*. The interactive station defaults to
+**embedded/local** compute — for latency (scrubbing/rotating needs jitter-free ms, not cluster
+round-trips + cold-starts), **offline/point-of-care** (a self-contained sealed product verifies and
+reads anywhere), IT simplicity, and a small PHI blast radius. SSOT comes from the shared **library**
+(`tessera-io` runs embedded *and* in-cluster identically), so K8s adds no SSOT gain. It reaches into
+the cluster **through the same `tsra serve` seam** only for ops that genuinely need it — heavy
+render / ML inference / big cohort — or a **PHI-never-leaves-the-enclave** posture (server-render:
+only pixels/results reach the endpoint). A spectrum on one codebase, not either/or.
+
+### The explorer is v0 / a substrate — not the endgame
+
+The `.tsra` explorer is (1) the **reference reader + shared view-model** every consumer builds on,
+(2) a tool that **grows along the CoW-edit axis** — measurement (SUV/ROI), annotation, structured
+reporting land as **new sealed versions with an audit trail**, and (3) a component that **feeds/embeds
+existing clinical viewers** (OHIF / 3D Slicer / napari) via interop (DICOM out, OME-Zarr facade,
+py/numpy) rather than reinventing a full PACS viewer. Its durable niche even against fancy viewers is
+the dimension they lack: **metadata · provenance · integrity · lineage · trust · schema · governance**
+— *"authentic? whence? conformant? signed by whom? audit trail?"* for scientists, data stewards, and
+auditors, plus competent clinical-lite viewing via `volren-rs`.
+
+### Engine ladder & object-table levels (recap of the analytics path)
+
+- **Intra-object** raw tables (listmode/sinograms) are huge but object-local (recon/QC within a study)
+  → they live **inside the sealed product** (Vortex), queried by **DataFusion embedded** (the SSOT
+  engine, single binary). Fan-out over products is **object-parallel map** on K8s.
+- **Inter-object** derived tables (small PHI-safe per-object summaries, unioned across many) are the
+  analytics/catalog level → **DuckDB/DataFusion single-node → lakehouse at population scale**;
+  **Ballista** only for genuine cross-object *shuffle/join* (rare; Arrow-native, runs on the same K8s;
+  Vortex+Ballista is shipping at Spice.ai). **Arrow is the waist** — engine choice is not lock-in.
+
 ## Open questions (to confirm before Phase 1)
 
 1. **TUI language** — Rust ratatui (recommended) or Python Textual? (Locks the crate + deps.)
