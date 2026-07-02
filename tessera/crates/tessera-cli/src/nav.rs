@@ -916,50 +916,14 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
     Ok((level + 1) as usize)
 }
 
-/// Min / max / mean / std over an [`ArrayData`], computed in `f64` (one pass). Empty → all zero.
-fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize) {
-    macro_rules! reduce {
-        ($v:expr) => {{
-            let n = $v.len();
-            if n == 0 {
-                (0.0, 0.0, 0.0, 0.0, 0)
-            } else {
-                let mut mn = f64::INFINITY;
-                let mut mx = f64::NEG_INFINITY;
-                let mut sum = 0.0f64;
-                let mut sumsq = 0.0f64;
-                for &x in $v.iter() {
-                    let x = x as f64;
-                    mn = mn.min(x);
-                    mx = mx.max(x);
-                    sum += x;
-                    sumsq += x * x;
-                }
-                let mean = sum / n as f64;
-                let var = (sumsq / n as f64) - mean * mean;
-                (mn, mx, mean, var.max(0.0).sqrt(), n)
-            }
-        }};
-    }
-    match d {
-        ArrayData::I16(v) => reduce!(v),
-        ArrayData::I32(v) => reduce!(v),
-        ArrayData::I64(v) => reduce!(v),
-        ArrayData::U16(v) => reduce!(v),
-        ArrayData::U32(v) => reduce!(v),
-        ArrayData::U64(v) => reduce!(v),
-        ArrayData::F32(v) => reduce!(v),
-        ArrayData::F64(v) => reduce!(v),
-    }
-}
-
 /// `tessera stats FILE BLOCK` — a numeric overview of an **array** block: shape · dtype · chunks ·
 /// codec · value range (min/max/mean/std, raw and — when a rescale is present — physical) · unit ·
 /// spatial referencing. Decodes the block once; the "general looking at it" for a volume.
 pub fn stats(file: &Path, block: &str, out: &mut dyn Write) -> Result<()> {
     let (spec, blob) = open_array(file, block)?;
     let data = tessera_io::array::decode(&spec, &blob)?;
-    let (mn, mx, mean, std, n) = array_stats(&data);
+    let s = tessera_explore::array::array_stats(&data);
+    let (mn, mx, mean, std, n) = (s.min, s.max, s.mean, s.std, s.count);
 
     let shape: Vec<String> = spec.shape.iter().map(u64::to_string).collect();
     let axes = if spec.axes.is_empty() {
@@ -1564,7 +1528,7 @@ mod tests {
         // A representative extra blob (the shape #255 uses for the DICOM header).
         b.with_extra(
             "dicom_header",
-            serde_json::json!({"0010,0010": {"vr": "PN", "value": ["X"]}}),
+            serde_json::json!({"0010,0010": {"vr": "ON", "value": ["X"]}}),
         );
         let sealed = b.seal().unwrap(); // seal embeds the recon schema (self-describing)
         pack(&sealed, &[payload], &p).unwrap();
@@ -1685,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_index_and_array_stats() {
+    fn parse_index_variants() {
         // Numpy-style index against a [4, 5, 6] array → (start, len) per axis.
         let shape = [4u64, 5, 6];
         assert_eq!(
@@ -1703,10 +1667,6 @@ mod tests {
         );
         // Wrong rank is a clear error, not a panic.
         assert!(parse_index("1,:", &shape).is_err());
-
-        let (mn, mx, mean, std, n) = array_stats(&ArrayData::I16(vec![0, 2, 4, 6]));
-        assert_eq!((mn, mx, n), (0.0, 6.0, 4));
-        assert!((mean - 3.0).abs() < 1e-9 && (std - 5f64.sqrt()).abs() < 1e-9);
     }
 
     #[test]

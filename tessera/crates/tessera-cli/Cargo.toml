@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 tessera-core.workspace = true
 tessera-io.workspace = true
+tessera-explore.workspace = true
 tessera-ingest.workspace = true
 serde_json.workspace = true
 clap.workspace = true

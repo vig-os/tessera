@@ -1,0 +1,12 @@
+[package]
+name = "tessera-explore"
+description = "Tessera view-model — presentation-agnostic derived views over a .tsra (the SSOT the CLI/TUI/serve render)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tessera-core.workspace = true
+tessera-io.workspace = true
