@@ -59,6 +59,44 @@ render-ready arrays/frames — ideal if the UI layer is Python (Textual).
 does not cross-compile to wasm today (zstd-sys / getrandom / linux-raw-sys blockers, per the runtime
 notes). **A pure in-browser reader is blocked on real work here.**
 
+## The core: intrinsic data *and* metadata exploration
+
+Rendering is a *leaf* of this tool, not its trunk. A `.tsra` is unusually **metadata-rich** — sealed,
+signed, versioned, schema-validated, provenance-carrying, spatially-referenced, governance-tagged — and
+the first questions a scientist, auditor, or clinician asks are *"what is this, where did it come from,
+is it authentic, does it conform, may I use it?"* — answered **before a single voxel is drawn**. The
+explorer is therefore a **navigator of the container's intrinsic structure first, a renderer second.**
+Concretely, the model is **navigate → inspect → query → visualize → (edit)**, and the same `tree`/`ls`/
+`read` logic that Phase 1a extracts *is* the intrinsic-exploration engine.
+
+### The metadata surface (first-class panels, not an afterthought)
+
+| Facet | What it exposes | Source |
+|---|---|---|
+| **Identity & integrity** | `id` (lineage), `manifest_hash` (version), `product`, `name`, per-block digests, magic, **sealed?** | manifest, `verify()` |
+| **`meta`** | arbitrary key/value metadata fields (the edit target) | manifest `meta` |
+| **Schema** | product schema, required blocks/fields, **conformance verdict** | `schema`, product registry |
+| **Referencing** | world affine, axes, spacing/origin, **physical units + rescale** (voxel → mm + HU) | `referencing.rs` |
+| **Provenance & lineage** | ingest provenance (how made), `sources` edges (`derived_from`, `supersedes`, `snapshot_of`), original files; CoW **`log`** (history) + **`diff`** (vs parent) | `provenance.rs`, repo |
+| **Trust** | signature envelope (`alg`/`key_id`/`signer`/`signed_at`/`key_format`), embedded vs sidecar, **verify-against-trust-store** verdict | [[signing-trust-model]] |
+| **Governance** | sensitivity tier, **PHI / de-id status**, WORM/retention policy | data-protection layer |
+| **FAIR** | the discovery record it can emit (RO-Crate / DataCite / JSON-LD) | `export` |
+
+### The data surface
+
+| Block kind | What you explore | Verbs reused |
+|---|---|---|
+| **Array** | values (slice / ROI), **stats + histogram** (raw *and* physical), projections (MIP/mean/sum), pyramid levels | `stats`/`slice`/`project`/`pyramid` |
+| **Table** (Vortex) | rows/cols, **cross-block logical view** (`events` over `events_NNNN`), column values, **SQL** (DataFusion), aggregations | `read`, `LogicalTableView`, `sql` |
+| **Blob** | opaque bytes header (filename/mime), **byte-identical extract** | `extract` |
+| **Cross-block** | logical tables, collections, block groups, relationships | `multiblock`, collection |
+
+The upshot for the UI: the tree/navigator is the spine; **metadata inspectors (integrity · provenance ·
+lineage · trust · schema · referencing · governance) are peers of the data/viz panels**, and for a
+FAIR/regulated product they are arguably the *primary* value. Editing (Phase 2) acts only on the `meta`
+facet — a CoW `commit` — which is why "explorer" and "editor" are one tool: you explore the metadata,
+then compose a new sealed version of it.
+
 ## Architecture: DRY / SOLID / SSOT — the compute · data · viz split
 
 The sharpest design question isn't "TUI or web" — it's **where the single source of truth lives, and
@@ -173,6 +211,81 @@ If (2) and (3) don't matter to the users, **drop the web phase** — the TUI is 
 use, and the `serve` view-model still exists for later. The web is a *viz+reach* play, not a
 capability the TUI lacks.
 
+## Prior art & reuse — adopt · adapt · borrow · build
+
+The explorer sits in two mature ecosystems (versioned-Zarr storage, and array/plot rendering). What we
+reuse vs. build, grounded in a review of each:
+
+### Storage formats — align at the array layer, keep the sealed product
+
+**OME-Zarr is a *store* (a keyed bag of chunk-objects); a `.tsra` is a *product* (one sealed,
+content-addressed, signed, versioned file of heterogeneous blocks).** The differences are essential at
+the *container* level and incidental at the *array-chunk* level (tsra arrays are already zarr v3). So
+the posture is **adopt NGFF at the Array-block layer, adapt (not adopt) for the container**: `tsra
+serve` exposes an OME-NGFF store facade over the sealed file (chunk-key → in-container range read; the
+chunk index *is* the offset map — same mechanism as kerchunk/VirtualiZarr references), so viv /
+neuroglancer / vtk.js / napari read it unmodified. Pyramid (#260) → `multiscales`; affine → `coordinate
+Transformations`; metadata via the `ome_zarr_metadata` crate (`zarrs_ome` does the multiscale build).
+
+**Icechunk** (by **[Earthmover](https://www.earthmover.io/)** — the scientific-array-data company;
+Apache-2.0 Rust crate, also behind the Arraylake platform) is "git for Zarr" and *looks* convergent
+with our CoW model, but diverges exactly where it counts:
+
+| | Icechunk | `.tsra` (ADR-0036) |
+|---|---|---|
+| Container | directory/prefix of many objects | **single sealed file** |
+| Identity | **12-byte *random* snapshot IDs** | **content-addressed** (`manifest_hash`) |
+| Integrity / signing | none / none | Merkle seal / ed25519 |
+| Content | Zarr arrays only | Array + **Vortex Table** + Blob |
+| Strength | **multi-writer serializable txns** over S3 | sealed, verifiable, offline-forever product |
+
+Verdict: **don't adopt as the format** (random IDs + no integrity/signing + multi-object + arrays-only
+would dissolve our differentiators), but **borrow** its multi-writer transaction protocol (where our
+single-writer CoW is weaker) and its **virtual-chunk** pattern (external byte-range refs — validates the
+facade), and optionally **bridge** import/export to reach the versioned-Zarr world. tessera is *not*
+reinventing Icechunk — content-addressing over random IDs is a deliberate divergence for a verifiable
+archival product.
+
+### Unified aggregation — one Arrow contract, two kernels
+
+Histograms/scatter/density unify on the **Arrow result contract + plot path**, *not* blindly on one
+engine: a **dense** volume histogram wants a streaming, rescale-aware ndarray kernel (routing 128 M
+voxels through SQL pays a materialization tax and drops constant-mem + physical units), while
+**relational/sparse** selections (threshold, mask, ADR-0044 sparse, cross-array join) *are* natively
+selection → Arrow → **DataFusion** (the existing `sql` path). DataFusion also composes the Arrow
+histogram results. The view-model exposes `histogram(block, selection, bins, physical) -> Arrow` and
+hides the dispatch.
+
+### Render / plot libraries — two Rust SSOTs fanning to three sinks
+
+| Concern | Crate | Why |
+|---|---|---|
+| **Volume rasterize** | [`volren-rs`](https://github.com/knopkem/volren-rs) | `volren-core` (GPU-agnostic) + `volren-gpu` (wgpu); **MIP/MinIP/composite/MPR/window-level** over an *in-memory buffer* ("No I/O" → tessera decode feeds it directly). MIT/Apache. **Vendor** it (native-only, ~13 commits) |
+| **Charts (SSOT)** | [`plotters`](https://github.com/plotters-rs/plotters) | one API → terminal (ratatui backend) + **HTML5 canvas (wasm)** + native PNG. line/scatter/**histogram** |
+| **Terminal image sink** | [`ratatui-image`](https://github.com/ratatui/ratatui-image) | sixel/kitty/iTerm2 + halfblock fallback; auto-detects protocol |
+| **Terminal ASCII/braille** | `artem`, ratatui `Canvas`(`Marker::Braille`) | image→text + braille plots for no-protocol terminals |
+| **NGFF metadata** | `ome_zarr_metadata`, `zarrs_ome` | emit the facade's multiscale metadata |
+
+Fan-out (two SSOT render libs, thin per-sink adapters):
+
+```text
+                        ┌─ line/scatter/histogram → plotters ─┬─► ratatui widget (tui-ascii/img)
+tessera-io (reduce) ────┤                                     ├─► HTML5 canvas   (web, wasm)
+  slice/project/pyramid/ │                                     └─► PNG            (server)
+  stats/histogram        └─ volume → volren (rasterize) ──► image ─┬─► ratatui-image (tui-img: sixel/kitty)
+                                                                    ├─► ASCII/braille (tui-ascii)
+                                                                    └─► PNG           (web/server)
+```
+
+### Rendering targets — `tui-ascii` · `tui-img` · `web`
+
+- **`tui-img`** (real pixels): `ratatui-image` (sixel/kitty/iTerm2) — the sink for server-rendered
+  volume PNG frames / plotters bitmaps.
+- **`tui-ascii`** (no protocol; SSH/CI): `artem` (image→ASCII, library) + ratatui `Canvas` braille for
+  line/scatter/histogram at 4× cell density.
+- **`web`**: `plotters` `CanvasBackend` for charts (same Rust code as the TUI); volume 3-D via
+  server-render PNG (works now) or wasm→WebGPU (`volren-gpu`, open question) or a JS/NGFF renderer.
+
 ## Form-factor analysis
 
 | Dimension | Rust TUI (ratatui + `tessera-io`) | Python TUI (Textual + `tessera-py`) | Vite+TS web |
@@ -221,17 +334,22 @@ explorer should live in notebook/Python land.
 - **Phase 1a — extract the view-model (SSOT foundation).** Lift the derived-view/compute out of
   `tessera-cli/src/nav.rs` into the shared core (`tessera-explore`, or a module in `tessera-io`) as
   functions returning **structured data** — a node tree, a page of rows, a decoded region (`ndarray`),
-  a projection (2-D image buffer) — *decoupled from any `Write` sink*. Re-express the CLI's
-  `tree/ls/read/stats/slice/project` as thin text formatters over it. Acceptance: existing `trycmd`
-  snapshots pass unchanged (behaviour identical, structure now reusable).
+  a projection (2-D image buffer) — *decoupled from any `Write` sink*. Include the **metadata views**
+  (integrity/provenance/lineage/trust/schema/referencing/governance — see the intrinsic-exploration
+  section) and the **aggregation primitives** `{ histogram (dense kernel, rescale-aware), density2d,
+  downsample }` normalized to an **Arrow result contract** (tables use the existing DataFusion path).
+  Re-express the CLI's `tree/ls/read/stats/slice/project` as thin text formatters over it. Acceptance:
+  existing `trycmd` snapshots pass unchanged (behaviour identical, structure now reusable).
 - **Phase 1b — read-only `tessera-tui` (ratatui).** New crate `crates/tessera-tui`, a *renderer* over
-  the Phase-1a view-model.
-  - Open a `.tsra` (+ later a repo lineage / `cloud` URL). Left pane: the ADR-0043 hierarchy tree
-    (root status — product · schema · sealed · signed —, `meta`, each block, `sources`).
-  - Right pane, block-typed: **Table** → paged viewer over `LogicalTableView` (cross-block `events`);
-    **Array** → `stats` header + interactive `slice`/`project` via `ratatui-image`; **Blob** → header
-    - `extract` action; **meta** → key/value inspector.
-  - Status bar: `verify()` result, signature (embedded/sidecar) + provenance (`read_aux`) summary.
+  the Phase-1a view-model. **Metadata exploration is co-equal with data viz, not secondary.**
+  - Left pane: the ADR-0043 hierarchy tree (root status — product · schema · sealed · signed —, `meta`,
+    each block, `sources`). Open a `.tsra` (+ later a repo lineage / `cloud` URL).
+  - Right pane, tabbed **metadata inspectors** (first-class): integrity/verify · provenance & lineage
+    (`log`/`diff`) · trust (signature + trust-store verdict) · schema conformance · referencing
+    (affine/units) · governance (sensitivity/PHI/WORM).
+  - Right pane, block-typed **data views**: **Table** → paged `LogicalTableView` + `sql`; **Array** →
+    `stats` + **histogram** (plotters/braille) + interactive `slice`/`project` via `ratatui-image`
+    (sixel/kitty) with `artem`/braille ASCII fallback; **Blob** → header + `extract`.
   - Tests: drive it headless with the `tui-probe` skill (tmux screenshots + assertions) against the
     committed conformance corpus (`tessera/corpus`).
 - **Phase 2 — metadata editor (CoW).** Edit `meta` fields → stage a delta → `commit --set` into a
@@ -242,12 +360,13 @@ explorer should live in notebook/Python land.
   keeping decode native (`io`), never in wasm:
   - **3a — server-render floor:** `serve` ships flat PNG planes; a thin Vite+TS SPA blits them.
     Compatibility floor (works without WebGPU), shareable URLs.
-  - **3b — client `wgpu` (recommended if 3-D matters):** a **shared `wgpu` render core** (volume
-    ray-march / MIP / transfer functions) compiled native *and* to wasm→WebGPU; `serve` ships a
-    budget-fitting pyramid level once, the browser renders interactively with no round-trips. Falls
-    back to 3a (WebGL2) on browsers without WebGPU. The same render core also enables an **optional
-    native `wgpu` desktop viewer** (true 3-D the terminal can't do). `tessera-wasm` stays the offline
-    verify/sign path, by design.
+  - **3b — client volume render (recommended if 3-D matters):** **vendor `volren-rs`** (`volren-core`
+    GPU-agnostic + `volren-gpu` wgpu — MIP/MinIP/composite/MPR/window-level over an in-memory buffer)
+    rather than hand-writing a ray-marcher; `serve` ships a budget-fitting pyramid level once, the
+    browser renders interactively. Native `volren-gpu` already powers 3a and an **optional native
+    desktop viewer**; the open question is compiling `volren-gpu` to wasm→WebGPU (fallback to 3a /
+    WebGL2 / a JS-NGFF renderer otherwise). `tessera-wasm` stays the offline verify/sign path, by
+    design. Charts on both tiers use `plotters` (`CanvasBackend`) — the same plot code as the TUI.
 
 ## Open questions (to confirm before Phase 1)
 
@@ -258,6 +377,10 @@ explorer should live in notebook/Python land.
 4. **Repo vs single-file** — open standalone `.tsra` only in v1, or also browse a CoW repository
    lineage (needs `repo.rs` wiring)?
 5. **Web phase — build it at all, and which tier?** Only if remote-reach (a shareable URL) or
-   interactive 3-D matters. If yes: server-render floor (3a) for max compatibility, or invest in the
-   shared `wgpu` core (3b) for interactive 3-D + a native GPU viewer? If neither matters, Phase 3 is
-   dead scope; the `serve` view-model still exists for whenever it isn't.
+   interactive 3-D matters. If yes: server-render floor (3a) for max compatibility, or vendor
+   `volren-rs` (3b) for interactive 3-D + a native viewer? If neither matters, Phase 3 is dead scope;
+   the `serve` view-model still exists for whenever it isn't.
+6. **Storage-format posture — confirm via ADR.** Adopt OME-NGFF at the Array-block layer + a `serve`
+   store-facade; keep the sealed-product container; don't adopt Icechunk/OME-Zarr as the format. Borrow
+   Icechunk's transaction model + virtual-chunk pattern; optionally bridge import/export. *(Load-bearing
+   — see "Prior art & reuse"; tracked as follow-up issues + an ADR.)*

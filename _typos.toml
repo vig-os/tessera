@@ -4,3 +4,5 @@
 # The Rust TUI framework (github.com/ratatui/ratatui). Without this, typos
 # "corrects" it to "ratatouille".
 ratatui = "ratatui"
+# OME-Zarr / OME-NGFF and the ome_zarr_metadata crate — typos reads "ome" as "some".
+ome = "ome"
