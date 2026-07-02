@@ -10,3 +10,4 @@ authors.workspace = true
 [dependencies]
 tessera-core.workspace = true
 tessera-io.workspace = true
+serde_json.workspace = true

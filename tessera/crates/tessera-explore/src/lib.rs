@@ -22,3 +22,4 @@
 
 pub mod array;
 pub mod referencing;
+pub mod table;

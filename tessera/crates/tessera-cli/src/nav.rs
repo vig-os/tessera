@@ -16,7 +16,7 @@ use std::path::Path;
 use serde_json::Value;
 use tessera_core::block::BlockKind;
 use tessera_core::{Result, SchemaRegistry};
-use tessera_io::{ColumnData, Reader};
+use tessera_io::Reader;
 
 /// Row-delimited output formats for [`read`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -765,44 +765,21 @@ pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
         )));
     }
 
-    let view = r.logical_table(opts.block)?;
-    let total = view.row_count();
-
-    // Resolve the column projection against the table schema (clear error on a typo).
-    let all_names: Vec<String> = view.columns().iter().map(|c| c.name.clone()).collect();
-    let selected: Vec<String> = if opts.columns.is_empty() {
-        all_names.clone()
-    } else {
-        for c in &opts.columns {
-            if !all_names.iter().any(|n| n == c) {
-                return Err(tessera_core::Error::Invalid(format!(
-                    "no column '{c}' in '{}' (columns: {})",
-                    opts.block,
-                    all_names.join(", ")
-                )));
-            }
+    // The logical view + projection + windowed column decode → a structured page (view-model); the
+    // CLI owns row-selection semantics (via the `window` closure) and the CSV/TSV/NDJSON formatting.
+    let page = tessera_explore::table::read_page(&mut r, opts.block, &opts.columns, |total| {
+        match opts.rows {
+            Some(spec) => spec.resolve(total),
+            None if opts.all => (0, total),
+            None => (0, opts.limit.min(total)),
         }
-        opts.columns.clone()
-    };
-
-    // Resolve the row window: explicit selection (resolved vs the row count), or all, or the cap.
-    let (lo, hi) = match opts.rows {
-        Some(spec) => spec.resolve(total),
-        None if opts.all => (0, total),
-        None => (0, opts.limit.min(total)),
-    };
+    })?;
+    let selected = page.columns;
+    let cells = page.cells;
+    let total = page.total;
+    let nrows = page.shown;
     // Only the default-cap path is a silent truncation worth warning about.
-    let truncated = opts.rows.is_none() && !opts.all && hi < total;
-    let nrows = hi.saturating_sub(lo);
-
-    // Decode each selected column (projected), slice to the window, stringify to JSON cells.
-    let lo_us = usize::try_from(lo).map_err(|e| tessera_core::Error::Invalid(e.to_string()))?;
-    let hi_us = usize::try_from(hi).map_err(|e| tessera_core::Error::Invalid(e.to_string()))?;
-    let mut cells: Vec<Vec<Value>> = Vec::with_capacity(selected.len());
-    for name in &selected {
-        let col = view.column(&mut r, name)?;
-        cells.push(col_to_values(&col.slice(lo_us, hi_us)));
-    }
+    let truncated = opts.rows.is_none() && !opts.all && nrows < total;
 
     // Header (csv/tsv only).
     if matches!(opts.format, Format::Csv | Format::Tsv) {
@@ -1210,33 +1187,6 @@ fn csv_cell(v: &Value) -> String {
         Value::Null => "nan".to_string(),
         Value::Number(n) => n.to_string(),
         other => other.to_string(),
-    }
-}
-
-/// Convert a (sliced) numeric column to per-row JSON values. Floats render via their **native**
-/// shortest round-trip `Display` (so an `f32` shows `0.01`, not its widened-`f64` expansion);
-/// non-finite floats (NaN/±inf) have no JSON encoding → null (CSV shows `nan`, ndjson `null`).
-fn col_to_values(col: &ColumnData) -> Vec<Value> {
-    fn floats<T: std::fmt::Display + Copy>(v: &[T]) -> Vec<Value> {
-        v.iter()
-            .map(|x| {
-                x.to_string()
-                    .parse::<serde_json::Number>()
-                    .map_or(Value::Null, Value::Number)
-            })
-            .collect()
-    }
-    match col {
-        ColumnData::I8(v) => v.iter().map(|x| Value::from(*x)).collect(),
-        ColumnData::I16(v) => v.iter().map(|x| Value::from(*x)).collect(),
-        ColumnData::I32(v) => v.iter().map(|x| Value::from(*x)).collect(),
-        ColumnData::I64(v) => v.iter().map(|x| Value::from(*x)).collect(),
-        ColumnData::U8(v) => v.iter().map(|x| Value::from(*x)).collect(),
-        ColumnData::U16(v) => v.iter().map(|x| Value::from(*x)).collect(),
-        ColumnData::U32(v) => v.iter().map(|x| Value::from(*x)).collect(),
-        ColumnData::U64(v) => v.iter().map(|x| Value::from(*x)).collect(),
-        ColumnData::F32(v) => floats(v),
-        ColumnData::F64(v) => floats(v),
     }
 }
 
