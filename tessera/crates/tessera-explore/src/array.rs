@@ -2,6 +2,8 @@
 //! serve) render. Decode stays in [`tessera_io::array`]; this module computes summaries over the
 //! decoded [`ArrayData`], returning typed structs rather than writing text.
 
+use tessera_core::block::array::ArraySpec;
+use tessera_core::Result;
 use tessera_io::array::ArrayData;
 
 /// A numeric summary of a decoded array block: value range and central tendency over every element,
@@ -104,9 +106,123 @@ pub fn region_to_f64(data: &ArrayData, rescale: Option<(f64, f64)>) -> Vec<f64> 
     }
 }
 
+/// A decoded rectangular sub-region of an array as `f64` values, row-major, with its per-axis lengths.
+/// The renderer decides how to lay it out (the CLI treats the last axis as columns).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrayRegion {
+    /// Region element values (physical or raw, per the `rescale` passed to [`slice_region`]).
+    pub values: Vec<f64>,
+    /// The region's per-axis lengths (its shape).
+    pub shape: Vec<u64>,
+}
+
+/// Decode a rectangular sub-region of an array (only the intersecting chunks) and flatten it to `f64`,
+/// applying the optional physical `rescale`. The single view-model entry the CLI `slice` (and the TUI /
+/// serve) render — index/world resolution into `(start, shape)` is the caller's job.
+pub fn slice_region(
+    spec: &ArraySpec,
+    blob: &[u8],
+    start: &[u64],
+    shape: &[u64],
+    rescale: Option<(f64, f64)>,
+) -> Result<ArrayRegion> {
+    let region = tessera_io::array::decode_subset(spec, blob, start, shape)?;
+    Ok(ArrayRegion {
+        values: region_to_f64(&region, rescale),
+        shape: shape.to_vec(),
+    })
+}
+
+/// Reduction mode for [`project_axis`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjMode {
+    /// Maximum-intensity projection (MIP) — the classic PET/CT overview.
+    Max,
+    /// Mean along the axis.
+    Mean,
+    /// Sum along the axis.
+    Sum,
+}
+
+/// A projection image: a row-major array reduced along one axis, with its (lower-D) shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Projection {
+    /// The surviving axes' lengths (the projected axis is dropped).
+    pub shape: Vec<u64>,
+    /// Reduced element values, row-major over `shape`.
+    pub values: Vec<f64>,
+}
+
+/// Reduce a row-major N-D array `values` (of `shape`) along `axis` by `mode`, dropping that axis — a
+/// 3-D volume → a 2-D projection (MIP / mean / sum). The pure compute behind `tessera project`.
+pub fn project_axis(values: &[f64], shape: &[u64], axis: usize, mode: ProjMode) -> Projection {
+    let n = shape.len();
+    let mut strides = vec![1usize; n];
+    for i in (0..n.saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * shape[i + 1] as usize;
+    }
+    let ax_len = shape[axis].max(1) as usize;
+    let out_shape: Vec<u64> = shape
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != axis)
+        .map(|(_, &d)| d)
+        .collect();
+    let out_n: usize = out_shape.iter().map(|&d| d as usize).product();
+    let init = match mode {
+        ProjMode::Max => f64::NEG_INFINITY,
+        _ => 0.0,
+    };
+    let mut out = vec![init; out_n.max(1)];
+    for (flat, &v) in values.iter().enumerate() {
+        // Output flat index = input coords with the projected axis removed (row-major).
+        let mut of = 0usize;
+        let mut os = 1usize;
+        for i in (0..n).rev() {
+            if i == axis {
+                continue;
+            }
+            let coord = (flat / strides[i]) % shape[i] as usize;
+            of += coord * os;
+            os *= shape[i] as usize;
+        }
+        match mode {
+            ProjMode::Max => out[of] = out[of].max(v),
+            ProjMode::Mean | ProjMode::Sum => out[of] += v,
+        }
+    }
+    if matches!(mode, ProjMode::Mean) {
+        for o in &mut out {
+            *o /= ax_len as f64;
+        }
+    }
+    Projection {
+        shape: out_shape,
+        values: out,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_axis_reduces_along_an_axis() {
+        // 2×3 array [[0,1,2],[10,11,12]] (row-major, shape [2,3]).
+        let v = vec![0.0, 1.0, 2.0, 10.0, 11.0, 12.0];
+        let shape = [2u64, 3];
+        // Max over axis 0 (rows) → the max of each column: [10,11,12].
+        let p = project_axis(&v, &shape, 0, ProjMode::Max);
+        assert_eq!(p.shape, vec![3]);
+        assert_eq!(p.values, vec![10.0, 11.0, 12.0]);
+        // Sum over axis 1 (cols) → row sums: [3, 33].
+        let p = project_axis(&v, &shape, 1, ProjMode::Sum);
+        assert_eq!(p.shape, vec![2]);
+        assert_eq!(p.values, vec![3.0, 33.0]);
+        // Mean over axis 1 → [1, 11].
+        let p = project_axis(&v, &shape, 1, ProjMode::Mean);
+        assert_eq!(p.values, vec![1.0, 11.0]);
+    }
 
     #[test]
     fn region_to_f64_applies_optional_rescale() {
