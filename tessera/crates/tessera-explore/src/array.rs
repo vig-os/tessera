@@ -74,9 +74,50 @@ pub fn array_stats(data: &ArrayData) -> ArrayStats {
     }
 }
 
+/// Flatten a decoded array (or a decoded sub-region) to `f64`, optionally applying the block's
+/// `(slope, intercept)` rescale to recover physical units (CT→HU, PET→Bq/mL). The renderer decides
+/// whether to pass `rescale` (raw vs `--physical`); this is the pure element conversion behind
+/// `tessera slice`/`project`.
+pub fn region_to_f64(data: &ArrayData, rescale: Option<(f64, f64)>) -> Vec<f64> {
+    macro_rules! conv {
+        ($v:expr) => {
+            $v.iter()
+                .map(|&x| {
+                    let x = x as f64;
+                    match rescale {
+                        Some((s, i)) => s * x + i,
+                        None => x,
+                    }
+                })
+                .collect()
+        };
+    }
+    match data {
+        ArrayData::I16(v) => conv!(v),
+        ArrayData::I32(v) => conv!(v),
+        ArrayData::I64(v) => conv!(v),
+        ArrayData::U16(v) => conv!(v),
+        ArrayData::U32(v) => conv!(v),
+        ArrayData::U64(v) => conv!(v),
+        ArrayData::F32(v) => conv!(v),
+        ArrayData::F64(v) => conv!(v),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn region_to_f64_applies_optional_rescale() {
+        let d = ArrayData::I16(vec![0, 10, 20]);
+        assert_eq!(region_to_f64(&d, None), vec![0.0, 10.0, 20.0]);
+        // HU-style rescale: slope 1, intercept -1024.
+        assert_eq!(
+            region_to_f64(&d, Some((1.0, -1024.0))),
+            vec![-1024.0, -1014.0, -1004.0]
+        );
+    }
 
     #[test]
     fn array_stats_reduces_min_max_mean_std() {

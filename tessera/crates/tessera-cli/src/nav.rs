@@ -16,7 +16,6 @@ use std::path::Path;
 use serde_json::Value;
 use tessera_core::block::BlockKind;
 use tessera_core::{Result, SchemaRegistry};
-use tessera_io::array::ArrayData;
 use tessera_io::{ColumnData, Reader};
 
 /// Row-delimited output formats for [`read`].
@@ -1030,90 +1029,6 @@ fn parse_index(index: &str, shape: &[u64]) -> Result<(Vec<u64>, Vec<u64>)> {
     Ok((start, len))
 }
 
-/// One decoded region value → an `f64` (for CSV), optionally rescaled to physical units.
-fn region_to_f64(d: &ArrayData, rescale: Option<(f64, f64)>) -> Vec<f64> {
-    macro_rules! conv {
-        ($v:expr) => {
-            $v.iter()
-                .map(|&x| {
-                    let x = x as f64;
-                    match rescale {
-                        Some((s, i)) => s * x + i,
-                        None => x,
-                    }
-                })
-                .collect()
-        };
-    }
-    match d {
-        ArrayData::I16(v) => conv!(v),
-        ArrayData::I32(v) => conv!(v),
-        ArrayData::I64(v) => conv!(v),
-        ArrayData::U16(v) => conv!(v),
-        ArrayData::U32(v) => conv!(v),
-        ArrayData::U64(v) => conv!(v),
-        ArrayData::F32(v) => conv!(v),
-        ArrayData::F64(v) => conv!(v),
-    }
-}
-
-/// `tessera slice FILE BLOCK --index "z,:,:"` — pull a rectangular sub-region of an **array** block
-/// (a 2-D plane, a 1-D line, or a point), decoding only the intersecting chunks. Emits the region as
-/// CSV/TSV (last region axis = columns, the rest flattened to rows). `--physical` applies the
-/// stored rescale (CT→HU, PET→Bq/mL).
-/// Invert a 3×3 matrix (cofactor method), or `None` if singular.
-fn inv3(m: &[[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
-    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-    if det.abs() < 1e-12 {
-        return None;
-    }
-    let id = 1.0 / det;
-    Some([
-        [
-            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * id,
-            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * id,
-            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * id,
-        ],
-        [
-            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * id,
-            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * id,
-            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * id,
-        ],
-        [
-            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * id,
-            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * id,
-            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * id,
-        ],
-    ])
-}
-
-/// Round an affine-resolved (bounded) coordinate to an integer voxel index — truncation is intended.
-#[allow(clippy::cast_possible_truncation)]
-fn round_index(v: f64) -> i64 {
-    v.round() as i64
-}
-
-/// Resolve a world `(L,P,S)` mm point to the nearest voxel index via the **inverse** of the stored
-/// voxel→world affine (`index = R⁻¹·(world − t)`). `None` if the array has no affine or it is singular.
-fn world_to_index(
-    wf: &tessera_core::block::array::WorldFrame,
-    world: [f64; 3],
-) -> Option<[i64; 3]> {
-    let a = &wf.affine; // row-major 3×4 [R | t]
-    let r = [[a[0], a[1], a[2]], [a[4], a[5], a[6]], [a[8], a[9], a[10]]];
-    let t = [a[3], a[7], a[11]];
-    let inv = inv3(&r)?;
-    let d = [world[0] - t[0], world[1] - t[1], world[2] - t[2]];
-    let mul = |row: &[f64; 3]| row[0] * d[0] + row[1] * d[1] + row[2] * d[2];
-    Some([
-        round_index(mul(&inv[0])),
-        round_index(mul(&inv[1])),
-        round_index(mul(&inv[2])),
-    ])
-}
-
 /// Parse `"L,P,S"` into an mm point.
 fn parse_world(s: &str) -> Result<[f64; 3]> {
     let v: Vec<f64> = s
@@ -1129,6 +1044,10 @@ fn parse_world(s: &str) -> Result<[f64; 3]> {
     })
 }
 
+/// `tessera slice FILE BLOCK --index "z,:,:"` — pull a rectangular sub-region of an **array** block
+/// (a 2-D plane, a 1-D line, or a point), decoding only the intersecting chunks. Emits the region as
+/// CSV/TSV (last region axis = columns, the rest flattened to rows). `--physical` applies the
+/// stored rescale (CT→HU, PET→Bq/mL).
 pub fn slice(
     file: &Path,
     block: &str,
@@ -1152,9 +1071,10 @@ pub fn slice(
                     "--world addressing requires a 3-D array".into(),
                 ));
             }
-            let idx = world_to_index(wf, parse_world(w)?).ok_or_else(|| {
-                tessera_core::Error::Invalid("--world: the array affine is singular".into())
-            })?;
+            let idx = tessera_explore::referencing::world_to_index(wf, parse_world(w)?)
+                .ok_or_else(|| {
+                    tessera_core::Error::Invalid("--world: the array affine is singular".into())
+                })?;
             // Resolve to that single voxel (clamped in-bounds); print its value.
             let start: Vec<u64> = idx
                 .iter()
@@ -1183,7 +1103,7 @@ pub fn slice(
     } else {
         None
     };
-    let values = region_to_f64(&region, rescale);
+    let values = tessera_explore::array::region_to_f64(&region, rescale);
 
     // Grid: the last region axis is the column count; everything before it flattens to rows.
     let cols = *len.last().unwrap_or(&1) as usize;
@@ -1313,7 +1233,7 @@ pub fn project(
     } else {
         None
     };
-    let values = region_to_f64(&data, rescale);
+    let values = tessera_explore::array::region_to_f64(&data, rescale);
     let (out_shape, out_vals) = project_axis(&values, &spec.shape, ax, mode);
 
     let cols = out_shape.last().copied().unwrap_or(1).max(1) as usize;
@@ -1622,30 +1542,10 @@ mod tests {
     }
 
     #[test]
-    fn world_to_index_inverts_the_affine() {
-        use tessera_core::block::array::WorldFrame;
-        // 2 mm isotropic voxels, LPS, with a translation — a diagonal affine.
-        let wf = WorldFrame {
-            affine: [
-                2.0, 0.0, 0.0, -100.0, //
-                0.0, 2.0, 0.0, -50.0, //
-                0.0, 0.0, 2.0, 10.0,
-            ],
-            convention: "LPS".into(),
-            unit: "mm".into(),
-            space: "scanner".into(),
-        };
-        // world (0,0,10) → index ((0+100)/2, (0+50)/2, (10-10)/2) = (50, 25, 0).
-        assert_eq!(world_to_index(&wf, [0.0, 0.0, 10.0]), Some([50, 25, 0]));
-        // A point that rounds: world (-99,-49,11) → (0.5, 0.5, 0.5) → rounds to (1,1,1)... check.
-        assert_eq!(world_to_index(&wf, [-98.0, -48.0, 12.0]), Some([1, 1, 1]));
-        // Singular affine → None.
-        let sing = WorldFrame {
-            affine: [0.0; 12],
-            ..wf
-        };
-        assert_eq!(world_to_index(&sing, [1.0, 2.0, 3.0]), None);
-        assert!(parse_world("1,2,3").is_ok() && parse_world("1,2").is_err());
+    fn parse_world_expects_three_mm_coords() {
+        assert_eq!(parse_world("1,2,3").unwrap(), [1.0, 2.0, 3.0]);
+        assert!(parse_world("1,2").is_err());
+        assert!(parse_world("a,b,c").is_err());
     }
 
     #[test]

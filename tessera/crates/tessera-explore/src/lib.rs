@@ -21,3 +21,4 @@
 //! behaviour-preserving guarantee.
 
 pub mod array;
+pub mod referencing;
