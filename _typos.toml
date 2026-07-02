@@ -1,0 +1,6 @@
+# crate-ci/typos configuration.
+# Project-specific terms that are correct spellings, not typos.
+[default.extend-words]
+# The Rust TUI framework (github.com/ratatui/ratatui). Without this, typos
+# "corrects" it to "ratatouille".
+ratatui = "ratatui"
