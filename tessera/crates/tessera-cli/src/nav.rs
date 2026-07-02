@@ -752,6 +752,19 @@ pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
             )));
         }
     }
+    // `extra/*` (the fd5 extension namespace) holds arbitrary object/blob metadata — e.g. the full
+    // preserved `extra/dicom_header` — not tables. `ls`/`tree` reach it, but `read` (table-only) would
+    // otherwise hit the opaque `logical_table: no blocks for prefix` miss. Give a clear pointer (#303).
+    let extra_key = opts.block.strip_prefix("extra/").unwrap_or(opts.block);
+    if r.manifest().extra.contains_key(extra_key) {
+        return Err(tessera_core::Error::Invalid(format!(
+            "'{}' is an extension (`extra/`) field, not a table — `read` is for tables. \
+             Use `tsra ls {} extra/{extra_key}` to dump it.",
+            opts.block,
+            opts.file.display(),
+        )));
+    }
+
     let view = r.logical_table(opts.block)?;
     let total = view.row_count();
 
