@@ -240,9 +240,10 @@ with our CoW model, but diverges exactly where it counts:
 | Strength | **multi-writer serializable txns** over S3 | sealed, verifiable, offline-forever product |
 
 Verdict: **don't adopt as the format** (random IDs + no integrity/signing + multi-object + arrays-only
-would dissolve our differentiators), but **borrow** its multi-writer transaction protocol (where our
-single-writer CoW is weaker) and its **virtual-chunk** pattern (external byte-range refs — validates the
-facade), and optionally **bridge** import/export to reach the versioned-Zarr world. tessera is *not*
+would dissolve our differentiators), but **borrow** its multi-writer transaction protocol (#288, where
+our single-writer CoW is weaker) and its **virtual-chunk** pattern (#289 — external byte-range refs,
+validates the facade), and optionally **bridge** import/export (#290) to reach the versioned-Zarr world.
+The posture itself is tracked as an ADR (#287). tessera is *not*
 reinventing Icechunk — content-addressing over random IDs is a deliberate divergence for a verifiable
 archival product.
 
@@ -383,4 +384,5 @@ explorer should live in notebook/Python land.
 6. **Storage-format posture — confirm via ADR.** Adopt OME-NGFF at the Array-block layer + a `serve`
    store-facade; keep the sealed-product container; don't adopt Icechunk/OME-Zarr as the format. Borrow
    Icechunk's transaction model + virtual-chunk pattern; optionally bridge import/export. *(Load-bearing
-   — see "Prior art & reuse"; tracked as follow-up issues + an ADR.)*
+   — see "Prior art & reuse"; tracked as #287 (ADR) · #288 (txn model) · #289 (virtual chunks) · #290
+   (bridge).)*
