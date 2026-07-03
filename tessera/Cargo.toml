@@ -12,6 +12,10 @@ authors = ["vig-os"]
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Arrow is the view-model's tabular/aggregation result contract (RowPage, histograms → RecordBatch).
+# Pinned to the SAME major the workspace already resolves through Vortex/DataFusion (arrow-array 58.x)
+# — two arrow majors in one graph fail to link (incompatible reprs behind the same type names).
+arrow = "58"
 serde_jcs = "0.2"          # RFC 8785 JSON Canonicalization Scheme — reproducible hashing
 blake3 = "1"
 thiserror = "2"

@@ -774,10 +774,16 @@ pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
             None => (0, opts.limit.min(total)),
         }
     })?;
-    let selected = page.columns;
-    let cells = page.cells;
     let total = page.total;
-    let nrows = page.shown;
+    let selected: Vec<String> = page
+        .batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    let cells = tessera_explore::table::page_cells(&page.batch);
+    let nrows = page.batch.num_rows() as u64;
     // Only the default-cap path is a silent truncation worth warning about.
     let truncated = opts.rows.is_none() && !opts.all && nrows < total;
 
