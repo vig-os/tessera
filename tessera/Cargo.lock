@@ -6159,6 +6159,7 @@ name = "tessera-explore"
 version = "0.0.0"
 dependencies = [
  "arrow",
+ "serde",
  "serde_json",
  "tessera-core",
  "tessera-io",

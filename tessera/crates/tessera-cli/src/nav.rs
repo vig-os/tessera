@@ -80,83 +80,11 @@ fn embedded_schema(v: &Value) -> Option<tessera_core::ProductSchema> {
     tessera_core::ProductSchema::from_value(v).ok()
 }
 
-/// Group-of-three thousands separators for human row counts (`4194304` → `4,194,304`).
-fn thousands(n: u64) -> String {
-    let s = n.to_string();
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    let first = bytes.len() % 3;
-    for (i, b) in bytes.iter().enumerate() {
-        if i != 0 && i >= first && (i - first).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(*b as char);
-    }
-    out
-}
-
-/// Render `spec["shape"]` (a JSON array of ints) as `[128, 512, 512]`.
-fn shape_str(spec: &Value) -> String {
-    match spec.get("shape").and_then(Value::as_array) {
-        Some(dims) => {
-            let parts: Vec<String> = dims
-                .iter()
-                .map(|d| {
-                    d.as_u64()
-                        .map(|u| u.to_string())
-                        .unwrap_or_else(|| "?".into())
-                })
-                .collect();
-            format!("[{}]", parts.join(", "))
-        }
-        None => "[?]".to_string(),
-    }
-}
-
-/// One-line block summary (`array int16 [..] pcodec` / `table 6 cols × 4,194,304 rows`).
-fn block_headline(kind: &BlockKind, spec: &Value) -> String {
-    match kind {
-        BlockKind::Array => {
-            let dtype = spec.get("dtype").and_then(Value::as_str).unwrap_or("?");
-            let codec = spec.get("codec").and_then(Value::as_str).unwrap_or("?");
-            format!("array  {dtype}  {}  {codec}", shape_str(spec))
-        }
-        BlockKind::Table => {
-            let ncols = spec
-                .get("columns")
-                .and_then(Value::as_array)
-                .map(|c| c.len())
-                .unwrap_or(0);
-            let rows = spec.get("rows").and_then(Value::as_u64).unwrap_or(0);
-            format!("table  {ncols} cols × {} rows", thousands(rows))
-        }
-        BlockKind::ChunkIndex => "index  (per-chunk hash + stats)".to_string(),
-        BlockKind::Blob => {
-            let mt = spec
-                .get("media_type")
-                .and_then(Value::as_str)
-                .unwrap_or("application/octet-stream");
-            let size = spec.get("size").and_then(Value::as_u64).unwrap_or(0);
-            format!("blob   {} · {mt}", human_bytes(size))
-        }
-    }
-}
-
-/// Human-readable byte size (`3.0 GiB`, `512 KiB`) for blob block display.
-fn human_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
-    }
-}
+// `block_headline` + its number formatters (`shape_str` · `thousands` · `human_bytes`) now live in
+// the view-model (`tessera_explore::hierarchy`, the SSOT) so the `tree`/`ls` text and the structural
+// `NodeTree` render byte-identical block summaries and never drift. `block_headline` and `thousands`
+// are called directly below; `shape_str`/`human_bytes` are used transitively inside `block_headline`.
+use tessera_explore::hierarchy::{block_headline, thousands};
 
 /// Child lines for a block: column `name dtype` rows for tables, spec detail for arrays.
 fn block_children(kind: &BlockKind, spec: &Value) -> Vec<String> {
