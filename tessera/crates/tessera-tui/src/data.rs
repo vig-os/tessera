@@ -10,7 +10,9 @@
 use std::path::Path;
 
 use tessera_core::block::{BlockKind, BlockRef};
-use tessera_explore::array::{array_stats, histogram, ArrayStats};
+use tessera_explore::array::{
+    array_stats, histogram, project_axis, region_to_f64, ArrayStats, ProjMode,
+};
 use tessera_explore::hierarchy::{Node, NodeHandle};
 use tessera_explore::table::{page_cells, read_page};
 use tessera_io::Reader;
@@ -19,6 +21,24 @@ use tessera_io::Reader;
 pub const PAGE_ROWS: u64 = 500;
 /// Histogram bin count for the array value distribution.
 pub const HIST_BINS: usize = 24;
+
+/// A 2-D intensity image (a maximum-intensity projection of a volume, or a 2-D array plane) at its
+/// native resolution — the renderer downsamples it to the pane and maps values to a glyph ramp.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImagePlane {
+    /// Columns (fastest-varying axis).
+    pub width: usize,
+    /// Rows (slowest-varying axis).
+    pub height: usize,
+    /// Row-major intensities (`values[row * width + col]`).
+    pub values: Vec<f64>,
+    /// Minimum intensity (window floor).
+    pub min: f64,
+    /// Maximum intensity (window ceiling).
+    pub max: f64,
+    /// How the plane was formed (`"MIP z"`, `"plane"`), shown in the pane title.
+    pub kind: String,
+}
 
 /// One histogram bar — a half-open value range and its element count.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -32,6 +52,9 @@ pub struct HistBin {
 }
 
 /// A block's data, reduced to exactly what the Data pane renders — no Arrow, no decoded volume held.
+// `Array` is much larger than the other variants, but a `DataView` is held as a single value in `App`
+// (never in a hot `Vec`), so boxing would add indirection for no real benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataView {
     /// A (bounded) page of a table block: header + stringified rows + the true total.
@@ -60,6 +83,9 @@ pub enum DataView {
         rescale: Option<(f64, f64)>,
         /// The (raw-value) histogram bars.
         hist: Vec<HistBin>,
+        /// A 2-D image (MIP of a volume / the plane of a 2-D array) for the image sub-view; `None`
+        /// for 1-D or non-imageable arrays.
+        image: Option<ImagePlane>,
     },
     /// An opaque blob block: media type, byte size, original filename.
     Blob {
@@ -179,6 +205,9 @@ fn load_array<R: std::io::Read + std::io::Seek>(
     };
     let hist_batch = histogram(&data, HIST_BINS, None); // raw-value distribution
     let hist = hist_bins(&hist_batch);
+    // A maximum-intensity projection (3-D) or the plane itself (2-D), for the image sub-view.
+    let flat = region_to_f64(&data, None);
+    let image = mip_plane(&flat, &spec.shape);
     Ok(DataView::Array {
         dtype: spec.dtype,
         codec: spec.codec,
@@ -187,6 +216,48 @@ fn load_array<R: std::io::Read + std::io::Seek>(
         stats,
         rescale,
         hist,
+        image,
+    })
+}
+
+/// Reduce a decoded array to a 2-D [`ImagePlane`]: a 3-D volume → a maximum-intensity projection over
+/// its first (z) axis; a 2-D array → the plane itself. 1-D and higher-D arrays have no image.
+fn mip_plane(values: &[f64], shape: &[u64]) -> Option<ImagePlane> {
+    let (plane, dims, kind): (Vec<f64>, [usize; 2], &str) = match shape.len() {
+        3 => {
+            let proj = project_axis(values, shape, 0, ProjMode::Max);
+            let h = proj.shape.first().copied().unwrap_or(0) as usize;
+            let w = proj.shape.get(1).copied().unwrap_or(0) as usize;
+            (proj.values, [h, w], "MIP z")
+        }
+        2 => {
+            let h = shape[0] as usize;
+            let w = shape[1] as usize;
+            (values.to_vec(), [h, w], "plane")
+        }
+        _ => return None,
+    };
+    let [height, width] = dims;
+    if width == 0 || height == 0 || plane.is_empty() {
+        return None;
+    }
+    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &v in &plane {
+        if v.is_finite() {
+            min = min.min(v);
+            max = max.max(v);
+        }
+    }
+    if !min.is_finite() {
+        (min, max) = (0.0, 0.0);
+    }
+    Some(ImagePlane {
+        width,
+        height,
+        values: plane,
+        min,
+        max,
+        kind: kind.to_string(),
     })
 }
 

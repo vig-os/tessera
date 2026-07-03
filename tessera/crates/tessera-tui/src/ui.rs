@@ -136,7 +136,14 @@ fn render_content(frame: &mut Frame, area: Rect, app: &App) {
     // Data mode renders its own widgets (a scrolling table / histogram), not a paragraph.
     if app.mode == Mode::Data {
         let label = app.selected_node().map(|n| n.label.as_str());
-        render_data(frame, area, app.data(), app.data_offset(), label);
+        render_data(
+            frame,
+            area,
+            app.data(),
+            app.data_offset(),
+            label,
+            app.show_image(),
+        );
         return;
     }
     let (title, lines) = match app.mode {
@@ -212,8 +219,16 @@ fn inspect_content(app: &App) -> (String, Vec<Line<'static>>) {
 }
 
 /// Data → the loaded [`DataView`] for the selected block: a scrolling table page, an array
-/// stats+histogram card, a blob summary, or a guiding message. Renders its own widgets.
-fn render_data(frame: &mut Frame, area: Rect, view: &DataView, offset: usize, label: Option<&str>) {
+/// stats card with a histogram or MIP image, a blob summary, or a guiding message. Renders its own
+/// widgets. `show_image` selects the array sub-view (histogram vs image).
+fn render_data(
+    frame: &mut Frame,
+    area: Rect,
+    view: &DataView,
+    offset: usize,
+    label: Option<&str>,
+    show_image: bool,
+) {
     let title = match (view, label) {
         (DataView::Table { .. } | DataView::Array { .. } | DataView::Blob { .. }, Some(l)) => {
             format!(" DATA › {l} ")
@@ -232,7 +247,10 @@ fn render_data(frame: &mut Frame, area: Rect, view: &DataView, offset: usize, la
         } => render_table(frame, area, block, columns, rows, *total, offset),
         DataView::Array { .. } | DataView::Blob { .. } | DataView::Unavailable(_) => {
             let lines = match view {
-                DataView::Array { .. } => array_lines(view),
+                // Image sizing uses the inner pane (minus borders + the stats header rows).
+                DataView::Array { .. } => {
+                    array_lines(view, show_image, area.width.saturating_sub(2))
+                }
                 DataView::Blob {
                     media_type,
                     size,
@@ -308,9 +326,10 @@ fn render_table(
     frame.render_widget(table, area);
 }
 
-/// The array stats + histogram card as text lines (shape/dtype/codec · raw & physical range · a
-/// horizontal bar per histogram bin).
-fn array_lines(view: &DataView) -> Vec<Line<'static>> {
+/// The array Data card: a stats header (shape/dtype/codec · raw & physical range) followed by either a
+/// histogram (`show_image == false`) or a MIP/plane image downsampled to `inner_w` (`show_image ==
+/// true`). A footer hint advertises the `m` toggle.
+fn array_lines(view: &DataView, show_image: bool, inner_w: u16) -> Vec<Line<'static>> {
     let DataView::Array {
         dtype,
         codec,
@@ -319,6 +338,7 @@ fn array_lines(view: &DataView) -> Vec<Line<'static>> {
         stats,
         rescale,
         hist,
+        image,
     } = view
     else {
         return Vec::new();
@@ -354,21 +374,79 @@ fn array_lines(view: &DataView) -> Vec<Line<'static>> {
         ));
     }
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "histogram (raw value distribution)",
-        Style::new().add_modifier(Modifier::BOLD),
-    ));
-    let peak = hist.iter().map(|b| b.count).max().unwrap_or(0).max(1);
-    for b in hist {
-        let width = ((b.count as f64 / peak as f64) * 30.0).round() as usize;
-        let bar: String = "█".repeat(width);
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:>10.3}  ", b.lo), Style::new().dim()),
-            Span::styled(bar, Style::new().cyan()),
-            Span::styled(format!("  {}", b.count), Style::new().dim()),
-        ]));
+    // The `m` toggle is only meaningful when an image exists (2-D/3-D arrays).
+    let toggle_hint = if image.is_some() {
+        "   (m: histogram / image)"
+    } else {
+        ""
+    };
+    if show_image {
+        match image {
+            Some(plane) => {
+                lines.push(Line::styled(
+                    format!(
+                        "{} image  {}×{}{toggle_hint}",
+                        plane.kind, plane.width, plane.height
+                    ),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ));
+                lines.extend(image_lines(plane, inner_w));
+            }
+            None => lines.push(Line::styled(
+                "no image for this array (needs a 2-D plane or 3-D volume)",
+                Style::new().dim(),
+            )),
+        }
+    } else {
+        lines.push(Line::styled(
+            format!("histogram (raw value distribution){toggle_hint}"),
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
+        let peak = hist.iter().map(|b| b.count).max().unwrap_or(0).max(1);
+        for b in hist {
+            let width = ((b.count as f64 / peak as f64) * 30.0).round() as usize;
+            let bar: String = "█".repeat(width);
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:>10.3}  ", b.lo), Style::new().dim()),
+                Span::styled(bar, Style::new().cyan()),
+                Span::styled(format!("  {}", b.count), Style::new().dim()),
+            ]));
+        }
     }
     lines
+}
+
+/// The glyph ramp for intensity rendering (darkest → brightest). Terminal-agnostic — no sixel/kitty
+/// dependency, so it renders (and snapshot-captures) everywhere; a high-fidelity image protocol is a
+/// later additive refinement.
+const RAMP: &[u8] = b" .:-=+*#%@";
+
+/// Downsample an [`ImagePlane`] to fit `inner_w` columns (preserving aspect, halving rows for the ~2:1
+/// character cell) and map each cell to a [`RAMP`] glyph by windowed intensity. Nearest-neighbour.
+fn image_lines(plane: &crate::data::ImagePlane, inner_w: u16) -> Vec<Line<'static>> {
+    let max_cols = (inner_w as usize).clamp(8, 80);
+    // Target grid: cap columns at the source width; rows follow the aspect, halved for cell height.
+    let cols = plane.width.min(max_cols).max(1);
+    let scale = cols as f64 / plane.width as f64;
+    let rows = ((plane.height as f64 * scale * 0.5).round() as usize)
+        .clamp(1, 40)
+        .min(plane.height);
+    let span = (plane.max - plane.min).max(f64::MIN_POSITIVE);
+    (0..rows)
+        .map(|ry| {
+            let sy = (ry as f64 / rows as f64 * plane.height as f64) as usize;
+            let row: String = (0..cols)
+                .map(|rx| {
+                    let sx = (rx as f64 / cols as f64 * plane.width as f64) as usize;
+                    let v = plane.values[sy * plane.width + sx];
+                    let t = ((v - plane.min) / span).clamp(0.0, 1.0);
+                    let idx = (t * (RAMP.len() - 1) as f64).round() as usize;
+                    RAMP[idx] as char
+                })
+                .collect();
+            Line::styled(row, Style::new().cyan())
+        })
+        .collect()
 }
 
 /// Verify → the structural checklist (manifest-only). The deep, block-by-block `ArtifactVerdict`
@@ -615,13 +693,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn data_pane_array_shows_stats_and_histogram() {
-        let mut app = sample_app();
-        select_label(&mut app, "pet_suv");
-        app.on_key(Key::Mode(3));
-        // Inject the loaded view (an in-memory test app has no file to read from).
-        app.set_data(DataView::Array {
+    /// An injected array view with a 4×4 gradient MIP image for the render tests.
+    fn array_view() -> DataView {
+        let values: Vec<f64> = (0..16).map(|i| i as f64).collect();
+        DataView::Array {
             dtype: "f32".into(),
             codec: "pcodec".into(),
             shape: vec![2, 2, 2],
@@ -646,11 +721,45 @@ mod tests {
                     count: 2,
                 },
             ],
-        });
+            image: Some(crate::data::ImagePlane {
+                width: 4,
+                height: 4,
+                values,
+                min: 0.0,
+                max: 15.0,
+                kind: "MIP z".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn data_pane_array_shows_stats_and_histogram() {
+        let mut app = sample_app();
+        select_label(&mut app, "pet_suv");
+        app.on_key(Key::Mode(3));
+        // Inject the loaded view (an in-memory test app has no file to read from).
+        app.set_data(array_view());
         let out = draw(&app);
         assert!(out.contains("DATA › pet_suv"), "{out}");
         assert!(out.contains("f32") && out.contains("pcodec"), "{out}");
         assert!(out.contains("histogram") && out.contains("█"), "{out}");
+    }
+
+    #[test]
+    fn pressing_m_toggles_the_array_image() {
+        let mut app = sample_app();
+        select_label(&mut app, "pet_suv");
+        app.on_key(Key::Mode(3));
+        app.set_data(array_view());
+        // Toggle to the image sub-view.
+        app.on_key(Key::ToggleImage);
+        let out = draw(&app);
+        assert!(out.contains("MIP z image"), "{out}");
+        // The high-intensity end of the gradient maps to bright ramp glyphs.
+        assert!(out.contains('#'), "{out}");
+        // Toggling back returns to the histogram.
+        app.on_key(Key::ToggleImage);
+        assert!(draw(&app).contains("histogram"));
     }
 
     #[test]

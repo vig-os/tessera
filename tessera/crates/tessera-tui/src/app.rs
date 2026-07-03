@@ -86,6 +86,8 @@ pub struct App {
     data_key: Option<String>,
     /// Scroll offset (first visible row) within a table [`DataView`].
     data_offset: usize,
+    /// Array Data sub-view: `false` = histogram (default), `true` = the MIP/plane image.
+    show_image: bool,
     /// Set when the user asks to quit.
     pub should_quit: bool,
 }
@@ -117,6 +119,7 @@ impl App {
             ),
             data_key: None,
             data_offset: 0,
+            show_image: false,
             should_quit: false,
         }
     }
@@ -236,6 +239,11 @@ impl App {
         self.data_offset
     }
 
+    /// Whether the array Data pane shows the image (`true`) or the histogram (`false`).
+    pub fn show_image(&self) -> bool {
+        self.show_image
+    }
+
     /// Inject a Data view directly — the seam used by tests (and any out-of-band loader). Resets the
     /// scroll offset. Normal operation goes through [`App::sync_data`].
     pub fn set_data(&mut self, data: DataView) {
@@ -296,6 +304,8 @@ impl App {
             Key::Expand | Key::Enter => self.toggle_selected(),
             Key::Collapse => self.collapse_or_parent(),
             Key::NextMode => self.next_mode(),
+            Key::ToggleImage if self.mode == Mode::Data => self.show_image = !self.show_image,
+            Key::ToggleImage => {}
             Key::Mode(d) => {
                 if let Some(m) = Mode::from_digit(d) {
                     self.set_mode(m);
@@ -349,6 +359,8 @@ pub enum Key {
     Enter,
     /// Cycle to the next mode (`Tab`).
     NextMode,
+    /// Toggle the array Data pane between histogram and image (`m`).
+    ToggleImage,
     /// Jump to mode by footer digit `1..=5`.
     Mode(u8),
     /// Any other key — ignored.

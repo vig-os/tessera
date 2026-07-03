@@ -59,6 +59,7 @@ fn map_key(code: KeyCode) -> Key {
         KeyCode::Left | KeyCode::Char('h') => Key::Collapse,
         KeyCode::Enter | KeyCode::Char(' ') => Key::Enter,
         KeyCode::Tab => Key::NextMode,
+        KeyCode::Char('m') => Key::ToggleImage,
         KeyCode::Char(c @ '1'..='9') => Key::Mode(c as u8 - b'0'),
         _ => Key::Other,
     }
