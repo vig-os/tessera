@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use tessera_core::{Manifest, SchemaRegistry};
 use tessera_explore::hierarchy::{hierarchy, Node, NodeTree};
+use tessera_explore::verify::{artifact_verdict, ArtifactVerdict};
 
 use crate::config::{Layout, Mode};
 use crate::data::{self, DataView};
@@ -88,6 +89,9 @@ pub struct App {
     data_offset: usize,
     /// Array Data sub-view: `false` = histogram (default), `true` = the MIP/plane image.
     show_image: bool,
+    /// The deep verification verdict, computed lazily on first entering Verify mode and cached (a
+    /// sealed `.tsra` is immutable). `None` until computed / when there is no file.
+    verdict: Option<ArtifactVerdict>,
     /// Set when the user asks to quit.
     pub should_quit: bool,
 }
@@ -120,6 +124,7 @@ impl App {
             data_key: None,
             data_offset: 0,
             show_image: false,
+            verdict: None,
             should_quit: false,
         }
     }
@@ -137,8 +142,10 @@ impl App {
             .to_string();
         let mut app = App::new(title, manifest, aux, layout);
         app.path = Some(path.to_path_buf());
-        // Populate Data if the layout opens directly in Data mode (e.g. the analyst preset).
+        // Populate the active mode's data if the layout opens directly in Data (analyst) or Verify
+        // (auditor).
         app.sync_data();
+        app.sync_verify();
         Ok(app)
     }
 
@@ -242,6 +249,30 @@ impl App {
     /// Whether the array Data pane shows the image (`true`) or the histogram (`false`).
     pub fn show_image(&self) -> bool {
         self.show_image
+    }
+
+    /// The deep verification verdict, once computed (see [`App::sync_verify`]).
+    pub fn verdict(&self) -> Option<&ArtifactVerdict> {
+        self.verdict.as_ref()
+    }
+
+    /// Compute the deep [`ArtifactVerdict`] the first time Verify mode is entered, then cache it (the
+    /// container is immutable). Reads + re-hashes every block — call from the event loop after input,
+    /// never from render. A no-op outside Verify, once cached, or without a file.
+    pub fn sync_verify(&mut self) {
+        if self.mode != Mode::Verify || self.verdict.is_some() {
+            return;
+        }
+        if let Some(p) = self.path.clone() {
+            if let Ok(mut reader) = tessera_io::Reader::open(&p) {
+                self.verdict = Some(artifact_verdict(&mut reader));
+            }
+        }
+    }
+
+    /// Inject a verdict directly — the test seam (normal operation goes through [`App::sync_verify`]).
+    pub fn set_verdict(&mut self, verdict: ArtifactVerdict) {
+        self.verdict = Some(verdict);
     }
 
     /// Inject a Data view directly — the seam used by tests (and any out-of-band loader). Resets the

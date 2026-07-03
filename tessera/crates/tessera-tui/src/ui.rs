@@ -16,6 +16,7 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use tessera_explore::hierarchy::{human_bytes, Node, NodeHandle, NodeKind};
+use tessera_explore::verify::{ArtifactVerdict, SchemaVerdict};
 
 use crate::app::{App, HeaderStatus, SchemaState};
 use crate::config::Mode;
@@ -449,24 +450,114 @@ fn image_lines(plane: &crate::data::ImagePlane, inner_w: u16) -> Vec<Line<'stati
         .collect()
 }
 
-/// Verify → the structural checklist (manifest-only). The deep, block-by-block `ArtifactVerdict`
-/// (streaming every block digest, signature + trust-store) is Phase 1b-c.
+/// Verify → the deep [`ArtifactVerdict`] (seal + every block digest + schema + signature + lineage).
+/// Until it is computed (or when there is no file), a manifest-only structural glance is shown.
 fn verify_content(app: &App) -> (String, Vec<Line<'static>>) {
+    match app.verdict() {
+        Some(v) => (" VERIFY ".into(), verdict_lines(v)),
+        None => verify_structural_fallback(app),
+    }
+}
+
+/// Render an [`ArtifactVerdict`] as the Verify pane's lines: an overall banner, then each dimension.
+fn verdict_lines(v: &ArtifactVerdict) -> Vec<Line<'static>> {
+    let mark = |ok: bool| if ok { "✓" } else { "✗" };
+    // Overall banner — byte integrity (sealed + all blocks verified), coloured.
+    let (banner, style) = if v.integrity_ok() {
+        (
+            "✓ INTACT — sealed, every block digest verified".to_string(),
+            Style::new().green().add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            "✗ FAILED — integrity check did not pass".to_string(),
+            Style::new().red().add_modifier(Modifier::BOLD),
+        )
+    };
+    let mut lines = vec![Line::styled(banner, style), Line::raw("")];
+    lines.push(kv(
+        "seal",
+        format!("{}  manifest_hash present", mark(v.sealed)),
+    ));
+    // Integrity: N/N blocks, or the first failing block.
+    let integ = match &v.integrity.failure {
+        None => format!(
+            "{}  {}/{} blocks re-hashed & verified",
+            mark(v.integrity.all_ok()),
+            v.integrity.blocks_ok,
+            v.integrity.blocks_total
+        ),
+        Some(f) => format!(
+            "✗  {} of {} ok — {f}",
+            v.integrity.blocks_ok, v.integrity.blocks_total
+        ),
+    };
+    lines.push(kv("integrity", integ));
+    lines.push(kv(
+        "schema",
+        match v.schema {
+            SchemaVerdict::Conformant => "✓ conformant",
+            SchemaVerdict::NonConformant => "✗ non-conformant",
+            SchemaVerdict::OpenWorld => "open-world (no schema)",
+        },
+    ));
+    // Signature: attribution only — never claim trust here.
+    match &v.signature {
+        Some(sig) => {
+            let signer = sig.signer.clone().unwrap_or_else(|| "—".into());
+            lines.push(kv(
+                "signature",
+                format!("{} · key {}", sig.alg, short(&sig.key_id)),
+            ));
+            lines.push(kv("signer", format!("{signer}  (attribution)")));
+            if let Some(ts) = &sig.signed_at {
+                lines.push(kv("signed_at", ts.clone()));
+            }
+            lines.push(Line::styled(
+                "trust: NOT checked here — run `tsra verify-sig` against a trust store to prove the \
+                 signer is trusted.",
+                Style::new().yellow(),
+            ));
+        }
+        None => lines.push(kv("signature", "none embedded")),
+    }
+    lines.push(kv(
+        "lineage",
+        format!(
+            "{} edge(s), {} pin an upstream content_hash",
+            v.lineage.edges, v.lineage.with_content_hash
+        ),
+    ));
+    lines
+}
+
+/// The pre-compute / no-file fallback for Verify — the manifest-only structural glance.
+fn verify_structural_fallback(app: &App) -> (String, Vec<Line<'static>>) {
     let s = app.header_status();
     let mark = |ok: bool| if ok { "✓" } else { "✗" };
     let lines = vec![
         kv("seal", format!("{}  manifest_hash present", mark(s.sealed))),
-        kv("signature", format!("{}  member in container", mark(s.signed))),
+        kv(
+            "signature",
+            format!("{}  member in container", mark(s.signed)),
+        ),
         kv("schema", schema_word(s.schema).to_string()),
-        kv("phi", if s.has_phi { "declares identifying fields" } else { "none declared" }),
         Line::raw(""),
         Line::styled(
-            "structural check (manifest only) — deep verify (every block digest + signature + trust) \
-             is Phase 1b-c.",
+            "structural glance (manifest only) — the deep verdict computes on entering Verify.",
             Style::new().dim(),
         ),
     ];
     (" VERIFY ".into(), lines)
+}
+
+/// Shorten a long hex identifier for display (`1a2b3c4d…`).
+fn short(id: &str) -> String {
+    if id.len() > 12 {
+        format!("{}…", &id[..12])
+    } else {
+        id.to_string()
+    }
 }
 
 /// Compare → the empty state until a second version/product is loaded (Phase 1b-c).
@@ -789,13 +880,52 @@ mod tests {
     }
 
     #[test]
-    fn verify_pane_is_structural_and_labelled_honestly() {
-        let mut app = sample_app();
-        app.on_key(crate::app::Key::Mode(4));
+    fn verify_pane_without_a_verdict_shows_the_structural_glance() {
+        let mut app = sample_app(); // in-memory, no file → no computed verdict
+        app.on_key(Key::Mode(4));
         let out = draw(&app);
         assert!(out.contains("VERIFY"), "{out}");
         assert!(out.contains("seal"));
-        // The honesty caveat is on screen — this is not claimed as a deep verify.
-        assert!(out.contains("structural check"), "{out}");
+        // Honest: this is the manifest-only glance, not claimed as a deep verify.
+        assert!(out.contains("structural glance"), "{out}");
+    }
+
+    #[test]
+    fn verify_pane_renders_a_deep_verdict_with_signature_attribution() {
+        use tessera_explore::verify::{
+            ArtifactVerdict, IntegrityCheck, LineageSummary, SchemaVerdict, SignatureInfo,
+        };
+        let mut app = sample_app();
+        app.on_key(Key::Mode(4));
+        app.set_verdict(ArtifactVerdict {
+            sealed: true,
+            integrity: IntegrityCheck {
+                blocks_total: 3,
+                blocks_ok: 3,
+                failure: None,
+            },
+            schema: SchemaVerdict::Conformant,
+            signature: Some(SignatureInfo {
+                alg: "ed25519".into(),
+                key_id: "9e2b1a2b3c4d5e6f7890".into(),
+                signer: Some("https://orcid.org/0000-0002-1825-0097".into()),
+                signed_at: Some("2026-07-03T10:00:00Z".into()),
+                key_format: Some("raw-hex".into()),
+                trust_checked: false,
+            }),
+            lineage: LineageSummary {
+                edges: 1,
+                with_content_hash: 1,
+            },
+        });
+        let out = draw(&app);
+        assert!(out.contains("INTACT"), "{out}");
+        assert!(out.contains("3/3 blocks"), "{out}");
+        assert!(
+            out.contains("ed25519") && out.contains("0000-0002-1825-0097"),
+            "{out}"
+        );
+        // Trust is explicitly not claimed here.
+        assert!(out.contains("trust: NOT checked"), "{out}");
     }
 }

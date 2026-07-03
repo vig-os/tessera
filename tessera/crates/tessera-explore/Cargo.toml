@@ -13,3 +13,7 @@ tessera-io.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 arrow.workspace = true
+
+[dev-dependencies]
+# Seal real `.tsra` fixtures on disk for the artifact_verdict integration tests.
+tempfile = "3"
