@@ -9,6 +9,7 @@ Inspect & navigate:
   verify      Verify integrity (magic, seal, every block digest)
   schema      Validate against the embedded product schema (--json dumps it)
   tree        Render the .tsra as a navigable hierarchy
+  tui         Open the interactive terminal explorer (navigator + inspect/data/verify)
   ls          List one node's children (meta / a block / sources)
   read        Read table data as CSV/TSV/NDJSON (cross-block)
   stats       Numeric overview of an array block (shape, dtype, value range)

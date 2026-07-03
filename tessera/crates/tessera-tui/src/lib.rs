@@ -6,11 +6,23 @@
 //! new way to read a `.tsra`, only an interactive way to look at one
 //! (`docs/spikes/tsra-explorer-wireframes.md`, #286).
 //!
-//! Built bottom-up, most-testable-first. This module currently ships the [`config`] layer — the
-//! config-driven layout ("a layout is data, not code"): the mode/tab/policy model and the shipped
-//! persona presets, all unit-tested without a terminal. The interactive shell (app state, render, event
-//! loop) lands on top of it.
+//! Structure — logic and presentation are terminal-free and fully unit/snapshot-tested; only [`run`]
+//! touches a TTY:
+//! - [`config`] — the config-driven layout ("a layout is data, not code"): modes, inspector tabs,
+//!   policy, and the shipped persona presets.
+//! - [`app`] — shell state + input handling (navigator selection/collapse, mode switching, the
+//!   structural header status) as a pure model driven by [`app::Key`].
+//! - [`ui`] — the render function ([`ui::render`]): header verdict strip · navigator · content pane ·
+//!   footer, snapshot-tested against a `TestBackend`.
+//! - [`run`] — the crossterm event loop + raw-mode/alternate-screen lifecycle (the only non-testable
+//!   part; a panic-safe [terminal guard] restores the terminal).
 //!
 //! [ratatui]: https://ratatui.rs
+//! [terminal guard]: run
 
+pub mod app;
 pub mod config;
+pub mod run;
+pub mod ui;
+
+pub use run::run;

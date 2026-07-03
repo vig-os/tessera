@@ -105,6 +105,7 @@ Inspect & navigate:
   verify      Verify integrity (magic, seal, every block digest)
   schema      Validate against the embedded product schema (--json dumps it)
   tree        Render the .tsra as a navigable hierarchy
+  tui         Open the interactive terminal explorer (navigator + inspect/data/verify)
   ls          List one node's children (meta / a block / sources)
   read        Read table data as CSV/TSV/NDJSON (cross-block)
   stats       Numeric overview of an array block (shape, dtype, value range)
@@ -612,6 +613,19 @@ enum Cmd {
     /// newline-delimited JSON-RPC 2.0 on stdin/stdout (diagnostics on stderr). Reuses the same
     /// view-model the CLI and TUI render. See `docs/spikes/tsra-explorer-wireframes.md` § Surfaces.
     Mcp,
+    /// Open the interactive terminal explorer (TUI) on a `.tsra`.
+    ///
+    /// A ratatui shell over the same view-model the CLI renders: a navigator tree plus the mode panes
+    /// (Navigate / Inspect / Data / Verify / Compare). Keys: arrows or j/k to move, h/l or Enter to
+    /// collapse/expand, 1–5 to switch mode, q to quit. `--layout` picks a shipped preset
+    /// (analyst · auditor · steward · fair) or a path to a layout TOML; the default is balanced.
+    Tui {
+        /// The `.tsra` to explore.
+        file: PathBuf,
+        /// Layout preset name (`analyst` · `auditor` · `steward` · `fair`) or a path to a layout TOML.
+        #[arg(long)]
+        layout: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -812,9 +826,30 @@ fn main() -> ExitCode {
     }
 }
 
+/// Resolve a `--layout` argument into a [`tessera_tui::config::Layout`]: a shipped preset name first
+/// (`analyst` · …), then a path to a layout TOML file, else the balanced default when unset.
+fn resolve_layout(spec: Option<&str>) -> tessera_core::Result<tessera_tui::config::Layout> {
+    use tessera_tui::config::Layout;
+    let Some(name) = spec else {
+        return Ok(Layout::default());
+    };
+    if let Some(preset) = Layout::preset(name) {
+        return Ok(preset);
+    }
+    let src = std::fs::read_to_string(name).map_err(|e| {
+        tessera_core::Error::Invalid(format!(
+            "--layout '{name}' is not a shipped preset (analyst · auditor · steward · fair) \
+             and could not be read as a file: {e}"
+        ))
+    })?;
+    Layout::from_toml(&src)
+        .map_err(|e| tessera_core::Error::Invalid(format!("--layout '{name}': {e}")))
+}
+
 fn run(cmd: Cmd) -> tessera_core::Result<()> {
     match cmd {
         Cmd::Mcp => mcp::serve(),
+        Cmd::Tui { file, layout } => tessera_tui::run(&file, resolve_layout(layout.as_deref())?),
         Cmd::Inspect { file, full } => {
             let r = open_local_or_url(&file)?;
             let m = r.manifest();

@@ -20,3 +20,7 @@ crossterm.workspace = true
 # spec uses.
 serde.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+# Synthesise in-memory manifests (block specs are JSON) for the terminal-free app/render tests.
+serde_json.workspace = true

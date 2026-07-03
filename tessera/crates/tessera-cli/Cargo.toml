@@ -16,6 +16,8 @@ tessera-core.workspace = true
 tessera-io.workspace = true
 tessera-explore.workspace = true
 tessera-ingest.workspace = true
+# The interactive terminal explorer (`tsra tui`) — a ratatui shell over the shared view-model.
+tessera-tui.workspace = true
 serde_json.workspace = true
 clap.workspace = true
 # Surface library WARNs (e.g. the schema recommended-field nudge from the ingest engine) on stderr.
