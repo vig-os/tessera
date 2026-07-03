@@ -89,14 +89,27 @@ Tabs (Tab / ←→): **Integrity · Provenance & lineage (log/diff) · Trust (si
 
 ### 1 · Navigate (tree focus) · 5 · Compare (A/B or prior — deferred detail to a later pass)
 
-## Per-profile defaults (one binary, `--profile`; every mode still reachable via number keys)
+## Configurable layout — presets, not hardcoded personas
 
-| Profile | Opens in | Pinned tabs | Policy defaults |
-|---|---|---|---|
-| **clinician** | Data · Array (image) | Referencing, Governance | PHI render **on**; verify = glyph |
-| **scientist** | Data · Table (SQL) | Referencing, Schema | PHI render aware; export-with-provenance |
-| **steward** | (Queue → ) Inspect | Schema, Provenance, Governance, Trust | edit capability **on** (Phase 2 gate) |
-| **auditor** | Verify | Integrity, Trust, Provenance | PHI render **off**; report `E` primary; read-only |
+The shell is **generic + config-parameterised**: a layout is *data* (default mode · pinned inspector
+tabs · keymap overrides · policy), never persona code. There is no persona branching in the shell.
+The UX-spike personas are shipped **presets** (example configs); anyone composes their own. This
+mirrors tessera's own rule — *"schemas are embedded data, not engine code"* — applied to the UI.
+Default (no `--layout`) = a balanced layout.
+
+```toml
+# ~/.config/tessera/layouts/analyst.toml  — a PRESET, just data (personas are configs, not code)
+default_mode = "data"                    # navigate | inspect | data | verify | compare
+pinned       = ["referencing", "schema"] # inspector tabs pinned open
+[policy]
+phi_render   = "aware"                    # on | off | aware
+edit         = false                      # gates the CoW editor capability (Phase 2)
+```
+
+The **modes are a fixed union** — `Navigate · Inspect · Data · Verify · Compare` — where **Data is one
+mode that adapts to the selected block's kind** (table → paged read + SQL; array → stats + histogram +
+slice/MIP). A layout only chooses *defaults + pins + policy*; it never adds or removes machinery. So
+the four "profiles" are four short TOML files, not four code paths.
 
 ## Traceability — every pane renders an existing view-model function (thin renderer)
 
@@ -114,11 +127,46 @@ So Phase 1b writes **exactly two** new view-model shapes — `NodeTree` and `Art
 concretely specified by the wireframes above (no longer speculative), plus the ratatui rendering. All
 other panes bind to functions that already exist and are tested.
 
-## Open questions for sign-off
+## Surfaces — one view-model, several driver surfaces (agent-co-drivable)
 
-1. **Mode set** — is `1 Navigate · 2 Inspect · 3 Data · 4 Verify · 5 Compare` the right top-level set,
-   or split Data into `3 Table · 4 Array`?
-2. **Default profile** when `--profile` is omitted — auto-detect (image-capable terminal → clinician;
-   else scientist), or a fixed default?
-3. **Compare (mode 5)** in the v0 read-only TUI, or defer to after the four core modes land?
-4. **Queue** (steward/auditor batch) — in the first TUI cut, or a follow-up once single-product is solid?
+The TUI is one *driver* of the view-model; the same operations are exposed through several surfaces,
+all **thin adapters over `tessera-explore`** (the reason the Phase-1a extraction was foundational):
+
+| Surface | Role | Over | Status |
+|---|---|---|---|
+| **TUI** (ratatui) | interactive human | `tessera-explore` | Phase 1b |
+| **CLI** (`tsra`) | scriptable verbs | `tessera-explore` | exists (now thin) |
+| **Lib API** (Rust + `tessera-py`) | embed / notebook | `tessera-explore` / `tessera-py` | exists |
+| **HTTP API** (`tsra serve`) | remote / programmatic | `tessera-explore` | Phase 3 |
+| **MCP server** | **agent tools** | `tessera-explore` (+ py) | **new — the agent surface** |
+
+**MCP is the lowest-effort, highest-leverage surface**: the view-model already returns structured data
+(`ArrayStats`, `histogram`→`RecordBatch`, `NodeTree`, `read_page`→`RecordBatch`, verdicts), so an MCP
+server is tool-wrappers with ~no rendering — `open · tree · ls · inspect · verify · read(SQL) · stats ·
+histogram · slice · project` become tools an agent calls. It can land **before/alongside** the TUI (and
+lets an agent drive + test the whole thing).
+
+**Co-driving a human (TUI) + an agent (MCP):**
+- **v1 (works with what exists):** both operate on the same **CoW repo / content-addressed products**;
+  they coordinate through **sealed versions** (the agent commits a new version; the human opens it) —
+  the "don't broker state through the user, use the repo" pattern, which tessera's CoW *is*.
+- **v2 (stretch):** a shared *live* session (agent + human in one instance, live cursor/state) — real
+  concurrency, deferred.
+
+## Decisions (signed off)
+
+1. **Mode set** — ✅ `Navigate · Inspect · Data · Verify · Compare`, with **Data as one common mode**
+   that adapts to the block kind (not split into Table/Array).
+2. **Default layout** — ✅ a **balanced configurable layout** (no auto-detected persona); presets are
+   config files, and the default is a sensible balanced one.
+3. **Compare** — ✅ **in v0**.
+4. **Queue** — deferred (see note). It is the *multi-product* list view (a cohort/collection browser:
+   rows = products, columns = status, filter/sort/batch) — the T4/T5 batch surface, tied to collections
+   (#223), **not** core single-product exploration. Not in the first cut; revisit as a follow-up.
+
+### Build order (post-sign-off)
+- **1b-a — the generic shell** + config-driven layout (ship the presets) + `NodeTree` (Navigate/Inspect).
+- **1b-b — Data mode** (table read+SQL / array stats+histogram+slice/MIP) over the existing view-model.
+- **1b-c — Verify mode** + `ArtifactVerdict`; then **Compare**.
+- **MCP server** — sibling increment over the view-model (early: enables agent-driving from the start).
+1. **Queue** (steward/auditor batch) — in the first TUI cut, or a follow-up once single-product is solid?
