@@ -1,0 +1,22 @@
+[package]
+name = "tessera-tui"
+description = "Tessera terminal explorer — a ratatui shell rendering the tessera-explore view-model (the .tsra navigator)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tessera-core.workspace = true
+tessera-io.workspace = true
+# The SSOT view-model — the TUI is a thin renderer over `tessera-explore` (NodeTree, stats, table
+# pages, …); it computes nothing a CLI/serve surface couldn't also render.
+tessera-explore.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+# Config-driven layout presets (`docs/spikes/tsra-explorer-wireframes.md` § Configurable layout) —
+# a layout is *data* (default mode · pinned tabs · policy), parsed with the same TOML the ingest
+# spec uses.
+serde.workspace = true
+toml.workspace = true

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-explore", "crates/tessera-cli", "crates/tessera-ingest", "crates/tessera-py", "crates/tessera-wasm"]
+members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-explore", "crates/tessera-cli", "crates/tessera-ingest", "crates/tessera-py", "crates/tessera-wasm", "crates/tessera-tui"]
 
 [workspace.package]
 edition = "2021"
@@ -69,7 +69,11 @@ pyo3 = { version = "0.27", features = ["extension-module", "abi3-py39"] }
 # parsed model (JCS) before hashing, so whitespace / comments / key-order in the source TOML never
 # change the spec hash that flows into each member's `ingested_via_spec` provenance edge.
 toml = "0.8"
+# tessera-tui — ratatui bundles crossterm 0.28; both pinned so the backend + event types match.
+ratatui = "0.29"
+crossterm = "0.28"
 tessera-core = { path = "crates/tessera-core" }
 tessera-io = { path = "crates/tessera-io" }
 tessera-explore = { path = "crates/tessera-explore" }
 tessera-ingest = { path = "crates/tessera-ingest" }
+tessera-tui = { path = "crates/tessera-tui" }
