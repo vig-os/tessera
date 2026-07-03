@@ -6,12 +6,13 @@
 //! test drives directly ([`App::new`] from in-memory data, then `on_key`) — no file, no terminal.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tessera_core::{Manifest, SchemaRegistry};
 use tessera_explore::hierarchy::{hierarchy, Node, NodeTree};
 
 use crate::config::{Layout, Mode};
+use crate::data::{self, DataView};
 
 /// One visible row of the navigator — a node at a tree depth, plus whether it can expand and is
 /// currently collapsed. Produced by [`App::rows`] against the current collapse set.
@@ -76,6 +77,15 @@ pub struct App {
     collapsed: HashSet<Vec<usize>>,
     /// Selected navigator row (index into [`App::rows`]).
     selected: usize,
+    /// The file this shell was opened from, for lazy Data-mode block reads. `None` for an in-memory
+    /// (test/embed) shell — Data mode then reports it has no file to read.
+    path: Option<PathBuf>,
+    /// The loaded Data-mode view for the current block (see [`App::sync_data`]).
+    data: DataView,
+    /// The block name `data` was loaded for, so it reloads only when the selection changes block.
+    data_key: Option<String>,
+    /// Scroll offset (first visible row) within a table [`DataView`].
+    data_offset: usize,
     /// Set when the user asks to quit.
     pub should_quit: bool,
 }
@@ -100,12 +110,19 @@ impl App {
             tree,
             collapsed: HashSet::new(),
             selected: 0,
+            path: None,
+            data: DataView::Unavailable(
+                "Select a block in the navigator (1 Navigate), then press 3 to view its data."
+                    .into(),
+            ),
+            data_key: None,
+            data_offset: 0,
             should_quit: false,
         }
     }
 
     /// Open a `.tsra` from disk and build the shell over it. Reads only the manifest + container
-    /// directory (aux names) — no block payloads are decoded.
+    /// directory (aux names) — no block payloads are decoded until Data mode asks for a block.
     pub fn open(path: &Path, layout: Layout) -> tessera_core::Result<App> {
         let reader = tessera_io::Reader::open(path)?;
         let manifest = reader.manifest().clone();
@@ -115,7 +132,11 @@ impl App {
             .and_then(|s| s.to_str())
             .unwrap_or("<tsra>")
             .to_string();
-        Ok(App::new(title, manifest, aux, layout))
+        let mut app = App::new(title, manifest, aux, layout);
+        app.path = Some(path.to_path_buf());
+        // Populate Data if the layout opens directly in Data mode (e.g. the analyst preset).
+        app.sync_data();
+        Ok(app)
     }
 
     /// The currently-visible navigator rows, honouring the collapse set (depth-first, root first).
@@ -205,6 +226,53 @@ impl App {
         self.mode = mode;
     }
 
+    /// The loaded Data-mode view for the current selection (see [`App::sync_data`]).
+    pub fn data(&self) -> &DataView {
+        &self.data
+    }
+
+    /// The current table scroll offset (first visible row) for Data mode.
+    pub fn data_offset(&self) -> usize {
+        self.data_offset
+    }
+
+    /// Inject a Data view directly — the seam used by tests (and any out-of-band loader). Resets the
+    /// scroll offset. Normal operation goes through [`App::sync_data`].
+    pub fn set_data(&mut self, data: DataView) {
+        self.data = data;
+        self.data_offset = 0;
+    }
+
+    /// Load (or reload) the Data-mode view when the mode is Data and the selected block changed. Does
+    /// the block read/decode — call it from the event loop after input, never from render. A no-op in
+    /// other modes and when the selection's block is unchanged (the view is cached).
+    pub fn sync_data(&mut self) {
+        if self.mode != Mode::Data {
+            return;
+        }
+        let key = self.selected_node().and_then(data::block_of);
+        if key == self.data_key {
+            return;
+        }
+        let view = match self.path.clone() {
+            Some(p) => self
+                .selected_node()
+                .map(|n| DataView::load(&p, n))
+                .unwrap_or_else(|| DataView::Unavailable("no selection".into())),
+            None => DataView::Unavailable("Data mode: no file loaded (in-memory shell).".into()),
+        };
+        self.data = view;
+        self.data_key = key;
+        self.data_offset = 0;
+    }
+
+    /// Scroll the table Data view by `delta` rows, clamped to the loaded page.
+    fn scroll_data(&mut self, delta: isize) {
+        let max = self.data.table_len().saturating_sub(1) as isize;
+        let next = (self.data_offset as isize + delta).clamp(0, max.max(0));
+        self.data_offset = next as usize;
+    }
+
     /// Advance to the next mode in footer order (wraps) — the `Tab` / `]` binding.
     pub fn next_mode(&mut self) {
         let i = Mode::ORDER
@@ -220,6 +288,9 @@ impl App {
     pub fn on_key(&mut self, key: Key) {
         match key {
             Key::Quit => self.should_quit = true,
+            // In Data mode, Up/Down scroll the table page; elsewhere they move the navigator.
+            Key::Down if self.mode == Mode::Data => self.scroll_data(1),
+            Key::Up if self.mode == Mode::Data => self.scroll_data(-1),
             Key::Down => self.select_next(),
             Key::Up => self.select_prev(),
             Key::Expand | Key::Enter => self.toggle_selected(),

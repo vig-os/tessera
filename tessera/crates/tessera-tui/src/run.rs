@@ -39,6 +39,8 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -
             // Ignore key-release / repeat events (Windows emits both); act only on press.
             if key.kind == KeyEventKind::Press {
                 app.on_key(map_key(key.code));
+                // Load Data-mode block data after input (the I/O the pure on_key deliberately omits).
+                app.sync_data();
             }
         }
         if app.should_quit {

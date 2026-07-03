@@ -19,8 +19,8 @@ crossterm.workspace = true
 # a layout is *data* (default mode · pinned tabs · policy), parsed with the same TOML the ingest
 # spec uses.
 serde.workspace = true
-toml.workspace = true
-
-[dev-dependencies]
-# Synthesise in-memory manifests (block specs are JSON) for the terminal-free app/render tests.
 serde_json.workspace = true
+toml.workspace = true
+# Data mode reduces the view-model's Arrow results (histogram RecordBatch, table page) to plain
+# strings/numbers for rendering — the same arrow major the workspace resolves through Vortex/explore.
+arrow.workspace = true
