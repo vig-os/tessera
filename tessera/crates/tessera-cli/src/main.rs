@@ -5,6 +5,7 @@
 //! block's stored bytes against its recorded digest.
 
 mod bench;
+mod mcp;
 mod nav;
 #[cfg(feature = "sql")]
 mod sql;
@@ -144,6 +145,9 @@ Signing & trust:
 
 Diagnostics:
   bench       Bench the write engine on this host (throughput + peak RSS)
+
+Agent:
+  mcp         Start an MCP server over stdio (agent driver surface — tree/ls/stats/verify tools)
 
 Run `tsra help <command>` for details, flags, and what to pass.
 
@@ -602,6 +606,12 @@ enum Cmd {
         #[command(subcommand)]
         action: BenchAction,
     },
+    /// Start a Model Context Protocol (MCP) server over stdio — the agent driver surface.
+    ///
+    /// Exposes the read verbs (tree / ls / stats / verify) as MCP tools an agent calls, over
+    /// newline-delimited JSON-RPC 2.0 on stdin/stdout (diagnostics on stderr). Reuses the same
+    /// view-model the CLI and TUI render. See `docs/spikes/tsra-explorer-wireframes.md` § Surfaces.
+    Mcp,
 }
 
 #[derive(Subcommand)]
@@ -804,6 +814,7 @@ fn main() -> ExitCode {
 
 fn run(cmd: Cmd) -> tessera_core::Result<()> {
     match cmd {
+        Cmd::Mcp => mcp::serve(),
         Cmd::Inspect { file, full } => {
             let r = open_local_or_url(&file)?;
             let m = r.manifest();

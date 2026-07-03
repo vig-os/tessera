@@ -50,6 +50,9 @@ Signing & trust:
 Diagnostics:
   bench       Bench the write engine on this host (throughput + peak RSS)
 
+Agent:
+  mcp         Start an MCP server over stdio (agent driver surface — tree/ls/stats/verify tools)
+
 Run `tsra help <command>` for details, flags, and what to pass.
 
 Options:
