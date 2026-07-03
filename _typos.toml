@@ -6,3 +6,5 @@
 ratatui = "ratatui"
 # OME-Zarr / OME-NGFF and the ome_zarr_metadata crate — typos reads "ome" as "some".
 ome = "ome"
+# DICOM VR code "PN" (Person Name) — typos reads it as "ON" (as it did "PNGs"→"ONGs").
+pn = "pn"

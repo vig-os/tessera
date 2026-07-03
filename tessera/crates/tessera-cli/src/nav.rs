@@ -1348,7 +1348,7 @@ mod tests {
         // A representative extra blob (the shape #255 uses for the DICOM header).
         b.with_extra(
             "dicom_header",
-            serde_json::json!({"0010,0010": {"vr": "ON", "value": ["X"]}}),
+            serde_json::json!({"0010,0010": {"vr": "PN", "value": ["X"]}}),
         );
         let sealed = b.seal().unwrap(); // seal embeds the recon schema (self-describing)
         pack(&sealed, &[payload], &p).unwrap();
