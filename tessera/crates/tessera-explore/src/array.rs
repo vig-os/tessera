@@ -2,6 +2,11 @@
 //! serve) render. Decode stays in [`tessera_io::array`]; this module computes summaries over the
 //! decoded [`ArrayData`], returning typed structs rather than writing text.
 
+use std::sync::Arc;
+
+use arrow::array::{Float64Array, UInt64Array};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
 use tessera_core::block::array::ArraySpec;
 use tessera_core::Result;
 use tessera_io::array::ArrayData;
@@ -202,9 +207,110 @@ pub fn project_axis(values: &[f64], shape: &[u64], axis: usize, mode: ProjMode) 
     }
 }
 
+/// Apply the optional physical `rescale` to each element of a decoded array and hand it to `f` as an
+/// `f64`. Bounded-memory (no intermediate buffer) — dispatches over the element type once per call.
+fn for_each_f64(data: &ArrayData, rescale: Option<(f64, f64)>, mut f: impl FnMut(f64)) {
+    let rs = |x: f64| match rescale {
+        Some((s, i)) => s * x + i,
+        None => x,
+    };
+    macro_rules! go {
+        ($v:expr) => {
+            for &x in $v.iter() {
+                f(rs(x as f64));
+            }
+        };
+    }
+    match data {
+        ArrayData::I16(v) => go!(v),
+        ArrayData::I32(v) => go!(v),
+        ArrayData::I64(v) => go!(v),
+        ArrayData::U16(v) => go!(v),
+        ArrayData::U32(v) => go!(v),
+        ArrayData::U64(v) => go!(v),
+        ArrayData::F32(v) => go!(v),
+        ArrayData::F64(v) => go!(v),
+    }
+}
+
+/// A rescale-aware **dense histogram** of an array block into `bins` equal-width bins over the value
+/// range, as an Arrow [`RecordBatch`] with columns `bin_lo`, `bin_hi` (`Float64`) and `count`
+/// (`UInt64`). Physical `rescale` `(slope, intercept)` is applied per element (raw if `None`). Two
+/// bounded-memory passes over the decoded array (min/max, then bin) — no intermediate `f64` buffer.
+/// An empty block yields all-zero counts; all-equal values fall in bin 0.
+pub fn histogram(data: &ArrayData, bins: usize, rescale: Option<(f64, f64)>) -> RecordBatch {
+    let bins = bins.max(1);
+    let (mut mn, mut mx, mut n) = (f64::INFINITY, f64::NEG_INFINITY, 0u64);
+    for_each_f64(data, rescale, |x| {
+        if x < mn {
+            mn = x;
+        }
+        if x > mx {
+            mx = x;
+        }
+        n += 1;
+    });
+    if n == 0 {
+        mn = 0.0;
+        mx = 0.0;
+    }
+    // Avoid a zero-width bin when all values are equal (or the block is empty): everything in bin 0.
+    let width = if mx > mn {
+        (mx - mn) / bins as f64
+    } else {
+        1.0
+    };
+    let mut counts = vec![0u64; bins];
+    if n > 0 {
+        for_each_f64(data, rescale, |x| {
+            let b = (((x - mn) / width).floor() as isize).clamp(0, bins as isize - 1) as usize;
+            counts[b] += 1;
+        });
+    }
+    let lo: Vec<f64> = (0..bins).map(|k| mn + k as f64 * width).collect();
+    let hi: Vec<f64> = (0..bins).map(|k| mn + (k + 1) as f64 * width).collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("bin_lo", DataType::Float64, false),
+        Field::new("bin_hi", DataType::Float64, false),
+        Field::new("count", DataType::UInt64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(lo)),
+            Arc::new(Float64Array::from(hi)),
+            Arc::new(UInt64Array::from(counts)),
+        ],
+    )
+    .expect("histogram columns are equal length by construction")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::{Array, UInt64Array};
+
+    #[test]
+    fn histogram_bins_and_counts_with_rescale() {
+        // 0,1,2,3 into 2 bins over [0,3]: width 1.5 → bin0=[0,1.5)={0,1}, bin1=[1.5,3]={2,3}.
+        let d = ArrayData::I16(vec![0, 1, 2, 3]);
+        let h = histogram(&d, 2, None);
+        assert_eq!(h.num_rows(), 2);
+        let count = h.column(2).as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(count.values(), &[2, 2]);
+        // Rescale shifts the range but not the counts.
+        let hr = histogram(&d, 2, Some((1.0, -1024.0)));
+        let cr = hr.column(2).as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(cr.values(), &[2, 2]);
+    }
+
+    #[test]
+    fn histogram_empty_is_all_zero() {
+        let h = histogram(&ArrayData::F32(vec![]), 3, None);
+        assert_eq!(h.num_rows(), 3);
+        let count = h.column(2).as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(count.values(), &[0, 0, 0]);
+    }
 
     #[test]
     fn project_axis_reduces_along_an_axis() {
