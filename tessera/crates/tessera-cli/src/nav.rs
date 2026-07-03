@@ -753,16 +753,38 @@ pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
         }
     }
     // `extra/*` (the fd5 extension namespace) holds arbitrary object/blob metadata — e.g. the full
-    // preserved `extra/dicom_header` — not tables. `ls`/`tree` reach it, but `read` (table-only) would
-    // otherwise hit the opaque `logical_table: no blocks for prefix` miss. Give a clear pointer (#303).
-    let extra_key = opts.block.strip_prefix("extra/").unwrap_or(opts.block);
-    if r.manifest().extra.contains_key(extra_key) {
-        return Err(tessera_core::Error::Invalid(format!(
+    // preserved `extra/dicom_header` — not tables. `ls`/`tree` reach them; the table-only read verb
+    // cannot, so point the user there instead of the opaque `logical_table` prefix miss (#303). Fire
+    // only when the target is addressed *as* an extra field — an explicit `extra/<key>`, or a bare key
+    // that exists only in `extra` — so it never shadows a real table block of the same name.
+    let hint = |key: &str| {
+        format!(
             "'{}' is an extension (`extra/`) field, not a table — `read` is for tables. \
-             Use `tsra ls {} extra/{extra_key}` to dump it.",
+             Use `tsra ls {} extra/{key}` to dump it.",
             opts.block,
             opts.file.display(),
-        )));
+        )
+    };
+    let is_block = r.manifest().blocks.iter().any(|b| b.name == opts.block);
+    if let Some(key) = opts.block.strip_prefix("extra/") {
+        return Err(tessera_core::Error::Invalid(
+            if r.manifest().extra.contains_key(key) {
+                hint(key)
+            } else {
+                format!(
+                    "no extra field 'extra/{key}' (keys: {})",
+                    r.manifest()
+                        .extra
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+        ));
+    }
+    if !is_block && r.manifest().extra.contains_key(opts.block) {
+        return Err(tessera_core::Error::Invalid(hint(opts.block)));
     }
 
     // The logical view + projection + windowed column decode → a structured page (view-model); the

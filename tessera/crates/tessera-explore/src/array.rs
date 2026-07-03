@@ -32,7 +32,8 @@ pub struct ArrayStats {
 ///
 /// One streaming pass computes min/max/mean/std together; an empty block yields all-zero stats. This
 /// is the pure compute behind `tessera stats` — extracted so the TUI and `serve` can reuse it without
-/// the CLI's text formatting.
+/// the CLI's text formatting. Note: single-pass moments (`E[x²] − E[x]²`); not numerically stable for
+/// large-magnitude data (e.g. raw PET counts) — revisit with Welford if precision bites.
 pub fn array_stats(data: &ArrayData) -> ArrayStats {
     macro_rules! reduce {
         ($v:expr) => {{
@@ -122,8 +123,9 @@ pub struct ArrayRegion {
 }
 
 /// Decode a rectangular sub-region of an array (only the intersecting chunks) and flatten it to `f64`,
-/// applying the optional physical `rescale`. The single view-model entry the CLI `slice` (and the TUI /
-/// serve) render — index/world resolution into `(start, shape)` is the caller's job.
+/// applying the optional physical `rescale`. The view-model entry that `slice` (and the TUI / serve)
+/// render over; the caller resolves the addressing (index or world) into `(start, shape)` — this
+/// function is index-space only.
 pub fn slice_region(
     spec: &ArraySpec,
     blob: &[u8],
