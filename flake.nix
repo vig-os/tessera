@@ -123,6 +123,11 @@
           env = {
             # bindgen (dicom-rs) needs libclang.
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+            # sccache's disk cache defaults to ~/.cache/sccache on the root fs, which fills up fast
+            # across parallel worktrees (each cold build writes GBs of cached objects) and wedges the
+            # whole box at 100% disk. Point it at the big HDD instead (77T) so the cache can grow
+            # without threatening root. Shared across every worktree using this devShell.
+            SCCACHE_DIR = "/mnt/HDD/larsgerchow/sccache";
             # NOTE: do NOT set HDF5_DIR — nix splits hdf5 headers into a separate `dev` output, so a
             # single root lacks include/; `hdf5-metno-sys` finds hdf5 via pkg-config instead (the
             # hdf5 dev pkgconfig is on PKG_CONFIG_PATH from buildInputs).
