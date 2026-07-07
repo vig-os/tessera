@@ -625,6 +625,9 @@ enum Cmd {
         /// Layout preset name (`analyst` · `auditor` · `steward` · `fair`) or a path to a layout TOML.
         #[arg(long)]
         layout: Option<String>,
+        /// A second `.tsra` to diff against in Compare mode (A = `file`, B = this target).
+        #[arg(long)]
+        compare: Option<PathBuf>,
     },
 }
 
@@ -849,7 +852,15 @@ fn resolve_layout(spec: Option<&str>) -> tessera_core::Result<tessera_tui::confi
 fn run(cmd: Cmd) -> tessera_core::Result<()> {
     match cmd {
         Cmd::Mcp => mcp::serve(),
-        Cmd::Tui { file, layout } => tessera_tui::run(&file, resolve_layout(layout.as_deref())?),
+        Cmd::Tui {
+            file,
+            layout,
+            compare,
+        } => tessera_tui::run(
+            &file,
+            resolve_layout(layout.as_deref())?,
+            compare.as_deref(),
+        ),
         Cmd::Inspect { file, full } => {
             let r = open_local_or_url(&file)?;
             let m = r.manifest();

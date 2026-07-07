@@ -15,6 +15,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
+use tessera_explore::diff::DiffStatus;
 use tessera_explore::hierarchy::{human_bytes, Node, NodeHandle, NodeKind};
 use tessera_explore::verify::{ArtifactVerdict, SchemaVerdict};
 
@@ -560,14 +561,68 @@ fn short(id: &str) -> String {
     }
 }
 
-/// Compare → the empty state until a second version/product is loaded (Phase 1b-c).
-fn compare_content(_app: &App) -> (String, Vec<Line<'static>>) {
+/// Compare → a field-level manifest diff (A = the opened file, B = the `--compare` target), or an
+/// empty state prompting how to load a comparison.
+fn compare_content(app: &App) -> (String, Vec<Line<'static>>) {
+    let Some(cv) = app.compare() else {
+        return (
+            " COMPARE ".into(),
+            vec![
+                Line::styled(
+                    "No comparison target loaded.",
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+                Line::raw(""),
+                Line::styled(
+                    "Open with `tsra tui <file> --compare <other.tsra>` to diff two products \
+                     (or a version against its prior).",
+                    Style::new().dim(),
+                ),
+            ],
+        );
+    };
+    let changed = cv.diff.changed();
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("A  ", Style::new().dim()),
+            Span::raw(cv.a_title.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled("B  ", Style::new().dim()),
+            Span::raw(cv.b_title.clone()),
+        ]),
+        Line::styled(
+            if changed == 0 {
+                "identical manifests — no fields differ".to_string()
+            } else {
+                format!("{changed} of {} fields differ", cv.diff.rows.len())
+            },
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+    ];
+    // The differing rows, coloured by status; unchanged rows are omitted to keep the diff legible.
+    for row in cv.diff.rows.iter().filter(|r| r.status != DiffStatus::Same) {
+        let (glyph, style) = match row.status {
+            DiffStatus::Changed => ("~", Style::new().yellow()),
+            DiffStatus::Added => ("+", Style::new().green()),
+            DiffStatus::Removed => ("-", Style::new().red()),
+            DiffStatus::Same => (" ", Style::new()),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{glyph} "), style),
+            Span::styled(
+                format!("{:<20}", row.field),
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(row.a.clone(), Style::new().dim()),
+            Span::raw("  →  "),
+            Span::raw(row.b.clone()),
+        ]));
+    }
     (
-        " COMPARE ".into(),
-        vec![Line::styled(
-            "No comparison target loaded. A/B against a prior version or sibling arrives in Phase 1b-c.",
-            Style::new().dim(),
-        )],
+        format!(" COMPARE › {} vs {} ", cv.a_title, cv.b_title),
+        lines,
     )
 }
 
@@ -927,5 +982,50 @@ mod tests {
         );
         // Trust is explicitly not claimed here.
         assert!(out.contains("trust: NOT checked"), "{out}");
+    }
+
+    #[test]
+    fn compare_pane_empty_state_prompts_for_a_target() {
+        let mut app = sample_app();
+        app.on_key(Key::Mode(5));
+        let out = draw(&app);
+        assert!(out.contains("COMPARE"), "{out}");
+        assert!(out.contains("--compare"), "{out}");
+    }
+
+    #[test]
+    fn compare_pane_shows_the_changed_rows() {
+        use tessera_explore::diff::{DiffRow, DiffStatus, ManifestDiff};
+        let mut app = sample_app();
+        app.on_key(Key::Mode(5));
+        app.set_compare(crate::app::CompareView {
+            a_title: "v1.tsra".into(),
+            b_title: "v2.tsra".into(),
+            diff: ManifestDiff {
+                rows: vec![
+                    DiffRow {
+                        field: "product".into(),
+                        a: "recon".into(),
+                        b: "recon".into(),
+                        status: DiffStatus::Same,
+                    },
+                    DiffRow {
+                        field: "meta:tracer".into(),
+                        a: "FDG".into(),
+                        b: "FMISO".into(),
+                        status: DiffStatus::Changed,
+                    },
+                ],
+            },
+        });
+        let out = draw(&app);
+        assert!(out.contains("COMPARE › v1.tsra vs v2.tsra"), "{out}");
+        assert!(out.contains("1 of 2 fields differ"), "{out}");
+        // The changed row is shown (A → B); the unchanged `product` row is omitted.
+        assert!(
+            out.contains("meta:tracer") && out.contains("FDG") && out.contains("FMISO"),
+            "{out}"
+        );
+        assert!(!out.contains("product"), "{out}");
     }
 }

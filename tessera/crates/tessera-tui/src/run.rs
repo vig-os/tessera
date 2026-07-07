@@ -20,10 +20,11 @@ use crate::app::{App, Key};
 use crate::config::Layout;
 use crate::ui;
 
-/// Open `path` under `layout` and run the interactive explorer until the user quits. Sets up raw mode
-/// + the alternate screen, restores them on exit (and on panic, via [`TerminalGuard`]).
-pub fn run(path: &Path, layout: Layout) -> Result<()> {
-    let app = App::open(path, layout)?;
+/// Open `path` under `layout` (optionally diffed against a `compare` target for Compare mode) and run
+/// the interactive explorer until the user quits. Sets up raw mode + the alternate screen, restores
+/// them on exit (and on panic, via [`TerminalGuard`]).
+pub fn run(path: &Path, layout: Layout, compare: Option<&Path>) -> Result<()> {
+    let app = App::open(path, layout, compare)?;
     let mut guard = TerminalGuard::enter()?;
     let res = event_loop(&mut guard.terminal, app);
     guard.restore()?; // explicit restore so a clean exit isn't relying on drop ordering

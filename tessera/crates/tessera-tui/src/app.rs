@@ -9,11 +9,23 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use tessera_core::{Manifest, SchemaRegistry};
+use tessera_explore::diff::{manifest_diff, ManifestDiff};
 use tessera_explore::hierarchy::{hierarchy, Node, NodeTree};
 use tessera_explore::verify::{artifact_verdict, ArtifactVerdict};
 
 use crate::config::{Layout, Mode};
 use crate::data::{self, DataView};
+
+/// A loaded Compare target — the two products' display titles + their manifest [`ManifestDiff`].
+#[derive(Debug, Clone)]
+pub struct CompareView {
+    /// Display title of side A (the opened file).
+    pub a_title: String,
+    /// Display title of side B (the `--compare` target).
+    pub b_title: String,
+    /// The field-level diff (A = opened, B = target).
+    pub diff: ManifestDiff,
+}
 
 /// One visible row of the navigator — a node at a tree depth, plus whether it can expand and is
 /// currently collapsed. Produced by [`App::rows`] against the current collapse set.
@@ -92,6 +104,8 @@ pub struct App {
     /// The deep verification verdict, computed lazily on first entering Verify mode and cached (a
     /// sealed `.tsra` is immutable). `None` until computed / when there is no file.
     verdict: Option<ArtifactVerdict>,
+    /// The loaded Compare target, when opened with one; `None` = the empty Compare state.
+    compare: Option<CompareView>,
     /// Set when the user asks to quit.
     pub should_quit: bool,
 }
@@ -125,23 +139,30 @@ impl App {
             data_offset: 0,
             show_image: false,
             verdict: None,
+            compare: None,
             should_quit: false,
         }
     }
 
     /// Open a `.tsra` from disk and build the shell over it. Reads only the manifest + container
-    /// directory (aux names) — no block payloads are decoded until Data mode asks for a block.
-    pub fn open(path: &Path, layout: Layout) -> tessera_core::Result<App> {
+    /// directory (aux names) — no block payloads are decoded until Data mode asks for a block. When
+    /// `compare` is given, its manifest is diffed against `path`'s for Compare mode (cheap — manifests
+    /// only, no payload decode).
+    pub fn open(path: &Path, layout: Layout, compare: Option<&Path>) -> tessera_core::Result<App> {
         let reader = tessera_io::Reader::open(path)?;
         let manifest = reader.manifest().clone();
         let aux = reader.aux_names();
-        let title = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("<tsra>")
-            .to_string();
+        let title = file_label(path);
         let mut app = App::new(title, manifest, aux, layout);
         app.path = Some(path.to_path_buf());
+        if let Some(other) = compare {
+            let target = tessera_io::Reader::open(other)?.manifest().clone();
+            app.compare = Some(CompareView {
+                a_title: file_label(path),
+                b_title: file_label(other),
+                diff: manifest_diff(&app.manifest, &target),
+            });
+        }
         // Populate the active mode's data if the layout opens directly in Data (analyst) or Verify
         // (auditor).
         app.sync_data();
@@ -256,6 +277,11 @@ impl App {
         self.verdict.as_ref()
     }
 
+    /// The loaded Compare target, when opened with `--compare`; `None` = the empty Compare state.
+    pub fn compare(&self) -> Option<&CompareView> {
+        self.compare.as_ref()
+    }
+
     /// Compute the deep [`ArtifactVerdict`] the first time Verify mode is entered, then cache it (the
     /// container is immutable). Reads + re-hashes every block — call from the event loop after input,
     /// never from render. A no-op outside Verify, once cached, or without a file.
@@ -273,6 +299,11 @@ impl App {
     /// Inject a verdict directly — the test seam (normal operation goes through [`App::sync_verify`]).
     pub fn set_verdict(&mut self, verdict: ArtifactVerdict) {
         self.verdict = Some(verdict);
+    }
+
+    /// Inject a Compare view directly — the test seam (normal operation loads it in [`App::open`]).
+    pub fn set_compare(&mut self, compare: CompareView) {
+        self.compare = Some(compare);
     }
 
     /// Inject a Data view directly — the seam used by tests (and any out-of-band loader). Resets the
@@ -396,6 +427,14 @@ pub enum Key {
     Mode(u8),
     /// Any other key — ignored.
     Other,
+}
+
+/// A file's display label — its filename, or a placeholder when it has none.
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("<tsra>")
+        .to_string()
 }
 
 /// Depth-first walk of the tree into visible [`Row`]s, pruning the children of collapsed nodes.

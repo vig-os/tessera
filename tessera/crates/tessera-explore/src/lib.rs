@@ -21,6 +21,7 @@
 //! behaviour-preserving guarantee.
 
 pub mod array;
+pub mod diff;
 pub mod hierarchy;
 pub mod referencing;
 pub mod table;
