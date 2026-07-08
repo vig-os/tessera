@@ -139,37 +139,62 @@ pub fn artifact_verdict<R: Read + Seek>(reader: &mut Reader<R>) -> ArtifactVerdi
     };
 
     // The embedded signature envelope (attribution), read from the aux member — never a trust proof.
-    let signature = sig_member.and_then(|name| {
-        let bytes = reader.read_aux(&name).ok()?;
-        let sig: Signature = serde_json::from_slice(&bytes).ok()?;
-        Some(SignatureInfo {
-            alg: sig.alg,
-            key_id: sig.key_id,
-            signer: sig.signer,
-            signed_at: sig.signed_at,
-            key_format: sig.key_format,
-            trust_checked: false,
-        })
-    });
+    let signature = sig_member.and_then(|name| read_signature_member(reader, &name));
 
     ArtifactVerdict {
         sealed: manifest.manifest_hash.is_some(),
         integrity,
         schema: schema_verdict(&manifest),
         signature,
-        lineage: LineageSummary {
-            edges: manifest.sources.len(),
-            with_content_hash: manifest
-                .sources
-                .iter()
-                .filter(|s| s.content_hash.is_some())
-                .count(),
-        },
+        lineage: lineage_summary(&manifest),
     }
 }
 
-/// Schema conformance for a manifest — known+valid / known+invalid / open-world.
-fn schema_verdict(m: &Manifest) -> SchemaVerdict {
+/// Read + parse the embedded signature envelope (attribution) from an aux member, or `None` if it is
+/// absent / unreadable / malformed. Cheap (one small aux read, no block decode) — shared by the deep
+/// [`artifact_verdict`] and the Inspect Trust tab. `trust_checked` is always `false`: this surfaces the
+/// signature's *declared* identity, never a trust-anchor match (that is `tsra verify-sig`).
+pub fn read_signature<R: Read + Seek>(reader: &mut Reader<R>) -> Option<SignatureInfo> {
+    let name = reader
+        .aux_names()
+        .into_iter()
+        .find(|n| n.starts_with("signatures/"))?;
+    read_signature_member(reader, &name)
+}
+
+/// Parse a specific signature aux member into a [`SignatureInfo`].
+fn read_signature_member<R: Read + Seek>(
+    reader: &mut Reader<R>,
+    name: &str,
+) -> Option<SignatureInfo> {
+    let bytes = reader.read_aux(name).ok()?;
+    let sig: Signature = serde_json::from_slice(&bytes).ok()?;
+    Some(SignatureInfo {
+        alg: sig.alg,
+        key_id: sig.key_id,
+        signer: sig.signer,
+        signed_at: sig.signed_at,
+        key_format: sig.key_format,
+        trust_checked: false,
+    })
+}
+
+/// Summarise the provenance DAG edges (`sources`) — total edges and how many pin an upstream
+/// `content_hash`. Pure manifest projection, shared by [`artifact_verdict`] and the Inspect tabs.
+pub fn lineage_summary(m: &Manifest) -> LineageSummary {
+    LineageSummary {
+        edges: m.sources.len(),
+        with_content_hash: m
+            .sources
+            .iter()
+            .filter(|s| s.content_hash.is_some())
+            .count(),
+    }
+}
+
+/// Schema conformance for a manifest — known+valid / known+invalid / open-world. Shared by
+/// [`artifact_verdict`] and the Inspect Schema tab.
+pub fn schema_verdict(m: &Manifest) -> SchemaVerdict {
     let known = m.schema.is_some() || SchemaRegistry::builtin().get(&m.product).is_some();
     if !known {
         SchemaVerdict::OpenWorld

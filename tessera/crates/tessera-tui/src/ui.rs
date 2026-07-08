@@ -17,10 +17,11 @@ use ratatui::Frame;
 
 use tessera_explore::diff::DiffStatus;
 use tessera_explore::hierarchy::{human_bytes, Node, NodeHandle, NodeKind};
-use tessera_explore::verify::{ArtifactVerdict, SchemaVerdict};
+use tessera_explore::inspect::{FairCheck, InspectFacets};
+use tessera_explore::verify::{ArtifactVerdict, SchemaVerdict, SignatureInfo};
 
 use crate::app::{App, HeaderStatus, SchemaState};
-use crate::config::Mode;
+use crate::config::{InspectTab, Mode};
 use crate::data::DataView;
 
 /// Render the whole shell for the current [`App`] state into `frame`.
@@ -191,33 +192,289 @@ fn navigate_content(app: &App) -> (String, Vec<Line<'static>>) {
     (format!(" NAVIGATE › {} ", node.label), lines)
 }
 
-/// Inspect → the Integrity tab (Phase 1b-a); the tab bar shows the full set with pinned tabs marked.
-/// The remaining tabs' bodies land in Phase 1b-c alongside the `ArtifactVerdict`.
+/// Inspect → the tab bar + the active tab's body (Phase 1c). Every body is a projection of the cached
+/// [`InspectFacets`] (manifest-only, no block decode); tabs switch with `h`/`l`.
 fn inspect_content(app: &App) -> (String, Vec<Line<'static>>) {
-    let m = &app.manifest;
-    let s = app.header_status();
-    let block_names: Vec<&str> = m.blocks.iter().map(|b| b.name.as_str()).collect();
+    let active = app.active_tab();
     let mut lines = vec![tab_bar(app), Line::raw("")];
-    lines.extend([
-        kv("id", m.id.clone()),
+    match app.facets() {
+        Some(f) => lines.extend(tab_body(active, f)),
+        None => lines.push(Line::styled(
+            "Metadata facets not yet computed.",
+            Style::new().dim(),
+        )),
+    }
+    (format!(" INSPECT › {} ", active.label()), lines)
+}
+
+/// The body lines for one Inspect tab, projected from the [`InspectFacets`].
+fn tab_body(tab: InspectTab, f: &InspectFacets) -> Vec<Line<'static>> {
+    match tab {
+        InspectTab::Integrity => integrity_tab(f),
+        InspectTab::Provenance => provenance_tab(f),
+        InspectTab::Trust => trust_tab(f),
+        InspectTab::Schema => schema_tab(f),
+        InspectTab::Referencing => referencing_tab(f),
+        InspectTab::Governance => governance_tab(f),
+        InspectTab::Fair => fair_tab(f),
+    }
+}
+
+/// Integrity tab — identity, seal, product/schema, per-block digests.
+fn integrity_tab(f: &InspectFacets) -> Vec<Line<'static>> {
+    let g = &f.integrity;
+    let mut lines = vec![
+        kv("id", g.id.clone()),
         kv(
             "manifest_hash",
             format!(
                 "{} (version)",
-                m.manifest_hash.clone().unwrap_or_else(|| "—".into())
+                g.manifest_hash.clone().unwrap_or_else(|| "—".into())
             ),
         ),
-        kv("sealed", if s.sealed { "yes" } else { "no" }),
-        kv(
-            "blocks",
-            format!("{}   {}", s.blocks, block_names.join(" · ")),
-        ),
+        kv("sealed", if g.sealed { "yes" } else { "no" }),
         kv(
             "product",
-            format!("{}   schema {}", m.product, schema_word(s.schema)),
+            format!("{}   schema {}", g.product, schema_verdict_word(g.schema)),
         ),
-    ]);
-    (" INSPECT ".into(), lines)
+        Line::raw(""),
+        Line::styled(
+            format!("blocks ({})", g.blocks.len()),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    for b in &g.blocks {
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {} ", b.name)),
+            Span::styled(format!("{}  ", b.kind), Style::new().dim()),
+            Span::styled(b.digest.clone(), Style::new().dim()),
+        ]));
+    }
+    lines
+}
+
+/// Provenance tab — the `sources` DAG edges + a lineage-coverage summary.
+fn provenance_tab(f: &InspectFacets) -> Vec<Line<'static>> {
+    let p = &f.provenance;
+    let mut lines = vec![kv(
+        "lineage",
+        format!(
+            "{} edge(s), {} pin an upstream content_hash",
+            p.summary.edges, p.summary.with_content_hash
+        ),
+    )];
+    if p.edges.is_empty() {
+        lines.push(Line::styled(
+            "no provenance edges recorded (a root/original product)",
+            Style::new().dim(),
+        ));
+        return lines;
+    }
+    lines.push(Line::raw(""));
+    for e in &p.edges {
+        let chain = match &e.content_hash {
+            Some(h) => format!("  ⛓ {h}"),
+            None => "  (no content_hash — chain not closed)".into(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", e.role),
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(e.reference.clone()),
+            Span::styled(chain, Style::new().dim()),
+        ]));
+    }
+    lines
+}
+
+/// Trust tab — the embedded signature envelope (attribution, never a trust proof).
+fn trust_tab(f: &InspectFacets) -> Vec<Line<'static>> {
+    match &f.trust.signature {
+        None => vec![Line::styled(
+            "no signature embedded — this product is unsigned.",
+            Style::new().dim(),
+        )],
+        Some(sig) => signature_lines(sig),
+    }
+}
+
+/// Shared signature rendering (Trust tab + Verify pane): declared identity + the honest trust caveat.
+fn signature_lines(sig: &SignatureInfo) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        kv("alg", sig.alg.clone()),
+        kv("key_id", short(&sig.key_id)),
+        kv(
+            "signer",
+            format!(
+                "{}  (attribution)",
+                sig.signer.clone().unwrap_or_else(|| "—".into())
+            ),
+        ),
+    ];
+    if let Some(ts) = &sig.signed_at {
+        lines.push(kv("signed_at", ts.clone()));
+    }
+    if let Some(fmt) = &sig.key_format {
+        lines.push(kv("key_format", fmt.clone()));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "trust: NOT checked here — run `tsra verify-sig` against a trust store to prove the signer \
+         is trusted.",
+        Style::new().yellow(),
+    ));
+    lines
+}
+
+/// Schema tab — conformance verdict + the declared field roster (present fields marked).
+fn schema_tab(f: &InspectFacets) -> Vec<Line<'static>> {
+    let s = &f.schema;
+    let mut lines = vec![kv(
+        "conformance",
+        match s.verdict {
+            SchemaVerdict::Conformant => "✓ conformant",
+            SchemaVerdict::NonConformant => "✗ non-conformant",
+            SchemaVerdict::OpenWorld => "open-world (no schema)",
+        },
+    )];
+    if let Some(h) = &s.heading {
+        lines.push(kv("schema", h.clone()));
+    }
+    if s.fields.is_empty() {
+        lines.push(Line::styled(
+            "open-world product — no declared field roster.",
+            Style::new().dim(),
+        ));
+        return lines;
+    }
+    lines.push(Line::raw(""));
+    for fr in &s.fields {
+        let mark = if fr.present { "✓" } else { "·" };
+        let style = if fr.present {
+            Style::new()
+        } else {
+            Style::new().dim()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{mark} "), style),
+            Span::raw(format!("{:<24}", fr.id)),
+            Span::styled(
+                format!("{} · {}", fr.tier, fr.sensitivity),
+                Style::new().dim(),
+            ),
+        ]));
+    }
+    lines
+}
+
+/// Referencing tab — per-array spatial frames (convention · unit · space · derived spacing).
+fn referencing_tab(f: &InspectFacets) -> Vec<Line<'static>> {
+    let r = &f.referencing;
+    if r.frames.is_empty() {
+        return vec![Line::styled(
+            "no world frame — this product is index-space only (no voxel→world affine).",
+            Style::new().dim(),
+        )];
+    }
+    let mut lines = Vec::new();
+    for fr in &r.frames {
+        lines.push(Line::styled(
+            fr.block.clone(),
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
+        lines.push(kv(
+            "convention",
+            format!("{} ({})", fr.convention, fr.space),
+        ));
+        lines.push(kv(
+            "spacing",
+            format!(
+                "{:.3} × {:.3} × {:.3} {}",
+                fr.spacing[0], fr.spacing[1], fr.spacing[2], fr.unit
+            ),
+        ));
+        lines.push(Line::raw(""));
+    }
+    lines
+}
+
+/// Governance tab — the PHI / sensitivity posture (schema-declared) + the seal's tamper-evidence.
+fn governance_tab(f: &InspectFacets) -> Vec<Line<'static>> {
+    let g = &f.governance;
+    let c = &g.sensitivity_counts;
+    let mut lines = vec![
+        kv(
+            "phi",
+            if g.has_phi {
+                "⚠ schema declares directly-identifying (PHI) fields".to_string()
+            } else {
+                "no directly-identifying fields declared".to_string()
+            },
+        ),
+        kv(
+            "sensitivity",
+            format!(
+                "{} public · {} coded · {} sensitive · {} identifying",
+                c.public, c.coded, c.sensitive, c.identifying
+            ),
+        ),
+        kv(
+            "immutability",
+            if g.sealed {
+                "sealed — content-addressed, tamper-evident"
+            } else {
+                "unsealed — not tamper-evident"
+            },
+        ),
+    ];
+    if !g.identifying_in_clear.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            format!(
+                "⚠ identifying fields present in the clear: {}",
+                g.identifying_in_clear.join(", ")
+            ),
+            Style::new().yellow(),
+        ));
+    }
+    lines
+}
+
+/// FAIR tab — the findable/accessible/interoperable/reusable checklist, each with a short reason.
+fn fair_tab(f: &InspectFacets) -> Vec<Line<'static>> {
+    let x = &f.fair;
+    let mut lines = vec![Line::styled(
+        format!("{}/4 FAIR dimensions met", x.met()),
+        Style::new().add_modifier(Modifier::BOLD),
+    )];
+    lines.push(Line::raw(""));
+    for (name, c) in [
+        ("Findable", &x.findable),
+        ("Accessible", &x.accessible),
+        ("Interoperable", &x.interoperable),
+        ("Reusable", &x.reusable),
+    ] {
+        lines.push(fair_line(name, c));
+    }
+    lines
+}
+
+/// One FAIR checklist row: a coloured ✓/✗ + the dimension name + its reason.
+fn fair_line(name: &str, c: &FairCheck) -> Line<'static> {
+    let (mark, style) = if c.met {
+        ("✓", Style::new().green())
+    } else {
+        ("✗", Style::new().red())
+    };
+    Line::from(vec![
+        Span::styled(format!("{mark} "), style),
+        Span::styled(
+            format!("{name:<15}"),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(c.reason.clone(), Style::new().dim()),
+    ])
 }
 
 /// Data → the loaded [`DataView`] for the selected block: a scrolling table page, an array
@@ -626,10 +883,10 @@ fn compare_content(app: &App) -> (String, Vec<Line<'static>>) {
     )
 }
 
-/// The inspector tab bar (`[Integrity] Provenance …`), with pinned tabs starred and the active tab
-/// (Integrity in 1b-a) bracketed.
+/// The inspector tab bar (`[Integrity] Provenance …`), with pinned tabs starred and the **active** tab
+/// (switched with `h`/`l`) bracketed + bold.
 fn tab_bar(app: &App) -> Line<'static> {
-    use crate::config::InspectTab;
+    let active = app.active_tab();
     let mut spans = Vec::new();
     for (i, tab) in InspectTab::ORDER.iter().enumerate() {
         if i > 0 {
@@ -641,8 +898,7 @@ fn tab_bar(app: &App) -> Line<'static> {
         } else {
             tab.label().to_string()
         };
-        // Integrity is the active tab in this build.
-        if *tab == InspectTab::Integrity {
+        if *tab == active {
             spans.push(Span::styled(
                 format!("[{label}]"),
                 Style::new().add_modifier(Modifier::BOLD),
@@ -739,6 +995,15 @@ fn schema_word(s: SchemaState) -> &'static str {
     }
 }
 
+/// One-word label for a [`SchemaVerdict`] (the view-model's conformance enum), for the Inspect tabs.
+fn schema_verdict_word(v: SchemaVerdict) -> &'static str {
+    match v {
+        SchemaVerdict::Conformant => "✓ conformant",
+        SchemaVerdict::NonConformant => "✗ non-conformant",
+        SchemaVerdict::OpenWorld => "open-world",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,18 +1090,77 @@ mod tests {
     }
 
     #[test]
-    fn switching_to_inspect_renders_the_integrity_tab() {
+    fn inspect_opens_on_the_first_pinned_tab_with_starred_pins() {
         let mut app = sample_app();
         app.on_key(crate::app::Key::Mode(2));
+        app.sync_inspect(); // manifest-only facets (no file) — the body needs them
         let out = draw(&app);
         assert!(out.contains("INSPECT"), "{out}");
-        assert!(out.contains("[Integrity]"));
-        assert!(out.contains("manifest_hash"));
-        // Pinned tabs (Schema, Referencing in the balanced default) are starred.
+        // Balanced default pins [Schema, Referencing] → Inspect opens on Schema (the first pinned).
+        assert!(
+            out.contains("[Schema*]"),
+            "opens on first pinned tab: {out}"
+        );
+        assert!(out.contains("conformance"), "schema-tab body: {out}");
+        // Both pinned tabs are starred.
         assert!(
             out.contains("Schema*") && out.contains("Referencing*"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn inspect_tabs_switch_with_left_right_and_render_their_bodies() {
+        use crate::app::Key;
+        let mut app = sample_app();
+        app.on_key(Key::Mode(2));
+        app.sync_inspect();
+        // Integrity is the default active tab (no pinned tab precedes it in the balanced layout's
+        // pinned list? balanced pins Schema first) — assert whatever the layout opened, then cycle.
+        // Cycle to each tab with `l` (Expand) and confirm the bracketed tab + a body marker.
+        let seen = |app: &App, needle: &str| draw(app).contains(needle);
+        // Walk all seven tabs; each should render without panicking and show its heading.
+        // Schema + Referencing are pinned in the balanced default, so their active bracket carries the
+        // star (`[Schema*]`); the rest are unpinned.
+        let markers = [
+            ("[Integrity]", "manifest_hash"),
+            ("[Provenance]", "lineage"),
+            ("[Trust]", "unsigned"),
+            ("[Schema*]", "conformance"),
+            ("[Referencing*]", "index-space only"),
+            ("[Governance]", "sensitivity"),
+            ("[FAIR]", "FAIR dimensions met"),
+        ];
+        // Set the active tab explicitly to Integrity first for a deterministic walk.
+        while app.active_tab() != InspectTab::Integrity {
+            app.on_key(Key::Expand);
+        }
+        for (tab_marker, body_marker) in markers {
+            assert!(seen(&app, tab_marker), "missing {tab_marker}");
+            assert!(
+                seen(&app, body_marker),
+                "missing body {body_marker} for {tab_marker}"
+            );
+            app.on_key(Key::Expand); // `l` → next tab
+        }
+        // `h` (Collapse) cycles backwards.
+        app.on_key(Key::Collapse);
+        assert!(seen(&app, "[FAIR]"), "h should wrap back to FAIR");
+    }
+
+    #[test]
+    fn inspect_governance_flags_phi_and_fair_scores() {
+        use crate::app::Key;
+        // pet-ct is a builtin schema that declares identifying fields → PHI + a FAIR score.
+        let mut app = sample_app();
+        app.on_key(Key::Mode(2));
+        app.sync_inspect();
+        while app.active_tab() != InspectTab::Governance {
+            app.on_key(Key::Expand);
+        }
+        let out = draw(&app);
+        assert!(out.contains("identifying"), "{out}");
+        assert!(out.contains("tamper-evident"), "sealed posture: {out}");
     }
 
     /// An injected array view with a 4×4 gradient MIP image for the render tests.

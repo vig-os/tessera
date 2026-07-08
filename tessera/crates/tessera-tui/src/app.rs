@@ -11,9 +11,10 @@ use std::path::{Path, PathBuf};
 use tessera_core::{Manifest, SchemaRegistry};
 use tessera_explore::diff::{manifest_diff, ManifestDiff};
 use tessera_explore::hierarchy::{hierarchy, Node, NodeTree};
+use tessera_explore::inspect::{inspect_facets, InspectFacets};
 use tessera_explore::verify::{artifact_verdict, ArtifactVerdict};
 
-use crate::config::{Layout, Mode};
+use crate::config::{InspectTab, Layout, Mode};
 use crate::data::{self, DataView};
 
 /// A loaded Compare target — the two products' display titles + their manifest [`ManifestDiff`].
@@ -104,6 +105,11 @@ pub struct App {
     /// The deep verification verdict, computed lazily on first entering Verify mode and cached (a
     /// sealed `.tsra` is immutable). `None` until computed / when there is no file.
     verdict: Option<ArtifactVerdict>,
+    /// The active Inspect tab (the metadata inspector the right pane shows in Inspect mode).
+    active_tab: InspectTab,
+    /// The cheap Inspect-tab facets, computed lazily on first entering Inspect mode and cached
+    /// (manifest-only — no block decode). `None` until computed / when there is no file.
+    facets: Option<InspectFacets>,
     /// The loaded Compare target, when opened with one; `None` = the empty Compare state.
     compare: Option<CompareView>,
     /// Set when the user asks to quit.
@@ -121,6 +127,12 @@ impl App {
     ) -> App {
         let tree = hierarchy(&manifest, &aux);
         let mode = layout.default_mode;
+        // Open Inspect on the layout's first pinned tab (the persona's headline concern), else Integrity.
+        let active_tab = layout
+            .pinned
+            .first()
+            .copied()
+            .unwrap_or(InspectTab::Integrity);
         App {
             title: title.into(),
             manifest,
@@ -139,6 +151,8 @@ impl App {
             data_offset: 0,
             show_image: false,
             verdict: None,
+            active_tab,
+            facets: None,
             compare: None,
             should_quit: false,
         }
@@ -163,10 +177,11 @@ impl App {
                 diff: manifest_diff(&app.manifest, &target),
             });
         }
-        // Populate the active mode's data if the layout opens directly in Data (analyst) or Verify
-        // (auditor).
+        // Populate the active mode's view if the layout opens directly in Data (analyst), Verify
+        // (auditor), or Inspect (steward / fair).
         app.sync_data();
         app.sync_verify();
+        app.sync_inspect();
         Ok(app)
     }
 
@@ -301,6 +316,53 @@ impl App {
         self.verdict = Some(verdict);
     }
 
+    /// Compute the cheap Inspect-tab [`InspectFacets`] the first time Inspect mode is entered, then
+    /// cache them (the container is immutable). Manifest + aux + the small signature member only — no
+    /// block decode — so it is safe after input, but kept out of render like the other syncs. Prefers
+    /// opening the container (so the Trust tab sees the embedded signature); falls back to a
+    /// manifest-only projection for an in-memory shell / when the file can't be opened. A no-op outside
+    /// Inspect and once cached.
+    pub fn sync_inspect(&mut self) {
+        if self.mode != Mode::Inspect || self.facets.is_some() {
+            return;
+        }
+        let facets = self
+            .path
+            .clone()
+            .and_then(|p| tessera_io::Reader::open(&p).ok())
+            .map(|mut r| inspect_facets(&mut r))
+            .unwrap_or_else(|| tessera_explore::inspect::facets_from(&self.manifest, None));
+        self.facets = Some(facets);
+    }
+
+    /// Inject facets directly — the test seam (normal operation goes through [`App::sync_inspect`]).
+    pub fn set_facets(&mut self, facets: InspectFacets) {
+        self.facets = Some(facets);
+    }
+
+    /// The cached Inspect-tab facets, once computed (see [`App::sync_inspect`]).
+    pub fn facets(&self) -> Option<&InspectFacets> {
+        self.facets.as_ref()
+    }
+
+    /// The active Inspect tab (the metadata inspector shown in Inspect mode).
+    pub fn active_tab(&self) -> InspectTab {
+        self.active_tab
+    }
+
+    /// Cycle the active Inspect tab by `delta` (wrapping) through [`InspectTab::ORDER`] — the tab
+    /// switcher bound to `h`/`l` (Left/Right) while in Inspect mode.
+    pub fn cycle_tab(&mut self, delta: isize) {
+        let order = InspectTab::ORDER;
+        let cur = order
+            .iter()
+            .position(|&t| t == self.active_tab)
+            .unwrap_or(0) as isize;
+        let n = order.len() as isize;
+        let next = ((cur + delta) % n + n) % n;
+        self.active_tab = order[next as usize];
+    }
+
     /// Inject a Compare view directly — the test seam (normal operation loads it in [`App::open`]).
     pub fn set_compare(&mut self, compare: CompareView) {
         self.compare = Some(compare);
@@ -363,6 +425,10 @@ impl App {
             Key::Up if self.mode == Mode::Data => self.scroll_data(-1),
             Key::Down => self.select_next(),
             Key::Up => self.select_prev(),
+            // In Inspect mode the right pane is a horizontal tab strip, so Left/Right switch tabs
+            // (the navigator tree still moves with Up/Down); elsewhere they expand/collapse the tree.
+            Key::Expand if self.mode == Mode::Inspect => self.cycle_tab(1),
+            Key::Collapse if self.mode == Mode::Inspect => self.cycle_tab(-1),
             Key::Expand | Key::Enter => self.toggle_selected(),
             Key::Collapse => self.collapse_or_parent(),
             Key::NextMode => self.next_mode(),
@@ -488,6 +554,56 @@ mod tests {
         app.layout = Layout::preset("analyst").unwrap();
         let app = App::new(app.title, app.manifest, app.aux, app.layout);
         assert_eq!(app.mode, Mode::Data); // analyst preset opens on Data
+    }
+
+    #[test]
+    fn inspect_active_tab_defaults_to_the_first_pinned_tab() {
+        // Balanced default pins [Schema, Referencing] → Inspect opens on Schema.
+        assert_eq!(sample_app().active_tab(), InspectTab::Schema);
+        // The steward preset pins [fair, governance, provenance] → opens on FAIR.
+        let mut app = sample_app();
+        app.layout = Layout::preset("steward").unwrap();
+        let app = App::new(app.title, app.manifest, app.aux, app.layout);
+        assert_eq!(app.active_tab(), InspectTab::Fair);
+    }
+
+    #[test]
+    fn cycle_tab_wraps_both_directions() {
+        let mut app = sample_app(); // active = Schema (index 3 in ORDER)
+        app.cycle_tab(-1);
+        assert_eq!(app.active_tab(), InspectTab::Trust);
+        app.cycle_tab(1);
+        assert_eq!(app.active_tab(), InspectTab::Schema);
+        // Walk forward through all seven and confirm we return to Schema (wrap).
+        for _ in 0..InspectTab::ORDER.len() {
+            app.cycle_tab(1);
+        }
+        assert_eq!(app.active_tab(), InspectTab::Schema);
+    }
+
+    #[test]
+    fn left_right_switch_tabs_only_in_inspect_mode() {
+        let mut app = sample_app();
+        app.set_mode(Mode::Inspect);
+        let before = app.active_tab();
+        app.on_key(Key::Expand); // `l` → next tab in Inspect
+        assert_ne!(app.active_tab(), before);
+        // In Navigate mode the same key expands the tree, never touches the tab.
+        app.set_mode(Mode::Navigate);
+        let tab = app.active_tab();
+        app.on_key(Key::Expand);
+        assert_eq!(app.active_tab(), tab);
+    }
+
+    #[test]
+    fn sync_inspect_computes_manifest_only_facets_without_a_file() {
+        let mut app = sample_app(); // no path (in-memory)
+        app.set_mode(Mode::Inspect);
+        assert!(app.facets().is_none());
+        app.sync_inspect();
+        let f = app.facets().expect("facets computed from the manifest");
+        assert!(f.integrity.sealed);
+        assert!(f.trust.signature.is_none()); // no file → no signature member read
     }
 
     #[test]

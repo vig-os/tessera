@@ -23,6 +23,7 @@
 pub mod array;
 pub mod diff;
 pub mod hierarchy;
+pub mod inspect;
 pub mod referencing;
 pub mod table;
 pub mod verify;
