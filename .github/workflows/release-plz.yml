@@ -34,7 +34,7 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
       - name: release-plz release-pr (held — no tag/publish)
-        uses: release-plz/action@b5543c19b03be9bd48852d20ca89f478b7723260  # v0.5
+        uses: release-plz/action@a80d79efe0a195618acb02a4089d55fe74d2505f  # v0.5
         with:
           command: release-pr
           # The Cargo workspace is nested under `tessera/`, not the repo root.
