@@ -1,0 +1,5 @@
+# trycmd runs the walkthrough in-place in this dir; `study.tsra` is the only real input.
+# Everything the walkthrough *creates* (the repo, the published artifact) is regenerated each run
+# and must not be tracked.
+/repo/
+/published.tsra

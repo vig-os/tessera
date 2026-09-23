@@ -1,0 +1,67 @@
+[package]
+name = "tessera-io"
+description = "Tessera I/O — .tsra container reader/writer (+ later, the streaming write engine)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tessera-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# blake3 with **`rayon` + `mmap`** — opt-in multi-core hashing of a large blob file in one native call:
+# `Hasher::update_mmap_rayon` (see [`blob::digest_file_parallel`]) mmaps the whole file (demand-paged →
+# bounded RSS) and fans the Merkle tree across all cores. The base `blake3` is already pulled in by
+# `tessera-core`; this line just turns the features on for builds that include `tessera-io`. The wasm-core
+# gate (`--package tessera-core --lib`) does NOT include this crate, so neither feature enters the wasm
+# graph — the spine stays single-threaded + wasm-compatible (ADR-0034). NB: a host `cargo build
+# --workspace` DOES feature-unify rayon/mmap into blake3 for tessera-core's *host* build (fine — both are
+# host-portable); the wasm-incompatibility only matters for the wasm32 target, which the isolated
+# `--package tessera-core` gate never co-builds with tessera-io.
+blake3 = { workspace = true, features = ["rayon", "mmap"] }
+zip.workspace = true
+zarrs.workspace = true
+bytes.workspace = true
+half.workspace = true
+vortex-file.workspace = true
+vortex-array.workspace = true
+vortex-btrblocks.workspace = true
+vortex-buffer.workspace = true
+vortex-io.workspace = true
+vortex-layout.workspace = true
+vortex-session.workspace = true
+futures.workspace = true
+tracing.workspace = true
+time.workspace = true   # RFC-3339 retain-until comparison for WORM retention (tessera_io::worm)
+sha2.workspace = true   # sha256 digests for OCI artifact descriptors (tessera_io::oci)
+
+# `cloud` feature (#225): a sealed `.tsra` range-reads directly from S3/HTTP — prune-before-fetch
+# over the network, including across a cohort of products. Default build/test and the wasm-core gate
+# are unaffected; tessera-core gains nothing (verified by `cargo tree -p tessera-io | grep object_store`
+# being empty without the feature).
+# object_store/aws pulls reqwest (rustls), which REQUIRES a tokio runtime — `futures::executor::block_on`
+# isn't enough. `tokio` here is just the driver the per-reader current-thread runtime uses (the one
+# legitimate tokio use per ADR-0034 §4: latency-bound network I/O behind the sync surface).
+object_store = { version = "0.14", default-features = false, features = ["aws", "http"], optional = true }
+tokio = { version = "1", features = ["rt", "net", "time"], optional = true }
+# In-Rust OCI distribution client (push/pull a .tsra to/from a registry). `blocking` keeps the CLI
+# verbs synchronous (reqwest spins its own runtime internally — no tokio coloring of our API).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"], optional = true }
+
+[features]
+cloud = ["dep:object_store", "dep:tokio", "dep:reqwest"]
+
+[dev-dependencies]
+tempfile = "3"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+tracing-subscriber.workspace = true
+
+[[bench]]
+name = "codec"
+harness = false
+
+[[bench]]
+name = "throughput"
+harness = false

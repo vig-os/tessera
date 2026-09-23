@@ -1,0 +1,59 @@
+# cargo-dist (`dist`) — the BROAD distribution channel: prebuilt, self-contained `tessera`/`tsra`
+# binaries + a `curl | sh` installer, published to the GitHub Release. Complements the nix/crane
+# channel (reproducible musl binary + maturin wheel — the deterministic/FAIR-grade channel).
+#
+# Handoff with release-plz: release-plz owns the version bump + CHANGELOG + the git TAG (the single
+# "cut" trigger); the generated `.github/workflows/release.yml` fires on that tag and attaches these
+# artifacts to the same Release. See release-plz.toml.
+#
+# The nested cargo workspace lives under `tessera/`; `cargo:tessera` points dist at it (this file sits
+# at the repo/git root so CI, which runs `dist` from the root, resolves the workspace).
+[workspace]
+members = ["cargo:tessera"]
+
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# `curl | sh` installer for Linux/macOS. (Homebrew needs a tap repo, Windows needs a proven
+# HDF5-from-source MSVC build — both deferred; see below. `cargo binstall` works off the archives
+# these produce with no extra installer.)
+installers = ["shell"]
+# Build the self-contained binaries with vendored libhdf5 so an end user needs NO system HDF5.
+# This is the whole point of the broad channel — `static-hdf5` → `hdf5-metno-sys/static` (builds
+# HDF5 2.2.0 from source). SAFE for determinism: HDF5 is read-only *input* (we encode to
+# Vortex/pcodec), never in the sealed byte-path, so the bundled libhdf5 can't move a content_hash.
+features = ["static-hdf5"]
+# Linux + macOS, both arches. Windows-msvc is deferred for the alpha: building libhdf5 from source
+# under MSVC is the riskiest leg and is not worth blocking the first installable release on.
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+
+# The vendored HDF5 build needs CMake (+ a C compiler & make, already present on GitHub runners) on
+# every build host. Declaring cmake makes the runner provision it explicitly rather than relying on
+# the image having it pre-installed.
+[dist.dependencies.apt]
+cmake = '*'
+
+[dist.dependencies.homebrew]
+cmake = '*'
+
+# Pin the generated `release.yml`'s `actions/checkout` to v7.0.1, matching what
+# Dependabot bumps hand-written workflows to (supersedes #427). cargo-dist 0.32.0
+# still emits `actions/checkout@v6` by default; without this override, any bump
+# in release.yml fails the `plan` job's own "workflow is out of date" check.
+# See `github-action-commits` in the cargo-dist reference.
+# The generated `release.yml` also uses `actions/upload-artifact` and `actions/download-artifact`
+# — cargo-dist 0.32.0's baked defaults (v7 / v8) are floating tag refs, so the SHA-pin
+# guardrail (`scripts/check-action-pins.sh`) fails on any workflow edit until these are pinned
+# too. All three values below are the full commit SHA of the tag noted in the trailing comment;
+# regenerate `release.yml` with `dist generate --ci github` after any change here.
+[dist.github-action-commits]
+"actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1"           # v7.0.1
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"    # v7.0.1
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"  # v8.0.1

@@ -1,0 +1,18 @@
+[package]
+name = "tessera-wasm"
+description = "Tessera WASM bindings — in-browser product verification (manifest seal + signature)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tessera-core.workspace = true
+serde_json.workspace = true
+# Pinned to the nixpkgs `wasm-bindgen-cli` version (0.2.121) — the crate and the CLI MUST match exactly,
+# or binding generation errors. The `wasm-core` flake check pins the same toolchain target.
+wasm-bindgen = "=0.2.121"

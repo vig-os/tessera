@@ -1,0 +1,52 @@
+# Opens/updates a HELD release PR (workspace version bump + CHANGELOG) — ADR-0052. It does NOT tag or
+# publish; the alpha is cut only by deliberately merging that release PR.
+#
+# TRIGGER = manual (workflow_dispatch) while the release is *held*: the crates are `0.0.0` with no
+# published/tagged baseline, so release-plz cannot determine a next version yet ("first-release
+# bootstrap"). Run this manually once the workspace version is bootstrapped to `0.1.0-alpha.1` — the
+# `producer` is now decoupled from the crate version (ADR-0052), so that bump costs no corpus regen.
+# Switch back to `push: [dev]` after the first release, when auto-updating the PR is useful.
+#
+# NOTE: the release PR is opened with a GitHub App installation token (secrets.RP_APP_ID +
+# RP_APP_PRIVATE_KEY, #430): the repo's GITHUB_TOKEN cannot create PRs (Actions PR-creation is off) and
+# PRs it creates would not trigger CI anyway. If the App secrets are absent the mint step fails softly
+# (continue-on-error) and the token falls back to RELEASE_PLZ_TOKEN / GITHUB_TOKEN as before.
+name: release-plz
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-plz
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    name: release-plz release-pr
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
+      - name: Mint GitHub App token (opens the release PR; its PRs trigger CI)
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.RP_APP_ID }}
+          private-key: ${{ secrets.RP_APP_PRIVATE_KEY }}
+      - name: release-plz release-pr (held — no tag/publish)
+        uses: release-plz/action@a80d79efe0a195618acb02a4089d55fe74d2505f  # v0.5
+        with:
+          command: release-pr
+          # The Cargo workspace is nested under `tessera/`, not the repo root.
+          manifest_path: tessera/Cargo.toml
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}

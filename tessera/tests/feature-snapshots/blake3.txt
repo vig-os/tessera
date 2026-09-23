@@ -1,0 +1,38 @@
+    `-- blake3 feature "mmap" (*)
+    |-- blake3 feature "default" (*)
+`-- blake3 feature "std"
+blake3 v1.8.5
+|   `-- tessera-io vWORKSPACE (*)
+|   `-- tessera-io vWORKSPACE (*)
+|   `-- tessera-io vWORKSPACE (*)
+|   |       `-- tessera-core feature "full" (command-line)
+|   |   `-- tessera-core feature "table-arrow" (command-line)
+|   |   |       `-- tessera-wasm feature "default" (command-line)
+|   |   |   `-- tessera-core feature "full" (command-line)
+|   |   |   `-- tessera-wasm vWORKSPACE
+|   |   |   |           `-- tessera-py feature "default" (command-line)
+|   |   |   |       `-- tessera-cli feature "static-hdf5" (command-line)
+|   |   |   |       `-- tessera-py vWORKSPACE
+|   |   |   |       |-- tessera-cli vWORKSPACE (*)
+|   |   |   |       |-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   `-- tessera-cli feature "static-hdf5" (command-line)
+|   |   |   |   `-- tessera-ingest feature "static-hdf5" (command-line)
+|   |   |   |   `-- tessera-io feature "default" (command-line)
+|   |   |   |   |   `-- tessera-cli feature "cloud" (command-line)
+|   |   |   |   |   `-- tessera-cli vWORKSPACE (*)
+|   |   |   |   |-- tessera-cli feature "cloud" (command-line)
+|   |   |   |   |-- tessera-cli feature "default" (command-line)
+|   |   |   |   |-- tessera-cli feature "sql" (command-line)
+|   |   |   |   |-- tessera-ingest feature "default" (command-line)
+|   |   |   |   |-- tessera-io feature "cloud" (command-line)
+|   |   |   |-- tessera-cli vWORKSPACE
+|   |   |   |-- tessera-ingest vWORKSPACE
+|   |   |   |-- tessera-io vWORKSPACE
+|   |   |   |-- tessera-py vWORKSPACE (*)
+|   |   |-- tessera-core feature "array-zarr" (command-line)
+|   |   |-- tessera-core feature "default" (command-line)
+|   |   |-- tessera-core feature "full" (command-line)
+|   |-- tessera-core vWORKSPACE
+|-- blake3 feature "default"
+|-- blake3 feature "mmap"
+|-- blake3 feature "rayon"

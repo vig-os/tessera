@@ -1,0 +1,58 @@
+[
+  {
+    "name": "recon_int16",
+    "product": "recon",
+    "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
+    "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
+    "manifest_hash": "blake3:4fd0b90d0aa3c2bddbaefec7e244b16dc444e08b3730b5747a0a970a549e3b91"
+  },
+  {
+    "name": "recon_float32_mumap",
+    "product": "recon",
+    "id": "blake3:529bb3fc4cb032cbb45917558b52fb6b81448a1cb574b3282336ce9a39b84149",
+    "content_hash": "blake3:ea3843267ea4bc54cb38d1090918da34ab9f37dffff2ce1e61e3ec478e479d9d",
+    "manifest_hash": "blake3:40e078b115d7c541f0522e09eab782773ba95864b8f6da1e119082fe6b9305fe"
+  },
+  {
+    "name": "listmode_events",
+    "product": "listmode",
+    "id": "blake3:55b8eac168d668c6e15ab3bdd1d78c0494384dbc6941ad48f9ee7237cf6e9457",
+    "content_hash": "blake3:207025b1bb4d2b647d1647a860c456513478cf46b2fee4da9eb2ba910e95c33e",
+    "manifest_hash": "blake3:b6570c78cd9ddde3839aadbefbc0068244d86e90c15e93a9fcf96bcc961c4ac9"
+  },
+  {
+    "name": "spectrum_lifetime",
+    "product": "spectrum",
+    "id": "blake3:765aa27dcf8732157230f947de95866cc88f720691a30ca8dba03ccd81964f0e",
+    "content_hash": "blake3:0ea11b7ec858fb44aa4a111b4bc5c466f45ff7def961aad07901a21dfba4a60a",
+    "manifest_hash": "blake3:d52e7189b7b4e1b9961d758ca1346a4a486878cc020af37791e054c2fa20e824"
+  },
+  {
+    "name": "multiblock_study",
+    "product": "recon",
+    "id": "blake3:216739168370b68f066c955f6c613839f5a8f2c62c4aad5af656c23909f55a2a",
+    "content_hash": "blake3:3b5d271b91ed2793445b561a709e38a469c7a73bdcd8ef8331e41ad7639498b8",
+    "manifest_hash": "blake3:b725e8bb6e852401978dc2a701706cb0926cb00f036331c1cb25eeb7fbfdf2b0"
+  },
+  {
+    "name": "empty_no_blocks",
+    "product": "marker",
+    "id": "blake3:682ff1f8841db94254ae9cc8f912824d2b31f51584cba5f43f65375840a3701b",
+    "content_hash": "blake3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+    "manifest_hash": "blake3:bf18db403ce129a1a4e06ac0f435909986f6e9ecc4a8aaf8d3a0c023037594ff"
+  },
+  {
+    "name": "blob_opaque",
+    "product": "blob",
+    "id": "blake3:1d503e926fc5545579056e075f840777eef545fbb11acc1e59850c55bbed6f58",
+    "content_hash": "blake3:c5b98765e1b869385c89abe64b8e56b2473f868810621bc7b9d6dbe1bc451575",
+    "manifest_hash": "blake3:feaceed4b3daea96363957c0858036bd46be5954390e6e266c33b4fbbed4559c"
+  },
+  {
+    "name": "segmentation_uint8",
+    "product": "segmentation",
+    "id": "blake3:70900b373daacb02d47855efbb1d01134881bab74603b3c34b47710d467974b6",
+    "content_hash": "blake3:8e2d917e6f414710c4d845a9a09922fc782314b1d547c8c63b1ca5e39277986a",
+    "manifest_hash": "blake3:458165b6587b7e7fd3e616e45df122264567f4b6fc76201cfa159c4a3f69d76a"
+  }
+]

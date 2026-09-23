@@ -1,0 +1,18 @@
+[project]
+name = "tessera-ecosystem-bench"
+version = "0.0.0"
+description = "Cross-ecosystem I/O comparison for Tessera .tsra vs HDF5/Zarr/NIfTI/DICOM/Parquet/NeXus (#143)"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2",
+    "h5py>=3.11",
+    "zarr>=3",
+    "numcodecs>=0.13",
+    "nibabel>=5.2",
+    "pydicom>=3",
+    "pyarrow>=17",
+    "uproot>=5",
+]
+
+[tool.uv]
+# Use the Nix-provided CPython (UV_PYTHON in the devShell); never download an interpreter.

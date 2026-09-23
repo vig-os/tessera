@@ -1,0 +1,13 @@
+```
+$ tessera inspect ../../corpus/files/listmode_events.tsra
+tessera [..] · product=listmode
+id            [..]
+name          lm-3p
+timestamp     2024-01-01T00:00:00Z
+producer      tessera/0.0.0
+content_hash  blake3:207025b1bb4d2b647d1647a860c456513478cf46b2fee4da9eb2ba910e95c33e
+manifest_hash blake3:b6570c78cd9ddde3839aadbefbc0068244d86e90c15e93a9fcf96bcc961c4ac9
+blocks        1
+  - events               Table blake3:b89d887ee84d1445f80e35b43f323cbaeb68c1d2b8b318acdbaac8415ebfb505
+
+```

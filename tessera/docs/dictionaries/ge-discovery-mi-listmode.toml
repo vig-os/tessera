@@ -1,0 +1,247 @@
+# GE Discovery MI (Gen2 / "DMI6", Galileo TOF architecture) listmode column dictionary
+# ---------------------------------------------------------------------------------------
+# The fd5/tessera per-column annotation triad (short_name · description · unit) for the GE
+# listmode HDF5 datasets — definitions the vendor HDF5 does NOT carry (issue #307).
+#
+# Provenance (domain-owner sources, in authority order):
+#   1. MorePET/ge-discovery-data-framework — the canonical GE Discovery listmode parser that
+#      WROTE this HDF5. Definitive references:
+#        - docs/DescriptionCSV.md   — the field dictionary (ID, E/eV, t/ps, N, V_{x,y,z}/mm, L/ps)
+#        - lib/DiscoveryMIGen2/include/ListModeEvent.h — field defs + unit comments
+#          ("timeMarker, in ms"; "coincCount = # coincidences in prior 1ms window"; …)
+#        - docs/DOC1170822 - CoinLink White Paper.pdf — GE's own event-format spec
+#        - lib/GEHDF5/ — the HDF5 writer;  geometry_DiscoveryMIGen2_sixRings.txt (54 ax × 544 tx)
+#   2. GE petCoincLinkEvents.h © 2012 General Electric — raw Galileo bitfields.
+#   3. Empirical range analysis of DP01 (500k-row samples) — used to CONFIRM/CORRECT units.
+#
+# Two doc-vs-data conflicts, resolved in favour of the data (flagged `_conflict`):
+#   - `lt`  : DescriptionCSV says "ps"; HDF5 float range is ±17 (matches the ±15 ns coincidence
+#             window) ⇒ the HDF5 `lt` is in **ns**. (CSV ps likely the integer export form.)
+#   - `en`  : DescriptionCSV says "eV"; HDF5 events `en` peaks at 511 (annihilation photopeak),
+#             range 425–650 ⇒ **keV**.
+#
+# `unit` uses UCUM; "1" = dimensionless (index/count/flag). `_tentative` = still unconfirmed.
+
+# ── raw_data/singles — per-single-photon detections (7.9 B rows) ────────────────────────
+[singles.ms]
+short_name = "ms"
+description = "Single-photon timestamp, milliseconds since the PROP time counter reset."
+dtype = "u4"
+unit = "ms"                     # CONFIRMED: ListModeEvent.h timeMarker "in 1ms increments"; data +1/row
+vocabulary = "GE-Galileo"
+
+[singles.en]
+short_name = "en"
+description = "Single-crystal energy readout (Anger-math). Data range ~100–450 → keV-scale."
+dtype = "u2"
+unit = "keV"                    # raw readout; cal-refined via getEnergyAxis (keV=((bin-0.5)/EPeak)*511)
+vocabulary = "GE-Galileo"
+_tentative = true               # singles en is the raw readout; confirm keV vs bin
+
+[singles.ax]
+short_name = "ax"
+description = "Crystal axial index (0–53 on DMI6, 54 rings)."
+dtype = "u1"
+unit = "1"
+vocabulary = "GE-Galileo"
+
+[singles.tx]
+short_name = "tx"
+description = "Crystal trans-axial index (0–543 on DMI6)."
+dtype = "u2"
+unit = "1"
+vocabulary = "GE-Galileo"
+
+[singles.td]
+short_name = "td"
+description = "Time until the NEXT hit (inter-single Δt). Not a rolling clock — a per-hit difference."
+dtype = "u2"
+unit = "ps"                     # CONFIRMED: DescriptionCSV "t/ps = Time until next hit, in ps"; data 0–65535, non-monotonic
+vocabulary = "GE-Galileo"
+
+# ── proc_data/coin_2p · coin_3p — raw coincidences (1.24 B / 340 M rows) ─────────────────
+# Same fields, arity 2 (doubles) or 3 (triples). Raw energies (integer readout, pre-keV-float).
+[coin.ms]
+short_name = "ms"
+description = "Coincidence timestamp, ms since PROP reset."
+dtype = "u4"
+unit = "ms"
+vocabulary = "GE-Galileo"
+
+[coin.en]
+short_name = "en"
+description = "Per-photon energy readout of the coincidence (integer). Array [2] (2p) / [3] (3p)."
+dtype = "u2[]"
+unit = "keV"
+vocabulary = "GE-Galileo"
+_tentative = true               # integer readout; keV-scale after cal
+
+[coin.ax]
+short_name = "ax"
+description = "Per-photon crystal axial indices. Array [2]/[3]."
+dtype = "u1[]"
+unit = "1"
+vocabulary = "GE-Galileo"
+
+[coin.tx]
+short_name = "tx"
+description = "Per-photon crystal trans-axial indices. Array [2]/[3]."
+dtype = "u2[]"
+unit = "1"
+vocabulary = "GE-Galileo"
+
+[coin.dt]
+short_name = "dt"
+description = "TOF signed delta-time (electronics bins → ps via TOF cal). Scalar (2p) / [2] (3p)."
+dtype = "u2"
+unit = "{tof_bin}"              # data 0–191 bins; convert to ps via TOF calibration
+vocabulary = "GE-Galileo"
+
+# ── proc_data/events_2p · events_3p — reconstructed annihilation events (158 M / 10 M) ───
+# The science tier: calibrated energies (keV, 511 photopeak), reconstructed vertex (mm); 3p
+# additionally carries the positronium lifetime (MorePET's target observable).
+[events.ms]
+short_name = "ms"
+description = "Event timestamp, ms since PROP reset."
+dtype = "u4"
+unit = "ms"
+vocabulary = "GE-Galileo"
+
+[events.dt]
+short_name = "dt"
+description = "TOF signed delta-time (electronics bins → ps via TOF cal). Data 0–191."
+dtype = "u2"
+unit = "{tof_bin}"
+vocabulary = "GE-Galileo"
+
+[events.en]
+short_name = "en"
+description = "Calibrated per-photon energies. [2]: the two 511 keV annihilation γ (425–650, peak 511). [3] (3p): the 3rd is the prompt γ (600–1220 keV)."
+dtype = "f4[]"
+unit = "keV"                    # CONFIRMED by 511 photopeak; DescriptionCSV "eV" is inconsistent
+vocabulary = "MorePET"
+_conflict = "DescriptionCSV.md says eV; data (511 photopeak) says keV"
+quantize_scale = 0.1   # 0.1 keV — 0..1220 keV ×10 fits int16 ±32767
+quantize_dtype = "i2"
+
+[events.ax]
+short_name = "ax"
+description = "Per-photon crystal axial indices. Array [2]/[3]."
+dtype = "u1[]"
+unit = "1"
+vocabulary = "GE-Galileo"
+
+[events.tx]
+short_name = "tx"
+description = "Per-photon crystal trans-axial indices. Array [2]/[3]."
+dtype = "u2[]"
+unit = "1"
+vocabulary = "GE-Galileo"
+
+[events.vtx]
+short_name = "vtx"
+description = "Reconstructed annihilation vertex (x, y, z). Data: x,y ±369.8 (transaxial FOV), z ±147.9 (axial FOV)."
+dtype = "f4[3]"
+unit = "mm"                     # CONFIRMED: DescriptionCSV V_{x,y,z}/mm + FOV-matching ranges
+vocabulary = "MorePET"
+quantize_scale = 0.0125   # 0.0125 mm — ±370 mm ×80 = ±29600 (int16-safe)
+quantize_dtype = "i2"
+
+[events.lt]
+short_name = "lt"
+description = "Positronium lifetime (3p only): Δt between the prompt γ and the o-Ps annihilation."
+dtype = "f4"
+unit = "ns"                     # data −16.8…+17.4 (matches ±15 ns window). DescriptionCSV says ps.
+vocabulary = "MorePET"
+_conflict = "DescriptionCSV.md says ps; HDF5 float range (±17, = ±15ns window) says ns"
+quantize_scale = 0.001   # 1 ps — ±17 ns ×1000 = ±17000 (int16-safe)
+quantize_dtype = "i2"
+
+[events.lt_corr]
+short_name = "lt_corr"
+description = "Positronium lifetime, corrected (TOF/geometry). Sparse — NaN for most events."
+dtype = "f4"
+unit = "ns"
+vocabulary = "MorePET"
+_tentative = true               # same ns/ps question as lt; mostly NaN in DP01
+quantize_scale = 0.001   # 1 ps, as lt
+quantize_dtype = "i2"
+
+# ── raw_data/time_markers — per-millisecond time index + running counts (416 k rows) ────
+[time_markers.tm]
+short_name = "tm"
+description = "Time marker: ms since PROP reset. One row per ms (monotonic +1), the block clock."
+dtype = "u4"
+unit = "ms"
+vocabulary = "GE-Galileo"
+
+[time_markers.idx]
+short_name = "idx"
+description = "Cumulative offset into the singles stream at this time marker (data → ~7.9e9 = total singles)."
+dtype = "u8"
+unit = "1"
+vocabulary = "MorePET"
+
+[time_markers.length]
+short_name = "length"
+description = "Number of 1 ms increments this marker row spans. Normally 1; >1 (up to ~253) marks dropped-marker / data-loss gaps."
+dtype = "u1"
+unit = "ms"
+vocabulary = "MorePET"
+
+[time_markers.n_singles]
+short_name = "n_singles"
+description = "Singles in this 1 ms interval (data ~19 k/ms ≈ 19 M/s)."
+dtype = "u4"
+unit = "1"
+vocabulary = "MorePET"
+
+[time_markers.n_coins2p]
+short_name = "n_coins2p"
+description = "Raw 2-photon coincidences in this interval (~3 k/ms)."
+dtype = "u4"
+unit = "1"
+vocabulary = "MorePET"
+
+[time_markers.n_coins3p]
+short_name = "n_coins3p"
+description = "Raw 3-photon coincidences in this interval (~0.8 k/ms)."
+dtype = "u4"
+unit = "1"
+vocabulary = "MorePET"
+
+[time_markers.n_event2p]
+short_name = "n_event2p"
+description = "Reconstructed 2p events in this interval (~380/ms)."
+dtype = "u4"
+unit = "1"
+vocabulary = "MorePET"
+
+[time_markers.n_event3p]
+short_name = "n_event3p"
+description = "Reconstructed 3p events in this interval (~24/ms)."
+dtype = "u4"
+unit = "1"
+vocabulary = "MorePET"
+
+# ── raw_data/coin_counters — hardware coincidence counter (408 k rows) ───────────────────
+[coin_counters.tm]
+short_name = "tm"
+description = "Time marker (ms) for this counter sample."
+dtype = "u4"
+unit = "ms"
+vocabulary = "GE-Galileo"
+
+[coin_counters.idx]
+short_name = "idx"
+description = "Cumulative offset into the listmode stream."
+dtype = "u8"
+unit = "1"
+vocabulary = "MorePET"
+
+[coin_counters.cc]
+short_name = "cc"
+description = "Hardware coincidence count in the prior 1 ms window (PET_LINK_EVT_COINC_COUNT, 20-bit) — integrity cross-check."
+dtype = "u4"
+unit = "1"
+vocabulary = "GE-Galileo"

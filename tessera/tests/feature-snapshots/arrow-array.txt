@@ -1,0 +1,462 @@
+    `-- vortex-array v0.75.0 (*)
+`-- arrow-array feature "ffi"
+arrow-array v58.3.0
+|       `-- datafusion-sql v54.0.0 (*)
+|       |               `-- datafusion v54.0.0 (*)
+|       |           `-- datafusion-functions-table feature "default"
+|       |       `-- datafusion feature "sql" (*)
+|       |       `-- datafusion-common feature "sql" (*)
+|       |       `-- datafusion-functions-table v54.0.0
+|       |       |       `-- datafusion v54.0.0 (*)
+|       |       |   `-- datafusion-catalog-listing feature "default"
+|       |       |-- datafusion v54.0.0 (*)
+|       |       |-- datafusion-catalog-listing v54.0.0
+|       |   `-- datafusion feature "sqlparser"
+|       |   `-- datafusion-catalog feature "default"
+|       |   `-- datafusion-common feature "sqlparser"
+|       |   `-- datafusion-session v54.0.0 (*)
+|       |   |           `-- tessera-cli feature "static-hdf5" (command-line)
+|       |   |           |-- tessera-cli feature "cloud" (command-line)
+|       |   |           |-- tessera-cli feature "default" (command-line)
+|       |   |           |-- tessera-cli feature "sql" (command-line)
+|       |   |       `-- datafusion-expr feature "sql" (*)
+|       |   |       `-- datafusion-pruning v54.0.0 (*)
+|       |   |       `-- tessera-cli vWORKSPACE
+|       |   |       |       `-- datafusion-physical-plan v54.0.0 (*)
+|       |   |       |       |-- datafusion-expr v54.0.0 (*)
+|       |   |       |       |-- datafusion-functions-aggregate v54.0.0 (*)
+|       |   |       |       |-- datafusion-functions-nested v54.0.0 (*)
+|       |   |       |       |-- datafusion-physical-expr v54.0.0 (*)
+|       |   |       |   `-- datafusion-functions-aggregate-common feature "default"
+|       |   |       |   `-- datafusion-pruning v54.0.0 (*)
+|       |   |       |   |       `-- datafusion-physical-plan v54.0.0 (*)
+|       |   |       |   |       |-- datafusion-expr v54.0.0 (*)
+|       |   |       |   |       |-- datafusion-functions-window v54.0.0 (*)
+|       |   |       |   |   `-- datafusion-functions-window-common feature "default"
+|       |   |       |   |-- datafusion v54.0.0 (*)
+|       |   |       |   |-- datafusion-catalog-listing v54.0.0 (*)
+|       |   |       |   |-- datafusion-datasource v54.0.0 (*)
+|       |   |       |   |-- datafusion-datasource-arrow v54.0.0 (*)
+|       |   |       |   |-- datafusion-datasource-csv v54.0.0 (*)
+|       |   |       |   |-- datafusion-datasource-json v54.0.0 (*)
+|       |   |       |   |-- datafusion-execution v54.0.0 (*)
+|       |   |       |   |-- datafusion-expr v54.0.0 (*)
+|       |   |       |   |-- datafusion-functions v54.0.0 (*)
+|       |   |       |   |-- datafusion-functions-aggregate v54.0.0 (*)
+|       |   |       |   |-- datafusion-functions-aggregate-common v54.0.0 (*)
+|       |   |       |   |-- datafusion-functions-nested v54.0.0 (*)
+|       |   |       |   |-- datafusion-functions-window v54.0.0 (*)
+|       |   |       |   |-- datafusion-functions-window-common v54.0.0
+|       |   |       |   |-- datafusion-physical-expr v54.0.0 (*)
+|       |   |       |   |-- datafusion-physical-expr-adapter v54.0.0 (*)
+|       |   |       |   |-- datafusion-physical-optimizer v54.0.0 (*)
+|       |   |       |   |-- datafusion-physical-plan v54.0.0 (*)
+|       |   |       |-- datafusion v54.0.0 (*)
+|       |   |       |-- datafusion-expr v54.0.0 (*)
+|       |   |       |-- datafusion-functions v54.0.0 (*)
+|       |   |       |-- datafusion-functions-aggregate-common v54.0.0
+|       |   |       |-- datafusion-functions-nested v54.0.0 (*)
+|       |   |       |-- datafusion-optimizer v54.0.0 (*)
+|       |   |       |-- datafusion-physical-expr v54.0.0 (*)
+|       |   |       |-- datafusion-physical-expr-common v54.0.0
+|       |   |       |-- datafusion-physical-optimizer v54.0.0 (*)
+|       |   |   `-- datafusion feature "recursive_protection" (*)
+|       |   |   `-- datafusion feature "sql"
+|       |   |   `-- datafusion feature "sql" (*)
+|       |   |   `-- datafusion-datasource-json v54.0.0 (*)
+|       |   |   `-- datafusion-expr feature "sqlparser"
+|       |   |   `-- datafusion-expr-common feature "default"
+|       |   |   `-- datafusion-pruning v54.0.0 (*)
+|       |   |   `-- datafusion-session v54.0.0 (*)
+|       |   |   `-- datafusion-session v54.0.0 (*)
+|       |   |   `-- datafusion-sql v54.0.0 (*)
+|       |   |   `-- tessera-cli vWORKSPACE (*)
+|       |   |   |                   `-- datafusion feature "recursive_protection" (*)
+|       |   |   |               `-- datafusion-physical-optimizer feature "recursive_protection"
+|       |   |   |               |   `-- datafusion v54.0.0 (*)
+|       |   |   |               |-- datafusion-physical-optimizer feature "default"
+|       |   |   |           `-- datafusion-physical-optimizer v54.0.0
+|       |   |   |       `-- datafusion feature "recursive_protection" (*)
+|       |   |   |       `-- datafusion feature "recursive_protection" (*)
+|       |   |   |       `-- datafusion v54.0.0 (*)
+|       |   |   |       `-- datafusion-functions feature "string_expressions" (*)
+|       |   |   |       `-- datafusion-functions-nested v54.0.0 (*)
+|       |   |   |       `-- datafusion-pruning feature "default"
+|       |   |   |       |-- datafusion v54.0.0 (*)
+|       |   |   |   `-- datafusion feature "recursive_protection" (*)
+|       |   |   |   `-- datafusion v54.0.0 (*)
+|       |   |   |   `-- datafusion-functions feature "uuid"
+|       |   |   |   `-- datafusion-functions-aggregate feature "default"
+|       |   |   |   `-- datafusion-functions-nested feature "sql" (*)
+|       |   |   |   `-- datafusion-functions-window feature "default"
+|       |   |   |   `-- datafusion-optimizer feature "recursive_protection"
+|       |   |   |   `-- datafusion-physical-expr feature "recursive_protection"
+|       |   |   |   `-- datafusion-pruning v54.0.0
+|       |   |   |   `-- datafusion-pruning v54.0.0 (*)
+|       |   |   |   `-- datafusion-sql v54.0.0 (*)
+|       |   |   |   |                           `-- datafusion-datasource-json v54.0.0 (*)
+|       |   |   |   |                           |-- datafusion v54.0.0 (*)
+|       |   |   |   |                           |-- datafusion-catalog v54.0.0 (*)
+|       |   |   |   |                           |-- datafusion-datasource v54.0.0 (*)
+|       |   |   |   |                           |-- datafusion-datasource-arrow v54.0.0 (*)
+|       |   |   |   |                           |-- datafusion-datasource-csv v54.0.0 (*)
+|       |   |   |   |                       `-- datafusion-session feature "default"
+|       |   |   |   |                   `-- datafusion-session v54.0.0
+|       |   |   |   |                   |-- datafusion v54.0.0 (*)
+|       |   |   |   |                   |-- datafusion-catalog v54.0.0 (*)
+|       |   |   |   |                   |-- datafusion-catalog-listing v54.0.0 (*)
+|       |   |   |   |                   |-- datafusion-datasource v54.0.0 (*)
+|       |   |   |   |                   |-- datafusion-datasource-arrow v54.0.0 (*)
+|       |   |   |   |                   |-- datafusion-datasource-csv v54.0.0 (*)
+|       |   |   |   |                   |-- datafusion-datasource-json v54.0.0 (*)
+|       |   |   |   |                   |-- datafusion-functions-table v54.0.0 (*)
+|       |   |   |   |                   |-- datafusion-physical-optimizer v54.0.0 (*)
+|       |   |   |   |                   |-- datafusion-pruning v54.0.0 (*)
+|       |   |   |   |               `-- datafusion-physical-plan feature "default"
+|       |   |   |   |           `-- datafusion-physical-plan v54.0.0
+|       |   |   |   |           |               `-- datafusion-sql feature "default" (*)
+|       |   |   |   |           |           `-- datafusion-sql feature "unparser"
+|       |   |   |   |           |           |   `-- datafusion feature "recursive_protection" (*)
+|       |   |   |   |           |           |   `-- datafusion v54.0.0 (*)
+|       |   |   |   |           |           |   `-- datafusion-sql feature "default" (*)
+|       |   |   |   |           |           |-- datafusion-sql feature "default"
+|       |   |   |   |           |           |-- datafusion-sql feature "recursive_protection"
+|       |   |   |   |           |           |-- datafusion-sql feature "unicode_expressions"
+|       |   |   |   |           |       `-- datafusion-sql v54.0.0
+|       |   |   |   |           |   `-- datafusion-datasource v54.0.0 (*)
+|       |   |   |   |           |   `-- datafusion-functions-nested feature "sql"
+|       |   |   |   |           |   |-- datafusion v54.0.0 (*)
+|       |   |   |   |           |   |-- datafusion-catalog-listing v54.0.0 (*)
+|       |   |   |   |           |-- datafusion v54.0.0 (*)
+|       |   |   |   |           |-- datafusion-functions-nested v54.0.0
+|       |   |   |   |           |-- datafusion-physical-expr-adapter v54.0.0
+|       |   |   |   |       `-- datafusion-functions feature "default"
+|       |   |   |   |       `-- datafusion-functions feature "default" (*)
+|       |   |   |   |       `-- datafusion-functions feature "default" (*)
+|       |   |   |   |   `-- datafusion v54.0.0 (*)
+|       |   |   |   |   `-- datafusion v54.0.0 (*)
+|       |   |   |   |   `-- datafusion v54.0.0 (*)
+|       |   |   |   |   `-- datafusion-functions feature "datetime_expressions"
+|       |   |   |   |   `-- datafusion-functions feature "default" (*)
+|       |   |   |   |   `-- datafusion-functions feature "default" (*)
+|       |   |   |   |   `-- datafusion-functions feature "default" (*)
+|       |   |   |   |   `-- datafusion-functions feature "encoding_expressions"
+|       |   |   |   |   `-- datafusion-functions feature "encoding_expressions" (*)
+|       |   |   |   |   `-- datafusion-functions feature "regex_expressions"
+|       |   |   |   |   `-- datafusion-physical-plan v54.0.0 (*)
+|       |   |   |   |-- datafusion v54.0.0 (*)
+|       |   |   |   |-- datafusion v54.0.0 (*)
+|       |   |   |   |-- datafusion-catalog v54.0.0 (*)
+|       |   |   |   |-- datafusion-catalog v54.0.0 (*)
+|       |   |   |   |-- datafusion-catalog-listing v54.0.0 (*)
+|       |   |   |   |-- datafusion-catalog-listing v54.0.0 (*)
+|       |   |   |   |-- datafusion-datasource v54.0.0 (*)
+|       |   |   |   |-- datafusion-datasource-arrow v54.0.0
+|       |   |   |   |-- datafusion-datasource-csv v54.0.0
+|       |   |   |   |-- datafusion-datasource-json v54.0.0
+|       |   |   |   |-- datafusion-functions feature "base64"
+|       |   |   |   |-- datafusion-functions feature "chrono-tz"
+|       |   |   |   |-- datafusion-functions feature "datetime_expressions" (*)
+|       |   |   |   |-- datafusion-functions feature "default" (*)
+|       |   |   |   |-- datafusion-functions feature "encoding_expressions" (*)
+|       |   |   |   |-- datafusion-functions feature "hex"
+|       |   |   |   |-- datafusion-functions feature "math_expressions"
+|       |   |   |   |-- datafusion-functions feature "regex"
+|       |   |   |   |-- datafusion-functions feature "regex_expressions" (*)
+|       |   |   |   |-- datafusion-functions feature "string_expressions"
+|       |   |   |   |-- datafusion-functions feature "unicode_expressions"
+|       |   |   |   |-- datafusion-functions-aggregate v54.0.0 (*)
+|       |   |   |   |-- datafusion-functions-table v54.0.0 (*)
+|       |   |   |   |-- datafusion-functions-window v54.0.0 (*)
+|       |   |   |   |-- datafusion-optimizer v54.0.0 (*)
+|       |   |   |   |-- datafusion-physical-expr feature "default"
+|       |   |   |   |-- datafusion-physical-expr-adapter v54.0.0 (*)
+|       |   |   |   |-- datafusion-physical-optimizer v54.0.0 (*)
+|       |   |   |-- datafusion v54.0.0 (*)
+|       |   |   |-- datafusion v54.0.0 (*)
+|       |   |   |-- datafusion v54.0.0 (*)
+|       |   |   |-- datafusion-catalog v54.0.0 (*)
+|       |   |   |-- datafusion-catalog v54.0.0 (*)
+|       |   |   |-- datafusion-catalog-listing v54.0.0 (*)
+|       |   |   |-- datafusion-catalog-listing v54.0.0 (*)
+|       |   |   |-- datafusion-catalog-listing v54.0.0 (*)
+|       |   |   |-- datafusion-datasource v54.0.0
+|       |   |   |-- datafusion-datasource v54.0.0 (*)
+|       |   |   |-- datafusion-datasource v54.0.0 (*)
+|       |   |   |-- datafusion-datasource-arrow v54.0.0 (*)
+|       |   |   |-- datafusion-datasource-arrow v54.0.0 (*)
+|       |   |   |-- datafusion-datasource-arrow v54.0.0 (*)
+|       |   |   |-- datafusion-datasource-csv v54.0.0 (*)
+|       |   |   |-- datafusion-datasource-csv v54.0.0 (*)
+|       |   |   |-- datafusion-datasource-csv v54.0.0 (*)
+|       |   |   |-- datafusion-datasource-json v54.0.0 (*)
+|       |   |   |-- datafusion-datasource-json v54.0.0 (*)
+|       |   |   |-- datafusion-execution v54.0.0 (*)
+|       |   |   |-- datafusion-expr feature "recursive_protection"
+|       |   |   |-- datafusion-expr feature "sql"
+|       |   |   |-- datafusion-functions v54.0.0
+|       |   |   |-- datafusion-functions v54.0.0 (*)
+|       |   |   |-- datafusion-functions-aggregate v54.0.0
+|       |   |   |-- datafusion-functions-aggregate v54.0.0 (*)
+|       |   |   |-- datafusion-functions-nested v54.0.0 (*)
+|       |   |   |-- datafusion-functions-nested v54.0.0 (*)
+|       |   |   |-- datafusion-functions-table v54.0.0 (*)
+|       |   |   |-- datafusion-functions-window v54.0.0
+|       |   |   |-- datafusion-optimizer v54.0.0
+|       |   |   |-- datafusion-optimizer v54.0.0 (*)
+|       |   |   |-- datafusion-physical-expr v54.0.0
+|       |   |   |-- datafusion-physical-expr-adapter v54.0.0 (*)
+|       |   |   |-- datafusion-physical-optimizer v54.0.0 (*)
+|       |   |   |-- datafusion-physical-optimizer v54.0.0 (*)
+|       |   |   |-- datafusion-physical-plan v54.0.0 (*)
+|       |   |   |-- datafusion-physical-plan v54.0.0 (*)
+|       |   |-- datafusion feature "datafusion-sql"
+|       |   |-- datafusion feature "recursive_protection"
+|       |   |-- datafusion feature "sql" (*)
+|       |   |-- datafusion-catalog v54.0.0 (*)
+|       |   |-- datafusion-common feature "default"
+|       |   |-- datafusion-common feature "object_store"
+|       |   |-- datafusion-common feature "recursive_protection"
+|       |   |-- datafusion-common feature "sql"
+|       |   |-- datafusion-execution v54.0.0
+|       |   |-- datafusion-expr v54.0.0
+|       |   |-- datafusion-expr-common v54.0.0
+|       |   |-- datafusion-functions v54.0.0 (*)
+|       |   |-- datafusion-functions-aggregate v54.0.0 (*)
+|       |   |-- datafusion-functions-aggregate-common v54.0.0 (*)
+|       |   |-- datafusion-functions-nested v54.0.0 (*)
+|       |   |-- datafusion-functions-table v54.0.0 (*)
+|       |   |-- datafusion-functions-window v54.0.0 (*)
+|       |   |-- datafusion-functions-window-common v54.0.0 (*)
+|       |   |-- datafusion-physical-expr v54.0.0 (*)
+|       |   |-- datafusion-physical-expr-adapter v54.0.0 (*)
+|       |   |-- datafusion-physical-expr-common v54.0.0 (*)
+|       |   |-- datafusion-physical-optimizer v54.0.0 (*)
+|       |   |-- datafusion-physical-plan v54.0.0 (*)
+|       |-- datafusion v54.0.0
+|       |-- datafusion-catalog v54.0.0
+|       |-- datafusion-catalog-listing v54.0.0 (*)
+|       |-- datafusion-common v54.0.0
+|       |-- datafusion-datasource v54.0.0 (*)
+|       |-- datafusion-datasource-arrow v54.0.0 (*)
+|       |-- datafusion-datasource-csv v54.0.0 (*)
+|       |-- datafusion-datasource-json v54.0.0 (*)
+|       |-- datafusion-execution v54.0.0 (*)
+|       |-- datafusion-expr v54.0.0 (*)
+|       |-- datafusion-expr-common v54.0.0 (*)
+|       |-- datafusion-functions v54.0.0 (*)
+|       |-- datafusion-functions-aggregate v54.0.0 (*)
+|       |-- datafusion-functions-aggregate-common v54.0.0 (*)
+|       |-- datafusion-functions-nested v54.0.0 (*)
+|       |-- datafusion-functions-table v54.0.0 (*)
+|       |-- datafusion-functions-window v54.0.0 (*)
+|       |-- datafusion-optimizer v54.0.0 (*)
+|       |-- datafusion-physical-expr v54.0.0 (*)
+|       |-- datafusion-physical-expr-adapter v54.0.0 (*)
+|       |-- datafusion-physical-expr-common v54.0.0 (*)
+|       |-- datafusion-physical-optimizer v54.0.0 (*)
+|       |-- datafusion-physical-plan v54.0.0 (*)
+|       |-- datafusion-pruning v54.0.0 (*)
+|   `-- arrow feature "chrono-tz"
+|   `-- vortex-layout v0.75.0 (*)
+|   |               `-- tessera-io vWORKSPACE (*)
+|   |               `-- vortex-file v0.75.0 (*)
+|   |               |-- vortex-btrblocks v0.75.0 (*)
+|   |           `-- vortex-array feature "default"
+|   |           `-- vortex-zigzag v0.75.0
+|   |           |       `-- tessera-io vWORKSPACE (*)
+|   |           |   `-- vortex-btrblocks v0.75.0 (*)
+|   |           |   `-- vortex-file v0.75.0 (*)
+|   |           |   `-- vortex-file v0.75.0 (*)
+|   |           |   `-- vortex-file v0.75.0 (*)
+|   |           |   `-- vortex-file v0.75.0 (*)
+|   |           |   `-- vortex-file v0.75.0 (*)
+|   |           |   `-- vortex-file v0.75.0 (*)
+|   |           |   `-- vortex-file v0.75.0 (*)
+|   |           |   `-- vortex-file v0.75.0 (*)
+|   |           |   `-- vortex-io feature "default"
+|   |           |   `-- vortex-layout v0.75.0 (*)
+|   |           |   `-- vortex-layout v0.75.0 (*)
+|   |           |   `-- vortex-layout v0.75.0 (*)
+|   |           |   `-- vortex-layout v0.75.0 (*)
+|   |           |   |           `-- tessera-io vWORKSPACE (*)
+|   |           |   |       `-- tessera-io vWORKSPACE (*)
+|   |           |   |       `-- vortex-file v0.75.0 (*)
+|   |           |   |       `-- vortex-layout feature "default"
+|   |           |   |   `-- vortex-btrblocks feature "pco"
+|   |           |   |   `-- vortex-layout v0.75.0
+|   |           |   |   |                   `-- tessera-py feature "default" (command-line)
+|   |           |   |   |               `-- tessera-py vWORKSPACE
+|   |           |   |   |               |       `-- tessera-cli feature "static-hdf5" (command-line)
+|   |           |   |   |               |   `-- tessera-ingest feature "static-hdf5" (command-line)
+|   |           |   |   |               |   |   `-- tessera-cli vWORKSPACE (*)
+|   |           |   |   |               |   |-- tessera-ingest feature "default" (command-line)
+|   |           |   |   |               |-- tessera-cli vWORKSPACE (*)
+|   |           |   |   |               |-- tessera-ingest vWORKSPACE
+|   |           |   |   |           `-- tessera-io feature "default" (command-line)
+|   |           |   |   |           |   `-- tessera-cli feature "cloud" (command-line)
+|   |           |   |   |           |-- tessera-io feature "cloud" (command-line)
+|   |           |   |   |       `-- tessera-io vWORKSPACE
+|   |           |   |   |   `-- tessera-io vWORKSPACE (*)
+|   |           |   |   |   `-- vortex-file feature "default"
+|   |           |   |   |-- vortex-btrblocks feature "default"
+|   |           |   |   |-- vortex-file v0.75.0
+|   |           |   |-- vortex-alp v0.75.0 (*)
+|   |           |   |-- vortex-btrblocks v0.75.0
+|   |           |   |-- vortex-btrblocks v0.75.0 (*)
+|   |           |   |-- vortex-btrblocks v0.75.0 (*)
+|   |           |   |-- vortex-btrblocks v0.75.0 (*)
+|   |           |   |-- vortex-btrblocks v0.75.0 (*)
+|   |           |   |-- vortex-btrblocks v0.75.0 (*)
+|   |           |   |-- vortex-btrblocks v0.75.0 (*)
+|   |           |   |-- vortex-btrblocks v0.75.0 (*)
+|   |           |   |-- vortex-btrblocks v0.75.0 (*)
+|   |           |   |-- vortex-file v0.75.0 (*)
+|   |           |   |-- vortex-file v0.75.0 (*)
+|   |           |   |-- vortex-file v0.75.0 (*)
+|   |           |   |-- vortex-file v0.75.0 (*)
+|   |           |-- vortex-alp v0.75.0
+|   |           |-- vortex-btrblocks v0.75.0 (*)
+|   |           |-- vortex-bytebool v0.75.0
+|   |           |-- vortex-compressor v0.75.0
+|   |           |-- vortex-datetime-parts v0.75.0
+|   |           |-- vortex-decimal-byte-parts v0.75.0
+|   |           |-- vortex-fastlanes v0.75.0
+|   |           |-- vortex-file v0.75.0 (*)
+|   |           |-- vortex-fsst v0.75.0
+|   |           |-- vortex-io v0.75.0
+|   |           |-- vortex-layout v0.75.0 (*)
+|   |           |-- vortex-pco v0.75.0
+|   |           |-- vortex-runend v0.75.0
+|   |           |-- vortex-scan v0.75.0
+|   |           |-- vortex-sequence v0.75.0
+|   |           |-- vortex-sparse v0.75.0
+|   |       `-- arrow v58.3.0 (*)
+|   |       `-- datafusion-physical-plan v54.0.0 (*)
+|   |       `-- datafusion-sql v54.0.0 (*)
+|   |       `-- vortex-array v0.75.0
+|   |       `-- vortex-array v0.75.0 (*)
+|   |       `-- vortex-array v0.75.0 (*)
+|   |       |       `-- vortex-array v0.75.0 (*)
+|   |       |       |-- arrow v58.3.0 (*)
+|   |       |   `-- arrow-string feature "default"
+|   |       |-- arrow v58.3.0 (*)
+|   |       |-- arrow v58.3.0 (*)
+|   |       |-- arrow v58.3.0 (*)
+|   |       |-- arrow-cast v58.3.0 (*)
+|   |       |-- arrow-cast v58.3.0 (*)
+|   |       |-- arrow-ipc v58.3.0 (*)
+|   |       |-- arrow-json v58.3.0 (*)
+|   |       |-- arrow-json v58.3.0 (*)
+|   |       |-- arrow-ord v58.3.0 (*)
+|   |       |-- arrow-string v58.3.0
+|   |       |-- datafusion v54.0.0 (*)
+|   |       |-- datafusion-catalog v54.0.0 (*)
+|   |       |-- datafusion-catalog-listing v54.0.0 (*)
+|   |       |-- datafusion-common v54.0.0 (*)
+|   |       |-- datafusion-common v54.0.0 (*)
+|   |       |-- datafusion-datasource v54.0.0 (*)
+|   |       |-- datafusion-datasource-arrow v54.0.0 (*)
+|   |       |-- datafusion-datasource-arrow v54.0.0 (*)
+|   |       |-- datafusion-datasource-csv v54.0.0 (*)
+|   |       |-- datafusion-datasource-json v54.0.0 (*)
+|   |       |-- datafusion-execution v54.0.0 (*)
+|   |       |-- datafusion-expr v54.0.0 (*)
+|   |       |-- datafusion-expr-common v54.0.0 (*)
+|   |       |-- datafusion-functions v54.0.0 (*)
+|   |       |-- datafusion-functions-aggregate v54.0.0 (*)
+|   |       |-- datafusion-functions-aggregate-common v54.0.0 (*)
+|   |       |-- datafusion-functions-nested v54.0.0 (*)
+|   |       |-- datafusion-functions-table v54.0.0 (*)
+|   |       |-- datafusion-functions-window v54.0.0 (*)
+|   |       |-- datafusion-optimizer v54.0.0 (*)
+|   |       |-- datafusion-physical-expr v54.0.0 (*)
+|   |       |-- datafusion-physical-expr-adapter v54.0.0 (*)
+|   |       |-- datafusion-physical-expr-common v54.0.0 (*)
+|   |       |-- datafusion-physical-optimizer v54.0.0 (*)
+|   |       |-- datafusion-physical-plan v54.0.0 (*)
+|   |       |-- datafusion-pruning v54.0.0 (*)
+|   |   `-- arrow feature "prettyprint"
+|   |   `-- arrow-arith feature "default"
+|   |   `-- arrow-cast feature "prettyprint" (*)
+|   |   `-- arrow-ipc feature "zstd"
+|   |   `-- arrow-ord feature "default"
+|   |   `-- arrow-row feature "default"
+|   |   `-- arrow-select feature "default"
+|   |   `-- datafusion-physical-plan v54.0.0 (*)
+|   |   |           `-- datafusion-sql v54.0.0 (*)
+|   |   |           |-- datafusion v54.0.0 (*)
+|   |   |           |-- datafusion-catalog v54.0.0 (*)
+|   |   |           |-- datafusion-catalog-listing v54.0.0 (*)
+|   |   |           |-- datafusion-common v54.0.0 (*)
+|   |   |           |-- datafusion-datasource v54.0.0 (*)
+|   |   |           |-- datafusion-datasource-arrow v54.0.0 (*)
+|   |   |           |-- datafusion-datasource-csv v54.0.0 (*)
+|   |   |           |-- datafusion-datasource-json v54.0.0 (*)
+|   |   |           |-- datafusion-execution v54.0.0 (*)
+|   |   |           |-- datafusion-expr v54.0.0 (*)
+|   |   |           |-- datafusion-expr-common v54.0.0 (*)
+|   |   |           |-- datafusion-functions v54.0.0 (*)
+|   |   |           |-- datafusion-functions-aggregate v54.0.0 (*)
+|   |   |           |-- datafusion-functions-aggregate-common v54.0.0 (*)
+|   |   |           |-- datafusion-functions-nested v54.0.0 (*)
+|   |   |           |-- datafusion-functions-table v54.0.0 (*)
+|   |   |           |-- datafusion-functions-window v54.0.0 (*)
+|   |   |           |-- datafusion-optimizer v54.0.0 (*)
+|   |   |           |-- datafusion-physical-expr v54.0.0 (*)
+|   |   |           |-- datafusion-physical-expr-adapter v54.0.0 (*)
+|   |   |           |-- datafusion-physical-expr-common v54.0.0 (*)
+|   |   |           |-- datafusion-physical-optimizer v54.0.0 (*)
+|   |   |           |-- datafusion-physical-plan v54.0.0 (*)
+|   |   |           |-- datafusion-pruning v54.0.0 (*)
+|   |   |       `-- arrow feature "default"
+|   |   |       `-- arrow feature "default" (*)
+|   |   |       `-- arrow feature "default" (*)
+|   |   |       `-- arrow feature "prettyprint" (*)
+|   |   |       `-- tessera-cli vWORKSPACE (*)
+|   |   |   `-- arrow feature "csv"
+|   |   |   `-- arrow feature "ipc"
+|   |   |   `-- arrow feature "json"
+|   |   |   `-- arrow v58.3.0 (*)
+|   |   |   `-- arrow-cast feature "prettyprint"
+|   |   |   `-- arrow-ipc feature "lz4" (*)
+|   |   |   `-- datafusion-expr v54.0.0 (*)
+|   |   |   `-- datafusion-physical-plan v54.0.0 (*)
+|   |   |   `-- vortex-array v0.75.0 (*)
+|   |   |   |       `-- arrow v58.3.0 (*)
+|   |   |   |       `-- arrow v58.3.0 (*)
+|   |   |   |   `-- arrow-csv feature "default"
+|   |   |   |   `-- arrow-json feature "default"
+|   |   |   |-- arrow v58.3.0 (*)
+|   |   |   |-- arrow-csv v58.3.0
+|   |   |   |-- arrow-json v58.3.0
+|   |   |   |-- datafusion-common v54.0.0 (*)
+|   |   |   |-- datafusion-datasource-arrow v54.0.0 (*)
+|   |   |-- arrow feature "arrow-csv"
+|   |   |-- arrow feature "arrow-ipc"
+|   |   |-- arrow feature "arrow-json"
+|   |   |-- arrow feature "canonical_extension_types"
+|   |   |-- arrow feature "chrono-tz" (*)
+|   |   |-- arrow feature "csv" (*)
+|   |   |-- arrow feature "default" (*)
+|   |   |-- arrow feature "ipc" (*)
+|   |   |-- arrow feature "json" (*)
+|   |   |-- arrow-cast feature "comfy-table"
+|   |   |-- arrow-cast feature "default"
+|   |   |-- arrow-ipc feature "default"
+|   |   |-- arrow-ipc feature "lz4"
+|   |   |-- arrow-ipc feature "lz4_flex"
+|   |   |-- datafusion-functions-nested v54.0.0 (*)
+|   |-- arrow v58.3.0
+|   |-- arrow-arith v58.3.0
+|   |-- arrow-cast v58.3.0
+|   |-- arrow-csv v58.3.0 (*)
+|   |-- arrow-ipc v58.3.0
+|   |-- arrow-json v58.3.0 (*)
+|   |-- arrow-ord v58.3.0
+|   |-- arrow-row v58.3.0
+|   |-- arrow-select v58.3.0
+|   |-- arrow-string v58.3.0 (*)
+|   |-- vortex-array v0.75.0 (*)
+|-- arrow-array feature "chrono-tz"
+|-- arrow-array feature "default"

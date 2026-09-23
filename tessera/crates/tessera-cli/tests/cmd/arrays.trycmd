@@ -1,0 +1,93 @@
+Working with an **array block** — the numeric overview, a single-voxel probe, and the projection /
+pyramid surfaces. Runs read-only against the conformance corpus (`recon_int16.tsra`: a 64³ int16 CT
+`volume` with a rescale to Hounsfield units). Digests are globbed with `[..]`.
+
+# === Numeric overview: shape, dtype, chunking, and both raw and physical (rescaled) value ranges. ===
+
+```
+$ tessera stats ../../corpus/files/recon_int16.tsra volume
+block     volume
+shape     [64, 64, 64] (z,y,x)
+dtype     int16   codec pcodec
+chunks    [64, 64, 64]   voxels 262,144
+raw       min -1024  max 3071  mean 1023.500  std 1182.413
+physical  min -2048  max 2047  (1·raw + -1024) HU
+world     index space (no affine — use --index, not --world)
+
+```
+
+# === Probe a single voxel by index (z,y,x) — no full decode, just the chunk it lands in. ===
+
+```
+$ tessera slice ../../corpus/files/recon_int16.tsra volume --index 32,32,32
+1056
+
+```
+
+# === Collapse the volume along an axis into a 2-D image (MIP) — max/mean/sum. ===
+
+```
+$ tessera project ../../corpus/files/recon_int16.tsra volume --help
+Collapse an **array** block along one axis into a projection image (MIP / mean / sum).
+
+A 3-D volume → a 2-D image. `--mode max` (MIP) over the z axis is the classic PET/CT overview. `--axis` is an axis name (`z`/`y`/`x`) or index. `--physical` applies the rescale.
+
+Usage: tessera project [OPTIONS] --axis <AXIS> <FILE> <BLOCK>
+
+Arguments:
+  <FILE>
+          The `.tsra` to read
+
+  <BLOCK>
+          The array block to project (e.g. `volume`)
+
+Options:
+      --axis <AXIS>
+          Axis to collapse: a name from the array's axes (`z`/`y`/`x`) or a 0-based index
+
+      --mode <MODE>
+          Reduction: `max` (MIP, default) | `mean` | `sum`
+          
+          [default: max]
+
+      --physical
+          Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples
+
+      --format <FORMAT>
+          Output format: `csv` (default) | `tsv`
+          
+          [default: csv]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```
+
+# === Build a multiscale overview pyramid → a new derived .tsra (OME-Zarr multiscales geometry). ===
+
+```
+$ tessera pyramid ../../corpus/files/recon_int16.tsra volume --help
+Build a multiscale pyramid of an array block (full-res + 2× downsampled levels) → a new `.tsra`.
+
+Emits a `recon` product with `<block>`, `<block>/1`, `<block>/2`, … (each a 2× max-downsample carrying its `at_level` affine), `derived_from` the source. Coarse levels give fast overviews.
+
+Usage: tessera pyramid [OPTIONS] <FILE> <BLOCK> <OUT>
+
+Arguments:
+  <FILE>
+          The source `.tsra`
+
+  <BLOCK>
+          The 3-D array block to build a pyramid of (e.g. `volume`)
+
+  <OUT>
+          Output `.tsra` path for the pyramid product
+
+Options:
+      --levels <LEVELS>
+          Max downsample levels (default: until the coarsest axis ≤ 64)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```

@@ -1,0 +1,61 @@
+`tessera info` — what this build is (ADR-0057 §7). The shape is pinned here; the *semantics*
+(build modes tracking `cfg!`, JSON keys, the disabled set) are pinned by the unit tests in
+`src/info.rs`. Versions are wildcarded because a dependency bump must not break a docs walkthrough.
+
+```
+$ tessera info
+tessera [..]
+backends:   blob · blob-series · dicom [..] · dicom-series [..] · hdf-compound [..] · nifti · raw
+disabled:   (none)
+build:      static-hdf5=[..] · cloud=[..] · sql=[..]
+
+```
+
+Nothing is disabled today: no decoder feature gate exists yet, so every known backend is compiled
+in. Phase 1's feature graph (ADR-0057 §5) is what starts moving names onto the `disabled:` line —
+and the missing-backend error will point here.
+
+`--json` emits the same facts in a shape meant for `aux/provenance.json`. The binary flavor is
+deliberately NOT sealed: ADR-0056 §6.2 seals `ingest_decoder`, which is what actually determined the
+bytes. ADR-0042's line holds — sealed = what changed the bytes; `aux/` = who was in the room.
+
+```
+$ tessera info --json
+{
+  "tessera_version": "[..]",
+  "format_version": "[..]",
+  "backends": [
+    {
+      "name": "blob"
+    },
+    {
+      "name": "blob-series"
+    },
+    {
+      "name": "dicom",
+      "version": "[..]"
+    },
+    {
+      "name": "dicom-series",
+      "version": "[..]"
+    },
+    {
+      "name": "hdf-compound",
+      "version": "[..]"
+    },
+    {
+      "name": "nifti"
+    },
+    {
+      "name": "raw"
+    }
+  ],
+  "backends_disabled": [],
+  "build": {
+    "cloud": [..],
+    "sql": [..],
+    "static-hdf5": [..]
+  }
+}
+
+```

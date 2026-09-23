@@ -1,0 +1,45 @@
+[package]
+name = "tessera-ingest"
+description = "Tessera ingest — vendor decoders (DICOM, …) that normalise at the door into Tessera products"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tessera-core.workspace = true
+tessera-io.workspace = true
+# Non-fatal ingest WARNs (e.g. recommended-but-absent schema fields) via the workspace tracing facade.
+tracing.workspace = true
+dicom.workspace = true
+# Enables the pure-Rust JPEG Baseline/Lossless adapters in the transfer-syntax registry (feature-unifies
+# with `dicom`); used through the `dicom::transfer_syntax` umbrella re-export.
+dicom-transfer-syntax-registry.workspace = true
+hdf5-metno.workspace = true
+# Raw libhdf5 C API — required by `ge_hdf5::read_compound` / `stream_compound` (#222) for the identity
+# (file-type == memory-type) H5Dread that hdf5-metno's typed `read_raw::<T>()` cannot do generically.
+hdf5-metno-sys.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Offline crypto-shred de-identification (ADR-0047 / #269): encrypt the DICOM identity document to
+# recipient `age` public keys. Host-only encrypt path; the decrypt (`reidentify`) lives in tessera-cli.
+age.workspace = true
+# Declarative ingest spec: pure-Rust TOML parser for `tessera-ingest::spec`. The engine canonicalizes
+# the *parsed* model (JCS) before hashing, so whitespace / comments in the source TOML never change
+# the spec hash that flows into each member's `ingested_via_spec` provenance edge.
+toml.workspace = true
+
+[features]
+# `static-hdf5`: build libhdf5 from vendored source (via `hdf5-metno-src`, bundled HDF5 2.2.0) and link
+# it statically, instead of finding a system libhdf5 through pkg-config. OFF by default so dev/nix builds
+# stay fast on the pre-built system library; the release channels (cargo-dist prebuilt binaries, the
+# maturin wheel) turn it ON so a plain `cargo install` / downloaded binary needs no system HDF5 at all.
+# Forwarding through `hdf5-metno` also flips the directly-depended `hdf5-metno-sys` via feature
+# unification (one shared libhdf5 build). SAFE for determinism: HDF5 is read-only *input* (Tessera
+# encodes to Vortex/pcodec), so the libhdf5 version is never in the sealed byte-path — it cannot move
+# any content_hash. `zlib` bundles zlib too, so the vendored HDF5 has gzip/deflate filter support.
+static-hdf5 = ["hdf5-metno/static", "hdf5-metno/zlib"]
+
+[dev-dependencies]
+tempfile = "3"

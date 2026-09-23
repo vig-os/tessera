@@ -1,0 +1,27 @@
+Your first thirty seconds with a `.tsra`: confirm it's intact, then see what it is. Both commands are
+read-only and run against a conformance-corpus product (`recon_int16.tsra`). Digests are globbed with
+`[..]`; the structural lines are matched exactly.
+
+# === Verify first — the seal and every block digest, before trusting a single byte. ===
+
+```
+$ tessera verify ../../corpus/files/recon_int16.tsra
+OK  ../../corpus/files/recon_int16.tsra verified (1 blocks)
+
+```
+
+# === Then look — a one-glance summary of identity, product kind, and per-block digests. ===
+
+```
+$ tessera inspect ../../corpus/files/recon_int16.tsra
+tessera [..] · product=recon
+id            [..]
+name          recon-int16
+timestamp     2024-01-01T00:00:00Z
+producer      tessera/0.0.0
+content_hash  blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9
+manifest_hash blake3:4fd0b90d0aa3c2bddbaefec7e244b16dc444e08b3730b5747a0a970a549e3b91
+blocks        1
+  - volume               Array blake3:dcbc6f3b0a1922d0f7ecc3197fc45d383f7e47b1cb5373597d0b4a61eab7a26e
+
+```

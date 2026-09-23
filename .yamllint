@@ -1,6 +1,12 @@
 ---
 extends: default
 
+# `.github/workflows/release.yml` is generated and owned by cargo-dist (`dist generate`); it is
+# regenerated verbatim and verified with `dist generate --check`, so it must not be hand-edited to add
+# yamllint pragmas (e.g. the `on:` truthy-disable the other workflows use). Exclude it from linting.
+ignore: |
+  .github/workflows/release.yml
+
 rules:
   # 80 chars should be enough, but don't fail if a line is longer
   line-length: disable

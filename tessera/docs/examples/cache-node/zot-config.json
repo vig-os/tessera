@@ -1,0 +1,43 @@
+{
+  "distSpecVersion": "1.1.0",
+  "storage": {
+    "rootDirectory": "/var/lib/tessera-cache",
+    "dedupe": true,
+    "gc": true,
+    "retention": {
+      "policies": [
+        {
+          "repositories": ["**"],
+          "keepTags": [
+            {
+              "patterns": [".*"],
+              "pulledWithin": "720h"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "http": {
+    "address": "127.0.0.1",
+    "port": "5000"
+  },
+  "log": {
+    "level": "info"
+  },
+  "extensions": {
+    "sync": {
+      "enable": true,
+      "registries": [
+        {
+          "urls": ["https://registry.example.com"],
+          "onDemand": true,
+          "tlsVerify": true
+        }
+      ]
+    },
+    "search": {
+      "enable": true
+    }
+  }
+}

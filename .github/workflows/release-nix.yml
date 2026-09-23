@@ -1,0 +1,67 @@
+# Nix reproducibility channel — attaches the nix-built tessera-py wheel to a published GitHub Release,
+# alongside cargo-dist's prebuilt CLI binaries (release.yml). The CLI itself needs no upload here: nix
+# users install it straight from the flake (`nix run` / `nix profile install github:vig-os/tessera`).
+#
+# TRIGGER = `release: published`, NOT the tag push. cargo-dist's release.yml is what CREATES and
+# publishes the Release on a tag; firing on `published` means this runs AFTER that exists, so the upload
+# never races release creation. Each matrix leg builds the wheel for its own arch (the platform tag is
+# `linux_x86_64` / `linux_aarch64`) and attaches it with `--clobber` (idempotent on re-runs).
+#
+# NB: the nix-built wheel is a `linux_<arch>` wheel, not `manylinux` — fine to attach to a GitHub
+# Release for download, but a PyPI upload needs an `auditwheel repair` / manylinux build first (tracked
+# follow-up). Actions are SHA-pinned to match ci.yml.
+
+name: release-nix
+
+on:  # yamllint disable-line rule:truthy
+  release:
+    types: [published]
+  # Manual re-run against an existing release (e.g. after a transient runner failure).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build + attach the wheel to'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  wheel:
+    name: nix wheel (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64-linux
+            runner: ubuntu-latest
+          - arch: aarch64-linux
+            runner: ubuntu-24.04-arm
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
+
+      - name: Build the reproducible wheel
+        run: nix build .#wheel -L
+
+      - name: Attach the wheel to the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          wheels=(result/*.whl)
+          if [ ${#wheels[@]} -eq 0 ]; then
+            echo "::error::no wheel produced by 'nix build .#wheel'"
+            exit 1
+          fi
+          gh release upload "$TAG" "${wheels[@]}" --clobber

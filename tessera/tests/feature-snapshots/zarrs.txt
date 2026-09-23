@@ -1,0 +1,20 @@
+    `-- tessera-io vWORKSPACE (*)
+`-- zarrs feature "zstd"
+zarrs v0.23.13
+|               `-- tessera-py feature "default" (command-line)
+|           `-- tessera-py vWORKSPACE
+|           |       `-- tessera-cli feature "static-hdf5" (command-line)
+|           |   `-- tessera-cli feature "static-hdf5" (command-line)
+|           |   `-- tessera-ingest feature "static-hdf5" (command-line)
+|           |   |   `-- tessera-cli vWORKSPACE (*)
+|           |   |-- tessera-cli feature "cloud" (command-line)
+|           |   |-- tessera-cli feature "default" (command-line)
+|           |   |-- tessera-cli feature "sql" (command-line)
+|           |   |-- tessera-ingest feature "default" (command-line)
+|           |-- tessera-cli vWORKSPACE
+|           |-- tessera-ingest vWORKSPACE
+|       `-- tessera-io feature "default" (command-line)
+|       |   `-- tessera-cli feature "cloud" (command-line)
+|       |-- tessera-io feature "cloud" (command-line)
+|   `-- tessera-io vWORKSPACE
+|-- zarrs feature "pcodec"

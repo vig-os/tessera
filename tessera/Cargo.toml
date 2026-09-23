@@ -1,0 +1,85 @@
+[workspace]
+resolver = "2"
+members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-cli", "crates/tessera-ingest", "crates/tessera-py", "crates/tessera-wasm"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+# Software SemVer (crates/CLI/bindings) — independent of the format-spec version `tessera_version`,
+# which stays `v0`/pre-1.0 (ADR-0052 §1). The sealed producer stamps TESSERA_VERSION, not this, so a
+# software bump costs no conformance-corpus regen (#336). Bootstrap baseline for release-plz (#337).
+version = "0.1.0-alpha.1"
+repository = "https://github.com/vig-os/tessera"
+authors = ["vig-os"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_jcs = "0.2"          # RFC 8785 JSON Canonicalization Scheme — reproducible hashing
+blake3 = "1"
+thiserror = "2"
+# Structured logging/trace — full write-path I/O observability (devs/users see every block written:
+# name·kind·bytes·digest·watermark). Zero-cost when no subscriber is attached; wasm-compatible.
+tracing = "0.1"
+tracing-subscriber = "0.3"   # test-side event capture + an opt-in human/JSON subscriber for consumers
+# Detached signatures over `manifest_hash` (S16 / #209). Pure-Rust ed25519 → sign/verify work in the
+# wasm core (browser verification); keys-from-bytes need no rng, so the verify path stays lean.
+ed25519-dalek = "2"
+sha2 = "0.10"   # sha256 digests for OCI artifact descriptors (registries are sha256-addressed)
+# Offline crypto-shred de-identification (ADR-0047 / #269): `age` X25519 + ChaCha20-Poly1305 envelope
+# encryption of the DICOM identity document, to recipient public keys (sops model). Host-only — encrypt
+# on ingest (tessera-ingest), decrypt on `reidentify` (tessera-cli); NEVER in the wasm verify path.
+# default-features=false drops the CLI/plugin machinery; `armor` gives ASCII-armored envelopes.
+age = { version = "0.11", default-features = false, features = ["armor"] }
+time = { version = "0.3", features = ["parsing", "formatting"] }
+proptest = "1"
+zip = { version = "2", default-features = false }   # STORED zip64 `.tsra` container (no compression deps)
+# Array block backend: zarrs (Zarr v3) + pcodec + zstd. default-features=false keeps it minimal
+# (no filesystem/sharding/ndarray/blosc/gzip/crc32c we don't use); the zstd codec is a selectable
+# alternative to pcodec per array block (`ArraySpec.codec = "zstd" | "auto"`) and bundles libzstd
+# via the `zstd` crate (no system zstd dep, hermetic build stays clean).
+zarrs = { version = "0.23", default-features = false, features = ["pcodec", "zstd"] }
+bytes = "1"                                          # zarrs store value type
+half = "2"                                           # float16 array dtype (already in-tree via zarrs)
+# Table block backend: Vortex (the settled columnar backend) — deterministic single-file writer +
+# reader. vortex-file pulls the default encoding crates (pco/alp/fsst/…); the sub-crates give the
+# exact import paths the probe verified. CurrentThreadRuntime drives the async write/read (no tokio).
+vortex-file = "0.75"
+vortex-array = "0.75"
+# compressor builder — exclude non-deterministic ALP, register deterministic Pco for float columns.
+vortex-btrblocks = { version = "0.75", features = ["pco"] }
+vortex-buffer = "0.75"
+vortex-io = "0.75"
+vortex-layout = "0.75"
+vortex-session = "0.75"
+futures = "0.3"
+clap = { version = "4", features = ["derive"] }     # tessera-cli
+# DICOM ingest (tessera-ingest, P5/#207). default-features=false drops the `ul` network stack and the
+# C++ codecs (charls/gdcm/openjpeg-sys); pure-Rust pixel decode covers uncompressed/RLE.
+dicom = { version = "0.9", default-features = false, features = ["pixeldata", "inventory-registry"] }
+# JPEG transfer-syntax adapters — JPEG Baseline (Process 1, 8-bit) + JPEG Lossless (Process 14) decode
+# pure-Rust via jpeg-decoder/jpeg-encoder (NO charls/gdcm/openjpeg). Feature-unifies with `dicom` above so
+# `decode_pixel_data()` dispatches to the registered JpegAdapter. Hermetic — builds in the nix gate.
+dicom-transfer-syntax-registry = { version = "0.9", features = ["jpeg"] }
+# GE/vendor HDF5 listmode ingest (#208). Native libhdf5 found via pkg-config (HDF5_DIR unset — see flake.nix).
+hdf5-metno = "0.12"
+# Raw libhdf5 C API used by the **generic** compound reader (#222) for the identity (file-type == memory-type)
+# H5Dread that hdf5-metno's typed `read_raw::<T>()` can't do — the file-type hid_t isn't reachable through
+# any public hdf5-metno surface. Caret (not a hard pin) so cargo unifies it with the exact `hdf5-metno-sys`
+# version `hdf5-metno` already pulls transitively (one shared build of libhdf5's bindings; currently 0.12.0).
+hdf5-metno-sys = "0.12"
+# Python bindings (tessera-py). abi3 → one .so works across CPython ≥3.9; extension-module → no
+# libpython link (the build needs only the abi3 minimum, not a runtime interpreter).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
+# Declarative ingest spec (`tessera-ingest::spec`) — pure-Rust TOML parser. The engine canonicalizes the
+# parsed model (JCS) before hashing, so whitespace / comments / key-order in the source TOML never
+# change the spec hash that flows into each member's `ingested_via_spec` provenance edge.
+toml = "0.8"
+tessera-core = { path = "crates/tessera-core" }
+tessera-io = { path = "crates/tessera-io" }
+tessera-ingest = { path = "crates/tessera-ingest" }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

@@ -1,0 +1,13 @@
+This directory exists to turn ON trycmd's filesystem sandbox for persona_signing.trycmd.
+
+trycmd enables the sandbox for a `.trycmd` file iff a sibling `<name>.out/` exists
+(trycmd-0.15.11 src/schema.rs:104 — `fs.sandbox = Some(path.with_extension("out").exists())`).
+A `<name>.toml` does NOT configure a `.trycmd` file; it is a test file in its own right, so it is
+silently ignored. With the sandbox on, the walkthrough runs against a COPY of `persona_signing.in/`.
+
+Why it matters here: `tessera sign` rewrites `study.tsra` IN PLACE, and that file is TRACKED. Run
+in-place, every `cargo test` left the tree dirty with different bytes each run (fresh keypair), so
+a routine `git add -A` would commit a corrupted fixture.
+
+`.keep` is ignored by trycmd, so this directory asserts nothing about the output — it only flips
+the sandbox on. Add real expected files here if you ever want to assert on the resulting tree.

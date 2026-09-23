@@ -1,0 +1,14 @@
+This directory exists to turn ON trycmd's filesystem sandbox for versioning.trycmd.
+
+trycmd enables the sandbox for a `.trycmd` file iff a sibling `<name>.out/` exists
+(trycmd-0.15.11 src/schema.rs:104 — `fs.sandbox = Some(path.with_extension("out").exists())`).
+A `<name>.toml` does NOT configure a `.trycmd` file; it is a test file in its own right, so it is
+silently ignored. With the sandbox on, the walkthrough runs against a COPY of `versioning.in/`.
+
+Why it matters here: `tessera init repo` + `tessera commit` build a version history inside the
+fixture dir. Run in-place that history ACCUMULATES across runs, so the SECOND `cargo test` saw
+`tessera log` print every previous run's versions, failed the walkthrough, and cancelled the other
+49 tests in the binary. CI never saw it (the nix sandbox starts clean), so it read as flakiness.
+
+`.keep` is ignored by trycmd, so this directory asserts nothing about the output — it only flips
+the sandbox on. Add real expected files here if you ever want to assert on the resulting tree.

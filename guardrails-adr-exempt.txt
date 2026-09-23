@@ -1,0 +1,6 @@
+# ADRs exempt from the guardrails-adr-matrix gate — Accepted decisions that are NOT feature rows.
+# 0002 = concurrency model · 0003 = schema-id (both recorded as-built decisions).
+# 0052 = versioning policy & release pipeline (process/governance, not a feature).
+0002
+0003
+0052

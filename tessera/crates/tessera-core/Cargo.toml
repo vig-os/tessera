@@ -1,0 +1,30 @@
+[package]
+name = "tessera-core"
+description = "Core library for the Tessera FAIR data product format (spike)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_jcs.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
+time.workspace = true
+ed25519-dalek.workspace = true   # detached signatures over manifest_hash (S16); pure-Rust → wasm verify
+
+[dev-dependencies]
+proptest.workspace = true
+
+# The core (manifest, identity, hash, provenance, block descriptors) compiles and tests
+# with NO storage-backend deps. The feature flags below gate the payload read/write paths;
+# enabling them will pull zarrs / arrow once those backends are implemented (ROADMAP P3).
+# See docs/rfc-tessera.md §6.
+[features]
+default = []
+array-zarr = []   # N-D chunked array block payloads (zarrs)
+table-arrow = []  # columnar table block payloads (arrow/parquet)
+full = ["array-zarr", "table-arrow"]

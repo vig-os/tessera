@@ -1,0 +1,17 @@
+# Project allowlist for `typos` (crate-ci/typos, wired in .pre-commit-config.yaml).
+# Medical-imaging domain vocabulary that typos mis-flags as misspellings — these are NOT typos.
+
+[files]
+# Binary conformance test vectors — typos' binary sniffing usually skips these, but any byte run
+# that happens to decode as UTF-8 words gets spell-checked (a widened-payload .tsra tripped on
+# "ba"). They are not text; exclude them structurally instead of per-lucky-file.
+extend-exclude = ["tessera/corpus/files/*.tsra"]
+[default.extend-words]
+OT = "OT"      # DICOM modality code: "Other" (0008,0060)
+PN = "PN"      # DICOM value representation: Person Name
+OME = "OME"    # Open Microscopy Environment (OME-Zarr / OME-NGFF)
+
+[default.extend-identifiers]
+aspec = "aspec"           # "array spec" local (tessera-io sparse-encoding spike example)
+flate2 = "flate2"         # crates.io crate name (gzip/deflate) — typos reads the "flate" stem as "flat"
+affine_nd = "affine_nd"   # ADR-0032 `Transform` taxonomy: `affine_1d` (1-D) / `affine_nd` (N-D)

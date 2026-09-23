@@ -1,0 +1,65 @@
+# cargo-deny — dependency licenses + RUSTSEC advisories for the Tessera workspace.
+# Wired in ../.pre-commit-config.yaml (the cargo-deny gate cd's into tessera/ before running).
+# Baseline from gerchowl/guardrails: permissive OSI allow-list, advisories deny-by-default with
+# an explicit, auditable `ignore` list. Tessera itself is Apache-2.0 (already allowed).
+
+[advisories]
+version = 2
+yanked = "warn"
+ignore = [
+    # paste v1.0.15 — UNMAINTAINED (not a vulnerability). A compile-time-only proc-macro pulled
+    # transitively by zarrs/pcodec (zarrs_plugin/_data_type/_codec); "no safe upgrade available"
+    # since zarrs depends on it. No runtime attack surface. Revisit when zarrs drops paste.
+    "RUSTSEC-2024-0436",
+    # encoding v0.2.33 — UNMAINTAINED (not a vulnerability). A legacy text-codec crate pulled
+    # transitively by dicom-encoding (charset decoding of DICOM string VRs). No safe upgrade
+    # while dicom 0.9 depends on it. Revisit when dicom migrates to `encoding_rs`.
+    "RUSTSEC-2021-0153",
+    # proc-macro-error2 v2.0.1 — UNMAINTAINED (not a vulnerability). A compile-time-only
+    # proc-macro pulled transitively by age → i18n-embed-fl (the ADR-0047 crypto-shred
+    # encryption dep). Both the original proc-macro-error and this fork are unmaintained;
+    # no safe upgrade while age 0.11 depends on it. No runtime attack surface. Revisit
+    # when age drops i18n-embed-fl.
+    "RUSTSEC-2026-0173",
+    # quick-xml v0.40.1 — two untrusted-XML DoS advisories, both fixed in quick-xml 0.41.0:
+    #   RUSTSEC-2026-0194 — O(N²) duplicate-attribute-name check on a single start tag.
+    #   RUSTSEC-2026-0195 — unbounded allocation in NamespaceResolver::push (NsReader) → OOM.
+    # NO UPGRADE PATH: quick-xml is a transitive dep of object_store 0.14.0 (the latest release),
+    # which caret-pins `quick-xml = "0.40.1"` (<0.41), so 0.41 is unreachable until object_store
+    # cuts a release that relaxes the bound. object_store reaches us only via the optional `cloud`
+    # feature of tessera-io and as a dev-dependency of tessera-cli — it parses S3 list-XML from the
+    # operator's own configured store, not arbitrary attacker-supplied XML. Revisit on the next
+    # object_store release (track upstream apache/arrow-rs object_store quick-xml bump).
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+private = { ignore = true }   # don't license-gate first-party (publish=false) crates
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "0BSD",
+  "BSL-1.0",
+  # jpeg-encoder (via dicom-transfer-syntax-registry) — the Independent JPEG Group license,
+  # classified FSF Free/Libre. Standard JPEG reference license; acceptable for an OSI/FAIR stack.
+  "IJG",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "allow"

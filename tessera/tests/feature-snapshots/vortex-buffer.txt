@@ -1,0 +1,129 @@
+    `-- tessera-io vWORKSPACE (*)
+`-- vortex-buffer feature "default"
+`-- vortex-zigzag v0.75.0 (*)
+vortex-buffer v0.75.0
+|       `-- vortex-zigzag v0.75.0 (*)
+|       |-- vortex-alp v0.75.0 (*)
+|       |-- vortex-array v0.75.0 (*)
+|       |-- vortex-bytebool v0.75.0 (*)
+|       |-- vortex-compressor v0.75.0 (*)
+|       |-- vortex-datetime-parts v0.75.0 (*)
+|       |-- vortex-decimal-byte-parts v0.75.0 (*)
+|       |-- vortex-fastlanes v0.75.0 (*)
+|       |-- vortex-file v0.75.0 (*)
+|       |-- vortex-fsst v0.75.0 (*)
+|       |-- vortex-layout v0.75.0 (*)
+|       |-- vortex-pco v0.75.0 (*)
+|       |-- vortex-runend v0.75.0 (*)
+|       |-- vortex-scan v0.75.0 (*)
+|       |-- vortex-sequence v0.75.0 (*)
+|       |-- vortex-sparse v0.75.0 (*)
+|   `-- vortex-btrblocks v0.75.0 (*)
+|   `-- vortex-file v0.75.0 (*)
+|   `-- vortex-file v0.75.0 (*)
+|   `-- vortex-file v0.75.0 (*)
+|   `-- vortex-file v0.75.0 (*)
+|   `-- vortex-file v0.75.0 (*)
+|   `-- vortex-flatbuffers feature "layout" (*)
+|   `-- vortex-mask v0.75.0
+|   |           `-- tessera-io vWORKSPACE (*)
+|   |           `-- tessera-io vWORKSPACE (*)
+|   |           `-- vortex-file v0.75.0 (*)
+|   |           |-- vortex-btrblocks v0.75.0 (*)
+|   |       `-- tessera-io vWORKSPACE (*)
+|   |       `-- vortex-array feature "default"
+|   |       `-- vortex-file v0.75.0 (*)
+|   |       `-- vortex-layout feature "default"
+|   |       `-- vortex-layout v0.75.0 (*)
+|   |       `-- vortex-zigzag v0.75.0
+|   |       |       `-- tessera-io vWORKSPACE (*)
+|   |       |   `-- vortex-file v0.75.0 (*)
+|   |       |   `-- vortex-file v0.75.0 (*)
+|   |       |   `-- vortex-file v0.75.0 (*)
+|   |       |   `-- vortex-io feature "default"
+|   |       |   `-- vortex-layout v0.75.0 (*)
+|   |       |   `-- vortex-layout v0.75.0 (*)
+|   |       |   `-- vortex-layout v0.75.0 (*)
+|   |       |   `-- vortex-layout v0.75.0 (*)
+|   |       |   |-- vortex-btrblocks v0.75.0 (*)
+|   |       |   |-- vortex-btrblocks v0.75.0 (*)
+|   |       |   |-- vortex-btrblocks v0.75.0 (*)
+|   |       |   |-- vortex-btrblocks v0.75.0 (*)
+|   |       |   |-- vortex-btrblocks v0.75.0 (*)
+|   |       |   |-- vortex-file v0.75.0 (*)
+|   |       |   |-- vortex-file v0.75.0 (*)
+|   |       |   |-- vortex-file v0.75.0 (*)
+|   |       |   |-- vortex-file v0.75.0 (*)
+|   |       |-- vortex-alp v0.75.0 (*)
+|   |       |-- vortex-btrblocks v0.75.0 (*)
+|   |       |-- vortex-bytebool v0.75.0 (*)
+|   |       |-- vortex-compressor v0.75.0 (*)
+|   |       |-- vortex-datetime-parts v0.75.0 (*)
+|   |       |-- vortex-decimal-byte-parts v0.75.0 (*)
+|   |       |-- vortex-fastlanes v0.75.0 (*)
+|   |       |-- vortex-file v0.75.0 (*)
+|   |       |-- vortex-fsst v0.75.0
+|   |       |-- vortex-io v0.75.0
+|   |       |-- vortex-layout v0.75.0 (*)
+|   |       |-- vortex-pco v0.75.0
+|   |       |-- vortex-runend v0.75.0
+|   |       |-- vortex-scan v0.75.0
+|   |       |-- vortex-sequence v0.75.0
+|   |       |-- vortex-sparse v0.75.0
+|   |   `-- vortex-array v0.75.0
+|   |   `-- vortex-array v0.75.0 (*)
+|   |   `-- vortex-btrblocks feature "pco"
+|   |   `-- vortex-flatbuffers feature "array" (*)
+|   |   `-- vortex-flatbuffers feature "layout"
+|   |   `-- vortex-layout v0.75.0
+|   |   |                   `-- tessera-py feature "default" (command-line)
+|   |   |               `-- tessera-py vWORKSPACE
+|   |   |               |       `-- tessera-cli feature "static-hdf5" (command-line)
+|   |   |               |   `-- tessera-cli feature "static-hdf5" (command-line)
+|   |   |               |   `-- tessera-ingest feature "static-hdf5" (command-line)
+|   |   |               |   |   `-- tessera-cli vWORKSPACE (*)
+|   |   |               |   |-- tessera-cli feature "cloud" (command-line)
+|   |   |               |   |-- tessera-cli feature "default" (command-line)
+|   |   |               |   |-- tessera-cli feature "sql" (command-line)
+|   |   |               |   |-- tessera-ingest feature "default" (command-line)
+|   |   |               |-- tessera-cli vWORKSPACE
+|   |   |               |-- tessera-ingest vWORKSPACE
+|   |   |           `-- tessera-io feature "default" (command-line)
+|   |   |           |   `-- tessera-cli feature "cloud" (command-line)
+|   |   |           |-- tessera-io feature "cloud" (command-line)
+|   |   |       `-- tessera-io vWORKSPACE
+|   |   |       `-- vortex-file v0.75.0 (*)
+|   |   |   `-- tessera-io vWORKSPACE (*)
+|   |   |   `-- vortex-file feature "default"
+|   |   |   `-- vortex-flatbuffers feature "file"
+|   |   |-- vortex-btrblocks feature "default"
+|   |   |-- vortex-file v0.75.0
+|   |   |-- vortex-flatbuffers feature "ipc"
+|   |-- vortex-alp v0.75.0 (*)
+|   |-- vortex-array v0.75.0 (*)
+|   |-- vortex-btrblocks v0.75.0
+|   |-- vortex-btrblocks v0.75.0 (*)
+|   |-- vortex-btrblocks v0.75.0 (*)
+|   |-- vortex-btrblocks v0.75.0 (*)
+|   |-- vortex-flatbuffers feature "array"
+|   |-- vortex-flatbuffers feature "dtype"
+|   |-- vortex-flatbuffers feature "file" (*)
+|   |-- vortex-flatbuffers feature "ipc" (*)
+|-- vortex-alp v0.75.0
+|-- vortex-btrblocks v0.75.0 (*)
+|-- vortex-buffer feature "arrow"
+|-- vortex-bytebool v0.75.0
+|-- vortex-compressor v0.75.0
+|-- vortex-datetime-parts v0.75.0
+|-- vortex-decimal-byte-parts v0.75.0
+|-- vortex-fastlanes v0.75.0
+|-- vortex-file v0.75.0 (*)
+|-- vortex-flatbuffers v0.75.0
+|-- vortex-fsst v0.75.0 (*)
+|-- vortex-io v0.75.0 (*)
+|-- vortex-layout v0.75.0 (*)
+|-- vortex-pco v0.75.0 (*)
+|-- vortex-runend v0.75.0 (*)
+|-- vortex-scan v0.75.0 (*)
+|-- vortex-sequence v0.75.0 (*)
+|-- vortex-sparse v0.75.0 (*)
