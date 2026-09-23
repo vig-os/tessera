@@ -1,3 +1,5 @@
+# Copy me: `cp .envrc.example .envrc && direnv allow`. `.envrc` is per-developer and gitignored
+# (a tracked+ignored .envrc made release-plz abort on "uncommitted changes" — #430).
 # direnv: load the guardrails-governed Nix devShell on entry (toolbelt + Rust/Python
 # toolchain) and auto-install the prek commit/push hooks. Run `direnv allow` once.
 #

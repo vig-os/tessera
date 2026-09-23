@@ -70,7 +70,7 @@ nix profile install github:vig-os/tessera                 # put `tessera` on PAT
 **5. Nix dev shell (contributors)** — pins the whole toolchain + native deps (hdf5/zstd/…):
 
 ```bash
-direnv allow          # or: nix develop
+cp .envrc.example .envrc && direnv allow   # or: nix develop
 cd tessera && cargo test
 ```
 

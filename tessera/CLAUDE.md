@@ -49,7 +49,7 @@ WASM / OCI / WORM / ingest all shipped). Get current status from, in this order:
 4. `tessera/docs/ROADMAP.md` — dependency order (phases → release gates).
 
 ## Dev environment (Nix + guardrails)
-The whole repo is Nix-managed. **`direnv allow`** (or `nix develop`) at the repo root loads the
+The whole repo is Nix-managed. **`cp .envrc.example .envrc && direnv allow`** (`.envrc` is per-developer + gitignored, #430; or `nix develop`) at the repo root loads the
 `tessera-dev` devShell — pinned Rust toolchain (`tessera/rust-toolchain.toml` via rust-overlay),
 Python 3.12 + `uv` (bench deps live in `uv.lock`, not Nix), native build deps (openssl/cmake/clang/
 hdf5/zstd), and the **guardrails** toolbelt. Inputs come from the shared `/nix/store` (hot cache);

@@ -77,7 +77,7 @@ The repository is Nix-managed; the dev shell pins the exact toolchain and every 
 (hdf5, zstd, …):
 
 ```bash
-direnv allow          # or: nix develop
+cp .envrc.example .envrc && direnv allow   # or: nix develop
 cd tessera && cargo test
 ```
 
