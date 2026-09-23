@@ -42,3 +42,11 @@ cmake = '*'
 
 [dist.dependencies.homebrew]
 cmake = '*'
+
+# Pin the generated `release.yml`'s `actions/checkout` to v7.0.1, matching what
+# Dependabot bumps hand-written workflows to (supersedes #427). cargo-dist 0.32.0
+# still emits `actions/checkout@v6` by default; without this override, any bump
+# in release.yml fails the `plan` job's own "workflow is out of date" check.
+# See `github-action-commits` in the cargo-dist reference.
+[dist.github-action-commits]
+"actions/checkout" = "v7.0.1"
