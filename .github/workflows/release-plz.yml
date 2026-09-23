@@ -1,12 +1,11 @@
 # Opens/updates a HELD release PR (workspace version bump + CHANGELOG) — ADR-0052. It does NOT tag or
 # publish; the alpha is cut only by deliberately merging that release PR.
 #
-# TRIGGER = manual (workflow_dispatch) while the release is *held*: the crates are `0.0.0` with no
-# published/tagged baseline, so release-plz cannot determine a next version yet ("first-release
-# bootstrap"). Run this manually once the workspace version is bootstrapped to `0.1.0-alpha.1` — the
-# `producer` is now decoupled from the crate version (ADR-0052), so that bump costs no corpus regen.
-# Switch back to `push: [dev]` after the first release, when auto-updating the PR is useful.
-#
+# TRIGGER = every push to `dev` (+ manual dispatch): release-plz keeps ONE held release PR
+# up to date with the version bump + CHANGELOG for the next release. Nothing is tagged or
+# published by this workflow — merging that PR is the deliberate 'cut' surface; the tag is pushed
+# by the operator and cargo-dist's release.yml + release-nix.yml build the artifacts (#337).
+# First tagged baseline: v0.1.0-alpha.1 (2026-09-24).
 # NOTE: the release PR is opened with a GitHub App installation token (secrets.RP_APP_ID +
 # RP_APP_PRIVATE_KEY, #430): the repo's GITHUB_TOKEN cannot create PRs (Actions PR-creation is off) and
 # PRs it creates would not trigger CI anyway. If the App secrets are absent the mint step fails softly
@@ -14,6 +13,8 @@
 name: release-plz
 
 on:  # yamllint disable-line rule:truthy
+  push:
+    branches: [dev]
   workflow_dispatch:
 
 permissions:
