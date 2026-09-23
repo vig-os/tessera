@@ -35,12 +35,10 @@ targets = [
 ]
 
 # The vendored HDF5 build needs CMake (+ a C compiler & make, already present on GitHub runners) on
-# every build host. Declaring cmake makes the runner provision it explicitly rather than relying on
-# the image having it pre-installed.
+# every build host. Linux gets cmake via apt; macOS runners (`macos-14`) ship cmake preinstalled and
+# we deliberately do NOT declare a Homebrew dependency, because that makes cargo-dist wrap the build
+# in `brew bundle exec`, which failed silently (exit 1) on the v0.1.0-alpha.1 release run.
 [dist.dependencies.apt]
-cmake = '*'
-
-[dist.dependencies.homebrew]
 cmake = '*'
 
 # Pin the generated `release.yml`'s `actions/checkout` to v7.0.1, matching what
