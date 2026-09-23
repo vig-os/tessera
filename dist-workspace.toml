@@ -48,5 +48,12 @@ cmake = '*'
 # still emits `actions/checkout@v6` by default; without this override, any bump
 # in release.yml fails the `plan` job's own "workflow is out of date" check.
 # See `github-action-commits` in the cargo-dist reference.
+# The generated `release.yml` also uses `actions/upload-artifact` and `actions/download-artifact`
+# — cargo-dist 0.32.0's baked defaults (v7 / v8) are floating tag refs, so the SHA-pin
+# guardrail (`scripts/check-action-pins.sh`) fails on any workflow edit until these are pinned
+# too. All three values below are the full commit SHA of the tag noted in the trailing comment;
+# regenerate `release.yml` with `dist generate --ci github` after any change here.
 [dist.github-action-commits]
-"actions/checkout" = "v7.0.1"
+"actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1"           # v7.0.1
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"    # v7.0.1
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"  # v8.0.1
