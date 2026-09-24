@@ -213,6 +213,7 @@
             # it in .pre-commit-config.yaml.
             typos
             shellcheck
+            ruff
 
             # devkit CI toolchain (vigos overlay): the managed ci.yml's
             # commit-checks job resolves `validate-commit-range` and
