@@ -47,7 +47,7 @@ Options:
 
       --mode <MODE>
           Reduction: `max` (MIP, default) | `mean` | `sum`
-
+          
           [default: max]
 
       --physical
@@ -55,7 +55,7 @@ Options:
 
       --format <FORMAT>
           Output format: `csv` (default) | `tsv`
-
+          
           [default: csv]
 
   -h, --help

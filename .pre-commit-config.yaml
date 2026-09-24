@@ -51,9 +51,18 @@ repos:
         # header mention from a key. The real fixture it used to flag was removed
         # in this same change; these two remaining mentions are by design.
         exclude: ^tessera/crates/tessera-cli/src/trust\.rs$
+      # `*.trycmd` files are BYTE-EXACT CLI snapshots: trycmd compares the
+      # recorded stdout verbatim, and clap's help output carries meaningful
+      # trailing spaces. An autofixer that "cleans" them silently rewrites the
+      # expected output and the assertion then fails against the real CLI --
+      # which is exactly what happened here before this exclude existed.
+      # Data files the whitespace fixers must not touch.
       - id: end-of-file-fixer
+        exclude: \.trycmd$
       - id: mixed-line-ending
+        exclude: \.trycmd$
       - id: trailing-whitespace
+        exclude: \.trycmd$
 
   # Python Linting and Formatting (Ruff). From Nix, like typos/shellcheck above:
   # ruff-pre-commit installs a generic-linux wheel whose dynamically linked
