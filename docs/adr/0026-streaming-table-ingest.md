@@ -82,7 +82,7 @@ into fixed `ROWS_PER_GROUP = 2¹⁶` row-groups (`table.rs`), so the batch and s
 code producing the *same* bytes (`encode_streaming_matches_batch_encode`, `accumulator_equals_batch_over_
 odd_batches`). §2 deterministic strategy (ALP excluded, fixed knobs) + §4 `row_index` are in that encoder.
 The bounded-memory streaming engine + journal/recover/seal (`WriteSession`, `TableStreamWriter`) is built
-+ tested, incl. the ADR-0028 §5 live fold (`with_live_index`).
+- tested, incl. the ADR-0028 §5 live fold (`with_live_index`).
 
 **§3 streaming HDF5 ingest reader — DONE (2026-06-27):** `ge_hdf5::stream_events_2p` reads the compound
 dataset in HDF5 row-slabs (hyperslab `read_slice_1d(start..end)`) → `transpose_2p` → `TableStreamWriter`

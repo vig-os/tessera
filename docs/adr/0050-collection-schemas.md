@@ -34,6 +34,7 @@ registry. So terminology becomes **schema**, symmetric with product schemas.
   doesn't ship is not an error), exactly like unknown product schemas.
 
 ### Worked shape
+
 ```
 core (generic):        product → dataset → project → project → …
 domain (registered):   recon(product) → exam → subject → cohort → site → trial

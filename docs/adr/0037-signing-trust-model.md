@@ -82,7 +82,7 @@ sign-time and embedded*. This is the single criterion that ranks the mechanisms 
     *auditable when online* but never a trust anchor.
 - **Archival-grade (feature-gated, post-alpha):**
   - `alg = sigstore-bundle` (`sigstore-rs`) with the cosign bundle (Fulcio cert + Rekor inclusion proof
-    + signed timestamp) **embedded** for self-contained offline verify — the publish-time upgrade for
+    - signed timestamp) **embedded** for self-contained offline verify — the publish-time upgrade for
     persona 4. Open problem to resolve before it lands: the **archival TUF-root snapshot** strategy.
     Behind a `sigstore` cargo feature so default + wasm cores stay lean.
   - A **SLSA-provenance side-statement** (`<file>.tsra.intoto.jsonl`, DSSE-signed by the alpha key) —

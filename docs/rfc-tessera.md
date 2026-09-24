@@ -316,6 +316,7 @@ footer-at-end; a crash before close loses the whole file) and by the throughput 
 | raw capture | memory/disk-bound (NVMe GB/s) | the DAQ never stalls |
 
 ### Streaming model (Rust: `rayon` encode pool + `crossbeam` fan-out, `Send`/`Sync` = race-free)
+
 ```
 acq → bounded RAM ring (backpressure)
     → rayon worker:  pcodec-encode(chunk)  +  blake3(chunk)     ← FUSED, in RAM, hash ~free
@@ -325,6 +326,7 @@ acq → bounded RAM ring (backpressure)
     → seal:          root = merkle(chunk_hashes)   ← microseconds, NO second data pass
                      + manifest + sign(root) at source
 ```
+
 - **No mandatory raw-first pass.** If `parallel-encode-rate ≥ DAQ-rate`, encode live in RAM
   (avoids the double-RAM/double-I/O of raw→disk→read-back). Durable commits of *encoded*
   fragments stay mandatory for irreplaceable data; commit cadence = max-loss window (s–min).
@@ -350,6 +352,7 @@ acq → bounded RAM ring (backpressure)
   leaves a **hash-verified, integrity-sealed partial product** up to `C`.
 
 ### Lifecycle — where the column forms / where it seals
+
 ```
 ACQUIRE  → durable Vortex/Zarr FRAGMENTS (committed, registry watermark, raw-spill on burst)
 COMPACT  → merge fragments → ONE FULL VORTEX COLUMN   ← full column forms here (bg or post-acq)
@@ -373,6 +376,7 @@ field { id: u16 (stable),  name: "lt",  desc: "per-event positronium lifetime",
         dtype: "f4",  units: "ns",  codec: "pcodec" }
 axis  { name: "z", desc: "slice (cranio-caudal)", unit: "mm", type: "space" }   # OME-NGFF
 ```
+
 - **Short stable `id` = the storage key** — compact (a small int per column/chunk, *not* a
   repeated string) **and** the schema-evolution anchor: readers bind by `id`, so **renaming a
   field never breaks them**; drop-then-re-add-same-name allocates a **new id** (Iceberg lesson —
@@ -429,7 +433,7 @@ the organic spike narrative omitted them — they are normative, not optional.
   binary attachments (MIME-typed) — the destination for §11's "preserve everything" promise.
 - **`sources[]`** typed-role DAG (fd5 I3): `{name, id, content_hash (required for Tessera
   parents), product, role (emission_data|mu_map|reference|calibration|…), description, hint_uri}`
-  + reader **`resolve(id)→URI`** fallback chain (link → manifest → hook → `SourceNotFound`).
+  - reader **`resolve(id)→URI`** fallback chain (link → manifest → hook → `SourceNotFound`).
 - **`provenance`**: `original_files: [{path, hash, size, mime}]` (Layer-0 source hashing — what
   §10/§11 verify-at-door records) + `ingest: {tool, tool_version, timestamp, description}`.
 - **`study`**: `{license (SPDX), license_url, creators: [{name, affiliation, orcid, role}]}` —

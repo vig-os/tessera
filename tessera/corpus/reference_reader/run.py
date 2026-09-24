@@ -11,7 +11,9 @@ import sys
 
 from reader import verify_tsra
 
-CORPUS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # .../tessera/corpus
+CORPUS_DIR = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)  # .../tessera/corpus
 FILES_DIR = os.path.join(CORPUS_DIR, "files")
 GOLDEN_JSON = os.path.join(CORPUS_DIR, "corpus.json")
 
@@ -20,7 +22,9 @@ def main() -> int:
     with open(GOLDEN_JSON) as f:
         goldens = json.load(f)
 
-    print(f"{'fixture':<22} {'id':<7} {'content':<7} {'manifest':<8} {'blocks':<6} verdict")
+    print(
+        f"{'fixture':<22} {'id':<7} {'content':<7} {'manifest':<8} {'blocks':<6} verdict"
+    )
     print("-" * 78)
 
     fails = 0
@@ -40,8 +44,12 @@ def main() -> int:
         )
         if verdict == "FAIL":
             print(f"    expected/computed id       : {g['id']} / {res.computed_id}")
-            print(f"    expected/computed content  : {g['content_hash']} / {res.computed_content_hash}")
-            print(f"    expected/computed manifest : {g['manifest_hash']} / {res.computed_manifest_hash}")
+            print(
+                f"    expected/computed content  : {g['content_hash']} / {res.computed_content_hash}"
+            )
+            print(
+                f"    expected/computed manifest : {g['manifest_hash']} / {res.computed_manifest_hash}"
+            )
             for n in res.notes:
                 print(f"    note: {n}")
 

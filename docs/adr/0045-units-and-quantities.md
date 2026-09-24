@@ -61,7 +61,7 @@ stays raw; nothing is baked in.
   precision (a lossless `i16` becomes a lossy `f32`), destroys the round-trip, and defeats writer
   determinism (float non-determinism at ingest).
 - **Physical is derived at read.** `to_physical` is applied downstream; the format ships the code
-  + transform, the reader (or an Arrow/numpy consumer) applies them.
+  - transform, the reader (or an Arrow/numpy consumer) applies them.
 - **No units engine in-format.** Conversion (mm→cm), dimensional analysis (adding `s` to `m` is an
   error), and simplification (`Bq/mL` vs `MBq/L`) are downstream. Tessera's job ends at delivering
   the code faithfully.
