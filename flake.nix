@@ -17,14 +17,23 @@
     guardrails.url = "github:gerchowl/guardrails";
     guardrails.inputs.nixpkgs.follows = "nixpkgs";
     guardrails.inputs.flake-utils.follows = "flake-utils";
+
+    # vigOS devkit toolchain, pinned to the release this repo adopts in
+    # `.vig-os` (#364). Its overlay supplies `vig-utils`, the console scripts
+    # the devkit-managed `ci.yml` calls: in `direnv` mode the commit-checks job
+    # runs `uv run validate-commit-range` and resolves it off THIS dev-shell's
+    # PATH, so without the input that job fails with "Failed to spawn". Keep the
+    # pin in step with DEVKIT_VERSION.
+    vigos.url = "github:vig-os/devkit/1.16.0";
+    vigos.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, guardrails }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, guardrails, vigos }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ (import rust-overlay) ];
+          overlays = [ (import rust-overlay) vigos.overlays.default ];
         };
         # One source of truth for the compiler + components — see tessera/rust-toolchain.toml.
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./tessera/rust-toolchain.toml;
@@ -205,6 +214,11 @@
             typos
             shellcheck
 
+            # devkit CI toolchain (vigos overlay): the managed ci.yml's
+            # commit-checks job resolves `validate-commit-range` and
+            # `check-pr-agent-fingerprints` off this dev-shell in direnv mode.
+            vig-utils
+
             # Native build deps the storage/ingest crates link once implemented
             # (object_store→openssl, hdf5-sys→hdf5+libclang, zarrs/codec FFI). Present now so a
             # subagent implementing P3/P5 (see tessera/docs/ROADMAP.md) doesn't hit a wall.
@@ -215,7 +229,13 @@
             zstd
             lz4
             hdf5
-          ]);
+          ]) ++ [
+            # pymarkdown CLI, packaged by devkit (nix/pymarkdown.nix) rather than
+            # exported on the overlay: the managed `.pre-commit-config.yaml` runs
+            # the `pymarkdown` hook as a system command, and prek's own installer
+            # cannot build it on NixOS.
+            (import "${vigos}/nix/pymarkdown.nix" pkgs)
+          ];
           env = {
             # bindgen (dicom-rs) needs libclang.
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
