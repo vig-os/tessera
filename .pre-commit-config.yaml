@@ -85,13 +85,15 @@ repos:
         name: hadolint
 
   # Markdown Linting (excludes auto-generated docs)
-  - repo: https://github.com/jackdewinter/pymarkdown
-    rev: f93643d339dfee2a1022e7b05e8b5a281bfac553  # v0.9.23
+  - repo: local
     hooks:
       - id: pymarkdown
         name: pymarkdown
+        entry: pymarkdown
+        language: system
+        types: [markdown]
         args: ["-c", ".pymarkdown", "fix"]
-        exclude: ^(README\.md|CONTRIBUTE\.md|TESTING\.md)
+        exclude: ^(README\.md|CONTRIBUTING\.md|TESTING\.md)
 
   # Justfile formatting
   - repo: local
