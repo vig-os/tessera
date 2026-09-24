@@ -1,4 +1,11 @@
-# CI — a shim over `nix flake check`.
+# Nix flake check — a shim over `nix flake check`.
+#
+# REPO-OWNED, and deliberately NOT named ci.yml: adopting the vigOS devkit scaffold
+# (#364) brings a managed `.github/workflows/ci.yml` that would overwrite this file.
+# The cross-arch determinism gate below cannot live inside it (a `just` recipe cannot
+# express a two-arch runner matrix), so it keeps its own workflow. The `gate` job is
+# still named `nix flake check`, and branch protection matches the JOB name, not the
+# file, so the required context is unchanged by the rename.
 #
 # The logic lives in the flake's `checks` (flake.nix), so the SAME command runs on a dev's
 # machine and here — no "passes locally / fails in CI" drift, nothing to reproduce by hand.

@@ -1,0 +1,10 @@
+# vig-os devkit manifest — pre-seeded for the #364 adoption.
+DEVKIT_MODE=direnv
+DEVKIT_WORKFLOW=gitflow
+DEVKIT_PROJECT=tessera
+DEVKIT_ORG=vigOS
+DEVKIT_REPO=vig-os/tessera
+DEVKIT_TAG_PREFIX=v
+# The release train is deliberately NOT adopted here: tessera's release
+# mechanism (release-plz + cargo-dist) is an open decision in vig-os/tessera#441.
+DEVKIT_FEATURES_DISABLED=release
