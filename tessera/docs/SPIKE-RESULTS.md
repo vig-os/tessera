@@ -123,7 +123,7 @@ Hedge = pin codec versions in the manifest + ship vendored pure-Rust readers (RF
 # #143 — `.tsra` vs the bare substrate (cross-substrate comparison)
 
 Tool: `cargo run -p tessera-io --example bench_compare --release`. `.tsra` = sealed zip64 (manifest
-+ blake3) over the **same** bare codec blob; "bare" = vanilla Zarr+pcodec (arrays) / Vortex (tables)
+- blake3) over the **same** bare codec blob; "bare" = vanilla Zarr+pcodec (arrays) / Vortex (tables)
 — the substrate Tessera wraps. Absolute MB/s is dev-box (not the §D 88-core box); the portable
 findings are the **ratios, container overhead %, and partial-read speedups**.
 
@@ -188,7 +188,7 @@ SWMR / concurrent-reader: HDF5, Zarr, NeXus (yes). Tessera = immutable-sealed (v
   beats every columnar format incl. Parquet (12×) and ROOT (15×).
 - **Partial reads = Tessera's structural win.** Volume z-slice: **~16 GB/s effective, 5–6× HDF5/Zarr/NeXus,
   ~110× NIfTI** — the chunked addressable read the others can't match (NIfTI's gzip stream forces a near-full
-  decompress: 146 MB/s). 
+  decompress: 146 MB/s).
 - **Full-volume decode is Tessera's honest cost.** 357 MB/s — mid-pack (DICOM's raw memcpy is 1043); pcodec
   decode is heavier than gzip/zstd. The tradeoff buys 130× compression + addressable slices.
 - **Column projection — now the fastest (#212, landed).** Originally Tessera's column read ≈ full read
@@ -239,7 +239,7 @@ pinned `taskset -c 10-39 nice -n19`, 256 × 64³ int16 blocks (128 MiB raw).
 | stream w=4 | 0.60 | 427 | 224 | **6.13×** |
 | stream w=8 | 0.59 | 432 | 227 | 6.20× |
 
-### Reading (ALOCA)
+## Reading (ALOCA)
 - **6.2× throughput over synchronous**, saturating ~4 workers (encode-bound on this box). Even 1 worker
   gives 1.6× — encode now overlaps the committer's fsync+journal instead of blocking the producer.
 - **Bounded RAM proven:** cap=2 with 4 workers completed (0.57 s) — peak in-flight ≤ ~cap blocks
@@ -326,10 +326,12 @@ record widths; **events/s is exact** (rows from the sealed manifest).
 ### Phase C — `--auto` adaptive allocator picks the knee on real storage (`541180b`)
 `tessera bench write --input singles --auto` warmup-measures the producer (read+transpose) rate and one
 worker's per-core encode rate, then `WriteConfig::balanced` recommends `ceil(read / per_core)` workers:
+
 ```
   measured read ≈ 213.9 MB/s, encode ≈ 187.5 MB/s/core → recommend 2 workers (storage is read-bound)
         2 |     12536523 events/s  |     213.1 MB/s |  257.1 MiB
 ```
+
 - **The allocator sized to the storage tier, not the box.** Measured *producer* rate is **214 MB/s** (the
   real read+transpose floor — note: NOT the 1871 MB/s cached `cat`, because the producer also transposes
   AoS→SoA on the CPU), so it picked **2 workers** — `ceil(214 / 187.5)`. More cores would starve at the

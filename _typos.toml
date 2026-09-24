@@ -1,17 +1,56 @@
 # Project allowlist for `typos` (crate-ci/typos, wired in .pre-commit-config.yaml).
 # Medical-imaging domain vocabulary that typos mis-flags as misspellings — these are NOT typos.
+#
+# This file shadows the devkit-shipped `.typos.toml` (typos' discovery order is
+# `typos.toml` → `_typos.toml` → `.typos.toml`), so per MIGRATION.md the devkit
+# template's own entries are folded in below rather than inherited.
 
 [files]
 # Binary conformance test vectors — typos' binary sniffing usually skips these, but any byte run
 # that happens to decode as UTF-8 words gets spell-checked (a widened-payload .tsra tripped on
 # "ba"). They are not text; exclude them structurally instead of per-lucky-file.
 extend-exclude = ["tessera/corpus/files/*.tsra"]
+
+[default]
+# blake3 digests in CLI golden output are hex; any 3+ char run that spells an
+# English-ish word (e.g. "afe" inside `blake3:827e49afe82b…`) gets flagged.
+extend-ignore-re = ["blake3:[0-9a-f]+"]
+
 [default.extend-words]
 OT = "OT"      # DICOM modality code: "Other" (0008,0060)
 PN = "PN"      # DICOM value representation: Person Name
 OME = "OME"    # Open Microscopy Environment (OME-Zarr / OME-NGFF)
 
+# ── Project vocabulary ──
+unparseable = "unparseable"  # the spelling used throughout the error/doc prose
+intoto = "intoto"            # in-toto attestation format (`*.intoto.jsonl`)
+Hashi = "Hashi"              # "HashiCorp", split at the CamelCase boundary
+arange = "arange"            # `np.arange` (numpy API name)
+Fo = "Fo"                    # "FoR" — Frame-of-Reference encoding
+# FAIR acronym written with bold markers: `**A**ccessible` tokenizes to
+# "ccessible". Allowlisted deliberately — the ADR/docs prose stays as written,
+# the entry is NOT a typo we failed to fix.
+ccessible = "ccessible"
+
+# ── devkit template entries (folded in; this file shadows .typos.toml) ──
+# Shell scripting: sed label syntax uses 'ba' (branch to label 'a')
+ba = "ba"
+# CVE policy term (#637): a finding "unexcepted" = not in the exception register
+unexcepted = "unexcepted"
+# version-check.sh duration placeholder (#759): 'Nd' = N days (cf. Nw/Nh/Nm)
+# Also covers this repo's "coupled-ND" / `AffineNd` referencing vocabulary.
+Nd = "Nd"
+# podman rootless-networking helper package name (#1106), not a misspelling
+passt = "passt"
+# The English prefix in hyphenated compounds: `mis-read`, `mis-parse`,
+# `mis-attributes`.
+mis = "mis"
+
 [default.extend-identifiers]
 aspec = "aspec"           # "array spec" local (tessera-io sparse-encoding spike example)
 flate2 = "flate2"         # crates.io crate name (gzip/deflate) — typos reads the "flate" stem as "flat"
 affine_nd = "affine_nd"   # ADR-0032 `Transform` taxonomy: `affine_1d` (1-D) / `affine_nd` (N-D)
+# extend-identifiers is a whole-identifier exact match, so `affine_nd` above
+# covers neither the enum variant nor the test that embed the same stem.
+AffineNd = "AffineNd"     # `Transform::AffineNd` variant (tessera-core referencing)
+affine_nd_from_world_frame_maps_voxel_to_world = "affine_nd_from_world_frame_maps_voxel_to_world"

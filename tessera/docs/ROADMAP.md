@@ -5,12 +5,14 @@ passes") and the RFC ("what it is"). No time/effort estimates — work is agent-
 unit that matters is **dependency order** (what unblocks what), not dev-weeks. Status: ✓/◑/○.
 
 ## Critical path (the dependency spine — do in this order)
+
 ```
 P0 ADRs ─▶ P1 core ─▶ P2 read-API ─▶ P3 io(write) ─▶ P4 conformance ═▶ v0.1
   │                                                        │
   └─ canonical-JSON + identity + container-spec            └─▶ P5 ingest ─▶ P6 integrity/dist ═▶ v0.3
      poison every fixture if deferred → FIRST                              └─▶ P7 bindings/ops ═▶ v0.5 ─▶ P8 stabilize ═▶ v1.0
 ```
+
 **Hard orderings:** canonical-JSON+identity (#20) before *any* hashing/fixtures · read-API (#21b)
 before the write-engine (else reader-hostile) · container spec (#22) before layout/read ·
 conformance corpus (#21c) gates v1.0.

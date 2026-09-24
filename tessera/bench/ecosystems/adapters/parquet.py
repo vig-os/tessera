@@ -49,7 +49,10 @@ def read_table(base: str) -> dict:
     table = pq.read_table(path_for(base, "table"))
     # zero_copy_only=False because Parquet decode produces a fresh buffer anyway;
     # the explicit numpy() call preserves the Arrow type's native numpy dtype (u8/f4).
-    return {name: table.column(name).to_numpy(zero_copy_only=False) for name in table.column_names}
+    return {
+        name: table.column(name).to_numpy(zero_copy_only=False)
+        for name in table.column_names
+    }
 
 
 def read_table_column(base: str, name: str) -> np.ndarray:

@@ -36,7 +36,7 @@ natively (crate versions, inter-crate deps, `cargo publish`), drives versioning 
 sits until merged. Chosen over release-please (generic + a rust plugin + a bolted-on publish step).
 
 - **`release-plz release-pr`** runs on pushes to `dev`: opens/updates a PR bumping the workspace version
-  + regenerating `CHANGELOG.md`. **Nothing is tagged or published by this.**
+  - regenerating `CHANGELOG.md`. **Nothing is tagged or published by this.**
 - **The release is *held* by construction** — `0.1.0-alpha.1` only happens when that release PR is
   **deliberately merged**, then `release-plz release` (a later, gated step) tags + publishes.
 - **`release = false`** in `release-plz.toml` for now → no auto-publish. crates.io publishing is wired

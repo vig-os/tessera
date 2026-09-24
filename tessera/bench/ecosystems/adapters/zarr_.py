@@ -20,7 +20,11 @@ from zarr.codecs import ZstdCodec
 
 NAME = "Zarr (zarr-python)"
 CODEC = "zstd-3, 64^3 chunks"
-CAPS = {"volume": True, "table": True, "swmr": True}  # zarr stores are append-safe; concurrent readers fine
+CAPS = {
+    "volume": True,
+    "table": True,
+    "swmr": True,
+}  # zarr stores are append-safe; concurrent readers fine
 
 _ZSTD_LEVEL = 3
 _VOL_CHUNK = (64, 64, 64)

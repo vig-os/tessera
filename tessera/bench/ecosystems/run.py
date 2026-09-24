@@ -30,7 +30,9 @@ def time_volume(mod, vol, tmp, iters):
     base = os.path.join(tmp, f"{mod.__name__.split('.')[-1]}_vol")
     mod.write_volume(base, vol)
     back = mod.read_volume(base)
-    assert back.shape == vol.shape and back.dtype == vol.dtype, f"{mod.NAME}: vol shape/dtype"
+    assert back.shape == vol.shape and back.dtype == vol.dtype, (
+        f"{mod.NAME}: vol shape/dtype"
+    )
     assert np.array_equal(back, vol), f"{mod.NAME}: vol not bit-exact"
     z = vol.shape[0] // 2
     sl = mod.read_volume_zslice(base, z)
@@ -50,7 +52,9 @@ def time_table(mod, cols, tmp, iters):
     mod.write_table(base, cols)
     back = mod.read_table(base)
     for k, v in cols.items():
-        assert k in back and np.array_equal(back[k], v), f"{mod.NAME}: table col {k} mismatch"
+        assert k in back and np.array_equal(back[k], v), (
+            f"{mod.NAME}: table col {k} mismatch"
+        )
     one = mod.read_table_column(base, "e0")
     assert np.array_equal(one, cols["e0"]), f"{mod.NAME}: column read mismatch"
     raw = sum(v.nbytes for v in cols.values())
@@ -68,8 +72,16 @@ def _resolve(mod, base, modality):
     """Find the path the adapter actually wrote (it may suffix base)."""
     if hasattr(mod, "path_for"):
         return mod.path_for(base, modality)
-    for cand in (base, base + ".h5", base + ".zarr", base + ".nii.gz", base + ".dcm",
-                 base + ".parquet", base + ".tsra", base + ".nxs"):
+    for cand in (
+        base,
+        base + ".h5",
+        base + ".zarr",
+        base + ".nii.gz",
+        base + ".dcm",
+        base + ".parquet",
+        base + ".tsra",
+        base + ".nxs",
+    ):
         if os.path.exists(cand):
             return cand
     return base
@@ -106,11 +118,17 @@ def main():
     ap.add_argument("--tab-iters", type=int, default=3)
     ap.add_argument("--only", default="", help="comma list to restrict adapters")
     ap.add_argument("--out", default="results.json")
-    ap.add_argument("--real-dicom", default="", help="path to a DICOM series dir → use as the volume (real data)")
+    ap.add_argument(
+        "--real-dicom",
+        default="",
+        help="path to a DICOM series dir → use as the volume (real data)",
+    )
     args = ap.parse_args()
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    vol = load_dicom_volume(args.real_dicom) if args.real_dicom else common.make_volume()
+    vol = (
+        load_dicom_volume(args.real_dicom) if args.real_dicom else common.make_volume()
+    )
     table = common.make_table()
     want = set(args.only.split(",")) if args.only else None
 
@@ -123,8 +141,13 @@ def main():
         except Exception as e:  # noqa: BLE001
             print(f"SKIP {name}: import failed — {e}", file=sys.stderr)
             continue
-        entry = {"name": mod.NAME, "codec": getattr(mod, "CODEC", "?"),
-                 "caps": mod.CAPS, "volume": None, "table": None}
+        entry = {
+            "name": mod.NAME,
+            "codec": getattr(mod, "CODEC", "?"),
+            "caps": mod.CAPS,
+            "volume": None,
+            "table": None,
+        }
         with tempfile.TemporaryDirectory() as tmp:
             if mod.CAPS.get("volume"):
                 try:
@@ -141,8 +164,15 @@ def main():
         results[name] = entry
 
     with open(args.out, "w") as f:
-        json.dump({"vol_mib": vol.nbytes / 2**20, "table_mib": sum(v.nbytes for v in table.values()) / 2**20,
-                   "results": results}, f, indent=2)
+        json.dump(
+            {
+                "vol_mib": vol.nbytes / 2**20,
+                "table_mib": sum(v.nbytes for v in table.values()) / 2**20,
+                "results": results,
+            },
+            f,
+            indent=2,
+        )
     _print_aloca(vol, table, results)
 
 
@@ -151,12 +181,18 @@ def _mbps(nbytes, s):
 
 
 def _print_aloca(vol, table, results):
-    print(f"\n# Cross-ecosystem I/O — #143  (volume {vol.nbytes/2**20:.0f} MiB int16 {vol.shape}, "
-          f"table {sum(v.nbytes for v in table.values())/2**20:.0f} MiB {len(table['t']):,} rows)")
-    print("# warm (page-cache) reads → decode/parse throughput; min-of-N; one slice of the box.\n")
+    print(
+        f"\n# Cross-ecosystem I/O — #143  (volume {vol.nbytes / 2**20:.0f} MiB int16 {vol.shape}, "
+        f"table {sum(v.nbytes for v in table.values()) / 2**20:.0f} MiB {len(table['t']):,} rows)"
+    )
+    print(
+        "# warm (page-cache) reads → decode/parse throughput; min-of-N; one slice of the box.\n"
+    )
 
     print("## Volume")
-    print(f"{'ecosystem':22} {'codec':22} {'ratio':>6} {'size':>9} {'write':>9} {'read':>9} {'slice':>9}")
+    print(
+        f"{'ecosystem':22} {'codec':22} {'ratio':>6} {'size':>9} {'write':>9} {'read':>9} {'slice':>9}"
+    )
     print(f"{'':22} {'':22} {'x':>6} {'MiB':>9} {'MB/s':>9} {'MB/s':>9} {'MB/s':>9}")
     for r in results.values():
         v = r.get("volume")
@@ -165,13 +201,17 @@ def _print_aloca(vol, table, results):
         if "error" in v:
             print(f"{r['name']:22} {r['codec']:22} {'ERR':>6}  {v['error'][:48]}")
             continue
-        print(f"{r['name']:22} {r['codec']:22} {v['ratio']:>6.1f} {v['bytes']/2**20:>9.2f} "
-              f"{_mbps(vol.nbytes, v['write_s']):>9.0f} {_mbps(vol.nbytes, v['read_full_s']):>9.0f} "
-              f"{_mbps(vol.nbytes, v['read_slice_s']):>9.0f}")
+        print(
+            f"{r['name']:22} {r['codec']:22} {v['ratio']:>6.1f} {v['bytes'] / 2**20:>9.2f} "
+            f"{_mbps(vol.nbytes, v['write_s']):>9.0f} {_mbps(vol.nbytes, v['read_full_s']):>9.0f} "
+            f"{_mbps(vol.nbytes, v['read_slice_s']):>9.0f}"
+        )
 
     print("\n## Table")
     raw = sum(v.nbytes for v in table.values())
-    print(f"{'ecosystem':22} {'codec':22} {'ratio':>6} {'size':>9} {'write':>9} {'read':>9} {'col':>9}")
+    print(
+        f"{'ecosystem':22} {'codec':22} {'ratio':>6} {'size':>9} {'write':>9} {'read':>9} {'col':>9}"
+    )
     print(f"{'':22} {'':22} {'x':>6} {'MiB':>9} {'MB/s':>9} {'MB/s':>9} {'MB/s':>9}")
     for r in results.values():
         t = r.get("table")
@@ -180,9 +220,11 @@ def _print_aloca(vol, table, results):
         if "error" in t:
             print(f"{r['name']:22} {r['codec']:22} {'ERR':>6}  {t['error'][:48]}")
             continue
-        print(f"{r['name']:22} {r['codec']:22} {t['ratio']:>6.1f} {t['bytes']/2**20:>9.2f} "
-              f"{_mbps(raw, t['write_s']):>9.0f} {_mbps(raw, t['read_full_s']):>9.0f} "
-              f"{_mbps(raw, t['read_col_s']):>9.0f}")
+        print(
+            f"{r['name']:22} {r['codec']:22} {t['ratio']:>6.1f} {t['bytes'] / 2**20:>9.2f} "
+            f"{_mbps(raw, t['write_s']):>9.0f} {_mbps(raw, t['read_full_s']):>9.0f} "
+            f"{_mbps(raw, t['read_col_s']):>9.0f}"
+        )
 
     swmr = [r["name"] for r in results.values() if r["caps"].get("swmr")]
     print(f"\nSWMR / concurrent-reader support: {', '.join(swmr) if swmr else 'none'}")

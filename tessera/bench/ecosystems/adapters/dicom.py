@@ -45,9 +45,13 @@ def path_for(base: str, modality: str) -> str:
 # ---- volume ----
 def write_volume(base: str, vol: np.ndarray) -> None:
     if vol.dtype != np.dtype("<i2"):
-        raise ValueError(f"DICOM adapter expects little-endian int16 volume, got {vol.dtype}")
+        raise ValueError(
+            f"DICOM adapter expects little-endian int16 volume, got {vol.dtype}"
+        )
     if vol.ndim != 3:
-        raise ValueError(f"DICOM adapter expects a 3-D (D, H, W) volume, got shape {vol.shape}")
+        raise ValueError(
+            f"DICOM adapter expects a 3-D (D, H, W) volume, got shape {vol.shape}"
+        )
     d, h, w = vol.shape
     path = path_for(base, "volume")
 

@@ -33,8 +33,8 @@ def write_volume(base: str, vol: np.ndarray) -> None:
     # np.eye(4) affine → no axis reordering on read; data is stored exactly as (D, H, W).
     img = nib.Nifti1Image(vol, affine=np.eye(4))
     hdr = img.header
-    hdr.set_data_dtype(vol.dtype)          # pin int16 on-disk, no implicit promotion
-    hdr.set_slope_inter(1, 0)              # disable scl_slope/scl_inter scaling → reads stay int16
+    hdr.set_data_dtype(vol.dtype)  # pin int16 on-disk, no implicit promotion
+    hdr.set_slope_inter(1, 0)  # disable scl_slope/scl_inter scaling → reads stay int16
     nib.save(img, path_for(base, "volume"))
 
 

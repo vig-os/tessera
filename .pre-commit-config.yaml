@@ -34,6 +34,10 @@ repos:
       - id: check-added-large-files
       - id: check-case-conflict
       - id: check-json
+        # The three JSONC scaffold files carry a `//` provenance banner (#1053)
+        # that check-json's strict parser rejects; VS Code / the devcontainer
+        # CLI accept it. Strict-JSON files (renovate.json etc.) stay checked.
+        exclude: (^|/)(\.devcontainer/devcontainer\.json|\.vscode/settings\.json|\.devcontainer/workspace\.code-workspace\.example)$
       - id: check-merge-conflict
       - id: check-symlinks
       - id: check-toml
@@ -41,17 +45,42 @@ repos:
       - id: debug-statements
       - id: destroyed-symlinks
       - id: detect-private-key
+        # `trust.rs` documents the PEM header the loader accepts (a doc comment)
+        # and writes it verbatim in a malformed-key negative test. The detector
+        # is a byte substring scan with no inline escape, so it cannot tell a
+        # header mention from a key. The real fixture it used to flag was removed
+        # in this same change; these two remaining mentions are by design.
+        exclude: ^tessera/crates/tessera-cli/src/trust\.rs$
+      # `*.trycmd` files are BYTE-EXACT CLI snapshots: trycmd compares the
+      # recorded stdout verbatim, and clap's help output carries meaningful
+      # trailing spaces. An autofixer that "cleans" them silently rewrites the
+      # expected output and the assertion then fails against the real CLI --
+      # which is exactly what happened here before this exclude existed.
+      # Data files the whitespace fixers must not touch.
       - id: end-of-file-fixer
+        exclude: \.trycmd$
       - id: mixed-line-ending
+        exclude: \.trycmd$
       - id: trailing-whitespace
+        exclude: \.trycmd$
 
-  # Python Linting and Formatting (Ruff)
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: aad66557af3b56ba6d4d69cd1b6cba87cef50cbb  # v0.14.3
+  # Python Linting and Formatting (Ruff). From Nix, like typos/shellcheck above:
+  # ruff-pre-commit installs a generic-linux wheel whose dynamically linked
+  # binary cannot start on NixOS, so the hook failed with exit 127 locally while
+  # passing in CI -- the exact split this repo already avoids for the other fast
+  # movers. Sourcing it from the dev-shell makes local and CI run one binary.
+  - repo: local
     hooks:
       - id: ruff
-        args: [--fix]
+        name: ruff
+        entry: ruff check --fix
+        language: system
+        types: [python]
       - id: ruff-format
+        name: ruff format
+        entry: ruff format
+        language: system
+        types: [python]
 
   # YAML Linting
   - repo: https://github.com/adrienverge/yamllint
@@ -76,6 +105,9 @@ repos:
         entry: shellcheck -x
         language: system
         types: [shell]
+        # .envrc files (root + the scaffolded template stub) are direnv stdlib
+        # scripts with no shebang; exclude them from SC2148 at any path.
+        exclude: (^|/)\.envrc$
 
   # Containerfile
   - repo: https://github.com/hadolint/hadolint
@@ -85,13 +117,15 @@ repos:
         name: hadolint
 
   # Markdown Linting (excludes auto-generated docs)
-  - repo: https://github.com/jackdewinter/pymarkdown
-    rev: f93643d339dfee2a1022e7b05e8b5a281bfac553  # v0.9.23
+  - repo: local
     hooks:
       - id: pymarkdown
         name: pymarkdown
+        entry: pymarkdown
+        language: system
+        types: [markdown]
         args: ["-c", ".pymarkdown", "fix"]
-        exclude: ^(README\.md|CONTRIBUTE\.md|TESTING\.md)
+        exclude: ^(README\.md|CONTRIBUTING\.md|TESTING\.md)
 
   # Justfile formatting
   - repo: local
@@ -130,9 +164,9 @@ repos:
     hooks:
       - id: check-skill-names
         name: check-skill-names (enforce naming convention)
-        entry: scripts/check-skill-names.sh .cursor/skills
+        entry: scripts/check-skill-names.sh .claude/skills
         language: script
-        files: ^\.cursor/skills/
+        files: ^\.claude/skills/
         pass_filenames: false
 
   # ADR ↔ FEATURE-MATRIX: advisory pre-push nudge (the HARD gate is in nix flake check →
@@ -164,6 +198,8 @@ repos:
         entry: guardrails-no-debug-leftovers
         language: system
         pass_filenames: true
+        # Report-printing benchmark/corpus harnesses: `print()` IS their output.
+        exclude: ^tessera/(bench|corpus)/.*/run\.py$
       - id: no-commented-code
         name: no commented-out code
         entry: guardrails-no-commented-code

@@ -14,7 +14,11 @@ import tessera  # tessera.so on sys.path (the bench dir)
 
 NAME = "Tessera (.tsra)"
 CODEC = "pcodec/Vortex, zip64+blake3"
-CAPS = {"volume": True, "table": True, "swmr": False}  # immutable-sealed; concurrent readers, no live append
+CAPS = {
+    "volume": True,
+    "table": True,
+    "swmr": False,
+}  # immutable-sealed; concurrent readers, no live append
 
 
 def path_for(base: str, modality: str) -> str:
@@ -42,6 +46,7 @@ def read_volume_zslice(base: str, z: int) -> np.ndarray:
 
 def read_shape(r):
     import json
+
     m = json.loads(r.manifest_json())
     return tuple(b["spec"]["shape"] for b in m["blocks"] if b["name"] == "volume")[0]
 

@@ -368,36 +368,51 @@ mod tests {
         (tsra, pub_hex)
     }
 
-    /// A throwaway, unencrypted OpenSSH ed25519 private key (generated offline with `ssh-keygen -t
-    /// ed25519 -N ''`). Its raw 32-byte public key is `438ddd…2acf6faf` — the `key_id` the loader
-    /// must derive, identical to a raw-hex key with the same pubkey (only the container differs).
-    const SSH_ED25519_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
-        b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n\
-        QyNTUxOQAAACBDjd0RWR+en8LrDAfDQLQB1mZIE5JKxQzen9pLKs9vrwAAAJDCcCx4wnAs\n\
-        eAAAAAtzc2gtZWQyNTUxOQAAACBDjd0RWR+en8LrDAfDQLQB1mZIE5JKxQzen9pLKs9vrw\n\
-        AAAEBe9p6oxAJOzfIpyQL96Ns+SnJxFNKYx5F+xRkgw9lFXUON3RFZH56fwusMB8NAtAHW\n\
-        ZkgTkkrFDN6f2ksqz2+vAAAADHRlc3NlcmEtdGVzdAE=\n\
-        -----END OPENSSH PRIVATE KEY-----\n";
+    /// Build a throwaway, unencrypted OpenSSH ed25519 private key around `seed` — the same 32 bytes
+    /// the raw-hex container carries, so the two on-disk formats provably hold the *same* key.
+    /// Generated per test run and never committed: a parseable private key checked into a public
+    /// repo is key material, and the loader is what is under test — not which key it happens to hold.
+    fn openssh_ed25519_pem(seed: &[u8; 32]) -> String {
+        use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey};
+        let mut key =
+            ssh_key::PrivateKey::from(Ed25519Keypair::from(Ed25519PrivateKey::from_bytes(seed)));
+        key.set_comment("tessera-test");
+        key.to_openssh(ssh_key::LineEnding::LF).unwrap().to_string()
+    }
 
     #[test]
     fn loads_an_openssh_ed25519_key_and_signs_with_the_same_key_id() {
         let dir = tempfile::tempdir().unwrap();
+        let mut seed = [0u8; 32];
+        getrandom::getrandom(&mut seed).unwrap();
+
         // an OpenSSH `id_ed25519` loads with key_format = "ssh-ed25519".
         let sshf = dir.path().join("id_ed25519");
-        std::fs::write(&sshf, SSH_ED25519_KEY).unwrap();
+        std::fs::write(&sshf, openssh_ed25519_pem(&seed)).unwrap();
         let (sk, fmt) = load_signing_key(&sshf).unwrap();
         assert_eq!(fmt, "ssh-ed25519");
-        // the key_id is the raw ed25519 pubkey hex — container-independent, so any verifier checks it
-        // exactly like a keygen key (the crypto is unchanged; only the on-disk key wrapper differs).
-        assert_eq!(
-            signing::verifying_key_hex(&sk.verifying_key()),
-            "438ddd11591f9e9fc2eb0c07c340b401d6664813924ac50cde9fda4b2acf6faf"
-        );
+        let ssh_key_id = signing::verifying_key_hex(&sk.verifying_key());
         // a signature made with the ssh-loaded key verifies under its public key.
         let env = signing::sign_ed25519("blake3:abcd", &sk, &signing::SignOpts::default()).unwrap();
         assert!(signing::verify("blake3:abcd", &env, &sk.verifying_key()));
 
-        // a raw-hex seed (what keygen writes) loads with key_format = "raw-hex".
+        // the SAME seed as a raw hex seed (what keygen writes) loads with key_format = "raw-hex" and
+        // yields the identical key_id — the container-independence the `ssh-ed25519` path promises:
+        // the key_id is the raw ed25519 pubkey hex either way, so any verifier checks it unchanged.
+        let samef = dir.path().join("same.key");
+        std::fs::write(
+            &samef,
+            signing::signing_key_hex(&SigningKey::from_bytes(&seed)),
+        )
+        .unwrap();
+        let (raw_sk, raw_fmt) = load_signing_key(&samef).unwrap();
+        assert_eq!(raw_fmt, "raw-hex");
+        assert_eq!(
+            ssh_key_id,
+            signing::verifying_key_hex(&raw_sk.verifying_key())
+        );
+
+        // a keygen-written key (its own fresh seed) also loads with key_format = "raw-hex".
         let rawf = dir.path().join("raw.key");
         keygen(&rawf, &mut Vec::new()).unwrap();
         assert_eq!(load_signing_key(&rawf).unwrap().1, "raw-hex");

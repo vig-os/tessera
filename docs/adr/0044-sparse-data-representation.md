@@ -101,7 +101,7 @@ Densification is downstream and optional.
 
 - **No new primitive, no new substrate.** Scatter-sparse is a Vortex table with three extra
   metadata fields (`shape`/`dtype`/`fill_value`); block-sparse is the existing dense-chunked array
-  + `count=0` prune. Pure convention.
+  - `count=0` prune. Pure convention.
 - **DRY integrity + query** — Merkle, monoid stats, pushdown, streaming append, SQL over tables
   (#262) all apply to the COO table unchanged.
 - **Deterministic** — canonical row ordering + explicit `fill_value` → stable digest; the encoding
@@ -133,7 +133,7 @@ Densification is downstream and optional.
 - Tracks #218; ratifies ADR-0031 (as-built).
 - ADR-0023 (array payload), ADR-0024 (table payload), ADR-0027 (chunk-index stats), ADR-0028
   (unified hierarchy — `count=0` prune), ADR-0029 §6 (substrate-by-nature), ADR-0032 (`fill_value`
-  + `unit` on ArraySpec, `Referenced` per-axis), #213 (codec-`auto` "store the concrete answer"),
+  - `unit` on ArraySpec, `Referenced` per-axis), #213 (codec-`auto` "store the concrete answer"),
   #262 (SQL over tables), #221-A (crossover bench).
 - Code: `tessera_io::array::to_coo`, `tessera_core::block::array::ArraySpec.fill_value`,
   `tessera_core::chunk_index::prune`.

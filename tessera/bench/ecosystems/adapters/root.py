@@ -33,7 +33,9 @@ def read_table(base: str) -> dict:
 
 def read_table_column(base: str, name: str) -> np.ndarray:
     # real per-branch read — ROOT decodes only the requested branch's baskets
-    return np.asarray(uproot.open(path_for(base, "table"))[_TREE][name].array(library="np"))
+    return np.asarray(
+        uproot.open(path_for(base, "table"))[_TREE][name].array(library="np")
+    )
 
 
 def write_volume(base, vol):

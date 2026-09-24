@@ -119,7 +119,7 @@ The substrate is chosen by *what the data is*, never by which tool emitted it.
 - **Unified access for regular N-D** falls out of treating the extra dimension as an array **axis** (so
   the ADR-0028 fold/pyramid/projection + the streaming MMR append all apply unchanged in 4-D).
 - **SPEC additions:** the composition model + feature-by-presence rule; the homogeneous-vs-heterogeneous
-  + `t_c` rule; the ROI representation matrix; the new schemas + trait-composition; the **substrate-by-
+  - `t_c` rule; the ROI representation matrix; the new schemas + trait-composition; the **substrate-by-
   nature** rule (grid→array / rows→table, density-flip for sparse, the histogram + ROOT mapping).
 - **Backward-compatible / additive** — existing `recon`/`listmode`/`roi` products are unchanged; the new
   schemas and the N-D usage are additions.
