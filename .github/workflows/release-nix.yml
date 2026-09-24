@@ -2,10 +2,19 @@
 # alongside cargo-dist's prebuilt CLI binaries (release.yml). The CLI itself needs no upload here: nix
 # users install it straight from the flake (`nix run` / `nix profile install github:vig-os/tessera`).
 #
-# TRIGGER = `release: published`, NOT the tag push. cargo-dist's release.yml is what CREATES and
-# publishes the Release on a tag; firing on `published` means this runs AFTER that exists, so the upload
-# never races release creation. Each matrix leg builds the wheel for its own arch (the platform tag is
-# `linux_x86_64` / `linux_aarch64`) and attaches it with `--clobber` (idempotent on re-runs).
+# TRIGGER = `workflow_run` chained off cargo-dist's `Release` workflow (release.yml), NOT the tag push
+# and NOT `release: published`. cargo-dist's `announce` job CREATES the GitHub Release using the
+# built-in `GITHUB_TOKEN`, and GitHub's anti-recursion rule silently drops workflow triggers for
+# `GITHUB_TOKEN`-caused events — so a `release: published` trigger here NEVER fires after an automated
+# release (proven on v0.1.0-alpha.1, issue #438: the wheel had to be re-attached by manual dispatch).
+# `workflow_run` DOES fire for `GITHUB_TOKEN`-driven workflows, so chaining off `Release: completed`
+# makes the wheel attach automatically. cargo-dist's Release runs on the tag ref, so
+# `workflow_run.head_branch` IS the tag (e.g. `v0.1.0-alpha.1`); the `startsWith(…,'v')` guard skips
+# the PR-triggered `plan`-only runs of the Release workflow.
+#
+# Manual re-run path (`workflow_dispatch` with a `tag` input) is preserved unchanged — required for
+# recovery after a transient runner failure, and it was the fallback used to attach the v0.1.0-alpha.1
+# wheels before this fix landed.
 #
 # NB: the nix-built wheel is a `linux_<arch>` wheel, not `manylinux` — fine to attach to a GitHub
 # Release for download, but a PyPI upload needs an `auditwheel repair` / manylinux build first (tracked
@@ -14,9 +23,11 @@
 name: release-nix
 
 on:  # yamllint disable-line rule:truthy
-  release:
-    types: [published]
-  # Manual re-run against an existing release (e.g. after a transient runner failure).
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  # Manual re-run against an existing release (e.g. after a transient runner failure, or to
+  # backfill a release created before this chained trigger existed).
   workflow_dispatch:
     inputs:
       tag:
@@ -30,6 +41,13 @@ permissions:
 jobs:
   wheel:
     name: nix wheel (${{ matrix.arch }})
+    # Manual dispatch always runs; the chained workflow_run only runs when the upstream Release
+    # succeeded AND its head ref is a version tag (`v*`) — that filters out the PR-triggered `plan`
+    # runs of cargo-dist's release.yml, which never produce a GitHub Release.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch'
+          || (github.event.workflow_run.conclusion == 'success'
+              && startsWith(github.event.workflow_run.head_branch, 'v')) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -41,7 +59,9 @@ jobs:
           - arch: aarch64-linux
             runner: ubuntu-24.04-arm
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      # Single source of truth for the tag across every step. On workflow_run, the upstream Release
+      # workflow ran on the tag ref, so head_branch IS the tag (e.g. `v0.1.0-alpha.1`).
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
     steps:
       - name: Checkout the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
