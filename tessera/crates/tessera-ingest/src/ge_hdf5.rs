@@ -557,6 +557,30 @@ pub fn stream_events_2p(
     stream_compound(path, dataset, slab_rows, sink)
 }
 
+/// Everything the streaming listmode path must stamp on its [`tessera_io::WriteSession`] **before
+/// the first block commits** (ADR-0058). Bundled into one struct rather than five more positional
+/// arguments because the streaming writer has no post-build re-seal hook: a `.tsra` is written once,
+/// straight to disk, so anything that must ride `manifest_hash` has to be declared up-front.
+///
+/// The metadata tiers are held separately, never pre-merged, so the backend can layer them in
+/// ascending precedence (`inherited` < the product's own default < `metadata`) — a value inherited
+/// from a parent must never clobber a product-own default.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StreamProvenance<'a> {
+    /// Schema-flagged identity inherited from the `derived_from` parents (ADR-0058 §5) — the
+    /// lowest-precedence metadata tier.
+    pub inherited: Option<&'a std::collections::BTreeMap<String, serde_json::Value>>,
+    /// The parents' first-class `study` grouping key, when this product declares none of its own.
+    pub inherited_study: Option<&'a str>,
+    /// The spec's `[product.metadata]` — the highest-precedence tier; an explicit operator value
+    /// wins over both the inherited identity and the product's own default.
+    pub metadata: Option<&'a std::collections::BTreeMap<String, serde_json::Value>>,
+    /// The spec's `[product.generation]` recipe (ADR-0058 §2) — *how* this product was made.
+    pub generation: Option<&'a tessera_core::Generation>,
+    /// The spec's `[product.producer]` identity (ADR-0058 §1) — *who/what* made it.
+    pub producer: Option<&'a tessera_core::Producer>,
+}
+
 /// Bounded-memory, **multi-block** ingest of a GE 2-photon dataset → sealed `listmode` product
 /// (ADR-0026 §3/§4): stream the HDF5 in row-slabs through a [`tessera_io::TableMultiBlockSink`]
 /// (≈ one slab on read + ≈ one row-group of buffered rows + per-block worker encode RAM), staging
@@ -593,9 +617,7 @@ pub fn stream_to_listmode_product_2p_to_file(
     row_index: &str,
     source_label: Option<&str>,
     extra_sources: &[tessera_core::provenance::Source],
-    inherited: &std::collections::BTreeMap<String, serde_json::Value>,
-    inherited_study: Option<&str>,
-    extra_metadata: &std::collections::BTreeMap<String, serde_json::Value>,
+    provenance: &StreamProvenance<'_>,
 ) -> Result<Manifest> {
     stream_to_listmode_product_2p_to_file_inner(
         path,
@@ -611,9 +633,7 @@ pub fn stream_to_listmode_product_2p_to_file(
         row_index,
         source_label,
         extra_sources,
-        inherited,
-        inherited_study,
-        extra_metadata,
+        provenance,
     )
 }
 
@@ -649,9 +669,7 @@ pub fn stream_to_listmode_product_2p_to_file_with_block_rows(
         "ms",
         None,
         &[],
-        &std::collections::BTreeMap::new(),
-        None,
-        &std::collections::BTreeMap::new(),
+        &StreamProvenance::default(),
     )
 }
 
@@ -675,9 +693,7 @@ fn stream_to_listmode_product_2p_to_file_inner(
     row_index: &str,
     source_label: Option<&str>,
     extra_sources: &[tessera_core::provenance::Source],
-    inherited: &std::collections::BTreeMap<String, serde_json::Value>,
-    inherited_study: Option<&str>,
-    extra_metadata: &std::collections::BTreeMap<String, serde_json::Value>,
+    provenance: &StreamProvenance<'_>,
 ) -> Result<Manifest> {
     let mut columns = compound_columns(path, dataset)?;
     // #343: annotate the streamed columns (unit/description/short_name) from the GEDDF dictionary so
@@ -713,10 +729,10 @@ fn stream_to_listmode_product_2p_to_file_inner(
     // apply in ascending priority so `with_field`'s last-write-wins yields spec > product-own > inherited.
     // (1) INHERITED schema-flagged identity from `derived_from` parents (ADR-0058 §5) — lowest, so any
     //     product-own default or explicit spec value below overrides it. `study` is a first-class field.
-    if let Some(s) = inherited_study {
+    if let Some(s) = provenance.inherited_study {
         ws.with_study(s)?;
     }
-    for (k, v) in inherited {
+    for (k, v) in provenance.inherited.into_iter().flatten() {
         ws.with_field(k, v.clone())?;
     }
     // (2) PRODUCT-OWN default coincidence_mode (same as the batch builder) — beats inherited, loses to spec.
@@ -726,8 +742,17 @@ fn stream_to_listmode_product_2p_to_file_inner(
     )?;
     // (3) SPEC `[product.metadata]` — highest; an explicit operator value wins over everything. All
     //     three are declared before any block commits, so they flow into the sealed manifest_hash.
-    for (k, v) in extra_metadata {
+    for (k, v) in provenance.metadata.into_iter().flatten() {
         ws.with_field(k, v.clone())?;
+    }
+    // #416 / ADR-0058 §1/§2: the spec's sealed recipe + producer identity. Declared here, alongside
+    // the metadata tiers and for the same reason — the streamed `.tsra` is sealed once with no
+    // post-build re-seal hook, so a recipe plumbed any later would be silently dropped.
+    if let Some(g) = provenance.generation {
+        ws.with_generation(g.clone())?;
+    }
+    if let Some(pr) = provenance.producer {
+        ws.with_producer(pr.clone())?;
     }
     let mut sw = tessera_io::StreamWriter::with_config(ws, cfg, unit_bytes);
     {
@@ -782,9 +807,7 @@ pub fn stream_to_listmode_product_2p(
         "ms",
         None,
         &[],
-        &std::collections::BTreeMap::new(),
-        None,
-        &std::collections::BTreeMap::new(),
+        &StreamProvenance::default(),
     )?;
     // Re-read block bytes from the temp .tsra so callers get the in-memory pair their API expects.
     // Multi-block products may not fit in RAM — callers needing constant-memory should use

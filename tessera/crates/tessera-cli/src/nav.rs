@@ -407,6 +407,80 @@ fn compact_value(v: &Value, full: bool) -> String {
     }
 }
 
+/// The `inspect` render of the sealed ADR-0058 §1 **producer identity**.
+///
+/// [`ProducerRef::display`](tessera_core::ProducerRef::display) folds the build fields into a
+/// `tool/version (commit)` one-liner — right for an inline mention, but it drops `git_repo` and
+/// `dirty` entirely, so two of the three sealed build fields had no operator surface at all (#417).
+/// `inspect` is that surface, so it shows every field the manifest actually carries: `tool/version`
+/// on the header line, one indented line per present build field. A legacy bare-string producer
+/// (pre-ADR-0058 manifests) round-trips verbatim — there is nothing more to show.
+pub(crate) fn producer_lines(p: &tessera_core::ProducerRef) -> Vec<String> {
+    let tessera_core::ProducerRef::Structured(s) = p else {
+        return vec![format!("producer      {}", p.display())];
+    };
+    let mut lines = vec![format!("producer      {}/{}", s.tool, s.version)];
+    for (k, v) in [
+        ("git_repo", s.git_repo.clone()),
+        ("git_commit", s.git_commit.clone()),
+        ("dirty", s.dirty.map(|d| d.to_string())),
+    ] {
+        if let Some(v) = v {
+            lines.push(format!("  {k:<12}{v}"));
+        }
+    }
+    lines
+}
+
+/// The `inspect` render of the sealed ADR-0058 §2 **generation recipe** — the answer to "how was
+/// this made?", which until #417 no CLI verb printed at all.
+///
+/// The header line summarises what the record holds (`N config keys`, and/or the `config_ref`
+/// digest of a carried config block); the body is one line per config key. The bag is deliberately
+/// **non-opinionated** (ADR-0058 §2), so the keys are rendered in the manifest's own order and are
+/// never interpreted, validated, or re-grouped — display only. Default caps the body at
+/// [`GENERATION_KEYS_SHOWN`] keys and elides long values, mirroring how `sources` collapses; `--full`
+/// prints every key and the full digest.
+///
+/// Resolving a `config_ref` to the bytes of the block it points at is a separate, larger job
+/// (ADR-0058 §2 / #417) — this prints the digest, not the payload.
+pub(crate) fn generation_lines(g: &tessera_core::Generation, full: bool) -> Vec<String> {
+    let mut head = Vec::new();
+    if !g.config.is_empty() {
+        let plural = if g.config.len() == 1 { "" } else { "s" };
+        head.push(format!("{} config key{plural}", g.config.len()));
+    }
+    if let Some(r) = &g.config_ref {
+        let digest = if full { r.clone() } else { short_hash(r) };
+        head.push(format!("config_ref {digest}"));
+    }
+    if head.is_empty() {
+        // A sealed-but-empty record is still state the operator should see; printing nothing would
+        // read as "this product has no recipe", which is a different fact.
+        head.push("(empty)".to_string());
+    }
+    let mut lines = vec![format!("generation    {}", head.join(" · "))];
+    let show = if full {
+        g.config.len()
+    } else {
+        g.config.len().min(GENERATION_KEYS_SHOWN)
+    };
+    for (k, v) in g.config.iter().take(show) {
+        lines.push(format!("  - {k:<22} {}", compact_value(v, full)));
+    }
+    if g.config.len() > show {
+        lines.push(format!(
+            "    … (+{} more, --full to list all)",
+            g.config.len() - show
+        ));
+    }
+    lines
+}
+
+/// How many `generation.config` keys `inspect` prints before collapsing — the same cap `ls sources`
+/// uses for a multi-file provenance edge, so the two summaries read alike.
+const GENERATION_KEYS_SHOWN: usize = 8;
+
 /// Middle-elide a string to `max` chars, keeping the head **and** the (informative) tail — for a
 /// filesystem path that means the filename survives. Returns as-is if already within `max`.
 fn elide(s: &str, max: usize) -> String {
@@ -1591,6 +1665,90 @@ mod tests {
         ls(&p, Some("events"), false, &mut cols).unwrap();
         let s = String::from_utf8(cols).unwrap();
         assert!(s.contains("ms") && s.contains("en"));
+    }
+
+    /// #417: the sealed producer's build fields must all be reachable. `ProducerRef::display()`
+    /// folds them into `tool/version (commit)`, which silently loses `git_repo` and `dirty` — so
+    /// `inspect` renders each present field on its own line instead.
+    #[test]
+    fn producer_lines_surface_every_sealed_build_field() {
+        let mut p = tessera_core::Producer::new("ge-listmode-daq", "3.2");
+        p.git_commit = Some("0855f5f".into());
+        p.git_repo = Some("vig-os/ge-daq".into());
+        p.dirty = Some(false);
+        let lines = producer_lines(&tessera_core::ProducerRef::Structured(p));
+        assert_eq!(lines[0], "producer      ge-listmode-daq/3.2");
+        let body = lines[1..].join("\n");
+        for want in [
+            "git_repo",
+            "vig-os/ge-daq",
+            "git_commit",
+            "0855f5f",
+            "dirty",
+            "false",
+        ] {
+            assert!(body.contains(want), "missing {want} in:\n{body}");
+        }
+
+        // A producer with no build fields is just the header line — no empty scaffolding.
+        let bare = producer_lines(&tessera_core::ProducerRef::Structured(
+            tessera_core::Producer::new("sim", "0.1"),
+        ));
+        assert_eq!(bare, vec!["producer      sim/0.1".to_string()]);
+
+        // A pre-ADR-0058 bare string round-trips verbatim.
+        let legacy = producer_lines(&tessera_core::ProducerRef::Legacy("tessera/0.0.0".into()));
+        assert_eq!(legacy, vec!["producer      tessera/0.0.0".to_string()]);
+    }
+
+    /// #417: the sealed generation recipe gets an operator surface — a summary header plus the
+    /// config bag, collapsing like `sources` does until `--full`.
+    #[test]
+    fn generation_lines_summarise_then_collapse_until_full() {
+        // Inline config + a config_ref: the header states both, the digest is shortened by default.
+        let mut g = tessera_core::Generation::default()
+            .with("energy_window_keV", serde_json::json!("425-650"))
+            .with("seed", serde_json::json!(7));
+        g.config_ref = Some("blake3:0123456789abcdef0123456789abcdef".into());
+        let lines = generation_lines(&g, false);
+        assert_eq!(
+            lines[0],
+            "generation    2 config keys · config_ref blake3:0123456789ab…"
+        );
+        assert!(lines[1].contains("energy_window_keV") && lines[1].contains("\"425-650\""));
+        assert!(lines[2].contains("seed") && lines[2].contains('7'));
+        // --full spells the digest out.
+        assert!(generation_lines(&g, true)[0].contains("blake3:0123456789abcdef0123456789abcdef"));
+
+        // A bag larger than the cap collapses with a footer; --full lists every key.
+        let big = (0..12).fold(tessera_core::Generation::default(), |acc, i| {
+            acc.with(format!("k{i:02}"), serde_json::json!(i))
+        });
+        let capped = generation_lines(&big, false);
+        assert_eq!(capped[0], "generation    12 config keys");
+        assert_eq!(
+            capped.len(),
+            1 + GENERATION_KEYS_SHOWN + 1,
+            "header + 8 + footer"
+        );
+        assert!(capped
+            .last()
+            .unwrap()
+            .contains("(+4 more, --full to list all)"));
+        assert_eq!(generation_lines(&big, true).len(), 1 + 12);
+
+        // config_ref alone — the large/bit-faithful vendor-config case (ADR-0058 §2).
+        let only_ref = tessera_core::Generation::default().with_config_ref("blake3:deadbeefcafe00");
+        assert_eq!(
+            generation_lines(&only_ref, false),
+            vec!["generation    config_ref blake3:deadbeefcafe…".to_string()]
+        );
+
+        // A sealed-but-empty record is still reported — silence would read as "no recipe".
+        assert_eq!(
+            generation_lines(&tessera_core::Generation::default(), false),
+            vec!["generation    (empty)".to_string()]
+        );
     }
 
     #[test]
