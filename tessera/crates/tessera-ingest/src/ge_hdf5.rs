@@ -1167,6 +1167,35 @@ mod tests {
             .unwrap();
     }
 
+    /// A CHUNKED + deflate-compressed 3p dataset — the layout every real vendor acquisition uses,
+    /// and the one that exercises libhdf5's per-chunk read/inflate against the slab size (#325).
+    fn write_synth_3p_chunked(path: &std::path::Path, n: usize, chunk_rows: usize, gzip: u8) {
+        let recs: Vec<Rec3p> = (0..n)
+            .map(|k| Rec3p {
+                ms: k as u32,
+                // Wrapping, not `+ 1`: this writer is used at row counts far past u16::MAX, where a
+                // plain add panics in debug. The values only have to be varied, not meaningful.
+                id: [
+                    k as u16,
+                    (k as u16).wrapping_add(1),
+                    (k as u16).wrapping_add(2),
+                ],
+                en: [511.0, 510.0 + k as f32, 512.0],
+                vtx: [0.1 * k as f32, 0.2, 0.3],
+                lt: 1.5 + k as f32 * 0.01,
+            })
+            .collect();
+        let f = hdf5::File::create(path).unwrap();
+        f.new_dataset::<Rec3p>()
+            .shape(n)
+            .chunk(chunk_rows.min(n))
+            .deflate(gzip)
+            .create("events_3p")
+            .unwrap()
+            .write(&recs)
+            .unwrap();
+    }
+
     fn write_synth_2p(path: &std::path::Path, n: usize) {
         let recs: Vec<Rec2p> = (0..n)
             .map(|k| Rec2p {
@@ -1295,6 +1324,92 @@ mod tests {
         let expect_2p = ground_truth_2p(&recs_2p);
         let got_2p = read_compound(&h5_2p, "events_2p").unwrap();
         assert_eq!(got_2p, expect_2p, "generic reader diverged on 2p compound");
+    }
+
+    /// #325 correctness gate (no timing — this is the one that runs everywhere): chunk-aligning the
+    /// slab changes only HOW MUCH is read per `H5Dread`, never WHAT is produced. Streaming a chunked,
+    /// compressed dataset must still concatenate to exactly the bulk read, including when the row
+    /// count is not a whole number of chunks (the ragged tail is where an alignment bug would show).
+    #[test]
+    fn chunked_stream_matches_bulk_read_including_a_ragged_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let h5 = dir.path().join("chunked_3p.h5");
+        // 5 chunks + a partial one, so the final slab is deliberately short.
+        write_synth_3p_chunked(&h5, 5 * 4096 + 37, 4096, 1);
+
+        let bulk = read_compound(&h5, "events_3p").unwrap();
+        // Same accumulation shape as `stream_compound_concatenated_matches_whole_file`.
+        let mut acc: Option<TableData> = None;
+        stream_compound(&h5, "events_3p", 1000, |slab| {
+            match acc.as_mut() {
+                None => acc = Some(slab),
+                Some(a) => {
+                    for (i, (_, c)) in slab.into_iter().enumerate() {
+                        a[i].1.extend(&c)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            acc.unwrap(),
+            bulk,
+            "chunk-aligned streaming changed the data"
+        );
+    }
+
+    /// #325 perf ratchet: the streaming slab reader must not re-inflate each chunk once per slab.
+    ///
+    /// Relative + machine-independent, like the table grid ratchet: compare the streaming read of a
+    /// COMPRESSED CHUNKED dataset against one bulk `read_compound` of the same file, best-of-N. Both
+    /// sides decompress the same bytes exactly once if the slab is chunk-aligned, so the ratio is
+    /// ~1×; with a sub-chunk slab libhdf5 re-inflates every chunk once per slab, which is the 8×
+    /// (here) / 4× (measured end-to-end on a 1 M-row chunk) regression this guards.
+    ///
+    /// Gated at >= 8 cores on purpose — it runs on dev machines with headroom and is SKIPPED on the
+    /// small, build-saturated CI runners where any timing assertion is flaky. The non-flaky gate
+    /// that runs everywhere is `chunk_aligned_slab_rounds_up_to_whole_chunks` (+ the correctness
+    /// test above); absolute throughput belongs in a perf job, not a unit gate.
+    #[test]
+    fn chunked_stream_read_does_not_reinflate_each_chunk() {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        if cores < 8 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let h5 = dir.path().join("ratchet_3p.h5");
+        // One 1,048,576-row chunk plus a ragged tail: the default 65,536-row slab is 1/16th of a
+        // chunk, so an unaligned reader inflates each chunk 16x. The gap has to be wide because
+        // BOTH sides also pay the same per-row transpose, which dilutes the ratio — at 8x the
+        // measured spread was only 2.07x against a 2.0 gate, too thin to be a reliable guard.
+        let rows = (1 << 20) + 12_345;
+        write_synth_3p_chunked(&h5, rows, 1 << 20, 6);
+
+        let best = |run: &dyn Fn()| -> f64 {
+            let mut m = f64::MAX;
+            for _ in 0..3 {
+                let t = std::time::Instant::now();
+                run();
+                m = m.min(t.elapsed().as_secs_f64());
+            }
+            m
+        };
+        let _ = read_compound(&h5, "events_3p").unwrap(); // warm the page cache for both sides
+        let bulk = best(&|| {
+            read_compound(&h5, "events_3p").unwrap();
+        });
+        let streamed = best(&|| {
+            stream_compound(&h5, "events_3p", STREAM_SLAB_ROWS, |_| Ok(())).unwrap();
+        });
+        let ratio = streamed / bulk;
+        assert!(
+            ratio < 2.0,
+            "streaming re-read overhead {ratio:.2}x vs one bulk read (regression — is the slab \
+             still chunk-aligned? a sub-chunk slab re-inflates every chunk once per slab)"
+        );
     }
 
     #[test]
