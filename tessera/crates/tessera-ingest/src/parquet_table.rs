@@ -19,7 +19,7 @@
 //! It reads the whole file into memory before sealing. Generic ingest has no streaming path in P1:
 //! the multi-block streaming writer exists (`tessera_io::pack_streaming`, used by the GE-HDF5 lane) but
 //! wiring a row-group-at-a-time generic ingest onto it is a separate, measurable piece of work rather
-//! than something to smuggle in here. Tracked as a follow-up; until then a multi-GB Parquet should go
+//! than something to smuggle in here. Tracked as #458; until then a multi-GB Parquet should go
 //! through `--spec` with the vendor path or be split by the producer.
 
 use std::path::Path;

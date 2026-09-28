@@ -513,23 +513,27 @@ fn dispatch(
         //
         // ADR-0057 §6's shape: the enum variant always **parses** (so a TOML spec's `spec_hash` is
         // portable across builds and an archival spec never becomes unreadable), and only the
-        // *handler* is feature-gated. An unavailable backend is a clean, typed runtime error —
-        // never a parse error that would point at the file instead of at the build.
-        FormatOptions::Parquet {
-            input,
-            exclude,
-            column_meta,
-        } => {
-            #[cfg(feature = "parquet")]
+        // *handler* is feature-gated. An unavailable backend is a clean, typed runtime error — never
+        // a parse error that would point at the file instead of at the build. The gating itself lives
+        // in `decode_generic_table`, so all three lanes share one shape.
+        FormatOptions::Parquet { input, .. }
+        | FormatOptions::Arrow { input, .. }
+        | FormatOptions::Csv { input, .. } => {
+            #[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
             {
-                let table = crate::parquet_table::read_table(input, exclude)?;
+                let (table, source_format, decoder) = decode_generic_table(&p.options)?
+                    .ok_or_else(|| {
+                        Error::Invalid(
+                            "ingest-engine: internal — a generic variant did not decode".into(),
+                        )
+                    })?;
                 let m = seal_generic_table(
                     &table,
                     p,
                     input,
-                    "parquet",
-                    crate::decoder::Decoder::PARQUET,
-                    column_meta,
+                    source_format,
+                    decoder,
+                    generic_column_meta(&p.options),
                     label,
                     extra_sources,
                     &timestamp,
@@ -538,87 +542,14 @@ fn dispatch(
                 )?;
                 Ok((m, ()))
             }
-            #[cfg(not(feature = "parquet"))]
+            // A build with every generic lane off still parses the spec and still computes its
+            // `spec_hash`; only the run fails, and it names which backend is missing.
+            #[cfg(not(any(feature = "parquet", feature = "arrow", feature = "csv")))]
             {
-                let _ = (input, exclude, column_meta);
-                Err(Error::BackendNotCompiled("parquet"))
-            }
-        }
-        FormatOptions::Arrow {
-            input,
-            exclude,
-            column_meta,
-        } => {
-            #[cfg(feature = "arrow")]
-            {
-                let table = crate::parquet_table::read_arrow_table(input, exclude)?;
-                let m = seal_generic_table(
-                    &table,
-                    p,
-                    input,
-                    "arrow",
-                    crate::decoder::Decoder::ARROW_IPC,
-                    column_meta,
-                    label,
-                    extra_sources,
-                    &timestamp,
-                    out_dir,
-                    parents,
-                )?;
-                Ok((m, ()))
-            }
-            #[cfg(not(feature = "arrow"))]
-            {
-                let _ = (input, exclude, column_meta);
-                Err(Error::BackendNotCompiled("arrow"))
-            }
-        }
-        FormatOptions::Csv {
-            input,
-            columns,
-            delimiter,
-            header,
-            null_tokens,
-            exclude,
-            column_meta,
-        } => {
-            #[cfg(feature = "csv")]
-            {
-                let mut opts = crate::csv_table::CsvOptions::from_decls(columns)?;
-                if let Some(d) = delimiter {
-                    opts.delimiter = one_byte_delimiter(d)?;
-                }
-                opts.header = *header;
-                opts.null_tokens = null_tokens.clone();
-                opts.exclude = exclude.clone();
-                let table = crate::csv_table::read_table(input, &opts)?;
-                let m = seal_generic_table(
-                    &table,
-                    p,
-                    input,
-                    "csv",
-                    crate::decoder::Decoder::CSV,
-                    column_meta,
-                    label,
-                    extra_sources,
-                    &timestamp,
-                    out_dir,
-                    parents,
-                )?;
-                Ok((m, ()))
-            }
-            #[cfg(not(feature = "csv"))]
-            {
-                let _ = (
-                    input,
-                    columns,
-                    delimiter,
-                    header,
-                    null_tokens,
-                    exclude,
-                    column_meta,
-                );
-                Err(Error::BackendNotCompiled("csv"))
+                let _ = input;
+                Err(Error::BackendNotCompiled(crate::backends::backend_name(
+                    &p.options,
+                )))
             }
         }
         FormatOptions::HdfCompound {
@@ -729,6 +660,90 @@ fn dispatch(
     }
 }
 
+/// Decode a generic table source into a canonicalised table, naming the source format and the decoder
+/// that read it.
+///
+/// The single place the three generic lanes are chosen between. Both the dispatch arms below and the
+/// conformance corpus go through it, which is what keeps the corpus honest: a fixture must exercise the
+/// same decode a real ingest does, not a parallel re-implementation that could drift from it.
+///
+/// Returns `None` for a non-generic (vendor) backend — the caller is expected to have dispatched it
+/// elsewhere, and the `match` is total so a new variant cannot be silently forgotten.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+pub fn decode_generic_table(
+    opts: &FormatOptions,
+) -> Result<
+    Option<(
+        crate::canonical::CanonicalTable,
+        &'static str,
+        crate::decoder::Decoder,
+    )>,
+> {
+    Ok(match opts {
+        FormatOptions::Parquet { input, exclude, .. } => {
+            #[cfg(feature = "parquet")]
+            {
+                Some((
+                    crate::parquet_table::read_table(input, exclude)?,
+                    "parquet",
+                    crate::decoder::Decoder::PARQUET,
+                ))
+            }
+            #[cfg(not(feature = "parquet"))]
+            {
+                let _ = (input, exclude);
+                return Err(Error::BackendNotCompiled("parquet"));
+            }
+        }
+        FormatOptions::Arrow { input, exclude, .. } => {
+            #[cfg(feature = "arrow")]
+            {
+                Some((
+                    crate::parquet_table::read_arrow_table(input, exclude)?,
+                    "arrow",
+                    crate::decoder::Decoder::ARROW_IPC,
+                ))
+            }
+            #[cfg(not(feature = "arrow"))]
+            {
+                let _ = (input, exclude);
+                return Err(Error::BackendNotCompiled("arrow"));
+            }
+        }
+        FormatOptions::Csv {
+            input,
+            columns,
+            delimiter,
+            header,
+            null_tokens,
+            exclude,
+            ..
+        } => {
+            #[cfg(feature = "csv")]
+            {
+                let mut o = crate::csv_table::CsvOptions::from_decls(columns)?;
+                if let Some(d) = delimiter {
+                    o.delimiter = one_byte_delimiter(d)?;
+                }
+                o.header = *header;
+                o.null_tokens = null_tokens.clone();
+                o.exclude = exclude.clone();
+                Some((
+                    crate::csv_table::read_table(input, &o)?,
+                    "csv",
+                    crate::decoder::Decoder::CSV,
+                ))
+            }
+            #[cfg(not(feature = "csv"))]
+            {
+                let _ = (input, columns, delimiter, header, null_tokens, exclude);
+                return Err(Error::BackendNotCompiled("csv"));
+            }
+        }
+        _ => None,
+    })
+}
+
 /// Seal a canonicalised generic table as a `table` product and write its `.tsra`.
 ///
 /// One helper for all three generic lanes, so the parts that must not drift between them — the
@@ -769,6 +784,22 @@ fn seal_generic_table(
         },
     )?;
     seal_to_tsra(m, &payloads, out_dir, p, parents, timestamp)
+}
+
+/// The `column_meta` of a generic variant — the one field the collapsed dispatch arm still needs
+/// per-variant, and the `match` stays total so a new generic backend must declare it.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+fn generic_column_meta(opts: &FormatOptions) -> &crate::column_meta::ColumnMeta {
+    use crate::column_meta::ColumnMeta;
+    /// The empty annotation set a vendor backend maps to. `OnceLock` rather than a `const`, because
+    /// `ColumnMeta` owns a `BTreeMap` and a borrow has to outlive the call.
+    static NONE: std::sync::OnceLock<ColumnMeta> = std::sync::OnceLock::new();
+    match opts {
+        FormatOptions::Parquet { column_meta, .. }
+        | FormatOptions::Arrow { column_meta, .. }
+        | FormatOptions::Csv { column_meta, .. } => column_meta,
+        _ => NONE.get_or_init(ColumnMeta::empty),
+    }
 }
 
 /// ADR-0056 §7's suspect-column advisory: print **once**, to stderr, with the fix.

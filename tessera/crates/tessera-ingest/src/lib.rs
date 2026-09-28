@@ -17,6 +17,11 @@ pub mod blob;
 pub mod canonical;
 /// Operator-declared per-column semantics (`--column-meta`, ADR-0056 §7).
 pub mod column_meta;
+/// The ingest conformance corpus (ADR-0056 §5) — fixtures whose golden hashes are pinned in
+/// `corpus/ingest-corpus.json`. Feature-gated, with a declared per-configuration fixture count so a
+/// vacuous run cannot report green (ADR-0057 §5).
+#[cfg(feature = "parquet")]
+pub mod corpus;
 /// CSV/TSV → `table`, inference-free under an operator-declared schema (ADR-0056 §8). Feature `csv`.
 #[cfg(feature = "csv")]
 pub mod csv_table;

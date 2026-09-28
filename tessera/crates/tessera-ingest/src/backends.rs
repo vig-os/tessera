@@ -14,7 +14,7 @@
 //! backends, so the two lists have genuinely diverged: a `--no-default-features` build knows all ten
 //! names and can run seven. The vendor decoders (`dicom`, `hdf5-metno`) are still unconditional
 //! dependencies of this crate — retro-gating them is ADR-0057 Phase 1's remaining half and moves every
-//! vendor backend, so it is tracked separately rather than smuggled in alongside #386.
+//! vendor backend, so it is tracked as #454 rather than smuggled in alongside #386.
 //!
 //! Everything downstream reads these two lists and nothing else: `tessera info`, the missing-backend
 //! error, and `aux/provenance.json`. Adding a gate is one `#[cfg]` attribute here.

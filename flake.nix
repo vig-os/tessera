@@ -64,7 +64,8 @@
         #   tessera-core   array-zarr, table-arrow   (= `full`)
         #   tessera-io     cloud
         #   tessera-cli    cloud (→ tessera-io/cloud), sql
-        #   tessera-ingest static-hdf5 only          → deliberately absent
+        #   tessera-ingest arrow, parquet, csv       → in `default`, so already on; `static-hdf5`
+        #                  static-hdf5                    → deliberately absent (ADR-0057 §4)
         #   tessera-py / tessera-wasm                → no features
         workspaceFeatures = builtins.concatStringsSep "," [
           "tessera-core/full"
@@ -350,6 +351,91 @@
               fi
             '';
           });
+
+          # **Gate A — the ingest determinism gate** (ADR-0057 §5, ADR-0056 §5). Where Gate B above
+          # catches the *risk* on the PR that introduces it, Gate A catches a golden that actually moved.
+          #
+          # The guarantee under test, stated so it can be cited (ADR-0057 §7):
+          #
+          #   For any input F and any tessera version V, `tessera ingest F` produces the same
+          #   content_hash under every distributed build of V. Feature selection may change which
+          #   formats are READABLE; it must never change the BYTES produced for a readable one.
+          #
+          # So the ingest corpus is regenerated under several feature configurations and every output
+          # must be byte-identical to every other AND to the committed `corpus/ingest-corpus.json`.
+          #
+          # The `tessera-cli/sql` configuration is the one that earns this check. ADR-0057 §5's probe
+          # found that the optional `sql` feature turns on `arrow-array/chrono-tz` — inside the shared
+          # arrow tree the ingest table lane decodes through — which is ADR-0056 hazard **H1** (tzdb:
+          # compiled-in vs. host `/usr/share/zoneinfo`) arriving through a *feature* rather than a host.
+          # The `ingest_parquet_scalars` fixture carries a `timestamp(us, "America/New_York")` column
+          # precisely so that door is watched. It is closed by construction as well (the type map reads
+          # the raw i64 ticks and never calls a zone-aware arrow function) but "by construction" is a
+          # claim, and this is the test of it.
+          ingest-gate-a = craneLib.mkCargoDerivation (commonArgs // {
+            inherit cargoArtifacts;
+            pnameSuffix = "-ingest-gate-a";
+            buildPhaseCargoCommand = ''
+              set -euo pipefail
+              mkdir -p "$TMPDIR/out"
+              # No `-p`: cargo only accepts the cross-package `--features pkg/feat` form from the
+              # workspace root, and cross-package unification is the entire point — `tessera-cli/sql`
+              # has to be able to reach the shared arrow tree for the H1 door to be under test at all.
+              # The example is unambiguous (only tessera-ingest declares it), so no `-p` is needed.
+              run() {
+                local tag="$1"; shift
+                echo "[gate A] $tag: cargo run --example gen_ingest_corpus $*" >&2
+                cargo run -q --example gen_ingest_corpus "$@" > "$TMPDIR/out/$tag.json"
+              }
+              run default
+              run sql                --features tessera-cli/sql
+              run cloud              --features tessera-io/cloud
+              run workspace-features --features ${workspaceFeatures}
+
+              fail=0
+              for f in "$TMPDIR"/out/*.json; do
+                if ! cmp -s "$f" corpus/ingest-corpus.json; then
+                  echo "" >&2
+                  echo "Gate A (ADR-0057 §5): the ingest corpus under $(basename "$f" .json) does NOT" >&2
+                  echo "match the committed corpus/ingest-corpus.json." >&2
+                  diff -u corpus/ingest-corpus.json "$f" >&2 || true
+                  fail=1
+                fi
+              done
+              if [ "$fail" -ne 0 ]; then
+                echo "" >&2
+                echo "A content_hash that moved means a decoder extracted DIFFERENT VALUES — say which" >&2
+                echo "ADR-0056 §5 H-rule changed behaviour and why the new values are correct." >&2
+                echo "A manifest_hash that moved is routine ONLY alongside a moved ingest_decoder." >&2
+                echo "Regenerate deliberately with:" >&2
+                echo "    cargo run -p tessera-ingest --example gen_ingest_corpus > corpus/ingest-corpus.json" >&2
+                exit 1
+              fi
+              echo "[gate A] every configuration agrees with the committed corpus" >&2
+            '';
+          });
+
+          # **ADR-0056 §5's `ingest_parquet_producers` fixture** — the same logical table written by
+          # **pyarrow**, **polars** and **DuckDB** must ingest to ONE `content_hash`.
+          #
+          # This is the check that catches what the in-Rust corpus can only approximate. The three
+          # writers disagree about dictionary ordering (pandas' `Categorical` order is insertion-time)
+          # and about whether a null-free column is *declared* nullable — the two leaks ADR-0056 §2
+          # materialises dictionaries and decides nullability-by-data to prevent. arrow-rs's own writer
+          # cannot test that the fix generalises beyond arrow-rs.
+          #
+          # It also asserts the three source files differ in size, so the comparison cannot pass
+          # vacuously, and that `manifest_hash` DOES differ (the `ingested_from` edge pins the source
+          # bytes) — so a bug that made every hash constant would fail rather than look perfect.
+          ingest-producer-equality = pkgs.runCommand "ingest-producer-equality"
+            {
+              nativeBuildInputs = [
+                (pkgs.python312.withPackages (ps: [ ps.pyarrow ps.polars ps.duckdb ]))
+              ];
+            } ''
+            python3 ${./tessera/crates/tessera-ingest/tests/producer_equality.py}               ${tessera-cli}/bin/tessera
+            touch $out
+          '';
 
           # `tessera-core` must stay **wasm32-compatible** (#210): the pure-Rust spine — manifest /
           # identity / hash / inclusion+consistency proofs / referencing / ed25519 *verify* — has zero

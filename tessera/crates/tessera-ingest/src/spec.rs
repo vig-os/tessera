@@ -429,7 +429,7 @@ pub fn is_generic_backend(opts: &FormatOptions) -> bool {
         // `array`" — but it is deliberately NOT swept in here. It still produces a `recon` product
         // (`raw::to_recon_product`), and the shipped `docs/examples/migrate-petct-study.toml` declares
         // `format = "raw"` with `schema = "recon"`. Enforcing the rule on it would therefore break a
-        // documented workflow and move existing goldens, which belongs to §4's vendor-verb collapse —
+        // documented workflow and move existing goldens, which belongs to §4's vendor-verb collapse (#456) —
         // a separate, mechanical change — not to this one. Until then, `raw` keeps the vendor
         // exemption it has always had in practice.
         FormatOptions::Raw { .. } => false,

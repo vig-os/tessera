@@ -167,6 +167,26 @@ impl TableBuilder {
                 existing.name, existing.name
             )));
         }
+        // The table backend carries a validity mask for the fixed-width numeric dtypes only
+        // (`tessera-io::table::validate_nullable`). A nullable `str`/`b1` column is therefore
+        // unrepresentable *today* — a limitation of the encoder, not a format decision — and it is
+        // caught here rather than left to surface from the codec, because only the boundary knows the
+        // column's name and can offer something to do about it.
+        if let ColumnData::Nullable { values, .. } = &data {
+            if matches!(**values, ColumnData::Bool(_) | ColumnData::Utf8(_)) {
+                return Err(he(format!(
+                    "column '{}' is a nullable '{}', which the table backend cannot encode yet \
+                     (validity masks currently cover the fixed-width numeric dtypes only; #457).\n  \
+                     drop it:              tessera ingest table <FILE> --exclude {}\n  \
+                     or fill the nulls in the source first, if a neutral value is meaningful for \
+                     this column\n  \
+                     keep every byte:      tessera ingest blob <FILE>",
+                    column.name,
+                    values.numpy_code(),
+                    column.name
+                )));
+            }
+        }
         if let Some(expected) = self.columns.first().map(|(_, d)| d.len()) {
             if data.len() != expected {
                 return Err(he(format!(
@@ -672,6 +692,46 @@ mod tests {
             .to_string();
         assert!(err.contains("duplicate column name 'a.b'"), "got {err}");
         assert!(err.contains("--exclude"), "the error offers a next command");
+    }
+
+    /// A nullable string/bool column is rejected **at the boundary**, with the column named and an
+    /// escape hatch offered — not left to fail later inside the Vortex encoder, where the message
+    /// mentions neither.
+    #[test]
+    fn a_nullable_string_or_bool_column_is_rejected_at_the_boundary() {
+        for values in [
+            ColumnData::Utf8(vec!["a".into(), String::new()]),
+            ColumnData::Bool(vec![true, false]),
+        ] {
+            let code = values.numpy_code();
+            let mut b = TableBuilder::new();
+            let err = b
+                .push(
+                    unclassified_column("maybe", code),
+                    ColumnData::Nullable {
+                        values: Box::new(values),
+                        validity: vec![true, false],
+                    },
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("nullable '{code}'")), "got {err}");
+            assert!(
+                err.contains("--exclude maybe"),
+                "offers a next command: {err}"
+            );
+            assert!(
+                err.contains("ingest blob"),
+                "offers the preserve tier: {err}"
+            );
+        }
+        // The same dtypes are fine when they carry no nulls, which is the common case.
+        let mut b = TableBuilder::new();
+        b.push(
+            unclassified_column("text", "str"),
+            ColumnData::Utf8(vec!["a".into(), "b".into()]),
+        )
+        .expect("a non-nullable string column is ordinary");
     }
 
     #[test]
