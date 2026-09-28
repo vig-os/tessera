@@ -4,9 +4,12 @@ The pull-request files in this directory are a **frozen snapshot**. They stopped
 `sync-issues.yml` was retargeted to the `sync/issue-mirror` branch, and they will drift further
 from reality with every new pull request.
 
-For current state, read the pull requests on GitHub, or the regenerated archive on the
+For current state, read the pull requests on GitHub, or the archive on the
 [`sync/issue-mirror`](https://github.com/vig-os/tessera/tree/sync/issue-mirror/docs/pull-requests) branch,
-which each sync run rewrites in full.
+which the daily sync keeps up to date. That sync is **incremental**: each run writes only the
+pull requests that changed since the last run's watermark (widening to a bounded 14-day look-back if the
+watermark cache was evicted). A full rebuild happens only on a `force-update` dispatch, so the
+mirror is a maintained archive rather than a from-scratch regeneration.
 
 ## Why
 
