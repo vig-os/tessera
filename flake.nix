@@ -24,7 +24,7 @@
     # runs `uv run validate-commit-range` and resolves it off THIS dev-shell's
     # PATH, so without the input that job fails with "Failed to spawn". Keep the
     # pin in step with DEVKIT_VERSION.
-    vigos.url = "github:vig-os/devkit/1.16.0";
+    vigos.url = "github:vig-os/devkit/1.17.0";
     vigos.inputs.nixpkgs.follows = "nixpkgs";
   };
 

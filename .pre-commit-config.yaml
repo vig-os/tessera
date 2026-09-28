@@ -109,6 +109,23 @@ repos:
         # scripts with no shebang; exclude them from SC2148 at any path.
         exclude: (^|/)\.envrc$
 
+  # Composite-action shell linting (vig-utils' shellcheck-composite-actions,
+  # #1704). actionlint refuses a composite action outright (`unexpected key
+  # "runs" for "workflow" section`) and has no composite mode, so every `run:`
+  # body moved out of a workflow and into .github/actions/*/action.yml loses its
+  # shellcheck pass. This hook reproduces actionlint's own recipe over those
+  # bodies — same `${{ }}` neutralisation, same prelude, same exclude list — so
+  # the two hooks gate one lint. shellcheck itself resolves from PATH (it ships
+  # in devTools in every mode), like actionlint above.
+  - repo: local
+    hooks:
+      - id: shellcheck-composite-actions
+        name: shellcheck-composite-actions (lint composite action run bodies)
+        entry: uv run shellcheck-composite-actions
+        language: system
+        files: (^|/)\.github/actions/[^/]+/action\.ya?ml$
+        pass_filenames: true
+
   # Containerfile
   - repo: https://github.com/hadolint/hadolint
     rev: 346e4199e4baca7d6827f20ac078b6eee5b39327  # v2.9.3
