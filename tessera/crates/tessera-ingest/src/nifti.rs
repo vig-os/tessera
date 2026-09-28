@@ -8,11 +8,19 @@
 //! all emit it by default) and is decompressed transparently, capped at the size the header itself
 //! declares so the path is not a decompression bomb.
 //!
+//! Both byte orders are read: NIfTI carries no endianness flag, so the order is inferred from
+//! `sizeof_hdr` (which must be 348, hence 348-byte-swapped means the file is big-endian). Byte order is
+//! **not** recorded anywhere — it needs no recovery instructions, and recording it would make a
+//! big-endian file and its little-endian twin seal differently, which ADR-0056 H6 forbids.
+//!
 //! NIfTI stores voxels **x-fastest** and its sform/qform affine is **RAS+**; Tessera arrays are C-order
 //! (last axis fastest) and **LPS canonical** (ADR-0030 §6). So the volume is declared with NIfTI's axes
 //! **reversed** — `[z,y,x]` for a 3-D volume, `[t,z,y,x]` for a 4-D series (x fastest — matches NIfTI's
 //! storage byte-for-byte, no transpose) — and the affine is reordered to `[k,j,i]` columns + converted
-//! RAS→LPS (negate the world x,y rows) at the door (ADR-0025).
+//! RAS→LPS (negate the world x,y rows) at the door (ADR-0025). The affine is scaled to **millimetres**
+//! at the same door, from the `xyzt_units` spatial code — ADR-0030 §1 makes `mm` the world-coordinate
+//! default and ADR-0032's `CANONICAL_UNITS` admits no other length, so a metre- or micron-unit source is
+//! normalised rather than carried.
 //!
 //! **Never panic** (FEATURE-MATRIX §A): every index this decoder derives from the header — `vox_offset`,
 //! the dim product, the datatype width, the gunzip size — is range- and overflow-checked before use.
@@ -102,18 +110,88 @@ pub struct NiftiImage {
     pub rescale_intercept: f64,
 }
 
-fn i16le(b: &[u8], o: usize) -> i16 {
-    i16::from_le_bytes([b[o], b[o + 1]])
+/// The byte order a NIfTI-1 file was written in. NIfTI carries no explicit flag: the order is inferred
+/// from `sizeof_hdr`, which must read as 348 — so if it reads as 348 byte-swapped, every multi-byte field
+/// in the file is swapped. That is the canonical sniff, and the reason the header opens with a known
+/// constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Endian {
+    Little,
+    Big,
 }
-fn i32le(b: &[u8], o: usize) -> i32 {
-    i32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+
+/// A NIfTI byte buffer plus the order to read it in. Every multi-byte read in this decoder goes through
+/// one of these methods, so there is exactly **one** place per width that knows about byte order and a
+/// half-swapped read is not expressible (#449).
+struct Raw<'a> {
+    b: &'a [u8],
+    e: Endian,
 }
-fn f32le(b: &[u8], o: usize) -> f32 {
-    f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+
+impl Raw<'_> {
+    fn u8(&self, o: usize) -> u8 {
+        self.b[o]
+    }
+    fn i16(&self, o: usize) -> i16 {
+        let v = [self.b[o], self.b[o + 1]];
+        match self.e {
+            Endian::Little => i16::from_le_bytes(v),
+            Endian::Big => i16::from_be_bytes(v),
+        }
+    }
+    // NB: no `i32` reader — the only `i32` header field is `sizeof_hdr`, and that one is read *before*
+    // the byte order is known (it is what reveals it), by `detect_endian`.
+    fn f32(&self, o: usize) -> f32 {
+        let v = [self.b[o], self.b[o + 1], self.b[o + 2], self.b[o + 3]];
+        match self.e {
+            Endian::Little => f32::from_le_bytes(v),
+            Endian::Big => f32::from_be_bytes(v),
+        }
+    }
+    /// A NIfTI `f32` header field widened to the `f64` Tessera stores geometry in.
+    fn f64(&self, o: usize) -> f64 {
+        f64::from(self.f32(o))
+    }
 }
-/// A NIfTI `f32` header field widened to the `f64` Tessera stores geometry in.
-fn f64le(b: &[u8], o: usize) -> f64 {
-    f64::from(f32le(b, o))
+
+impl Endian {
+    /// Decode one voxel of `width` bytes in this order. The voxel decode's single source of byte order,
+    /// paired with [`dtype_width`] as its single source of width.
+    fn u16(self, s: &[u8]) -> u16 {
+        let v = [s[0], s[1]];
+        match self {
+            Endian::Little => u16::from_le_bytes(v),
+            Endian::Big => u16::from_be_bytes(v),
+        }
+    }
+    fn i16(self, s: &[u8]) -> i16 {
+        let v = [s[0], s[1]];
+        match self {
+            Endian::Little => i16::from_le_bytes(v),
+            Endian::Big => i16::from_be_bytes(v),
+        }
+    }
+    fn i32(self, s: &[u8]) -> i32 {
+        let v = [s[0], s[1], s[2], s[3]];
+        match self {
+            Endian::Little => i32::from_le_bytes(v),
+            Endian::Big => i32::from_be_bytes(v),
+        }
+    }
+    fn f32(self, s: &[u8]) -> f32 {
+        let v = [s[0], s[1], s[2], s[3]];
+        match self {
+            Endian::Little => f32::from_le_bytes(v),
+            Endian::Big => f32::from_be_bytes(v),
+        }
+    }
+    fn f64(self, s: &[u8]) -> f64 {
+        let v = [s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]];
+        match self {
+            Endian::Little => f64::from_le_bytes(v),
+            Endian::Big => f64::from_be_bytes(v),
+        }
+    }
 }
 /// NIfTI stores `vox_offset` as a float that is really an integer. Convert it to a byte index without
 /// panicking or wrapping: NaN and negatives clamp to 0 and anything past `usize::MAX` saturates (Rust's
@@ -124,28 +202,100 @@ fn f32_to_usize(v: f32) -> usize {
     v.max(0.0) as usize
 }
 
-/// Diagnose a `sizeof_hdr` that is not 348, so the error names the format actually found instead of
-/// blaming the file for not being NIfTI — the same misleading-error complaint as B2's `.nii.gz` case.
-/// Both alternatives are real rather than theoretical: **three of the six `.nii` fixtures in nibabel's
-/// own test data are big-endian**, and every CIFTI `.dconn.nii`/`.dtseries.nii` is a NIfTI-2.
-///
-/// Neither is *supported* — this only makes the refusal say which one it is, so an operator knows
-/// whether to byte-swap, convert, or look elsewhere.
+/// 348 with its bytes reversed — what a **big-endian** NIfTI-1 header's `sizeof_hdr` reads as when read
+/// little-endian. This is the byte-order sniff (#449).
+const SWAPPED_348: i32 = i32::from_le_bytes(348i32.to_be_bytes());
+
+/// Infer the file's byte order from `sizeof_hdr`, which a NIfTI-1 header defines to be 348. Reading 348
+/// byte-swapped means every multi-byte field is swapped; anything else is not NIfTI-1 at all.
+fn detect_endian(b: &[u8]) -> Result<Endian> {
+    match i32::from_le_bytes([b[0], b[1], b[2], b[3]]) {
+        348 => Ok(Endian::Little),
+        SWAPPED_348 => Ok(Endian::Big),
+        other => Err(sizeof_hdr_error(other)),
+    }
+}
+
+/// Diagnose a `sizeof_hdr` that is neither 348 nor its byte-swapped form, so the error names the format
+/// actually found instead of blaming the file for not being NIfTI — the same misleading-error complaint
+/// as the `.nii.gz` case. NIfTI-2 is real rather than theoretical: every CIFTI `.dconn.nii` /
+/// `.dtseries.nii` is one. It is not supported; this only makes the refusal say which format it is.
 fn sizeof_hdr_error(sizeof_hdr: i32) -> Error {
-    /// 348 with its bytes reversed — what a big-endian NIfTI-1 header reads as here.
-    const SWAPPED_348: i32 = i32::from_le_bytes(348i32.to_be_bytes());
     /// The NIfTI-2 header size, either way round.
     const NIFTI2: i32 = 540;
     const SWAPPED_540: i32 = i32::from_le_bytes(540i32.to_be_bytes());
     he(match sizeof_hdr {
-        SWAPPED_348 => "big-endian NIfTI-1 is not supported (sizeof_hdr is 348 byte-swapped) — \
-                        convert the file to little-endian first"
-            .to_string(),
         NIFTI2 | SWAPPED_540 => "this is NIfTI-2 (sizeof_hdr = 540), not NIfTI-1 — unsupported \
                                  (CIFTI .dconn.nii / .dtseries.nii files are NIfTI-2)"
             .to_string(),
         other => format!("sizeof_hdr = {other}, not 348 — not a NIfTI-1 file"),
     })
+}
+
+/// The **spatial** half of `xyzt_units` (bits 0–2) as the factor converting the header's length unit into
+/// Tessera's canonical millimetre (#446). The sform/qform affine *and* `pixdim` are expressed in this
+/// unit, so ignoring it sealed a micron-unit volume — routine in preclinical / µCT / light-sheet work —
+/// with an affine whose numbers were microns while `world_frame.unit` claimed `"mm"`: a silent 1000×
+/// geometry error, and one no validation gate can catch because such an affine is perfectly
+/// non-degenerate.
+///
+/// Normalising here rather than carrying the source unit is what ADR-0030 §1 asks for (`"mm"` is the
+/// world-coordinate default, sources are "normalised at the door", ADR-0025) and what ADR-0032 requires:
+/// `CANONICAL_UNITS` has only `mm` for length, so `"um"`/`"m"` would fail `unit_is_canonical`. It is the
+/// same move as the RAS→LPS flip.
+fn space_unit_to_mm(r: &Raw) -> LengthUnit {
+    match r.u8(123) & 0x07 {
+        2 => LengthUnit::Mm,     // NIFTI_UNITS_MM — already canonical
+        1 => LengthUnit::Metre,  // NIFTI_UNITS_METER
+        3 => LengthUnit::Micron, // NIFTI_UNITS_MICRON
+        0 => {
+            // Unspecified. mm is the de-facto NIfTI default and what ADR-0030 names, so assume it —
+            // at debug level, not a warning: this is common enough (nibabel's own `standard.nii.gz`
+            // leaves it 0) that warning would only train operators to ignore warnings.
+            tracing::debug!(
+                target: "tessera::ingest",
+                "nifti: xyzt_units names no spatial unit — assuming mm (the NIfTI default)"
+            );
+            LengthUnit::Mm
+        }
+        invalid => {
+            // 4–7 are not defined spatial units. The bits are junk, which is worth being loud about,
+            // but the geometry is still usable, so assume mm rather than refuse the volume.
+            tracing::warn!(
+                target: "tessera::ingest",
+                code = invalid,
+                "nifti: xyzt_units spatial code is not a defined unit (expected 0/1/2/3) — assuming mm"
+            );
+            LengthUnit::Mm
+        }
+    }
+}
+
+/// The source length unit a NIfTI affine is expressed in, and the conversion into Tessera's canonical
+/// millimetre.
+///
+/// Deliberately an operation rather than a single multiplicative factor: **0.001 is not representable in
+/// binary**, so `v * 0.001` rounds twice (representing the constant, then multiplying) and can land 1 ULP
+/// from the correctly-rounded answer. `v / 1000.0` divides by an exactly-representable 1000.0 and rounds
+/// once, mirroring the `* 1000.0` used for metres. These values are **sealed**, so a 1-ULP difference is a
+/// different `manifest_hash` — which is what earns the enum. (Measured: 51 of the first 417 whole-number
+/// inputs differ between the two forms, and no value used in the other unit tests does — exactly how this
+/// would have shipped unnoticed.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LengthUnit {
+    Mm,
+    Metre,
+    Micron,
+}
+
+impl LengthUnit {
+    fn to_mm(self, v: f64) -> f64 {
+        match self {
+            LengthUnit::Mm => v,
+            LengthUnit::Metre => v * 1000.0,
+            LengthUnit::Micron => v / 1000.0,
+        }
+    }
 }
 
 /// Bytes per voxel for a supported NIfTI datatype code. Rejecting an unsupported code *here* — before
@@ -212,6 +362,8 @@ struct Header {
     world_frame: Option<WorldFrame>,
     geometry_source: Option<GeometrySource>,
     axis_referencing: Option<Vec<Option<Referenced>>>,
+    /// The order the voxels (and every header field) were written in (#449).
+    endian: Endian,
 }
 
 impl Header {
@@ -233,10 +385,10 @@ impl Header {
 /// is (a gratuitous rank bump would move the `content_hash` of every single-frame 4-D file); and a real
 /// 4-D series becomes `[t,z,y,x]` **with all of its volumes** — they used to be silently discarded,
 /// which ADR-0025 (lossless at the door) forbids.
-fn parse_shape(b: &[u8], ndim: usize) -> Result<(Vec<u64>, Vec<String>, usize)> {
+fn parse_shape(r: &Raw, ndim: usize) -> Result<(Vec<u64>, Vec<String>, usize)> {
     let mut dims = [1u64; 8];
     for (k, slot) in dims.iter_mut().enumerate().take(ndim + 1).skip(1) {
-        let extent = i16le(b, 40 + 2 * k);
+        let extent = r.i16(40 + 2 * k);
         // Zero and negative are not NIfTI extents; both used to slip through into a 0-voxel or
         // wrapped-size array.
         if extent < 1 {
@@ -263,15 +415,8 @@ fn parse_shape(b: &[u8], ndim: usize) -> Result<(Vec<u64>, Vec<String>, usize)> 
 }
 
 /// The sform's three RAS rows — `srow_x/y/z` at 280/296/312, each `f32[4] = [Mi, Mj, Mk, offset]`.
-fn sform_rows(b: &[u8]) -> [[f64; 4]; 3] {
-    let row = |o: usize| {
-        [
-            f64le(b, o),
-            f64le(b, o + 4),
-            f64le(b, o + 8),
-            f64le(b, o + 12),
-        ]
-    };
+fn sform_rows(r: &Raw) -> [[f64; 4]; 3] {
+    let row = |o: usize| [r.f64(o), r.f64(o + 4), r.f64(o + 8), r.f64(o + 12)];
     [row(280), row(296), row(312)]
 }
 
@@ -285,8 +430,8 @@ fn sform_rows(b: &[u8]) -> [[f64; 4]; 3] {
 /// * **`pixdim[0] < 0` (`qfac`) negates the `k` column** — the left-handed case, and the sign convention
 ///   that is easy to get subtly wrong;
 /// * the translation is `qoffset_x/y/z`.
-fn qform_rows(b: &[u8]) -> [[f64; 4]; 3] {
-    let (mut qb, mut qc, mut qd) = (f64le(b, 256), f64le(b, 260), f64le(b, 264));
+fn qform_rows(r: &Raw) -> [[f64; 4]; 3] {
+    let (mut qb, mut qc, mut qd) = (r.f64(256), r.f64(260), r.f64(264));
     let radicand = 1.0 - (qb * qb + qc * qc + qd * qd);
     let qa = if radicand < 1.0e-7 {
         let norm = (qb * qb + qc * qc + qd * qd).sqrt();
@@ -301,14 +446,14 @@ fn qform_rows(b: &[u8]) -> [[f64; 4]; 3] {
     };
     // pixdim[k] at 76 + 4k; pixdim[0] is qfac, negative = left-handed (k column flipped).
     let spacing = |k: usize| {
-        let d = f64le(b, 76 + 4 * k);
+        let d = r.f64(76 + 4 * k);
         if d > 0.0 {
             d
         } else {
             1.0
         }
     };
-    let qfac = if f64le(b, 76) < 0.0 { -1.0 } else { 1.0 };
+    let qfac = if r.f64(76) < 0.0 { -1.0 } else { 1.0 };
     let scale = [spacing(1), spacing(2), spacing(3) * qfac];
     let rotation = [
         [
@@ -327,7 +472,7 @@ fn qform_rows(b: &[u8]) -> [[f64; 4]; 3] {
             qa * qa + qd * qd - qc * qc - qb * qb,
         ],
     ];
-    let offset = [f64le(b, 268), f64le(b, 272), f64le(b, 276)];
+    let offset = [r.f64(268), r.f64(272), r.f64(276)];
     let mut rows = [[0.0f64; 4]; 3];
     for (i, row) in rows.iter_mut().enumerate() {
         for (j, cell) in row.iter_mut().take(3).enumerate() {
@@ -375,13 +520,26 @@ fn affine_is_usable(wf: &WorldFrame) -> bool {
 /// RAS rows `[Mi, Mj, Mk, offset]` → the Tessera LPS `world_frame`: reorder the columns
 /// `[i,j,k] → [k,j,i]` (Tessera declares the fastest axis last) and convert RAS→LPS by negating the
 /// world x and y rows (ADR-0030 §6).
-fn world_frame_from_ras(rows: [[f64; 4]; 3], code: i16) -> Result<WorldFrame> {
+/// `unit` converts the header's length unit into Tessera's canonical millimetre (#446, see
+/// [`space_unit_to_mm`]) — applied to the rotation/scale block *and* the translation, because every entry
+/// of a NIfTI affine is a length in that same unit.
+fn world_frame_from_ras(rows: [[f64; 4]; 3], code: i16, unit: LengthUnit) -> Result<WorldFrame> {
     let [x, y, z] = rows;
+    let mm = |v: f64| unit.to_mm(v);
     Ok(WorldFrame {
         affine: [
-            -x[2], -x[1], -x[0], -x[3], // world L = -RAS x
-            -y[2], -y[1], -y[0], -y[3], // world P = -RAS y
-            z[2], z[1], z[0], z[3], // world S =  RAS z
+            mm(-x[2]),
+            mm(-x[1]),
+            mm(-x[0]),
+            mm(-x[3]), // world L = -RAS x
+            mm(-y[2]),
+            mm(-y[1]),
+            mm(-y[0]),
+            mm(-y[3]), // world P = -RAS y
+            mm(z[2]),
+            mm(z[1]),
+            mm(z[0]),
+            mm(z[3]), // world S =  RAS z
         ],
         convention: "LPS".into(),
         unit: "mm".into(),
@@ -405,8 +563,10 @@ fn world_frame_from_ras(rows: [[f64; 4]; 3], code: i16) -> Result<WorldFrame> {
 /// even when a valid qform is present. The file names the sform as its primary transform, and quietly
 /// substituting a differently-coded qform would be the same silent-substitution sin in reverse — the
 /// operator needs to see that the preferred transform is uninterpretable.
-fn parse_geometry(b: &[u8]) -> Result<(Option<WorldFrame>, Option<GeometrySource>)> {
-    let (sform_code, qform_code) = (i16le(b, 254), i16le(b, 252));
+fn parse_geometry(r: &Raw) -> Result<(Option<WorldFrame>, Option<GeometrySource>)> {
+    let (sform_code, qform_code) = (r.i16(254), r.i16(252));
+    // The header's length unit, resolved once — both transforms are expressed in it (#446).
+    let unit = space_unit_to_mm(r);
     // A *negative* code is a malformed header, not "absent" — `code > 0` alone read -1 as absent and
     // silently dropped the geometry.
     for (name, code) in [("sform_code", sform_code), ("qform_code", qform_code)] {
@@ -417,7 +577,7 @@ fn parse_geometry(b: &[u8]) -> Result<(Option<WorldFrame>, Option<GeometrySource
         }
     }
     if sform_code > 0 {
-        let wf = world_frame_from_ras(sform_rows(b), sform_code)?;
+        let wf = world_frame_from_ras(sform_rows(r), sform_code, unit)?;
         // Non-finite is corruption: refuse rather than fall through to a different transform, since
         // "the sform is unreadable" is not the same claim as "there is no sform".
         if !affine_is_finite(&wf) {
@@ -436,7 +596,7 @@ fn parse_geometry(b: &[u8]) -> Result<(Option<WorldFrame>, Option<GeometrySource
         );
     }
     if qform_code > 0 {
-        let wf = world_frame_from_ras(qform_rows(b), qform_code)?;
+        let wf = world_frame_from_ras(qform_rows(r), qform_code, unit)?;
         if !affine_is_finite(&wf) {
             return Err(he(
                 "the qform quaternion/pixdim contains a non-finite (NaN/inf) entry — corrupt header",
@@ -465,20 +625,20 @@ fn parse_geometry(b: &[u8]) -> Result<(Option<WorldFrame>, Option<GeometrySource
 /// DWI direction stack lands there: its `dim[4]` counts gradient directions, not seconds, and such files
 /// leave `pixdim[4]` / the time unit unset. ADR-0032's `time_regular` is reused verbatim — this decoder
 /// invents no axis convention of its own.
-fn parse_time_axis(b: &[u8], rank: usize) -> Option<Vec<Option<Referenced>>> {
+fn parse_time_axis(r: &Raw, rank: usize) -> Option<Vec<Option<Referenced>>> {
     let t_axis = rank.checked_sub(4)?; // rank 4 → axis 0, rank 5 → axis 1, …
                                        // xyzt_units bits 3..5 are the time unit: 8 = NIFTI_UNITS_SEC, 16 = MSEC, 24 = USEC.
-    let scale = match b[123] & 0x38 {
+    let scale = match r.u8(123) & 0x38 {
         8 => 1.0,
         16 => 1.0e-3,
         24 => 1.0e-6,
         _ => return None,
     };
-    let step = f64le(b, 76 + 4 * 4) * scale; // pixdim[4]
+    let step = r.f64(76 + 4 * 4) * scale; // pixdim[4]
     if step <= 0.0 || !step.is_finite() {
         return None;
     }
-    let start = f64le(b, 136) * scale; // toffset
+    let start = r.f64(136) * scale; // toffset
     let mut per_axis = vec![None; rank];
     per_axis[t_axis] = Some(Referenced::time_regular(start, step));
     Some(per_axis)
@@ -489,29 +649,28 @@ fn parse_header(b: &[u8]) -> Result<Header> {
     if b.len() < HEADER_LEN {
         return Err(he("file shorter than a NIfTI-1 header"));
     }
-    let sizeof_hdr = i32le(b, 0);
-    if sizeof_hdr != 348 {
-        return Err(sizeof_hdr_error(sizeof_hdr));
-    }
+    // The byte order comes first: every field below is read through it.
+    let endian = detect_endian(b)?;
+    let r = Raw { b, e: endian };
     // magic "n+1\0" at offset 344 marks a single-file .nii.
     if &b[344..347] != b"n+1" {
         return Err(he(
             "magic is not 'n+1' (only single-file .nii is supported)",
         ));
     }
-    let ndim = i16le(b, 40);
+    let ndim = r.i16(40);
     if !(1..=7).contains(&ndim) {
         return Err(he(format!("dim[0] (ndim) = {ndim} is outside 1..=7")));
     }
     let ndim = usize::try_from(ndim).map_err(|_| he("dim[0] (ndim) out of range"))?;
-    let (shape, axes, count) = parse_shape(b, ndim)?;
+    let (shape, axes, count) = parse_shape(&r, ndim)?;
 
-    let datatype = i16le(b, 70);
+    let datatype = r.i16(70);
     let width = dtype_width(datatype)?;
 
     // `vox_offset` is a float that is really a byte index. A fractional value used to be truncated in
     // silence — it is a malformed header, so say so rather than guess which byte was meant.
-    let declared_offset = f32le(b, 108);
+    let declared_offset = r.f32(108);
     if !declared_offset.is_finite() || declared_offset.fract() != 0.0 {
         return Err(he(format!(
             "vox_offset {declared_offset} is not a whole byte count"
@@ -527,15 +686,15 @@ fn parse_header(b: &[u8]) -> Result<Header> {
     }
 
     // NIfTI spells "no rescale" as `scl_slope == 0`, not as a degenerate scale.
-    let scl_slope = f64le(b, 112);
+    let scl_slope = r.f64(112);
     let rescale = if scl_slope == 0.0 {
         (1.0, 0.0)
     } else {
-        (scl_slope, f64le(b, 116))
+        (scl_slope, r.f64(116))
     };
 
-    let (world_frame, geometry_source) = parse_geometry(b)?;
-    let axis_referencing = parse_time_axis(b, shape.len());
+    let (world_frame, geometry_source) = parse_geometry(&r)?;
+    let axis_referencing = parse_time_axis(&r, shape.len());
     Ok(Header {
         shape,
         axes,
@@ -547,6 +706,7 @@ fn parse_header(b: &[u8]) -> Result<Header> {
         world_frame,
         geometry_source,
         axis_referencing,
+        endian,
     })
 }
 
@@ -572,25 +732,24 @@ fn read_voxels(h: &Header, b: &[u8]) -> Result<ArrayData> {
             h.vox_offset
         )));
     }
-    let (n, w) = (h.count, h.width);
-    // The stride comes from `dtype_width` via `h.width` — never repeated per arm, so a width can never
-    // disagree with the type that reads it (the bound checked above is `n * w`).
+    let (n, w, en) = (h.count, h.width, h.endian);
+    // The stride comes from `dtype_width` via `h.width` and the byte order from `h.endian` — one source
+    // of truth each, so neither can disagree with the type that reads it (the bound checked above is
+    // `n * w`).
     macro_rules! read_vec {
         ($variant:ident, $from:expr) => {
-            ArrayData::$variant((0..n).map(|i| $from(&d[i * w..])).collect())
+            ArrayData::$variant((0..n).map(|i| $from(&d[i * w..], en)).collect())
         };
     }
     Ok(match h.datatype {
         // Tessera's dtype floor is 16-bit (ADR — 8-bit out of scope), so NIfTI uint8 (e.g. masks)
         // widens losslessly to uint16.
-        2 => read_vec!(U16, |s: &[u8]| u16::from(s[0])),
-        4 => read_vec!(I16, |s: &[u8]| i16::from_le_bytes([s[0], s[1]])),
-        512 => read_vec!(U16, |s: &[u8]| u16::from_le_bytes([s[0], s[1]])),
-        8 => read_vec!(I32, |s: &[u8]| i32::from_le_bytes([s[0], s[1], s[2], s[3]])),
-        16 => read_vec!(F32, |s: &[u8]| f32::from_le_bytes([s[0], s[1], s[2], s[3]])),
-        64 => read_vec!(F64, |s: &[u8]| f64::from_le_bytes([
-            s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]
-        ])),
+        2 => read_vec!(U16, |s: &[u8], _e: Endian| u16::from(s[0])),
+        4 => read_vec!(I16, |s: &[u8], e: Endian| e.i16(s)),
+        512 => read_vec!(U16, |s: &[u8], e: Endian| e.u16(s)),
+        8 => read_vec!(I32, |s: &[u8], e: Endian| e.i32(s)),
+        16 => read_vec!(F32, |s: &[u8], e: Endian| e.f32(s)),
+        64 => read_vec!(F64, |s: &[u8], e: Endian| e.f64(s)),
         // `dtype_width` already rejected every other code, so this arm is unreachable in practice — but
         // it is an error rather than a panic.
         other => return Err(he(format!("unsupported NIfTI datatype code {other}"))),
@@ -770,16 +929,9 @@ mod tests {
         qoffset: [f32; 3],
         xyzt_units: u8,
         toffset: f32,
-    }
-
-    fn put_i16(h: &mut [u8], off: usize, v: i16) {
-        h[off..off + 2].copy_from_slice(&v.to_le_bytes());
-    }
-    fn put_i32(h: &mut [u8], off: usize, v: i32) {
-        h[off..off + 4].copy_from_slice(&v.to_le_bytes());
-    }
-    fn put_f32(h: &mut [u8], off: usize, v: f32) {
-        h[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        /// Write every multi-byte field (and the voxels) **big-endian** — the byte order half of
+        /// nibabel's real corpus, and what #449 has to read.
+        big: bool,
     }
 
     impl Synth {
@@ -802,7 +954,18 @@ mod tests {
                 qoffset: [10.0, 20.0, 30.0],
                 xyzt_units: 0,
                 toffset: 0.0,
+                big: false,
             }
+        }
+        /// Emit the whole file big-endian (`sizeof_hdr` then reads as 348 byte-swapped).
+        fn big_endian(mut self) -> Self {
+            self.big = true;
+            self
+        }
+        /// Set the **spatial** half of `xyzt_units` (bits 0–2: 1 m, 2 mm, 3 µm), leaving the time bits.
+        fn space_units(mut self, code: u8) -> Self {
+            self.xyzt_units = (self.xyzt_units & !0x07) | (code & 0x07);
+            self
         }
         fn sform(mut self, code: i16) -> Self {
             self.sform_code = code;
@@ -810,6 +973,18 @@ mod tests {
         }
         fn no_sform(mut self) -> Self {
             self.sform_code = 0;
+            self
+        }
+        /// `pixdim[1..=3]`, the voxel spacing the qform scales its rotation columns by.
+        fn spacing(mut self, dx: f32, dy: f32, dz: f32) -> Self {
+            self.pixdim[1] = dx;
+            self.pixdim[2] = dy;
+            self.pixdim[3] = dz;
+            self
+        }
+        /// `qoffset_x/y/z`, the qform translation.
+        fn qoffset(mut self, q: [f32; 3]) -> Self {
+            self.qoffset = q;
             self
         }
         /// Set the qform: its code, the `quatern_b/c/d` triple, and the `pixdim[0]` handedness.
@@ -838,7 +1013,32 @@ mod tests {
         }
 
         fn header(&self) -> Vec<u8> {
-            let mut h = vec![0u8; 352]; // the 348-byte header + the 4-byte magic
+            // One definition of the byte order per width, so a fixture can never be half-swapped.
+            let (big, mut h) = (self.big, vec![0u8; 352]); // 348-byte header + 4-byte magic
+            let put_i16 = |h: &mut [u8], o: usize, v: i16| {
+                let b = if big {
+                    v.to_be_bytes()
+                } else {
+                    v.to_le_bytes()
+                };
+                h[o..o + 2].copy_from_slice(&b);
+            };
+            let put_i32 = |h: &mut [u8], o: usize, v: i32| {
+                let b = if big {
+                    v.to_be_bytes()
+                } else {
+                    v.to_le_bytes()
+                };
+                h[o..o + 4].copy_from_slice(&b);
+            };
+            let put_f32 = |h: &mut [u8], o: usize, v: f32| {
+                let b = if big {
+                    v.to_be_bytes()
+                } else {
+                    v.to_le_bytes()
+                };
+                h[o..o + 4].copy_from_slice(&b);
+            };
             put_i32(&mut h, 0, 348); // sizeof_hdr
             for (k, d) in self.dim.iter().enumerate() {
                 put_i16(&mut h, 40 + 2 * k, *d);
@@ -872,7 +1072,11 @@ mod tests {
         fn bytes(&self, voxels: &[i16]) -> Vec<u8> {
             let mut b = self.header();
             for v in voxels {
-                b.extend_from_slice(&v.to_le_bytes());
+                if self.big {
+                    b.extend_from_slice(&v.to_be_bytes());
+                } else {
+                    b.extend_from_slice(&v.to_le_bytes());
+                }
             }
             b
         }
@@ -1125,12 +1329,329 @@ mod tests {
         assert!(m.generation.is_none());
     }
 
-    /// A header that is not little-endian NIfTI-1 must say **which** format it is. The old catch-all
-    /// ("not NIfTI-1, or big-endian") is the same misleading-error complaint as B2's `.nii.gz` case: it
-    /// blames the file. Both alternatives are real — three of the six `.nii` fixtures in nibabel's own
-    /// test data are big-endian, and every CIFTI `.dconn.nii` is a NIfTI-2. Still unsupported; just named.
+    /// **#448** — the third-party cross-check, as a committed regression test.
+    ///
+    /// #396 asked for the quaternion to be validated "against a real FSL-produced file". That was done
+    /// during #447 but only as a throwaway probe, because the file could not be vendored: nibabel's
+    /// `COPYING` covers "the package, including all examples, code snippets and attached documentation"
+    /// under MIT, carves out its **Philips PAR/REC** data as PDDL and `doc/source/someone.nii.gz` as
+    /// MNI/ICBM, and never names `nibabel/tests/data/*.nii` at all — nor does that directory's own
+    /// `README.rst`, which documents only the PAR/REC provenance. MIT is a *software* licence, so the
+    /// `.nii` files are covered only by omission.
+    ///
+    /// What is *not* encumbered is the **header parameters**, which are facts about the format. So this
+    /// fixture carries the exact qform `nibabel/tests/data/functional.nii` was written with, and asserts
+    /// the decoder reproduces the affine **FSL itself wrote into that same file's sform** — measured
+    /// during #447 as an exact match (max |qform − sform| = 0). The bytes are ours; the numbers, and the
+    /// answer they must produce, are FSL's.
+    ///
+    /// It exercises the two parts the quaternion conversion is easy to get wrong: `pixdim[0] = -1` (the
+    /// qfac k-column flip) and `b² + c² + d² = 1` exactly, which takes the `a = 0` 180°-rotation branch of
+    /// `nifti_quatern_to_mat44` rather than the ordinary `a = sqrt(1 − …)` path.
     #[test]
-    fn a_non_little_endian_nifti1_header_is_named_not_blamed_on_the_file() {
+    fn a_real_fsl_qform_reproduces_the_affine_fsl_itself_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let voxels: Vec<i16> = (0..8).collect();
+        let p = dir.path().join("fsl-qform.nii");
+        // functional.nii: qform_code=2, quatern (b=0, c=1, d=0), pixdim[0]=-1, pixdim (4,4,8),
+        // qoffset (32,-40,0), xyzt_units=10 (mm | sec).
+        Synth::new(&[2, 2, 2])
+            .no_sform()
+            .qform(2, [0.0, 1.0, 0.0], -1.0)
+            .spacing(4.0, 4.0, 8.0)
+            .qoffset([32.0, -40.0, 0.0])
+            .space_units(2)
+            .write(&p, &voxels);
+
+        let img = read_nifti(&p).unwrap();
+        let wf = img.world_frame.clone().unwrap();
+        assert_eq!(img.geometry_source, Some(GeometrySource::Qform));
+        // FSL's own sform rows for this header are [-4,0,0,32] / [0,4,0,-40] / [0,0,8,0] (RAS); Tessera
+        // reorders the columns to [k,j,i] and flips RAS→LPS.
+        approx(wf.voxel_to_world([1.0, 1.0, 1.0]), [-28.0, 36.0, 8.0]);
+        approx(wf.spacing(), [8.0, 4.0, 4.0]);
+        // sform_code/qform_code 2 is "aligned to another file", NOT scanner-anatomical — the real file
+        // #396 B4 would have mislabelled.
+        assert_eq!(wf.space, "aligned");
+    }
+
+    /// **#446** — `xyzt_units` carries the **spatial** unit in bits 0–2 (1 m, 2 mm, 3 µm), and the
+    /// sform/qform affine *and* `pixdim` are expressed in it. #396 taught this decoder to read the *time*
+    /// half of that same byte and left the space half ignored, so a micron-unit file — routine in
+    /// preclinical / µCT / light-sheet work — sealed an affine whose numbers were microns while
+    /// `world_frame.unit` claimed `"mm"`: a silent 1000× geometry error every consumer inherits, and one
+    /// `ArraySpec::validate` cannot catch because the affine is perfectly non-degenerate.
+    ///
+    /// Normalised **at the door** (ADR-0025), exactly like the RAS→LPS flip: the affine is scaled and
+    /// `unit` stays the canonical `"mm"`. Carrying the source unit instead would need a format change —
+    /// ADR-0032's `CANONICAL_UNITS` has only `mm` for length, so `"um"`/`"m"` would fail
+    /// `unit_is_canonical`.
+    #[test]
+    fn the_xyzt_units_spatial_code_scales_the_affine_to_mm() {
+        let dir = tempfile::tempdir().unwrap();
+        let voxels: Vec<i16> = (0..8).collect();
+        let frame = |name: &str, s: Synth| {
+            let p = dir.path().join(name);
+            s.write(&p, &voxels);
+            read_nifti(&p).unwrap().world_frame.unwrap()
+        };
+        // The fixture's diagonal sform is spacing (2,3,4) and offset (10,20,30) in whatever unit the
+        // header names; voxel [1,1,1] lands at (-12,-23,34) when that unit is mm.
+
+        // MICRON (3): every length is 1/1000 mm.
+        let wf = frame("um.nii", Synth::new(&[2, 2, 2]).space_units(3));
+        assert_eq!(wf.unit, "mm", "the stored unit stays canonical");
+        approx(wf.spacing(), [0.004, 0.003, 0.002]);
+        approx(wf.voxel_to_world([1.0, 1.0, 1.0]), [-0.012, -0.023, 0.034]);
+
+        // METER (1): 1000× mm.
+        let wf = frame("m.nii", Synth::new(&[2, 2, 2]).space_units(1));
+        approx(wf.spacing(), [4000.0, 3000.0, 2000.0]);
+        approx(
+            wf.voxel_to_world([1.0, 1.0, 1.0]),
+            [-12000.0, -23000.0, 34000.0],
+        );
+
+        // MM (2) and UNSPECIFIED (0) must be byte-identical to today — mm is the de-facto NIfTI default,
+        // and the common case must not move a single hash.
+        for code in [2u8, 0] {
+            let wf = frame(
+                &format!("mm-{code}.nii"),
+                Synth::new(&[2, 2, 2]).space_units(code),
+            );
+            assert_eq!(
+                wf.spacing(),
+                [4.0, 3.0, 2.0],
+                "space code {code} must be unscaled"
+            );
+            assert_eq!(wf.voxel_to_world([1.0, 1.0, 1.0]), [-12.0, -23.0, 34.0]);
+        }
+
+        // the qform path reads the same `pixdim`/`qoffset`, so it scales identically.
+        let wf = frame(
+            "um-qform.nii",
+            Synth::new(&[2, 2, 2])
+                .no_sform()
+                .qform(1, [0.0; 3], 1.0)
+                .space_units(3),
+        );
+        approx(wf.spacing(), [0.004, 0.003, 0.002]);
+        // an identity quaternion reproduces the same affine as the diagonal sform, so the same
+        // (-12,-23,34) mm point, scaled: the rotation contributes, not just the offset.
+        approx(wf.voxel_to_world([1.0, 1.0, 1.0]), [-0.012, -0.023, 0.034]);
+        // whatever the source said, the sealed descriptor stays inside the pinned UCUM subset.
+        assert!(tessera_core::referencing::Referenced::from_world_frame(&wf).unit_is_canonical());
+
+        // the TIME half of the same byte must keep working independently (mm | sec = 2 | 8).
+        let p = dir.path().join("um-time.nii");
+        Synth::new(&[2, 2, 2, 3])
+            .time_axis(2.5, 1.0, 8)
+            .space_units(3)
+            .write(&p, &(0..24).map(|k| k as i16).collect::<Vec<_>>());
+        let img = read_nifti(&p).unwrap();
+        assert_eq!(
+            img.axis_referencing.as_ref().unwrap()[0],
+            Some(Referenced::time_regular(1.0, 2.5)),
+            "the spatial scale must not touch the time axis"
+        );
+        approx(img.world_frame.unwrap().spacing(), [0.004, 0.003, 0.002]);
+    }
+
+    /// The µm conversion must be **bit-exact**, not merely close. `v * 0.001` rounds twice — 0.001 is not
+    /// representable in binary — and lands 1 ULP from the correctly-rounded answer for many inputs, while
+    /// `v / 1000.0` divides by an exact 1000.0 and rounds once. The affine is **sealed**, so 1 ULP is a
+    /// different `manifest_hash`.
+    ///
+    /// `9.0` is the smallest whole number where the two forms disagree, and none of the values the other
+    /// tests use (2, 3, 4, 10, 20, 30) does — precisely how this would have shipped unnoticed — so this
+    /// asserts exact equality rather than approximate.
+    #[test]
+    fn the_micron_conversion_is_bit_exact() {
+        // sanity: the two forms really do differ here, or this test proves nothing.
+        assert_ne!(
+            9.0_f64 * 0.001,
+            9.0_f64 / 1000.0,
+            "9.0 must be a discriminating value"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("um-exact.nii");
+        let mut s = Synth::new(&[2, 2, 2]).space_units(3);
+        // a diagonal sform whose k column (the world-S row) is exactly 9 µm
+        s.srows = [[2., 0., 0., 10.], [0., 3., 0., 20.], [0., 0., 9., 30.]];
+        s.write(&p, &(0..8).map(|k| k as i16).collect::<Vec<_>>());
+
+        let wf = read_nifti(&p).unwrap().world_frame.unwrap();
+        // affine[8] is the world-S row's k column = srow_z[2], converted to mm.
+        assert_eq!(
+            wf.affine[8],
+            9.0_f64 / 1000.0,
+            "the µm conversion must be a single correctly-rounded division"
+        );
+        assert_ne!(
+            wf.affine[8],
+            9.0_f64 * 0.001,
+            "…not a multiply by an inexact 0.001"
+        );
+    }
+
+    /// **#449** — big-endian NIfTI-1. Not theoretical: **three of the six** `.nii`/`.nii.gz` files in
+    /// nibabel's own test data are big-endian (`sizeof_hdr` reads 348 byte-swapped), which is what
+    /// ANALYZE-era and SPARC/PowerPC-written data looks like — precisely the data an archival format is
+    /// asked to read *because* nothing modern can.
+    ///
+    /// ADR-0056 **H6** requires the byte order be value-preserving and **unrecorded**: a big-endian file
+    /// and its little-endian twin must seal the *identical* `content_hash`, as PR #461 established for
+    /// NumPy `>f8`/`<f8`. Byte order needs no recovery instructions, and recording it would make the
+    /// twins differ in the seal — the one thing that gate forbids. This is the relation test.
+    #[test]
+    fn the_big_endian_and_little_endian_twins_agree_with_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let voxels: Vec<i16> = (0..2 * 3 * 4).map(|k| k as i16 - 20).collect();
+        let base = || Synth::new(&[4, 3, 2]).time_axis(0.0, 0.0, 2);
+
+        let le = dir.path().join("le.nii");
+        base().write(&le, &voxels);
+        let be = dir.path().join("be.nii");
+        base().big_endian().write(&be, &voxels);
+
+        let (a, b) = (read_nifti(&le).unwrap(), read_nifti(&be).unwrap());
+        assert_eq!(a.shape, b.shape);
+        assert_eq!(a.axes, b.axes);
+        assert_eq!(
+            a.world_frame, b.world_frame,
+            "geometry must survive the swap"
+        );
+        assert_eq!(a.geometry_source, b.geometry_source);
+        assert_eq!(a.axis_referencing, b.axis_referencing);
+        assert_eq!(a.rescale_slope, b.rescale_slope);
+        assert_eq!(a.rescale_intercept, b.rescale_intercept);
+        assert!(
+            matches!(b.data, ArrayData::I16(ref v) if v == &voxels),
+            "voxels byte-swapped"
+        );
+
+        // THE RELATION the gate is about: identical seals, given the same source reference.
+        let seal = |img: &NiftiImage| {
+            to_recon_product(img, "twin", "2024-01-01T00:00:00Z", "twin.nii", None, &[])
+                .unwrap()
+                .0
+        };
+        let (ma, mb) = (seal(&a), seal(&b));
+        assert_eq!(
+            ma.content_hash, mb.content_hash,
+            "H6: the twins must seal identically"
+        );
+        assert_eq!(
+            ma.manifest_hash, mb.manifest_hash,
+            "…and nothing about the byte order may be recorded, or the seals would differ"
+        );
+        ma.verify().unwrap();
+        mb.verify().unwrap();
+
+        // every supported dtype survives the swap, not just int16 (the widths are where a naive
+        // byte-swap goes wrong).
+        for (code, bitpix, le_payload) in [
+            (2i16, 8i16, vec![200u8]),
+            (512, 16, 60000u16.to_le_bytes().to_vec()),
+            (8, 32, (-70000i32).to_le_bytes().to_vec()),
+            (16, 32, 0.5f32.to_le_bytes().to_vec()),
+            (64, 64, (-0.25f64).to_le_bytes().to_vec()),
+        ] {
+            let lp = dir.path().join(format!("dt{code}-le.nii"));
+            Synth::new(&[1, 1, 1])
+                .datatype(code, bitpix)
+                .write_raw(&lp, &le_payload);
+            let bp = dir.path().join(format!("dt{code}-be.nii"));
+            let mut be_payload = le_payload.clone();
+            be_payload.reverse(); // one element, so a whole-buffer reverse is its big-endian form
+            Synth::new(&[1, 1, 1])
+                .datatype(code, bitpix)
+                .big_endian()
+                .write_raw(&bp, &be_payload);
+            assert_eq!(
+                read_nifti(&lp).unwrap().data.as_f64(),
+                read_nifti(&bp).unwrap().data.as_f64(),
+                "datatype {code} must decode identically in both byte orders"
+            );
+        }
+
+        // and a big-endian `.nii.gz` still works, with its trailer verified (the two features compose).
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&base().big_endian().bytes(&voxels)).unwrap();
+        let gz = dir.path().join("be.nii.gz");
+        std::fs::write(&gz, enc.finish().unwrap()).unwrap();
+        assert_eq!(read_nifti(&gz).unwrap().shape, a.shape);
+    }
+
+    /// The #396 B1 / §P2 hostile-input guards must hold in **both** byte orders. A byte-swapped header is
+    /// still attacker-controlled, and it would be easy to add a decode path that reads the new order but
+    /// checks nothing — the `.nii.gz` CRC lesson, one layer down.
+    #[test]
+    fn malformed_big_endian_headers_are_typed_errors_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let voxels: Vec<i16> = (0..8).collect();
+        let invalid = |name: &str, s: Synth| {
+            let p = dir.path().join(name);
+            s.write(&p, &voxels);
+            match read_nifti(&p).map(|i| i.shape) {
+                Err(Error::Invalid(_)) => (),
+                other => panic!("{name}: expected Error::Invalid, got {other:?}"),
+            }
+        };
+        let be = || Synth::new(&[2, 2, 2]).big_endian();
+        invalid("be-far.nii", be().vox_offset(1e9));
+        invalid("be-low.nii", be().vox_offset(0.0));
+        invalid("be-frac.nii", be().vox_offset(352.5));
+        invalid("be-nan-off.nii", be().vox_offset(f32::NAN));
+        invalid("be-zero-dim.nii", Synth::new(&[2, 0, 2]).big_endian());
+        invalid("be-neg-dim.nii", Synth::new(&[2, -1, 2]).big_endian());
+        invalid("be-overflow.nii", Synth::new(&[32767; 5]).big_endian());
+        invalid(
+            "be-short.nii",
+            Synth::new(&[32767, 32767, 32767]).big_endian(),
+        );
+        invalid("be-neg-sform.nii", be().sform(-1));
+        invalid("be-odd-sform.nii", be().sform(9));
+        invalid("be-dtype.nii", be().datatype(128, 24));
+        // a non-finite sform, written in the big-endian encoding of NaN
+        let mut nan = be().qform(1, [0.0; 3], 1.0);
+        nan.srows[1][2] = f32::NAN;
+        invalid("be-nan-sform.nii", nan);
+        // `ndim` (dim[0]) outside 1..=7, in the big-endian encoding
+        let mut bad_ndim = be();
+        bad_ndim.dim[0] = 9;
+        invalid("be-ndim.nii", bad_ndim);
+        // the magic is an ASCII char array, so it is NOT byte-swapped — a wrong one must still be caught
+        let mut h = be().header();
+        h[344..348].copy_from_slice(b"ni1\0"); // the .hdr/.img pair form, not single-file
+        let bad_magic = dir.path().join("be-magic.nii");
+        std::fs::write(&bad_magic, h).unwrap();
+        assert!(
+            matches!(read_nifti(&bad_magic), Err(Error::Invalid(_))),
+            "be-magic"
+        );
+        // NIfTI-2 is still refused in either order (its `sizeof_hdr` is 540, not 348).
+        for (name, hdr) in [
+            ("n2le", 540i32.to_le_bytes()),
+            ("n2be", 540i32.to_be_bytes()),
+        ] {
+            let mut h = Synth::new(&[2, 2, 2]).header();
+            h[0..4].copy_from_slice(&hdr);
+            let p = dir.path().join(format!("{name}.nii"));
+            std::fs::write(&p, h).unwrap();
+            assert!(matches!(read_nifti(&p), Err(Error::Invalid(_))), "{name}");
+        }
+    }
+
+    /// A header that is not NIfTI-1 **in either byte order** must say *which* format it is rather than
+    /// blame the file — the same misleading-error complaint as the `.nii.gz` case. Big-endian used to be
+    /// refused here too; #449 reads it, so the only remaining named alternative is NIfTI-2, which is real
+    /// rather than theoretical: every CIFTI `.dconn.nii` / `.dtseries.nii` is one. Still unsupported, just
+    /// named.
+    #[test]
+    fn a_header_that_is_not_nifti1_in_either_order_is_named_not_blamed_on_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let named = |name: &str, sizeof_hdr: [u8; 4]| {
             let mut h = Synth::new(&[2, 2, 2]).header();
@@ -1142,10 +1663,8 @@ mod tests {
                 other => panic!("{name}: expected Error::Invalid, got {other:?}"),
             }
         };
-        assert!(
-            named("be.nii", 348i32.to_be_bytes()).contains("big-endian"),
-            "a byte-swapped 348 is a big-endian NIfTI-1, and the error should say so"
-        );
+        // (a byte-swapped 348 is a big-endian NIfTI-1, which #449 now SUPPORTS — see
+        // `the_big_endian_and_little_endian_twins_agree_with_each_other`; it is no longer an error.)
         for (name, hdr) in [
             ("n2.nii", 540i32.to_le_bytes()),
             ("n2-be.nii", 540i32.to_be_bytes()),
