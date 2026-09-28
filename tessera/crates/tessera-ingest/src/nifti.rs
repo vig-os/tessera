@@ -243,11 +243,11 @@ fn sizeof_hdr_error(sizeof_hdr: i32) -> Error {
 /// world-coordinate default, sources are "normalised at the door", ADR-0025) and what ADR-0032 requires:
 /// `CANONICAL_UNITS` has only `mm` for length, so `"um"`/`"m"` would fail `unit_is_canonical`. It is the
 /// same move as the RAS→LPS flip.
-fn space_unit_to_mm(r: &Raw) -> f64 {
+fn space_unit_to_mm(r: &Raw) -> LengthUnit {
     match r.u8(123) & 0x07 {
-        2 => 1.0,    // NIFTI_UNITS_MM — already canonical
-        1 => 1000.0, // NIFTI_UNITS_METER
-        3 => 0.001,  // NIFTI_UNITS_MICRON
+        2 => LengthUnit::Mm,     // NIFTI_UNITS_MM — already canonical
+        1 => LengthUnit::Metre,  // NIFTI_UNITS_METER
+        3 => LengthUnit::Micron, // NIFTI_UNITS_MICRON
         0 => {
             // Unspecified. mm is the de-facto NIfTI default and what ADR-0030 names, so assume it —
             // at debug level, not a warning: this is common enough (nibabel's own `standard.nii.gz`
@@ -256,7 +256,7 @@ fn space_unit_to_mm(r: &Raw) -> f64 {
                 target: "tessera::ingest",
                 "nifti: xyzt_units names no spatial unit — assuming mm (the NIfTI default)"
             );
-            1.0
+            LengthUnit::Mm
         }
         invalid => {
             // 4–7 are not defined spatial units. The bits are junk, which is worth being loud about,
@@ -266,7 +266,34 @@ fn space_unit_to_mm(r: &Raw) -> f64 {
                 code = invalid,
                 "nifti: xyzt_units spatial code is not a defined unit (expected 0/1/2/3) — assuming mm"
             );
-            1.0
+            LengthUnit::Mm
+        }
+    }
+}
+
+/// The source length unit a NIfTI affine is expressed in, and the conversion into Tessera's canonical
+/// millimetre.
+///
+/// Deliberately an operation rather than a single multiplicative factor: **0.001 is not representable in
+/// binary**, so `v * 0.001` rounds twice (representing the constant, then multiplying) and can land 1 ULP
+/// from the correctly-rounded answer. `v / 1000.0` divides by an exactly-representable 1000.0 and rounds
+/// once, mirroring the `* 1000.0` used for metres. These values are **sealed**, so a 1-ULP difference is a
+/// different `manifest_hash` — which is what earns the enum. (Measured: 51 of the first 417 whole-number
+/// inputs differ between the two forms, and no value used in the other unit tests does — exactly how this
+/// would have shipped unnoticed.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LengthUnit {
+    Mm,
+    Metre,
+    Micron,
+}
+
+impl LengthUnit {
+    fn to_mm(self, v: f64) -> f64 {
+        match self {
+            LengthUnit::Mm => v,
+            LengthUnit::Metre => v * 1000.0,
+            LengthUnit::Micron => v / 1000.0,
         }
     }
 }
@@ -493,26 +520,26 @@ fn affine_is_usable(wf: &WorldFrame) -> bool {
 /// RAS rows `[Mi, Mj, Mk, offset]` → the Tessera LPS `world_frame`: reorder the columns
 /// `[i,j,k] → [k,j,i]` (Tessera declares the fastest axis last) and convert RAS→LPS by negating the
 /// world x and y rows (ADR-0030 §6).
-/// `mm_per_unit` converts the header's length unit into Tessera's canonical millimetre (#446, see
-/// [`space_unit_to_mm`]) — it scales the rotation/scale block *and* the translation, because every entry
+/// `unit` converts the header's length unit into Tessera's canonical millimetre (#446, see
+/// [`space_unit_to_mm`]) — applied to the rotation/scale block *and* the translation, because every entry
 /// of a NIfTI affine is a length in that same unit.
-fn world_frame_from_ras(rows: [[f64; 4]; 3], code: i16, mm_per_unit: f64) -> Result<WorldFrame> {
+fn world_frame_from_ras(rows: [[f64; 4]; 3], code: i16, unit: LengthUnit) -> Result<WorldFrame> {
     let [x, y, z] = rows;
-    let m = mm_per_unit;
+    let mm = |v: f64| unit.to_mm(v);
     Ok(WorldFrame {
         affine: [
-            -x[2] * m,
-            -x[1] * m,
-            -x[0] * m,
-            -x[3] * m, // world L = -RAS x
-            -y[2] * m,
-            -y[1] * m,
-            -y[0] * m,
-            -y[3] * m, // world P = -RAS y
-            z[2] * m,
-            z[1] * m,
-            z[0] * m,
-            z[3] * m, // world S =  RAS z
+            mm(-x[2]),
+            mm(-x[1]),
+            mm(-x[0]),
+            mm(-x[3]), // world L = -RAS x
+            mm(-y[2]),
+            mm(-y[1]),
+            mm(-y[0]),
+            mm(-y[3]), // world P = -RAS y
+            mm(z[2]),
+            mm(z[1]),
+            mm(z[0]),
+            mm(z[3]), // world S =  RAS z
         ],
         convention: "LPS".into(),
         unit: "mm".into(),
@@ -539,7 +566,7 @@ fn world_frame_from_ras(rows: [[f64; 4]; 3], code: i16, mm_per_unit: f64) -> Res
 fn parse_geometry(r: &Raw) -> Result<(Option<WorldFrame>, Option<GeometrySource>)> {
     let (sform_code, qform_code) = (r.i16(254), r.i16(252));
     // The header's length unit, resolved once — both transforms are expressed in it (#446).
-    let mm = space_unit_to_mm(r);
+    let unit = space_unit_to_mm(r);
     // A *negative* code is a malformed header, not "absent" — `code > 0` alone read -1 as absent and
     // silently dropped the geometry.
     for (name, code) in [("sform_code", sform_code), ("qform_code", qform_code)] {
@@ -550,7 +577,7 @@ fn parse_geometry(r: &Raw) -> Result<(Option<WorldFrame>, Option<GeometrySource>
         }
     }
     if sform_code > 0 {
-        let wf = world_frame_from_ras(sform_rows(r), sform_code, mm)?;
+        let wf = world_frame_from_ras(sform_rows(r), sform_code, unit)?;
         // Non-finite is corruption: refuse rather than fall through to a different transform, since
         // "the sform is unreadable" is not the same claim as "there is no sform".
         if !affine_is_finite(&wf) {
@@ -569,7 +596,7 @@ fn parse_geometry(r: &Raw) -> Result<(Option<WorldFrame>, Option<GeometrySource>
         );
     }
     if qform_code > 0 {
-        let wf = world_frame_from_ras(qform_rows(r), qform_code, mm)?;
+        let wf = world_frame_from_ras(qform_rows(r), qform_code, unit)?;
         if !affine_is_finite(&wf) {
             return Err(he(
                 "the qform quaternion/pixdim contains a non-finite (NaN/inf) entry — corrupt header",
@@ -706,10 +733,9 @@ fn read_voxels(h: &Header, b: &[u8]) -> Result<ArrayData> {
         )));
     }
     let (n, w, en) = (h.count, h.width, h.endian);
-    // The stride comes from `dtype_width` via `h.width` — never repeated per arm, so a width can never
-    // disagree with the type that reads it (the bound checked above is `n * w`).
     // The stride comes from `dtype_width` via `h.width` and the byte order from `h.endian` — one source
-    // of truth each, so neither can disagree with the type that reads it.
+    // of truth each, so neither can disagree with the type that reads it (the bound checked above is
+    // `n * w`).
     macro_rules! read_vec {
         ($variant:ident, $from:expr) => {
             ArrayData::$variant((0..n).map(|i| $from(&d[i * w..], en)).collect())
@@ -1431,6 +1457,44 @@ mod tests {
         approx(img.world_frame.unwrap().spacing(), [0.004, 0.003, 0.002]);
     }
 
+    /// The µm conversion must be **bit-exact**, not merely close. `v * 0.001` rounds twice — 0.001 is not
+    /// representable in binary — and lands 1 ULP from the correctly-rounded answer for many inputs, while
+    /// `v / 1000.0` divides by an exact 1000.0 and rounds once. The affine is **sealed**, so 1 ULP is a
+    /// different `manifest_hash`.
+    ///
+    /// `9.0` is the smallest whole number where the two forms disagree, and none of the values the other
+    /// tests use (2, 3, 4, 10, 20, 30) does — precisely how this would have shipped unnoticed — so this
+    /// asserts exact equality rather than approximate.
+    #[test]
+    fn the_micron_conversion_is_bit_exact() {
+        // sanity: the two forms really do differ here, or this test proves nothing.
+        assert_ne!(
+            9.0_f64 * 0.001,
+            9.0_f64 / 1000.0,
+            "9.0 must be a discriminating value"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("um-exact.nii");
+        let mut s = Synth::new(&[2, 2, 2]).space_units(3);
+        // a diagonal sform whose k column (the world-S row) is exactly 9 µm
+        s.srows = [[2., 0., 0., 10.], [0., 3., 0., 20.], [0., 0., 9., 30.]];
+        s.write(&p, &(0..8).map(|k| k as i16).collect::<Vec<_>>());
+
+        let wf = read_nifti(&p).unwrap().world_frame.unwrap();
+        // affine[8] is the world-S row's k column = srow_z[2], converted to mm.
+        assert_eq!(
+            wf.affine[8],
+            9.0_f64 / 1000.0,
+            "the µm conversion must be a single correctly-rounded division"
+        );
+        assert_ne!(
+            wf.affine[8],
+            9.0_f64 * 0.001,
+            "…not a multiply by an inexact 0.001"
+        );
+    }
+
     /// **#449** — big-endian NIfTI-1. Not theoretical: **three of the six** `.nii`/`.nii.gz` files in
     /// nibabel's own test data are big-endian (`sizeof_hdr` reads 348 byte-swapped), which is what
     /// ANALYZE-era and SPARC/PowerPC-written data looks like — precisely the data an archival format is
@@ -1555,6 +1619,19 @@ mod tests {
         let mut nan = be().qform(1, [0.0; 3], 1.0);
         nan.srows[1][2] = f32::NAN;
         invalid("be-nan-sform.nii", nan);
+        // `ndim` (dim[0]) outside 1..=7, in the big-endian encoding
+        let mut bad_ndim = be();
+        bad_ndim.dim[0] = 9;
+        invalid("be-ndim.nii", bad_ndim);
+        // the magic is an ASCII char array, so it is NOT byte-swapped — a wrong one must still be caught
+        let mut h = be().header();
+        h[344..348].copy_from_slice(b"ni1\0"); // the .hdr/.img pair form, not single-file
+        let bad_magic = dir.path().join("be-magic.nii");
+        std::fs::write(&bad_magic, h).unwrap();
+        assert!(
+            matches!(read_nifti(&bad_magic), Err(Error::Invalid(_))),
+            "be-magic"
+        );
         // NIfTI-2 is still refused in either order (its `sizeof_hdr` is 540, not 348).
         for (name, hdr) in [
             ("n2le", 540i32.to_le_bytes()),
@@ -1568,12 +1645,13 @@ mod tests {
         }
     }
 
-    /// A header that is not little-endian NIfTI-1 must say **which** format it is. The old catch-all
-    /// ("not NIfTI-1, or big-endian") is the same misleading-error complaint as B2's `.nii.gz` case: it
-    /// blames the file. Both alternatives are real — three of the six `.nii` fixtures in nibabel's own
-    /// test data are big-endian, and every CIFTI `.dconn.nii` is a NIfTI-2. Still unsupported; just named.
+    /// A header that is not NIfTI-1 **in either byte order** must say *which* format it is rather than
+    /// blame the file — the same misleading-error complaint as the `.nii.gz` case. Big-endian used to be
+    /// refused here too; #449 reads it, so the only remaining named alternative is NIfTI-2, which is real
+    /// rather than theoretical: every CIFTI `.dconn.nii` / `.dtseries.nii` is one. Still unsupported, just
+    /// named.
     #[test]
-    fn a_non_little_endian_nifti1_header_is_named_not_blamed_on_the_file() {
+    fn a_header_that_is_not_nifti1_in_either_order_is_named_not_blamed_on_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let named = |name: &str, sizeof_hdr: [u8; 4]| {
             let mut h = Synth::new(&[2, 2, 2]).header();
