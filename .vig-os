@@ -167,7 +167,7 @@ DEVKIT_REFS_OPTIONAL_TYPES=
 # `release` is dropped). Realized at scaffold time (an anchored render of the
 # hook pattern + resolve-toolchain's `branch-types` output); written back only
 # for a non-empty value (#1432).
-DEVKIT_BRANCH_TYPES=
+DEVKIT_BRANCH_TYPES=chore,feat,feature,fix,bugfix,hotfix,release,perf,polish,spike,refactor,docs,test,build,ci,style,land
 
 # Auto-upgrade opt-out for the scaffolded devkit-upgrade.yml workflow. Empty
 # (default) or any value other than `false` keeps the WEEKLY schedule path
