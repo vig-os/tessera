@@ -29,7 +29,20 @@ const JOURNAL: &str = "journal.jsonl";
 const BLOCKS: &str = "blocks";
 
 /// The manifest header captured at session creation — everything needed to seal except the blocks.
+///
+/// **`deny_unknown_fields` is load-bearing (#462).** A stage dir is resumed by whichever binary
+/// happens to run [`WriteSession::recover`], which need not be the one that wrote it. Without this,
+/// an older binary silently DROPS any field it does not know — and those fields are sealed,
+/// identity-bearing provenance (`producer`, `generation`), so the resumed seal would differ from
+/// the intended one with nothing to show for it. That is the same silent-loss class as #416.
+///
+/// Chosen over a `version` integer deliberately: a version only protects you if whoever adds the
+/// next field remembers to bump it, and #416 happened precisely because a field was added without
+/// its plumbing being finished. `deny_unknown_fields` needs no such discipline — every future field
+/// is covered the moment it exists, and the cost is that cross-version resume fails loudly, which
+/// is the correct outcome for a short-lived internal staging artifact that is cheap to redo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Header {
     product: String,
     name: String,
@@ -430,6 +443,38 @@ mod tests {
         let reread = Reader::open(&out).unwrap().manifest().clone();
         assert_eq!(reread.generation, sealed.generation);
         assert_eq!(reread.producer, sealed.producer);
+    }
+
+    /// #462: an older binary resuming a stage dir written by NEWER code must fail loudly rather
+    /// than silently drop the fields it does not understand. Those fields are sealed provenance
+    /// (`producer`/`generation`), so dropping them yields a different, quieter seal — the #416
+    /// failure mode again. Simulated by injecting a field no current version knows.
+    #[test]
+    fn recover_refuses_a_header_from_a_newer_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        {
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            ws.with_producer(tessera_core::Producer::new("daq", "1.0"))
+                .unwrap();
+        }
+        // A field from a hypothetical future writer, alongside the ones we do know.
+        let hpath = stage.join(HEADER);
+        let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&hpath).unwrap()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .insert("attestation".into(), serde_json::json!({"alg": "future"}));
+        fs::write(&hpath, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+
+        // `expect_err` would need `WriteSession: Debug`, which it deliberately is not.
+        let msg = match WriteSession::recover(&stage) {
+            Ok(_) => panic!("resume must refuse a header written by a newer writer"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("attestation"),
+            "the error must name the unknown field, got: {msg}"
+        );
     }
 
     #[test]
