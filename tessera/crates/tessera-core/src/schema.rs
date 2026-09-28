@@ -20,8 +20,8 @@ use crate::block::BlockKind;
 use crate::manifest::Manifest;
 
 /// Schema-driven **sensitivity tier** for a metadata field (ADR-0040 §1 — the spike that
-/// teaches the engine to *reason* about PHI without yet redacting/encrypting). One of four,
-/// in increasing identifiability:
+/// teaches the engine to *reason* about PHI without yet redacting/encrypting). Four tiers on an
+/// increasing-identifiability ladder, plus one off-ladder tier for *unclassified*:
 /// - [`Public`](Sensitivity::Public) — safe in clear (e.g. modality vocab, calibration
 ///   coefficients, scan geometry); ships unchanged.
 /// - [`Coded`](Sensitivity::Coded) — a controlled-vocab code, intrinsically non-identifying but
@@ -33,6 +33,13 @@ use crate::manifest::Manifest;
 ///   PS3.15's confidentiality profile — Patient Name, Patient ID, MRN, Birth Date, …,
 ///   plus UIDs that bind to the patient/study). The redactor / field-encryption phases
 ///   (deferred) operate on the fields the schema marks at this tier.
+/// - [`Unknown`](Sensitivity::Unknown) — **not on the ladder: nobody has classified this yet.**
+///   Added for generic ingest (ADR-0056 §7). A Parquet/CSV a scientist hands us carries column
+///   names and dtypes but no tiers, and the vendor paths' two defences are both absent: GE
+///   listmode never sees PHI (scan events), and DICOM classifies at the door (PS3.15). Stamping
+///   [`Public`](Sensitivity::Public) there would seal the assertion "safe in clear" over a
+///   column that might be a patient identifier — and a seal is forever. `Unknown` says the true
+///   thing instead, and gives `verify --require-classified` something to gate on.
 ///
 /// Pure data (`Copy` + serde) — the wasm-targeted `tessera-core` stays host-free; no PHI logic
 /// lives in this enum, only the classification.
@@ -49,6 +56,13 @@ pub enum Sensitivity {
     /// Direct PHI — DICOM PS3.15 confidentiality-profile fields (Patient Name/ID/MRN, DOB,
     /// linking UIDs). The redact / field-encryption phases (deferred) operate on this tier.
     Identifying,
+    /// **Unclassified** — no classification pass has run on this field/column (ADR-0056 §7).
+    /// Off the ladder rather than at the bottom of it: it is not a claim of safety, it is the
+    /// absence of a claim. What generic ingest stamps on every column no `--column-meta`
+    /// classified. Deliberately NOT the serde default (that stays
+    /// [`Public`](Sensitivity::Public)), so every schema written before this variant existed
+    /// deserialises byte-identically — a producer opts into honesty explicitly.
+    Unknown,
 }
 
 /// A field's self-description — carried once, in the schema, so values stay lean and a reader
@@ -442,6 +456,69 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                 "Opaque preserved file — bytes stored bit-faithfully, not engine-parsed (the \"junk\" tier).",
             )
         },
+        // ── The two **generic-ingest** schemas (ADR-0056 §7). Named by *primitive*, not by source
+        //    format, because the primitive is what the product IS: the same `table` schema serves a
+        //    Parquet, an Arrow IPC file and a CSV, and nothing downstream needs to care which.
+        //
+        //    Permissive by the same argument that makes `blob` permissive: every field is
+        //    `recommended`, never `required`, so the door stays frictionless (normalise now, label
+        //    later) and the warn tier does the FAIR nudging. A generic ingest that *blocked* on
+        //    missing semantics would push users back onto `ingest blob`, which is the outcome
+        //    ADR-0056 exists to prevent.
+        //
+        //    These two are also the **laundering rule's** allowlist (ADR-0056 §7): a generic backend
+        //    may only produce a product in {table, array, blob}, enforced by the ingest engine, which
+        //    knows which backend it dispatched to. Without that, `ingest table events.csv --schema
+        //    listmode` would mint a `.tsra` byte-indistinguishable from a real vendor listmode
+        //    ingest, carrying PS3.15 `Identifying` tiers no classification pass ever validated.
+        ProductSchema {
+            fields: vec![
+                FieldSpec::recommended(
+                    "study",
+                    "Study / cohort / experiment this table belongs to (FAIR grouping)",
+                    "string",
+                ),
+                FieldSpec::recommended(
+                    "source_format",
+                    "Source format normalised at ingest (\"parquet\" | \"arrow\" | \"csv\" | …)",
+                    "string",
+                ),
+            ],
+            blocks: vec![one(
+                "data",
+                Some(Table),
+                "Normalised flat columnar table (Vortex-encoded at seal)",
+            )],
+            ..schema(
+                "table",
+                "1.0",
+                "A generically-ingested flat table — structural preservation, semantics still to be attached.",
+            )
+        },
+        ProductSchema {
+            fields: vec![
+                FieldSpec::recommended(
+                    "study",
+                    "Study / cohort / experiment this array belongs to (FAIR grouping)",
+                    "string",
+                ),
+                FieldSpec::recommended(
+                    "source_format",
+                    "Source format normalised at ingest (\"npy\" | \"npz\" | \"nifti\" | …)",
+                    "string",
+                ),
+            ],
+            blocks: vec![one(
+                "data",
+                Some(Array),
+                "Normalised dense N-D numeric grid (Zarr v3 + pcodec at seal)",
+            )],
+            ..schema(
+                "array",
+                "1.0",
+                "A generically-ingested dense N-D array — structural preservation, semantics still to be attached.",
+            )
+        },
         ProductSchema {
             // `rescale_*` are pure scan geometry → `Public`. The remaining fields are seeded
             // from DICOM **PS3.15 Annex E** (Basic Application Confidentiality Profile, the
@@ -763,6 +840,10 @@ mod tests {
     use crate::block::array::{ArrayBlock, ArraySpec};
     use crate::ProductBuilder;
 
+    /// A fixed acquisition timestamp — identity is content-derived, so every test that seals needs
+    /// one that never comes from the clock.
+    const TS: &str = "2024-01-01T00:00:00Z";
+
     #[test]
     fn registry_has_all_builtins() {
         let r = SchemaRegistry::builtin();
@@ -782,10 +863,12 @@ mod tests {
             "multicontrast_mri",
             "deformation_field", // ADR-0030 §5 deformable registration carrier
             "blob",              // ADR-0038 opaque preservation tier
+            "table",             // ADR-0056 §7 generic ingest — the table primitive
+            "array",             // ADR-0056 §7 generic ingest — the array primitive
         ] {
             assert!(r.get(p).is_some(), "missing built-in schema '{p}'");
         }
-        assert_eq!(r.products().count(), 14);
+        assert_eq!(r.products().count(), 16);
     }
 
     #[test]
@@ -1209,5 +1292,92 @@ mod tests {
         let permissive = schema("daq", "1", "a DAQ product");
         let bare = Manifest::new("daq", "y", "d", ts);
         assert!(permissive.validate(&bare).is_ok(), "default is permissive");
+    }
+
+    /// ADR-0056 §7: the two generic-ingest schemas are **permissive** — a product carrying nothing
+    /// but its one block validates. That is the load-bearing property: a generic ingest that blocked
+    /// on absent semantics would push users back onto `ingest blob`, which is the outcome ADR-0056
+    /// exists to prevent. The FAIR nudge is the warn tier instead.
+    #[test]
+    fn generic_ingest_schemas_are_permissive_and_nudge_rather_than_block() {
+        use crate::block::table::{Column, TableBlock, TableSpec};
+        let r = SchemaRegistry::builtin();
+
+        let t = TableBlock::new(
+            "data",
+            TableSpec {
+                columns: vec![Column::new("x", "f8")],
+                rows: 3,
+                row_index: None,
+            },
+        );
+        let mut b = ProductBuilder::new("table", "t-01", "a parquet someone handed us", TS);
+        b.add_block(&t).unwrap();
+        let m = b.seal().unwrap();
+        r.validate(&m).expect("a bare generic table validates");
+
+        let a = ArrayBlock::new("data", ArraySpec::new(vec![4, 4], "float32"));
+        let mut b = ProductBuilder::new("array", "a-01", "an npy someone handed us", TS);
+        b.add_block(&a).unwrap();
+        let ma = b.seal().unwrap();
+        r.validate(&ma).expect("a bare generic array validates");
+
+        // …but both nudge: `study` and `source_format` are recommended, so the warn tier fires.
+        for m in [&m, &ma] {
+            let missing: Vec<&str> = r
+                .missing_recommended(m)
+                .iter()
+                .map(|f| f.id.as_str())
+                .collect();
+            assert_eq!(missing, vec!["study", "source_format"]);
+        }
+
+        // Neither requires a recipe — `ingest_decoder` is recorded because the engine derives it,
+        // not because a schema compels it (ADR-0056 §6a: "require the key" is a separate, unbuilt
+        // mechanism; until it exists a generic product must not be blocked for lacking one).
+        assert!(!r.get("table").unwrap().requires_generation);
+        assert!(!r.get("array").unwrap().requires_generation);
+    }
+
+    /// The block *kind* is what the generic schemas pin: a `table` product whose only block is an
+    /// array is not a `table` product. This is what stops `--from`/verb confusion producing a
+    /// mislabelled artifact.
+    #[test]
+    fn generic_schemas_pin_the_block_kind() {
+        let r = SchemaRegistry::builtin();
+        let a = ArrayBlock::new("data", ArraySpec::new(vec![2, 2], "int16"));
+        let mut b = ProductBuilder::new("table", "wrong", "an array claiming to be a table", TS);
+        b.add_block(&a).unwrap();
+        let err = r.validate(&b.seal().unwrap()).unwrap_err().to_string();
+        assert!(err.contains("table") && err.contains("Table"), "got {err}");
+    }
+
+    /// ADR-0056 §6.3 / §7: `Unknown` is reachable, serialises as `"unknown"`, and — the part that
+    /// matters for the corpus — is **not** the serde default, so every schema written before it
+    /// existed still deserialises to `Public`.
+    #[test]
+    fn unknown_sensitivity_is_opt_in_and_public_stays_the_default() {
+        assert_eq!(Sensitivity::default(), Sensitivity::Public);
+        assert_eq!(
+            serde_json::to_string(&Sensitivity::Unknown).unwrap(),
+            r#""unknown""#
+        );
+        // A FieldSpec written before the variant existed (no `sensitivity` key) is still Public.
+        let f: FieldSpec =
+            serde_json::from_str(r#"{"id":"x","description":"d","dtype":"string"}"#).unwrap();
+        assert_eq!(f.sensitivity, Sensitivity::Public);
+        // And the tier query finds it, so `verify --require-classified` has something to select on.
+        let s = ProductSchema {
+            fields: vec![FieldSpec::optional("c", "an unclassified column", "string")
+                .with_sensitivity(Sensitivity::Unknown)],
+            ..schema("g", "1", "generic")
+        };
+        assert_eq!(
+            s.fields_by_sensitivity(Sensitivity::Unknown)
+                .iter()
+                .map(|f| f.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
     }
 }

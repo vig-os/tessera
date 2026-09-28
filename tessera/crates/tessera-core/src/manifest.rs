@@ -71,6 +71,19 @@ pub struct Manifest {
     /// to collide with core keys (it is a nested object).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
+    /// **Recorded transforms** applied when this product was normalised at the door (ADR-0056 §6.2).
+    ///
+    /// The receipt for the ladder's middle lane: every mapping that changed the *representation* of a
+    /// value while preserving the value (decimal → integer + scale, tz → UTC ticks, f16 → f32,
+    /// dictionary → materialised values, struct → dotted columns). Empty for products whose ingest was
+    /// bit-faithful, and therefore for every vendor path that existed before generic ingest.
+    ///
+    /// Sealed, and for the §6 reason: it **changes what the values mean**, so a reader who cannot see
+    /// it cannot reconstruct the source's semantics. `skip_serializing_if` keeps an untransformed
+    /// product's JSON byte-identical to a pre-ADR-0056 manifest, which is what lets the committed
+    /// conformance corpus keep its goldens.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingest_transform: Vec<crate::provenance::IngestTransform>,
     /// Merkle root over block digests; `Some` once sealed, `None` while building.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
@@ -112,6 +125,7 @@ impl Manifest {
             study: None,
             metadata: BTreeMap::new(),
             extra: BTreeMap::new(),
+            ingest_transform: Vec::new(),
             content_hash: None,
             manifest_hash: None,
         }

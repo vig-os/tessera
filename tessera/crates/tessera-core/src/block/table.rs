@@ -42,6 +42,39 @@ pub struct Column {
     /// keep its `content_hash` without regeneration. Legacy manifests deserialize as `false`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub nullable: bool,
+    /// **Epoch/frame anchor** for the column's values (ADR-0056 §6.1, ADR-0032 descriptor).
+    ///
+    /// `unit` + `scale` say *how big a tick is*; they cannot say *what a tick is counted from*. So
+    /// an ingested Arrow `Timestamp(us, _)` would otherwise land as `i8 + unit="s" + scale=1e-6` —
+    /// arithmetically indistinguishable from a **duration**, and a live violation of ADR-0046 §2's
+    /// ticks-plus-epoch time model. A [`Referenced`](crate::referencing::Referenced) with
+    /// `frame = "epoch:unix"` carries the missing half, and the same slot serves any column whose
+    /// values are referenced rather than bare (a rescaled intensity, a log-spaced axis).
+    ///
+    /// Sealed, because it **changes what the values mean** (ADR-0056 §6): a reader who cannot see
+    /// the epoch cannot reconstruct the source's semantics, and FAIR-Reusable collapses.
+    /// `skip_serializing_if` keeps an unreferenced column's JSON byte-identical to a manifest
+    /// written before this field existed, so the committed conformance corpus needs no regeneration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referencing: Option<crate::referencing::Referenced>,
+    /// Per-column PHI classification (ADR-0056 §6.3) — the column-level twin of
+    /// [`FieldSpec::sensitivity`](crate::schema::FieldSpec::sensitivity).
+    ///
+    /// Schema `FieldSpec`s classify *metadata*; a table's PHI lives in its **columns**, and until
+    /// now there was nowhere to say so. Generic ingest stamps
+    /// [`Sensitivity::Unknown`](crate::schema::Sensitivity::Unknown) on every column an operator
+    /// did not classify, which is what lets a future `verify --require-classified` be a one-line
+    /// gate before share/push instead of a manual audit.
+    ///
+    /// Serialised only when it is not the default, so existing manifests are unchanged.
+    #[serde(default, skip_serializing_if = "is_public")]
+    pub sensitivity: crate::schema::Sensitivity,
+}
+
+/// `skip_serializing_if` predicate — omit the default tier so adding [`Column::sensitivity`] leaves
+/// every previously-sealed manifest's bytes (and therefore its `manifest_hash`) untouched.
+fn is_public(s: &crate::schema::Sensitivity) -> bool {
+    matches!(s, crate::schema::Sensitivity::Public)
 }
 
 /// `skip_serializing_if` predicate — `bool::not` is not usable here (it takes `self` by value,
@@ -88,6 +121,16 @@ impl Column {
     /// Builder: the column may contain NULLs (#330) — its payload carries a validity mask.
     pub fn nullable(mut self) -> Self {
         self.nullable = true;
+        self
+    }
+    /// Builder: anchor the column's values in a reference frame — the epoch slot (ADR-0056 §6.1).
+    pub fn with_referencing(mut self, referencing: crate::referencing::Referenced) -> Self {
+        self.referencing = Some(referencing);
+        self
+    }
+    /// Builder: classify the column's PHI tier (ADR-0056 §6.3).
+    pub fn with_sensitivity(mut self, sensitivity: crate::schema::Sensitivity) -> Self {
+        self.sensitivity = sensitivity;
         self
     }
 }
@@ -145,6 +188,21 @@ impl TableBlock {
 mod tests {
     use super::Column;
 
+    /// The set of JSON keys a `Column` serialises to, sorted.
+    ///
+    /// Sorted deliberately: these assertions are about **which** keys are emitted (the
+    /// `skip_serializing_if` back-compat guarantee), never about their order. And order is not ours
+    /// to assert — `serde_json`'s `preserve_order` feature is enabled under workspace feature
+    /// unification (Vortex pulls it in) and disabled for a bare `cargo test -p tessera-core`, so an
+    /// order-sensitive assertion here passes in one invocation and fails in the other. The sealed
+    /// bytes are unaffected either way: the seal canonicalises through RFC 8785 JCS, which sorts.
+    fn json_keys(c: &Column) -> Vec<String> {
+        let v = serde_json::to_value(c).unwrap();
+        let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
     #[test]
     fn builders_attach_annotation_triad_and_scale() {
         let c = Column::new("en", "i2")
@@ -165,9 +223,7 @@ mod tests {
         // Back-compat: an unannotated column serializes to exactly the legacy shape (name+dtype),
         // so existing on-disk `.tsra` specs and content hashes are unaffected.
         let bare = Column::new("ms", "u4");
-        let v = serde_json::to_value(&bare).unwrap();
-        let obj = v.as_object().unwrap();
-        assert_eq!(obj.keys().collect::<Vec<_>>(), vec!["name", "dtype"]);
+        assert_eq!(json_keys(&bare), ["dtype", "name"]);
     }
 
     #[test]
@@ -186,13 +242,12 @@ mod tests {
     #[test]
     fn non_nullable_column_emits_no_nullable_key() {
         let c = Column::new("t", "u8");
-        let v = serde_json::to_value(&c).unwrap();
-        let obj = v.as_object().unwrap();
+        let keys = json_keys(&c);
         assert!(
-            !obj.contains_key("nullable"),
-            "non-nullable column must not emit the key: {obj:?}"
+            !keys.contains(&"nullable".to_string()),
+            "non-nullable column must not emit the key: {keys:?}"
         );
-        assert_eq!(obj.keys().collect::<Vec<_>>(), vec!["name", "dtype"]);
+        assert_eq!(keys, ["dtype", "name"]);
     }
 
     /// A nullable column round-trips, and the flag is explicit in the JSON when set.
@@ -221,5 +276,70 @@ mod tests {
         let c: Column = serde_json::from_str(r#"{"name":"t","dtype":"u8"}"#).unwrap();
         assert_eq!(c.name, "t");
         assert!(c.unit.is_none() && c.scale.is_none() && c.description.is_none());
+    }
+
+    /// ADR-0056 §6.1 — the epoch slot. `unit`+`scale` size a tick; only `referencing` says what it
+    /// is counted *from*, which is the difference between an absolute instant and a duration
+    /// (ADR-0046 §2). An ingested Arrow `Timestamp(us, tz)` lands here.
+    #[test]
+    fn referencing_carries_the_epoch_a_unit_and_scale_cannot() {
+        use crate::referencing::{Referenced, Transform};
+        let ts = Column::new("acq_time", "i8")
+            .with_unit("s")
+            .with_scale(1e-6)
+            .with_referencing(
+                Referenced {
+                    transform: Transform::Affine1d {
+                        slope: 1e-6,
+                        intercept: 0.0,
+                    },
+                    unit: Some("s".into()),
+                    vocabulary: None,
+                    frame: Some("epoch".into()),
+                }
+                .with_epoch("unix"),
+            );
+        let r = ts.referencing.as_ref().expect("epoch anchor present");
+        assert_eq!(r.frame.as_deref(), Some("epoch:unix"));
+        // The frame must be in ADR-0032's pinned vocabulary, not free text — `epoch:<instant>` is
+        // the refinement the existing validator already accepts, so no new frame vocabulary lands.
+        assert!(r.vocabularies_pinned());
+        // …and the whole column round-trips (the descriptor is sealed, so it must serialise).
+        let back: Column = serde_json::from_str(&serde_json::to_string(&ts).unwrap()).unwrap();
+        assert_eq!(back, ts);
+    }
+
+    /// ADR-0056 §6.3 — a column's PHI tier. Generic ingest stamps `Unknown` on anything the
+    /// operator did not classify, because `Public` there would seal a false safety claim.
+    #[test]
+    fn sensitivity_round_trips_and_unknown_is_expressible() {
+        use crate::schema::Sensitivity;
+        let c = Column::new("patient_id", "str").with_sensitivity(Sensitivity::Unknown);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains(r#""sensitivity":"unknown""#), "got {json}");
+        let back: Column = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sensitivity, Sensitivity::Unknown);
+    }
+
+    /// The corpus-stability guarantee for ADR-0056 §6, stated the same way #330 stated it for
+    /// `nullable`: both new fields are `skip_serializing_if`-guarded, so a column that uses neither
+    /// serialises to the **pre-ADR-0056 byte sequence**. Every committed fixture in `tessera/corpus/`
+    /// is such a column; if either field serialised unconditionally, every pinned `content_hash` and
+    /// `manifest_hash` in the corpus would move and the format would have silently revved.
+    ///
+    /// Note the two fields differ in *why* they are omitted: `referencing` is `Option::is_none`, but
+    /// `sensitivity` is not an `Option` — it is omitted by value, when it equals the `Public` default.
+    #[test]
+    fn unreferenced_unclassified_column_emits_neither_key() {
+        use crate::schema::Sensitivity;
+        let annotated = Column::new("en", "i2").with_unit("keV").with_scale(0.1);
+        assert_eq!(json_keys(&annotated), ["dtype", "name", "scale", "unit"]);
+        // The explicit-Public case is the one that would bite: it must also emit nothing.
+        let explicit = Column::new("ms", "u4").with_sensitivity(Sensitivity::Public);
+        assert_eq!(
+            json_keys(&explicit),
+            ["dtype", "name"],
+            "an explicitly-Public column must serialise like a pre-ADR-0056 one"
+        );
     }
 }

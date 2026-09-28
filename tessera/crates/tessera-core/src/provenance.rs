@@ -129,6 +129,54 @@ impl ProducerRef {
     }
 }
 
+/// One **recorded transform** applied at the door (ADR-0056 §2/§6.2) — the middle lane of the
+/// normalise-vs-preserve ladder, made honest.
+///
+/// Generic ingest maps a foreign type system onto Tessera's flat one, and some of those mappings are
+/// *reversible transformations* rather than identities: an Arrow `Decimal128(18,4)` becomes an `i8`
+/// column plus a `scale`, a `Timestamp(_, Some("America/New_York"))` becomes UTC ticks, a
+/// `Dictionary` becomes its materialised values. Each is lossless **only because its parameters are
+/// recorded**, and ADR-0056 §2 rejected the alternative of printing a warning: a warning does not
+/// travel with the artifact, and a seal over silently-degraded values asserts under a signature that
+/// those values are the truth. So the transform list rides **inside the seal** and the artifact
+/// carries its own recovery instructions.
+///
+/// `params` is a bag rather than a typed union on purpose — the set of transforms grows with the
+/// source formats we accept, and a closed enum in the *format* would make every new decoder a format
+/// revision. The names ADR-0056 §6.2 fixes are `tz_to_utc`, `decimal_fixed_point`, `f16_widen`,
+/// `dictionary_materialised`, `fixed_list_expand`, `null_slot_normalisation`, `struct_flatten` and
+/// `csv_explicit_schema`; a transform that names a single column puts it in `params["column"]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IngestTransform {
+    /// The transform's stable name (`"decimal_fixed_point"`, `"tz_to_utc"`, …).
+    pub name: String,
+    /// The transform's parameters — everything a reader needs to invert it, plus `column` when the
+    /// transform applies to one. `BTreeMap` so canonical JSON is key-ordered and the seal is stable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
+}
+
+impl IngestTransform {
+    /// A transform with no parameters (e.g. `f16_widen`).
+    pub fn new(name: impl Into<String>) -> Self {
+        IngestTransform {
+            name: name.into(),
+            params: BTreeMap::new(),
+        }
+    }
+
+    /// Builder: record one parameter.
+    pub fn with(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.params.insert(key.into(), value);
+        self
+    }
+
+    /// Builder: record the column this transform applied to (the `column` parameter).
+    pub fn on_column(self, column: &str) -> Self {
+        self.with("column", serde_json::Value::String(column.to_string()))
+    }
+}
+
 /// Generation record (ADR-0058 §2) — *how a product was made*: a generic, **non-opinionated bag**.
 /// The format enforces only that it is present + non-empty for products whose schema requires a
 /// recipe; the `config` keys are the generator's business and are never inspected by the engine.
