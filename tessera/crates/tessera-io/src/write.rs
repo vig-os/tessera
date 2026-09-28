@@ -47,6 +47,14 @@ struct Header {
     /// for the manifest seal (same as [`tessera_core::ProductBuilder`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     sources: Vec<tessera_core::provenance::Source>,
+    /// ADR-0058 §1 producer identity, declared BEFORE seal. Like `sources`, this exists on the
+    /// header rather than as a post-seal edit because the streamed `.tsra` is written once, straight
+    /// to disk — there is no re-seal hook that would not mean rewriting a multi-GB archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    producer: Option<tessera_core::Producer>,
+    /// ADR-0058 §2 generation recipe, declared BEFORE seal (see `producer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<tessera_core::Generation>,
 }
 
 /// A crash-tolerant streaming writer over a staging directory.
@@ -96,6 +104,8 @@ impl WriteSession {
             metadata: BTreeMap::new(),
             extra: BTreeMap::new(),
             sources: Vec::new(),
+            producer: None,
+            generation: None,
         };
         write_durable(&dir.join(HEADER), &serde_json::to_vec_pretty(&header)?)?;
         let journal = OpenOptions::new()
@@ -140,6 +150,26 @@ impl WriteSession {
     /// the seal hash). Persisted to the header so it survives crash recovery.
     pub fn add_source(&mut self, source: tessera_core::provenance::Source) -> Result<&mut Self> {
         self.header.sources.push(source);
+        self.persist_header()?;
+        Ok(self)
+    }
+
+    /// Declare the producing tool/build (ADR-0058 §1) on the session — mirrors
+    /// [`ProductBuilder::with_producer`], overriding the default `tessera` stamp so an external
+    /// DAQ/SIM/sorter records its own identity. Declared before any block commits, so it rides the
+    /// sealed `manifest_hash`. Persisted to the header so it survives crash recovery.
+    pub fn with_producer(&mut self, producer: tessera_core::Producer) -> Result<&mut Self> {
+        self.header.producer = Some(producer);
+        self.persist_header()?;
+        Ok(self)
+    }
+
+    /// Attach the generation record (ADR-0058 §2) — *how* this product was made, as a generic bag —
+    /// mirroring [`ProductBuilder::with_generation`]. Declared before any block commits, so the
+    /// recipe rides the sealed `manifest_hash` and is tamper-evident. Persisted to the header so it
+    /// survives crash recovery.
+    pub fn with_generation(&mut self, generation: tessera_core::Generation) -> Result<&mut Self> {
+        self.header.generation = Some(generation);
         self.persist_header()?;
         Ok(self)
     }
@@ -269,6 +299,14 @@ impl WriteSession {
         for s in &self.header.sources {
             b.add_source(s.clone());
         }
+        // ADR-0058 §1/§2 — sealed provenance, applied through the same `ProductBuilder` the batch
+        // writer uses, so a streamed product with a recipe is byte-identical to a batch-sealed one.
+        if let Some(producer) = &self.header.producer {
+            b.with_producer(producer.clone());
+        }
+        if let Some(generation) = &self.header.generation {
+            b.with_generation(generation.clone());
+        }
         for r in &self.blocks {
             b.add_block_ref(r.clone());
         }
@@ -348,6 +386,50 @@ mod tests {
         for n in rdr.block_names() {
             rdr.read_block(&n).unwrap();
         }
+    }
+
+    /// #416 / ADR-0058 §1/§2: a recipe + producer declared on the session ride the seal, survive a
+    /// crash-recovery round-trip (they live on the durable header, not in RAM), and produce a
+    /// manifest byte-identical to the batch builder's — so a streamed product with provenance is
+    /// indistinguishable from a batch-sealed one.
+    #[test]
+    fn declared_producer_and_generation_ride_the_streamed_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let (r1, p1) = block("a", 0);
+        let producer = tessera_core::Producer::new("ge-listmode-daq", "3.2");
+        let generation = tessera_core::Generation::default()
+            .with("energy_window_keV", serde_json::json!("425-650"))
+            .with_config_ref("blake3:abc");
+        {
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            ws.with_producer(producer.clone()).unwrap();
+            ws.with_generation(generation.clone()).unwrap();
+            ws.append_block(r1.clone(), &p1).unwrap();
+        }
+        // Reopen from disk — the header is the only thing that carried them across the "crash".
+        let ws = WriteSession::recover(&stage).unwrap();
+        let out = dir.path().join("recovered.tsra");
+        let sealed = ws.seal(&out).unwrap();
+
+        assert_eq!(sealed.generation.as_ref(), Some(&generation));
+        assert_eq!(
+            sealed.producer.as_ref(),
+            Some(&tessera_core::ProducerRef::Structured(producer.clone()))
+        );
+
+        // Identical to the batch-built equivalent, seal hash included.
+        let mut bb = ProductBuilder::new("recon", "p", "d", TS);
+        bb.add_block_ref(r1);
+        bb.with_producer(producer);
+        bb.with_generation(generation);
+        let batch = bb.seal().unwrap();
+        assert_eq!(sealed.manifest_hash, batch.manifest_hash);
+
+        // And it survives the container round-trip.
+        let reread = Reader::open(&out).unwrap().manifest().clone();
+        assert_eq!(reread.generation, sealed.generation);
+        assert_eq!(reread.producer, sealed.producer);
     }
 
     #[test]

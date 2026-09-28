@@ -6656,6 +6656,7 @@ dependencies = [
  "csv",
  "dicom",
  "dicom-transfer-syntax-registry",
+ "flate2",
  "half",
  "hdf5-metno",
  "hdf5-metno-sys",

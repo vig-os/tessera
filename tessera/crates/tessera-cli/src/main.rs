@@ -192,6 +192,11 @@ enum Cmd {
         /// reads all payloads; for a huge blob prefer the fast default (seal only) unless auditing.
         #[arg(long)]
         verify: bool,
+        /// Dump the whole sealed manifest as JSON instead of the human summary — everything the
+        /// seal covers (metadata, provenance, producer, generation), scriptable with `jq` and
+        /// without reaching into the container format.
+        #[arg(long)]
+        json: bool,
     },
     /// Verify a `.tsra`'s integrity (magic, seal, every block digest).
     ///
@@ -1034,7 +1039,12 @@ fn main() -> ExitCode {
 
 fn run(cmd: Cmd) -> tessera_core::Result<()> {
     match cmd {
-        Cmd::Inspect { file, full, verify } => {
+        Cmd::Inspect {
+            file,
+            full,
+            verify,
+            json,
+        } => {
             let mut r = open_local_or_url(&file)?;
             // Deep-verify (opt-in): re-hash every payload before rendering, so a corrupt file
             // errors out here instead of printing a clean-looking summary (#268). Bounded RSS.
@@ -1042,12 +1052,28 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 r.verify_payloads(&file.display().to_string())?;
             }
             let m = r.manifest();
+            // `--json`: the sealed manifest verbatim. #417's motivation was that reading a sealed
+            // `generation` meant a `zipfile` + `json` Python one-liner; this is that escape hatch,
+            // typed and supported, so provenance is scriptable without the container internals.
+            if json {
+                println!("{}", serde_json::to_string_pretty(m)?);
+                return Ok(());
+            }
             println!("tessera {} · product={}", m.tessera_version, m.product);
             println!("id            {}", m.id);
             println!("name          {}", m.name);
             println!("timestamp     {}", m.timestamp);
+            // ADR-0058 §1/§2, the operator surface (#417): who/what made this, and with what recipe.
+            // Both are sealed into `manifest_hash`, so what is printed here is tamper-evident.
             if let Some(p) = &m.producer {
-                println!("producer      {}", p.display());
+                for line in nav::producer_lines(p) {
+                    println!("{line}");
+                }
+            }
+            if let Some(g) = &m.generation {
+                for line in nav::generation_lines(g, full) {
+                    println!("{line}");
+                }
             }
             if let Some(s) = &m.study {
                 println!("study         {s}");
@@ -2183,6 +2209,7 @@ mod tests {
             file: tsra.clone(),
             full: false,
             verify: false,
+            json: false,
         })
         .unwrap();
         run(Cmd::Schema {
@@ -2311,6 +2338,7 @@ mod tests {
                 file: bad,
                 full: false,
                 verify: true,
+                json: false,
             }),
             Err(tessera_core::Error::BlockIntegrity { .. })
         ));
@@ -2378,6 +2406,7 @@ mod tests {
             file: out.clone(),
             full: false,
             verify: false,
+            json: false,
         })
         .unwrap();
         let r = Reader::open(&out).unwrap();

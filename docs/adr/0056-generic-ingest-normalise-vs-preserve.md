@@ -671,25 +671,41 @@ stays the single source of truth (ADR-0035).
 | Parquet / Arrow / Feather | table | **P1** — self-describing dtypes, no guessing |
 | NumPy `.npy` | array | **P1** — shape + dtype explicit. Fortran-order transposed to C at the door (recorded); **structured/record dtype routes to `table`**; object/pickled dtype rejects to blob (never unpickle at ingest); big-endian normalised to native |
 | NumPy `.npz` | collection | **P1** — one array product per member; warn on auto-generated `arr_N` names |
-| NIfTI `.nii[.gz]` | array | **already built** — see the gaps below |
+| NIfTI `.nii[.gz]` | array | **already built**; the gaps below are **closed** (#396) |
 | CSV / TSV | table | **P2**, inference-free (§8) |
 | TIFF / OME-TIFF | array | **cut from P1** → #394 |
 | anything else | blob | the honest fallback, signposted by `analyze` |
 
 **NIfTI is largely already answered** — `tessera/crates/tessera-ingest/src/nifti.rs` reads the sform,
 reorders it to `[z,y,x]`, converts RAS+→LPS and carries `scl_slope`/`scl_inter`, which is ADR-0030
-§1/§6 compliant. Four real gaps remain, and they are correctness bugs rather than design questions:
+§1/§6 compliant. Four real gaps remained, and they were correctness bugs rather than design questions.
+**All four are now fixed** (#396, plus a fifth found on the way — a header-driven panic on a malformed
+`vox_offset`); each carries a regression test that failed before the fix. They are recorded here as
+resolved rather than deleted, because the reasoning is what says *why* each was a bug:
 
-1. **`.nii.gz` is unsupported** — and it is the majority of NIfTI on disk. Currently fails with a
-   confusing `sizeof_hdr != 348`.
-2. **qform is ignored.** Files with `sform_code == 0` and `qform_code > 0` (older SPM/FSL outputs)
-   carry geometry in the quaternion; ignoring it silently drops the frame from an array that *has*
-   one. Precedence must be sform, else qform, else no `world_frame`.
-3. **`world_frame.space` is hard-coded `"scanner"`** — the `sform_code`/`qform_code` value
-   (scanner=1, aligned=2, talairach=3, mni=4) must map onto it, and which code was used recorded.
-4. **4-D/5-D volumes are silently truncated to 3-D**, dropping fMRI time and DWI directions — the
-   second-most-common neuroimaging shape. Either declare `[t,z,y,x]` with the time axis carried via
-   ADR-0032 `axis_referencing`, or hard-error. Silently losing volumes is not an option.
+1. ~~**`.nii.gz` is unsupported**~~ — **FIXED (#396).** It is the majority of NIfTI on disk, and it used
+   to fail with a confusing `sizeof_hdr != 348`. The gzip magic is now sniffed and decompressed
+   transparently, capped at the size the *header itself* declares (so the path is not a decompression
+   bomb) under an 8 GiB in-memory ceiling.
+2. ~~**qform is ignored.**~~ — **FIXED (#396).** Files with `sform_code == 0` and `qform_code > 0`
+   (older SPM/FSL outputs) carry geometry in the quaternion; ignoring it silently dropped the frame from
+   an array that *has* one. Precedence is now sform, else qform, else no `world_frame`; a *degenerate*
+   sform falls through to the qform rather than sealing a singular affine.
+3. ~~**`world_frame.space` is hard-coded `"scanner"`**~~ — **FIXED (#396).** The `sform_code`/`qform_code`
+   value (scanner=1, aligned=2, talairach=3, mni=4, other-template=5) now maps onto it, every result
+   staying inside the ADR-0032 pinned frame vocabulary, and an unknown code is a typed error rather than
+   a mislabelled frame. Which transform was used is reported on the decode (`NiftiImage.geometry_source`)
+   and traced — deliberately *not* sealed as a manifest field, since a new field would move the
+   `content_hash` of every NIfTI product including those whose geometry did not change.
+   The `unit` half of the same problem (`xyzt_units` spatial code ignored, `"mm"` hard-coded) is #446.
+4. ~~**4-D/5-D volumes are silently truncated to 3-D**~~ — **FIXED (#396)**, by the better of the two
+   options: the array is declared `[t,z,y,x]` (5-D `[u,t,z,y,x]` — NIfTI's own axis letters reversed) and
+   **every** volume is read, with the `t` axis carrying ADR-0032 `time_regular` when the header names both
+   a step (`pixdim[4]`) and a time unit (`xyzt_units`). A DWI direction stack names neither, so that axis
+   stays a bare index (feature-by-presence) rather than being given a guessed cadence — no new axis
+   convention was invented here. The declared rank keeps a higher axis only while it has more than one
+   element, so a `ndim = 4, dim[4] = 1` file stays the 3-D volume it is and its `content_hash` does not
+   move.
 
 ## §12 — Dependency and feature layout: gate the readers, but not because of bloat
 

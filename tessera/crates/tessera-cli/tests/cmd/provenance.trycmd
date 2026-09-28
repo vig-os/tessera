@@ -1,0 +1,66 @@
+ADR-0058 provenance, end to end: a spec records WHO made a product and HOW, the seal covers
+both, and `inspect` prints them back. `spec.toml` + `acq.cfg` are the only tracked inputs.
+
+```
+$ tessera ingest --spec spec.toml --out out
+ingested collection blake3:bc42e3896dc7eb353f00d1c450ef92f9d7083349314dbd97a819d01e62dda803 (1 members) -> out
+  - blake3:ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81 -> blake3_ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
+
+```
+
+`producer` names the DAQ that generated the content — not tessera, the packager — and every build
+field it recorded is shown. `generation` is the recipe: a non-opinionated bag whose keys tessera
+never interprets. Both sit inside `manifest_hash`, so neither can be edited without changing the
+product's identity.
+
+```
+$ tessera inspect out/blake3_ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
+tessera [..] · product=blob
+id            blake3:ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81
+name          daq-raw
+timestamp     2024-01-01T00:00:00Z
+producer      ge-listmode-daq/3.2
+  git_repo    vig-os/ge-daq
+  git_commit  0855f5f
+  dirty       false
+generation    4 config keys
+  - coincidence_window_ns  4.5
+  - detector_ring          "LYSO4x9"
+  - energy_window_keV      "425-650"
+  - tof_cal_ref            "cal-2024-01"
+content_hash  blake3:9a84f639ca89918bf2b7bea1c60db4d6677570dc47337edb679ddf6bffbe5ea9
+manifest_hash blake3:1158ad9fec90cf627068166a857c2a079a9e909f39e174876ba19d0152a1348f
+blocks        1
+  - data                 Blob blake3:1defcb6623ef07a15287f7bca3cfcaabedf8bc8bed5a227856616cf21e8f6dee
+sources       2
+  - ingested_from <- acq.cfg  [blake3:1defcb6623ef…]
+  - ingested_via_spec <- spec.toml  [blake3:85b49fd978cf…]
+
+```
+
+For scripting, `--json` dumps the sealed manifest itself — provenance included — so reading a
+recipe never means reaching into the container format.
+
+```
+$ tessera inspect --json out/blake3_ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
+{
+...
+  "producer": {
+    "tool": "ge-listmode-daq",
+    "version": "3.2",
+    "git_commit": "0855f5f",
+    "git_repo": "vig-os/ge-daq",
+    "dirty": false
+  },
+  "generation": {
+    "config": {
+      "coincidence_window_ns": 4.5,
+      "detector_ring": "LYSO4x9",
+      "energy_window_keV": "425-650",
+      "tof_cal_ref": "cal-2024-01"
+    }
+  },
+...
+}
+
+```
