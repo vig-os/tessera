@@ -51,6 +51,78 @@ impl Format {
     }
 }
 
+/// Default row cap for **text** grid output when neither `--limit` nor `--all` is given — the same
+/// number `read` uses, so one cap idiom covers every data-emitting verb.
+pub const DEFAULT_GRID_ROWS: u64 = 20;
+
+/// What `slice`/`project` write.
+///
+/// Deliberately separate from [`Format`] (the table formats) because the valid sets differ: an array
+/// plane has no `ndjson` shape, and a table has no `npy`/`png`. A `ValueEnum` rather than a string parsed
+/// at runtime, so clap rejects a typo at parse time and `--help` lists the values from one place instead
+/// of a hand-maintained doc string that can drift (#387).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum GridFormat {
+    /// Comma-separated rows (default).
+    Csv,
+    /// Tab-separated rows.
+    Tsv,
+    /// One self-describing object: `{shape, dtype, values: [[row], …]}`.
+    Json,
+    /// NumPy `.npy` (float64) — the **lossless** path for analysis.
+    Npy,
+    /// 8-bit greyscale PNG — a **lossy preview**, windowed to 0–255. Not data.
+    Png,
+}
+
+impl GridFormat {
+    /// Text formats are line-oriented and honour the row cap. The binary ones always write the whole
+    /// plane: a truncated `.npy` or `.png` is a **corrupt artifact**, not a preview.
+    pub fn is_text(self) -> bool {
+        !matches!(self, GridFormat::Npy | GridFormat::Png)
+    }
+    fn sep(self) -> char {
+        if matches!(self, GridFormat::Tsv) {
+            '\t'
+        } else {
+            ','
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            GridFormat::Csv => "csv",
+            GridFormat::Tsv => "tsv",
+            GridFormat::Json => "json",
+            GridFormat::Npy => "npy",
+            GridFormat::Png => "png",
+        }
+    }
+}
+
+/// How much of a grid to write, and how to window a preview image.
+pub struct GridOpts {
+    pub format: GridFormat,
+    /// `Some(n)` caps **text** output at `n` rows; `None` means the caller gave no `--limit`, so a text
+    /// format falls back to [`DEFAULT_GRID_ROWS`] and a binary one writes everything.
+    pub limit: Option<u64>,
+    /// `--all`: write every row (text formats; binary already does).
+    pub all: bool,
+    /// `png` only: an explicit intensity window `(lo, hi)`. `None` auto-windows on the plane's own
+    /// finite min/max.
+    pub window: Option<(f64, f64)>,
+}
+
+/// What [`write_grid`] emitted, so `main` can print notes to stderr without `nav` touching it.
+#[derive(Debug)]
+pub struct GridResult {
+    pub shown: u64,
+    pub total: u64,
+    /// True when the row cap hid some rows.
+    pub truncated: bool,
+    /// A one-line advisory — currently the `png` "this is a lossy preview, windowed to …" note.
+    pub note: Option<String>,
+}
+
 /// Shorten a `blake3:<hex>` digest to a glanceable prefix for tree/inspect rendering.
 fn short_digest(d: Option<&str>) -> String {
     match d {
@@ -1273,9 +1345,9 @@ pub fn slice(
     index: Option<&str>,
     world: Option<&str>,
     physical: bool,
-    format: Format,
+    opts: &GridOpts,
     out: &mut dyn Write,
-) -> Result<()> {
+) -> Result<GridResult> {
     let (spec, blob) = open_array(file, block)?;
     let (start, len) = match (index, world) {
         (Some(ix), _) => parse_index(ix, &spec.shape)?,
@@ -1324,14 +1396,7 @@ pub fn slice(
     let values = region_to_f64(&region, rescale);
 
     // Grid: the last region axis is the column count; everything before it flattens to rows.
-    let cols = *len.last().unwrap_or(&1) as usize;
-    let cols = cols.max(1);
-    let sep = format.sep();
-    for row in values.chunks(cols) {
-        let line: Vec<String> = row.iter().map(fmt_f64).collect();
-        writeln!(out, "{}", line.join(&sep.to_string())).map_err(tessera_core::Error::from)?;
-    }
-    Ok(())
+    write_grid(&values, &len, &spec.dtype, opts, out)
 }
 
 /// Reduce mode for [`project`].
@@ -1419,9 +1484,9 @@ pub fn project(
     axis: &str,
     mode: &str,
     physical: bool,
-    format: Format,
+    opts: &GridOpts,
     out: &mut dyn Write,
-) -> Result<()> {
+) -> Result<GridResult> {
     let (spec, blob) = open_array(file, block)?;
     let mode = ProjMode::parse(mode)?;
     // Resolve the axis by name (from `spec.axes`) or by index.
@@ -1453,14 +1518,7 @@ pub fn project(
     };
     let values = region_to_f64(&data, rescale);
     let (out_shape, out_vals) = project_axis(&values, &spec.shape, ax, mode);
-
-    let cols = out_shape.last().copied().unwrap_or(1).max(1) as usize;
-    let sep = format.sep();
-    for row in out_vals.chunks(cols) {
-        let line: Vec<String> = row.iter().map(fmt_f64).collect();
-        writeln!(out, "{}", line.join(&sep.to_string())).map_err(tessera_core::Error::from)?;
-    }
-    Ok(())
+    write_grid(&out_vals, &out_shape, &spec.dtype, opts, out)
 }
 
 /// Does this path address the manifest's `extra/` namespace (the fd5 extension fields)?
@@ -1508,6 +1566,194 @@ fn write_extra(
         }
     }
     Ok(())
+}
+
+/// Write a 2-D grid of values (row-major, `cols` = the last axis) in the requested format.
+///
+/// ONE place, so `slice` and `project` cannot drift on rendering, capping or windowing — they used to
+/// carry a copy of the row loop each (#387).
+fn write_grid(
+    values: &[f64],
+    shape: &[u64],
+    dtype: &str,
+    opts: &GridOpts,
+    out: &mut dyn Write,
+) -> Result<GridResult> {
+    // An explicit cap on a binary format is a flag that would do nothing, which is its own foot-gun —
+    // say so rather than ignore it.
+    if !opts.format.is_text() && opts.limit.is_some() {
+        return Err(tessera_core::Error::Invalid(format!(
+            "--limit applies to text output; --format {} always writes the full plane",
+            opts.format.name()
+        )));
+    }
+    let cols = shape.last().copied().unwrap_or(1).max(1) as usize;
+    let total = values.len().div_ceil(cols) as u64;
+    // Text output caps at --limit, else the default; --all lifts it. Binary always writes everything.
+    let cap = match (opts.format.is_text(), opts.all) {
+        (false, _) | (true, true) => total,
+        (true, false) => opts.limit.unwrap_or(DEFAULT_GRID_ROWS).min(total),
+    };
+    let shown_vals = &values[..(cap as usize * cols).min(values.len())];
+    let mut res = GridResult {
+        shown: cap,
+        total,
+        truncated: cap < total,
+        note: None,
+    };
+
+    match opts.format {
+        GridFormat::Csv | GridFormat::Tsv => {
+            let sep = opts.format.sep().to_string();
+            for row in shown_vals.chunks(cols) {
+                let line: Vec<String> = row.iter().map(fmt_f64).collect();
+                writeln!(out, "{}", line.join(&sep)).map_err(tessera_core::Error::from)?;
+            }
+        }
+        GridFormat::Json => {
+            // Self-describing: an analyst gets the shape and source dtype with the numbers, not bare
+            // cells. Non-finite values become JSON `null`, which is the only thing JSON can say.
+            let rows: Vec<Value> = shown_vals
+                .chunks(cols)
+                .map(|r| Value::Array(r.iter().map(|v| json_num(*v)).collect()))
+                .collect();
+            let doc = serde_json::json!({
+                "shape": [rows.len() as u64, cols as u64],
+                "dtype": dtype,
+                "values": rows,
+            });
+            writeln!(out, "{}", serde_json::to_string(&doc)?).map_err(tessera_core::Error::from)?;
+        }
+        GridFormat::Npy => write_npy(shown_vals, &[total, cols as u64], out)?,
+        GridFormat::Png => {
+            let (lo, hi) = write_png(shown_vals, cols, dtype, opts.window, out)?;
+            res.note = Some(format!(
+                "png is a lossy 8-bit preview (window {lo} … {hi}, source dtype {dtype}) — \
+                 use --format npy for the data"
+            ));
+        }
+    }
+    Ok(res)
+}
+
+/// A grid cell as JSON: a number, or `null` for NaN/±inf (which JSON cannot represent).
+///
+/// An integral value renders as an **integer**, the same rule [`fmt_f64`] applies to the CSV/TSV path —
+/// so the two text formats agree, and an `int16` array does not come back as `0.0` while the same
+/// document reports `"dtype": "int16"`.
+#[allow(clippy::cast_possible_truncation)]
+fn json_num(v: f64) -> Value {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        return Value::Number((v as i64).into());
+    }
+    serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number)
+}
+
+/// Write a NumPy `.npy` v1.0 array: the magic + version, a padded header dict, then the values.
+///
+/// `'<f8'` (little-endian float64) regardless of the source dtype, because every value here has already
+/// been through `region_to_f64` — so `f8` is exactly what the CLI computed rather than a widening
+/// introduced at the door, and `--physical` output is floating-point anyway. The header is space-padded so
+/// `10 + header_len` is a multiple of 64, which is the alignment numpy's own writer produces.
+fn write_npy(values: &[f64], shape: &[u64], out: &mut dyn Write) -> Result<()> {
+    let dims: Vec<String> = shape.iter().map(u64::to_string).collect();
+    // numpy needs a 1-tuple to keep its trailing comma: `(6,)` not `(6)`.
+    let tuple = if dims.len() == 1 {
+        format!("{},", dims[0])
+    } else {
+        dims.join(", ")
+    };
+    let dict = format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({tuple}), }}");
+    let pad = (64 - ((10 + dict.len() + 1) % 64)) % 64;
+    let mut header = dict.into_bytes();
+    header.extend(std::iter::repeat_n(b' ', pad));
+    header.push(b'\n');
+    let len = u16::try_from(header.len())
+        .map_err(|_| tessera_core::Error::Invalid("npy header too long".into()))?;
+    out.write_all(b"\x93NUMPY\x01\x00")
+        .map_err(tessera_core::Error::from)?;
+    out.write_all(&len.to_le_bytes())
+        .map_err(tessera_core::Error::from)?;
+    out.write_all(&header).map_err(tessera_core::Error::from)?;
+    for v in values {
+        out.write_all(&v.to_le_bytes())
+            .map_err(tessera_core::Error::from)?;
+    }
+    Ok(())
+}
+
+/// Write an 8-bit greyscale PNG preview, windowing `[lo, hi]` onto black..white. Returns the window
+/// actually used.
+///
+/// This is **not data**: 8 bits cannot hold a CT Hounsfield range, let alone a float activity map, so the
+/// mapping is lossy by construction and `npy` is the lossless path. The window used and the source dtype
+/// are written into `tEXt` chunks so a preview that has been copied out of context stays self-describing
+/// and cannot be mistaken for the values later.
+fn write_png(
+    values: &[f64],
+    cols: usize,
+    dtype: &str,
+    window: Option<(f64, f64)>,
+    out: &mut dyn Write,
+) -> Result<(f64, f64)> {
+    let rows = values.len().div_ceil(cols.max(1));
+    if rows == 0 || cols == 0 {
+        return Err(tessera_core::Error::Invalid(
+            "png: nothing to write (empty plane)".into(),
+        ));
+    }
+    // Auto-window on the plane's own finite min/max — the honest default for an unknown modality, and
+    // what makes `--format png` a one-liner. Non-finite samples are excluded from the window.
+    let (lo, hi) = window.unwrap_or_else(|| {
+        let finite = || values.iter().copied().filter(|v| v.is_finite());
+        let lo = finite().fold(f64::INFINITY, f64::min);
+        let hi = finite().fold(f64::NEG_INFINITY, f64::max);
+        if lo.is_finite() && hi.is_finite() {
+            (lo, hi)
+        } else {
+            (0.0, 0.0)
+        }
+    });
+    let span = hi - lo;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let grey: Vec<u8> = values
+        .iter()
+        .map(|&v| {
+            if !v.is_finite() || span <= 0.0 {
+                // A flat plane (or a non-finite sample) has no contrast to show; black is the honest
+                // rendering rather than an arbitrary mid-grey.
+                0
+            } else {
+                (((v - lo) / span).clamp(0.0, 1.0) * 255.0).round() as u8
+            }
+        })
+        .collect();
+
+    let (w, h) = (
+        u32::try_from(cols).map_err(|_| tessera_core::Error::Invalid("png: too wide".into()))?,
+        u32::try_from(rows).map_err(|_| tessera_core::Error::Invalid("png: too tall".into()))?,
+    );
+    let mut enc = png::Encoder::new(out, w, h);
+    enc.set_color(png::ColorType::Grayscale);
+    enc.set_depth(png::BitDepth::Eight);
+    let text = |e: png::EncodingError| tessera_core::Error::Invalid(format!("png: {e}"));
+    enc.add_text_chunk("Software".into(), "tessera".into())
+        .map_err(text)?;
+    enc.add_text_chunk("tessera:window".into(), format!("{lo},{hi}"))
+        .map_err(text)?;
+    enc.add_text_chunk("tessera:source_dtype".into(), dtype.to_string())
+        .map_err(text)?;
+    enc.add_text_chunk(
+        "Comment".into(),
+        "lossy 8-bit preview of a Tessera array; not the data \
+         (use `tsra slice|project --format npy`)"
+            .into(),
+    )
+    .map_err(text)?;
+    let mut writer = enc.write_header().map_err(text)?;
+    writer.write_image_data(&grey).map_err(text)?;
+    writer.finish().map_err(text)?;
+    Ok((lo, hi))
 }
 
 /// Compact numeric render for slice CSV: integers without a trailing `.0`, floats to 6 sig-ish.
@@ -2017,7 +2263,247 @@ mod tests {
         assert!((mean - 3.0).abs() < 1e-9 && (std - 5f64.sqrt()).abs() < 1e-9);
     }
 
+    /// Default text-CSV grid options — the shape almost every test wants.
+    fn csv_grid() -> GridOpts {
+        GridOpts {
+            format: GridFormat::Csv,
+            limit: None,
+            all: true,
+            window: None,
+        }
+    }
+
+    /// Seal a small 2-D int16 array as a `recon` volume and hand back its path.
+    fn sealed_grid(dir: &std::path::Path, shape: Vec<u64>, vals: Vec<i16>) -> std::path::PathBuf {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        use tessera_io::{array::ArrayData, pack};
+        let p = dir.join("g.tsra");
+        let spec = ArraySpec::new(shape, "int16");
+        let (bref, payload) =
+            tessera_io::array::array_block("volume", &spec, &ArrayData::I16(vals)).unwrap();
+        let mut b = ProductBuilder::new("recon", "G", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        let sealed = b.seal().unwrap();
+        pack(&sealed, &[payload], &p).unwrap();
+        p
+    }
+
+    /// **#387** — array reads emitted CSV only, which is a foot-gun on a real volume: a 512×512 plane is
+    /// a 512-wide CSV spew, and an analyst wants numpy or an image. `json` carries the shape and dtype
+    /// with the numbers; `npy` is the lossless path.
+    ///
+    /// The expectations here are derived **independently of our own writer** — the `.npy` bytes against
+    /// the NumPy format spec (magic, `'<f8'` descr, 64-byte header alignment, little-endian payload) and
+    /// the PNG by decoding it with the `png` crate's *reader*. A test that merely echoed whatever we
+    /// emitted would pass for a wrong encoder.
     #[test]
+    fn slice_writes_json_npy_and_png() {
+        let dir = tempfile::tempdir().unwrap();
+        // 2×3: [[0,1,2],[10,11,12]]
+        let p = sealed_grid(dir.path(), vec![2, 3], vec![0, 1, 2, 10, 11, 12]);
+        let run = |fmt: GridFormat, window: Option<(f64, f64)>| {
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: fmt,
+                limit: None,
+                all: true,
+                window,
+            };
+            let res = slice(&p, "volume", Some(":,:"), None, false, &opts, &mut buf).unwrap();
+            (buf, res)
+        };
+
+        // ── json: self-describing, and the values are the array ──
+        let (buf, _) = run(GridFormat::Json, None);
+        let v: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["shape"], serde_json::json!([2, 3]));
+        assert_eq!(v["dtype"], "int16");
+        assert_eq!(v["values"], serde_json::json!([[0, 1, 2], [10, 11, 12]]));
+
+        // ── npy: checked against the NumPy format spec, not against our own output ──
+        let (buf, _) = run(GridFormat::Npy, None);
+        assert_eq!(&buf[..6], b"\x93NUMPY", "magic");
+        assert_eq!(&buf[6..8], &[1, 0], "version 1.0");
+        let hlen = u16::from_le_bytes([buf[8], buf[9]]) as usize;
+        assert_eq!(
+            (10 + hlen) % 64,
+            0,
+            "numpy requires 64-byte header alignment"
+        );
+        let header = std::str::from_utf8(&buf[10..10 + hlen]).unwrap();
+        assert!(header.contains("'descr': '<f8'"), "{header}");
+        assert!(header.contains("'fortran_order': False"), "{header}");
+        assert!(header.contains("'shape': (2, 3)"), "{header}");
+        assert!(header.ends_with('\n'), "the header must end with a newline");
+        let body = &buf[10 + hlen..];
+        assert_eq!(body.len(), 6 * 8, "6 float64 values");
+        let got: Vec<f64> = body
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(got, vec![0.0, 1.0, 2.0, 10.0, 11.0, 12.0]);
+
+        // ── png: decoded back with the png crate; window + dtype recorded in tEXt ──
+        let (buf, res) = run(GridFormat::Png, None);
+        let decoder = png::Decoder::new(std::io::Cursor::new(&buf));
+        let mut reader = decoder.read_info().unwrap();
+        let info = reader.info();
+        assert_eq!((info.width, info.height), (3, 2), "cols × rows");
+        assert_eq!(info.bit_depth, png::BitDepth::Eight);
+        assert_eq!(info.color_type, png::ColorType::Grayscale);
+        let texts: Vec<(String, String)> = info
+            .uncompressed_latin1_text
+            .iter()
+            .map(|t| (t.keyword.clone(), t.text.clone()))
+            .collect();
+        let get = |k: &str| {
+            texts
+                .iter()
+                .find(|(kw, _)| kw == k)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| panic!("missing tEXt '{k}' in {texts:?}"))
+        };
+        // the window ACTUALLY used, so a preview copied out of context stays self-describing
+        assert_eq!(get("tessera:window"), "0,12");
+        assert_eq!(get("tessera:source_dtype"), "int16");
+        assert!(get("Comment").contains("not the data"), "{texts:?}");
+        // auto-window maps min→black and max→white
+        let mut pixels = vec![0u8; reader.output_buffer_size()];
+        let frame = reader.next_frame(&mut pixels).unwrap();
+        let px = &pixels[..frame.buffer_size()];
+        assert_eq!(px[0], 0, "the minimum (0) is black");
+        assert_eq!(px[5], 255, "the maximum (12) is white");
+        // and the caller is told it is lossy
+        let note = res.note.expect("png must report that it is a preview");
+        assert!(note.contains("lossy"), "{note}");
+        assert!(
+            note.contains("npy"),
+            "the note must point at the lossless path: {note}"
+        );
+
+        // ── an explicit window overrides, and is what gets recorded ──
+        let (buf, _) = run(GridFormat::Png, Some((0.0, 24.0)));
+        let mut reader = png::Decoder::new(std::io::Cursor::new(&buf))
+            .read_info()
+            .unwrap();
+        let recorded = reader
+            .info()
+            .uncompressed_latin1_text
+            .iter()
+            .find(|t| t.keyword == "tessera:window")
+            .map(|t| t.text.clone())
+            .unwrap();
+        assert_eq!(recorded, "0,24");
+        let mut pixels = vec![0u8; reader.output_buffer_size()];
+        let frame = reader.next_frame(&mut pixels).unwrap();
+        // 12 of a 0..24 window is mid-grey, not white any more
+        assert_eq!(pixels[..frame.buffer_size()][5], 128);
+    }
+
+    /// **#387** — the size guard. Text output caps like `read` does; binary output never does, because a
+    /// truncated `.npy`/`.png` is a corrupt artifact rather than a preview — and an explicit `--limit`
+    /// with a binary format is therefore an **error**, since a flag that silently does nothing is its own
+    /// foot-gun.
+    #[test]
+    fn text_grid_output_caps_and_binary_output_refuses_a_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        // 5 rows × 2 cols
+        let p = sealed_grid(dir.path(), vec![5, 2], (0..10).collect());
+        let run = |opts: &GridOpts| {
+            let mut buf = Vec::new();
+            slice(&p, "volume", Some(":,:"), None, false, opts, &mut buf)
+                .map(|res| (String::from_utf8_lossy(&buf).to_string(), res))
+        };
+        let text = |limit: Option<u64>, all: bool| GridOpts {
+            format: GridFormat::Csv,
+            limit,
+            all,
+            window: None,
+        };
+
+        // an explicit cap wins, and the result reports the truncation for main's stderr note
+        let (out, res) = run(&text(Some(2), false)).unwrap();
+        assert_eq!(out.lines().count(), 2);
+        assert_eq!((res.shown, res.total, res.truncated), (2, 5, true));
+
+        // --all lifts it
+        let (out, res) = run(&text(None, true)).unwrap();
+        assert_eq!(out.lines().count(), 5);
+        assert!(!res.truncated);
+
+        // no flags → the shared default, and NOT truncated here because 5 < 20
+        let (out, res) = run(&text(None, false)).unwrap();
+        assert_eq!(out.lines().count(), 5);
+        assert!(!res.truncated);
+        // (this case relies on DEFAULT_GRID_ROWS exceeding the 5 rows above, which it does at 20)
+
+        // binary formats ignore no flag silently: an explicit --limit is refused, naming the reason
+        for fmt in [GridFormat::Npy, GridFormat::Png] {
+            let err = run(&GridOpts {
+                format: fmt,
+                limit: Some(2),
+                all: false,
+                window: None,
+            })
+            .unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("--limit applies to text output"), "{msg}");
+            assert!(
+                msg.contains(fmt.name()),
+                "the error must name the format: {msg}"
+            );
+        }
+
+        // …but --all with a binary format is consistent (it asks for everything and gets everything)
+        let (_, res) = run(&GridOpts {
+            format: GridFormat::Npy,
+            limit: None,
+            all: true,
+            window: None,
+        })
+        .unwrap();
+        assert_eq!((res.shown, res.total, res.truncated), (5, 5, false));
+    }
+
+    /// **#387** — `project` shares the one grid writer, so it gets every format and the same cap without
+    /// a second copy of the row loop (the two verbs each carried one before).
+    #[test]
+    fn project_shares_the_grid_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        // 2×2×2 where a max-projection over axis 0 gives [[4,5],[6,7]]
+        let p = sealed_grid(dir.path(), vec![2, 2, 2], vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        let mut buf = Vec::new();
+        let opts = GridOpts {
+            format: GridFormat::Json,
+            limit: None,
+            all: true,
+            window: None,
+        };
+        project(&p, "volume", "0", "max", false, &opts, &mut buf).unwrap();
+        let v: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["values"], serde_json::json!([[4, 5], [6, 7]]));
+        assert_eq!(v["dtype"], "int16");
+
+        // and the cap refusal reaches project too, from the same place
+        let err = project(
+            &p,
+            "volume",
+            "0",
+            "max",
+            false,
+            &GridOpts {
+                format: GridFormat::Png,
+                limit: Some(1),
+                all: false,
+                window: None,
+            },
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("--limit applies to text output"));
+    }
+
     /// **#303** — `ls` and `read` disagreed about what is addressable. The full preserved DICOM header
     /// lands in `extra/dicom_header` (an object, ~167 keys) and `ls FILE extra/dicom_header` dumps it,
     /// but `read FILE extra/dicom_header` died with the internal
@@ -2115,7 +2601,7 @@ mod tests {
             Some("1,:"),
             None,
             false,
-            Format::Csv,
+            &csv_grid(),
             &mut buf,
         )
         .unwrap();

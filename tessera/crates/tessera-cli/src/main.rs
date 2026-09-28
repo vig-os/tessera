@@ -303,9 +303,20 @@ enum Cmd {
         /// Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples.
         #[arg(long)]
         physical: bool,
-        /// Output format: `csv` (default) | `tsv`.
-        #[arg(long, default_value = "csv")]
-        format: String,
+        /// Output format. `npy` is the lossless path for analysis; `png` is a **lossy** 8-bit preview.
+        #[arg(long, value_enum, default_value = "csv")]
+        format: nav::GridFormat,
+        /// Max rows for **text** output (csv/tsv/json); omit for 20. Not valid with `npy`/`png`, which
+        /// always write the whole plane.
+        #[arg(long)]
+        limit: Option<u64>,
+        /// Write every row (text formats; `npy`/`png` always do).
+        #[arg(long)]
+        all: bool,
+        /// `png` only: explicit intensity window `lo,hi` mapped to black..white. Default: the plane's
+        /// own min/max.
+        #[arg(long, allow_hyphen_values = true)]
+        window: Option<String>,
     },
     /// Collapse an **array** block along one axis into a projection image (MIP / mean / sum).
     ///
@@ -325,9 +336,20 @@ enum Cmd {
         /// Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples.
         #[arg(long)]
         physical: bool,
-        /// Output format: `csv` (default) | `tsv`.
-        #[arg(long, default_value = "csv")]
-        format: String,
+        /// Output format. `npy` is the lossless path for analysis; `png` is a **lossy** 8-bit preview.
+        #[arg(long, value_enum, default_value = "csv")]
+        format: nav::GridFormat,
+        /// Max rows for **text** output (csv/tsv/json); omit for 20. Not valid with `npy`/`png`, which
+        /// always write the whole plane.
+        #[arg(long)]
+        limit: Option<u64>,
+        /// Write every row (text formats; `npy`/`png` always do).
+        #[arg(long)]
+        all: bool,
+        /// `png` only: explicit intensity window `lo,hi` mapped to black..white. Default: the plane's
+        /// own min/max.
+        #[arg(long, allow_hyphen_values = true)]
+        window: Option<String>,
     },
     /// Build a multiscale pyramid of an array block (full-res + 2× downsampled levels) → a new `.tsra`.
     ///
@@ -928,6 +950,72 @@ enum IngestSrc {
     },
 }
 
+/// Build the grid options for `slice`/`project` from the parsed flags, refusing binary output to a
+/// terminal.
+///
+/// A `.npy`/`.png` written to a TTY is a screenful of garbage, which is the same class of foot-gun as a
+/// flag that silently does nothing — so it is an error naming the fix, rather than a surprise. Pipes and
+/// redirections are not terminals, so the useful cases are unaffected (#387).
+fn grid_opts(
+    format: nav::GridFormat,
+    limit: Option<u64>,
+    all: bool,
+    window: Option<&str>,
+) -> tessera_core::Result<nav::GridOpts> {
+    use std::io::IsTerminal;
+    if !format.is_text() && std::io::stdout().is_terminal() {
+        return Err(tessera_core::Error::Invalid(format!(
+            "--format {format:?} writes binary data — redirect it to a file \
+             (e.g. `> plane.{}`) or pipe it onward",
+            format!("{format:?}").to_lowercase()
+        )));
+    }
+    let window = match window {
+        None => None,
+        Some(w) => {
+            let (lo, hi) = w.split_once(',').ok_or_else(|| {
+                tessera_core::Error::Invalid(
+                    "--window expects `lo,hi` (e.g. `--window -1000,2000`)".into(),
+                )
+            })?;
+            let parse = |s: &str, which: &str| {
+                s.trim().parse::<f64>().map_err(|_| {
+                    tessera_core::Error::Invalid(format!("--window {which} '{s}' is not a number"))
+                })
+            };
+            let (lo, hi) = (parse(lo, "lo")?, parse(hi, "hi")?);
+            // Written as positive comparisons, not `!(lo < hi)`: a negated partial-order compare reads
+            // badly AND silently accepts NaN, which `is_finite` has to rule out explicitly.
+            if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+                return Err(tessera_core::Error::Invalid(format!(
+                    "--window needs finite lo < hi (got lo {lo}, hi {hi})"
+                )));
+            }
+            Some((lo, hi))
+        }
+    };
+    Ok(nav::GridOpts {
+        format,
+        limit,
+        all,
+        window,
+    })
+}
+
+/// Print a grid write's advisories to stderr — the row-cap note (same wording as `read`'s) and the
+/// `png` lossy-preview line. stdout stays pure data so `| head` and `> file` keep working.
+fn grid_notes(res: &nav::GridResult) {
+    if res.truncated {
+        eprintln!(
+            "note: showed {} of {} rows — pass --all or --limit N for more",
+            res.shown, res.total
+        );
+    }
+    if let Some(n) = &res.note {
+        eprintln!("note: {n}");
+    }
+}
+
 fn main() -> ExitCode {
     // Restore the default SIGPIPE disposition so piping tessera's output into `head`, `less`, etc.
     // terminates it quietly — like every standard Unix tool — instead of erroring. Rust's runtime
@@ -1156,18 +1244,23 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             world,
             physical,
             format,
+            limit,
+            all,
+            window,
         } => {
-            let fmt = nav::Format::parse(&format)?;
+            let opts = grid_opts(format, limit, all, window.as_deref())?;
             let mut out = std::io::stdout().lock();
-            nav::slice(
+            let res = nav::slice(
                 &file,
                 &block,
                 index.as_deref(),
                 world.as_deref(),
                 physical,
-                fmt,
+                &opts,
                 &mut out,
-            )
+            )?;
+            grid_notes(&res);
+            Ok(())
         }
         Cmd::Project {
             file,
@@ -1176,10 +1269,15 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             mode,
             physical,
             format,
+            limit,
+            all,
+            window,
         } => {
-            let fmt = nav::Format::parse(&format)?;
+            let opts = grid_opts(format, limit, all, window.as_deref())?;
             let mut out = std::io::stdout().lock();
-            nav::project(&file, &block, &axis, &mode, physical, fmt, &mut out)
+            let res = nav::project(&file, &block, &axis, &mode, physical, &opts, &mut out)?;
+            grid_notes(&res);
+            Ok(())
         }
         Cmd::Pyramid {
             file,
