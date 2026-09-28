@@ -18,8 +18,8 @@
         "H11"
       ],
       "id": "blake3:330301c04c9a5aa6b15cd2182eeb345d2fa6fbdb98bec83d6920886c5b4bebd8",
-      "content_hash": "blake3:b4fe245033581967c6677e15a9c855492687244b246b78ded876b765b5c96230",
-      "manifest_hash": "blake3:dc2d387c2e150d24eb93bb43ade32885babf0a4f9951a7348520421007d7e51f",
+      "content_hash": "blake3:64a62f5ef418a93686b7451183bb8fd9905c3e97a739d9e0be1f20fa9fd47e13",
+      "manifest_hash": "blake3:c4dd4b0a61b1473c8dc4f993dce2a7729c320f958a408623454c76cf601e2c74",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
         "version": "=58.3.0",

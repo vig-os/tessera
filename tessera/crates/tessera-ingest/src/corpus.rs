@@ -412,7 +412,18 @@ fn write_scalars(dir: &Path) -> Result<PathBuf> {
         Arc::new(Int8Array::from(vec![-128, 0, 127])),
         Arc::new(Int16Array::from(vec![-32768, 0, 32767])),
         Arc::new(Int32Array::from(vec![i32::MIN, 0, i32::MAX])),
-        Arc::new(Int64Array::from(vec![i64::MIN, 0, i64::MAX])),
+        // NOT `[i64::MIN, 0, i64::MAX]`. That shape — a full-width span containing zero — hits #468:
+        // vortex 0.75.0 writes different container metadata for it under a debug vs a release build
+        // (and x86-64 vs aarch64 release disagree), so the sealed bytes would be a function of the
+        // compiler rather than of the data. ±(2^53 + 1) keeps what this column is *for* — a value no
+        // `f64` can represent, so an i64 silently routed through a float is still caught — without
+        // the pathological span. The pathological shape itself is covered, and its divergence pinned,
+        // by `known_limitation_468_full_span_int_container_bytes`.
+        Arc::new(Int64Array::from(vec![
+            -9_007_199_254_740_993,
+            0,
+            9_007_199_254_740_993,
+        ])),
         Arc::new(UInt8Array::from(vec![0u8, 1, 255])),
         Arc::new(UInt16Array::from(vec![0u16, 1, 65535])),
         Arc::new(UInt32Array::from(vec![0u32, 1, u32::MAX])),
