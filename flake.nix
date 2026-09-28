@@ -313,6 +313,58 @@
           });
           workspace-fmt = craneLib.cargoFmt { inherit src; };
 
+          # **The third determinism axis — the build configuration** (ADR-0057 §5, #468).
+          #
+          # Gate A varies the *feature configuration*; Gate B varies the *dependency graph*. Neither
+          # varies the compiler's own cfg flags, and that is where #468 hid: vortex 0.75.0 writes
+          # different container bytes for an integer column whose encoding produces patches, depending
+          # on whether `debug_assertions` is enabled (an assertion with a side effect —
+          # `vortex-array/src/patches.rs` evaluates `is_sorted` on the patch indices, which annotates
+          # that array, and the written file reflects it).
+          #
+          # This gate closes the axis for the sealed corpus: the goldens are regenerated under BOTH the
+          # dev and the release profile and must agree with each other and with the committed file. Note
+          # that the committed `corpus/corpus.json` was historically produced by a bare `cargo run`
+          # (dev profile) while `workspace-test` runs the same code release-built — so before #468 the
+          # two halves of our own CI were checking different builds and neither compared them.
+          #
+          # Scoped to `-p tessera-io` on purpose: the point is the seal path, and a second full-workspace
+          # profile would roughly double this leg's build time for no extra coverage.
+          seal-profile-determinism = craneLib.mkCargoDerivation (commonArgs // {
+            inherit cargoArtifacts;
+            doInstallCargoArtifacts = false;
+            pnameSuffix = "-seal-profile-determinism";
+            buildPhaseCargoCommand = ''
+              echo "[#468] conformance corpus under the dev and release profiles" >&2
+              cargo run -q -p tessera-io --example gen_corpus > "$TMPDIR/corpus.dev.json"
+              cargo run -q --release -p tessera-io --example gen_corpus > "$TMPDIR/corpus.release.json"
+
+              if ! diff -u "$TMPDIR/corpus.dev.json" "$TMPDIR/corpus.release.json"; then
+                echo "" >&2
+                echo "The sealed corpus DEPENDS ON THE BUILD PROFILE (ADR-0057 §5, #468)." >&2
+                echo "A content_hash must be a function of the data alone. Two builds of one commit" >&2
+                echo "disagreeing means the format's identity is a function of how it was compiled." >&2
+                echo "This is not a golden to regenerate — find what made the bytes configuration-" >&2
+                echo "dependent. #468 is the worked example: an assertion with a side effect." >&2
+                exit 1
+              fi
+              if ! cmp -s "$TMPDIR/corpus.dev.json" corpus/corpus.json; then
+                echo "" >&2
+                echo "Both profiles agree with each other but NOT with corpus/corpus.json." >&2
+                echo "That is an ordinary moved golden — regenerate deliberately with:" >&2
+                echo "    cargo run -p tessera-io --example gen_corpus > corpus/corpus.json" >&2
+                exit 1
+              fi
+
+              # The #468 reproducer asserts the two known per-`debug_assertions` byte counts, so running
+              # it in both profiles pins both. It FAILS when upstream fixes the bug — deliberately, so
+              # the `tessera-ingest` fixture workaround gets removed rather than forgotten.
+              echo "[#468] the known-limitation reproducer under both profiles" >&2
+              cargo test -q -p tessera-io --lib known_limitation_468
+              cargo test -q --release -p tessera-io --lib known_limitation_468
+            '';
+          });
+
           # **Gate B — the feature-snapshot determinism gate** (ADR-0057 §5). Regenerates the resolved
           # feature graph of every crate on the seal path and diffs it against the committed baseline
           # in `tessera/tests/feature-snapshots/` — the hermetic equivalent of the ADR's

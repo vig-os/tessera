@@ -372,6 +372,51 @@ ADR-0056 §5 already prescribes for `arrow`/`parquet` `=` pins, applied one leve
 Gate B is what would have flagged the `chrono-tz` drift above on the PR that added the `sql` feature,
 rather than on the release that shipped an ingest path through it.
 
+### The axis both gates missed — the build configuration (#468)
+
+Gate A varies the **feature configuration**. Gate B varies the **dependency graph**. Neither varies the
+**compiler's own cfg flags**, and that is where #468 was hiding.
+
+An `i64` column whose range spans nearly the full width *and* contains zero — `[i64::MIN, 0, i64::MAX]`
+is the minimal case — is written by vortex 0.75.0 to **different container bytes** depending on whether
+`debug_assertions` is enabled: 2796 vs 2772 bytes for a bare `PrimitiveArray`, a constant 24-byte delta.
+The cause is an assertion with a side effect (`vortex-array/src/patches.rs`: the debug-only `is_sorted`
+check on patch indices executes and annotates that array, and the written container reflects it), so it
+fires only for inputs whose encoding produces **patches**.
+
+The measured axis is `debug_assertions` and nothing else: toggling `overflow-checks` or the optimisation
+level alone changes nothing. Every release build therefore agrees with every other release build, on any
+architecture, so **shipped binaries are consistent with each other**; what diverges is a debug-built tool
+versus a release-built one. That is a narrower blast radius than it first appeared — our own CI disagreed
+with itself only because `ingest-gate-a` runs the generator under `cargo run` (dev profile,
+`debug_assertions` on) while `workspace-test` runs it under a release build. It is still an S15 violation,
+because "the bytes are a function of the data" has to hold for *a* build of a given version, not merely
+for the release ones.
+
+Two things about it are worth keeping, because both were reasoning errors rather than oversights:
+
+**A determinism argument about the codec does not cover the container.** `tessera-io`'s
+`deterministic_table_compressor` excludes ALP/ALPRD with an explicit and correct justification: their
+exponent search runs float arithmetic whose result varies with the build profile's float codegen. That
+argument is sound, and it is about the *encoding of values*. #468 has **identical** codec decisions in
+both profiles — same chosen schemes (`zigzag → bitpacking`), same `compressed_nbytes`, same estimated
+and achieved ratios, same statistics values — and differs in the *file metadata written around them*.
+The seal covers the whole container, so a guarantee that stops at the codec does not reach the seal.
+
+**An exclusion list is not a proof.** Excluding the schemes we knew to be profile-sensitive made the
+float path safe and said nothing about the integer path, because nothing tested the claim on an axis the
+exclusion was not about. The gate has to vary the axis; enumerating known-bad cases cannot.
+
+So the gate set gains a third axis, as the `seal-profile-determinism` flake check: the conformance
+corpus is regenerated under **both** the dev and the release profile and must agree with itself and with
+the committed file. Until #468 is fixed upstream the known-diverging shape is
+covered by `known_limitation_468_full_span_int_container_bytes`, which asserts the divergence is *still
+present* and therefore **fails when upstream fixes it** — so the workaround in `corpus::write_scalars`
+(which avoids the shape, at the cost of weaker `i64` coverage) is removed deliberately rather than
+forgotten. Cross-*architecture* agreement is a separate axis, still covered only as a side effect of CI
+running both arches — which is how #472 (a float fixture that moves on aarch64 under the *same* profile)
+was found. Making that a first-class axis of this gate is left open.
+
 ### Where ingest fixtures live, and the anti-vacuity guard
 
 Today's corpus lives in `tessera-io`, which has no decoders, so it is feature-invariant by
