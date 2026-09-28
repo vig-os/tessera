@@ -211,7 +211,7 @@ step.** Naming it is half the fix.
 | **H3** | Float parsing (`strtod`/`lexical`) and decimal→float casts (FMA-sensitive) | high × fatal | CSV deferred (§8); decimal→float **banned** (§2) |
 | **H4** | `NaN` payload bits and `-0.0` — arrow-rs preserves the source bit pattern; producers differ | medium × fatal | canonicalise every NaN to the quiet default at the boundary |
 | **H5** | Values **under** a null — arrow hands over whatever the writer left there | medium × fatal | zero at the `arrow → ColumnData` boundary, not only at encode (see below) |
-| **H6** | NPY/raw endianness (`>f8` vs `<f8`) — a naive `cast_slice` is silently wrong on one arch | low × fatal | decode and normalise to native LE; test both twins |
+| **H6** | NPY/raw endianness (`>f8` vs `<f8`) — a naive `cast_slice` is silently wrong on one arch | low × fatal | decode and normalise to native LE; test both twins. **NIfTI-1 too (#449): half the `.nii` files in nibabel's own test data are big-endian.** Byte order is never recorded, so the twins seal identically |
 | **H7** | SIMD-dispatched decode paths | medium × float-only | covered by H3/H4 canonicalisation |
 | **H8** | Locale (`LC_NUMERIC=de_DE` reading `1,5` as 1.5) | low × medium | `LC_ALL=C` for the decode |
 | **H9** | arrow-rs / parquet minor bumps changing decoded values | medium × fatal | `=` version pins + the §6a corpus gate; the decoder triple is recorded in the sealed recipe bag (§6a) |
@@ -697,7 +697,10 @@ resolved rather than deleted, because the reasoning is what says *why* each was 
    a mislabelled frame. Which transform was used is reported on the decode (`NiftiImage.geometry_source`)
    and traced — deliberately *not* sealed as a manifest field, since a new field would move the
    `content_hash` of every NIfTI product including those whose geometry did not change.
-   The `unit` half of the same problem (`xyzt_units` spatial code ignored, `"mm"` hard-coded) is #446.
+   The `unit` half of the same problem is **also FIXED** (#446): the `xyzt_units` spatial code
+   (1 m / 2 mm / 3 µm) now scales the affine to millimetres at the door, rather than `"mm"` being
+   hard-coded over micron data — a silent 1000× geometry error on preclinical/µCT volumes. Normalising
+   rather than carrying the source unit is what ADR-0030 §1 and ADR-0032's `CANONICAL_UNITS` require.
 4. ~~**4-D/5-D volumes are silently truncated to 3-D**~~ — **FIXED (#396)**, by the better of the two
    options: the array is declared `[t,z,y,x]` (5-D `[u,t,z,y,x]` — NIfTI's own axis letters reversed) and
    **every** volume is read, with the `t` axis carrying ADR-0032 `time_regular` when the header names both
