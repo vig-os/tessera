@@ -8,7 +8,9 @@ blake3 v1.8.5
 |   |       `-- tessera-core feature "full" (command-line)
 |   |   `-- tessera-core feature "table-arrow" (command-line)
 |   |   |       `-- tessera-wasm feature "default" (command-line)
+|   |   |   [dev-dependencies]
 |   |   |   `-- tessera-core feature "full" (command-line)
+|   |   |   `-- tessera-io vWORKSPACE (*)
 |   |   |   `-- tessera-wasm vWORKSPACE
 |   |   |   |           `-- tessera-py feature "default" (command-line)
 |   |   |   |       `-- tessera-cli feature "static-hdf5" (command-line)

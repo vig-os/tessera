@@ -54,6 +54,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 cloud = ["dep:object_store", "dep:tokio", "dep:reqwest"]
 
 [dev-dependencies]
+# The #356 regression test in tests/ builds an ArraySpec, which tessera-io does not re-export.
+tessera-core.workspace = true
 tempfile = "3"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tracing-subscriber.workspace = true
