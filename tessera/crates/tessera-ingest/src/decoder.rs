@@ -44,11 +44,10 @@
 //!
 //! # The residual, stated plainly
 //!
-//! The digest's pre-image is *this crate's* resolved features plus the pinned versions of the
-//! decode-path crates. It does **not** capture a feature flipped inside the shared arrow tree by an
-//! unrelated crate (the `sql` → `chrono-tz` case), because a build script cannot see the unified
-//! feature graph of its own dependencies without shelling out to `cargo tree`. Two things discharge
-//! that gap rather than one:
+//! The digest's pre-image is the pinned versions of the decode-path crates, and nothing else. It does
+//! **not** capture a feature flipped *inside* the shared arrow tree by an unrelated crate (the `sql` →
+//! `chrono-tz` case), because a build script cannot see the unified feature graph of its own
+//! dependencies without shelling out to `cargo tree`. Two things discharge that gap rather than one:
 //!
 //! 1. **We never call arrow's timezone machinery.** Hazard H1's rule is "strip tz, take raw ticks,
 //!    apply our own scale" — an Arrow `Timestamp(_, Some(tz))` already stores UTC-normalised ticks
@@ -122,16 +121,16 @@ impl Decoder {
 
 /// The pre-image the [`feature_digest`] is taken over — emitted verbatim by `build.rs`.
 ///
-/// Shape: `tessera-ingest=<version>;features=<sorted,comma,list>;pins=<crate=version,…>`. Kept
+/// Shape: `pins=<crate=version,…>` over every crate on the generic-ingest decode path. Kept
 /// human-readable on purpose: a digest with no recoverable pre-image is an unfalsifiable label, which
 /// is the failure mode §6a rejected the profile id for. `tessera info --json` prints it.
 ///
-/// Including this crate's own version is deliberate. ADR-0056 leaves open that
-/// "`tessera-ingest`'s own canonicalisation code is attributed by nothing"; naming it in the
-/// pre-image closes part of that gap at no cost, so the recipe does not describe the third-party
-/// decoder more precisely than it describes us.
+/// **It contains no feature list and no version of ours**, and `build.rs` documents why: a lane that was
+/// not compiled in did not read the file, and this crate's software version moves on every release
+/// (which would re-introduce the corpus churn ADR-0052 §1 removed). Both were tried; both made
+/// `manifest_hash` move for a reason that was not a difference in interpretation.
 pub fn feature_preimage() -> &'static str {
-    option_env!("TESSERA_INGEST_DECODE_FEATURES").unwrap_or("unknown")
+    option_env!("TESSERA_INGEST_DECODE_PINS").unwrap_or("unknown")
 }
 
 /// `blake3:` digest over [`feature_preimage`] — the third component of the triple.
@@ -166,24 +165,33 @@ mod tests {
         );
     }
 
-    /// The pre-image must actually name the things the digest claims to cover — otherwise the digest
-    /// is stable for the wrong reason and would not move when a decoder did.
+    /// The pre-image must name the decoder pins — otherwise the digest is stable for the wrong reason
+    /// and would not move when a decoder did.
     #[test]
-    fn the_preimage_names_this_crate_its_features_and_the_decoder_pins() {
+    fn the_preimage_names_the_decoder_pins() {
         let p = feature_preimage();
         assert_ne!(p, "unknown", "a workspace build always emits the pre-image");
+        assert!(p.starts_with("pins="), "{p}");
+        assert!(p.contains("arrow-array=58."), "the arrow pin is named: {p}");
+        assert!(p.contains("parquet=58."), "the parquet pin is named: {p}");
+    }
+
+    /// The pre-image must **not** name this build's feature selection or this crate's software version.
+    ///
+    /// Both were in an earlier derivation and both were wrong, for different reasons (see `build.rs`).
+    /// This is a regression test rather than a style check: either one makes `manifest_hash` move when
+    /// the *interpretation of the file* did not, and `manifest_hash` is the format's version identity.
+    #[test]
+    fn the_preimage_is_invariant_to_feature_selection_and_to_our_own_version() {
+        let p = feature_preimage();
         assert!(
-            p.contains(concat!("tessera-ingest=", env!("CARGO_PKG_VERSION"))),
-            "our own version is part of the attribution: {p}"
+            !p.contains("features="),
+            "a lane that was not compiled in did not read the file, so it must not reach the seal: {p}"
         );
-        assert!(p.contains("features="), "{p}");
-        assert!(p.contains("pins="), "{p}");
-        // Every feature that is on for THIS build must appear, so the digest separates a
-        // `--no-default-features` build from a full one.
-        #[cfg(feature = "parquet")]
-        assert!(p.contains("parquet"), "an enabled feature is named: {p}");
-        #[cfg(feature = "csv")]
-        assert!(p.contains("csv"), "an enabled feature is named: {p}");
+        assert!(
+            !p.contains(env!("CARGO_PKG_VERSION")),
+            "sealing our software version would make every release a corpus event (ADR-0052 §1): {p}"
+        );
     }
 
     #[test]

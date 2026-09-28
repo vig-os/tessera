@@ -18,11 +18,11 @@
       ],
       "id": "blake3:330301c04c9a5aa6b15cd2182eeb345d2fa6fbdb98bec83d6920886c5b4bebd8",
       "content_hash": "blake3:b4fe245033581967c6677e15a9c855492687244b246b78ded876b765b5c96230",
-      "manifest_hash": "blake3:35fde3f8a9eb44c18f08447d8017bdfbd18514ff5092cf0e2e11cd7fb9eaf1bd",
+      "manifest_hash": "blake3:e84143a3eef51d4fa42469086bfba8050e417df6b65a8bba06045e8afecf50b1",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
         "version": "=58.3.0",
-        "features": "blake3:98372b5e3eb038d0bf38d60b5fb7ee41cebba0a3e42aa57ac3bac0e2b3fd6824"
+        "features": "blake3:89022cbd147b623b069628133a1ed60e7222d5dd637b566c7fd802ff3fc9efd3"
       }
     },
     {
@@ -36,11 +36,11 @@
       ],
       "id": "blake3:ba441f393dcdcb0c1bdcb05f33da5bcc6391573085e405e805b7890659993793",
       "content_hash": "blake3:fdbe98ee7f39bf219deee5e5e01e3d8c0d8808a5313d507c97a51f353b7546dc",
-      "manifest_hash": "blake3:78fcf230721a7dff59fb70b314092200eb6d7b5178f5ada8490822c27c941442",
+      "manifest_hash": "blake3:7e95e18e54ceebde73bab239d4afc8278ebbd1fbb6b2b2ff7a8eb2ca88ddae11",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
         "version": "=58.3.0",
-        "features": "blake3:98372b5e3eb038d0bf38d60b5fb7ee41cebba0a3e42aa57ac3bac0e2b3fd6824"
+        "features": "blake3:89022cbd147b623b069628133a1ed60e7222d5dd637b566c7fd802ff3fc9efd3"
       }
     },
     {
@@ -54,11 +54,11 @@
       ],
       "id": "blake3:c39298c514aefd0fd55bc60baf9a214ff4aebbcd7f7ef2108128d51323462619",
       "content_hash": "blake3:2ee5bf4d1b337ed58d8f4bdd315ae637a00fddb74919070bd02c59caa8707474",
-      "manifest_hash": "blake3:d66e36951eb9b44947a351449ba3dfa97c8dc55863dcbcea99e0d2a804005222",
+      "manifest_hash": "blake3:8ccf202b87a4dde57130add8250783e0e20213dcadcb174df958d274a8f07eab",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
         "version": "=58.3.0",
-        "features": "blake3:98372b5e3eb038d0bf38d60b5fb7ee41cebba0a3e42aa57ac3bac0e2b3fd6824"
+        "features": "blake3:89022cbd147b623b069628133a1ed60e7222d5dd637b566c7fd802ff3fc9efd3"
       }
     },
     {
@@ -72,11 +72,11 @@
       ],
       "id": "blake3:4ff4ec8479944f7950add265f86237a240235bdd9865b06cd5d97b019b5b301a",
       "content_hash": "blake3:eec3ef309b2cec055b6cae5930c950d47eede7d44f723e9034eb51105da9ed3b",
-      "manifest_hash": "blake3:65fe1693616ca068cff8c287377a2dd2f1bffbc87e2d4fad22a172fa6dbbf242",
+      "manifest_hash": "blake3:a7271e792bbbc7236cbd92fc379bd14bb613eed21c7d6e395ab5eb192071077b",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
         "version": "=58.3.0",
-        "features": "blake3:98372b5e3eb038d0bf38d60b5fb7ee41cebba0a3e42aa57ac3bac0e2b3fd6824"
+        "features": "blake3:89022cbd147b623b069628133a1ed60e7222d5dd637b566c7fd802ff3fc9efd3"
       }
     },
     {
@@ -90,11 +90,11 @@
       ],
       "id": "blake3:573329727757b9457e69e544f045718fd9282c186f0123499d73bc029499d66b",
       "content_hash": "blake3:eec3ef309b2cec055b6cae5930c950d47eede7d44f723e9034eb51105da9ed3b",
-      "manifest_hash": "blake3:9b84309091773484021bf52f5b6d5059be956e22f7499ac948a1138f27f9c66b",
+      "manifest_hash": "blake3:ed4fb7804faee47a9ee5b01cda24389afa6bde7d4384db82bf71f24d007e5e19",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
         "version": "=58.3.0",
-        "features": "blake3:98372b5e3eb038d0bf38d60b5fb7ee41cebba0a3e42aa57ac3bac0e2b3fd6824"
+        "features": "blake3:89022cbd147b623b069628133a1ed60e7222d5dd637b566c7fd802ff3fc9efd3"
       }
     },
     {
@@ -108,11 +108,11 @@
       ],
       "id": "blake3:b013dc4f302e78ad8ab37b64f4c9e703e055de21a03f7f566b3859d61dadd878",
       "content_hash": "blake3:eec3ef309b2cec055b6cae5930c950d47eede7d44f723e9034eb51105da9ed3b",
-      "manifest_hash": "blake3:7613e3356acca13a6e3057a557f77829f2f124162fa2139ee8a69ecbaed07031",
+      "manifest_hash": "blake3:a1984a6fc4906e35a0b7005f4f4ef6f12bd17920125ef80ebc9c930be4fa95b6",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
         "version": "=58.3.0",
-        "features": "blake3:98372b5e3eb038d0bf38d60b5fb7ee41cebba0a3e42aa57ac3bac0e2b3fd6824"
+        "features": "blake3:89022cbd147b623b069628133a1ed60e7222d5dd637b566c7fd802ff3fc9efd3"
       }
     },
     {
@@ -126,11 +126,11 @@
       ],
       "id": "blake3:27bf5606aea01b68d666efbb052da69bd22e0b5af659be9a275ec6d13785064d",
       "content_hash": "blake3:eec3ef309b2cec055b6cae5930c950d47eede7d44f723e9034eb51105da9ed3b",
-      "manifest_hash": "blake3:630016012b9e8f97c09777c24c0a32f8293025098f99cc5efc95d36df71e3608",
+      "manifest_hash": "blake3:81cdd60f0b1b0f787a246c46413ff1ff71a7b91505c5fef2396e59e09a3cbaad",
       "ingest_decoder": {
         "name": "arrow-rs/arrow-ipc",
         "version": "=58.3.0",
-        "features": "blake3:98372b5e3eb038d0bf38d60b5fb7ee41cebba0a3e42aa57ac3bac0e2b3fd6824"
+        "features": "blake3:89022cbd147b623b069628133a1ed60e7222d5dd637b566c7fd802ff3fc9efd3"
       }
     },
     {
@@ -145,11 +145,11 @@
       ],
       "id": "blake3:9b1bea9155255a3b5ad46ad56ba3feba34ceb7c010ef08657e4840c9e8cacc3d",
       "content_hash": "blake3:6c305c96d8b5fdd3b2c29a1b06ee3418aa4871a8a000cb614f040c25e11daedd",
-      "manifest_hash": "blake3:6328f751da70aaeab1330bff4a07e1dd4d1faeb9a28eeeb90f0c3ad55f5dd94a",
+      "manifest_hash": "blake3:e5b54d0ed69b976575415c7b919f8eecf6b91f8d4e26c3af49dd07fca4801c3d",
       "ingest_decoder": {
         "name": "rust-csv",
         "version": "=1.4.0",
-        "features": "blake3:98372b5e3eb038d0bf38d60b5fb7ee41cebba0a3e42aa57ac3bac0e2b3fd6824"
+        "features": "blake3:89022cbd147b623b069628133a1ed60e7222d5dd637b566c7fd802ff3fc9efd3"
       }
     },
     {
@@ -163,11 +163,11 @@
       ],
       "id": "blake3:9cef6f0858b412bdf80d2722dabe48084e32e6e9336289705f4571e315bd860e",
       "content_hash": "blake3:835d98bbb5aebef51d43897ea3474e2272c3d6f12542deb763f552430bcddf44",
-      "manifest_hash": "blake3:c1598c7276fe1f15c2bd07210a632815208dadb73c36bcf8cd92befcbcd53416",
+      "manifest_hash": "blake3:932853f2dc2d48bf3e3d283b4021c19e55b9d898507e64f969ca7bec66fb44c2",
       "ingest_decoder": {
         "name": "rust-csv",
         "version": "=1.4.0",
-        "features": "blake3:98372b5e3eb038d0bf38d60b5fb7ee41cebba0a3e42aa57ac3bac0e2b3fd6824"
+        "features": "blake3:89022cbd147b623b069628133a1ed60e7222d5dd637b566c7fd802ff3fc9efd3"
       }
     }
   ]

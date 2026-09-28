@@ -987,14 +987,38 @@ crates, single arrow tree.
 
 §6a specifies "a digest over the resolved decode-relevant features" without saying how it is derived. A
 build script cannot see the unified feature graph of its own dependencies, and shelling out to
-`cargo tree` from one is not something to ship. The derivation is therefore:
+`cargo tree` from one is not something to ship. The derivation is:
 
-> `blake3(` `tessera-ingest=<version>;features=<this crate's resolved CARGO_FEATURE_* set>;pins=<each decode-path crate=version, from the workspace lockfile>` `)`
+> `blake3(` `pins=<each decode-path crate=version, from the workspace lockfile>` `)`
 
 computed at **runtime** over a string `build.rs` emits, because hashing in the build script would need a
-`[build-dependencies]` entry and adding one is itself a Gate B event. Including this crate's own version
-also closes part of the gap §6a leaves open — *"`tessera-ingest`'s own canonicalisation code is attributed
-by nothing"* — so the recipe no longer names the third-party decoder more precisely than it names us.
+`[build-dependencies]` entry and adding one is itself a Gate B event.
+
+**Two things were in an earlier derivation and had to come out.** Both are worth recording, because both
+looked like straightforward readings of §6a and both were wrong in the same way — they made
+`manifest_hash` move for a reason that was not a difference in how the file was interpreted, and
+`manifest_hash` is the format's *version identity*.
+
+- **This crate's resolved `CARGO_FEATURE_*` set.** The obvious reading of "resolved decode-relevant
+  features", and the wrong one: whether the *CSV* lane was compiled in has nothing to do with how a
+  *Parquet* file was read. A lane that is off did not touch the bytes. Including it meant two builds of
+  one version sealed different `manifest_hash`es for an identical input — i.e. the version identity of a
+  product became a function of how the reader's binary happened to be compiled. It also missed the thing
+  §6a actually cares about (a feature flip *inside* arrow), so it was contributing precisely the wrong
+  information.
+- **This crate's own `CARGO_PKG_VERSION`.** Added to close the gap §6a leaves open — *"`tessera-ingest`'s
+  own canonicalisation code is attributed by nothing"*. But the workspace version moves on every release,
+  so sealing it would make **every release a conformance-corpus regeneration**, re-introducing exactly the
+  churn ADR-0052 §1 / #336 removed by stamping the *format* version rather than the software version. The
+  gap stays open rather than closed at that price.
+
+**How it was found, because the mechanism is the point.** Not by review — by the `parquet-no-csv`
+configuration in ADR-0057 §5's declared-count table. Declaring a count for a configuration forces someone
+to *run* that configuration, and running it showed `content_hash` matching while `manifest_hash` moved.
+That is the anti-vacuity guard doing a job nobody designed it for, and it is the argument for declaring
+counts for configurations that are reachable rather than only for the one CI happens to build. Gate A now
+runs that configuration too, via the corpus test (which compares field-wise over the fixtures a reduced
+build can run, so a subset is checkable where a byte-comparison is not).
 
 **The residual, stated without varnish:** this pre-image does **not** capture a feature flipped inside the
 shared arrow tree by an unrelated crate — the `sql` → `chrono-tz` case itself. Two things discharge that,

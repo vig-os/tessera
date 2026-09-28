@@ -105,29 +105,31 @@ fn emit_decoder_pins() {
     }
 }
 
-/// Emit the ADR-0056 §6a feature-digest **pre-image**: this crate's version, the generic-ingest
-/// features resolved for *this* build, and the pinned versions of every decode-path crate.
+/// Emit the ADR-0056 §6a decoder-digest **pre-image**: the `=`-pinned version of every crate on the
+/// generic-ingest decode path.
 ///
-/// Cargo hands a build script its own crate's resolved features as `CARGO_FEATURE_<NAME>` env vars
-/// (uppercased, `-` → `_`), which is the only feature information available here — and it is the
-/// information that matters, because it is what decides which decoder can run at all.
+/// # What is deliberately NOT in here, and why
 ///
-/// The digest itself is taken at **runtime** over this string (see `decoder::feature_digest`), not
-/// here: hashing in a build script would need a `[build-dependencies]` entry, and adding one moves the
-/// resolved feature graph — an ADR-0057 Gate B event. Emitting a legible pre-image and hashing it with
-/// a crate we already depend on costs nothing and leaves the digest invertible from any build.
+/// Two things were in an earlier version of this and were removed, because each made `manifest_hash`
+/// move for a reason that is not a difference in how the file was interpreted:
+///
+/// - **This crate's resolved `CARGO_FEATURE_*` set.** It looked like the obvious reading of "resolved
+///   decode-relevant features", and it is the wrong one. Whether the *CSV* lane was compiled in has
+///   nothing to do with how a *Parquet* file was read — a lane that is off did not touch the bytes.
+///   Including it meant two builds of one version sealed different `manifest_hash`es for an identical
+///   input, which makes the format's own version identity a function of how the reader's binary was
+///   compiled. Caught by the `parquet-no-csv` corpus configuration, which is exactly what ADR-0057 §5's
+///   declared-count table exists to make someone look at.
+/// - **This crate's own `CARGO_PKG_VERSION`.** Tempting, because ADR-0056 leaves open that
+///   "`tessera-ingest`'s own canonicalisation code is attributed by nothing". But the workspace version
+///   moves on every release, so sealing it would make every release a conformance-corpus regeneration —
+///   re-introducing precisely the churn ADR-0052 §1 / #336 removed by stamping `TESSERA_VERSION` (the
+///   *format* version) rather than the software version. The gap stays open rather than closed at that
+///   price.
+///
+/// What remains moves when, and only when, a decoder is bumped — which is what makes a decoder bump a
+/// recipe change and nothing else one.
 fn emit_decode_feature_preimage() {
-    // The generic-ingest capability features, in sorted order so the pre-image is stable across
-    // cargo's env-var ordering.
-    let mut features: Vec<&str> = ["arrow", "parquet", "csv", "npy"]
-        .into_iter()
-        .filter(|f| {
-            let var = format!("CARGO_FEATURE_{}", f.to_uppercase().replace('-', "_"));
-            std::env::var_os(var).is_some()
-        })
-        .collect();
-    features.sort_unstable();
-
     let mut pins: Vec<String> = Vec::new();
     if let Some(lock_path) = find_lockfile() {
         if let Ok(lock) = std::fs::read_to_string(&lock_path) {
@@ -138,13 +140,11 @@ fn emit_decode_feature_preimage() {
             }
         }
     }
-    // Sorted by construction (DECODE_PATH_CRATES is walked in order and that order is fixed), so the
-    // pre-image depends only on the resolved versions, never on filesystem or env iteration order.
+    // Sorted by construction (`DECODE_PATH_CRATES` is walked in its declared order, which is fixed), so
+    // the pre-image depends only on the resolved versions — never on filesystem or env iteration order.
     println!(
-        "cargo::rustc-env=TESSERA_INGEST_DECODE_FEATURES=tessera-ingest={};features={};pins={}",
-        std::env::var("CARGO_PKG_VERSION").unwrap_or_default(),
-        features.join(","),
-        pins.join(","),
+        "cargo::rustc-env=TESSERA_INGEST_DECODE_PINS=pins={}",
+        pins.join(",")
     );
 }
 

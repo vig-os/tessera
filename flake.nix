@@ -373,7 +373,12 @@
           # the raw i64 ticks and never calls a zone-aware arrow function) but "by construction" is a
           # claim, and this is the test of it.
           ingest-gate-a = craneLib.mkCargoDerivation (commonArgs // {
+            # The prebuilt dependency artifacts are needed (this compiles four feature configurations),
+            # but must not be re-installed into `$out` — this derivation's output is a pass/fail marker,
+            # not a build cache, and inheriting the install hook without disabling it fails the check on
+            # `doCompressAndInstallFullArchive: unbound variable` *after* the gate itself has passed.
             inherit cargoArtifacts;
+            doInstallCargoArtifacts = false;
             pnameSuffix = "-ingest-gate-a";
             buildPhaseCargoCommand = ''
               set -euo pipefail
@@ -411,7 +416,17 @@
                 echo "    cargo run -p tessera-ingest --example gen_ingest_corpus > corpus/ingest-corpus.json" >&2
                 exit 1
               fi
-              echo "[gate A] every configuration agrees with the committed corpus" >&2
+              echo "[gate A] every full configuration agrees with the committed corpus" >&2
+
+              # A REDUCED configuration cannot be byte-compared (it produces fewer fixtures), so it is
+              # checked by the corpus test itself, which compares field-wise over the fixtures it can run
+              # AND asserts the declared count for that configuration. This is the leg that catches a
+              # `manifest_hash` depending on which lanes were compiled in — an earlier derivation of the
+              # sealed decoder digest did exactly that, and this configuration is what surfaced it.
+              echo "[gate A] parquet-no-csv: cargo test --no-default-features --features parquet" >&2
+              cargo test -p tessera-ingest --no-default-features --features parquet \
+                --test ingest_corpus
+              echo "[gate A] the reduced configuration reproduces the same goldens" >&2
             '';
           });
 
