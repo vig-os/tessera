@@ -352,6 +352,17 @@ jobs:
           ALLOWED+="|^(${TYPES_ALTERNATION})/[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$"
           ALLOWED+="|^worktree/[0-9]+$"
           ALLOWED+="|^renovate/.+$"
+          # LOCAL PATCH (#466, upstream vig-os/devkit#1755): this repo uses
+          # Dependabot, not Renovate, and Dependabot's `dependabot/` prefix is
+          # not configurable (`pull-request-branch-name.separator` only changes
+          # the separator), so no dependabot.yml setting can produce a name the
+          # clauses above accept. Without this, every Dependabot PR fails this
+          # step before the commit-message validator runs (#443, #444) — the
+          # `Refs:` line is NOT the problem: validate_commit_range already
+          # exempts `…[bot]` authors. As safe as the renovate clause above:
+          # only the bot creates this namespace. REMOVE once devkit#1755 lands;
+          # until then a devkit upgrade regenerating ci.yml drops this line.
+          ALLOWED+="|^dependabot/.+$"
           ALLOWED+="|^release/[0-9]+\.[0-9]+\.[0-9]+$"
           if printf '%s' "${HEAD_REF}" | grep -qE "${ALLOWED}"; then
             echo "Branch name OK: ${HEAD_REF}"
