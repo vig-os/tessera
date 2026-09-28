@@ -1,0 +1,3 @@
+# trycmd runs this walkthrough in-place; `acq.cfg` + `spec.toml` are the only real inputs.
+# Everything the walkthrough *creates* is regenerated each run and must not be tracked.
+/out/
