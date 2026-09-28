@@ -45,6 +45,17 @@ on:  # yamllint disable-line rule:truthy
       - main
   workflow_dispatch:
 
+# Added with the stacked-PR trigger widening (#463): this is the expensive lane
+# (~40-60 min per leg and it varies, two arch legs per run), and the base filter above
+# now matches any base, so without this a force-push to a stacked branch would
+# leave two superseded ~40-90 min legs burning runner slots. Keyed per workflow AND
+# per ref so distinct refs stay independent. `!= 'push'` mirrors ci.yml: the
+# push-to-main leg must not be cancelled by a rapid follow-up merge. This file is
+# this repo's own, not devkit-managed, so the group is durable.
+concurrency:
+  group: nix-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
 permissions:
   contents: read
 
