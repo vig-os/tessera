@@ -39,12 +39,26 @@ sources       2
 ```
 
 For scripting, `--json` dumps the sealed manifest itself — provenance included — so reading a
-recipe never means reaching into the container format.
+recipe never means reaching into the container format. It is exactly the serialized manifest, so the
+key names here are the format's, not the CLI's: `producer` is an OBJECT on anything sealed since
+ADR-0058 and a bare STRING on older products, and optional fields are omitted rather than `null`.
+Only the embedded product schema is elided below — everything else is pinned, so a renamed key or a
+producer that stopped serializing as an object fails this test.
 
 ```
 $ tessera inspect --json out/blake3_ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
 {
-...
+  "tessera_version": "[..]",
+  "id": "blake3:ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81",
+  "id_inputs": {
+    "name": "daq-raw",
+    "product": "blob",
+    "timestamp": "2024-01-01T00:00:00Z"
+  },
+  "product": "blob",
+  "name": "daq-raw",
+  "description": "opaque preserved file",
+  "timestamp": "2024-01-01T00:00:00Z",
   "producer": {
     "tool": "ge-listmode-daq",
     "version": "3.2",
@@ -60,7 +74,38 @@ $ tessera inspect --json out/blake3_ec73a94b678c7606ef782686054b595a9e17e892383e
       "tof_cal_ref": "cal-2024-01"
     }
   },
+  "schema": {
 ...
+  },
+  "blocks": [
+    {
+      "name": "data",
+      "kind": "blob",
+      "digest": "blake3:1defcb6623ef07a15287f7bca3cfcaabedf8bc8bed5a227856616cf21e8f6dee",
+      "spec": {
+        "filename": "acq.cfg",
+        "media_type": "text/plain",
+        "size": 220
+      }
+    }
+  ],
+  "sources": [
+    {
+      "role": "ingested_from",
+      "reference": "acq.cfg",
+      "content_hash": "blake3:1defcb6623ef07a15287f7bca3cfcaabedf8bc8bed5a227856616cf21e8f6dee"
+    },
+    {
+      "role": "ingested_via_spec",
+      "reference": "spec.toml",
+      "content_hash": "blake3:85b49fd978cf81b69d3dda7a93e43ff899d2b1ea192c5d1718fd79c824c71459"
+    }
+  ],
+  "metadata": {
+    "study": "DEMO-2024-01"
+  },
+  "content_hash": "blake3:9a84f639ca89918bf2b7bea1c60db4d6677570dc47337edb679ddf6bffbe5ea9",
+  "manifest_hash": "blake3:1158ad9fec90cf627068166a857c2a079a9e909f39e174876ba19d0152a1348f"
 }
 
 ```
