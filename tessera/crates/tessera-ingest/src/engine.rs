@@ -533,6 +533,9 @@ fn dispatch(
                 let inherited_study = parents.iter().find_map(|m| m.study.as_deref());
                 // Build extra_sources with the canonical `ingested_from` flowing through the
                 // streaming session (it adds its own `ingested_from`); pass `extra_sources` as-is.
+                // #416: the spec's `[product.generation]`/`[product.producer]` (ADR-0058 §1/§2) ride
+                // the same pre-seal bag — the batch path's `apply_spec_metadata` has no counterpart
+                // here, so anything not declared before the first block commits is dropped silently.
                 let m = crate::ge_hdf5::stream_to_listmode_product_2p_to_file(
                     input,
                     dataset,
@@ -546,9 +549,13 @@ fn dispatch(
                     row_index,
                     label,
                     extra_sources,
-                    &inherited,
-                    inherited_study,
-                    &p.metadata,
+                    &crate::ge_hdf5::StreamProvenance {
+                        inherited: Some(&inherited),
+                        inherited_study,
+                        metadata: Some(&p.metadata),
+                        generation: p.generation.as_ref(),
+                        producer: p.producer.as_ref(),
+                    },
                 )?;
                 // Rename the pending .tsra to its id-named final path. Same filesystem → rename is
                 // atomic, so a crash here leaves either the old or the new file in place.

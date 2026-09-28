@@ -292,9 +292,7 @@ fn run_listmode_real(
         "ms",
         None,
         &[],
-        &std::collections::BTreeMap::new(),
-        None,
-        &std::collections::BTreeMap::new(),
+        &ge_hdf5::StreamProvenance::default(),
     )?;
     let wall_s = t.elapsed().as_secs_f64();
     // Total rows = sum over all event blocks (multi-block products split at BLOCK_ROWS).
