@@ -281,6 +281,37 @@ pub fn read_compound(path: &std::path::Path, dataset: &str) -> Result<TableData>
 /// Default row-slab for streaming reads — rows pulled per HDF5 hyperslab (the bounded-memory unit).
 pub const STREAM_SLAB_ROWS: usize = 1 << 16;
 
+/// Ceiling on one streaming slab's transient read buffer (#325). Only a *chunk-aligned* slab grows
+/// toward this — the cap bounds how many whole chunks we swallow per `H5Dread`, keeping the
+/// bounded-memory promise (ADR-0026) while leaving room for a realistic vendor chunk.
+const MAX_SLAB_BYTES: usize = 64 << 20;
+
+/// Round a requested slab up to a whole number of dataset **chunks** (#325).
+///
+/// libhdf5 must materialise an ENTIRE chunk to serve any row inside it (for a compressed dataset
+/// that means inflating it), and the default per-dataset chunk cache is **1 MiB** — far smaller
+/// than one chunk of a real acquisition. So a slab covering a *fraction* of a chunk makes libhdf5
+/// re-read and re-inflate that whole chunk once per slab: at the default 65,536-row slab against a
+/// 1,048,576-row chunk that is 16 passes over every chunk, which is exactly the streaming-vs-batch
+/// gap #325 measured (batch issues one bulk read, so each chunk is touched once).
+///
+/// Reading LESS than a whole chunk therefore never saves work — the chunk is paid for either way —
+/// so one chunk is the natural minimum unit, and [`MAX_SLAB_BYTES`] caps how many we take above
+/// that. A **contiguous** (unchunked) dataset has no such quantum and keeps the caller's request.
+fn chunk_aligned_slab(chunk_rows: Option<usize>, slab_rows: usize, row_bytes: usize) -> usize {
+    let slab_rows = slab_rows.max(1);
+    // `0` is not a legal chunk edge, but guard rather than divide by it.
+    let Some(chunk) = chunk_rows.filter(|c| *c > 0) else {
+        return slab_rows;
+    };
+    let cap_rows = (MAX_SLAB_BYTES / row_bytes.max(1)).max(1);
+    // Whole chunks that fit under the cap — but never fewer than one, since a partial chunk costs
+    // the same read and then pays for it again on the next slab.
+    let max_chunks = (cap_rows / chunk).max(1);
+    let wanted_chunks = slab_rows.div_ceil(chunk).max(1);
+    wanted_chunks.min(max_chunks).saturating_mul(chunk)
+}
+
 /// Stream any compound dataset in bounded-memory **row-slabs** (ADR-0026 §3): read `slab_rows`
 /// records at a time via an HDF5 hyperslab, decode each slab to columns with [`slab_to_columns`],
 /// and feed `sink` — never holding more than one slab in RAM. `slab_rows` clamps to ≥ 1. Same
@@ -296,7 +327,13 @@ pub fn stream_compound(
     let ds = file.dataset(dataset).map_err(he)?;
     let c = compound_descriptor(&ds)?;
     let n = ds.shape().first().copied().unwrap_or(0);
-    let slab = slab_rows.max(1);
+    // #325: align the slab to the dataset's chunking, or a compressed vendor table re-inflates every
+    // chunk once per sub-chunk slab (measured 4× slower than the batch path before this).
+    let slab = chunk_aligned_slab(
+        ds.chunk().as_deref().and_then(|c| c.first().copied()),
+        slab_rows,
+        c.size,
+    );
 
     // Acquire libhdf5 type + file-space ids once (under `sync()`); they're reused for every slab.
     let (dt_id, file_space_id) = hdf5::sync::sync(|| -> Result<(hid_t, hid_t)> {
@@ -1324,6 +1361,62 @@ mod tests {
         let expect_2p = ground_truth_2p(&recs_2p);
         let got_2p = read_compound(&h5_2p, "events_2p").unwrap();
         assert_eq!(got_2p, expect_2p, "generic reader diverged on 2p compound");
+    }
+
+    /// #325: the slab must round up to whole dataset chunks, because libhdf5 pays for a whole
+    /// chunk however little of it you ask for.
+    #[test]
+    fn chunk_aligned_slab_rounds_up_to_whole_chunks() {
+        const ROW: usize = 38; // the 3p record width
+        let chunk = 1 << 20; // 1,048,576 rows — a realistic vendor chunk (38 MB at this row width)
+
+        // The default slab is 1/16th of a chunk → snap up to exactly one chunk. That 16× re-inflate
+        // is the streaming-vs-batch gap #325 measured.
+        assert_eq!(
+            chunk_aligned_slab(Some(chunk), STREAM_SLAB_ROWS, ROW),
+            chunk
+        );
+        // Two of THESE chunks is 76 MB, over the cap, so one chunk is the honest answer here.
+        assert_eq!(chunk_aligned_slab(Some(chunk), chunk + 1, ROW), chunk);
+
+        // With a chunk small enough that several fit under the cap, a request above one chunk
+        // rounds UP to the next whole multiple, never down.
+        let small = 1 << 16; // 65,536 rows — 2.5 MB at this row width
+        assert_eq!(chunk_aligned_slab(Some(small), small + 1, ROW), 2 * small);
+        assert_eq!(chunk_aligned_slab(Some(small), 2 * small, ROW), 2 * small);
+        assert_eq!(
+            chunk_aligned_slab(Some(small), 3 * small - 1, ROW),
+            3 * small
+        );
+
+        // A contiguous dataset has no chunk quantum — the caller's request is honoured verbatim.
+        assert_eq!(
+            chunk_aligned_slab(None, STREAM_SLAB_ROWS, ROW),
+            STREAM_SLAB_ROWS
+        );
+        assert_eq!(chunk_aligned_slab(None, 999, ROW), 999);
+
+        // The byte cap bounds how many chunks we swallow (ADR-0026 stays bounded-memory)...
+        let big_req = 1_000 * chunk;
+        let aligned = chunk_aligned_slab(Some(chunk), big_req, ROW);
+        assert!(
+            aligned * ROW <= MAX_SLAB_BYTES,
+            "slab {aligned} rows x {ROW} B exceeds the {MAX_SLAB_BYTES} B cap"
+        );
+        assert_eq!(
+            aligned % chunk,
+            0,
+            "capped slab must still be chunk-aligned"
+        );
+
+        // ...except that ONE chunk is always allowed, even when it alone blows the cap: reading
+        // less than a chunk cannot cost less, so capping below a chunk would be pure loss.
+        let huge = MAX_SLAB_BYTES / ROW * 4;
+        assert_eq!(chunk_aligned_slab(Some(huge), 1, ROW), huge);
+
+        // Degenerate inputs must not divide by zero or collapse to a zero-row slab.
+        assert_eq!(chunk_aligned_slab(Some(0), 4096, ROW), 4096);
+        assert!(chunk_aligned_slab(Some(chunk), 0, 0) >= 1);
     }
 
     /// #325 correctness gate (no timing — this is the one that runs everywhere): chunk-aligning the
