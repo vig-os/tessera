@@ -87,6 +87,10 @@ pub mod transform {
     pub const NAN_CANONICALISATION: &str = "nan_canonicalisation";
     /// A CSV read under an operator-declared schema — never an inferred one (ADR-0056 §8).
     pub const CSV_EXPLICIT_SCHEMA: &str = "csv_explicit_schema";
+    /// Field texts an operator declared as NULL in a CSV (`--null-token`). Recorded because it changes
+    /// what the values mean: a reader comparing back to the source cannot otherwise tell a NULL from
+    /// the literal string `NA`.
+    pub const CSV_NULL_TOKENS: &str = "csv_null_tokens";
 }
 
 fn he(e: impl std::fmt::Display) -> Error {

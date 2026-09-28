@@ -65,9 +65,16 @@ const DECODE_PATH_CRATES: &[&str] = &[
     "parquet",
     "arrow-array",
     "arrow-buffer",
+    "arrow-data",
     "arrow-schema",
     "arrow-ipc",
+    // Pulled by parquet's `arrow` feature and used by its reads.
+    "arrow-select",
     "csv",
+    // `csv-core` is where the RFC-4180 state machine actually lives; `csv` is the wrapper around it.
+    "csv-core",
+    // `half` decodes `Float16` (the §2 `f16_widen` lane) and carries the f2 array dtype.
+    "half",
 ];
 
 fn main() {
@@ -130,15 +137,27 @@ fn emit_decoder_pins() {
 /// What remains moves when, and only when, a decoder is bumped — which is what makes a decoder bump a
 /// recipe change and nothing else one.
 fn emit_decode_feature_preimage() {
+    // No lockfile (a crates.io build) means no pins can be read — and then the pre-image would be the
+    // bare string `pins=` for EVERY such build, so every one would seal an identical digest: a false
+    // claim of sameness between builds that may have resolved completely different decoders. Emitting
+    // nothing is the honest answer, and it is the same choice `version` already makes (absent rather
+    // than guessed). `decoder::to_value` then omits the `features` component entirely.
+    let Some(lock_path) = find_lockfile() else {
+        return;
+    };
+    let Ok(lock) = std::fs::read_to_string(&lock_path) else {
+        return;
+    };
     let mut pins: Vec<String> = Vec::new();
-    if let Some(lock_path) = find_lockfile() {
-        if let Ok(lock) = std::fs::read_to_string(&lock_path) {
-            for c in DECODE_PATH_CRATES {
-                if let Some(v) = lock_version(&lock, c) {
-                    pins.push(format!("{c}={v}"));
-                }
-            }
+    for c in DECODE_PATH_CRATES {
+        if let Some(v) = lock_version(&lock, c) {
+            pins.push(format!("{c}={v}"));
         }
+    }
+    if pins.is_empty() {
+        // A lockfile naming none of the decode-path crates is not a build whose decoder we can
+        // describe. Same reasoning as above: say nothing rather than say "pins=".
+        return;
     }
     // Sorted by construction (`DECODE_PATH_CRATES` is walked in its declared order, which is fixed), so
     // the pre-image depends only on the resolved versions — never on filesystem or env iteration order.

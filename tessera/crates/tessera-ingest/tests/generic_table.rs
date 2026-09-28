@@ -410,7 +410,11 @@ fn the_sealed_product_carries_the_decoder_triple_the_receipt_and_the_source_dige
         d["version"].as_str().unwrap().starts_with('='),
         "the version is recorded as a PIN: {d}"
     );
-    assert_eq!(d["features"].as_str().unwrap(), decoder::feature_digest());
+    assert_eq!(
+        d["features"].as_str().map(str::to_owned),
+        decoder::feature_digest(),
+        "the sealed feature component is the digest this build derives"
+    );
 
     // The transform receipt: this fixture has a nullable column, so H5 fired and says so.
     let names: Vec<&str> = m.ingest_transform.iter().map(|t| t.name.as_str()).collect();
@@ -752,4 +756,67 @@ fn arrow_ipc_and_parquet_produce_the_same_payload() {
     assert_eq!(a.content_hash, b.content_hash);
     assert_eq!(a.metadata["source_format"], "parquet");
     assert_eq!(b.metadata["source_format"], "arrow");
+}
+
+/// **ADR-0056 §6a: nobody types the decoder record.**
+///
+/// The key's contract is "a mechanically derived build-honest triple… it is derived, or it is not
+/// written" — so a spec-supplied `ingest_decoder` is a hard error for **every** backend, not just the
+/// generic ones. The vendor case is the one that matters: a `dicom` or `hdf-compound` product writes no
+/// decoder record at all, so a hand-written one would seal *unchanged* and be indistinguishable from a
+/// derived triple to every later reader — a sealed, signed, unfalsifiable claim about how the file was
+/// interpreted, which is exactly what §6a rejected a profile id for.
+#[test]
+fn a_hand_written_ingest_decoder_is_refused_for_every_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("h.parquet");
+    write_parquet(&p, WriterProperties::builder().build());
+
+    let typed = tessera_core::Generation::default().with(
+        tessera_ingest::decoder::RECIPE_KEY,
+        serde_json::json!({"name": "totally-legit", "version": "=99.0.0"}),
+    );
+
+    // The generic lane, where it would merely be overwritten…
+    let mut spec = one_product_spec(
+        FormatOptions::Parquet {
+            input: p.clone(),
+            exclude: Vec::new(),
+            column_meta: ColumnMeta::empty(),
+        },
+        "table",
+    );
+    spec.products[0].generation = Some(typed.clone());
+    let err = tessera_ingest::spec::validate(&spec)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("by hand"), "got {err}");
+    assert!(err.contains("unfalsifiable"), "says why: {err}");
+
+    // …and a VENDOR backend, where it would seal unchanged. This is the case with teeth.
+    let mut vendor = one_product_spec(
+        FormatOptions::Nifti {
+            input: dir.path().join("scan.nii"),
+        },
+        "recon",
+    );
+    vendor.products[0].generation = Some(typed);
+    let err = tessera_ingest::spec::validate(&vendor)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("by hand"), "got {err}");
+
+    // An operator's OWN recipe keys are untouched — the bag is for exactly that.
+    let mut ok = one_product_spec(
+        FormatOptions::Parquet {
+            input: p,
+            exclude: Vec::new(),
+            column_meta: ColumnMeta::empty(),
+        },
+        "table",
+    );
+    ok.products[0].generation = Some(
+        tessera_core::Generation::default().with("energy_window", serde_json::json!([425, 650])),
+    );
+    tessera_ingest::spec::validate(&ok).expect("an operator's own recipe keys are fine");
 }

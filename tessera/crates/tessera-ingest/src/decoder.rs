@@ -104,7 +104,13 @@ impl Decoder {
             // resolve — ADR-0056 §5 requires `=` pins for exactly this reason.
             m.insert("version".into(), format!("={v}").into());
         }
-        m.insert("features".into(), feature_digest().into());
+        // Omitted, not defaulted, when there is no pre-image to digest (a crates.io build with no
+        // workspace lockfile). A digest over an empty pre-image would be identical for every such
+        // build — a false claim of sameness between builds that may have resolved different decoders —
+        // so absence is the honest record, exactly as it is for `version`.
+        if let Some(digest) = feature_digest() {
+            m.insert("features".into(), digest.into());
+        }
         serde_json::Value::Object(m)
     }
 
@@ -129,8 +135,8 @@ impl Decoder {
 /// not compiled in did not read the file, and this crate's software version moves on every release
 /// (which would re-introduce the corpus churn ADR-0052 §1 removed). Both were tried; both made
 /// `manifest_hash` move for a reason that was not a difference in interpretation.
-pub fn feature_preimage() -> &'static str {
-    option_env!("TESSERA_INGEST_DECODE_PINS").unwrap_or("unknown")
+pub fn feature_preimage() -> Option<&'static str> {
+    option_env!("TESSERA_INGEST_DECODE_PINS")
 }
 
 /// `blake3:` digest over [`feature_preimage`] — the third component of the triple.
@@ -139,8 +145,8 @@ pub fn feature_preimage() -> &'static str {
 /// would need a `[build-dependencies]` entry, and adding one moves the resolved feature graph — which
 /// is itself an ADR-0057 Gate B event. A disproportionate price for hashing one short string with a
 /// crate we already depend on.
-pub fn feature_digest() -> String {
-    tessera_core::hash::digest(feature_preimage().as_bytes())
+pub fn feature_digest() -> Option<String> {
+    feature_preimage().map(|p| tessera_core::hash::digest(p.as_bytes()))
 }
 
 #[cfg(test)]
@@ -169,8 +175,7 @@ mod tests {
     /// and would not move when a decoder did.
     #[test]
     fn the_preimage_names_the_decoder_pins() {
-        let p = feature_preimage();
-        assert_ne!(p, "unknown", "a workspace build always emits the pre-image");
+        let p = feature_preimage().expect("a workspace build always emits the pre-image");
         assert!(p.starts_with("pins="), "{p}");
         assert!(p.contains("arrow-array=58."), "the arrow pin is named: {p}");
         assert!(p.contains("parquet=58."), "the parquet pin is named: {p}");
@@ -183,7 +188,7 @@ mod tests {
     /// the *interpretation of the file* did not, and `manifest_hash` is the format's version identity.
     #[test]
     fn the_preimage_is_invariant_to_feature_selection_and_to_our_own_version() {
-        let p = feature_preimage();
+        let p = feature_preimage().expect("a workspace build emits the pre-image");
         assert!(
             !p.contains("features="),
             "a lane that was not compiled in did not read the file, so it must not reach the seal: {p}"

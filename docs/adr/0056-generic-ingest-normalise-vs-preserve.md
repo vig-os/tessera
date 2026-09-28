@@ -1036,7 +1036,7 @@ The pre-image is not sealed (the digest is, per §6a) but `tessera info --json` 
 sealed digest is **checkable** rather than merely observable — a reader holding a `.tsra` and a matching
 `tessera info` can confirm the correspondence instead of taking it on faith.
 
-### (h) One defect an adversarial review found, and what it says about the §2 equivalences
+### (h) Three defects adversarial review found, and what they say about the §2 equivalences
 
 A fresh-context review of the type map found a real one, worth recording because the *class* is the
 interesting part.
@@ -1059,6 +1059,35 @@ equivalent *by construction* rather than by three authors remembering the same r
 check came out of the run-end lane. The lesson generalises past this bug: **a shared helper makes lanes
 equivalent only for the decisions actually taken inside it.** Two of the three lanes had been reading as
 "obviously the same" for a decision each was in fact taking separately.
+
+**The same class, one level up: a null STRUCT row.** A second review found the flatten arm walking each
+child directly, without applying the *struct's own* validity. Arrow permits perfectly valid child data
+underneath a null parent row — `pyarrow.StructArray.from_arrays(…, mask=…)` writes exactly that, and it
+survives an Arrow IPC round-trip — so a row the source says is **absent** sealed as present child values,
+unmasked and unrecorded. §3 calls a struct flatten a *renaming*, and a renaming must not change which rows
+exist. Fixed by intersecting the parent's validity into each leaf after the recursion, so a nested
+struct's absence reaches the leaf through however many levels.
+
+Two independent reviews finding the same class of bug at two different levels is the useful signal here,
+and it sharpens the lesson: **nested nullability composes, and every level that can be absent must be
+asked.** The type map now has exactly one place that composition happens per level, and tests at each.
+
+**The documented rejection that did not exist.** §6a says of the decoder triple: *"Nobody types this
+string. It is derived, or it is not written."* This ADR's own module documentation claimed the engine
+rejected a hand-written `ingest_decoder`, and nothing did. On a generic lane it was merely overwritten; on
+a **vendor** backend — which writes no decoder record at all — a spec-supplied one sealed **unchanged**,
+indistinguishable from a derived triple to every later reader. That is a sealed, signed, unfalsifiable
+claim about how a file was interpreted: precisely what §6a rejected a profile id for, reached by a shorter
+road. Now rejected in `spec::validate` for **every** backend, with the vendor case as the one with teeth.
+
+Two further findings touched sealed bytes and are worth naming because neither is about ingest logic at
+all. `Column.scale` for a decimal column was computed with `10f64.powi(-s)` — `powi` is documented as
+permitted to differ across platforms and optimisation levels, and that value rides inside `manifest_hash`,
+so it is hazard **H3**'s family (platform-sensitive arithmetic) arriving through *our* code rather than a
+decoder's; it is now a table of exact literals. And the feature digest's pre-image degenerated to the bare
+string `pins=` on a build with no workspace lockfile, so **every** such build would seal an identical
+digest — a false claim of sameness between builds that may have resolved entirely different decoders. It
+is now omitted rather than defaulted, the same choice `version` already makes.
 
 The same review also found that the `ingest_parquet_nulls` fixture could not test the hazard it claimed.
 H5 is *producer garbage under a null*, and neither format can express it — Parquet encodes absence in its

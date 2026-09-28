@@ -76,10 +76,14 @@ struct Info {
     /// and a `tessera info --json` from the same version can confirm the digest rather than merely
     /// observe it. Unsealed by design — it is a diagnostic about the build, and ADR-0042's line is
     /// that `aux/` holds who was in the room.
-    ingest_decode_features: &'static str,
+    /// Absent on a build with no workspace lockfile (see `tessera_ingest::decoder`): a digest over an
+    /// empty pre-image would be identical for every such build, so absence is the honest record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ingest_decode_features: Option<&'static str>,
     /// `blake3:…` over [`Self::ingest_decode_features`] — the exact third component of the sealed
     /// triple, so the correspondence is checkable without recomputing it by hand.
-    ingest_decode_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ingest_decode_digest: Option<String>,
 }
 
 fn collect() -> Info {
@@ -223,8 +227,12 @@ mod tests {
         let mut buf = Vec::new();
         info(true, &mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        let preimage = v["ingest_decode_features"].as_str().unwrap();
-        let digest = v["ingest_decode_digest"].as_str().unwrap();
+        let preimage = v["ingest_decode_features"]
+            .as_str()
+            .expect("a workspace build emits the pre-image");
+        let digest = v["ingest_decode_digest"]
+            .as_str()
+            .expect("…and therefore its digest");
         assert_eq!(
             digest,
             tessera_core::hash::digest(preimage.as_bytes()),

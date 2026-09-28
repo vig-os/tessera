@@ -118,13 +118,23 @@ impl CsvOptions {
         })
     }
 
-    /// Is this field text one of the declared NULL tokens?
+    /// Is this field text NULL for a column of this dtype?
     ///
-    /// The empty field is always NULL in a nullable column: a CSV cannot distinguish "empty string"
-    /// from "absent", and for a *numeric* column there is no empty value to mean, so treating it as
-    /// present would force an arbitrary 0.
-    fn is_null(&self, text: &str) -> bool {
-        text.is_empty() || self.null_tokens.iter().any(|t| t == text)
+    /// **The rule differs by dtype, and the difference is the point.** For a numeric or boolean column
+    /// an empty field cannot be a value — there is no empty number — so it is NULL. For a `str` column
+    /// the empty field **is** the empty string: a legitimate value that a CSV has no other way to write,
+    /// and treating it as NULL would make `""` un-ingestable *and* silently reinterpret data the
+    /// operator wrote.
+    ///
+    /// A `str` column therefore takes NULLs only from an explicitly declared `--null-token`, which is
+    /// the same principle as the rest of this lane: the operator says what the file means, Tessera does
+    /// not guess. `read_table` records `csv_null_tokens` in the seal when any are declared, so the
+    /// artifact carries which spellings were treated as absent.
+    fn is_null(&self, text: &str, dtype: &str) -> bool {
+        if self.null_tokens.iter().any(|t| t == text) {
+            return true;
+        }
+        dtype != "str" && text.is_empty()
     }
 }
 
@@ -188,7 +198,7 @@ pub fn read_table(path: &Path, opts: &CsvOptions) -> Result<CanonicalTable> {
             // artifact. So text columns are taken verbatim and everything else is trimmed, which is what
             // also makes ` 1.5 ` parse rather than fail.
             let text = if decl.dtype == "str" { raw } else { raw.trim() };
-            if opts.is_null(text) {
+            if opts.is_null(text, &decl.dtype) {
                 if !decl.nullable {
                     return Err(he(format!(
                         "{}: row {}, column '{}' is empty but was declared non-nullable — append '?' \
@@ -235,6 +245,15 @@ pub fn read_table(path: &Path, opts: &CsvOptions) -> Result<CanonicalTable> {
     }
     let mut b = TableBuilder::new();
     b.record(IngestTransform::new(transform::CSV_EXPLICIT_SCHEMA));
+    if !opts.null_tokens.is_empty() {
+        // Which field texts were read as absent is a recorded transform: it changes what the values
+        // mean, and a reader comparing back to the CSV cannot otherwise tell a NULL from the literal
+        // string "NA".
+        b.record(
+            IngestTransform::new(transform::CSV_NULL_TOKENS)
+                .with("tokens", serde_json::json!(opts.null_tokens)),
+        );
+    }
     for (i, decl) in opts.columns.iter().enumerate() {
         if opts.exclude.iter().any(|e| e == &decl.name) {
             continue;
@@ -291,6 +310,16 @@ fn check_header(header: &csv::StringRecord, declared: &[Declared]) -> Result<()>
     Ok(())
 }
 
+/// Does this field text itself spell an infinity?
+///
+/// The spellings Rust's float parser accepts for infinity, case-insensitively, with an optional sign.
+/// Used to tell "the operator wrote `inf`" from "a finite decimal overflowed the declared dtype" — the
+/// second of which must not seal silently as infinity.
+fn spells_infinity(text: &str) -> bool {
+    let t = text.trim_start_matches(['+', '-']).to_ascii_lowercase();
+    t == "inf" || t == "infinity"
+}
+
 /// Push the dtype's zero into a column — the value that sits under a NULL before
 /// [`canonicalise`] confirms it (H5 normalises masked slots, and this is already that value, so the
 /// CSV lane never carries producer noise under a null in the first place).
@@ -326,6 +355,29 @@ fn push_parsed(data: &mut ColumnData, text: &str) -> std::result::Result<(), Str
             $v.push(parsed);
         }};
     }
+    /// Floats get the same parse plus an **overflow check**.
+    ///
+    /// `"1e39".parse::<f32>()` and `"1e400".parse::<f64>()` both succeed, returning `inf` — so without
+    /// this a value far outside the declared dtype's range would seal as infinity, silently, and the
+    /// artifact would assert that the measurement *was* infinite. An explicitly-spelled `inf` / `nan`
+    /// is a different thing and is allowed: those are unambiguous IEEE values, `NaN` is a legitimate
+    /// measured quantity (the S13 clinical gate guarantees its bit-exact round-trip), and a text file
+    /// that spells one means it.
+    macro_rules! float {
+        ($v:expr, $t:ty) => {{
+            let parsed: $t = text
+                .parse()
+                .map_err(|e| format!("'{text}' is not a valid {}: {e}", stringify!($t)))?;
+            if parsed.is_infinite() && !spells_infinity(text) {
+                return Err(format!(
+                    "'{text}' overflows {} (it parses to infinity). Declare a wider dtype, or write \
+                     'inf' explicitly if infinity is the value you mean.",
+                    stringify!($t)
+                ));
+            }
+            $v.push(parsed);
+        }};
+    }
     match data {
         ColumnData::I8(v) => num!(v, i8),
         ColumnData::I16(v) => num!(v, i16),
@@ -335,8 +387,8 @@ fn push_parsed(data: &mut ColumnData, text: &str) -> std::result::Result<(), Str
         ColumnData::U16(v) => num!(v, u16),
         ColumnData::U32(v) => num!(v, u32),
         ColumnData::U64(v) => num!(v, u64),
-        ColumnData::F32(v) => num!(v, f32),
-        ColumnData::F64(v) => num!(v, f64),
+        ColumnData::F32(v) => float!(v, f32),
+        ColumnData::F64(v) => float!(v, f64),
         ColumnData::Bool(v) => {
             let b = match text.to_ascii_lowercase().as_str() {
                 "true" | "t" | "1" | "yes" | "y" => true,
@@ -576,6 +628,93 @@ mod tests {
             .to_string();
         assert!(err.contains("not a boolean"), "got {err}");
         assert!(err.contains("true/false"), "lists what is accepted: {err}");
+    }
+
+    /// A finite decimal that overflows the declared dtype must NOT seal as infinity: the artifact would
+    /// otherwise assert that the measurement *was* infinite.
+    #[test]
+    fn a_value_that_overflows_its_declared_dtype_is_an_error_not_an_infinity() {
+        let dir = tempfile::tempdir().unwrap();
+        for (body, dtype, token) in [
+            ("x\n1e39\n", "f4", "f32"),
+            ("x\n1e400\n", "f8", "f64"),
+            ("x\n-1e400\n", "f8", "f64"),
+        ] {
+            let p = write(dir.path(), body);
+            let err = read_table(&p, &decls(&[&format!("x:{dtype}")]))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("overflows"), "{body}: got {err}");
+            assert!(err.contains(token), "{body}: names the dtype: {err}");
+            assert!(
+                err.contains("write 'inf' explicitly"),
+                "{body}: offers the fix: {err}"
+            );
+        }
+    }
+
+    /// …but an explicitly-spelled infinity or NaN is a *value*, not an overflow. `NaN` is a legitimate
+    /// measured quantity — the S13 clinical gate guarantees its bit-exact round-trip — and a text file
+    /// that spells one means it.
+    #[test]
+    fn an_explicitly_spelled_infinity_or_nan_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(dir.path(), "x\ninf\n-inf\nInfinity\nnan\n1.5\n");
+        let t = read_table(&p, &decls(&["x:f8"])).unwrap();
+        let ColumnData::F64(v) = &t.columns[0].1 else {
+            unreachable!()
+        };
+        assert!(v[0].is_infinite() && v[0] > 0.0);
+        assert!(v[1].is_infinite() && v[1] < 0.0);
+        assert!(v[2].is_infinite() && v[2] > 0.0);
+        assert!(v[3].is_nan());
+        assert_eq!(v[4], 1.5);
+    }
+
+    /// **An empty field in a `str` column is the empty string, not NULL.** A CSV has no other way to
+    /// write `""`, so treating it as absent would make a legitimate value un-ingestable *and* silently
+    /// reinterpret what the operator wrote. A numeric column is the opposite: there is no empty number.
+    #[test]
+    fn an_empty_field_is_a_string_in_a_text_column_and_a_null_in_a_numeric_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(dir.path(), "label,n\n,\nfoo,1.5\n");
+        let t = read_table(&p, &decls(&["label:str", "n:f8?"])).unwrap();
+        assert_eq!(
+            t.columns[0].1,
+            ColumnData::Utf8(vec![String::new(), "foo".into()]),
+            "the empty field is the empty STRING"
+        );
+        assert!(
+            !t.columns[0].0.nullable,
+            "…so the column has no nulls at all"
+        );
+        let ColumnData::Nullable { validity, .. } = &t.columns[1].1 else {
+            panic!("the numeric column IS nullable")
+        };
+        assert_eq!(validity, &vec![false, true]);
+
+        // A `str` column takes NULLs only from an explicit token — and that is recorded in the seal,
+        // because a reader cannot otherwise tell a NULL from the literal string "NA".
+        let p = write(dir.path(), "label\nNA\nfoo\n");
+        let mut opts = decls(&["label:str?"]);
+        opts.null_tokens = vec!["NA".into()];
+        let t = read_table(&p, &opts).unwrap_err().to_string();
+        assert!(
+            t.contains("nullable 'str'"),
+            "a nullable str column is still unrepresentable (#457): {t}"
+        );
+
+        let p = write(dir.path(), "n\nNA\n1.5\n");
+        let mut opts = decls(&["n:f8?"]);
+        opts.null_tokens = vec!["NA".into()];
+        let t = read_table(&p, &opts).unwrap();
+        assert!(
+            t.transforms
+                .iter()
+                .any(|x| x.name == transform::CSV_NULL_TOKENS),
+            "the declared tokens are recorded: {:?}",
+            t.transforms
+        );
     }
 
     #[test]

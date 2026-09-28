@@ -369,8 +369,43 @@ pub fn validate(spec: &IngestSpec) -> Result<Vec<usize>> {
     // 4. ADR-0056 §7: the laundering rule.
     for p in &spec.products {
         check_no_schema_laundering(p)?;
+        check_no_handwritten_decoder(p)?;
     }
     Ok(order)
+}
+
+/// **ADR-0056 §6a: nobody types the decoder record.** A spec-supplied `ingest_decoder` recipe key is a
+/// hard error, for **every** backend.
+///
+/// §6a's whole argument against a decoder *profile id* was that it "substitutes a maintainer claim for a
+/// verifiable fact inside an immutable record" — and a hand-written `ingest_decoder` is that same
+/// substitution by a shorter road. The key's value is "a mechanically derived build-honest triple, every
+/// component derived at build time… **Nobody types this string. It is derived, or it is not written.**"
+///
+/// Enforced for vendor backends too, and that is the case that actually matters. A generic lane would
+/// overwrite a typed value anyway, so the damage there is limited to confusion; but a `dicom` or
+/// `hdf-compound` product does not write a decoder record at all, so a spec-supplied one would seal
+/// **unchanged** and be indistinguishable from a derived triple to every later reader. That is a sealed,
+/// signed, unfalsifiable claim about how a file was interpreted — exactly what §6a exists to prevent.
+fn check_no_handwritten_decoder(p: &ProductSpec) -> Result<()> {
+    let Some(generation) = &p.generation else {
+        return Ok(());
+    };
+    if !generation.config.contains_key(crate::decoder::RECIPE_KEY) {
+        return Ok(());
+    }
+    Err(Error::Invalid(format!(
+        "ingest-spec: product '{}' sets the '{}' recipe key by hand.\n  \
+         That key is derived at build time — the decoder's name, its `=`-pinned version and a digest \
+         over the resolved decode-path pins (ADR-0056 §6a) — and a typed value would be an \
+         unfalsifiable claim about how the file was interpreted, sealed and signed alongside the data.\n  \
+         remove it: the generic ingest lanes write it for you; a vendor backend deliberately writes \
+         none rather than a guess.\n  \
+         to record YOUR tool's own settings, use any other key in [product.generation.config] — that \
+         is what the bag is for.",
+        p.name,
+        crate::decoder::RECIPE_KEY,
+    )))
 }
 
 /// Resolve a table source's backend from its magic bytes, or explain what to pass (ADR-0056 §4).
@@ -463,8 +498,26 @@ fn check_no_schema_laundering(p: &ProductSpec) -> Result<()> {
     if !is_generic_backend(&p.options) {
         return Ok(());
     }
-    if GENERIC_PRODUCT_SCHEMAS.contains(&p.schema.as_str()) {
+    // The allowlist alone is not enough: `schema = "array"` on a Parquet product is *in* the allowlist
+    // but the parquet lane builds a `table`, so the engine would seal a product whose declared schema
+    // and actual block kind disagree — caught later by `schema.validate()` as a confusing block-kind
+    // error, or worse, not caught if the schemas ever converge. A generic backend must claim **its own**
+    // primitive.
+    let expected = default_schema_for(&p.options);
+    if p.schema == expected {
         return Ok(());
+    }
+    if GENERIC_PRODUCT_SCHEMAS.contains(&p.schema.as_str()) {
+        return Err(Error::Invalid(format!(
+            "ingest-spec: product '{}' is read by the '{}' backend, which produces a '{expected}', but \
+             declares schema '{}'.\n  \
+             Both are primitive schemas, so this is not a laundering attempt — it is a mismatch that \
+             would seal a product whose declared contract and actual block kind disagree.\n  \
+             use:  schema = \"{expected}\"",
+            p.name,
+            crate::backends::backend_name(&p.options),
+            p.schema,
+        )));
     }
     Err(Error::Invalid(format!(
         "ingest-spec: product '{}' is read by the generic '{}' backend but claims schema '{}'.\n  A generic backend has no domain knowledge, so it cannot honour a domain schema's promises — \

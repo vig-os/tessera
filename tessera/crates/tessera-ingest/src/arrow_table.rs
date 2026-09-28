@@ -124,10 +124,13 @@ pub fn canonicalise_batches(batches: &[RecordBatch], exclude: &[String]) -> Resu
     // An `--exclude` that matches nothing is a typo, and a typo that silently does nothing is the worst
     // outcome here: the operator believes they dropped a PHI column. The CSV lane already errors on
     // this, so the two lanes agree rather than differing by accident.
-    if let Some(unknown) = exclude
-        .iter()
-        .find(|e| !schema.fields().iter().any(|f| f.name() == *e))
-    {
+    // A dotted name is allowed here even though no top-level field matches it: it may name a leaf a
+    // struct flatten will produce. Requiring the prefix to exist is what keeps this a real check rather
+    // than a hole — `--exclude nosuch.child` is still rejected.
+    if let Some(unknown) = exclude.iter().find(|e| {
+        let head = e.split('.').next().unwrap_or(e.as_str());
+        !schema.fields().iter().any(|f| f.name() == head)
+    }) {
         return Err(he(format!(
             "--exclude names '{unknown}', which is not a column in this file\n  columns: {}",
             schema
@@ -146,6 +149,10 @@ pub fn canonicalise_batches(batches: &[RecordBatch], exclude: &[String]) -> Resu
         if exclude.iter().any(|e| e == field.name()) {
             continue;
         }
+        // A dotted `--exclude parent.child` names a LEAF that a struct flatten will produce, which does
+        // not exist yet at this point — so the top-level check above cannot see it. It is applied after
+        // the flatten instead (below), which is what makes the advice in a nested-column rejection
+        // ("drop it: --exclude parent.child") actually work rather than silently doing nothing.
         // A struct or fixed-size list fans out into several columns, so the unit of folding is
         // "named leaves", not "one column".
         let mut folded: Vec<(String, Column, ColumnData)> = Vec::new();
@@ -183,6 +190,10 @@ pub fn canonicalise_batches(batches: &[RecordBatch], exclude: &[String]) -> Resu
             }
         }
         for (name, column, mut data) in folded {
+            // The post-flatten half of `--exclude`: a dotted leaf name.
+            if exclude.iter().any(|e| e == &name) {
+                continue;
+            }
             canonicalise(&mut b, &name, &mut data);
             // The nullable flag on the sealed `Column` follows the data, exactly as the wrapper does.
             let column = if matches!(data, ColumnData::Nullable { .. }) {
@@ -219,9 +230,26 @@ fn map_field(
         DataType::Struct(children) => {
             b.record(IngestTransform::new(transform::STRUCT_FLATTEN).on_column(name));
             let sa = array.as_struct();
+            let first_leaf = out.len();
             for (i, child) in children.iter().enumerate() {
                 let child_array = sa.column(i).clone();
                 map_field(&child_name(name, child.name()), child, &child_array, b, out)?;
+            }
+            // **Apply the STRUCT's own validity to every leaf it flattened into.**
+            //
+            // Arrow permits perfectly valid child data underneath a **null parent row**
+            // (`pyarrow.StructArray.from_arrays(…, mask=…)` writes exactly that, and it survives an
+            // Arrow IPC round-trip), and walking the children directly reads straight past it. Without
+            // this, a row the source says is *absent* sealed as present child values — unmasked,
+            // unrecorded, and verifying. §3 calls a flatten a **renaming**, and a renaming must not
+            // change which rows exist.
+            //
+            // Applied after the recursion rather than inside it, so a nested struct's absence reaches
+            // the leaf through however many levels: each level masks the leaves below it in turn.
+            if let Some(parent_valid) = validity_of(sa) {
+                for (_, _, data) in out[first_leaf..].iter_mut() {
+                    mask_absent_rows(data, &parent_valid);
+                }
             }
             Ok(())
         }
@@ -306,6 +334,34 @@ fn validity_of(array: &dyn Array) -> Option<Vec<bool>> {
     Some((0..array.len()).map(|i| array.is_valid(i)).collect())
 }
 
+/// Intersect a parent's validity into a leaf column: a row absent in the parent is absent in the leaf.
+///
+/// The composition rule for nested nullability. Promotes a non-nullable leaf to nullable when the parent
+/// has any null, and ANDs the two masks when it is already nullable — so a leaf that was null for its
+/// own reason stays null, and one whose parent was absent becomes null too.
+///
+/// The value under a newly-masked slot is left as-is; [`crate::canonical::canonicalise`] zeroes every
+/// masked slot at the boundary afterwards (H5), which is the single place that normalisation lives.
+fn mask_absent_rows(data: &mut ColumnData, parent_valid: &[bool]) {
+    if parent_valid.iter().all(|v| *v) {
+        return;
+    }
+    match data {
+        ColumnData::Nullable { validity, .. } => {
+            for (v, p) in validity.iter_mut().zip(parent_valid) {
+                *v = *v && *p;
+            }
+        }
+        other => {
+            let values = std::mem::replace(other, ColumnData::Bool(Vec::new()));
+            *other = ColumnData::Nullable {
+                values: Box::new(values),
+                validity: parent_valid.to_vec(),
+            };
+        }
+    }
+}
+
 /// Wrap `values` in [`ColumnData::Nullable`] if `array` carries nulls.
 fn with_validity(array: &dyn Array, values: ColumnData) -> ColumnData {
     match validity_of(array) {
@@ -385,7 +441,7 @@ fn map_leaf(
                     ))
                 })?);
             }
-            let factor = 10f64.powi(-i32::from(*scale));
+            let factor = decimal_scale_factor(*scale)?;
             b.record(
                 IngestTransform::new(transform::DECIMAL_FIXED_POINT)
                     .on_column(name)
@@ -657,6 +713,32 @@ fn map_scalar(dt: &DataType, array: &ArrayRef) -> Result<Option<ColumnData>> {
         _ => None,
     };
     Ok(values.map(|v| with_validity(array.as_ref(), v)))
+}
+
+/// `10⁻ˢ` as an **exact literal**, for the `Column.scale` a decimal column carries.
+///
+/// Not `10f64.powi(-s)`: `powi` is explicitly documented as permitted to differ between platforms and
+/// between optimisation levels, and this value is **sealed** — it lands in `Column.scale`, inside
+/// `manifest_hash`. A cross-platform difference in the last bit would make the same Parquet seal two
+/// ways, which is hazard **H3**'s family (FMA-sensitive arithmetic) arriving through our own code rather
+/// than a decoder's.
+///
+/// A table of literals is exact by construction: the compiler parses each with the same
+/// correctly-rounded algorithm `str::parse` uses, and nothing is computed at runtime. Bounded at 18
+/// because §2 rejects `Decimal128(p > 18)`, so no larger scale can reach here.
+fn decimal_scale_factor(scale: i8) -> Result<f64> {
+    const FACTORS: [f64; 19] = [
+        1e0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12, 1e-13,
+        1e-14, 1e-15, 1e-16, 1e-17, 1e-18,
+    ];
+    usize::try_from(scale)
+        .ok()
+        .and_then(|i| FACTORS.get(i).copied())
+        .ok_or_else(|| {
+            he(format!(
+                "decimal scale {scale} is outside 0..=18, which precision ≤ 18 cannot reach"
+            ))
+        })
 }
 
 /// Seconds per tick for an Arrow time unit — the `Column.scale` a tick column carries.
@@ -1143,6 +1225,34 @@ mod tests {
         assert_eq!(rec.params["scale"], 1e-4);
     }
 
+    /// The sealed `Column.scale` must be an **exact literal**, never `10f64.powi(-s)`: `powi` may differ
+    /// across platforms and optimisation levels, and this value rides inside `manifest_hash`. For several
+    /// scales the two differ in the last bit, which is precisely how a cross-platform seal split starts.
+    #[test]
+    fn the_decimal_scale_factor_is_an_exact_literal() {
+        for (scale, want) in [
+            (0i8, 1e0f64),
+            (1, 1e-1),
+            (2, 1e-2),
+            (4, 1e-4),
+            (6, 1e-6),
+            (10, 1e-10),
+            (18, 1e-18),
+        ] {
+            let got = decimal_scale_factor(scale).unwrap();
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "scale {scale}: {got:e} is not the literal {want:e}"
+            );
+            // …and the literal is what `str::parse` gives, i.e. correctly rounded.
+            assert_eq!(got, format!("1e-{scale}").parse::<f64>().unwrap());
+        }
+        // Out of range for precision ≤ 18 — unreachable through the public path, but total.
+        assert!(decimal_scale_factor(19).is_err());
+        assert!(decimal_scale_factor(-1).is_err());
+    }
+
     #[test]
     fn a_decimal_too_wide_for_an_integer_carrier_is_rejected_with_a_next_command() {
         let a = Decimal128Array::from(vec![1_i128])
@@ -1319,6 +1429,110 @@ mod tests {
         );
         assert_eq!(values_of(&t, 0), ColumnData::I32(vec![1, 2]));
         assert!(transforms(&t).contains(&transform::STRUCT_FLATTEN));
+    }
+
+    /// **A null STRUCT row must null every column it flattened into.**
+    ///
+    /// Regression test, same class as the dictionary-values bug: Arrow permits perfectly valid child
+    /// data underneath a null parent row (`pyarrow.StructArray.from_arrays(..., mask=…)` writes exactly
+    /// that, and it survives an Arrow IPC round-trip), and the flatten walked each child directly. So a
+    /// row the source says is **absent** sealed as present child values, unmasked and unrecorded.
+    ///
+    /// A struct flatten is a *renaming* (§3), and a renaming must not change which rows exist.
+    #[test]
+    fn a_null_struct_row_nulls_every_column_it_flattened_into() {
+        let x: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        let z: ArrayRef = Arc::new(Float64Array::from(vec![1.5, 2.5, 3.5]));
+        // Row 1 is an absent struct, and the child arrays still carry live values there.
+        let nulls = arrow_buffer::NullBuffer::from(vec![true, false, true]);
+        let st = StructArray::try_new(
+            Fields::from(vec![
+                Field::new("x", DataType::Int32, false),
+                Field::new("z", DataType::Float64, false),
+            ]),
+            vec![x, z],
+            Some(nulls),
+        )
+        .unwrap();
+        assert_eq!(
+            st.column(0).as_primitive::<Int32Type>().value(1),
+            2,
+            "live child data under the null"
+        );
+
+        let t = one("pos", Arc::new(st)).unwrap();
+        let by = |n: &str| {
+            t.columns
+                .iter()
+                .find(|(c, _)| c.name == n)
+                .map(|(c, d)| (c.clone(), d.clone()))
+                .unwrap_or_else(|| panic!("column '{n}' missing"))
+        };
+        // EVERY column the struct flattened into is masked, not just the first.
+        for (name, want) in [
+            ("pos.x", ColumnData::I32(vec![1, 0, 3])),
+            ("pos.z", ColumnData::F64(vec![1.5, 0.0, 3.5])),
+        ] {
+            let (col, data) = by(name);
+            let ColumnData::Nullable { values, validity } = &data else {
+                panic!("'{name}': a null struct row must mask its columns, got {data:?}")
+            };
+            assert_eq!(**values, want, "'{name}' masked slot is the dtype default");
+            assert_eq!(validity, &vec![true, false, true], "'{name}'");
+            assert!(col.nullable, "'{name}'");
+        }
+
+        // The `str` child is the sharper case: a nullable `str` column is *unrepresentable*
+        // (#457), so the parent's validity must turn it into a clean rejection rather than a
+        // silently-present value.
+        let err = one(
+            "pos",
+            Arc::new(
+                StructArray::try_new(
+                    Fields::from(vec![Field::new("y", DataType::Utf8, false)]),
+                    vec![Arc::new(StringArray::from(vec!["a", "b"])) as ArrayRef],
+                    Some(arrow_buffer::NullBuffer::from(vec![true, false])),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("nullable 'str'"), "got {err}");
+    }
+
+    /// Nested structs: the parent's absence has to reach the leaf, not just the level below it.
+    #[test]
+    fn a_null_outer_struct_nulls_a_nested_leaf() {
+        let deep: ArrayRef = Arc::new(Int32Array::from(vec![5, 6]));
+        let inner = StructArray::try_new(
+            Fields::from(vec![Field::new("deep", DataType::Int32, false)]),
+            vec![deep],
+            None,
+        )
+        .unwrap();
+        let outer = StructArray::try_new(
+            Fields::from(vec![Field::new(
+                "inner",
+                DataType::Struct(Fields::from(vec![Field::new(
+                    "deep",
+                    DataType::Int32,
+                    false,
+                )])),
+                true,
+            )]),
+            vec![Arc::new(inner) as ArrayRef],
+            // The OUTER struct's row 0 is absent; the inner struct and the leaf are both fully valid.
+            Some(arrow_buffer::NullBuffer::from(vec![false, true])),
+        )
+        .unwrap();
+        let t = one("outer", Arc::new(outer)).unwrap();
+        let ColumnData::Nullable { values, validity } = &t.columns[0].1 else {
+            panic!("expected a mask, got {:?}", t.columns[0].1)
+        };
+        assert_eq!(t.columns[0].0.name, "outer.inner.deep");
+        assert_eq!(**values, ColumnData::I32(vec![0, 6]));
+        assert_eq!(validity, &vec![false, true]);
     }
 
     /// §3: a flatten is a renaming, and a renaming that collides is an error — never a silent suffix,

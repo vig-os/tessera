@@ -9,9 +9,15 @@ in-Rust corpus can only approximate:
   another. Preserving a writer's integer codes would import that order into `content_hash`, so the same
   logical data would seal three ways — which is why ADR-0056 §2 materialises dictionaries to their
   *values* and drops the codes.
-- **nullability declaration.** The three disagree about whether a column with no nulls is *declared*
-  nullable, and about how they pad a validity buffer. Tessera's boundary decides nullability from the
-  **data**, not from the schema, for exactly this reason.
+- **nullability declaration.** pyarrow declares `id` and `label` **non**-nullable below while polars and
+  DuckDB declare every column nullable, and the three pad a validity buffer differently. Tessera's
+  boundary decides nullability from the **data**, not from the schema (hazard H10), for exactly this
+  reason — honouring the declaration would seal one logical table three ways.
+
+The check asserts these differences are real rather than assuming them: the label column is confirmed
+`dictionary`-TYPED (not merely dictionary-encoded on the page, which `use_dictionary=True` alone would
+give), the declared nullability is confirmed to differ between writers, and the three files are confirmed
+to differ in size. A comparison whose inputs are accidentally identical proves nothing.
 
 It lives here rather than in `tests/generic_table.rs` because it needs three third-party writers. The
 Rust corpus covers the same mechanisms with writer *configurations* (dictionary on/off, row-group size,
@@ -48,14 +54,39 @@ def write_pyarrow(path: pathlib.Path) -> None:
     import pyarrow
     import pyarrow.parquet
 
+    # A genuinely DICTIONARY-TYPED label column, and a NON-nullable declaration for the two columns
+    # that have no nulls. `use_dictionary=True` alone would only pick a page encoding — it would not
+    # put an Arrow `dictionary<...>` type in the schema, so the type map's dictionary lane would never
+    # be exercised and this check would not test what it claims to. polars and DuckDB below write the
+    # same logical data as plain strings with everything declared nullable, which is exactly the
+    # disagreement ADR-0056 §2 (materialise dictionaries) and the H10 rule (nullability by data) exist
+    # to absorb.
+    schema = pyarrow.schema(
+        [
+            pyarrow.field("id", pyarrow.int64(), nullable=False),
+            pyarrow.field(
+                "label",
+                pyarrow.dictionary(pyarrow.int32(), pyarrow.string()),
+                nullable=False,
+            ),
+            pyarrow.field("energy", pyarrow.float64(), nullable=True),
+        ]
+    )
     table = pyarrow.table(
         {
             "id": pyarrow.array(ROWS["id"], type=pyarrow.int64()),
-            "label": pyarrow.array(ROWS["label"], type=pyarrow.string()),
+            # Built from a pandas-style Categorical ordering (first-seen), which is the ordering that
+            # differs between producers and must NOT reach the payload.
+            "label": pyarrow.array(
+                ROWS["label"], type=pyarrow.string()
+            ).dictionary_encode(),
             "energy": pyarrow.array(ROWS["energy"], type=pyarrow.float64()),
-        }
+        },
+        schema=schema,
     )
-    # Dictionary encoding ON and a small row group, i.e. the choices most likely to leak.
+    assert pyarrow.types.is_dictionary(table.schema.field("label").type), (
+        "the label column must really be dictionary-TYPED, not merely dictionary-encoded on the page"
+    )
     pyarrow.parquet.write_table(
         table, path, use_dictionary=True, compression="snappy", row_group_size=2
     )
@@ -158,6 +189,23 @@ def main() -> int:
             results[producer] = ingest(tessera, source, work / f"{producer}.tsra")
             print(
                 f"{producer:8s} {sizes[producer]:7d} B  {results[producer]['content_hash']}"
+            )
+
+        # The writers must genuinely disagree about nullability, or the H10 half of this check is
+        # vacuous. Read it back off the files rather than trusting the code above.
+        import pyarrow.parquet
+
+        declared = {
+            p: {
+                f.name: f.nullable
+                for f in pyarrow.parquet.read_schema(work / f"{p}.parquet")
+            }
+            for p in WRITERS
+        }
+        if len({tuple(sorted(d.items())) for d in declared.values()}) == 1:
+            raise SystemExit(
+                "every writer declared the same nullability, so the H10 half of this check is "
+                f"vacuous:\n{json.dumps(declared, indent=2)}"
             )
 
         # The three source files must genuinely differ, or the whole comparison is vacuous — the same
