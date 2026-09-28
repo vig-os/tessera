@@ -181,7 +181,13 @@ pub fn read_table(path: &Path, opts: &CsvOptions) -> Result<CanonicalTable> {
             )));
         }
         for (i, decl) in opts.columns.iter().enumerate() {
-            let text = record.get(i).unwrap_or_default().trim();
+            let raw = record.get(i).unwrap_or_default();
+            // Surrounding whitespace is insignificant to a *number* and significant to a *string*.
+            // Trimming a `str` column would be a silent, unrecorded transformation (` foo ` → `foo`) of
+            // exactly the kind ADR-0056 §2 exists to forbid — and one that could not be undone from the
+            // artifact. So text columns are taken verbatim and everything else is trimmed, which is what
+            // also makes ` 1.5 ` parse rather than fail.
+            let text = if decl.dtype == "str" { raw } else { raw.trim() };
             if opts.is_null(text) {
                 if !decl.nullable {
                     return Err(he(format!(
@@ -390,30 +396,33 @@ mod tests {
             .any(|x| x.name == transform::CSV_EXPLICIT_SCHEMA));
     }
 
-    /// The whole reason CSV is allowed in P1 (ADR-0056 §5 H8). A hostile locale must change nothing —
-    /// and the comma-decimal spelling must *fail to parse* rather than silently mean 1.5.
+    /// The whole reason CSV is allowed in P1 (ADR-0056 §5 H8): a hostile locale must change nothing —
+    /// and the comma-decimal spelling must *fail* rather than silently mean 1.5.
+    ///
+    /// Deliberately does **not** mutate `LC_ALL`. An earlier version did, and it was wrong twice over:
+    /// `std::env::set_var` is `unsafe` precisely because it is not thread-safe, and this repo runs
+    /// shared-process `cargo test`, so a concurrent test reading the environment is UB — and an assert
+    /// firing mid-test would have leaked the variable into every test that ran after it.
+    ///
+    /// It does not need to. H8's hazard is that a *locale-sensitive* parser reinterprets the input;
+    /// `str::parse` has a grammar fixed by the language and never consults the C locale, so the property
+    /// is established by pinning the exact values and by showing the German spelling is **rejected**.
+    /// The full-process version of this claim belongs in a harness that can set the environment before
+    /// `main`, not in a `#[test]`.
     #[test]
     fn parsing_is_locale_independent() {
-        // `str::parse` never consults the C locale, so setting one cannot change the result. Setting
-        // it here is what makes the test a proof rather than an assertion about the implementation.
-        // SAFETY: single-threaded test body; the value is a constant with no interior nul.
-        unsafe {
-            std::env::set_var("LC_ALL", "de_DE.UTF-8");
-            std::env::set_var("LC_NUMERIC", "de_DE.UTF-8");
-        }
         let dir = tempfile::tempdir().unwrap();
 
-        // A dot-decimal file parses to exactly the same doubles it would under LC_ALL=C.
+        // Dot-decimal parses to exactly these doubles, under any locale, on any host.
         let p = write(dir.path(), "x\n1.5\n0.1\n2.2250738585072014e-308\n");
         let t = read_table(&p, &decls(&["x:f8"])).unwrap();
         assert_eq!(
             t.columns[0].1,
-            ColumnData::F64(vec![1.5, 0.1, 2.2250738585072014e-308]),
-            "a German locale must not change a single bit"
+            ColumnData::F64(vec![1.5, 0.1, 2.2250738585072014e-308])
         );
 
-        // …and the German spelling is REJECTED, not reinterpreted. Accepting `1,5` here would also
-        // mean a comma-delimited file silently re-splits, which is the actual disaster H8 describes.
+        // …and the German spelling is REJECTED, not reinterpreted. Accepting `1,5` would also mean a
+        // comma-delimited file silently re-splits, which is the actual disaster H8 describes.
         let p = write(dir.path(), "x\n1,5\n");
         let err = read_table(&p, &decls(&["x:f8"])).unwrap_err().to_string();
         assert!(
@@ -421,10 +430,11 @@ mod tests {
             "got {err}"
         );
 
-        unsafe {
-            std::env::remove_var("LC_ALL");
-            std::env::remove_var("LC_NUMERIC");
-        }
+        // A comma *inside a quoted field* is data, not a delimiter — so the rejection above is about
+        // the number's grammar, not about commas being unparseable.
+        let p = write(dir.path(), "label\n\"a,b\"\n");
+        let t = read_table(&p, &decls(&["label:str"])).unwrap();
+        assert_eq!(t.columns[0].1, ColumnData::Utf8(vec!["a,b".into()]));
     }
 
     /// Correct rounding (H3): these are the classic `strtod`-divergence inputs. A nearest-representable
@@ -445,6 +455,26 @@ mod tests {
         assert_eq!(v[1].to_bits(), 0x000f_ffff_ffff_ffff);
         // A halfway case that rounds up under round-to-nearest-even.
         assert_eq!(v[2], 0.5000000000000002);
+    }
+
+    /// Whitespace is insignificant to a number and significant to a string, and the lane must not
+    /// quietly decide otherwise: trimming a `str` column would be an unrecorded transformation that
+    /// cannot be undone from the artifact.
+    #[test]
+    fn whitespace_is_trimmed_for_numbers_and_preserved_for_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(dir.path(), "n,label\n  1.5  ,  padded  \n");
+        let t = read_table(&p, &decls(&["n:f8", "label:str"])).unwrap();
+        assert_eq!(
+            t.columns[0].1,
+            ColumnData::F64(vec![1.5]),
+            "a number is trimmed"
+        );
+        assert_eq!(
+            t.columns[1].1,
+            ColumnData::Utf8(vec!["  padded  ".into()]),
+            "a string is taken verbatim"
+        );
     }
 
     #[test]

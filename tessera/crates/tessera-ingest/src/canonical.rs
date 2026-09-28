@@ -348,7 +348,7 @@ fn promote_nullable(data: ColumnData) -> ColumnData {
 /// [`crate::arrow_table`]'s boundary rules). So a column whose third row group is the only one
 /// containing a null must still seal as one nullable column — which means the merge, not the
 /// per-chunk mapping, is where the promotion happens.
-pub fn concat_columns(acc: ColumnData, next: ColumnData) -> Result<ColumnData> {
+pub fn concat_columns(name: &str, acc: ColumnData, next: ColumnData) -> Result<ColumnData> {
     // If either side carries a mask, both must, so the merged validity is total.
     if matches!(acc, ColumnData::Nullable { .. }) || matches!(next, ColumnData::Nullable { .. }) {
         let acc = promote_nullable(acc);
@@ -368,7 +368,7 @@ pub fn concat_columns(acc: ColumnData, next: ColumnData) -> Result<ColumnData> {
         };
         amask.extend(bmask);
         return Ok(ColumnData::Nullable {
-            values: Box::new(concat_columns(*av, *bv)?),
+            values: Box::new(concat_columns(name, *av, *bv)?),
             validity: amask,
         });
     }
@@ -394,11 +394,12 @@ pub fn concat_columns(acc: ColumnData, next: ColumnData) -> Result<ColumnData> {
         (ColumnData::Utf8(a), ColumnData::Utf8(b)) => join!(a, b, ColumnData::Utf8),
         (a, b) => {
             return Err(he(format!(
-            "cannot concatenate a '{}' chunk onto a '{}' column — the source changed a column's \
-                 dtype between chunks, which no single sealed column can represent",
-            b.numpy_code(),
-            a.numpy_code()
-        )))
+                "column '{name}': cannot concatenate a '{}' chunk onto a '{}' column — the source \
+                 changed this column's dtype between chunks, which no single sealed column can \
+                 represent",
+                b.numpy_code(),
+                a.numpy_code()
+            )))
         }
     };
     Ok(merged)

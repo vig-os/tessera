@@ -50,13 +50,24 @@ use tessera_core::{Error, Result};
 
 use crate::spec::FormatOptions;
 
-/// Every hazard from ADR-0056 §5 that a *fixture* can cover.
+/// Every hazard from ADR-0056 §5 (plus §12a's H10/H11) that a **file-format fixture** can cover.
 ///
-/// H2 (lossy tile codecs — JPEG-in-TIFF and friends) and H6 (NPY/raw endianness) are deliberately
-/// absent: H2 is **rejected from the normalising path** entirely, so there is nothing to seal and
-/// nothing to pin, and H6 belongs to the array lane. H7 (SIMD-dispatched decode) is covered *through*
-/// H3/H4 rather than on its own, exactly as the ADR's own table says.
-pub const LIVE_HAZARDS: &[&str] = &["H1", "H3", "H4", "H5", "H8", "H9"];
+/// The exclusions are all deliberate, and each is a statement about reachability rather than about
+/// effort — a hazard listed here that no fixture can actually fail for would be worse than an omission,
+/// because `every_live_hazard_has_a_fixture` would then certify a blind spot:
+///
+/// - **H2** (lossy tile codecs — JPEG-in-TIFF and friends) is *rejected from the normalising path*
+///   entirely, so there is nothing to seal and nothing to pin.
+/// - **H5** (values under a NULL) is **unreachable through a file format**: Parquet stores no values
+///   under its nulls (they are absent, encoded in the definition levels) and a CSV null is an empty
+///   field. The hazard exists only at the in-memory arrow boundary, where a library consumer hands us a
+///   `RecordBatch` built from a values buffer plus a separate mask — so it is covered by
+///   `arrow_table::tests::garbage_under_a_null_is_zeroed_and_recorded` and
+///   `canonical::tests::null_slots_are_zeroed_at_the_boundary`, which construct exactly that, and a
+///   corpus fixture claiming it would be theatre.
+/// - **H6** (NPY/raw endianness) belongs to the array lane.
+/// - **H7** (SIMD-dispatched decode) is covered *through* H3/H4, exactly as the ADR's own table says.
+pub const LIVE_HAZARDS: &[&str] = &["H1", "H3", "H4", "H8", "H9", "H10", "H11"];
 
 /// The number of fixtures each named build configuration must run.
 ///
@@ -140,14 +151,20 @@ pub fn fixtures() -> Vec<IngestFixture> {
         IngestFixture {
             name: "ingest_parquet_scalars",
             requires: &["parquet"],
-            hazards: &["H1", "H9"],
+            // H11 too: sixteen columns of distinct widths in a fixed order, so a re-encode that sorted
+            // them or widened an `Int8` to the machine word would move this fixture.
+            hazards: &["H1", "H9", "H11"],
             build: write_scalars,
             options: parquet_opts,
         },
         IngestFixture {
             name: "ingest_parquet_nulls",
             requires: &["parquet"],
-            hazards: &["H5"],
+            // H10, not H5: what a Parquet round-trip can pin is **nullability-by-presence** — a column
+            // declared nullable that contains no null must come out unwrapped, and one that contains a
+            // null must come out masked. H5 (producer garbage *under* a null) cannot be expressed in a
+            // Parquet file at all; see LIVE_HAZARDS.
+            hazards: &["H10"],
             build: write_nulls,
             options: parquet_opts,
         },
@@ -196,7 +213,7 @@ pub fn fixtures() -> Vec<IngestFixture> {
         IngestFixture {
             name: "ingest_csv_nulls",
             requires: &["csv"],
-            hazards: &["H5"],
+            hazards: &["H10"],
             build: write_csv_nulls,
             options: csv_nulls_opts,
         },
@@ -433,6 +450,10 @@ fn write_nulls(dir: &Path) -> Result<PathBuf> {
         field("id", DataType::Int32, false),
         field("maybe_i64", DataType::Int64, true),
         field("maybe_f64", DataType::Float64, true),
+        // Declared nullable, contains no null. The H10 half that is easy to get wrong: this column must
+        // seal **unwrapped**, because pyarrow, polars and DuckDB disagree about the declaration and
+        // honouring it would seal one logical table three ways.
+        field("declared_nullable_but_full", DataType::Int32, true),
     ]));
     // Numeric only, deliberately: the table backend carries a validity mask for the fixed-width
     // numeric dtypes only, so a nullable `str` column is rejected at the boundary (with its own unit
@@ -442,6 +463,7 @@ fn write_nulls(dir: &Path) -> Result<PathBuf> {
         Arc::new(Int32Array::from(vec![1, 2, 3])),
         Arc::new(Int64Array::from(vec![Some(1), None, Some(3)])),
         Arc::new(Float64Array::from(vec![Some(1.5), None, Some(-0.0)])),
+        Arc::new(Int32Array::from(vec![Some(4), Some(5), Some(6)])),
     ];
     let batch = RecordBatch::try_new(schema, columns).map_err(he)?;
     write_parquet_with(

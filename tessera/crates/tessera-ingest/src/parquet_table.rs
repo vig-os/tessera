@@ -37,9 +37,9 @@ fn he(e: impl std::fmt::Display) -> Error {
 /// Rows per `RecordBatch` handed to the canonicaliser.
 ///
 /// **Not** a determinism input: the canonicaliser folds every batch into one column before anything is
-/// encoded, so the batch size cannot reach `content_hash` — which is exactly what the
-/// `three_batch_sizes_seal_identically` test pins, because a reader would otherwise be right to
-/// suspect it could. Chosen purely to bound peak RSS during the fold.
+/// encoded, so the batch size cannot reach `content_hash` — which is what
+/// `tests/generic_table.rs::the_reader_batch_size_does_not_reach_the_hash` pins, because a reader
+/// would otherwise be right to suspect it could. Chosen purely to bound peak RSS during the fold.
 const BATCH_ROWS: usize = 8192;
 
 /// Read a Parquet file into `RecordBatch`es.

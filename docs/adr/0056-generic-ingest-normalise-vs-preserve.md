@@ -1036,6 +1036,40 @@ The pre-image is not sealed (the digest is, per §6a) but `tessera info --json` 
 sealed digest is **checkable** rather than merely observable — a reader holding a `.tsra` and a matching
 `tessera info` can confirm the correspondence instead of taking it on faith.
 
+### (h) One defect an adversarial review found, and what it says about the §2 equivalences
+
+A fresh-context review of the type map found a real one, worth recording because the *class* is the
+interesting part.
+
+Three lanes — dictionary, run-end and fixed-size-list — reduce to one mechanism: a logical→physical index
+map plus a values array. They were implemented that way, sharing a `gather` helper, which is what §2's
+equivalence claims rest on ("a `Dictionary<Int32, Utf8>` and a plain `Utf8` must produce byte-identical
+columns"). But each lane derived its index map from **its own** level of nullity — a null dictionary *key*,
+a null list *slot* — and only the run-end lane also consulted the values array's validity. So a dictionary
+whose *values* contained a null decoded that row to a **present zero**: non-nullable, no transform record,
+a corrupt product that verifies.
+
+It also inverted the §2 justification it was supposed to serve. The plain nullable-`str` column is
+*rejected* (§12a(e)), so a dictionary-encoded column with a null value silently sealed wrong data where the
+plain equivalent refused — the producer's choice to dictionary-encode changing not just the bytes but
+whether the data was accepted at all.
+
+The fix folds the values array's own validity into the index map **inside** `gather`, so all three lanes are
+equivalent *by construction* rather than by three authors remembering the same rule, and the redundant
+check came out of the run-end lane. The lesson generalises past this bug: **a shared helper makes lanes
+equivalent only for the decisions actually taken inside it.** Two of the three lanes had been reading as
+"obviously the same" for a decision each was in fact taking separately.
+
+The same review also found that the `ingest_parquet_nulls` fixture could not test the hazard it claimed.
+H5 is *producer garbage under a null*, and neither format can express it — Parquet encodes absence in its
+definition levels and stores no value, and a CSV null is an empty field. So H5 came off `LIVE_HAZARDS`
+with the reason stated, the fixture was relabelled **H10** (nullability-by-presence, which a Parquet
+round-trip genuinely does pin) and given a declared-nullable-but-null-free column so the claim is real, and
+H5's coverage is the two unit tests that construct a values buffer plus a separate mask — the only shape in
+which the hazard can occur, and only reachable at the in-memory arrow boundary. A hazard label on a fixture
+that cannot fail for that reason is worse than an omission: `every_live_hazard_has_a_fixture` would then
+certify a blind spot.
+
 ### What the corpus pins, and one thing it deliberately does not
 
 `corpus/ingest-corpus.json` carries nine fixtures with a **declared per-configuration count** checked

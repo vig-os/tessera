@@ -121,6 +121,23 @@ pub fn canonicalise_batches(batches: &[RecordBatch], exclude: &[String]) -> Resu
         return Ok(CanonicalTable::default());
     };
     let schema = first.schema();
+    // An `--exclude` that matches nothing is a typo, and a typo that silently does nothing is the worst
+    // outcome here: the operator believes they dropped a PHI column. The CSV lane already errors on
+    // this, so the two lanes agree rather than differing by accident.
+    if let Some(unknown) = exclude
+        .iter()
+        .find(|e| !schema.fields().iter().any(|f| f.name() == *e))
+    {
+        return Err(he(format!(
+            "--exclude names '{unknown}', which is not a column in this file\n  columns: {}",
+            schema
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>()
+                .join(" · ")
+        )));
+    }
     let mut b = TableBuilder::new();
     // Per top-level field, fold every batch's chunk into one column. Nullability is resolved by the
     // fold (see the module docs), so a column whose only null is in the last row group still seals as
@@ -158,6 +175,7 @@ pub fn canonicalise_batches(batches: &[RecordBatch], exclude: &[String]) -> Resu
                     )));
                 }
                 let merged = concat_columns(
+                    &acc.0,
                     std::mem::replace(&mut acc.2, ColumnData::Bool(vec![])),
                     next.2,
                 )?;
@@ -220,6 +238,14 @@ fn map_field(
                      keep bytes:              tessera ingest blob <FILE>",
                     child.data_type(),
                     MAX_FIXED_LIST_WIDTH
+                )));
+            }
+            if width == 0 {
+                return Err(he(format!(
+                    "column '{name}' is fixed_size_list<{}>[0]; a zero-width tuple carries no values, \
+                     so expanding it would drop the column silently\n  \
+                     drop it explicitly: tessera ingest table <FILE> --exclude {name}",
+                    child.data_type()
                 )));
             }
             if !child.data_type().is_primitive() && !matches!(child.data_type(), DataType::Boolean)
@@ -744,17 +770,10 @@ fn run_end_parts(
                 .downcast_ref::<arrow_array::RunArray<$t>>()
                 .ok_or_else(|| he(format!("column '{name}': run-end array failed to downcast")))?;
             let values = r.values().clone();
-            let idx: Vec<Option<usize>> = (0..r.len())
-                .map(|i| {
-                    let phys = r.get_physical_index(i);
-                    // A run whose *value* is null makes that logical row null.
-                    if values.is_null(phys) {
-                        None
-                    } else {
-                        Some(phys)
-                    }
-                })
-                .collect();
+            // Only the run-level mapping here; `gather` folds in the values array's own validity for
+            // every lane, so a run whose *value* is null still yields a null row.
+            let idx: Vec<Option<usize>> =
+                (0..r.len()).map(|i| Some(r.get_physical_index(i))).collect();
             (values, idx)
         }};
     }
@@ -789,9 +808,31 @@ fn gather(values: &ArrayRef, indices: &[Option<usize>], name: &str) -> Result<Co
             values.data_type()
         ))
     })?;
-    // `map_scalar` may itself have wrapped the values in `Nullable` (a dictionary whose *values*
-    // array contains a null). Unwrap to the flat values; the mask we build below is the authoritative
-    // one, because it already accounts for both a null key and a null value.
+    // **Fold the values array's OWN validity into the index map**, so a live index pointing at a null
+    // value is a null row.
+    //
+    // This is the correctness heart of the shared gather, and its absence was a real defect: each
+    // lane's `*_parts` derived `indices` from *its own* level of nullity (a null dictionary key, a null
+    // list slot) and only the run-end lane also consulted the values array. So a
+    // `Dictionary<Int32, Utf8>` whose *values* contained a null decoded that row to a **present
+    // zero** — non-nullable, no transform record, a corrupt product that verifies. It also broke the
+    // dictionary lane's entire justification (ADR-0056 §2: a dictionary must produce the column a plain
+    // array would), because the plain column is *rejected* when it is a nullable `str` while the
+    // encoded one silently sealed a wrong value.
+    //
+    // Doing it here rather than in each `*_parts` is what makes the three lanes equivalent **by
+    // construction** instead of by three authors remembering the same rule.
+    let resolved: Vec<Option<usize>> = indices
+        .iter()
+        .map(|i| match i {
+            Some(p) if values.is_null(*p) => None,
+            other => *other,
+        })
+        .collect();
+    let indices = resolved.as_slice();
+    // `map_scalar` may itself have wrapped the values in `Nullable`. Unwrap to the flat values; the
+    // mask built below is the authoritative one, because `indices` now accounts for nullity at every
+    // level — the key/slot AND the value it points at.
     let flat = match mapped {
         ColumnData::Nullable { values, .. } => *values,
         other => other,
@@ -1037,22 +1078,33 @@ mod tests {
         assert_eq!(validity, &vec![true, true, true, false]);
     }
 
-    /// H5 — whatever the producer left under a null is gone, and the fact is recorded.
+    /// **H5** — whatever the producer left under a null is gone, and the fact is recorded.
+    ///
+    /// The array is built from a values buffer plus a separate null mask, **not** from an `Option`
+    /// iterator: an `Option` iterator writes the dtype default into masked slots, so a test built that
+    /// way asserts nothing about H5 at all. This is the only construction that puts real producer
+    /// garbage under a null, and it is also the only way the hazard can occur in practice — Parquet
+    /// stores no values under its nulls, so H5 is reachable exactly at this in-memory arrow boundary
+    /// (a library consumer handing us a `RecordBatch`), which is why the corpus cannot cover it and
+    /// this test must.
     #[test]
     fn garbage_under_a_null_is_zeroed_and_recorded() {
-        // arrow-rs keeps the values buffer a producer wrote, so a null slot can carry anything.
-        let arr = Int32Array::from(vec![Some(1), Some(i32::MAX), Some(3)]);
-        let nulled = Int32Array::from(
-            arr.iter()
-                .enumerate()
-                .map(|(i, v)| if i == 1 { None } else { v })
-                .collect::<Vec<_>>(),
-        );
-        let t = one("x", Arc::new(nulled)).unwrap();
-        let ColumnData::Nullable { values, .. } = &t.columns[0].1 else {
+        let values = arrow_buffer::ScalarBuffer::<i32>::from(vec![1, i32::MAX, 3]);
+        let nulls = arrow_buffer::NullBuffer::from(vec![true, false, true]);
+        let arr = arrow_array::PrimitiveArray::<Int32Type>::new(values, Some(nulls));
+        // The garbage really is there before we touch it — otherwise this test would be vacuous.
+        assert_eq!(arr.values()[1], i32::MAX);
+
+        let t = one("x", Arc::new(arr)).unwrap();
+        let ColumnData::Nullable { values, validity } = &t.columns[0].1 else {
             panic!("expected a mask")
         };
-        assert_eq!(**values, ColumnData::I32(vec![1, 0, 3]));
+        assert_eq!(
+            **values,
+            ColumnData::I32(vec![1, 0, 3]),
+            "the masked slot must be the dtype default, not the producer's leftover"
+        );
+        assert_eq!(validity, &vec![true, false, true]);
         assert!(transforms(&t).contains(&transform::NULL_SLOT_NORMALISATION));
     }
 
@@ -1439,6 +1491,83 @@ mod tests {
         let t = canonicalise_batches(&[], &[]).unwrap();
         assert_eq!(t.rows(), 0);
         assert!(t.columns.is_empty());
+    }
+
+    /// **A null inside an encoded column's VALUES array must survive the decode.**
+    ///
+    /// Regression test for a real defect, and the failure mode is the worst kind: an encoded column whose
+    /// *values* array contained a null decoded to a **present zero**, non-nullable, with no transform
+    /// record — a corrupt product that verifies. Three lanes gather through one index map, and only the
+    /// run-end one was consulting the values array's own validity.
+    ///
+    /// It also broke the dictionary lane's whole reason for existing (ADR-0056 §2): a
+    /// `Dictionary<Int32, Utf8>` must produce the byte-identical column a plain `Utf8` would, or the
+    /// producer's choice to dictionary-encode reaches the seal. With the bug, the plain column was
+    /// *rejected* (a nullable `str` is unrepresentable, #457) while the dictionary-encoded one silently
+    /// sealed wrong values — a divergence worse than an inconsistency.
+    #[test]
+    fn a_null_in_an_encoded_columns_values_array_is_not_decoded_as_a_present_zero() {
+        // A dictionary whose VALUES contain a null, reached by a non-null key.
+        let values = Int32Array::from(vec![Some(7), None, Some(9)]);
+        let keys = Int32Array::from(vec![0, 1, 2, 1]);
+        let dict: ArrayRef = Arc::new(
+            arrow_array::DictionaryArray::<arrow_array::types::Int32Type>::try_new(
+                keys,
+                Arc::new(values),
+            )
+            .unwrap(),
+        );
+        let t = one("d", dict).unwrap();
+        let ColumnData::Nullable { values, validity } = &t.columns[0].1 else {
+            panic!(
+                "a null value reached through a live key must produce a mask, got {:?}",
+                t.columns[0].1
+            )
+        };
+        assert_eq!(**values, ColumnData::I32(vec![7, 0, 9, 0]));
+        assert_eq!(validity, &vec![true, false, true, false]);
+        assert!(t.columns[0].0.nullable, "the sealed Column says so too");
+
+        // The equivalence the dictionary lane claims: the same logical data, plainly encoded.
+        let plain = one(
+            "d",
+            Arc::new(Int32Array::from(vec![Some(7), None, Some(9), None])),
+        )
+        .unwrap();
+        assert_eq!(
+            t.columns[0].1, plain.columns[0].1,
+            "dictionary-encoded and plain must produce the identical column"
+        );
+
+        // A null *element* inside a fixed-size list is the same question one level down.
+        let list_values = Int32Array::from(vec![Some(1), None, Some(3), Some(4)]);
+        let fsl: ArrayRef = Arc::new(
+            arrow_array::FixedSizeListArray::try_new(
+                Arc::new(Field::new("item", DataType::Int32, true)),
+                2,
+                Arc::new(list_values),
+                None,
+            )
+            .unwrap(),
+        );
+        let t = canonicalise_batch(&record_batch(vec![("pair", fsl)]).unwrap(), &[]).unwrap();
+        // Row 0 is [1, null], row 1 is [3, 4] — so `pair.1` is nullable and `pair.0` is not.
+        let by = |n: &str| {
+            t.columns
+                .iter()
+                .find(|(c, _)| c.name == n)
+                .map(|(_, d)| d.clone())
+                .unwrap()
+        };
+        assert_eq!(by("pair.0"), ColumnData::I32(vec![1, 3]));
+        let ColumnData::Nullable { values, validity } = by("pair.1") else {
+            panic!(
+                "the null list element must produce a mask, got {:?}",
+                by("pair.1")
+            )
+        };
+        assert_eq!(*values, ColumnData::I32(vec![0, 4]));
+        assert_eq!(validity, vec![false, true]);
     }
 
     /// **Sliced arrays must map to their sliced values.**

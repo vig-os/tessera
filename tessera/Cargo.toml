@@ -107,7 +107,11 @@ parquet = { version = "=58.3.0", default-features = false, features = [
 # `str::parse`, which is correctly-rounded and locale-independent. That closes hazard H3 (strtod /
 # lexical rounding differences) and H8 (`LC_NUMERIC=de_DE` reading `1,5` as 1.5) *by construction*,
 # which is what lets CSV ship in P1 with an explicit schema instead of waiting for P2.
-csv = "1"
+#
+# `=`-pinned like the arrow crates, and for the same reason: this version goes into the sealed
+# `ingest_decoder` digest (ADR-0056 §6a), so a caret range would let a routine `cargo update` move
+# `manifest_hash` and red Gate A *un*-deliberately — which is precisely what the `=` pins prevent.
+csv = "=1.4.0"
 # Python bindings (tessera-py). abi3 → one .so works across CPython ≥3.9; extension-module → no
 # libpython link (the build needs only the abi3 minimum, not a runtime interpreter).
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
