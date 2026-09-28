@@ -871,3 +871,161 @@ dependencies is out of scope here but is the larger prize, and is named for a fu
   the ADR-number collision with the shipped ADR-0052 versioning-and-release was resolved by
   renumbering to the next free slot). ADR-0056 §6a's recipe-bag home is now realisable against a
   trunk-visible `Producer`/`Generation`.
+
+---
+
+## §12a — Amended 2026-09-28 by [#386](https://github.com/vig-os/tessera/issues/386): what P1 actually decided
+
+The table half of P1 is built (Parquet · Arrow IPC · CSV). Building it settled six things this ADR left
+open, ambiguous, or decided differently, and found one limitation nobody had named. Each is recorded
+here rather than in a commit message, because each is a decision a future reader will otherwise
+re-litigate.
+
+**Status note.** This ADR stays **Proposed**. P1's array half (`.npy`/`.npz`), P2 (`analyze`,
+`verify --require-classified`) and P3 (the §11 NIfTI correctness gaps) are unbuilt, and marking the
+record Accepted while most of its landing plan is outstanding would misstate what has been discharged.
+
+### (a) CSV ships in P1 with an explicit schema. §8 is revised, not overridden
+
+§8 deferred CSV and gave the right reason: *"sample-based inference is anti-deterministic by
+construction — the inferred schema depends on which rows landed in the sample, so the same file can seal
+to two different products."* That argument is against **inference**, not against CSV, and #386 removes
+the inference rather than the format:
+
+- `--column NAME:DTYPE` (repeatable) or nothing. No mixed mode, no fallback, no sampling.
+- Declarations are **positional and cross-checked against the header row** — a mismatch is a hard error,
+  because the failure it prevents is silent: declare two columns in the wrong order and every value
+  parses fine, lands in the wrong column, and seals.
+- §8's verbatim refusal (with the `duckdb COPY` conversion path) is what you get with no declarations.
+
+**Hazards H3 and H8 are closed by construction, and that is the whole licence for this change.** Both
+were written with C's `strtod` in mind. Rust's `str::parse::<f64>()` is **correctly rounded** (the
+Eisel-Lemire/Clinger path in `core::num::dec2flt` returns the nearest representable double for every
+input, with no FMA-sensitive fast path to diverge on) and **locale-independent** (the grammar is fixed by
+the language, so `LC_NUMERIC=de_DE` cannot make `1,5` parse as 1.5 — it fails to parse, which is the
+honest outcome). The CSV lane therefore uses the `csv` crate for RFC-4180 record splitting only and
+parses every value with std. A test sets a comma-decimal locale and proves a German `LC_ALL` changes not
+one bit; a corpus fixture pins the subnormal and halfway-rounding spellings so a parser swap moves a
+golden rather than passing quietly.
+
+The seal records `csv_explicit_schema`, not `csv_inferred_schema`. **Optional inference stays deferred,
+and is now closer to "never" than to P2**: its output is reproducible only if the sample is the whole
+file, at which point it is not inference.
+
+### (b) `--as` is dropped. The verb is the override
+
+§4's synopsis shows both `--from` and `--as` on `ingest table` / `ingest array`. Once the verb *names the
+primitive*, `--as` is redundant surface: `tessera ingest table x.npy` (a structured/record NPY) and
+`tessera ingest array x.parquet` (a Parquet of flattened volumes) already **are** §1.2's override for a
+source that misrepresents its shape. Shipping both would mean documenting their interaction and fielding
+`ingest table --as array` forever. One flag fewer, no capability lost.
+
+### (c) The §7 laundering rule lands in P1, contradicting the phase table
+
+The landing plan files the laundering rule under **P2**. §7 itself says why that is wrong:
+*"Retrofitting this after the first such artifact ships would leave those seals permanently ambiguous."*
+Since P1 is what ships the first such artifact, the rule lands with it.
+
+It is enforced in `spec::validate`, so it fires **before a byte is read** (a test points it at a
+nonexistent file and expects the schema rejection, not an I/O error) — and `engine::run`'s validation was
+hoisted above its first filesystem touch, so a rejected spec no longer leaves even an empty output
+directory. `--classification-ack` is **not** built: §7 pins its mechanism to ADR-0037 keys but explicitly
+leaves its ergonomics undesigned, so the error names the constraint rather than offering a flag that does
+not exist.
+
+**One exemption, stated so it is not mistaken for an oversight: `raw` is not subject to the rule yet.**
+§4 says `raw` "was always a headerless `array`", but it still produces a `recon` product, and the shipped
+`docs/examples/migrate-petct-study.toml` declares `format = "raw"` with `schema = "recon"`. Enforcing the
+rule on it would break a documented workflow and move existing goldens — that belongs to §4's vendor-verb
+collapse ([#456](https://github.com/vig-os/tessera/issues/456)), which is a separate mechanical change.
+
+### (d) Two boundary rules the §2 table did not state, both load-bearing
+
+The landing plan asks for *"the §2 boundary normalising nullable-wrapping, column order and dtype width,
+added to the §5 hazard table"*. They are hazards **H10** and **H11**:
+
+| # | Hazard | Likelihood × radius | Rule |
+| --- | --- | --- | --- |
+| **H10** | **Nullability declared vs. present.** pyarrow, polars and DuckDB disagree about whether a column with no nulls is *declared* nullable, and about how a validity buffer is padded | high × fatal | wrap in `ColumnData::Nullable` **iff the column actually contains a null** — never on the strength of the schema's declaration |
+| **H11** | **Column order and dtype width.** Sorting columns, or widening an `Int8` to the machine word, would be a re-encode editorialising | low × fatal | preserve source order and source width exactly (`Int8` → `i1`) |
+
+H10 is the one that matters, and it is what makes the three-producer fixture passable at all: honouring a
+nullability *declaration* would seal one logical table three different ways. What is given up is the
+producer's "could have been null but wasn't" — schema nuance, not a value, and §2 says ingest imports the
+logical values.
+
+### (e) A nullable `str` / `b1` column is currently unrepresentable, and is rejected at the door
+
+Not a format decision — an encoder limitation nobody had written down. `tessera-io`'s
+`validate_nullable` carries a validity mask for the **fixed-width numeric dtypes only**, so a nullable
+string or boolean column cannot be encoded. Left alone, an ingest of a Parquet with a nullable string
+column would fail deep inside the codec with a message naming neither the column nor anything to do about
+it.
+
+It is therefore rejected at the canonicalisation boundary, which knows the column's name and can offer
+`--exclude`, filling the nulls in the source, or `ingest blob`. Extending the mask to `str`/`b1` is an
+encoder change, tracked as [#457](https://github.com/vig-os/tessera/issues/457); until then this is a
+documented rejection rather than a surprise.
+
+### (f) The arrow **sub-crates**, not the `arrow` meta-crate
+
+§12's sketch is `ingest-parquet = ["dep:parquet", "dep:arrow"]`. Measured against the actual lockfile, the
+`arrow` meta-crate reaches this tree **only via datafusion**, under `tessera-cli`'s optional `sql` feature
+— while `arrow-array` / `-buffer` / `-schema` are already in the *default* graph via Vortex. Taking the
+meta-crate would newly pull `arrow-cast` / `-ord` / `-string` / `-row` / `-json` into every build,
+including the `arrow-array/chrono-tz` surface ADR-0057 §5 identified as **H1's door**.
+
+So the dependency is `arrow-array` + `arrow-buffer` + `arrow-schema` + `arrow-ipc` + `parquet`, all
+`=`-pinned at 58.3.0. `simdutf8` is dropped from parquet's defaults (**H7**): UTF-8 *validation* is a
+yes/no answer that cannot change a value, so turning it off costs nothing and removes a dispatch-dependent
+path from upstream of the seal. The compression codecs are kept in full — a scientist's Parquet is
+snappy/gzip/zstd/brotli/lz4-compressed in the wild, and refusing to read one is a wall, not a safety
+property, since ingest re-encodes and the source codec never reaches our bytes. Net cost: **ten** new
+crates, single arrow tree.
+
+### (g) The feature digest's pre-image, and the residual §6a could not close
+
+§6a specifies "a digest over the resolved decode-relevant features" without saying how it is derived. A
+build script cannot see the unified feature graph of its own dependencies, and shelling out to
+`cargo tree` from one is not something to ship. The derivation is therefore:
+
+> `blake3(` `tessera-ingest=<version>;features=<this crate's resolved CARGO_FEATURE_* set>;pins=<each decode-path crate=version, from the workspace lockfile>` `)`
+
+computed at **runtime** over a string `build.rs` emits, because hashing in the build script would need a
+`[build-dependencies]` entry and adding one is itself a Gate B event. Including this crate's own version
+also closes part of the gap §6a leaves open — *"`tessera-ingest`'s own canonicalisation code is attributed
+by nothing"* — so the recipe no longer names the third-party decoder more precisely than it names us.
+
+**The residual, stated without varnish:** this pre-image does **not** capture a feature flipped inside the
+shared arrow tree by an unrelated crate — the `sql` → `chrono-tz` case itself. Two things discharge that,
+and neither is the digest:
+
+1. **We never call arrow's timezone machinery.** H1's rule is "strip tz, take raw ticks". An Arrow
+   `Timestamp(_, Some(tz))` already stores UTC-normalised ticks with the zone as a display annotation, so
+   the type map reads the raw `i64` buffer and no tzdb is consulted on any build. The source zone is
+   sealed in a `tz_to_utc{from}` transform record rather than dropped.
+2. **Gate A compares goldens across four feature configurations, `sql` among them**, and
+   `ingest_parquet_scalars` carries a `timestamp(us, "America/New_York")` column precisely so that door is
+   watched. "By construction" is a claim; Gate A is the test of it.
+
+The pre-image is not sealed (the digest is, per §6a) but `tessera info --json` prints it verbatim, so the
+sealed digest is **checkable** rather than merely observable — a reader holding a `.tsra` and a matching
+`tessera info` can confirm the correspondence instead of taking it on faith.
+
+### What the corpus pins, and one thing it deliberately does not
+
+`corpus/ingest-corpus.json` carries nine fixtures with a **declared per-configuration count** checked
+before any hash comparison (ADR-0057 §5's anti-vacuity guard — this repo has shipped a zero-case green
+before) and a test asserting every live hazard has a fixture. Source files are generated, never committed,
+as §5 requires.
+
+The fixtures go through the ingest **seam** rather than through `engine::run`, and that is a determinism
+requirement rather than a shortcut: `engine::run` seals an `ingested_via_spec` edge whose digest is over
+the parsed spec, and a spec names its `input` **path** — which for a generated fixture is a temp directory
+that differs every run. Sealing it would make `manifest_hash` unreproducible and §6a's value-preservation
+check unenforceable. The spec-engine path is covered by its own tests instead.
+
+§5's `ingest_parquet_producers` fixture is built for real, as a hermetic flake check: **pyarrow, polars and
+DuckDB** write the same logical table, and all three ingest to one `content_hash` while their
+`manifest_hash`es differ (the `ingested_from` edge pins the source bytes, which genuinely differ). Both
+directions are asserted, so a bug that made every hash constant would fail rather than look perfect.
