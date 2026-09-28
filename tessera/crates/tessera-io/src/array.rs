@@ -1146,25 +1146,6 @@ mod tests {
         assert_eq!(ArrayData::U64(vec![0; 3]).byte_len(), 24);
     }
 
-    /// A `MakeWriter` over a shared buffer — captures tracing fmt output for assertions.
-    #[derive(Clone)]
-    struct CapWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-    impl std::io::Write for CapWriter {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapWriter {
-        type Writer = CapWriter;
-        fn make_writer(&'a self) -> CapWriter {
-            self.clone()
-        }
-    }
-
     /// Regression for #356: `tracing` caches each callsite's `Interest` process-wide on
     /// first use, and that registration consults only the GLOBAL default dispatcher —
     /// never a thread-local one installed by `with_default`. So the first thread to reach
@@ -1199,18 +1180,11 @@ mod tests {
 
     #[test]
     fn encode_emits_a_structured_compression_trace() {
-        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(CapWriter(buf.clone()))
-            .with_max_level(tracing::Level::DEBUG)
-            .with_ansi(false)
-            .finish();
         let spec = pcodec_spec(vec![8, 8, 8], "int16");
         let data = ArrayData::I16((0..512).map(|k| (k % 97) as i16).collect());
-        tracing::subscriber::with_default(sub, || {
+        let log = crate::test_trace::capture(tracing::Level::DEBUG, || {
             encode(&spec, &data).unwrap();
         });
-        let log = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         // the encode event fired with the codec + raw/encoded sizes (full I/O info on write).
         assert!(
             log.contains("encoded array block"),
