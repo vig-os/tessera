@@ -1173,9 +1173,11 @@ metadata = {{ coincidence_mode = "singles", site = "anvil" }}
         }
     }
 
-    /// ADR-0058 through-line (#342/#324): a derived product **inherits** schema-flagged identity
-    /// from its parent on BOTH the batch and streaming paths, an explicit child value wins, and the
-    /// raw records a **generation** recipe + external **producer** identity that ride the seal.
+    /// ADR-0058 through-line (#342/#324/#416): a derived product **inherits** schema-flagged
+    /// identity from its parent on BOTH the batch and streaming paths, an explicit child value wins,
+    /// and a **generation** recipe + external **producer** identity ride the seal on BOTH paths —
+    /// the batch raw records one, and so does the streamed derived (#416: the streaming path used to
+    /// drop them silently).
     #[test]
     fn derived_inherits_identity_and_raw_records_generation() {
         let dir = tempfile::tempdir().unwrap();
@@ -1233,6 +1235,13 @@ streaming = "stream"
 [product.metadata]
 coincidence_mode = "prompt-coincidence"
 patient_id = "OVERRIDE"
+[product.generation.config]
+tof_cal_ref = "cal-2024-01"
+seed = 7
+[product.producer]
+tool = "coincidence-sorter"
+version = "1.4"
+git_commit = "0855f5f"
 "#,
             a = a.display(),
             b = b.display()
@@ -1298,5 +1307,28 @@ patient_id = "OVERRIDE"
             Some(&serde_json::json!("OVERRIDE")),
             "an explicit child value wins over the inherited one"
         );
+
+        // #416: the spec's recipe + producer must ride the STREAMING seal too. The streaming writer
+        // has no post-build re-seal hook, so these are declared on the `WriteSession` before the
+        // first block commits — a regression here is silent provenance loss on exactly the large
+        // acquisitions that select the streaming path.
+        let gs = der_stream
+            .generation
+            .as_ref()
+            .expect("streamed product must carry its spec's generation record");
+        assert_eq!(
+            gs.config.get("tof_cal_ref"),
+            Some(&serde_json::json!("cal-2024-01")),
+            "streaming path seals the spec's [product.generation.config]"
+        );
+        assert_eq!(gs.config.get("seed"), Some(&serde_json::json!(7)));
+        match der_stream.producer.as_ref().expect("streamed producer") {
+            tessera_core::ProducerRef::Structured(p) => {
+                assert_eq!(p.tool, "coincidence-sorter");
+                assert_eq!(p.version, "1.4");
+                assert_eq!(p.git_commit.as_deref(), Some("0855f5f"));
+            }
+            other => panic!("expected a structured producer, got {other:?}"),
+        }
     }
 }
