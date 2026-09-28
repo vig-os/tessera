@@ -407,6 +407,24 @@ The seal covers the whole container, so a guarantee that stops at the codec does
 float path safe and said nothing about the integer path, because nothing tested the claim on an axis the
 exclusion was not about. The gate has to vary the axis; enumerating known-bad cases cannot.
 
+**A guarantee that depends on an absence is not a guarantee.** The `.tsra` container's STORED
+invariant — the one that makes a block's bytes fetchable by range, and therefore makes a cloud reader
+possible at all — was documented and written but never *checked* on read. It did not need to be: the
+workspace pinned `zip = { default-features = false }`, so no decompressor was compiled in and a
+compressed member simply failed to decode. Adding `deflate-flate2` for the `.npz` reader would have
+removed that accident workspace-wide (cargo unifies features), and a deflated `.tsra` would then have
+**verified perfectly** while silently ceasing to be range-readable. Third instance of the same shape in
+one sitting, so it is worth stating as a rule rather than a war story: an invariant that holds because
+some capability is *missing* stops holding the moment anyone adds that capability for an unrelated
+reason, and nothing in the diff will mention it. Enforced now by an explicit compression-method scan;
+the test has to live in `tessera-ingest`, because `-p tessera-io` alone cannot even name
+`CompressionMethod::Deflated`.
+
+Note also what the two determinism defects have in common. #468 and #472 both diverge in the metadata
+*around* the values — a container record and a persisted `Stat::Sum` respectively — while the encoded
+values are identical. That is exactly why `deterministic_table_compressor`'s exclusion list could not
+reach either: it reasons about the codec, and the seal covers the whole container.
+
 So the gate set gains a third axis, as the `seal-profile-determinism` flake check: the conformance
 corpus is regenerated under **both** the dev and the release profile and must agree with itself and with
 the committed file. Until #468 is fixed upstream the known-diverging shape is
