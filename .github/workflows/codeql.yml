@@ -41,6 +41,15 @@ on:  # yamllint disable-line rule:truthy
       - dev
       - 'release/**'
       - main
+      # Stacked PRs (#463): a PR based on another topic branch matched none of
+      # the bases above, so it got no lint/test/commit-message/nix checks at all
+      # and stayed untested until its base merged and GitHub retargeted it.
+      # '**' matches any base, including the three named above (a PR matches the
+      # filter once, so this adds no duplicate runs). Safe to widen now that the
+      # workflow has a concurrency group: a superseded stacked run cancels
+      # instead of accumulating. NOTE devkit-managed file -- upstream
+      # vig-os/devkit#1759; a devkit upgrade regenerating it drops this line.
+      - '**'
   push:
     branches:
       - main

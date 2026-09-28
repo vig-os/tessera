@@ -35,6 +35,11 @@ on:  # yamllint disable-line rule:truthy
       - dev
       - 'release/**'
       - main
+      # Stacked PRs (#463): a PR based on another topic branch matched none of
+      # the bases above, so `nix flake check` -- the required status check on dev
+      # -- never ran on it. '**' matches any base, including the three named
+      # above (a PR matches the filter once, so this adds no duplicate runs).
+      - '**'
   push:
     branches:
       - main
