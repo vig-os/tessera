@@ -467,9 +467,9 @@ fn check_no_schema_laundering(p: &ProductSpec) -> Result<()> {
         return Ok(());
     }
     Err(Error::Invalid(format!(
-        "ingest-spec: product '{}' is read by the generic '{}' backend but claims schema '{}'.\n           A generic backend has no domain knowledge, so it cannot honour a domain schema's promises — \
+        "ingest-spec: product '{}' is read by the generic '{}' backend but claims schema '{}'.\n  A generic backend has no domain knowledge, so it cannot honour a domain schema's promises — \
          and a `.tsra` carrying that schema's sensitivity tiers would be indistinguishable from one a \
-         real vendor ingest classified (ADR-0056 §7).\n           use a primitive schema:  schema = \"{}\"\n           or ingest through the vendor backend that knows the domain (format = \"dicom\" / \"ge-hdf5\" \
+         real vendor ingest classified (ADR-0056 §7).\n  use a primitive schema:  schema = \"{}\"\n  or ingest through the vendor backend that knows the domain (format = \"dicom\" / \"ge-hdf5\" \
          / \"nifti\"), which classifies at the door",
         p.name,
         crate::backends::backend_name(&p.options),

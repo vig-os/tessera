@@ -83,6 +83,12 @@ pub fn run(
     cfg: &tessera_io::WriteConfig,
     stream_threshold: u64,
 ) -> Result<tessera_core::Collection> {
+    // Validate BEFORE touching the filesystem. `run_into` validates too (it needs the topo order),
+    // so this is a cheap pure re-check bought for one property: a rejected spec leaves **nothing**
+    // behind, not even an empty `out_dir`. That matters most for the ADR-0056 §7 laundering rule,
+    // whose whole point is to refuse at the door — an operator who is told "this spec cannot run"
+    // should not then find an output directory suggesting it partly did.
+    validate(spec)?;
     // Atomicity (#302): the engine writes each member `.tsra` as it goes, so a failure on member N
     // used to leave members 0..N orphaned in `out_dir` with NO `collection.json` — a half-written
     // collection indistinguishable from a complete one. Fix: run the whole spec into a private

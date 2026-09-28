@@ -1,0 +1,4 @@
+# trycmd 0.15 runs a `.in/` case IN PLACE when there is no matching `.out/`, so anything the
+# walkthrough writes lands here. Only the two INPUTS above are tracked.
+*.tsra
+laundered-out/

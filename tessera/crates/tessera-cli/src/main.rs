@@ -20,7 +20,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use tessera_core::collection::{member_filename, MemberKind};
 use tessera_core::SchemaRegistry;
-use tessera_ingest::{engine, spec as ingest_spec};
+use tessera_ingest::{column_meta as ingest_column_meta, engine, spec as ingest_spec};
 use tessera_io::{pack_dir, parse_byte_size, unpack, Reader};
 
 /// Cloud-URL prefixes the `cloud` feature recognises. Used to detect a URL-shaped argument and
@@ -538,8 +538,12 @@ enum Cmd {
         /// streaming path. Default: 256 MiB.
         #[arg(long, requires = "spec")]
         stream_threshold: Option<String>,
+        /// Boxed so `Cmd` stays small: `IngestSrc::Table` carries a dozen CLI flags, and without the
+        /// indirection the whole `Cmd` enum pays that variant's size on every arm
+        /// (`clippy::large_enum_variant`). clap constructs it once per process, so the allocation is
+        /// free in practice and the enum stops being 400 bytes wide.
         #[command(subcommand)]
-        src: Option<IngestSrc>,
+        src: Option<Box<IngestSrc>>,
     },
     /// Emit a FAIR discovery record for a `.tsra` (prints JSON to stdout).
     Export {
@@ -892,6 +896,67 @@ enum IngestSrc {
         #[arg(long)]
         quantize: bool,
     },
+    /// Any table-shaped file (Parquet · Arrow/Feather · CSV) → a flat `table` product.
+    ///
+    /// Normalises the source's *logical values* into Tessera's flat columns and re-encodes them under
+    /// Tessera's own deterministic codecs (ADR-0056). The source's compression, page layout and
+    /// dictionary ordering are all dropped by design: a snappy Parquet and a zstd Parquet of the same
+    /// logical table produce the same `content_hash`.
+    ///
+    /// The verb names the **primitive**, not the format — so `ingest table` is also how you override a
+    /// source that misrepresents its shape (ADR-0056 §1/§4). `--from` is sniffed from magic bytes when
+    /// unambiguous; CSV has none, so it must be named.
+    Table {
+        /// Source file: Parquet, Arrow IPC / Feather, or CSV/TSV.
+        input: PathBuf,
+        /// Output `.tsra`.
+        out: PathBuf,
+        /// Product name (the human handle in the manifest, and an identity input).
+        #[arg(long)]
+        name: String,
+        /// Acquisition timestamp (ISO-8601), recorded verbatim. Never defaulted from the clock — an
+        /// identity input must be reproducible.
+        #[arg(long)]
+        timestamp: String,
+        /// Source format. Sniffed from magic bytes (PAR1 / ARROW1) when omitted; required for CSV,
+        /// which has none.
+        #[arg(long, value_parser = ["parquet", "arrow", "csv"])]
+        from: Option<String>,
+        /// Drop a source column before mapping. Repeatable. The escape hatch every rejected-column
+        /// error names (opaque bytes, lists, over-wide decimals).
+        #[arg(long = "exclude", value_name = "COLUMN")]
+        exclude: Vec<String>,
+        /// CSV only: declare a column as `NAME:DTYPE`, in file order. Repeatable and **required** for
+        /// CSV — Tessera infers no dtypes, because an inferred schema depends on which rows were
+        /// sampled and the seal must be reproducible. Append `?` to allow NULLs (`age:i4?`).
+        /// Accepted dtypes: i1 i2 i4 i8 · u1 u2 u4 u8 · f4 f8 · b1 · str.
+        #[arg(long = "column", value_name = "NAME:DTYPE")]
+        column: Vec<String>,
+        /// CSV only: field delimiter (default `,`; pass a tab for TSV). Never sniffed.
+        #[arg(long, value_name = "CHAR")]
+        delimiter: Option<String>,
+        /// CSV only: the file has no header row. By default row 1 is treated as a header and
+        /// **cross-checked** against `--column` order, which is what catches a positional mismatch
+        /// before every value lands in the wrong column.
+        #[arg(long)]
+        no_header: bool,
+        /// CSV only: an extra field text to read as NULL (the empty field always is). Repeatable.
+        #[arg(long = "null-token", value_name = "TOKEN")]
+        null_token: Vec<String>,
+        /// Per-column semantics TOML — `short_name` / `description` / `unit` / `scale` /
+        /// `sensitivity` per column, landing INSIDE the seal (ADR-0056 §7). This is the door that
+        /// keeps a generically-ingested table from being "a Parquet file with a seal on it"; the other
+        /// door is `tessera commit --set …` after the fact.
+        #[arg(long, value_name = "FILE")]
+        column_meta: Option<PathBuf>,
+        /// Clean label for the `ingested_from` provenance edge — replaces the input PATH in the
+        /// sealed manifest (ADR-0040 PHI hygiene).
+        #[arg(long, value_name = "LABEL")]
+        source_label: Option<String>,
+        /// Attach metadata `key=value` (value parsed as JSON, else string). Repeatable.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
+    },
     /// Preserve an un-parsed file as an opaque `blob` product (the "junk" tier).
     ///
     /// Preserves an un-parsed file **bit-faithfully** as an opaque `blob` (`.l64`, `.7z`, PDF;
@@ -944,6 +1009,22 @@ fn main() -> ExitCode {
         .try_init();
     match run(Cli::parse().cmd) {
         Ok(()) => ExitCode::SUCCESS,
+        // ADR-0057 §7: **two distinct errors, two distinct exit codes**, so a cookbook recipe or a
+        // script can branch on "wrong build" versus "wrong invocation" without parsing stderr.
+        //
+        //   3 — the backend name is known, its handler is not in this build. Rebuilding or downloading
+        //       the release binary fixes it; nothing about the command is wrong.
+        //   2 — clap's own usage error, which an unknown `--from` value already produces (with its
+        //       "tip: a similar value exists" suggestion), so it needs no code here.
+        //   1 — everything else.
+        //
+        // The long guidance lives in `tessera_ingest::backends` rather than in the `Display` impl,
+        // because it needs the compiled/disabled lists and a library caller wants the one-liner.
+        Err(e @ tessera_core::Error::BackendNotCompiled(_)) => {
+            eprintln!("error: {e}.\n");
+            eprint!("{}", tessera_ingest::backends::missing_backend_help());
+            ExitCode::from(3)
+        }
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
@@ -1391,7 +1472,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                             .into(),
                     )
                 })?;
-                run_ingest(src)
+                run_ingest(*src)
             }
         }
         Cmd::Export { file, format } => {
@@ -1881,6 +1962,95 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
             },
             out,
         ),
+        IngestSrc::Table {
+            input,
+            out,
+            name,
+            timestamp,
+            from,
+            exclude,
+            column,
+            delimiter,
+            no_header,
+            null_token,
+            column_meta,
+            source_label,
+            meta,
+        } => {
+            // ADR-0056 §4: magic bytes when unambiguous, explicit when not. Sniffing happens HERE, in
+            // the CLI, and never in the engine — the spec records the resolved backend, so a spec is
+            // never ambiguous about which decoder it meant and `spec_hash` stays a complete record.
+            let from = match from {
+                Some(f) => f,
+                None => ingest_spec::sniff_or_explain(&input)?,
+            };
+            // The `--column-meta` file is read here and INLINED into the spec, rather than referenced
+            // by path. ADR-0035 hashes the parsed spec into each member's `ingested_via_spec` edge, so
+            // a path would make that hash a promise about a file the spec does not contain.
+            let column_meta = match &column_meta {
+                Some(p) => ingest_column_meta::ColumnMeta::load(p)?,
+                None => ingest_column_meta::ColumnMeta::empty(),
+            };
+            let options = match from.as_str() {
+                "parquet" => FormatOptions::Parquet {
+                    input,
+                    exclude,
+                    column_meta,
+                },
+                "arrow" => FormatOptions::Arrow {
+                    input,
+                    exclude,
+                    column_meta,
+                },
+                "csv" => {
+                    if column.is_empty() {
+                        return Err(ingest_spec::csv_needs_declarations());
+                    }
+                    FormatOptions::Csv {
+                        input,
+                        columns: column,
+                        delimiter,
+                        header: !no_header,
+                        null_tokens: null_token,
+                        exclude,
+                        column_meta,
+                    }
+                }
+                // Unreachable via clap's value_parser, but the CLI is not the only caller of this
+                // function (the tests construct `IngestSrc` directly), so it stays total.
+                other => {
+                    return Err(tessera_core::Error::Invalid(format!(
+                        "tessera ingest table: unknown --from '{other}' (expected parquet | arrow | csv)"
+                    )))
+                }
+            };
+            (
+                IngestSpec {
+                    collection: CollectionMeta {
+                        name: name.clone(),
+                        description: None,
+                        timestamp: timestamp.clone(),
+                        study: None,
+                    },
+                    spec: SpecMeta::default(),
+                    products: vec![ProductSpec {
+                        name,
+                        role: Role::Raw,
+                        // The primitive schema, always. ADR-0056 §7's laundering rule makes any other
+                        // value a hard error for a generic backend, so there is nothing to choose.
+                        schema: "table".into(),
+                        description: None,
+                        derived_from: Vec::new(),
+                        source_label,
+                        metadata: parse_meta(&meta)?,
+                        generation: None,
+                        producer: None,
+                        options,
+                    }],
+                },
+                out,
+            )
+        }
         IngestSrc::Blob {
             input,
             out,
@@ -2187,7 +2357,7 @@ mod tests {
             ram_budget: None,
             auto: false,
             stream_threshold: None,
-            src: Some(IngestSrc::GeHdf5 {
+            src: Some(Box::new(IngestSrc::GeHdf5 {
                 input: h5,
                 out: out.clone(),
                 name: "DP06-lm".into(),
@@ -2196,7 +2366,7 @@ mod tests {
                 source_label: None,
                 meta: vec![],
                 quantize: false,
-            }),
+            })),
         })
         .unwrap();
 
@@ -2365,7 +2535,7 @@ streaming = "batch"
             ram_budget: None,
             auto: false,
             stream_threshold: None,
-            src: Some(IngestSrc::Dicom {
+            src: Some(Box::new(IngestSrc::Dicom {
                 input: dir.path().join("nope.dcm"),
                 out: dir.path().join("nope.tsra"),
                 name: "x".into(),
@@ -2374,7 +2544,7 @@ streaming = "batch"
                 recipient: vec![],
                 source_label: None,
                 meta: vec![],
-            }),
+            })),
         })
         .unwrap_err();
         assert!(
@@ -2399,7 +2569,7 @@ streaming = "batch"
             ram_budget: None,
             auto: false,
             stream_threshold: None,
-            src: Some(IngestSrc::DicomSeries {
+            src: Some(Box::new(IngestSrc::DicomSeries {
                 inputs: vec![dir.path().join("a.dcm"), dir.path().join("b.dcm")],
                 out: dir.path().join("series.tsra"),
                 name: "DP06-ct".into(),
@@ -2409,7 +2579,7 @@ streaming = "batch"
                 source_label: None,
                 meta: vec![],
                 rescale_mode: "bit-exact".into(),
-            }),
+            })),
         })
         .unwrap_err();
         let msg = format!("{err}");
@@ -2492,7 +2662,7 @@ streaming = "batch"
             ram_budget: None,
             auto: false,
             stream_threshold: None,
-            src: Some(IngestSrc::DicomSeries {
+            src: Some(Box::new(IngestSrc::DicomSeries {
                 inputs: vec![p1.clone(), p2.clone()],
                 out: out.clone(),
                 name: "DP06-ct".into(),
@@ -2502,7 +2672,7 @@ streaming = "batch"
                 source_label: Some("DUPLET-07/CT".into()),
                 meta: vec![],
                 rescale_mode: "bit-exact".into(),
-            }),
+            })),
         })
         .unwrap();
 
@@ -2611,7 +2781,7 @@ streaming = "batch"
             ram_budget: None,
             auto: false,
             stream_threshold: None,
-            src: Some(IngestSrc::Dicom {
+            src: Some(Box::new(IngestSrc::Dicom {
                 input: dcm.clone(),
                 out: shredded.clone(),
                 name: "cs".into(),
@@ -2620,7 +2790,7 @@ streaming = "batch"
                 recipient: vec![recipient_pub],
                 source_label: Some("STUDY-1/CT".into()),
                 meta: vec![],
-            }),
+            })),
         })
         .unwrap();
 
@@ -2732,7 +2902,7 @@ streaming = "batch"
                 ram_budget: None,
                 auto: false,
                 stream_threshold: None,
-                src: Some(IngestSrc::Dicom {
+                src: Some(Box::new(IngestSrc::Dicom {
                     input: dcm.clone(),
                     out: out.to_path_buf(),
                     name: "eq".into(),
@@ -2741,7 +2911,7 @@ streaming = "batch"
                     recipient,
                     source_label: Some("S/CT".into()),
                     meta: vec![],
-                }),
+                })),
             })
             .unwrap();
         };

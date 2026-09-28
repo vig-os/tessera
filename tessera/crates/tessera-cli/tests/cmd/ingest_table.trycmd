@@ -1,0 +1,161 @@
+`tessera ingest table` — bring your own data (#386, ADR-0056).
+
+Tessera has always been able to *preserve* an arbitrary file (`ingest blob` — the FAIR zip: identity,
+seal, provenance, signing, distribution, opaque payload) and to *normalise* a vendor acquisition
+(`ingest dicom`, `ingest ge-hdf5`). This is the third thing, and the one a scientist who is not holding
+a vendor file actually needs: normalise **your own** table into Tessera's primitives, so you get the
+codecs, the column projection, the chunk-level integrity and the cross-arch-deterministic bytes too.
+
+The verb names the **primitive**, not the format (ADR-0056 §4). `--from` is sniffed from magic bytes for
+Parquet (`PAR1`) and Arrow IPC (`ARROW1`); CSV has none, so it is named explicitly.
+
+The input for this walkthrough is `measurements.csv` — six rows, four columns, two missing energies:
+
+```text
+# measurements.csv  (the tracked input; shown, not executed — trycmd runs only `tessera`)
+run_id,detector,energy_kev,coincident
+1,DET-A,511.0,true
+2,DET-B,509.8,true
+3,DET-A,,false
+4,DET-C,511.2,true
+5,DET-B,,false
+6,DET-A,510.5,true
+```
+
+## CSV requires you to declare the dtypes, and that is a determinism decision
+
+Tessera will not infer a CSV schema. An inferred schema depends on which rows were sampled, so the
+*same file* could seal two different ways — and the one property Tessera cannot trade is that the seal
+is reproducible. Asking for it without declarations tells you so, and offers both ways forward:
+
+```
+$ tessera ingest table measurements.csv out.tsra --from csv --name demo --timestamp 2024-03-01T12:00:00Z
+? failed
+error: invalid product: ingest: csv: CSV carries no schema and Tessera does not infer one (an inferred schema depends on which rows were sampled, so the same file could seal two ways — and the seal must be reproducible).
+  declare the columns:
+    tessera ingest table input.csv --column id:i8 --column energy:f8 --column label:str
+  or convert first, keeping the dtypes the producer already knew:
+    duckdb -c "COPY (SELECT * FROM 'input.csv') TO 'input.parquet' (FORMAT parquet)"
+    tessera ingest table input.parquet
+
+```
+
+Declare them and it goes through. `?` marks a column that may be NULL — `energy_kev` has two empty
+fields, and an empty numeric field is not the same as zero:
+
+```
+$ tessera ingest table measurements.csv out.tsra --from csv --name demo --timestamp 2024-03-01T12:00:00Z --column run_id:u4 --column detector:str --column energy_kev:f8? --column coincident:b1 --column-meta columns.toml --meta study=DEMO-2024
+ingested blake3:08332af96ec37e4aebc738b25da4740a4f5b041e11b6bd5ac04eda6a1427c011 (table) -> out.tsra
+
+```
+
+`--meta study=…` is not decoration: the `table` schema marks `study` **recommended**, so leaving it out
+prints a FAIR-completeness nudge on stderr. It never blocks — you can always normalise now and label
+later — but a study handle is what makes a sealed table findable next year, so the example supplies one.
+
+The declaration is **positional**, and it is cross-checked against the header row — so getting the order
+wrong is an error rather than a silent catastrophe where every value lands one column over:
+
+```
+$ tessera ingest table measurements.csv wrong.tsra --from csv --name demo --timestamp 2024-03-01T12:00:00Z --column detector:str --column run_id:u4 --column energy_kev:f8? --column coincident:b1
+? failed
+error: invalid product: ingest: csv: declared column 1 is 'detector' but the header says 'run_id' — declarations are positional, so a mismatch here would put every value in the wrong column.
+  header:   run_id · detector · energy_kev · coincident
+  declared: detector · run_id · energy_kev · coincident
+  (pass --no-header if the file genuinely has no header row)
+
+```
+
+## What you get back is a real Tessera product
+
+It verifies, it declares the `table` schema, and it carries its own contract:
+
+```
+$ tessera verify out.tsra
+OK  out.tsra verified (1 blocks)
+
+```
+
+```
+$ tessera schema out.tsra
+product 'table' — embedded schema v1.0 (A generically-ingested flat table — structural preservation, semantics still to be attached.)
+fields (2 declared):
+  ◐ study                  recommended  public      = "DEMO-2024"
+  ◐ source_format          recommended  public      = "csv"
+OK  schema-valid: out.tsra
+
+```
+
+The columns are queryable — this is the whole difference from `ingest blob`, where the payload is a
+black box. Project a single column without reading the rest (the two missing energies render as `nan`:
+the validity mask is the authority on absence, and a float column has no in-band sentinel for it):
+
+```
+$ tessera read out.tsra data --column energy_kev
+energy_kev
+511
+509.8
+nan
+511.2
+nan
+510.5
+
+```
+
+## Semantics ship with the door, not as homework
+
+A Parquet or CSV has column names and dtypes and nothing else — no descriptions, no units, no
+vocabularies. A sealed table that left those empty would be "a CSV with a seal on it", so
+`--column-meta` (used above) puts them **inside the seal**. `tessera ls` shows what a reader now sees
+without any external data dictionary:
+
+```
+$ tessera ls out.tsra data
+data   table  4 cols × 6 rows
+  run_id     u4
+  detector   str  · Detector module identifier (site-local vocabulary)
+  energy_kev f8  · keV · Calibrated single-photon energy at the detector face
+  coincident b1
+
+```
+
+Anything you did not classify is stamped `unknown` rather than `public`. That is deliberate: generic
+ingest has neither of the vendor paths' defences (GE listmode never sees PHI; DICOM classifies at the
+door per PS3.15), so asserting "safe in clear" over a column that might hold patient identifiers would
+be a false claim sealed permanently. `unknown` says the true thing, and gives an operator something to
+gate on before sharing. The other door stays open too: `tessera commit --set` annotates after the fact,
+content-addressed, with the lineage preserved.
+
+## A generic backend cannot borrow a domain schema's promises
+
+This is the ADR-0056 §7 laundering rule. Without it, pointing `ingest table` at a CSV while claiming
+`--schema listmode` would mint a `.tsra` byte-indistinguishable from a real vendor listmode ingest —
+carrying that schema's PS3.15 `Identifying` tiers that **no classification pass ever validated**, which
+every downstream consumer of `manifest.schema.fields[].sensitivity` would then trust. So a generic
+backend may only produce `table`, `array` or `blob`, and the spec engine enforces it before a byte is
+read:
+
+```
+$ tessera ingest --spec laundered.toml --out laundered-out
+? failed
+error: invalid product: ingest-spec: product 'sneaky' is read by the generic 'csv' backend but claims schema 'listmode'.
+  A generic backend has no domain knowledge, so it cannot honour a domain schema's promises — and a `.tsra` carrying that schema's sensitivity tiers would be indistinguishable from one a real vendor ingest classified (ADR-0056 §7).
+  use a primitive schema:  schema = "table"
+  or ingest through the vendor backend that knows the domain (format = "dicom" / "ge-hdf5" / "nifti"), which classifies at the door
+
+```
+
+## Parquet and Arrow need no declarations — they carry their own dtypes
+
+For the self-describing formats there is nothing to declare and nothing to sniff wrong, so the whole
+invocation is the verb, the file and the identity:
+
+```text
+tessera ingest table study.parquet study.tsra --name study-01 --timestamp 2024-03-01T12:00:00Z
+tessera ingest table study.arrow   study.tsra --name study-01 --timestamp 2024-03-01T12:00:00Z
+```
+
+The source's *physical* encoding is dropped on the way in, by design: ingest is a logical re-encode
+through Tessera's own deterministic codecs. A snappy Parquet and a zstd Parquet of the same logical
+table produce the **same** `content_hash` — which is the point, not a coincidence, and is what makes
+the seal mean something a source file's bytes could not.

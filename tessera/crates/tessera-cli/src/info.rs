@@ -17,10 +17,15 @@
 //!
 //! `--json` emits the same facts in a shape meant to be embedded in `aux/provenance.json`.
 //!
-//! **The flavor is deliberately NOT sealed.** ADR-0056 §6.2 seals `ingest_decoder` — the decoder
-//! name + version, the thing that actually determined the bytes. A compile-time bundle label did
-//! not, and sealing it would invite the false inference "same flavor ⇒ same bytes". ADR-0042's line
-//! holds: sealed = what changed the bytes; `aux/` = who was in the room.
+//! **The flavor is deliberately NOT sealed.** ADR-0056 §6a seals the `ingest_decoder` triple — the
+//! decoder name, its `=`-pinned version, and a digest over the resolved decode-relevant features: the
+//! things that actually determined the bytes. A compile-time bundle label did not, and sealing it
+//! would invite the false inference "same flavor ⇒ same bytes". ADR-0042's line holds: sealed = what
+//! changed the bytes; `aux/` = who was in the room.
+//!
+//! What the `--json` form *does* add is the **pre-image** of that sealed feature digest. Without it
+//! the digest would be a label nobody could check; with it, anyone holding a `.tsra` and a matching
+//! `tessera info --json` can verify the correspondence.
 
 use std::io::Write;
 
@@ -57,10 +62,24 @@ struct Info {
     /// The format/spec version this build *writes* into a manifest's `tessera_version` field.
     format_version: &'static str,
     backends: Vec<BackendInfo>,
-    /// Known backend names whose handler is not in this build. Empty until Phase 1's feature graph.
+    /// Known backend names whose handler is not in this build. Non-empty as soon as a generic-ingest
+    /// lane is switched off (ADR-0057 §5) — which is what makes the two error classes (exit 3 "not
+    /// compiled in" vs exit 2 "unknown name") distinguishable to a script.
     backends_disabled: Vec<&'static str>,
     /// Build modes, by the same names their Cargo features carry.
     build: std::collections::BTreeMap<&'static str, bool>,
+    /// The **pre-image** of the `ingest_decoder` feature digest that this build seals into every
+    /// generic-ingest product's recipe (ADR-0056 §6a).
+    ///
+    /// The sealed triple carries `blake3(<this string>)`. Printing the pre-image here is what keeps
+    /// that digest from being a one-way function with no inverse anywhere: a reader holding a `.tsra`
+    /// and a `tessera info --json` from the same version can confirm the digest rather than merely
+    /// observe it. Unsealed by design — it is a diagnostic about the build, and ADR-0042's line is
+    /// that `aux/` holds who was in the room.
+    ingest_decode_features: &'static str,
+    /// `blake3:…` over [`Self::ingest_decode_features`] — the exact third component of the sealed
+    /// triple, so the correspondence is checkable without recomputing it by hand.
+    ingest_decode_digest: String,
 }
 
 fn collect() -> Info {
@@ -76,6 +95,8 @@ fn collect() -> Info {
             .collect(),
         backends_disabled: backends_disabled(),
         build: BUILD_FLAGS.iter().copied().collect(),
+        ingest_decode_features: tessera_ingest::decoder::feature_preimage(),
+        ingest_decode_digest: tessera_ingest::decoder::feature_digest(),
     }
 }
 
@@ -157,11 +178,17 @@ mod tests {
             );
         }
 
-        assert_eq!(
-            lines.next().unwrap(),
-            "disabled:   (none)",
-            "no decoder feature gate exists yet, so nothing is disabled (Phase 1 changes this)"
-        );
+        // A default build has every generic lane on, so nothing is disabled. Under
+        // `--no-default-features` the same line must name them instead of the ingest failing with a
+        // parse error — that is the whole point of the total-enum/gated-handler split (ADR-0057 §6).
+        let disabled = lines.next().unwrap();
+        if backends_disabled().is_empty() {
+            assert_eq!(disabled, "disabled:   (none)");
+        } else {
+            for name in backends_disabled() {
+                assert!(disabled.contains(name), "'{name}' missing from: {disabled}");
+            }
+        }
 
         let build = lines.next().unwrap();
         for (flag, _) in BUILD_FLAGS {
@@ -188,6 +215,30 @@ mod tests {
         expect("sql", cfg!(feature = "sql"));
     }
 
+    /// ADR-0056 §6a: the sealed feature digest must be *checkable*, not merely observable. So the
+    /// JSON form carries both the digest and its pre-image, and they must correspond — otherwise the
+    /// sealed third component of the triple would be a label with no inverse anywhere.
+    #[test]
+    fn the_sealed_feature_digest_is_invertible_from_this_output() {
+        let mut buf = Vec::new();
+        info(true, &mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let preimage = v["ingest_decode_features"].as_str().unwrap();
+        let digest = v["ingest_decode_digest"].as_str().unwrap();
+        assert_eq!(
+            digest,
+            tessera_core::hash::digest(preimage.as_bytes()),
+            "the printed digest must be blake3 of the printed pre-image"
+        );
+        // …and it must be the same digest a sealed product actually carries.
+        let sealed = tessera_ingest::decoder::Decoder::PARQUET.to_value();
+        assert_eq!(sealed["features"].as_str().unwrap(), digest);
+        assert!(
+            preimage.contains("tessera-ingest="),
+            "the pre-image attributes our own canonicalisation too: {preimage}"
+        );
+    }
+
     #[test]
     fn json_form_is_parseable_and_carries_the_same_facts() {
         let mut buf = Vec::new();
@@ -200,7 +251,10 @@ mod tests {
             v["backends"].as_array().unwrap().len(),
             BACKENDS_ENABLED.len()
         );
-        assert!(v["backends_disabled"].as_array().unwrap().is_empty());
+        assert_eq!(
+            v["backends_disabled"].as_array().unwrap().len(),
+            backends_disabled().len()
+        );
         assert_eq!(v["build"]["cloud"], cfg!(feature = "cloud"));
 
         // hdf-compound reports the libhdf5 actually linked; the in-tree parsers report no decoder.

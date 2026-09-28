@@ -659,6 +659,37 @@ fn the_laundering_rule_fires_before_the_file_is_opened() {
     );
 }
 
+/// A rejected spec must leave **nothing** behind — not even an empty output directory. An operator
+/// told "this spec cannot run" should not then find a directory suggesting it partly did.
+#[test]
+fn a_rejected_spec_creates_no_output_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("should-not-exist");
+    let spec = one_product_spec(
+        FormatOptions::Parquet {
+            input: dir.path().join("whatever.parquet"),
+            exclude: Vec::new(),
+            column_meta: ColumnMeta::empty(),
+        },
+        "listmode",
+    );
+    let err = engine::run(
+        &spec,
+        Path::new("test-inline-spec"),
+        &out,
+        &tessera_io::WriteConfig::default(),
+        engine::DEFAULT_STREAM_THRESHOLD_BYTES,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("claims schema 'listmode'"), "got {err}");
+    assert!(
+        !out.exists(),
+        "a spec rejected at the door must not have created {}",
+        out.display()
+    );
+}
+
 /// The allowlisted primitive schema is accepted, so the rule is a filter and not a blanket refusal.
 #[test]
 fn the_primitive_schema_is_accepted() {
