@@ -513,25 +513,6 @@ mod tests {
         assert_eq!(sealed.content_hash.as_deref(), Some(final_root.as_str()));
     }
 
-    /// A `MakeWriter` over a shared buffer — captures the tracing fmt output for assertions.
-    #[derive(Clone)]
-    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-    impl std::io::Write for BufWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
-        type Writer = BufWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
     #[test]
     fn seal_streams_fragments_without_materializing_into_one_vec() {
         // The must-fix: seal MUST stream each fragment file straight into the zip (pack_streaming),
@@ -588,22 +569,13 @@ mod tests {
 
     #[test]
     fn append_block_emits_a_structured_write_trace() {
-        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::INFO)
-            .with_ansi(false)
-            .finish();
-
         let dir = tempfile::tempdir().unwrap();
-        tracing::subscriber::with_default(subscriber, || {
+        let logged = crate::test_trace::capture(tracing::Level::INFO, || {
             let mut ws =
                 WriteSession::create(&dir.path().join("stage"), "recon", "p", "d", TS).unwrap();
             let (r, p) = block("volume", 0);
             ws.append_block(r, &p).unwrap();
         });
-
-        let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         // the write-path event fired with full I/O info: message + every structured field.
         assert!(
             logged.contains("committed block"),

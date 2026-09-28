@@ -25,6 +25,14 @@ pub mod repo;
 pub mod sign;
 pub mod stream;
 pub mod table;
+// Test-only tracing setup (#356). PRIVATE and `cfg(test)` — it installs a global tracing
+// subscriber, which must never be reachable from a release build or from a downstream crate. The
+// regression test in `tests/` compiles this same file directly via `#[path]` rather than going
+// through the public API; see that file for why.
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod test_trace;
 pub mod worm;
 pub mod write;
 
