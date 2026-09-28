@@ -74,6 +74,44 @@
           "tessera-cli/sql"
         ];
 
+        # One Gate A derivation per feature configuration (see `checks.ingest-gate-a*` for the why).
+        # Regenerates the ingest conformance corpus under `features` and requires byte-equality with the
+        # committed goldens.
+        #
+        # No `-p`: cargo only accepts the cross-package `--features pkg/feat` form from the workspace
+        # root, and cross-package unification is the entire point — `tessera-cli/sql` has to be able to
+        # reach the shared arrow tree for the H1 door to be under test at all. The example is unambiguous
+        # (only tessera-ingest declares it), so no `-p` is needed.
+        ingestGateA = tag: features:
+          craneLib.mkCargoDerivation (commonArgs // {
+            inherit cargoArtifacts;
+            # The prebuilt dependency artifacts are needed, but must not be re-installed into `$out` —
+            # this derivation's output is a pass/fail marker, not a build cache, and inheriting the
+            # install hook without disabling it fails the check on
+            # `doCompressAndInstallFullArchive: unbound variable` *after* the gate has passed.
+            doInstallCargoArtifacts = false;
+            pnameSuffix = "-ingest-gate-a-${tag}";
+            buildPhaseCargoCommand = ''
+              set -euo pipefail
+              echo "[gate A/${tag}] cargo run --example gen_ingest_corpus ${features}" >&2
+              cargo run -q --example gen_ingest_corpus ${features} > "$TMPDIR/corpus.json"
+              if ! cmp -s "$TMPDIR/corpus.json" corpus/ingest-corpus.json; then
+                echo "" >&2
+                echo "Gate A (ADR-0057 §5): the ingest corpus under the '${tag}' feature" >&2
+                echo "configuration does NOT match the committed corpus/ingest-corpus.json." >&2
+                diff -u corpus/ingest-corpus.json "$TMPDIR/corpus.json" >&2 || true
+                echo "" >&2
+                echo "A content_hash that moved means a decoder extracted DIFFERENT VALUES — say which" >&2
+                echo "ADR-0056 §5 H-rule changed behaviour and why the new values are correct." >&2
+                echo "A manifest_hash that moved is routine ONLY alongside a moved ingest_decoder." >&2
+                echo "Regenerate deliberately with:" >&2
+                echo "    cargo run -p tessera-ingest --example gen_ingest_corpus > corpus/ingest-corpus.json" >&2
+                exit 1
+              fi
+              echo "[gate A/${tag}] agrees with the committed corpus" >&2
+            '';
+          });
+
         commonArgs = {
           inherit src;
           strictDeps = true;
@@ -362,71 +400,42 @@
           #   formats are READABLE; it must never change the BYTES produced for a readable one.
           #
           # So the ingest corpus is regenerated under several feature configurations and every output
-          # must be byte-identical to every other AND to the committed `corpus/ingest-corpus.json`.
+          # must be byte-identical to the committed `corpus/ingest-corpus.json`.
           #
-          # The `tessera-cli/sql` configuration is the one that earns this check. ADR-0057 §5's probe
-          # found that the optional `sql` feature turns on `arrow-array/chrono-tz` — inside the shared
-          # arrow tree the ingest table lane decodes through — which is ADR-0056 hazard **H1** (tzdb:
-          # compiled-in vs. host `/usr/share/zoneinfo`) arriving through a *feature* rather than a host.
-          # The `ingest_parquet_scalars` fixture carries a `timestamp(us, "America/New_York")` column
+          # **One derivation per configuration, not one derivation running all of them.** Each
+          # configuration recompiles the crates its features touch, and doing four in a single sandbox
+          # exhausted the disk on a host whose `/` was near full (`No space left on device`, after the
+          # gate logic itself had passed). Splitting them lets nix schedule and reclaim between builds,
+          # and a failure names the offending configuration in the derivation name instead of in a log.
+          #
+          # The `sql` configuration is the one that earns this gate. ADR-0057 §5's probe found that the
+          # optional `sql` feature turns on `arrow-array/chrono-tz` — inside the shared arrow tree the
+          # ingest table lane decodes through — which is ADR-0056 hazard **H1** (tzdb: compiled-in vs.
+          # host `/usr/share/zoneinfo`) arriving through a *feature* rather than a host. The
+          # `ingest_parquet_scalars` fixture carries a `timestamp(us, "America/New_York")` column
           # precisely so that door is watched. It is closed by construction as well (the type map reads
           # the raw i64 ticks and never calls a zone-aware arrow function) but "by construction" is a
           # claim, and this is the test of it.
-          ingest-gate-a = craneLib.mkCargoDerivation (commonArgs // {
-            # The prebuilt dependency artifacts are needed (this compiles four feature configurations),
-            # but must not be re-installed into `$out` — this derivation's output is a pass/fail marker,
-            # not a build cache, and inheriting the install hook without disabling it fails the check on
-            # `doCompressAndInstallFullArchive: unbound variable` *after* the gate itself has passed.
+          ingest-gate-a = ingestGateA "default" "";
+          ingest-gate-a-sql = ingestGateA "sql" "--features tessera-cli/sql";
+          ingest-gate-a-workspace = ingestGateA "workspace-features" "--features ${workspaceFeatures}";
+
+          # The REDUCED configuration cannot be byte-compared (it produces fewer fixtures), so it is
+          # checked by the corpus test itself, which compares field-wise over the fixtures it can run
+          # AND asserts the declared count for that configuration (ADR-0057 §5's anti-vacuity guard).
+          #
+          # This is the leg that catches a `manifest_hash` depending on which lanes were compiled in.
+          # An earlier derivation of the sealed `ingest_decoder` digest did exactly that — it hashed this
+          # crate's own resolved feature set, so a build without the CSV lane sealed a different
+          # `manifest_hash` for the same Parquet — and this configuration is what surfaced it. Keeping it
+          # in CI is what stops that class of bug coming back.
+          ingest-gate-a-reduced = craneLib.mkCargoDerivation (commonArgs // {
             inherit cargoArtifacts;
             doInstallCargoArtifacts = false;
-            pnameSuffix = "-ingest-gate-a";
+            pnameSuffix = "-ingest-gate-a-reduced";
             buildPhaseCargoCommand = ''
-              set -euo pipefail
-              mkdir -p "$TMPDIR/out"
-              # No `-p`: cargo only accepts the cross-package `--features pkg/feat` form from the
-              # workspace root, and cross-package unification is the entire point — `tessera-cli/sql`
-              # has to be able to reach the shared arrow tree for the H1 door to be under test at all.
-              # The example is unambiguous (only tessera-ingest declares it), so no `-p` is needed.
-              run() {
-                local tag="$1"; shift
-                echo "[gate A] $tag: cargo run --example gen_ingest_corpus $*" >&2
-                cargo run -q --example gen_ingest_corpus "$@" > "$TMPDIR/out/$tag.json"
-              }
-              run default
-              run sql                --features tessera-cli/sql
-              run cloud              --features tessera-io/cloud
-              run workspace-features --features ${workspaceFeatures}
-
-              fail=0
-              for f in "$TMPDIR"/out/*.json; do
-                if ! cmp -s "$f" corpus/ingest-corpus.json; then
-                  echo "" >&2
-                  echo "Gate A (ADR-0057 §5): the ingest corpus under $(basename "$f" .json) does NOT" >&2
-                  echo "match the committed corpus/ingest-corpus.json." >&2
-                  diff -u corpus/ingest-corpus.json "$f" >&2 || true
-                  fail=1
-                fi
-              done
-              if [ "$fail" -ne 0 ]; then
-                echo "" >&2
-                echo "A content_hash that moved means a decoder extracted DIFFERENT VALUES — say which" >&2
-                echo "ADR-0056 §5 H-rule changed behaviour and why the new values are correct." >&2
-                echo "A manifest_hash that moved is routine ONLY alongside a moved ingest_decoder." >&2
-                echo "Regenerate deliberately with:" >&2
-                echo "    cargo run -p tessera-ingest --example gen_ingest_corpus > corpus/ingest-corpus.json" >&2
-                exit 1
-              fi
-              echo "[gate A] every full configuration agrees with the committed corpus" >&2
-
-              # A REDUCED configuration cannot be byte-compared (it produces fewer fixtures), so it is
-              # checked by the corpus test itself, which compares field-wise over the fixtures it can run
-              # AND asserts the declared count for that configuration. This is the leg that catches a
-              # `manifest_hash` depending on which lanes were compiled in — an earlier derivation of the
-              # sealed decoder digest did exactly that, and this configuration is what surfaced it.
-              echo "[gate A] parquet-no-csv: cargo test --no-default-features --features parquet" >&2
               cargo test -p tessera-ingest --no-default-features --features parquet \
                 --test ingest_corpus
-              echo "[gate A] the reduced configuration reproduces the same goldens" >&2
             '';
           });
 
