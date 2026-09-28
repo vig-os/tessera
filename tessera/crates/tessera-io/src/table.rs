@@ -2448,6 +2448,35 @@ mod tests {
             enc(&format!("prefix_{k}"), &all[..k]);
         }
         enc("full_fixture_column", &all);
+
+        // #468 reproducer, same probe so one run covers both defects. The i64 shape
+        // [MIN, 0, MAX] zigzags to a value that bitpacks with exactly one exception, which
+        // produces a PATCHES array — and constructing Patches ran a debug-only is_sorted assert
+        // that cached a statistic on the indices. Cached stats are serialised, so debug and
+        // release wrote different bytes. These lines must be identical across build profiles.
+        {
+            fn enc_i64(label: &str, vals: &[i64]) {
+                let data: TableData = vec![("x".into(), ColumnData::I64(vals.to_vec()))];
+                let spec = TableSpec {
+                    columns: vec![col("x", "i8")],
+                    rows: vals.len() as u64,
+                    row_index: None,
+                };
+                let bytes = encode(&spec, &data).unwrap();
+                emit(&format!(
+                    "PROBE468\t{label}\tn={}\tlen={}\thex={}",
+                    vals.len(),
+                    bytes.len(),
+                    bytes.iter().map(|x| format!("{x:02x}")).collect::<String>()
+                ));
+            }
+            enc_i64("i64_min_zero_max", &[i64::MIN, 0, i64::MAX]);
+            enc_i64("i64_max_zero_min", &[i64::MAX, 0, i64::MIN]);
+            enc_i64("i64_min_zero_zero_max", &[i64::MIN, 0, 0, i64::MAX]);
+            // Controls the issue reports as profile-identical even before the fix.
+            enc_i64("ctl_i64_min_max", &[i64::MIN, i64::MAX]);
+            enc_i64("ctl_i64_neg1_0_1", &[-1, 0, 1]);
+        }
     }
 
     #[test]

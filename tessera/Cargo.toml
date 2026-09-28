@@ -89,3 +89,37 @@ tessera-ingest = { path = "crates/tessera-ingest" }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# SCRATCH ONLY -- never merge, and never open a tessera PR carrying this.
+# Points the WHOLE vortex graph at the fork branch that carries the #468 and #472 fixes, so their
+# effect on tessera's own bytes can be measured. Every vortex crate must be patched together:
+# patching vortex-array alone leaves its siblings coming from crates.io, which yields two copies of
+# vortex-proto/vortex-buffer and a wall of type mismatches.
+[patch.crates-io]
+vortex-alp = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-array = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-array-macros = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-btrblocks = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-buffer = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-bytebool = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-compressor = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-datetime-parts = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-decimal-byte-parts = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-error = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-fastlanes = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-file = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-flatbuffers = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-fsst = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-io = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-layout = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-mask = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-metrics = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-pco = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-proto = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-runend = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-scan = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-sequence = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-session = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-sparse = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-utils = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
+vortex-zigzag = { git = "https://github.com/gerchowl/vortex", rev = "252cb7afb" }
