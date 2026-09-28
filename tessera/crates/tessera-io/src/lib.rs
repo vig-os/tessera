@@ -25,6 +25,8 @@ pub mod repo;
 pub mod sign;
 pub mod stream;
 pub mod table;
+#[cfg(test)]
+mod test_trace;
 pub mod worm;
 pub mod write;
 
