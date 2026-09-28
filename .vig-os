@@ -75,7 +75,7 @@ DEVKIT_DEV_PROFILE_PATH=
 # mirror branch, e.g. `sync/issue-mirror`; the sync job bootstraps it from the
 # default branch head if absent. The mirror diverges permanently and is never
 # merged back — each sync run regenerates full state (#1228).
-DEVKIT_SYNC_TARGET=
+DEVKIT_SYNC_TARGET=sync/issue-mirror
 
 # Cron override for the sync-issues schedule trigger (5-field cron, validated at
 # scaffold time). Empty (default) => the daily `0 2 * * *`. e.g. `0 5 * * 0` runs
