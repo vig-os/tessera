@@ -660,35 +660,7 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
             }
             Ok(())
         }
-        Some(p) if p == "extra" || p == "extra/" => {
-            if m.extra.is_empty() {
-                writeln!(out, "(no extra fields)").map_err(tessera_core::Error::from)?;
-            }
-            for (k, v) in &m.extra {
-                let kind = match v {
-                    Value::Object(o) => format!("object, {} keys", o.len()),
-                    Value::Array(a) => format!("array, {} items", a.len()),
-                    Value::String(_) => "string".into(),
-                    other => other.to_string(),
-                };
-                writeln!(out, "{k}  ({kind})").map_err(tessera_core::Error::from)?;
-            }
-            Ok(())
-        }
-        Some(p) if p.starts_with("extra/") => {
-            let key = &p["extra/".len()..];
-            match m.extra.get(key) {
-                Some(v) => writeln!(out, "{}", serde_json::to_string_pretty(v)?)
-                    .map_err(tessera_core::Error::from)?,
-                None => {
-                    return Err(tessera_core::Error::Invalid(format!(
-                        "no extra key '{key}' (keys: {})",
-                        m.extra.keys().cloned().collect::<Vec<_>>().join(", ")
-                    )))
-                }
-            }
-            Ok(())
-        }
+        Some(p) if is_extra_path(p) => write_extra(m, p, out),
         Some(p) if p == "aux" || p == "aux/" => {
             // List the embedded aux members carried inside the container (ADR-0042). No sizes are
             // shown — an aux member is opaque JSON / arbitrary bytes; `ls FILE aux/<name>` reads it.
@@ -835,6 +807,18 @@ pub struct ReadResult {
 /// Columns are projected (only the requested columns' segments are decoded per block).
 pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
     let mut r = Reader::open(opts.file)?;
+    // `extra/*` is manifest metadata rather than a block, so it matches neither the non-table-block
+    // guard below nor any table prefix — it used to fall through to `logical_table` and surface
+    // "no blocks for prefix 'extra/…'" (#303). Serve it as JSON through the same renderer `ls` uses, so
+    // both navigation verbs address one namespace. Not row-oriented, hence never truncated.
+    if is_extra_path(opts.block) {
+        write_extra(r.manifest(), opts.block, out)?;
+        return Ok(ReadResult {
+            shown: 1,
+            total: 1,
+            truncated: false,
+        });
+    }
     // `read` is table-only. If the target names a non-table block (array volume, blob, index), fail
     // with a clear pointer instead of the opaque "missing field columns" from the table decoder
     // (#253/#268). Covers Array/Blob/ChunkIndex; a multi-block table prefix like `events` won't
@@ -1479,6 +1463,53 @@ pub fn project(
     Ok(())
 }
 
+/// Does this path address the manifest's `extra/` namespace (the fd5 extension fields)?
+///
+/// `extra/*` is **manifest metadata, not a block**, which is why `read` used to fall through to the
+/// logical-table path and surface its internal "no blocks for prefix" error (#303).
+fn is_extra_path(p: &str) -> bool {
+    p == "extra" || p == "extra/" || p.starts_with("extra/")
+}
+
+/// Render the `extra/` namespace: the key listing for `extra` itself, or one key's value as pretty JSON.
+///
+/// Shared by `ls` and `read` so the two navigation verbs address exactly the same namespace (#303) —
+/// `ls` could reach the preserved DICOM header while `read` could not, which is confusing for a first
+/// user exploring a product, and the fix is to make the error impossible rather than better-worded.
+fn write_extra(
+    m: &tessera_core::manifest::Manifest,
+    path: &str,
+    out: &mut dyn Write,
+) -> Result<()> {
+    if path == "extra" || path == "extra/" {
+        if m.extra.is_empty() {
+            writeln!(out, "(no extra fields)").map_err(tessera_core::Error::from)?;
+        }
+        for (k, v) in &m.extra {
+            let kind = match v {
+                Value::Object(o) => format!("object, {} keys", o.len()),
+                Value::Array(a) => format!("array, {} items", a.len()),
+                Value::String(_) => "string".into(),
+                other => other.to_string(),
+            };
+            writeln!(out, "{k}  ({kind})").map_err(tessera_core::Error::from)?;
+        }
+        return Ok(());
+    }
+    let key = &path["extra/".len()..];
+    match m.extra.get(key) {
+        Some(v) => writeln!(out, "{}", serde_json::to_string_pretty(v)?)
+            .map_err(tessera_core::Error::from)?,
+        None => {
+            return Err(tessera_core::Error::Invalid(format!(
+                "no extra key '{key}' (keys: {})",
+                m.extra.keys().cloned().collect::<Vec<_>>().join(", ")
+            )))
+        }
+    }
+    Ok(())
+}
+
 /// Compact numeric render for slice CSV: integers without a trailing `.0`, floats to 6 sig-ish.
 fn fmt_f64(v: &f64) -> String {
     if v.fract() == 0.0 && v.abs() < 1e15 {
@@ -1986,6 +2017,7 @@ mod tests {
         assert!((mean - 3.0).abs() < 1e-9 && (std - 5f64.sqrt()).abs() < 1e-9);
     }
 
+    #[test]
     /// **#303** — `ls` and `read` disagreed about what is addressable. The full preserved DICOM header
     /// lands in `extra/dicom_header` (an object, ~167 keys) and `ls FILE extra/dicom_header` dumps it,
     /// but `read FILE extra/dicom_header` died with the internal
