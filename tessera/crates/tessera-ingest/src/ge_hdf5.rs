@@ -281,9 +281,21 @@ pub fn read_compound(path: &std::path::Path, dataset: &str) -> Result<TableData>
 /// Default row-slab for streaming reads — rows pulled per HDF5 hyperslab (the bounded-memory unit).
 pub const STREAM_SLAB_ROWS: usize = 1 << 16;
 
-/// Ceiling on one streaming slab's transient read buffer (#325). Only a *chunk-aligned* slab grows
-/// toward this — the cap bounds how many whole chunks we swallow per `H5Dread`, keeping the
-/// bounded-memory promise (ADR-0026) while leaving room for a realistic vendor chunk.
+/// Soft ceiling on one streaming slab's transient read buffer (#325): it bounds how many WHOLE
+/// chunks are swallowed per `H5Dread`, but it is **not** a hard cap on the buffer.
+///
+/// [`chunk_aligned_slab`] never returns less than one chunk, so on a dataset whose single chunk
+/// exceeds this value the slab is that chunk and the buffer exceeds the ceiling. Peak transient
+/// footprint of a slab is therefore about `2 x max(MAX_SLAB_BYTES, chunk_bytes)` — the raw `buf`
+/// and the decoded columns from [`slab_to_columns`] are both live across the `sink` call. That is
+/// honest rather than tight: sub-chunk reads cannot lower it, because libhdf5 materialises the
+/// whole chunk regardless (see [`chunk_aligned_slab`]).
+///
+/// The alternative was to leave the slab small and instead enlarge libhdf5's per-dataset chunk
+/// cache (`H5Pset_chunk_cache` on the dataset-access plist), which fixes the same re-inflation.
+/// Alignment was chosen because it needs **no new FFI** — the cache route means another raw
+/// `hdf5-metno-sys` plist call on top of the existing unsafe block — and costs the same memory:
+/// a cache big enough to stop the re-reads has to hold a chunk too.
 const MAX_SLAB_BYTES: usize = 64 << 20;
 
 /// Round a requested slab up to a whole number of dataset **chunks** (#325).
