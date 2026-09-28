@@ -1441,6 +1441,116 @@ mod tests {
         assert!(t.columns.is_empty());
     }
 
+    /// **Sliced arrays must map to their sliced values.**
+    ///
+    /// A `RecordBatch` does not always own its buffers from index 0: a reader that splits a row group,
+    /// or any caller that used `RecordBatch::slice`, hands over arrays with a non-zero offset. Several
+    /// arms here read `values()` — the raw buffer — and the `FixedSizeList` arm does its own
+    /// `r * width + k` arithmetic, so "does this respect the offset?" is a question with a wrong answer
+    /// available. It happens to be right (arrow-rs's `ScalarBuffer` carries the slice, and
+    /// `FixedSizeListArray::slice` slices its child too), but *happens to be right* is exactly what a
+    /// test is for: nothing in the type map's own code would stop a future arm from reading through an
+    /// offset, and the failure mode is silently sealing the wrong rows.
+    #[test]
+    fn sliced_arrays_map_to_their_sliced_values_not_the_whole_buffer() {
+        // Offset 2, length 3, out of 6 rows — so a bug that ignored the offset would read [10,11,12]
+        // and a bug that ignored the length would read to the end.
+        let mut fsl = FixedSizeListBuilder::new(Int32Builder::new(), 2);
+        for row in [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12]] {
+            fsl.values().append_slice(&row);
+            fsl.append(true);
+        }
+        let batch = record_batch(vec![
+            (
+                "prim",
+                Arc::new(Int32Array::from(vec![10, 11, 12, 13, 14, 15])) as ArrayRef,
+            ),
+            (
+                "nullable",
+                Arc::new(Int32Array::from(vec![
+                    Some(10),
+                    Some(11),
+                    None,
+                    Some(13),
+                    None,
+                    Some(15),
+                ])) as ArrayRef,
+            ),
+            (
+                "text",
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e", "f"])) as ArrayRef,
+            ),
+            (
+                "flag",
+                Arc::new(BooleanArray::from(vec![
+                    true, false, true, true, false, false,
+                ])) as ArrayRef,
+            ),
+            ("pair", Arc::new(fsl.finish()) as ArrayRef),
+        ])
+        .unwrap();
+
+        let sliced = batch.slice(2, 3);
+        assert_eq!(sliced.num_rows(), 3);
+        let t = canonicalise_batch(&sliced, &[]).unwrap();
+        assert_eq!(t.rows(), 3);
+
+        let by = |name: &str| {
+            t.columns
+                .iter()
+                .find(|(c, _)| c.name == name)
+                .map(|(_, d)| d.clone())
+                .unwrap_or_else(|| panic!("column '{name}' missing"))
+        };
+        assert_eq!(by("prim"), ColumnData::I32(vec![12, 13, 14]));
+        assert_eq!(
+            by("text"),
+            ColumnData::Utf8(vec!["c".into(), "d".into(), "e".into()])
+        );
+        assert_eq!(by("flag"), ColumnData::Bool(vec![true, true, false]));
+        // The validity mask has to be sliced in step with the values, or a null lands on the wrong row.
+        let ColumnData::Nullable { values, validity } = by("nullable") else {
+            panic!("expected a mask")
+        };
+        assert_eq!(*values, ColumnData::I32(vec![0, 13, 0]));
+        assert_eq!(validity, vec![false, true, false]);
+        // And the expanded tuple columns: rows 2..5 of the pairs are [5,6], [7,8], [9,10].
+        assert_eq!(by("pair.0"), ColumnData::I32(vec![5, 7, 9]));
+        assert_eq!(by("pair.1"), ColumnData::I32(vec![6, 8, 10]));
+    }
+
+    /// The same question for the two *encoded* lanes, whose `gather` walks a logical→physical index map.
+    #[test]
+    fn sliced_dictionary_and_run_end_arrays_decode_their_sliced_region() {
+        let mut b = StringDictionaryBuilder::<arrow_array::types::Int32Type>::new();
+        for v in ["red", "green", "blue", "green", "red", "blue"] {
+            b.append_value(v);
+        }
+        let dict: ArrayRef = Arc::new(b.finish());
+        let t = one_sliced("c", dict, 2, 3).unwrap();
+        assert_eq!(
+            values_of(&t, 0),
+            ColumnData::Utf8(vec!["blue".into(), "green".into(), "red".into()])
+        );
+
+        // Runs: [7,7] [9,9,9] [11] — rows 2..5 span the end of run 0 and all of run 1.
+        let rle: ArrayRef = Arc::new(
+            RunArray::try_new(
+                &Int32Array::from(vec![2, 5, 6]),
+                &Int32Array::from(vec![7, 9, 11]),
+            )
+            .unwrap(),
+        );
+        let t = one_sliced("x", rle, 2, 3).unwrap();
+        assert_eq!(values_of(&t, 0), ColumnData::I32(vec![9, 9, 9]));
+    }
+
+    /// Canonicalise one column after slicing it — the seam the two slice tests share.
+    fn one_sliced(name: &str, a: ArrayRef, offset: usize, len: usize) -> Result<CanonicalTable> {
+        let batch = record_batch(vec![(name, a)])?;
+        canonicalise_batch(&batch.slice(offset, len), &[])
+    }
+
     /// A struct nested in a struct flattens all the way down — the recursion is not one level deep.
     #[test]
     fn nested_structs_flatten_recursively() {

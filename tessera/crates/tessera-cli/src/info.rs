@@ -233,9 +233,18 @@ mod tests {
         // …and it must be the same digest a sealed product actually carries.
         let sealed = tessera_ingest::decoder::Decoder::PARQUET.to_value();
         assert_eq!(sealed["features"].as_str().unwrap(), digest);
+        // The pre-image names the DECODER PINS and nothing else. An earlier derivation also named this
+        // build's feature selection and this crate's version; both were removed because both made
+        // `manifest_hash` move when the interpretation of the file did not (see
+        // `tessera-ingest/build.rs`). Asserting the absence here keeps `tessera info` honest about what
+        // the sealed digest actually covers.
         assert!(
-            preimage.contains("tessera-ingest="),
-            "the pre-image attributes our own canonicalisation too: {preimage}"
+            preimage.starts_with("pins="),
+            "the pre-image is the decoder pins: {preimage}"
+        );
+        assert!(
+            !preimage.contains("features="),
+            "a lane that was not compiled in did not read the file: {preimage}"
         );
     }
 
