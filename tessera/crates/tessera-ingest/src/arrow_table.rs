@@ -124,21 +124,21 @@ pub fn canonicalise_batches(batches: &[RecordBatch], exclude: &[String]) -> Resu
     // An `--exclude` that matches nothing is a typo, and a typo that silently does nothing is the worst
     // outcome here: the operator believes they dropped a PHI column. The CSV lane already errors on
     // this, so the two lanes agree rather than differing by accident.
-    // A dotted name is allowed here even though no top-level field matches it: it may name a leaf a
-    // struct flatten will produce. Requiring the prefix to exist is what keeps this a real check rather
-    // than a hole — `--exclude nosuch.child` is still rejected.
-    if let Some(unknown) = exclude.iter().find(|e| {
-        let head = e.split('.').next().unwrap_or(e.as_str());
-        !schema.fields().iter().any(|f| f.name() == head)
-    }) {
+    // **Every `--exclude` must name a real LEAF path**, dotted or not.
+    //
+    // Checking only the part before the dot let `--exclude patient.nmae` pass and then match nothing —
+    // so the column the operator believed they had dropped was **sealed**. That is the same
+    // false-confidence failure the `--column-meta` typo check exists to prevent, and worse here, because
+    // the column in question is the one they thought was PHI.
+    //
+    // The leaf paths are enumerated from the schema *before* anything is decoded, which also makes the
+    // advice in a rejected-column error work: an excluded leaf is skipped before `map_field` can reject
+    // it (see below).
+    let leaves = schema_leaf_paths(&schema);
+    if let Some(unknown) = exclude.iter().find(|e| !leaves.contains(*e)) {
         return Err(he(format!(
             "--exclude names '{unknown}', which is not a column in this file\n  columns: {}",
-            schema
-                .fields()
-                .iter()
-                .map(|f| f.name().as_str())
-                .collect::<Vec<_>>()
-                .join(" · ")
+            leaves.join(" · ")
         )));
     }
     let mut b = TableBuilder::new();
@@ -149,17 +149,13 @@ pub fn canonicalise_batches(batches: &[RecordBatch], exclude: &[String]) -> Resu
         if exclude.iter().any(|e| e == field.name()) {
             continue;
         }
-        // A dotted `--exclude parent.child` names a LEAF that a struct flatten will produce, which does
-        // not exist yet at this point — so the top-level check above cannot see it. It is applied after
-        // the flatten instead (below), which is what makes the advice in a nested-column rejection
-        // ("drop it: --exclude parent.child") actually work rather than silently doing nothing.
         // A struct or fixed-size list fans out into several columns, so the unit of folding is
         // "named leaves", not "one column".
         let mut folded: Vec<(String, Column, ColumnData)> = Vec::new();
         for batch in batches {
             let array = batch.column(idx);
             let mut leaves = Vec::new();
-            map_field(field.name(), field, array, &mut b, &mut leaves)?;
+            map_field(field.name(), field, array, exclude, &mut b, &mut leaves)?;
             if folded.is_empty() {
                 folded = leaves;
                 continue;
@@ -190,10 +186,6 @@ pub fn canonicalise_batches(batches: &[RecordBatch], exclude: &[String]) -> Resu
             }
         }
         for (name, column, mut data) in folded {
-            // The post-flatten half of `--exclude`: a dotted leaf name.
-            if exclude.iter().any(|e| e == &name) {
-                continue;
-            }
             canonicalise(&mut b, &name, &mut data);
             // The nullable flag on the sealed `Column` follows the data, exactly as the wrapper does.
             let column = if matches!(data, ColumnData::Nullable { .. }) {
@@ -205,6 +197,47 @@ pub fn canonicalise_batches(batches: &[RecordBatch], exclude: &[String]) -> Resu
         }
     }
     Ok(b.finish())
+}
+
+/// Every **leaf path** the schema will flatten into, in order — the set `--exclude` is validated against.
+///
+/// Derived from the schema rather than from a mapping pass, so it is available *before* anything is
+/// decoded. That ordering is what lets an excluded leaf be skipped before `map_field` can reject it, and
+/// what turns a typo in a dotted name into an error instead of a silent no-op.
+fn schema_leaf_paths(schema: &arrow_schema::Schema) -> Vec<String> {
+    let mut out = Vec::with_capacity(schema.fields().len());
+    for f in schema.fields() {
+        push_leaf_paths(f.name(), f, &mut out);
+    }
+    out
+}
+
+/// [`schema_leaf_paths`] for one field.
+///
+/// A field whose own name contains a dot is a leaf path in its own right, which is why matching is always
+/// against these **whole paths** and never against a prefix split on `.` — splitting first would look for
+/// a field called `a` when the operator wrote `a.b` and meant a column of that name.
+fn push_leaf_paths(name: &str, field: &Field, out: &mut Vec<String>) {
+    match field.data_type() {
+        DataType::Struct(children) => {
+            for child in children {
+                push_leaf_paths(&child_name(name, child.name()), child, out);
+            }
+        }
+        DataType::FixedSizeList(_, width) => match usize::try_from(*width) {
+            // A list narrow enough to expand contributes one leaf per component.
+            Ok(w) if w > 0 && w <= MAX_FIXED_LIST_WIDTH => {
+                for k in 0..w {
+                    out.push(child_name(name, &k.to_string()));
+                }
+            }
+            // Anything else is going to be rejected by `map_field` (too wide, or zero-width), so the only
+            // meaningful exclusion is the whole field — and enumerating 262144 component paths for a
+            // flattened volume would be absurd as well as useless.
+            _ => out.push(name.to_string()),
+        },
+        _ => out.push(name.to_string()),
+    }
 }
 
 /// The per-leaf name a struct flatten or fixed-list expansion produces: `parent.child`.
@@ -222,9 +255,16 @@ fn map_field(
     name: &str,
     field: &Field,
     array: &ArrayRef,
+    exclude: &[String],
     b: &mut TableBuilder,
     out: &mut Vec<(String, Column, ColumnData)>,
 ) -> Result<()> {
+    // Skip an excluded leaf **before decoding it**. This is what makes the advice in a rejection
+    // actionable: a nested `binary` column's error says "--exclude pos.blob", and filtering after the
+    // mapping would mean `map_field` had already rejected it, so following the advice still failed.
+    if exclude.iter().any(|e| e == name) {
+        return Ok(());
+    }
     match field.data_type() {
         // ── §3: a struct flatten is a renaming. Recurse. ──
         DataType::Struct(children) => {
@@ -233,7 +273,14 @@ fn map_field(
             let first_leaf = out.len();
             for (i, child) in children.iter().enumerate() {
                 let child_array = sa.column(i).clone();
-                map_field(&child_name(name, child.name()), child, &child_array, b, out)?;
+                map_field(
+                    &child_name(name, child.name()),
+                    child,
+                    &child_array,
+                    exclude,
+                    b,
+                    out,
+                )?;
             }
             // **Apply the STRUCT's own validity to every leaf it flattened into.**
             //
@@ -293,6 +340,13 @@ fn map_field(
             let fl = array.as_fixed_size_list();
             let values = fl.values();
             for k in 0..width {
+                // An expanded component can be excluded by its dotted path, like any other leaf.
+                if exclude
+                    .iter()
+                    .any(|e| *e == child_name(name, &k.to_string()))
+                {
+                    continue;
+                }
                 // Gather element k of every row: logical row r sits at values[r * width + k].
                 let indices: Vec<Option<usize>> = (0..fl.len())
                     .map(|r| {
@@ -1628,6 +1682,101 @@ mod tests {
                 "every rejection offers a runnable next command: {err}"
             );
         }
+    }
+
+    /// **A typo in a dotted `--exclude` must be an error, not a silent no-op.**
+    ///
+    /// Only the part before the dot was checked, so `--exclude patient.nmae` passed validation and then
+    /// matched nothing — and the column the operator believed they had dropped was **sealed**. That is
+    /// the same false-confidence failure the `--column-meta` typo check exists to prevent, and it is
+    /// worse here because the column in question is the one they thought was PHI.
+    #[test]
+    fn a_typo_in_a_dotted_exclude_is_an_error_not_a_silent_no_op() {
+        let inner = StructArray::from(vec![
+            (
+                Arc::new(Field::new("mrn", DataType::Int32, false)),
+                Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("age", DataType::Int32, false)),
+                Arc::new(Int32Array::from(vec![30, 40])) as ArrayRef,
+            ),
+        ]);
+        let batch = record_batch(vec![("patient", Arc::new(inner) as ArrayRef)]).unwrap();
+
+        // The real leaf works…
+        let t = canonicalise_batch(&batch, &["patient.mrn".to_string()]).unwrap();
+        assert_eq!(
+            t.columns
+                .iter()
+                .map(|(c, _)| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["patient.age"]
+        );
+
+        // …and a typo in the CHILD is refused, listing the leaves that exist.
+        let err = canonicalise_batch(&batch, &["patient.nmae".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--exclude names 'patient.nmae'"), "got {err}");
+        assert!(err.contains("patient.mrn"), "lists the real leaves: {err}");
+
+        // A typo in the PARENT too, which the old prefix check did catch.
+        assert!(canonicalise_batch(&batch, &["paitent.mrn".to_string()]).is_err());
+    }
+
+    /// **`--exclude` must be applied BEFORE the column is mapped**, or the advice printed by a
+    /// rejection is a dead end: `map_field` would reject the nested binary leaf before the exclude
+    /// filter ever ran, so the very command the error suggested still failed.
+    #[test]
+    fn excluding_a_rejected_nested_leaf_works() {
+        let inner = StructArray::from(vec![
+            (
+                Arc::new(Field::new("keep", DataType::Int32, false)),
+                Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("blob", DataType::Binary, false)),
+                Arc::new(BinaryArray::from(vec![b"a".as_ref(), b"b".as_ref()])) as ArrayRef,
+            ),
+        ]);
+        let batch = record_batch(vec![("pos", Arc::new(inner) as ArrayRef)]).unwrap();
+
+        // Without the exclude it is rejected, and the error names the dotted leaf.
+        let err = canonicalise_batch(&batch, &[]).unwrap_err().to_string();
+        assert!(
+            err.contains("pos.blob"),
+            "the error names the dotted leaf: {err}"
+        );
+
+        // …and following that advice actually works.
+        let t = canonicalise_batch(&batch, &["pos.blob".to_string()]).unwrap();
+        assert_eq!(
+            t.columns
+                .iter()
+                .map(|(c, _)| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pos.keep"]
+        );
+    }
+
+    /// A top-level field whose NAME literally contains a dot must be excludable. Splitting on the dot
+    /// before trying the whole name would look for a field called `a` and find none.
+    #[test]
+    fn a_top_level_field_named_with_a_dot_can_be_excluded() {
+        let batch = record_batch(vec![
+            ("a.b", Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef),
+            ("keep", Arc::new(Int32Array::from(vec![3, 4])) as ArrayRef),
+        ])
+        .unwrap();
+        let t = canonicalise_batch(&batch, &["a.b".to_string()]).unwrap();
+        assert_eq!(
+            t.columns
+                .iter()
+                .map(|(c, _)| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["keep"]
+        );
     }
 
     /// The escape hatch the rejection advertises has to actually work, or the advice is a dead end.
