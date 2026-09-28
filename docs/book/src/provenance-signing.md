@@ -16,6 +16,32 @@ De-identification is a first-class transform: `ingest dicom --deidentify` applie
 file — recoverable by a key holder, and unrecoverable (shredded) by destroying the key. The sealed edge
 stays a single merkle-rooted reference, never a list of patient-bearing paths (ADR-0048).
 
+## Who made it, and how (ADR-0058)
+
+The `sources[]` DAG answers *which parent*. Two further sealed records answer *who built this* and
+*how*:
+
+- **`producer`** — the generating tool's identity (`tool`, `version`, and optionally `git_repo`,
+  `git_commit`, `dirty`). This is the DAQ / sorter / recon / sim that produced the semantic content,
+  not the packager. An external generator records its own identity through the write API or the
+  ingest spec's `[product.producer]`.
+- **`generation`** — the *recipe*: either an inline `config` bag, or a `config_ref` digest pointing
+  at a vendor config file carried verbatim as a Blob block in the same `.tsra`. The bag is
+  deliberately **non-opinionated** — the keys belong to the generator, and Tessera never interprets
+  or validates them, so an instrument it has never seen is self-describing with zero format change.
+
+Both are inside `manifest_hash`. You cannot alter the recorded recipe without changing the product's
+id, which is what makes the record worth trusting — the same reason signatures sign the envelope and
+not just the payload. (Wall-clock `ingested_at` and host stay *outside* the seal, in unsealed `aux/`,
+so re-ingesting the same bytes stays byte-identical — ADR-0042.)
+
+`ingest --spec` records both declaratively, and `inspect` prints them back:
+
+{{#include ../../../tessera/crates/tessera-cli/tests/cmd/provenance.trycmd}}
+
+For scripting, `inspect --json` dumps the whole sealed manifest — provenance included — so you never
+have to reach into the container format to read it.
+
 ## Signing & trust
 
 A signature is an **ed25519 detached signature over `manifest_hash`** — which transitively attests every
