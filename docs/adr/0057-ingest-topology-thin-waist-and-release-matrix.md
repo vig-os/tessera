@@ -385,9 +385,10 @@ check on patch indices executes and annotates that array, and the written contai
 fires only for inputs whose encoding produces **patches**.
 
 The measured axis is `debug_assertions` and nothing else: toggling `overflow-checks` or the optimisation
-level alone changes nothing. Every release build therefore agrees with every other release build, on any
-architecture, so **shipped binaries are consistent with each other**; what diverges is a debug-built tool
-versus a release-built one. That is a narrower blast radius than it first appeared — our own CI disagreed
+level alone changes nothing. **Scoped to this defect**, then, release builds agree with each other and
+what diverges is a debug-built tool against a release-built one. That is a statement about #468 only, and
+emphatically *not* a claim that release builds agree in general — #472 below is a same-profile divergence
+between x86-64 and aarch64, so two release binaries really can disagree, for a different reason. That is a narrower blast radius than it first appeared — our own CI disagreed
 with itself only because `ingest-gate-a` runs the generator under `cargo run` (dev profile,
 `debug_assertions` on) while `workspace-test` runs it under a release build. It is still an S15 violation,
 because "the bytes are a function of the data" has to hold for *a* build of a given version, not merely
@@ -416,9 +417,11 @@ removed that accident workspace-wide (cargo unifies features), and a deflated `.
 **verified perfectly** while silently ceasing to be range-readable. Third instance of the same shape in
 one sitting, so it is worth stating as a rule rather than a war story: an invariant that holds because
 some capability is *missing* stops holding the moment anyone adds that capability for an unrelated
-reason, and nothing in the diff will mention it. Enforced now by an explicit compression-method scan;
-the test has to live in `tessera-ingest`, because `-p tessera-io` alone cannot even name
-`CompressionMethod::Deflated`.
+reason, and nothing in the diff will mention it. The replacement — an explicit compression-method scan,
+run before any member is read — arrives with the `.npz` lane in #461, i.e. in the same change that adds
+the decompressor; it is not part of this PR, which is based on `dev` and adds no `zip` feature. Its test
+has to live in `tessera-ingest`, because `-p tessera-io` alone cannot even name
+`CompressionMethod::Deflated`, and that asymmetry is the hazard restated.
 
 Note also what the two determinism defects have in common. #468 and #472 both diverge in the metadata
 *around* the values — a container record and a persisted `Stat::Sum` respectively — while the encoded
@@ -427,11 +430,18 @@ reach either: it reasons about the codec, and the seal covers the whole containe
 
 So the gate set gains a third axis, as the `seal-profile-determinism` flake check: the conformance
 corpus is regenerated under **both** the dev and the release profile and must agree with itself and with
-the committed file. Until #468 is fixed upstream the known-diverging shape is
+the committed file.
+
+Its present reach is worth stating plainly rather than overselling: `tessera-io`'s corpus contains no
+integer column that produces bitpacking *patches*, so this check does not currently reproduce #468 — it
+guards the **class** going forward, and the specific shape is pinned separately by
+`known_limitation_468_full_span_int_container_bytes`. It would start catching #468 itself the day a
+patch-producing integer fixture joined that corpus, which is a reasonable thing to add once upstream is
+fixed and the expected bytes stop depending on the build. Until #468 is fixed upstream the known-diverging shape is
 covered by `known_limitation_468_full_span_int_container_bytes`, which asserts the divergence is *still
-present* and therefore **fails when upstream fixes it** — so the workaround in `corpus::write_scalars`
-(which avoids the shape, at the cost of weaker `i64` coverage) is removed deliberately rather than
-forgotten. Cross-*architecture* agreement is a separate axis, still covered only as a side effect of CI
+present* and therefore **fails when upstream fixes it** — so any fixture narrowed to avoid the shape
+(the generic-ingest corpus's scalars fixture, once that lane lands) is widened again deliberately rather
+than left permanently weaker. Cross-*architecture* agreement is a separate axis, still covered only as a side effect of CI
 running both arches — which is how #472 (a float fixture that moves on aarch64 under the *same* profile)
 was found. Making that a first-class axis of this gate is left open.
 

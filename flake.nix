@@ -330,6 +330,14 @@
           #
           # Scoped to `-p tessera-io` on purpose: the point is the seal path, and a second full-workspace
           # profile would roughly double this leg's build time for no extra coverage.
+          #
+          # COST, stated rather than discovered later: `cargoArtifacts` (`buildDepsOnly`) pre-builds the
+          # **release** dependency graph, so the release half of this check is warm while the dev half
+          # compiles vortex and friends from source on every run. That is the bulk of this leg's time.
+          # The fix would be a second `buildDepsOnly` pinned to the dev profile, which crane does not
+          # make convenient (a derivation inherits one `cargoArtifacts`), so it is left as a known cost
+          # rather than a speculative nix refactor. If this leg becomes the critical path, the cheaper
+          # move is to run it release-only on PRs and keep both profiles for `main`.
           seal-profile-determinism = craneLib.mkCargoDerivation (commonArgs // {
             inherit cargoArtifacts;
             doInstallCargoArtifacts = false;

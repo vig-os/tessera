@@ -1575,10 +1575,11 @@ mod tests {
     /// them. See ADR-0057 §5 — "a determinism argument about the codec does not cover the container".
     ///
     /// **This test asserts the bug is STILL PRESENT, so it fails when upstream fixes it.** That
-    /// failure is the signal to drop the workaround in `tessera_ingest::corpus::write_scalars`, which
-    /// currently avoids the shape at the cost of the `i64` envelope's extremes, and to restore
-    /// `[i64::MIN, 0, i64::MAX]` there. A `#[ignore]` would let the fix land unnoticed and leave the
-    /// fixture permanently weakened.
+    /// failure is the signal to drop whatever fixtures have been narrowed to avoid the shape and put
+    /// the integer extremes back. (At the time of writing that is the generic-ingest corpus's scalars
+    /// fixture, which arrives with the ingest lane and is not part of this crate — hence no reference
+    /// to it by name here, so this comment stays true wherever it is read.) A `#[ignore]` would let the
+    /// upstream fix land unnoticed and leave those fixtures permanently weakened.
     #[test]
     fn known_limitation_468_full_span_int_container_bytes() {
         let pathological = encode_bare_i64_via_vortex(&[i64::MIN, 0, i64::MAX]);
@@ -1590,9 +1591,9 @@ mod tests {
             pathological.len(),
             expected,
             "#468: expected {expected} bytes with debug_assertions={}. If both profiles now agree, \
-             upstream has FIXED this — delete this test and restore [i64::MIN, 0, i64::MAX] in \
-             tessera-ingest's `write_scalars` (and regenerate the ingest corpus). If vortex was \
-             merely bumped, re-measure both profiles and check the divergence still exists.",
+             upstream has FIXED this — delete this test and restore the full-span integer extremes in \
+             any fixture that was narrowed to avoid the shape (regenerating those goldens). If vortex \
+             was merely bumped, re-measure both profiles and check the divergence still exists.",
             cfg!(debug_assertions)
         );
 
