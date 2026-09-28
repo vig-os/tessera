@@ -20,6 +20,21 @@ use tessera_core::block::array::ArraySpec;
 use tessera_io::{encode, ArrayData};
 use tracing_subscriber::fmt::MakeWriter;
 
+/// The interest floor, compiled from the library's own source rather than reached through its API.
+///
+/// `init` installs a process-wide tracing subscriber, so exposing it — even `#[doc(hidden)]` behind
+/// a feature — would put a global-subscriber installer in tessera-io's public surface where a
+/// downstream crate could call it. Gating it behind a cargo feature and enabling that feature via a
+/// dev-dependency self-reference also works, but it adds a `tessera-io -> tessera-io` edge that
+/// shows up in all 11 of Gate B's seal-path snapshots (as a `[dev-dependencies]` header plus a
+/// `tessera-io feature "test-support"` line), churning a determinism baseline for a test helper.
+///
+/// `#[path]` avoids both: the module stays private and `cfg(test)` in the library, the dependency
+/// graph is untouched, and this is the same source file rather than a copy — so the floor under test
+/// is the real one. It compiles standalone because it depends only on `tracing`.
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// A local `MakeWriter` over a shared buffer. The lib has an equivalent in its `#[cfg(test)]`
 /// `test_trace` module, which a separate test binary cannot reach, and `tracing-subscriber` is a
 /// dev-dependency so the helper cannot move into the library either.
@@ -55,7 +70,7 @@ fn data() -> ArrayData {
 
 #[test]
 fn encode_trace_survives_a_concurrent_first_hit_from_an_unsubscribed_thread() {
-    tessera_io::test_support::init();
+    test_support::init();
 
     let buf = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
