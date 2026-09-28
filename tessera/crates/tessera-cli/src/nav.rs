@@ -1986,6 +1986,79 @@ mod tests {
         assert!((mean - 3.0).abs() < 1e-9 && (std - 5f64.sqrt()).abs() < 1e-9);
     }
 
+    /// **#303** — `ls` and `read` disagreed about what is addressable. The full preserved DICOM header
+    /// lands in `extra/dicom_header` (an object, ~167 keys) and `ls FILE extra/dicom_header` dumps it,
+    /// but `read FILE extra/dicom_header` died with the internal
+    /// `container: logical_table: no blocks for prefix 'extra/dicom_header'`.
+    ///
+    /// The cause is that `extra/*` is **not a block at all** — it is manifest metadata — so it never
+    /// matched the non-table-block guard above and fell through to the logical-table path. A first user
+    /// exploring what is inside a product hits it immediately. `read` now serves it as JSON, so the two
+    /// navigation verbs address the same namespace and the error is impossible rather than better-worded.
+    #[test]
+    fn read_reaches_extra_object_blocks_as_json() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        use tessera_io::{array::ArrayData, pack};
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("h.tsra");
+        let spec = ArraySpec::new(vec![2, 2], "int16");
+        let data = ArrayData::I16(vec![1, 2, 3, 4]);
+        let (bref, payload) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+        let mut b = ProductBuilder::new("recon", "H", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        b.with_extra(
+            "dicom_header",
+            serde_json::json!({"0008,0060": "CT", "0018,0050": "1.25"}),
+        );
+        b.with_extra("note", serde_json::json!("a string value"));
+        let sealed = b.seal().unwrap();
+        pack(&sealed, &[payload], &p).unwrap();
+
+        let read_to_string = |block: &str| {
+            let mut buf = Vec::new();
+            read(
+                ReadOpts {
+                    file: &p,
+                    block,
+                    columns: vec![],
+                    rows: None,
+                    all: false,
+                    limit: 20,
+                    format: Format::Csv,
+                },
+                &mut buf,
+            )
+            .map(|_| String::from_utf8(buf).unwrap())
+        };
+
+        // the object case: valid JSON carrying the tags, NOT a logical_table error.
+        let out = read_to_string("extra/dicom_header")
+            .unwrap_or_else(|e| panic!("read must reach extra/ blocks: {e}"));
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["0008,0060"], "CT");
+        assert_eq!(v["0018,0050"], "1.25");
+
+        // a scalar extra value works too.
+        let out = read_to_string("extra/note").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+            "a string value"
+        );
+
+        // `extra` itself lists the keys rather than erroring.
+        let out = read_to_string("extra").unwrap();
+        assert!(out.contains("dicom_header"), "{out}");
+
+        // an unknown key names the available ones instead of leaking the table decoder's message.
+        let err = format!("{}", read_to_string("extra/nope").unwrap_err());
+        assert!(err.contains("dicom_header"), "{err}");
+        assert!(
+            !err.contains("logical_table"),
+            "must not surface the internal table error: {err}"
+        );
+    }
+
     #[test]
     fn slice_extracts_a_plane_from_a_sealed_array() {
         use tessera_core::block::array::ArraySpec;
