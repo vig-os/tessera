@@ -105,6 +105,30 @@ fn f32_to_usize(v: f32) -> usize {
     v.max(0.0) as usize
 }
 
+/// Diagnose a `sizeof_hdr` that is not 348, so the error names the format actually found instead of
+/// blaming the file for not being NIfTI — the same misleading-error complaint as B2's `.nii.gz` case.
+/// Both alternatives are real rather than theoretical: **three of the six `.nii` fixtures in nibabel's
+/// own test data are big-endian**, and every CIFTI `.dconn.nii`/`.dtseries.nii` is a NIfTI-2.
+///
+/// Neither is *supported* — this only makes the refusal say which one it is, so an operator knows
+/// whether to byte-swap, convert, or look elsewhere.
+fn sizeof_hdr_error(sizeof_hdr: i32) -> Error {
+    /// 348 with its bytes reversed — what a big-endian NIfTI-1 header reads as here.
+    const SWAPPED_348: i32 = i32::from_le_bytes(348i32.to_be_bytes());
+    /// The NIfTI-2 header size, either way round.
+    const NIFTI2: i32 = 540;
+    const SWAPPED_540: i32 = i32::from_le_bytes(540i32.to_be_bytes());
+    he(match sizeof_hdr {
+        SWAPPED_348 => "big-endian NIfTI-1 is not supported (sizeof_hdr is 348 byte-swapped) — \
+                        convert the file to little-endian first"
+            .to_string(),
+        NIFTI2 | SWAPPED_540 => "this is NIfTI-2 (sizeof_hdr = 540), not NIfTI-1 — unsupported \
+                                 (CIFTI .dconn.nii / .dtseries.nii files are NIfTI-2)"
+            .to_string(),
+        other => format!("sizeof_hdr = {other}, not 348 — not a NIfTI-1 file"),
+    })
+}
+
 /// Bytes per voxel for a supported NIfTI datatype code. Rejecting an unsupported code *here* — before
 /// any size arithmetic — keeps the width in every overflow check a real one.
 fn dtype_width(datatype: i16) -> Result<usize> {
@@ -391,10 +415,9 @@ fn parse_header(b: &[u8]) -> Result<Header> {
     if b.len() < HEADER_LEN {
         return Err(he("file shorter than a NIfTI-1 header"));
     }
-    if i32le(b, 0) != 348 {
-        return Err(he(
-            "sizeof_hdr != 348 (not NIfTI-1, or big-endian — unsupported)",
-        ));
+    let sizeof_hdr = i32le(b, 0);
+    if sizeof_hdr != 348 {
+        return Err(sizeof_hdr_error(sizeof_hdr));
     }
     // magic "n+1\0" at offset 344 marks a single-file .nii.
     if &b[344..347] != b"n+1" {
@@ -788,6 +811,37 @@ mod tests {
         let bad = dir.path().join("bad.nii");
         std::fs::write(&bad, vec![0u8; 400]).unwrap();
         assert!(read_nifti(&bad).is_err());
+    }
+
+    /// A header that is not little-endian NIfTI-1 must say **which** format it is. The old catch-all
+    /// ("not NIfTI-1, or big-endian") is the same misleading-error complaint as B2's `.nii.gz` case: it
+    /// blames the file. Both alternatives are real — three of the six `.nii` fixtures in nibabel's own
+    /// test data are big-endian, and every CIFTI `.dconn.nii` is a NIfTI-2. Still unsupported; just named.
+    #[test]
+    fn a_non_little_endian_nifti1_header_is_named_not_blamed_on_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let named = |name: &str, sizeof_hdr: [u8; 4]| {
+            let mut h = Synth::new(&[2, 2, 2]).header();
+            h[0..4].copy_from_slice(&sizeof_hdr);
+            let p = dir.path().join(name);
+            std::fs::write(&p, h).unwrap();
+            match read_nifti(&p).map(|img| img.shape) {
+                Err(Error::Invalid(msg)) => msg,
+                other => panic!("{name}: expected Error::Invalid, got {other:?}"),
+            }
+        };
+        assert!(
+            named("be.nii", 348i32.to_be_bytes()).contains("big-endian"),
+            "a byte-swapped 348 is a big-endian NIfTI-1, and the error should say so"
+        );
+        for (name, hdr) in [
+            ("n2.nii", 540i32.to_le_bytes()),
+            ("n2-be.nii", 540i32.to_be_bytes()),
+        ] {
+            assert!(named(name, hdr).contains("NIfTI-2"), "{name}");
+        }
+        // anything else is simply not NIfTI, and the message quotes what was found.
+        assert!(named("junk.nii", 1234i32.to_le_bytes()).contains("1234"));
     }
 
     /// The datatype ladder, and the guard that makes the §P2 bounds audit hold: `dtype_width` is the
