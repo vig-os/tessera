@@ -6561,6 +6561,7 @@ dependencies = [
  "age",
  "dicom",
  "dicom-transfer-syntax-registry",
+ "flate2",
  "hdf5-metno",
  "hdf5-metno-sys",
  "serde",
