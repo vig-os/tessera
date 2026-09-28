@@ -10,16 +10,31 @@
 //!
 //! # Reading — performance & the intended access pattern
 //!
-//! **These are Vortex-native reads and they parallelise.** [`decode`] /
-//! [`decode_projected`] drive the scan on a per-thread multi-core worker pool
-//! (`READ_RT`) so segment I/O + decode fan out across cores — do **not**
-//! reach for the bare single-threaded runtime and hand-roll a scan loop; that
-//! path is single-core and will read ~4× slower than a mature row store, which is
-//! a misuse artefact, not a property of the format.
+//! **These are Vortex-native reads and they parallelise.** Every public read —
+//! [`decode`], [`decode_with_workers`], [`decode_projected`], [`decode_column`],
+//! [`decode_rows`] — drives the scan on a per-thread multi-core worker pool
+//! (`READ_RT`) so segment I/O + decode fan out across cores. Do **not** reach for
+//! the bare single-threaded runtime and hand-roll a scan loop: that path is
+//! single-core and will read ~4× slower than a mature row store, which is a
+//! misuse artefact, not a property of the format.
+//!
+//! The pool is not the whole story, though — what decides a read is the
+//! **materialise** path. Measured on 4 M rows x 8 f64 columns, a one-column read
+//! that ran its own chunk-by-chunk loop instead of the shared column-parallel
+//! grid (#352/#385) cost 13.1 ms against 2.2 ms for the same column through
+//! [`decode_projected`] — 5.7x, with the runtime making no difference either way
+//! (that measurement is why [`decode_column`] now delegates rather than
+//! duplicating the loop). If you write a new read, reuse the existing scan +
+//! materialise helpers; do not hand-roll a third one.
 //!
 //! Match the read to the format's shape:
-//! - **Project** — ask only for the columns you need ([`decode_projected`] /
-//!   [`decode_column`]); Vortex reads just those columns' layout segments.
+//! - **Project** — ask only for the columns you need ([`decode_projected`], or
+//!   [`decode_column`] for exactly one); Vortex reads just those columns' layout
+//!   segments. Prefer ONE [`decode_projected`] over N [`decode_column`] calls:
+//!   it pays the session + scan setup once, which is most of the cost of a
+//!   narrow read.
+//! - **Take rows** — [`decode_rows`] for a scattered row set (O(1) random take),
+//!   rather than decoding everything and indexing into it.
 //! - **Full-materialise-to-`Vec<struct>` is the slow path on purpose.** The
 //!   fast, intended consumption is the columnar/zero-copy one (project + filter,
 //!   hand the canonical arrays to Arrow/DuckDB) — not decompressing every row into
@@ -1369,33 +1384,20 @@ fn decode_inner(spec: &TableSpec, blob: &[u8], workers: Option<usize>) -> Result
 /// column's layout segments, so it doesn't materialise the whole table (the columnar-take win;
 /// cf. Parquet/ROOT column projection in the #143 ecosystem bench). Bit-exact with [`decode`]'s
 /// matching column.
+///
+/// A thin wrapper over [`decode_projected`] (#351). It used to run its own scan loop on the bare
+/// single-threaded runtime, materialising chunk by chunk with `extend_field`; that bypassed the
+/// column-parallel grid path (#352/#385) and measured **~5.7x slower** than asking
+/// `decode_projected` for the same one column (13.1 ms vs 2.2 ms, 4 M rows x 8 f64 columns).
+/// Delegating makes the one-column read take the same fast path as every other read, and deletes
+/// the duplicated scan loop rather than keeping two that must stay bit-identical.
 pub fn decode_column(spec: &TableSpec, blob: &[u8], name: &str) -> Result<ColumnData> {
-    let col = spec
-        .columns
-        .iter()
-        .find(|c| c.name == name)
+    // `decode_projected` validates the name and returns exactly the columns asked for, in order.
+    let mut projected = decode_projected(spec, blob, &[name])?;
+    let (_, col) = projected
+        .pop()
         .ok_or_else(|| Error::Codec(format!("table has no column '{name}'")))?;
-    let (rt, s) = runtime_session();
-    let mut out = empty_column_for(col, spec.rows as usize)?;
-    let mut ctx = s.create_execution_ctx();
-    rt.block_on(async {
-        let stream = s
-            .open_options()
-            .open_buffer(ByteBuffer::copy_from(blob))
-            .map_err(ze)?
-            .scan()
-            .map_err(ze)?
-            .with_projection(select([name], root())) // only this field is scanned
-            .into_array_stream()
-            .map_err(ze)?;
-        futures::pin_mut!(stream);
-        while let Some(chunk) = stream.next().await {
-            let st: StructArray = chunk.map_err(ze)?.execute(&mut ctx).map_err(ze)?;
-            extend_field(&mut out, st.unmasked_field(0).clone(), &mut ctx)?;
-        }
-        Ok::<(), Error>(())
-    })?;
-    Ok(out)
+    Ok(col)
 }
 
 /// Decode a **projected subset** of columns in a **single session** — Vortex
