@@ -281,6 +281,49 @@ pub fn read_compound(path: &std::path::Path, dataset: &str) -> Result<TableData>
 /// Default row-slab for streaming reads — rows pulled per HDF5 hyperslab (the bounded-memory unit).
 pub const STREAM_SLAB_ROWS: usize = 1 << 16;
 
+/// Soft ceiling on one streaming slab's transient read buffer (#325): it bounds how many WHOLE
+/// chunks are swallowed per `H5Dread`, but it is **not** a hard cap on the buffer.
+///
+/// [`chunk_aligned_slab`] never returns less than one chunk, so on a dataset whose single chunk
+/// exceeds this value the slab is that chunk and the buffer exceeds the ceiling. Peak transient
+/// footprint of a slab is therefore about `2 x max(MAX_SLAB_BYTES, chunk_bytes)` — the raw `buf`
+/// and the decoded columns from [`slab_to_columns`] are both live across the `sink` call. That is
+/// honest rather than tight: sub-chunk reads cannot lower it, because libhdf5 materialises the
+/// whole chunk regardless (see [`chunk_aligned_slab`]).
+///
+/// The alternative was to leave the slab small and instead enlarge libhdf5's per-dataset chunk
+/// cache (`H5Pset_chunk_cache` on the dataset-access plist), which fixes the same re-inflation.
+/// Alignment was chosen because it needs **no new FFI** — the cache route means another raw
+/// `hdf5-metno-sys` plist call on top of the existing unsafe block — and costs the same memory:
+/// a cache big enough to stop the re-reads has to hold a chunk too.
+const MAX_SLAB_BYTES: usize = 64 << 20;
+
+/// Round a requested slab up to a whole number of dataset **chunks** (#325).
+///
+/// libhdf5 must materialise an ENTIRE chunk to serve any row inside it (for a compressed dataset
+/// that means inflating it), and the default per-dataset chunk cache is **1 MiB** — far smaller
+/// than one chunk of a real acquisition. So a slab covering a *fraction* of a chunk makes libhdf5
+/// re-read and re-inflate that whole chunk once per slab: at the default 65,536-row slab against a
+/// 1,048,576-row chunk that is 16 passes over every chunk, which is exactly the streaming-vs-batch
+/// gap #325 measured (batch issues one bulk read, so each chunk is touched once).
+///
+/// Reading LESS than a whole chunk therefore never saves work — the chunk is paid for either way —
+/// so one chunk is the natural minimum unit, and [`MAX_SLAB_BYTES`] caps how many we take above
+/// that. A **contiguous** (unchunked) dataset has no such quantum and keeps the caller's request.
+fn chunk_aligned_slab(chunk_rows: Option<usize>, slab_rows: usize, row_bytes: usize) -> usize {
+    let slab_rows = slab_rows.max(1);
+    // `0` is not a legal chunk edge, but guard rather than divide by it.
+    let Some(chunk) = chunk_rows.filter(|c| *c > 0) else {
+        return slab_rows;
+    };
+    let cap_rows = (MAX_SLAB_BYTES / row_bytes.max(1)).max(1);
+    // Whole chunks that fit under the cap — but never fewer than one, since a partial chunk costs
+    // the same read and then pays for it again on the next slab.
+    let max_chunks = (cap_rows / chunk).max(1);
+    let wanted_chunks = slab_rows.div_ceil(chunk).max(1);
+    wanted_chunks.min(max_chunks).saturating_mul(chunk)
+}
+
 /// Stream any compound dataset in bounded-memory **row-slabs** (ADR-0026 §3): read `slab_rows`
 /// records at a time via an HDF5 hyperslab, decode each slab to columns with [`slab_to_columns`],
 /// and feed `sink` — never holding more than one slab in RAM. `slab_rows` clamps to ≥ 1. Same
@@ -296,7 +339,13 @@ pub fn stream_compound(
     let ds = file.dataset(dataset).map_err(he)?;
     let c = compound_descriptor(&ds)?;
     let n = ds.shape().first().copied().unwrap_or(0);
-    let slab = slab_rows.max(1);
+    // #325: align the slab to the dataset's chunking, or a compressed vendor table re-inflates every
+    // chunk once per sub-chunk slab (measured 4× slower than the batch path before this).
+    let slab = chunk_aligned_slab(
+        ds.chunk().as_deref().and_then(|c| c.first().copied()),
+        slab_rows,
+        c.size,
+    );
 
     // Acquire libhdf5 type + file-space ids once (under `sync()`); they're reused for every slab.
     let (dt_id, file_space_id) = hdf5::sync::sync(|| -> Result<(hid_t, hid_t)> {
@@ -1167,6 +1216,35 @@ mod tests {
             .unwrap();
     }
 
+    /// A CHUNKED + deflate-compressed 3p dataset — the layout every real vendor acquisition uses,
+    /// and the one that exercises libhdf5's per-chunk read/inflate against the slab size (#325).
+    fn write_synth_3p_chunked(path: &std::path::Path, n: usize, chunk_rows: usize, gzip: u8) {
+        let recs: Vec<Rec3p> = (0..n)
+            .map(|k| Rec3p {
+                ms: k as u32,
+                // Wrapping, not `+ 1`: this writer is used at row counts far past u16::MAX, where a
+                // plain add panics in debug. The values only have to be varied, not meaningful.
+                id: [
+                    k as u16,
+                    (k as u16).wrapping_add(1),
+                    (k as u16).wrapping_add(2),
+                ],
+                en: [511.0, 510.0 + k as f32, 512.0],
+                vtx: [0.1 * k as f32, 0.2, 0.3],
+                lt: 1.5 + k as f32 * 0.01,
+            })
+            .collect();
+        let f = hdf5::File::create(path).unwrap();
+        f.new_dataset::<Rec3p>()
+            .shape(n)
+            .chunk(chunk_rows.min(n))
+            .deflate(gzip)
+            .create("events_3p")
+            .unwrap()
+            .write(&recs)
+            .unwrap();
+    }
+
     fn write_synth_2p(path: &std::path::Path, n: usize) {
         let recs: Vec<Rec2p> = (0..n)
             .map(|k| Rec2p {
@@ -1295,6 +1373,148 @@ mod tests {
         let expect_2p = ground_truth_2p(&recs_2p);
         let got_2p = read_compound(&h5_2p, "events_2p").unwrap();
         assert_eq!(got_2p, expect_2p, "generic reader diverged on 2p compound");
+    }
+
+    /// #325: the slab must round up to whole dataset chunks, because libhdf5 pays for a whole
+    /// chunk however little of it you ask for.
+    #[test]
+    fn chunk_aligned_slab_rounds_up_to_whole_chunks() {
+        const ROW: usize = 38; // the 3p record width
+        let chunk = 1 << 20; // 1,048,576 rows — a realistic vendor chunk (38 MB at this row width)
+
+        // The default slab is 1/16th of a chunk → snap up to exactly one chunk. That 16× re-inflate
+        // is the streaming-vs-batch gap #325 measured.
+        assert_eq!(
+            chunk_aligned_slab(Some(chunk), STREAM_SLAB_ROWS, ROW),
+            chunk
+        );
+        // Two of THESE chunks is 76 MB, over the cap, so one chunk is the honest answer here.
+        assert_eq!(chunk_aligned_slab(Some(chunk), chunk + 1, ROW), chunk);
+
+        // With a chunk small enough that several fit under the cap, a request above one chunk
+        // rounds UP to the next whole multiple, never down.
+        let small = 1 << 16; // 65,536 rows — 2.5 MB at this row width
+        assert_eq!(chunk_aligned_slab(Some(small), small + 1, ROW), 2 * small);
+        assert_eq!(chunk_aligned_slab(Some(small), 2 * small, ROW), 2 * small);
+        assert_eq!(
+            chunk_aligned_slab(Some(small), 3 * small - 1, ROW),
+            3 * small
+        );
+
+        // A contiguous dataset has no chunk quantum — the caller's request is honoured verbatim.
+        assert_eq!(
+            chunk_aligned_slab(None, STREAM_SLAB_ROWS, ROW),
+            STREAM_SLAB_ROWS
+        );
+        assert_eq!(chunk_aligned_slab(None, 999, ROW), 999);
+
+        // The byte cap bounds how many chunks we swallow (ADR-0026 stays bounded-memory)...
+        let big_req = 1_000 * chunk;
+        let aligned = chunk_aligned_slab(Some(chunk), big_req, ROW);
+        assert!(
+            aligned * ROW <= MAX_SLAB_BYTES,
+            "slab {aligned} rows x {ROW} B exceeds the {MAX_SLAB_BYTES} B cap"
+        );
+        assert_eq!(
+            aligned % chunk,
+            0,
+            "capped slab must still be chunk-aligned"
+        );
+
+        // ...except that ONE chunk is always allowed, even when it alone blows the cap: reading
+        // less than a chunk cannot cost less, so capping below a chunk would be pure loss.
+        let huge = MAX_SLAB_BYTES / ROW * 4;
+        assert_eq!(chunk_aligned_slab(Some(huge), 1, ROW), huge);
+
+        // Degenerate inputs must not divide by zero or collapse to a zero-row slab.
+        assert_eq!(chunk_aligned_slab(Some(0), 4096, ROW), 4096);
+        assert!(chunk_aligned_slab(Some(chunk), 0, 0) >= 1);
+    }
+
+    /// #325 correctness gate (no timing — this is the one that runs everywhere): chunk-aligning the
+    /// slab changes only HOW MUCH is read per `H5Dread`, never WHAT is produced. Streaming a chunked,
+    /// compressed dataset must still concatenate to exactly the bulk read, including when the row
+    /// count is not a whole number of chunks (the ragged tail is where an alignment bug would show).
+    #[test]
+    fn chunked_stream_matches_bulk_read_including_a_ragged_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let h5 = dir.path().join("chunked_3p.h5");
+        // 5 chunks + a partial one, so the final slab is deliberately short.
+        write_synth_3p_chunked(&h5, 5 * 4096 + 37, 4096, 1);
+
+        let bulk = read_compound(&h5, "events_3p").unwrap();
+        // Same accumulation shape as `stream_compound_concatenated_matches_whole_file`.
+        let mut acc: Option<TableData> = None;
+        stream_compound(&h5, "events_3p", 1000, |slab| {
+            match acc.as_mut() {
+                None => acc = Some(slab),
+                Some(a) => {
+                    for (i, (_, c)) in slab.into_iter().enumerate() {
+                        a[i].1.extend(&c)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            acc.unwrap(),
+            bulk,
+            "chunk-aligned streaming changed the data"
+        );
+    }
+
+    /// #325 perf ratchet: the streaming slab reader must not re-inflate each chunk once per slab.
+    ///
+    /// Relative + machine-independent, like the table grid ratchet: compare the streaming read of a
+    /// COMPRESSED CHUNKED dataset against one bulk `read_compound` of the same file, best-of-N. Both
+    /// sides decompress the same bytes exactly once if the slab is chunk-aligned, so the ratio is
+    /// ~1×; with a sub-chunk slab libhdf5 re-inflates every chunk once per slab, which is the 8×
+    /// (here) / 4× (measured end-to-end on a 1 M-row chunk) regression this guards.
+    ///
+    /// Gated at >= 8 cores on purpose — it runs on dev machines with headroom and is SKIPPED on the
+    /// small, build-saturated CI runners where any timing assertion is flaky. The non-flaky gate
+    /// that runs everywhere is `chunk_aligned_slab_rounds_up_to_whole_chunks` (+ the correctness
+    /// test above); absolute throughput belongs in a perf job, not a unit gate.
+    #[test]
+    fn chunked_stream_read_does_not_reinflate_each_chunk() {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        if cores < 8 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let h5 = dir.path().join("ratchet_3p.h5");
+        // One 1,048,576-row chunk plus a ragged tail: the default 65,536-row slab is 1/16th of a
+        // chunk, so an unaligned reader inflates each chunk 16x. The gap has to be wide because
+        // BOTH sides also pay the same per-row transpose, which dilutes the ratio — at 8x the
+        // measured spread was only 2.07x against a 2.0 gate, too thin to be a reliable guard.
+        let rows = (1 << 20) + 12_345;
+        write_synth_3p_chunked(&h5, rows, 1 << 20, 6);
+
+        let best = |run: &dyn Fn()| -> f64 {
+            let mut m = f64::MAX;
+            for _ in 0..3 {
+                let t = std::time::Instant::now();
+                run();
+                m = m.min(t.elapsed().as_secs_f64());
+            }
+            m
+        };
+        let _ = read_compound(&h5, "events_3p").unwrap(); // warm the page cache for both sides
+        let bulk = best(&|| {
+            read_compound(&h5, "events_3p").unwrap();
+        });
+        let streamed = best(&|| {
+            stream_compound(&h5, "events_3p", STREAM_SLAB_ROWS, |_| Ok(())).unwrap();
+        });
+        let ratio = streamed / bulk;
+        assert!(
+            ratio < 2.0,
+            "streaming re-read overhead {ratio:.2}x vs one bulk read (regression — is the slab \
+             still chunk-aligned? a sub-chunk slab re-inflates every chunk once per slab)"
+        );
     }
 
     #[test]
