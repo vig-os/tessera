@@ -2328,6 +2328,128 @@ mod tests {
         }
     }
 
+    /// **PROBE for #472 — temporary, NOT for merge.** Locates the aarch64 vs x86_64 divergence in
+    /// the `ingest_parquet_floats` fixture by encoding the same pathological f64 column per value
+    /// and per cumulative prefix, printing the exact encoded bytes.
+    ///
+    /// Run with:
+    ///   cargo test -p tessera-io --lib -- probe_472 --nocapture --test-threads=1
+    ///
+    /// This probes the ENCODER only (`table::encode`). If both arches print identical bytes here,
+    /// the divergence is upstream of it (the parquet decode into `TableData`), which is the point of
+    /// the `out=` field: it shows the values as they survive encode+decode.
+    #[test]
+    fn probe_472_float_encode_bytes() {
+        // One annotated print site: the probe's whole purpose is stdout, and keeping it to a single
+        // line survives rustfmt (which relocates a comment placed inside a multi-line macro call).
+        fn emit(s: &str) {
+            println!("{s}"); // guardrails-ok: probe output IS this test's deliverable (#472, throwaway)
+        }
+        fn hex(b: &[u8]) -> String {
+            b.iter().map(|x| format!("{x:02x}")).collect()
+        }
+        fn bits(vals: &[f64]) -> String {
+            vals.iter()
+                .map(|v| format!("{:016x}", v.to_bits()))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+        fn enc(label: &str, vals: &[f64]) {
+            let data: TableData = vec![("x".into(), ColumnData::F64(vals.to_vec()))];
+            let spec = TableSpec {
+                columns: vec![col("x", "f8")],
+                rows: vals.len() as u64,
+                row_index: None,
+            };
+            let bytes = encode(&spec, &data).unwrap();
+            // Round-trip so a canonicalisation inside to_vortex/decode shows up as changed bits.
+            let back = decode(&spec, &bytes).unwrap();
+            let out = match &back[0].1 {
+                ColumnData::F64(g) => bits(g),
+                other => format!("UNEXPECTED {other:?}"),
+            };
+            emit(&format!(
+                "PROBE472\t{label}\tn={}\tlen={}\tin=[{}]\tout=[{}]\thex={}",
+                vals.len(),
+                bytes.len(),
+                bits(vals),
+                out,
+                hex(&bytes)
+            ));
+        }
+
+        let odd_nan = f64::from_bits(0x7ff8_0000_dead_beef);
+        let max_sub = f64::from_bits(0x000f_ffff_ffff_ffff);
+        // Exactly the fixture's column, in order (tessera-ingest::corpus::write_floats).
+        let all = [
+            odd_nan,
+            -0.0,
+            0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+            max_sub,
+        ];
+        let names = [
+            "odd_nan",
+            "neg_zero",
+            "pos_zero",
+            "pos_inf",
+            "neg_inf",
+            "min_positive",
+            "max_subnormal",
+        ];
+
+        emit(&format!(
+            "PROBE472\tarch={}\tos={}\tdebug_assertions={}",
+            std::env::consts::ARCH,
+            std::env::consts::OS,
+            cfg!(debug_assertions)
+        ));
+        // Hardware NaN semantics, the leading hypothesis. x86's default quiet NaN is NEGATIVE
+        // (0xfff8_0000_0000_0000) while aarch64's is POSITIVE (0x7ff8_0000_0000_0000), so any
+        // INVALID operation inside a codec produces different bits per arch — and this column
+        // carries both infinities and both zeros, so inf-inf / inf/inf / 0*inf / 0/0 are all
+        // reachable from an ordinary range or spread computation. `black_box` keeps rustc from
+        // const-folding these with its own (target-independent) softfloat and hiding the answer.
+        {
+            use std::hint::black_box;
+            let inf = black_box(f64::INFINITY);
+            let zero = black_box(0.0f64);
+            emit(&format!(
+                "PROBE472\tnan_semantics\tinf_minus_inf={:016x}\tinf_div_inf={:016x}\tzero_div_zero={:016x}\tzero_times_inf={:016x}\tsqrt_neg1={:016x}",
+                (inf - inf).to_bits(),
+                (inf / inf).to_bits(),
+                (zero / zero).to_bits(),
+                (zero * inf).to_bits(),
+                black_box(-1.0f64).sqrt().to_bits()
+            ));
+            // Does an arithmetic op preserve the fixture's NaN payload, or canonicalise it?
+            let odd = black_box(f64::from_bits(0x7ff8_0000_dead_beef));
+            emit(&format!(
+                "PROBE472\tnan_payload\tidentity={:016x}\tplus_zero={:016x}\ttimes_one={:016x}\tmin_with_1={:016x}\tmax_with_1={:016x}",
+                odd.to_bits(),
+                (odd + zero).to_bits(),
+                (odd * black_box(1.0f64)).to_bits(),
+                odd.min(black_box(1.0f64)).to_bits(),
+                odd.max(black_box(1.0f64)).to_bits()
+            ));
+        }
+        // Control: ordinary finite values. If THIS differs across arches, the divergence does not
+        // need a pathological value at all.
+        enc("control_1_2_3", &[1.0, 2.0, 3.0]);
+        // Each pathological value on its own.
+        for (n, v) in names.iter().zip(all.iter()) {
+            enc(&format!("solo_{n}"), std::slice::from_ref(v));
+        }
+        // Cumulative prefixes: the first prefix whose bytes differ across arches names the value
+        // whose presence triggers the divergence.
+        for k in 1..=all.len() {
+            enc(&format!("prefix_{k}"), &all[..k]);
+        }
+        enc("full_fixture_column", &all);
+    }
+
     #[test]
     fn f64_column_is_compressed_by_pco_not_stored_raw() {
         // Regression guard for #380. A high-cardinality continuous f64 column (a physics-like energy
