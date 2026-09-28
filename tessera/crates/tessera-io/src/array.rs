@@ -1146,38 +1146,6 @@ mod tests {
         assert_eq!(ArrayData::U64(vec![0; 3]).byte_len(), 24);
     }
 
-    /// Regression for #356: `tracing` caches each callsite's `Interest` process-wide on
-    /// first use, and that registration consults only the GLOBAL default dispatcher —
-    /// never a thread-local one installed by `with_default`. So the first thread to reach
-    /// the encode callsite while no global subscriber is set latches `Interest::never` for
-    /// the whole process, and a capturing test on another thread then sees an empty log.
-    ///
-    /// In the real suite that is a race against every other `encode` caller (it reproduces
-    /// as ~20/25 runs under `taskset -c 0-3 <test-bin> --test-threads=8`). This test forces
-    /// the losing interleaving deterministically, so it fails on every run without the
-    /// process-wide interest floor.
-    #[test]
-    fn encode_trace_survives_a_concurrent_first_hit_from_an_unsubscribed_thread() {
-        let spec = pcodec_spec(vec![8, 8, 8], "int16");
-        let data = ArrayData::I16((0..512).map(|k| (k % 97) as i16).collect());
-        let log = crate::test_trace::capture(tracing::Level::DEBUG, || {
-            // Register the callsite from a thread that has no subscriber of its own,
-            // while this thread holds a capturing one.
-            let (s2, d2) = (
-                pcodec_spec(vec![8, 8, 8], "int16"),
-                ArrayData::I16((0..512).map(|k| (k % 97) as i16).collect()),
-            );
-            std::thread::spawn(move || encode(&s2, &d2).unwrap())
-                .join()
-                .unwrap();
-            encode(&spec, &data).unwrap();
-        });
-        assert!(
-            log.contains("encoded array block"),
-            "a concurrent unsubscribed first hit disabled the callsite: {log}"
-        );
-    }
-
     #[test]
     fn encode_emits_a_structured_compression_trace() {
         let spec = pcodec_spec(vec![8, 8, 8], "int16");

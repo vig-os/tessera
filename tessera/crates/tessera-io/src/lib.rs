@@ -25,6 +25,10 @@ pub mod repo;
 pub mod sign;
 pub mod stream;
 pub mod table;
+// Test-only tracing setup (#356). Public, and `doc(hidden)`, only so the regression test in
+// `tests/` can reach it; see the module docs. Not part of the supported API.
+#[doc(hidden)]
+pub mod test_support;
 #[cfg(test)]
 mod test_trace;
 pub mod worm;
