@@ -1,0 +1,71 @@
+# THROWAWAY probe workflow for #472 — delete with this branch. Never merged to dev.
+#
+# Runs the `probe_472_float_encode_bytes` unit test on BOTH arches in ONE workflow, with the same
+# pinned rustc and the same dependency build, so the only variable between the two logs is the
+# target architecture. Comparing a nix-built x86 result against a non-nix aarch64 one would leave
+# the toolchain as a second variable.
+#
+# `push` trigger, not `workflow_dispatch`: a dispatchable workflow has to exist on the default
+# branch, and this must not touch `dev`. A push to this branch runs the definition from the pushed
+# commit.
+name: PROBE 472 float cross-arch
+
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches:
+      - 'spike/472-**'
+
+permissions: {}  # restrict default; job declares its own
+
+concurrency:
+  group: probe-472-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: probe (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Pinned explicitly rather than via rust-toolchain.toml's `channel = "stable"`: the flake
+      # resolves stable to 1.96.0, and a probe about float codegen must not also vary rustc.
+      - name: Install pinned Rust 1.96.0
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
+          rustc -vV
+          echo "host triple above; arch matrix entry = ${{ matrix.arch }}"
+
+      - name: "Run the #472 probe (debug profile — matches ingest-gate-a-default)"
+        run: |
+          set -euo pipefail
+          cd tessera
+          cargo test -p tessera-io --lib -- probe_472 --nocapture --test-threads=1 \
+            | tee ../probe-${{ matrix.arch }}.log
+          echo "--- PROBE472 lines only ---"
+          grep -a 'PROBE472' ../probe-${{ matrix.arch }}.log || true
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5.0.0
+        with:
+          name: probe-472-${{ matrix.arch }}
+          path: probe-${{ matrix.arch }}.log
+          if-no-files-found: error
