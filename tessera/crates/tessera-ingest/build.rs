@@ -41,16 +41,41 @@
 
 use std::path::{Path, PathBuf};
 
-/// `(Cargo.lock package name, env var `backends::backend_version` reads via `option_env!`)`.
+/// `(Cargo.lock package name, env var read via `option_env!`)`.
 ///
-/// Phase 1's `parquet` / `arrow` decoders are one line each.
-const DECODERS: &[(&str, &str)] = &[("dicom", "TESSERA_DEP_DICOM")];
+/// Read by `backends::backend_version` (for `tessera info`) and — for the generic-ingest lane — by
+/// `decoder::Decoder`, which seals the pin as part of the ADR-0056 §6a triple.
+const DECODERS: &[(&str, &str)] = &[
+    ("dicom", "TESSERA_DEP_DICOM"),
+    // The generic-ingest table lane (ADR-0056/#386). These are `=`-pinned in the workspace manifest,
+    // so the lockfile value IS the pin.
+    ("parquet", "TESSERA_DEP_PARQUET"),
+    ("arrow-ipc", "TESSERA_DEP_ARROW_IPC"),
+    ("arrow-array", "TESSERA_DEP_ARROW_ARRAY"),
+    ("csv", "TESSERA_DEP_CSV"),
+];
+
+/// The crates whose pinned version goes into the ADR-0056 §6a **feature digest** pre-image — i.e.
+/// everything on the *decode* path of the generic-ingest lanes.
+///
+/// Deliberately not "every dependency": the digest answers "which decoder interpreted these bytes",
+/// and widening it to the whole graph would make the digest move on changes that provably cannot
+/// touch a decoded value, turning every `cargo update` into a recipe event for no information gain.
+const DECODE_PATH_CRATES: &[&str] = &[
+    "parquet",
+    "arrow-array",
+    "arrow-buffer",
+    "arrow-schema",
+    "arrow-ipc",
+    "csv",
+];
 
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-env-changed=DEP_HDF5_ROOT");
 
     emit_decoder_pins();
+    emit_decode_feature_preimage();
 
     // Only relevant for the vendored-static build; a no-op for the default pkg-config path (where
     // hdf5-metno-sys does not emit `root`, so DEP_HDF5_ROOT is unset).
@@ -78,6 +103,49 @@ fn emit_decoder_pins() {
             println!("cargo::rustc-env={var}={version}");
         }
     }
+}
+
+/// Emit the ADR-0056 §6a feature-digest **pre-image**: this crate's version, the generic-ingest
+/// features resolved for *this* build, and the pinned versions of every decode-path crate.
+///
+/// Cargo hands a build script its own crate's resolved features as `CARGO_FEATURE_<NAME>` env vars
+/// (uppercased, `-` → `_`), which is the only feature information available here — and it is the
+/// information that matters, because it is what decides which decoder can run at all.
+///
+/// The digest itself is taken at **runtime** over this string (see `decoder::feature_digest`), not
+/// here: hashing in a build script would need a `[build-dependencies]` entry, and adding one moves the
+/// resolved feature graph — an ADR-0057 Gate B event. Emitting a legible pre-image and hashing it with
+/// a crate we already depend on costs nothing and leaves the digest invertible from any build.
+fn emit_decode_feature_preimage() {
+    // The generic-ingest capability features, in sorted order so the pre-image is stable across
+    // cargo's env-var ordering.
+    let mut features: Vec<&str> = ["arrow", "parquet", "csv", "npy"]
+        .into_iter()
+        .filter(|f| {
+            let var = format!("CARGO_FEATURE_{}", f.to_uppercase().replace('-', "_"));
+            std::env::var_os(var).is_some()
+        })
+        .collect();
+    features.sort_unstable();
+
+    let mut pins: Vec<String> = Vec::new();
+    if let Some(lock_path) = find_lockfile() {
+        if let Ok(lock) = std::fs::read_to_string(&lock_path) {
+            for c in DECODE_PATH_CRATES {
+                if let Some(v) = lock_version(&lock, c) {
+                    pins.push(format!("{c}={v}"));
+                }
+            }
+        }
+    }
+    // Sorted by construction (DECODE_PATH_CRATES is walked in order and that order is fixed), so the
+    // pre-image depends only on the resolved versions, never on filesystem or env iteration order.
+    println!(
+        "cargo::rustc-env=TESSERA_INGEST_DECODE_FEATURES=tessera-ingest={};features={};pins={}",
+        std::env::var("CARGO_PKG_VERSION").unwrap_or_default(),
+        features.join(","),
+        pins.join(","),
+    );
 }
 
 /// Walk up from this crate's manifest to the nearest `Cargo.lock` (the workspace root).

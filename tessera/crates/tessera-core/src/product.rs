@@ -130,6 +130,22 @@ impl ProductBuilder {
         self
     }
 
+    /// Record the **transforms applied at the door** (ADR-0056 §6.2) — the receipt for the
+    /// normalise-vs-preserve ladder's middle lane.
+    ///
+    /// Only generic ingest has any business calling this: a vendor backend that preserves its
+    /// source's values bit-faithfully records nothing, and an empty list serialises to nothing, which
+    /// is what keeps every pre-ADR-0056 product's bytes unchanged. Call before `seal` so the receipt
+    /// is covered by the seal — a transform list outside the seal would be a warning with extra
+    /// steps, which is the thing ADR-0056 §2 rejected.
+    pub fn with_ingest_transform(
+        &mut self,
+        transforms: Vec<crate::provenance::IngestTransform>,
+    ) -> &mut Self {
+        self.manifest.ingest_transform = transforms;
+        self
+    }
+
     /// Inherit **schema-flagged identity** fields from a resolved `derived_from` parent (ADR-0058
     /// §5) — the DAG-walk caller (the ingest engine) supplies the parent manifest + this product's
     /// schema; only fields the schema marks `inherit` flow, and an explicit child value always wins.

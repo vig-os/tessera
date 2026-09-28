@@ -68,6 +68,46 @@ hdf5-metno = "0.12"
 # any public hdf5-metno surface. Caret (not a hard pin) so cargo unifies it with the exact `hdf5-metno-sys`
 # version `hdf5-metno` already pulls transitively (one shared build of libhdf5's bindings; currently 0.12.0).
 hdf5-metno-sys = "0.12"
+# ── Generic-ingest readers (ADR-0056 / ADR-0057, #386). The TABLE lane. ──
+#
+# `=`-pinned, not caret. ADR-0056 §5 makes the `arrow → primitive` canonicalisation the ingest
+# determinism gate and treats a decoder bump as a *deliberate corpus event*; a `^` range would let one
+# happen on an unrelated `cargo update`, which is the same discipline as the ALP-exclusion pin.
+#
+# 58.3.0 is the version Vortex already resolves, so `arrow-array` / `-buffer` / `-schema` are ALREADY
+# in the default graph (Gate B snapshots all three) and these pins add no second arrow copy.
+#
+# Deliberately NOT the `arrow` meta-crate that ADR-0056 §12 sketched: it reaches this tree only via
+# datafusion, under tessera-cli's optional `sql` feature. Depending on it would newly pull
+# arrow-cast / -ord / -string / -row / -json into *every* build — including the
+# `arrow-array/chrono-tz` surface ADR-0057 §5's probe identified as hazard H1's door. The sub-crates
+# are the whole decode surface we need and nothing more.
+arrow-array = "=58.3.0"
+arrow-buffer = "=58.3.0"
+arrow-schema = "=58.3.0"
+arrow-ipc = "=58.3.0"          # Arrow IPC / Feather source files (`--from arrow`)
+# parquet = arrow-rs's reader. Defaults minus `simdutf8` (ADR-0056 §5 H7 — SIMD-dispatched decode
+# paths): UTF-8 *validation* is a yes/no answer that cannot change a value, so dropping it costs
+# nothing and removes one dispatch-dependent path from upstream of the seal.
+#
+# The compression codecs are kept in FULL, on purpose. A scientist's Parquet in the wild is
+# snappy / gzip / zstd / brotli / lz4-compressed, and refusing to read one is a wall rather than a
+# safety property: the source's compression never reaches our bytes, because ingest is a logical
+# re-encode through Vortex (ADR-0056 §2). `snap` + `brotli` + `zlib-rs` are the only genuinely new
+# crates; flate2 / lz4_flex / zstd are already in-tree.
+parquet = { version = "=58.3.0", default-features = false, features = [
+    "arrow",
+    "snap",
+    "brotli",
+    "flate2-zlib-rs",
+    "lz4",
+    "zstd",
+] }
+# CSV tokenizer (ADR-0056 §8). RFC-4180 record splitting ONLY — every number is parsed by Rust std's
+# `str::parse`, which is correctly-rounded and locale-independent. That closes hazard H3 (strtod /
+# lexical rounding differences) and H8 (`LC_NUMERIC=de_DE` reading `1,5` as 1.5) *by construction*,
+# which is what lets CSV ship in P1 with an explicit schema instead of waiting for P2.
+csv = "1"
 # Python bindings (tessera-py). abi3 → one .so works across CPython ≥3.9; extension-module → no
 # libpython link (the build needs only the abi3 minimum, not a runtime interpreter).
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }

@@ -29,6 +29,20 @@ age.workspace = true
 # the *parsed* model (JCS) before hashing, so whitespace / comments in the source TOML never change
 # the spec hash that flows into each member's `ingested_via_spec` provenance edge.
 toml.workspace = true
+# ── Generic-ingest table lane (ADR-0056 §2/§8, #386) — all optional, all default-ON. ──
+#
+# ADR-0057 §5: the gates exist for embedders and CI, not for end users, so `default` is generous and
+# the released binary carries everything. Gating buys three things (CI cost, an embedder's `cargo deny`
+# surface, and — the load-bearing one — making *which decoders could have produced this artifact* a
+# build-time fact that the ADR-0056 §6a `ingest_decoder` triple can be derived from rather than
+# guessed at). What it must NEVER buy is different bytes: a feature may decide whether a format is
+# readable, never how one encodes. Gate A (flake.nix) is the enforcement of that sentence.
+arrow-array = { workspace = true, optional = true }
+arrow-buffer = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
+arrow-ipc = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
+csv = { workspace = true, optional = true }
 
 [features]
 # `static-hdf5`: build libhdf5 from vendored source (via `hdf5-metno-src`, bundled HDF5 2.2.0) and link
@@ -41,5 +55,37 @@ toml.workspace = true
 # any content_hash. `zlib` bundles zlib too, so the vendored HDF5 has gzip/deflate filter support.
 static-hdf5 = ["hdf5-metno/static", "hdf5-metno/zlib"]
 
+# ── The generic-ingest capability features (ADR-0057 §5) ──
+#
+# `default` is generous on purpose: a `cargo install tessera-cli` with no flags reads Parquet, Arrow
+# IPC and CSV. The heavy native-dep vendor decoders (dicom, hdf5) are NOT gated here — retro-gating
+# them is a separate, mechanical change tracked on its own issue, because it moves every vendor
+# backend and is not #386's to carry.
+default = ["arrow", "parquet", "csv"]
+
+# The ADR-0056 §2 arrow→primitive type map: the table lane's canonicalisation, plus the Arrow IPC /
+# Feather reader. This is the ONLY place arrow enters the graph from our side (ADR-0057 §3 forbids it
+# in tessera-core, which is tessera-wasm's only dependency and the pure-abi3 wheel's).
+arrow = ["dep:arrow-array", "dep:arrow-buffer", "dep:arrow-schema", "dep:arrow-ipc"]
+# Parquet reads *through* the arrow lane — `source → RecordBatch → canonicalise → ColumnData` — so it
+# implies `arrow` rather than duplicating a type map.
+parquet = ["arrow", "dep:parquet"]
+# CSV needs NO arrow (ADR-0057 §5 sketched `csv = ["arrow", …]`; it turned out not to): with an
+# explicit schema there is nothing to infer and nothing to reinterpret, so the reader goes
+# `&str → ColumnData` directly through the shared canonicalisation. One fewer crate in the decode path
+# of the one format whose values are text.
+csv = ["dep:csv"]
+
 [dev-dependencies]
 tempfile = "3"
+# `half::f16` to build the Float16 fixtures the ADR-0056 §2 `f16_widen` test needs. Already in-tree
+# (zarrs pulls it for the f2 array dtype); dev-only, so it never enters the decode path.
+half.workspace = true
+# Write the Parquet fixtures the type-map + producer-equality tests read back. The writer is dev-only
+# on purpose: Tessera never *emits* Parquet, so a writer in the runtime graph would be dead weight in
+# the released binary and extra surface under `cargo deny`.
+parquet.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+# Write the Arrow IPC fixture the parity test reads back (Tessera never emits Arrow IPC either).
+arrow-ipc.workspace = true

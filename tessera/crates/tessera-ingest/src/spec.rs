@@ -202,6 +202,63 @@ pub enum FormatOptions {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         media_type: Option<String>,
     },
+    /// **Parquet → flat `table`** (ADR-0056 §11 P1). A logical re-encode: the source's compression,
+    /// page layout and dictionary ordering are all dropped, so a snappy Parquet and a zstd Parquet of
+    /// the same logical table seal to the same `content_hash`.
+    Parquet {
+        input: PathBuf,
+        /// Source columns to drop before mapping — the escape hatch every §2 rejection names.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<String>,
+        /// Operator-declared per-column semantics (ADR-0056 §7), landing **inside the seal**.
+        ///
+        /// Inline rather than a path to a sidecar TOML, deliberately: ADR-0035 hashes the *parsed*
+        /// spec into each member's `ingested_via_spec` edge, which makes a spec an archival artifact.
+        /// A path would make that hash a promise about a file the spec does not contain.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::column_meta::ColumnMeta::is_empty"
+        )]
+        column_meta: crate::column_meta::ColumnMeta,
+    },
+    /// **Arrow IPC / Feather → flat `table`**. Same type map as `parquet`; only the container differs.
+    Arrow {
+        input: PathBuf,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "crate::column_meta::ColumnMeta::is_empty"
+        )]
+        column_meta: crate::column_meta::ColumnMeta,
+    },
+    /// **CSV/TSV → flat `table`, under a DECLARED schema** (ADR-0056 §8).
+    ///
+    /// `columns` is required and total: Tessera infers no dtype, because an inferred schema depends on
+    /// which rows were sampled and the seal must be reproducible. Declarations are positional and are
+    /// cross-checked against the header row.
+    Csv {
+        input: PathBuf,
+        /// `NAME:DTYPE` per column, in file order; `?` suffix allows NULLs (`age:i4?`).
+        columns: Vec<String>,
+        /// Field delimiter, as a one-character string (`","`, `"\t"`). Never sniffed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delimiter: Option<String>,
+        /// Whether row 1 is a header to skip and check. Default `true`.
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        header: bool,
+        /// Extra field texts read as NULL, beyond the always-NULL empty field (`"NA"`, `"NULL"`, …).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        null_tokens: Vec<String>,
+        /// Declared columns to drop after reading (declarations stay positional).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "crate::column_meta::ColumnMeta::is_empty"
+        )]
+        column_meta: crate::column_meta::ColumnMeta,
+    },
     /// Multi-file opaque preservation: seal a set of files as ONE `blob` product with a `Blob` block
     /// **per file** (no tar — the `.tsra` is already a STORED-zip container). The block-per-file cold
     /// tier for a multi-file vendor series (e.g. a DICOM series' slices). `format = "blob-series"`.
@@ -220,6 +277,14 @@ fn default_block_prefix() -> String {
 }
 fn default_slab_rows() -> usize {
     DEFAULT_SLAB_ROWS
+}
+fn default_true() -> bool {
+    true
+}
+/// `skip_serializing_if` for a `bool` whose default is `true` — omit it when it holds the default, so a
+/// spec's canonical JSON (and therefore its `spec_hash`) is unchanged by not mentioning the field.
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// Read + parse a `.toml` file into an [`IngestSpec`]. Does NOT validate — call [`validate`] next
@@ -301,7 +366,136 @@ pub fn validate(spec: &IngestSpec) -> Result<Vec<usize>> {
             "ingest-spec: cycle in derived_from involving products {names:?}"
         )));
     }
+    // 4. ADR-0056 §7: the laundering rule.
+    for p in &spec.products {
+        check_no_schema_laundering(p)?;
+    }
     Ok(order)
+}
+
+/// Resolve a table source's backend from its magic bytes, or explain what to pass (ADR-0056 §4).
+///
+/// Lives here rather than in the CLI so the one-product spec the CLI builds and a hand-written TOML
+/// spec name the backend from the same string set — ADR-0056 §4's "`--from <name>` and the TOML
+/// `from = \"<name>\"` are one string set and one grep locates every backend".
+pub fn sniff_or_explain(input: &std::path::Path) -> Result<String> {
+    match crate::canonical::sniff_table_format(input)? {
+        Some(f) => Ok(f.to_string()),
+        None => Err(crate::canonical::unknown_format_error(input)),
+    }
+}
+
+/// The CSV-without-declarations refusal, routed through the one place that owns its wording.
+///
+/// Feature-gated indirection rather than a duplicated string: with `csv` compiled in, the message is
+/// the canonical one from [`crate::csv_table::no_schema_error`]; without it, a build that cannot read
+/// CSV at all should say *that* instead, since the declarations would not help.
+pub fn csv_needs_declarations() -> Error {
+    #[cfg(feature = "csv")]
+    {
+        crate::csv_table::no_schema_error()
+    }
+    #[cfg(not(feature = "csv"))]
+    {
+        Error::BackendNotCompiled("csv")
+    }
+}
+
+/// The product schemas a **generic** backend is allowed to claim (ADR-0056 §7).
+///
+/// Named by primitive, because that is all a generic backend knows about its input: it read a flat
+/// table, a dense grid, or opaque bytes.
+pub const GENERIC_PRODUCT_SCHEMAS: &[&str] = &["table", "array", "blob"];
+
+/// Is this backend a **generic** one — i.e. one that normalises a format with no domain semantics?
+///
+/// Exhaustive by construction: the `match` forces a new [`FormatOptions`] variant to declare which
+/// side of the line it is on, so a future backend cannot slip through unclassified.
+pub fn is_generic_backend(opts: &FormatOptions) -> bool {
+    match opts {
+        // Generic: the container tells us the shape and nothing about the domain.
+        FormatOptions::Parquet { .. }
+        | FormatOptions::Arrow { .. }
+        | FormatOptions::Csv { .. }
+        | FormatOptions::Blob { .. }
+        | FormatOptions::BlobSeries { .. } => true,
+        // Vendor: the decoder itself establishes the domain facts the schema then asserts (DICOM's
+        // PS3.15 tag classification, GE's GEDDF dictionary, NIfTI's sform/qform frame).
+        FormatOptions::Dicom { .. }
+        | FormatOptions::DicomSeries { .. }
+        | FormatOptions::HdfCompound { .. }
+        | FormatOptions::Nifti { .. } => false,
+        // `raw` is genuinely generic in nature — ADR-0056 §4 says it "was always a headerless
+        // `array`" — but it is deliberately NOT swept in here. It still produces a `recon` product
+        // (`raw::to_recon_product`), and the shipped `docs/examples/migrate-petct-study.toml` declares
+        // `format = "raw"` with `schema = "recon"`. Enforcing the rule on it would therefore break a
+        // documented workflow and move existing goldens, which belongs to §4's vendor-verb collapse —
+        // a separate, mechanical change — not to this one. Until then, `raw` keeps the vendor
+        // exemption it has always had in practice.
+        FormatOptions::Raw { .. } => false,
+    }
+}
+
+/// **ADR-0056 §7's laundering rule**: a generic backend may only produce a product in
+/// [`GENERIC_PRODUCT_SCHEMAS`].
+///
+/// # Why this is a hard error and not a warning
+///
+/// The seal binds a schema's *promises*, not the pipeline's fulfilment of them. Without this check,
+/// `tessera ingest table events.csv --schema listmode` produces a `.tsra` that is
+/// **byte-indistinguishable** from a real vendor listmode ingest — carrying the `listmode` schema's
+/// PS3.15 `Identifying` sensitivity tiers that *no classification pass ever validated*. Every
+/// downstream consumer of `manifest.schema.fields[].sensitivity` would then trust them. That is the
+/// self-describing-artifact thesis turned into a weapon.
+///
+/// It is enforced **here**, at parse time, rather than read back off a manifest field, for two
+/// reasons: the engine knows which backend it dispatched to (a manifest only knows what it claims),
+/// and failing before a single byte is read means a bad spec has no side effects.
+///
+/// It is also enforced **now** rather than in a later phase, contradicting ADR-0056's own landing
+/// plan, because §7 says why: retrofitting it after the first such artifact ships would leave those
+/// seals permanently ambiguous — nobody could tell a laundered `listmode` from a real one.
+///
+/// The designed escape hatch is `--classification-ack`, an ADR-0037 signature over the
+/// (schema, column-tier) tuple. Its ergonomics are explicitly undesigned in the ADR, so it is not
+/// built here; the error names the constraint instead of offering a flag that does not exist.
+fn check_no_schema_laundering(p: &ProductSpec) -> Result<()> {
+    if !is_generic_backend(&p.options) {
+        return Ok(());
+    }
+    if GENERIC_PRODUCT_SCHEMAS.contains(&p.schema.as_str()) {
+        return Ok(());
+    }
+    Err(Error::Invalid(format!(
+        "ingest-spec: product '{}' is read by the generic '{}' backend but claims schema '{}'.\n           A generic backend has no domain knowledge, so it cannot honour a domain schema's promises — \
+         and a `.tsra` carrying that schema's sensitivity tiers would be indistinguishable from one a \
+         real vendor ingest classified (ADR-0056 §7).\n           use a primitive schema:  schema = \"{}\"\n           or ingest through the vendor backend that knows the domain (format = \"dicom\" / \"ge-hdf5\" \
+         / \"nifti\"), which classifies at the door",
+        p.name,
+        crate::backends::backend_name(&p.options),
+        p.schema,
+        default_schema_for(&p.options),
+    )))
+}
+
+/// The primitive schema a generic backend's output belongs to — what the CLI stamps and what the
+/// laundering error suggests.
+pub fn default_schema_for(opts: &FormatOptions) -> &'static str {
+    match opts {
+        FormatOptions::Parquet { .. } | FormatOptions::Arrow { .. } | FormatOptions::Csv { .. } => {
+            "table"
+        }
+        // See `is_generic_backend`: `raw` is not subject to the rule yet, so this value is
+        // informational only (it is what §4's collapse will make it).
+        FormatOptions::Raw { .. } => "array",
+        FormatOptions::Blob { .. } | FormatOptions::BlobSeries { .. } => "blob",
+        // A vendor backend's schema is the operator's declaration, not ours to default; the value is
+        // only ever read for generic backends (see `check_no_schema_laundering`).
+        FormatOptions::Dicom { .. }
+        | FormatOptions::DicomSeries { .. }
+        | FormatOptions::HdfCompound { .. }
+        | FormatOptions::Nifti { .. } => "recon",
+    }
 }
 
 /// Canonical-JSON bytes of the parsed spec — what [`spec_hash`] hashes over. Whitespace / comments

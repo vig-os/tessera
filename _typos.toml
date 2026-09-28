@@ -31,6 +31,10 @@ Fo = "Fo"                    # "FoR" — Frame-of-Reference encoding
 # "ccessible". Allowlisted deliberately — the ADR/docs prose stays as written,
 # the entry is NOT a typo we failed to fix.
 ccessible = "ccessible"
+# ADR-0056 §7's identifying-column-name heuristic matches the spellings PHI columns actually carry in
+# the wild, and `patname` / `pat_name` is one of them (ADR-0056 §7 lists the family: MRN / patient id /
+# name / DOB / accession / UID). It is a needle in a match list, not prose — and NOT "pathname".
+patname = "patname"
 
 # ── devkit template entries (folded in; this file shadows .typos.toml) ──
 # Shell scripting: sed label syntax uses 'ba' (branch to label 'a')

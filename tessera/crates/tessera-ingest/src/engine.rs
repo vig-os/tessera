@@ -503,6 +503,118 @@ fn dispatch(
             let m = seal_to_tsra(m, &payloads, out_dir, p, parents, timestamp.as_str())?;
             Ok((m, ()))
         }
+        // ── The generic-ingest lanes (ADR-0056 §11 P1) ──
+        //
+        // ADR-0057 §6's shape: the enum variant always **parses** (so a TOML spec's `spec_hash` is
+        // portable across builds and an archival spec never becomes unreadable), and only the
+        // *handler* is feature-gated. An unavailable backend is a clean, typed runtime error —
+        // never a parse error that would point at the file instead of at the build.
+        FormatOptions::Parquet {
+            input,
+            exclude,
+            column_meta,
+        } => {
+            #[cfg(feature = "parquet")]
+            {
+                let table = crate::parquet_table::read_table(input, exclude)?;
+                let m = seal_generic_table(
+                    &table,
+                    p,
+                    input,
+                    "parquet",
+                    crate::decoder::Decoder::PARQUET,
+                    column_meta,
+                    label,
+                    extra_sources,
+                    &timestamp,
+                    out_dir,
+                    parents,
+                )?;
+                Ok((m, ()))
+            }
+            #[cfg(not(feature = "parquet"))]
+            {
+                let _ = (input, exclude, column_meta);
+                Err(Error::BackendNotCompiled("parquet"))
+            }
+        }
+        FormatOptions::Arrow {
+            input,
+            exclude,
+            column_meta,
+        } => {
+            #[cfg(feature = "arrow")]
+            {
+                let table = crate::parquet_table::read_arrow_table(input, exclude)?;
+                let m = seal_generic_table(
+                    &table,
+                    p,
+                    input,
+                    "arrow",
+                    crate::decoder::Decoder::ARROW_IPC,
+                    column_meta,
+                    label,
+                    extra_sources,
+                    &timestamp,
+                    out_dir,
+                    parents,
+                )?;
+                Ok((m, ()))
+            }
+            #[cfg(not(feature = "arrow"))]
+            {
+                let _ = (input, exclude, column_meta);
+                Err(Error::BackendNotCompiled("arrow"))
+            }
+        }
+        FormatOptions::Csv {
+            input,
+            columns,
+            delimiter,
+            header,
+            null_tokens,
+            exclude,
+            column_meta,
+        } => {
+            #[cfg(feature = "csv")]
+            {
+                let mut opts = crate::csv_table::CsvOptions::from_decls(columns)?;
+                if let Some(d) = delimiter {
+                    opts.delimiter = one_byte_delimiter(d)?;
+                }
+                opts.header = *header;
+                opts.null_tokens = null_tokens.clone();
+                opts.exclude = exclude.clone();
+                let table = crate::csv_table::read_table(input, &opts)?;
+                let m = seal_generic_table(
+                    &table,
+                    p,
+                    input,
+                    "csv",
+                    crate::decoder::Decoder::CSV,
+                    column_meta,
+                    label,
+                    extra_sources,
+                    &timestamp,
+                    out_dir,
+                    parents,
+                )?;
+                Ok((m, ()))
+            }
+            #[cfg(not(feature = "csv"))]
+            {
+                let _ = (
+                    input,
+                    columns,
+                    delimiter,
+                    header,
+                    null_tokens,
+                    exclude,
+                    column_meta,
+                );
+                Err(Error::BackendNotCompiled("csv"))
+            }
+        }
         FormatOptions::HdfCompound {
             input,
             dataset,
@@ -608,6 +720,100 @@ fn dispatch(
                 Ok((m, ()))
             }
         }
+    }
+}
+
+/// Seal a canonicalised generic table as a `table` product and write its `.tsra`.
+///
+/// One helper for all three generic lanes, so the parts that must not drift between them — the
+/// decoder record, the `source_format` field, the operator's recipe, the `--column-meta` application,
+/// the PHI advisory — are written once. The lanes differ only in how they produced the `CanonicalTable`.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+#[allow(clippy::too_many_arguments)] // the dispatch context, same as every other backend seam
+fn seal_generic_table(
+    table: &crate::canonical::CanonicalTable,
+    p: &crate::spec::ProductSpec,
+    input: &Path,
+    source_format: &str,
+    decoder: crate::decoder::Decoder,
+    column_meta: &crate::column_meta::ColumnMeta,
+    label: Option<&str>,
+    extra_sources: &[Source],
+    timestamp: &str,
+    out_dir: &Path,
+    parents: &[&Manifest],
+) -> Result<Manifest> {
+    warn_unclassified_identifying_columns(table, column_meta, &p.name);
+    let (m, payloads) = crate::canonical::to_table_product(
+        table,
+        &crate::canonical::GenericIngest {
+            name: &p.name,
+            timestamp,
+            description: p
+                .description
+                .as_deref()
+                .unwrap_or("generically-ingested table"),
+            source_format,
+            source_path: input,
+            source_label: label,
+            extra_sources,
+            decoder,
+            generation: p.generation.clone(),
+            column_meta,
+        },
+    )?;
+    seal_to_tsra(m, &payloads, out_dir, p, parents, timestamp)
+}
+
+/// ADR-0056 §7's suspect-column advisory: print **once**, to stderr, with the fix.
+///
+/// Never gates the ingest, and deliberately quiet when there is nothing an operator could act on.
+/// §9's loudness rule is why this is one aggregated line per product rather than one per column:
+/// someone running `find … -exec tessera ingest …` across 5000 files must not scroll 30k lines of
+/// advice. It goes through the `tracing` facade, so a non-TTY consumer can filter it out entirely.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+fn warn_unclassified_identifying_columns(
+    table: &crate::canonical::CanonicalTable,
+    column_meta: &crate::column_meta::ColumnMeta,
+    product: &str,
+) {
+    let classified = column_meta.classified();
+    let suspect: Vec<&str> = table
+        .columns
+        .iter()
+        .map(|(c, _)| c.name.as_str())
+        .filter(|n| crate::column_meta::looks_identifying(n))
+        .filter(|n| !classified.contains(n))
+        .collect();
+    if suspect.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        target: "tessera::ingest::phi",
+        member = %product,
+        columns = %suspect.join(", "),
+        "column(s) '{}' match an identifying-name pattern (MRN / patient id / name / DOB / \
+         accession / UID) and no --column-meta gave them a tier; stamped: unknown. Classify before \
+         sharing: add a [<column>] sensitivity = \"identifying\" entry to a --column-meta file, or \
+         edit after the fact with `tessera commit --set`.",
+        suspect.join("', '")
+    );
+}
+
+/// Parse a spec's one-character `delimiter` string into a byte.
+///
+/// A whole `char` rather than a byte in the TOML because `"\t"` must be writable; but the `csv`
+/// tokenizer takes a byte, and a multi-byte delimiter is not a thing RFC 4180 has — so a
+/// `delimiter = "::"` is an error rather than a silently truncated `:`.
+#[cfg(feature = "csv")]
+fn one_byte_delimiter(d: &str) -> Result<u8> {
+    let bytes = d.as_bytes();
+    match bytes {
+        [b] => Ok(*b),
+        _ => Err(Error::Invalid(format!(
+            "ingest-spec: delimiter must be exactly one ASCII character, got '{d}' ({} bytes)",
+            bytes.len()
+        ))),
     }
 }
 
