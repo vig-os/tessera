@@ -901,13 +901,17 @@ enum BenchAction {
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
-    /// Head-to-head size + latency against HDF5 on the same logical data (#388).
+    /// Head-to-head size + latency against HDF5 and Parquet on the same logical data (#388).
     ///
-    /// Writes one synthetic volume and one synthetic table to `.tsra` and to HDF5 — each format at
-    /// its sensible DEFAULT and at a TUNED setting, all printed — then measures on-disk size,
-    /// write+seal, full read, projected/column read, ROI read and integrity cost. Reports the median
-    /// of N runs with spread; correctness is asserted before any timing counts. Rows where Tessera
-    /// loses are included on purpose. Parquet joins once #460 lands its crates.
+    /// Writes one synthetic volume and TWO synthetic tables to `.tsra`, HDF5 and Parquet — each
+    /// format at its sensible DEFAULT and at a TUNED setting, all printed — then measures on-disk
+    /// size, write+seal, full read, projected/column read, ROI read and integrity cost. Reports the
+    /// median of N runs with spread; correctness is asserted before any timing counts. Rows where
+    /// Tessera loses are included on purpose.
+    ///
+    /// Both table fixtures are always reported: a PERIODIC one that is adversarial for
+    /// value-distribution codecs, and a CONTINUOUS one shaped after real listmode. Showing only one
+    /// of them would be choosing the answer (#493).
     Compare {
         /// Which dataset(s) to run: `volume`, `table`, or `both`.
         #[arg(long, default_value = "both")]
@@ -925,7 +929,7 @@ enum BenchAction {
         /// Volume edge (N^3 int16). Default 256 = 32 MiB raw, matching the #143 harness.
         #[arg(long, default_value_t = bench_compare::VOL_N)]
         vol_n: usize,
-        /// Table row count (`u8 + 2xf4`).
+        /// Table row count (`u8 + 2xf4`) for each synthetic fixture.
         #[arg(long, default_value_t = bench_compare::TABLE_ROWS)]
         rows: usize,
     },

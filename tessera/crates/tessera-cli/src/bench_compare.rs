@@ -1,4 +1,4 @@
-//! `tessera bench compare` — head-to-head size + latency against HDF5 on the same logical data
+//! `tessera bench compare` — head-to-head size + latency vs HDF5 and Parquet on the same data
 //! (#388, the AX pitch gap from #390).
 //!
 //! # Why this exists
@@ -29,7 +29,9 @@
 //! - **HDF5 `fletcher32`** is a per-chunk checksum. It detects *corruption* — bit rot, a truncated
 //!   write, a bad disk — on the chunks you actually read. It is not keyed, it covers no metadata, and
 //!   an attacker who rewrites a chunk simply rewrites its checksum too.
-//! - **Parquet page CRCs** are the same class of thing (stage 2, once #460 lands the Rust crates).
+//! - **Parquet** has nothing in this class to time. The format permits an optional per-page CRC32,
+//!   but parquet-rs 58's writer never emits one, so for the files this benchmark writes there is
+//!   nothing to check — the row is absent by fact, not by omission.
 //! - **Tessera `verify`** re-derives every block digest and checks them against the sealed manifest,
 //!   whose own hash covers the metadata and provenance as well. That detects corruption too, but its
 //!   point is *tamper-evidence*: you cannot alter a block, a field, or the recipe without changing
@@ -55,7 +57,7 @@ use tessera_core::block::array::ArraySpec;
 use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::{ProductBuilder, Result};
 use tessera_io::array::{self, ArrayData};
-use tessera_io::table::{self, ColumnData, TableData};
+use tessera_io::table::{self, ColumnData, TableData, ROWS_PER_GROUP};
 use tessera_io::{pack, BlockPayload, Reader};
 
 /// Cubic chunk edge Tessera uses for arrays by default. HDF5's tuned variant is given the SAME
@@ -97,9 +99,54 @@ fn make_volume(n: usize) -> ArrayData {
     ArrayData::I16(v)
 }
 
-/// A listmode-like table: monotonic u64 timestamp + two f32 energy columns.
-/// Same shape as `bench/ecosystems/common.py::make_table` (#143).
-fn make_table(rows: usize) -> (TableSpec, TableData) {
+/// Deterministic xorshift64* — a continuous fixture needs pseudo-random values, but the benchmark
+/// must stay byte-reproducible, so this is a fixed-seed generator rather than a real RNG.
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn unit(&mut self) -> f32 {
+        (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32
+    }
+    /// Sum of four uniforms — a cheap, dependency-free bell curve (central limit). The property
+    /// under test is that the column is drawn from a CONTINUOUS distribution, which is what defeats
+    /// a dictionary. It is emphatically NOT that the values are distinct: at 4M draws from a 24-bit
+    /// uniform, collisions are a certainty, and claiming otherwise was simply wrong (#497 review).
+    fn bell(&mut self) -> f32 {
+        self.unit() + self.unit() + self.unit() + self.unit() - 2.0
+    }
+    /// An exponentially-distributed run length with the given mean, floored at one event.
+    ///
+    /// A real detector clock does not tick every Nth event exactly: arrivals are Poisson, so the
+    /// number of events sharing one millisecond stamp is geometric (exponential in the continuum
+    /// limit). Generating the clock as an exact `k / MEAN` would hand the continuous fixture the
+    /// PERIODIC fixture's defining property — the one thing it exists in order not to have.
+    fn exp_run(&mut self, mean: f32) -> u64 {
+        // `unit()` samples [0, 1) and ln(0) is -inf, so shift to (0, 1].
+        let u = 1.0 - self.unit();
+        let n = (-mean * u.ln()).round();
+        if n.is_finite() && n >= 1.0 {
+            n as u64
+        } else {
+            1
+        }
+    }
+}
+
+/// **Periodic** fixture — the original #388 table: a monotonic `u64` counter and two `f32` columns
+/// with periods 7 and 5.
+///
+/// It is kept, and kept labelled, because it is **adversarial for value-distribution codecs**: LZ77
+/// (deflate, behind HDF5's shuffle+gzip) locks onto the repeating byte block, while Pco, dictionary
+/// and bit-packing model the value distribution and cannot exploit periodicity at all. Tessera loses
+/// it ~6× (#493). Replacing it with something friendlier would be tuning the benchmark until we win;
+/// reporting it beside a realistic fixture is the honest form.
+fn make_table_periodic(rows: usize) -> (TableSpec, TableData) {
     let data: TableData = vec![
         ("t".into(), ColumnData::U64((0..rows as u64).collect())),
         (
@@ -111,16 +158,56 @@ fn make_table(rows: usize) -> (TableSpec, TableData) {
             ColumnData::F32((0..rows).map(|k| 510.0 - (k % 5) as f32).collect()),
         ),
     ];
-    let spec = TableSpec {
-        columns: vec![
-            Column::new("t", "u8"),
-            Column::new("e0", "f4"),
-            Column::new("e1", "f4"),
-        ],
+    (table_spec(&data, rows), data)
+}
+
+/// Mean number of events sharing one millisecond stamp on real DUPLET `/events_2p` (#493).
+const MS_RUN_EVENTS: f32 = 250.0;
+
+/// **Continuous** fixture — shaped after what a real acquisition actually looks like, measured on
+/// DUPLET `/events_2p` during the #493 investigation:
+///
+/// - `t` is a coarse millisecond clock, not a dense counter: it advances once every ~250 events, so
+///   ~99.6 % of its deltas are zero, matching the real column's run structure. The run lengths are
+///   POISSON (exponentially-distributed gaps), not a fixed stride — see [`Rng::exp_run`].
+/// - `e0`/`e1` are energies drawn from a continuous distribution. On the real data shuffle+gzip
+///   manages only ~1.4× on columns of this character, and Pco beats it.
+fn make_table_continuous(rows: usize) -> (TableSpec, TableData) {
+    // The clock draws from its OWN stream so that changing it leaves the energy columns
+    // byte-identical, and the two effects on the reported sizes stay separable.
+    let mut clk = Rng(0x2545_F491_4F6C_DD1D);
+    let mut t = Vec::with_capacity(rows);
+    let mut clock: u64 = 0;
+    let mut left = clk.exp_run(MS_RUN_EVENTS);
+    for _ in 0..rows {
+        if left == 0 {
+            clock += 1;
+            left = clk.exp_run(MS_RUN_EVENTS);
+        }
+        t.push(clock);
+        left -= 1;
+    }
+
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let e0: Vec<f32> = (0..rows).map(|_| 511.0 + 25.0 * rng.bell()).collect();
+    let e1: Vec<f32> = (0..rows).map(|_| 511.0 + 25.0 * rng.bell()).collect();
+    let data: TableData = vec![
+        ("t".into(), ColumnData::U64(t)),
+        ("e0".into(), ColumnData::F32(e0)),
+        ("e1".into(), ColumnData::F32(e1)),
+    ];
+    (table_spec(&data, rows), data)
+}
+
+fn table_spec(data: &TableData, rows: usize) -> TableSpec {
+    TableSpec {
+        columns: data
+            .iter()
+            .map(|(n, c)| Column::new(n.clone(), c.numpy_code()))
+            .collect(),
         rows: rows as u64,
         row_index: None,
-    };
-    (spec, data)
+    }
 }
 
 /// Best-effort page-cache eviction for one file, so a "cold" read measures a first read rather than
@@ -253,7 +340,7 @@ const COLD_RESIDENT_OK: f64 = 0.01;
 pub struct Row {
     pub format: String,
     pub settings: String,
-    pub modality: &'static str,
+    pub modality: String,
     pub op: &'static str,
     pub cache: &'static str,
     /// Post-eviction page residency for THIS row's file, when it was a cold run. `None` on warm rows
@@ -304,7 +391,7 @@ struct H5Variant {
 /// used: the volume gets Tessera's own cubic 64³ (so the ROI row compares layouts, not chunk-size
 /// luck), while a 1-D table gets a row-count chunk. Printing "64³" on a table row would be a lie.
 fn h5_variants(modality: &str) -> Vec<H5Variant> {
-    let chunk_desc = if modality == "volume" {
+    let chunk_desc = if modality.starts_with("volume") {
         format!("chunked {CHUNK}^3 (= tessera's)")
     } else {
         format!("chunked {TABLE_CHUNK_ROWS} rows (1-D)")
@@ -390,6 +477,30 @@ fn expect_rows(data: &TableData, start: usize, len: usize) -> Result<TableData> 
             Ok((name.clone(), sliced))
         })
         .collect()
+}
+
+/// Take `len` rows starting at `off` from an already-read table — used to cut the exact row window
+/// out of the whole row groups Parquet must read, so every format is compared on the same rows.
+fn slice_rows(data: &TableData, off: usize, len: usize) -> Result<TableData> {
+    expect_rows(data, off, len)
+}
+
+/// The row groups a row window overlaps, plus the window's offset INSIDE the first of them.
+///
+/// Row groups are Parquet's coarsest IO unit: it cannot hand back a row range, only whole groups,
+/// so a fair timing reads every group the window touches and slices the exact window out of them.
+///
+/// Getting this wrong is not loud. The benchmark shipped with `roi_start / ROWS_PER_GROUP` alone —
+/// ONE group — and at 4M rows the window [2,000,000, 2,040,000) straddles groups 30 and 31, so
+/// Parquet returned 31,616 of 40,000 rows and was timed on 79% of the work. It verified clean
+/// because the check compared against *that group's* slice rather than the exact source window, the
+/// same shape as the #487 row-ROI asymmetry: an expectation derived from the same wrong thing as the
+/// result. Hence a named function with its own tests rather than two lines inline (#503 review).
+fn window_row_groups(start: usize, len: usize, rows_per_group: usize) -> (Vec<usize>, usize) {
+    debug_assert!(len > 0, "an empty window has no groups to read");
+    let first = start / rows_per_group;
+    let last = (start + len - 1) / rows_per_group;
+    ((first..=last).collect(), start - first * rows_per_group)
 }
 
 /// Fail loudly when a timed read did not return what was written. Correctness gates timing: a read
@@ -609,7 +720,7 @@ fn compare_volume(
             rows.push(Row {
                 format: v.label.into(),
                 settings: v.settings,
-                modality: "volume",
+                modality: "volume".into(),
                 op: "verify",
                 cache: "-",
                 resident: None,
@@ -626,7 +737,8 @@ const CLAIM_FULL: &str = "baseline full materialise";
 const CLAIM_ROI: &str = "cubic chunks -> cheap ROI / orthogonal access";
 const CLAIM_COLUMN: &str =
     "columnar projection: decode one column (tessera still READS the block's bytes)";
-const CLAIM_ROWS: &str = "row-index pushdown: take a window without decoding the rest";
+const CLAIM_ROWS: &str =
+    "row window without decoding the rest (parquet reads whole row groups, then slices)";
 const CLAIM_SIZE: &str = "smaller on disk than the alternatives";
 const CLAIM_WRITE: &str = "the cost of sealing (tessera pays, the others do not)";
 const CLAIM_VERIFY_TSRA: &str =
@@ -634,12 +746,20 @@ const CLAIM_VERIFY_TSRA: &str =
 const CLAIM_VERIFY_H5: &str =
     "fletcher32: per-chunk CORRUPTION check on read; not keyed, no identity";
 const CLAIM_VERIFY_NONE: &str = "no integrity mechanism configured";
+/// Parquet's FORMAT has an optional per-page CRC32, but parquet-rs 58's **writer never emits one**
+/// (no property enables it), and its reader checks a page CRC only under the crate's `crc` feature
+/// AND only when the page header carries one. For files this benchmark writes there is therefore
+/// nothing to verify — reported as absent rather than timed, because timing a mechanism that is not
+/// in the file would be inventing a number.
+const CLAIM_VERIFY_PQ: &str =
+    "parquet-rs writes NO page CRC (the format allows one; this writer omits it) -> nothing to check";
+const PQ: &str = "Parquet (parquet-rs)";
 
-fn push_size(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &'static str, b: u64) {
+fn push_size(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &str, b: u64) {
     rows.push(Row {
         format: format.into(),
         settings: settings.into(),
-        modality,
+        modality: modality.into(),
         op: "size",
         cache: "-",
         resident: None,
@@ -649,11 +769,11 @@ fn push_size(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &'stat
     });
 }
 
-fn push_write(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &'static str, s: Stats) {
+fn push_write(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &str, s: Stats) {
     rows.push(Row {
         format: format.into(),
         settings: settings.into(),
-        modality,
+        modality: modality.into(),
         op: "write+seal",
         cache: "warm",
         resident: None,
@@ -668,7 +788,7 @@ fn push_read(
     rows: &mut Vec<Row>,
     format: &str,
     settings: &str,
-    modality: &'static str,
+    modality: &str,
     op: &'static str,
     cache: &'static str,
     s: Stats,
@@ -684,7 +804,7 @@ fn push_read(
     rows.push(Row {
         format: format.into(),
         settings: settings.into(),
-        modality,
+        modality: modality.into(),
         op,
         cache,
         resident,
@@ -708,20 +828,208 @@ fn slug(s: &str) -> String {
         .collect()
 }
 
+/// Parquet variants for the head-to-head (#388 stage 2), written with the real `parquet` crate.
+struct PqVariant {
+    settings: String,
+    compression: parquet::basic::Compression,
+    dictionary: bool,
+    statistics: parquet::file::properties::EnabledStatistics,
+    /// BYTE_STREAM_SPLIT on the float columns — Parquet's counterpart to HDF5's shuffle filter.
+    byte_stream_split: bool,
+    /// Rows per row group. Always [`ROWS_PER_GROUP`] in the benchmark, so Parquet gets the same IO
+    /// granularity as the other two formats; a test overrides it to exercise a window that spans
+    /// more than one group without writing millions of rows.
+    rows_per_group: usize,
+}
+
+fn pq_variants() -> Vec<PqVariant> {
+    use parquet::basic::{Compression, ZstdLevel};
+    use parquet::file::properties::EnabledStatistics;
+    vec![
+        PqVariant {
+            // parquet-58's actual DEFAULT_COMPRESSION is UNCOMPRESSED. Calling snappy "the default"
+            // was wrong; both are shown so the crate default and the ecosystem default are distinct.
+            settings: format!(
+                "default (crate): uncompressed, dict, page stats, {ROWS_PER_GROUP}-row groups"
+            ),
+            compression: Compression::UNCOMPRESSED,
+            dictionary: true,
+            statistics: EnabledStatistics::Page,
+            byte_stream_split: false,
+            rows_per_group: ROWS_PER_GROUP,
+        },
+        PqVariant {
+            settings: format!(
+                "pyarrow/Spark default: snappy, dict, page stats, {ROWS_PER_GROUP}-row groups"
+            ),
+            compression: Compression::SNAPPY,
+            dictionary: true,
+            statistics: EnabledStatistics::Page,
+            byte_stream_split: false,
+            rows_per_group: ROWS_PER_GROUP,
+        },
+        PqVariant {
+            // The float analogue of HDF5's shuffle: BYTE_STREAM_SPLIT regroups each float's bytes by
+            // significance so the codec sees runs. Dictionary OFF, because a dictionary over
+            // continuous floats defeats the split. Omitting this understated Parquet exactly as
+            // omitting shuffle understated HDF5 (#487).
+            settings: format!(
+                "tuned: zstd-4, BYTE_STREAM_SPLIT floats, no dict, {ROWS_PER_GROUP}-row groups"
+            ),
+            compression: Compression::ZSTD(ZstdLevel::try_new(4).expect("valid zstd level")),
+            dictionary: false,
+            statistics: EnabledStatistics::Page,
+            byte_stream_split: true,
+            rows_per_group: ROWS_PER_GROUP,
+        },
+    ]
+}
+
+/// Write one table as Parquet with the given settings. One row group per [`ROWS_PER_GROUP`]-sized
+/// slice so the row-range read below can select a row group, mirroring the other two formats' chunk
+/// granularity rather than giving Parquet a free layout advantage.
+/// Build the Arrow batch ONCE, outside the timed region — cloning the column vectors into Arrow is
+/// this benchmark's own marshalling cost, not Parquet's write cost, and timing it would charge
+/// Parquet for work the other two formats never do (#503 review).
+fn arrow_batch(data: &TableData) -> Result<arrow_array::RecordBatch> {
+    use arrow_array::{ArrayRef, Float32Array, RecordBatch, UInt64Array};
+    use arrow_schema::{DataType, Field, Schema};
+    let mut fields = Vec::new();
+    let mut arrays: Vec<ArrayRef> = Vec::new();
+    for (name, col) in data {
+        match col {
+            ColumnData::U64(v) => {
+                fields.push(Field::new(name, DataType::UInt64, false));
+                arrays.push(std::sync::Arc::new(UInt64Array::from(v.clone())));
+            }
+            ColumnData::F32(v) => {
+                fields.push(Field::new(name, DataType::Float32, false));
+                arrays.push(std::sync::Arc::new(Float32Array::from(v.clone())));
+            }
+            other => return Err(err(&format!("parquet bench: unsupported column {other:?}"))),
+        }
+    }
+    let schema = std::sync::Arc::new(Schema::new(fields));
+    RecordBatch::try_new(schema, arrays).map_err(|e| err(&format!("arrow batch: {e}")))
+}
+
+/// Write one prebuilt batch as Parquet with the given settings.
+fn write_parquet(
+    path: &Path,
+    v: &PqVariant,
+    batch: &arrow_array::RecordBatch,
+    data: &TableData,
+) -> Result<()> {
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
+    let schema = batch.schema();
+    let mut pb = WriterProperties::builder()
+        .set_compression(v.compression)
+        .set_dictionary_enabled(v.dictionary)
+        .set_statistics_enabled(v.statistics)
+        .set_max_row_group_row_count(Some(v.rows_per_group));
+    if v.byte_stream_split {
+        // Per-column, because the split only makes sense for the floats; the integer clock keeps
+        // whatever the codec picks for it.
+        for (name, col) in data {
+            if matches!(col, ColumnData::F32(_) | ColumnData::F64(_)) {
+                let path = parquet::schema::types::ColumnPath::from(name.as_str());
+                pb = pb
+                    .set_column_encoding(path.clone(), parquet::basic::Encoding::BYTE_STREAM_SPLIT)
+                    .set_column_dictionary_enabled(path, false);
+            }
+        }
+    }
+    let props = pb.build();
+    let file = std::fs::File::create(path)?;
+    let mut w = ArrowWriter::try_new(file, schema, Some(props))
+        .map_err(|e| err(&format!("parquet writer: {e}")))?;
+    w.write(batch)
+        .map_err(|e| err(&format!("parquet write: {e}")))?;
+    w.close().map_err(|e| err(&format!("parquet close: {e}")))?;
+    Ok(())
+}
+
+/// Read Parquet back as `(column name, values)`, optionally projecting columns and/or selecting row
+/// groups — the two pushdowns Parquet is actually good at.
+fn read_parquet(
+    path: &Path,
+    project: Option<&[usize]>,
+    row_groups: Option<Vec<usize>>,
+) -> Result<TableData> {
+    use arrow_array::{Array, Float32Array, UInt64Array};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::arrow::ProjectionMask;
+
+    let file = std::fs::File::open(path)?;
+    let mut b = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| err(&format!("parquet open: {e}")))?;
+    if let Some(idx) = project {
+        let mask = ProjectionMask::roots(b.parquet_schema(), idx.iter().copied());
+        b = b.with_projection(mask);
+    }
+    if let Some(rg) = row_groups {
+        b = b.with_row_groups(rg);
+    }
+    let reader = b
+        .build()
+        .map_err(|e| err(&format!("parquet reader: {e}")))?;
+
+    let mut out: TableData = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| err(&format!("parquet batch: {e}")))?;
+        for (i, field) in batch.schema().fields().iter().enumerate() {
+            let col = batch.column(i);
+            let name = field.name().clone();
+            let slot = match out.iter_mut().find(|(n, _)| *n == name) {
+                Some(s) => s,
+                None => {
+                    let empty = if col.as_any().is::<UInt64Array>() {
+                        ColumnData::U64(Vec::new())
+                    } else {
+                        ColumnData::F32(Vec::new())
+                    };
+                    out.push((name.clone(), empty));
+                    out.last_mut().expect("just pushed")
+                }
+            };
+            match (&mut slot.1, col.as_any()) {
+                (ColumnData::U64(dst), a) => dst.extend(
+                    a.downcast_ref::<UInt64Array>()
+                        .expect("u64")
+                        .values()
+                        .iter(),
+                ),
+                (ColumnData::F32(dst), a) => dst.extend(
+                    a.downcast_ref::<Float32Array>()
+                        .expect("f32")
+                        .values()
+                        .iter(),
+                ),
+                _ => return Err(err("parquet bench: column type drift")),
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The table half of the matrix.
 fn compare_table(
     dir: &Path,
-    rows_n: usize,
+    label: &str,
+    spec: &TableSpec,
+    data: &TableData,
     iters: usize,
     cold: bool,
     rows: &mut Vec<Row>,
 ) -> Result<()> {
-    let (spec, data) = make_table(rows_n);
+    let rows_n = spec.rows as usize;
+    let modality = label;
     // Row-range ROI: a contiguous 1% window, the "take a slice of the acquisition" access pattern.
     let roi_len = (rows_n / 100).max(1);
     let roi_start = rows_n / 2;
     let roi_idx: Vec<u64> = (roi_start as u64..(roi_start + roi_len) as u64).collect();
-    let expected_rows = expect_rows(&data, roi_start, roi_len)?;
+    let expected_rows = expect_rows(data, roi_start, roi_len)?;
     let ColumnData::U64(t) = &data[0].1 else {
         return Err(err("t must be u64"));
     };
@@ -736,45 +1044,51 @@ fn compare_table(
     // column. Stated rather than invented: a fabricated "tuned" row would imply a lever that is not
     // there. (The ARRAY path does have one, and the volume half exercises it.)
     let settings = "default: Vortex cascade (no user-facing codec knob)".to_string();
-    let name = "tab_default";
+    let name = format!("tab_{}", slug(label));
     let (wr, _) = timed(iters, None, || {
-        let blk = table::table_block("events", &spec, &data).expect("encode");
-        let _ = seal_tsra(dir, name, blk).expect("seal");
+        let blk = table::table_block("events", spec, data).expect("encode");
+        let _ = seal_tsra(dir, &name, blk).expect("seal");
     });
     let path = dir.join(format!("{name}.tsra"));
 
     // Correctness gates timing — full, single-column AND row-window are each verified.
     let blob = Reader::open(&path)?.read_block("events")?;
     check(
-        &table::decode(&spec, &blob)?,
-        &data,
+        &table::decode(spec, &blob)?,
+        data,
         "tessera table full read",
     )?;
     check(
-        &table::decode_column(&spec, &blob, "e0")?,
+        &table::decode_column(spec, &blob, "e0")?,
         &data[1].1,
         "tessera table 1-column read",
     )?;
     check(
-        &table::decode_rows(&spec, &blob, &roi_idx)?,
+        &table::decode_rows(spec, &blob, &roi_idx)?,
         &expected_rows,
         "tessera table row-ROI read",
     )?;
 
-    push_size(rows, "Tessera (.tsra)", &settings, "table", file_len(&path));
-    push_write(rows, "Tessera (.tsra)", &settings, "table", wr);
+    push_size(
+        rows,
+        "Tessera (.tsra)",
+        &settings,
+        modality,
+        file_len(&path),
+    );
+    push_write(rows, "Tessera (.tsra)", &settings, modality, wr);
 
     for (cache, evict_path) in warm_cold(&path, cold) {
         let (s, res) = timed(iters, evict_path, || {
             let mut r = Reader::open(&path).expect("open");
             let b = r.read_block("events").expect("block");
-            let _ = table::decode(&spec, &b).expect("decode");
+            let _ = table::decode(spec, &b).expect("decode");
         });
         push_read(
             rows,
             "Tessera (.tsra)",
             &settings,
-            "table",
+            modality,
             "read full",
             cache,
             s,
@@ -785,13 +1099,13 @@ fn compare_table(
         let (s, res) = timed(iters, evict_path, || {
             let mut r = Reader::open(&path).expect("open");
             let b = r.read_block("events").expect("block");
-            let _ = table::decode_column(&spec, &b, "e0").expect("column");
+            let _ = table::decode_column(spec, &b, "e0").expect("column");
         });
         push_read(
             rows,
             "Tessera (.tsra)",
             &settings,
-            "table",
+            modality,
             "read 1 column",
             cache,
             s,
@@ -802,13 +1116,13 @@ fn compare_table(
         let (s, res) = timed(iters, evict_path, || {
             let mut r = Reader::open(&path).expect("open");
             let b = r.read_block("events").expect("block");
-            let _ = table::decode_rows(&spec, &b, &roi_idx).expect("rows");
+            let _ = table::decode_rows(spec, &b, &roi_idx).expect("rows");
         });
         push_read(
             rows,
             "Tessera (.tsra)",
             &settings,
-            "table",
+            modality,
             "read row ROI",
             cache,
             s,
@@ -824,7 +1138,7 @@ fn compare_table(
         rows,
         "Tessera (.tsra)",
         &settings,
-        "table",
+        modality,
         "verify",
         "warm",
         s,
@@ -834,7 +1148,7 @@ fn compare_table(
 
     // ---- HDF5 side: one dataset per column, which is how a columnar table is expressed in HDF5.
     for v in h5_variants("table") {
-        let path = dir.join(format!("tab_{}.h5", slug(&v.settings)));
+        let path = dir.join(format!("tab_{}_{}.h5", slug(label), slug(&v.settings)));
         let (wr, _) = timed(iters, None, || {
             let _ = std::fs::remove_file(&path);
             write_h5_table(&path, &v, t, e0, e1).expect("h5 write");
@@ -892,8 +1206,8 @@ fn compare_table(
             )?;
         }
 
-        push_size(rows, v.label, &v.settings, "table", file_len(&path));
-        push_write(rows, v.label, &v.settings, "table", wr);
+        push_size(rows, v.label, &v.settings, modality, file_len(&path));
+        push_write(rows, v.label, &v.settings, modality, wr);
 
         for (cache, evict_path) in warm_cold(&path, cold) {
             let (s, res) = timed(iters, evict_path, || {
@@ -906,7 +1220,7 @@ fn compare_table(
                 rows,
                 v.label,
                 &v.settings,
-                "table",
+                modality,
                 "read full",
                 cache,
                 s,
@@ -923,7 +1237,7 @@ fn compare_table(
                 rows,
                 v.label,
                 &v.settings,
-                "table",
+                modality,
                 "read 1 column",
                 cache,
                 s,
@@ -953,7 +1267,7 @@ fn compare_table(
                 rows,
                 v.label,
                 &v.settings,
-                "table",
+                modality,
                 "read row ROI",
                 cache,
                 s,
@@ -973,7 +1287,7 @@ fn compare_table(
                 rows,
                 v.label,
                 &v.settings,
-                "table",
+                modality,
                 "verify",
                 "warm",
                 s,
@@ -984,7 +1298,7 @@ fn compare_table(
             rows.push(Row {
                 format: v.label.into(),
                 settings: v.settings,
-                modality: "table",
+                modality: modality.into(),
                 op: "verify",
                 cache: "-",
                 resident: None,
@@ -994,6 +1308,99 @@ fn compare_table(
             });
         }
     }
+
+    // ---- Parquet (#388 stage 2), via the real `parquet` crate.
+    let col_names: Vec<String> = data.iter().map(|(n, _)| n.clone()).collect();
+    let e0_idx = col_names.iter().position(|n| n == "e0").unwrap_or(1);
+    let (roi_groups, win_off) = window_row_groups(roi_start, roi_len, ROWS_PER_GROUP);
+
+    let batch = arrow_batch(data)?;
+    for v in pq_variants() {
+        let path = dir.join(format!("tab_{}_{}.parquet", slug(label), slug(&v.settings)));
+        let (wr, _) = timed(iters, None, || {
+            let _ = std::fs::remove_file(&path);
+            write_parquet(&path, &v, &batch, data).expect("parquet write");
+        });
+
+        // Correctness gates timing, same rule as the other two formats: full, projected AND the
+        // row-group window are each checked against the source before any number counts.
+        check(&read_parquet(&path, None, None)?, data, "parquet full read")?;
+        let proj = read_parquet(&path, Some(&[e0_idx]), None)?;
+        check(&proj.len(), &1usize, "parquet projection column count")?;
+        check(&proj[0].1, &data[e0_idx].1, "parquet 1-column read")?;
+        // Checked against the EXACT window, not against whatever the selected groups happened to
+        // contain — comparing to the group's own slice is what let the short read pass before.
+        let win = slice_rows(
+            &read_parquet(&path, None, Some(roi_groups.clone()))?,
+            win_off,
+            roi_len,
+        )?;
+        check(&win, &expected_rows, "parquet row window")?;
+
+        push_size(rows, PQ, &v.settings, modality, file_len(&path));
+        push_write(rows, PQ, &v.settings, modality, wr);
+
+        for (cache, evict_path) in warm_cold(&path, cold) {
+            let (s, res) = timed(iters, evict_path, || {
+                let _ = read_parquet(&path, None, None).expect("full");
+            });
+            push_read(
+                rows,
+                PQ,
+                &v.settings,
+                modality,
+                "read full",
+                cache,
+                s,
+                res,
+                CLAIM_FULL,
+            );
+
+            let (s, res) = timed(iters, evict_path, || {
+                let _ = read_parquet(&path, Some(&[e0_idx]), None).expect("projection");
+            });
+            push_read(
+                rows,
+                PQ,
+                &v.settings,
+                modality,
+                "read 1 column",
+                cache,
+                s,
+                res,
+                CLAIM_COLUMN,
+            );
+
+            let (s, res) = timed(iters, evict_path, || {
+                let got = read_parquet(&path, None, Some(roi_groups.clone())).expect("row groups");
+                let _ = slice_rows(&got, win_off, roi_len).expect("slice to the exact window");
+            });
+            push_read(
+                rows,
+                PQ,
+                &v.settings,
+                modality,
+                "read row ROI",
+                cache,
+                s,
+                res,
+                CLAIM_ROWS,
+            );
+        }
+
+        rows.push(Row {
+            format: PQ.into(),
+            settings: v.settings,
+            modality: modality.into(),
+            op: "verify",
+            cache: "-",
+            resident: None,
+            bytes: None,
+            stats: None,
+            claim: CLAIM_VERIFY_PQ,
+        });
+    }
+
     Ok(())
 }
 
@@ -1137,7 +1544,29 @@ pub fn run(opts: CompareOpts) -> Result<()> {
         compare_volume(dir.path(), opts.vol_n, opts.iters, opts.cold, &mut rows)?;
     }
     if want_tab {
-        compare_table(dir.path(), opts.rows, opts.iters, opts.cold, &mut rows)?;
+        // BOTH synthetic fixtures, always, and always labelled. The periodic one is adversarial
+        // for tessera and stays; the continuous one is what a real acquisition looks like. One
+        // without the other is a chosen answer (#493).
+        let (sp, dp) = make_table_periodic(opts.rows);
+        compare_table(
+            dir.path(),
+            "table (periodic)",
+            &sp,
+            &dp,
+            opts.iters,
+            opts.cold,
+            &mut rows,
+        )?;
+        let (sc, dc) = make_table_continuous(opts.rows);
+        compare_table(
+            dir.path(),
+            "table (continuous)",
+            &sc,
+            &dc,
+            opts.iters,
+            opts.cold,
+            &mut rows,
+        )?;
     }
 
     let mi = machine_info(dir.path());
@@ -1164,7 +1593,7 @@ fn raw_bytes_note(opts: &CompareOpts) -> String {
     }
     if opts.dataset == "both" || opts.dataset == "table" {
         parts.push(format!(
-            "table {} rows x (u8+2xf4) = {} raw",
+            "table {} rows x (u8+2xf4) = {} raw, TWO fixtures (periodic + continuous)",
             opts.rows,
             human(opts.rows as u64 * (8 + 4 + 4))
         ));
@@ -1188,7 +1617,7 @@ fn human(b: u64) -> String {
 }
 
 fn print_table(opts: &CompareOpts, rows: &[Row], mi: &MachineInfo) {
-    out!("tessera bench compare — .tsra vs HDF5 (#388)");
+    out!("tessera bench compare — .tsra vs HDF5 vs Parquet (#388)");
     out!("  data     {}", raw_bytes_note(opts));
     out!(
         "  machine  {} x{} · {} RAM · bench dir on {} · kernel {}",
@@ -1220,13 +1649,26 @@ fn print_table(opts: &CompareOpts, rows: &[Row], mi: &MachineInfo) {
             "warm only (pass --cold to add best-effort cold-cache rows)".to_string()
         }
     );
-    out!("  note     Parquet lands once #460 puts the arrow/parquet crates on dev (#388 stage 2)");
+    out!("  note     three formats: .tsra, HDF5 and Parquet (#388)");
     out!(
-        "  CAVEAT   the synthetic data is a smooth gradient + monotonic counters (verbatim from the"
+        "  fixtures table (periodic)   = the original #388 fixture: f32 columns of period 7 and 5."
     );
-    out!("           #143 harness, for comparability). It is FAR more compressible than real");
-    out!("           acquisitions, so read the size rows as a RATIO BETWEEN FORMATS on identical");
-    out!("           input, never as a compression ratio you will see on clinical data.");
+    out!("           ADVERSARIAL for value-distribution codecs — deflate's LZ77 locks onto the");
+    out!(
+        "           repeating byte block; Pco/dict/bitpacking model values, not repetition (#493)."
+    );
+    out!("           table (continuous) = shaped after REAL DUPLET listmode: a coarse ms clock");
+    out!(
+        "           (~99.6% zero deltas) + continuous energies. Both are reported, always: showing"
+    );
+    out!("           only one of them would be choosing the answer.");
+    out!("  CAVEAT   the VOLUME is a smooth gradient (verbatim from the #143 harness, for");
+    out!("           comparability), and the PERIODIC table is adversarial by construction. Both");
+    out!("           are far more compressible than a real acquisition, so read every size row as");
+    out!("           a RATIO BETWEEN FORMATS on identical input, not as a compression ratio to");
+    out!(
+        "           expect clinically. The CONTINUOUS table is the one shaped after real listmode."
+    );
     out!();
     out!(
         "{:<18} {:<56} {:<7} {:<14} {:<5} {:>10} {:>26}",
@@ -1317,8 +1759,10 @@ fn print_json(opts: &CompareOpts, rows: &[Row], mi: &MachineInfo) {
         // dataset this run never touched.
         "volume_n": (opts.dataset != "table").then_some(opts.vol_n),
         "table_rows": (opts.dataset != "volume").then_some(opts.rows),
-        "caveat": "synthetic data (a smooth gradient + monotonic counters, verbatim from the #143 harness) is far more compressible than real acquisitions; size rows are a ratio BETWEEN formats on identical input, not a compression ratio for clinical data",
-        "parquet": "pending #460 (arrow/parquet crates not yet on dev) — stage 2",
+        // Must say the same thing as the printed CAVEAT: json is the CI format, and a report that
+        // contradicts itself between its two renderings is worse than one that is merely terse.
+        "caveat": "the VOLUME is a smooth gradient (verbatim from the #143 harness) and the PERIODIC table is adversarial by construction; both are far more compressible than a real acquisition, so size rows are a ratio BETWEEN formats on identical input, not a compression ratio to expect clinically. The CONTINUOUS table is the one shaped after real listmode",
+        "parquet": "included (parquet-rs); its writer emits no page CRC, so the integrity row is absent by fact, not omission",
         "rows": items,
     });
     out!("{}", serde_json::to_string_pretty(&doc).expect("json"));
@@ -1419,6 +1863,257 @@ mod tests {
         let got = expect_roi(&raw, n, 2, 2);
         // z,y in {2,3}, x in 2..4 -> rows starting at 2*16+2*4+2 = 42, 46, 58, 62
         assert_eq!(got, vec![42, 43, 46, 47, 58, 59, 62, 63]);
+    }
+
+    /// The window math must cover EVERY group a window touches, not just the one it starts in.
+    #[test]
+    fn window_row_groups_covers_every_group_the_window_spans() {
+        // Straddles a boundary: rows 50..80 over 64-row groups touch groups 0 and 1.
+        let (groups, off) = window_row_groups(50, 30, 64);
+        assert_eq!(groups, vec![0, 1], "50..80 crosses the 64 boundary");
+        assert_eq!(off, 50);
+
+        // Fully inside one group.
+        let (groups, off) = window_row_groups(10, 20, 64);
+        assert_eq!(groups, vec![0]);
+        assert_eq!(off, 10);
+
+        // Exactly aligned to a group start, exactly one group long.
+        let (groups, off) = window_row_groups(128, 64, 64);
+        assert_eq!(groups, vec![2]);
+        assert_eq!(off, 0);
+
+        // Spans three groups: 60..160 ends in group 2.
+        let (groups, off) = window_row_groups(60, 100, 64);
+        assert_eq!(groups, vec![0, 1, 2]);
+        assert_eq!(off, 60);
+
+        // Spans four: 60..200 ends in group 3. One row past a boundary is still a whole extra group.
+        let (groups, _) = window_row_groups(60, 140, 64);
+        assert_eq!(groups, vec![0, 1, 2, 3]);
+
+        // The real regression: the benchmark's own window at the benchmark's own group size.
+        let (groups, off) = window_row_groups(2_000_000, 40_000, ROWS_PER_GROUP);
+        assert_eq!(
+            groups,
+            vec![30, 31],
+            "the shipped window straddles two groups"
+        );
+        assert_eq!(off, 2_000_000 - 30 * ROWS_PER_GROUP);
+    }
+
+    /// End-to-end: a Parquet row window that SPANS TWO ROW GROUPS must come back byte-exact.
+    ///
+    /// The unit test above pins the arithmetic; this one pins the whole chain — write with small
+    /// row groups, select the groups, read, slice, compare against the exact source window. It is
+    /// the test that would have failed on the shipped code, where only the first group was read.
+    #[test]
+    fn parquet_row_window_spanning_two_row_groups_round_trips_exactly() {
+        use parquet::basic::Compression;
+        use parquet::file::properties::EnabledStatistics;
+
+        const ROWS: usize = 200;
+        const GROUP: usize = 64; // -> groups [0..64), [64..128), [128..192), [192..200)
+
+        let mut rng = Rng(0xDEAD_BEEF_CAFE_F00D);
+        let data: TableData = vec![
+            (
+                "t".into(),
+                ColumnData::U64((0..ROWS as u64).map(|k| k * 7 + 1).collect()),
+            ),
+            (
+                "e0".into(),
+                ColumnData::F32((0..ROWS).map(|_| 511.0 + 25.0 * rng.bell()).collect()),
+            ),
+            (
+                "e1".into(),
+                ColumnData::F32((0..ROWS).map(|_| 511.0 + 25.0 * rng.bell()).collect()),
+            ),
+        ];
+
+        let v = PqVariant {
+            settings: "test: uncompressed, small groups".into(),
+            compression: Compression::UNCOMPRESSED,
+            dictionary: false,
+            statistics: EnabledStatistics::Page,
+            byte_stream_split: false,
+            rows_per_group: GROUP,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("two_groups.parquet");
+        let batch = arrow_batch(&data).expect("arrow batch");
+        write_parquet(&path, &v, &batch, &data).expect("write");
+
+        // [100, 150) starts in group 1 and ends in group 2 — reading only group 1 yields 28 of the
+        // 50 rows, which is exactly the bug.
+        let (groups, off) = window_row_groups(100, 50, GROUP);
+        assert_eq!(groups, vec![1, 2], "the window must span two groups");
+
+        let got = read_parquet(&path, None, Some(groups)).expect("read row groups");
+        let win = slice_rows(&got, off, 50).expect("slice to the exact window");
+        let want = expect_rows(&data, 100, 50).expect("source window");
+        assert_eq!(win, want, "row window across two groups must be exact");
+
+        // And the count is the full window, not the first group's share of it.
+        let ColumnData::U64(t) = &win[0].1 else {
+            panic!("t must be u64");
+        };
+        assert_eq!(t.len(), 50);
+        assert_eq!(t[0], 100 * 7 + 1);
+        assert_eq!(t[49], 149 * 7 + 1);
+    }
+
+    /// The continuous fixture's clock must have POISSON run lengths, not a fixed stride.
+    ///
+    /// It shipped as `k / 250` — an exact period, which is the PERIODIC fixture's defining property
+    /// smuggled into the fixture whose entire purpose is not to have it (#497 review). A fixed
+    /// stride makes every run length identical, so that is exactly what this asserts against.
+    #[test]
+    fn continuous_clock_runs_are_poisson_not_a_fixed_stride() {
+        let (_, data) = make_table_continuous(200_000);
+        let ColumnData::U64(t) = &data[0].1 else {
+            panic!("t must be u64");
+        };
+
+        // Run lengths: how many consecutive events share each clock value.
+        let mut runs = Vec::new();
+        let mut cur = 1usize;
+        for w in t.windows(2) {
+            if w[0] == w[1] {
+                cur += 1;
+            } else {
+                runs.push(cur);
+                cur = 1;
+            }
+        }
+        assert!(runs.len() > 100, "too few runs to judge: {}", runs.len());
+
+        // A fixed stride yields ONE distinct run length. Exponential gaps yield many.
+        let distinct: std::collections::BTreeSet<_> = runs.iter().copied().collect();
+        assert!(
+            distinct.len() > 50,
+            "run lengths look like a fixed stride: {} distinct values",
+            distinct.len()
+        );
+
+        // Mean run length tracks MS_RUN_EVENTS, so the column keeps the real data's run STRUCTURE
+        // (~99.6% zero deltas) while losing its periodicity.
+        let mean = runs.iter().sum::<usize>() as f64 / runs.len() as f64;
+        assert!(
+            (150.0..400.0).contains(&mean),
+            "mean run length {mean} is nowhere near MS_RUN_EVENTS ({MS_RUN_EVENTS})"
+        );
+
+        // The clock still advances monotonically and is still coarse.
+        assert!(
+            t.windows(2).all(|w| w[1] >= w[0]),
+            "clock must be monotonic"
+        );
+        let zero_deltas = t.windows(2).filter(|w| w[0] == w[1]).count();
+        let frac = zero_deltas as f64 / (t.len() - 1) as f64;
+        assert!(frac > 0.99, "expected ~99.6% zero deltas, got {frac}");
+    }
+
+    /// #497: every table row must carry its FIXTURE label. Eight `push_*` call sites once passed a
+    /// literal "table", so the continuous fixture's read rows were emitted indistinguishable from
+    /// the periodic ones — the two fixtures exist precisely to be told apart, so a mislabelled row
+    /// is worse than a missing one.
+    #[test]
+    fn table_rows_carry_their_fixture_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rows: Vec<Row> = Vec::new();
+        let (spec, data) = make_table_continuous(2_000);
+        compare_table(
+            dir.path(),
+            "table (continuous)",
+            &spec,
+            &data,
+            1,
+            false,
+            &mut rows,
+        )
+        .unwrap();
+        assert!(!rows.is_empty());
+        for r in &rows {
+            assert_eq!(
+                r.modality, "table (continuous)",
+                "row {:?}/{:?} lost its fixture label",
+                r.format, r.op
+            );
+        }
+        // ...and every access pattern is present, so a dropped row cannot pass as a labelled one.
+        for op in [
+            "size",
+            "write+seal",
+            "read full",
+            "read 1 column",
+            "read row ROI",
+        ] {
+            assert!(rows.iter().any(|r| r.op == op), "missing op {op}");
+        }
+    }
+
+    /// #388 stage 2 / #503 review: Parquet must be shown at the CRATE's real default, at the
+    /// ecosystem default, and tuned — with the standard float tuning actually applied.
+    ///
+    /// Two things this pins, both of which were wrong first time round. parquet-58's
+    /// `DEFAULT_COMPRESSION` is UNCOMPRESSED, so labelling snappy "the default" was false. And the
+    /// tuned variant must carry BYTE_STREAM_SPLIT (Parquet's counterpart to HDF5's shuffle) with the
+    /// dictionary off: without it the tuned file was 39.3 MiB instead of 23.4 MiB on the continuous
+    /// fixture, which flattered Tessera exactly as omitting shuffle had flattered it against HDF5.
+    #[test]
+    fn parquet_variants_cover_crate_default_ecosystem_default_and_a_real_tuning() {
+        let vs = pq_variants();
+        let labels: Vec<&str> = vs.iter().map(|p| p.settings.as_str()).collect();
+
+        assert!(
+            labels
+                .iter()
+                .any(|s| s.contains("default (crate)") && s.contains("uncompressed")),
+            "the crate default is UNCOMPRESSED and must be shown as such: {labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|s| s.contains("pyarrow/Spark default") && s.contains("snappy")),
+            "snappy is the ecosystem default, not the crate's: {labels:?}"
+        );
+
+        let tuned = vs
+            .iter()
+            .find(|v| v.settings.starts_with("tuned:"))
+            .expect("a tuned variant must exist");
+        assert!(
+            tuned.byte_stream_split,
+            "the tuned variant must apply BYTE_STREAM_SPLIT to the floats: {}",
+            tuned.settings
+        );
+        assert!(
+            !tuned.dictionary,
+            "BYTE_STREAM_SPLIT wants the dictionary OFF: {}",
+            tuned.settings
+        );
+        assert!(
+            tuned.settings.contains("BYTE_STREAM_SPLIT"),
+            "the settings line must say so: {}",
+            tuned.settings
+        );
+        // Every label states the row-group size, since it sets the row-window granularity.
+        for l in &labels {
+            assert!(
+                l.contains("65536-row groups"),
+                "settings must print the row-group size: {l}"
+            );
+        }
+
+        // The integrity claim must not imply a mechanism the written files do not carry.
+        assert!(
+            CLAIM_VERIFY_PQ.contains("NO page CRC") && CLAIM_VERIFY_PQ.contains("nothing to check"),
+            "{CLAIM_VERIFY_PQ}"
+        );
+        // ...and the row-window claim must say Parquet reads whole groups and slices.
+        assert!(CLAIM_ROWS.contains("row groups"), "{CLAIM_ROWS}");
     }
 
     #[test]
