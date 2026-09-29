@@ -133,7 +133,27 @@
           buildInputs = with pkgs; [ stdenv.cc.cc.lib hdf5 ];
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
         };
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        # `cargoBuildExtraArgs = "--all-targets"` is load-bearing, not tidiness.
+        #
+        # crane's `buildDepsOnly` defaults to:
+        #     cargo check --locked --all-targets     <- metadata (.rmeta) for every target
+        #     cargo build --locked                   <- CODEGEN for lib/bin targets only
+        #
+        # So the dependency graph reachable only from TEST targets was type-checked but never
+        # compiled to .rlib. `cargoNextest` has to link real test binaries, so it recompiled all of
+        # it inside `workspace-test` -- measured on a green CI leg: `tessera-deps` compiled 535
+        # crates, then `tessera-nextest` compiled 194 more, of which 96 were the SAME name+version
+        # (checked, never built) and 59 were dev-dependency-only (datafusion, arrow-csv/json/row,
+        # comfy-table). That made nextest ~96% compilation: 58.5 min of which ~30 s was running
+        # tests, and it is the serial floor that bounds every CI parallelism design (#517).
+        #
+        # Adding `--all-targets` to the BUILD step makes the shared artifact include that codegen,
+        # so it is paid once here instead of again in every consumer. This makes `tessera-deps`
+        # slower and `workspace-test` faster; the trade is favourable because ~14 derivations
+        # inherit these artifacts and only one of them was paying the rebuild.
+        cargoArtifacts = craneLib.buildDepsOnly (
+          commonArgs // { cargoBuildExtraArgs = "--all-targets"; }
+        );
 
         # The Python extension module (#210). crane doesn't install cdylibs by default, so copy the
         # built `lib_native.so` → `_native.so` into $out/lib — the `tessera._native` extension that the
