@@ -136,7 +136,11 @@ fn evict(path: &Path) {
     // DONTNEED only drops CLEAN pages. A file we just wrote still has dirty ones, so without this
     // the eviction silently does nothing and a "cold" read is really a warm read wearing a label —
     // which was exactly the first result here (cold == warm to 4 decimal places).
-    let _ = f.sync_all();
+    if f.sync_all().is_err() {
+        // Nothing we can do, but DONTNEED will then skip the dirty pages and the residency probe
+        // below will report the file as resident — the report says so rather than silently lying.
+        return;
+    }
     // SAFETY: `f` owns a live fd for the duration of the call; POSIX_FADV_DONTNEED only drops clean
     // page-cache pages for that fd's file and cannot corrupt or truncate it.
     unsafe {
@@ -216,12 +220,14 @@ static COLD_RESIDENT_PERMILLE: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(u32::MAX);
 
 /// Time `f` `iters` times, evicting `cold` (when given) before each run, and return median+spread.
-fn timed(iters: usize, cold: Option<&Path>, mut f: impl FnMut()) -> Stats {
+fn timed(iters: usize, cold: Option<&Path>, mut f: impl FnMut()) -> (Stats, Option<f64>) {
     let mut xs = Vec::with_capacity(iters);
+    let mut worst_resident: Option<f64> = None;
     for _ in 0..iters {
         if let Some(p) = cold {
             evict(p);
             if let Some(frac) = resident_fraction(p) {
+                worst_resident = Some(worst_resident.map_or(frac, |w: f64| w.max(frac)));
                 let permille = (frac * 1000.0).round() as u32;
                 let cur = COLD_RESIDENT_PERMILLE.load(std::sync::atomic::Ordering::Relaxed);
                 let worst = if cur == u32::MAX {
@@ -236,8 +242,12 @@ fn timed(iters: usize, cold: Option<&Path>, mut f: impl FnMut()) -> Stats {
         f();
         xs.push(t.elapsed().as_secs_f64());
     }
-    Stats::of(xs)
+    (Stats::of(xs), worst_resident)
 }
+
+/// Eviction counts as effective below this residency; above it the row is relabelled, because a
+/// "cold" number the kernel served from RAM is a warm number with a wrong label.
+const COLD_RESIDENT_OK: f64 = 0.01;
 
 /// One measured cell of the matrix.
 pub struct Row {
@@ -246,6 +256,10 @@ pub struct Row {
     pub modality: &'static str,
     pub op: &'static str,
     pub cache: &'static str,
+    /// Post-eviction page residency for THIS row's file, when it was a cold run. `None` on warm rows
+    /// and when the probe failed. Per-row rather than one global worst case, because eviction can
+    /// succeed for one file and fail for another in the same run (#388 review).
+    pub resident: Option<f64>,
     pub bytes: Option<u64>,
     pub stats: Option<Stats>,
     /// Which pitch claim this row speaks to — printed so a reader knows why the row exists.
@@ -278,6 +292,11 @@ struct H5Variant {
     settings: String,
     chunked: bool,
     deflate: Option<u8>,
+    /// The byte-shuffle filter. Standard HDF5 tuning is shuffle+deflate, not deflate alone: shuffle
+    /// groups the like-significance bytes of each value so deflate has runs to find. Leaving it out
+    /// would weaken the baseline we are measuring against and flatter Tessera's size ratios (#388
+    /// review), so both tuned variants carry it.
+    shuffle: bool,
     fletcher32: bool,
 }
 
@@ -297,20 +316,23 @@ fn h5_variants(modality: &str) -> Vec<H5Variant> {
             settings: "default: contiguous, uncompressed".into(),
             chunked: false,
             deflate: None,
+            shuffle: false,
             fletcher32: false,
         },
         H5Variant {
             label: "HDF5 (hdf5-metno)",
-            settings: format!("tuned: {chunk_desc}, gzip-4"),
+            settings: format!("tuned: {chunk_desc}, shuffle+gzip-4"),
             chunked: true,
             deflate: Some(4),
+            shuffle: true,
             fletcher32: false,
         },
         H5Variant {
             label: "HDF5 (hdf5-metno)",
-            settings: format!("tuned: {chunk_desc}, gzip-4, fletcher32"),
+            settings: format!("tuned: {chunk_desc}, shuffle+gzip-4, fletcher32"),
             chunked: true,
             deflate: Some(4),
+            shuffle: true,
             fletcher32: true,
         },
     ]
@@ -338,6 +360,50 @@ fn write_h5_volume(path: &Path, v: &H5Variant, n: usize, data: &[i16]) -> Result
     Ok(())
 }
 
+/// The exact sub-box a volume ROI read must return, in C order — the ground truth the timed ROI
+/// reads are checked against (#388 review: a partial read that was never verified could be fast
+/// because it returned less than it should).
+fn expect_roi(raw: &[i16], n: usize, start: usize, edge: usize) -> Vec<i16> {
+    let mut out = Vec::with_capacity(edge * edge * edge);
+    for z in start..start + edge {
+        for y in start..start + edge {
+            let base = z * n * n + y * n + start;
+            out.extend_from_slice(&raw[base..base + edge]);
+        }
+    }
+    out
+}
+
+/// The exact rows a row-ROI read must return, across EVERY column.
+fn expect_rows(data: &TableData, start: usize, len: usize) -> Result<TableData> {
+    data.iter()
+        .map(|(name, col)| {
+            let sliced = match col {
+                ColumnData::U64(v) => ColumnData::U64(v[start..start + len].to_vec()),
+                ColumnData::F32(v) => ColumnData::F32(v[start..start + len].to_vec()),
+                other => {
+                    return Err(err(&format!(
+                        "bench compare: unexpected column type in fixture: {other:?}"
+                    )))
+                }
+            };
+            Ok((name.clone(), sliced))
+        })
+        .collect()
+}
+
+/// Fail loudly when a timed read did not return what was written. Correctness gates timing: a read
+/// whose numbers count must first be shown to produce the right bytes, for EVERY format, setting and
+/// access pattern — not just the full read of one of them.
+fn check<T: PartialEq>(got: &T, want: &T, what: &str) -> Result<()> {
+    if got != want {
+        return Err(err(&format!(
+            "bench compare: {what} returned data != the source; its timings would be meaningless"
+        )));
+    }
+    Ok(())
+}
+
 fn err(m: &str) -> tessera_core::Error {
     tessera_core::Error::Invalid(m.to_string())
 }
@@ -354,10 +420,12 @@ fn compare_volume(
     let ArrayData::I16(raw) = &data else {
         return Err(err("volume must be i16"));
     };
-    // Centre ROI: one cubic chunk, the access pattern cubic chunking exists for. Clamped to the
-    // volume so a small `--vol-n` (the trycmd fixture uses one) cannot underflow the centring.
+    // One WHOLE cubic chunk, chunk-ALIGNED — the access pattern cubic chunking exists for. Centring
+    // without aligning (the first draft) put the box across 8 chunks, so the row measured a
+    // misaligned read while the prose claimed a single chunk (#388 review).
     let roi_edge = CHUNK.min(n);
-    let roi0 = (n - roi_edge) / 2;
+    let roi0 = ((n - roi_edge) / 2 / roi_edge) * roi_edge;
+    let expected_roi = expect_roi(raw, n, roi0, roi_edge);
     let roi_start = [roi0 as u64; 3];
     let roi_shape = [roi_edge as u64; 3];
 
@@ -367,184 +435,176 @@ fn compare_volume(
         let settings = format!("{label}, {CHUNK}^3 chunks");
         let name = format!("vol_{codec}");
 
-        let wr = timed(iters, None, || {
+        let (wr, _) = timed(iters, None, || {
             let blk = array::array_block("volume", &spec, &data).expect("encode");
             let _ = seal_tsra(dir, &name, blk).expect("seal");
         });
         let path = dir.join(format!("{name}.tsra"));
 
-        // Correctness gate: the sealed product must read back exactly what was written.
+        // Correctness gates timing — EVERY read that gets a row is verified first.
         let blob = Reader::open(&path)?.read_block("volume")?;
-        let back = array::decode(&spec, &blob)?;
-        if back != data {
-            return Err(err("tessera volume read-back != written"));
-        }
+        check(
+            &array::decode(&spec, &blob)?,
+            &data,
+            "tessera volume full read",
+        )?;
+        let roi = array::decode_subset(&spec, &blob, &roi_start, &roi_shape)?;
+        check(
+            &roi,
+            &ArrayData::I16(expected_roi.clone()),
+            "tessera volume ROI read",
+        )?;
 
-        rows.push(Row {
-            format: "Tessera (.tsra)".into(),
-            settings: settings.clone(),
-            modality: "volume",
-            op: "size",
-            cache: "-",
-            bytes: Some(file_len(&path)),
-            stats: None,
-            claim: "smaller on disk than the alternatives",
-        });
-        rows.push(Row {
-            format: "Tessera (.tsra)".into(),
-            settings: settings.clone(),
-            modality: "volume",
-            op: "write+seal",
-            cache: "warm",
-            bytes: None,
-            stats: Some(wr),
-            claim: "the cost of sealing (tessera pays, the others do not)",
-        });
+        push_size(
+            rows,
+            "Tessera (.tsra)",
+            &settings,
+            "volume",
+            file_len(&path),
+        );
+        push_write(rows, "Tessera (.tsra)", &settings, "volume", wr);
 
         for (cache, evict_path) in warm_cold(&path, cold) {
-            let s = timed(iters, evict_path, || {
+            let (s, res) = timed(iters, evict_path, || {
                 let mut r = Reader::open(&path).expect("open");
                 let b = r.read_block("volume").expect("block");
                 let _ = array::decode(&spec, &b).expect("decode");
             });
-            rows.push(Row {
-                format: "Tessera (.tsra)".into(),
-                settings: settings.clone(),
-                modality: "volume",
-                op: "read full",
+            push_read(
+                rows,
+                "Tessera (.tsra)",
+                &settings,
+                "volume",
+                "read full",
                 cache,
-                bytes: None,
-                stats: Some(s),
-                claim: "baseline full materialise",
-            });
+                s,
+                res,
+                CLAIM_FULL,
+            );
 
-            let s = timed(iters, evict_path, || {
+            let (s, res) = timed(iters, evict_path, || {
                 let mut r = Reader::open(&path).expect("open");
                 let b = r.read_block("volume").expect("block");
                 let _ = array::decode_subset(&spec, &b, &roi_start, &roi_shape).expect("roi");
             });
-            rows.push(Row {
-                format: "Tessera (.tsra)".into(),
-                settings: settings.clone(),
-                modality: "volume",
-                op: "read ROI",
+            push_read(
+                rows,
+                "Tessera (.tsra)",
+                &settings,
+                "volume",
+                "read ROI",
                 cache,
-                bytes: None,
-                stats: Some(s),
-                claim: "cubic chunks -> cheap ROI / orthogonal access",
-            });
+                s,
+                res,
+                CLAIM_ROI,
+            );
         }
 
-        let s = timed(iters, None, || {
+        let (s, _) = timed(iters, None, || {
             let _ = tessera_io::verify_payloads_parallel(&path, "bench", 1).expect("verify");
         });
-        rows.push(Row {
-            format: "Tessera (.tsra)".into(),
-            settings,
-            modality: "volume",
-            op: "verify",
-            cache: "warm",
-            bytes: None,
-            stats: Some(s),
-            claim: "tamper-evident: re-derives every digest against the sealed manifest",
-        });
+        push_read(
+            rows,
+            "Tessera (.tsra)",
+            &settings,
+            "volume",
+            "verify",
+            "warm",
+            s,
+            None,
+            CLAIM_VERIFY_TSRA,
+        );
     }
 
     for v in h5_variants("volume") {
         let path = dir.join(format!("vol_{}.h5", slug(&v.settings)));
-        let wr = timed(iters, None, || {
+        let (wr, _) = timed(iters, None, || {
             let _ = std::fs::remove_file(&path);
             write_h5_volume(&path, &v, n, raw).expect("h5 write");
         });
 
-        // Correctness gate.
+        // Correctness: the full read AND the ROI, same as the tessera side.
         {
             let f = hdf5::File::open(&path).map_err(|e| err(&format!("h5 open: {e}")))?;
             let ds = f
                 .dataset("volume")
                 .map_err(|e| err(&format!("h5 ds: {e}")))?;
             let got: Vec<i16> = ds.read_raw().map_err(|e| err(&format!("h5 read: {e}")))?;
-            if &got != raw {
-                return Err(err("hdf5 volume read-back != written"));
-            }
+            check(&got, raw, "hdf5 volume full read")?;
+            let got_roi = ds
+                .read_slice::<i16, _, ndarray::Ix3>(ndarray::s![
+                    roi0..roi0 + roi_edge,
+                    roi0..roi0 + roi_edge,
+                    roi0..roi0 + roi_edge
+                ])
+                .map_err(|e| err(&format!("h5 roi: {e}")))?;
+            let flat: Vec<i16> = got_roi.iter().copied().collect();
+            check(&flat, &expected_roi, "hdf5 volume ROI read")?;
         }
 
-        rows.push(Row {
-            format: v.label.into(),
-            settings: v.settings.clone(),
-            modality: "volume",
-            op: "size",
-            cache: "-",
-            bytes: Some(file_len(&path)),
-            stats: None,
-            claim: "smaller on disk than the alternatives",
-        });
-        rows.push(Row {
-            format: v.label.into(),
-            settings: v.settings.clone(),
-            modality: "volume",
-            op: "write+seal",
-            cache: "warm",
-            bytes: None,
-            stats: Some(wr),
-            claim: "the cost of sealing (tessera pays, the others do not)",
-        });
+        push_size(rows, v.label, &v.settings, "volume", file_len(&path));
+        push_write(rows, v.label, &v.settings, "volume", wr);
 
         for (cache, evict_path) in warm_cold(&path, cold) {
-            let s = timed(iters, evict_path, || {
+            let (s, res) = timed(iters, evict_path, || {
                 let f = hdf5::File::open(&path).expect("open");
                 let ds = f.dataset("volume").expect("ds");
                 let _: Vec<i16> = ds.read_raw().expect("read");
             });
-            rows.push(Row {
-                format: v.label.into(),
-                settings: v.settings.clone(),
-                modality: "volume",
-                op: "read full",
+            push_read(
+                rows,
+                v.label,
+                &v.settings,
+                "volume",
+                "read full",
                 cache,
-                bytes: None,
-                stats: Some(s),
-                claim: "baseline full materialise",
-            });
+                s,
+                res,
+                CLAIM_FULL,
+            );
 
-            let (z, y, x) = (roi0, roi0, roi0);
             let e = roi_edge;
-            let s = timed(iters, evict_path, || {
+            let (s, res) = timed(iters, evict_path, || {
                 let f = hdf5::File::open(&path).expect("open");
                 let ds = f.dataset("volume").expect("ds");
                 let _ = ds
-                    .read_slice::<i16, _, ndarray::Ix3>(ndarray::s![z..z + e, y..y + e, x..x + e])
+                    .read_slice::<i16, _, ndarray::Ix3>(ndarray::s![
+                        roi0..roi0 + e,
+                        roi0..roi0 + e,
+                        roi0..roi0 + e
+                    ])
                     .expect("roi");
             });
-            rows.push(Row {
-                format: v.label.into(),
-                settings: v.settings.clone(),
-                modality: "volume",
-                op: "read ROI",
+            push_read(
+                rows,
+                v.label,
+                &v.settings,
+                "volume",
+                "read ROI",
                 cache,
-                bytes: None,
-                stats: Some(s),
-                claim: "cubic chunks -> cheap ROI / orthogonal access",
-            });
+                s,
+                res,
+                CLAIM_ROI,
+            );
         }
 
-        // Integrity: only the fletcher32 variant checks anything on read, and only for corruption.
         if v.fletcher32 {
-            let s = timed(iters, None, || {
+            let (s, _) = timed(iters, None, || {
                 let f = hdf5::File::open(&path).expect("open");
                 let ds = f.dataset("volume").expect("ds");
                 let _: Vec<i16> = ds.read_raw().expect("read");
             });
-            rows.push(Row {
-                format: v.label.into(),
-                settings: v.settings,
-                modality: "volume",
-                op: "verify",
-                cache: "warm",
-                bytes: None,
-                stats: Some(s),
-                claim: "fletcher32: per-chunk CORRUPTION check on read; not keyed, no identity",
-            });
+            push_read(
+                rows,
+                v.label,
+                &v.settings,
+                "volume",
+                "verify",
+                "warm",
+                s,
+                None,
+                CLAIM_VERIFY_H5,
+            );
         } else {
             rows.push(Row {
                 format: v.label.into(),
@@ -552,13 +612,86 @@ fn compare_volume(
                 modality: "volume",
                 op: "verify",
                 cache: "-",
+                resident: None,
                 bytes: None,
                 stats: None,
-                claim: "no integrity mechanism configured",
+                claim: CLAIM_VERIFY_NONE,
             });
         }
     }
     Ok(())
+}
+
+const CLAIM_FULL: &str = "baseline full materialise";
+const CLAIM_ROI: &str = "cubic chunks -> cheap ROI / orthogonal access";
+const CLAIM_COLUMN: &str =
+    "columnar projection: decode one column (tessera still READS the block's bytes)";
+const CLAIM_ROWS: &str = "row-index pushdown: take a window without decoding the rest";
+const CLAIM_SIZE: &str = "smaller on disk than the alternatives";
+const CLAIM_WRITE: &str = "the cost of sealing (tessera pays, the others do not)";
+const CLAIM_VERIFY_TSRA: &str =
+    "tamper-evident: re-derives every digest against the sealed manifest";
+const CLAIM_VERIFY_H5: &str =
+    "fletcher32: per-chunk CORRUPTION check on read; not keyed, no identity";
+const CLAIM_VERIFY_NONE: &str = "no integrity mechanism configured";
+
+fn push_size(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &'static str, b: u64) {
+    rows.push(Row {
+        format: format.into(),
+        settings: settings.into(),
+        modality,
+        op: "size",
+        cache: "-",
+        resident: None,
+        bytes: Some(b),
+        stats: None,
+        claim: CLAIM_SIZE,
+    });
+}
+
+fn push_write(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &'static str, s: Stats) {
+    rows.push(Row {
+        format: format.into(),
+        settings: settings.into(),
+        modality,
+        op: "write+seal",
+        cache: "warm",
+        resident: None,
+        bytes: None,
+        stats: Some(s),
+        claim: CLAIM_WRITE,
+    });
+}
+
+#[allow(clippy::too_many_arguments)] // one row of the matrix; every field is a distinct column
+fn push_read(
+    rows: &mut Vec<Row>,
+    format: &str,
+    settings: &str,
+    modality: &'static str,
+    op: &'static str,
+    cache: &'static str,
+    s: Stats,
+    resident: Option<f64>,
+    claim: &'static str,
+) {
+    // A "cold" row whose file the kernel kept is a warm row with a wrong label — say so in the
+    // label itself, not only in a footnote (#388 review).
+    let cache = match (cache, resident) {
+        ("cold", Some(r)) if r > COLD_RESIDENT_OK => "cold?",
+        _ => cache,
+    };
+    rows.push(Row {
+        format: format.into(),
+        settings: settings.into(),
+        modality,
+        op,
+        cache,
+        resident,
+        bytes: None,
+        stats: Some(s),
+        claim,
+    });
 }
 
 fn warm_cold(path: &Path, cold: bool) -> Vec<(&'static str, Option<&Path>)> {
@@ -588,109 +721,7 @@ fn compare_table(
     let roi_len = (rows_n / 100).max(1);
     let roi_start = rows_n / 2;
     let roi_idx: Vec<u64> = (roi_start as u64..(roi_start + roi_len) as u64).collect();
-
-    // Tessera's table backend exposes no user-facing codec knob — Vortex picks its cascade per
-    // column. Stated rather than invented: a fabricated "tuned" row would imply a lever that is not
-    // there. (The ARRAY path does have one, and the volume half exercises it.)
-    let settings = "default: Vortex cascade (no user-facing codec knob)".to_string();
-    let name = "tab_default";
-    let wr = timed(iters, None, || {
-        let blk = table::table_block("events", &spec, &data).expect("encode");
-        let _ = seal_tsra(dir, name, blk).expect("seal");
-    });
-    let path = dir.join(format!("{name}.tsra"));
-
-    let blob = Reader::open(&path)?.read_block("events")?;
-    if table::decode(&spec, &blob)? != data {
-        return Err(err("tessera table read-back != written"));
-    }
-
-    rows.push(Row {
-        format: "Tessera (.tsra)".into(),
-        settings: settings.clone(),
-        modality: "table",
-        op: "size",
-        cache: "-",
-        bytes: Some(file_len(&path)),
-        stats: None,
-        claim: "smaller on disk than the alternatives",
-    });
-    rows.push(Row {
-        format: "Tessera (.tsra)".into(),
-        settings: settings.clone(),
-        modality: "table",
-        op: "write+seal",
-        cache: "warm",
-        bytes: None,
-        stats: Some(wr),
-        claim: "the cost of sealing (tessera pays, the others do not)",
-    });
-
-    for (cache, evict_path) in warm_cold(&path, cold) {
-        let s = timed(iters, evict_path, || {
-            let mut r = Reader::open(&path).expect("open");
-            let b = r.read_block("events").expect("block");
-            let _ = table::decode(&spec, &b).expect("decode");
-        });
-        rows.push(Row {
-            format: "Tessera (.tsra)".into(),
-            settings: settings.clone(),
-            modality: "table",
-            op: "read full",
-            cache,
-            bytes: None,
-            stats: Some(s),
-            claim: "baseline full materialise (columnar stores are worst at this)",
-        });
-
-        let s = timed(iters, evict_path, || {
-            let mut r = Reader::open(&path).expect("open");
-            let b = r.read_block("events").expect("block");
-            let _ = table::decode_column(&spec, &b, "e0").expect("column");
-        });
-        rows.push(Row {
-            format: "Tessera (.tsra)".into(),
-            settings: settings.clone(),
-            modality: "table",
-            op: "read 1 column",
-            cache,
-            bytes: None,
-            stats: Some(s),
-            claim: "columnar projection: read one column, not the table",
-        });
-
-        let s = timed(iters, evict_path, || {
-            let mut r = Reader::open(&path).expect("open");
-            let b = r.read_block("events").expect("block");
-            let _ = table::decode_rows(&spec, &b, &roi_idx).expect("rows");
-        });
-        rows.push(Row {
-            format: "Tessera (.tsra)".into(),
-            settings: settings.clone(),
-            modality: "table",
-            op: "read row ROI",
-            cache,
-            bytes: None,
-            stats: Some(s),
-            claim: "row-index pushdown: take a window without decoding the rest",
-        });
-    }
-
-    let s = timed(iters, None, || {
-        let _ = tessera_io::verify_payloads_parallel(&path, "bench", 1).expect("verify");
-    });
-    rows.push(Row {
-        format: "Tessera (.tsra)".into(),
-        settings,
-        modality: "table",
-        op: "verify",
-        cache: "warm",
-        bytes: None,
-        stats: Some(s),
-        claim: "tamper-evident: re-derives every digest against the sealed manifest",
-    });
-
-    // ---- HDF5 side: one dataset per column, which is how a columnar table is expressed in HDF5.
+    let expected_rows = expect_rows(&data, roi_start, roi_len)?;
     let ColumnData::U64(t) = &data[0].1 else {
         return Err(err("t must be u64"));
     };
@@ -701,125 +732,254 @@ fn compare_table(
         return Err(err("e1 must be f32"));
     };
 
+    // Tessera's table backend exposes no user-facing codec knob — Vortex picks its cascade per
+    // column. Stated rather than invented: a fabricated "tuned" row would imply a lever that is not
+    // there. (The ARRAY path does have one, and the volume half exercises it.)
+    let settings = "default: Vortex cascade (no user-facing codec knob)".to_string();
+    let name = "tab_default";
+    let (wr, _) = timed(iters, None, || {
+        let blk = table::table_block("events", &spec, &data).expect("encode");
+        let _ = seal_tsra(dir, name, blk).expect("seal");
+    });
+    let path = dir.join(format!("{name}.tsra"));
+
+    // Correctness gates timing — full, single-column AND row-window are each verified.
+    let blob = Reader::open(&path)?.read_block("events")?;
+    check(
+        &table::decode(&spec, &blob)?,
+        &data,
+        "tessera table full read",
+    )?;
+    check(
+        &table::decode_column(&spec, &blob, "e0")?,
+        &data[1].1,
+        "tessera table 1-column read",
+    )?;
+    check(
+        &table::decode_rows(&spec, &blob, &roi_idx)?,
+        &expected_rows,
+        "tessera table row-ROI read",
+    )?;
+
+    push_size(rows, "Tessera (.tsra)", &settings, "table", file_len(&path));
+    push_write(rows, "Tessera (.tsra)", &settings, "table", wr);
+
+    for (cache, evict_path) in warm_cold(&path, cold) {
+        let (s, res) = timed(iters, evict_path, || {
+            let mut r = Reader::open(&path).expect("open");
+            let b = r.read_block("events").expect("block");
+            let _ = table::decode(&spec, &b).expect("decode");
+        });
+        push_read(
+            rows,
+            "Tessera (.tsra)",
+            &settings,
+            "table",
+            "read full",
+            cache,
+            s,
+            res,
+            CLAIM_FULL,
+        );
+
+        let (s, res) = timed(iters, evict_path, || {
+            let mut r = Reader::open(&path).expect("open");
+            let b = r.read_block("events").expect("block");
+            let _ = table::decode_column(&spec, &b, "e0").expect("column");
+        });
+        push_read(
+            rows,
+            "Tessera (.tsra)",
+            &settings,
+            "table",
+            "read 1 column",
+            cache,
+            s,
+            res,
+            CLAIM_COLUMN,
+        );
+
+        let (s, res) = timed(iters, evict_path, || {
+            let mut r = Reader::open(&path).expect("open");
+            let b = r.read_block("events").expect("block");
+            let _ = table::decode_rows(&spec, &b, &roi_idx).expect("rows");
+        });
+        push_read(
+            rows,
+            "Tessera (.tsra)",
+            &settings,
+            "table",
+            "read row ROI",
+            cache,
+            s,
+            res,
+            CLAIM_ROWS,
+        );
+    }
+
+    let (s, _) = timed(iters, None, || {
+        let _ = tessera_io::verify_payloads_parallel(&path, "bench", 1).expect("verify");
+    });
+    push_read(
+        rows,
+        "Tessera (.tsra)",
+        &settings,
+        "table",
+        "verify",
+        "warm",
+        s,
+        None,
+        CLAIM_VERIFY_TSRA,
+    );
+
+    // ---- HDF5 side: one dataset per column, which is how a columnar table is expressed in HDF5.
     for v in h5_variants("table") {
         let path = dir.join(format!("tab_{}.h5", slug(&v.settings)));
-        let wr = timed(iters, None, || {
+        let (wr, _) = timed(iters, None, || {
             let _ = std::fs::remove_file(&path);
             write_h5_table(&path, &v, t, e0, e1).expect("h5 write");
         });
 
+        // Correctness: full (ALL three columns, not just e0), the projected column, and the window.
         {
             let f = hdf5::File::open(&path).map_err(|e| err(&format!("h5 open: {e}")))?;
-            let got: Vec<f32> = f
+            let got_t: Vec<u64> = f
+                .dataset("t")
+                .and_then(|d| d.read_raw())
+                .map_err(|e| err(&format!("h5 read t: {e}")))?;
+            let got_e0: Vec<f32> = f
                 .dataset("e0")
                 .and_then(|d| d.read_raw())
-                .map_err(|e| err(&format!("h5 read: {e}")))?;
-            if &got != e0 {
-                return Err(err("hdf5 table read-back != written"));
-            }
+                .map_err(|e| err(&format!("h5 read e0: {e}")))?;
+            let got_e1: Vec<f32> = f
+                .dataset("e1")
+                .and_then(|d| d.read_raw())
+                .map_err(|e| err(&format!("h5 read e1: {e}")))?;
+            check(&got_t, t, "hdf5 table full read (t)")?;
+            check(&got_e0, e0, "hdf5 table full read (e0)")?;
+            check(&got_e1, e1, "hdf5 table full read (e1)")?;
+            check(&got_e0, e0, "hdf5 table 1-column read")?;
+
+            let win = |name: &str| -> Result<Vec<f32>> {
+                let d = f
+                    .dataset(name)
+                    .map_err(|e| err(&format!("h5 ds {name}: {e}")))?;
+                let a = d
+                    .read_slice_1d::<f32, _>(ndarray::s![roi_start..roi_start + roi_len])
+                    .map_err(|e| err(&format!("h5 window {name}: {e}")))?;
+                Ok(a.to_vec())
+            };
+            let wt = f
+                .dataset("t")
+                .and_then(|d| {
+                    d.read_slice_1d::<u64, _>(ndarray::s![roi_start..roi_start + roi_len])
+                })
+                .map_err(|e| err(&format!("h5 window t: {e}")))?;
+            check(
+                &wt.to_vec(),
+                &t[roi_start..roi_start + roi_len].to_vec(),
+                "hdf5 row-ROI (t)",
+            )?;
+            check(
+                &win("e0")?,
+                &e0[roi_start..roi_start + roi_len].to_vec(),
+                "hdf5 row-ROI (e0)",
+            )?;
+            check(
+                &win("e1")?,
+                &e1[roi_start..roi_start + roi_len].to_vec(),
+                "hdf5 row-ROI (e1)",
+            )?;
         }
 
-        rows.push(Row {
-            format: v.label.into(),
-            settings: v.settings.clone(),
-            modality: "table",
-            op: "size",
-            cache: "-",
-            bytes: Some(file_len(&path)),
-            stats: None,
-            claim: "smaller on disk than the alternatives",
-        });
-        rows.push(Row {
-            format: v.label.into(),
-            settings: v.settings.clone(),
-            modality: "table",
-            op: "write+seal",
-            cache: "warm",
-            bytes: None,
-            stats: Some(wr),
-            claim: "the cost of sealing (tessera pays, the others do not)",
-        });
+        push_size(rows, v.label, &v.settings, "table", file_len(&path));
+        push_write(rows, v.label, &v.settings, "table", wr);
 
         for (cache, evict_path) in warm_cold(&path, cold) {
-            let s = timed(iters, evict_path, || {
+            let (s, res) = timed(iters, evict_path, || {
                 let f = hdf5::File::open(&path).expect("open");
-                for c in ["t", "e0", "e1"] {
-                    let ds = f.dataset(c).expect("ds");
-                    if c == "t" {
-                        let _: Vec<u64> = ds.read_raw().expect("read");
-                    } else {
-                        let _: Vec<f32> = ds.read_raw().expect("read");
-                    }
-                }
+                let _: Vec<u64> = f.dataset("t").and_then(|d| d.read_raw()).expect("read t");
+                let _: Vec<f32> = f.dataset("e0").and_then(|d| d.read_raw()).expect("read e0");
+                let _: Vec<f32> = f.dataset("e1").and_then(|d| d.read_raw()).expect("read e1");
             });
-            rows.push(Row {
-                format: v.label.into(),
-                settings: v.settings.clone(),
-                modality: "table",
-                op: "read full",
+            push_read(
+                rows,
+                v.label,
+                &v.settings,
+                "table",
+                "read full",
                 cache,
-                bytes: None,
-                stats: Some(s),
-                claim: "baseline full materialise (columnar stores are worst at this)",
-            });
+                s,
+                res,
+                CLAIM_FULL,
+            );
 
-            let s = timed(iters, evict_path, || {
+            let (s, res) = timed(iters, evict_path, || {
                 let f = hdf5::File::open(&path).expect("open");
                 let ds = f.dataset("e0").expect("ds");
                 let _: Vec<f32> = ds.read_raw().expect("read");
             });
-            rows.push(Row {
-                format: v.label.into(),
-                settings: v.settings.clone(),
-                modality: "table",
-                op: "read 1 column",
+            push_read(
+                rows,
+                v.label,
+                &v.settings,
+                "table",
+                "read 1 column",
                 cache,
-                bytes: None,
-                stats: Some(s),
-                claim: "columnar projection: read one column, not the table",
-            });
+                s,
+                res,
+                CLAIM_COLUMN,
+            );
 
-            let s = timed(iters, evict_path, || {
+            // ALL THREE columns, matching what tessera's `decode_rows` returns — the first draft
+            // timed one column here against tessera's three, which is not a comparison (#388 review).
+            let (s, res) = timed(iters, evict_path, || {
                 let f = hdf5::File::open(&path).expect("open");
-                let ds = f.dataset("e0").expect("ds");
-                let _ = ds
-                    .read_slice_1d::<f32, _>(ndarray::s![roi_start..roi_start + roi_len])
-                    .expect("roi");
+                let sel = ndarray::s![roi_start..roi_start + roi_len];
+                let _ = f
+                    .dataset("t")
+                    .and_then(|d| d.read_slice_1d::<u64, _>(sel))
+                    .expect("window t");
+                let _ = f
+                    .dataset("e0")
+                    .and_then(|d| d.read_slice_1d::<f32, _>(sel))
+                    .expect("window e0");
+                let _ = f
+                    .dataset("e1")
+                    .and_then(|d| d.read_slice_1d::<f32, _>(sel))
+                    .expect("window e1");
             });
-            rows.push(Row {
-                format: v.label.into(),
-                settings: v.settings.clone(),
-                modality: "table",
-                op: "read row ROI",
+            push_read(
+                rows,
+                v.label,
+                &v.settings,
+                "table",
+                "read row ROI",
                 cache,
-                bytes: None,
-                stats: Some(s),
-                claim: "row-index pushdown: take a window without decoding the rest",
-            });
+                s,
+                res,
+                CLAIM_ROWS,
+            );
         }
 
         if v.fletcher32 {
-            let s = timed(iters, None, || {
+            let (s, _) = timed(iters, None, || {
                 let f = hdf5::File::open(&path).expect("open");
-                for c in ["t", "e0", "e1"] {
-                    let ds = f.dataset(c).expect("ds");
-                    if c == "t" {
-                        let _: Vec<u64> = ds.read_raw().expect("read");
-                    } else {
-                        let _: Vec<f32> = ds.read_raw().expect("read");
-                    }
-                }
+                let _: Vec<u64> = f.dataset("t").and_then(|d| d.read_raw()).expect("read t");
+                let _: Vec<f32> = f.dataset("e0").and_then(|d| d.read_raw()).expect("read e0");
+                let _: Vec<f32> = f.dataset("e1").and_then(|d| d.read_raw()).expect("read e1");
             });
-            rows.push(Row {
-                format: v.label.into(),
-                settings: v.settings,
-                modality: "table",
-                op: "verify",
-                cache: "warm",
-                bytes: None,
-                stats: Some(s),
-                claim: "fletcher32: per-chunk CORRUPTION check on read; not keyed, no identity",
-            });
+            push_read(
+                rows,
+                v.label,
+                &v.settings,
+                "table",
+                "verify",
+                "warm",
+                s,
+                None,
+                CLAIM_VERIFY_H5,
+            );
         } else {
             rows.push(Row {
                 format: v.label.into(),
@@ -827,9 +987,10 @@ fn compare_table(
                 modality: "table",
                 op: "verify",
                 cache: "-",
+                resident: None,
                 bytes: None,
                 stats: None,
-                claim: "no integrity mechanism configured",
+                claim: CLAIM_VERIFY_NONE,
             });
         }
     }
@@ -845,6 +1006,9 @@ fn write_h5_table(path: &Path, v: &H5Variant, t: &[u64], e0: &[f32], e1: &[f32])
             if v.chunked {
                 // 1-D chunking for tables; the cubic geometry only applies to the volume.
                 b = b.chunk([TABLE_CHUNK_ROWS.min($vals.len())]);
+            }
+            if v.shuffle {
+                b = b.shuffle();
             }
             if let Some(l) = v.deflate {
                 b = b.deflate(l);
@@ -862,6 +1026,75 @@ fn write_h5_table(path: &Path, v: &H5Variant, t: &[u64], e0: &[f32], e1: &[f32])
     col!("e0", f32, e0);
     col!("e1", f32, e1);
     Ok(())
+}
+
+/// The machine + toolchain the numbers came from. Timings are meaningless without it, and a reader
+/// comparing two runs needs to know whether they are even the same box (#388 review).
+struct MachineInfo {
+    cpu: String,
+    cores: usize,
+    ram: String,
+    fs: String,
+    kernel: String,
+    tessera: String,
+    libhdf5: String,
+}
+
+fn first_field(path: &str, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines()
+        .find(|l| l.starts_with(key))
+        .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+}
+
+/// Filesystem type of the directory the benchmark actually wrote to — tmpfs vs ext4 vs a network
+/// mount changes every I/O number here, so it is reported rather than assumed.
+fn fs_type(dir: &Path) -> String {
+    // SAFETY: `statfs` writes into a zeroed, correctly-sized struct; the path is NUL-terminated.
+    unsafe {
+        let mut buf: libc::statfs = std::mem::zeroed();
+        let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()) else {
+            return "unknown".into();
+        };
+        if libc::statfs(c.as_ptr(), &mut buf) != 0 {
+            return "unknown".into();
+        }
+        // The common ones by magic; anything else is reported as its raw magic rather than guessed.
+        match buf.f_type {
+            0x0000_1021 | 0x0000_9123 => "btrfs".into(),
+            0x0000_EF53 => "ext2/3/4".into(),
+            0x0000_6969 => "nfs".into(),
+            0x0102_1994 => "tmpfs".into(),
+            0x5846_5342 => "xfs".into(),
+            0x2011_BAB0 => "exfat".into(),
+            other => format!("0x{other:x}"),
+        }
+    }
+}
+
+fn machine_info(dir: &Path) -> MachineInfo {
+    let ram = first_field("/proc/meminfo", "MemTotal")
+        .and_then(|v| {
+            v.split_whitespace()
+                .next()
+                .and_then(|k| k.parse::<u64>().ok())
+        })
+        .map(|kb| human(kb * 1024))
+        .unwrap_or_else(|| "unknown".into());
+    MachineInfo {
+        cpu: first_field("/proc/cpuinfo", "model name").unwrap_or_else(|| "unknown".into()),
+        cores: std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0),
+        ram,
+        fs: fs_type(dir),
+        kernel: kernel(),
+        tessera: tessera_core::manifest::TESSERA_VERSION.to_string(),
+        libhdf5: {
+            let (a, b, c) = hdf5::library_version();
+            format!("{a}.{b}.{c}")
+        },
+    }
 }
 
 /// Kernel string for the provenance line — cold-cache eviction behaviour is kernel-dependent, so the
@@ -907,9 +1140,10 @@ pub fn run(opts: CompareOpts) -> Result<()> {
         compare_table(dir.path(), opts.rows, opts.iters, opts.cold, &mut rows)?;
     }
 
+    let mi = machine_info(dir.path());
     match opts.format.as_str() {
-        "json" => print_json(&opts, &rows),
-        "table" => print_table(&opts, &rows),
+        "json" => print_json(&opts, &rows, &mi),
+        "table" => print_table(&opts, &rows, &mi),
         other => {
             return Err(err(&format!(
                 "bench compare: --format must be table|json, got {other:?}"
@@ -953,12 +1187,26 @@ fn human(b: u64) -> String {
     }
 }
 
-fn print_table(opts: &CompareOpts, rows: &[Row]) {
+fn print_table(opts: &CompareOpts, rows: &[Row], mi: &MachineInfo) {
     out!("tessera bench compare — .tsra vs HDF5 (#388)");
     out!("  data     {}", raw_bytes_note(opts));
     out!(
-        "  method   median of {} runs, spread = [min..max]; correctness asserted before timing",
+        "  machine  {} x{} · {} RAM · bench dir on {} · kernel {}",
+        mi.cpu,
+        mi.cores,
+        mi.ram,
+        mi.fs,
+        mi.kernel
+    );
+    out!("  versions tessera {} · libhdf5 {}", mi.tessera, mi.libhdf5);
+    out!(
+        "  method   median of {} runs, spread = [min..max]; EVERY timed read is verified against",
         opts.iters
+    );
+    out!("           the source data first (full, projected and ROI, per format and setting)");
+    out!("  warm-up  none beyond the correctness pass: the verification read precedes the warm");
+    out!(
+        "           timings, so warm rows start with the file in page cache; cold rows evict first"
     );
     out!(
         "  cache    {}",
@@ -1026,7 +1274,7 @@ fn print_table(opts: &CompareOpts, rows: &[Row]) {
     out!("  flipped bit; only one answers 'is this the artifact that was sealed, and by whom'.");
 }
 
-fn print_json(opts: &CompareOpts, rows: &[Row]) {
+fn print_json(opts: &CompareOpts, rows: &[Row], mi: &MachineInfo) {
     let items: Vec<serde_json::Value> = rows
         .iter()
         .map(|r| {
@@ -1035,7 +1283,10 @@ fn print_json(opts: &CompareOpts, rows: &[Row]) {
                 "settings": r.settings,
                 "dataset": r.modality,
                 "op": r.op,
+                // "cold" only survives when eviction actually worked for THIS file; otherwise the
+                // row is "cold?" and the residency says why.
                 "cache": r.cache,
+                "resident_after_evict": r.resident,
                 "bytes": r.bytes,
                 "median_s": r.stats.as_ref().map(|s| s.median_s),
                 "min_s": r.stats.as_ref().map(|s| s.min_s),
@@ -1053,7 +1304,15 @@ fn print_json(opts: &CompareOpts, rows: &[Row]) {
         "cold_cache": opts.cold,
         "cold_method": if opts.cold { "fsync + posix_fadvise(POSIX_FADV_DONTNEED), best-effort" } else { "n/a" },
         "cold_eviction": if opts.cold { cold_verdict() } else { "n/a".to_string() },
-        "kernel": kernel(),
+        "machine": {
+            "cpu": mi.cpu,
+            "cores": mi.cores,
+            "ram": mi.ram,
+            "bench_dir_fs": mi.fs,
+            "kernel": mi.kernel,
+        },
+        "versions": { "tessera": mi.tessera, "libhdf5": mi.libhdf5 },
+        "verification": "every timed read (full, projected, ROI) is compared against the source data, per format and setting, before its timings count",
         // null rather than the configured-but-unused value, so a consumer cannot read a size for a
         // dataset this run never touched.
         "volume_n": (opts.dataset != "table").then_some(opts.vol_n),
@@ -1116,6 +1375,18 @@ mod tests {
         );
         assert!(tab.iter().any(|s| s.contains("65536 rows")));
 
+        // shuffle+deflate is the standard HDF5 tuning. Omitting shuffle weakened the baseline so
+        // much that the table size result INVERTED: 5.9 MiB without it vs 155.3 KiB with, against
+        // tessera's 959.4 KiB. A tuned variant without shuffle is not a tuned variant (#388 review).
+        for set in [&vol, &tab] {
+            for tuned in set.iter().filter(|s| s.starts_with("tuned:")) {
+                assert!(
+                    tuned.contains("shuffle+gzip"),
+                    "a tuned HDF5 variant must pair shuffle with deflate: {tuned}"
+                );
+            }
+        }
+
         // Both modalities must offer a default AND tuned variants, or the comparison is a straw man.
         for set in [&vol, &tab] {
             assert!(set.iter().any(|s| s.starts_with("default:")), "{set:?}");
@@ -1125,6 +1396,29 @@ mod tests {
             );
             assert!(set.iter().any(|s| s.contains("fletcher32")), "{set:?}");
         }
+    }
+
+    /// The ROI must be ONE WHOLE, CHUNK-ALIGNED cubic chunk — the claim the row makes. Centring
+    /// without aligning put it across 8 chunks (roi0 = 96 for n = 256), so the row measured a
+    /// misaligned read while the prose said "one cubic chunk" (#388 review).
+    #[test]
+    fn volume_roi_is_one_aligned_chunk() {
+        for n in [64usize, 128, 256, 512] {
+            let edge = CHUNK.min(n);
+            let roi0 = ((n - edge) / 2 / edge) * edge;
+            assert_eq!(
+                roi0 % edge,
+                0,
+                "n={n}: ROI start {roi0} is not chunk-aligned"
+            );
+            assert!(roi0 + edge <= n, "n={n}: ROI runs past the volume");
+        }
+        // And the expectation helper agrees with a hand-computed box.
+        let n = 4;
+        let raw: Vec<i16> = (0..(n * n * n) as i16).collect();
+        let got = expect_roi(&raw, n, 2, 2);
+        // z,y in {2,3}, x in 2..4 -> rows starting at 2*16+2*4+2 = 42, 46, 58, 62
+        assert_eq!(got, vec![42, 43, 46, 47, 58, 59, 62, 63]);
     }
 
     #[test]
