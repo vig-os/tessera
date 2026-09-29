@@ -448,6 +448,97 @@ pub struct GenericIngest<'a> {
 }
 
 /// Seal a canonicalised table as a generic `table` product (ADR-0056 §7's builtin schema).
+/// The manifest facts a generic-table ingest declares, independent of how its blocks get written.
+///
+/// Two writers implement it — [`ProductBuilder`] for the batch path and `tessera_io::WriteSession` for
+/// the streaming one — so [`declare_generic_table`] is the single place either path decides what a
+/// `table` product's manifest says. That matters because the two must seal the *same* manifest for the
+/// same input (#458), and a twin maintained by hand is exactly the drift this codebase keeps finding: a
+/// fact added to one and forgotten in the other moves `manifest_hash` while leaving `content_hash`
+/// identical, which a content-hash comparison cannot see. Add a fact here and both paths get it; add it
+/// to one writer only and it does not compile.
+pub trait DeclareTable {
+    fn declare_field(&mut self, id: &str, value: serde_json::Value) -> Result<()>;
+    fn declare_generation(&mut self, generation: tessera_core::Generation) -> Result<()>;
+    fn declare_ingest_transform(&mut self, transforms: Vec<IngestTransform>) -> Result<()>;
+    fn declare_source(&mut self, source: tessera_core::provenance::Source) -> Result<()>;
+}
+
+impl DeclareTable for ProductBuilder {
+    fn declare_field(&mut self, id: &str, value: serde_json::Value) -> Result<()> {
+        self.with_field(id, value);
+        Ok(())
+    }
+    fn declare_generation(&mut self, generation: tessera_core::Generation) -> Result<()> {
+        self.with_generation(generation);
+        Ok(())
+    }
+    fn declare_ingest_transform(&mut self, transforms: Vec<IngestTransform>) -> Result<()> {
+        self.with_ingest_transform(transforms);
+        Ok(())
+    }
+    fn declare_source(&mut self, source: tessera_core::provenance::Source) -> Result<()> {
+        self.add_source(source);
+        Ok(())
+    }
+}
+
+impl DeclareTable for tessera_io::WriteSession {
+    fn declare_field(&mut self, id: &str, value: serde_json::Value) -> Result<()> {
+        self.with_field(id, value)?;
+        Ok(())
+    }
+    fn declare_generation(&mut self, generation: tessera_core::Generation) -> Result<()> {
+        self.with_generation(generation)?;
+        Ok(())
+    }
+    fn declare_ingest_transform(&mut self, transforms: Vec<IngestTransform>) -> Result<()> {
+        self.with_ingest_transform(transforms)?;
+        Ok(())
+    }
+    fn declare_source(&mut self, source: tessera_core::provenance::Source) -> Result<()> {
+        self.add_source(source)?;
+        Ok(())
+    }
+}
+
+/// Declare every generic-table manifest fact on `w`, in the order the seal depends on.
+///
+/// `transforms` is passed separately from `opts` because the streaming path accumulates it across
+/// batches (its receipt is only complete once the last one is read) while the batch path has it on the
+/// folded table. Everything else is identical by construction.
+pub fn declare_generic_table(
+    w: &mut impl DeclareTable,
+    opts: &GenericIngest<'_>,
+    transforms: &[IngestTransform],
+) -> Result<()> {
+    w.declare_field(
+        "source_format",
+        serde_json::Value::String(opts.source_format.to_string()),
+    )?;
+    w.declare_generation(opts.decoder.record_into(opts.generation.clone()))?;
+    // Empty stays ABSENT rather than an empty list: a product where nothing fired must seal exactly as
+    // it did before the receipt existed.
+    if !transforms.is_empty() {
+        w.declare_ingest_transform(transforms.to_vec())?;
+    }
+    // ADR-0040: `source_label` replaces the path in the sealed edge (an absolute clinical path is itself
+    // PHI); the bytes are still read from, and digested at, the real path.
+    let source_ref = opts
+        .source_label
+        .map(str::to_string)
+        .unwrap_or_else(|| opts.source_path.display().to_string());
+    w.declare_source(crate::provenance::ingested_from(
+        &[opts.source_path],
+        source_ref,
+    )?)?;
+    // Order matters for the seal: `ingested_from` first, then whatever the engine threaded in.
+    for s in opts.extra_sources {
+        w.declare_source(s.clone())?;
+    }
+    Ok(())
+}
+
 pub fn to_table_product(
     table: &CanonicalTable,
     opts: &GenericIngest<'_>,
@@ -461,25 +552,9 @@ pub fn to_table_product(
     let (block_ref, payload) = tessera_io::table::table_block(GENERIC_BLOCK, &spec, &data)?;
     let mut b = ProductBuilder::new("table", opts.name, opts.description, opts.timestamp);
     b.add_block_ref(block_ref);
-    b.with_field(
-        "source_format",
-        serde_json::Value::String(opts.source_format.to_string()),
-    );
-    b.with_generation(opts.decoder.record_into(opts.generation.clone()));
-    if !table.transforms.is_empty() {
-        b.with_ingest_transform(table.transforms.clone());
-    }
-    let source_ref = opts
-        .source_label
-        .map(str::to_string)
-        .unwrap_or_else(|| opts.source_path.display().to_string());
-    b.add_source(crate::provenance::ingested_from(
-        &[opts.source_path],
-        source_ref,
-    )?);
-    for s in opts.extra_sources {
-        b.add_source(s.clone());
-    }
+    // Every manifest fact goes through the shared applier, so the streaming path cannot declare a
+    // different set (#458).
+    declare_generic_table(&mut b, opts, &table.transforms)?;
     Ok((b.seal()?, vec![payload]))
 }
 
