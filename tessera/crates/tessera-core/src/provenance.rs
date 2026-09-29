@@ -235,10 +235,28 @@ pub fn inherit_identity(
 }
 
 /// Resolves a provenance `reference` (a parent product's `id`) to its manifest, so a chain can be
-/// walked and verified. A `BTreeMap<id, Manifest>` is the simplest implementation; a real store
-/// would fetch from object storage.
+/// walked and verified.
+///
+/// **A `reference` is a lineage handle, not a version.** ADR-0036 makes `id` stable across a product's
+/// commits while `manifest_hash` is the version, so one `reference` legitimately addresses *many*
+/// manifests and a resolver has to choose. Returning a different version than an edge pinned is a
+/// normal outcome, reported as [`EdgeOutcome::VersionSkew`] — not corruption. A resolver that wants an
+/// exact version should match on the edge's pinned hash; the `BTreeMap<id, Manifest>` impl below holds
+/// one manifest per id and so cannot, which is why it never exercises the skew path.
 pub trait Resolver {
     fn resolve(&self, reference: &str) -> Option<Manifest>;
+
+    /// Resolve `reference`, preferring the exact version an edge pinned when this store holds more
+    /// than one.
+    ///
+    /// Default: ignore the hint and defer to [`Resolver::resolve`] — correct for a store with one
+    /// manifest per `id`, which cannot choose anyway. A store that indexes by `(id, manifest_hash)`
+    /// should override it; otherwise a walk over a store holding two versions of one parent reports
+    /// skew by coin flip, which is worse than not knowing.
+    fn resolve_pinned(&self, reference: &str, pinned: Option<&str>) -> Option<Manifest> {
+        let _ = pinned;
+        self.resolve(reference)
+    }
 }
 
 impl Resolver for BTreeMap<String, Manifest> {
@@ -247,43 +265,231 @@ impl Resolver for BTreeMap<String, Manifest> {
     }
 }
 
-/// Verify the provenance chain rooted at `manifest`: every [`Source`] edge that carries a
-/// `content_hash` **and** resolves to a parent product must have that hash equal the parent's
-/// `manifest_hash` (SPEC §8 — the edge commits to the parent's seal), recursively to the roots.
-/// Edges that don't resolve (external leaves — e.g. a raw DICOM SOP UID or file path) are skipped:
-/// they are acquisition provenance, not Tessera products. A genuine cycle is a hard error.
-pub fn verify_chain<R: Resolver>(manifest: &Manifest, resolver: &R) -> Result<()> {
-    verify_walk(manifest, resolver, &mut BTreeSet::new())
+/// What resolving one provenance edge produced. The walk's whole job is telling these apart, because
+/// collapsing them is how a version mismatch gets reported as corruption (or corruption as routine).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EdgeOutcome {
+    /// The parent resolved and seals exactly the version the edge pinned. The chain holds here.
+    Pinned,
+    /// The parent resolved by lineage (`id` matched) but seals a *different* version than the edge
+    /// pinned. ADR-0036 makes `id` a lineage handle addressing many versions, so this is the ordinary
+    /// result of resolving against a store holding a newer commit of the parent — a gap in what this
+    /// walk can prove, not evidence that anything is wrong with the bytes.
+    VersionSkew {
+        /// The `manifest_hash` the edge committed to.
+        pinned: String,
+        /// The `manifest_hash` the resolved parent actually carries.
+        resolved: String,
+    },
+    /// Nothing resolved. Either an external (non-Tessera) leaf — a raw DICOM SOP UID, a vendor file
+    /// path — or a parent product this walk simply cannot reach from where it is looking.
+    Unresolved,
+    /// The edge carries no pinned hash, so there is nothing to check even if it resolves.
+    Unpinned,
 }
 
-fn verify_walk<R: Resolver>(
+/// The role `publish` writes for its version breadcrumb (ADR-0036) — the one version-pointer role the
+/// format itself emits.
+pub const SNAPSHOT_OF_ROLE: &str = "snapshot_of";
+
+/// Is this edge a **version pointer** rather than a derivation edge?
+///
+/// A derivation edge references a parent's *lineage* `id` and pins that parent's `manifest_hash`, so
+/// the two values differ. ADR-0036's `snapshot_of` breadcrumb instead references the version itself, so
+/// reference and pin are the same string.
+///
+/// Both halves are required, and the role half is the security-relevant one. Shape alone is **forgeable**:
+/// a crafted `derived_from` whose reference equals its pin would be exempted from descent and from
+/// completeness, quietly passing a `--require-complete` gate it never satisfied (#452 review). So the
+/// role must be the one the format writes for this purpose. That is not "guessing semantics from a
+/// free-form label" — it is recognising *our own* emitted breadcrumb; a producer's arbitrary role gets no
+/// exemption. [`is_self_snapshot`] adds the third check once a parent actually resolves.
+pub fn is_version_pointer(s: &Source) -> bool {
+    s.role == SNAPSHOT_OF_ROLE && s.content_hash.as_deref() == Some(s.reference.as_str())
+}
+
+/// A resolved version pointer that really points **into its own lineage** — the case [`walk`] must not
+/// recurse through, because a published artifact keeps its lineage `id` while naming an earlier version
+/// of *itself*, so descending re-walks the same product and trips the cycle guard on a well-formed DAG.
+/// An edge that resolves to a *different* lineage is not a self-snapshot whatever it is called, and is
+/// walked like any other parent.
+fn is_self_snapshot(s: &Source, from: &Manifest, parent: &Manifest) -> bool {
+    is_version_pointer(s) && parent.id == from.id
+}
+
+/// A node reached during a [`walk`], with the edge that led to it.
+#[derive(Debug, Clone)]
+pub struct Step<'a> {
+    /// The manifest the edge leaves *from*.
+    pub from: &'a Manifest,
+    /// The edge itself.
+    pub source: &'a Source,
+    /// What resolving it produced.
+    pub outcome: EdgeOutcome,
+    /// The parent this edge resolved to, when one did. Carried so a visitor never has to resolve the
+    /// edge a second time — a second lookup is a second chance for the walk and the render to disagree
+    /// about what the DAG is, which is the whole reason there is only one traversal.
+    pub parent: Option<&'a Manifest>,
+    /// Hops from the root (the root's own edges are depth 1).
+    pub depth: usize,
+    /// True when this parent was already reached by another path — a diamond. Reported once so a
+    /// renderer can mark the repeat instead of printing the subtree twice.
+    pub revisited: bool,
+}
+
+/// Observes a [`walk`]. One walk, many uses: `verify_chain` is the strict visitor that refuses any
+/// edge it cannot prove, while an operator view collects the same steps and renders the gaps.
+pub trait Visit {
+    /// Called once per edge, parent-first, before descending into it. Returning `Err` aborts the walk
+    /// and the error reaches the [`walk`] caller — which is exactly how the strict verifier fails.
+    fn edge(&mut self, step: &Step<'_>) -> Result<()>;
+}
+
+/// Walk the provenance DAG rooted at `manifest`, reporting every edge to `visitor`.
+///
+/// One traversal shared by every consumer (#452): the verifier and the operator view must agree about
+/// what the DAG *is*, and two walks would drift. Properties:
+/// - **Cycles are a hard error** — a product cannot descend from itself, so this is a malformed DAG
+///   rather than something to render.
+/// - **Diamonds are visited once**, flagged via [`Step::revisited`]. Re-walking a shared subtree can
+///   only reach the same verdict, so skipping it is both cheaper and what a reader wants to see.
+/// - **Self-lineage version pointers are not recursed through** (see [`is_self_snapshot`]) — they name a
+///   version of the walked product's own lineage, not a parent to visit.
+/// - `max_depth` caps how far to descend (`None` = unlimited). Edges *at* the cap are still reported;
+///   their children are not.
+pub fn walk<R: Resolver, V: Visit>(
+    manifest: &Manifest,
+    resolver: &R,
+    max_depth: Option<usize>,
+    visitor: &mut V,
+) -> Result<()> {
+    let mut on_stack = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    walk_inner(
+        manifest,
+        resolver,
+        max_depth,
+        visitor,
+        &mut on_stack,
+        &mut seen,
+        0,
+    )
+}
+
+/// A node's identity for traversal bookkeeping: lineage `id` **plus** version.
+///
+/// Keyed by the pair, not the `id`, because an `id` addresses many versions (ADR-0036). Two paths that
+/// pin *different* versions of one lineage are different nodes and both deserve a walk, and a cycle then
+/// means the same **version** re-entered — unambiguously a loop, rather than a lineage that legitimately
+/// appears twice at different versions.
+fn node_key(m: &Manifest) -> (String, String) {
+    (m.id.clone(), m.manifest_hash.clone().unwrap_or_default())
+}
+
+fn walk_inner<R: Resolver, V: Visit>(
     m: &Manifest,
     resolver: &R,
-    on_stack: &mut BTreeSet<String>,
+    max_depth: Option<usize>,
+    visitor: &mut V,
+    on_stack: &mut BTreeSet<(String, String)>,
+    seen: &mut BTreeSet<(String, String)>,
+    depth: usize,
 ) -> Result<()> {
-    if !on_stack.insert(m.id.clone()) {
+    let key = node_key(m);
+    if !on_stack.insert(key.clone()) {
         return Err(Error::Invalid(format!(
             "provenance cycle detected at product '{}'",
             m.id
         )));
     }
     for s in &m.sources {
-        let (Some(expected), Some(parent)) = (&s.content_hash, resolver.resolve(&s.reference))
-        else {
-            continue; // no pinned hash, or an external (non-Tessera) leaf reference
+        let resolved = resolver.resolve_pinned(&s.reference, s.content_hash.as_deref());
+        let outcome = match (&s.content_hash, &resolved) {
+            (None, _) => EdgeOutcome::Unpinned,
+            (Some(_), None) => EdgeOutcome::Unresolved,
+            (Some(pinned), Some(parent)) => {
+                let actual = parent.manifest_hash.clone().unwrap_or_default();
+                if &actual == pinned {
+                    EdgeOutcome::Pinned
+                } else {
+                    EdgeOutcome::VersionSkew {
+                        pinned: pinned.clone(),
+                        resolved: actual,
+                    }
+                }
+            }
         };
-        let actual = parent.manifest_hash.clone().unwrap_or_default();
-        if &actual != expected {
-            return Err(Error::Integrity {
-                what: "provenance_edge",
-                expected: expected.clone(),
-                actual,
-            });
+        let parent_key = resolved.as_ref().map(node_key);
+        // **Cycle before diamond.** A parent enters `seen` before we descend into it, so every ancestor
+        // on the current stack is in `seen` too. Testing `seen` first therefore makes the edge that
+        // *closes* a loop look like the second arm of a diamond — reported, skipped, walk returns Ok,
+        // cycle masked (#452 review). The real distinction: a diamond's shared parent is **finished**,
+        // a cycle's target is **still on the stack**. So exclude on-stack nodes from `revisited` and let
+        // them fall through to the recursive entry guard, which is the one place a cycle is raised.
+        let on_stack_now = parent_key.as_ref().is_some_and(|k| on_stack.contains(k));
+        let revisited = !on_stack_now && parent_key.as_ref().is_some_and(|k| seen.contains(k));
+        visitor.edge(&Step {
+            from: m,
+            source: s,
+            outcome,
+            parent: resolved.as_ref(),
+            depth: depth + 1,
+            revisited,
+        })?;
+        let Some(parent) = resolved.as_ref() else {
+            continue;
+        };
+        if revisited || is_self_snapshot(s, m, parent) || max_depth.is_some_and(|d| depth + 1 >= d)
+        {
+            continue;
         }
-        verify_walk(&parent, resolver, on_stack)?;
+        seen.insert(parent_key.expect("a resolved parent always has a key"));
+        walk_inner(
+            parent,
+            resolver,
+            max_depth,
+            visitor,
+            on_stack,
+            seen,
+            depth + 1,
+        )?;
     }
-    on_stack.remove(&m.id); // pop: diamonds (a node reached by two paths) are fine; only cycles fail
+    on_stack.remove(&key); // pop: only a genuine cycle fails, a diamond does not
     Ok(())
+}
+
+/// The strict visitor behind [`verify_chain`]: an edge it cannot *prove* is an error.
+struct StrictVerifier;
+
+impl Visit for StrictVerifier {
+    fn edge(&mut self, step: &Step<'_>) -> Result<()> {
+        match &step.outcome {
+            // Nothing pinned, or an external leaf that is acquisition provenance rather than a
+            // Tessera product — neither is a claim this can check, so neither is a failure.
+            EdgeOutcome::Pinned | EdgeOutcome::Unpinned | EdgeOutcome::Unresolved => Ok(()),
+            EdgeOutcome::VersionSkew { pinned, resolved } => Err(Error::ProvenanceVersionSkew {
+                role: step.source.role.clone(),
+                reference: step.source.reference.clone(),
+                pinned: pinned.clone(),
+                resolved: resolved.clone(),
+            }),
+        }
+    }
+}
+
+/// Verify the provenance chain rooted at `manifest`: every [`Source`] edge that carries a
+/// `content_hash` **and** resolves to a parent product must have that hash equal the parent's
+/// `manifest_hash` (SPEC §8 — the edge commits to the parent's seal), recursively to the roots.
+/// Edges that don't resolve (external leaves — e.g. a raw DICOM SOP UID or file path) are skipped:
+/// they are acquisition provenance, not Tessera products. A genuine cycle is a hard error.
+///
+/// Strict by design: it answers "is this chain proven?", so a resolver handing back a *different
+/// version* of the right parent fails. That failure is [`Error::ProvenanceVersionSkew`], never
+/// [`Error::Integrity`] — the bytes are fine, the version is not the pinned one, and an auditor has to
+/// be able to tell those apart. Callers that want the gap rendered instead of raised should drive
+/// [`walk`] with their own [`Visit`].
+pub fn verify_chain<R: Resolver>(manifest: &Manifest, resolver: &R) -> Result<()> {
+    walk(manifest, resolver, None, &mut StrictVerifier)
 }
 
 #[cfg(test)]
@@ -314,8 +520,18 @@ mod tests {
         verify_chain(&child, &store).unwrap();
     }
 
+    /// An edge whose pinned hash is not the seal the resolved parent carries fails `verify_chain` —
+    /// but as [`Error::ProvenanceVersionSkew`], NOT [`Error::Integrity`].
+    ///
+    /// The distinction is the whole point (#452). A chain check compares a pinned hash to a resolved
+    /// parent's seal; it cannot see bytes, so it cannot distinguish "hand-edited to deadbeef" from
+    /// "pinned an older version of a product that has since been committed again". Reporting both as
+    /// `Integrity` — "tampering, corruption, or a producer bug" — makes routine version skew look like
+    /// an attack, and teaches operators to wave away the one error that should never be waved away.
+    /// Real corruption is caught by payload verification (`Error::BlockIntegrity`), a different
+    /// mechanism reading actual bytes.
     #[test]
-    fn verify_chain_rejects_a_tampered_edge() {
+    fn verify_chain_reports_a_hash_mismatch_as_version_skew_not_corruption() {
         let parent = sealed("parent");
         let mut store = BTreeMap::new();
         store.insert(parent.id.clone(), parent.clone());
@@ -324,13 +540,314 @@ mod tests {
         cb.add_source(Source::new("derived_from", &parent.id).with_content_hash("blake3:deadbeef"));
         let child = cb.seal().unwrap();
 
-        assert!(matches!(
-            verify_chain(&child, &store),
-            Err(Error::Integrity {
-                what: "provenance_edge",
-                ..
-            })
-        ));
+        match verify_chain(&child, &store) {
+            Err(Error::ProvenanceVersionSkew {
+                role,
+                reference,
+                pinned,
+                resolved,
+            }) => {
+                assert_eq!(role, "derived_from");
+                assert_eq!(reference, parent.id);
+                assert_eq!(pinned, "blake3:deadbeef");
+                assert_eq!(resolved, parent.manifest_hash.clone().unwrap());
+            }
+            other => panic!("expected ProvenanceVersionSkew, got {other:?}"),
+        }
+    }
+
+    /// The real-world shape of skew, and the reason it must not be called corruption: **one `id`
+    /// addresses many versions** (ADR-0036 — `id` is the lineage handle, `manifest_hash` the version).
+    /// A child pins the version of the parent it was actually built from; a store that has since
+    /// committed the parent again resolves the *newer* one. Nothing is corrupt, and the walk says so.
+    #[test]
+    fn one_lineage_id_addresses_two_versions_and_the_newer_one_reads_as_skew() {
+        // Two versions of ONE product: same identity inputs (product/name/timestamp) ⇒ same `id`,
+        // different metadata ⇒ different `manifest_hash`. This is what `tessera commit --set` makes.
+        let v1 = ProductBuilder::new("recon", "parent", "d", TS)
+            .seal()
+            .unwrap();
+        let mut b2 = ProductBuilder::new("recon", "parent", "d", TS);
+        b2.with_field("study", serde_json::json!("RESTAGED-02"));
+        let v2 = b2.seal().unwrap();
+        assert_eq!(
+            v1.id, v2.id,
+            "same identity inputs must give the same lineage id"
+        );
+        assert_ne!(
+            v1.manifest_hash, v2.manifest_hash,
+            "different content must give a different version"
+        );
+
+        // The child was built from v1 and pins it.
+        let mut cb = ProductBuilder::new("recon", "child", "d", TS);
+        cb.add_source(
+            Source::new("derived_from", &v1.id)
+                .with_content_hash(v1.manifest_hash.clone().unwrap()),
+        );
+        let child = cb.seal().unwrap();
+
+        // Resolved against a store holding v1: proven.
+        let mut at_v1 = BTreeMap::new();
+        at_v1.insert(v1.id.clone(), v1.clone());
+        verify_chain(&child, &at_v1).expect("the pinned version must verify");
+
+        // Resolved against a store holding v2: the same lineage, a different version.
+        let mut at_v2 = BTreeMap::new();
+        at_v2.insert(v2.id.clone(), v2.clone());
+        let mut seen = Vec::new();
+        walk(&child, &at_v2, None, &mut Collector(&mut seen)).unwrap();
+        assert_eq!(
+            seen,
+            vec![EdgeOutcome::VersionSkew {
+                pinned: v1.manifest_hash.clone().unwrap(),
+                resolved: v2.manifest_hash.clone().unwrap(),
+            }],
+            "the newer version of the right lineage is skew, not corruption"
+        );
+    }
+
+    /// A visitor that records outcomes and never fails — the operator view's shape, and what lets a
+    /// caller render a gap instead of raising it.
+    struct Collector<'a>(&'a mut Vec<EdgeOutcome>);
+
+    impl Visit for Collector<'_> {
+        fn edge(&mut self, step: &Step<'_>) -> Result<()> {
+            self.0.push(step.outcome.clone());
+            Ok(())
+        }
+    }
+
+    /// A diamond (one parent reached by two paths) is reported once and never walked twice, while a
+    /// genuine cycle is still a hard error. Both are properties of the shared walk, so both consumers
+    /// inherit them rather than each re-deriving the traversal.
+    #[test]
+    fn walk_visits_a_diamond_once_and_still_rejects_a_cycle() {
+        let root = sealed("shared-root");
+        let pin = root.manifest_hash.clone().unwrap();
+        let mk_mid = |name: &str| {
+            let mut b = ProductBuilder::new("recon", name, "d", TS);
+            b.add_source(Source::new("derived_from", &root.id).with_content_hash(pin.clone()));
+            b.seal().unwrap()
+        };
+        let left = mk_mid("left");
+        let right = mk_mid("right");
+
+        let mut store = BTreeMap::new();
+        for m in [&root, &left, &right] {
+            store.insert(m.id.clone(), m.clone());
+        }
+        let mut leaf = ProductBuilder::new("recon", "leaf", "d", TS);
+        for m in [&left, &right] {
+            leaf.add_source(
+                Source::new("derived_from", &m.id)
+                    .with_content_hash(m.manifest_hash.clone().unwrap()),
+            );
+        }
+        let leaf = leaf.seal().unwrap();
+
+        // 4 edges: leaf→left, left→root, leaf→right, right→root. The second arrival at `root` is
+        // reported (so a renderer can mark the diamond) but its subtree is not re-walked.
+        let mut revisits = 0;
+        struct CountRevisits<'a>(&'a mut usize, &'a mut usize);
+        impl Visit for CountRevisits<'_> {
+            fn edge(&mut self, step: &Step<'_>) -> Result<()> {
+                *self.1 += 1;
+                if step.revisited {
+                    *self.0 += 1;
+                }
+                Ok(())
+            }
+        }
+        let mut edges = 0;
+        walk(
+            &leaf,
+            &store,
+            None,
+            &mut CountRevisits(&mut revisits, &mut edges),
+        )
+        .unwrap();
+        assert_eq!(edges, 4, "every edge is reported");
+        assert_eq!(
+            revisits, 1,
+            "the shared root is flagged on its second arrival"
+        );
+        verify_chain(&leaf, &store).expect("a diamond is a valid DAG, not a cycle");
+
+        // A genuine cycle: a -> b -> a, with both edges pinning the seal the other side carries, so
+        // the traversal reaches the cycle check rather than stopping at a version mismatch first.
+        // Built by hand because a sealing builder cannot produce mutually-pinned hashes.
+        let mut a = Manifest::new("recon", "a", "d", TS);
+        let mut b = Manifest::new("recon", "b", "d", TS);
+        a.manifest_hash = Some("blake3:aaa".into());
+        b.manifest_hash = Some("blake3:bbb".into());
+        a.sources
+            .push(Source::new("derived_from", &b.id).with_content_hash("blake3:bbb"));
+        b.sources
+            .push(Source::new("derived_from", &a.id).with_content_hash("blake3:aaa"));
+        let mut cyc = BTreeMap::new();
+        cyc.insert(a.id.clone(), a.clone());
+        cyc.insert(b.id.clone(), b.clone());
+        assert!(
+            matches!(verify_chain(&a, &cyc), Err(Error::Invalid(m)) if m.contains("cycle")),
+            "a -> b -> a must stay a hard error"
+        );
+    }
+
+    /// A published artifact's `snapshot_of` breadcrumb points back at an earlier version of its OWN
+    /// lineage (ADR-0036 — `publish` keeps `id`, drops history). Recursing through it re-walks the same
+    /// product and trips the cycle guard, so a well-formed published artifact would be rejected as a
+    /// malformed DAG the moment its source version is also on hand. Report the edge, never descend it.
+    #[test]
+    fn a_version_pointer_at_a_present_version_is_not_a_cycle() {
+        // One lineage, two versions; the published copy points back at the original version.
+        let original = sealed("published-product");
+        let mut snapshot = original.clone();
+        snapshot.manifest_hash = Some("blake3:snapshotseal".into());
+        let pin = original.manifest_hash.clone().unwrap();
+        snapshot
+            .sources
+            .push(Source::new("snapshot_of", &pin).with_content_hash(&pin));
+        assert_eq!(snapshot.id, original.id, "publish keeps the lineage id");
+
+        // A store where the pointed-at version IS resolvable — by its own seal.
+        struct ByVersion(Manifest);
+        impl Resolver for ByVersion {
+            fn resolve(&self, reference: &str) -> Option<Manifest> {
+                (self.0.manifest_hash.as_deref() == Some(reference)).then(|| self.0.clone())
+            }
+        }
+        let store = ByVersion(original);
+
+        verify_chain(&snapshot, &store)
+            .expect("a version pointer into one's own lineage is not a cycle");
+        let mut seen = Vec::new();
+        walk(&snapshot, &store, None, &mut Collector(&mut seen)).unwrap();
+        assert_eq!(
+            seen,
+            vec![EdgeOutcome::Pinned],
+            "the edge is reported once, and not recursed through"
+        );
+    }
+
+    /// The version-pointer exemption must not be **forgeable**. Skipping descent and skipping
+    /// completeness is a real privilege, so shape alone cannot earn it: a crafted `derived_from` whose
+    /// reference happens to equal its pin would otherwise go unwalked and pass a `--require-complete`
+    /// gate it never satisfied (#452 review). Two further checks close that: the role must be the one
+    /// the format itself writes, and a resolved pointer must land in the walked product's OWN lineage.
+    #[test]
+    fn the_version_pointer_exemption_is_not_forgeable() {
+        let parent = sealed("a-real-parent");
+        let pin = parent.manifest_hash.clone().unwrap();
+
+        // Forged: pointer SHAPE (reference == pin) but a derivation role. Not exempt.
+        let forged = Source::new("derived_from", &pin).with_content_hash(&pin);
+        assert!(!is_version_pointer(&forged));
+        // The format's own breadcrumb role, same shape. Exempt by shape+role.
+        let genuine = Source::new(SNAPSHOT_OF_ROLE, &pin).with_content_hash(&pin);
+        assert!(is_version_pointer(&genuine));
+
+        // …but only into its OWN lineage. Pointing at a different lineage is an ordinary parent, so it
+        // is still walked — the `snapshot_of` label buys nothing on someone else's product.
+        let mut child = ProductBuilder::new("recon", "child", "d", TS);
+        child.add_source(genuine.clone());
+        let child = child.seal().unwrap();
+        assert_ne!(child.id, parent.id);
+        assert!(!is_self_snapshot(&genuine, &child, &parent));
+        assert!(is_self_snapshot(&genuine, &parent, &parent));
+
+        // End to end: a forged edge is walked, so the parent it names is verified rather than waved
+        // through. Resolving the forged reference (a manifest_hash) to a DIFFERENT version proves the
+        // walk really descended instead of exempting it.
+        let mut skewed = parent.clone();
+        skewed.manifest_hash = Some("blake3:adifferentversion".into());
+        struct ByRef(String, Manifest);
+        impl Resolver for ByRef {
+            fn resolve(&self, reference: &str) -> Option<Manifest> {
+                (reference == self.0).then(|| self.1.clone())
+            }
+        }
+        let mut forged_child = ProductBuilder::new("recon", "forged", "d", TS);
+        forged_child.add_source(forged);
+        let forged_child = forged_child.seal().unwrap();
+        assert!(
+            matches!(
+                verify_chain(&forged_child, &ByRef(pin.clone(), skewed)),
+                Err(Error::ProvenanceVersionSkew { .. })
+            ),
+            "a forged version pointer must be checked like any other edge"
+        );
+    }
+
+    /// A cycle that does **not** pass through the root must still be a hard error: `r → b → c → b`.
+    ///
+    /// Regression guard for the diamond optimisation (#452 review). Marking a parent "already seen"
+    /// before descending into it puts every *ancestor* in that set too, so testing it before the
+    /// cycle guard makes the edge that closes a loop look like the second arm of a diamond — reported,
+    /// skipped, and the walk returns `Ok`. The distinction is that a diamond's shared parent has been
+    /// *finished*, while a cycle's target is still on the stack. Cycle first, diamond second.
+    #[test]
+    fn a_cycle_below_the_root_is_still_rejected() {
+        // r → b → c → b, all edges pinning the seal each parent carries.
+        let mut r = Manifest::new("recon", "r", "d", TS);
+        let mut b = Manifest::new("recon", "b", "d", TS);
+        let mut c = Manifest::new("recon", "c", "d", TS);
+        r.manifest_hash = Some("blake3:rrr".into());
+        b.manifest_hash = Some("blake3:bbb".into());
+        c.manifest_hash = Some("blake3:ccc".into());
+        r.sources
+            .push(Source::new("derived_from", &b.id).with_content_hash("blake3:bbb"));
+        b.sources
+            .push(Source::new("derived_from", &c.id).with_content_hash("blake3:ccc"));
+        c.sources
+            .push(Source::new("derived_from", &b.id).with_content_hash("blake3:bbb"));
+        let mut store = BTreeMap::new();
+        for m in [&r, &b, &c] {
+            store.insert(m.id.clone(), m.clone());
+        }
+
+        assert!(
+            matches!(verify_chain(&r, &store), Err(Error::Invalid(m)) if m.contains("cycle")),
+            "r -> b -> c -> b is a cycle even though it never revisits the root"
+        );
+        // And a visitor-driven walk must not quietly succeed either.
+        let mut seen = Vec::new();
+        assert!(
+            walk(&r, &store, None, &mut Collector(&mut seen)).is_err(),
+            "the operator walk must surface the cycle, not render a clean chain"
+        );
+    }
+
+    /// `max_depth` reports the edges at the cap but stops descending — the `--depth N` operator knob.
+    #[test]
+    fn walk_depth_cap_reports_the_boundary_edge_without_descending() {
+        let gp = sealed("grandparent");
+        let mut pb = ProductBuilder::new("recon", "parent", "d", TS);
+        pb.add_source(
+            Source::new("derived_from", &gp.id)
+                .with_content_hash(gp.manifest_hash.clone().unwrap()),
+        );
+        let parent = pb.seal().unwrap();
+        let mut cb = ProductBuilder::new("recon", "child", "d", TS);
+        cb.add_source(
+            Source::new("derived_from", &parent.id)
+                .with_content_hash(parent.manifest_hash.clone().unwrap()),
+        );
+        let child = cb.seal().unwrap();
+
+        let mut store = BTreeMap::new();
+        for m in [&gp, &parent] {
+            store.insert(m.id.clone(), m.clone());
+        }
+        for (cap, want) in [(Some(1), 1), (Some(2), 2), (None, 2)] {
+            let mut seen = Vec::new();
+            walk(&child, &store, cap, &mut Collector(&mut seen)).unwrap();
+            assert_eq!(
+                seen.len(),
+                want,
+                "depth cap {cap:?} should report {want} edge(s)"
+            );
+        }
     }
 
     /// Back-compat (ADR-0058): a pre-ADR-0058 manifest carries `producer` as a bare string. Reading

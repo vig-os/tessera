@@ -747,6 +747,26 @@ fn write_repacked_archive(
 /// exploded form of ADR-0022; ADR-0042 adds the aux round-trip). Verifies the seal on open and each
 /// block against its digest. Aux members are copied verbatim under `aux/` (they carry no digest —
 /// seal-ignored). Returns the verified manifest.
+/// Read a `.tsra`'s manifest **without verifying its seal** — for diagnostics only.
+///
+/// [`Reader::open`] refuses a product whose manifest does not verify, which is right for every read that
+/// will act on the contents. But refusing it also throws away the one thing needed to *report* the
+/// problem usefully: which product the broken file claims to be. Without that, a tool resolving
+/// provenance can only say "something here is corrupt", not "the parent this edge needs is corrupt".
+///
+/// The returned manifest is **untrusted**. Its `id`, `manifest_hash` and metadata are claims by a file
+/// that has already failed verification, so use them to name and locate, never to decide. Anything that
+/// reads block payloads or acts on metadata must go through [`Reader::open`] and get the refusal.
+pub fn read_manifest_unverified(path: &Path) -> Result<Manifest> {
+    let mut archive = ZipArchive::new(File::open(path)?).map_err(cz)?;
+    let mut mj = String::new();
+    archive
+        .by_name(MANIFEST_ENTRY)
+        .map_err(|_| Error::Container("missing manifest.json".into()))?
+        .read_to_string(&mut mj)?;
+    Manifest::from_json(&mj)
+}
+
 pub fn unpack(path: &Path, outdir: &Path) -> Result<Manifest> {
     let mut r = Reader::open(path)?;
     let manifest = r.manifest().clone();

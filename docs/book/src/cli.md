@@ -33,3 +33,7 @@ there, which is the point of keeping one copy rather than two.
 ### Version & sub-command help
 
 {{#include ../../../tessera/crates/tessera-cli/tests/cmd/commands.trycmd}}
+
+### Provenance: the recipe and the chain
+
+{{#include ../../../tessera/crates/tessera-cli/tests/cmd/provenance-walk.trycmd}}

@@ -9,7 +9,7 @@
 #
 # The logic lives in the flake's `checks` (flake.nix), so the SAME command runs on a dev's
 # machine and here — no "passes locally / fails in CI" drift, nothing to reproduce by hand.
-# Run it yourself: `nix flake check -L`.
+# Run it yourself with the SAME flags CI uses: `nix flake check -L --keep-going --fallback`.
 #
 # Checks (see flake.nix): workspace-clippy · workspace-test · workspace-fmt ·
 # guardrails-gates · dev-shell. cargo-deny + the full pre-commit gate set run via `prek`
@@ -168,33 +168,61 @@ jobs:
       # than that it was skipped. No output format to drift against.
       - name: Summarise per-check results
         if: always()
+        # Through `env:` rather than inline `${{ }}` in the run block: a workflow expression expanded
+        # into shell is the template-injection shape the zizmor gate flags, and `matrix.arch` being
+        # repo-controlled today does not make interpolating it a habit worth keeping.
+        env:
+          SYS: ${{ matrix.arch }}
+          CHECK_RC: ${{ steps.check.outputs.rc }}
         run: |
           set +e
-          SYS="${{ matrix.arch }}"
           S="$GITHUB_STEP_SUMMARY"
-          names=$(nix eval --json ".#checks.${SYS}" --apply builtins.attrNames \
-                  | tr -d '[]"' | tr ',' ' ')
-          pass=0; fail=0; failed_names=""
+
+          # One evaluation for every check's output path, instead of `attrNames` followed by an
+          # `outPath` eval per check: 17 nix evaluations became 1, and the name and the path can no
+          # longer disagree because they come from the same attrset.
+          paths_json=$(nix eval --json ".#checks.${SYS}" \
+            --apply 'builtins.mapAttrs (_: c: c.outPath)' 2>/dev/null)
+
+          if [ -z "$paths_json" ] || [ "$paths_json" = "{}" ]; then
+            # Without this, a failed evaluation reported "0 passed, 0 failed or not built", which
+            # reads like an empty-but-fine result rather than a broken one.
+            {
+              echo "## nix flake check — ${SYS}"
+              echo ""
+              echo ":warning: **Could not evaluate \`.#checks.${SYS}\`** — no per-check summary."
+              echo "The flake may have failed to evaluate; the job log is authoritative."
+            } >> "$S"
+            echo "ERROR: could not evaluate .#checks.${SYS}; no summary produced"
+            exit "${CHECK_RC:-1}"
+          fi
+
           {
             echo "## nix flake check — ${SYS}"
             echo ""
             echo "| check | result |"
             echo "|---|---|"
           } >> "$S"
-          for n in $names; do
-            outp=$(nix eval --raw ".#checks.${SYS}.${n}.outPath" 2>/dev/null)
-            if [ -n "$outp" ] && nix path-info "$outp" >/dev/null 2>&1; then
-              echo "| \`$n\` | :white_check_mark: passed |" >> "$S"
+
+          pass=0; fail=0; failed_names=""
+          while IFS=$'\t' read -r name outp; do
+            [ -n "$name" ] || continue
+            # `--check-validity` is unambiguously LOCAL. Plain `nix path-info` may consult
+            # substituters, which would report a path as present because a cache HAS it rather than
+            # because this leg built it — turning a failed check into a green row. No extra
+            # substituter is configured today, so this is closing a latent trap, not a live bug.
+            if [ -n "$outp" ] && nix-store --check-validity "$outp" >/dev/null 2>&1; then
+              echo "| \`$name\` | :white_check_mark: passed |" >> "$S"
               pass=$((pass+1))
             else
-              echo "| \`$n\` | :x: failed or not built |" >> "$S"
-              fail=$((fail+1)); failed_names="$failed_names $n"
+              echo "| \`$name\` | :x: failed or not built |" >> "$S"
+              fail=$((fail+1)); failed_names="$failed_names $name"
             fi
-          done
-          rc="${{ steps.check.outputs.rc }}"
+          done <<< "$(jq -r 'to_entries[] | "\(.key)\t\(.value)"' <<< "$paths_json")"
+
           {
             echo ""
-            echo "**$pass passed, $fail failed or not built** (\`nix flake check\` exited \`${rc:-?}\`)."
+            echo "**$pass passed, $fail failed or not built** (\`nix flake check\` exited \`${CHECK_RC:-?}\`)."
             if [ "$fail" -gt 0 ]; then
               echo ""
               echo "Not built:$failed_names"
@@ -204,9 +232,9 @@ jobs:
               echo "its 90-minute cap, in which case the tail of the job log says so."
             fi
           } >> "$S"
-          echo "summary: $pass passed, $fail failed or not built; check rc=${rc:-?}"
+          echo "summary: $pass passed, $fail failed or not built; check rc=${CHECK_RC:-?}"
           # Re-raise the real result: the check step swallowed it so this summary could run.
-          exit "${rc:-1}"
+          exit "${CHECK_RC:-1}"
 
   # ── The single REQUIRED status check ──────────────────────────────────────────────────────
   # Branch protection matches context names EXACTLY. A matrix job is reported per-leg as
