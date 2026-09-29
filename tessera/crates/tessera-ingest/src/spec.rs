@@ -259,6 +259,24 @@ pub enum FormatOptions {
         )]
         column_meta: crate::column_meta::ColumnMeta,
     },
+    /// **NumPy `.npy` → a dense `array`** (ADR-0056 §11). Shape and dtype are explicit in the header,
+    /// so there is nothing to infer; a **structured** dtype routes to the `table` primitive instead
+    /// (§1: the shape of the data decides, and a record array is rows of typed fields).
+    Npy {
+        input: PathBuf,
+    },
+    /// **One member of a NumPy `.npz` archive → a dense `array`.**
+    ///
+    /// An `.npz` is a zip of `.npy` files, so §11 makes it a **collection** — one product per member,
+    /// not one product with N blocks (§10's shape rule one level up: the members are independent
+    /// arrays, not slices of one grid). Naming the member explicitly is what keeps the spec an honest
+    /// archival record: a spec that said "everything in this archive" would have a meaning that
+    /// depended on the archive.
+    NpzMember {
+        input: PathBuf,
+        /// The member's name inside the archive, e.g. `energy.npy`.
+        member: String,
+    },
     /// Multi-file opaque preservation: seal a set of files as ONE `blob` product with a `Blob` block
     /// **per file** (no tar — the `.tsra` is already a STORED-zip container). The block-per-file cold
     /// tier for a multi-file vendor series (e.g. a DICOM series' slices). `format = "blob-series"`.
@@ -420,6 +438,14 @@ pub fn sniff_or_explain(input: &std::path::Path) -> Result<String> {
     }
 }
 
+/// Resolve an array source's backend from its magic bytes, or explain what to pass (ADR-0056 §4).
+pub fn sniff_array_or_explain(input: &std::path::Path) -> Result<String> {
+    match crate::canonical::sniff_array_format(input)? {
+        Some(f) => Ok(f.to_string()),
+        None => Err(crate::canonical::unknown_array_format_error(input)),
+    }
+}
+
 /// The CSV-without-declarations refusal, routed through the one place that owns its wording.
 ///
 /// Feature-gated indirection rather than a duplicated string: with `csv` compiled in, the message is
@@ -452,6 +478,8 @@ pub fn is_generic_backend(opts: &FormatOptions) -> bool {
         FormatOptions::Parquet { .. }
         | FormatOptions::Arrow { .. }
         | FormatOptions::Csv { .. }
+        | FormatOptions::Npy { .. }
+        | FormatOptions::NpzMember { .. }
         | FormatOptions::Blob { .. }
         | FormatOptions::BlobSeries { .. } => true,
         // Vendor: the decoder itself establishes the domain facts the schema then asserts (DICOM's
@@ -507,6 +535,17 @@ fn check_no_schema_laundering(p: &ProductSpec) -> Result<()> {
     if p.schema == expected {
         return Ok(());
     }
+    // The one case where the primitive depends on the FILE and not the format: a NumPy **structured**
+    // dtype is rows of typed fields, so a `.npy` may legitimately produce either primitive (§1/§11). An
+    // operator cannot know which without opening the file, so both are accepted here and the engine
+    // seals whichever the header held.
+    if matches!(
+        p.options,
+        FormatOptions::Npy { .. } | FormatOptions::NpzMember { .. }
+    ) && p.schema == "table"
+    {
+        return Ok(());
+    }
     if GENERIC_PRODUCT_SCHEMAS.contains(&p.schema.as_str()) {
         return Err(Error::Invalid(format!(
             "ingest-spec: product '{}' is read by the '{}' backend, which produces a '{expected}', but \
@@ -538,6 +577,10 @@ pub fn default_schema_for(opts: &FormatOptions) -> &'static str {
         FormatOptions::Parquet { .. } | FormatOptions::Arrow { .. } | FormatOptions::Csv { .. } => {
             "table"
         }
+        // `npy` is the one generic backend whose primitive depends on the FILE: a structured/record
+        // dtype is a table (§1/§11). The spec declares `array`, and the engine relaxes the check for
+        // exactly that case rather than making an operator predict their own dtype.
+        FormatOptions::Npy { .. } | FormatOptions::NpzMember { .. } => "array",
         // See `is_generic_backend`: `raw` is not subject to the rule yet, so this value is
         // informational only (it is what §4's collapse will make it).
         FormatOptions::Raw { .. } => "array",

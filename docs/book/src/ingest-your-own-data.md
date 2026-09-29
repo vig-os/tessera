@@ -26,6 +26,7 @@ The verb names the **primitive**, not your file format — because the primitive
 
 - your data is **rows of typed fields** (measurements, events, a table) → `ingest table`
 - your data is a **dense numeric grid** (an image, a volume, a field) → `ingest array`
+  (NumPy `.npy`; a `.npz` archive becomes a collection)
 - neither, or you are not ready to decide → `ingest blob`
 
 That also means the verb is how you override a file that misrepresents its shape. A Parquet full of
@@ -142,6 +143,45 @@ becomes an integer plus a `scale`, and a timestamp becomes integer ticks plus a 
 of those transformations is written **inside the seal**, so the artifact carries its own record of what was
 done to it rather than relying on a warning you saw once.
 
+### A NumPy array or archive
+
+Shape and dtype are explicit in an `.npy` header, so there is nothing to declare:
+
+```text
+tessera ingest array volume.npy volume.tsra \
+  --name scan-01 --timestamp 2024-03-01T12:00:00Z --meta study=COHORT-A
+```
+
+Three things happen without you asking, and the difference between the first two is worth knowing:
+
+- a **big-endian** file (`>f8`) is byte-swapped to native, and that is *not* recorded in the seal — byte
+  order needs no recovery instructions, and recording it would make a `>f8` file and its `<f8` twin seal
+  differently, which is the one thing the endianness gate forbids;
+- a **Fortran-ordered** buffer is *rewritten* to C order and **is** recorded, because that is a real
+  reordering and a reader comparing back to the original needs to know. The shape is not reversed —
+  reversing it would make the axes wrong instead of the bytes, which reads back transposed with no record
+  of why;
+- a **structured (record) dtype** seals a `table`, not an array, because rows of typed fields *are* a
+  table. The tool tells you which primitive it sealed rather than echoing the one you asked for.
+
+A `.npz` is a zip of `.npy` files, so it becomes a **collection** — one array product per member, named
+after the archive member. The output path is therefore a directory:
+
+```text
+tessera ingest array bundle.npz bundle-out/ \
+  --name bundle-01 --timestamp 2024-03-01T12:00:00Z --meta study=COHORT-A
+```
+
+`np.savez(f, energy=…, counts=…)` gives you products called `energy` and `counts`. If you used positional
+arguments instead, the members are `arr_0`, `arr_1`, … — they ingest fine and mean nothing, so ingest says
+so once and carries on. A one-member archive is still a collection: the output shape should not depend on
+how many arrays you happened to save.
+
+Four NumPy dtypes have no home in a dense numeric grid, and each is refused with somewhere to go:
+`object` (a pickled `.npy` is arbitrary Python code — there is no `allow_pickle` here, by design) and
+`complex` route to `ingest blob`; fixed-width strings and `datetime64` route to `ingest table`, where a
+column can carry text and an epoch.
+
 ### Many files at once
 
 The CLI verbs build a one-product ingest under the hood. When you have several products, or a derivation
@@ -177,6 +217,8 @@ Everything below is a **test**. It runs on every build against the real binary, 
 what the tool actually does.
 
 {{#include ../../../tessera/crates/tessera-cli/tests/cmd/ingest_table.trycmd}}
+
+{{#include ../../../tessera/crates/tessera-cli/tests/cmd/ingest_array.trycmd}}
 
 ## What you can rely on
 

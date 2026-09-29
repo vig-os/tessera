@@ -39,6 +39,10 @@ pub mod engine;
 pub mod ge_hdf5;
 pub mod identity;
 pub mod nifti;
+/// NumPy `.npy` → `array` (and a structured dtype → `table`); `.npz` → a collection.
+/// ADR-0056 §11's P1 array rows. Feature `npy` — an in-tree header parse, no decoder dependency.
+#[cfg(feature = "npy")]
+pub mod npy;
 /// Parquet + Arrow IPC → `table` (ADR-0056 §11). Feature `parquet`; the type map is
 /// [`crate::arrow_table`]'s.
 #[cfg(feature = "parquet")]

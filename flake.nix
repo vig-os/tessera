@@ -511,6 +511,36 @@
             '';
           });
 
+          # **The array lane with NO archive reader** (#386) — `npy` compiled without `npz`.
+          #
+          # `.npy` is parsed in-tree and `.npz` is that same parser behind `dep:zip`, so they are two
+          # lanes rather than one feature (ADR-0056 §386 amendment): while they shared a feature, every
+          # plain `.npy` seal committed to a zip library that never read its bytes — #477's defect one
+          # scale down. Two lanes only mean something if the split is *exercised*, and this is the one
+          # configuration where `zip` is genuinely absent from the graph.
+          #
+          # It earned its place immediately: nothing had ever built `npy` without a table lane, and the
+          # configuration did not compile. `generic_column_meta` and
+          # `warn_unclassified_identifying_columns` were gated on `any(parquet, arrow, csv)` while the
+          # array arm calls both, and three targets (the corpus example and two integration tests) hard-
+          # require a Parquet reader — now declared with `required-features` so cargo skips rather than
+          # fails them. A gate nobody runs is a claim nobody checks.
+          ingest-gate-a-npy-only = craneLib.mkCargoDerivation (commonArgs // {
+            inherit cargoArtifacts;
+            doInstallCargoArtifacts = false;
+            pnameSuffix = "-ingest-gate-a-npy-only";
+            buildPhaseCargoCommand = ''
+              # Two configurations, because they fail differently. `npy` alone proves the parser needs no
+              # archive reader. `parquet,npy` is the one that exercises the CORPUS without `npz`: the
+              # corpus module is gated on `parquet`, so `npy` alone never compiles it and the
+              # `ingest_npz_member` fixture — whose builder calls `zip` — stayed invisible. That
+              # combination did not compile when this gate was written.
+              cargo test -p tessera-ingest --no-default-features --features npy --lib
+              cargo test -p tessera-ingest --no-default-features --features parquet,npy \
+                --lib --test ingest_corpus
+            '';
+          });
+
           # **ADR-0056 §5's `ingest_parquet_producers` fixture** — the same logical table written by
           # **pyarrow**, **polars** and **DuckDB** must ingest to ONE `content_hash`.
           #

@@ -118,6 +118,13 @@ pub const IN_DIGEST: &[&str] = &[
     "zlib-rs",
     "adler2",
     "simd-adler32",
+    // ── The `.npz` archive reader (#386) ──
+    //
+    // `zip` decides where each member starts and ends, so it decides what bytes the `.npy` parser is
+    // handed — a change in its central-directory or local-header handling can change a decoded array
+    // without any value codec being involved. Its deflate stack (`flate2`/`miniz_oxide`/`zlib-rs`) is
+    // already above, reached by Parquet's page codecs.
+    "zip",
     // ── Integrity of the compressed stream: a wrong verdict here changes what is read ──
     "crc32fast",
     // Parquet's bloom-filter hash — wrong hashing can skip a page that should have been read.
@@ -169,6 +176,29 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("unicode-ident", "compile-time identifier validation"),
     ("version_check", "build-time toolchain probe"),
     (
+        "arbitrary",
+        "zip's optional fuzzing-input trait; a fuzz harness constructs inputs, it does not read ours",
+    ),
+    (
+        "derive_arbitrary",
+        "compile-time derive for the above",
+    ),
+    (
+        "crossbeam-utils",
+        "concurrency primitives reached through zip; scheduling cannot change which bytes a member \
+         decodes to, only when",
+    ),
+    (
+        "displaydoc",
+        "compile-time derive of error DISPLAY strings; error text is not a decoded value",
+    ),
+    (
+        "thiserror",
+        "error types and their formatting; a decode either fails or yields bytes, and the wording of \
+         the failure is not part of the bytes",
+    ),
+    ("thiserror-impl", "compile-time derive for the above"),
+    (
         "seq-macro",
         "generates parquet's bit-unpacking code AT COMPILE TIME; the behaviour of what it \
          generates is parquet's own version, which IS pinned",
@@ -212,7 +242,22 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("cfg-if", "conditional compilation"),
     ("equivalent", "key-equivalence traits"),
     ("hashbrown", "hash container"),
-    ("indexmap", "insertion-ordered map"),
+    (
+        "indexmap",
+        "insertion-ordered map. Since #386 it is also zip's name->entry index, which decides which \
+         entry `by_name` returns when an archive holds two members of the same name — so the reason it \
+         stays out needs to be stated rather than assumed. For a well-formed `.npz` (one entry per \
+         name) it is a lookup index and no ordering question arises. For a duplicate-name archive the \
+         choice is made by ZIP'S insert policy over IndexMap's documented contract, and `zip` is in \
+         the digest, so a change in that policy moves the pin; indexmap altering its own overwrite or \
+         ordering contract would be a semver break, not a silent bump. Our dependence on the collapse \
+         is additionally pinned by `a_duplicated_npz_member_name_collapses_in_the_zip_reader`, so it \
+         is caught by the suite and not only by a digest. Residual risk, stated rather than denied: a \
+         within-contract behaviour change in a compatible indexmap bump could alter which duplicate \
+         survives without moving any pin — confined to malformed input, and test-pinned. Elsewhere it \
+         arrives via serde_json, where our manifests are JCS-canonical (sorted), so map order cannot \
+         reach a sealed byte",
+    ),
     ("once_cell", "lazy initialisation"),
     ("parking_lot_core", "lock primitives"),
     ("pin-project-lite", "pin projection"),

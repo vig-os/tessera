@@ -90,10 +90,23 @@ struct Info {
 #[derive(Debug, serde::Serialize)]
 struct DecodeLaneInfo {
     /// The sealed `blake3:…` third component of that lane's `ingest_decoder` triple.
-    digest: String,
+    ///
+    /// Absent for an **in-tree** lane (see `in_tree`), which has no third-party decode path to digest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digest: Option<String>,
     /// The exact string it is a digest of, so the correspondence is checkable rather than asserted. This
     /// is what keeps the sealed digest from being a one-way label with no inverse anywhere.
-    features: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    features: Option<&'static str>,
+    /// This lane's decoder is **our own code**, with no third-party crate on its path — so there is
+    /// nothing to pin and no digest to take (`.npy`: ADR-0056 §12 declined `ndarray-npy` because "NPY is
+    /// a header parse plus a memcpy").
+    ///
+    /// Reported rather than omitted. Dropping the lane would be the more convenient shape, but it would
+    /// make a build that *has* the lane indistinguishable from one compiled without it — the seal says
+    /// `tessera/npy` read the bytes, and `info` has to be able to corroborate that.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    in_tree: bool,
 }
 
 fn collect() -> Info {
@@ -111,17 +124,28 @@ fn collect() -> Info {
         build: BUILD_FLAGS.iter().copied().collect(),
         ingest_decode: tessera_ingest::decoder::ALL
             .iter()
-            .filter_map(|d| {
+            .map(|d| {
                 // Both or neither: a digest whose pre-image we cannot print would be exactly the
-                // unfalsifiable label §6a rejected.
-                let (p, dg) = (d.feature_preimage()?, d.feature_digest()?);
-                Some((
-                    d.name,
-                    DecodeLaneInfo {
-                        digest: dg,
-                        features: p,
-                    },
-                ))
+                // unfalsifiable label §6a rejected. Neither is the honest record for an in-tree lane,
+                // which is reported with `in_tree` instead of being dropped.
+                match (d.feature_preimage(), d.feature_digest()) {
+                    (Some(p), Some(dg)) => (
+                        d.name,
+                        DecodeLaneInfo {
+                            digest: Some(dg),
+                            features: Some(p),
+                            in_tree: false,
+                        },
+                    ),
+                    _ => (
+                        d.name,
+                        DecodeLaneInfo {
+                            digest: None,
+                            features: None,
+                            in_tree: true,
+                        },
+                    ),
+                }
             })
             .collect(),
     }
@@ -258,7 +282,19 @@ mod tests {
             tessera_ingest::decoder::ALL.len(),
             "one entry per lane: {lanes:?}"
         );
+        let mut in_tree = Vec::new();
         for (lane, e) in lanes {
+            // An in-tree lane has no third-party decode path, so it carries neither a pre-image nor a
+            // digest — and says which it is, rather than being absent. Asserted as an exclusive-or so
+            // a lane cannot quietly report both, or a digest with no pre-image to check it against.
+            if e.get("in_tree").and_then(|v| v.as_bool()) == Some(true) {
+                assert!(
+                    e.get("features").is_none() && e.get("digest").is_none(),
+                    "lane {lane}: an in-tree lane must carry no pre-image and no digest: {e:?}"
+                );
+                in_tree.push(lane.as_str());
+                continue;
+            }
             let preimage = e["features"].as_str().expect("the pre-image");
             let digest = e["digest"].as_str().expect("…and its digest");
             assert_eq!(
@@ -267,12 +303,23 @@ mod tests {
                 "lane {lane}: the printed digest must be blake3 of the printed pre-image"
             );
         }
+        // Bounded, not blanket: exactly the NumPy `.npy` lane is in-tree. A second digest-less lane
+        // would be indistinguishable from the first in the seal, so it has to fail here.
+        assert_eq!(
+            in_tree,
+            vec!["tessera/npy"],
+            "exactly one lane is in-tree: {lanes:?}"
+        );
         // Distinct per lane — before #477 every lane printed, and sealed, the same digest.
         let digests: std::collections::BTreeSet<&str> = lanes
             .values()
-            .map(|e| e["digest"].as_str().unwrap())
+            .filter_map(|e| e["digest"].as_str())
             .collect();
-        assert_eq!(digests.len(), lanes.len(), "each lane has its own digest");
+        assert_eq!(
+            digests.len(),
+            lanes.len() - in_tree.len(),
+            "each lane with a decode path has its own digest"
+        );
 
         let preimage = lanes["arrow-rs/parquet"]["features"].as_str().unwrap();
         let digest = lanes["arrow-rs/parquet"]["digest"].as_str().unwrap();

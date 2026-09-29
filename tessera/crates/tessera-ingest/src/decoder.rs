@@ -110,6 +110,45 @@ impl Decoder {
         pins: option_env!("TESSERA_DECODE_PINS_CSV"),
     };
 
+    /// The NumPy `.npy` lane — **an in-tree decoder**, and the only lane with no third-party code on
+    /// its path at all. ADR-0056 §12 declined `ndarray-npy` because "NPY is a header parse plus a
+    /// memcpy", so the parser is this crate and the honest record names no one else.
+    ///
+    /// All three optional components are absent, each for a stated reason rather than by omission:
+    ///
+    /// - `version` is `None` because the only version available would be **ours**, and `build.rs`
+    ///   removed our version from the pre-image precisely because "our software version moves on every
+    ///   release, which would re-introduce the corpus churn ADR-0052 §1 removed". Putting it in the
+    ///   triple instead would recreate that churn one field over: every release would move the
+    ///   `manifest_hash` of every `.npy` product without anything having changed about how the bytes
+    ///   were read. Pinning *which* in-tree parser ran is worth having, but it needs an identity that
+    ///   does not move per release (a digest of the parser's own sources) — #508.
+    /// - `pins` is `None` because `npy = []` enables no dependency, so `lane_roots` correctly declines
+    ///   to treat it as a third-party lane and `build.rs` emits no pre-image for it. A digest over an
+    ///   empty pre-image would be *identical for every build*, which is a false claim of sameness —
+    ///   the same reasoning `to_value` gives for omitting rather than defaulting.
+    ///
+    /// The record is therefore `{"name": "tessera/npy"}`: short, and true.
+    pub const NPY: Decoder = Decoder {
+        name: "tessera/npy",
+        version: None,
+        pins: None,
+    };
+
+    /// The NumPy `.npz` lane — the same in-tree member parser, reached **through a zip archive**.
+    ///
+    /// A separate lane from [`Decoder::NPY`] rather than a flag on it, because `zip` is third-party code
+    /// on this path and on no other. While the two shared one feature, every plain `.npy` seal committed
+    /// to a zip library that never touched its bytes — which is #477's defect exactly (a parquet seal
+    /// committing to this very crate), just one scale down. `zip` reads the *container*; the members are
+    /// still parsed in-tree, which is why the name stays ours and `zip` appears in the digest instead of
+    /// in the name.
+    pub const NPZ: Decoder = Decoder {
+        name: "tessera/npz",
+        version: None,
+        pins: option_env!("TESSERA_DECODE_PINS_NPZ"),
+    };
+
     /// The sealed JSON form of the triple.
     pub fn to_value(&self) -> serde_json::Value {
         let mut m = serde_json::Map::new();
@@ -184,6 +223,10 @@ pub const ALL: &[Decoder] = &[
     Decoder::ARROW_IPC,
     #[cfg(feature = "csv")]
     Decoder::CSV,
+    #[cfg(feature = "npy")]
+    Decoder::NPY,
+    #[cfg(feature = "npz")]
+    Decoder::NPZ,
 ];
 
 #[cfg(test)]
@@ -266,15 +309,62 @@ mod tests {
             "{pq}"
         );
 
-        // And therefore the three digests differ. Before #477 all three were identical, which is the
-        // whole defect in one assertion.
+        // Every lane that HAS a digest must have its own. Before #477 all of them were identical,
+        // which is the whole defect in one assertion.
         let digests: std::collections::BTreeSet<String> =
             ALL.iter().filter_map(|d| d.feature_digest()).collect();
+        let (in_tree, third_party): (Vec<&Decoder>, Vec<&Decoder>) =
+            ALL.iter().partition(|d| d.feature_preimage().is_none());
         assert_eq!(
             digests.len(),
-            ALL.len(),
-            "every lane must have its own digest"
+            third_party.len(),
+            "every lane with a decode path must have its own digest"
         );
+        // Tolerated, but BOUNDED and named rather than blanket: `.npy` is parsed in-tree, so it has no
+        // third-party decode path and deliberately carries no digest. If a second such lane appears,
+        // this fails — because two digest-less lanes would be indistinguishable in the seal, which is
+        // the property the assertion above exists to protect.
+        assert_eq!(
+            in_tree.iter().map(|d| d.name).collect::<Vec<_>>(),
+            vec!["tessera/npy"],
+            "exactly one lane may be digest-less, and it is the in-tree NPY parser"
+        );
+    }
+
+    /// **The #477 property, one scale down: a `.npy` seal must not name the zip library.**
+    ///
+    /// `.npy` is parsed in-tree and `.npz` is the same parser behind a zip archive, so while the two
+    /// shared one Cargo feature every plain `.npy` product committed to a decoder that never touched its
+    /// bytes — exactly what a parquet product did to `zip` before the digest went per-lane. Asserted on
+    /// `to_value()`, which IS the sealed form, so this is a statement about what lands in the file.
+    #[test]
+    fn a_npy_seal_names_no_third_party_decoder_and_a_npz_seal_names_zip() {
+        let npy = Decoder::NPY.to_value();
+        assert_eq!(npy["name"], "tessera/npy");
+        assert!(
+            npy.get("version").is_none() && npy.get("features").is_none(),
+            "the in-tree lane seals a bare name — a version would be OURS and would churn every \
+             release, a digest would be over an empty pre-image: {npy}"
+        );
+        assert!(
+            Decoder::NPY.feature_preimage().is_none(),
+            "the `.npy` lane has no decode path to pin, so it must have no pre-image either"
+        );
+
+        let npz = Decoder::NPZ.to_value();
+        assert_eq!(npz["name"], "tessera/npz");
+        // Only in a workspace build is there a lockfile to derive pins from; on a crates.io build both
+        // are absent, which `to_value` documents as the honest record rather than a defaulted one.
+        if let Some(p) = Decoder::NPZ.feature_preimage() {
+            assert!(
+                p.contains("zip="),
+                "the `.npz` lane reads through the archive reader, so it must pin it: {p}"
+            );
+            assert!(
+                npz.get("features").is_some(),
+                "a lane with a pre-image seals its digest: {npz}"
+            );
+        }
     }
 
     /// A git-forked decode-path crate must be a different pin from the registry release at the same
