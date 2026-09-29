@@ -5,6 +5,7 @@
 //! block's stored bytes against its recorded digest.
 
 mod bench;
+mod bench_compare;
 mod collection;
 mod info;
 mod nav;
@@ -811,6 +812,34 @@ enum BenchAction {
         /// Seed for the MC sampler (deterministic synthetic data).
         #[arg(long, default_value_t = 1)]
         seed: u64,
+    },
+    /// Head-to-head size + latency against HDF5 on the same logical data (#388).
+    ///
+    /// Writes one synthetic volume and one synthetic table to `.tsra` and to HDF5 — each format at
+    /// its sensible DEFAULT and at a TUNED setting, all printed — then measures on-disk size,
+    /// write+seal, full read, projected/column read, ROI read and integrity cost. Reports the median
+    /// of N runs with spread; correctness is asserted before any timing counts. Rows where Tessera
+    /// loses are included on purpose. Parquet joins once #460 lands its crates.
+    Compare {
+        /// Which dataset(s) to run: `volume`, `table`, or `both`.
+        #[arg(long, default_value = "both")]
+        dataset: String,
+        /// Timed runs per cell; the report prints the median and the [min..max] spread.
+        #[arg(long, default_value_t = 7)]
+        iters: usize,
+        /// `table` for the human report, `json` for CI.
+        #[arg(long, default_value = "table")]
+        format: String,
+        /// Also measure cold-cache reads, evicting each file with `posix_fadvise(DONTNEED)` first.
+        /// Best-effort: the kernel may keep pages, so the report says so and names the kernel.
+        #[arg(long)]
+        cold: bool,
+        /// Volume edge (N^3 int16). Default 256 = 32 MiB raw, matching the #143 harness.
+        #[arg(long, default_value_t = bench_compare::VOL_N)]
+        vol_n: usize,
+        /// Table row count (`u8 + 2xf4`).
+        #[arg(long, default_value_t = bench_compare::TABLE_ROWS)]
+        rows: usize,
     },
 }
 
@@ -1725,6 +1754,21 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 input,
                 dataset,
                 seed,
+            }),
+            BenchAction::Compare {
+                dataset,
+                iters,
+                format,
+                cold,
+                vol_n,
+                rows,
+            } => bench_compare::run(bench_compare::CompareOpts {
+                dataset,
+                iters,
+                format,
+                cold,
+                vol_n,
+                rows,
             }),
         },
     }
