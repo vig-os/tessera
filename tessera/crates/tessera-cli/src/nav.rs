@@ -85,7 +85,7 @@ pub enum GridFormat {
     Tsv,
     /// One self-describing object: `{shape, dtype, values: [[row], …]}`.
     Json,
-    /// NumPy `.npy` (float64) — the **lossless** path for analysis.
+    /// NumPy `.npy` at the array's own dtype — the **lossless** path for analysis.
     Npy,
     /// 8-bit greyscale PNG — a **lossy preview**, windowed to 0–255. Not data.
     Png,
@@ -119,43 +119,114 @@ impl GridFormat {
 /// are. They diverge whenever the values were computed rather than read — `--physical` applies a rescale,
 /// and `project --mode mean` averages — and a document that reported only the stored type would be
 /// describing something other than the numbers beside it (#387 review).
-pub struct GridDtype {
-    stored: String,
-    /// `true` when the emitted values are no longer the stored integers (a rescale or a reducing
-    /// projection), so they are reported as `float64`.
-    computed_float: bool,
+pub enum GridData {
+    /// Untransformed samples, **native dtype intact** — nothing computed them, so they are the array's own
+    /// values. `npy` writes the real descr (`<i8`, `|b1`, …) and integer text prints exactly, rather than
+    /// through an `f64` that cannot represent `i64`/`u64` magnitudes above 2^53 (#478).
+    Native(ArrayData),
+    /// Values the CLI **computed** — a `--physical` rescale, or a reducing projection (`mean`/`sum`).
+    /// Genuinely `f64`, so that is what is emitted and declared.
+    Computed {
+        values: Vec<f64>,
+        /// The dtype the array *stores*, kept for the metadata even though the values are now floats.
+        source_dtype: String,
+    },
 }
 
-impl GridDtype {
-    /// Values read straight out of the array: emitted dtype == stored dtype.
-    pub fn stored_as(dtype: &str) -> Self {
-        GridDtype {
-            stored: dtype.to_string(),
-            computed_float: false,
+impl GridData {
+    fn len(&self) -> usize {
+        match self {
+            GridData::Native(d) => d.len(),
+            GridData::Computed { values, .. } => values.len(),
         }
     }
-    /// Values the CLI computed (rescale / mean / sum): emitted as `float64` whatever the array holds.
-    pub fn computed_from(dtype: &str) -> Self {
-        GridDtype {
-            stored: dtype.to_string(),
-            computed_float: true,
-        }
-    }
-    /// The array's own dtype.
+    /// The dtype the array stores — for `source_dtype` and the png note.
     fn stored(&self) -> &str {
-        &self.stored
+        match self {
+            GridData::Native(d) => d.dtype(),
+            GridData::Computed { source_dtype, .. } => source_dtype,
+        }
     }
     /// The dtype of the values actually emitted.
     fn emitted(&self) -> &str {
-        if self.computed_float {
-            "float64"
-        } else {
-            &self.stored
+        match self {
+            GridData::Native(d) => d.dtype(),
+            GridData::Computed { .. } => "float64",
         }
     }
-    /// Does the emitted grid hold floats? Drives the JSON number rendering.
-    fn is_float(&self) -> bool {
-        self.computed_float || self.stored.starts_with("float")
+    /// Every sample as `f64` — for the png windowing, which is 8-bit anyway.
+    fn as_f64(&self) -> Vec<f64> {
+        match self {
+            GridData::Native(d) => d.as_f64(),
+            GridData::Computed { values, .. } => values.clone(),
+        }
+    }
+    /// One cell as text, **exactly**. An integer array prints its integer, never an `f64` round-trip —
+    /// which is what made `i64` above 2^53 lossy in CSV as well as in `npy`.
+    fn text_cell(&self, i: usize) -> String {
+        match self {
+            GridData::Native(d) => native_cell(d, i).unwrap_or_default(),
+            GridData::Computed { values, .. } => values.get(i).map_or(String::new(), fmt_f64),
+        }
+    }
+    /// One cell as JSON, exactly — integers as integers, floats keeping their float-ness.
+    fn json_cell(&self, i: usize) -> Value {
+        match self {
+            GridData::Native(d) => native_json(d, i),
+            GridData::Computed { values, .. } => {
+                values.get(i).map_or(Value::Null, |v| json_num(*v, true))
+            }
+        }
+    }
+}
+
+/// The numpy `descr` for a grid: the element's code with its byte-order char. Single-byte types take
+/// `|` (byte order is not applicable), which is what `numpy.lib.format` itself writes.
+fn npy_descr(d: &ArrayData) -> String {
+    let code = d.numpy_code();
+    let order = if matches!(code, "i1" | "u1" | "b1") {
+        '|'
+    } else {
+        '<'
+    };
+    format!("{order}{code}")
+}
+
+/// One native sample as text — exact for every width, unlike a detour through `f64`.
+fn native_cell(d: &ArrayData, i: usize) -> Option<String> {
+    Some(match d {
+        ArrayData::I8(v) => v.get(i)?.to_string(),
+        ArrayData::U8(v) => v.get(i)?.to_string(),
+        ArrayData::I16(v) => v.get(i)?.to_string(),
+        ArrayData::I32(v) => v.get(i)?.to_string(),
+        ArrayData::I64(v) => v.get(i)?.to_string(),
+        ArrayData::U16(v) => v.get(i)?.to_string(),
+        ArrayData::U32(v) => v.get(i)?.to_string(),
+        ArrayData::U64(v) => v.get(i)?.to_string(),
+        ArrayData::F16(v) => fmt_f64(&f64::from(*v.get(i)?)),
+        ArrayData::F32(v) => fmt_f64(&f64::from(*v.get(i)?)),
+        ArrayData::F64(v) => fmt_f64(v.get(i)?),
+        ArrayData::Bool(v) => u8::from(*v.get(i)?).to_string(),
+    })
+}
+
+/// One native sample as JSON — integers stay integers at full width (`serde_json` carries `i64`/`u64`
+/// natively), so a `u64` beyond `f64`'s mantissa survives the document too.
+fn native_json(d: &ArrayData, i: usize) -> Value {
+    let num = |o: Option<Value>| o.unwrap_or(Value::Null);
+    match d {
+        ArrayData::I8(v) => num(v.get(i).map(|&x| Value::from(i64::from(x)))),
+        ArrayData::U8(v) => num(v.get(i).map(|&x| Value::from(u64::from(x)))),
+        ArrayData::I16(v) => num(v.get(i).map(|&x| Value::from(i64::from(x)))),
+        ArrayData::I32(v) => num(v.get(i).map(|&x| Value::from(i64::from(x)))),
+        ArrayData::I64(v) => num(v.get(i).map(|&x| Value::from(x))),
+        ArrayData::U16(v) => num(v.get(i).map(|&x| Value::from(u64::from(x)))),
+        ArrayData::U32(v) => num(v.get(i).map(|&x| Value::from(u64::from(x)))),
+        ArrayData::U64(v) => num(v.get(i).map(|&x| Value::from(x))),
+        ArrayData::F16(v) => num(v.get(i).map(|&x| json_num(f64::from(x), true))),
+        ArrayData::F32(v) => num(v.get(i).map(|&x| json_num(f64::from(x), true))),
+        ArrayData::F64(v) => num(v.get(i).map(|&x| json_num(x, true))),
+        ArrayData::Bool(v) => num(v.get(i).map(|&x| Value::from(u64::from(x)))),
     }
 }
 
@@ -1461,16 +1532,18 @@ pub fn slice(
     } else {
         None
     };
-    let values = region_to_f64(&region, rescale);
-
-    // Grid: the last region axis is the column count; everything before it flattens to rows. `--physical`
-    // means the values are rescaled floats, not the stored integers.
-    let dtype = if physical {
-        GridDtype::computed_from(&spec.dtype)
-    } else {
-        GridDtype::stored_as(&spec.dtype)
+    // Grid: the last region axis is the column count; everything before it flattens to rows. Without
+    // `--physical` nothing transformed the samples, so they travel at their NATIVE dtype — which is what
+    // lets `npy` declare `<i8` and an `int64` above 2^53 survive (#478). A rescale genuinely produces
+    // floats.
+    let data = match rescale {
+        Some(r) => GridData::Computed {
+            values: region_to_f64(&region, Some(r)),
+            source_dtype: spec.dtype.clone(),
+        },
+        None => GridData::Native(region),
     };
-    write_grid(&values, &len, &dtype, opts, out)
+    write_grid(&data, &len, opts, out)
 }
 
 /// Reduce mode for [`project`].
@@ -1497,34 +1570,27 @@ impl ProjMode {
     }
 }
 
-/// Reduce a row-major N-D array `values` (shape `shape`) along `axis` by `mode`, dropping that axis.
-/// Returns `(out_shape, out_values)`.
-fn project_axis(
-    values: &[f64],
-    shape: &[u64],
-    axis: usize,
-    mode: ProjMode,
-) -> (Vec<u64>, Vec<f64>) {
+/// The projection geometry: the output shape with `axis` dropped, and for each input flat index the output
+/// flat index it contributes to.
+///
+/// Factored out so the `f64` reduction and the native `max` reduction cannot disagree about layout — two
+/// copies of this index arithmetic would be a silent-wrong-answer waiting to happen (#478).
+fn projection_map(shape: &[u64], axis: usize) -> (Vec<u64>, Vec<usize>) {
     let n = shape.len();
     let mut strides = vec![1usize; n];
     for i in (0..n.saturating_sub(1)).rev() {
         strides[i] = strides[i + 1] * shape[i + 1] as usize;
     }
-    let ax_len = shape[axis].max(1) as usize;
     let out_shape: Vec<u64> = shape
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != axis)
         .map(|(_, &d)| d)
         .collect();
-    let out_n: usize = out_shape.iter().map(|&d| d as usize).product();
-    let init = match mode {
-        ProjMode::Max => f64::NEG_INFINITY,
-        _ => 0.0,
-    };
-    let mut out = vec![init; out_n.max(1)];
-    for (flat, &v) in values.iter().enumerate() {
-        // Output flat index = input coords with the projected axis removed (row-major).
+    let in_n: usize = shape.iter().map(|&d| d as usize).product();
+    let mut map = Vec::with_capacity(in_n);
+    for flat in 0..in_n {
+        // Output flat index = the input coords with the projected axis removed (row-major).
         let mut of = 0usize;
         let mut os = 1usize;
         for i in (0..n).rev() {
@@ -1535,6 +1601,29 @@ fn project_axis(
             of += coord * os;
             os *= shape[i] as usize;
         }
+        map.push(of);
+    }
+    (out_shape, map)
+}
+
+/// Reduce a row-major N-D array `values` (shape `shape`) along `axis` by `mode`, dropping that axis.
+/// Returns `(out_shape, out_values)`.
+fn project_axis(
+    values: &[f64],
+    shape: &[u64],
+    axis: usize,
+    mode: ProjMode,
+) -> (Vec<u64>, Vec<f64>) {
+    let (out_shape, map) = projection_map(shape, axis);
+    let ax_len = shape[axis].max(1) as usize;
+    let out_n: usize = out_shape.iter().map(|&d| d as usize).product();
+    let init = match mode {
+        ProjMode::Max => f64::NEG_INFINITY,
+        _ => 0.0,
+    };
+    let mut out = vec![init; out_n.max(1)];
+    for (flat, &v) in values.iter().enumerate() {
+        let Some(&of) = map.get(flat) else { continue };
         match mode {
             ProjMode::Max => out[of] = out[of].max(v),
             ProjMode::Mean | ProjMode::Sum => out[of] += v,
@@ -1546,6 +1635,46 @@ fn project_axis(
         }
     }
     (out_shape, out)
+}
+
+/// Max-project along `axis` **natively**, so the result keeps the array's dtype exactly.
+///
+/// `max` picks an existing sample rather than computing a new one, so there is no reason to route it
+/// through `f64` — and a good reason not to: two `int64`s differing only beyond the 53-bit mantissa compare
+/// *equal* as `f64`, so the f64 path could pick the wrong sample as well as round it (#478).
+fn project_max_native(data: &ArrayData, shape: &[u64], axis: usize) -> (Vec<u64>, ArrayData) {
+    let (out_shape, map) = projection_map(shape, axis);
+    let out_n: usize = out_shape
+        .iter()
+        .map(|&d| d as usize)
+        .product::<usize>()
+        .max(1);
+    macro_rules! reduce {
+        ($v:expr, $variant:ident, $init:expr, $max:expr) => {{
+            let mut out = vec![$init; out_n];
+            for (flat, &x) in $v.iter().enumerate() {
+                let Some(&of) = map.get(flat) else { continue };
+                out[of] = $max(out[of], x);
+            }
+            ArrayData::$variant(out)
+        }};
+    }
+    let reduced = match data {
+        ArrayData::I8(v) => reduce!(v, I8, i8::MIN, i8::max),
+        ArrayData::U8(v) => reduce!(v, U8, u8::MIN, u8::max),
+        ArrayData::I16(v) => reduce!(v, I16, i16::MIN, i16::max),
+        ArrayData::I32(v) => reduce!(v, I32, i32::MIN, i32::max),
+        ArrayData::I64(v) => reduce!(v, I64, i64::MIN, i64::max),
+        ArrayData::U16(v) => reduce!(v, U16, u16::MIN, u16::max),
+        ArrayData::U32(v) => reduce!(v, U32, u32::MIN, u32::max),
+        ArrayData::U64(v) => reduce!(v, U64, u64::MIN, u64::max),
+        // Floats keep the f64 path's identity so an all-empty axis reads the same either way.
+        ArrayData::F16(v) => reduce!(v, F16, half::f16::NEG_INFINITY, half::f16::max),
+        ArrayData::F32(v) => reduce!(v, F32, f32::NEG_INFINITY, f32::max),
+        ArrayData::F64(v) => reduce!(v, F64, f64::NEG_INFINITY, f64::max),
+        ArrayData::Bool(v) => reduce!(v, Bool, false, bool::max),
+    };
+    (out_shape, reduced)
 }
 
 /// `tessera project FILE BLOCK --axis <name|idx> --mode max|mean|sum` — collapse an **array** block
@@ -1590,17 +1719,24 @@ pub fn project(
     } else {
         None
     };
-    let values = region_to_f64(&data, rescale);
-    let (out_shape, out_vals) = project_axis(&values, &spec.shape, ax, mode);
-    // `max` picks existing samples, so they keep the stored dtype. `mean` averages and `sum` can leave the
-    // stored type's range, so both are reported as the floats they were computed as — and `--physical`
-    // rescales whatever the mode.
-    let dtype = if physical || !matches!(mode, ProjMode::Max) {
-        GridDtype::computed_from(&spec.dtype)
+    // `max` PICKS an existing sample, so the result keeps the stored dtype and is reduced natively —
+    // an f64 comparison could not tell two `int64`s apart beyond 2^53. `mean` averages and `sum` can
+    // leave the stored type's range, so both are genuinely floats; `--physical` rescales whatever the mode.
+    let (out_shape, grid) = if rescale.is_none() && matches!(mode, ProjMode::Max) {
+        let (shape, reduced) = project_max_native(&data, &spec.shape, ax);
+        (shape, GridData::Native(reduced))
     } else {
-        GridDtype::stored_as(&spec.dtype)
+        let values = region_to_f64(&data, rescale);
+        let (shape, vals) = project_axis(&values, &spec.shape, ax, mode);
+        (
+            shape,
+            GridData::Computed {
+                values: vals,
+                source_dtype: spec.dtype.clone(),
+            },
+        )
     };
-    write_grid(&out_vals, &out_shape, &dtype, opts, out)
+    write_grid(&grid, &out_shape, opts, out)
 }
 
 /// Does this path address the manifest's `extra/` namespace (the fd5 extension fields)?
@@ -1655,9 +1791,8 @@ fn write_extra(
 /// ONE place, so `slice` and `project` cannot drift on rendering, capping or windowing — they used to
 /// carry a copy of the row loop each (#387).
 fn write_grid(
-    values: &[f64],
+    data: &GridData,
     shape: &[u64],
-    dtype: &GridDtype,
     opts: &GridOpts,
     out: &mut dyn Write,
 ) -> Result<GridResult> {
@@ -1670,7 +1805,7 @@ fn write_grid(
         )));
     }
     let cols = shape.last().copied().unwrap_or(1).max(1) as usize;
-    let total = values.len().div_ceil(cols) as u64;
+    let total = data.len().div_ceil(cols) as u64;
     // Binary formats never cap (a truncated artifact is corrupt, not a preview); text formats follow the
     // shared rule, where the *default* only bites an interactive terminal.
     let cap = if opts.format.is_text() {
@@ -1678,7 +1813,9 @@ fn write_grid(
     } else {
         total
     };
-    let shown_vals = &values[..(cap as usize * cols).min(values.len())];
+    // Nothing is sliced: the cap only bounds how far the text writers iterate, and the binary writers
+    // are never capped — so `data` stays whole and a native buffer needs no per-variant truncation.
+    let shown = (cap as usize * cols).min(data.len());
     let mut res = GridResult {
         shown: cap,
         total,
@@ -1689,8 +1826,10 @@ fn write_grid(
     match opts.format {
         GridFormat::Csv | GridFormat::Tsv => {
             let sep = opts.format.sep().to_string();
-            for row in shown_vals.chunks(cols) {
-                let line: Vec<String> = row.iter().map(fmt_f64).collect();
+            for start in (0..shown).step_by(cols) {
+                let line: Vec<String> = (start..(start + cols).min(shown))
+                    .map(|i| data.text_cell(i))
+                    .collect();
                 writeln!(out, "{}", line.join(&sep)).map_err(tessera_core::Error::from)?;
             }
         }
@@ -1698,27 +1837,33 @@ fn write_grid(
             // Self-describing AND honest about what it is: `shape` is the FULL region, so a saved
             // document can never masquerade as the complete plane; `rows_emitted`/`truncated` say what
             // was actually written; `dtype` describes the VALUES and `source_dtype` the stored array.
-            let rows: Vec<Value> = shown_vals
-                .chunks(cols)
-                .map(|r| Value::Array(r.iter().map(|v| json_num(*v, dtype.is_float())).collect()))
+            let rows: Vec<Value> = (0..shown)
+                .step_by(cols)
+                .map(|start| {
+                    Value::Array(
+                        (start..(start + cols).min(shown))
+                            .map(|i| data.json_cell(i))
+                            .collect(),
+                    )
+                })
                 .collect();
             let doc = serde_json::json!({
                 "shape": [total, cols as u64],
                 "rows_emitted": rows.len() as u64,
                 "truncated": res.truncated,
-                "dtype": dtype.emitted(),
-                "source_dtype": dtype.stored(),
+                "dtype": data.emitted(),
+                "source_dtype": data.stored(),
                 "values": rows,
             });
             writeln!(out, "{}", serde_json::to_string(&doc)?).map_err(tessera_core::Error::from)?;
         }
-        GridFormat::Npy => write_npy(shown_vals, total, cols as u64, out)?,
+        GridFormat::Npy => write_npy(data, total, cols as u64, out)?,
         GridFormat::Png => {
-            let (lo, hi) = write_png(shown_vals, cols, dtype.stored(), opts.window, out)?;
+            let (lo, hi) = write_png(&data.as_f64(), cols, data.stored(), opts.window, out)?;
             res.note = Some(format!(
                 "png is a lossy 8-bit preview (window {lo} … {hi}, source dtype {}) — \
                  use --format npy for the data",
-                dtype.stored()
+                data.stored()
             ));
         }
     }
@@ -1744,22 +1889,23 @@ fn json_num(v: f64, float_grid: bool) -> Value {
 
 /// Write a 2-D NumPy `.npy` v1.0 array: the magic + version, a padded header dict, then the values.
 ///
-/// Always `'<f8'` (little-endian float64), because this whole code path is `f64`: `region_to_f64` converts
-/// on the way in, shared with the CSV and `stats` paths. So `f8` is *exactly* what the CLI computed rather
-/// than a widening introduced here.
-///
-/// **The fidelity caveat, stated precisely:** that is exact for every dtype whose values fit in an `f64`
-/// mantissa — `int8/16/32`, `uint8/16/32`, `float16/32`, `bool` — i.e. every dtype a Tessera array is
-/// likely to hold, and `--physical` output is floating-point regardless. It is **not** exact for `int64` /
-/// `uint64` magnitudes above 2^53, where `f64` cannot represent every integer. Emitting a native `'<i8'`
-/// descr would not fix that, only relabel it, because the precision is already gone before this function
-/// sees the values; a faithful integer path means carrying `ArrayData` through instead of `f64`, which is
-/// tracked separately. For full-fidelity 64-bit integers use the Python bindings or `tessera export`.
+/// The `descr` is the grid's **native** dtype whenever nothing transformed the samples — `'<i8'` for an
+/// `int64` array, `'|b1'` for bool, and so on — so `numpy.load()` hands back the dtype the product stores
+/// and a 64-bit integer beyond `f64`'s 53-bit mantissa survives exactly (#478). A `--physical` rescale or a
+/// reducing projection genuinely produces floats, and those are written `'<f8'` and declared as such.
 ///
 /// The header is space-padded so `10 + header_len` is a multiple of 64 — the alignment numpy's own writer
 /// produces, and what its reader expects.
-fn write_npy(values: &[f64], rows: u64, cols: u64, out: &mut dyn Write) -> Result<()> {
-    let dict = format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({rows}, {cols}), }}");
+fn write_npy(data: &GridData, rows: u64, cols: u64, out: &mut dyn Write) -> Result<()> {
+    let (descr, payload) = match data {
+        GridData::Native(d) => (npy_descr(d), d.to_le_bytes()),
+        GridData::Computed { values, .. } => (
+            "<f8".to_string(),
+            values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        ),
+    };
+    let dict =
+        format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': ({rows}, {cols}), }}");
     let pad = (64 - ((10 + dict.len() + 1) % 64)) % 64;
     let mut header = dict.into_bytes();
     header.extend(std::iter::repeat_n(b' ', pad));
@@ -1771,10 +1917,7 @@ fn write_npy(values: &[f64], rows: u64, cols: u64, out: &mut dyn Write) -> Resul
     out.write_all(&len.to_le_bytes())
         .map_err(tessera_core::Error::from)?;
     out.write_all(&header).map_err(tessera_core::Error::from)?;
-    for v in values {
-        out.write_all(&v.to_le_bytes())
-            .map_err(tessera_core::Error::from)?;
-    }
+    out.write_all(&payload).map_err(tessera_core::Error::from)?;
     Ok(())
 }
 
@@ -2459,17 +2602,18 @@ mod tests {
             "numpy requires 64-byte header alignment"
         );
         let header = std::str::from_utf8(&buf[10..10 + hlen]).unwrap();
-        assert!(header.contains("'descr': '<f8'"), "{header}");
+        // the NATIVE descr (#478): this is an int16 array, so `.npy` says so rather than widening to f8
+        assert!(header.contains("'descr': '<i2'"), "{header}");
         assert!(header.contains("'fortran_order': False"), "{header}");
         assert!(header.contains("'shape': (2, 3)"), "{header}");
         assert!(header.ends_with('\n'), "the header must end with a newline");
         let body = &buf[10 + hlen..];
-        assert_eq!(body.len(), 6 * 8, "6 float64 values");
-        let got: Vec<f64> = body
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        assert_eq!(body.len(), 6 * 2, "6 int16 values");
+        let got: Vec<i16> = body
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes(c.try_into().unwrap()))
             .collect();
-        assert_eq!(got, vec![0.0, 1.0, 2.0, 10.0, 11.0, 12.0]);
+        assert_eq!(got, vec![0, 1, 2, 10, 11, 12]);
 
         // ── png: decoded back with the png crate; window + dtype recorded in tEXt ──
         let (buf, res) = run(GridFormat::Png, None);
@@ -2683,6 +2827,213 @@ mod tests {
         assert!(mean["values"][0][0].is_f64(), "{mean}");
         // `sum` can leave the stored type's range, so it is reported as computed too
         assert_eq!(doc("sum")["dtype"], "float64");
+    }
+
+    /// Seal a 2-D array of an arbitrary dtype and hand back its path.
+    fn sealed_typed(dir: &std::path::Path, shape: Vec<u64>, data: ArrayData) -> std::path::PathBuf {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        use tessera_io::pack;
+        let p = dir.join(format!("{}.tsra", data.dtype()));
+        let spec = ArraySpec::new(shape, data.dtype());
+        let (bref, payload) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+        let mut b = ProductBuilder::new("recon", "T", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        pack(&b.seal().unwrap(), &[payload], &p).unwrap();
+        p
+    }
+
+    /// Parse an `.npy` buffer independently of our writer: returns `(descr, shape_text, payload)`.
+    /// Checked against the NumPy format spec, so it cannot rubber-stamp a wrong encoder.
+    fn parse_npy(buf: &[u8]) -> (String, String, Vec<u8>) {
+        assert_eq!(&buf[..6], b"\x93NUMPY", "magic");
+        assert_eq!(&buf[6..8], &[1, 0], "version 1.0");
+        let hlen = u16::from_le_bytes([buf[8], buf[9]]) as usize;
+        assert_eq!(
+            (10 + hlen) % 64,
+            0,
+            "numpy requires 64-byte header alignment"
+        );
+        let header = std::str::from_utf8(&buf[10..10 + hlen]).unwrap();
+        assert!(header.ends_with('\n'), "the header must end with a newline");
+        let descr = header
+            .split("'descr': '")
+            .nth(1)
+            .and_then(|r| r.split('\'').next())
+            .expect("descr")
+            .to_string();
+        let shape = header
+            .split("'shape': (")
+            .nth(1)
+            .and_then(|r| r.split(')').next())
+            .expect("shape")
+            .to_string();
+        (descr, shape, buf[10 + hlen..].to_vec())
+    }
+
+    /// **#478** — `.npy` used to be written `'<f8'` whatever the array held, because the whole nav value
+    /// path converted to `f64` on the way in. `f64` has a 53-bit mantissa, so an `int64`/`uint64` magnitude
+    /// above 2^53 could not survive — the file was silently rounded while claiming to be the data.
+    ///
+    /// The samples now travel at their native dtype when nothing transformed them, so `.npy` declares the
+    /// real descr and the bytes are exact. Verified with an independent header parser plus a payload
+    /// compare, not against our own reader.
+    #[test]
+    fn npy_preserves_64_bit_integers_beyond_an_f64_mantissa() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = || GridOpts {
+            format: GridFormat::Npy,
+            limit: None,
+            all: true,
+            interactive: false,
+            window: None,
+        };
+
+        // 2^53 + 1 is the first integer f64 cannot represent; the neighbours bracket it.
+        let edge: i64 = (1i64 << 53) + 1;
+        let vals: Vec<i64> = vec![edge, edge + 2, -edge, i64::MAX];
+        assert_ne!(
+            vals[0] as f64 as i64, vals[0],
+            "2^53+1 must really be unrepresentable as f64, or this test proves nothing"
+        );
+        let p = sealed_typed(dir.path(), vec![2, 2], ArrayData::I64(vals.clone()));
+        let mut buf = Vec::new();
+        slice(&p, "volume", Some(":,:"), None, false, &binary(), &mut buf).unwrap();
+        let (descr, shape, body) = parse_npy(&buf);
+        assert_eq!(descr, "<i8", "an int64 array must declare int64");
+        assert_eq!(shape, "2, 2");
+        let got: Vec<i64> = body
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(got, vals, "every int64 must survive byte-exactly");
+
+        // uint64 at its maximum — the same hazard from the unsigned side.
+        let uvals: Vec<u64> = vec![u64::MAX, (1u64 << 53) + 1, 0, 7];
+        let p = sealed_typed(dir.path(), vec![2, 2], ArrayData::U64(uvals.clone()));
+        let mut buf = Vec::new();
+        slice(&p, "volume", Some(":,:"), None, false, &binary(), &mut buf).unwrap();
+        let (descr, _, body) = parse_npy(&buf);
+        assert_eq!(descr, "<u8");
+        let got: Vec<u64> = body
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(got, uvals, "u64::MAX must survive byte-exactly");
+
+        // …and the TEXT paths are exact too, which they were not while everything went through f64.
+        let mut buf = Vec::new();
+        let text = GridOpts {
+            format: GridFormat::Json,
+            limit: None,
+            all: true,
+            interactive: false,
+            window: None,
+        };
+        slice(&p, "volume", Some(":,:"), None, false, &text, &mut buf).unwrap();
+        let v: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["dtype"], "uint64");
+        assert_eq!(
+            v["values"][0][0].as_u64(),
+            Some(u64::MAX),
+            "JSON must carry u64::MAX exactly, not an f64 approximation"
+        );
+        let mut buf = Vec::new();
+        slice(
+            &p,
+            "volume",
+            Some(":,:"),
+            None,
+            false,
+            &csv_grid(),
+            &mut buf,
+        )
+        .unwrap();
+        let csv = String::from_utf8(buf).unwrap();
+        assert!(
+            csv.starts_with(&format!("{},", u64::MAX)),
+            "CSV must print u64::MAX exactly: {csv}"
+        );
+    }
+
+    /// **#478** — every dtype in the envelope declares its own descr, and the byte-order character follows
+    /// numpy's own convention (`|` for single-byte types, where byte order does not apply).
+    #[test]
+    fn npy_declares_the_native_descr_for_every_dtype() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: Vec<(ArrayData, &str, usize)> = vec![
+            (ArrayData::I8(vec![-1, 2]), "|i1", 1),
+            (ArrayData::U8(vec![1, 2]), "|u1", 1),
+            (ArrayData::Bool(vec![true, false]), "|b1", 1),
+            (ArrayData::I16(vec![-1, 2]), "<i2", 2),
+            (ArrayData::U16(vec![1, 2]), "<u2", 2),
+            (ArrayData::I32(vec![-1, 2]), "<i4", 4),
+            (ArrayData::U32(vec![1, 2]), "<u4", 4),
+            (ArrayData::I64(vec![-1, 2]), "<i8", 8),
+            (ArrayData::U64(vec![1, 2]), "<u8", 8),
+            (ArrayData::F32(vec![-1.5, 2.5]), "<f4", 4),
+            (ArrayData::F64(vec![-1.5, 2.5]), "<f8", 8),
+        ];
+        for (data, want_descr, width) in cases {
+            let dtype = data.dtype();
+            let p = sealed_typed(dir.path(), vec![1, 2], data);
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: GridFormat::Npy,
+                limit: None,
+                all: true,
+                interactive: false,
+                window: None,
+            };
+            slice(&p, "volume", Some(":,:"), None, false, &opts, &mut buf).unwrap();
+            let (descr, shape, body) = parse_npy(&buf);
+            assert_eq!(descr, want_descr, "{dtype}");
+            assert_eq!(shape, "1, 2", "{dtype}");
+            assert_eq!(body.len(), 2 * width, "{dtype}: 2 values of {width} bytes");
+        }
+    }
+
+    /// **#478** — a transform genuinely produces floats, so those still go out as `'<f8'` and say so.
+    /// `max` PICKS an existing sample, so it keeps the native dtype and is reduced natively.
+    #[test]
+    fn a_transformed_grid_still_declares_float64() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = sealed_typed(
+            dir.path(),
+            vec![2, 2, 2],
+            ArrayData::I64(vec![1, 2, 3, 4, (1i64 << 53) + 1, 6, 7, 8]),
+        );
+        let npy = |mode: &str, physical: bool| {
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: GridFormat::Npy,
+                limit: None,
+                all: true,
+                interactive: false,
+                window: None,
+            };
+            project(&p, "volume", "0", mode, physical, &opts, &mut buf).unwrap();
+            parse_npy(&buf)
+        };
+
+        // max: native, and the 2^53+1 sample comes through exactly
+        let (descr, shape, body) = npy("max", false);
+        assert_eq!(descr, "<i8", "max picks stored samples, so it keeps int64");
+        assert_eq!(shape, "2, 2");
+        let got: Vec<i64> = body
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![(1i64 << 53) + 1, 6, 7, 8],
+            "a native max must not round the sample it picked"
+        );
+
+        // mean averages, so it is genuinely f64 and declared as such
+        assert_eq!(npy("mean", false).0, "<f8");
+        // sum can leave the stored range — also computed
+        assert_eq!(npy("sum", false).0, "<f8");
     }
 
     /// **#387** — the size guard. Text output caps like `read` does; binary output never does, because a
