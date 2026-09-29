@@ -87,12 +87,18 @@ The last two are deliberately not gaps. A real chain ends at vendor files, and `
 drops history, so counting either would leave every product permanently "incomplete" and make the flag
 worthless.
 
-**Corruption is not opt-in.** A candidate file that *is* a Tessera product but whose manifest fails
-verification always exits nonzero, with or without `--require-complete`, and is reported **on the edge
-that needed it** — the hop reads `CORRUPT` and names the file, rather than calling the parent absent. The
-two states invite opposite responses: "I could not find that parent" sends you looking for another copy,
-while "what I found does not verify" ends the search and starts an incident. A file that is not a Tessera
-product at all is ignored in silence, so pointing `--search` at a real directory stays practical.
+**A corrupt parent is not a missing one.** When the parent an edge needs is present but its manifest
+fails verification, the hop reads `CORRUPT` and names the file, and the verb exits nonzero with or
+without `--require-complete`. The two states invite opposite responses: "I could not find that parent"
+sends you looking for another copy, while "what I found does not verify" ends the search and starts an
+incident.
+
+That is scoped to parents the chain actually needs. A corrupt file **no edge asked for** is a warning on
+stderr and an entry in `--json`'s `corrupt_candidates`, and leaves the exit code alone — this verb answers
+where one product came from, not whether a whole store is healthy, and failing here would make it
+unusable against a partly damaged store and punish a product for an unrelated neighbour. Store-wide
+integrity is what `tessera verify` and `collection verify` are for. A file that is not a Tessera product
+at all is ignored in silence, so pointing `--search` at a real directory stays practical.
 
 Naming the file means reading the identity it *claims*, which is why `tessera-io` exposes
 `read_manifest_unverified`. What it returns is untrusted by construction — a claim by something that has

@@ -1280,12 +1280,14 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             let mut out = std::io::stdout().lock();
             let verdict = provenance::run(&file, &opts, &mut out)?;
             // The chain is already rendered either way, so these only decide the exit code — the operator
-            // sees WHICH hops are unproven rather than just that something is. Corruption is
-            // unconditional: a broken seal in the store is never a "you may want to check for that" state
-            // that a gate opts into. An incomplete chain is, because resolving one from a single directory
-            // routinely fails and a verb that died on it would be useless in a pipeline.
-            if verdict.corrupt > 0 {
-                return Err(provenance::corruption_error(verdict.corrupt));
+            // sees WHICH hops are unproven rather than just that something is. A parent the chain NEEDS
+            // being unverifiable is unconditional, never a state a gate opts into checking. An incomplete
+            // chain is opt-in, because resolving one from a single directory routinely fails and a verb
+            // that died on it would be useless in a pipeline. A corrupt file no edge needed is neither: it
+            // is warned about on stderr, because this verb answers where one product came from, not
+            // whether a whole store is healthy.
+            if verdict.corrupt_parents > 0 {
+                return Err(provenance::corruption_error(verdict.corrupt_parents));
             }
             if require_complete && !verdict.complete {
                 return Err(provenance::incomplete_error(&file));
@@ -2400,7 +2402,7 @@ mod tests {
         let mut out = Vec::new();
         let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
         assert!(
-            v.complete && v.corrupt == 0,
+            v.complete && v.corrupt_parents == 0,
             "{}",
             String::from_utf8_lossy(&out)
         );
@@ -2419,7 +2421,10 @@ mod tests {
         let mut out = Vec::new();
         let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
         let text = String::from_utf8_lossy(&out);
-        assert_eq!(v.corrupt, 1, "the tampered sibling must be named:\n{text}");
+        assert_eq!(
+            v.corrupt_parents, 1,
+            "the tampered sibling IS the needed parent:\n{text}"
+        );
         assert!(
             !v.complete,
             "a corrupt store is never a complete chain:\n{text}"
@@ -2453,13 +2458,52 @@ mod tests {
             "a corrupt candidate must fail the verb on its own"
         );
 
+        // A corrupt file NO edge needed must not fail the verb. `provenance` answers "where did THIS come
+        // from", not "is this store healthy" — failing here would make it unusable against a partly
+        // damaged store and punish a product for an unrelated neighbour. It is warned about on stderr and
+        // listed in `--json`; store-wide integrity is `verify`'s job.
+        let bystander = d.join("bystander.tsra");
+        sample_tsra(&bystander);
+        tamper_manifest_metadata(&bystander);
+        // Restore the real parent so the chain itself is whole again.
+        sample_tsra(&parent_path);
+        let mut out = Vec::new();
+        let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(
+            v.corrupt_candidates, 1,
+            "the bystander is still reported:\n{text}"
+        );
+        assert_eq!(
+            v.corrupt_parents, 0,
+            "no edge needed the bystander:\n{text}"
+        );
+        assert!(
+            v.complete,
+            "an unrelated corrupt file does not break this chain:\n{text}"
+        );
+        run(Cmd::Provenance {
+            file: d.join("child.tsra"),
+            search: vec![],
+            collection: None,
+            depth: None,
+            json: false,
+            full: false,
+            require_complete: true,
+        })
+        .expect("an off-chain corrupt file must not fail the verb, even under --require-complete");
+        std::fs::remove_file(&bystander).unwrap();
+
         // A file that is not a Tessera product at all stays silently ignored — otherwise `--search` is
         // unusable on any real directory.
         std::fs::write(d.join("notes.tsra"), b"this is not a container").unwrap();
         std::fs::remove_file(&parent_path).unwrap();
         let mut out = Vec::new();
         let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
-        assert_eq!(v.corrupt, 0, "a non-product must not be called corrupt");
+        assert_eq!(
+            v.corrupt_candidates, 0,
+            "a file that is not a Tessera product must not be called corrupt"
+        );
     }
 
     /// Rewrite a sealed `.tsra`'s `manifest.json` so its recorded `manifest_hash` no longer matches its
@@ -2591,7 +2635,7 @@ mod tests {
             "the pinned version is no longer on disk:\n{text}"
         );
         assert_eq!(
-            verdict.corrupt, 0,
+            verdict.corrupt_parents, 0,
             "a superseded parent is a version difference, never corruption:\n{text}"
         );
         assert!(

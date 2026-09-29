@@ -16,7 +16,7 @@
 //! of scope here (the `--help` says so) — it needs a fetch policy and a cache, and shipping it inside a
 //! read verb would make `provenance` quietly hit the network.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -412,14 +412,21 @@ pub struct Opts {
     pub full: bool,
 }
 
-/// What a walk concluded. Two independent facts, because they warrant different responses: an
-/// incomplete chain is usually "fetch more and look again", while corruption is "stop and investigate".
+/// What a walk concluded.
+///
+/// `corrupt_parents` and `corrupt_candidates` are deliberately different facts. This verb answers "where
+/// did THIS product come from", not "is this store healthy" — so a corrupt file that *is* a parent the
+/// chain needs is fatal, while a corrupt file nobody asked for is a warning. Failing on the latter would
+/// make `provenance` unusable against a partly damaged store and punish a product for an unrelated
+/// neighbour; store-wide integrity belongs to `verify` and `collection verify`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Verdict {
     /// Every hop proven or a legitimate leaf.
     pub complete: bool,
-    /// Candidate files that are Tessera products whose manifests do not verify.
-    pub corrupt: usize,
+    /// Hops whose needed parent is present but fails verification. Fatal.
+    pub corrupt_parents: usize,
+    /// Every corrupt candidate seen while discovering, needed or not. Reported, never fatal on its own.
+    pub corrupt_candidates: usize,
 }
 
 /// Walk `file`'s provenance DAG and render it.
@@ -438,24 +445,40 @@ pub fn run(file: &Path, opts: &Opts, out: &mut impl Write) -> Result<Verdict> {
     // A cycle aborts the walk mid-way. Render what was collected first, so the operator sees where the
     // loop is instead of a bare error, then surface the error (the caller exits non-zero).
     let walked = walk(&root, &resolver, opts.depth, &mut collect);
-    // A chain cannot be called complete while the store it was resolved against holds a product whose
-    // seal is broken: the parent that file was meant to supply is, at best, unaccounted for.
-    let complete = collect.hops.iter().all(|h| !h.kind.is_gap()) && resolver.corrupt.is_empty();
+    // Completeness is decided by the HOPS alone. A corrupt file that no edge needed says nothing about
+    // whether this product's provenance is proven.
+    let complete = collect.hops.iter().all(|h| !h.kind.is_gap());
+    let needed: BTreeSet<&Path> = collect
+        .hops
+        .iter()
+        .filter_map(|h| h.corrupt_file.as_deref())
+        .collect();
+    // The ones no edge asked for: loud on stderr (naming the file, so it can be dealt with) and in the
+    // `--json` document, but never touching the exit code.
+    for c in resolver
+        .corrupt
+        .iter()
+        .filter(|c| !needed.contains(c.path.as_path()))
+    {
+        tracing::warn!(
+            file = %c.path.display(),
+            "a .tsra in the searched locations is a Tessera product whose manifest does not verify; no \
+             edge of this chain needed it, so it does not change this result — but `tessera verify` it"
+        );
+    }
     let verdict = Verdict {
         complete,
-        corrupt: resolver.corrupt.len(),
+        corrupt_parents: collect
+            .hops
+            .iter()
+            .filter(|h| h.kind == HopKind::CorruptParent)
+            .count(),
+        corrupt_candidates: resolver.corrupt.len(),
     };
     if opts.json {
         write_json(&root, &collect.hops, &resolver.corrupt, verdict, out)?;
     } else {
-        write_text(
-            &root,
-            &collect.hops,
-            &resolver.corrupt,
-            verdict,
-            opts.full,
-            out,
-        )?;
+        write_text(&root, &collect.hops, verdict, opts.full, out)?;
     }
     walked?;
     Ok(verdict)
@@ -469,7 +492,6 @@ fn indent(depth: usize) -> String {
 fn write_text(
     root: &Manifest,
     hops: &[Hop],
-    corrupt: &[Corrupt],
     verdict: Verdict,
     full: bool,
     out: &mut impl Write,
@@ -577,24 +599,14 @@ fn write_text(
         .iter()
         .filter(|h| h.kind == HopKind::ExternalLeaf)
         .count();
-    // Named before the summary line, and never folded into the gap count: an operator must not read
-    // "1 gap" and reach for another `--search` when the answer is already on disk and broken.
-    if !corrupt.is_empty() {
-        writeln!(
-            out,
-            "\nCORRUPT candidate(s) — a .tsra whose manifest does not verify:"
-        )?;
-        for c in corrupt {
-            writeln!(out, "  ! {}", c.path.display())?;
-            writeln!(out, "      {}", c.detail)?;
-        }
-    }
+    // A corrupt parent is already marked on the hop that needed it; one nobody needed was warned about
+    // on stderr. Neither gets a second stdout section, so the summary stays about THIS chain.
     let mut verdicts = Vec::new();
-    if verdict.corrupt > 0 {
-        verdicts.push(format!("{} CORRUPT candidate(s)", verdict.corrupt));
+    if verdict.corrupt_parents > 0 {
+        verdicts.push(format!("{} CORRUPT parent(s)", verdict.corrupt_parents));
     }
-    if gaps > 0 {
-        verdicts.push(format!("{gaps} gap(s)"));
+    if gaps > verdict.corrupt_parents {
+        verdicts.push(format!("{} gap(s)", gaps - verdict.corrupt_parents));
     }
     writeln!(
         out,
@@ -724,9 +736,17 @@ fn write_json(
         },
         "complete": verdict.complete,
         "gaps": hops.iter().filter(|h| h.kind.is_gap()).count(),
-        "corrupt": corrupt
+        // Every corrupt candidate found, needed or not — a store observation. Whether THIS chain is
+        // proven is `complete`, and a needed one also appears as its hop's `corrupt_file`.
+        "corrupt_candidates": corrupt
             .iter()
-            .map(|c| serde_json::json!({"file": c.path.display().to_string(), "detail": c.detail}))
+            .map(|c| {
+                serde_json::json!({
+                    "file": c.path.display().to_string(),
+                    "detail": c.detail,
+                    "claims_id": c.claims_id,
+                })
+            })
             .collect::<Vec<_>>(),
         "hops": hops_json,
     });

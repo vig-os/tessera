@@ -255,8 +255,11 @@ Three consequences follow, each a structural rule rather than a special case:
   a cycle means the same *version* re-entered.
 - **A candidate that fails verification is corruption, not absence.** Discovery distinguishes "not a
   Tessera product" (skipped in silence, so a search root stays usable) from "a product whose manifest
-  does not verify" (named, and always a nonzero exit). Collapsing the second into the first reported a
-  tampered parent as merely missing, at exit 0.
+  does not verify". Collapsing the second into the first reported a tampered parent as merely missing,
+  at exit 0. The fatal case is scoped to a parent the chain *needs*, reported on the edge that needed
+  it; a corrupt file no edge asked for is a stderr warning, because this verb answers where one product
+  came from and not whether a store is healthy. Naming the file means reading the identity it *claims*,
+  hence `tessera_io::read_manifest_unverified` — untrusted by construction, for pointing only.
 - **Verification and the operator view share one traversal** (`provenance::walk` + a `Visit`
   visitor). Two walks would drift, and then the verifier and the view would disagree about what the
   DAG is. They differ only in the visitor: strict refuses what it cannot prove, the operator view
