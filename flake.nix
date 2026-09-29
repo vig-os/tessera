@@ -323,7 +323,14 @@
 
         # ── CI = a shim over `nix flake check`. The logic lives HERE so the exact same command
         #    runs on a dev's machine and in CI — no "passes locally / fails in CI" drift. ──
-        checks = {
+        # Every check must have a DISTINCT derivation name (#535). `nix flake check -L` prefixes each
+        # log line with the derivation *name*, so two checks that share one are indistinguishable in
+        # CI logs — nothing errors, the logs just interleave. That happened: `workspace-test`,
+        # `sql-tests` and `minio-range-read` were all `tessera-nextest-0.0.0` (crane's default
+        # `-nextest` suffix), and a whole diagnosis (#517/#518/#519) was built on counting three
+        # builds as one. This fails EVALUATION, so it runs on every `nix flake check`, locally too.
+        checks = let
+          allChecks = {
           # Hermetic Rust gates over the tessera workspace.
           #
           # NOT `--all-features` (ADR-0057 §4): that pulls `static-hdf5`, which builds libhdf5 2.2.0
@@ -739,6 +746,10 @@
           in
           craneLib.cargoNextest (commonArgs // {
             inherit cargoArtifacts;
+            # Distinct from `workspace-test` so CI logs attribute its lines (#535). Via `pname`, not
+            # `pnameSuffix`: crane's cargoNextest hard-sets `pnameSuffix = "-nextest${extraSuffix}"`
+            # and silently discards a caller's value -> derivation name `tessera-cloud-nextest-0.0.0`.
+            pname = "tessera-cloud";
             # Run both crates' cloud tests in one MinIO session (shared bucket): the `cloud::`
             # module in tessera-io for unit-level range/cohort/tail-prefetch coverage, AND the
             # `cloud_cli_inspect_and_verify_over_s3_url` test in tessera-cli for the binary
@@ -797,6 +808,10 @@
           # proves the query actually EXECUTES (WHERE + ORDER BY + LIMIT round-trip).
           sql-tests = craneLib.cargoNextest (commonArgs // {
             inherit cargoArtifacts;
+            # Distinct from `workspace-test` so CI logs attribute its lines (#535). Via `pname`, not
+            # `pnameSuffix`: crane's cargoNextest hard-sets `pnameSuffix = "-nextest${extraSuffix}"`
+            # and silently discards a caller's value -> derivation name `tessera-sql-nextest-0.0.0`.
+            pname = "tessera-sql";
             # `sql::tests::*` runs the DataFusion SessionContext path end-to-end (register table,
             # execute query, collect batches). The positional `sql` filter matches every test
             # name in the `sql` module — DataFusion 54 pins arrow-58, so cargo unifies with the
@@ -876,6 +891,15 @@
           # The dev shell itself must build (toolbelt + toolchain resolve).
           dev-shell = self.devShells.${system}.default;
         };
+          names = map (c: c.name) (builtins.attrValues allChecks);
+          dupes = pkgs.lib.unique (builtins.filter (n: pkgs.lib.count (m: m == n) names > 1) names);
+        in
+          if dupes == [ ] then allChecks
+          else throw ''
+            flake checks share derivation names: ${builtins.concatStringsSep ", " dupes}
+            `nix flake check -L` labels log lines by derivation name, so these checks would be
+            indistinguishable in CI logs. Give each a distinct `pname`/`pnameSuffix` (#535).
+          '';
 
         formatter = pkgs.nixpkgs-fmt;
       });
