@@ -7,19 +7,18 @@ built from tessera-py) — the same read/write path a user gets, via its PUBLIC 
 (`read_array_subset`); the table column read uses Vortex projection (`read_table_column`), which
 touches only that column's segments.
 
-One variant, and why (#485 / #487's "no invented knobs")
--------------------------------------------------------
-Every other adapter here is reported at a default AND its standard tuning. Tessera is reported at
-one setting because **the Python binding exposes no codec lever**: `tessera-py`'s `add_array`
-hard-codes the array codec (`crates/tessera-py/src/lib.rs:260` — `spec.codec = "pcodec".into()`)
-and its signature takes no codec argument, and the table backend has no user-facing codec knob at
-all. #487 could report a tuned Tessera row because the **Rust** API exposes that choice; this
-binding does not.
+Variants (#485, #533)
+---------------------
+default   pcodec for arrays — the binding's default and the settled imaging-volume codec.
+tuned     `codec="auto"` for arrays: the writer encodes each array block with BOTH pcodec and zstd
+          and keeps the smaller, recording the concrete winner in the manifest. That is the
+          setting a user tunes to when they do not know their data's shape in advance, and it
+          dominates a fixed `zstd` on size (it can only match or beat it).
 
-Fabricating a second row to satisfy the symmetry requirement would be the same dishonesty as
-omitting a real one, so the asymmetry is declared instead. Note which way it cuts: it is a
-**disadvantage to disclose**, not an excuse — a reader tuning HDF5 or Parquet for their data has
-knobs that a Tessera user driving it from Python does not.
+The table backend (Vortex) has **no user-facing codec knob**, so both variants write tables
+identically — the table settings string says so rather than implying a lever that does not exist.
+Until #533 the Python binding hard-coded pcodec and this adapter declared a single-variant reason
+saying so; that stopped being true when the binding gained its `codec` argument, so it is removed.
 """
 
 from __future__ import annotations
@@ -29,11 +28,17 @@ import numpy as np
 import tessera  # tessera.so on sys.path (the bench dir)
 
 NAME = "Tessera (.tsra)"
-VARIANTS = {"default": "pcodec array / Vortex table, zip64+blake3"}
-SINGLE_VARIANT_REASON = (
-    "the Python binding exposes no codec knob: add_array hard-codes pcodec "
-    "(tessera-py/src/lib.rs:260) and the table backend has no user-facing codec setting"
-)
+VARIANTS = {
+    "default": {
+        "volume": "pcodec, 64^3 chunks, zip64+blake3",
+        "table": "Vortex (no user codec knob), zip64+blake3",
+    },
+    "tuned": {
+        "volume": "auto (pcodec|zstd, smaller kept), 64^3 chunks",
+        "table": "Vortex — identical to default (no codec knob)",
+    },
+}
+_ARRAY_CODEC = {"default": "pcodec", "tuned": "auto"}
 CAPS = {
     "volume": True,
     "table": True,
@@ -57,7 +62,7 @@ def path_for(base: str, modality: str, variant: str = "default") -> str:
 # ---- volume ----
 def write_volume(base: str, vol: np.ndarray, variant: str = "default") -> None:
     b = tessera.Builder("recon", "bench", "ecosystem bench", "2024-01-01T00:00:00Z")
-    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes(), _ARRAY_CODEC[variant])
     b.pack(path_for(base, "volume"))
 
 

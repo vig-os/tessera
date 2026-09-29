@@ -32,7 +32,9 @@ import importlib
 import json
 import os
 import platform
+import statistics
 import sys
+import time
 import traceback
 
 import numpy as np
@@ -69,124 +71,110 @@ def _resolve(mod, base, modality, variant):
     return base
 
 
-def _timed(fn, iters, path=None):
-    """Warm timing, or cold if `path` is given.
-
-    Cold repeats the eviction before every iteration — one eviction followed by N reads would
-    measure one cold read and N-1 warm ones, and report the median of a mixture.
-    """
-    if path is None:
-        s = common.stats(fn, iters)
-        s["cold"] = False
-        return s
-    worst = 0.0
-    samples = []
-    for _ in range(iters):
-        worst = max(worst, common.evict(path))
-        one = common.stats(fn, 1)
-        samples.append(one["median"])
-    import statistics
-
-    return {
+def _summary(samples, worst=None):
+    out = {
         "median": statistics.median(samples),
         "min": min(samples),
         "max": max(samples),
         "n": len(samples),
-        "cold": True,
-        # The MEASURED post-eviction residency. Printed on every cold row: eviction is best-effort
-        # and the kernel may decline, so the report says which it actually got (#487).
-        "worst_residency": worst,
+        "cold": worst is not None,
     }
+    if worst is not None:
+        # The MEASURED post-eviction residency, printed on every cold row: eviction is
+        # best-effort and the kernel may decline, so the report says which it actually got (#487).
+        out["worst_residency"] = worst
+    return out
 
 
-def _time_verify(mod, base, modality, variant, iters, do_cold, path, out):
-    """Time a STANDALONE integrity pass, for adapters that have one (tessera's `verify`).
+def _round_robin(fns, iters, paths=None):
+    """Time several operations N times each, INTERLEAVED — sample i of every op before sample
+    i+1 of any.
 
-    HDF5 fletcher32 and Parquet page CRCs have no separate verify step: the checksum is checked
-    during a read, so their integrity cost is the difference between the `checked` and `tuned`
-    read rows. Tessera's `verify` is a whole-file pass that re-derives every block digest against
-    the sealed manifest. The report shows both and says they are different operations rather than
-    presenting one as a like-for-like of the other.
+    Timing each variant as a contiguous block made results depend on what ran immediately
+    before. Measured: Tessera's `auto` variant wrote a file BYTE-IDENTICAL to `default` (same
+    sha256, same recorded codec) yet its reads timed 27% slower, because they ran straight after
+    its own 15 double-encode writes — a heavy multi-threaded burst that depresses whatever is timed
+    next. Interleaved, the two read in 62.7 vs 60.0 ms, overlapping. Round-robin spreads any drift
+    evenly across the things being compared instead of charging it to whichever ran second.
+
+    With `paths`, every sample is COLD: eviction is repeated before each one, because a cold read
+    repopulates the cache and one eviction followed by N reads would time 1 cold + N-1 warm.
     """
-    if not hasattr(mod, "verify"):
-        return
-    mod.verify(
-        base, modality, variant
-    )  # must succeed on an intact file before it is timed
-    out["verify_warm"] = _timed(lambda: mod.verify(base, modality, variant), iters)
-    if do_cold:
-        out["verify_cold"] = _timed(
-            lambda: mod.verify(base, modality, variant), iters, path
-        )
-
-
-# --------------------------------------------------------------------------- modalities
-def time_volume(mod, variant, vol, tmp, iters, do_cold, tag="vol"):
-    base = os.path.join(tmp, f"{mod.__name__.split('.')[-1]}_{variant}_{tag}_vol")
-    mod.write_volume(base, vol, variant)
-    back = mod.read_volume(base, variant)
-    assert back.shape == vol.shape and back.dtype == vol.dtype, (
-        f"{mod.NAME}/{variant}: vol shape/dtype"
-    )
-    assert np.array_equal(back, vol), f"{mod.NAME}/{variant}: vol not bit-exact"
-    z = vol.shape[0] // 2
-    assert np.array_equal(mod.read_volume_zslice(base, z, variant), vol[z]), (
-        f"{mod.NAME}/{variant}: zslice mismatch"
-    )
-    path = _resolve(mod, base, "volume", variant)
-    size = common.dir_or_file_bytes(path)
-    out = {
-        "bytes": size,
-        "ratio": vol.nbytes / size,
-        "write": common.stats(lambda: mod.write_volume(base, vol, variant), iters),
-        "read_full_warm": _timed(lambda: mod.read_volume(base, variant), iters),
-        "read_slice_warm": _timed(
-            lambda: mod.read_volume_zslice(base, z, variant), iters
-        ),
+    samples = {k: [] for k in fns}
+    worst = {k: 0.0 for k in fns}
+    for _ in range(iters):
+        for k, fn in fns.items():
+            if paths is not None:
+                worst[k] = max(worst[k], common.evict(paths[k]))
+            t0 = time.perf_counter()
+            fn()
+            samples[k].append(time.perf_counter() - t0)
+    return {
+        k: _summary(samples[k], worst[k] if paths is not None else None) for k in fns
     }
-    _time_verify(mod, base, "volume", variant, iters, do_cold, path, out)
-    if do_cold:
-        out["read_full_cold"] = _timed(
-            lambda: mod.read_volume(base, variant), iters, path
-        )
-        out["read_slice_cold"] = _timed(
-            lambda: mod.read_volume_zslice(base, z, variant), iters, path
-        )
-    return out
 
 
-def time_table(mod, variant, cols, tmp, iters, do_cold, tag):
-    base = os.path.join(tmp, f"{mod.__name__.split('.')[-1]}_{variant}_{tag}_tab")
-    mod.write_table(base, cols, variant)
-    back = mod.read_table(base, variant)
-    for k, v in cols.items():
-        assert k in back and np.array_equal(back[k], v), (
-            f"{mod.NAME}/{variant}/{tag}: col {k}"
-        )
-    assert np.array_equal(mod.read_table_column(base, "e0", variant), cols["e0"]), (
-        f"{mod.NAME}/{variant}/{tag}: column read mismatch"
+def _prepare(mod, variant, modality, fixture, data, root):
+    """Write one config ONCE and verify it against the source before anything is timed.
+
+    Correctness gates timing: a read that returns the wrong data never gets a number, so no
+    format can win by returning something cheaper.
+    """
+    base = os.path.join(
+        root, f"{mod.__name__.split('.')[-1]}_{variant}_{fixture}_{modality}"
     )
-    path = _resolve(mod, base, "table", variant)
-    raw = sum(v.nbytes for v in cols.values())
+    if modality == "volume":
+        mod.write_volume(base, data, variant)
+        back = mod.read_volume(base, variant)
+        assert back.shape == data.shape and back.dtype == data.dtype, (
+            f"{mod.NAME}/{variant}: shape"
+        )
+        assert np.array_equal(back, data), (
+            f"{mod.NAME}/{variant}/{fixture}: volume not bit-exact"
+        )
+        z = data.shape[0] // 2
+        assert np.array_equal(mod.read_volume_zslice(base, z, variant), data[z]), (
+            f"{mod.NAME}/{variant}/{fixture}: z-slice mismatch"
+        )
+        nbytes = data.nbytes
+        ops = {
+            "read_full": lambda: mod.read_volume(base, variant),
+            "read_slice": lambda: mod.read_volume_zslice(base, z, variant),
+        }
+        write = lambda: mod.write_volume(base, data, variant)  # noqa: E731
+    else:
+        mod.write_table(base, data, variant)
+        back = mod.read_table(base, variant)
+        for k, v in data.items():
+            assert k in back and np.array_equal(back[k], v), (
+                f"{mod.NAME}/{variant}/{fixture}: {k}"
+            )
+        assert np.array_equal(mod.read_table_column(base, "e0", variant), data["e0"]), (
+            f"{mod.NAME}/{variant}/{fixture}: projected column mismatch"
+        )
+        nbytes = sum(v.nbytes for v in data.values())
+        ops = {
+            "read_full": lambda: mod.read_table(base, variant),
+            "read_col": lambda: mod.read_table_column(base, "e0", variant),
+        }
+        write = lambda: mod.write_table(base, data, variant)  # noqa: E731
+    if hasattr(mod, "verify"):
+        # A standalone integrity pass (tessera). HDF5 fletcher32 / Parquet CRCs are checked
+        # DURING a read instead, so their cost shows as checked-vs-tuned read rows.
+        mod.verify(
+            base, modality, variant
+        )  # must pass on the intact file before it is timed
+        ops["verify"] = lambda: mod.verify(base, modality, variant)
+    path = _resolve(mod, base, modality, variant)
     size = common.dir_or_file_bytes(path)
-    out = {
+    return {
+        "path": path,
+        "nbytes": nbytes,
         "bytes": size,
-        "ratio": raw / size,
-        "write": common.stats(lambda: mod.write_table(base, cols, variant), iters),
-        "read_full_warm": _timed(lambda: mod.read_table(base, variant), iters),
-        "read_col_warm": _timed(
-            lambda: mod.read_table_column(base, "e0", variant), iters
-        ),
+        "ratio": nbytes / size,
+        "ops": ops,
+        "write": write,
     }
-    _time_verify(mod, base, "table", variant, iters, do_cold, path, out)
-    if do_cold:
-        out["read_full_cold"] = _timed(
-            lambda: mod.read_table(base, variant), iters, path
-        )
-        out["read_col_cold"] = _timed(
-            lambda: mod.read_table_column(base, "e0", variant), iters, path
-        )
-    return out
 
 
 # --------------------------------------------------------------------------- environment
@@ -246,56 +234,89 @@ def main():
     want = set(args.only.split(",")) if args.only else None
     do_cold = not args.no_cold
 
-    results = {}
-    for name in ADAPTERS:
-        if want and name not in want:
-            continue
-        try:
-            mod = importlib.import_module(f"adapters.{name}")
-        except Exception as e:  # noqa: BLE001
-            # The reference adapter missing invalidates the whole comparison; an ecosystem adapter
-            # missing only drops its rows. Never let the first read as the second.
-            if name == REFERENCE:
-                sys.exit(f"FATAL: reference adapter {name!r} not importable — {e}")
-            print(f"SKIP {name}: import failed — {e}", file=sys.stderr)
-            continue
-        entry = {"name": mod.NAME, "caps": mod.CAPS, "variants": {}}
-        if hasattr(mod, "INTEGRITY"):
-            entry["integrity"] = mod.INTEGRITY
-        if getattr(mod, "SINGLE_VARIANT_REASON", ""):
-            entry["single_variant_reason"] = mod.SINGLE_VARIANT_REASON
-        for variant in mod.VARIANTS:
-            v = {"volumes": {}, "tables": {}}
-            # Settings are resolved PER MODALITY: HDF5/NeXus/Zarr chunk volumes 64^3 but tables
-            # 1-D at 65536 rows, and a row that printed the cubic geometry on a table would be
-            # claiming a fairness property the code does not honour (#487).
-            if mod.CAPS.get("volume"):
-                v["settings_volume"] = common.settings_for(mod, variant, "volume")
-            if mod.CAPS.get("table"):
-                v["settings_table"] = common.settings_for(mod, variant, "table")
-            import tempfile
+    # Three GLOBAL phases, so no timed read ever follows a timed-write burst (see _round_robin):
+    #   0  prepare  — write every config once and verify it against the source
+    #   1  reads    — all timed reads (warm, cold, verify), variants interleaved round-robin
+    #   2  writes   — all timed writes, last, variants interleaved round-robin
+    import shutil
+    import tempfile
 
-            with tempfile.TemporaryDirectory(dir=args.tmp or None) as tmp:
+    root = tempfile.mkdtemp(prefix="tessera-bench-", dir=args.tmp or None)
+    results, mods, prepared = {}, {}, {}
+    try:
+        # ---- phase 0: prepare
+        for name in ADAPTERS:
+            if want and name not in want:
+                continue
+            try:
+                mod = importlib.import_module(f"adapters.{name}")
+            except Exception as e:  # noqa: BLE001
+                # The reference adapter missing invalidates the whole comparison; an ecosystem
+                # adapter missing only drops its rows. Never let the first read as the second.
+                if name == REFERENCE:
+                    sys.exit(f"FATAL: reference adapter {name!r} not importable — {e}")
+                print(f"SKIP {name}: import failed — {e}", file=sys.stderr)
+                continue
+            mods[name] = mod
+            entry = {"name": mod.NAME, "caps": mod.CAPS, "variants": {}}
+            if hasattr(mod, "INTEGRITY"):
+                entry["integrity"] = mod.INTEGRITY
+            if getattr(mod, "SINGLE_VARIANT_REASON", ""):
+                entry["single_variant_reason"] = mod.SINGLE_VARIANT_REASON
+            for variant in mod.VARIANTS:
+                # Settings resolved PER MODALITY: volumes chunk 64^3, tables 1-D at 65536 rows,
+                # and printing the cubic geometry on a table row would be a false claim (#487).
+                v = {"volumes": {}, "tables": {}}
                 if mod.CAPS.get("volume"):
-                    for vtag, vol in volumes.items():
-                        try:
-                            v["volumes"][vtag] = time_volume(
-                                mod, variant, vol, tmp, args.iters, do_cold, vtag
-                            )
-                        except Exception as e:  # noqa: BLE001
-                            v["volumes"][vtag] = {"error": str(e)}
-                            traceback.print_exc()
+                    v["settings_volume"] = common.settings_for(mod, variant, "volume")
                 if mod.CAPS.get("table"):
-                    for tag, cols in tables.items():
+                    v["settings_table"] = common.settings_for(mod, variant, "table")
+                entry["variants"][variant] = v
+                for modality, src, datasets in (
+                    ("volume", "volumes", volumes),
+                    ("table", "tables", tables),
+                ):
+                    if not mod.CAPS.get(modality):
+                        continue
+                    for fixture, data in datasets.items():
                         try:
-                            v["tables"][tag] = time_table(
-                                mod, variant, cols, tmp, args.iters, do_cold, tag
-                            )
+                            cfg = _prepare(mod, variant, modality, fixture, data, root)
+                            prepared[(name, variant, src, fixture)] = cfg
+                            v[src][fixture] = {
+                                "bytes": cfg["bytes"],
+                                "ratio": cfg["ratio"],
+                            }
                         except Exception as e:  # noqa: BLE001
-                            v["tables"][tag] = {"error": str(e)}
+                            v[src][fixture] = {"error": str(e)}
                             traceback.print_exc()
-            entry["variants"][variant] = v
-        results[name] = entry
+            results[name] = entry
+
+        def groups():
+            """(adapter, src, fixture) -> {variant: cfg}, only for configs that prepared OK."""
+            g = {}
+            for (name, variant, src, fixture), cfg in prepared.items():
+                g.setdefault((name, src, fixture), {})[variant] = cfg
+            return g
+
+        # ---- phase 1: every timed read, variants interleaved
+        for (name, src, fixture), cfgs in groups().items():
+            ops = next(iter(cfgs.values()))["ops"]
+            for op in ops:
+                fns = {v: c["ops"][op] for v, c in cfgs.items()}
+                for v, st in _round_robin(fns, args.iters).items():
+                    results[name]["variants"][v][src][fixture][f"{op}_warm"] = st
+                if do_cold:
+                    paths = {v: c["path"] for v, c in cfgs.items()}
+                    for v, st in _round_robin(fns, args.iters, paths).items():
+                        results[name]["variants"][v][src][fixture][f"{op}_cold"] = st
+
+        # ---- phase 2: every timed write, last
+        for (name, src, fixture), cfgs in groups().items():
+            fns = {v: c["write"] for v, c in cfgs.items()}
+            for v, st in _round_robin(fns, args.iters).items():
+                results[name]["variants"][v][src][fixture]["write"] = st
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
     payload = {
         "environment": environment(),
@@ -597,7 +618,10 @@ def markdown(payload, volumes, tables) -> str:
                 val = f(m)
                 txt = f"{val:.2f}" if c == "MiB" else f"{val:.0f}"
                 cells.append(f"**{txt}**" if val == best[c] else txt)
-            out.append(f"| {n} | {st} | " + " | ".join(cells) + " |")
+            # A literal `|` in a settings string (e.g. "auto (pcodec|zstd, ...)") ends the cell
+            # and silently shifts every column after it — escape it.
+            st_md = st.replace("|", "\\|")
+            out.append(f"| {n} | {st_md} | " + " | ".join(cells) + " |")
         out.append("")
 
     for k, vol in volumes.items():
