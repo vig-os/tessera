@@ -62,4 +62,8 @@ wildcards = "allow"
 
 [sources]
 unknown-registry = "deny"
-unknown-git = "allow"
+# Tightened from `unknown-git = "allow"` alongside the vortex fork pin (#480). A blanket allow would
+# have let ANY git dependency in unnoticed, which is exactly the review signal a fork pin should
+# raise. Deny by default and allow precisely the one repository we pin.
+unknown-git = "deny"
+allow-git = ["https://github.com/gerchowl/vortex"]

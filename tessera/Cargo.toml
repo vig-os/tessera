@@ -89,3 +89,52 @@ tessera-ingest = { path = "crates/tessera-ingest" }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# --- vortex fork pin (#480 tracks removal) -------------------------------------------------------
+# vortex 0.75.0 has two determinism defects that both leak a WRITE-TIME STATISTIC into the
+# serialised bytes, so the sealed `content_hash` stops being a function of the data alone:
+#
+#   #468  the `debug_assertions`-gated `is_sorted` assert on patch indices caches `Stat::IsSorted`
+#         on them, so a debug-built writer emitted 24 bytes more than a release-built one.
+#   #472  `sum_float_all` skips NaN, so a column holding both `+inf` and `-inf` evaluates
+#         `inf + -inf`; the resulting default NaN is `0xfff8…` on x86_64 and `0x7ff8…` on aarch64,
+#         and `Stat::Sum` is persisted — so the bytes depended on the writing host.
+#
+# Pinned to a FULL COMMIT SHA, never a branch name: a branch would let the pinned content move
+# underneath a lockfile that still looks unchanged.
+#
+# Every vortex crate must be patched TOGETHER. Patching `vortex-array` alone leaves its siblings
+# resolving from crates.io, which yields two copies of `vortex-proto`/`vortex-buffer` and ~1000 type
+# errors. The fork branch also carries one non-upstream commit setting the workspace version to
+# 0.75.0: the tag ships the placeholder 0.1.0, and without that commit cargo reports
+# `patch ... was not used in the crate graph` and SILENTLY keeps using crates.io.
+#
+# REMOVE THIS BLOCK once a released vortex contains both fixes — see #480 for the checklist.
+[patch.crates-io]
+vortex-alp = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-array = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-array-macros = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-btrblocks = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-buffer = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-bytebool = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-compressor = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-datetime-parts = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-decimal-byte-parts = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-error = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-fastlanes = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-file = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-flatbuffers = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-fsst = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-io = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-layout = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-mask = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-metrics = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-pco = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-proto = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-runend = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-scan = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-sequence = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-session = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-sparse = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-utils = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-zigzag = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }

@@ -1,10 +1,10 @@
         `-- tessera-io vWORKSPACE (*)
     `-- tessera-io vWORKSPACE (*)
-    `-- vortex-file v0.75.0 (*)
+    `-- vortex-file v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
     `-- vortex-layout feature "default"
 `-- vortex-btrblocks feature "pco"
-`-- vortex-layout v0.75.0
-vortex-btrblocks v0.75.0
+`-- vortex-layout v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)
+vortex-btrblocks v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)
 |                   `-- tessera-py feature "default" (command-line)
 |               `-- tessera-py vWORKSPACE
 |               |       `-- tessera-cli feature "static-hdf5" (command-line)
@@ -24,4 +24,4 @@ vortex-btrblocks v0.75.0
 |   `-- tessera-io vWORKSPACE (*)
 |   `-- vortex-file feature "default"
 |-- vortex-btrblocks feature "default"
-|-- vortex-file v0.75.0
+|-- vortex-file v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)
