@@ -84,8 +84,83 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
 
+      # `--keep-going` is the fix for #483. Without it the FIRST failing derivation cancels every
+      # other check, so a leg goes red with all 17 checks reporting `(cancelled)` and nothing naming
+      # a real failure. That is exactly what happened on #481: an unrelated `minio` substitution
+      # failed and took down the determinism gates, clippy, the wasm checks — none of which depend on
+      # it. A red leg that names no failing check costs a reader log archaeology to distinguish from a
+      # genuine break, and two reviewers paid that cost before it was understood.
+      #
+      # `--fallback` builds a derivation from source when it cannot be substituted, instead of
+      # failing. Measured for the one that actually bit us, minio, on these exact runner images:
+      # 102s (x86_64) and 73s (aarch64) — on aarch64 that is FASTER than pulling its 36 MiB from
+      # cache.nixos.org, because the download is the slow part, not the Go build. Against the
+      # 90-minute cap above, noise.
+      #
+      # The flag applies to EVERY derivation, so a pathological outage on something large (a
+      # toolchain, LLVM) could build until that cap rather than failing in seconds. Deliberate: both
+      # outcomes are a red leg, it is bounded by the budget already set above, and in exchange the
+      # common case stops being a spurious failure. Accepted with that tradeoff stated rather than
+      # discovered.
+      #
+      # `set +e` so a failure reaches the summary step below instead of ending the job here; the real
+      # result is re-raised there, so the leg still fails when a check fails.
       - name: nix flake check
-        run: nix flake check -L
+        id: check
+        run: |
+          set +e
+          nix flake check -L --keep-going --fallback
+          rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "nix flake check exited $rc"
+
+      # Per-check verdicts, so a red leg always names what failed (#483).
+      #
+      # Derived from the STORE, not by parsing nix's human-readable output: a check whose output path
+      # is valid was built and therefore passed. `--keep-going` above is what makes that inference
+      # sound, because every check is attempted, so a missing output means that check failed rather
+      # than that it was skipped. No output format to drift against.
+      - name: Summarise per-check results
+        if: always()
+        run: |
+          set +e
+          SYS="${{ matrix.arch }}"
+          S="$GITHUB_STEP_SUMMARY"
+          names=$(nix eval --json ".#checks.${SYS}" --apply builtins.attrNames \
+                  | tr -d '[]"' | tr ',' ' ')
+          pass=0; fail=0; failed_names=""
+          {
+            echo "## nix flake check — ${SYS}"
+            echo ""
+            echo "| check | result |"
+            echo "|---|---|"
+          } >> "$S"
+          for n in $names; do
+            outp=$(nix eval --raw ".#checks.${SYS}.${n}.outPath" 2>/dev/null)
+            if [ -n "$outp" ] && nix path-info "$outp" >/dev/null 2>&1; then
+              echo "| \`$n\` | :white_check_mark: passed |" >> "$S"
+              pass=$((pass+1))
+            else
+              echo "| \`$n\` | :x: failed or not built |" >> "$S"
+              fail=$((fail+1)); failed_names="$failed_names $n"
+            fi
+          done
+          rc="${{ steps.check.outputs.rc }}"
+          {
+            echo ""
+            echo "**$pass passed, $fail failed or not built** (\`nix flake check\` exited \`${rc:-?}\`)."
+            if [ "$fail" -gt 0 ]; then
+              echo ""
+              echo "Not built:$failed_names"
+              echo ""
+              echo "A check listed here either failed or never produced an output. With \`--keep-going\`"
+              echo "every check is attempted, so the usual reading is a real failure — unless the leg hit"
+              echo "its 90-minute cap, in which case the tail of the job log says so."
+            fi
+          } >> "$S"
+          echo "summary: $pass passed, $fail failed or not built; check rc=${rc:-?}"
+          # Re-raise the real result: the check step swallowed it so this summary could run.
+          exit "${rc:-1}"
 
   # ── The single REQUIRED status check ──────────────────────────────────────────────────────
   # Branch protection matches context names EXACTLY. A matrix job is reported per-leg as
