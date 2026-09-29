@@ -10,16 +10,19 @@ major. That keeps the bytes a flat `D * H * W * 2`-byte slab on disk — bit-ide
 to `vol.tobytes()` — so `pixel_array.reshape(D, H, W)` round-trips exactly. No
 modality-LUT / rescale-slope / window-level is set, so pydicom returns raw int16.
 
-Compression: none. DICOM is overwhelmingly stored uncompressed in the wild, so
-ratio ~= 1.0 here is a real, honest data point for the cross-ecosystem table — the
-overhead vs raw is just the (tiny) header + per-element VR tags.
+Two variants (#485):
 
-Slice read: `pydicom.dcmread(...).pixel_array[z]` builds the full int16 ndarray and
-then takes plane `z`. Because the transfer syntax is uncompressed and frames are
-contiguous on disk, decode is just a `np.frombuffer` over PixelData — no per-frame
-codec invocation — but it still touches all D*H*W*2 bytes. A truly partial decode
-would require the Basic Offset Table (encapsulated transfer syntaxes only) and is
-not meaningful for uncompressed data, so this is the honest implementation.
+- `default` — uncompressed. DICOM is overwhelmingly stored uncompressed in the wild, so ratio ~= 1.0
+  is a real, honest data point: the overhead vs raw is just the header + per-element VR tags.
+- `tuned` — RLE Lossless (encapsulated), the standard lossless transfer syntax pydicom 3 encodes
+  natively. Verified bit-exact before it was listed.
+
+Slice read: `pydicom.dcmread(...).pixel_array[z]` builds the FULL int16 ndarray, then takes plane `z`,
+in both variants. Uncompressed, that is a `np.frombuffer` over contiguous PixelData — no codec, but it
+still touches all D*H*W*2 bytes. Under RLE every frame is decoded before the plane is selected, so the
+"slice" row costs the same as a full read (visible in the results). A truly partial decode would need
+per-frame fragment access through the Basic Offset Table; pydicom's `pixel_array` does not do that, so
+this is the honest implementation of what a user of the library gets, and the row says so by its speed.
 """
 
 from __future__ import annotations
@@ -27,10 +30,16 @@ from __future__ import annotations
 import numpy as np
 import pydicom
 from pydicom.dataset import FileDataset, FileMetaDataset
-from pydicom.uid import ExplicitVRLittleEndian, generate_uid
+from pydicom.uid import ExplicitVRLittleEndian, RLELossless, generate_uid
 
 NAME = "DICOM (pydicom)"
-CODEC = "uncompressed multiframe, explicit-VR LE"
+# DICOM's standard lossless tuning is an encapsulated transfer syntax. RLE Lossless is the one
+# pydicom 3 encodes natively (verified bit-exact before being listed here, per #485) -- no extra
+# plugin, no JPEG-LS dependency. Left as the tuned variant rather than a promise.
+VARIANTS = {
+    "default": "uncompressed multiframe, explicit-VR LE",
+    "tuned": "RLE Lossless (encapsulated), explicit-VR LE",
+}
 CAPS = {"volume": True, "table": False, "swmr": False}
 
 # Multi-frame Grayscale Word Secondary Capture Image Storage — the canonical SOP for
@@ -43,7 +52,7 @@ def path_for(base: str, modality: str) -> str:
 
 
 # ---- volume ----
-def write_volume(base: str, vol: np.ndarray) -> None:
+def write_volume(base: str, vol: np.ndarray, variant: str = "tuned") -> None:
     if vol.dtype != np.dtype("<i2"):
         raise ValueError(
             f"DICOM adapter expects little-endian int16 volume, got {vol.dtype}"
@@ -104,12 +113,18 @@ def write_volume(base: str, vol: np.ndarray) -> None:
     # exactly, so dcmread().pixel_array round-trips bit-for-bit.
     ds.PixelData = vol.tobytes()
 
+    if variant == "tuned":
+        # RLE Lossless: DICOM's standard lossless encapsulated syntax, encoded natively by
+        # pydicom 3 (no plugin). Verified bit-exact before it was listed as a variant -- the
+        # tuning is offered because it works here, not because the format nominally allows it.
+        ds.compress(RLELossless)
+
     # pydicom 3.x: `enforce_file_format=True` writes a real Part-10 file (preamble
     # + DICM magic + file meta) instead of "like-original" raw-dataset mode.
     pydicom.dcmwrite(path, ds, enforce_file_format=True)
 
 
-def read_volume(base: str) -> np.ndarray:
+def read_volume(base: str, variant: str = "tuned") -> np.ndarray:
     ds = pydicom.dcmread(path_for(base, "volume"))
     arr = ds.pixel_array  # (frames, rows, cols) int16 for this config
     # Defensive: normalise to the contract dtype/shape even if pydicom returns a
@@ -117,7 +132,7 @@ def read_volume(base: str) -> np.ndarray:
     return np.ascontiguousarray(arr, dtype="<i2")
 
 
-def read_volume_zslice(base: str, z: int) -> np.ndarray:
+def read_volume_zslice(base: str, z: int, variant: str = "tuned") -> np.ndarray:
     # See module docstring: pixel_array decodes all frames (cheap memcpy here because
     # the transfer syntax is uncompressed); slicing is just an ndarray view.
     ds = pydicom.dcmread(path_for(base, "volume"))
@@ -126,13 +141,13 @@ def read_volume_zslice(base: str, z: int) -> np.ndarray:
 
 
 # ---- table (unsupported — DICOM is volume-only here) ----
-def write_table(base: str, cols: dict) -> None:
+def write_table(base: str, cols: dict, variant: str = "tuned") -> None:
     raise NotImplementedError("DICOM adapter is volume-only in this bench")
 
 
-def read_table(base: str) -> dict:
+def read_table(base: str, variant: str = "tuned") -> dict:
     raise NotImplementedError("DICOM adapter is volume-only in this bench")
 
 
-def read_table_column(base: str, name: str) -> np.ndarray:
+def read_table_column(base: str, name: str, variant: str = "tuned") -> np.ndarray:
     raise NotImplementedError("DICOM adapter is volume-only in this bench")
