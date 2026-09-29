@@ -55,7 +55,11 @@
             || (pkgs.lib.hasInfix "/docs/examples/" path)
             || (pkgs.lib.hasInfix "/docs/dictionaries/" path)
             || (pkgs.lib.hasInfix "/tests/cmd/" path)
-            || (pkgs.lib.hasInfix "/tests/feature-snapshots/" path);
+            || (pkgs.lib.hasInfix "/tests/feature-snapshots/" path)
+            # The GENERATED product-schema reference the book includes (#389). Its drift test compares
+            # this committed copy against `SchemaRegistry::builtin()`, so the file has to reach the
+            # sandbox — the `derived-docs` gate cannot do the job here because it runs without cargo.
+            || (pkgs.lib.hasInfix "/tests/derived-docs/" path);
           name = "source";
         };
         # Every feature declared anywhere in the workspace **except `static-hdf5`** (ADR-0057 §4), in

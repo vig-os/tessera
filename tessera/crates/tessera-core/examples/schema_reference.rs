@@ -5,14 +5,19 @@
 //! `derived-docs` gate fails the commit if the two disagree. A schema cannot gain a required field
 //! without the documented table gaining it in the same commit.
 //!
-//! Regenerate with:
+//! Regenerate the committed copy with:
 //!
 //! ```text
-//! guardrails-derived-docs --fix docs/book/src/schemas.md
+//! cd tessera && cargo run -q -p tessera-core --example schema_reference \
+//!   > tests/derived-docs/schema-reference.md
 //! ```
 //!
-//! Emitting markdown from a `cargo run` (rather than a build script or a hand-maintained table) keeps the
-//! whole thing inspectable: the command in the doc's marker is the command a human runs.
+//! `schema_reference_matches_the_committed_copy` (in `schema.rs`) fails if the two drift, and the book
+//! `{{#include}}`s that one file — so the registry, the test and the published page cannot disagree.
+//!
+//! Why a test rather than the `derived-docs` gate: that gate runs inside the `guardrails-gates` nix
+//! sandbox, which has **no cargo on PATH**, so a cargo-backed marker command can never succeed there.
+//! A test runs where cargo obviously exists.
 
 use tessera_core::schema::{FieldSpec, ProductSchema, SchemaRegistry};
 
