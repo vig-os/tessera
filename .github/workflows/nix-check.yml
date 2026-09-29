@@ -10,7 +10,7 @@
 # The logic lives in the flake's `checks` (flake.nix), so the SAME command runs on a dev's
 # machine and here — no "passes locally / fails in CI" drift, nothing to reproduce by hand.
 # Run it yourself with the SAME flags CI uses:
-#   nix flake check -L --keep-going --fallback --cores 2
+#   nix flake check -L --keep-going --fallback --max-jobs 2 --cores 4
 #
 # Checks (see flake.nix): workspace-clippy · workspace-test · workspace-fmt ·
 # guardrails-gates · dev-shell. cargo-deny + the full pre-commit gate set run via `prek`
@@ -127,29 +127,47 @@ jobs:
       # common case stops being a spurious failure. Accepted with that tradeoff stated rather than
       # discovered.
       #
-      # `--cores 2` is the fix for the evictions, and it is measured rather than guessed (#495). The
-      # sampler added in #488 caught one in the act on this workflow: memory available fell
-      # monotonically 5167M -> 412M over three and a half minutes and the runner was then killed with
-      # "received a shutdown signal" and exit 143 — the OOM killer taking the runner AGENT, which is
-      # why these jobs could never print an error of their own. Disk never dropped below 57.6 GB free
-      # across the same run, so disk was never the constraint.
+      # `--max-jobs 2 --cores 4` is the memory fix, and every number below is measured (#495).
       #
-      # Why `--cores` rather than `--max-jobs`. Observed load average was 13-16 on a 4-core runner.
-      # nix's `max-jobs` defaults to the core count, so four derivations build concurrently, each
-      # spawning about four compiler threads: 4 x 4 = 16, matching the load exactly. Peak memory tracks
-      # the number of concurrent rustc/LLVM processes, i.e. that product, so either factor halves it —
-      # but `--cores 2` keeps four derivations in flight while `--max-jobs 2` serialises whole
-      # derivations and costs closer to 2x on the parallel portion. With x86_64 draws already reaching
-      # 89 minutes, a lever that doubles the parallel portion could reach even the 120-minute cap above.
+      # WHAT DRIVES PEAK MEMORY: the number of CONCURRENT DERIVATIONS. Each is a separate
+      # cargo/rustc process tree holding its own heap, so halving how many run at once halves the
+      # dominant term. `--cores` caps threads INSIDE one derivation, which is the weaker factor.
       #
-      # This is self-verifying: the sampler reports peak memory on every leg, so the peak must fall well
-      # below the 15.6 GB that evicted. If it does not, this model is wrong and `--max-jobs` is next —
-      # do not simply lower this number further without re-reading the trace.
+      # An earlier revision of this comment framed these as alternatives — "`--cores 2` keeps four
+      # derivations in flight while `--max-jobs 2` serialises whole derivations and costs closer to
+      # 2x" — and chose `--cores 2` alone on that basis. That framing was the error: the two are
+      # independent knobs and the right answer combines them. `--cores 2` alone was not enough, and
+      # #497 was OOM-KILLED (exit 137) at 15.5 GB with four derivations still in flight.
+      #
+      # `--max-jobs 2 --cores 4` keeps TOTAL cpu at ~8 (2 x 4, as the old 4 x 2) while halving the
+      # concurrent process trees. Measured on scratch branches against both heavy branches:
+      #
+      #   leg           before (--cores 2)          after (--max-jobs 2 --cores 4)
+      #   #497 x86      82m 14651 MB 1338 MB free   80m 11171 MB 4818 MB free   (-24% peak)
+      #   #497 arm      66m 11503 MB 4444 MB free   54m 11431 MB 4516 MB free
+      #   #461 x86      85m 13534 MB 2454 MB free   76m 12980 MB 3008 MB free
+      #   #461 arm      69m 11536 MB 4410 MB free   55m 10690 MB 5256 MB free
+      #
+      # WALL-CLOCK IMPROVED ON ALL FOUR LEGS (-2, -12, -9, -14 min), which was NOT predicted — the
+      # argument had been that it would stay neutral since total cpu is unchanged. Max load1 held at
+      # 8.3-8.6 throughout, confirming cpu really was constant, so the gain is memory-pressure stalls
+      # disappearing. The memory fix paid a wall-clock dividend rather than costing one.
+      #
+      # HONEST CAVEAT, and why #495 stays open. The accept bar was fixed BEFORE the run at
+      # peak < 12288 MB and < 100 min. #461's x86 leg MISSED it: 12980 MB, over by 692 MB. It is
+      # adopted anyway because it dominates the previous setting on every leg measured, but the
+      # ceiling risk on the heaviest branch is REDUCED, NOT ELIMINATED — 3.0 GB of headroom. That leg
+      # is the watch item on #495. Do not read four green legs as "solved".
       #
       # A contributing factor worth naming: peak climbed 10.2 -> 12.0 -> 15.6 GB across observed runs,
       # and the vortex fork pin (#480) is part of that — ~27 crates now compile from a git source with
       # no binary-cache substituter where they were previously downloaded. Removing the pin later
-      # should give headroom back, at which point this flag can be revisited.
+      # should give headroom back, at which point these flags can be revisited.
+      #
+      # Related, measured, and NOT fixed by these flags: there is no nix store cache (#507), so every
+      # run recompiles the dependency graph from source — `tessera-deps` alone is a 19.4-minute serial
+      # prefix, 23% of a leg. That is a wall-clock issue, not a memory one: the deps phase peaks at
+      # 4.6 GB against a leg peak of 12.0 GB, so caching it would not lower the peak.
       #
       # `set +e` so a failure reaches the summary step below instead of ending the job here; the real
       # result is re-raised there, so the leg still fails when a check fails.
@@ -160,8 +178,14 @@ jobs:
           # Resource sampler, started INSIDE this step on purpose (#483). Three legs on #460/#461
           # died with the generic "runner has received a shutdown signal" and exit 143, with NO
           # in-job error — no ENOSPC, no OOM line. That is the shape of the runner AGENT being
-          # killed rather than a build failing, so the cause stayed inferred (four concurrent Rust
-          # derivations on a 4-core/16 GB runner) instead of measured.
+          # killed rather than a build failing.
+          #
+          # The cause is now MEASURED, not inferred. This sampler caught it twice: a leg pegged at
+          # 15.60 GB with ~340 MB available for 3m14s while load climbed 15.5 -> 29.0, then took the
+          # signal; and #497 was killed outright with exit 137 (SIGKILL, the kernel's OOM killer)
+          # after memory jumped 6956 -> 15531 MB inside one 4-minute window. Disk never fell below
+          # 58.9 GB across those runs, so disk was never the constraint — tested on six legs across
+          # four branches and never once supported.
           #
           # It must print to THIS step's stdout rather than to a file collected later: GitHub
           # streams step logs, so samples written before the agent dies are preserved, whereas a
@@ -179,7 +203,7 @@ jobs:
           # shellcheck disable=SC2064
           trap "kill $sampler 2>/dev/null" EXIT
 
-          nix flake check -L --keep-going --fallback --cores 2
+          nix flake check -L --keep-going --fallback --max-jobs 2 --cores 4
           rc=$?
           kill "$sampler" 2>/dev/null
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
