@@ -124,6 +124,37 @@ def main() -> int:
             "add_array accepts str — the docstrings document it as table-only; update both"
         )
 
+    # --- array codec knob (#522) -------------------------------------------------------------
+    # The docstring advertises exactly pcodec / zstd / auto. Probe each against the live module so
+    # the advertised set cannot drift from what the binding accepts -- and assert the REJECTION
+    # too, since silently accepting an unknown codec would be worse than not exposing the knob.
+    import numpy as _np
+
+    _vol = _np.arange(64, dtype="<i2")
+    accepted = set()
+    for _c in ("pcodec", "zstd", "auto", "lz4", "", "PCODEC"):
+        try:
+            _b = tessera.Builder("r", "b", "probe", "2024-01-01T00:00:00Z")
+            _b.add_array("v", "i2", [64], _vol.tobytes(), _c)
+            accepted.add(_c)
+        except Exception:  # noqa: BLE001
+            pass
+    if accepted != {"pcodec", "zstd", "auto"}:
+        errors.append(
+            f"add_array codec set is {sorted(accepted)}, docstrings advertise "
+            "['auto', 'pcodec', 'zstd'] — update both"
+        )
+    try:
+        _b = tessera.Builder("r", "b", "probe", "2024-01-01T00:00:00Z")
+        _b.add_array("v", "i2", [64], _vol.tobytes())
+        _default_ok = True
+    except Exception:  # noqa: BLE001
+        _default_ok = False
+    if not _default_ok:
+        errors.append(
+            "add_array is no longer callable without an explicit codec (default lost)"
+        )
+
     for e in errors:
         print(f"DRIFT: {e}", file=sys.stderr)
     if not errors:

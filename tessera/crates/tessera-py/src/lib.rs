@@ -247,7 +247,28 @@ impl Builder {
     /// ladder plus bool. Sub-16-bit codes (`i1/u1/b1/f2`) are stored **widened** to a
     /// pcodec-native width (free in output size) and read back at their original dtype —
     /// transparent to callers. For string data use a **table** block ([`add_table`]).
-    fn add_array(&mut self, name: &str, code: &str, shape: Vec<u64>, data: &[u8]) -> PyResult<()> {
+    ///
+    /// `codec` selects the array codec, matching the Rust API (`tessera_io::array`):
+    ///
+    /// - `"pcodec"` (default) — the settled imaging-volume codec. On real CT/PET it compresses
+    ///   ~3.8x vs zstd's ~3.3x, and it is what an acquisition-shaped volume wants.
+    /// - `"zstd"` — Zarr v3 `bytes` + `zstd`. Wins on data with long byte-level repeats rather
+    ///   than a numeric distribution: synthetic ramps, masks, packed bitfields.
+    /// - `"auto"` — encode with both and keep the smaller, recording the winner in the manifest.
+    ///   Readers never see `"auto"`; it costs a double encode at write time.
+    ///
+    /// Both are per-chunk codecs, so partial reads ([`Reader::read_array_subset`]) work
+    /// identically whichever was used. Until now this binding hard-coded `"pcodec"` with no way
+    /// to choose, which is why a Python caller could not tune the array path at all.
+    #[pyo3(signature = (name, code, shape, data, codec="pcodec"))]
+    fn add_array(
+        &mut self,
+        name: &str,
+        code: &str,
+        shape: Vec<u64>,
+        data: &[u8],
+        codec: &str,
+    ) -> PyResult<()> {
         let arr = ArrayData::from_le_bytes(code, data).map_err(err)?;
         let n: u64 = shape.iter().product();
         if arr.len() as u64 != n {
@@ -257,7 +278,9 @@ impl Builder {
             )));
         }
         let mut spec = ArraySpec::new(shape, arr.dtype());
-        spec.codec = "pcodec".into(); // the array backend speaks pcodec (ArraySpec defaults to zstd)
+        // `ArraySpec` defaults to zstd; the array backend's own default is pcodec, and
+        // `array_block` validates the value and rejects anything other than pcodec/zstd/auto.
+        spec.codec = codec.into();
         let (block_ref, payload) =
             tessera_io::array::array_block(name, &spec, &arr).map_err(err)?;
         self.builder()?.add_block_ref(block_ref);
