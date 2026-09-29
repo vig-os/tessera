@@ -336,7 +336,7 @@ pub fn canonicalise(b: &mut TableBuilder, name: &str, data: &mut ColumnData) {
 ///
 /// The half of [`concat_columns`] that makes the nullable-by-presence rule composable: a source whose
 /// first chunk has no nulls and whose second does must end up with one nullable column, not an error.
-fn promote_nullable(data: ColumnData) -> ColumnData {
+pub(crate) fn promote_nullable(data: ColumnData) -> ColumnData {
     match data {
         already @ ColumnData::Nullable { .. } => already,
         values => {
