@@ -58,6 +58,10 @@ const DECODERS: &[(&str, &str)] = &[
     ("arrow-ipc", "TESSERA_DEP_ARROW_IPC"),
     ("arrow-array", "TESSERA_DEP_ARROW_ARRAY"),
     ("csv", "TESSERA_DEP_CSV"),
+    // `.npz` is a zip of `.npy` members, so the archive reader is the `npz` lane's root crate
+    // (ADR-0056 §11). A *container* reader rather than a value decoder, but it is what turns the
+    // archive into members, so it is on that lane's decode path and nowhere else.
+    ("zip", "TESSERA_DEP_ZIP"),
 ];
 
 fn main() {

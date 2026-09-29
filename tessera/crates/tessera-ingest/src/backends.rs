@@ -37,6 +37,8 @@ pub const BACKENDS_ALL: &[&str] = &[
     "dicom-series",
     "hdf-compound",
     "nifti",
+    "npy",
+    "npz-member",
     "parquet",
     "raw",
 ];
@@ -67,6 +69,13 @@ pub const BACKENDS_ENABLED: &[&str] = &[
     "hdf-compound",
     // in-tree parsers, no third-party decoder
     "nifti",
+    // in-tree header parse + memcpy, no third-party decoder at all (feature `npy`)
+    #[cfg(feature = "npy")]
+    "npy",
+    // the same in-tree member parser reached through `dep:zip` (feature `npz`) — a separate lane
+    // because the archive reader is third-party code on this path and on no other (#477)
+    #[cfg(feature = "npz")]
+    "npz-member",
     // `dep:parquet` (+ the arrow lane it implies) — ADR-0056 §11's P1 table row (feature `parquet`)
     #[cfg(feature = "parquet")]
     "parquet",
@@ -118,6 +127,9 @@ pub fn backend_version(name: &str) -> Option<String> {
         "parquet" => option_env!("TESSERA_DEP_PARQUET").map(str::to_owned),
         "arrow" => option_env!("TESSERA_DEP_ARROW_IPC").map(str::to_owned),
         "csv" => option_env!("TESSERA_DEP_CSV").map(str::to_owned),
+        // `npy` is an in-tree header parse; only the `.npz` archive reader has a third-party
+        // component worth naming, and it is a container rather than a decoder of values.
+        "npz-member" => option_env!("TESSERA_DEP_ZIP").map(str::to_owned),
         "hdf-compound" => {
             let (major, minor, patch) = hdf5_metno::library_version();
             Some(format!("{major}.{minor}.{patch}"))
@@ -141,6 +153,8 @@ pub fn backend_name(opts: &crate::spec::FormatOptions) -> &'static str {
         F::DicomSeries { .. } => "dicom-series",
         F::HdfCompound { .. } => "hdf-compound",
         F::Nifti { .. } => "nifti",
+        F::Npy { .. } => "npy",
+        F::NpzMember { .. } => "npz-member",
         F::Parquet { .. } => "parquet",
         F::Raw { .. } => "raw",
     }
@@ -207,7 +221,13 @@ mod tests {
         // is no longer trivially `ALL` — which is the point of the split. On a default build every
         // name is present; on `--no-default-features` the three generic ones are `disabled`, and
         // `tessera info` says so instead of the ingest failing with a parse error.
-        if cfg!(all(feature = "arrow", feature = "parquet", feature = "csv")) {
+        if cfg!(all(
+            feature = "arrow",
+            feature = "parquet",
+            feature = "csv",
+            feature = "npy",
+            feature = "npz"
+        )) {
             assert_eq!(
                 BACKENDS_ENABLED, BACKENDS_ALL,
                 "a full build enables everything"

@@ -1,0 +1,43 @@
+            `-- tessera-py feature "default" (command-line)
+        `-- tessera-py vWORKSPACE
+        |       `-- tessera-cli feature "static-hdf5" (command-line)
+        |   `-- tessera-cli feature "static-hdf5" (command-line)
+        |   `-- tessera-ingest feature "static-hdf5" (command-line)
+        |   |       `-- tessera-ingest feature "default" (command-line) (*)
+        |   |       `-- tessera-ingest feature "default" (command-line) (*)
+        |   |       |-- tessera-cli feature "parquet" (command-line)
+        |   |   `-- tessera-ingest feature "default" (command-line) (*)
+        |   |   `-- tessera-ingest feature "npz" (command-line)
+        |   |   `-- tessera-ingest feature "parquet" (command-line)
+        |   |   |   `-- tessera-cli vWORKSPACE (*)
+        |   |   |-- tessera-cli feature "arrow" (command-line)
+        |   |   |-- tessera-cli feature "csv" (command-line)
+        |   |   |-- tessera-ingest feature "default" (command-line)
+        |   |   |-- tessera-ingest feature "default" (command-line) (*)
+        |   |-- tessera-cli feature "arrow" (command-line)
+        |   |-- tessera-cli feature "cloud" (command-line)
+        |   |-- tessera-cli feature "csv" (command-line)
+        |   |-- tessera-cli feature "default" (command-line)
+        |   |-- tessera-cli feature "parquet" (command-line)
+        |   |-- tessera-cli feature "sql" (command-line)
+        |   |-- tessera-ingest feature "arrow" (command-line)
+        |   |-- tessera-ingest feature "csv" (command-line)
+        |   |-- tessera-ingest feature "default" (command-line) (*)
+        |   |-- tessera-ingest feature "npy" (command-line)
+        |   |-- tessera-ingest feature "npz" (command-line) (*)
+        |   |-- tessera-ingest feature "parquet" (command-line) (*)
+        |-- tessera-cli vWORKSPACE
+        |-- tessera-ingest vWORKSPACE
+    `-- tessera-ingest vWORKSPACE (*)
+    `-- tessera-io feature "default" (command-line)
+    |   `-- tessera-cli feature "cloud" (command-line)
+    |-- tessera-io feature "cloud" (command-line)
+[dev-dependencies]
+`-- tessera-cli vWORKSPACE (*)
+`-- tessera-io vWORKSPACE
+`-- zip feature "flate2"
+zip v2.4.2
+|       `-- tessera-ingest vWORKSPACE (*)
+|   `-- zip feature "deflate-flate2"
+|-- zip feature "_deflate-any"
+|-- zip feature "deflate-flate2" (*)

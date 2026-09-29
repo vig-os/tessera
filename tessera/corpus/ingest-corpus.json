@@ -1,9 +1,10 @@
 {
   "expected_counts": {
-    "all-features": 9,
-    "default": 9,
-    "full": 9,
-    "parquet-no-csv": 7
+    "all-features": 14,
+    "default": 14,
+    "full": 14,
+    "parquet-no-csv": 7,
+    "parquet-npy-no-npz": 11
   },
   "fixtures": [
     {
@@ -169,6 +170,87 @@
         "name": "rust-csv",
         "version": "=1.4.0",
         "features": "blake3:adadbe5d5e5a240b48a088db3fc31d296ffecfd5b7a09b10b639a446674fac8f"
+      }
+    },
+    {
+      "name": "ingest_npy_endianness_le",
+      "product": "array",
+      "requires": [
+        "npy"
+      ],
+      "hazards": [
+        "H6"
+      ],
+      "id": "blake3:1614b7a8399e0c6327d2a35a49b8a59f77df5389ceb4705b6a9e2aa775abdd97",
+      "content_hash": "blake3:4c0a43d0a74ad15d5a75c8a6118f8dd6e07891dd079aed03c307c0f637200ded",
+      "manifest_hash": "blake3:87466a9b2fe72134489d976189aa5758a017ea3991f7de6cae39fe946e4be14a",
+      "ingest_decoder": {
+        "name": "tessera/npy"
+      }
+    },
+    {
+      "name": "ingest_npy_endianness_be",
+      "product": "array",
+      "requires": [
+        "npy"
+      ],
+      "hazards": [
+        "H6"
+      ],
+      "id": "blake3:896c78936fb7b801f1bc372306726d538c4170a914b90d147530b7337fa6e0e3",
+      "content_hash": "blake3:4c0a43d0a74ad15d5a75c8a6118f8dd6e07891dd079aed03c307c0f637200ded",
+      "manifest_hash": "blake3:10982f926fdddaf0e4f86a25e040ea22d48d7fa7b32cb8cb017212f589d31fe2",
+      "ingest_decoder": {
+        "name": "tessera/npy"
+      }
+    },
+    {
+      "name": "ingest_npy_fortran",
+      "product": "array",
+      "requires": [
+        "npy"
+      ],
+      "hazards": [
+        "H11"
+      ],
+      "id": "blake3:c7aeeed5a72278097e8526d9dcdd1de46101258c80785fa2b5ebcbd2f63c872d",
+      "content_hash": "blake3:4197bce3d3ffe9bcea14664069e0fed8623d3bf19e0e6b485af77fb91e1fbe01",
+      "manifest_hash": "blake3:a411ef2daa4421915d338f9165443ca3c332036cbe2cf547e469bc465851bee5",
+      "ingest_decoder": {
+        "name": "tessera/npy"
+      }
+    },
+    {
+      "name": "ingest_npy_structured",
+      "product": "table",
+      "requires": [
+        "npy"
+      ],
+      "hazards": [
+        "H11"
+      ],
+      "id": "blake3:9e86cc719308581ef9a3066db1d9ca30ee0edecac62b1ffe7ed8c8295b64b4c0",
+      "content_hash": "blake3:a3d8688aaa71a1318f920033ccbd3bc261b5d14b6e0d53c1700afe7b428e5c10",
+      "manifest_hash": "blake3:01c5966138b5a42b38dba8db3c3b0073d1740d4c295ce822018bcbb0c0161a1a",
+      "ingest_decoder": {
+        "name": "tessera/npy"
+      }
+    },
+    {
+      "name": "ingest_npz_member",
+      "product": "array",
+      "requires": [
+        "npz"
+      ],
+      "hazards": [
+        "H9"
+      ],
+      "id": "blake3:130378530be6153a668972e4f48e666d7aa09345300ff44cf840594b585d35e2",
+      "content_hash": "blake3:27d36426f6dc2970ec2691ba0f25a39e644192d35aedc07c920d7adcea952bff",
+      "manifest_hash": "blake3:a76afcda067db3075b120abd46cc5a9889e862e34d1087d9c5159d26efb5c776",
+      "ingest_decoder": {
+        "name": "tessera/npz",
+        "features": "blake3:14f0e6af539443f281a1664baa90e77ee5517bb0f9ed0b898a3443406ba2828a"
       }
     }
   ]

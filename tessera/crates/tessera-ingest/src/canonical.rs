@@ -91,6 +91,10 @@ pub mod transform {
     /// what the values mean: a reader comparing back to the source cannot otherwise tell a NULL from
     /// the literal string `NA`.
     pub const CSV_NULL_TOKENS: &str = "csv_null_tokens";
+    /// A Fortran-ordered (column-major) source buffer rewritten to C order (ADR-0056 §11).
+    pub const FORTRAN_TO_C_ORDER: &str = "fortran_to_c_order";
+    /// An interleaved record array de-interleaved into columns — the #193 transpose, one format over.
+    pub const RECORD_DEINTERLEAVE: &str = "record_deinterleave";
 }
 
 fn he(e: impl std::fmt::Display) -> Error {
@@ -479,6 +483,58 @@ pub fn to_table_product(
     Ok((b.seal()?, vec![payload]))
 }
 
+/// Seal a canonicalised dense grid as a generic `array` product (ADR-0056 §7's builtin schema).
+///
+/// The array twin of [`to_table_product`], and deliberately the same shape: the same `GenericIngest`
+/// options, the same sealed decoder record, the same `ingested_from` edge, the same `source_format`
+/// field. ADR-0057 §1's note that "the array lane needs no `arrow` dependency at all" is why the two
+/// are separate functions rather than one generic over the primitive — but everything *around* the
+/// payload has to stay identical, or the two lanes would drift into producing differently-shaped
+/// products for the same operator input.
+///
+/// `transforms` comes from the decoder rather than a `CanonicalTable`, because an array has no
+/// per-column boundary to accumulate them at — the whole grid is one value space.
+pub fn to_array_product(
+    spec: &tessera_core::block::array::ArraySpec,
+    data: &tessera_io::array::ArrayData,
+    transforms: &[IngestTransform],
+    opts: &GenericIngest<'_>,
+) -> Result<(Manifest, Vec<BlockPayload>)> {
+    if !opts.column_meta.is_empty() {
+        // `--column-meta` annotates COLUMNS. Silently ignoring it on an array would let an operator
+        // believe they had classified something (ADR-0056 §7's whole concern), so it is an error that
+        // names the alternative.
+        return Err(he(
+            "--column-meta describes table columns and an array has none; annotate the array's \
+             sample values instead with the array spec's own unit/scale, or attach product metadata \
+             with --meta",
+        ));
+    }
+    let (block_ref, payload) = tessera_io::array::array_block(GENERIC_BLOCK, spec, data)?;
+    let mut b = ProductBuilder::new("array", opts.name, opts.description, opts.timestamp);
+    b.add_block_ref(block_ref);
+    b.with_field(
+        "source_format",
+        serde_json::Value::String(opts.source_format.to_string()),
+    );
+    b.with_generation(opts.decoder.record_into(opts.generation.clone()));
+    if !transforms.is_empty() {
+        b.with_ingest_transform(transforms.to_vec());
+    }
+    let source_ref = opts
+        .source_label
+        .map(str::to_string)
+        .unwrap_or_else(|| opts.source_path.display().to_string());
+    b.add_source(crate::provenance::ingested_from(
+        &[opts.source_path],
+        source_ref,
+    )?);
+    for s in opts.extra_sources {
+        b.add_source(s.clone());
+    }
+    Ok((b.seal()?, vec![payload]))
+}
+
 /// Parse a `name:dtype` column declaration (the CSV lane's `--column`, ADR-0056 §8).
 ///
 /// Accepts the fd5 numpy-style codes the table backend already speaks (`i1 i2 i4 i8`, `u1 u2 u4 u8`,
@@ -605,6 +661,50 @@ pub fn sniff_table_format(path: &std::path::Path) -> Result<Option<&'static str>
         )));
     }
     Ok(None)
+}
+
+/// Identify an **array**-shaped source from its magic bytes (ADR-0056 §4).
+///
+/// `.npy` opens with `\x93NUMPY`; `.npz` is a zip, so it opens with `PK\x03\x04`. Both are unambiguous,
+/// which means the array lane needs no `--from` in the common case — and, as in the table lane, the
+/// extension is never consulted (§9: sniffing it "trains users into a habit that breaks the moment the
+/// extension lies").
+pub fn sniff_array_format(path: &std::path::Path) -> Result<Option<&'static str>> {
+    use std::io::Read;
+    let mut f =
+        std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
+    let mut head = [0u8; 8];
+    let n = f
+        .read(&mut head)
+        .map_err(|e| he(format!("read {}: {e}", path.display())))?;
+    let head = &head[..n];
+    if head.starts_with(b"\x93NUMPY") {
+        return Ok(Some("npy"));
+    }
+    // Any zip: a `.npz` is a zip of `.npy` members, and the member check happens when it is opened.
+    if head.starts_with(b"PK\x03\x04") || head.starts_with(b"PK\x05\x06") {
+        return Ok(Some("npz"));
+    }
+    Ok(None)
+}
+
+/// The error for an array source whose format could not be sniffed.
+pub fn unknown_array_format_error(path: &std::path::Path) -> Error {
+    he(format!(
+        "cannot tell what kind of array {} is — no NumPy (\\x93NUMPY) or zip/.npz (PK) magic bytes, and \
+         Tessera does not guess from the extension.\n  \
+         say so explicitly:\n    \
+           tessera ingest array {} <OUT> --from npy\n    \
+           tessera ingest array {} <OUT_DIR> --from npz\n  \
+         a headerless binary needs its geometry, which only you know:\n    \
+           tessera ingest --spec …   # format = \"raw\", with shape + dtype\n  \
+         or preserve it opaquely, losing query but keeping every byte:\n    \
+           tessera ingest blob {} <OUT> …",
+        path.display(),
+        path.display(),
+        path.display(),
+        path.display()
+    ))
 }
 
 /// The error for a source whose format could not be sniffed (ADR-0056 §4: `--from` is required when

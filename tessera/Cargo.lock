@@ -6672,6 +6672,7 @@ dependencies = [
  "tessera-io",
  "toml 0.8.23",
  "tracing",
+ "zip",
 ]
 
 [[package]]
@@ -8560,6 +8561,7 @@ dependencies = [
  "crc32fast",
  "crossbeam-utils",
  "displaydoc",
+ "flate2",
  "indexmap",
  "memchr",
  "thiserror 2.0.18",

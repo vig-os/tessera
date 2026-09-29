@@ -88,11 +88,38 @@ Array data comes out as CSV, TSV, JSON, NumPy `.npy` or a PNG preview — see
 [Arrays](./arrays.md#output-formats). Tables come out as CSV/TSV/NDJSON, or via SQL — see
 [Tables & SQL](./tables-sql.md).
 
-## Not yet: generic `table` / `array` ingest
+## 4. Your own data: generic `table` / `array` ingest
 
-The verbs above are all *vendor* decoders. A generic "here is a Parquet file / a `.npy` / an Arrow table,
-make it a product" path is designed (ADR-0056) and in progress, but **is not on `dev` yet**, so it is
-deliberately not documented here — a cookbook that lists flags you cannot run is worse than one that
-admits the gap. Track it at
-[#386](https://github.com/vig-os/tessera/issues/386). Until then, the Python `Builder` in §2 is the
-supported way to turn in-memory arrays and columns into a product without an intermediate vendor file.
+The verbs in §1 are all *vendor* decoders. These two are not: they take a file you already have — a
+Parquet table, an Arrow file, a CSV, a NumPy `.npy`/`.npz` — and normalise it into a product, with no
+vendor format involved.
+
+The verb names the **primitive, not your file format**, because the primitive is what the product *is*:
+
+- rows of typed fields → `tessera ingest table`
+- a dense numeric grid → `tessera ingest array`
+- neither, or not ready to decide → `tessera ingest blob` (§1)
+
+That is also how you override a file that misrepresents its shape: a NumPy *structured* array is a
+table, not an array, and a Parquet full of flattened volumes is still volumes. Name the primitive you
+actually have — Tessera will not argue, but it will never *guess*, because nothing in the bytes
+distinguishes a 2-D image from an N-row × M-column table.
+
+The transcript below runs on every build, like the rest of this chapter:
+
+{{#include ../../../tessera/crates/tessera-cli/tests/cmd/cookbook_generic.trycmd}}
+
+Two things worth pulling out:
+
+- **Your source's physical encoding does not survive, and that is the point.** Ingest is a *logical*
+  re-encode through Tessera's own deterministic codecs, so a snappy Parquet, a zstd Parquet, an Arrow
+  IPC file and the CSV that `duckdb COPY` made from it all seal the **same** `content_hash`. There is a
+  CI gate that checks exactly that, across three independent writers (pyarrow, polars, DuckDB).
+- **CSV is inference-free on purpose.** An inferred schema depends on which rows got sampled, so the
+  same file could seal two different ways — and a seal has to be reproducible. `--column NAME:DTYPE` is
+  required, positional, and cross-checked against the header, so a wrong order is an error rather than
+  every value landing one column over.
+
+For the full treatment — the type map and what it refuses, attaching units and PHI tiers inside the seal
+with `--column-meta`, why unclassified columns are stamped `unknown` rather than `public`, and the
+`.npz` multi-array route — see [Ingesting your own data](./ingest-your-own-data.md).

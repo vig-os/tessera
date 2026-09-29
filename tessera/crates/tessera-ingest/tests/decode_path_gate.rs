@@ -197,7 +197,10 @@ fn the_lanes_are_derived_from_the_capability_features() {
     let names: Vec<&str> = lanes.iter().map(|(l, _)| l.as_str()).collect();
     assert_eq!(
         names,
-        vec!["arrow", "csv", "parquet"],
+        // `npz` is a lane; `npy` deliberately is NOT — it enables no `dep:`, because the `.npy`
+        // parser is in-tree, so there is no third-party decode path for it to have (ADR-0056 #386
+        // amendment). That asymmetry is the point of the split, so it is asserted rather than assumed.
+        vec!["arrow", "csv", "npz", "parquet"],
         "the derived lane set changed — if a capability feature was added or renamed, the decoder \
          constants in `decoder.rs` need the matching `TESSERA_DECODE_PINS_<LANE>` env var"
     );

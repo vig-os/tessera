@@ -5,7 +5,7 @@
 ```
 $ tessera info
 tessera [..]
-backends:   arrow [..] · blob · blob-series · csv [..] · dicom [..] · dicom-series [..] · hdf-compound [..] · nifti · parquet [..] · raw
+backends:   arrow 58.3.0 · blob · blob-series · csv 1.4.0 · dicom 0.9.1 · dicom-series 0.9.1 · hdf-compound 1.14.6 · nifti · npy · npz-member 2.4.2 · parquet 58.3.0 · raw
 disabled:   (none)
 build:      static-hdf5=[..] · cloud=[..] · sql=[..]
 
@@ -62,8 +62,15 @@ $ tessera info --json
       "name": "nifti"
     },
     {
+      "name": "npy"
+    },
+    {
+      "name": "npz-member",
+      "version": "2.4.2"
+    },
+    {
       "name": "parquet",
-      "version": "[..]"
+      "version": "58.3.0"
     },
     {
       "name": "raw"
@@ -71,9 +78,9 @@ $ tessera info --json
   ],
   "backends_disabled": [],
   "build": {
-    "cloud": [..],
-    "sql": [..],
-    "static-hdf5": [..]
+    "cloud": false,
+    "sql": false,
+    "static-hdf5": false
   },
   "ingest_decode": {
     "arrow-rs/arrow-ipc": {
@@ -85,6 +92,13 @@ $ tessera info --json
       "features": "v2;pins=[..]"
     },
     "rust-csv": {
+      "digest": "blake3:[..]",
+      "features": "v2;pins=[..]"
+    },
+    "tessera/npy": {
+      "in_tree": true
+    },
+    "tessera/npz": {
       "digest": "blake3:[..]",
       "features": "v2;pins=[..]"
     }

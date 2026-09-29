@@ -422,6 +422,37 @@ closed here, and ADR-0057 Gate A is what would catch a resulting value differenc
 source, not its resolved features. The residual below stands, and ADR-0057 Gate A — which regenerates the
 corpus under four feature configurations including `--all-features` — remains what guards it.
 
+### Amendment (#386) — an **in-tree** decoder records a name and deliberately nothing else
+
+The `.npy` lane is the first whose decoder is *our own code*: §12 declined `ndarray-npy` because "NPY is
+a header parse plus a memcpy", so there is no third-party crate on that path to pin. That makes two of
+the triple's three components inapplicable, and the honest record omits both rather than inventing them.
+
+**The record is `{"name": "tessera/npy"}`.**
+
+- **No version.** The only version available would be *ours*, and the #477 pre-image deliberately
+  excludes our version because "our software version moves on every release, which would re-introduce
+  the corpus churn ADR-0052 §1 removed". Putting it in the triple instead would recreate that churn one
+  field over: every release would move the `manifest_hash` of every `.npy` product with nothing having
+  changed about how the bytes were read. Pinning *which* in-tree parser ran is still worth having, but
+  it needs an identity that does not move per release — a digest over the parser's own sources — which
+  is #508 rather than something the version string can solve.
+- **No feature digest.** A digest over an empty pre-image is *identical for every build*, which is a
+  false claim of sameness between builds that may differ. Absence is the same choice §6a already makes
+  for a crates.io build with no workspace lockfile.
+
+**`.npz` is a separate lane, not a flag on `.npy`.** It is the same in-tree member parser reached through
+a zip archive, so `zip` is third-party code on that path — and on no other. While the two shared one
+Cargo feature, every plain `.npy` seal committed to a zip library that had never touched its bytes, which
+is #477's defect exactly (a parquet seal committing to `zip`) one scale down. Two lanes, two records:
+`tessera/npy` names nobody, `tessera/npz` pins the archive reader.
+
+This generalises: **a lane's record names the third-party code that read the bytes, and when that set is
+empty the record says so by being short.** The gate that enforces per-lane distinctness therefore
+tolerates exactly one digest-less lane and fails on a second, because two of them would be
+indistinguishable in the seal — which is the property #477's amendment exists to protect.
+
+
 ### Findings that survive from the earlier passes
 
 **Finding 1 — `content_hash` is a function of extracted values, not of the decoder.** §2 decided there
@@ -1201,6 +1232,35 @@ H5's coverage is the two unit tests that construct a values buffer plus a separa
 which the hazard can occur, and only reachable at the in-memory arrow boundary. A hazard label on a fixture
 that cannot fail for that reason is worse than an omission: `every_live_hazard_has_a_fixture` would then
 certify a blind spot.
+
+### (i) The array lane, and the one place the primitive depends on the file
+
+`.npy` and `.npz` complete P1's §11 rows. Three notes:
+
+- **Byte order is the clean lane, Fortran order is the recorded one**, and the distinction is forced by
+  §5's own fixture. H6 asks that "a `>f8` file and its `<f8` twin must seal identically" — so the
+  byte-swap cannot be recorded, because a transform record would make the twins differ in the seal.
+  A Fortran reorder *is* recorded, because it rewrites the buffer and a reader comparing back to the
+  source needs to know. The buffer is rewritten rather than the shape reversed: reversing the shape would
+  make the **axes** wrong instead of the bytes, which reads back transposed with no record of why.
+- **A structured dtype is the one case where the primitive depends on the FILE, not the format.** §1 says
+  the shape of the data decides, and a NumPy record dtype is rows of typed fields — so `ingest array`
+  seals a `table`. The spec declares `array` and `validate` accepts `table` for this backend alone,
+  because an operator cannot know their own dtype without opening the file, and the CLI reports the
+  primitive it *sealed* rather than the one that was asked for.
+- **A `.npz` is a collection, keyed on the source kind rather than the member count.** §11 makes it one
+  array product per member (§10's shape rule one level up: archive members are independent arrays, not
+  slices of one grid). The expansion names each member explicitly in the spec, so the spec stays an
+  honest archival record. And a one-member archive is still a collection — branching on the count would
+  make the output a file or a directory depending on the data.
+
+The whole array lane costs **zero new dependencies**: §12's "NPY is a header parse plus a memcpy" holds,
+and the `.npz` reader is the `zip` crate already present for the `.tsra` container. Choosing its features
+turned up something worth recording: **`zip` was missing from ADR-0057 Gate B's snapshot list**, which is
+exactly the blind spot §5's own note warns about — the crate that frames every sealed byte was unwatched.
+Adding it immediately paid for itself, by showing that zip's umbrella `deflate` feature drags in the
+zopfli **compressor** for a capability nothing uses (we only read). `deflate-flate2` + `flate2` gets the
+decompressor alone.
 
 ### What the corpus pins, and one thing it deliberately does not
 
