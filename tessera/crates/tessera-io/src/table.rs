@@ -1536,6 +1536,100 @@ mod tests {
     use super::*;
     use tessera_core::block::table::Column;
 
+    /// Encode one `i64` column through **vortex only**, with the stock strategy — no tessera types,
+    /// no `deterministic_table_compressor`. Used by the #468 reproducer so the finding cannot be
+    /// mistaken for something our compressor configuration causes.
+    fn encode_bare_i64_via_vortex(values: &[i64]) -> Vec<u8> {
+        let rt = CurrentThreadRuntime::new();
+        let s = new_session(&rt);
+        let arr: ArrayRef = Buffer::copy_from(values).into_array();
+        let mut buf = ByteBufferMut::empty();
+        rt.block_on(
+            s.write_options()
+                // Deliberately NOT `deterministic_table_compressor()`: the point is that the stock
+                // strategy diverges too.
+                .with_strategy(WriteStrategyBuilder::default().build())
+                .write(&mut buf, arr.to_array_stream()),
+        )
+        .expect("vortex write");
+        buf.freeze().to_vec()
+    }
+
+    /// **#468 — a KNOWN UPSTREAM LIMITATION, pinned so it cannot be forgotten.**
+    ///
+    /// vortex 0.75.0 writes **different container bytes** for an integer column whose encoding
+    /// produces *patches*, depending on whether `debug_assertions` is enabled. The minimal case is
+    /// `[i64::MIN, 0, i64::MAX]`: it zigzags to `[u64::MAX, 0, u64::MAX - 1]`, which bitpacks with
+    /// exactly one exception, and the file comes out 2796 bytes with `debug_assertions` on and 2772
+    /// with it off — a constant 24-byte delta, stable across runs within a profile.
+    ///
+    /// The cause is an **assertion with a side effect**: `vortex-array/src/patches.rs` guards patch
+    /// construction with a `#[cfg(debug_assertions)]` `is_sorted(&indices, …)` check, and evaluating
+    /// that aggregate executes and annotates the indices array, which the written container then
+    /// reflects. `overflow-checks` and the optimisation level are measured to have **no** effect; the
+    /// axis is `debug_assertions` alone.
+    ///
+    /// Why this matters for us: `content_hash` is a blake3 root over these bytes, so the sealed
+    /// identity of a product stops being a function of only its data. Release builds all agree with
+    /// each other, so *shipped* binaries are mutually consistent; a debug-built tool disagrees with
+    /// them. See ADR-0057 §5 — "a determinism argument about the codec does not cover the container".
+    ///
+    /// **This test asserts the bug is STILL PRESENT, so it fails when upstream fixes it.** That
+    /// failure is the signal to drop whatever fixtures have been narrowed to avoid the shape and put
+    /// the integer extremes back. (At the time of writing that is the generic-ingest corpus's scalars
+    /// fixture, which arrives with the ingest lane and is not part of this crate — hence no reference
+    /// to it by name here, so this comment stays true wherever it is read.) A `#[ignore]` would let the
+    /// upstream fix land unnoticed and leave those fixtures permanently weakened.
+    #[test]
+    fn known_limitation_468_full_span_int_container_bytes() {
+        let pathological = encode_bare_i64_via_vortex(&[i64::MIN, 0, i64::MAX]);
+
+        // The lengths, not the hashes: a vortex bump legitimately moves bytes, and this test should
+        // fire for the *determinism* change rather than for every dependency update.
+        let expected = if cfg!(debug_assertions) { 2796 } else { 2772 };
+        assert_eq!(
+            pathological.len(),
+            expected,
+            "#468: expected {expected} bytes with debug_assertions={}. If both profiles now agree, \
+             upstream has FIXED this — delete this test and restore the full-span integer extremes in \
+             any fixture that was narrowed to avoid the shape (regenerating those goldens). If vortex \
+             was merely bumped, re-measure both profiles and check the divergence still exists.",
+            cfg!(debug_assertions)
+        );
+
+        // Same shape through OUR seal path: the divergence reaches `content_hash`, which is the
+        // reason this is a format problem and not a curiosity.
+        let sealed = encode(
+            &TableSpec {
+                columns: vec![col("x", "i8")],
+                rows: 3,
+                row_index: None,
+            },
+            &vec![("x".into(), ColumnData::I64(vec![i64::MIN, 0, i64::MAX]))],
+        )
+        .expect("encode");
+        assert_eq!(
+            sealed.len(),
+            if cfg!(debug_assertions) { 2940 } else { 2916 },
+            "#468 reaches the sealed table payload, not just a bare vortex write"
+        );
+
+        // A control that does NOT produce patches, and is byte-identical in both profiles. If this
+        // one ever diverges, the defect is broader than #468 describes.
+        assert_eq!(
+            encode_bare_i64_via_vortex(&[i64::MIN, i64::MAX]).len(),
+            2444
+        );
+
+        // Within a single profile the bytes must still be stable — #468 is cross-configuration, not
+        // nondeterminism. A failure here would be a much worse bug.
+        assert_eq!(
+            pathological,
+            encode_bare_i64_via_vortex(&[i64::MIN, 0, i64::MAX]),
+            "#468 is a cross-configuration divergence; within one build it must be reproducible"
+        );
+    }
+
     fn col(name: &str, dtype: &str) -> Column {
         Column {
             name: name.into(),
