@@ -38,9 +38,17 @@ const BLOCKS: &str = "blocks";
 ///
 /// Chosen over a `version` integer deliberately: a version only protects you if whoever adds the
 /// next field remembers to bump it, and #416 happened precisely because a field was added without
-/// its plumbing being finished. `deny_unknown_fields` needs no such discipline — every future field
-/// is covered the moment it exists, and the cost is that cross-version resume fails loudly, which
-/// is the correct outcome for a short-lived internal staging artifact that is cheap to redo.
+/// its plumbing being finished. The cost is that cross-version resume fails loudly, which is the
+/// correct outcome for a short-lived internal staging artifact that is cheap to redo.
+///
+/// **Scope: this covers TOP-LEVEL header fields only.** A new field added *inside* `Producer`,
+/// `Generation` or `Source` is still dropped silently on resume. That is deliberate, not an
+/// oversight: those are `tessera_core`'s own manifest types, so `deny_unknown_fields` on them would
+/// apply to **manifest** deserialization too and turn every future format field into a hard break
+/// for older readers — the exact forward-compatibility ADR-0058 relied on when it added `producer`
+/// and `generation` behind `#[serde(default)]`. The staging header can afford strictness because it
+/// is internal and short-lived; the sealed format cannot. Closing the nested gap needs a
+/// stage-local mirror of those structs, which is not worth it until a nested field actually exists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Header {
@@ -247,7 +255,17 @@ impl WriteSession {
     /// torn final line (partial write) fails to parse and is dropped — the watermark is the last
     /// fully-committed block — and the journal is rewritten to that clean prefix so appends resume.
     pub fn recover(dir: &Path) -> Result<Self> {
-        let header: Header = serde_json::from_slice(&fs::read(dir.join(HEADER))?)?;
+        // A header this build cannot parse in full is refused rather than silently narrowed (see
+        // [`Header`]); say what to do about it, since "unknown field" alone reads like corruption.
+        let header: Header = serde_json::from_slice(&fs::read(dir.join(HEADER))?).map_err(|e| {
+            Error::Invalid(format!(
+                "stage dir {} cannot be resumed by this build: {e}. It was most likely written by a \
+                 NEWER tessera whose header carries fields this one would drop — including sealed \
+                 provenance — so resuming would silently change the product. Re-run the ingest with \
+                 the newer build, or start a fresh stage dir with this one.",
+                dir.display()
+            ))
+        })?;
         let raw = fs::read_to_string(dir.join(JOURNAL))?;
         let mut blocks = Vec::new();
         let mut merkle = MerkleAccumulator::new();
