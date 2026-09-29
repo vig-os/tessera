@@ -111,11 +111,30 @@ def test_continuous_clock_runs_are_poisson_not_a_fixed_stride():
     )
 
 
-def test_continuous_floats_are_not_few_valued():
-    """The realistic fixture's e0/e1 come from a continuous distribution -- the property is the
-    DISTRIBUTION, not distinctness (#497 corrected that claim), so assert many values, not all."""
+def test_continuous_floats_really_are_continuous():
+    """The realistic fixture's e0/e1 must come from a continuous distribution.
+
+    An earlier version asserted only `> 1000` distinct values -- an arbitrary threshold weak enough
+    to PASS on a degenerate generator that produced 1143 distinct values in 1,000,000 draws (a
+    dropped XOR in xorshift64*). A categorical column wearing the "continuous" label is exactly the
+    #497 failure: the fixture that exists to be realistic quietly acquiring the adversarial property
+    of the one it is contrasted with. Assert a large FRACTION of n, not a magic constant.
+    """
     con = common.make_table("continuous")
-    assert len(np.unique(con["e0"])) > 1000
+    for col in ("e0", "e1"):
+        frac = len(np.unique(con[col])) / con[col].size
+        assert frac > 0.5, (
+            f"{col}: only {frac:.2%} distinct — not a continuous distribution"
+        )
+
+
+def test_continuous_energy_columns_are_independent():
+    """e1 was derived as `450 + 120*(1 - f)` from e0's own draw, making them perfectly
+    anti-correlated (r = -1.0). The second column then carried no information the first did not,
+    which no two-detector energy pair looks like and which flatters any format exploiting it."""
+    con = common.make_table("continuous")
+    r = float(np.corrcoef(con["e0"], con["e1"])[0, 1])
+    assert abs(r) < 0.05, f"e0/e1 correlation {r:.6f} — the columns are not independent"
 
 
 def test_make_table_rejects_an_unknown_fixture_name():

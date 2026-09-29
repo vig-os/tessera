@@ -87,8 +87,12 @@ def _xorshift64star(seed: int, n: int) -> np.ndarray:
     x = seed & mask
     out = np.empty(n, dtype=np.uint64)
     for i in range(n):
+        # All three steps are XOR-assignments. Writing the middle one as a plain assignment
+        # (`x = (x << 25) & mask`) drops 39 bits of state every iteration and the generator
+        # degenerates: it produced 1143 distinct values in 1,000,000 draws, which made the
+        # "continuous" fixture categorical -- the exact property it exists NOT to have.
         x ^= x >> 12
-        x = (x << 25) & mask
+        x ^= (x << 25) & mask
         x ^= x >> 27
         out[i] = (x * 0x2545F4914F6CDD1D) & mask
     return out
@@ -127,9 +131,17 @@ def make_table(kind: str = "periodic") -> dict:
     ticks = np.cumsum(gaps)
     t = np.searchsorted(ticks, np.arange(r), side="right").astype("<u8")
 
-    f = (raw[-r:] >> np.uint64(11)).astype(np.float64) / float(1 << 53)
-    e0 = (450.0 + 120.0 * f).astype("<f4")
-    e1 = (450.0 + 120.0 * (1.0 - f)).astype("<f4")
+    # e0 and e1 must be INDEPENDENT draws. Deriving e1 from e0 (`450 + 120*(1 - f)`) made them
+    # perfectly anti-correlated (r = -1.0): the second column carried no information the first did
+    # not, which is not what a two-detector energy pair looks like and flatters any format that
+    # happens to exploit it.
+    half = r // 2
+    g = _xorshift64star(0x9E3779B97F4A7C15, 2 * r)
+    f0 = (g[:r] >> np.uint64(11)).astype(np.float64) / float(1 << 53)
+    f1 = (g[r:] >> np.uint64(11)).astype(np.float64) / float(1 << 53)
+    del half
+    e0 = (450.0 + 120.0 * f0).astype("<f4")
+    e1 = (450.0 + 120.0 * f1).astype("<f4")
     return {"t": t, "e0": e0, "e1": e1}
 
 
