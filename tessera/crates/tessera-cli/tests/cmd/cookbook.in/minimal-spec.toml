@@ -1,0 +1,18 @@
+# The smallest useful ingest spec: one collection, one member. Run with
+#   tessera ingest --spec minimal-spec.toml --out ./study
+[collection]
+name = "DEMO-2024-01"
+timestamp = "2024-01-01T00:00:00Z"
+study = "DEMO-2024-01"
+
+[[product]]
+name = "console-export"
+role = "raw"          # raw | derived — drives WORM retention
+schema = "blob"       # the product kind (see the product-schema reference)
+format = "blob"       # how to read the input
+input = "notes.txt"
+
+# Per-product schema metadata. `blob` RECOMMENDS `study`, so set it here rather than
+# accept the WARN — `[collection] study` names the collection, not each member.
+[product.metadata]
+study = "DEMO-2024-01"

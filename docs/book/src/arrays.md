@@ -19,3 +19,36 @@ and ROI reads only touch the chunks they intersect — a single voxel decodes on
 Coordinates: an array optionally carries a voxel→world affine (`world_frame`, LPS mm); when present,
 `slice`/`stats` become world-aware (`--world`). When absent — as in this corpus fixture — the tools stay
 in index space rather than inventing coordinates.
+
+## Output formats
+
+`slice` and `project` write CSV by default, and four other shapes with `--format`:
+
+| `--format` | what you get |
+| --- | --- |
+| `csv` / `tsv` | one line per row — the default, fine for a plane you are eyeballing |
+| `json` | one self-describing object: the full `shape`, `dtype`, `source_dtype`, `rows_emitted`, `truncated` and the values |
+| `npy` | NumPy `.npy` (float64) — **the lossless path**; `np.load()` it directly |
+| `png` | 8-bit greyscale preview, auto-windowed on the plane's own min/max (`--window lo,hi` to override) |
+
+`npy` and `png` are binary, so they must be redirected — writing them to a terminal is refused rather
+than spewed:
+
+```console
+tessera slice ct.tsra volume --index "32,:,:" --format npy > plane.npy
+tessera project ct.tsra volume --axis z --format png  > mip.png
+```
+
+**`png` is a preview, not data.** Eight bits cannot hold a Hounsfield range, let alone a float activity
+map, so the mapping is lossy by construction. The window actually used and the source dtype are written
+into the PNG's `tEXt` chunks, so a preview that has been copied out of context still says what it is —
+and NaN/inf samples render as black, indistinguishable from the window's low end. Use `npy` when you
+mean the numbers.
+
+### The row cap
+
+Text output at an **interactive terminal** stops after 20 rows and tells you so on stderr — a preview, so
+a 512-wide plane cannot flood your scrollback. Piped or redirected output is **never** capped by default,
+because a script silently receiving 20 of 4097 rows is data loss rather than a courtesy. `--limit N` and
+`--all` apply anywhere; `--limit` with `npy`/`png` is an error, since a truncated binary artifact is
+corrupt rather than short.

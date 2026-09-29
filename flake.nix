@@ -55,7 +55,11 @@
             || (pkgs.lib.hasInfix "/docs/examples/" path)
             || (pkgs.lib.hasInfix "/docs/dictionaries/" path)
             || (pkgs.lib.hasInfix "/tests/cmd/" path)
-            || (pkgs.lib.hasInfix "/tests/feature-snapshots/" path);
+            || (pkgs.lib.hasInfix "/tests/feature-snapshots/" path)
+            # The GENERATED product-schema reference the book includes (#389). Its drift test compares
+            # this committed copy against `SchemaRegistry::builtin()`, so the file has to reach the
+            # sandbox — the `derived-docs` gate cannot do the job here because it runs without cargo.
+            || (pkgs.lib.hasInfix "/tests/derived-docs/" path);
           name = "source";
         };
         # Every feature declared anywhere in the workspace **except `static-hdf5`** (ADR-0057 §4), in
@@ -665,6 +669,9 @@
             # Docstring-vs-behaviour drift gate (#412): probes every dtype code against the live
             # module and asserts the accepted sets exactly match what the docstrings advertise.
             python3 ${./tessera/crates/tessera-py/tests/api_drift.py}
+            # The WRITE path as documentation (#389): the book `{{#include}}`s anchored regions of this
+            # script, so running it here means a snippet that stopped working cannot reach the docs.
+            python3 ${./tessera/crates/tessera-py/tests/write_example.py}
             touch $out
           '';
 
@@ -686,6 +693,8 @@
             python3 ${./tessera/crates/tessera-py/tests/smoke.py} ${./tessera/corpus/files}
             # Same drift gate as tessera-py-import, proven through the installed wheel.
             python3 ${./tessera/crates/tessera-py/tests/api_drift.py}
+            # …and the documented write path, so the book's example works through the real wheel too.
+            python3 ${./tessera/crates/tessera-py/tests/write_example.py}
             touch $out
           '';
 
