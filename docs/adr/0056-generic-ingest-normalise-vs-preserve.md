@@ -338,6 +338,64 @@ parked in an unauthenticated, silently-editable sidecar. That is a worse trade t
 saw. R1 also restores signature coverage — the bag is inside the manifest, so the decoder record is
 tamper-evident on disk and tape, not only over digest-pinned OCI.
 
+### Amendment (#477) — the digest is **per lane**, carries each crate's **source**, and its pre-image is **versioned**
+
+The triple's third component committed to the wrong slice of reality in three ways, all found after §6a
+landed. Fixing them moved every `manifest_hash` in the ingest corpus once, deliberately.
+
+**1. It was one global crate list for every lane.** Adding `zip` for the `.npz` lane moved the
+`manifest_hash` of every parquet and csv product, because a parquet seal committed to the presence of a zip
+library that had no part in reading it. Measured before the fix: all **9** ingest-corpus fixtures across
+**3** lanes carried the **same** digest, so it could not distinguish the Parquet decoder from the CSV one.
+Now one digest per lane, keyed off the capability features that already declare each lane's crates.
+
+**2. It read only `version` from the lockfile and ignored `source`.** A decode-path crate pinned to a git
+fork at the same version was indistinguishable from the registry release — the one question the digest
+exists to answer, wrong in exactly the case where someone deliberately changed a decoder's behaviour. This
+repo pins `vortex` to a fork, so the manoeuvre is established practice rather than hypothetical; it did not
+bite only because vortex is the *encoder* and correctly absent from the decode path. Now each pin records
+`crate=version` for a registry release and `crate=version@git+<url>#<rev>` otherwise, so a fork-free build's
+per-crate shape is unchanged and only a fork reads differently.
+
+**3. It omitted most of the decode path.** The hand-maintained list named 10 crates. The parquet lane's real
+closure holds 114, of which **41** can change a decoded value — and absent from the digest were `thrift` and
+`integer-encoding` (Parquet's footer, schema and page headers are Thrift), `flatbuffers` (Arrow IPC's wire
+format), and **every page codec**: `snap`, `zstd`, `brotli`, `flate2`, `lz4_flex`. Swapping a snappy
+implementation moved nothing. `chrono-tz` was absent too — the crate this very ADR names as hazard H1's
+mechanism. The digest now covers 41 crates for parquet, 24 for arrow-ipc and 3 for csv.
+
+**Membership cannot be derived, and that was measured rather than assumed.** Four successive derivations
+over this workspace: the full lockfile closure gives 114 crates for parquet (including `syn`, `cc`,
+`windows-*`); `cargo metadata` restricted to normal dependencies with proc-macro crates dropped gives 92
+(`syn` survives as a normal dependency *of* a proc-macro crate); never descending into a proc-macro subtree
+gives 85; additionally cutting the `iana-time-zone` subtree gives 77 — still containing `hashbrown`, `bytes`
+and `slab`. `hashbrown` is a genuine runtime dependency of the Parquet reader that provably cannot change a
+decoded value, and nothing in the dependency graph says so. The question is semantic.
+
+So the **candidate set** is derived and the **membership** is declared, with a gate requiring every
+candidate to be one or the other. That inversion is the substance of the fix: an unclassified crate now
+fails the build, where a forgotten one used to narrow the sealed claim in silence. Over-claiming costs
+visible churn; under-claiming was invisible, which is how three crates' worth accumulated.
+
+**The pre-image is now versioned (`v1` → `v2`).** This digest has been redefined three times — the crate's
+own feature set came out, `CARGO_PKG_VERSION` came out, and now this — and each earlier redefinition was
+silent, so a reader comparing digests across one would read "the decoder changed" when only the derivation
+had. The pre-image therefore begins `v2;`, and any future change bumps it. Three bytes, and the boundary
+becomes a declared fact instead of an inference.
+
+**No format-version bump.** No sealed field is added, removed or renamed; `features` remains an opaque
+digest whose pre-image *composition* is explicitly not part of the format contract (it is printed by
+`tessera info`, never declared in a schema). The only artefacts affected are the 9 ingest fixtures, and the
+migration is **self-verifying**: because `content_hash` is the Merkle root over *block digests* while the
+triple lives in the manifest's generation bag, regenerating must move 9 `manifest_hash`es and **zero**
+`content_hash`es. It did exactly that — 0/9 `id`, 0/9 `content_hash`, 9/9 `manifest_hash` — so if a
+`content_hash` had moved, the corpus gate would have said so and the change would have been wrong.
+
+**What this does not close.** A feature flipped *inside* the shared arrow tree by an unrelated crate (the
+`sql` → `arrow-array/chrono-tz` case) is still outside the digest: it records each crate's version and
+source, not its resolved features. The residual below stands, and ADR-0057 Gate A — which regenerates the
+corpus under four feature configurations including `--all-features` — remains what guards it.
+
 ### Findings that survive from the earlier passes
 
 **Finding 1 — `content_hash` is a function of extracted values, not of the decoder.** §2 decided there

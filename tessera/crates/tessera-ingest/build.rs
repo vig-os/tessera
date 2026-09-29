@@ -41,6 +41,11 @@
 
 use std::path::{Path, PathBuf};
 
+// The decode-path classification, shared verbatim with the library and the gate test so the digest and
+// the gate can never disagree about what the decode path is. `include!` rather than a module because a
+// build script is its own crate root and cannot `use` the crate it builds.
+include!("src/decode_path.rs");
+
 /// `(Cargo.lock package name, env var read via `option_env!`)`.
 ///
 /// Read by `backends::backend_version` (for `tessera info`) and — for the generic-ingest lane — by
@@ -55,34 +60,14 @@ const DECODERS: &[(&str, &str)] = &[
     ("csv", "TESSERA_DEP_CSV"),
 ];
 
-/// The crates whose pinned version goes into the ADR-0056 §6a **feature digest** pre-image — i.e.
-/// everything on the *decode* path of the generic-ingest lanes.
-///
-/// Deliberately not "every dependency": the digest answers "which decoder interpreted these bytes",
-/// and widening it to the whole graph would make the digest move on changes that provably cannot
-/// touch a decoded value, turning every `cargo update` into a recipe event for no information gain.
-const DECODE_PATH_CRATES: &[&str] = &[
-    "parquet",
-    "arrow-array",
-    "arrow-buffer",
-    "arrow-data",
-    "arrow-schema",
-    "arrow-ipc",
-    // Pulled by parquet's `arrow` feature and used by its reads.
-    "arrow-select",
-    "csv",
-    // `csv-core` is where the RFC-4180 state machine actually lives; `csv` is the wrapper around it.
-    "csv-core",
-    // `half` decodes `Float16` (the §2 `f16_widen` lane) and carries the f2 array dtype.
-    "half",
-];
-
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
+    println!("cargo::rerun-if-changed=src/decode_path.rs");
+    println!("cargo::rerun-if-changed=Cargo.toml");
     println!("cargo::rerun-if-env-changed=DEP_HDF5_ROOT");
 
     emit_decoder_pins();
-    emit_decode_feature_preimage();
+    emit_decode_feature_preimages();
 
     // Only relevant for the vendored-static build; a no-op for the default pkg-config path (where
     // hdf5-metno-sys does not emit `root`, so DEP_HDF5_ROOT is unset).
@@ -106,65 +91,60 @@ fn emit_decoder_pins() {
         return;
     };
     for (package, var) in DECODERS {
-        if let Some(version) = lock_version(&lock, package) {
+        if let Some((version, _source)) = lock_pin(&lock, package) {
             println!("cargo::rustc-env={var}={version}");
         }
     }
 }
 
-/// Emit the ADR-0056 §6a decoder-digest **pre-image**: the `=`-pinned version of every crate on the
-/// generic-ingest decode path.
+/// Emit one ADR-0056 §6a decoder-digest **pre-image per ingest lane** (#477).
+///
+/// Per lane, because the digest answers "which decoder interpreted *these* bytes": a parquet product has
+/// no business committing to the zip library the `.npz` lane gained, and before this it did — adding that
+/// dependency moved the `manifest_hash` of every parquet and csv product in the corpus.
+///
+/// The lanes and their root crates come from `[features]`, the candidate closure from `Cargo.lock`, and
+/// the membership from [`IN_DIGEST`] — see `decode_path` for why membership is declared rather than
+/// derived, and for the measurements behind that.
 ///
 /// # What is deliberately NOT in here, and why
 ///
-/// Two things were in an earlier version of this and were removed, because each made `manifest_hash`
+/// Two things were in earlier versions of this digest and were removed, because each made `manifest_hash`
 /// move for a reason that is not a difference in how the file was interpreted:
 ///
-/// - **This crate's resolved `CARGO_FEATURE_*` set.** It looked like the obvious reading of "resolved
-///   decode-relevant features", and it is the wrong one. Whether the *CSV* lane was compiled in has
-///   nothing to do with how a *Parquet* file was read — a lane that is off did not touch the bytes.
-///   Including it meant two builds of one version sealed different `manifest_hash`es for an identical
-///   input, which makes the format's own version identity a function of how the reader's binary was
-///   compiled. Caught by the `parquet-no-csv` corpus configuration, which is exactly what ADR-0057 §5's
-///   declared-count table exists to make someone look at.
-/// - **This crate's own `CARGO_PKG_VERSION`.** Tempting, because ADR-0056 leaves open that
-///   "`tessera-ingest`'s own canonicalisation code is attributed by nothing". But the workspace version
-///   moves on every release, so sealing it would make every release a conformance-corpus regeneration —
-///   re-introducing precisely the churn ADR-0052 §1 / #336 removed by stamping `TESSERA_VERSION` (the
-///   *format* version) rather than the software version. The gap stays open rather than closed at that
-///   price.
+/// - **This crate's resolved `CARGO_FEATURE_*` set.** Whether the *CSV* lane was compiled in has nothing
+///   to do with how a *Parquet* file was read — a lane that is off did not touch the bytes. Including it
+///   made the format's own version identity a function of how the reader's binary was compiled.
+/// - **This crate's own `CARGO_PKG_VERSION`.** The workspace version moves on every release, so sealing
+///   it would make every release a conformance-corpus regeneration — re-introducing exactly the churn
+///   ADR-0052 §1 / #336 removed by stamping the *format* version rather than the software version.
 ///
-/// What remains moves when, and only when, a decoder is bumped — which is what makes a decoder bump a
-/// recipe change and nothing else one.
-fn emit_decode_feature_preimage() {
-    // No lockfile (a crates.io build) means no pins can be read — and then the pre-image would be the
-    // bare string `pins=` for EVERY such build, so every one would seal an identical digest: a false
-    // claim of sameness between builds that may have resolved completely different decoders. Emitting
-    // nothing is the honest answer, and it is the same choice `version` already makes (absent rather
-    // than guessed). `decoder::to_value` then omits the `features` component entirely.
+/// Both remain out. What is now *in*, and was wrongly out, is the rest of each lane's decode path: the
+/// Thrift and FlatBuffers readers that parse Parquet's and Arrow IPC's own metadata, and every page codec.
+fn emit_decode_feature_preimages() {
+    // No lockfile (a crates.io build) means no pins can be read — and then every such build would seal an
+    // identical digest over an empty pre-image, a false claim of sameness between builds that may have
+    // resolved completely different decoders. Emitting nothing is the honest answer, and the same choice
+    // `version` already makes (absent rather than guessed).
     let Some(lock_path) = find_lockfile() else {
         return;
     };
     let Ok(lock) = std::fs::read_to_string(&lock_path) else {
         return;
     };
-    let mut pins: Vec<String> = Vec::new();
-    for c in DECODE_PATH_CRATES {
-        if let Some(v) = lock_version(&lock, c) {
-            pins.push(format!("{c}={v}"));
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let Ok(cargo_toml) = std::fs::read_to_string(Path::new(&manifest_dir).join("Cargo.toml"))
+    else {
+        return;
+    };
+    for (lane, roots) in lane_roots(&cargo_toml) {
+        if let Some(preimage) = lane_preimage(&lock, &roots) {
+            println!(
+                "cargo::rustc-env=TESSERA_DECODE_PINS_{}={preimage}",
+                lane.to_uppercase().replace('-', "_")
+            );
         }
     }
-    if pins.is_empty() {
-        // A lockfile naming none of the decode-path crates is not a build whose decoder we can
-        // describe. Same reasoning as above: say nothing rather than say "pins=".
-        return;
-    }
-    // Sorted by construction (`DECODE_PATH_CRATES` is walked in its declared order, which is fixed), so
-    // the pre-image depends only on the resolved versions — never on filesystem or env iteration order.
-    println!(
-        "cargo::rustc-env=TESSERA_INGEST_DECODE_PINS=pins={}",
-        pins.join(",")
-    );
 }
 
 /// Walk up from this crate's manifest to the nearest `Cargo.lock` (the workspace root).
@@ -177,30 +157,6 @@ fn find_lockfile() -> Option<PathBuf> {
             return Some(candidate);
         }
         dir = d.parent();
-    }
-    None
-}
-
-/// The `version` of one `[[package]]` entry in a `Cargo.lock`.
-///
-/// Hand-scanned rather than parsed with `toml`, to keep this build script dependency-free: adding a
-/// `[build-dependencies]` entry would move the resolved feature graph, which is a Gate B event
-/// (ADR-0057 §5) — a disproportionate price for reading one string. The lockfile's shape is fixed by
-/// cargo (`[[package]]`, then `name = "…"`, then `version = "…"`, one key per line, in that order)
-/// and contains no nested tables, so a scanner cannot mis-parse it.
-fn lock_version(lock: &str, package: &str) -> Option<String> {
-    let mut in_wanted_package = false;
-    for line in lock.lines() {
-        let line = line.trim();
-        if line == "[[package]]" {
-            in_wanted_package = false;
-        } else if let Some(name) = line.strip_prefix("name = ") {
-            in_wanted_package = name.trim_matches('"') == package;
-        } else if in_wanted_package {
-            if let Some(version) = line.strip_prefix("version = ") {
-                return Some(version.trim_matches('"').to_owned());
-            }
-        }
     }
     None
 }

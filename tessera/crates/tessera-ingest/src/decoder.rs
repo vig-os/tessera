@@ -75,6 +75,12 @@ pub struct Decoder {
     /// The `=`-pinned version read from the workspace lockfile at build time, or `None` when this
     /// crate was built without one (as a crates.io dependency). Absent rather than guessed.
     pub version: Option<&'static str>,
+    /// **This lane's** decode-path pre-image, emitted by `build.rs` (#477).
+    ///
+    /// Per lane, not global. The digest answers "which decoder interpreted *these* bytes", so a parquet
+    /// product must not commit to the zip library the `.npz` lane gained — which, while it was one global
+    /// list, it did: adding that dependency moved the `manifest_hash` of every parquet and csv product.
+    pub pins: Option<&'static str>,
 }
 
 impl Decoder {
@@ -82,17 +88,26 @@ impl Decoder {
     pub const PARQUET: Decoder = Decoder {
         name: "arrow-rs/parquet",
         version: option_env!("TESSERA_DEP_PARQUET"),
+        // The `parquet` feature's closure: the Parquet reader, the arrow tree it decodes through, the
+        // Thrift metadata reader, and every page codec.
+        pins: option_env!("TESSERA_DECODE_PINS_PARQUET"),
     };
     /// arrow-rs's IPC reader — Arrow IPC / Feather source files.
     pub const ARROW_IPC: Decoder = Decoder {
         name: "arrow-rs/arrow-ipc",
         version: option_env!("TESSERA_DEP_ARROW_IPC"),
+        // The `arrow` feature's closure — no `parquet`, and no Thrift.
+        pins: option_env!("TESSERA_DECODE_PINS_ARROW"),
     };
     /// The CSV lane. The `csv` crate tokenises RFC-4180 records; every *value* is parsed by Rust
     /// std's `str::parse`, so the tokenizer is the only third-party component there is to name.
     pub const CSV: Decoder = Decoder {
         name: "rust-csv",
         version: option_env!("TESSERA_DEP_CSV"),
+        // The `csv` feature's closure: three crates. ADR-0057 §5 sketched `csv = ["arrow", …]` and it
+        // turned out not to need arrow at all, so this lane's digest is genuinely tiny — and until #477
+        // it carried the whole arrow tree and `parquet` besides.
+        pins: option_env!("TESSERA_DECODE_PINS_CSV"),
     };
 
     /// The sealed JSON form of the triple.
@@ -108,7 +123,7 @@ impl Decoder {
         // workspace lockfile). A digest over an empty pre-image would be identical for every such
         // build — a false claim of sameness between builds that may have resolved different decoders —
         // so absence is the honest record, exactly as it is for `version`.
-        if let Some(digest) = feature_digest() {
+        if let Some(digest) = self.feature_digest() {
             m.insert("features".into(), digest.into());
         }
         serde_json::Value::Object(m)
@@ -125,29 +140,51 @@ impl Decoder {
     }
 }
 
-/// The pre-image the [`feature_digest`] is taken over — emitted verbatim by `build.rs`.
-///
-/// Shape: `pins=<crate=version,…>` over every crate on the generic-ingest decode path. Kept
-/// human-readable on purpose: a digest with no recoverable pre-image is an unfalsifiable label, which
-/// is the failure mode §6a rejected the profile id for. `tessera info --json` prints it.
-///
-/// **It contains no feature list and no version of ours**, and `build.rs` documents why: a lane that was
-/// not compiled in did not read the file, and this crate's software version moves on every release
-/// (which would re-introduce the corpus churn ADR-0052 §1 removed). Both were tried; both made
-/// `manifest_hash` move for a reason that was not a difference in interpretation.
-pub fn feature_preimage() -> Option<&'static str> {
-    option_env!("TESSERA_INGEST_DECODE_PINS")
+impl Decoder {
+    /// The pre-image this lane's digest is taken over — emitted verbatim by `build.rs`.
+    ///
+    /// Shape: `v2;pins=<crate>=<version>[@<source>],…` over the crates on **this lane's** decode path.
+    /// Kept human-readable on purpose: a digest with no recoverable pre-image is an unfalsifiable label,
+    /// which is the failure mode §6a rejected a profile id for. `tessera info --json` prints it.
+    ///
+    /// The `v2;` prefix is the derivation version. `v1` was the single global `pins=…`; this digest has
+    /// been redefined three times, and each earlier redefinition was silent, so a reader comparing digests
+    /// across one could not tell "the decoder changed" from "the digest is computed differently". It costs
+    /// three bytes to end that.
+    ///
+    /// **It contains no feature list and no version of ours** — see `build.rs` for why both were tried and
+    /// removed: a lane that was not compiled in did not read the file, and our software version moves on
+    /// every release, which would re-introduce the corpus churn ADR-0052 §1 removed.
+    pub fn feature_preimage(&self) -> Option<&'static str> {
+        self.pins
+    }
+
+    /// `blake3:` digest over [`Decoder::feature_preimage`] — the third component of the triple.
+    ///
+    /// Computed at runtime from a build-emitted string rather than in `build.rs`, because hashing there
+    /// would need a `[build-dependencies]` entry, and adding one moves the resolved feature graph — itself
+    /// an ADR-0057 Gate B event. A disproportionate price for hashing one short string with a crate we
+    /// already depend on.
+    pub fn feature_digest(&self) -> Option<String> {
+        self.pins.map(|p| tessera_core::hash::digest(p.as_bytes()))
+    }
 }
 
-/// `blake3:` digest over [`feature_preimage`] — the third component of the triple.
+/// Every lane **compiled into this build** that records a decoder triple — for `tessera info`, and for
+/// the gate that checks each lane's digest is distinct from the others'.
 ///
-/// Computed at runtime from a build-emitted string rather than in `build.rs`, because hashing there
-/// would need a `[build-dependencies]` entry, and adding one moves the resolved feature graph — which
-/// is itself an ADR-0057 Gate B event. A disproportionate price for hashing one short string with a
-/// crate we already depend on.
-pub fn feature_digest() -> Option<String> {
-    feature_preimage().map(|p| tessera_core::hash::digest(p.as_bytes()))
-}
+/// Gated by feature, because a lane that is not compiled in cannot have read anything and must not be
+/// reported as though it could. The pre-images themselves are derived from the *lockfile*, so they are
+/// feature-selection-invariant (§6a requires that — whether the CSV lane was compiled has nothing to do
+/// with how a Parquet file was read); what varies here is only which lanes exist to describe.
+pub const ALL: &[Decoder] = &[
+    #[cfg(feature = "parquet")]
+    Decoder::PARQUET,
+    #[cfg(feature = "arrow")]
+    Decoder::ARROW_IPC,
+    #[cfg(feature = "csv")]
+    Decoder::CSV,
+];
 
 #[cfg(test)]
 mod tests {
@@ -172,13 +209,102 @@ mod tests {
     }
 
     /// The pre-image must name the decoder pins — otherwise the digest is stable for the wrong reason
-    /// and would not move when a decoder did.
+    /// and would not move when a decoder did. It must also name the wire-format readers and the page
+    /// codecs, which #477 found absent: a Parquet file's metadata is Thrift and its pages are compressed,
+    /// so a digest that omits `thrift` and `snap` does not describe the decoder that read it.
     #[test]
-    fn the_preimage_names_the_decoder_pins() {
-        let p = feature_preimage().expect("a workspace build always emits the pre-image");
-        assert!(p.starts_with("pins="), "{p}");
-        assert!(p.contains("arrow-array=58."), "the arrow pin is named: {p}");
-        assert!(p.contains("parquet=58."), "the parquet pin is named: {p}");
+    fn the_preimage_names_this_lanes_decode_path() {
+        let p = Decoder::PARQUET
+            .feature_preimage()
+            .expect("a workspace build always emits the pre-image");
+        assert!(
+            p.starts_with("v2;pins="),
+            "the derivation version is declared: {p}"
+        );
+        for want in [
+            "parquet=58.",
+            "arrow-array=58.",
+            "thrift=",    // Parquet's footer / schema / page headers
+            "snap=",      // a page codec
+            "zstd=",      // ditto
+            "flate2=",    // ditto
+            "crc32fast=", // page checksums
+            "chrono-tz=", // §6a names this as hazard H1's mechanism
+        ] {
+            assert!(p.contains(want), "the parquet lane must pin {want}: {p}");
+        }
+    }
+
+    /// **Per lane, not global** — the defect #477 opened on. Each lane's pre-image covers its own decode
+    /// path and nothing else, so adding a dependency for one lane cannot move another lane's seal.
+    #[test]
+    fn each_lane_pins_only_its_own_decode_path() {
+        let csv = Decoder::CSV.feature_preimage().expect("workspace build");
+        let ipc = Decoder::ARROW_IPC
+            .feature_preimage()
+            .expect("workspace build");
+        let pq = Decoder::PARQUET
+            .feature_preimage()
+            .expect("workspace build");
+
+        // CSV reads text through `csv` + `csv-core` + memchr's scanners. ADR-0057 §5 sketched
+        // `csv = ["arrow", …]` and it turned out not to need arrow at all.
+        assert!(csv.contains("csv=") && csv.contains("csv-core="), "{csv}");
+        for absent in ["parquet=", "arrow-array=", "thrift=", "zstd="] {
+            assert!(
+                !csv.contains(absent),
+                "the csv lane never touched {absent}, so it must not commit to it: {csv}"
+            );
+        }
+        // Arrow IPC decodes FlatBuffers messages; it has no Parquet reader and no Thrift.
+        assert!(ipc.contains("flatbuffers="), "{ipc}");
+        assert!(!ipc.contains("parquet="), "{ipc}");
+        assert!(!ipc.contains("thrift="), "{ipc}");
+        // Parquet reads THROUGH arrow, so it is a superset of the IPC lane's readers.
+        assert!(
+            pq.contains("parquet=") && pq.contains("arrow-array="),
+            "{pq}"
+        );
+
+        // And therefore the three digests differ. Before #477 all three were identical, which is the
+        // whole defect in one assertion.
+        let digests: std::collections::BTreeSet<String> =
+            ALL.iter().filter_map(|d| d.feature_digest()).collect();
+        assert_eq!(
+            digests.len(),
+            ALL.len(),
+            "every lane must have its own digest"
+        );
+    }
+
+    /// A git-forked decode-path crate must be a different pin from the registry release at the same
+    /// version — #477's second finding. Latent today (no decode-path crate is forked), so the property is
+    /// tested on the pre-image builder rather than waiting for the first fork to expose it.
+    #[test]
+    fn a_git_source_makes_a_different_pin_than_the_registry_at_the_same_version() {
+        const REGISTRY: &str = r#"
+[[package]]
+name = "csv"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"#;
+        const FORK: &str = r#"
+[[package]]
+name = "csv"
+version = "1.3.1"
+source = "git+https://github.com/example/csv?rev=deadbeef#deadbeef"
+"#;
+        let roots = vec!["csv".to_string()];
+        let reg = crate::decode_path::lane_preimage(REGISTRY, &roots).expect("registry pin");
+        let fork = crate::decode_path::lane_preimage(FORK, &roots).expect("fork pin");
+        // A plain registry release keeps the bare shape, so adopting `source` moved nothing on the
+        // fork-free builds that already exist.
+        assert_eq!(reg, "v2;pins=csv=1.3.1");
+        assert!(fork.contains("@git+"), "a fork records its source: {fork}");
+        assert_ne!(
+            reg, fork,
+            "same version, different decoder — must not hash alike"
+        );
     }
 
     /// The pre-image must **not** name this build's feature selection or this crate's software version.
@@ -188,7 +314,9 @@ mod tests {
     /// the *interpretation of the file* did not, and `manifest_hash` is the format's version identity.
     #[test]
     fn the_preimage_is_invariant_to_feature_selection_and_to_our_own_version() {
-        let p = feature_preimage().expect("a workspace build emits the pre-image");
+        let p = Decoder::PARQUET
+            .feature_preimage()
+            .expect("a workspace build emits the pre-image");
         assert!(
             !p.contains("features="),
             "a lane that was not compiled in did not read the file, so it must not reach the seal: {p}"
