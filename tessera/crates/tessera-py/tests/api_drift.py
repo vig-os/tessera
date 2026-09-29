@@ -124,6 +124,37 @@ def main() -> int:
             "add_array accepts str — the docstrings document it as table-only; update both"
         )
 
+    # --- array codec knob (#522) -------------------------------------------------------------
+    # The docstring advertises exactly pcodec / zstd / auto. Probe each against the live module so
+    # the advertised set cannot drift from what the binding accepts -- and assert the REJECTION
+    # too, since silently accepting an unknown codec would be worse than not exposing the knob.
+    import numpy as _np
+
+    _vol = _np.arange(64, dtype="<i2")
+    accepted = set()
+    for _c in ("pcodec", "zstd", "auto", "lz4", "", "PCODEC"):
+        _b = tessera.Builder("r", "b", "probe", "2024-01-01T00:00:00Z")
+        try:
+            _b.add_array("v", "i2", [64], _vol.tobytes(), _c)
+            accepted.add(_c)
+        except tessera.TesseraError:
+            # ONLY a TesseraError counts as a rejection. A TypeError from a signature regression
+            # (say, the `codec` parameter disappearing) must fail loudly here, not be tallied as
+            # "correctly rejected" and leave the advertised set looking right.
+            pass
+    if accepted != {"pcodec", "zstd", "auto"}:
+        errors.append(
+            f"add_array codec set is {sorted(accepted)}, docstrings advertise "
+            "['auto', 'pcodec', 'zstd'] — update both"
+        )
+    try:
+        _b = tessera.Builder("r", "b", "probe", "2024-01-01T00:00:00Z")
+        _b.add_array("v", "i2", [64], _vol.tobytes())
+    except (tessera.TesseraError, TypeError) as _e:
+        errors.append(
+            f"add_array is no longer callable without an explicit codec: {_e}"
+        )
+
     for e in errors:
         print(f"DRIFT: {e}", file=sys.stderr)
     if not errors:

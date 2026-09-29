@@ -49,6 +49,17 @@ Dtype codes are the fd5 numpy codes without a byte-order prefix: `i2/i4/i8`, `u2
 (tables also allow `i1/u1`). Buffers are little-endian, C-order — pass
 `arr.astype(arr.dtype.newbyteorder("<")).tobytes()` if your array isn't already `<`.
 
+`add_array` takes an optional **`codec`**: `"pcodec"` (the default — best on acquisitions with
+detector noise), `"zstd"` (best on synthetic or highly repetitive data such as masks), or `"auto"`
+(encode with both, keep the smaller). Neither codec dominates — on a 256³ volume pcodec was 18%
+smaller on acquisition-shaped data and zstd 12% smaller on a synthetic ramp. The manifest always
+records the concrete codec; see the book's *Arrays* chapter for the measurements.
+
+```python
+b.add_array("mask", "u1", list(mask.shape), mask.tobytes(), codec="zstd")
+b.add_array("volume", "i2", list(vol.shape), vol.tobytes(), codec="auto")
+```
+
 ## Building
 
 The crate is part of the Tessera Nix workspace; `nix flake check` builds the `.so` and runs the
