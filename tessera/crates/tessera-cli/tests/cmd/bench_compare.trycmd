@@ -10,7 +10,12 @@ A tiny fixture keeps it fast; the real run uses the defaults.
 $ tessera bench compare --dataset volume --vol-n 64 --iters 1
 tessera bench compare — .tsra vs HDF5 (#388)
   data     volume 64^3 int16 = 512.0 KiB raw
-  method   median of 1 runs, spread = [min..max]; correctness asserted before timing
+  machine [..]
+  versions [..]
+  method   median of 1 runs, spread = [min..max]; EVERY timed read is verified against
+           the source data first (full, projected and ROI, per format and setting)
+  warm-up  none beyond the correctness pass: the verification read precedes the warm
+           timings, so warm rows start with the file in page cache; cold rows evict first
   cache    warm only (pass --cold to add best-effort cold-cache rows)
   note     Parquet lands once #460 puts the arrow/parquet crates on dev (#388 stage 2)
   CAVEAT   the synthetic data is a smooth gradient + monotonic counters (verbatim from the
@@ -34,16 +39,16 @@ HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volu
 HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  read full[..]
 HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  read ROI[..]
 HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  verify[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4                volume  size[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4                volume  write+seal[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4                volume  read full[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4                volume  read ROI[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4                volume  verify[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4, fletcher32    volume  size[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4, fletcher32    volume  write+seal[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4, fletcher32    volume  read full[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4, fletcher32    volume  read ROI[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4, fletcher32    volume  verify[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  size[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  write+seal[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  read full[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  read ROI[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  verify[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  size[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  write+sea[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  read full[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  read ROI[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  verify[..]
 
 What each row supports:
   size           smaller on disk than the alternatives
@@ -73,7 +78,18 @@ $ tessera bench compare --dataset table --rows 5000 --iters 1 --format json
   "cold_cache": false,
   "cold_method": "n/a",
   "cold_eviction": "n/a",
-  "kernel": "[..]",
+  "machine": {
+    "cpu": "[..]",
+    "cores": [..],
+    "ram": "[..]",
+    "bench_dir_fs": "[..]",
+    "kernel": "[..]"
+  },
+  "versions": {
+    "tessera": "[..]",
+    "libhdf5": "[..]"
+  },
+  "verification": "every timed read (full, projected, ROI) is compared against the source data, per format and setting, before its timings count",
   "volume_n": null,
   "table_rows": 5000,
   "caveat": "synthetic data (a smooth gradient + monotonic counters, verbatim from the #143 harness) is far more compressible than real acquisitions; size rows are a ratio BETWEEN formats on identical input, not a compression ratio for clinical data",
