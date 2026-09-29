@@ -1359,13 +1359,113 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
     Ok((level + 1) as usize)
 }
 
-/// Min / max / mean / std over an [`ArrayData`], computed in `f64` (one pass). Empty → all zero.
-fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize) {
-    macro_rules! reduce {
+/// Min / max / mean / std over an [`ArrayData`], plus the sample count and whether the reduction
+/// was **exact**.
+///
+/// **Integer dtypes reduce in exact integer arithmetic** (`i128`/`u128` sums, like
+/// [`ChunkStats`](tessera_core::chunk_index::ChunkStats)), not `f64`. That matters: an `f64` running
+/// sum stops accumulating once it passes 2^53, so a large volume silently loses the low bits of
+/// `sum`/`sum_sq` and reports a slightly wrong mean/std. Reducing the same way the chunk-index monoid
+/// does also makes this path agree BIT-FOR-BIT with `ChunkIndex::aggregate()`, which is what lets
+/// `stats` serve either source and claim `exact` for both (#347).
+///
+/// Two cases cannot be exact, and both report `false` rather than pretending:
+///   - **floats**, which have no exact integer form;
+///   - **64-bit integers whose `sum_sq` overflows the accumulator.** `i64::MAX²` is ~8.5e37 and
+///     `i128::MAX` is ~1.7e38, so three such samples overflow; `u64::MAX²` is ~3.4e38 against a
+///     `u128::MAX` of ~3.4e38, so two do. Narrower dtypes cannot overflow (`i32::MAX²` is 2^62, and
+///     you would need >2^65 samples), so they keep the unchecked fast path.
+///
+/// Empty → all zero, and exact.
+fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize, bool) {
+    /// Exact integer reduction for dtypes that provably cannot overflow `i128`.
+    /// The final `f64` conversions mirror `ChunkStats::mean`/`variance` exactly, so both paths
+    /// produce identical bits.
+    macro_rules! reduce_int {
         ($v:expr) => {{
             let n = $v.len();
             if n == 0 {
-                (0.0, 0.0, 0.0, 0.0, 0)
+                (0.0, 0.0, 0.0, 0.0, 0, true)
+            } else {
+                let mut mn = i64::MAX;
+                let mut mx = i64::MIN;
+                let mut sum: i128 = 0;
+                let mut sum_sq: i128 = 0;
+                for &x in $v.iter() {
+                    let x = x as i64;
+                    if x < mn {
+                        mn = x;
+                    }
+                    if x > mx {
+                        mx = x;
+                    }
+                    let x = x as i128;
+                    sum += x;
+                    sum_sq += x * x;
+                }
+                match moments_exact(sum, sum_sq, n) {
+                    Some((mean, std)) => (mn as f64, mx as f64, mean, std, n, true),
+                    // Cannot happen for these dtypes (see the overflow note above), but fail closed
+                    // rather than assume it.
+                    None => (mn as f64, mx as f64, f64::NAN, f64::NAN, n, false),
+                }
+            }
+        }};
+    }
+    /// Checked variant for 64-bit dtypes, where `sum_sq` genuinely can overflow. `None` on overflow,
+    /// so the caller can fall back to `f64` and label the result inexact instead of wrapping (release)
+    /// or panicking (debug) — both of which would be silent corruption of a reported statistic.
+    macro_rules! reduce_checked {
+        ($v:expr, $acc:ty, $lo:expr, $hi:expr) => {{
+            let n = $v.len();
+            if n == 0 {
+                Some((0.0, 0.0, 0.0, 0.0, 0, true))
+            } else {
+                let mut mn = $hi;
+                let mut mx = $lo;
+                let mut sum: $acc = 0;
+                let mut sum_sq: $acc = 0;
+                let mut ok = true;
+                for &x in $v.iter() {
+                    if x < mn {
+                        mn = x;
+                    }
+                    if x > mx {
+                        mx = x;
+                    }
+                    let w = x as $acc;
+                    match (
+                        sum.checked_add(w),
+                        w.checked_mul(w).and_then(|q| sum_sq.checked_add(q)),
+                    ) {
+                        (Some(a), Some(b)) => {
+                            sum = a;
+                            sum_sq = b;
+                        }
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    // `sum`/`sum_sq` fit; the variance numerator still might not, so this can
+                    // legitimately return None and send the caller to the f64 fallback.
+                    moments_exact(sum as i128, sum_sq as i128, n)
+                        .map(|(mean, std)| (mn as f64, mx as f64, mean, std, n, true))
+                } else {
+                    None
+                }
+            }
+        }};
+    }
+    /// The `f64` reduction — for float dtypes, and as the inexact fallback when an integer
+    /// accumulator overflows.
+    macro_rules! reduce_f64 {
+        ($v:expr, $exact:expr) => {{
+            let n = $v.len();
+            if n == 0 {
+                (0.0, 0.0, 0.0, 0.0, 0, true)
             } else {
                 let mut mn = f64::INFINITY;
                 let mut mx = f64::NEG_INFINITY;
@@ -1378,29 +1478,62 @@ fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize) {
                     sum += x;
                     sumsq += x * x;
                 }
-                let mean = sum / n as f64;
-                let var = (sumsq / n as f64) - mean * mean;
-                (mn, mx, mean, var.max(0.0).sqrt(), n)
+                let (mean, std) = moments_f64(sum, sumsq, n);
+                (mn, mx, mean, std, n, $exact)
             }
         }};
     }
     match d {
-        ArrayData::I8(v) => reduce!(v),
-        ArrayData::U8(v) => reduce!(v),
-        ArrayData::I16(v) => reduce!(v),
-        ArrayData::I32(v) => reduce!(v),
-        ArrayData::I64(v) => reduce!(v),
-        ArrayData::U16(v) => reduce!(v),
-        ArrayData::U32(v) => reduce!(v),
-        ArrayData::U64(v) => reduce!(v),
-        ArrayData::F32(v) => reduce!(v),
-        ArrayData::F64(v) => reduce!(v),
-        // f16/bool have no `as f64` cast — go through the lossless f64 view.
-        ArrayData::F16(_) | ArrayData::Bool(_) => {
+        ArrayData::I8(v) => reduce_int!(v),
+        ArrayData::U8(v) => reduce_int!(v),
+        ArrayData::I16(v) => reduce_int!(v),
+        ArrayData::I32(v) => reduce_int!(v),
+        ArrayData::U16(v) => reduce_int!(v),
+        ArrayData::U32(v) => reduce_int!(v),
+        ArrayData::Bool(v) => reduce_int!(v),
+        ArrayData::I64(v) => {
+            reduce_checked!(v, i128, i64::MIN, i64::MAX).unwrap_or_else(|| reduce_f64!(v, false))
+        }
+        ArrayData::U64(v) => {
+            reduce_checked!(v, u128, u64::MIN, u64::MAX).unwrap_or_else(|| reduce_f64!(v, false))
+        }
+        ArrayData::F32(v) => reduce_f64!(v, false),
+        ArrayData::F64(v) => reduce_f64!(v, false),
+        // f16 has no `as f64` cast — go through the lossless f64 view.
+        ArrayData::F16(_) => {
             let v = d.as_f64();
-            reduce!(v)
+            reduce_f64!(v, false)
         }
     }
+}
+
+/// Mean and population standard deviation from **exact integer** raw moments.
+///
+/// Delegates to [`ChunkStats`] so the decode path and the chunk-index path are the same arithmetic
+/// by construction and cannot drift. That means the variance is `(n·Σx² − (Σx)²) / n²` with the
+/// numerator in `i128`, NOT the textbook `E[x²] − E[x]²`: converting the moments to `f64` before
+/// subtracting two nearly-equal huge numbers cancels catastrophically — for `[10¹⁵, 10¹⁵+1]` the
+/// true variance is 0.25 and the `f64` form returns 0.0.
+///
+/// Returns `None` when the variance cannot be computed exactly (overflow, #523), so the caller
+/// falls back rather than reporting a wrong number as exact.
+fn moments_exact(sum: i128, sum_sq: i128, n: usize) -> Option<(f64, f64)> {
+    let cs = tessera_core::chunk_index::ChunkStats {
+        count: n as u64,
+        min: None,
+        max: None,
+        sum,
+        sum_sq,
+    };
+    Some((cs.mean()?, cs.std_dev()?))
+}
+
+/// The `f64` moments, for float dtypes only — inherently not correctly rounded, hence never `exact`.
+fn moments_f64(sum: f64, sum_sq: f64, n: usize) -> (f64, f64) {
+    let nf = n as f64;
+    let mean = sum / nf;
+    let var = (sum_sq / nf - mean * mean).max(0.0);
+    (mean, var.sqrt())
 }
 
 /// `tessera stats FILE BLOCK` — a numeric overview of an **array** block: shape · dtype · chunks ·
@@ -1409,7 +1542,7 @@ fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize) {
 pub fn stats(file: &Path, block: &str, out: &mut dyn Write) -> Result<()> {
     let (spec, blob) = open_array(file, block)?;
     let data = tessera_io::array::decode(&spec, &blob)?;
-    let (mn, mx, mean, std, n) = array_stats(&data);
+    let (mn, mx, mean, std, n, _exact) = array_stats(&data);
 
     let shape: Vec<String> = spec.shape.iter().map(u64::to_string).collect();
     let axes = if spec.axes.is_empty() {
@@ -2702,9 +2835,47 @@ mod tests {
         // Wrong rank is a clear error, not a panic.
         assert!(parse_index("1,:", &shape).is_err());
 
-        let (mn, mx, mean, std, n) = array_stats(&ArrayData::I16(vec![0, 2, 4, 6]));
+        let (mn, mx, mean, std, n, _) = array_stats(&ArrayData::I16(vec![0, 2, 4, 6]));
         assert_eq!((mn, mx, n), (0.0, 6.0, 4));
         assert!((mean - 3.0).abs() < 1e-9 && (std - 5f64.sqrt()).abs() < 1e-9);
+    }
+
+    /// Integer arrays must reduce in EXACT integer arithmetic, not `f64` (#347).
+    ///
+    /// `array_stats` accumulated `sum`/`sum_sq` as `f64`. Once a running sum passes 2^53 the
+    /// increments stop landing: adding 1 to 2^53 rounds back to 2^53 (ties-to-even), so this input
+    /// loses all 1000 of its trailing ones and reports a mean ~1.0 too low. On a real 127.7M-voxel
+    /// int16 volume the same effect puts `sum_sq` past 2^53 and moves `std` in the 4th decimal.
+    ///
+    /// This also makes the full-decode path agree BIT-FOR-BIT with the chunk-index aggregate, which
+    /// reduces through the same `i128` monoid — the property #347's equivalence test rests on.
+    #[test]
+    fn array_stats_reduces_integers_exactly_past_two_pow_53() {
+        let mut v: Vec<i64> = vec![1i64 << 53];
+        v.extend(std::iter::repeat_n(1i64, 1000));
+        let n = v.len();
+
+        let (mn, mx, mean, _std, got_n, exact) = array_stats(&ArrayData::I64(v.clone()));
+        assert!(exact, "i64 within accumulator range must reduce exactly");
+        assert_eq!((mn, mx, got_n), (1.0, (1u64 << 53) as f64, n));
+
+        // Exact reference, computed in i128 the way ChunkStats does.
+        let sum: i128 = v.iter().map(|&x| x as i128).sum();
+        let want_mean = sum as f64 / n as f64;
+        assert_eq!(
+            sum,
+            (1i128 << 53) + 1000,
+            "the 1000 ones must all be counted"
+        );
+        assert_eq!(
+            mean, want_mean,
+            "integer reduction must be exact: f64 accumulation stalls at 2^53 and drops the ones"
+        );
+
+        // And it must equal the chunk-index monoid exactly — same reduction, same answer.
+        let cs = tessera_core::chunk_index::ChunkStats::from_values(&v);
+        assert_eq!(mean, cs.mean().unwrap());
+        assert_eq!(_std, cs.std_dev().unwrap());
     }
 
     /// Default text-CSV grid options — the shape almost every test wants.
