@@ -61,9 +61,80 @@ tessera verify study.tsra     # re-checks the seal + every block digest
 - Tables: Vortex float columns compress via pcodec and land competitive with — often smaller than —
   Parquet+zstd on continuous scientific data (issue #380).
 
-A head-to-head `tessera bench compare` (same data → `.tsra` vs Parquet vs HDF5: size, column-projection
-and ROI-slice latency, cold-cache cloud read) is tracked as a follow-up so these claims ship as
-reproducible numbers, not assertions.
+### Run the head-to-head yourself
+
+`tessera bench compare` writes the *same* synthetic volume and table to `.tsra` and to HDF5 and
+reports on-disk size, write+seal, full read, projected-column read, ROI read and integrity cost:
+
+```sh
+tessera bench compare                 # both datasets, warm, median of 7
+tessera bench compare --cold          # add best-effort cold-cache rows
+tessera bench compare --format json   # the CI shape
+```
+
+It is built to be checkable rather than flattering:
+
+- **Every format appears twice**, at its sensible default and at a tuned setting, with the settings
+  printed on each row. HDF5's default really is contiguous and uncompressed; its tuned variant gets
+  **shuffle+gzip-4** (the standard pairing — shuffle alone changes a lot, see below) and *Tessera's
+  own* 64³ chunk geometry, so the ROI row compares layouts rather than chunk-size luck.
+- **Every timed read is verified against the source data first** — full, projected and ROI, for each
+  format and setting. A partial read that returned too little would otherwise look fast.
+- **Medians of N with a `[min..max]` spread**, never a single run, and the machine, filesystem and
+  library versions are printed with them.
+- **The synthetic data is far more compressible than real acquisitions** (it is the generator from the
+  cross-ecosystem harness, kept verbatim for comparability), so the size column is a ratio *between
+  formats on identical input*, not a compression ratio to expect clinically.
+
+#### What it actually says (Xeon w9-3575X ×88, ext4, median of 5)
+
+**Volume, 256³ int16 (32 MiB raw) — Tessera wins on size and ROI.**
+
+| | size | full read (warm) | ROI read (warm) |
+|---|---|---|---|
+| Tessera, pcodec (default) | 256.1 KiB | 0.0244s | 0.0008s |
+| Tessera, zstd (tuned) | **225.5 KiB** | 0.0256s | **0.0003s** |
+| HDF5, contiguous uncompressed | 32.0 MiB | **0.0162s** | 0.0005s |
+| HDF5, 64³ + shuffle+gzip-4 | 698.8 KiB | 0.0506s | 0.0006s |
+
+**Table, 4M rows × (u8+2×f4) (61 MiB raw) — HDF5 wins on size; Tessera wins the compressed reads.**
+
+| | size | full read | 1 column | row ROI | write+seal |
+|---|---|---|---|---|---|
+| Tessera, Vortex cascade | 959.4 KiB | 0.0062s | 0.0024s | 0.0015s | 0.3179s |
+| HDF5, contiguous uncompressed | 61.0 MiB | 0.0110s | **0.0017s** | **0.0001s** | **0.0361s** |
+| HDF5, 65536-row + shuffle+gzip-4 | **155.3 KiB** | 0.0682s | 0.0164s | 0.0023s | 0.3372s |
+
+#### Where Tessera loses, and why
+
+- **Table size: HDF5 shuffle+gzip is 6.2× smaller here** (155.3 KiB vs 959.4 KiB). Shuffle is
+  near-ideal for this fixture — a monotonic u64 counter and two floats with a tiny repeating period —
+  and it is the single biggest change in the table: *without* shuffle the same HDF5 file is 5.9 MiB,
+  and Tessera would appear to win by 6×. That is why the tuned baseline has it. Whether the ordering
+  holds on real listmode floats is a separate question this fixture cannot answer.
+- **Writing is ~9× slower than uncompressed HDF5** (0.3179s vs 0.0361s). Tessera hashes and seals;
+  HDF5 memcpys. That is the cost of the integrity guarantee, not a tuning bug.
+- **Uncompressed HDF5 wins the small, raw-speed reads** — the single-column read (0.0017s vs 0.0024s)
+  and especially the row window (0.0001s vs 0.0015s, ~15×), because a contiguous uncompressed slab is
+  a seek plus a memcpy and nothing Tessera does can be cheaper than that.
+- **Full volume read is slower than uncompressed HDF5** (0.0244s vs 0.0162s) — decompression against
+  no decompression — though Tessera is ~2× *faster* than the compressed HDF5 it is actually
+  comparable to (0.0506s).
+
+Against the **compressed** configuration, which is the fair comparison for a format that always
+compresses, Tessera reads the table 11× faster (0.0062s vs 0.0682s), a column 6.8× faster, and the
+volume 2× faster.
+
+#### Integrity is not one number
+
+HDF5's `fletcher32` detects corruption in the chunks you read; it is unkeyed and covers no metadata,
+and anyone who rewrites a chunk rewrites its checksum. `tessera verify` re-derives every block digest
+against a sealed manifest whose hash also covers metadata and provenance, and which a signature can
+bind to a signer. Both catch a flipped bit; only one answers "is this the artifact that was sealed,
+and by whom". The benchmark times both and says which is which.
+
+Parquet joins the table once its Rust crates land (#460); the broader seven-format comparison
+(Zarr, NeXus, NIfTI, DICOM, ROOT, Parquet) lives in `tessera/bench/ecosystems/`.
 
 ## When a plain format is the right call
 

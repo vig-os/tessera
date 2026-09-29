@@ -6525,6 +6525,7 @@ dependencies = [
  "half",
  "hdf5-metno",
  "libc",
+ "ndarray",
  "object_store 0.14.0",
  "png",
  "serde",
