@@ -65,7 +65,7 @@ THE LOOP (repeat until DONE; this is "full circle"):
      own "done" as an UNVERIFIED claim until the reviewer re-derives it. If it finds drift, fabrication,
      or an overstatement: fix, then re-review before advancing. Never let a self-assessment stand alone.
   6. Commit (ONLY after a background `nix flake check` exits 0 — never commit+check in one command;
-     `git -c commit.gpgsign=false commit --no-verify`), push, update FEATURE-MATRIX (tick the row with
+     a SIGNED `git commit --no-verify`, never with `-c commit.gpgsign=false`), push, update FEATURE-MATRIX (tick the row with
      its proving test+gate — the adr-matrix gate enforces Accepted↔matrix), flip ADR status, close/
      comment the issue, update memory. Then loop to the next gap.
 
