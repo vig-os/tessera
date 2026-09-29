@@ -47,51 +47,74 @@ jobs:
 
       - name: "Measure minio: substituted vs built from source"
         run: |
-          set -uo pipefail
+          # `set +e` deliberately: GitHub runs this with `bash -e`, which aborts before any `rc=$?`
+          # capture, so a failing nix build would kill the step instead of being measured.
+          set +e
+          set -u
           NIXPKGS="github:NixOS/nixpkgs/567a49d1913ce81ac6e9582e3553dd90a955875f"
+          # nixpkgs marks minio insecure (knownVulnerabilities); the flake's check strips that in an
+          # overrideAttrs, so a direct `nix build nixpkgs#minio` refuses to evaluate. Allow it here —
+          # `meta` is not part of the derivation, so this measures the same build the flake does.
+          export NIXPKGS_ALLOW_INSECURE=1
           S="$GITHUB_STEP_SUMMARY"
           {
             echo "## minio build cost — ${{ matrix.arch }}"
             echo ""
             echo "- runner: \`${{ matrix.runner }}\`, nproc: \`$(nproc)\`"
             echo ""
-            echo "| phase | seconds |"
-            echo "|---|---|"
+            echo "| phase | seconds | rc |"
+            echo "|---|---|---|"
           } >> "$S"
 
+          echo "::group::substitute from cache (baseline)"
           t0=$(date +%s)
-          nix build --no-link --print-out-paths "$NIXPKGS#minio" > /tmp/minio.out 2>/tmp/sub.err
+          OUT=$(nix build --impure --no-link --print-out-paths "$NIXPKGS#minio" 2>&1 | tee /dev/stderr | tail -1)
           rc=$?
           t1=$(date +%s)
-          OUT=$(cat /tmp/minio.out 2>/dev/null | tail -1)
-          echo "| substitute from cache (baseline) | $((t1-t0)) |" >> "$S"
-          echo "substituted rc=$rc out=$OUT"
-          tail -5 /tmp/sub.err || true
+          echo "::endgroup::"
+          echo "PROBE483 substituted rc=$rc elapsed=$((t1-t0))s out=$OUT"
+          echo "| substitute from cache (baseline) | $((t1-t0)) | $rc |" >> "$S"
 
-          # The vendored-Go-modules FOD, named so we can delete it too.
-          GOMOD=$(nix path-info -r "$OUT" 2>/dev/null | grep -E 'minio.*go-modules$' | head -1)
-          echo "go-modules path: ${GOMOD:-<none>}"
+          if [ "$rc" -ne 0 ] || [ ! -e "$OUT" ]; then
+            echo "PROBE483 baseline failed — cannot measure a from-source build; stopping."
+            echo "" >> "$S"; echo "Baseline substitute FAILED (rc=$rc); no from-source number." >> "$S"
+            exit 0
+          fi
 
-          # Delete ONLY minio's own outputs; build inputs stay in the store.
-          nix store delete "$OUT" ${GOMOD:+"$GOMOD"} 2>/tmp/del.err || {
-            echo "delete failed (likely still referenced); results below are NOT a from-source build" ; tail -3 /tmp/del.err ; }
+          GOMOD=$(nix path-info -r "$OUT" 2>/dev/null | grep -E 'go-modules$' | head -1)
+          echo "PROBE483 go-modules path: ${GOMOD:-<none>}"
 
+          echo "::group::delete minio outputs only"
+          nix store delete "$OUT" ${GOMOD:+"$GOMOD"} 2>&1 | tail -5
+          delrc=$?
+          echo "::endgroup::"
+          echo "PROBE483 delete rc=$delrc"
+          if [ "$delrc" -ne 0 ]; then
+            echo "PROBE483 WARNING: delete failed, so the next phase is NOT a from-source build"
+            echo "| (delete failed — next number is not from-source) | - | $delrc |" >> "$S"
+          fi
+
+          echo "::group::build from source (substituters disabled)"
           t2=$(date +%s)
-          nix build --no-link --option substituters '' --option substitute false "$NIXPKGS#minio" > /dev/null 2>/tmp/src.err
-          rc2=$?
+          nix build --impure --no-link --option substitute false --option substituters '' "$NIXPKGS#minio" 2>&1 | tail -25
+          rc2=${PIPESTATUS[0]}
           t3=$(date +%s)
-          echo "| **build from source** | **$((t3-t2))** |" >> "$S"
-          echo "from-source rc=$rc2 elapsed=$((t3-t2))s"
-          tail -15 /tmp/src.err || true
+          echo "::endgroup::"
+          echo "PROBE483 from-source rc=$rc2 elapsed=$((t3-t2))s"
+          echo "| **build from source** | **$((t3-t2))** | $rc2 |" >> "$S"
 
           {
             echo ""
-            if [ "$rc2" -eq 0 ]; then
-              echo "From-source build **succeeded** in $((t3-t2))s ($(( (t3-t2)/60 )) min)."
+            if [ "$rc2" -eq 0 ] && [ "$delrc" -eq 0 ]; then
+              echo "From-source build **succeeded** in $((t3-t2))s (~$(( (t3-t2)/60 )) min)."
+            elif [ "$rc2" -eq 0 ]; then
+              echo "Build returned 0 but the delete failed, so this is a cache hit, not a real measurement."
             else
               echo "From-source build **FAILED** (rc=$rc2) after $((t3-t2))s — see the job log."
             fi
             echo ""
-            echo "Budget context: the nix leg's timeout is 90 min; observed real runs are ~57 min"
-            echo "(x86_64) and ~43 min (aarch64), so the headroom is roughly 33 and 47 min."
+            echo "Budget: the nix leg times out at 90 min; observed real runs are ~57 min (x86_64) and"
+            echo "~43 min (aarch64), leaving roughly 33 and 47 min of headroom."
           } >> "$S"
+          # Always succeed: this probe reports a measurement, it does not gate anything.
+          exit 0
