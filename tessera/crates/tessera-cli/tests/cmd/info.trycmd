@@ -5,19 +5,26 @@
 ```
 $ tessera info
 tessera [..]
-backends:   blob · blob-series · dicom [..] · dicom-series [..] · hdf-compound [..] · nifti · raw
+backends:   arrow [..] · blob · blob-series · csv [..] · dicom [..] · dicom-series [..] · hdf-compound [..] · nifti · parquet [..] · raw
 disabled:   (none)
 build:      static-hdf5=[..] · cloud=[..] · sql=[..]
 
 ```
 
-Nothing is disabled today: no decoder feature gate exists yet, so every known backend is compiled
-in. Phase 1's feature graph (ADR-0057 §5) is what starts moving names onto the `disabled:` line —
-and the missing-backend error will point here.
+Nothing is disabled in a default build: `arrow`, `parquet` and `csv` are feature-gated (ADR-0057 §5)
+but default-ON, because the gates exist for embedders and CI, not for end users — a downloaded
+`tessera` that cannot read Parquet is a bad binary. Build with `--no-default-features` and those three
+names move to the `disabled:` line instead of vanishing, which is what lets an ingest naming one fail
+with "not compiled into this build" (exit 3) rather than "unknown backend" (exit 2).
 
 `--json` emits the same facts in a shape meant for `aux/provenance.json`. The binary flavor is
-deliberately NOT sealed: ADR-0056 §6.2 seals `ingest_decoder`, which is what actually determined the
-bytes. ADR-0042's line holds — sealed = what changed the bytes; `aux/` = who was in the room.
+deliberately NOT sealed: ADR-0056 §6a seals the `ingest_decoder` triple, which is what actually
+determined the bytes. ADR-0042's line holds — sealed = what changed the bytes; `aux/` = who was in the
+room.
+
+It also carries the **pre-image** of the sealed feature digest (`ingest_decode_features`) alongside the
+digest itself, so the third component of that triple is checkable rather than merely observable: a
+reader holding a `.tsra` and this output from the same version can confirm the correspondence.
 
 ```
 $ tessera info --json
@@ -26,10 +33,18 @@ $ tessera info --json
   "format_version": "[..]",
   "backends": [
     {
+      "name": "arrow",
+      "version": "[..]"
+    },
+    {
       "name": "blob"
     },
     {
       "name": "blob-series"
+    },
+    {
+      "name": "csv",
+      "version": "[..]"
     },
     {
       "name": "dicom",
@@ -47,6 +62,10 @@ $ tessera info --json
       "name": "nifti"
     },
     {
+      "name": "parquet",
+      "version": "[..]"
+    },
+    {
       "name": "raw"
     }
   ],
@@ -55,7 +74,9 @@ $ tessera info --json
     "cloud": [..],
     "sql": [..],
     "static-hdf5": [..]
-  }
+  },
+  "ingest_decode_features": "[..]",
+  "ingest_decode_digest": "blake3:[..]"
 }
 
 ```

@@ -69,6 +69,19 @@ cloud = ["tessera-io/cloud"]
 # `tessera sql` still parses (uniform UX) but returns a typed "rebuild with --features sql" error,
 # same shape as the `cloud`-gated `push`/`pull` fallback.
 sql = ["dep:datafusion", "dep:tokio", "dep:arrow"]
+# ── Generic-ingest backends (ADR-0057 §5, #386) ──
+#
+# Each forwards to `tessera-ingest/<same name>` and NEVER to `tessera-core` — core gains no features
+# from this axis (it is tessera-wasm's only dependency and the pure-abi3 wheel's). Default-ON, so a
+# downloaded or `cargo install`ed `tessera` reads Parquet / Arrow / CSV out of the box; the gates are
+# for embedders and CI (ADR-0057 §4's one-binary decision).
+#
+# Note the name collision that is NOT one: this crate also has an optional `arrow` *dependency* for
+# the `sql` surface. `tessera-cli/arrow` below is a feature that forwards to the ingest lane; they
+# resolve to the same single arrow 58.3.0 tree, which is why two arrow majors can never co-exist here.
+arrow = ["tessera-ingest/arrow"]
+parquet = ["tessera-ingest/parquet"]
+csv = ["tessera-ingest/csv"]
 # `static-hdf5`: forward the vendored-libhdf5 build down to `tessera-ingest` (see its Cargo.toml). The
 # release channels build the CLI with this ON so the shipped `tessera`/`tsra` binaries and a source
 # `cargo install --features static-hdf5` carry their own HDF5 — no system libhdf5 / pkg-config needed.

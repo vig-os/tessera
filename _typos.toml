@@ -12,9 +12,17 @@
 extend-exclude = ["tessera/corpus/files/*.tsra"]
 
 [default]
-# blake3 digests in CLI golden output are hex; any 3+ char run that spells an
-# English-ish word (e.g. "afe" inside `blake3:827e49afe82b…`) gets flagged.
-extend-ignore-re = ["blake3:[0-9a-f]+"]
+extend-ignore-re = [
+  # blake3 digests in CLI golden output are hex; any 3+ char run that spells an
+  # English-ish word (e.g. "afe" inside `blake3:827e49afe82b…`) gets flagged.
+  "blake3:[0-9a-f]+",
+  # The `--exclude` typo test (tessera-ingest `arrow_table.rs`) has to *contain* misspellings: it proves
+  # that `--exclude patient.nmae` is rejected rather than silently sealing the column the operator
+  # believed they had dropped. Scoped to these exact strings instead of allowlisting `nmae`/`paitent` as
+  # words, so a real occurrence of either anywhere else still fails the gate.
+  "patient\\.nmae",
+  "paitent\\.mrn",
+]
 
 [default.extend-words]
 OT = "OT"      # DICOM modality code: "Other" (0008,0060)
@@ -31,6 +39,10 @@ Fo = "Fo"                    # "FoR" — Frame-of-Reference encoding
 # "ccessible". Allowlisted deliberately — the ADR/docs prose stays as written,
 # the entry is NOT a typo we failed to fix.
 ccessible = "ccessible"
+# ADR-0056 §7's identifying-column-name heuristic matches the spellings PHI columns actually carry in
+# the wild, and `patname` / `pat_name` is one of them (ADR-0056 §7 lists the family: MRN / patient id /
+# name / DOB / accession / UID). It is a needle in a match list, not prose — and NOT "pathname".
+patname = "patname"
 
 # ── devkit template entries (folded in; this file shadows .typos.toml) ──
 # Shell scripting: sed label syntax uses 'ba' (branch to label 'a')

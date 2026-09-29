@@ -16,8 +16,11 @@ arrow-array v58.3.0
 |       |   `-- datafusion-common feature "sqlparser"
 |       |   `-- datafusion-session v54.0.0 (*)
 |       |   |           `-- tessera-cli feature "static-hdf5" (command-line)
+|       |   |           |-- tessera-cli feature "arrow" (command-line)
 |       |   |           |-- tessera-cli feature "cloud" (command-line)
+|       |   |           |-- tessera-cli feature "csv" (command-line)
 |       |   |           |-- tessera-cli feature "default" (command-line)
+|       |   |           |-- tessera-cli feature "parquet" (command-line)
 |       |   |           |-- tessera-cli feature "sql" (command-line)
 |       |   |       `-- datafusion-expr feature "sql" (*)
 |       |   |       `-- datafusion-pruning v54.0.0 (*)
@@ -257,7 +260,9 @@ arrow-array v58.3.0
 |       |-- datafusion-physical-optimizer v54.0.0 (*)
 |       |-- datafusion-physical-plan v54.0.0 (*)
 |       |-- datafusion-pruning v54.0.0 (*)
+|   [dev-dependencies]
 |   `-- arrow feature "chrono-tz"
+|   `-- tessera-ingest vWORKSPACE (*)
 |   `-- vortex-layout v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
 |   |               `-- tessera-io vWORKSPACE (*)
 |   |               `-- vortex-file v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
@@ -289,8 +294,18 @@ arrow-array v58.3.0
 |   |           |   |   |               `-- tessera-py vWORKSPACE
 |   |           |   |   |               |       `-- tessera-cli feature "static-hdf5" (command-line)
 |   |           |   |   |               |   `-- tessera-ingest feature "static-hdf5" (command-line)
-|   |           |   |   |               |   |   `-- tessera-cli vWORKSPACE (*)
-|   |           |   |   |               |   |-- tessera-ingest feature "default" (command-line)
+|   |           |   |   |               |   |       `-- tessera-ingest feature "default" (command-line) (*)
+|   |           |   |   |               |   |       |-- tessera-cli feature "parquet" (command-line)
+|   |           |   |   |               |   |   `-- tessera-ingest feature "default" (command-line) (*)
+|   |           |   |   |               |   |   `-- tessera-ingest feature "parquet" (command-line)
+|   |           |   |   |               |   |   |   `-- tessera-cli vWORKSPACE (*)
+|   |           |   |   |               |   |   |-- tessera-cli feature "arrow" (command-line)
+|   |           |   |   |               |   |   |-- tessera-cli feature "csv" (command-line)
+|   |           |   |   |               |   |   |-- tessera-ingest feature "default" (command-line)
+|   |           |   |   |               |   |-- tessera-ingest feature "arrow" (command-line)
+|   |           |   |   |               |   |-- tessera-ingest feature "csv" (command-line)
+|   |           |   |   |               |   |-- tessera-ingest feature "default" (command-line) (*)
+|   |           |   |   |               |   |-- tessera-ingest feature "parquet" (command-line) (*)
 |   |           |   |   |               |-- tessera-cli vWORKSPACE (*)
 |   |           |   |   |               |-- tessera-ingest vWORKSPACE
 |   |           |   |   |           `-- tessera-io feature "default" (command-line)
@@ -376,6 +391,7 @@ arrow-array v58.3.0
 |   |       |-- datafusion-physical-optimizer v54.0.0 (*)
 |   |       |-- datafusion-physical-plan v54.0.0 (*)
 |   |       |-- datafusion-pruning v54.0.0 (*)
+|   |       |-- parquet v58.3.0 (*)
 |   |   `-- arrow feature "prettyprint"
 |   |   `-- arrow-arith feature "default"
 |   |   `-- arrow-cast feature "prettyprint" (*)
@@ -414,24 +430,70 @@ arrow-array v58.3.0
 |   |   |       `-- arrow feature "default" (*)
 |   |   |       `-- arrow feature "prettyprint" (*)
 |   |   |       `-- tessera-cli vWORKSPACE (*)
+|   |   |   [dev-dependencies]
 |   |   |   `-- arrow feature "csv"
 |   |   |   `-- arrow feature "ipc"
 |   |   |   `-- arrow feature "json"
-|   |   |   `-- arrow v58.3.0 (*)
 |   |   |   `-- arrow-cast feature "prettyprint"
 |   |   |   `-- arrow-ipc feature "lz4" (*)
 |   |   |   `-- datafusion-expr v54.0.0 (*)
 |   |   |   `-- datafusion-physical-plan v54.0.0 (*)
+|   |   |   `-- tessera-ingest vWORKSPACE (*)
+|   |   |   `-- tessera-ingest vWORKSPACE (*)
 |   |   |   `-- vortex-array v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
+|   |   |   |       [dev-dependencies]
 |   |   |   |       `-- arrow v58.3.0 (*)
 |   |   |   |       `-- arrow v58.3.0 (*)
+|   |   |   |       `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |       `-- tessera-ingest vWORKSPACE (*)
 |   |   |   |   `-- arrow-csv feature "default"
 |   |   |   |   `-- arrow-json feature "default"
+|   |   |   |   `-- parquet feature "zstd"
+|   |   |   |   |       [dev-dependencies]
+|   |   |   |   |       `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |       `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |   [dev-dependencies]
+|   |   |   |   |   [dev-dependencies]
+|   |   |   |   |   [dev-dependencies]
+|   |   |   |   |   [dev-dependencies]
+|   |   |   |   |   `-- parquet feature "arrow" (*)
+|   |   |   |   |   `-- parquet feature "arrow" (*)
+|   |   |   |   |   `-- parquet feature "arrow" (*)
+|   |   |   |   |   `-- parquet feature "arrow" (*)
+|   |   |   |   |   `-- parquet feature "arrow" (*)
+|   |   |   |   |   `-- parquet feature "arrow" (*)
+|   |   |   |   |   `-- parquet feature "arrow" (*)
+|   |   |   |   |   `-- parquet feature "flate2-zlib-rs"
+|   |   |   |   |   `-- parquet feature "lz4" (*)
+|   |   |   |   |   `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |   `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |   `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |   `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |   `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |   `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |   `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |   `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |-- parquet feature "arrow"
+|   |   |   |   |-- parquet feature "arrow-array"
+|   |   |   |   |-- parquet feature "arrow-buffer"
+|   |   |   |   |-- parquet feature "arrow-data"
+|   |   |   |   |-- parquet feature "arrow-ipc"
+|   |   |   |   |-- parquet feature "arrow-schema"
+|   |   |   |   |-- parquet feature "arrow-select"
+|   |   |   |   |-- parquet feature "base64"
+|   |   |   |   |-- parquet feature "brotli"
+|   |   |   |   |-- parquet feature "flate2"
+|   |   |   |   |-- parquet feature "flate2-zlib-rs" (*)
+|   |   |   |   |-- parquet feature "lz4"
+|   |   |   |   |-- parquet feature "lz4_flex"
+|   |   |   |   |-- parquet feature "snap"
+|   |   |   |-- arrow v58.3.0 (*)
 |   |   |   |-- arrow v58.3.0 (*)
 |   |   |   |-- arrow-csv v58.3.0
 |   |   |   |-- arrow-json v58.3.0
 |   |   |   |-- datafusion-common v54.0.0 (*)
 |   |   |   |-- datafusion-datasource-arrow v54.0.0 (*)
+|   |   |   |-- parquet v58.3.0
 |   |   |-- arrow feature "arrow-csv"
 |   |   |-- arrow feature "arrow-ipc"
 |   |   |-- arrow feature "arrow-json"
@@ -457,6 +519,8 @@ arrow-array v58.3.0
 |   |-- arrow-row v58.3.0
 |   |-- arrow-select v58.3.0
 |   |-- arrow-string v58.3.0 (*)
+|   |-- parquet v58.3.0 (*)
+|   |-- tessera-ingest vWORKSPACE (*)
 |   |-- vortex-array v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
 |-- arrow-array feature "chrono-tz"
 |-- arrow-array feature "default"

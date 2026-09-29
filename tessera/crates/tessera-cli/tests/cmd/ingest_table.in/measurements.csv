@@ -1,0 +1,7 @@
+run_id,detector,energy_kev,coincident
+1,DET-A,511.0,true
+2,DET-B,509.8,true
+3,DET-A,,false
+4,DET-C,511.2,true
+5,DET-B,,false
+6,DET-A,510.5,true

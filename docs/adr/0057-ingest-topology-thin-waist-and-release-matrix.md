@@ -378,17 +378,24 @@ Gate A varies the **feature configuration**. Gate B varies the **dependency grap
 **compiler's own cfg flags**, and that is where #468 was hiding.
 
 An `i64` column whose range spans nearly the full width *and* contains zero — `[i64::MIN, 0, i64::MAX]`
-is the minimal case — is written by vortex 0.75.0 to **different container bytes** depending on whether
-`debug_assertions` is enabled: 2796 vs 2772 bytes for a bare `PrimitiveArray`, a constant 24-byte delta.
-The cause is an assertion with a side effect (`vortex-array/src/patches.rs`: the debug-only `is_sorted`
-check on patch indices executes and annotates that array, and the written container reflects it), so it
-fires only for inputs whose encoding produces **patches**.
+is the minimal case — was written by vortex **0.75.0** to **different container bytes** depending on
+whether `debug_assertions` is enabled: 2796 vs 2772 bytes for a bare `PrimitiveArray`, a constant 24-byte
+delta. The cause is an assertion with a side effect (`vortex-array/src/patches.rs`: the debug-only
+`is_sorted` check on patch indices executes and annotates that array, and the written container reflects
+it), so it fired only for inputs whose encoding produces **patches**.
+
+**Both this and #472 are now fixed**, by pinning vortex to a patched fork (0.75.0 plus the two narrow
+fixes) — upstream `vortex-data/vortex` **#10119** / PR **#10121** for #468 and **#10120** / PR **#10122**
+for #472, with **#480** tracking removal of the pin once upstream releases. Under the pin the numbers
+agree: the bare `PrimitiveArray` is **2772** bytes and the sealed table payload **2916** in *both*
+profiles — i.e. the debug build was the one carrying the extra 24 bytes of cached statistic, and it now
+matches what release always produced.
 
 The measured axis is `debug_assertions` and nothing else: toggling `overflow-checks` or the optimisation
 level alone changes nothing. **Scoped to this defect**, then, release builds agree with each other and
 what diverges is a debug-built tool against a release-built one. That is a statement about #468 only, and
-emphatically *not* a claim that release builds agree in general — #472 below is a same-profile divergence
-between x86-64 and aarch64, so two release binaries really can disagree, for a different reason. That is a narrower blast radius than it first appeared — our own CI disagreed
+emphatically *not* a claim that release builds agree in general — #472 was a same-profile divergence
+between x86-64 and aarch64, so two release binaries really could disagree, for a different reason. That is a narrower blast radius than it first appeared — our own CI disagreed
 with itself only because `ingest-gate-a` runs the generator under `cargo run` (dev profile,
 `debug_assertions` on) while `workspace-test` runs it under a release build. It is still an S15 violation,
 because "the bytes are a function of the data" has to hold for *a* build of a given version, not merely
@@ -435,15 +442,30 @@ the committed file.
 Its present reach is worth stating plainly rather than overselling: `tessera-io`'s corpus contains no
 integer column that produces bitpacking *patches*, so this check does not currently reproduce #468 — it
 guards the **class** going forward, and the specific shape is pinned separately by
-`known_limitation_468_full_span_int_container_bytes`. It would start catching #468 itself the day a
-patch-producing integer fixture joined that corpus, which is a reasonable thing to add once upstream is
-fixed and the expected bytes stop depending on the build. Until #468 is fixed upstream the known-diverging shape is
-covered by `known_limitation_468_full_span_int_container_bytes`, which asserts the divergence is *still
-present* and therefore **fails when upstream fixes it** — so any fixture narrowed to avoid the shape
-(the generic-ingest corpus's scalars fixture, once that lane lands) is widened again deliberately rather
-than left permanently weaker. Cross-*architecture* agreement is a separate axis, still covered only as a side effect of CI
-running both arches — which is how #472 (a float fixture that moves on aarch64 under the *same* profile)
-was found. Making that a first-class axis of this gate is left open.
+`known_limitation_468_full_span_int_container_bytes`. It would start catching #468's shape itself the day a
+patch-producing integer fixture joined that corpus — and with the pin in place that is now **safe to do**,
+because the expected bytes no longer depend on the build. Worth adding while #480 is open, since it is
+exactly the fixture that would catch a regression when the pin is eventually dropped for an upstream
+release. The reproducer that guarded the shape while it was broken did its job and has been
+**inverted**: `known_limitation_468_full_span_int_container_bytes` asserted the divergence was *still
+present*, so it failed the moment the pin fixed it, which is what forced this section to be rewritten
+rather than quietly left stale. It is now
+`full_span_int_container_bytes_are_build_config_independent`, asserting **one** length per shape with no
+`cfg!(debug_assertions)` branch at all — the absence of that branch *is* the assertion — and the flake
+check still runs it under both profiles, so a re-divergence fails in one line. A test written to be
+deleted by its own fix is worth more than one written to be ignored. Cross-*architecture* agreement remains a separate axis, still covered only as a side effect of CI
+running both arches — which is how **#472** was found: a float fixture that moved on aarch64 under the
+*same* profile. Its cause is worth recording next to #468's, because the pair is the argument for this
+whole section. `sum_float_all` **skips** NaN, so a column containing `+inf` and `-inf` summed to a NaN
+whose sign/payload bits differed by architecture (x86-64 `0xfff8…`, aarch64 `0x7ff8…`) — **one bit**, in a
+persisted `Stat::Sum`. Canonicalising to `0x7ff8_0000_0000_0000` leaves aarch64's bytes untouched and
+moves x86-64's onto them, which is why fixing it moved exactly one fixture to the value the other
+architecture was already producing rather than to a new one.
+
+So both defects lived in the metadata *around* the values while the encoded values were identical, and
+neither was reachable by the codec-level exclusion list. Making cross-architecture agreement a
+first-class axis of this gate — rather than something CI happens to notice because it runs two runners —
+is left open.
 
 ### Where ingest fixtures live, and the anti-vacuity guard
 

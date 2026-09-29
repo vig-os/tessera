@@ -72,4 +72,16 @@ pub enum Error {
     /// Structurally invalid product (bad dtype, rank mismatch, missing required field, ...).
     #[error("invalid product: {0}")]
     Invalid(String),
+
+    /// An ingest backend whose **name is known but whose handler is not compiled into this build**
+    /// (ADR-0057 §6/§7).
+    ///
+    /// ADR-0057 §6 keeps `FormatOptions` closed *and total*: every backend name parses on every
+    /// build, because a TOML ingest spec is an archival artifact whose `spec_hash` must not depend on
+    /// which binary read it. A feature gate switches off the **handler**, not the name — so "this
+    /// build cannot run that backend" is a distinct, *typed* condition rather than a parse failure or
+    /// a string to grep for. `tessera` maps it to its own exit code (3), which is what lets a cookbook
+    /// recipe branch on "wrong build" versus "wrong invocation" (exit 2) without parsing stderr.
+    #[error("backend '{0}' is not compiled into this build")]
+    BackendNotCompiled(&'static str),
 }

@@ -2,6 +2,7 @@
 
 | product | version | requires a recipe | description |
 | --- | --- | --- | --- |
+| [`array`](#array) | 1.0 | no | A generically-ingested dense N-D array — structural preservation, semantics still to be attached. |
 | [`blob`](#blob) | 1.0 | no | Opaque preserved file — bytes stored bit-faithfully, not engine-parsed (the "junk" tier). |
 | [`calibration`](#calibration) | 1.0 | no | Scanner calibration data. |
 | [`deformation_field`](#deformation-field) | 1.0 | no | A non-linear (deformable) spatial transform — a per-voxel displacement field (ADR-0030 §5). |
@@ -15,7 +16,21 @@
 | [`sim`](#sim) | 1.0 | no | Monte-Carlo simulation output. |
 | [`sinogram`](#sinogram) | 1.0 | no | Projection-space (sinogram) data. |
 | [`spectrum`](#spectrum) | 1.0 | no | An energy / positronium-lifetime / TOF histogram. |
+| [`table`](#table) | 1.0 | no | A generically-ingested flat table — structural preservation, semantics still to be attached. |
 | [`transform`](#transform) | 1.0 | no | A spatial transform / registration result. |
+
+### array
+
+A generically-ingested dense N-D array — structural preservation, semantics still to be attached.
+
+| field | tier | dtype | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- |
+| `study` | recommended | string | — | Public | Study / cohort / experiment this array belongs to (FAIR grouping) |
+| `source_format` | recommended | string | — | Public | Source format normalised at ingest ("npy" \| "npz" \| "nifti" \| …) |
+
+| block role | kind | min | description |
+| --- | --- | --- | --- |
+| `data` | array | 1 | Normalised dense N-D numeric grid (Zarr v3 + pcodec at seal) |
 
 ### blob
 
@@ -187,6 +202,19 @@ An energy / positronium-lifetime / TOF histogram.
 | block role | kind | min | description |
 | --- | --- | --- | --- |
 | `spectrum` | array | 1 | Histogram of an energy/lifetime/TOF quantity — a dense 1-D array by nature (ADR-0029 §6) |
+
+### table
+
+A generically-ingested flat table — structural preservation, semantics still to be attached.
+
+| field | tier | dtype | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- |
+| `study` | recommended | string | — | Public | Study / cohort / experiment this table belongs to (FAIR grouping) |
+| `source_format` | recommended | string | — | Public | Source format normalised at ingest ("parquet" \| "arrow" \| "csv" \| …) |
+
+| block role | kind | min | description |
+| --- | --- | --- | --- |
+| `data` | table | 1 | Normalised flat columnar table (Vortex-encoded at seal) |
 
 ### transform
 

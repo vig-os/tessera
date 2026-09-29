@@ -14,6 +14,7 @@
 
 - [Arrays: stats, slice, project, pyramid](./arrays.md)
 - [Tables & SQL](./tables-sql.md)
+- [Ingesting your own data](./ingest-your-own-data.md)
 - [Ingesting vendor data](./ingest.md)
 - [Ingest cookbook: writing your own data](./ingest-cookbook.md)
 - [Product-schema reference](./schemas.md)

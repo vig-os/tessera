@@ -29,7 +29,9 @@ pub use collection::{Collection, CollectionBuilder, CollectionMember, Role};
 pub use error::{Error, Result};
 pub use manifest::Manifest;
 pub use product::ProductBuilder;
-pub use provenance::{inherit_identity, Generation, Producer, ProducerRef, Source};
+pub use provenance::{
+    inherit_identity, Generation, IngestTransform, Producer, ProducerRef, Source,
+};
 pub use schema::{validate_manifest, ProductSchema, SchemaRegistry};
 
 #[cfg(test)]
