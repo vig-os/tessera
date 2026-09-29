@@ -4,33 +4,35 @@
 exclude: ^.github_data/|^docs/issues/|^docs/pull-requests/
 
 repos:
+  # Branch-name gate — kept FIRST so it fails before anything slower runs.
+  #
+  # This replaces a `no-commit-to-branch --pattern` that accepted `<type>/<slug>` with NO issue
+  # number. Its reasoning was that `.gitmessage` already forces `Refs: #<issue>`, so requiring the
+  # number in the branch name too "bought nothing" — reasonable in isolation, but CI does not agree:
+  # `.github/workflows/ci.yml`'s `Validate branch name` step REQUIRES `<type>/<issue>-<summary>` for
+  # every type except `chore`. So the local gate was strictly more permissive than the one that
+  # actually blocks merges, and a branch could pass everything here and fail only after a ~45-minute
+  # CI leg (#499 — which is exactly how it was found).
+  #
+  # The script mirrors CI's `ALLOWED` clause for clause, and reads the TYPE LIST from `.vig-os`'s
+  # `DEVKIT_BRANCH_TYPES` — the same key CI's resolve-toolchain action reads — so the two gates cannot
+  # drift on which types exist. Only the shape rule is written twice, and the script says so.
+  #
+  # CI's copy is devkit-managed, so if the rule should change, change it upstream first: a local-only
+  # relaxation would be reverted by the next scaffold upgrade while CI kept rejecting.
+  - repo: local
+    hooks:
+      - id: branch-name
+        name: branch-name (mirrors CI's <type>/<issue>-<summary> gate)
+        entry: scripts/check-branch-name.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+
   # General Pre-commit Hooks (Fixes formatting issues)
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b  # v5.0.0
     hooks:
-      # Enforce topic branch naming: `<type>/<summary>`.
-      #
-      # The issue number is OPTIONAL — put it in the summary (`feat/349-log-axis-transform`) when
-      # there is one. It is NOT required in the branch name because `.gitmessage` already makes
-      # every commit carry `Refs: #<issue>`; requiring it in both places bought nothing and
-      # blocked most real work.
-      #
-      # The type list is derived from branch names actually used on merged PRs (checked against
-      # `gh pr list --state merged`), not from an aspirational convention: the previous pattern
-      # rejected `feat/`, `fix/`, `perf/`, `polish/`, `land/` and `spike/` — i.e. 14 of the last
-      # 30 merged PR branches, including the branch that graduated the spike. A gate that no real
-      # branch can satisfy is not a gate; it just teaches everyone to pass `--no-verify`, which
-      # then bypasses the *other* gates in this file too.
-      #
-      # `release/<semver>` is kept strict on purpose (release-plz owns that namespace).
-      # Allows main, dev, and branches matching the convention.
-      - id: no-commit-to-branch
-        name: branch-name (enforce <type>/<summary>)
-        args:
-          - --branch
-          - __none__  # override default so main/dev are not protected
-          - --pattern
-          - "^(?!main$)(?!dev$)(?!(chore|feat|feature|fix|bugfix|hotfix|perf|polish|spike|refactor|docs|test|build|ci|style|land)/[a-z0-9][a-z0-9._-]*$)(?!release/[0-9]+\\.[0-9]+(\\.[0-9]+)?$)(?!worktree/[0-9]+$).+$"
       - id: check-added-large-files
       - id: check-case-conflict
       - id: check-json
