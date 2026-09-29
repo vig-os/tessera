@@ -573,6 +573,26 @@
           # stripping `knownVulnerabilities`. The test mock isn't network-reachable — it binds
           # 127.0.0.1 inside the nix sandbox — so the upstream-CVE exposure surface is nil.
           minio-range-read = let
+            # nixpkgs marks this minio INSECURE (`knownVulnerabilities`), so evaluating it refuses
+            # outright: "Refusing to evaluate package 'minio-…' because it is marked as insecure".
+            # Stripping the marker is a deliberate, narrow decision, recorded here at the point it is
+            # made rather than left implicit (#483):
+            #
+            #   - it is a TEST FIXTURE, never shipped and never part of any tessera artifact. The
+            #     check starts a MinIO on 127.0.0.1:9101 inside the nix build sandbox, which has no
+            #     network access and no persistent state, and throws it away with the derivation.
+            #   - the CVEs are in minio's server/console surface reached over a network by untrusted
+            #     clients. Here the only client is the test itself, over loopback, with a throwaway
+            #     credential pair that is also in this file.
+            #   - the alternative is dropping the check, which would mean the cloud range-read path
+            #     (ADR-0002 §4, prune-before-fetch over real S3 semantics) has no test against a real
+            #     object store at all. A sandboxed known-CVE fixture is the lesser risk.
+            #
+            # `meta` is not part of the derivation, so this override changes no output hash: the
+            # binary built here is byte-identical to the one nixpkgs would give.
+            #
+            # Revisit if minio ever becomes reachable from outside the sandbox, or if the check starts
+            # handling anything that is not synthetic test data.
             minio = pkgs.minio.overrideAttrs (old: {
               meta = (old.meta or { }) // { knownVulnerabilities = [ ]; };
             });
