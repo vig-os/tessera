@@ -1,11 +1,28 @@
-"""Cross-ecosystem I/O comparison driver (#143).
+"""Cross-ecosystem I/O comparison driver (#143, method hardened in #485).
 
-Generates one synthetic volume + one table, drives every adapter through identical operations under
-the SAME process (pin externally with `taskset`/`nice` for a clean slice), times min-of-N, asserts
-correctness, and prints an ALOCA report + writes results.json.
+Generates one synthetic volume + BOTH table fixtures, drives every adapter through identical
+operations at every VARIANT, times median-of-N with spread, repeats every read warm and cold, and
+prints an ALOCA report + writes results.json.
+
+Method, and why each piece is here
+----------------------------------
+median + spread   Replaces min-of-N. The minimum is a throughput ceiling; it hides variance and
+                  cannot show when two formats are within noise of each other.
+default AND tuned Every format at a sensible default and at its standard tuning, settings printed
+                  on every row. #487 (HDF5 shuffle) and #503 (Parquet BYTE_STREAM_SPLIT) each found
+                  that omitting a format's standard tuning flatters Tessera by a large factor.
+both fixtures     periodic AND continuous, every row labelled (#497). Same encoder, same command,
+                  opposite verdicts — publishing one is choosing the answer.
+warm AND cold     Cold via fsync + POSIX_FADV_DONTNEED, with post-eviction residency MEASURED per
+                  row. A cold-labelled row the kernel served from RAM is worse than no row.
+correctness first Every read is verified against the source before its timing counts, so no format
+                  can win by returning something cheaper.
+
+Cold timing is not warm timing with an extra step: each cold read repopulates the page cache, so
+the eviction is repeated before EVERY iteration and the worst residency across them is reported.
 
 Run (inside `nix develop`, from this dir):
-    taskset -c 10-39 nice -n 19 uv run python run.py
+    taskset -c 10-39 nice -n 19 uv run python run.py --iters 5
 """
 
 from __future__ import annotations
@@ -14,123 +31,187 @@ import argparse
 import importlib
 import json
 import os
+import platform
 import sys
-import tempfile
 import traceback
 
 import numpy as np
 
 import common
 
-# Adapter modules (in adapters/) and display order. Missing/broken ones are skipped with a note.
 ADAPTERS = ["tessera", "hdf5", "zarr_", "nexus", "nifti", "dicom", "parquet", "root"]
+REFERENCE = "tessera"
 
 
-def time_volume(mod, vol, tmp, iters):
-    base = os.path.join(tmp, f"{mod.__name__.split('.')[-1]}_vol")
-    mod.write_volume(base, vol)
-    back = mod.read_volume(base)
-    assert back.shape == vol.shape and back.dtype == vol.dtype, (
-        f"{mod.NAME}: vol shape/dtype"
-    )
-    assert np.array_equal(back, vol), f"{mod.NAME}: vol not bit-exact"
-    z = vol.shape[0] // 2
-    sl = mod.read_volume_zslice(base, z)
-    assert np.array_equal(sl, vol[z]), f"{mod.NAME}: zslice mismatch"
-    size = common.dir_or_file_bytes(_resolve(mod, base, "volume"))
-    return {
-        "bytes": size,
-        "ratio": vol.nbytes / size,
-        "write_s": common.best(lambda: mod.write_volume(base, vol), iters),
-        "read_full_s": common.best(lambda: mod.read_volume(base), iters),
-        "read_slice_s": common.best(lambda: mod.read_volume_zslice(base, z), iters),
-    }
-
-
-def time_table(mod, cols, tmp, iters):
-    base = os.path.join(tmp, f"{mod.__name__.split('.')[-1]}_tab")
-    mod.write_table(base, cols)
-    back = mod.read_table(base)
-    for k, v in cols.items():
-        assert k in back and np.array_equal(back[k], v), (
-            f"{mod.NAME}: table col {k} mismatch"
-        )
-    one = mod.read_table_column(base, "e0")
-    assert np.array_equal(one, cols["e0"]), f"{mod.NAME}: column read mismatch"
-    raw = sum(v.nbytes for v in cols.values())
-    size = common.dir_or_file_bytes(_resolve(mod, base, "table"))
-    return {
-        "bytes": size,
-        "ratio": raw / size,
-        "write_s": common.best(lambda: mod.write_table(base, cols), iters),
-        "read_full_s": common.best(lambda: mod.read_table(base), iters),
-        "read_col_s": common.best(lambda: mod.read_table_column(base, "e0"), iters),
-    }
-
-
-def _resolve(mod, base, modality):
-    """Find the path the adapter actually wrote (it may suffix base)."""
+# --------------------------------------------------------------------------- helpers
+def _resolve(mod, base, modality, variant):
+    """The path the adapter actually wrote (it may suffix base, and the suffix may be variant-
+    dependent — NIfTI's `.nii` vs `.nii.gz` is exactly that)."""
     if hasattr(mod, "path_for"):
-        return mod.path_for(base, modality)
+        try:
+            return mod.path_for(base, modality, variant)
+        except TypeError:
+            return mod.path_for(base, modality)
     for cand in (
         base,
         base + ".h5",
         base + ".zarr",
+        base + ".nii",
         base + ".nii.gz",
         base + ".dcm",
         base + ".parquet",
         base + ".tsra",
         base + ".nxs",
+        base + ".root",
     ):
         if os.path.exists(cand):
             return cand
     return base
 
 
-def load_dicom_volume(dirpath: str) -> np.ndarray:
-    """Stack a real DICOM CT series into a (D,H,W) int16 volume (raw stored values, no rescale).
-    Sorted by ImagePositionPatient-z when present, else InstanceNumber. PHI is never printed/stored —
-    only the pixel array is used; the bench reports aggregate throughput/size, never identifiers.
-    """
-    import pydicom
+def _timed(fn, iters, path=None):
+    """Warm timing, or cold if `path` is given.
 
-    metas = []
-    for name in os.listdir(dirpath):
-        p = os.path.join(dirpath, name)
-        if not os.path.isfile(p):
-            continue
-        ds = pydicom.dcmread(p, defer_size="1 KB")
-        if "PixelData" not in ds:
-            continue
+    Cold repeats the eviction before every iteration — one eviction followed by N reads would
+    measure one cold read and N-1 warm ones, and report the median of a mixture.
+    """
+    if path is None:
+        s = common.stats(fn, iters)
+        s["cold"] = False
+        return s
+    worst = 0.0
+    samples = []
+    for _ in range(iters):
+        worst = max(worst, common.evict(path))
+        one = common.stats(fn, 1)
+        samples.append(one["median"])
+    import statistics
+
+    return {
+        "median": statistics.median(samples),
+        "min": min(samples),
+        "max": max(samples),
+        "n": len(samples),
+        "cold": True,
+        # The MEASURED post-eviction residency. Printed on every cold row: eviction is best-effort
+        # and the kernel may decline, so the report says which it actually got (#487).
+        "worst_residency": worst,
+    }
+
+
+# --------------------------------------------------------------------------- modalities
+def time_volume(mod, variant, vol, tmp, iters, do_cold):
+    base = os.path.join(tmp, f"{mod.__name__.split('.')[-1]}_{variant}_vol")
+    mod.write_volume(base, vol, variant)
+    back = mod.read_volume(base, variant)
+    assert back.shape == vol.shape and back.dtype == vol.dtype, (
+        f"{mod.NAME}/{variant}: vol shape/dtype"
+    )
+    assert np.array_equal(back, vol), f"{mod.NAME}/{variant}: vol not bit-exact"
+    z = vol.shape[0] // 2
+    assert np.array_equal(mod.read_volume_zslice(base, z, variant), vol[z]), (
+        f"{mod.NAME}/{variant}: zslice mismatch"
+    )
+    path = _resolve(mod, base, "volume", variant)
+    size = common.dir_or_file_bytes(path)
+    out = {
+        "bytes": size,
+        "ratio": vol.nbytes / size,
+        "write": common.stats(lambda: mod.write_volume(base, vol, variant), iters),
+        "read_full_warm": _timed(lambda: mod.read_volume(base, variant), iters),
+        "read_slice_warm": _timed(
+            lambda: mod.read_volume_zslice(base, z, variant), iters
+        ),
+    }
+    if do_cold:
+        out["read_full_cold"] = _timed(
+            lambda: mod.read_volume(base, variant), iters, path
+        )
+        out["read_slice_cold"] = _timed(
+            lambda: mod.read_volume_zslice(base, z, variant), iters, path
+        )
+    return out
+
+
+def time_table(mod, variant, cols, tmp, iters, do_cold, tag):
+    base = os.path.join(tmp, f"{mod.__name__.split('.')[-1]}_{variant}_{tag}_tab")
+    mod.write_table(base, cols, variant)
+    back = mod.read_table(base, variant)
+    for k, v in cols.items():
+        assert k in back and np.array_equal(back[k], v), (
+            f"{mod.NAME}/{variant}/{tag}: col {k}"
+        )
+    assert np.array_equal(mod.read_table_column(base, "e0", variant), cols["e0"]), (
+        f"{mod.NAME}/{variant}/{tag}: column read mismatch"
+    )
+    path = _resolve(mod, base, "table", variant)
+    raw = sum(v.nbytes for v in cols.values())
+    size = common.dir_or_file_bytes(path)
+    out = {
+        "bytes": size,
+        "ratio": raw / size,
+        "write": common.stats(lambda: mod.write_table(base, cols, variant), iters),
+        "read_full_warm": _timed(lambda: mod.read_table(base, variant), iters),
+        "read_col_warm": _timed(
+            lambda: mod.read_table_column(base, "e0", variant), iters
+        ),
+    }
+    if do_cold:
+        out["read_full_cold"] = _timed(
+            lambda: mod.read_table(base, variant), iters, path
+        )
+        out["read_col_cold"] = _timed(
+            lambda: mod.read_table_column(base, "e0", variant), iters, path
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- environment
+def environment() -> dict:
+    """Recorded with every result set — absolute throughput is machine and slice dependent, so a
+    number without its box is not reproducible and should not be quoted."""
+    mods = {}
+    for m in ("numpy", "h5py", "zarr", "pyarrow", "nibabel", "pydicom", "uproot"):
         try:
-            z = float(ds.ImagePositionPatient[2])
+            mods[m] = importlib.import_module(m).__version__
         except Exception:  # noqa: BLE001
-            z = float(getattr(ds, "InstanceNumber", len(metas)))
-        metas.append((z, p))
-    metas.sort()
-    slices = [pydicom.dcmread(p).pixel_array.astype("<i2") for _z, p in metas]
-    return np.ascontiguousarray(np.stack(slices))
+            mods[m] = "absent"
+    try:
+        with open("/proc/cpuinfo") as f:
+            cpu = next(
+                (
+                    ln.split(":", 1)[1].strip()
+                    for ln in f
+                    if ln.startswith("model name")
+                ),
+                platform.processor(),
+            )
+    except OSError:
+        cpu = platform.processor()
+    return {
+        "cpu": cpu,
+        "cores": os.cpu_count(),
+        "kernel": platform.release(),
+        "python": platform.python_version(),
+        "libraries": mods,
+        "affinity": sorted(os.sched_getaffinity(0)),
+    }
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--vol-iters", type=int, default=3)
-    ap.add_argument("--tab-iters", type=int, default=3)
+    ap.add_argument("--iters", type=int, default=5, help="N for median-of-N")
     ap.add_argument("--only", default="", help="comma list to restrict adapters")
+    ap.add_argument("--no-cold", action="store_true", help="skip cold-cache rows")
     ap.add_argument("--out", default="results.json")
-    ap.add_argument(
-        "--real-dicom",
-        default="",
-        help="path to a DICOM series dir → use as the volume (real data)",
-    )
+    ap.add_argument("--tmp", default="", help="scratch dir (defaults to system temp)")
     args = ap.parse_args()
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    vol = (
-        load_dicom_volume(args.real_dicom) if args.real_dicom else common.make_volume()
-    )
-    table = common.make_table()
+    vol = common.make_volume()
+    tables = {k: common.make_table(k) for k in common.FIXTURES}
     want = set(args.only.split(",")) if args.only else None
+    do_cold = not args.no_cold
 
     results = {}
     for name in ADAPTERS:
@@ -139,94 +220,181 @@ def main():
         try:
             mod = importlib.import_module(f"adapters.{name}")
         except Exception as e:  # noqa: BLE001
+            # The reference adapter missing invalidates the whole comparison; an ecosystem adapter
+            # missing only drops its rows. Never let the first read as the second.
+            if name == REFERENCE:
+                sys.exit(f"FATAL: reference adapter {name!r} not importable — {e}")
             print(f"SKIP {name}: import failed — {e}", file=sys.stderr)
             continue
-        entry = {
-            "name": mod.NAME,
-            "codec": getattr(mod, "CODEC", "?"),
-            "caps": mod.CAPS,
-            "volume": None,
-            "table": None,
-        }
-        with tempfile.TemporaryDirectory() as tmp:
+        entry = {"name": mod.NAME, "caps": mod.CAPS, "variants": {}}
+        if hasattr(mod, "INTEGRITY"):
+            entry["integrity"] = mod.INTEGRITY
+        if getattr(mod, "SINGLE_VARIANT_REASON", ""):
+            entry["single_variant_reason"] = mod.SINGLE_VARIANT_REASON
+        for variant in mod.VARIANTS:
+            v = {"volume": None, "tables": {}}
+            # Settings are resolved PER MODALITY: HDF5/NeXus/Zarr chunk volumes 64^3 but tables
+            # 1-D at 65536 rows, and a row that printed the cubic geometry on a table would be
+            # claiming a fairness property the code does not honour (#487).
             if mod.CAPS.get("volume"):
-                try:
-                    entry["volume"] = time_volume(mod, vol, tmp, args.vol_iters)
-                except Exception as e:  # noqa: BLE001
-                    entry["volume"] = {"error": str(e)}
-                    traceback.print_exc()
+                v["settings_volume"] = common.settings_for(mod, variant, "volume")
             if mod.CAPS.get("table"):
-                try:
-                    entry["table"] = time_table(mod, table, tmp, args.tab_iters)
-                except Exception as e:  # noqa: BLE001
-                    entry["table"] = {"error": str(e)}
-                    traceback.print_exc()
+                v["settings_table"] = common.settings_for(mod, variant, "table")
+            import tempfile
+
+            with tempfile.TemporaryDirectory(dir=args.tmp or None) as tmp:
+                if mod.CAPS.get("volume"):
+                    try:
+                        v["volume"] = time_volume(
+                            mod, variant, vol, tmp, args.iters, do_cold
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        v["volume"] = {"error": str(e)}
+                        traceback.print_exc()
+                if mod.CAPS.get("table"):
+                    for tag, cols in tables.items():
+                        try:
+                            v["tables"][tag] = time_table(
+                                mod, variant, cols, tmp, args.iters, do_cold, tag
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            v["tables"][tag] = {"error": str(e)}
+                            traceback.print_exc()
+            entry["variants"][variant] = v
         results[name] = entry
 
+    payload = {
+        "environment": environment(),
+        "iters": args.iters,
+        "vol_mib": vol.nbytes / 2**20,
+        "table_mib": {
+            k: sum(c.nbytes for c in v.values()) / 2**20 for k, v in tables.items()
+        },
+        "results": results,
+    }
     with open(args.out, "w") as f:
-        json.dump(
-            {
-                "vol_mib": vol.nbytes / 2**20,
-                "table_mib": sum(v.nbytes for v in table.values()) / 2**20,
-                "results": results,
-            },
-            f,
-            indent=2,
-        )
-    _print_aloca(vol, table, results)
+        json.dump(payload, f, indent=2)
+    report(payload, vol, tables)
 
 
+# --------------------------------------------------------------------------- report
 def _mbps(nbytes, s):
     return (nbytes / 1e6) / s if s and s > 0 else float("nan")
 
 
-def _print_aloca(vol, table, results):
+def _cell(st, nbytes):
+    """`median MB/s [min..max]` — the spread is printed so a reader can see overlap."""
+    if not st:
+        return f"{'-':>11}"
+    return f"{_mbps(nbytes, st['median']):>7.0f}"
+
+
+def report(payload, vol, tables):
+    env = payload["environment"]
     print(
-        f"\n# Cross-ecosystem I/O — #143  (volume {vol.nbytes / 2**20:.0f} MiB int16 {vol.shape}, "
-        f"table {sum(v.nbytes for v in table.values()) / 2**20:.0f} MiB {len(table['t']):,} rows)"
+        f"\n# Cross-ecosystem I/O — #143/#485  (volume {vol.nbytes / 2**20:.0f} MiB int16 {vol.shape}; "
+        f"tables {len(next(iter(tables.values()))['t']):,} rows)"
     )
     print(
-        "# warm (page-cache) reads → decode/parse throughput; min-of-N; one slice of the box.\n"
+        f"# {env['cpu']} x{env['cores']} · kernel {env['kernel']} · python {env['python']}"
+    )
+    print(f"# {' · '.join(f'{k} {v}' for k, v in env['libraries'].items())}")
+    print(
+        f"# median of N={payload['iters']}, [min..max] in results.json · MB/s over RAW bytes"
+    )
+    print(
+        "# CAVEAT: synthetic data is far more compressible than real acquisitions — the size"
+    )
+    print(
+        "#         column is a ratio BETWEEN formats on identical input, not an absolute claim.\n"
     )
 
     print("## Volume")
-    print(
-        f"{'ecosystem':22} {'codec':22} {'ratio':>6} {'size':>9} {'write':>9} {'read':>9} {'slice':>9}"
-    )
-    print(f"{'':22} {'':22} {'x':>6} {'MiB':>9} {'MB/s':>9} {'MB/s':>9} {'MB/s':>9}")
-    for r in results.values():
-        v = r.get("volume")
-        if not v:
-            continue
-        if "error" in v:
-            print(f"{r['name']:22} {r['codec']:22} {'ERR':>6}  {v['error'][:48]}")
-            continue
-        print(
-            f"{r['name']:22} {r['codec']:22} {v['ratio']:>6.1f} {v['bytes'] / 2**20:>9.2f} "
-            f"{_mbps(vol.nbytes, v['write_s']):>9.0f} {_mbps(vol.nbytes, v['read_full_s']):>9.0f} "
-            f"{_mbps(vol.nbytes, v['read_slice_s']):>9.0f}"
-        )
+    hdr = f"{'ecosystem':20} {'settings':52} {'ratio':>6} {'MiB':>8} {'write':>7} {'read':>7} {'slice':>7} {'cold-rd':>8} {'resid':>6}"
+    print(hdr)
+    for r in payload["results"].values():
+        for vkey, v in r["variants"].items():
+            m = v.get("volume")
+            if not m:
+                continue
+            if "error" in m:
+                print(
+                    f"{r['name']:20} {v['settings_volume']:52} {'ERR':>6}  {m['error'][:40]}"
+                )
+                continue
+            cold = m.get("read_full_cold")
+            resid = f"{cold['worst_residency'] * 100:>5.1f}%" if cold else f"{'-':>6}"
+            print(
+                f"{r['name']:20} {v['settings_volume']:52} {m['ratio']:>6.1f} {m['bytes'] / 2**20:>8.2f} "
+                f"{_cell(m['write'], vol.nbytes)} {_cell(m['read_full_warm'], vol.nbytes)} "
+                f"{_cell(m['read_slice_warm'], vol.nbytes)} {_cell(cold, vol.nbytes):>8} {resid}"
+            )
 
-    print("\n## Table")
-    raw = sum(v.nbytes for v in table.values())
-    print(
-        f"{'ecosystem':22} {'codec':22} {'ratio':>6} {'size':>9} {'write':>9} {'read':>9} {'col':>9}"
-    )
-    print(f"{'':22} {'':22} {'x':>6} {'MiB':>9} {'MB/s':>9} {'MB/s':>9} {'MB/s':>9}")
-    for r in results.values():
-        t = r.get("table")
-        if not t:
-            continue
-        if "error" in t:
-            print(f"{r['name']:22} {r['codec']:22} {'ERR':>6}  {t['error'][:48]}")
-            continue
-        print(
-            f"{r['name']:22} {r['codec']:22} {t['ratio']:>6.1f} {t['bytes'] / 2**20:>9.2f} "
-            f"{_mbps(raw, t['write_s']):>9.0f} {_mbps(raw, t['read_full_s']):>9.0f} "
-            f"{_mbps(raw, t['read_col_s']):>9.0f}"
-        )
+    for tag, cols in tables.items():
+        raw = sum(c.nbytes for c in cols.values())
+        print(f"\n## Table — {tag} fixture")
+        if tag == "periodic":
+            print(
+                "#  adversarial for value-distribution codecs: exact periods 7 and 5, which"
+            )
+            print(
+                "#  deflate's LZ77 window exploits and Pco/dictionary/bit-packing cannot (#497)."
+            )
+        else:
+            print(
+                "#  listmode-like: Poisson clock runs + continuous floats, shaped after real"
+            )
+            print(
+                "#  /events_2p (#493). Both fixtures are always reported — one is choosing (#497)."
+            )
+        print(hdr.replace("slice", "  col"))
+        for r in payload["results"].values():
+            for vkey, v in r["variants"].items():
+                m = v.get("tables", {}).get(tag)
+                if not m:
+                    continue
+                if "error" in m:
+                    print(
+                        f"{r['name']:20} {v['settings_table']:52} {'ERR':>6}  {m['error'][:40]}"
+                    )
+                    continue
+                cold = m.get("read_full_cold")
+                resid = (
+                    f"{cold['worst_residency'] * 100:>5.1f}%" if cold else f"{'-':>6}"
+                )
+                print(
+                    f"{r['name']:20} {v['settings_table']:52} {m['ratio']:>6.1f} {m['bytes'] / 2**20:>8.2f} "
+                    f"{_cell(m['write'], raw)} {_cell(m['read_full_warm'], raw)} "
+                    f"{_cell(m['read_col_warm'], raw)} {_cell(cold, raw):>8} {resid}"
+                )
 
-    swmr = [r["name"] for r in results.values() if r["caps"].get("swmr")]
+    print("\n## Integrity — what each mechanism costs, and what it proves")
+    for r in payload["results"].values():
+        ig = r.get("integrity")
+        if not ig:
+            continue
+        print(f"{r['name']}: {ig['mechanism']}")
+        print(f"    detects : {ig['detects']}")
+        print(f"    does NOT: {ig['does_not']}")
+    print(
+        "\nBoth a checksum and a sealed manifest catch a flipped bit. Only one answers\n"
+        "'is this the artifact that was sealed, and by whom' — corruption detection is not\n"
+        "whole-file tamper-evidence, and the table does not let one stand in for the other."
+    )
+
+    lone = [
+        (r["name"], r["single_variant_reason"])
+        for r in payload["results"].values()
+        if r.get("single_variant_reason")
+    ]
+    if lone:
+        print(
+            "\n## Reported at ONE setting (no tuning lever exists — stated, not assumed)"
+        )
+        for nm, why in lone:
+            print(f"{nm}: {why}")
+
+    swmr = [r["name"] for r in payload["results"].values() if r["caps"].get("swmr")]
     print(f"\nSWMR / concurrent-reader support: {', '.join(swmr) if swmr else 'none'}")
 
 
