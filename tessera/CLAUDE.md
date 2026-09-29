@@ -88,5 +88,7 @@ build is ~link time.
     hide a different bug class; the flake is the only thing that runs both.
 - **Commits:** commit inside `nix develop` so the `prek` gates fire. If a hook fails to *install*,
   that is a bug worth fixing at the source — do not reach for `--no-verify` by reflex, because it
-  disables every other gate in `.pre-commit-config.yaml` too. (Commit signing is unavailable on the
-  agent VMs, so `-c commit.gpgsign=false` is expected; that is not the same as skipping gates.)
+  disables every other gate in `.pre-commit-config.yaml` too. **Commits are signed**
+  (owner decision 2026-09-29): the local git config signs with the registered SSH signing key. Never pass
+  `-c commit.gpgsign=false`. Squash merges are disabled, so every branch commit lands on `dev` as-is and
+  must be both signed and conventional.
