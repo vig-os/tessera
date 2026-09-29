@@ -109,8 +109,31 @@ jobs:
         id: check
         run: |
           set +e
+          # Resource sampler, started INSIDE this step on purpose (#483). Three legs on #460/#461
+          # died with the generic "runner has received a shutdown signal" and exit 143, with NO
+          # in-job error — no ENOSPC, no OOM line. That is the shape of the runner AGENT being
+          # killed rather than a build failing, so the cause stayed inferred (four concurrent Rust
+          # derivations on a 4-core/16 GB runner) instead of measured.
+          #
+          # It must print to THIS step's stdout rather than to a file collected later: GitHub
+          # streams step logs, so samples written before the agent dies are preserved, whereas a
+          # file and an `always()` step both vanish with the runner. The last sample before a
+          # shutdown is exactly the number worth having.
+          ( while true; do
+              printf '[res] %s | mem %s | %s | load %s\n' \
+                "$(date -u +%H:%M:%S)" \
+                "$(free -m 2>/dev/null | awk '/^Mem:/{printf "used=%sM avail=%sM", $3, $7}')" \
+                "$(df -m /nix /home/runner 2>/dev/null | awk 'NR>1{printf "%s avail=%sM ", $6, $4}')" \
+                "$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+              sleep 30
+            done ) &
+          sampler=$!
+          # shellcheck disable=SC2064
+          trap "kill $sampler 2>/dev/null" EXIT
+
           nix flake check -L --keep-going --fallback
           rc=$?
+          kill "$sampler" 2>/dev/null
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           echo "nix flake check exited $rc"
 
