@@ -1555,6 +1555,56 @@ mod tests {
         buf.freeze().to_vec()
     }
 
+    /// **#472 — a persisted float `Sum` must not carry the platform's default NaN.**
+    ///
+    /// A column holding both `+inf` and `-inf` makes vortex's `Sum` statistic evaluate `inf + -inf`,
+    /// an IEEE 754 *invalid* operation. IEEE leaves the resulting bit pattern unspecified and the
+    /// targets disagree — x86_64 produces `0xfff8_0000_0000_0000` (sign bit set), aarch64
+    /// `0x7ff8_0000_0000_0000` (clear). `Stat::Sum` is persisted, so those bits reached the sealed
+    /// bytes and the same logical table sealed to a different `content_hash` per host.
+    ///
+    /// Fixed upstream by canonicalising a NaN sum; carried here by the vortex fork pin (see the
+    /// `[patch.crates-io]` block in `tessera/Cargo.toml`, removal tracked in #480).
+    ///
+    /// **Asymmetry worth knowing before trusting this test.** aarch64 was always producing the
+    /// canonical value, so on aarch64 the sealed bytes are identical with and without the fix — no
+    /// test can detect a dropped pin there via this defect. The guard therefore bites on **x86_64**,
+    /// which is where it matters: that is the host whose bytes were wrong. #468's separate guard is
+    /// the profile-dependent half and fires on both arches.
+    ///
+    /// Asserts byte *patterns* rather than a digest, following the same reasoning as the #468 guard:
+    /// a vortex bump legitimately moves bytes, and this test should fire for a determinism regression
+    /// rather than for every dependency update.
+    #[test]
+    fn float_sum_stat_is_canonical_nan_not_the_platform_default() {
+        let data: TableData = vec![(
+            "x".into(),
+            ColumnData::F64(vec![f64::INFINITY, f64::NEG_INFINITY]),
+        )];
+        let spec = TableSpec {
+            columns: vec![col("x", "f8")],
+            rows: 2,
+            row_index: None,
+        };
+        let sealed = encode(&spec, &data).expect("encode");
+
+        let canonical = 0x7ff8_0000_0000_0000u64.to_le_bytes();
+        let x86_default = 0xfff8_0000_0000_0000u64.to_le_bytes();
+        let contains = |needle: &[u8]| sealed.windows(needle.len()).any(|w| w == needle);
+
+        assert!(
+            contains(&canonical),
+            "#472: the sealed bytes must carry the CANONICAL quiet NaN as the float Sum statistic"
+        );
+        assert!(
+            !contains(&x86_default),
+            "#472 regression: the sealed bytes carry x86_64's default NaN (0xfff8_0000_0000_0000). \
+             The vortex fork pin has most likely been dropped before the fix shipped upstream — see \
+             #480. Note this assertion cannot fire on aarch64, which always produced the canonical \
+             value, so a green aarch64 leg is not evidence against it."
+        );
+    }
+
     /// **#468 — the container bytes must NOT depend on the build configuration.**
     ///
     /// This was a known upstream limitation, asserted as still-broken. It is now FIXED, and this test

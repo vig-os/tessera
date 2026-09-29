@@ -370,6 +370,14 @@
               echo "[#468] the build-config independence guard under both profiles" >&2
               cargo test -q -p tessera-io --lib full_span_int_container_bytes_are_build_config_independent
               cargo test -q --release -p tessera-io --lib full_span_int_container_bytes_are_build_config_independent
+
+              # #472's guard (the arch-dependent half): the persisted float Sum must be the canonical
+              # NaN, not x86_64's default. Run in both profiles for symmetry with the above, though
+              # this one's axis is the architecture — the aarch64 leg of this matrix is what pairs
+              # with it, and aarch64 cannot fail it (it always produced the canonical value).
+              echo "[#472] the canonical-NaN Sum guard under both profiles" >&2
+              cargo test -q -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
+              cargo test -q --release -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
             '';
           });
 
