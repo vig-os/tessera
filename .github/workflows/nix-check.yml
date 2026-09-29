@@ -10,7 +10,7 @@
 # The logic lives in the flake's `checks` (flake.nix), so the SAME command runs on a dev's
 # machine and here — no "passes locally / fails in CI" drift, nothing to reproduce by hand.
 # Run it yourself with the SAME flags CI uses:
-#   nix flake check -L --keep-going --fallback --cores 2
+#   nix flake check -L --keep-going --fallback --max-jobs 2 --cores 2
 #
 # Checks (see flake.nix): workspace-clippy · workspace-test · workspace-fmt ·
 # guardrails-gates · dev-shell. cargo-deny + the full pre-commit gate set run via `prek`
@@ -179,7 +179,7 @@ jobs:
           # shellcheck disable=SC2064
           trap "kill $sampler 2>/dev/null" EXIT
 
-          nix flake check -L --keep-going --fallback --cores 2
+          nix flake check -L --keep-going --fallback --max-jobs 2 --cores 2
           rc=$?
           kill "$sampler" 2>/dev/null
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
