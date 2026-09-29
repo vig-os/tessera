@@ -622,7 +622,7 @@ fn ze(e: impl std::fmt::Display) -> Error {
 /// Sessions must never be shared across runtimes. `VortexSession` is `Arc`-backed,
 /// so `clone().with_handle(..)` rebinds the *shared* state instead of producing an
 /// independent session: caching one template and re-binding a handle per call lets a
-/// short-lived runtime (`encode`/`decode_column`) leave every other holder — notably
+/// short-lived runtime (`encode`/`encode_streaming`) leave every other holder — notably
 /// the long-lived pooled [`READ_RT`] session — pointing at a dropped runtime. The next
 /// pooled read then panics `Attempted to use a Handle after its runtime was dropped`.
 /// Regression-tested by `short_lived_runtime_does_not_poison_pooled_session`.
@@ -2187,12 +2187,20 @@ mod tests {
 
     /// A short-lived runtime must not poison the long-lived pooled read session.
     ///
-    /// `encode`/`encode_streaming`/`decode_column` each build their own
-    /// `CurrentThreadRuntime` and drop it on return, while `decode`/`decode_projected`
-    /// use the per-thread pooled [`READ_RT`]. When every session was cloned from one
-    /// cached template, `clone().with_handle(..)` rebound `Arc`-shared state, so the
-    /// short-lived runtime's death left the pooled session dangling and this third
-    /// call panicked with `Attempted to use a Handle after its runtime was dropped`.
+    /// `encode`/`encode_streaming` each build their own `CurrentThreadRuntime` and drop
+    /// it on return, while every read (`decode`/`decode_projected`/`decode_column`/
+    /// `decode_rows`) uses the per-thread pooled [`READ_RT`]. When every session was
+    /// cloned from one cached template, `clone().with_handle(..)` rebound `Arc`-shared
+    /// state, so the short-lived runtime's death left the pooled session dangling and
+    /// this third call panicked with `Attempted to use a Handle after its runtime was
+    /// dropped`.
+    ///
+    /// **The middle call must be a short-lived-runtime one.** It used to be
+    /// `decode_column`, which now delegates to the pooled `decode_projected` (#351) —
+    /// leaving the sequence pooled→pooled→pooled, i.e. vacuous. `encode` is the
+    /// remaining short-lived-runtime caller, so it is what reproduces the ordering.
+    /// Verified by A/B: restoring the cached-template `new_session` makes this test
+    /// panic with the original message, and pass again once reverted.
     ///
     /// The ordering is the whole test: it only reproduces when a pooled read, a
     /// short-lived-runtime read, and another pooled read share **one process** — which
@@ -2213,13 +2221,75 @@ mod tests {
         let blob = encode(&spec, &data).unwrap();
 
         assert_eq!(decode(&spec, &blob).unwrap(), data, "pooled decode");
-        // Builds and drops its own runtime — the poisoning step.
-        decode_column(&spec, &blob, "idx").unwrap();
+        // The poisoning step: builds its own runtime and drops it on return. Must NOT be a
+        // read — every read is pooled now, which would make this test assert nothing.
+        let _ = encode(&spec, &data).unwrap();
         assert_eq!(
             decode(&spec, &blob).unwrap(),
             data,
             "pooled session poisoned by a dropped short-lived runtime"
         );
+    }
+
+    /// #462: `decode_column` delegates to `decode_projected` (#351), so its equivalence with a full
+    /// `decode` has to hold for the dtypes and the shapes the delegation could plausibly diverge on
+    /// — not just the fixed-width numerics the older test used. Covers `b1`/`str` (whose
+    /// materialise paths differ from the primitives) and a table spanning MULTIPLE row-groups,
+    /// where a per-chunk bug would only show from the second group onward.
+    #[test]
+    fn decode_column_matches_full_decode_across_dtypes_and_chunks() {
+        use tessera_core::block::table::{Column, TableSpec};
+        // Deliberately not a multiple of ROWS_PER_GROUP: the last group is short.
+        let n = ROWS_PER_GROUP + 1_234;
+        let data: TableData = vec![
+            ("idx".into(), ColumnData::U32((0..n as u32).collect())),
+            (
+                "val".into(),
+                ColumnData::F64((0..n).map(|k| k as f64 * 0.25).collect()),
+            ),
+            (
+                "flag".into(),
+                ColumnData::Bool((0..n).map(|k| k % 7 == 0).collect()),
+            ),
+            (
+                "origin".into(),
+                ColumnData::Utf8(
+                    (0..n)
+                        .map(|k| ["annih511", "prompt_nuclear", "other"][k % 3].to_string())
+                        .collect(),
+                ),
+            ),
+        ];
+        let spec = TableSpec {
+            columns: vec![
+                Column::new("idx", "u4"),
+                Column::new("val", "f8"),
+                Column::new("flag", "b1"),
+                Column::new("origin", "str"),
+            ],
+            rows: n as u64,
+            row_index: None,
+        };
+        let blob = encode(&spec, &data).unwrap();
+        let whole = decode(&spec, &blob).unwrap();
+        assert!(
+            n > ROWS_PER_GROUP,
+            "fixture must span more than one row-group"
+        );
+        for (name, expected) in &whole {
+            assert_eq!(
+                &decode_column(&spec, &blob, name).unwrap(),
+                expected,
+                "decode_column('{name}') diverged from the full decode"
+            );
+        }
+        // And the multi-column projection agrees with both, in the order asked for.
+        let projected = decode_projected(&spec, &blob, &["origin", "idx"]).unwrap();
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].0, "origin");
+        assert_eq!(projected[1].0, "idx");
+        assert_eq!(projected[0].1, whole[3].1);
+        assert_eq!(projected[1].1, whole[0].1);
     }
 
     #[test]
