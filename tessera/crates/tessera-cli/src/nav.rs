@@ -1570,40 +1570,64 @@ impl ProjMode {
     }
 }
 
-/// The projection geometry: the output shape with `axis` dropped, and for each input flat index the output
-/// flat index it contributes to.
+/// The projection geometry: the output shape with `axis` dropped, plus the input→output index mapping.
 ///
 /// Factored out so the `f64` reduction and the native `max` reduction cannot disagree about layout — two
 /// copies of this index arithmetic would be a silent-wrong-answer waiting to happen (#478).
-fn projection_map(shape: &[u64], axis: usize) -> (Vec<u64>, Vec<usize>) {
-    let n = shape.len();
-    let mut strides = vec![1usize; n];
-    for i in (0..n.saturating_sub(1)).rev() {
-        strides[i] = strides[i + 1] * shape[i + 1] as usize;
+///
+/// The mapping is a **function**, not a materialised table. A stored `Vec<usize>` costs 8 bytes per input
+/// sample — ~1.07 GiB of pure bookkeeping on a 512³ volume (134M samples), on top of the samples
+/// themselves — for arithmetic that is a handful of divisions. This holds O(rank) state instead.
+struct Projection {
+    out_shape: Vec<u64>,
+    /// Row-major strides of the INPUT shape.
+    strides: Vec<usize>,
+    dims: Vec<usize>,
+    axis: usize,
+}
+
+impl Projection {
+    fn new(shape: &[u64], axis: usize) -> Self {
+        let n = shape.len();
+        let mut strides = vec![1usize; n];
+        for i in (0..n.saturating_sub(1)).rev() {
+            strides[i] = strides[i + 1] * shape[i + 1] as usize;
+        }
+        Projection {
+            out_shape: shape
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != axis)
+                .map(|(_, &d)| d)
+                .collect(),
+            strides,
+            dims: shape.iter().map(|&d| d as usize).collect(),
+            axis,
+        }
     }
-    let out_shape: Vec<u64> = shape
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != axis)
-        .map(|(_, &d)| d)
-        .collect();
-    let in_n: usize = shape.iter().map(|&d| d as usize).product();
-    let mut map = Vec::with_capacity(in_n);
-    for flat in 0..in_n {
-        // Output flat index = the input coords with the projected axis removed (row-major).
+
+    /// The number of output cells the declared output shape has. Deliberately **not** clamped to 1: when
+    /// another axis is zero-length the projection really is empty, and inventing a cell would emit a value
+    /// the declared shape says is not there (#478 review).
+    fn out_len(&self) -> usize {
+        self.out_shape.iter().map(|&d| d as usize).product()
+    }
+
+    /// The output flat index an input flat index contributes to: the input coords with the projected axis
+    /// removed, row-major.
+    fn output_index(&self, flat: usize) -> usize {
         let mut of = 0usize;
         let mut os = 1usize;
-        for i in (0..n).rev() {
-            if i == axis {
+        for i in (0..self.dims.len()).rev() {
+            if i == self.axis {
                 continue;
             }
-            let coord = (flat / strides[i]) % shape[i] as usize;
+            let coord = (flat / self.strides[i]) % self.dims[i].max(1);
             of += coord * os;
-            os *= shape[i] as usize;
+            os *= self.dims[i];
         }
-        map.push(of);
+        of
     }
-    (out_shape, map)
 }
 
 /// Reduce a row-major N-D array `values` (shape `shape`) along `axis` by `mode`, dropping that axis.
@@ -1614,19 +1638,20 @@ fn project_axis(
     axis: usize,
     mode: ProjMode,
 ) -> (Vec<u64>, Vec<f64>) {
-    let (out_shape, map) = projection_map(shape, axis);
+    let p = Projection::new(shape, axis);
     let ax_len = shape[axis].max(1) as usize;
-    let out_n: usize = out_shape.iter().map(|&d| d as usize).product();
     let init = match mode {
         ProjMode::Max => f64::NEG_INFINITY,
         _ => 0.0,
     };
-    let mut out = vec![init; out_n.max(1)];
+    let mut out = vec![init; p.out_len()];
     for (flat, &v) in values.iter().enumerate() {
-        let Some(&of) = map.get(flat) else { continue };
+        let Some(slot) = out.get_mut(p.output_index(flat)) else {
+            continue;
+        };
         match mode {
-            ProjMode::Max => out[of] = out[of].max(v),
-            ProjMode::Mean | ProjMode::Sum => out[of] += v,
+            ProjMode::Max => *slot = slot.max(v),
+            ProjMode::Mean | ProjMode::Sum => *slot += v,
         }
     }
     if matches!(mode, ProjMode::Mean) {
@@ -1634,7 +1659,7 @@ fn project_axis(
             *o /= ax_len as f64;
         }
     }
-    (out_shape, out)
+    (p.out_shape, out)
 }
 
 /// Max-project along `axis` **natively**, so the result keeps the array's dtype exactly.
@@ -1643,18 +1668,16 @@ fn project_axis(
 /// through `f64` — and a good reason not to: two `int64`s differing only beyond the 53-bit mantissa compare
 /// *equal* as `f64`, so the f64 path could pick the wrong sample as well as round it (#478).
 fn project_max_native(data: &ArrayData, shape: &[u64], axis: usize) -> (Vec<u64>, ArrayData) {
-    let (out_shape, map) = projection_map(shape, axis);
-    let out_n: usize = out_shape
-        .iter()
-        .map(|&d| d as usize)
-        .product::<usize>()
-        .max(1);
+    let p = Projection::new(shape, axis);
+    let out_n = p.out_len();
     macro_rules! reduce {
         ($v:expr, $variant:ident, $init:expr, $max:expr) => {{
             let mut out = vec![$init; out_n];
             for (flat, &x) in $v.iter().enumerate() {
-                let Some(&of) = map.get(flat) else { continue };
-                out[of] = $max(out[of], x);
+                let Some(slot) = out.get_mut(p.output_index(flat)) else {
+                    continue;
+                };
+                *slot = $max(*slot, x);
             }
             ArrayData::$variant(out)
         }};
@@ -1674,7 +1697,7 @@ fn project_max_native(data: &ArrayData, shape: &[u64], axis: usize) -> (Vec<u64>
         ArrayData::F64(v) => reduce!(v, F64, f64::NEG_INFINITY, f64::max),
         ArrayData::Bool(v) => reduce!(v, Bool, false, bool::max),
     };
-    (out_shape, reduced)
+    (p.out_shape, reduced)
 }
 
 /// `tessera project FILE BLOCK --axis <name|idx> --mode max|mean|sum` — collapse an **array** block
@@ -1719,6 +1742,15 @@ pub fn project(
     } else {
         None
     };
+    // Reducing over a ZERO-LENGTH axis has no answer: `max` of nothing is not a value. The f64 path used
+    // to emit -inf and the native path its type's MIN (`i64::MIN`, `0u8`, `false`) — which looks exactly
+    // like real data. Refuse instead (#478 review); `ArraySpec` does allow a zero extent.
+    if spec.shape[ax] == 0 {
+        return Err(tessera_core::Error::Invalid(format!(
+            "--axis '{axis}' has zero length, so there is nothing to project — \
+             a reduction over an empty axis has no value to report"
+        )));
+    }
     // `max` PICKS an existing sample, so the result keeps the stored dtype and is reduced natively —
     // an f64 comparison could not tell two `int64`s apart beyond 2^53. `mean` averages and `sum` can
     // leave the stored type's range, so both are genuinely floats; `--physical` rescales whatever the mode.
@@ -2971,6 +3003,11 @@ mod tests {
             (ArrayData::U32(vec![1, 2]), "<u4", 4),
             (ArrayData::I64(vec![-1, 2]), "<i8", 8),
             (ArrayData::U64(vec![1, 2]), "<u8", 8),
+            (
+                ArrayData::F16(vec![half::f16::from_f32(-1.5), half::f16::from_f32(2.5)]),
+                "<f2",
+                2,
+            ),
             (ArrayData::F32(vec![-1.5, 2.5]), "<f4", 4),
             (ArrayData::F64(vec![-1.5, 2.5]), "<f8", 8),
         ];
@@ -2991,6 +3028,78 @@ mod tests {
             assert_eq!(shape, "1, 2", "{dtype}");
             assert_eq!(body.len(), 2 * width, "{dtype}: 2 values of {width} bytes");
         }
+    }
+
+    /// **#478 review** — zero-length dims are legal in an `ArraySpec`, and a reduction over an empty axis
+    /// has no value to report. The f64 path used to emit `-inf` and the native path its type's minimum
+    /// (`i64::MIN`, `0u8`, `false`) — which looks exactly like real data rather than like an error. Both
+    /// paths now refuse.
+    ///
+    /// A zero-length axis *elsewhere* is different: the projection is then genuinely empty, and the grid
+    /// must match the declared output shape rather than invent a cell (the carried-over `out_n.max(1)`).
+    #[test]
+    fn projecting_over_an_empty_axis_is_refused_and_an_empty_result_stays_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = |fmt: GridFormat| GridOpts {
+            format: fmt,
+            limit: None,
+            all: true,
+            interactive: false,
+            window: None,
+        };
+
+        // axis 0 is zero-length: max/mean/sum over nothing must all be errors, not MIN/-inf/0.
+        let p = sealed_typed(dir.path(), vec![0, 2, 2], ArrayData::I64(vec![]));
+        for mode in ["max", "mean", "sum"] {
+            let err = project(
+                &p,
+                "volume",
+                "0",
+                mode,
+                false,
+                &opts(GridFormat::Npy),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("zero length"), "{mode}: {msg}");
+        }
+
+        // A zero extent on ANOTHER axis: projecting axis 0 is legal (it has length 2), and the result is
+        // an empty grid whose shape matches the declaration — no invented cell.
+        let p = sealed_typed(dir.path(), vec![2, 0, 3], ArrayData::I64(vec![]));
+        let mut buf = Vec::new();
+        let res = project(
+            &p,
+            "volume",
+            "0",
+            "max",
+            false,
+            &opts(GridFormat::Json),
+            &mut buf,
+        )
+        .unwrap();
+        assert_eq!(res.total, 0, "an empty projection has no rows");
+        let v: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["values"].as_array().unwrap().len(), 0);
+        assert_eq!(v["rows_emitted"], 0);
+
+        // …and the same through the f64 path, so both agree.
+        let mut buf = Vec::new();
+        let res = project(
+            &p,
+            "volume",
+            "0",
+            "mean",
+            false,
+            &opts(GridFormat::Json),
+            &mut buf,
+        )
+        .unwrap();
+        assert_eq!(res.total, 0);
+        let v: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["values"].as_array().unwrap().len(), 0);
+        assert_eq!(v["dtype"], "float64", "mean still computes floats");
     }
 
     /// **#478** — a transform genuinely produces floats, so those still go out as `'<f8'` and say so.
