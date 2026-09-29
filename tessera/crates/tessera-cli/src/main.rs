@@ -925,7 +925,7 @@ enum BenchAction {
         /// Volume edge (N^3 int16). Default 256 = 32 MiB raw, matching the #143 harness.
         #[arg(long, default_value_t = bench_compare::VOL_N)]
         vol_n: usize,
-        /// Table row count (`u8 + 2xf4`).
+        /// Table row count (`u8 + 2xf4`) for each synthetic fixture.
         #[arg(long, default_value_t = bench_compare::TABLE_ROWS)]
         rows: usize,
     },

@@ -97,9 +97,54 @@ fn make_volume(n: usize) -> ArrayData {
     ArrayData::I16(v)
 }
 
-/// A listmode-like table: monotonic u64 timestamp + two f32 energy columns.
-/// Same shape as `bench/ecosystems/common.py::make_table` (#143).
-fn make_table(rows: usize) -> (TableSpec, TableData) {
+/// Deterministic xorshift64* — a continuous fixture needs pseudo-random values, but the benchmark
+/// must stay byte-reproducible, so this is a fixed-seed generator rather than a real RNG.
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn unit(&mut self) -> f32 {
+        (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32
+    }
+    /// Sum of four uniforms — a cheap, dependency-free bell curve (central limit). The property
+    /// under test is that the column is drawn from a CONTINUOUS distribution, which is what defeats
+    /// a dictionary. It is emphatically NOT that the values are distinct: at 4M draws from a 24-bit
+    /// uniform, collisions are a certainty, and claiming otherwise was simply wrong (#497 review).
+    fn bell(&mut self) -> f32 {
+        self.unit() + self.unit() + self.unit() + self.unit() - 2.0
+    }
+    /// An exponentially-distributed run length with the given mean, floored at one event.
+    ///
+    /// A real detector clock does not tick every Nth event exactly: arrivals are Poisson, so the
+    /// number of events sharing one millisecond stamp is geometric (exponential in the continuum
+    /// limit). Generating the clock as an exact `k / MEAN` would hand the continuous fixture the
+    /// PERIODIC fixture's defining property — the one thing it exists in order not to have.
+    fn exp_run(&mut self, mean: f32) -> u64 {
+        // `unit()` samples [0, 1) and ln(0) is -inf, so shift to (0, 1].
+        let u = 1.0 - self.unit();
+        let n = (-mean * u.ln()).round();
+        if n.is_finite() && n >= 1.0 {
+            n as u64
+        } else {
+            1
+        }
+    }
+}
+
+/// **Periodic** fixture — the original #388 table: a monotonic `u64` counter and two `f32` columns
+/// with periods 7 and 5.
+///
+/// It is kept, and kept labelled, because it is **adversarial for value-distribution codecs**: LZ77
+/// (deflate, behind HDF5's shuffle+gzip) locks onto the repeating byte block, while Pco, dictionary
+/// and bit-packing model the value distribution and cannot exploit periodicity at all. Tessera loses
+/// it ~6× (#493). Replacing it with something friendlier would be tuning the benchmark until we win;
+/// reporting it beside a realistic fixture is the honest form.
+fn make_table_periodic(rows: usize) -> (TableSpec, TableData) {
     let data: TableData = vec![
         ("t".into(), ColumnData::U64((0..rows as u64).collect())),
         (
@@ -111,16 +156,56 @@ fn make_table(rows: usize) -> (TableSpec, TableData) {
             ColumnData::F32((0..rows).map(|k| 510.0 - (k % 5) as f32).collect()),
         ),
     ];
-    let spec = TableSpec {
-        columns: vec![
-            Column::new("t", "u8"),
-            Column::new("e0", "f4"),
-            Column::new("e1", "f4"),
-        ],
+    (table_spec(&data, rows), data)
+}
+
+/// Mean number of events sharing one millisecond stamp on real DUPLET `/events_2p` (#493).
+const MS_RUN_EVENTS: f32 = 250.0;
+
+/// **Continuous** fixture — shaped after what a real acquisition actually looks like, measured on
+/// DUPLET `/events_2p` during the #493 investigation:
+///
+/// - `t` is a coarse millisecond clock, not a dense counter: it advances once every ~250 events, so
+///   ~99.6 % of its deltas are zero, matching the real column's run structure. The run lengths are
+///   POISSON (exponentially-distributed gaps), not a fixed stride — see [`Rng::exp_run`].
+/// - `e0`/`e1` are energies drawn from a continuous distribution. On the real data shuffle+gzip
+///   manages only ~1.4× on columns of this character, and Pco beats it.
+fn make_table_continuous(rows: usize) -> (TableSpec, TableData) {
+    // The clock draws from its OWN stream so that changing it leaves the energy columns
+    // byte-identical, and the two effects on the reported sizes stay separable.
+    let mut clk = Rng(0x2545_F491_4F6C_DD1D);
+    let mut t = Vec::with_capacity(rows);
+    let mut clock: u64 = 0;
+    let mut left = clk.exp_run(MS_RUN_EVENTS);
+    for _ in 0..rows {
+        if left == 0 {
+            clock += 1;
+            left = clk.exp_run(MS_RUN_EVENTS);
+        }
+        t.push(clock);
+        left -= 1;
+    }
+
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let e0: Vec<f32> = (0..rows).map(|_| 511.0 + 25.0 * rng.bell()).collect();
+    let e1: Vec<f32> = (0..rows).map(|_| 511.0 + 25.0 * rng.bell()).collect();
+    let data: TableData = vec![
+        ("t".into(), ColumnData::U64(t)),
+        ("e0".into(), ColumnData::F32(e0)),
+        ("e1".into(), ColumnData::F32(e1)),
+    ];
+    (table_spec(&data, rows), data)
+}
+
+fn table_spec(data: &TableData, rows: usize) -> TableSpec {
+    TableSpec {
+        columns: data
+            .iter()
+            .map(|(n, c)| Column::new(n.clone(), c.numpy_code()))
+            .collect(),
         rows: rows as u64,
         row_index: None,
-    };
-    (spec, data)
+    }
 }
 
 /// Best-effort page-cache eviction for one file, so a "cold" read measures a first read rather than
@@ -253,7 +338,7 @@ const COLD_RESIDENT_OK: f64 = 0.01;
 pub struct Row {
     pub format: String,
     pub settings: String,
-    pub modality: &'static str,
+    pub modality: String,
     pub op: &'static str,
     pub cache: &'static str,
     /// Post-eviction page residency for THIS row's file, when it was a cold run. `None` on warm rows
@@ -304,7 +389,7 @@ struct H5Variant {
 /// used: the volume gets Tessera's own cubic 64³ (so the ROI row compares layouts, not chunk-size
 /// luck), while a 1-D table gets a row-count chunk. Printing "64³" on a table row would be a lie.
 fn h5_variants(modality: &str) -> Vec<H5Variant> {
-    let chunk_desc = if modality == "volume" {
+    let chunk_desc = if modality.starts_with("volume") {
         format!("chunked {CHUNK}^3 (= tessera's)")
     } else {
         format!("chunked {TABLE_CHUNK_ROWS} rows (1-D)")
@@ -609,7 +694,7 @@ fn compare_volume(
             rows.push(Row {
                 format: v.label.into(),
                 settings: v.settings,
-                modality: "volume",
+                modality: "volume".into(),
                 op: "verify",
                 cache: "-",
                 resident: None,
@@ -635,11 +720,11 @@ const CLAIM_VERIFY_H5: &str =
     "fletcher32: per-chunk CORRUPTION check on read; not keyed, no identity";
 const CLAIM_VERIFY_NONE: &str = "no integrity mechanism configured";
 
-fn push_size(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &'static str, b: u64) {
+fn push_size(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &str, b: u64) {
     rows.push(Row {
         format: format.into(),
         settings: settings.into(),
-        modality,
+        modality: modality.into(),
         op: "size",
         cache: "-",
         resident: None,
@@ -649,11 +734,11 @@ fn push_size(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &'stat
     });
 }
 
-fn push_write(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &'static str, s: Stats) {
+fn push_write(rows: &mut Vec<Row>, format: &str, settings: &str, modality: &str, s: Stats) {
     rows.push(Row {
         format: format.into(),
         settings: settings.into(),
-        modality,
+        modality: modality.into(),
         op: "write+seal",
         cache: "warm",
         resident: None,
@@ -668,7 +753,7 @@ fn push_read(
     rows: &mut Vec<Row>,
     format: &str,
     settings: &str,
-    modality: &'static str,
+    modality: &str,
     op: &'static str,
     cache: &'static str,
     s: Stats,
@@ -684,7 +769,7 @@ fn push_read(
     rows.push(Row {
         format: format.into(),
         settings: settings.into(),
-        modality,
+        modality: modality.into(),
         op,
         cache,
         resident,
@@ -711,17 +796,20 @@ fn slug(s: &str) -> String {
 /// The table half of the matrix.
 fn compare_table(
     dir: &Path,
-    rows_n: usize,
+    label: &str,
+    spec: &TableSpec,
+    data: &TableData,
     iters: usize,
     cold: bool,
     rows: &mut Vec<Row>,
 ) -> Result<()> {
-    let (spec, data) = make_table(rows_n);
+    let rows_n = spec.rows as usize;
+    let modality = label;
     // Row-range ROI: a contiguous 1% window, the "take a slice of the acquisition" access pattern.
     let roi_len = (rows_n / 100).max(1);
     let roi_start = rows_n / 2;
     let roi_idx: Vec<u64> = (roi_start as u64..(roi_start + roi_len) as u64).collect();
-    let expected_rows = expect_rows(&data, roi_start, roi_len)?;
+    let expected_rows = expect_rows(data, roi_start, roi_len)?;
     let ColumnData::U64(t) = &data[0].1 else {
         return Err(err("t must be u64"));
     };
@@ -736,45 +824,51 @@ fn compare_table(
     // column. Stated rather than invented: a fabricated "tuned" row would imply a lever that is not
     // there. (The ARRAY path does have one, and the volume half exercises it.)
     let settings = "default: Vortex cascade (no user-facing codec knob)".to_string();
-    let name = "tab_default";
+    let name = format!("tab_{}", slug(label));
     let (wr, _) = timed(iters, None, || {
-        let blk = table::table_block("events", &spec, &data).expect("encode");
-        let _ = seal_tsra(dir, name, blk).expect("seal");
+        let blk = table::table_block("events", spec, data).expect("encode");
+        let _ = seal_tsra(dir, &name, blk).expect("seal");
     });
     let path = dir.join(format!("{name}.tsra"));
 
     // Correctness gates timing — full, single-column AND row-window are each verified.
     let blob = Reader::open(&path)?.read_block("events")?;
     check(
-        &table::decode(&spec, &blob)?,
-        &data,
+        &table::decode(spec, &blob)?,
+        data,
         "tessera table full read",
     )?;
     check(
-        &table::decode_column(&spec, &blob, "e0")?,
+        &table::decode_column(spec, &blob, "e0")?,
         &data[1].1,
         "tessera table 1-column read",
     )?;
     check(
-        &table::decode_rows(&spec, &blob, &roi_idx)?,
+        &table::decode_rows(spec, &blob, &roi_idx)?,
         &expected_rows,
         "tessera table row-ROI read",
     )?;
 
-    push_size(rows, "Tessera (.tsra)", &settings, "table", file_len(&path));
-    push_write(rows, "Tessera (.tsra)", &settings, "table", wr);
+    push_size(
+        rows,
+        "Tessera (.tsra)",
+        &settings,
+        modality,
+        file_len(&path),
+    );
+    push_write(rows, "Tessera (.tsra)", &settings, modality, wr);
 
     for (cache, evict_path) in warm_cold(&path, cold) {
         let (s, res) = timed(iters, evict_path, || {
             let mut r = Reader::open(&path).expect("open");
             let b = r.read_block("events").expect("block");
-            let _ = table::decode(&spec, &b).expect("decode");
+            let _ = table::decode(spec, &b).expect("decode");
         });
         push_read(
             rows,
             "Tessera (.tsra)",
             &settings,
-            "table",
+            modality,
             "read full",
             cache,
             s,
@@ -785,13 +879,13 @@ fn compare_table(
         let (s, res) = timed(iters, evict_path, || {
             let mut r = Reader::open(&path).expect("open");
             let b = r.read_block("events").expect("block");
-            let _ = table::decode_column(&spec, &b, "e0").expect("column");
+            let _ = table::decode_column(spec, &b, "e0").expect("column");
         });
         push_read(
             rows,
             "Tessera (.tsra)",
             &settings,
-            "table",
+            modality,
             "read 1 column",
             cache,
             s,
@@ -802,13 +896,13 @@ fn compare_table(
         let (s, res) = timed(iters, evict_path, || {
             let mut r = Reader::open(&path).expect("open");
             let b = r.read_block("events").expect("block");
-            let _ = table::decode_rows(&spec, &b, &roi_idx).expect("rows");
+            let _ = table::decode_rows(spec, &b, &roi_idx).expect("rows");
         });
         push_read(
             rows,
             "Tessera (.tsra)",
             &settings,
-            "table",
+            modality,
             "read row ROI",
             cache,
             s,
@@ -824,7 +918,7 @@ fn compare_table(
         rows,
         "Tessera (.tsra)",
         &settings,
-        "table",
+        modality,
         "verify",
         "warm",
         s,
@@ -834,7 +928,7 @@ fn compare_table(
 
     // ---- HDF5 side: one dataset per column, which is how a columnar table is expressed in HDF5.
     for v in h5_variants("table") {
-        let path = dir.join(format!("tab_{}.h5", slug(&v.settings)));
+        let path = dir.join(format!("tab_{}_{}.h5", slug(label), slug(&v.settings)));
         let (wr, _) = timed(iters, None, || {
             let _ = std::fs::remove_file(&path);
             write_h5_table(&path, &v, t, e0, e1).expect("h5 write");
@@ -892,8 +986,8 @@ fn compare_table(
             )?;
         }
 
-        push_size(rows, v.label, &v.settings, "table", file_len(&path));
-        push_write(rows, v.label, &v.settings, "table", wr);
+        push_size(rows, v.label, &v.settings, modality, file_len(&path));
+        push_write(rows, v.label, &v.settings, modality, wr);
 
         for (cache, evict_path) in warm_cold(&path, cold) {
             let (s, res) = timed(iters, evict_path, || {
@@ -906,7 +1000,7 @@ fn compare_table(
                 rows,
                 v.label,
                 &v.settings,
-                "table",
+                modality,
                 "read full",
                 cache,
                 s,
@@ -923,7 +1017,7 @@ fn compare_table(
                 rows,
                 v.label,
                 &v.settings,
-                "table",
+                modality,
                 "read 1 column",
                 cache,
                 s,
@@ -953,7 +1047,7 @@ fn compare_table(
                 rows,
                 v.label,
                 &v.settings,
-                "table",
+                modality,
                 "read row ROI",
                 cache,
                 s,
@@ -973,7 +1067,7 @@ fn compare_table(
                 rows,
                 v.label,
                 &v.settings,
-                "table",
+                modality,
                 "verify",
                 "warm",
                 s,
@@ -984,7 +1078,7 @@ fn compare_table(
             rows.push(Row {
                 format: v.label.into(),
                 settings: v.settings,
-                modality: "table",
+                modality: modality.into(),
                 op: "verify",
                 cache: "-",
                 resident: None,
@@ -1137,7 +1231,29 @@ pub fn run(opts: CompareOpts) -> Result<()> {
         compare_volume(dir.path(), opts.vol_n, opts.iters, opts.cold, &mut rows)?;
     }
     if want_tab {
-        compare_table(dir.path(), opts.rows, opts.iters, opts.cold, &mut rows)?;
+        // BOTH synthetic fixtures, always, and always labelled. The periodic one is adversarial
+        // for tessera and stays; the continuous one is what a real acquisition looks like. One
+        // without the other is a chosen answer (#493).
+        let (sp, dp) = make_table_periodic(opts.rows);
+        compare_table(
+            dir.path(),
+            "table (periodic)",
+            &sp,
+            &dp,
+            opts.iters,
+            opts.cold,
+            &mut rows,
+        )?;
+        let (sc, dc) = make_table_continuous(opts.rows);
+        compare_table(
+            dir.path(),
+            "table (continuous)",
+            &sc,
+            &dc,
+            opts.iters,
+            opts.cold,
+            &mut rows,
+        )?;
     }
 
     let mi = machine_info(dir.path());
@@ -1164,7 +1280,7 @@ fn raw_bytes_note(opts: &CompareOpts) -> String {
     }
     if opts.dataset == "both" || opts.dataset == "table" {
         parts.push(format!(
-            "table {} rows x (u8+2xf4) = {} raw",
+            "table {} rows x (u8+2xf4) = {} raw, TWO fixtures (periodic + continuous)",
             opts.rows,
             human(opts.rows as u64 * (8 + 4 + 4))
         ));
@@ -1222,11 +1338,24 @@ fn print_table(opts: &CompareOpts, rows: &[Row], mi: &MachineInfo) {
     );
     out!("  note     Parquet lands once #460 puts the arrow/parquet crates on dev (#388 stage 2)");
     out!(
-        "  CAVEAT   the synthetic data is a smooth gradient + monotonic counters (verbatim from the"
+        "  fixtures table (periodic)   = the original #388 fixture: f32 columns of period 7 and 5."
     );
-    out!("           #143 harness, for comparability). It is FAR more compressible than real");
-    out!("           acquisitions, so read the size rows as a RATIO BETWEEN FORMATS on identical");
-    out!("           input, never as a compression ratio you will see on clinical data.");
+    out!("           ADVERSARIAL for value-distribution codecs — deflate's LZ77 locks onto the");
+    out!(
+        "           repeating byte block; Pco/dict/bitpacking model values, not repetition (#493)."
+    );
+    out!("           table (continuous) = shaped after REAL DUPLET listmode: a coarse ms clock");
+    out!(
+        "           (~99.6% zero deltas) + continuous energies. Both are reported, always: showing"
+    );
+    out!("           only one of them would be choosing the answer.");
+    out!("  CAVEAT   the VOLUME is a smooth gradient (verbatim from the #143 harness, for");
+    out!("           comparability), and the PERIODIC table is adversarial by construction. Both");
+    out!("           are far more compressible than a real acquisition, so read every size row as");
+    out!("           a RATIO BETWEEN FORMATS on identical input, not as a compression ratio to");
+    out!(
+        "           expect clinically. The CONTINUOUS table is the one shaped after real listmode."
+    );
     out!();
     out!(
         "{:<18} {:<56} {:<7} {:<14} {:<5} {:>10} {:>26}",
@@ -1419,6 +1548,96 @@ mod tests {
         let got = expect_roi(&raw, n, 2, 2);
         // z,y in {2,3}, x in 2..4 -> rows starting at 2*16+2*4+2 = 42, 46, 58, 62
         assert_eq!(got, vec![42, 43, 46, 47, 58, 59, 62, 63]);
+    }
+
+    /// The continuous fixture's clock must have POISSON run lengths, not a fixed stride.
+    ///
+    /// It shipped as `k / 250` — an exact period, which is the PERIODIC fixture's defining property
+    /// smuggled into the fixture whose entire purpose is not to have it (#497 review). A fixed
+    /// stride makes every run length identical, so that is exactly what this asserts against.
+    #[test]
+    fn continuous_clock_runs_are_poisson_not_a_fixed_stride() {
+        let (_, data) = make_table_continuous(200_000);
+        let ColumnData::U64(t) = &data[0].1 else {
+            panic!("t must be u64");
+        };
+
+        // Run lengths: how many consecutive events share each clock value.
+        let mut runs = Vec::new();
+        let mut cur = 1usize;
+        for w in t.windows(2) {
+            if w[0] == w[1] {
+                cur += 1;
+            } else {
+                runs.push(cur);
+                cur = 1;
+            }
+        }
+        assert!(runs.len() > 100, "too few runs to judge: {}", runs.len());
+
+        // A fixed stride yields ONE distinct run length. Exponential gaps yield many.
+        let distinct: std::collections::BTreeSet<_> = runs.iter().copied().collect();
+        assert!(
+            distinct.len() > 50,
+            "run lengths look like a fixed stride: {} distinct values",
+            distinct.len()
+        );
+
+        // Mean run length tracks MS_RUN_EVENTS, so the column keeps the real data's run STRUCTURE
+        // (~99.6% zero deltas) while losing its periodicity.
+        let mean = runs.iter().sum::<usize>() as f64 / runs.len() as f64;
+        assert!(
+            (150.0..400.0).contains(&mean),
+            "mean run length {mean} is nowhere near MS_RUN_EVENTS ({MS_RUN_EVENTS})"
+        );
+
+        // The clock still advances monotonically and is still coarse.
+        assert!(
+            t.windows(2).all(|w| w[1] >= w[0]),
+            "clock must be monotonic"
+        );
+        let zero_deltas = t.windows(2).filter(|w| w[0] == w[1]).count();
+        let frac = zero_deltas as f64 / (t.len() - 1) as f64;
+        assert!(frac > 0.99, "expected ~99.6% zero deltas, got {frac}");
+    }
+
+    /// #497: every table row must carry its FIXTURE label. Eight `push_*` call sites once passed a
+    /// literal "table", so the continuous fixture's read rows were emitted indistinguishable from
+    /// the periodic ones — the two fixtures exist precisely to be told apart, so a mislabelled row
+    /// is worse than a missing one.
+    #[test]
+    fn table_rows_carry_their_fixture_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rows: Vec<Row> = Vec::new();
+        let (spec, data) = make_table_continuous(2_000);
+        compare_table(
+            dir.path(),
+            "table (continuous)",
+            &spec,
+            &data,
+            1,
+            false,
+            &mut rows,
+        )
+        .unwrap();
+        assert!(!rows.is_empty());
+        for r in &rows {
+            assert_eq!(
+                r.modality, "table (continuous)",
+                "row {:?}/{:?} lost its fixture label",
+                r.format, r.op
+            );
+        }
+        // ...and every access pattern is present, so a dropped row cannot pass as a labelled one.
+        for op in [
+            "size",
+            "write+seal",
+            "read full",
+            "read 1 column",
+            "read row ROI",
+        ] {
+            assert!(rows.iter().any(|r| r.op == op), "missing op {op}");
+        }
     }
 
     #[test]
