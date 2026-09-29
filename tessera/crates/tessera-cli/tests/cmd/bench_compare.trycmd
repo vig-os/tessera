@@ -8,7 +8,7 @@ A tiny fixture keeps it fast; the real run uses the defaults.
 
 ```
 $ tessera bench compare --dataset volume --vol-n 64 --iters 1
-tessera bench compare — .tsra vs HDF5 (#388)
+tessera bench compare — .tsra vs HDF5 vs Parquet (#388)
   data     volume 64^3 int16 = 512.0 KiB raw
   machine [..]
   versions [..]
@@ -17,7 +17,7 @@ tessera bench compare — .tsra vs HDF5 (#388)
   warm-up  none beyond the correctness pass: the verification read precedes the warm
            timings, so warm rows start with the file in page cache; cold rows evict first
   cache    warm only (pass --cold to add best-effort cold-cache rows)
-  note     Parquet lands once #460 puts the arrow/parquet crates on dev (#388 stage 2)
+  note     three formats: .tsra, HDF5 and Parquet (#388)
   fixtures table (periodic)   = the original #388 fixture: f32 columns of period 7 and 5.
            ADVERSARIAL for value-distribution codecs — deflate's LZ77 locks onto the
            repeating byte block; Pco/dict/bitpacking model values, not repetition (#493).
@@ -99,8 +99,8 @@ $ tessera bench compare --dataset table --rows 5000 --iters 1 --format json
   "verification": "every timed read (full, projected, ROI) is compared against the source data, per format and setting, before its timings count",
   "volume_n": null,
   "table_rows": 5000,
-  "caveat": "synthetic data (a smooth gradient + monotonic counters, verbatim from the #143 harness) is far more compressible than real acquisitions; size rows are a ratio BETWEEN formats on identical input, not a compression ratio for clinical data",
-  "parquet": "pending #460 (arrow/parquet crates not yet on dev) — stage 2",
+  "caveat": "the VOLUME is a smooth gradient (verbatim from the #143 harness) and the PERIODIC table is adversarial by construction; both are far more compressible than a real acquisition, so size rows are a ratio BETWEEN formats on identical input, not a compression ratio to expect clinically. The CONTINUOUS table is the one shaped after real listmode",
+  "parquet": "included (parquet-rs); its writer emits no page CRC, so the integrity row is absent by fact, not omission",
   "rows": [
 ...
   ]

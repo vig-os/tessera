@@ -97,50 +97,61 @@ It is built to be checkable rather than flattering:
 | HDF5, contiguous uncompressed | 32.0 MiB | **0.0162s** | 0.0005s |
 | HDF5, 64³ + shuffle+gzip-4 | 698.8 KiB | 0.0506s | 0.0006s |
 
-**Table — reported on TWO fixtures, because one fixture is a chosen answer.**
+**Table — three formats, two fixtures.** One fixture is a chosen answer, so both are reported.
 
-The original fixture's float columns have periods 7 and 5. That is *adversarial* for
+The periodic fixture's float columns have periods 7 and 5, which is *adversarial* for
 value-distribution codecs: deflate's LZ77 window locks onto the repeating byte block, while Pco,
-dictionary and bit-packing model the value distribution and cannot exploit periodicity at all. The
-continuous fixture is shaped after real DUPLET listmode — a coarse millisecond clock (~99.6 % zero
-deltas) plus continuous energies. Both are reported, always.
+dictionary and bit-packing model the value distribution and cannot exploit periodicity. The
+continuous fixture is shaped after real DUPLET listmode — a coarse millisecond clock with
+Poisson-varying run lengths plus continuous energies.
 
-| fixture | Tessera | HDF5 shuffle+gzip-4 | |
+Every format is shown at its default *and* tuned, with the standard float tuning applied to each:
+HDF5 gets **shuffle**+gzip, Parquet gets **BYTE_STREAM_SPLIT**+zstd (its counterpart, with the
+dictionary off since a dictionary over continuous floats defeats the split).
+
+| size | periodic | continuous |
+|---|---|---|
+| Tessera | 959.4 KiB | **19.6 MiB** |
+| HDF5, shuffle+gzip-4 | **155.3 KiB** | 21.5 MiB |
+| HDF5, uncompressed | 61.0 MiB | 61.0 MiB |
+| Parquet, uncompressed (crate default) | 40.9 MiB | 44.9 MiB |
+| Parquet, snappy (pyarrow/Spark default) | 23.0 MiB | 44.8 MiB |
+| Parquet, zstd-4 + BYTE_STREAM_SPLIT | 4.0 MiB | 23.4 MiB |
+
+On the **continuous** fixture — the representative one — Tessera is smallest: 1.10× under HDF5
+shuffle+gzip and 1.19× under tuned Parquet. On the **periodic** one HDF5 wins by 6.2×, and Tessera
+beats tuned Parquet 4.3×. On real DUPLET listmode Tessera seals to 73.4 MiB against shuffle+gzip's
+75.7 MiB (**1.03× smaller**), tracking the continuous fixture.
+
+Latency on the continuous fixture (warm):
+
+| | full read | 1 column | row window |
 |---|---|---|---|
-| **periodic** (adversarial) | 959.4 KiB | **155.3 KiB** | HDF5 **6.2× smaller** |
-| **continuous** (listmode-like) | **19.6 MiB** | 21.5 MiB | Tessera **1.10× smaller** |
-
-Same encoder, same command, opposite verdicts — which is why publishing only one of them would be
-picking the result. On real DUPLET listmode (`/events_2p`, 4M rows, 106.8 MiB raw) Tessera seals to
-73.4 MiB against shuffle+gzip's 75.7 MiB — **1.03× smaller**, tracking the continuous fixture rather
-than the periodic one.
-
-Latency, on the periodic fixture (full/1-column/row-ROI, warm):
-
-| | full read | 1 column | row ROI | write+seal |
-|---|---|---|---|---|
-| Tessera | 0.0062s | 0.0024s | 0.0015s | 0.3179s |
-| HDF5, contiguous uncompressed | 0.0110s | **0.0017s** | **0.0001s** | **0.0361s** |
-| HDF5, shuffle+gzip-4 | 0.0682s | 0.0164s | 0.0023s | 0.3372s |
+| Tessera | 0.0309s | 0.0160s | 0.0119s |
+| HDF5, uncompressed | **0.0098s** | **0.0014s** | **0.0001s** |
+| HDF5, shuffle+gzip-4 | 0.1266s | 0.0479s | 0.0043s |
+| Parquet, snappy | 0.0483s | 0.0125s | 0.0010s |
+| Parquet, zstd-4 + BSS | 0.0751s | 0.0245s | 0.0021s |
 
 #### Where Tessera loses, and why
 
-- **The periodic fixture's size, by 6.2×.** Explained above, and it is the only place that gap
-  appears: on the continuous fixture and on real data Tessera is ahead. Investigated in full in
-  #493 — the container and stats account for 0.4 % of the file, and the integer column compresses
-  2213×; it is entirely the two periodic float columns.
-- **Writing is ~9× slower than uncompressed HDF5** (0.3179s vs 0.0361s). Tessera hashes and seals;
-  HDF5 memcpys. That is the cost of the integrity guarantee, not a tuning bug.
-- **Uncompressed HDF5 wins the small, raw-speed reads** — the single-column read (0.0017s vs 0.0024s)
-  and especially the row window (0.0001s vs 0.0015s, ~15×), because a contiguous uncompressed slab is
-  a seek plus a memcpy and nothing Tessera does can be cheaper than that.
+- **The periodic fixture's size, by 6.2× to HDF5.** Explained above, and only there: on the
+  continuous fixture and on real data Tessera leads. Investigated in #493 — the container and stats
+  are 0.4 % of the file and the integer column compresses 2213×; it is entirely the periodic floats.
+- **Every small, raw-speed read.** Uncompressed HDF5 wins the single column (0.0014s vs 0.0160s) and
+  the row window (0.0001s vs 0.0119s), because a contiguous uncompressed slab is a seek plus a
+  memcpy. **Parquet also beats Tessera on both** (0.0125s and 0.0010s with snappy) — column
+  projection is its headline strength, and a row window is a row-group read it is built for.
+  Tessera's column and window reads decode from the whole sealed block, so they carry the block's
+  bytes even when only part is wanted.
+- **Writing is ~9× slower than uncompressed HDF5.** Tessera hashes and seals; HDF5 memcpys. That is
+  the cost of the integrity guarantee, not a tuning bug.
 - **Full volume read is slower than uncompressed HDF5** (0.0244s vs 0.0162s) — decompression against
-  no decompression — though Tessera is ~2× *faster* than the compressed HDF5 it is actually
-  comparable to (0.0506s).
+  none — though Tessera is ~2× *faster* than the compressed HDF5 it is comparable to (0.0506s).
 
-Against the **compressed** configuration, which is the fair comparison for a format that always
-compresses, Tessera reads the periodic table 11× faster (0.0062s vs 0.0682s), a column 6.8× faster,
-and the volume 2× faster.
+Against the **compressed** configurations, which are the fair comparison for a format that always
+compresses, Tessera reads the continuous table 4× faster than shuffle+gzip HDF5 and 2.4× faster than
+tuned Parquet.
 
 #### Integrity is not one number
 
@@ -150,8 +161,10 @@ against a sealed manifest whose hash also covers metadata and provenance, and wh
 bind to a signer. Both catch a flipped bit; only one answers "is this the artifact that was sealed,
 and by whom". The benchmark times both and says which is which.
 
-Parquet joins the table once its Rust crates land (#460); the broader seven-format comparison
-(Zarr, NeXus, NIfTI, DICOM, ROOT, Parquet) lives in `tessera/bench/ecosystems/`.
+Parquet has no integrity row to time: the format permits an optional per-page CRC32, but
+parquet-rs 58's writer never emits one, so for the files this benchmark writes there is nothing to
+check. The broader seven-format comparison (Zarr, NeXus, NIfTI, DICOM, ROOT, Parquet) lives in
+`tessera/bench/ecosystems/`.
 
 ## When a plain format is the right call
 
