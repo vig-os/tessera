@@ -100,8 +100,8 @@ def _timed(fn, iters, path=None):
 
 
 # --------------------------------------------------------------------------- modalities
-def time_volume(mod, variant, vol, tmp, iters, do_cold):
-    base = os.path.join(tmp, f"{mod.__name__.split('.')[-1]}_{variant}_vol")
+def time_volume(mod, variant, vol, tmp, iters, do_cold, tag="vol"):
+    base = os.path.join(tmp, f"{mod.__name__.split('.')[-1]}_{variant}_{tag}_vol")
     mod.write_volume(base, vol, variant)
     back = mod.read_volume(base, variant)
     assert back.shape == vol.shape and back.dtype == vol.dtype, (
@@ -208,7 +208,7 @@ def main():
     args = ap.parse_args()
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    vol = common.make_volume()
+    volumes = {k: common.make_volume(k) for k in common.VOLUMES}
     tables = {k: common.make_table(k) for k in common.FIXTURES}
     want = set(args.only.split(",")) if args.only else None
     do_cold = not args.no_cold
@@ -232,7 +232,7 @@ def main():
         if getattr(mod, "SINGLE_VARIANT_REASON", ""):
             entry["single_variant_reason"] = mod.SINGLE_VARIANT_REASON
         for variant in mod.VARIANTS:
-            v = {"volume": None, "tables": {}}
+            v = {"volumes": {}, "tables": {}}
             # Settings are resolved PER MODALITY: HDF5/NeXus/Zarr chunk volumes 64^3 but tables
             # 1-D at 65536 rows, and a row that printed the cubic geometry on a table would be
             # claiming a fairness property the code does not honour (#487).
@@ -244,13 +244,14 @@ def main():
 
             with tempfile.TemporaryDirectory(dir=args.tmp or None) as tmp:
                 if mod.CAPS.get("volume"):
-                    try:
-                        v["volume"] = time_volume(
-                            mod, variant, vol, tmp, args.iters, do_cold
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        v["volume"] = {"error": str(e)}
-                        traceback.print_exc()
+                    for vtag, vol in volumes.items():
+                        try:
+                            v["volumes"][vtag] = time_volume(
+                                mod, variant, vol, tmp, args.iters, do_cold, vtag
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            v["volumes"][vtag] = {"error": str(e)}
+                            traceback.print_exc()
                 if mod.CAPS.get("table"):
                     for tag, cols in tables.items():
                         try:
@@ -266,7 +267,7 @@ def main():
     payload = {
         "environment": environment(),
         "iters": args.iters,
-        "vol_mib": vol.nbytes / 2**20,
+        "vol_mib": {k: v.nbytes / 2**20 for k, v in volumes.items()},
         "table_mib": {
             k: sum(c.nbytes for c in v.values()) / 2**20 for k, v in tables.items()
         },
@@ -274,7 +275,7 @@ def main():
     }
     with open(args.out, "w") as f:
         json.dump(payload, f, indent=2)
-    report(payload, vol, tables)
+    report(payload, volumes, tables)
 
 
 # --------------------------------------------------------------------------- report
@@ -289,10 +290,12 @@ def _cell(st, nbytes):
     return f"{_mbps(nbytes, st['median']):>7.0f}"
 
 
-def report(payload, vol, tables):
+def report(payload, volumes, tables):
     env = payload["environment"]
+    _anyvol = next(iter(volumes.values()))
     print(
-        f"\n# Cross-ecosystem I/O — #143/#485  (volume {vol.nbytes / 2**20:.0f} MiB int16 {vol.shape}; "
+        f"\n# Cross-ecosystem I/O — #143/#485  (volumes {_anyvol.nbytes / 2**20:.0f} MiB int16 "
+        f"{_anyvol.shape}; "
         f"tables {len(next(iter(tables.values()))['t']):,} rows)"
     )
     print(
@@ -309,26 +312,49 @@ def report(payload, vol, tables):
         "#         column is a ratio BETWEEN formats on identical input, not an absolute claim.\n"
     )
 
-    print("## Volume")
     hdr = f"{'ecosystem':20} {'settings':52} {'ratio':>6} {'MiB':>8} {'write':>7} {'read':>7} {'slice':>7} {'cold-rd':>8} {'resid':>6}"
-    print(hdr)
-    for r in payload["results"].values():
-        for vkey, v in r["variants"].items():
-            m = v.get("volume")
-            if not m:
-                continue
-            if "error" in m:
-                print(
-                    f"{r['name']:20} {v['settings_volume']:52} {'ERR':>6}  {m['error'][:40]}"
-                )
-                continue
-            cold = m.get("read_full_cold")
-            resid = f"{cold['worst_residency'] * 100:>5.1f}%" if cold else f"{'-':>6}"
+    for vtag, vol in volumes.items():
+        print(f"\n## Volume — {vtag} fixture")
+        if vtag == "gradient":
             print(
-                f"{r['name']:20} {v['settings_volume']:52} {m['ratio']:>6.1f} {m['bytes'] / 2**20:>8.2f} "
-                f"{_cell(m['write'], vol.nbytes)} {_cell(m['read_full_warm'], vol.nbytes)} "
-                f"{_cell(m['read_slice_warm'], vol.nbytes)} {_cell(cold, vol.nbytes):>8} {resid}"
+                "#  a pure linear ramp: CONSTANT deltas, so LZ77 matches run the length of the"
             )
+            print(
+                "#  array — ideal for deflate/zstd, adversarial for value-distribution codecs."
+            )
+            print(
+                "#  Its verdict MOVES WITH SIZE (pcodec/zstd 1.11 -> 1.65 over n=64..256)."
+            )
+        else:
+            print(
+                "#  anatomy + detector noise — what a real reconstruction contains. The noise"
+            )
+            print(
+                "#  destroys long LZ matches but is exactly what a numeric codec models. Its"
+            )
+            print(
+                "#  ratio is SIZE-INVARIANT (pcodec/zstd ~0.82, n=64..320), matching real CT/PET."
+            )
+        print(hdr)
+        for r in payload["results"].values():
+            for v in r["variants"].values():
+                m = v.get("volumes", {}).get(vtag)
+                if not m:
+                    continue
+                if "error" in m:
+                    print(
+                        f"{r['name']:20} {v['settings_volume']:52} {'ERR':>6}  {m['error'][:40]}"
+                    )
+                    continue
+                cold = m.get("read_full_cold")
+                resid = (
+                    f"{cold['worst_residency'] * 100:>5.1f}%" if cold else f"{'-':>6}"
+                )
+                print(
+                    f"{r['name']:20} {v['settings_volume']:52} {m['ratio']:>6.1f} {m['bytes'] / 2**20:>8.2f} "
+                    f"{_cell(m['write'], vol.nbytes)} {_cell(m['read_full_warm'], vol.nbytes)} "
+                    f"{_cell(m['read_slice_warm'], vol.nbytes)} {_cell(cold, vol.nbytes):>8} {resid}"
+                )
 
     for tag, cols in tables.items():
         raw = sum(c.nbytes for c in cols.values())

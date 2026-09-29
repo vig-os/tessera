@@ -149,3 +149,36 @@ def test_fixtures_are_byte_reproducible():
         a, b = common.make_table(kind), common.make_table(kind)
         for k in a:
             assert np.array_equal(a[k], b[k]), f"{kind}/{k} not reproducible"
+
+
+# --------------------------------------------------------------------------- volume fixtures
+def test_both_volume_fixtures_exist_and_differ():
+    """Volumes get the same treatment as tables (#497): the harness shipped ONLY the gradient, which
+    is adversarial for value-distribution codecs exactly as the periodic table fixture is."""
+    g = common.make_volume("gradient")
+    a = common.make_volume("acquired")
+    assert g.shape == a.shape and g.dtype == a.dtype == np.dtype("<i2")
+    assert not np.array_equal(g, a)
+
+
+def test_gradient_volume_is_the_one_that_is_adversarial():
+    """Pins the property: constant deltas along z, which LZ77 exploits and numeric codecs cannot."""
+    g = common.make_volume("gradient")
+    dz = np.diff(g[:, 0, 0].astype(np.int64))
+    assert len(np.unique(dz)) == 1, "gradient fixture no longer has constant deltas"
+
+
+def test_acquired_volume_carries_detector_noise():
+    """The realistic fixture's defining property. Without noise it is just a smooth phantom and
+    compresses like the gradient — measured pcodec/zstd 1.65 there vs 0.82 with noise."""
+    a = common.make_volume("acquired")
+    flat = a[: a.shape[0] // 8, : a.shape[1] // 8, : a.shape[2] // 8].astype(np.float64)
+    assert flat.std() > 5.0, f"acquired volume has no noise (std {flat.std():.2f})"
+    assert len(np.unique(a)) > 500, (
+        "acquired volume is too few-valued to be an acquisition"
+    )
+
+
+def test_make_volume_rejects_an_unknown_fixture_name():
+    with pytest.raises(ValueError):
+        common.make_volume("ramp")

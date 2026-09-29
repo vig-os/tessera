@@ -1,6 +1,6 @@
 """Shared scaffold for the cross-ecosystem I/O comparison (#143, method hardened in #485).
 
-The driver (`run.py`) generates ONE synthetic volume + TWO synthetic tables, then drives every
+The driver (`run.py`) generates TWO synthetic volumes + TWO synthetic tables, then drives every
 ecosystem adapter through the same operations and times them identically. Each adapter lives in
 `adapters/<name>.py` and implements this contract:
 
@@ -69,14 +69,48 @@ def settings_for(mod, variant: str, modality: str) -> str:
     return v
 
 
-def make_volume() -> np.ndarray:
-    """A smooth CT-like int16 volume (gradient in z+y) — realistic compression, not a pure ramp."""
+VOLUMES = ("gradient", "acquired")
+
+
+def make_volume(kind: str = "acquired") -> np.ndarray:
+    """One of the two volume fixtures. BOTH are always reported, for the same reason as the tables
+    (#497): same encoder, same command, opposite verdicts.
+
+    gradient
+        A pure linear ramp in z and y. Its deltas are CONSTANT, so LZ77 match lengths run the
+        length of the array — ideal for deflate/zstd and adversarial for value-distribution codecs,
+        exactly as the `periodic` table fixture is. This was the harness's only volume fixture.
+
+        It is worse than merely unrepresentative: its verdict **depends on the fixture size**.
+        Measured pcodec/zstd size ratio at n = 64/128/192/256/320 → 1.11, 1.25, 1.39, 1.65, 0.41.
+        zstd's advantage grows as match lengths scale, then inverts once the pattern outgrows its
+        window. A benchmark whose answer moves with the array size is not measuring the codec, and
+        the 256 this harness uses sits near the worst point for pcodec.
+
+    acquired
+        Anatomy plus **detector noise** — what a real CT/PET reconstruction contains. The noise is
+        what destroys long LZ matches while remaining exactly what a numeric codec models. Its
+        ratio is SIZE-INVARIANT: pcodec/zstd = 0.85, 0.83, 0.82, 0.82, 0.82 across the same sizes,
+        i.e. pcodec is ~18% smaller at every scale. That tracks the -21% CT / -33% PET measured on
+        real acquisitions, which is the test of whether a fixture is representative.
+    """
+    if kind not in VOLUMES:
+        raise ValueError(f"unknown volume fixture {kind!r}; expected one of {VOLUMES}")
     n = VOL_N
-    z = np.arange(n, dtype=np.int64)[:, None, None]
-    y = np.arange(n, dtype=np.int64)[None, :, None]
-    x = np.zeros((1, 1, n), dtype=np.int64)
-    vol = (z * 8 + y * 2 - 1024 + x).astype("<i2")
-    return np.ascontiguousarray(vol)
+    if kind == "gradient":
+        z = np.arange(n, dtype=np.int64)[:, None, None]
+        y = np.arange(n, dtype=np.int64)[None, :, None]
+        x = np.zeros((1, 1, n), dtype=np.int64)
+        return np.ascontiguousarray((z * 8 + y * 2 - 1024 + x).astype("<i2"))
+
+    # A spherical phantom (soft tissue ~40 HU, a denser core ~340 HU, air -1000) plus Gaussian
+    # detector noise. Fixed seed so the fixture is byte-reproducible across runs.
+    rng = np.random.default_rng(20240101)
+    zz, yy, xx = np.meshgrid(*[np.arange(n)] * 3, indexing="ij")
+    r = np.sqrt((zz - n / 2) ** 2 + (yy - n / 2) ** 2 + (xx - n / 2) ** 2)
+    body = np.where(r < n * 0.4, 40.0, -1000.0) + np.where(r < n * 0.15, 300.0, 0.0)
+    body = body + rng.normal(0.0, 25.0, size=body.shape)
+    return np.ascontiguousarray(np.clip(body, -1024, 3071).astype("<i2"))
 
 
 # ---------------------------------------------------------------- table fixtures (#497)
