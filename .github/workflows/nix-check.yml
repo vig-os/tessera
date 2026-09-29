@@ -68,7 +68,30 @@ jobs:
     # very next one, which the previous 60-minute cap cancelled mid-build. A cancelled leg is not
     # a code failure, but it blocks the merge and costs a full rebuild to find out — so the cap is
     # set above the observed spread rather than just above the median.
-    timeout-minutes: 90
+    #
+    # Raised 90 -> 120 because the spread widened past 90 and the cap started cutting real work.
+    # Measured leg durations, same workflow, all on GitHub-hosted runners:
+    #
+    #     commit     x86_64            aarch64
+    #     7d2eaf8d   43m  success      41m  success
+    #     33aa5134   46m  success      43m  success
+    #     (pin PR)   57m  success      43m  success
+    #     1442ba12   89m  TIMEOUT      54m  success
+    #
+    # The axis is NOT architecture. x86_64's own range is 43-89m, a 2.1x spread; aarch64's is
+    # 41-54m, 1.3x. So x86_64 is not systematically slower — it is far more variable, and its bad
+    # draws are what hit the cap. Sizing against "x86 is slower" would tune for a constant that is
+    # not there; sizing against its own spread points at headroom, which is this change.
+    #
+    # 120 is the worst observed draw plus ~35%. Deliberately not higher: the cap also has to fail a
+    # genuinely hung leg in reasonable time, and GitHub's own ceiling is 6 hours.
+    #
+    # This raises the ceiling, it does not make the legs faster. The variance is the real defect and
+    # is tracked separately (#495) — the sampler added in #488 now records memory and disk on every
+    # leg, so the next long draw can be diagnosed as I/O starvation, memory pressure or simply slow
+    # silicon instead of guessed at. A concurrency cap (`--max-jobs`) must NOT land before this
+    # change: at 89 of 90 minutes any slowdown converts an intermittent failure into a reliable one.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
