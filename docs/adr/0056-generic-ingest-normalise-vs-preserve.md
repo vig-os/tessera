@@ -391,6 +391,32 @@ triple lives in the manifest's generation bag, regenerating must move 9 `manifes
 `content_hash`es. It did exactly that — 0/9 `id`, 0/9 `content_hash`, 9/9 `manifest_hash` — so if a
 `content_hash` had moved, the corpus gate would have said so and the change would have been wrong.
 
+**A package's identity is `(name, version)`, not its name.** A lockfile legitimately resolves several
+versions of one crate, and they are different code. A name-keyed scan of the lockfile sealed
+`base64=0.21.7` for the parquet lane, which depends on `base64 0.22.1` — so a real `base64` bump in the
+Parquet reader would not have moved the digest, which is the same false sameness this amendment exists to
+remove, reproduced inside its own first fix. Following only the first same-name package also dropped every
+crate reachable solely through a second version. A crate present at two versions on one path now contributes
+**two** pins.
+
+**A source is hashed unless it is the default registry.** `crate=version` for a crates.io release (so
+adopting `source` moved nothing on existing fork-free builds), and `crate=version@<source>` for a git fork
+*or a private registry* — an internal fork published at the same version would otherwise read as the public
+release. A **path** dependency cannot be identified this way at all, because `Cargo.lock` records no path for
+one; rather than pretend otherwise, the gate refuses an in-digest path dependency, so the first one forces a
+deliberate decision.
+
+**Exclusions are enumerated, never pattern-matched.** A `*-macro`/`*-derive` name rule read tidily and was
+wrong in kind: it silently excluded crates nobody had examined, which is the failure this gate exists to end.
+`seq-macro` is the cautionary case — it generates Parquet's bit-unpacking code, so a name rule would have
+waved through something that does bear on decoding.
+
+**Known limit — system-linked codecs.** `zstd-sys`, and `flate2`'s backend, link a library whose identity the
+digest pins only by the **crate** version, not by the library actually linked. A vendored build and a
+system-library build of the same `-sys` crate version therefore seal the same digest while potentially
+decompressing differently. This is the same class of gap as the feature-unification residual below, it is not
+closed here, and ADR-0057 Gate A is what would catch a resulting value difference.
+
 **What this does not close.** A feature flipped *inside* the shared arrow tree by an unrelated crate (the
 `sql` → `arrow-array/chrono-tz` case) is still outside the digest: it records each crate's version and
 source, not its resolved features. The residual below stands, and ADR-0057 Gate A — which regenerates the

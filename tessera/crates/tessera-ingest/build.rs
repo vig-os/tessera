@@ -90,9 +90,12 @@ fn emit_decoder_pins() {
     let Ok(lock) = std::fs::read_to_string(&lock_path) else {
         return;
     };
+    let pkgs = parse_lock(&lock);
     for (package, var) in DECODERS {
-        if let Some((version, _source)) = lock_pin(&lock, package) {
-            println!("cargo::rustc-env={var}={version}");
+        // The reader's own version, for `tessera info`. Unambiguous by name here: these are the crates
+        // whose single resolved version IS the `=` pin in the workspace manifest.
+        if let Some(p) = resolve(&pkgs, package, None) {
+            println!("cargo::rustc-env={var}={}", p.version);
         }
     }
 }
