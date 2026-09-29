@@ -1121,6 +1121,41 @@ enum IngestSrc {
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
     },
+    /// Any dense numeric grid (NumPy `.npy`, or `.npz` → a collection) → an `array` product.
+    ///
+    /// The array twin of `ingest table`: the verb names the **primitive**, so this is also how you
+    /// override a source that misrepresents its shape (ADR-0056 §1/§4). `--from` is sniffed from magic
+    /// bytes (`\x93NUMPY` for `.npy`, `PK` for `.npz`), and the extension is never consulted.
+    ///
+    /// One wrinkle worth knowing, because it is the format's and not ours: a NumPy **structured**
+    /// (record) dtype is rows of typed fields, so it seals a `table` product rather than an `array`.
+    /// The shape of the data decides the primitive, and the tool does not make you predict your own
+    /// dtype.
+    Array {
+        /// Source file: NumPy `.npy`, or `.npz` (a zip of `.npy` members).
+        input: PathBuf,
+        /// Output. A `.tsra` for a single array; a **directory** for a `.npz`, which is a collection
+        /// (one array product per member — ADR-0056 §11).
+        out: PathBuf,
+        /// Product name. For a `.npz` this names the collection; each member's product is named after
+        /// the archive member (`np.savez(f, energy=…)` → `energy`).
+        #[arg(long)]
+        name: String,
+        /// Acquisition timestamp (ISO-8601). Never defaulted from the clock — an identity input must be
+        /// reproducible.
+        #[arg(long)]
+        timestamp: String,
+        /// Source format. Sniffed from magic bytes when omitted.
+        #[arg(long, value_parser = ["npy", "npz"])]
+        from: Option<String>,
+        /// Clean label for the `ingested_from` provenance edge — replaces the input PATH in the sealed
+        /// manifest (ADR-0040 PHI hygiene).
+        #[arg(long, value_name = "LABEL")]
+        source_label: Option<String>,
+        /// Attach metadata `key=value` (value parsed as JSON, else string). Repeatable.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
+    },
     /// Preserve an un-parsed file as an opaque `blob` product (the "junk" tier).
     ///
     /// Preserves an un-parsed file **bit-faithfully** as an opaque `blob` (`.l64`, `.7z`, PDF;
@@ -2120,7 +2155,7 @@ fn do_sql(
 /// This is the "net code delete" the per-format paths now share with the spec-driven path —
 /// dispatch logic lives in one place (`engine::dispatch`), not duplicated here.
 fn run_ingest(src: IngestSrc) -> tessera_core::Result<()> {
-    let (spec, user_out) = ingest_src_to_spec(src)?;
+    let (spec, user_out, out_is_dir) = ingest_src_to_spec(src)?;
     let staging = tempfile::tempdir().map_err(|e| {
         tessera_core::Error::Invalid(format!("tessera ingest: create staging dir: {e}"))
     })?;
@@ -2134,6 +2169,43 @@ fn run_ingest(src: IngestSrc) -> tessera_core::Result<()> {
         &cfg,
         engine::DEFAULT_STREAM_THRESHOLD_BYTES,
     )?;
+    // A collection-shaped source (a `.npz` archive — ADR-0056 §11) puts the whole staging tree into
+    // `out` as a directory, exactly as `--spec` does. Keyed on the SOURCE KIND, not on the member count:
+    // a one-member archive is still a collection, and branching on the count would make the output shape
+    // depend on the data.
+    if out_is_dir {
+        std::fs::create_dir_all(&user_out).map_err(|e| {
+            tessera_core::Error::Invalid(format!(
+                "tessera ingest: create {}: {e}",
+                user_out.display()
+            ))
+        })?;
+        for entry in std::fs::read_dir(staging.path()).map_err(|e| {
+            tessera_core::Error::Invalid(format!("tessera ingest: read staging: {e}"))
+        })? {
+            let entry = entry.map_err(|e| {
+                tessera_core::Error::Invalid(format!("tessera ingest: read staging entry: {e}"))
+            })?;
+            let to = user_out.join(entry.file_name());
+            if std::fs::rename(entry.path(), &to).is_err() {
+                std::fs::copy(entry.path(), &to).map_err(|e| {
+                    tessera_core::Error::Invalid(format!(
+                        "tessera ingest: copy {} -> {}: {e}",
+                        entry.path().display(),
+                        to.display()
+                    ))
+                })?;
+            }
+        }
+        let n = coll.members.len();
+        println!(
+            "ingested {n} product{} -> {}/ (collection {})",
+            if n == 1 { "" } else { "s" },
+            user_out.display(),
+            coll.id
+        );
+        return Ok(());
+    }
     // Move the single produced `.tsra` to the user's `out` path. The engine names files by the
     // shared `member_filename` SSoT (`blake3_<hex>.tsra`); resolve that same name here (#323).
     let member = coll.members.first().ok_or_else(|| {
@@ -2163,17 +2235,31 @@ fn run_ingest(src: IngestSrc) -> tessera_core::Result<()> {
             ))
         })?;
     }
+    // Report the product the manifest ACTUALLY sealed rather than the schema the spec declared: a
+    // structured `.npy` is a table while its spec says `array` (ADR-0056 §1 — the file decides), and
+    // telling the operator "array" would be a small lie about what they now hold.
+    let sealed_product = Reader::open(&user_out)
+        .map(|r| r.manifest().product.clone())
+        .unwrap_or_else(|_| spec.products[0].schema.clone());
     println!(
         "ingested {} ({}) -> {}",
         member.reference,
-        spec.products[0].schema,
+        sealed_product,
         user_out.display()
     );
     Ok(())
 }
 
 /// Translate a per-format CLI subcommand into a 1-product spec + the caller's chosen output path.
-fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::IngestSpec, PathBuf)> {
+/// Translate a per-format CLI subcommand into a spec, its output path, and **whether that path is a
+/// directory**.
+///
+/// The third element exists because a `.npz` is a *collection* (ADR-0056 §11) however many members it
+/// happens to contain. Branching on the member count instead would make the same command write a file
+/// for a one-member archive and a directory for a two-member one — a shape that depends on the data.
+fn ingest_src_to_spec(
+    src: IngestSrc,
+) -> tessera_core::Result<(ingest_spec::IngestSpec, PathBuf, bool)> {
     use ingest_spec::{
         CollectionMeta, FormatOptions, IngestSpec, ProductSpec, SpecMeta, StreamingMode,
         DEFAULT_BLOCK_PREFIX, DEFAULT_ROW_INDEX, DEFAULT_SLAB_ROWS,
@@ -2216,6 +2302,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                 }],
             },
             out,
+            false,
         ),
         IngestSrc::DicomSeries {
             inputs,
@@ -2260,6 +2347,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                 }],
             },
             out,
+            false,
         ),
         IngestSrc::GeHdf5 {
             input,
@@ -2301,6 +2389,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                 }],
             },
             out,
+            false,
         ),
         IngestSrc::Table {
             input,
@@ -2389,6 +2478,100 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     }],
                 },
                 out,
+                false,
+            )
+        }
+        IngestSrc::Array {
+            input,
+            out,
+            name,
+            timestamp,
+            from,
+            source_label,
+            meta,
+        } => {
+            let from = match from {
+                Some(f) => f,
+                None => ingest_spec::sniff_array_or_explain(&input)?,
+            };
+            let metadata = parse_meta(&meta)?;
+            let products = match from.as_str() {
+                "npy" => vec![ProductSpec {
+                    name: name.clone(),
+                    role: Role::Raw,
+                    schema: "array".into(),
+                    description: None,
+                    derived_from: Vec::new(),
+                    source_label: source_label.clone(),
+                    metadata: metadata.clone(),
+                    generation: None,
+                    producer: None,
+                    options: FormatOptions::Npy { input },
+                }],
+                // A `.npz` expands into ONE PRODUCT PER MEMBER (ADR-0056 §11): the members are
+                // independent arrays, not slices of one grid. The expansion happens here, naming each
+                // member explicitly, so the resulting spec is an honest archival record — a spec saying
+                // "everything in this archive" would have a meaning that depended on the archive.
+                "npz" => {
+                    let members = tessera_ingest::npy::npz_members(&input)?;
+                    // §11's advisory, printed once: `arr_0` ingests fine and means nothing, so a
+                    // collection of them is findable by nothing. The operator passed positional
+                    // arguments to `np.savez` where keywords would have named the arrays.
+                    let auto: Vec<&str> = members
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|m| tessera_ingest::npy::is_auto_generated_member_name(m))
+                        .collect();
+                    if !auto.is_empty() {
+                        tracing::warn!(
+                            target: "tessera::ingest",
+                            members = %auto.join(", "),
+                            "archive member(s) '{}' carry auto-generated names — they ingest fine but \
+                             mean nothing, so the products will be findable by nothing. Re-save with \
+                             keyword arguments (np.savez(f, energy=…)) to name them, or annotate after \
+                             the fact with `tessera commit --set`.",
+                            auto.join("', '")
+                        );
+                    }
+                    members
+                        .into_iter()
+                        .map(|member| ProductSpec {
+                            name: tessera_ingest::npy::member_product_name(&member).to_string(),
+                            role: Role::Raw,
+                            schema: "array".into(),
+                            description: None,
+                            derived_from: Vec::new(),
+                            source_label: source_label.clone(),
+                            metadata: metadata.clone(),
+                            generation: None,
+                            producer: None,
+                            options: FormatOptions::NpzMember {
+                                input: input.clone(),
+                                member,
+                            },
+                        })
+                        .collect()
+                }
+                other => {
+                    return Err(tessera_core::Error::Invalid(format!(
+                        "tessera ingest array: unknown --from '{other}' (expected npy | npz)"
+                    )))
+                }
+            };
+            (
+                IngestSpec {
+                    collection: CollectionMeta {
+                        name: name.clone(),
+                        description: None,
+                        timestamp: timestamp.clone(),
+                        study: None,
+                    },
+                    spec: SpecMeta::default(),
+                    products,
+                },
+                out,
+                // A `.npz` is a collection whatever its member count.
+                from == "npz",
             )
         }
         IngestSrc::Blob {
@@ -2422,6 +2605,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                 }],
             },
             out,
+            false,
         ),
     })
 }

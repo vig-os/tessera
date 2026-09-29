@@ -18,6 +18,7 @@
     |   |               |   |       `-- tessera-ingest feature "default" (command-line) (*)
     |   |               |   |       |-- tessera-cli feature "parquet" (command-line)
     |   |               |   |   `-- tessera-ingest feature "default" (command-line) (*)
+    |   |               |   |   `-- tessera-ingest feature "default" (command-line) (*)
     |   |               |   |   `-- tessera-ingest feature "parquet" (command-line)
     |   |               |   |   |   `-- tessera-cli vWORKSPACE (*)
     |   |               |   |   |-- tessera-cli feature "arrow" (command-line)
@@ -32,6 +33,7 @@
     |   |               |   |-- tessera-ingest feature "arrow" (command-line)
     |   |               |   |-- tessera-ingest feature "csv" (command-line)
     |   |               |   |-- tessera-ingest feature "default" (command-line) (*)
+    |   |               |   |-- tessera-ingest feature "npy" (command-line)
     |   |               |   |-- tessera-ingest feature "parquet" (command-line) (*)
     |   |               |-- tessera-cli vWORKSPACE
     |   |               |-- tessera-ingest vWORKSPACE

@@ -53,6 +53,7 @@ const DECODERS: &[(&str, &str)] = &[
     ("arrow-ipc", "TESSERA_DEP_ARROW_IPC"),
     ("arrow-array", "TESSERA_DEP_ARROW_ARRAY"),
     ("csv", "TESSERA_DEP_CSV"),
+    ("zip", "TESSERA_DEP_ZIP"),
 ];
 
 /// The crates whose pinned version goes into the ADR-0056 §6a **feature digest** pre-image — i.e.
@@ -75,6 +76,8 @@ const DECODE_PATH_CRATES: &[&str] = &[
     "csv-core",
     // `half` decodes `Float16` (the §2 `f16_widen` lane) and carries the f2 array dtype.
     "half",
+    // `.npz` is a zip of `.npy` members, so the archive reader is on the decode path too.
+    "zip",
 ];
 
 fn main() {

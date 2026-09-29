@@ -5,7 +5,7 @@
 ```
 $ tessera info
 tessera [..]
-backends:   arrow [..] · blob · blob-series · csv [..] · dicom [..] · dicom-series [..] · hdf-compound [..] · nifti · parquet [..] · raw
+backends:   arrow 58.3.0 · blob · blob-series · csv 1.4.0 · dicom 0.9.1 · dicom-series 0.9.1 · hdf-compound 1.14.6 · nifti · npy · npz-member 2.4.2 · parquet 58.3.0 · raw
 disabled:   (none)
 build:      static-hdf5=[..] · cloud=[..] · sql=[..]
 
@@ -62,8 +62,15 @@ $ tessera info --json
       "name": "nifti"
     },
     {
+      "name": "npy"
+    },
+    {
+      "name": "npz-member",
+      "version": "2.4.2"
+    },
+    {
       "name": "parquet",
-      "version": "[..]"
+      "version": "58.3.0"
     },
     {
       "name": "raw"
@@ -71,12 +78,12 @@ $ tessera info --json
   ],
   "backends_disabled": [],
   "build": {
-    "cloud": [..],
-    "sql": [..],
-    "static-hdf5": [..]
+    "cloud": false,
+    "sql": false,
+    "static-hdf5": false
   },
-  "ingest_decode_features": "[..]",
-  "ingest_decode_digest": "blake3:[..]"
+  "ingest_decode_features": "pins=parquet=58.3.0,arrow-array=58.3.0,arrow-buffer=58.3.0,arrow-data=58.3.0,arrow-schema=58.3.0,arrow-ipc=58.3.0,arrow-select=58.3.0,csv=1.4.0,csv-core=0.1.13,half=2.7.1,zip=2.4.2",
+  "ingest_decode_digest": "blake3:606b736dd2052161f346f6f44ea77976ad7efc0d767d2cca3dc1d4d9aec68ab9"
 }
 
 ```

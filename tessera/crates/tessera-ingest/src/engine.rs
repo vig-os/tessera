@@ -552,6 +552,55 @@ fn dispatch(
                 )))
             }
         }
+        // ── The generic ARRAY lane (ADR-0056 §11) ──
+        //
+        // The one generic backend whose primitive depends on the FILE rather than the format: a NumPy
+        // structured dtype is rows of typed fields, so it routes to the table primitive (§1). The spec
+        // declares `array`, and this arm honours whichever the header turned out to hold rather than
+        // making an operator predict their own dtype.
+        FormatOptions::Npy { input } | FormatOptions::NpzMember { input, .. } => {
+            #[cfg(feature = "npy")]
+            {
+                let content = match &p.options {
+                    FormatOptions::NpzMember { input, member } => {
+                        crate::npy::read_npz_member(input, member)?
+                    }
+                    _ => crate::npy::read_npy(input)?,
+                };
+                let source_format = match &p.options {
+                    FormatOptions::NpzMember { .. } => "npz",
+                    _ => "npy",
+                };
+                let opts = crate::canonical::GenericIngest {
+                    name: &p.name,
+                    timestamp: &timestamp,
+                    description: p
+                        .description
+                        .as_deref()
+                        .unwrap_or("generically-ingested array"),
+                    source_format,
+                    source_path: input,
+                    source_label: label,
+                    extra_sources,
+                    decoder: crate::decoder::Decoder::NPY,
+                    generation: p.generation.clone(),
+                    column_meta: generic_column_meta(&p.options),
+                };
+                // One dispatch, shared with `seal_generic_product`, so the declared-vs-actual check
+                // cannot be present in one copy and missing in the other.
+                let (m, payloads) =
+                    seal_npy_content(content, Some(p.schema.as_str()), input, &p.name, &opts)?;
+                let m = seal_to_tsra(m, &payloads, out_dir, p, parents, timestamp.as_str())?;
+                Ok((m, ()))
+            }
+            #[cfg(not(feature = "npy"))]
+            {
+                let _ = input;
+                Err(Error::BackendNotCompiled(crate::backends::backend_name(
+                    &p.options,
+                )))
+            }
+        }
         FormatOptions::HdfCompound {
             input,
             dataset,
@@ -749,6 +798,117 @@ pub fn decode_generic_table(
         }
         _ => None,
     })
+}
+
+/// Decode **and seal** one generic-ingest product, choosing the primitive the source implies.
+///
+/// The single path both the engine's dispatch arms and the conformance corpus take, so a fixture
+/// exercises the real ingest rather than a parallel re-implementation that could drift from it. It stops
+/// short of writing the `.tsra` — the caller does that, because the engine writes into a staging
+/// directory and the corpus only needs the manifest.
+///
+/// Returns `None` for a non-generic (vendor) backend, so the `match` stays total and a new variant
+/// cannot be silently forgotten.
+/// Seal decoded `.npy` content, checking the declared schema against the primitive the file turned out
+/// to hold.
+///
+/// **One function because there were two.** `run` and [`seal_generic_product`] both dispatched on
+/// `NpyContent`, and only one of them checked the declaration — so the corpus path and the spec path
+/// could disagree about what is acceptable, which is the shape of bug that survives review by looking
+/// correct in whichever copy the reviewer opened. There is one dispatch now and the check rides inside
+/// it.
+///
+/// `declared` is the spec's `schema`, or `None` where there is no declaration to falsify (the
+/// conformance corpus seals content directly, with no spec).
+#[cfg(feature = "npy")]
+fn seal_npy_content(
+    content: crate::npy::NpyContent,
+    declared: Option<&str>,
+    input: &std::path::Path,
+    name: &str,
+    opts: &crate::canonical::GenericIngest<'_>,
+) -> Result<(Manifest, Vec<tessera_io::BlockPayload>)> {
+    match content {
+        crate::npy::NpyContent::Array(a) => {
+            // `spec::check_no_schema_laundering` lets a `.npy` product declare `table`, because a
+            // NumPy **structured** dtype really is rows of typed fields and an operator cannot know
+            // which they have without opening the file. That relaxation is only honest until the file
+            // IS open: a spec claiming `table` over a plain array would otherwise seal an **array**
+            // whose declared contract said otherwise — the declared-vs-actual disagreement the
+            // laundering rule exists to stop, merely deferred to where it became knowable.
+            //
+            // Only this direction is an error. `array` is the agnostic declaration and stays accepted
+            // whichever primitive the header holds (that is the point of the relaxation); `table` is a
+            // positive claim, and a plain array falsifies it.
+            if declared == Some("table") {
+                return Err(Error::Invalid(format!(
+                    "ingest-spec: product '{name}' declares schema 'table', but {} holds a plain \
+                     (non-structured) NumPy dtype, so the ingest produces an 'array'.\n  \
+                     A structured/record dtype would be a table; this file is not one.\n  \
+                     use:  schema = \"array\"  (or omit it — 'array' is the default for this backend, \
+                     and it also accepts a structured dtype)",
+                    input.display()
+                )));
+            }
+            crate::canonical::to_array_product(&a.spec, &a.data, &a.transforms, opts)
+        }
+        crate::npy::NpyContent::Table(table) => {
+            warn_unclassified_identifying_columns(&table, opts.column_meta, name);
+            crate::canonical::to_table_product(&table, opts)
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "parquet",
+    feature = "arrow",
+    feature = "csv",
+    feature = "npy"
+))]
+pub fn seal_generic_product(
+    options: &FormatOptions,
+    opts: &crate::canonical::GenericIngest<'_>,
+) -> Result<Option<(Manifest, Vec<tessera_io::BlockPayload>)>> {
+    // The ARRAY lane, whose primitive depends on the file: a NumPy structured dtype is a table.
+    #[cfg(feature = "npy")]
+    if let FormatOptions::Npy { input } | FormatOptions::NpzMember { input, .. } = options {
+        let content = match options {
+            FormatOptions::NpzMember { member, .. } => crate::npy::read_npz_member(input, member)?,
+            _ => crate::npy::read_npy(input)?,
+        };
+        // No spec here, so no declaration to falsify — the corpus seals content directly.
+        return Ok(Some(seal_npy_content(
+            content, None, input, opts.name, opts,
+        )?));
+    }
+    // The TABLE lane.
+    #[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+    if let Some((table, _, _)) = decode_generic_table(options)? {
+        warn_unclassified_identifying_columns(&table, opts.column_meta, opts.name);
+        return Ok(Some(crate::canonical::to_table_product(&table, opts)?));
+    }
+    Ok(None)
+}
+
+/// The `source_format` and decoder a generic backend records — the two facts `GenericIngest` needs that
+/// only the backend knows.
+#[cfg(any(
+    feature = "parquet",
+    feature = "arrow",
+    feature = "csv",
+    feature = "npy"
+))]
+pub fn generic_source_and_decoder(
+    options: &FormatOptions,
+) -> Option<(&'static str, crate::decoder::Decoder)> {
+    match options {
+        FormatOptions::Parquet { .. } => Some(("parquet", crate::decoder::Decoder::PARQUET)),
+        FormatOptions::Arrow { .. } => Some(("arrow", crate::decoder::Decoder::ARROW_IPC)),
+        FormatOptions::Csv { .. } => Some(("csv", crate::decoder::Decoder::CSV)),
+        FormatOptions::Npy { .. } => Some(("npy", crate::decoder::Decoder::NPY)),
+        FormatOptions::NpzMember { .. } => Some(("npz", crate::decoder::Decoder::NPY)),
+        _ => None,
+    }
 }
 
 /// Seal a canonicalised generic table as a `table` product and write its `.tsra`.
@@ -1073,6 +1233,77 @@ mod tests {
     use std::path::PathBuf;
 
     const TS: &str = "2024-01-01T00:00:00Z";
+
+    /// A `.npy` spec may declare `schema = "table"` — `spec::check_no_schema_laundering` permits it
+    /// because a NumPy **structured** dtype genuinely is a table and an operator cannot know their own
+    /// dtype without opening the file. But nothing re-checked the claim once the file *was* open, so a
+    /// spec declaring `table` over a plain array sealed an **array** product while its sealed spec said
+    /// `table` — the declared-vs-actual disagreement the laundering rule exists to prevent, deferred
+    /// past the point where it became checkable.
+    ///
+    /// Only that direction is an error: `array` is the agnostic declaration and must keep accepting
+    /// either primitive, which is the whole point of the relaxation.
+    #[cfg(feature = "npy")]
+    #[test]
+    fn a_npy_spec_claiming_table_over_a_plain_array_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let npy = dir.path().join("vol.npy");
+        // A plain `<f8` array — decidedly not a record dtype.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\x93NUMPY\x01\x00");
+        let header = "{'descr': '<f8', 'fortran_order': False, 'shape': (2,), }\n";
+        bytes.extend_from_slice(&(header.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&1.0f64.to_le_bytes());
+        bytes.extend_from_slice(&2.0f64.to_le_bytes());
+        std::fs::write(&npy, &bytes).unwrap();
+
+        let spec_of = |schema: &str| {
+            format!(
+                r#"
+[collection]
+name = "npy-schema-test"
+timestamp = "{TS}"
+
+[[product]]
+name = "vol"
+role = "raw"
+schema = "{schema}"
+format = "npy"
+input = "{}"
+"#,
+                npy.display()
+            )
+        };
+        let cfg = tessera_io::WriteConfig::for_system().workers(1);
+
+        // The false claim is refused, and the message says what the file actually is.
+        let parsed = crate::spec::parse_str(&spec_of("table")).unwrap();
+        let err = run(
+            &parsed,
+            &PathBuf::from("inline-spec"),
+            &dir.path().join("out-table"),
+            &cfg,
+            1,
+        )
+        .expect_err("declaring 'table' over a plain array must be refused")
+        .to_string();
+        assert!(
+            err.contains("declares schema 'table'") && err.contains("plain"),
+            "got: {err}"
+        );
+
+        // The agnostic declaration still works on the same file.
+        let parsed = crate::spec::parse_str(&spec_of("array")).unwrap();
+        run(
+            &parsed,
+            &PathBuf::from("inline-spec"),
+            &dir.path().join("out-array"),
+            &cfg,
+            1,
+        )
+        .expect("'array' is the correct declaration for a plain dtype");
+    }
 
     // Mirrors the GE 2p record; only used to write the synthetic .h5 fixtures the engine then
     // reads through `crate::ge_hdf5::read_compound` (generic, no per-record struct).

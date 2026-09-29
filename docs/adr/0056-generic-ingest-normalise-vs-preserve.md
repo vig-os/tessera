@@ -1118,6 +1118,35 @@ which the hazard can occur, and only reachable at the in-memory arrow boundary. 
 that cannot fail for that reason is worse than an omission: `every_live_hazard_has_a_fixture` would then
 certify a blind spot.
 
+### (i) The array lane, and the one place the primitive depends on the file
+
+`.npy` and `.npz` complete P1's §11 rows. Three notes:
+
+- **Byte order is the clean lane, Fortran order is the recorded one**, and the distinction is forced by
+  §5's own fixture. H6 asks that "a `>f8` file and its `<f8` twin must seal identically" — so the
+  byte-swap cannot be recorded, because a transform record would make the twins differ in the seal.
+  A Fortran reorder *is* recorded, because it rewrites the buffer and a reader comparing back to the
+  source needs to know. The buffer is rewritten rather than the shape reversed: reversing the shape would
+  make the **axes** wrong instead of the bytes, which reads back transposed with no record of why.
+- **A structured dtype is the one case where the primitive depends on the FILE, not the format.** §1 says
+  the shape of the data decides, and a NumPy record dtype is rows of typed fields — so `ingest array`
+  seals a `table`. The spec declares `array` and `validate` accepts `table` for this backend alone,
+  because an operator cannot know their own dtype without opening the file, and the CLI reports the
+  primitive it *sealed* rather than the one that was asked for.
+- **A `.npz` is a collection, keyed on the source kind rather than the member count.** §11 makes it one
+  array product per member (§10's shape rule one level up: archive members are independent arrays, not
+  slices of one grid). The expansion names each member explicitly in the spec, so the spec stays an
+  honest archival record. And a one-member archive is still a collection — branching on the count would
+  make the output a file or a directory depending on the data.
+
+The whole array lane costs **zero new dependencies**: §12's "NPY is a header parse plus a memcpy" holds,
+and the `.npz` reader is the `zip` crate already present for the `.tsra` container. Choosing its features
+turned up something worth recording: **`zip` was missing from ADR-0057 Gate B's snapshot list**, which is
+exactly the blind spot §5's own note warns about — the crate that frames every sealed byte was unwatched.
+Adding it immediately paid for itself, by showing that zip's umbrella `deflate` feature drags in the
+zopfli **compressor** for a capability nothing uses (we only read). `deflate-flate2` + `flate2` gets the
+decompressor alone.
+
 ### What the corpus pins, and one thing it deliberately does not
 
 `corpus/ingest-corpus.json` carries nine fixtures with a **declared per-configuration count** checked

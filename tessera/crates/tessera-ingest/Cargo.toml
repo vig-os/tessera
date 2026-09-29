@@ -45,6 +45,21 @@ arrow-schema = { workspace = true, optional = true }
 arrow-ipc = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
 csv = { workspace = true, optional = true }
+# `.npz` is a zip of `.npy` members (ADR-0056 §11). Deflate support on top of the workspace's STORED-only
+# default, because `np.savez_compressed` is the commoner call for anything large.
+#
+# `["deflate-flate2", "flate2"]`, NOT the umbrella `deflate`: the umbrella also enables
+# `deflate-zopfli`, which pulls the zopfli **compressor** — and we only ever *read* these archives.
+# `deflate-flate2` alone just sets zip's `_deflate-any` marker, so zip's own optional `flate2`
+# dependency has to be named too; flate2 is already in-tree via parquet, so the decompressor costs
+# nothing new while the umbrella would have added a crate for a capability nothing uses. (Caught by
+# Gate B, once `zip` was added to its snapshot list — which is the blind spot closing on its first day.)
+#
+# Determinism-safe: Tessera never *writes* a zip through this dependency — the `.tsra` container is
+# tessera-io's and it writes `CompressionMethod::Stored` explicitly — so enabling a decompressor cannot
+# move a sealed byte. `zip` is now in Gate B's list, so that is a claim this gate checks rather than one
+# a comment asserts.
+zip = { workspace = true, features = ["deflate-flate2", "flate2"], optional = true }
 
 [features]
 # `static-hdf5`: build libhdf5 from vendored source (via `hdf5-metno-src`, bundled HDF5 2.2.0) and link
@@ -63,7 +78,7 @@ static-hdf5 = ["hdf5-metno/static", "hdf5-metno/zlib"]
 # IPC and CSV. The heavy native-dep vendor decoders (dicom, hdf5) are NOT gated here — retro-gating
 # them is a separate, mechanical change tracked on its own issue, because it moves every vendor
 # backend and is not #386's to carry.
-default = ["arrow", "parquet", "csv"]
+default = ["arrow", "parquet", "csv", "npy"]
 
 # The ADR-0056 §2 arrow→primitive type map: the table lane's canonicalisation, plus the Arrow IPC /
 # Feather reader. This is the ONLY place arrow enters the graph from our side (ADR-0057 §3 forbids it
@@ -77,6 +92,12 @@ parquet = ["arrow", "dep:parquet"]
 # `&str → ColumnData` directly through the shared canonicalisation. One fewer crate in the decode path
 # of the one format whose values are text.
 csv = ["dep:csv"]
+# NumPy `.npy` — ADR-0056 §12: "`ndarray-npy` is deliberately NOT taken: NPY is a header parse plus a
+# memcpy, and the crate would drag `ndarray` into the tree for one format." So this gates **no
+# dependency at all**; it is a capability switch over in-tree code, which is why it costs nothing to
+# leave on and is still worth naming (ADR-0057 §5: a feature gate makes *which decoders could have
+# produced this artifact* a build-time fact).
+npy = ["dep:zip"]
 
 [dev-dependencies]
 tempfile = "3"

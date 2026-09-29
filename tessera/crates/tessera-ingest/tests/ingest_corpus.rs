@@ -82,7 +82,14 @@ fn the_fixture_count_matches_the_declared_count_for_this_configuration() {
 }
 
 /// ADR-0057 §5's second half: at least one fixture per live hazard.
+///
+/// A claim about the corpus **as a whole**, so it is checked in the full configuration only — a reduced
+/// build has its array or CSV fixtures compiled out by design, and asserting completeness there would
+/// either fail spuriously or have to be weakened into asserting nothing. The reduced configurations still
+/// check the two things that matter to them: the declared fixture count, and value preservation over the
+/// fixtures they can run.
 #[test]
+#[cfg(all(feature = "npy", feature = "csv", feature = "parquet"))]
 fn every_live_hazard_has_a_fixture() {
     let covered: BTreeSet<&str> = corpus::fixtures()
         .iter()
@@ -158,6 +165,7 @@ fn ingest_corpus_hashes_match_goldens() {
 /// The properties the corpus exists to pin, asserted against each other rather than against a file —
 /// so they hold even in a build where the goldens were just regenerated.
 #[test]
+#[cfg(feature = "parquet")]
 fn the_dictionary_plain_and_chunked_fixtures_agree_with_each_other() {
     let dir = tempfile::tempdir().unwrap();
     let built = corpus::build(dir.path()).unwrap();
@@ -221,4 +229,77 @@ fn every_fixture_seals_a_decoder_triple() {
             f.name
         );
     }
+}
+
+/// **ADR-0056 §5's `ingest_npy_endianness` claim, asserted as a relation rather than a pair of hashes.**
+///
+/// "A `>f8` file and its `<f8` twin must seal identically." Two corpus fixtures pin the *values*, but the
+/// property is the equality BETWEEN them — so it is checked directly, which means it holds even in a
+/// build where the goldens were just regenerated (a regeneration would happily record two different
+/// hashes without complaint).
+#[test]
+#[cfg(feature = "npy")]
+fn the_endianness_twins_seal_to_the_same_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let built = corpus::build(dir.path()).unwrap();
+    let hash = |name: &str| {
+        built
+            .fixtures
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.content_hash.clone())
+            .unwrap_or_else(|| panic!("fixture '{name}' missing"))
+    };
+    assert_eq!(
+        hash("ingest_npy_endianness_le"),
+        hash("ingest_npy_endianness_be"),
+        "a big-endian .npy and its little-endian twin carry the same values, so they must seal the same \
+         payload — a naive cast_slice of the big-endian buffer would produce garbage that looks like data"
+    );
+    // …and their `manifest_hash`es DIFFER, because the `ingested_from` edge pins the source bytes, which
+    // genuinely are different. Asserting both directions is what stops a bug that made every hash
+    // constant from looking like a pass.
+    let seal = |name: &str| {
+        built
+            .fixtures
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.manifest_hash.clone())
+            .unwrap()
+    };
+    assert_ne!(
+        seal("ingest_npy_endianness_le"),
+        seal("ingest_npy_endianness_be"),
+        "different source bytes, so the seal must say so"
+    );
+}
+
+/// A NumPy **structured** dtype is a table, so its fixture must seal a `table` product while every other
+/// array fixture seals an `array` one. That is ADR-0056 §1 — the shape of the data decides the primitive —
+/// visible in the committed goldens rather than only in a unit test.
+#[test]
+#[cfg(feature = "npy")]
+fn the_array_lane_seals_the_primitive_the_file_implies() {
+    let dir = tempfile::tempdir().unwrap();
+    let built = corpus::build(dir.path()).unwrap();
+    let product = |name: &str| {
+        built
+            .fixtures
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.product.clone())
+            .unwrap_or_else(|| panic!("fixture '{name}' missing"))
+    };
+    for array_fixture in [
+        "ingest_npy_endianness_le",
+        "ingest_npy_fortran",
+        "ingest_npz_member",
+    ] {
+        assert_eq!(product(array_fixture), "array", "{array_fixture}");
+    }
+    assert_eq!(
+        product("ingest_npy_structured"),
+        "table",
+        "a record dtype is rows of typed fields, so it is a TABLE"
+    );
 }

@@ -95,6 +95,15 @@ impl Decoder {
         version: option_env!("TESSERA_DEP_CSV"),
     };
 
+    /// The NumPy lane. An in-tree header parse plus a memcpy — so the only third-party component to
+    /// name is the `zip` archive reader that `.npz` goes through, and even that is a *container* rather
+    /// than a decoder of values. `version` is therefore `None` for a plain `.npy`, which is honest: the
+    /// decoder is this crate, and the feature digest already names the decode-path pins.
+    pub const NPY: Decoder = Decoder {
+        name: "tessera-npy",
+        version: None,
+    };
+
     /// The sealed JSON form of the triple.
     pub fn to_value(&self) -> serde_json::Value {
         let mut m = serde_json::Map::new();

@@ -269,11 +269,71 @@ impl<R: Read + Seek> Reader<R> {
     pub fn from_reader(reader: R) -> Result<Self> {
         let mut archive = ZipArchive::new(reader).map_err(cz)?;
 
+        // **Every entry must be STORED — checked before ANY member is read.**
+        //
+        // The invariant itself is the one the module docs open with, and it is load-bearing rather
+        // than stylistic: a block's bytes are addressable by range only because they are stored
+        // verbatim, which is what lets a cloud reader fetch one block out of a multi-GB archive. A
+        // deflated entry still *verifies* — the bytes decompress to the sealed content — so nothing
+        // downstream would notice; the product would simply stop being range-readable.
+        //
+        // It used to be enforced by **accident**: the workspace pinned
+        // `zip = { default-features = false }`, so no decompressor was compiled in and a compressed
+        // member failed to decode. The `.npz` reader added in this same change needs `deflate-flate2`,
+        // and cargo unifies features workspace-wide, so `tessera-io`'s `zip` gains deflate whether it
+        // wants it or not. A guarantee that depends on a dependency *lacking* a feature is not a
+        // guarantee.
+        //
+        // **Ordering matters, and getting it wrong was a real hole.** An earlier revision ran this scan
+        // after reading `mimetype`, to keep the friendlier "not a .tsra" error for a random zip. But
+        // that read is unbounded, so a `.tsra` whose *mimetype member* is a deflate bomb exhausted
+        // memory before the scan could reject it — a guard placed behind the thing it guards. The scan
+        // now runs first and touches no payload: `ZipArchive` parsed the central directory at open, so
+        // the method and the member names are already in hand.
+        //
+        // Both errors are still possible because the pass collects what it needs and decides
+        // afterwards: a missing `mimetype` means "not a .tsra" (the better message, and safe — nothing
+        // was read), and otherwise a compressed member is refused.
+        //
+        // On which compression method this is: `zip` takes it from the **central directory** for both
+        // this check (`by_index_raw` → `get_metadata().compression_method`) and the actual decode
+        // (`by_index_with_optional_password` → `data.compression_method`). `find_data_start` parses the
+        // local header only to locate the payload, never to choose a codec. So a crafted file whose
+        // local header disagrees with its central directory cannot slip past this check and then be
+        // decompressed anyway — there is one source of truth, and it is the one checked here.
+        let mut has_mimetype = false;
+        let mut compressed: Option<(String, CompressionMethod)> = None;
+        for i in 0..archive.len() {
+            let f = archive.by_index_raw(i).map_err(cz)?;
+            if f.name() == MIMETYPE_ENTRY {
+                has_mimetype = true;
+            }
+            if compressed.is_none() && f.compression() != CompressionMethod::Stored {
+                compressed = Some((f.name().to_string(), f.compression()));
+            }
+        }
+        if !has_mimetype {
+            return Err(Error::Container("not a .tsra (no mimetype entry)".into()));
+        }
+        if let Some((name, method)) = compressed {
+            return Err(Error::Container(format!(
+                "entry '{name}' is {method:?}, but a .tsra must be STORED throughout — a compressed \
+                 entry is not range-readable, so a cloud reader could not fetch one block without the \
+                 whole archive"
+            )));
+        }
+
+        // Bounded even though every entry is now known to be STORED: the magic is a short fixed
+        // string, so a member claiming to be `mimetype` and carrying gigabytes is malformed by
+        // definition, and `read_to_string` would happily allocate all of it.
         let mut magic = String::new();
-        archive
-            .by_name(MIMETYPE_ENTRY)
-            .map_err(|_| Error::Container("not a .tsra (no mimetype entry)".into()))?
-            .read_to_string(&mut magic)?;
+        {
+            let mut mime = archive
+                .by_name(MIMETYPE_ENTRY)
+                .map_err(|_| Error::Container("not a .tsra (no mimetype entry)".into()))?
+                .take(64);
+            mime.read_to_string(&mut magic)?;
+        }
         if magic != MIMETYPE {
             return Err(Error::Container(format!("bad container magic: {magic:?}")));
         }

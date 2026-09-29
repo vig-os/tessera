@@ -65,9 +65,10 @@ use crate::spec::FormatOptions;
 ///   `arrow_table::tests::garbage_under_a_null_is_zeroed_and_recorded` and
 ///   `canonical::tests::null_slots_are_zeroed_at_the_boundary`, which construct exactly that, and a
 ///   corpus fixture claiming it would be theatre.
-/// - **H6** (NPY/raw endianness) belongs to the array lane.
+/// - **H6** (NPY endianness) IS covered, by the `ingest_npy_endianness_{le,be}` pair — ADR-0056 §5's
+///   named fixture: "a `>f8` file and its `<f8` twin must seal identically".
 /// - **H7** (SIMD-dispatched decode) is covered *through* H3/H4, exactly as the ADR's own table says.
-pub const LIVE_HAZARDS: &[&str] = &["H1", "H3", "H4", "H8", "H9", "H10", "H11"];
+pub const LIVE_HAZARDS: &[&str] = &["H1", "H3", "H4", "H6", "H8", "H9", "H10", "H11"];
 
 /// The number of fixtures each named build configuration must run.
 ///
@@ -81,15 +82,15 @@ pub const LIVE_HAZARDS: &[&str] = &["H1", "H3", "H4", "H8", "H9", "H10", "H11"];
 /// build is loud, while a corpus that builds and silently runs three of nine fixtures is not.
 pub const EXPECTED_COUNTS: &[(&str, usize)] = &[
     // `default` = arrow + parquet + csv, which is every generic lane P1 ships.
-    ("default", 9),
+    ("default", 14),
     // `full` and `--all-features` add vendor decoders and the `sql`/`cloud` surfaces; neither adds a
     // generic lane, so the count is unchanged. That invariance is itself the claim: a feature may
     // decide whether a format is readable, never how one encodes.
-    ("full", 9),
-    ("all-features", 9),
+    ("full", 14),
+    ("all-features", 14),
     // `--no-default-features --features parquet` — a real configuration for an embedder who wants the
-    // columnar lane without the text one. The two CSV fixtures drop out, and the count says so, which
-    // is exactly the case that would otherwise pass while quietly testing less.
+    // columnar lane without the text one. The two CSV fixtures and the five array ones drop out, and
+    // the count says so, which is exactly the case that would otherwise pass while quietly testing less.
     ("parquet-no-csv", 7),
 ];
 
@@ -147,7 +148,12 @@ const LABEL: &str = "corpus/ingest";
 
 /// Every fixture, in a fixed order (the corpus file is compared element-wise).
 pub fn fixtures() -> Vec<IngestFixture> {
-    vec![
+    // The array-lane entries are `#[cfg]`-gated because their *writers* need the `npy` feature (and the
+    // `zip` crate it pulls for `.npz`). `BACKENDS_ALL`-style build-invariance does not apply here: a
+    // fixture that cannot be built is not a fixture, and `EXPECTED_COUNTS` declares the per-configuration
+    // count so a smaller list is checked rather than assumed.
+    #[allow(unused_mut)]
+    let mut fixtures = vec![
         IngestFixture {
             name: "ingest_parquet_scalars",
             requires: &["parquet"],
@@ -217,6 +223,61 @@ pub fn fixtures() -> Vec<IngestFixture> {
             build: write_csv_nulls,
             options: csv_nulls_opts,
         },
+    ];
+    #[cfg(feature = "npy")]
+    fixtures.extend(array_fixtures());
+    fixtures
+}
+
+/// The array-lane fixtures, split out so the `Vec` above stays a plain literal.
+#[cfg(feature = "npy")]
+fn array_fixtures() -> Vec<IngestFixture> {
+    vec![
+        // ── The array lane (ADR-0056 §11) ──
+        //
+        // The `_le` / `_be` pair is §5's named `ingest_npy_endianness` fixture, split in two because the
+        // claim is a RELATION between them: "a `>f8` file and its `<f8` twin must seal identically".
+        // `the_endianness_twins_agree_with_each_other` asserts that relation directly, so it holds even
+        // in a build where the goldens were just regenerated.
+        IngestFixture {
+            name: "ingest_npy_endianness_le",
+            requires: &["npy"],
+            hazards: &["H6"],
+            build: write_npy_le,
+            options: npy_opts,
+        },
+        IngestFixture {
+            name: "ingest_npy_endianness_be",
+            requires: &["npy"],
+            hazards: &["H6"],
+            build: write_npy_be,
+            options: npy_opts,
+        },
+        IngestFixture {
+            name: "ingest_npy_fortran",
+            requires: &["npy"],
+            // H11 in the array lane: a column-major buffer must be rewritten, not relabelled, or the
+            // axes end up wrong instead of the bytes.
+            hazards: &["H11"],
+            build: write_npy_fortran,
+            options: npy_opts,
+        },
+        IngestFixture {
+            name: "ingest_npy_structured",
+            requires: &["npy"],
+            // The de-interleave is the #193 transpose one format over; H11 because field order and
+            // width must survive it exactly.
+            hazards: &["H11"],
+            build: write_npy_structured,
+            options: npy_opts,
+        },
+        IngestFixture {
+            name: "ingest_npz_member",
+            requires: &["npy"],
+            hazards: &["H9"],
+            build: write_npz,
+            options: npz_opts,
+        },
     ]
 }
 
@@ -226,6 +287,7 @@ pub fn enabled(f: &IngestFixture) -> bool {
         "arrow" => cfg!(feature = "arrow"),
         "parquet" => cfg!(feature = "parquet"),
         "csv" => cfg!(feature = "csv"),
+        "npy" => cfg!(feature = "npy"),
         // An unknown predicate must not silently enable a fixture.
         _ => false,
     })
@@ -250,10 +312,10 @@ pub fn enabled_fixtures() -> Vec<IngestFixture> {
 pub fn golden(f: &IngestFixture, dir: &Path) -> Result<IngestGolden> {
     let input = (f.build)(dir)?;
     let options = (f.options)(input.clone());
-    let (table, source_format, decoder) = crate::engine::decode_generic_table(&options)?
+    let (source_format, decoder) = crate::engine::generic_source_and_decoder(&options)
         .ok_or_else(|| he(format!("fixture '{}' is not a generic backend", f.name)))?;
-    let (m, _payloads) = crate::canonical::to_table_product(
-        &table,
+    let (m, _payloads) = crate::engine::seal_generic_product(
+        &options,
         &crate::canonical::GenericIngest {
             name: f.name,
             timestamp: TS,
@@ -269,7 +331,8 @@ pub fn golden(f: &IngestFixture, dir: &Path) -> Result<IngestGolden> {
             generation: None,
             column_meta: &crate::column_meta::ColumnMeta::empty(),
         },
-    )?;
+    )?
+    .ok_or_else(|| he(format!("fixture '{}' produced no product", f.name)))?;
     Ok(record(f, &m))
 }
 
@@ -606,6 +669,128 @@ fn write_csv(dir: &Path) -> Result<PathBuf> {
          6,-0.0,negative-zero\n",
     )
     .map_err(he)?;
+    Ok(path)
+}
+
+#[cfg(feature = "npy")]
+fn npy_opts(input: PathBuf) -> FormatOptions {
+    FormatOptions::Npy { input }
+}
+
+#[cfg(feature = "npy")]
+fn npz_opts(input: PathBuf) -> FormatOptions {
+    FormatOptions::NpzMember {
+        input,
+        member: "energy.npy".into(),
+    }
+}
+
+#[cfg(feature = "npy")]
+/// Write a minimal `.npy` (v1.0) with the given descriptor, shape and payload.
+fn write_npy_file(
+    dir: &Path,
+    name: &str,
+    descr: &str,
+    fortran: bool,
+    shape: &[u64],
+    payload: &[u8],
+) -> Result<PathBuf> {
+    let path = dir.join(format!("{name}.npy"));
+    std::fs::write(&path, npy_bytes(descr, fortran, shape, payload)).map_err(he)?;
+    Ok(path)
+}
+
+#[cfg(feature = "npy")]
+/// The `.npy` byte sequence — shared with the `.npz` writer below.
+fn npy_bytes(descr: &str, fortran: bool, shape: &[u64], payload: &[u8]) -> Vec<u8> {
+    let shape_text = if shape.len() == 1 {
+        format!("({},)", shape[0])
+    } else {
+        format!(
+            "({})",
+            shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let header = format!(
+        "{{'descr': {descr}, 'fortran_order': {}, 'shape': {shape_text}, }}\n",
+        if fortran { "True" } else { "False" }
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(b"\x93NUMPY");
+    out.extend_from_slice(&[1, 0]);
+    out.extend_from_slice(&(header.len() as u16).to_le_bytes());
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+#[cfg(feature = "npy")]
+/// The float values both endianness twins carry — deliberately including the edge cases S13 guarantees.
+const TWIN_VALUES: [f64; 5] = [1.5, -0.5, 0.0, 1e-300, f64::MIN_POSITIVE];
+
+#[cfg(feature = "npy")]
+/// **H6** — the little-endian half of ADR-0056 §5's `ingest_npy_endianness` fixture.
+fn write_npy_le(dir: &Path) -> Result<PathBuf> {
+    let payload: Vec<u8> = TWIN_VALUES.iter().flat_map(|x| x.to_le_bytes()).collect();
+    write_npy_file(dir, "twin_le", "'<f8'", false, &[5], &payload)
+}
+
+#[cfg(feature = "npy")]
+/// **H6** — the big-endian twin. Different bytes, identical values, so it must seal the same
+/// `content_hash` as [`write_npy_le`]. A naive `cast_slice` of this buffer produces garbage that looks
+/// like data, which is why the hazard is rated *low × fatal*.
+fn write_npy_be(dir: &Path) -> Result<PathBuf> {
+    let payload: Vec<u8> = TWIN_VALUES.iter().flat_map(|x| x.to_be_bytes()).collect();
+    write_npy_file(dir, "twin_be", "'>f8'", false, &[5], &payload)
+}
+
+#[cfg(feature = "npy")]
+/// A Fortran-ordered 2×3 matrix. Must be **rewritten** to C order and recorded, not relabelled by
+/// reversing the shape (which would make the axes wrong instead of the bytes).
+fn write_npy_fortran(dir: &Path) -> Result<PathBuf> {
+    // The matrix [[1,2,3],[4,5,6]] in column-major order.
+    let f_order = [1.0f64, 4.0, 2.0, 5.0, 3.0, 6.0];
+    let payload: Vec<u8> = f_order.iter().flat_map(|x| x.to_le_bytes()).collect();
+    write_npy_file(dir, "fortran", "'<f8'", true, &[2, 3], &payload)
+}
+
+#[cfg(feature = "npy")]
+/// A structured/record dtype — which is a **table**, not an array (ADR-0056 §1/§11). NumPy stores records
+/// interleaved, so the fixture pins the de-interleave.
+fn write_npy_structured(dir: &Path) -> Result<PathBuf> {
+    let mut payload = Vec::new();
+    for (i, f) in [(1i32, 1.5f64), (-2, -0.25), (3, 7.0)] {
+        payload.extend_from_slice(&i.to_le_bytes());
+        payload.extend_from_slice(&f.to_le_bytes());
+    }
+    write_npy_file(
+        dir,
+        "records",
+        "[('id', '<i4'), ('energy', '<f8')]",
+        false,
+        &[3],
+        &payload,
+    )
+}
+
+#[cfg(feature = "npy")]
+/// A `.npz` archive — a zip of `.npy` members, STORED like `np.savez`.
+fn write_npz(dir: &Path) -> Result<PathBuf> {
+    let path = dir.join("bundle.npz");
+    let values = [511.0f64, 7.25, -0.5];
+    let payload: Vec<u8> = values.iter().flat_map(|x| x.to_le_bytes()).collect();
+    let member = npy_bytes("'<f8'", false, &[3], &payload);
+    let file = std::fs::File::create(&path).map_err(he)?;
+    let mut w = zip::ZipWriter::new(file);
+    let opts: zip::write::FileOptions<'_, ()> =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip::ZipWriter::start_file(&mut w, "energy.npy", opts).map_err(he)?;
+    std::io::Write::write_all(&mut w, &member).map_err(he)?;
+    w.finish().map_err(he)?;
     Ok(path)
 }
 
