@@ -412,7 +412,7 @@ fn the_sealed_product_carries_the_decoder_triple_the_receipt_and_the_source_dige
     );
     assert_eq!(
         d["features"].as_str().map(str::to_owned),
-        decoder::feature_digest(),
+        decoder::Decoder::PARQUET.feature_digest(),
         "the sealed feature component is the digest this build derives"
     );
 

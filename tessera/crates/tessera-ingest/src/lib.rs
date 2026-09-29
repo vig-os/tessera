@@ -26,6 +26,13 @@ pub mod corpus;
 #[cfg(feature = "csv")]
 pub mod csv_table;
 /// The sealed decoder identity — ADR-0056 §6a's build-honest triple in the provenance recipe bag.
+/// The decode-path classification behind the per-lane decoder digest (ADR-0056 §6a, #477): which crates
+/// each ingest lane's digest covers, and — with a reason each — which candidates it deliberately does not.
+///
+/// Shared verbatim with `build.rs` (which `include!`s it) and with the gate test, so the digest and the
+/// gate cannot disagree about what the decode path is. The file's own header comment carries the
+/// measurements behind "derive the candidates, declare the membership".
+pub mod decode_path;
 pub mod decoder;
 pub mod dicom;
 pub mod engine;

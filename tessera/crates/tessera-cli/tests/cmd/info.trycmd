@@ -22,7 +22,7 @@ deliberately NOT sealed: ADR-0056 §6a seals the `ingest_decoder` triple, which 
 determined the bytes. ADR-0042's line holds — sealed = what changed the bytes; `aux/` = who was in the
 room.
 
-It also carries the **pre-image** of the sealed feature digest (`ingest_decode_features`) alongside the
+It also carries, **per ingest lane**, the sealed feature digest and the **pre-image** it is taken over — one entry per lane since #477, because a global digest made a parquet product commit to the crate list of every other lane. The pre-image is `v2;`-prefixed: the derivation is versioned, so a future change to it reads as a declared difference rather than as a decoder that moved. Alongside the
 digest itself, so the third component of that triple is checkable rather than merely observable: a
 reader holding a `.tsra` and this output from the same version can confirm the correspondence.
 
@@ -75,8 +75,20 @@ $ tessera info --json
     "sql": [..],
     "static-hdf5": [..]
   },
-  "ingest_decode_features": "[..]",
-  "ingest_decode_digest": "blake3:[..]"
+  "ingest_decode": {
+    "arrow-rs/arrow-ipc": {
+      "digest": "blake3:[..]",
+      "features": "v2;pins=[..]"
+    },
+    "arrow-rs/parquet": {
+      "digest": "blake3:[..]",
+      "features": "v2;pins=[..]"
+    },
+    "rust-csv": {
+      "digest": "blake3:[..]",
+      "features": "v2;pins=[..]"
+    }
+  }
 }
 
 ```

@@ -78,12 +78,22 @@ struct Info {
     /// that `aux/` holds who was in the room.
     /// Absent on a build with no workspace lockfile (see `tessera_ingest::decoder`): a digest over an
     /// empty pre-image would be identical for every such build, so absence is the honest record.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ingest_decode_features: Option<&'static str>,
-    /// `blake3:…` over [`Self::ingest_decode_features`] — the exact third component of the sealed
-    /// triple, so the correspondence is checkable without recomputing it by hand.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ingest_decode_digest: Option<String>,
+    ///
+    /// **One entry per ingest lane** (#477). It was a single string until the digest went per-lane, and
+    /// that was the defect: a parquet product committed to the crate list of every other lane, so adding
+    /// `zip` for `.npz` moved the `manifest_hash` of every parquet and csv product in the corpus.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    ingest_decode: std::collections::BTreeMap<&'static str, DecodeLaneInfo>,
+}
+
+/// One lane's decoder digest and the pre-image it is taken over.
+#[derive(Debug, serde::Serialize)]
+struct DecodeLaneInfo {
+    /// The sealed `blake3:…` third component of that lane's `ingest_decoder` triple.
+    digest: String,
+    /// The exact string it is a digest of, so the correspondence is checkable rather than asserted. This
+    /// is what keeps the sealed digest from being a one-way label with no inverse anywhere.
+    features: &'static str,
 }
 
 fn collect() -> Info {
@@ -99,8 +109,21 @@ fn collect() -> Info {
             .collect(),
         backends_disabled: backends_disabled(),
         build: BUILD_FLAGS.iter().copied().collect(),
-        ingest_decode_features: tessera_ingest::decoder::feature_preimage(),
-        ingest_decode_digest: tessera_ingest::decoder::feature_digest(),
+        ingest_decode: tessera_ingest::decoder::ALL
+            .iter()
+            .filter_map(|d| {
+                // Both or neither: a digest whose pre-image we cannot print would be exactly the
+                // unfalsifiable label §6a rejected.
+                let (p, dg) = (d.feature_preimage()?, d.feature_digest()?);
+                Some((
+                    d.name,
+                    DecodeLaneInfo {
+                        digest: dg,
+                        features: p,
+                    },
+                ))
+            })
+            .collect(),
     }
 }
 
@@ -227,18 +250,32 @@ mod tests {
         let mut buf = Vec::new();
         info(true, &mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        let preimage = v["ingest_decode_features"]
-            .as_str()
-            .expect("a workspace build emits the pre-image");
-        let digest = v["ingest_decode_digest"]
-            .as_str()
-            .expect("…and therefore its digest");
+        let lanes = v["ingest_decode"]
+            .as_object()
+            .expect("a workspace build emits one entry per lane");
         assert_eq!(
-            digest,
-            tessera_core::hash::digest(preimage.as_bytes()),
-            "the printed digest must be blake3 of the printed pre-image"
+            lanes.len(),
+            tessera_ingest::decoder::ALL.len(),
+            "one entry per lane: {lanes:?}"
         );
-        // …and it must be the same digest a sealed product actually carries.
+        for (lane, e) in lanes {
+            let preimage = e["features"].as_str().expect("the pre-image");
+            let digest = e["digest"].as_str().expect("…and its digest");
+            assert_eq!(
+                digest,
+                tessera_core::hash::digest(preimage.as_bytes()),
+                "lane {lane}: the printed digest must be blake3 of the printed pre-image"
+            );
+        }
+        // Distinct per lane — before #477 every lane printed, and sealed, the same digest.
+        let digests: std::collections::BTreeSet<&str> = lanes
+            .values()
+            .map(|e| e["digest"].as_str().unwrap())
+            .collect();
+        assert_eq!(digests.len(), lanes.len(), "each lane has its own digest");
+
+        let preimage = lanes["arrow-rs/parquet"]["features"].as_str().unwrap();
+        let digest = lanes["arrow-rs/parquet"]["digest"].as_str().unwrap();
         let sealed = tessera_ingest::decoder::Decoder::PARQUET.to_value();
         assert_eq!(sealed["features"].as_str().unwrap(), digest);
         // The pre-image names the DECODER PINS and nothing else. An earlier derivation also named this
@@ -247,9 +284,17 @@ mod tests {
         // `tessera-ingest/build.rs`). Asserting the absence here keeps `tessera info` honest about what
         // the sealed digest actually covers.
         assert!(
-            preimage.starts_with("pins="),
-            "the pre-image is the decoder pins: {preimage}"
+            preimage.starts_with("v2;pins="),
+            "the pre-image declares its derivation version, then the decoder pins: {preimage}"
         );
+        // And it names this lane's whole decode path, not just the reader: the Thrift metadata parser and
+        // the page codecs were absent until #477, so a swapped decompressor moved nothing.
+        for want in ["thrift=", "snap=", "flatbuffers=", "crc32fast="] {
+            assert!(
+                preimage.contains(want),
+                "the parquet lane pins {want}: {preimage}"
+            );
+        }
         assert!(
             !preimage.contains("features="),
             "a lane that was not compiled in did not read the file: {preimage}"
