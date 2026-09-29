@@ -22,6 +22,9 @@ toml.workspace = true
 clap.workspace = true
 # PNG previews for slice/project --format png (#387).
 png.workspace = true
+# `half::f16` — naming the float16 element type in the native max-projection (#478). Already in-tree
+# via zarrs; bare `f16` would resolve to Rust's UNSTABLE primitive of the same name.
+half.workspace = true
 # Surface library WARNs (e.g. the schema recommended-field nudge from the ingest engine) on stderr.
 tracing.workspace = true
 tracing-subscriber.workspace = true

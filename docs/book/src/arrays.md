@@ -28,7 +28,7 @@ in index space rather than inventing coordinates.
 | --- | --- |
 | `csv` / `tsv` | one line per row — the default, fine for a plane you are eyeballing |
 | `json` | one self-describing object: the full `shape`, `dtype`, `source_dtype`, `rows_emitted`, `truncated` and the values |
-| `npy` | NumPy `.npy` (float64) — **the lossless path**; `np.load()` it directly |
+| `npy` | NumPy `.npy` at **the array's own dtype** (`<i2`, `<u8`, `|b1`, …) — **the lossless path**; `np.load()` it directly |
 | `png` | 8-bit greyscale preview, auto-windowed on the plane's own min/max (`--window lo,hi` to override) |
 
 `npy` and `png` are binary, so they must be redirected — writing them to a terminal is refused rather
@@ -38,6 +38,11 @@ than spewed:
 tessera slice ct.tsra volume --index "32,:,:" --format npy > plane.npy
 tessera project ct.tsra volume --axis z --format png  > mip.png
 ```
+
+`npy` carries the dtype the product stores, so a 64-bit integer survives exactly — `f64` has a 53-bit
+mantissa and could not promise that. A `--physical` rescale or a reducing projection (`--mode mean`/`sum`)
+genuinely computes floats, so those are written `<f8` and the JSON `dtype` says `float64`; `--mode max`
+picks an existing sample, so it keeps the native dtype.
 
 **`png` is a preview, not data.** Eight bits cannot hold a Hounsfield range, let alone a float activity
 map, so the mapping is lossy by construction. The window actually used and the source dtype are written

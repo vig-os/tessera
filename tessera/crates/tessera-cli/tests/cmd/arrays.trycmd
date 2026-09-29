@@ -60,7 +60,7 @@ Options:
           - csv:  Comma-separated rows (default)
           - tsv:  Tab-separated rows
           - json: One self-describing object: `{shape, dtype, values: [[row], …]}`
-          - npy:  NumPy `.npy` (float64) — the **lossless** path for analysis
+          - npy:  NumPy `.npy` at the array's own dtype — the **lossless** path for analysis
           - png:  8-bit greyscale PNG — a **lossy preview**, windowed to 0–255. Not data
           
           [default: csv]
