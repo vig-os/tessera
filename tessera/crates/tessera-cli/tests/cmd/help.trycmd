@@ -5,8 +5,9 @@ Tessera FAIR data-product CLI
 Usage: tessera <COMMAND>
 
 Inspect & navigate:
-  inspect     Manifest summary (id, product, blocks, hashes)
+  inspect     Manifest summary (id, product, blocks, hashes; --resolve-config reads the recipe)
   verify      Verify integrity (magic, seal, every block digest)
+  provenance  Walk the derived_from DAG — producer + recipe + identity per hop
   schema      Validate against the embedded product schema (--json dumps it)
   tree        Render the .tsra as a navigable hierarchy
   ls          List one node's children (meta / a block / sources)

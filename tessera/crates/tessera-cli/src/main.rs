@@ -8,6 +8,7 @@ mod bench;
 mod collection;
 mod info;
 mod nav;
+mod provenance;
 mod resource;
 #[cfg(feature = "sql")]
 mod sql;
@@ -92,6 +93,46 @@ impl<R: std::io::Read + std::io::Seek> TsraSource for Reader<R> {
     }
 }
 
+/// The `inspect --resolve-config` lines for `file` — the config a product's `generation.config_ref`
+/// actually points at (#452 part 1, ADR-0058 §2).
+///
+/// Lives here rather than in `nav` because resolving needs the [`TsraSource`] handle, while `nav`
+/// stays a pure renderer over bytes someone else read. The two "nothing to resolve" cases return
+/// `Ok` with a line saying so: nothing was promised, so nothing is broken. `Err` is reserved for a
+/// `config_ref` that IS set and names no carried block — a sealed reference that does not hold.
+fn resolved_config_lines(
+    r: &mut dyn TsraSource,
+    file: &std::path::Path,
+    full: bool,
+) -> tessera_core::Result<Vec<String>> {
+    let Some(g) = r.manifest().generation.clone() else {
+        return Ok(vec![
+            "generation    (none — this product carries no generation record to resolve)"
+                .to_string(),
+        ]);
+    };
+    let Some(digest) = g.config_ref else {
+        return Ok(vec![
+            "  config      (none — this generation record has no config_ref)".to_string(),
+        ]);
+    };
+    let label = file.display().to_string();
+    // Locate from the manifest alone, then drop that borrow before reading: the Blob spec's `size` is
+    // what makes the inline-or-extract decision answerable without fetching a byte of a multi-GB config.
+    let cb = nav::config_block(r.manifest(), &label, &digest)?;
+    let bytes = if nav::config_inlines(&cb) {
+        // Buffering IS what inlining means, and `config_inlines` has already capped this at the
+        // inline limit. `stream_block_to` verifies the digest after the last byte and works over a
+        // cloud URL too; on `Err` the `?` drops the unverified bytes instead of rendering them.
+        let mut buf = Vec::new();
+        r.stream_block_to(&cb.name, &mut buf)?;
+        Some(buf)
+    } else {
+        None
+    };
+    Ok(nav::config_lines(&cb, bytes.as_deref(), &label, full))
+}
+
 /// Grouped top-level help (#249) — clap 4 doesn't group subcommands natively, so we render a
 /// hand-authored command reference by command family via a custom `help_template`. Per-command
 /// detail (`tsra help <cmd>`) still comes from each variant's own `///` doc + positional
@@ -102,8 +143,9 @@ const HELP_TEMPLATE: &str = "\
 {usage-heading} {usage}
 
 Inspect & navigate:
-  inspect     Manifest summary (id, product, blocks, hashes)
+  inspect     Manifest summary (id, product, blocks, hashes; --resolve-config reads the recipe)
   verify      Verify integrity (magic, seal, every block digest)
+  provenance  Walk the derived_from DAG — producer + recipe + identity per hop
   schema      Validate against the embedded product schema (--json dumps it)
   tree        Render the .tsra as a navigable hierarchy
   ls          List one node's children (meta / a block / sources)
@@ -213,6 +255,48 @@ enum Cmd {
         /// without reaching into the container format.
         #[arg(long)]
         json: bool,
+        /// Dereference `generation.config_ref` to the config block it names, so the recipe reads end
+        /// to end instead of ending at a digest. A small text config is printed inline; a large or
+        /// binary one is named with the `extract` command that streams it. Errors if the digest names
+        /// no carried block — plain `inspect` never does.
+        #[arg(long)]
+        resolve_config: bool,
+    },
+    /// Walk a product's `derived_from` provenance DAG — producer + recipe + identity per hop.
+    ///
+    /// `inspect` answers "who made THIS product". This answers the chain question (ADR-0058 §5):
+    /// what identity did it inherit, from where, and what recipe made each hop?
+    ///
+    /// Parents are resolved **locally**: the product's own directory first, then an explicit
+    /// `--collection`, then each `--search` directory. There is no registry/OCI resolver — a read
+    /// verb should not reach the network, so a parent that only exists in a registry reads as
+    /// unresolved until you fetch it.
+    ///
+    /// A gap (a parent at a different version, or one that could not be found) is RENDERED and still
+    /// exits 0 — an unresolvable chain is the normal case and a gate should opt in with
+    /// `--require-complete`. A cycle is a malformed DAG and always exits nonzero.
+    Provenance {
+        /// The `.tsra` whose provenance to walk.
+        file: PathBuf,
+        /// Extra directory to resolve parents from. Repeatable. Indexed by (lineage id, version), so
+        /// a directory holding two commits of one parent still matches the pinned one.
+        #[arg(long)]
+        search: Vec<PathBuf>,
+        /// A `collection.json` whose members are candidate parents.
+        #[arg(long)]
+        collection: Option<PathBuf>,
+        /// Stop after N hops (edges at the cap are shown; their parents are not walked).
+        #[arg(long)]
+        depth: Option<usize>,
+        /// Machine-readable walk: `{root, complete, gaps, hops: [{depth, role, outcome, …}]}`.
+        #[arg(long)]
+        json: bool,
+        /// Print references and digests in full instead of collapsing them.
+        #[arg(long)]
+        full: bool,
+        /// Exit nonzero unless every hop is proven (or a legitimate external leaf) — the gate mode.
+        #[arg(long)]
+        require_complete: bool,
     },
     /// Verify a `.tsra`'s integrity (magic, seal, every block digest).
     ///
@@ -1082,21 +1166,38 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             full,
             verify,
             json,
+            resolve_config,
         } => {
+            // `--json` promises *exactly* the serialized manifest (#417/#479 pinned that), and a
+            // resolved config is not in the manifest. Refuse the pair rather than silently dropping
+            // one flag or quietly widening the documented JSON shape.
+            if json && resolve_config {
+                return Err(tessera_core::Error::Invalid(
+                    "--resolve-config cannot be combined with --json: --json is exactly the sealed \
+                     manifest, and the resolved config is not part of it. Use one or the other."
+                        .into(),
+                ));
+            }
             let mut r = open_local_or_url(&file)?;
             // Deep-verify (opt-in): re-hash every payload before rendering, so a corrupt file
             // errors out here instead of printing a clean-looking summary (#268). Bounded RSS.
             if verify {
                 r.verify_payloads(&file.display().to_string())?;
             }
-            let m = r.manifest();
             // `--json`: the sealed manifest verbatim. #417's motivation was that reading a sealed
             // `generation` meant a `zipfile` + `json` Python one-liner; this is that escape hatch,
             // typed and supported, so provenance is scriptable without the container internals.
             if json {
-                println!("{}", serde_json::to_string_pretty(m)?);
+                println!("{}", serde_json::to_string_pretty(r.manifest())?);
                 return Ok(());
             }
+            // Resolve BEFORE printing anything: an unresolvable `config_ref` must fail cleanly, not
+            // half-render a summary and then error partway down it. Needs `&mut r`, so it also has to
+            // happen before `m` takes its immutable borrow for the rest of the render.
+            let resolved = resolve_config
+                .then(|| resolved_config_lines(r.as_mut(), &file, full))
+                .transpose()?;
+            let m = r.manifest();
             println!("tessera {} · product={}", m.tessera_version, m.product);
             println!("id            {}", m.id);
             println!("name          {}", m.name);
@@ -1112,6 +1213,11 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 for line in nav::generation_lines(g, full) {
                     println!("{line}");
                 }
+            }
+            // `generation_lines` printed the recipe; these are the dereferenced `config_ref` lines
+            // resolved above (#452 part 1).
+            for line in resolved.into_iter().flatten() {
+                println!("{line}");
             }
             if let Some(s) = &m.study {
                 println!("study         {s}");
@@ -1152,6 +1258,31 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                         nav::compact_reference(&s.reference, full)
                     );
                 }
+            }
+            Ok(())
+        }
+        Cmd::Provenance {
+            file,
+            search,
+            collection,
+            depth,
+            json,
+            full,
+            require_complete,
+        } => {
+            let opts = provenance::Opts {
+                collection,
+                search,
+                depth,
+                json,
+                full,
+            };
+            let mut out = std::io::stdout().lock();
+            let complete = provenance::run(&file, &opts, &mut out)?;
+            // The chain is already rendered; `--require-complete` only decides the exit code, so the
+            // operator sees WHICH hops are missing either way rather than just that something is.
+            if require_complete && !complete {
+                return Err(provenance::incomplete_error(&file));
             }
             Ok(())
         }
@@ -2149,6 +2280,120 @@ mod tests {
         }
     }
 
+    /// The `--require-complete` gate must tell **version skew** from **corruption** end to end, on two
+    /// versions of one parent made the way a user makes them: `tessera commit`.
+    ///
+    /// The sequence is the real one — seal a parent, seal a child that pins it, then correct the
+    /// parent's metadata in a repository and `publish` the corrected version next to the child. The
+    /// child now points at a version that is no longer what is on disk. That is routine (ADR-0036: `id`
+    /// is a lineage handle, `manifest_hash` the version), so `provenance` must render it as a different
+    /// version, keep walking, and exit 0 — while `--require-complete` still refuses it. Reporting it as
+    /// an integrity failure would cry corruption over a metadata edit.
+    #[test]
+    fn a_committed_second_version_of_a_parent_reads_as_skew_not_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+
+        // A parent, and a child that pins the parent's seal.
+        let parent_path = d.join("parent.tsra");
+        sample_tsra(&parent_path);
+        let parent = Reader::open(&parent_path).unwrap().manifest().clone();
+        let mut cb = ProductBuilder::new("recon", "child", "d", "2024-01-01T00:00:00Z");
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![4, 4, 4], "int16"));
+        cb.add_block(&vol).unwrap();
+        cb.add_source(
+            tessera_core::provenance::Source::new("derived_from", &parent.id)
+                .with_content_hash(parent.manifest_hash.clone().unwrap()),
+        );
+        let child = cb.seal().unwrap();
+        let handover = d.join("handover");
+        std::fs::create_dir_all(&handover).unwrap();
+        pack(
+            &child,
+            &[BlockPayload::new(
+                "volume",
+                serde_json::to_vec(&vol.spec).unwrap(),
+            )],
+            &handover.join("child.tsra"),
+        )
+        .unwrap();
+
+        // With the pinned parent beside it, the chain is proven.
+        std::fs::copy(&parent_path, handover.join("parent.tsra")).unwrap();
+        let opts = provenance::Opts {
+            collection: None,
+            search: vec![],
+            depth: None,
+            json: false,
+            full: false,
+        };
+        let mut out = Vec::new();
+        assert!(
+            provenance::run(&handover.join("child.tsra"), &opts, &mut out).unwrap(),
+            "the pinned parent is present: {}",
+            String::from_utf8_lossy(&out)
+        );
+
+        // Correct the parent's metadata through the real verbs, then publish the new version over it.
+        let repo = d.join("repo");
+        run(Cmd::Init { repo: repo.clone() }).unwrap();
+        run(Cmd::Import {
+            repo: repo.clone(),
+            file: parent_path.clone(),
+        })
+        .unwrap();
+        run(Cmd::Commit {
+            repo: repo.clone(),
+            lineage: parent.id.clone(),
+            set: vec!["tracer=FDG".to_string()],
+            add_block: vec![],
+            remove_block: vec![],
+        })
+        .unwrap();
+        let tip = tessera_io::repo::Repository::open(&repo)
+            .unwrap()
+            .read_ref(&parent.id)
+            .unwrap()
+            .expect("the lineage has a tip after commit");
+        assert_ne!(
+            Some(tip.as_str()),
+            parent.manifest_hash.as_deref(),
+            "commit must produce a NEW version of the same lineage"
+        );
+        run(Cmd::Publish {
+            repo,
+            version: tip,
+            out: handover.join("parent.tsra"),
+            anonymous: false,
+        })
+        .unwrap();
+
+        // Same lineage, different version: a rendered gap, exit-0-worthy, and NOT an integrity error.
+        let mut out = Vec::new();
+        let complete = provenance::run(&handover.join("child.tsra"), &opts, &mut out).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            !complete,
+            "the pinned version is no longer on disk:\n{text}"
+        );
+        assert!(
+            text.contains("different version"),
+            "skew must be named as a version difference:\n{text}"
+        );
+        for forbidden in ["corrupt", "tamper", "integrity"] {
+            assert!(
+                !text.to_lowercase().contains(forbidden),
+                "a metadata edit must not be reported as {forbidden}:\n{text}"
+            );
+        }
+        // The child still verifies: nothing about it is corrupt, which is the whole point.
+        run(Cmd::Verify {
+            file: handover.join("child.tsra"),
+            workers: None,
+        })
+        .unwrap();
+    }
+
     fn sample_tsra(path: &std::path::Path) {
         let vol = ArrayBlock::new("volume", ArraySpec::new(vec![16, 16, 16], "int16"));
         let payload = serde_json::to_vec(&vol.spec).unwrap();
@@ -2229,6 +2474,7 @@ mod tests {
             full: false,
             verify: false,
             json: false,
+            resolve_config: false,
         })
         .unwrap();
         run(Cmd::Schema {
@@ -2371,6 +2617,7 @@ mod tests {
                 full: false,
                 verify: true,
                 json: false,
+                resolve_config: false,
             }),
             Err(tessera_core::Error::BlockIntegrity { .. })
         ));
@@ -2443,6 +2690,7 @@ mod tests {
             full: false,
             verify: false,
             json: false,
+            resolve_config: false,
         })
         .unwrap();
         let r = Reader::open(&out).unwrap();

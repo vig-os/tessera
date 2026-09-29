@@ -202,6 +202,58 @@ is self-describing with zero format change.
   schema, not the engine** — tessera stays domain-agnostic (ADR-0003/0040/0050); adding a new
   inheritable field or a new required-provenance rule is a schema edit, never an engine change.
 
+## Amendment (#452) — the operator surface, and skew is not corruption
+
+§2 and §5 described records; #417 printed them; #452 made them answerable. Two decisions were needed,
+and only the second is load-bearing beyond the CLI.
+
+**1. `config_ref` resolution is a flag on `inspect`, not a verb.** `inspect --resolve-config`
+dereferences the digest to the block it names. It is a flag because the question ("what recipe made
+this?") is the one `inspect` already answers — a separate verb would split one question across two
+commands. Three rules make it safe:
+
+- **Inline only what belongs on a terminal.** Small valid-UTF-8 text prints verbatim; anything larger
+  or non-UTF-8 is named with the `tessera extract` command that streams it. The choice is made from
+  the Blob spec's recorded `size` — which exists so a manifest-only reader knows it — so a multi-GB
+  vendor config is never buffered just to decide not to print it.
+- **A broken sealed reference is loud.** A `config_ref` naming no carried block is
+  `Error::UnresolvedConfigRef`, raised only where a caller explicitly asked to resolve. Plain
+  `inspect` on the same product still works: the reference is sealed and the rest of the product is
+  valid, so a read must not fail on it.
+- **`--json` stays exactly the manifest.** A resolved config is not part of the manifest, so asking
+  for both is refused rather than quietly widening a documented shape.
+
+**2. A resolved parent at a different version is `ProvenanceVersionSkew`, never `Integrity`.** This is
+the decision that matters. ADR-0036 makes `id` a *lineage handle* and `manifest_hash` the version, so
+one reference legitimately addresses many manifests: resolving an edge against a store that has since
+committed the parent again returns a *different version of the right parent*. A chain check compares
+hashes and cannot see bytes, so it can never tell that apart from tampering — which means the shared
+`Integrity` variant ("tampering, corruption, or a producer bug") reported a routine metadata edit as
+an attack. Operators who see that learn to wave the error away, and then wave away the real one. The
+two are now different types, and real corruption stays where it can actually be observed: payload
+verification, reading the bytes.
+
+Three consequences follow, each a structural rule rather than a special case:
+
+- `Resolver` gains `resolve_pinned(reference, pinned)`. A store holding two versions of one parent
+  must be able to return the pinned one; without it the walk reports skew whenever the newer version
+  happens to sort first — skew by coin flip, which is worse than not knowing.
+- **Version pointers are reported, never recursed through.** An edge whose `reference` equals its
+  pinned hash names a version rather than a lineage (ADR-0036's `snapshot_of`). A published artifact
+  keeps its lineage `id` while pointing back at an earlier version of *itself*, so descending re-walks
+  the same product and trips the cycle guard — a well-formed published artifact rejected as a
+  malformed DAG. Read off the edge's *shape*, never its role name: roles are free-form strings the
+  format never constrains.
+- **Verification and the operator view share one traversal** (`provenance::walk` + a `Visit`
+  visitor). Two walks would drift, and then the verifier and the view would disagree about what the
+  DAG is. They differ only in the visitor: strict refuses what it cannot prove, the operator view
+  renders the gap and keeps going, because "I cannot reach that parent from here" is a fact to show,
+  not an error that hides the rest of the chain.
+
+Parent resolution is deliberately **local** (own directory → `--collection` → `--search`). A registry
+resolver needs a fetch policy and a cache, and putting one inside a read verb would make `provenance`
+quietly reach the network.
+
 ## Non-decisions / deferred
 
 - Cross-product **generation-graph** queries (`which config produced this cohort?`) — a downstream
