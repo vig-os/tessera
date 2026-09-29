@@ -89,7 +89,10 @@ fn main() {
             let cs = 1usize << log2cs;
             let mut idx = ChunkIndex::new();
             for chunk in data.chunks(cs) {
-                idx.push(chunk_digest(chunk), chunk);
+                assert!(
+                    idx.push(chunk_digest(chunk), chunk),
+                    "spike fixture values fit the exact accumulator"
+                );
             }
             let nchunks = idx.len();
             let index_bytes = nchunks * ENTRY_BYTES;

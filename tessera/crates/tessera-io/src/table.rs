@@ -1447,7 +1447,7 @@ pub fn decode_projected(spec: &TableSpec, blob: &[u8], names: &[&str]) -> Result
 ///     row_index: None,
 /// };
 /// let data: TableData = vec![("t".into(), ColumnData::U64(vec![10, 20, 30]))];
-/// let idx = table_chunk_index(&spec, &data, "t").unwrap();
+/// let idx = table_chunk_index(&spec, &data, "t").unwrap().expect("an indexable fixture");
 ///
 /// assert_eq!(idx.len(), 1); // 3 rows <= ROWS_PER_GROUP -> a single row-group
 /// assert_eq!(idx.aggregate().max, Some(30)); // stats over the column
@@ -1458,19 +1458,19 @@ pub fn table_chunk_index(
     spec: &TableSpec,
     data: &TableData,
     stat_column: &str,
-) -> Result<ChunkIndex> {
+) -> Result<Option<ChunkIndex>> {
     validate(spec, data)?;
     let stat_vals = data
         .iter()
         .find(|(name, _)| name == stat_column)
         .ok_or_else(|| Error::Codec(format!("table has no column '{stat_column}'")))?
         .1
-        .as_i64()
-        .ok_or_else(|| {
-            Error::Codec(format!(
-                "column '{stat_column}' is not an integer column for stats"
-            ))
-        })?;
+        .as_i64();
+    // Not an integer column → no index (`None`), consistent with the array path: callers ask for an
+    // index and are told there is none, rather than getting an error for a legitimate shape.
+    let Some(stat_vals) = stat_vals else {
+        return Ok(None);
+    };
     let rows = data.first().map(|(_, c)| c.len()).unwrap_or(0);
     let n_groups = rows.div_ceil(ROWS_PER_GROUP).max(1);
     let mut idx = ChunkIndex::new();
@@ -1482,12 +1482,13 @@ pub fn table_chunk_index(
         for (_, col) in data.iter() {
             bytes.extend_from_slice(&col.slice(start, end).to_le_bytes());
         }
-        idx.push_entry(
-            digest(&bytes),
-            ChunkStats::from_values(&stat_vals[start..end]),
-        );
+        // Fail closed (ADR-0059 M2, #523) — see `array_chunk_index`.
+        let Some(stats) = ChunkStats::from_values(&stat_vals[start..end]) else {
+            return Ok(None);
+        };
+        idx.push_entry(digest(&bytes), stats);
     }
-    Ok(idx)
+    Ok(Some(idx))
 }
 
 /// Encode a table block and produce both the digested [`BlockRef`] (digest over the real Vortex
@@ -1524,9 +1525,13 @@ pub fn table_block_with_index(
 ) -> Result<(EncodedBlock, Option<EncodedBlock>)> {
     let block = table_block(name, spec, data)?;
     let sidecar = match stat_column {
-        Some(col) if data.iter().any(|(n, c)| n == col && c.as_i64().is_some()) => {
-            let index = table_chunk_index(spec, data, col)?;
-            Some(crate::chunk_index::chunk_index_block(name, &index)?)
+        Some(col) if data.iter().any(|(n, _)| n == col) => {
+            match table_chunk_index(spec, data, col)? {
+                Some(index) => Some(crate::chunk_index::chunk_index_block(name, &index)?),
+                // Not an integer column, or an accumulator that would overflow — no sidecar rather than
+                // an approximate one (ADR-0059 M2).
+                None => None,
+            }
         }
         _ => None, // no integer stat column → no prunable-stats sidecar (ADR-0028 §3 integer core)
     };
@@ -2161,7 +2166,9 @@ mod tests {
         let (blk_ref, _) = table_block("t", &spec, &data).unwrap();
         assert_eq!(blk.digest, blk_ref.digest);
         let (scar, _) = sidecar.expect("integer stat column yields a sidecar");
-        let idx = table_chunk_index(&spec, &data, "i8").unwrap();
+        let idx = table_chunk_index(&spec, &data, "i8")
+            .unwrap()
+            .expect("an indexable fixture");
         let (expect, _) = crate::chunk_index::chunk_index_block("t", &idx).unwrap();
         assert_eq!(scar.digest, expect.digest);
         assert_eq!(scar.name, expect.name);
@@ -2280,7 +2287,9 @@ mod tests {
                 ColumnData::F32((0..rows).map(|k| (k % 7) as f32).collect()),
             ),
         ];
-        let idx = table_chunk_index(&spec, &data, "t").unwrap();
+        let idx = table_chunk_index(&spec, &data, "t")
+            .unwrap()
+            .expect("an indexable fixture");
         // one entry per encoder row-group
         assert_eq!(idx.len(), rows.div_ceil(ROWS_PER_GROUP));
         // stats roll up to the whole monotonic column [0, rows)
@@ -2295,11 +2304,15 @@ mod tests {
         // root = the sub-block MMR over the per-group digests; deterministic
         assert!(idx.root().starts_with("blake3:"));
         assert_eq!(
-            table_chunk_index(&spec, &data, "t").unwrap().root(),
+            table_chunk_index(&spec, &data, "t")
+                .unwrap()
+                .expect("an indexable fixture")
+                .root(),
             idx.root()
         );
         // a float column can't supply integer stats
-        assert!(table_chunk_index(&spec, &data, "e").is_err());
+        // A non-integer stat column is not an ERROR, it is "no index" (ADR-0059 M2 shape).
+        assert!(table_chunk_index(&spec, &data, "e").unwrap().is_none());
     }
 
     #[test]
