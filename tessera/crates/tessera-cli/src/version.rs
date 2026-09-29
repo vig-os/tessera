@@ -86,6 +86,15 @@ pub fn commit(
             )));
         }
         names.remove(name);
+        // A `{hash, stats}` chunk-index sidecar describes ONE data block and is bound to it only by
+        // name. Leaving `<name>.cidx` behind when `<name>` goes means the next
+        // `--add-block …:<name>` silently inherits it, and `tessera stats` would then serve the OLD
+        // block's statistics for the NEW block and label them exact. The sidecar is `class: derived`
+        // — regenerable from the data — so removing it with its block loses nothing (#347 review).
+        let sidecar = tessera_io::chunk_index::cidx_name(name);
+        if b.remove_block(&sidecar) {
+            names.remove(&sidecar);
+        }
     }
 
     // Adds — copy an already-encoded block from another .tsra (file i/o, no re-encode).
@@ -629,6 +638,96 @@ mod tests {
         assert!(
             sm.sources.iter().any(|s| s.role == "supersedes"),
             "seal preserves history"
+        );
+    }
+
+    /// Removing a block must take its chunk-index sidecar with it (#347 review).
+    ///
+    /// The `.cidx` is bound to its data block only by NAME. Leaving `volume.cidx` behind when
+    /// `volume` is removed means the very next `--add-block <other>:volume` silently inherits it,
+    /// and `tessera stats` would then serve the OLD volume's min/max/mean for the NEW block and
+    /// label them `exact: true`. This is the exact command sequence from the review:
+    ///
+    /// ```text
+    /// tessera commit --remove-block volume --add-block other.tsra:volume
+    /// ```
+    #[test]
+    fn removing_a_block_also_removes_its_chunk_index_sidecar() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_io::array::ArrayData;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let p1 = dir.path().join("p1.tsra");
+        let p2 = dir.path().join("p2.tsra");
+
+        // p1: an indexed integer volume -> carries BOTH `volume` and `volume.cidx`.
+        let mut spec = ArraySpec::new(vec![4], "int16");
+        spec.chunks = vec![2];
+        let ((br, pl), side) = tessera_io::array::array_block_with_index(
+            "volume",
+            &spec,
+            &ArrayData::I16(vec![1, 2, 3, 4]),
+        )
+        .unwrap();
+        let (sref, spl) = side.expect("integer array gets a sidecar");
+        let mut b = PB::new("recon", "DP-idx", "v", "2024-01-01T00:00:00Z");
+        b.add_block_ref(br);
+        b.add_block_ref(sref);
+        pack(&b.seal().unwrap(), &[pl, spl], &p1).unwrap();
+
+        // p2: a DIFFERENT volume, same block name, no index.
+        let (br2, pl2) = tessera_io::array::array_block(
+            "volume",
+            &spec,
+            &ArrayData::I16(vec![100, 200, 300, 400]),
+        )
+        .unwrap();
+        let mut b2 = PB::new("recon", "DP-other", "v", "2024-01-01T00:00:00Z");
+        b2.add_block_ref(br2);
+        pack(&b2.seal().unwrap(), &[pl2], &p2).unwrap();
+
+        init(&repo, &mut Vec::new()).unwrap();
+        let mut ibuf = Vec::new();
+        import(&repo, &p1, &mut ibuf).unwrap();
+        let lineage = String::from_utf8(ibuf)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("imported lineage "))
+            .unwrap()
+            .to_string();
+
+        let r = Repository::open(&repo).unwrap();
+        let m0 = r
+            .get_manifest(&r.read_ref(&lineage).unwrap().unwrap())
+            .unwrap();
+        assert!(
+            m0.blocks.iter().any(|b| b.name == "volume.cidx"),
+            "precondition: the imported version carries the sidecar"
+        );
+
+        // Swap the volume for a different one, in one commit.
+        let add = format!("volume={}:volume", p2.to_str().unwrap());
+        commit(
+            &repo,
+            &lineage,
+            &[],
+            &[add],
+            &["volume".into()],
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let m1 = r
+            .get_manifest(&r.read_ref(&lineage).unwrap().unwrap())
+            .unwrap();
+        assert!(
+            m1.blocks.iter().any(|b| b.name == "volume"),
+            "the new volume is attached"
+        );
+        assert!(
+            !m1.blocks.iter().any(|b| b.name == "volume.cidx"),
+            "the STALE sidecar must not survive its block — it would describe the old data"
         );
     }
 

@@ -11,8 +11,58 @@ shape     [64, 64, 64] (z,y,x)
 dtype     int16   codec pcodec
 chunks    [64, 64, 64]   voxels 262,144
 raw       min -1024  max 3071  mean 1023.500  std 1182.413
+source    full-decode-exact-integer (exact)
 physical  min -2048  max 2047  (1·raw + -1024) HU
 world     index space (no affine — use --index, not --world)
+
+```
+
+# === `--json` adds `exact` and `method`: where the numbers came from, and whether to trust them. ===
+
+A `.tsra` whose array carries a `{hash, stats}` chunk-index sidecar (`volume.cidx`) answers
+`count/min/max/mean/std` from the index's monoid aggregate — **no block read, no decode**, and the
+numbers are exact. Without a sidecar the array is decoded once. Either way the output says which
+happened, so a consumer never has to guess. This corpus fixture has no sidecar, so it decodes.
+
+```
+$ tessera stats ../../corpus/files/recon_int16.tsra volume --json
+{
+  "block": "volume",
+  "shape": [
+    64,
+    64,
+    64
+  ],
+  "axes": [
+    "z",
+    "y",
+    "x"
+  ],
+  "dtype": "int16",
+  "codec": "pcodec",
+  "chunks": [
+    64,
+    64,
+    64
+  ],
+  "count": 262144,
+  "exact": true,
+  "method": "full-decode-exact-integer",
+  "raw": {
+    "min": -1024.0,
+    "max": 3071.0,
+    "mean": 1023.5,
+    "std": 1182.413316061689
+  },
+  "physical": {
+    "min": -2048.0,
+    "max": 2047.0,
+    "slope": 1.0,
+    "intercept": -1024.0,
+    "unit": "HU"
+  },
+  "world": null
+}
 
 ```
 

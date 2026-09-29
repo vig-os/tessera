@@ -281,11 +281,35 @@ impl LogicalTableView {
         // `table_block_with_index`. The sidecar payload itself doesn't record which column its
         // stats are over, so we trust this heuristic rather than reading the wrong stats.
         let sidecar = cidx_name(bname);
-        let sidecar_present = reader.manifest().blocks.iter().any(|b| b.name == sidecar);
         let is_row_index = spec.row_index.as_deref() == Some(column);
-        if sidecar_present && is_row_index {
+        // Name alone is not enough to trust an index (#347 review). Additionally require that the
+        // sidecar DECLARES it indexes this block, that its entry count matches this block's row-group
+        // grid, and that the roll-up does not overflow. A mismatched or stale index would otherwise
+        // silently answer a pruning query with another block's min/max — which drops real rows,
+        // because pruning acts on the answer.
+        let declared_ok = reader
+            .manifest()
+            .blocks
+            .iter()
+            .find(|b| b.name == sidecar)
+            .and_then(|b| b.spec.get("indexes").and_then(|v| v.as_str()))
+            .map(|idx| idx == bname.as_str())
+            .unwrap_or(false);
+        if declared_ok && is_row_index {
             let bytes = reader.read_block(&sidecar)?;
-            return Ok(ChunkIndex::from_bytes(&bytes)?.aggregate());
+            let index = ChunkIndex::from_bytes(&bytes)?;
+            let want_groups = spec
+                .rows
+                .div_ceil(crate::table::ROWS_PER_GROUP as u64)
+                .max(1);
+            if index.len() as u64 == want_groups {
+                // `checked_aggregate` rather than `aggregate`: a wrapped sum_sq (#523) would be a
+                // wrong bound, and a wrong bound prunes real data away.
+                if let Some(agg) = index.checked_aggregate() {
+                    return Ok(agg);
+                }
+            }
+            // Otherwise fall through to the projection below — slower, but correct.
         }
         // Fallback: project just the stat column (Vortex column projection is cheap; we never
         // decode the whole block to learn its min/max).

@@ -382,13 +382,21 @@ enum Cmd {
     },
     /// Numeric overview of an **array** block (shape, dtype, value range, spatial referencing).
     ///
-    /// Decodes the array once and reports shape · dtype · chunks · codec · min/max/mean/std (raw,
-    /// plus physical units when a rescale is present) · whether a world affine is carried.
+    /// Reports shape · dtype · chunks · codec · min/max/mean/std (raw, plus physical units when a
+    /// rescale is present) · whether a world affine is carried.
+    ///
+    /// When the block carries a `{hash, stats}` chunk-index sidecar the statistics are exact monoid
+    /// roll-ups and are read straight from it — **no block read, no decode**. Otherwise the array is
+    /// decoded once. The output names which path ran and whether the numbers are exact.
     Stats {
         /// The `.tsra` to read.
         file: PathBuf,
         /// The array block to summarise (e.g. `volume`).
         block: String,
+        /// Emit JSON, including `exact` and `method` — which path produced the numbers and whether
+        /// they can be trusted as exact (#347).
+        #[arg(long)]
+        json: bool,
     },
     /// Pull a rectangular sub-region (2-D plane / 1-D line / point) of an **array** block.
     ///
@@ -1554,9 +1562,9 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             }
             Ok(())
         }
-        Cmd::Stats { file, block } => {
+        Cmd::Stats { file, block, json } => {
             let mut out = std::io::stdout().lock();
-            nav::stats(&file, &block, &mut out)
+            nav::stats(&file, &block, json, &mut out)
         }
         Cmd::Slice {
             file,
