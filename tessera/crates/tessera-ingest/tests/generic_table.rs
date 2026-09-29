@@ -820,3 +820,219 @@ fn a_hand_written_ingest_decoder_is_refused_for_every_backend() {
     );
     tessera_ingest::spec::validate(&ok).expect("an operator's own recipe keys are fine");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// #458 — streaming must agree with batch, on BOTH hashes
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Stream one Parquet file to a sealed product, with explicit batch/block/worker knobs.
+fn stream_parquet(
+    dir: &Path,
+    input: &Path,
+    batch_rows: usize,
+    block_rows: u64,
+    workers: usize,
+) -> tessera_core::Result<Manifest> {
+    let tag = uniq();
+    let stage = dir.join(format!("stage-{tag}"));
+    let out = dir.join(format!("streamed-{tag}.tsra"));
+    std::fs::create_dir_all(&stage).unwrap();
+    let cfg = tessera_io::WriteConfig::default().workers(workers);
+    let column_meta = ColumnMeta::default();
+    tessera_ingest::stream_table::stream_to_table_product(
+        || tessera_ingest::parquet_table::parquet_batches(input, batch_rows),
+        &[],
+        &tessera_ingest::canonical::GenericIngest {
+            name: "gen-01",
+            timestamp: TS,
+            description: "generically-ingested table",
+            source_format: "parquet",
+            source_path: input,
+            source_label: None,
+            extra_sources: &[],
+            decoder: decoder::Decoder::PARQUET,
+            generation: None,
+            column_meta: &column_meta,
+        },
+        &tessera_ingest::stream_table::StreamOpts {
+            stage: &stage,
+            out: &out,
+            cfg: &cfg,
+            batch_rows,
+            block_rows,
+            column_meta: &column_meta,
+        },
+    )
+}
+
+/// The batch-sealed manifest for the same Parquet file, through the real batch path.
+fn batch_parquet(dir: &Path, input: &Path) -> Manifest {
+    let table = tessera_ingest::parquet_table::read_table(input, &[]).expect("batch read");
+    let column_meta = ColumnMeta::default();
+    let (m, _payloads) = tessera_ingest::canonical::to_table_product(
+        &table,
+        &tessera_ingest::canonical::GenericIngest {
+            name: "gen-01",
+            timestamp: TS,
+            description: "generically-ingested table",
+            source_format: "parquet",
+            source_path: input,
+            source_label: None,
+            extra_sources: &[],
+            decoder: decoder::Decoder::PARQUET,
+            generation: None,
+            column_meta: &column_meta,
+        },
+    )
+    .expect("batch seal");
+    let _ = dir;
+    m
+}
+
+/// **The load-bearing equality (#458).** A streamed ingest and a batch one must seal the *same product*.
+///
+/// `manifest_hash` is compared as well as `content_hash`, and that is not belt-and-braces: the two
+/// divergences this work had to design around — a late-arriving null changing a column's representation,
+/// and the transform receipt being recorded per batch instead of per column — both leave `content_hash`
+/// **identical** and move only `manifest_hash`. A content-hash-only comparison would have called the
+/// paths equal while the sealed manifests disagreed.
+///
+/// The fixture is deliberately the one whose `energy` column is nullable, so the streamed path exercises
+/// the promote-to-nullable coercion rather than the trivially-equal case.
+#[test]
+fn streamed_and_batch_parquet_seal_the_same_product() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.parquet");
+    write_parquet(&input, WriterProperties::builder().build());
+
+    let batch = batch_parquet(dir.path(), &input);
+    let streamed = stream_parquet(dir.path(), &input, 2, tessera_io::BLOCK_ROWS as u64, 1)
+        .expect("stream the parquet");
+
+    assert_eq!(
+        batch.content_hash, streamed.content_hash,
+        "the decoded values must be identical"
+    );
+    assert_eq!(
+        batch.manifest_hash, streamed.manifest_hash,
+        "…and so must every sealed manifest field: a divergence here is invisible to content_hash"
+    );
+    assert_eq!(batch.id, streamed.id, "same identity inputs ⇒ same lineage");
+    // Named explicitly, because these are the fields a hand-maintained streaming twin would drift on.
+    assert_eq!(batch.ingest_transform, streamed.ingest_transform);
+    assert_eq!(batch.generation, streamed.generation);
+    assert_eq!(batch.sources, streamed.sources);
+    assert_eq!(batch.metadata, streamed.metadata);
+    // Small input ⇒ small-stays-single: exactly one block, byte-identical to the batch layout.
+    assert_eq!(streamed.blocks.len(), 1, "small input stays a single block");
+    assert_eq!(batch.blocks.len(), streamed.blocks.len());
+    assert_eq!(batch.blocks[0].digest, streamed.blocks[0].digest);
+}
+
+/// The batch size and the worker count are **runtime knobs**, not determinism inputs.
+///
+/// The batch size is the read-side bounded-memory unit and the worker count is encode parallelism;
+/// neither may touch a sealed byte. Without this, "streaming works" could mean "streaming works at the
+/// one batch size the test used".
+#[test]
+fn the_batch_size_and_worker_count_never_move_a_seal() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.parquet");
+    write_parquet(&input, WriterProperties::builder().build());
+    let expected = batch_parquet(dir.path(), &input);
+
+    for batch_rows in [1, 2, 5, 6, 64] {
+        for workers in [1, 2, 4] {
+            let got = stream_parquet(
+                dir.path(),
+                &input,
+                batch_rows,
+                tessera_io::BLOCK_ROWS as u64,
+                workers,
+            )
+            .unwrap_or_else(|e| panic!("stream at batch_rows={batch_rows} workers={workers}: {e}"));
+            assert_eq!(
+                (&expected.content_hash, &expected.manifest_hash),
+                (&got.content_hash, &got.manifest_hash),
+                "batch_rows={batch_rows} workers={workers} moved a seal"
+            );
+        }
+    }
+}
+
+/// A file whose **only null is in the last row group** must stream identically to batch.
+///
+/// This is the case the two-pass design exists for. With one row group per row and the null last, a
+/// single-pass stream would seal the first blocks non-nullable and discover the truth at the end — so the
+/// promote-to-nullable coercion is exercised on every earlier batch, and the result must still equal the
+/// batch fold, which saw the whole column at once.
+#[test]
+fn a_null_only_in_the_last_row_group_streams_identically() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("late-null.parquet");
+
+    // `energy` is null ONLY in the final row, and the writer is told to start a new row group per row,
+    // so the null lands alone in the last one.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("energy", DataType::Float64, true),
+    ]));
+    let id: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3, 4]));
+    let energy: ArrayRef = Arc::new(Float64Array::from(vec![
+        Some(1.0),
+        Some(2.0),
+        Some(3.0),
+        None,
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![id, energy]).unwrap();
+    let props = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(1))
+        .build();
+    let file = std::fs::File::create(&input).unwrap();
+    let mut w = ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+
+    let table = tessera_ingest::parquet_table::read_table(&input, &[]).expect("batch read");
+    let column_meta = ColumnMeta::default();
+    let ingest = tessera_ingest::canonical::GenericIngest {
+        name: "late-null",
+        timestamp: TS,
+        description: "generically-ingested table",
+        source_format: "parquet",
+        source_path: &input,
+        source_label: None,
+        extra_sources: &[],
+        decoder: decoder::Decoder::PARQUET,
+        generation: None,
+        column_meta: &column_meta,
+    };
+    let (expected, _) =
+        tessera_ingest::canonical::to_table_product(&table, &ingest).expect("batch seal");
+
+    // Batch size 1 ⇒ the first three batches see no null at all.
+    let stage = dir.path().join("stage-late");
+    std::fs::create_dir_all(&stage).unwrap();
+    let out = dir.path().join("late.tsra");
+    let cfg = tessera_io::WriteConfig::default();
+    let got = tessera_ingest::stream_table::stream_to_table_product(
+        || tessera_ingest::parquet_table::parquet_batches(&input, 1),
+        &[],
+        &ingest,
+        &tessera_ingest::stream_table::StreamOpts {
+            stage: &stage,
+            out: &out,
+            cfg: &cfg,
+            batch_rows: 1,
+            block_rows: tessera_io::BLOCK_ROWS as u64,
+            column_meta: &column_meta,
+        },
+    )
+    .expect("stream the late-null parquet");
+
+    assert_eq!(
+        (&expected.content_hash, &expected.manifest_hash),
+        (&got.content_hash, &got.manifest_hash),
+        "a null in only the last row group must not change what streaming seals"
+    );
+}

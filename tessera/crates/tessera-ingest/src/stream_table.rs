@@ -313,3 +313,162 @@ mod tests {
         );
     }
 }
+
+/// The streaming knobs, beyond the manifest facts [`crate::canonical::GenericIngest`] already carries.
+pub struct StreamOpts<'a> {
+    /// Staging directory for the write session and the sink's row-group fragments.
+    pub stage: &'a std::path::Path,
+    /// Where the sealed `.tsra` is written.
+    pub out: &'a std::path::Path,
+    /// Worker count and RAM budget for the encode pipeline. A **runtime** knob: it must not change a
+    /// sealed byte, which the batch-equals-stream test across worker counts is there to prove.
+    pub cfg: &'a tessera_io::WriteConfig,
+    /// Rows per decoded batch — the read-side bounded-memory unit, independent of the block partition.
+    pub batch_rows: usize,
+    /// Rows per block. Production passes [`tessera_io::BLOCK_ROWS`]; tests lower it to exercise the
+    /// multi-block path without materialising millions of rows.
+    pub block_rows: u64,
+    /// `--column-meta`: operator semantics that land inside the seal, applied to the same columns the
+    /// batch path applies them to.
+    pub column_meta: &'a crate::column_meta::ColumnMeta,
+}
+
+/// A guard that the input did not change between the two passes.
+///
+/// Captured when the shape pass opens the file and re-checked before the encode pass, because a two-pass
+/// read of a file someone is rewriting would seal a mixture of two inputs under one `ingested_from`
+/// digest — silently.
+///
+/// **What it does not catch**, stated here rather than implied: a modification that preserves size,
+/// mtime, ctime and inode. Hashing in-line during the encode pass cannot close that either, because the
+/// Parquet reader does random-access reads through a `ChunkReader` and would hash out of order and
+/// partially. Single-pass in-line hashing is the only complete answer and the nullability rule forbids
+/// it (see the module docs), so this is a metadata guard and is documented as one.
+#[derive(Debug, PartialEq, Eq)]
+struct InputFingerprint {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl InputFingerprint {
+    fn of(path: &std::path::Path) -> Result<Self> {
+        let md = std::fs::metadata(path).map_err(|e| {
+            shape_error(format!("stat {} for the change guard: {e}", path.display()))
+        })?;
+        Ok(Self {
+            len: md.len(),
+            modified: md.modified().ok(),
+            created: md.created().ok(),
+            #[cfg(unix)]
+            inode: std::os::unix::fs::MetadataExt::ino(&md),
+        })
+    }
+}
+
+/// Is this input safe to read twice?
+///
+/// A pipe, fifo or character device cannot be: the second pass would read an exhausted stream and seal a
+/// truncated product. Callers fall back to the batch path for these rather than refusing, because
+/// `tessera ingest table <(zcat big.csv.gz) …` passes `/dev/fd/63` and works today for CSV — refusing
+/// would regress behaviour that exists.
+pub fn is_seekable(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|md| md.is_file())
+}
+
+/// Two-pass streaming ingest of a re-openable batch source into a sealed `table` product.
+///
+/// `open` is called **twice** — once for the shape pass and once to encode — which is why it is a
+/// closure rather than an iterator. See the module docs for why one pass cannot work.
+///
+/// Memory is bounded by one decoded batch plus the sink's row-group buffer and the encode pool, never by
+/// the file: pass 1 drops each batch after inspecting it, and pass 2 hands each batch to the sink, which
+/// spills full row groups to durable fragments under `stage`.
+pub fn stream_to_table_product<F, I>(
+    open: F,
+    exclude: &[String],
+    ingest: &crate::canonical::GenericIngest<'_>,
+    opts: &StreamOpts<'_>,
+) -> Result<tessera_core::Manifest>
+where
+    F: Fn() -> Result<I>,
+    I: Iterator<Item = Result<arrow_array::RecordBatch>>,
+{
+    let before = InputFingerprint::of(ingest.source_path)?;
+
+    // ── Pass 1: the shape. Every batch is canonicalised with the SAME entry point the batch fold uses,
+    //    inspected, and dropped.
+    let mut scan = ShapeScan::new();
+    for batch in open()? {
+        let batch = batch?;
+        scan.push(&crate::arrow_table::canonicalise_batch(&batch, exclude)?)?;
+    }
+    let mut shape = scan.finish();
+    if shape.columns.is_empty() {
+        return Err(shape_error(format!(
+            "{} decoded to no columns",
+            ingest.source_path.display()
+        )));
+    }
+    // Operator semantics land inside the seal, on the same columns the batch path applies them to.
+    opts.column_meta.apply(&mut shape.columns)?;
+
+    // ── The change guard, between the passes.
+    let after = InputFingerprint::of(ingest.source_path)?;
+    if before != after {
+        return Err(shape_error(format!(
+            "{} changed during ingest (size, mtime or inode moved between the shape pass and the \
+             encode pass) — re-run on a stable input rather than sealing a mixture of two files",
+            ingest.source_path.display()
+        )));
+    }
+
+    // ── The session. Every manifest fact goes through the shared applier, so this declares exactly what
+    //    the batch path declares. The receipt comes from pass 1, which saw every batch, and must be
+    //    declared BEFORE any block commits: a streamed `.tsra` is written once with no re-seal hook.
+    let mut ws = tessera_io::WriteSession::create(
+        opts.stage,
+        "table",
+        ingest.name,
+        ingest.description,
+        ingest.timestamp,
+    )?;
+    crate::canonical::declare_generic_table(&mut ws, ingest, &shape.transforms)?;
+
+    let row_bytes: u64 = shape
+        .columns
+        .iter()
+        .map(|c| {
+            u64::try_from(tessera_io::ColumnData::dtype_size(&c.dtype).unwrap_or(0)).unwrap_or(0)
+        })
+        .sum();
+    let unit_bytes = opts.block_rows.saturating_mul(row_bytes.max(1));
+    let mut sw = tessera_io::StreamWriter::with_config(ws, opts.cfg, unit_bytes);
+    {
+        let mut sink = tessera_io::TableMultiBlockSink::with_block_rows(
+            shape.columns.clone(),
+            crate::canonical::GENERIC_BLOCK,
+            &opts.stage.join("sink"),
+            &mut sw,
+            opts.block_rows,
+        )?;
+        // ── Pass 2: encode. Each batch is canonicalised, coerced to the file-wide schema so every block
+        //    encodes alike, and pushed.
+        for batch in open()? {
+            let batch = batch?;
+            let table = crate::arrow_table::canonicalise_batch(&batch, exclude)?;
+            let data = coerce_to_shape(&shape, table)?;
+            let named: tessera_io::TableData = shape
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .zip(data)
+                .collect();
+            sink.push(named)?;
+        }
+        sink.finish()?;
+    }
+    sw.finish(opts.out)
+}
