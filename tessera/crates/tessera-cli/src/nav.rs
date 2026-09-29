@@ -2112,6 +2112,33 @@ mod tests {
             .contains("(+4 more, --full to list all)"));
         assert_eq!(generation_lines(&big, true).len(), 1 + 12);
 
+        // #462: config_ref AND a bag over the cap AND --full, together — the combination the
+        // per-feature assertions above never exercise as one render. `--full` must spell the digest
+        // out AND list every key, with the header still reporting both halves.
+        let mut both = (0..12).fold(tessera_core::Generation::default(), |acc, i| {
+            acc.with(format!("k{i:02}"), serde_json::json!(i))
+        });
+        both.config_ref = Some("blake3:0123456789abcdef0123456789abcdef".into());
+        let full = generation_lines(&both, true);
+        assert_eq!(
+            full[0],
+            "generation    12 config keys · config_ref blake3:0123456789abcdef0123456789abcdef",
+            "--full must not shorten the digest when a bag is present too"
+        );
+        assert_eq!(full.len(), 1 + 12, "--full lists every key, no footer");
+        assert!(full.last().unwrap().contains("k11"));
+        // ...and the default render of the SAME record collapses the bag but still names the digest.
+        let capped_both = generation_lines(&both, false);
+        assert_eq!(
+            capped_both[0],
+            "generation    12 config keys · config_ref blake3:0123456789ab…"
+        );
+        assert_eq!(capped_both.len(), 1 + GENERATION_KEYS_SHOWN + 1);
+        assert!(capped_both
+            .last()
+            .unwrap()
+            .contains("(+4 more, --full to list all)"));
+
         // config_ref alone — the large/bit-faithful vendor-config case (ADR-0058 §2).
         let only_ref = tessera_core::Generation::default().with_config_ref("blake3:deadbeefcafe00");
         assert_eq!(

@@ -180,6 +180,22 @@ enum Cmd {
     ///
     /// With the `cloud` feature enabled, `file` also accepts `s3://<bucket>/<key>` or
     /// `http(s)://<host>/<key>` — the manifest is read via range-GET over the wire.
+    ///
+    /// `--json` emits exactly the serialized sealed manifest — the same object the seal hashes
+    /// cover, not a CLI-shaped view of it. Two things to know before parsing it:
+    ///
+    /// * `producer` is polymorphic. It is a JSON OBJECT
+    ///   (`{tool, version, git_commit?, git_repo?, dirty?}`) on anything sealed since ADR-0058, and
+    ///   a bare STRING (`"tessera/0.0.0"`) on older products, which round-trip unchanged. It is
+    ///   an untagged enum, so consumers must accept both; it is absent entirely on pre-stamp files.
+    ///   `generation`, `study`, `schema` and the other optional fields are omitted when unset
+    ///   rather than emitted as null.
+    ///
+    /// * Its stability is the FORMAT's, tracked by the `tessera_version` field the dump itself
+    ///   carries — this is the spec version, not the CLI's. Fields are added compatibly (readers
+    ///   default them, which is how `producer`/`generation` arrived); a rename or a removal is a
+    ///   major-version break, and a reader refuses a manifest whose major exceeds the one it
+    ///   understands. So pin behaviour to `tessera_version`, not to the tessera binary's version.
     Inspect {
         /// The `.tsra` to summarise (or an `s3://` / `http(s)://` URL with the `cloud` feature).
         file: PathBuf,
@@ -207,6 +223,11 @@ enum Cmd {
     Verify {
         /// The `.tsra` to verify (or an `s3://` / `http(s)://` URL with the `cloud` feature).
         file: PathBuf,
+        /// Worker threads for the parallel payload probe. Overrides `TESSERA_WORKERS` and
+        /// `.tessera/config.toml`; omitted, the resource-cap resolver picks the machine default.
+        /// Ignored for a URL, which verifies serially.
+        #[arg(long)]
+        workers: Option<usize>,
     },
     /// Render a `.tsra` as a navigable hierarchy tree.
     ///
@@ -1134,14 +1155,15 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             }
             Ok(())
         }
-        Cmd::Verify { file } => {
+        Cmd::Verify { file, workers } => {
             let label = file.display().to_string();
             // Payload half of verification: re-derive every block's digest from its stored bytes at
             // bounded RSS + typed, located errors (#268 parts 3+4). `open` already checked the seal.
             // A local `.tsra` fans the probe across the worker pool — each block is independently
             // addressable in the STORED zip (#367); a URL verifies serially (no cheap multi-handle
-            // reopen). Worker count is the machine default for now; #368 will feed it from the
-            // resource-cap resolver.
+            // reopen). The worker count comes from the resource-cap resolver (#368/#373), so
+            // `--workers` > `TESSERA_WORKERS` > `.tessera/config.toml` > machine default applies
+            // here exactly as it does on ingest — one cap for the whole CLI, not a per-verb default.
             #[cfg(feature = "cloud")]
             let is_url = cloud_url(&file).is_some();
             #[cfg(not(feature = "cloud"))]
@@ -1152,7 +1174,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 r.verify_payloads(&label)?;
                 println!("OK  {label} verified ({n} blocks)");
             } else {
-                let workers = tessera_io::WriteConfig::for_system().worker_count();
+                let workers = resource::resolve_write_config(workers, None)?.worker_count();
                 // Returns the block count (verified with L1 seal + L2 payloads) — no extra reopen.
                 let n = tessera_io::verify_payloads_parallel(&file, &label, workers)?;
                 println!("OK  {label} verified ({n} blocks)");
@@ -2137,13 +2159,71 @@ mod tests {
         pack(&sealed, &[BlockPayload::new("volume", payload)], path).unwrap();
     }
 
+    /// #373: `tessera verify`'s parallel payload probe must take its worker count from the
+    /// resource-cap resolver (#368), not from a per-verb `WriteConfig::for_system()`, so one cap
+    /// governs the whole CLI. Asserts the flag tier the new `--workers` feeds, and that the verb
+    /// still verifies end to end through that path.
+    ///
+    /// The env tier is deliberately NOT exercised by mutating `TESSERA_WORKERS`: the process
+    /// environment is global, so it races every other test in this binary. `resource`'s own
+    /// `precedence_is_flag_over_env_over_conf_over_default_per_field` already covers env through
+    /// the pure `resolve()` seam, which is the right place for it.
+    #[test]
+    fn verify_worker_cap_comes_from_the_resource_resolver() {
+        // The flag tier — the same call `Cmd::Verify` now makes — wins over every lower tier.
+        let cfg = resource::resolve_write_config(Some(3), None).unwrap();
+        assert_eq!(cfg.worker_count(), 3, "--workers must reach the resolver");
+
+        // And with no flag it still resolves to something usable rather than panicking.
+        assert!(
+            resource::resolve_write_config(None, None)
+                .unwrap()
+                .worker_count()
+                >= 1
+        );
+
+        // End to end: the verb runs over that path and still verifies.
+        let dir = tempfile::tempdir().unwrap();
+        let tsra = dir.path().join("p.tsra");
+        sample_tsra(&tsra);
+        run(Cmd::Verify {
+            file: tsra.clone(),
+            workers: Some(2),
+        })
+        .unwrap();
+        run(Cmd::Verify {
+            file: tsra.clone(),
+            workers: None,
+        })
+        .unwrap();
+
+        // ...and the flag REACHES the resolver rather than being dropped on the floor. `0` is the
+        // observable probe: the resolver rejects it, while the old `WriteConfig::for_system()` path
+        // (and `WriteConfig::workers`, which clamps to >= 1) would have swallowed it and verified
+        // happily. So this failing is the proof of pass-through, not merely of validation.
+        let err = run(Cmd::Verify {
+            file: tsra,
+            workers: Some(0),
+        })
+        .expect_err("--workers 0 must be refused through the verb, not clamped");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--workers") && msg.contains(">= 1"),
+            "error must name the flag and the bound, got: {msg}"
+        );
+    }
+
     #[test]
     fn verify_inspect_unpack_pack_all_succeed() {
         let dir = tempfile::tempdir().unwrap();
         let tsra = dir.path().join("p.tsra");
         sample_tsra(&tsra);
 
-        run(Cmd::Verify { file: tsra.clone() }).unwrap();
+        run(Cmd::Verify {
+            file: tsra.clone(),
+            workers: None,
+        })
+        .unwrap();
         run(Cmd::Inspect {
             file: tsra.clone(),
             full: false,
@@ -2172,7 +2252,11 @@ mod tests {
             out: repacked.clone(),
         })
         .unwrap();
-        run(Cmd::Verify { file: repacked }).unwrap();
+        run(Cmd::Verify {
+            file: repacked,
+            workers: None,
+        })
+        .unwrap();
     }
 
     #[test]
@@ -2180,7 +2264,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("bad.tsra");
         std::fs::write(&bad, b"not a zip at all").unwrap();
-        assert!(run(Cmd::Verify { file: bad }).is_err());
+        assert!(run(Cmd::Verify {
+            file: bad,
+            workers: None
+        })
+        .is_err());
     }
 
     /// #268 parts 3+4: a corrupt block payload makes `verify` fail with a typed `BlockIntegrity`
@@ -2211,7 +2299,12 @@ mod tests {
         })
         .unwrap();
 
-        match run(Cmd::Verify { file: bad }).unwrap_err() {
+        match run(Cmd::Verify {
+            file: bad,
+            workers: None,
+        })
+        .unwrap_err()
+        {
             tessera_core::Error::BlockIntegrity {
                 file,
                 block,
@@ -2340,7 +2433,11 @@ mod tests {
         // the ingested product verifies (seal + block digest) and is schema-valid. The engine adds
         // an `ingested_via_spec` edge on every member it produces (including the synthesised
         // 1-product spec the per-format CLI builds), so the source count goes from 1 to 2.
-        run(Cmd::Verify { file: out.clone() }).unwrap();
+        run(Cmd::Verify {
+            file: out.clone(),
+            workers: None,
+        })
+        .unwrap();
         run(Cmd::Inspect {
             file: out.clone(),
             full: false,
@@ -2440,7 +2537,11 @@ streaming = "batch"
         for m in &coll.members {
             let p = out_dir.join(member_filename(&m.reference, MemberKind::Product));
             assert!(p.exists(), "missing {}", p.display());
-            run(Cmd::Verify { file: p.clone() }).unwrap();
+            run(Cmd::Verify {
+                file: p.clone(),
+                workers: None,
+            })
+            .unwrap();
             let r = Reader::open(&p).unwrap();
             assert!(r
                 .manifest()
@@ -2645,7 +2746,11 @@ streaming = "batch"
         .unwrap();
 
         // The sealed product opens + verifies + carries the clean source label (NOT a slice path).
-        run(Cmd::Verify { file: out.clone() }).unwrap();
+        run(Cmd::Verify {
+            file: out.clone(),
+            workers: None,
+        })
+        .unwrap();
         let m = Reader::open(&out).unwrap().manifest().clone();
         let ingested_from = m
             .sources
@@ -2766,6 +2871,7 @@ streaming = "batch"
         // patient name / id (they live only in the encrypted envelope).
         run(Cmd::Verify {
             file: shredded.clone(),
+            workers: None,
         })
         .unwrap();
         let raw = std::fs::read(&shredded).unwrap();
@@ -2823,6 +2929,7 @@ streaming = "batch"
         .unwrap();
         run(Cmd::Verify {
             file: shredded.clone(),
+            workers: None,
         })
         .unwrap();
         let r = Reader::open(&shredded).unwrap();
