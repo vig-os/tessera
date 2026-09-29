@@ -1,0 +1,97 @@
+# THROWAWAY measurement for #483 — delete with this branch. Never merged to dev.
+#
+# Question: if `minio` cannot be substituted from cache.nixos.org, how long does building it from
+# source cost on each hosted runner? That decides whether `--fallback` is affordable or whether
+# #483 should rely on `--keep-going` plus isolating the check.
+#
+# Method, faithful to the real failure (only minio's substitution failed; its build inputs were
+# substitutable): substitute everything, DELETE just minio's outputs, then rebuild with substituters
+# disabled so only minio and its go-modules FOD are built locally.
+name: PROBE 483 minio build cost
+
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches:
+      - 'ci/483-**'
+
+permissions: {}
+
+concurrency:
+  group: probe-483-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    name: minio cost (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
+
+      - name: "Measure minio: substituted vs built from source"
+        run: |
+          set -uo pipefail
+          NIXPKGS="github:NixOS/nixpkgs/567a49d1913ce81ac6e9582e3553dd90a955875f"
+          S="$GITHUB_STEP_SUMMARY"
+          {
+            echo "## minio build cost — ${{ matrix.arch }}"
+            echo ""
+            echo "- runner: \`${{ matrix.runner }}\`, nproc: \`$(nproc)\`"
+            echo ""
+            echo "| phase | seconds |"
+            echo "|---|---|"
+          } >> "$S"
+
+          t0=$(date +%s)
+          nix build --no-link --print-out-paths "$NIXPKGS#minio" > /tmp/minio.out 2>/tmp/sub.err
+          rc=$?
+          t1=$(date +%s)
+          OUT=$(cat /tmp/minio.out 2>/dev/null | tail -1)
+          echo "| substitute from cache (baseline) | $((t1-t0)) |" >> "$S"
+          echo "substituted rc=$rc out=$OUT"
+          tail -5 /tmp/sub.err || true
+
+          # The vendored-Go-modules FOD, named so we can delete it too.
+          GOMOD=$(nix path-info -r "$OUT" 2>/dev/null | grep -E 'minio.*go-modules$' | head -1)
+          echo "go-modules path: ${GOMOD:-<none>}"
+
+          # Delete ONLY minio's own outputs; build inputs stay in the store.
+          nix store delete "$OUT" ${GOMOD:+"$GOMOD"} 2>/tmp/del.err || {
+            echo "delete failed (likely still referenced); results below are NOT a from-source build" ; tail -3 /tmp/del.err ; }
+
+          t2=$(date +%s)
+          nix build --no-link --option substituters '' --option substitute false "$NIXPKGS#minio" > /dev/null 2>/tmp/src.err
+          rc2=$?
+          t3=$(date +%s)
+          echo "| **build from source** | **$((t3-t2))** |" >> "$S"
+          echo "from-source rc=$rc2 elapsed=$((t3-t2))s"
+          tail -15 /tmp/src.err || true
+
+          {
+            echo ""
+            if [ "$rc2" -eq 0 ]; then
+              echo "From-source build **succeeded** in $((t3-t2))s ($(( (t3-t2)/60 )) min)."
+            else
+              echo "From-source build **FAILED** (rc=$rc2) after $((t3-t2))s — see the job log."
+            fi
+            echo ""
+            echo "Budget context: the nix leg's timeout is 90 min; observed real runs are ~57 min"
+            echo "(x86_64) and ~43 min (aarch64), so the headroom is roughly 33 and 47 min."
+          } >> "$S"
