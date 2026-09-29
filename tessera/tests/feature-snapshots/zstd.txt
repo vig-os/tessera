@@ -55,6 +55,7 @@ zstd v0.13.3
 |   |   |       |-- datafusion-physical-optimizer v54.0.0 (*)
 |   |   |       |-- datafusion-physical-plan v54.0.0 (*)
 |   |   |       |-- datafusion-pruning v54.0.0 (*)
+|   |   |       |-- tessera-cli vWORKSPACE (*)
 |   |   |   `-- arrow feature "prettyprint"
 |   |   |   `-- parquet feature "zstd"
 |   |   |   |           `-- datafusion-sql v54.0.0 (*)
@@ -336,6 +337,7 @@ zstd v0.13.3
 |   |   |   |       |   |-- tessera-cli feature "csv" (command-line)
 |   |   |   |       |   |-- tessera-ingest feature "default" (command-line)
 |   |   |   |       |   |-- tessera-ingest feature "default" (command-line) (*)
+|   |   |   |       |-- tessera-cli vWORKSPACE (*)
 |   |   |   |       |-- tessera-ingest feature "arrow" (command-line)
 |   |   |   |       |-- tessera-ingest feature "csv" (command-line)
 |   |   |   |       |-- tessera-ingest feature "default" (command-line) (*)
@@ -392,6 +394,10 @@ zstd v0.13.3
 |   |   |   |   |-- datafusion-physical-optimizer v54.0.0 (*)
 |   |   |   |   |-- datafusion-physical-plan v54.0.0 (*)
 |   |   |   |   |-- datafusion-pruning v54.0.0 (*)
+|   |   |   |   |-- tessera-cli vWORKSPACE (*)
+|   |   |   |   |-- tessera-cli vWORKSPACE (*)
+|   |   |   |   |-- tessera-cli vWORKSPACE (*)
+|   |   |   |   |-- tessera-cli vWORKSPACE (*)
 |   |   |   |-- arrow feature "arrow-csv"
 |   |   |   |-- arrow feature "arrow-ipc"
 |   |   |   |-- arrow feature "arrow-json"

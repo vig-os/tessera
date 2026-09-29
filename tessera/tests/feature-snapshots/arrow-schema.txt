@@ -398,6 +398,7 @@ arrow-schema v58.3.0
 |   |   |   |   |   |       `-- tessera-ingest vWORKSPACE (*)
 |   |   |   |   |   |       `-- tessera-ingest vWORKSPACE (*)
 |   |   |   |   |   |       `-- vortex-file v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
+|   |   |   |   |   |       |-- tessera-cli vWORKSPACE (*)
 |   |   |   |   |   |   `-- arrow-csv feature "default"
 |   |   |   |   |   |   `-- arrow-json feature "default"
 |   |   |   |   |   |   `-- parquet feature "zstd"
@@ -405,6 +406,7 @@ arrow-schema v58.3.0
 |   |   |   |   |   |   |       [dev-dependencies]
 |   |   |   |   |   |   |       `-- tessera-ingest vWORKSPACE (*)
 |   |   |   |   |   |   |       `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |   |   |       |-- tessera-cli vWORKSPACE (*)
 |   |   |   |   |   |   |   [dev-dependencies]
 |   |   |   |   |   |   |   [dev-dependencies]
 |   |   |   |   |   |   |   [dev-dependencies]
@@ -426,6 +428,10 @@ arrow-schema v58.3.0
 |   |   |   |   |   |   |   `-- tessera-ingest vWORKSPACE (*)
 |   |   |   |   |   |   |   `-- tessera-ingest vWORKSPACE (*)
 |   |   |   |   |   |   |   `-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   |   |   |   |-- tessera-cli vWORKSPACE (*)
+|   |   |   |   |   |   |   |-- tessera-cli vWORKSPACE (*)
+|   |   |   |   |   |   |   |-- tessera-cli vWORKSPACE (*)
+|   |   |   |   |   |   |   |-- tessera-cli vWORKSPACE (*)
 |   |   |   |   |   |   |-- parquet feature "arrow"
 |   |   |   |   |   |   |-- parquet feature "arrow-array"
 |   |   |   |   |   |   |-- parquet feature "arrow-buffer"
@@ -566,6 +572,7 @@ arrow-schema v58.3.0
 |   |   |   |-- datafusion-pruning v54.0.0 (*)
 |   |   |   |-- parquet v58.3.0 (*)
 |   |   |   |-- parquet v58.3.0 (*)
+|   |   |   |-- tessera-cli vWORKSPACE (*)
 |   |   |   |-- tessera-ingest vWORKSPACE (*)
 |   |   |   |-- vortex-alp v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
 |   |   |   |-- vortex-alp v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
@@ -674,6 +681,7 @@ arrow-schema v58.3.0
 |   |-- datafusion-common v54.0.0
 |   |-- datafusion-expr v54.0.0 (*)
 |   |-- parquet v58.3.0 (*)
+|   |-- tessera-cli vWORKSPACE (*)
 |   |-- tessera-ingest vWORKSPACE (*)
 |   |-- vortex-array v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
 |   |-- vortex-error v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)

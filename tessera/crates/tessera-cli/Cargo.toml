@@ -43,6 +43,12 @@ tempfile = "3"
 # tessera-ingest, ndarray via hdf5-metno), so declaring them here adds no compilation.
 hdf5-metno.workspace = true
 ndarray = "0.17"
+# Parquet is the third format in the head-to-head (#388 stage 2). Written with the REAL parquet
+# crate, not hand-rolled. Already in the build graph via tessera-ingest's table lane (#460), so
+# declaring them here adds no compilation.
+parquet.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
 
 # `sql` feature (#251): `tessera sql <FILE> "<QUERY>"` runs DataFusion in-process over a table
 # block's Arrow projection. DataFusion 54 pins `arrow ^58` — the SAME major the workspace already
