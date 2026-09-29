@@ -6631,6 +6631,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trycmd",
+ "zip",
 ]
 
 [[package]]

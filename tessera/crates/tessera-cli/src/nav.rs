@@ -637,6 +637,27 @@ pub(crate) fn producer_lines(p: &tessera_core::ProducerRef) -> Vec<String> {
     lines
 }
 
+/// One-line summary of what a generation record holds — `N config keys`, and/or the `config_ref`
+/// digest of a carried config block. Shared by `inspect`'s multi-line render and `provenance`'s
+/// per-hop line so the two can never describe the same recipe differently.
+pub(crate) fn generation_summary(g: &tessera_core::Generation, full: bool) -> String {
+    let mut head = Vec::new();
+    if !g.config.is_empty() {
+        let plural = if g.config.len() == 1 { "" } else { "s" };
+        head.push(format!("{} config key{plural}", g.config.len()));
+    }
+    if let Some(r) = &g.config_ref {
+        let digest = if full { r.clone() } else { short_hash(r) };
+        head.push(format!("config_ref {digest}"));
+    }
+    if head.is_empty() {
+        // A sealed-but-empty record is still state the operator should see; printing nothing would
+        // read as "this product has no recipe", which is a different fact.
+        return "(empty)".to_string();
+    }
+    head.join(" · ")
+}
+
 /// The `inspect` render of the sealed ADR-0058 §2 **generation recipe** — the answer to "how was
 /// this made?", which until #417 no CLI verb printed at all.
 ///
@@ -650,21 +671,7 @@ pub(crate) fn producer_lines(p: &tessera_core::ProducerRef) -> Vec<String> {
 /// Resolving a `config_ref` to the bytes of the block it points at is a separate, larger job
 /// (ADR-0058 §2 / #417) — this prints the digest, not the payload.
 pub(crate) fn generation_lines(g: &tessera_core::Generation, full: bool) -> Vec<String> {
-    let mut head = Vec::new();
-    if !g.config.is_empty() {
-        let plural = if g.config.len() == 1 { "" } else { "s" };
-        head.push(format!("{} config key{plural}", g.config.len()));
-    }
-    if let Some(r) = &g.config_ref {
-        let digest = if full { r.clone() } else { short_hash(r) };
-        head.push(format!("config_ref {digest}"));
-    }
-    if head.is_empty() {
-        // A sealed-but-empty record is still state the operator should see; printing nothing would
-        // read as "this product has no recipe", which is a different fact.
-        head.push("(empty)".to_string());
-    }
-    let mut lines = vec![format!("generation    {}", head.join(" · "))];
+    let mut lines = vec![format!("generation    {}", generation_summary(g, full))];
     let show = if full {
         g.config.len()
     } else {
@@ -685,6 +692,143 @@ pub(crate) fn generation_lines(g: &tessera_core::Generation, full: bool) -> Vec<
 /// How many `generation.config` keys `inspect` prints before collapsing — the same cap `ls sources`
 /// uses for a multi-file provenance edge, so the two summaries read alike.
 const GENERATION_KEYS_SHOWN: usize = 8;
+
+/// How large a carried config block `inspect --resolve-config` inlines into its output. Past this it
+/// names the block and prints the `extract` command instead — rendering holds the bytes in memory
+/// while `extract` streams them, and ADR-0058 §2's `config_ref` exists *for* large vendor config (the
+/// DUPLET DAQ `acq.cfg.LYSO4x9_…` family), so the big case is the designed-for one, not the exception.
+const CONFIG_INLINE_MAX: u64 = 64 * 1024;
+
+/// A carried config block, located from the **manifest alone** — no payload fetch. A Blob's spec
+/// records its `size` precisely so a manifest-only reader knows it ([`tessera_core::block::blob::BlobSpec`]),
+/// which is what lets the inline-or-extract decision be made before reading a byte of a multi-GB config.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ConfigBlock {
+    pub(crate) name: String,
+    /// The blob's recorded original filename — the natural `extract --out` target. `None` when the
+    /// `config_ref` points at a non-Blob block, which carries no filename.
+    pub(crate) filename: Option<String>,
+    pub(crate) media_type: Option<String>,
+    /// Recorded byte size. `None` for a non-Blob block, whose spec makes no such promise — treated
+    /// as "unknown, therefore assume large", so an unknown size never inlines.
+    pub(crate) size: Option<u64>,
+}
+
+/// Find the block a `generation.config_ref` digest points at. `config_ref` is a `blake3:` digest of a
+/// block carried in the **same** `.tsra` (ADR-0058 §2), so resolution is a lookup over the manifest's
+/// own block list — never a filesystem or network reach. Returns `None` when nothing matches, which
+/// the caller turns into [`tessera_core::Error::UnresolvedConfigRef`].
+pub(crate) fn locate_config(m: &tessera_core::Manifest, digest: &str) -> Option<ConfigBlock> {
+    let b = m
+        .blocks
+        .iter()
+        .find(|b| b.digest.as_deref() == Some(digest))?;
+    // A Blob spec carries `filename`/`media_type`/`size`; any other block kind does not, and a spec
+    // that fails to parse as one is treated the same way — missing metadata, not an error, because
+    // the digest did resolve and that is the question being asked.
+    let blob: Option<tessera_core::block::blob::BlobSpec> =
+        serde_json::from_value(b.spec.clone()).ok();
+    Some(ConfigBlock {
+        name: b.name.clone(),
+        filename: blob.as_ref().map(|s| s.filename.clone()),
+        media_type: blob.as_ref().and_then(|s| s.media_type.clone()),
+        size: blob.as_ref().map(|s| s.size),
+    })
+}
+
+/// Locate the block a `generation.config_ref` names, or fail loudly (#452 part 1).
+///
+/// `config_ref` is a `blake3:` digest of a block carried in the **same** `.tsra` (ADR-0058 §2), so
+/// resolution is a lookup over the manifest's own block list — never a filesystem or network reach.
+/// A digest that matches nothing is a broken promise, not a missing option: the reference is sealed,
+/// so either the block was dropped or it points into a different product. Callers reach this only by
+/// asking to resolve, which is why erroring here still leaves plain `inspect` working on the file.
+pub(crate) fn config_block(
+    m: &tessera_core::Manifest,
+    label: &str,
+    digest: &str,
+) -> Result<ConfigBlock> {
+    locate_config(m, digest).ok_or_else(|| tessera_core::Error::UnresolvedConfigRef {
+        file: label.to_string(),
+        digest: digest.to_string(),
+        blocks: m.blocks.len(),
+    })
+}
+
+/// Will this config be inlined, i.e. must the caller read its payload? Unknown size counts as large:
+/// a non-Blob block makes no size promise, and guessing wrong means buffering an arbitrary payload
+/// just to render it.
+pub(crate) fn config_inlines(cb: &ConfigBlock) -> bool {
+    cb.size.is_some_and(|n| n <= CONFIG_INLINE_MAX)
+}
+
+/// The `inspect --resolve-config` render: the config the product was actually generated with, so the
+/// recipe reads end to end instead of stopping at a hash the operator has to chase by hand.
+///
+/// `bytes` is `Some` exactly when [`config_inlines`] said so. Three outcomes, and telling them apart
+/// is the point:
+/// - **inlined** — a small, valid-UTF-8 config is printed verbatim under the `generation` block.
+/// - **not inlined** — too large, or not UTF-8: prints the block plus the exact `tessera extract`
+///   command, which streams in bounded memory and verifies the digest before the bytes land. Refusing
+///   to dump binary at a terminal is the rule `slice --format npy` already follows.
+/// - **unresolved** — handled by [`config_block`] before this is reached.
+pub(crate) fn config_lines(
+    cb: &ConfigBlock,
+    bytes: Option<&[u8]>,
+    label: &str,
+    full: bool,
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "  config      block '{}'{}{}",
+        cb.name,
+        cb.filename
+            .as_deref()
+            .map(|f| format!(" ({f})"))
+            .unwrap_or_default(),
+        cb.size.map(|n| format!(" · {n} B")).unwrap_or_default(),
+    )];
+    if let Some(mt) = &cb.media_type {
+        lines.push(format!("  media_type  {mt}"));
+    }
+    let Some(bytes) = bytes else {
+        lines.push(extract_hint(label, cb, "larger than the inline limit"));
+        return lines;
+    };
+    match std::str::from_utf8(bytes) {
+        Ok(text) => {
+            let total = text.lines().count();
+            let show = if full {
+                total
+            } else {
+                total.min(CONFIG_LINES_SHOWN)
+            };
+            for line in text.lines().take(show) {
+                lines.push(format!("  │ {line}"));
+            }
+            if total > show {
+                lines.push(format!(
+                    "  │ … (+{} more line(s), --full to print all)",
+                    total - show
+                ));
+            }
+        }
+        Err(_) => lines.push(extract_hint(label, cb, "not valid UTF-8")),
+    }
+    lines
+}
+
+/// How many lines of an inlined config `inspect --resolve-config` prints before collapsing, mirroring
+/// [`GENERATION_KEYS_SHOWN`]. `--full` prints all of them.
+const CONFIG_LINES_SHOWN: usize = 20;
+
+/// The copy-pasteable `extract` command for a config that will not be inlined, and why it is not.
+fn extract_hint(label: &str, cb: &ConfigBlock, why: &str) -> String {
+    let out = cb.filename.as_deref().unwrap_or(&cb.name);
+    format!(
+        "  payload     not inlined ({why}) — tessera extract {label} {} --out {out}",
+        cb.name
+    )
+}
 
 /// Middle-elide a string to `max` chars, keeping the head **and** the (informative) tail — for a
 /// filesystem path that means the filename survives. Returns as-is if already within `max`.

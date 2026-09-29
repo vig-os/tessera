@@ -52,6 +52,76 @@ things are worth knowing before you parse it:
   rename or removal is a major break, and a reader refuses a manifest whose major exceeds its own.
   Key your parser off `tessera_version`, not off the tessera binary's version.
 
+## Reading the recipe, and walking the chain
+
+`inspect` prints `generation.config_ref` as a digest. `inspect --resolve-config` dereferences it to the
+config the product was actually generated with, so the recipe reads end to end rather than ending at a
+hash you have to chase by hand. A small text config is printed inline; a large or non-UTF-8 one is named
+along with the `tessera extract` command that streams it — and which of the two happens is decided from
+the Blob spec's recorded `size`, so nothing is buffered to find out. A `config_ref` that names no carried
+block is a **sealed reference that does not hold**, and is reported as a typed error; plain `inspect` on
+the same file keeps working, because the product is otherwise valid.
+
+`sources[]` answers *which parent* for one product. `tessera provenance` answers the chain question:
+what identity did this inherit, from where, and what recipe made each hop. It walks `derived_from` back
+toward the roots and prints the producer, the recipe and the shared identity fields per hop.
+
+Parents live in other files, so resolution is explicit and **local**: the product's own directory first,
+then an explicit `--collection`, then each `--search` directory. There is no registry resolver — a read
+verb should not reach the network, so a parent that exists only in a registry reads as unresolved until
+you fetch it.
+
+What the walk reports per hop, and whether it counts against `--require-complete`:
+
+| Outcome | Gap? | Meaning |
+| --- | --- | --- |
+| `pinned` | no | the parent on disk is the exact version the edge committed to |
+| `different version` | yes | the right lineage, another version — see below |
+| `unresolved` | yes | a product-shaped reference nothing was found for |
+| `CORRUPT` | yes | the parent is on disk but its manifest does not verify |
+| `no pinned version` | yes | names a parent but pins no version, so nothing to prove against |
+| `external leaf` | no | a vendor path, filename or SOP UID — where a chain *should* end |
+| `version not present` | no | a `snapshot_of` breadcrumb whose version is absent |
+
+The last two are deliberately not gaps. A real chain ends at vendor files, and `publish` deliberately
+drops history, so counting either would leave every product permanently "incomplete" and make the flag
+worthless.
+
+**A corrupt parent is not a missing one.** When the parent an edge needs is present but its manifest
+fails verification, the hop reads `CORRUPT` and names the file, and the verb exits nonzero with or
+without `--require-complete`. The two states invite opposite responses: "I could not find that parent"
+sends you looking for another copy, while "what I found does not verify" ends the search and starts an
+incident.
+
+That is scoped to parents the chain actually needs. A corrupt file **no edge asked for** is a warning on
+stderr and an entry in `--json`'s `corrupt_candidates`, and leaves the exit code alone — this verb answers
+where one product came from, not whether a whole store is healthy, and failing here would make it
+unusable against a partly damaged store and punish a product for an unrelated neighbour. Store-wide
+integrity is what `tessera verify` and `collection verify` are for. A file that is not a Tessera product
+at all is ignored in silence, so pointing `--search` at a real directory stays practical.
+
+Naming the file means reading the identity it *claims*, which is why `tessera-io` exposes
+`read_manifest_unverified`. What it returns is untrusted by construction — a claim by something that has
+already failed verification — and is used only to point at the file, never to satisfy the edge.
+
+A version pointer earns its exemption from **three** checks, not one: the reference equals the pinned
+hash, the role is the one `publish` writes, and — once it resolves — the parent is in the walked product's
+own lineage. Shape alone is forgeable, and skipping both descent and completeness is too much to hand to
+any edge that can be crafted to look the part.
+
+A gap is **rendered, not raised**: the exit stays 0, because a chain you cannot resolve from one
+directory is the normal case and a verb that failed on it would be useless in a pipeline. Pass
+`--require-complete` for the gate, and `--json` for a machine-readable walk whose `outcome` tokens are
+stable. A genuine cycle is a malformed DAG and always exits nonzero.
+
+The distinction the taxonomy exists to protect is the second row. A metadata correction on a parent is
+routine, and reporting it as an integrity failure would cry corruption over an edit — after which
+operators learn to wave away the one error that must never be waved away. So chain verification raises
+`ProvenanceVersionSkew`, never `Integrity`; real corruption is caught by payload verification
+(`tessera verify`), a separate mechanism that reads the actual bytes.
+
+{{#include ../../../tessera/crates/tessera-cli/tests/cmd/provenance-walk.trycmd}}
+
 ## Signing & trust
 
 A signature is an **ed25519 detached signature over `manifest_hash`** — which transitively attests every

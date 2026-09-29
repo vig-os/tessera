@@ -89,6 +89,11 @@ static-hdf5 = ["tessera-ingest/static-hdf5"]
 
 [dev-dependencies]
 tempfile = "3"
+# Repack a sealed `.tsra` with an edited `manifest.json` so its recorded seal no longer covers its
+# contents — the only way to build a fixture that is a well-formed container yet fails verification, which
+# is what distinguishes a CORRUPT parent from a merely missing one (#452). A same-length byte patch cannot
+# do it: the zip CRC would fail first and surface as a container error instead of an integrity one.
+zip.workspace = true
 hdf5-metno.workspace = true
 # Synthesise minimal `.dcm` fixtures inline for ingest e2e tests (e.g. the dicom-series --deidentify
 # end-to-end test) — same workspace pin tessera-ingest uses for the real DICOM read path.

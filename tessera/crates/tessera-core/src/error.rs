@@ -56,6 +56,40 @@ pub enum Error {
     #[error("container: {0}")]
     Container(String),
 
+    /// A provenance edge resolved to the **right lineage but a different version**: the parent's `id`
+    /// matched the edge's `reference`, but the seal it carries is not the one the edge pinned.
+    ///
+    /// Deliberately NOT [`Error::Integrity`]. ADR-0036 makes `id` a *lineage handle* that addresses
+    /// many `manifest_hash`es, so resolving an edge against a store holding a newer commit of the
+    /// parent produces exactly this — a version mismatch, not tampering or corruption. A caller that
+    /// cannot tell the two apart either cries corruption over a routine version skew or, worse,
+    /// learns to ignore real corruption reported the same way.
+    #[error(
+        "provenance edge '{role}' -> '{reference}' resolved to a different version — \
+         the edge pins {pinned}, the resolved parent seals {resolved}"
+    )]
+    ProvenanceVersionSkew {
+        role: String,
+        reference: String,
+        pinned: String,
+        resolved: String,
+    },
+
+    /// A `generation.config_ref` digest names no block carried in the product being read — the block
+    /// was dropped, or the reference points into a *different* `.tsra` (ADR-0058 §2 pins the config
+    /// **inside** the product it describes). Raised only where a caller explicitly asked for the
+    /// config to be dereferenced: the reference is sealed and the rest of the product is valid, so a
+    /// plain read must keep working and report the digest as-is.
+    #[error(
+        "config_ref {digest} names no block carried in {file} — \
+         the product carries {blocks} block(s), none with that digest"
+    )]
+    UnresolvedConfigRef {
+        file: String,
+        digest: String,
+        blocks: usize,
+    },
+
     /// A storage-block codec (array pcodec/zarr, table Vortex) failed to encode or decode a
     /// payload, or was asked for an unsupported dtype/codec combination.
     #[error("codec: {0}")]
