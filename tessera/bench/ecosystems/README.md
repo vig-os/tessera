@@ -90,7 +90,7 @@ uv sync
 uv run python -m pytest -q                     # contract + bit-exactness first
 
 # pin to a quiet core-slice on a busy box:
-taskset -c 10-39 nice -n 19 uv run python run.py --iters 5
+taskset -c 10-39 nice -n 19 uv run python run.py            # N=15 — reproduces the published numbers
 ```
 
 Absolute MB/s is machine- and slice-dependent — `results.json` records the box so a number is never

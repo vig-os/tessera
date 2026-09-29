@@ -10,16 +10,19 @@ major. That keeps the bytes a flat `D * H * W * 2`-byte slab on disk — bit-ide
 to `vol.tobytes()` — so `pixel_array.reshape(D, H, W)` round-trips exactly. No
 modality-LUT / rescale-slope / window-level is set, so pydicom returns raw int16.
 
-Compression: none. DICOM is overwhelmingly stored uncompressed in the wild, so
-ratio ~= 1.0 here is a real, honest data point for the cross-ecosystem table — the
-overhead vs raw is just the (tiny) header + per-element VR tags.
+Two variants (#485):
 
-Slice read: `pydicom.dcmread(...).pixel_array[z]` builds the full int16 ndarray and
-then takes plane `z`. Because the transfer syntax is uncompressed and frames are
-contiguous on disk, decode is just a `np.frombuffer` over PixelData — no per-frame
-codec invocation — but it still touches all D*H*W*2 bytes. A truly partial decode
-would require the Basic Offset Table (encapsulated transfer syntaxes only) and is
-not meaningful for uncompressed data, so this is the honest implementation.
+- `default` — uncompressed. DICOM is overwhelmingly stored uncompressed in the wild, so ratio ~= 1.0
+  is a real, honest data point: the overhead vs raw is just the header + per-element VR tags.
+- `tuned` — RLE Lossless (encapsulated), the standard lossless transfer syntax pydicom 3 encodes
+  natively. Verified bit-exact before it was listed.
+
+Slice read: `pydicom.dcmread(...).pixel_array[z]` builds the FULL int16 ndarray, then takes plane `z`,
+in both variants. Uncompressed, that is a `np.frombuffer` over contiguous PixelData — no codec, but it
+still touches all D*H*W*2 bytes. Under RLE every frame is decoded before the plane is selected, so the
+"slice" row costs the same as a full read (visible in the results). A truly partial decode would need
+per-frame fragment access through the Basic Offset Table; pydicom's `pixel_array` does not do that, so
+this is the honest implementation of what a user of the library gets, and the row says so by its speed.
 """
 
 from __future__ import annotations

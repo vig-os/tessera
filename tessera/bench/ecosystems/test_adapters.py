@@ -45,8 +45,8 @@ def _mod(name):
             pytest.fail(
                 f"adapters.{name} not importable: {e}\n"
                 "This is the reference adapter — build it first:\n"
-                "  cargo build -p tessera-py --release && "
-                "cp ../../target/release/libtessera.so ./tessera.so"
+                "  cargo build -p tessera-py --release, then assemble the package: see README.md "
+                "'Run' (the cdylib is lib_native.so -> tessera/_native.so, not libtessera.so)"
             )
         pytest.skip(f"adapters.{name} not importable: {e}")
 
@@ -170,29 +170,115 @@ def test_name_does_not_claim_a_container_the_writer_does_not_produce(name):
         )
 
 
+def _assert_materialised(arr, where):
+    assert not isinstance(arr, np.memmap), f"{where}: returned a np.memmap"
+    assert not isinstance(getattr(arr, "base", None), np.memmap), (
+        f"{where}: returned a view backed by a np.memmap — the bytes were never read, so its "
+        "timing is not comparable with the other adapters"
+    )
+
+
 @pytest.mark.parametrize("name", ADAPTERS)
 def test_reads_materialise_rather_than_returning_a_lazy_view(name, tmp_path):
-    """No format may win by returning something cheaper than the others.
+    """No format may win by returning something cheaper than the others — on ANY read path.
 
     nibabel's ArrayProxy over an uncompressed `.nii` is MEMORY-MAPPED, so `np.asarray` returned a
-    view whose `.base` is a `np.memmap` — no bytes read, no decode, nothing faulted until something
-    later touched the pages. It timed at 96,407 MB/s warm and 63,342 MB/s cold, which are not
-    measurements. Every other adapter materialises a real array, so the comparison was not
-    like-for-like and the cold row was vacuous.
-
-    mmap is a genuine NIfTI capability; it is simply not what a full-read row measures.
+    view over a `np.memmap`: no bytes read, nothing faulted until something later touched the
+    pages. It timed at 96,407 MB/s warm and 63,342 MB/s cold, which are not measurements. The same
+    guard now covers the z-slice, full-table and projected-column reads for every adapter and
+    variant, since a lazy view on any timed path is the same defect.
     """
     mod = _mod(name)
-    if not mod.CAPS.get("volume"):
-        pytest.skip(f"{name}: no volume modality")
     for variant in mod.VARIANTS:
-        base = str(tmp_path / f"{name}_{variant}_lazy")
-        mod.write_volume(base, _VOL, variant)
-        got = mod.read_volume(base, variant)
-        assert not isinstance(got, np.memmap), (
-            f"{name}/{variant}: read returned a memmap"
-        )
-        assert not isinstance(got.base, np.memmap), (
-            f"{name}/{variant}: read returned a view backed by a memmap — the bytes were never "
-            "read, so its timing is not comparable with the other adapters"
-        )
+        if mod.CAPS.get("volume"):
+            base = str(tmp_path / f"{name}_{variant}_lazy_vol")
+            mod.write_volume(base, _VOL, variant)
+            _assert_materialised(
+                mod.read_volume(base, variant), f"{name}/{variant}/read_volume"
+            )
+            _assert_materialised(
+                mod.read_volume_zslice(base, _VOL.shape[0] // 2, variant),
+                f"{name}/{variant}/read_volume_zslice",
+            )
+        if mod.CAPS.get("table"):
+            base = str(tmp_path / f"{name}_{variant}_lazy_tab")
+            mod.write_table(base, _COLS, variant)
+            for col, arr in mod.read_table(base, variant).items():
+                _assert_materialised(arr, f"{name}/{variant}/read_table[{col}]")
+            _assert_materialised(
+                mod.read_table_column(base, "e0", variant),
+                f"{name}/{variant}/read_table_column",
+            )
+
+
+def _flip_payload_byte(path):
+    """Flip one byte in the middle of a file (or of the largest file in a store directory)."""
+    import os
+
+    if os.path.isdir(path):
+        files = [os.path.join(r, f) for r, _d, fs in os.walk(path) for f in fs]
+        path = max(files, key=os.path.getsize)
+    with open(path, "r+b") as f:
+        f.seek(0, 2)
+        n = f.tell()
+        f.seek(n // 2)
+        b = f.read(1)
+        f.seek(n // 2)
+        f.write(bytes([b[0] ^ 0xFF]))
+
+
+@pytest.mark.parametrize("name", ADAPTERS)
+def test_integrity_mechanism_actually_detects_a_flipped_byte(name, tmp_path):
+    """Every mechanism the integrity table TIMES must actually DETECT corruption.
+
+    Timing a checksum that never fires would be the NIfTI-memmap defect again: a row that looks
+    like a measurement of work that is not being done. For each adapter declaring INTEGRITY, flip
+    one byte in the middle of the written file and require the checked path to raise.
+
+    What this proves, precisely — observed errors on a mid-file flip:
+
+    - Parquet: "CRC checksum verification failed for page_ordinal 0" — the page CRC itself fired.
+    - tessera: "io: Invalid checksum" — the STORED zip container's per-entry CRC32 fired first, before
+      the blake3 re-derivation `verify` would reach; corruption is caught either way.
+    - HDF5/NeXus: "filter returned failure during read" — the gzip OR the fletcher32 filter; the error
+      does not say which, because both sit in the same filter pipeline.
+
+    So it asserts the CHECKED PATH raises on corruption, which is what the integrity rows time. It does
+    not claim the named mechanism is always the one that fires, because for three of the four it is
+    not observable which one did.
+    """
+    mod = _mod(name)
+    ig = getattr(mod, "INTEGRITY", None)
+    if not ig:
+        pytest.skip(f"{name}: declares no integrity mechanism")
+    variant = ig["variant"]
+    rng = np.random.default_rng(3)
+    # incompressible payload so the middle of the file is data, not a header
+    noisy = rng.integers(-2000, 2000, size=(8, 64, 64)).astype("<i2")
+    cols = {
+        "t": np.arange(20000, dtype="<u8"),
+        "e0": rng.random(20000).astype("<f4"),
+        "e1": rng.random(20000).astype("<f4"),
+    }
+    if mod.CAPS.get("volume"):
+        base, modality = str(tmp_path / f"{name}_ig_vol"), "volume"
+        mod.write_volume(base, noisy, variant)
+        read = lambda: mod.read_volume(base, variant)  # noqa: E731
+    else:
+        base, modality = str(tmp_path / f"{name}_ig_tab"), "table"
+        mod.write_table(base, cols, variant)
+        read = lambda: mod.read_table(base, variant)  # noqa: E731
+    check = (
+        (lambda: mod.verify(base, modality, variant))
+        if hasattr(mod, "verify")
+        else read
+    )
+    check()  # intact file must pass
+    path = (
+        mod.path_for(base, modality, variant)
+        if "variant" in mod.path_for.__code__.co_varnames
+        else mod.path_for(base, modality)
+    )
+    _flip_payload_byte(path)
+    with pytest.raises(Exception):
+        check()

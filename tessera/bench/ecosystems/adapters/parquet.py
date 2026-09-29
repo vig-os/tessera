@@ -36,9 +36,12 @@ import pyarrow.parquet as pq
 
 NAME = "Parquet (pyarrow)"
 VARIANTS = {
-    "default": "snappy + dictionary (pyarrow/Spark default)",
-    "tuned": "zstd + BYTE_STREAM_SPLIT on floats, dictionary off",
-    "checked": "zstd + BYTE_STREAM_SPLIT, page CRC32 written+verified",
+    # pyarrow 24's own default: snappy, dictionary on, and ONE row group for a 1M-row table
+    # (verified: a default write of 1,000,000 rows produces a single row group). An earlier
+    # revision forced 65,536-row groups here too, which made "default" not pyarrow's default.
+    "default": "snappy + dictionary, 1 row group (pyarrow default)",
+    "tuned": "zstd + BYTE_STREAM_SPLIT on floats, dict off, 65536-row groups",
+    "checked": "zstd + BYTE_STREAM_SPLIT, 65536-row groups, page CRC32 verified",
 }
 CAPS = {"volume": False, "table": True, "swmr": False}
 
@@ -73,6 +76,7 @@ def read_volume_zslice(base: str, z: int, variant: str = "tuned") -> np.ndarray:
 # ---- table ----
 def _write_opts(cols: dict, variant: str) -> dict:
     if variant == "default":
+        # No row_group_size: pyarrow's default, which is what a user who does nothing gets.
         return {"compression": "snappy", "use_dictionary": True}
     floats = [n for n, a in cols.items() if a.dtype.kind == "f"]
     kw = {
@@ -90,12 +94,12 @@ def _write_opts(cols: dict, variant: str) -> dict:
 def write_table(base: str, cols: dict, variant: str = "tuned") -> None:
     # from_pydict preserves numpy dtypes 1:1 (uint64 -> uint64, float32 -> float32).
     table = pa.table({name: pa.array(arr) for name, arr in cols.items()})
-    pq.write_table(
-        table,
-        path_for(base, "table"),
-        row_group_size=_ROWS_PER_GROUP,
-        **_write_opts(cols, variant),
-    )
+    opts = _write_opts(cols, variant)
+    if variant != "default":
+        # Tuned variants use the same 65,536-row granularity HDF5/Zarr/NeXus chunk tables at, so
+        # Parquet is compared on layout-equal terms rather than handed a free layout advantage.
+        opts["row_group_size"] = _ROWS_PER_GROUP
+    pq.write_table(table, path_for(base, "table"), **opts)
 
 
 def _read_opts(variant: str) -> dict:

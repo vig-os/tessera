@@ -22,7 +22,7 @@ Cold timing is not warm timing with an extra step: each cold read repopulates th
 the eviction is repeated before EVERY iteration and the worst residency across them is reported.
 
 Run (inside `nix develop`, from this dir):
-    taskset -c 10-39 nice -n 19 uv run python run.py --iters 5
+    taskset -c 10-39 nice -n 19 uv run python run.py          # N=15, as published
 """
 
 from __future__ import annotations
@@ -99,6 +99,27 @@ def _timed(fn, iters, path=None):
     }
 
 
+def _time_verify(mod, base, modality, variant, iters, do_cold, path, out):
+    """Time a STANDALONE integrity pass, for adapters that have one (tessera's `verify`).
+
+    HDF5 fletcher32 and Parquet page CRCs have no separate verify step: the checksum is checked
+    during a read, so their integrity cost is the difference between the `checked` and `tuned`
+    read rows. Tessera's `verify` is a whole-file pass that re-derives every block digest against
+    the sealed manifest. The report shows both and says they are different operations rather than
+    presenting one as a like-for-like of the other.
+    """
+    if not hasattr(mod, "verify"):
+        return
+    mod.verify(
+        base, modality, variant
+    )  # must succeed on an intact file before it is timed
+    out["verify_warm"] = _timed(lambda: mod.verify(base, modality, variant), iters)
+    if do_cold:
+        out["verify_cold"] = _timed(
+            lambda: mod.verify(base, modality, variant), iters, path
+        )
+
+
 # --------------------------------------------------------------------------- modalities
 def time_volume(mod, variant, vol, tmp, iters, do_cold, tag="vol"):
     base = os.path.join(tmp, f"{mod.__name__.split('.')[-1]}_{variant}_{tag}_vol")
@@ -123,6 +144,7 @@ def time_volume(mod, variant, vol, tmp, iters, do_cold, tag="vol"):
             lambda: mod.read_volume_zslice(base, z, variant), iters
         ),
     }
+    _time_verify(mod, base, "volume", variant, iters, do_cold, path, out)
     if do_cold:
         out["read_full_cold"] = _timed(
             lambda: mod.read_volume(base, variant), iters, path
@@ -156,6 +178,7 @@ def time_table(mod, variant, cols, tmp, iters, do_cold, tag):
             lambda: mod.read_table_column(base, "e0", variant), iters
         ),
     }
+    _time_verify(mod, base, "table", variant, iters, do_cold, path, out)
     if do_cold:
         out["read_full_cold"] = _timed(
             lambda: mod.read_table(base, variant), iters, path
@@ -200,9 +223,19 @@ def environment() -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iters", type=int, default=5, help="N for median-of-N")
+    ap.add_argument(
+        "--iters",
+        type=int,
+        default=15,
+        help="N for median-of-N (published results use 15)",
+    )
     ap.add_argument("--only", default="", help="comma list to restrict adapters")
     ap.add_argument("--no-cold", action="store_true", help="skip cold-cache rows")
+    ap.add_argument(
+        "--markdown",
+        default="",
+        help="also write Markdown tables here; the best cell per column is bolded FROM THE DATA",
+    )
     ap.add_argument("--out", default="results.json")
     ap.add_argument("--tmp", default="", help="scratch dir (defaults to system temp)")
     args = ap.parse_args()
@@ -276,6 +309,9 @@ def main():
     with open(args.out, "w") as f:
         json.dump(payload, f, indent=2)
     report(payload, volumes, tables)
+    if args.markdown:
+        with open(args.markdown, "w") as f:
+            f.write(markdown(payload, volumes, tables))
 
 
 # --------------------------------------------------------------------------- report
@@ -283,11 +319,31 @@ def _mbps(nbytes, s):
     return (nbytes / 1e6) / s if s and s > 0 else float("nan")
 
 
-def _cell(st, nbytes):
-    """`median MB/s [min..max]` — the spread is printed so a reader can see overlap."""
+def _ms(st):
+    """`median [lo-hi]` in milliseconds."""
     if not st:
-        return f"{'-':>11}"
-    return f"{_mbps(nbytes, st['median']):>7.0f}"
+        return "-"
+    return f"{st['median'] * 1e3:.1f} [{st['min'] * 1e3:.1f}-{st['max'] * 1e3:.1f}]"
+
+
+def _size_ratio(payload, a, b, src, fixture):
+    """bytes(a) / bytes(b) for one fixture, from the results themselves; None if either is absent."""
+    try:
+        ra = payload["results"][a[0]]["variants"][a[1]][src][fixture]["bytes"]
+        rb = payload["results"][b[0]]["variants"][b[1]][src][fixture]["bytes"]
+    except (KeyError, TypeError):
+        return None
+    return ra / rb
+
+
+def _cell(st, nbytes):
+    """`median [lo-hi]` in MB/s — the spread is printed so a reader can see when two formats are
+    within noise of each other. lo/hi come from the SLOWEST/FASTEST sample (max/min time)."""
+    if not st:
+        return "-"
+    med = _mbps(nbytes, st["median"])
+    lo, hi = _mbps(nbytes, st["max"]), _mbps(nbytes, st["min"])
+    return f"{med:.0f} [{lo:.0f}-{hi:.0f}]"
 
 
 def report(payload, volumes, tables):
@@ -312,7 +368,7 @@ def report(payload, volumes, tables):
         "#         column is a ratio BETWEEN formats on identical input, not an absolute claim.\n"
     )
 
-    hdr = f"{'ecosystem':20} {'settings':52} {'ratio':>6} {'MiB':>8} {'write':>7} {'read':>7} {'slice':>7} {'cold-rd':>8} {'resid':>6}"
+    hdr = f"{'ecosystem':20} {'settings':52} {'ratio':>6} {'MiB':>8} {'write':>15} {'read':>15} {'slice':>15} {'cold-rd':>15} {'resid':>6}"
     for vtag, vol in volumes.items():
         print(f"\n## Volume — {vtag} fixture")
         if vtag == "gradient":
@@ -322,18 +378,23 @@ def report(payload, volumes, tables):
             print(
                 "#  array — ideal for deflate/zstd, adversarial for value-distribution codecs."
             )
-            print(
-                "#  Its verdict MOVES WITH SIZE (pcodec/zstd 1.11 -> 1.65 over n=64..256)."
-            )
         else:
             print(
                 "#  anatomy + detector noise — what a real reconstruction contains. The noise"
             )
             print(
-                "#  destroys long LZ matches but is exactly what a numeric codec models. Its"
+                "#  destroys long LZ matches but is exactly what a numeric codec models."
             )
+        # Computed from THIS run, never hard-coded (a number in a header must come from the data
+        # beside it). The size-dependence of the gradient's ratio is a separate measurement,
+        # recorded where it was made: common.make_volume's docstring.
+        cr = _size_ratio(
+            payload, ("tessera", "default"), ("zarr_", "default"), "volumes", vtag
+        )
+        if cr is not None:
             print(
-                "#  ratio is SIZE-INVARIANT (pcodec/zstd ~0.82, n=64..320), matching real CT/PET."
+                f"#  this run: Tessera (pcodec) / Zarr (zstd-3) size = {cr:.2f}"
+                f"  ({'pcodec smaller' if cr < 1 else 'zstd smaller'})"
             )
         print(hdr)
         for r in payload["results"].values():
@@ -352,8 +413,8 @@ def report(payload, volumes, tables):
                 )
                 print(
                     f"{r['name']:20} {v['settings_volume']:52} {m['ratio']:>6.1f} {m['bytes'] / 2**20:>8.2f} "
-                    f"{_cell(m['write'], vol.nbytes)} {_cell(m['read_full_warm'], vol.nbytes)} "
-                    f"{_cell(m['read_slice_warm'], vol.nbytes)} {_cell(cold, vol.nbytes):>8} {resid}"
+                    f"{_cell(m['write'], vol.nbytes):>15} {_cell(m['read_full_warm'], vol.nbytes):>15} "
+                    f"{_cell(m['read_slice_warm'], vol.nbytes):>15} {_cell(cold, vol.nbytes):>15} {resid}"
                 )
 
     for tag, cols in tables.items():
@@ -390,11 +451,67 @@ def report(payload, volumes, tables):
                 )
                 print(
                     f"{r['name']:20} {v['settings_table']:52} {m['ratio']:>6.1f} {m['bytes'] / 2**20:>8.2f} "
-                    f"{_cell(m['write'], raw)} {_cell(m['read_full_warm'], raw)} "
-                    f"{_cell(m['read_col_warm'], raw)} {_cell(cold, raw):>8} {resid}"
+                    f"{_cell(m['write'], raw):>15} {_cell(m['read_full_warm'], raw):>15} "
+                    f"{_cell(m['read_col_warm'], raw):>15} {_cell(cold, raw):>15} {resid}"
                 )
 
     print("\n## Integrity — what each mechanism costs, and what it proves")
+    print(
+        "#  NOT like-for-like, and deliberately shown side by side anyway. fletcher32 and page\n"
+        "#  CRCs are checked DURING a read, so their cost is the checked read vs the same read\n"
+        "#  without them. tessera `verify` is a SEPARATE whole-file pass that re-derives every\n"
+        "#  block digest against the sealed manifest.\n"
+        "#  Reported as TIME (ms), not MB/s: `verify` hashes the STORED bytes, so MB/s over raw\n"
+        "#  bytes would make a highly compressible file look absurdly fast (126 GB/s on the\n"
+        "#  gradient, which is real and meaningless). Time is comparable across a read and a hash."
+    )
+    ihdr = (
+        f"{'ecosystem':20} {'fixture':11} {'what is timed':44} "
+        f"{'warm ms':>20} {'cold ms':>20} {'file MiB':>9}"
+    )
+    print(ihdr)
+    datasets = [("volume", k, v.nbytes) for k, v in volumes.items()] + [
+        ("table", k, sum(c.nbytes for c in cols.values())) for k, cols in tables.items()
+    ]
+    for r in payload["results"].values():
+        ig = r.get("integrity")
+        if not ig:
+            continue
+        chk = ig["variant"]
+        for kind, fx, nbytes in datasets:
+            src = "volumes" if kind == "volume" else "tables"
+            m = r["variants"].get(chk, {}).get(src, {}).get(fx)
+            if not m or "error" in m:
+                continue
+            if "verify_warm" in m:
+                rows = [
+                    (
+                        "verify(): re-hash every block vs manifest",
+                        m["verify_warm"],
+                        m.get("verify_cold"),
+                    )
+                ]
+            else:
+                base = r["variants"].get("tuned", {}).get(src, {}).get(fx) or {}
+                rows = [
+                    (
+                        "read WITHOUT checksum (tuned)",
+                        base.get("read_full_warm"),
+                        base.get("read_full_cold"),
+                    ),
+                    (
+                        "read WITH checksum verified",
+                        m.get("read_full_warm"),
+                        m.get("read_full_cold"),
+                    ),
+                ]
+            fmib = m["bytes"] / 2**20
+            for what, w, c in rows:
+                print(
+                    f"{r['name']:20} {fx:11} {what:44} "
+                    f"{_ms(w):>20} {_ms(c):>20} {fmib:>9.2f}"
+                )
+    print()
     for r in payload["results"].values():
         ig = r.get("integrity")
         if not ig:
@@ -422,6 +539,80 @@ def report(payload, volumes, tables):
 
     swmr = [r["name"] for r in payload["results"].values() if r["caps"].get("swmr")]
     print(f"\nSWMR / concurrent-reader support: {', '.join(swmr) if swmr else 'none'}")
+
+
+def markdown(payload, volumes, tables) -> str:
+    """Markdown tables for a PR body or docs, with the best cell per column bolded.
+
+    The bolding is COMPUTED, never hand-placed. A hand-bolded table in this PR's first draft marked
+    Tessera's continuous-table read as best while Parquet's was faster; generating the emphasis from
+    the numbers removes that failure class rather than correcting one instance of it.
+    Size: smallest is best. Throughput: highest MB/s is best (uncompressed formats will often win
+    raw speed, and are bolded when they do).
+    """
+    env = payload["environment"]
+    out = [
+        f"_{env['cpu']} ×{env['cores']} · kernel {env['kernel']} · median of N={payload['iters']}, "
+        "MB/s over raw bytes, `[lo-hi]` = slowest/fastest sample · best per column in **bold**_",
+        "",
+    ]
+
+    def section(title, src, fixture, nbytes, partial_key, partial_label):
+        rows = []
+        for r in payload["results"].values():
+            for v in r["variants"].values():
+                m = v.get(src, {}).get(fixture)
+                if not m or "error" in m:
+                    continue
+                settings = v.get(
+                    "settings_volume" if src == "volumes" else "settings_table", ""
+                )
+                rows.append((r["name"], settings, m))
+        if not rows:
+            return
+        cols = [
+            ("MiB", lambda m: m["bytes"] / 2**20, min),
+            ("write", lambda m: _mbps(nbytes, m["write"]["median"]), max),
+            ("read", lambda m: _mbps(nbytes, m["read_full_warm"]["median"]), max),
+            (partial_label, lambda m: _mbps(nbytes, m[partial_key]["median"]), max),
+        ]
+        if all("read_full_cold" in m for _n, _s, m in rows):
+            cols.append(
+                (
+                    "cold read",
+                    lambda m: _mbps(nbytes, m["read_full_cold"]["median"]),
+                    max,
+                )
+            )
+        best = {c: pick(f(m) for _n, _s, m in rows) for c, f, pick in cols}
+        out.append(f"#### {title}")
+        out.append("")
+        out.append(
+            "| ecosystem | settings | " + " | ".join(c for c, _f, _p in cols) + " |"
+        )
+        out.append("|---|---|" + "---:|" * len(cols))
+        for n, st, m in rows:
+            cells = []
+            for c, f, _p in cols:
+                val = f(m)
+                txt = f"{val:.2f}" if c == "MiB" else f"{val:.0f}"
+                cells.append(f"**{txt}**" if val == best[c] else txt)
+            out.append(f"| {n} | {st} | " + " | ".join(cells) + " |")
+        out.append("")
+
+    for k, vol in volumes.items():
+        section(
+            f"Volume — `{k}` fixture",
+            "volumes",
+            k,
+            vol.nbytes,
+            "read_slice_warm",
+            "z-slice",
+        )
+    for k, cols in tables.items():
+        raw = sum(c.nbytes for c in cols.values())
+        section(f"Table — `{k}` fixture", "tables", k, raw, "read_col_warm", "1 column")
+    return "\n".join(out) + "\n"
 
 
 if __name__ == "__main__":
