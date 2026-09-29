@@ -133,11 +133,14 @@ def main() -> int:
     _vol = _np.arange(64, dtype="<i2")
     accepted = set()
     for _c in ("pcodec", "zstd", "auto", "lz4", "", "PCODEC"):
+        _b = tessera.Builder("r", "b", "probe", "2024-01-01T00:00:00Z")
         try:
-            _b = tessera.Builder("r", "b", "probe", "2024-01-01T00:00:00Z")
             _b.add_array("v", "i2", [64], _vol.tobytes(), _c)
             accepted.add(_c)
-        except Exception:  # noqa: BLE001
+        except tessera.TesseraError:
+            # ONLY a TesseraError counts as a rejection. A TypeError from a signature regression
+            # (say, the `codec` parameter disappearing) must fail loudly here, not be tallied as
+            # "correctly rejected" and leave the advertised set looking right.
             pass
     if accepted != {"pcodec", "zstd", "auto"}:
         errors.append(
@@ -147,12 +150,9 @@ def main() -> int:
     try:
         _b = tessera.Builder("r", "b", "probe", "2024-01-01T00:00:00Z")
         _b.add_array("v", "i2", [64], _vol.tobytes())
-        _default_ok = True
-    except Exception:  # noqa: BLE001
-        _default_ok = False
-    if not _default_ok:
+    except (tessera.TesseraError, TypeError) as _e:
         errors.append(
-            "add_array is no longer callable without an explicit codec (default lost)"
+            f"add_array is no longer callable without an explicit codec: {_e}"
         )
 
     for e in errors:

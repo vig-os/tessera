@@ -1,7 +1,33 @@
 # Arrays: stats, slice, project, pyramid
 
-Array blocks are dense N-D grids (Zarr v3, 64³ cubic chunks, `pcodec`). The cubic grid means orthogonal
-and ROI reads only touch the chunks they intersect — a single voxel decodes one chunk, not the volume.
+Array blocks are dense N-D grids (Zarr v3, 64³ cubic chunks, `pcodec` by default). The cubic grid means
+orthogonal and ROI reads only touch the chunks they intersect — a single voxel decodes one chunk, not the
+volume.
+
+## Choosing the codec
+
+The writer supports three array codecs, chosen per block (`Builder.add_array(..., codec=...)` in Python):
+
+| codec | wins on | why |
+|---|---|---|
+| `pcodec` (default) | acquisitions — CT, PET, anything with detector noise | models the *numeric distribution*, which noise does not destroy |
+| `zstd` | synthetic ramps, masks, packed bitfields | exploits long *byte-level* repeats (LZ77), which noise does destroy |
+| `auto` | when you don't know | encodes with both and keeps the smaller; costs a double encode at write |
+
+Neither dominates. On a 256³ int16 volume, measured through the Python binding:
+
+| volume | `pcodec` | `zstd` | `auto` picks |
+|---|---|---|---|
+| phantom + detector noise (acquisition-shaped) | **13.12 MiB** | 15.97 MiB | `pcodec` |
+| pure linear ramp (synthetic) | 0.25 MiB | **0.22 MiB** | `zstd` |
+
+On acquisition-shaped data the advantage is **size-invariant** — pcodec/zstd ≈ 0.82 from 64³ to 320³ —
+so the absolute saving grows linearly with the volume; real acquisitions measured −21% (CT) and −33%
+(PET) against zstd. On a synthetic ramp the ratio *moves with the array size*, which is why a
+benchmark built on one can mislead in either direction.
+
+All three are per-chunk codecs, so partial reads work identically whichever was used, and the manifest
+records the **concrete** codec: `auto` is resolved at write time and a reader never sees it.
 
 {{#include ../../../tessera/crates/tessera-cli/tests/cmd/arrays.trycmd}}
 

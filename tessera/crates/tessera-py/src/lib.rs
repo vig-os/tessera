@@ -257,9 +257,8 @@ impl Builder {
     /// - `"auto"` — encode with both and keep the smaller, recording the winner in the manifest.
     ///   Readers never see `"auto"`; it costs a double encode at write time.
     ///
-    /// Both are per-chunk codecs, so partial reads ([`Reader::read_array_subset`]) work
-    /// identically whichever was used. Until now this binding hard-coded `"pcodec"` with no way
-    /// to choose, which is why a Python caller could not tune the array path at all.
+    /// All three are per-chunk codecs, so partial reads ([`Reader::read_array_subset`]) work
+    /// identically whichever was used, and the manifest always records the concrete codec.
     #[pyo3(signature = (name, code, shape, data, codec="pcodec"))]
     fn add_array(
         &mut self,
