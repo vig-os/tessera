@@ -31,6 +31,7 @@ should land in the same event**, which is what this ADR is for.
 |---|---|---|
 | **M1** | Bind the index to its block's **content digest** | mandatory (§7) |
 | **M2** | Fail closed on accumulator overflow; never wrap | mandatory (§6, #523) |
+| **M3** | Define the per-chunk digest over **native element bytes**, not the `i64` gather buffer | mandatory (§7a) |
 | **S1** | Keep `count / min / max / sum / sum_sq` | unchanged |
 | **S2** | Add `nan / pos_inf / neg_inf / masked` counts | recommended (§2) |
 | **S3** | Add **one block-level histogram**, integer counts | recommended (§3–§5) |
@@ -225,6 +226,39 @@ regenerated, or copied-from-another-product — rather than the one path #524 pa
 it must land in this event**, because after default-on there will be indexes in the wild that cannot
 be validated retroactively.
 
+## §7a — M3 (mandatory): the per-chunk digest is over native element bytes
+
+Today `array_chunk_index` hashes a **derived** buffer: every element is widened to `i64` and written
+little-endian, so an `int16` chunk is hashed as 8 bytes per voxel — four times the necessary hashing
+work, over a representation that is not the data's own.
+
+**This is a now-or-never change.** The per-chunk digest feeds the index root, so redefining it moves
+every `.cidx`. Today that costs nothing (**no product carries one**); after this event's default-on
+seal it would be a second corpus regeneration and a break for every index already written. It
+therefore rides this event or it never happens.
+
+**Definition.** The digest of a chunk is `blake3` over the concatenation of its elements, in **C-order
+with the last axis varying fastest** and edge chunks clipped to the array bounds (unchanged — this is
+the existing odometer order), where each element is encoded in a **fixed little-endian** width
+determined by the block's dtype:
+
+| dtype | encoding |
+|---|---|
+| `int8` / `uint8` | 1 byte |
+| `bool` | 1 byte, `0x00` or `0x01` — never the host's `bool` representation |
+| `int16` / `uint16` | 2 bytes, little-endian |
+| `int32` / `uint32` | 4 bytes, little-endian |
+| `int64` / `uint64` | 8 bytes, little-endian |
+| floats | no index today (§8); when added, IEEE-754 little-endian with a canonicalised NaN |
+
+Little-endian is fixed **by the format, not by the host**: a big-endian machine must byte-swap on the
+way into the hasher, not `memcpy`. That is the only way the digest is a function of the data rather
+than of the architecture, and #472 is the standing reminder that this class of assumption gets checked,
+not asserted — so C3's determinism tests prove it **cross-architecture (CI runs x86_64 and aarch64)
+and cross-profile (dev vs release)**, alongside the worker-count invariance.
+
+Only the per-element *encoding* changes. Chunk order, element order and clipping are as they were.
+
 ## §8 — Floats
 
 Float arrays get no index today (`as_i64` returns `None`), which is why §1's integer-only rule costs
@@ -278,6 +312,11 @@ So dual-hashing costs **3.2× blake3's time serially, or 2.25× with the second 
 thread** — in absolute terms, ~120 ms on a 151 MiB product. `sha2` is **already in the dependency
 graph** (two versions, transitively), so this adds no new dependency.
 
+**Gate B.** `sha2` becomes a direct dependency, and ADR-0057 §5 defines that gate's crate list as
+*everything that can move sealed bytes* — which a sha256 co-digest in the manifest does whenever the
+flag is on. So `sha2` joins the list (a 12th feature snapshot) in the same commit, rather than being
+discovered as a ~60-minute CI failure later.
+
 **Default: off.** On request (`--fixity sha256`) or implied by BagIt/OCFL export (#527). Turning it on
 by default would pay 2.25–3.2× on every seal for a value most users never read.
 
@@ -292,9 +331,9 @@ by default would pay 2.25–3.2× on every seal for a value most users never rea
 ## §11 — Landing plan (after ratification)
 
 1. `tessera-core`: extend `ChunkStats` with S2 counts + the block histogram type; `Monoid::combine`
-   fail-closed per M2; `spec` gains `indexed_digest` per M1. Bump `recipe` `chunk_index@1` → `@2`;
-   a missing field reads as **absent**, never as zero (the `sum_sq` `#[serde(default)]` precedent —
-   "absent" and "all-zero bins" must not be confusable).
+   fail-closed per M2; `spec` gains `indexed_digest` per M1; the per-chunk digest is redefined per M3.
+   Bump `recipe` `chunk_index@1` → `@2`; a missing field reads as **absent**, never as zero (the
+   `sum_sq` `#[serde(default)]` precedent — "absent" and "all-zero bins" must not be confusable).
 2. `tessera-io`: two-pass build (scalars → edges → histogram), writer opt-out for the histogram.
 3. Reader: verify `indexed_digest`; serve quantiles/fences from the histogram; keep #524's
    `exact`/`method` contract and extend it with the histogram's `exact` flag.
