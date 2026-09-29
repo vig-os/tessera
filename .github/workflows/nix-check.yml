@@ -10,7 +10,7 @@
 # The logic lives in the flake's `checks` (flake.nix), so the SAME command runs on a dev's
 # machine and here — no "passes locally / fails in CI" drift, nothing to reproduce by hand.
 # Run it yourself with the SAME flags CI uses:
-#   nix flake check -L --keep-going --fallback --cores 2
+#   nix flake check -L --keep-going --fallback --max-jobs 2 --cores 4
 #
 # Checks (see flake.nix): workspace-clippy · workspace-test · workspace-fmt ·
 # guardrails-gates · dev-shell. cargo-deny + the full pre-commit gate set run via `prek`
@@ -127,6 +127,14 @@ jobs:
       # common case stops being a spurious failure. Accepted with that tradeoff stated rather than
       # discovered.
       #
+      # EXPERIMENT (#495, scratch branch — do NOT merge): `--max-jobs 2 --cores 4`.
+      # `--cores 2` alone was not enough: #497 was OOM-KILLED (exit 137) at 15.5 GB with four
+      # derivations still in flight. Memory scales with CONCURRENT DERIVATIONS (separate cargo/rustc
+      # trees, each holding its own heap), not with threads inside one -- so `--max-jobs` is the
+      # dominant lever and `--cores` the weaker one. Combining them keeps total CPU at ~8 (2x4, as
+      # today's 4x2) so wall-clock stays near the current 85 min of a 120 min cap, which a plain
+      # `--max-jobs 2 --cores 2` (total CPU 4) would not. Accept iff peak < 12 GB AND < 100 min.
+      #
       # `--cores 2` is the fix for the evictions, and it is measured rather than guessed (#495). The
       # sampler added in #488 caught one in the act on this workflow: memory available fell
       # monotonically 5167M -> 412M over three and a half minutes and the runner was then killed with
@@ -179,7 +187,7 @@ jobs:
           # shellcheck disable=SC2064
           trap "kill $sampler 2>/dev/null" EXIT
 
-          nix flake check -L --keep-going --fallback --cores 2
+          nix flake check -L --keep-going --fallback --max-jobs 2 --cores 4
           rc=$?
           kill "$sampler" 2>/dev/null
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
