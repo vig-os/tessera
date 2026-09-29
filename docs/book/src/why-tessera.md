@@ -61,9 +61,36 @@ tessera verify study.tsra     # re-checks the seal + every block digest
 - Tables: Vortex float columns compress via pcodec and land competitive with — often smaller than —
   Parquet+zstd on continuous scientific data (issue #380).
 
-A head-to-head `tessera bench compare` (same data → `.tsra` vs Parquet vs HDF5: size, column-projection
-and ROI-slice latency, cold-cache cloud read) is tracked as a follow-up so these claims ship as
-reproducible numbers, not assertions.
+### Run the head-to-head yourself
+
+`tessera bench compare` writes the *same* synthetic volume and table to `.tsra` and to HDF5 and
+reports on-disk size, write+seal, full read, projected-column read, ROI read and integrity cost:
+
+```sh
+tessera bench compare                 # both datasets, warm, median of 7
+tessera bench compare --cold          # add best-effort cold-cache rows
+tessera bench compare --format json   # the CI shape
+```
+
+It is built to be checkable rather than flattering, so read it with these in mind:
+
+- **Every format appears twice**, at its sensible default and at a tuned setting, with the settings
+  printed on each row — HDF5's default really is contiguous and uncompressed, and its tuned variant
+  is given *Tessera's own* 64³ chunk geometry so the ROI row compares layouts, not chunk-size luck.
+- **Medians of N with a `[min..max]` spread**, never a single run; correctness is asserted before any
+  timing counts.
+- **Tessera loses some rows.** It is slower to write (it hashes and seals, which the others do not)
+  and HDF5 beats it on a full read of an uncompressed table. Those rows are in the same table.
+- **The synthetic data is far more compressible than real acquisitions** (it is the generator from the
+  cross-ecosystem harness, kept verbatim for comparability), so the size column is a ratio *between
+  formats on identical input*, not a compression ratio you should expect clinically.
+- **Integrity is not one number.** HDF5's `fletcher32` detects corruption in the chunks you read;
+  `tessera verify` re-derives every block digest against a sealed manifest whose hash also covers
+  metadata and provenance, and which a signature can bind to a signer. Both catch a flipped bit; only
+  one answers "is this the artifact that was sealed, and by whom".
+
+Parquet joins the table once its Rust crates land (#460); the broader seven-format comparison
+(Zarr, NeXus, NIfTI, DICOM, ROOT, Parquet) lives in `tessera/bench/ecosystems/`.
 
 ## When a plain format is the right call
 
