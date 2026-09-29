@@ -2083,10 +2083,25 @@ mod tests {
         })
         .unwrap();
         run(Cmd::Verify {
-            file: tsra,
+            file: tsra.clone(),
             workers: None,
         })
         .unwrap();
+
+        // ...and the flag REACHES the resolver rather than being dropped on the floor. `0` is the
+        // observable probe: the resolver rejects it, while the old `WriteConfig::for_system()` path
+        // (and `WriteConfig::workers`, which clamps to >= 1) would have swallowed it and verified
+        // happily. So this failing is the proof of pass-through, not merely of validation.
+        let err = run(Cmd::Verify {
+            file: tsra,
+            workers: Some(0),
+        })
+        .expect_err("--workers 0 must be refused through the verb, not clamped");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--workers") && msg.contains(">= 1"),
+            "error must name the flag and the bound, got: {msg}"
+        );
     }
 
     #[test]
