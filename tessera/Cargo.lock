@@ -6525,6 +6525,7 @@ dependencies = [
  "hdf5-metno",
  "libc",
  "object_store 0.14.0",
+ "png",
  "serde",
  "serde_json",
  "ssh-key",
