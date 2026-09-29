@@ -1,0 +1,86 @@
+`tessera bench compare` is the head-to-head behind the Parquet/HDF5 pitch (#388). Every number here
+varies by machine and run, so this walkthrough asserts the STRUCTURE — that each format appears at
+both its default and a tuned setting, that the settings are printed, that the cache state and N are
+stated, and that the honesty scaffolding (the caveat, the per-row claims, the integrity wording) is
+present. The numbers themselves are wildcarded.
+
+A tiny fixture keeps it fast; the real run uses the defaults.
+
+```
+$ tessera bench compare --dataset volume --vol-n 64 --iters 1
+tessera bench compare — .tsra vs HDF5 (#388)
+  data     volume 64^3 int16 = 512.0 KiB raw
+  method   median of 1 runs, spread = [min..max]; correctness asserted before timing
+  cache    warm only (pass --cold to add best-effort cold-cache rows)
+  note     Parquet lands once #460 puts the arrow/parquet crates on dev (#388 stage 2)
+  CAVEAT   the synthetic data is a smooth gradient + monotonic counters (verbatim from the
+           #143 harness, for comparability). It is FAR more compressible than real
+           acquisitions, so read the size rows as a RATIO BETWEEN FORMATS on identical
+           input, never as a compression ratio you will see on clinical data.
+
+format             settings                                                 data    op             cache       size          median [min..max]
+Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  size[..]
+Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  write+seal[..]
+Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  read full[..]
+Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  read ROI[..]
+Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  verify[..]
+Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  size[..]
+Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  write+seal[..]
+Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  read full[..]
+Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  read ROI[..]
+Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  verify[..]
+HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  size[..]
+HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  write+seal[..]
+HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  read full[..]
+HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  read ROI[..]
+HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  verify[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4                volume  size[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4                volume  write+seal[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4                volume  read full[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4                volume  read ROI[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4                volume  verify[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4, fletcher32    volume  size[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4, fletcher32    volume  write+seal[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4, fletcher32    volume  read full[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4, fletcher32    volume  read ROI[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), gzip-4, fletcher32    volume  verify[..]
+
+What each row supports:
+  size           smaller on disk than the alternatives
+  write+seal     the cost of sealing (tessera pays, the others do not)
+  read full      baseline full materialise
+  read ROI       cubic chunks -> cheap ROI / orthogonal access
+  verify         tamper-evident: re-derives every digest against the sealed manifest
+
+Integrity is not one thing — see the module docs for the long form:
+  fletcher32 detects CORRUPTION on the chunks you read. It is unkeyed and covers no metadata.
+  tessera verify re-derives every block digest against the sealed manifest, whose hash also
+  covers metadata + provenance, and which a signature can bind to a signer. Both catch a
+  flipped bit; only one answers 'is this the artifact that was sealed, and by whom'.
+
+```
+
+`--format json` is the CI shape. The metadata block states the method so a consumer never has to
+guess how the numbers were produced; `rows` is elided here because its contents are timings.
+
+```
+$ tessera bench compare --dataset table --rows 5000 --iters 1 --format json
+{
+  "benchmark": "tessera bench compare",
+  "issue": 388,
+  "iters": 1,
+  "statistic": "median with [min..max] spread",
+  "cold_cache": false,
+  "cold_method": "n/a",
+  "cold_eviction": "n/a",
+  "kernel": "[..]",
+  "volume_n": null,
+  "table_rows": 5000,
+  "caveat": "synthetic data (a smooth gradient + monotonic counters, verbatim from the #143 harness) is far more compressible than real acquisitions; size rows are a ratio BETWEEN formats on identical input, not a compression ratio for clinical data",
+  "parquet": "pending #460 (arrow/parquet crates not yet on dev) — stage 2",
+  "rows": [
+...
+  ]
+}
+
+```
