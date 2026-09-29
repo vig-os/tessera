@@ -9,7 +9,8 @@
 #
 # The logic lives in the flake's `checks` (flake.nix), so the SAME command runs on a dev's
 # machine and here — no "passes locally / fails in CI" drift, nothing to reproduce by hand.
-# Run it yourself with the SAME flags CI uses: `nix flake check -L --keep-going --fallback`.
+# Run it yourself with the SAME flags CI uses:
+#   nix flake check -L --keep-going --fallback --cores 2
 #
 # Checks (see flake.nix): workspace-clippy · workspace-test · workspace-fmt ·
 # guardrails-gates · dev-shell. cargo-deny + the full pre-commit gate set run via `prek`
@@ -68,7 +69,30 @@ jobs:
     # very next one, which the previous 60-minute cap cancelled mid-build. A cancelled leg is not
     # a code failure, but it blocks the merge and costs a full rebuild to find out — so the cap is
     # set above the observed spread rather than just above the median.
-    timeout-minutes: 90
+    #
+    # Raised 90 -> 120 because the spread widened past 90 and the cap started cutting real work.
+    # Measured leg durations, same workflow, all on GitHub-hosted runners:
+    #
+    #     commit     x86_64            aarch64
+    #     7d2eaf8d   43m  success      41m  success
+    #     33aa5134   46m  success      43m  success
+    #     (pin PR)   57m  success      43m  success
+    #     1442ba12   89m  TIMEOUT      54m  success
+    #
+    # The axis is NOT architecture. x86_64's own range is 43-89m, a 2.1x spread; aarch64's is
+    # 41-54m, 1.3x. So x86_64 is not systematically slower — it is far more variable, and its bad
+    # draws are what hit the cap. Sizing against "x86 is slower" would tune for a constant that is
+    # not there; sizing against its own spread points at headroom, which is this change.
+    #
+    # 120 is the worst observed draw plus ~35%. Deliberately not higher: the cap also has to fail a
+    # genuinely hung leg in reasonable time, and GitHub's own ceiling is 6 hours.
+    #
+    # This raises the ceiling, it does not make the legs faster. The variance is the real defect and
+    # is tracked separately (#495) — the sampler added in #488 now records memory and disk on every
+    # leg, so the next long draw can be diagnosed as I/O starvation, memory pressure or simply slow
+    # silicon instead of guessed at. A concurrency cap (`--max-jobs`) must NOT land before this
+    # change: at 89 of 90 minutes any slowdown converts an intermittent failure into a reliable one.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -103,6 +127,30 @@ jobs:
       # common case stops being a spurious failure. Accepted with that tradeoff stated rather than
       # discovered.
       #
+      # `--cores 2` is the fix for the evictions, and it is measured rather than guessed (#495). The
+      # sampler added in #488 caught one in the act on this workflow: memory available fell
+      # monotonically 5167M -> 412M over three and a half minutes and the runner was then killed with
+      # "received a shutdown signal" and exit 143 — the OOM killer taking the runner AGENT, which is
+      # why these jobs could never print an error of their own. Disk never dropped below 57.6 GB free
+      # across the same run, so disk was never the constraint.
+      #
+      # Why `--cores` rather than `--max-jobs`. Observed load average was 13-16 on a 4-core runner.
+      # nix's `max-jobs` defaults to the core count, so four derivations build concurrently, each
+      # spawning about four compiler threads: 4 x 4 = 16, matching the load exactly. Peak memory tracks
+      # the number of concurrent rustc/LLVM processes, i.e. that product, so either factor halves it —
+      # but `--cores 2` keeps four derivations in flight while `--max-jobs 2` serialises whole
+      # derivations and costs closer to 2x on the parallel portion. With x86_64 draws already reaching
+      # 89 minutes, a lever that doubles the parallel portion could reach even the 120-minute cap above.
+      #
+      # This is self-verifying: the sampler reports peak memory on every leg, so the peak must fall well
+      # below the 15.6 GB that evicted. If it does not, this model is wrong and `--max-jobs` is next —
+      # do not simply lower this number further without re-reading the trace.
+      #
+      # A contributing factor worth naming: peak climbed 10.2 -> 12.0 -> 15.6 GB across observed runs,
+      # and the vortex fork pin (#480) is part of that — ~27 crates now compile from a git source with
+      # no binary-cache substituter where they were previously downloaded. Removing the pin later
+      # should give headroom back, at which point this flag can be revisited.
+      #
       # `set +e` so a failure reaches the summary step below instead of ending the job here; the real
       # result is re-raised there, so the leg still fails when a check fails.
       - name: nix flake check
@@ -131,7 +179,7 @@ jobs:
           # shellcheck disable=SC2064
           trap "kill $sampler 2>/dev/null" EXIT
 
-          nix flake check -L --keep-going --fallback
+          nix flake check -L --keep-going --fallback --cores 2
           rc=$?
           kill "$sampler" 2>/dev/null
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
