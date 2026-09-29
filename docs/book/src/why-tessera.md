@@ -97,21 +97,38 @@ It is built to be checkable rather than flattering:
 | HDF5, contiguous uncompressed | 32.0 MiB | **0.0162s** | 0.0005s |
 | HDF5, 64³ + shuffle+gzip-4 | 698.8 KiB | 0.0506s | 0.0006s |
 
-**Table, 4M rows × (u8+2×f4) (61 MiB raw) — HDF5 wins on size; Tessera wins the compressed reads.**
+**Table — reported on TWO fixtures, because one fixture is a chosen answer.**
 
-| | size | full read | 1 column | row ROI | write+seal |
-|---|---|---|---|---|---|
-| Tessera, Vortex cascade | 959.4 KiB | 0.0062s | 0.0024s | 0.0015s | 0.3179s |
-| HDF5, contiguous uncompressed | 61.0 MiB | 0.0110s | **0.0017s** | **0.0001s** | **0.0361s** |
-| HDF5, 65536-row + shuffle+gzip-4 | **155.3 KiB** | 0.0682s | 0.0164s | 0.0023s | 0.3372s |
+The original fixture's float columns have periods 7 and 5. That is *adversarial* for
+value-distribution codecs: deflate's LZ77 window locks onto the repeating byte block, while Pco,
+dictionary and bit-packing model the value distribution and cannot exploit periodicity at all. The
+continuous fixture is shaped after real DUPLET listmode — a coarse millisecond clock (~99.6 % zero
+deltas) plus continuous energies. Both are reported, always.
+
+| fixture | Tessera | HDF5 shuffle+gzip-4 | |
+|---|---|---|---|
+| **periodic** (adversarial) | 959.4 KiB | **155.3 KiB** | HDF5 **6.2× smaller** |
+| **continuous** (listmode-like) | **19.6 MiB** | 21.5 MiB | Tessera **1.10× smaller** |
+
+Same encoder, same command, opposite verdicts — which is why publishing only one of them would be
+picking the result. On real DUPLET listmode (`/events_2p`, 4M rows, 106.8 MiB raw) Tessera seals to
+73.4 MiB against shuffle+gzip's 75.7 MiB — **1.03× smaller**, tracking the continuous fixture rather
+than the periodic one.
+
+Latency, on the periodic fixture (full/1-column/row-ROI, warm):
+
+| | full read | 1 column | row ROI | write+seal |
+|---|---|---|---|---|
+| Tessera | 0.0062s | 0.0024s | 0.0015s | 0.3179s |
+| HDF5, contiguous uncompressed | 0.0110s | **0.0017s** | **0.0001s** | **0.0361s** |
+| HDF5, shuffle+gzip-4 | 0.0682s | 0.0164s | 0.0023s | 0.3372s |
 
 #### Where Tessera loses, and why
 
-- **Table size: HDF5 shuffle+gzip is 6.2× smaller here** (155.3 KiB vs 959.4 KiB). Shuffle is
-  near-ideal for this fixture — a monotonic u64 counter and two floats with a tiny repeating period —
-  and it is the single biggest change in the table: *without* shuffle the same HDF5 file is 5.9 MiB,
-  and Tessera would appear to win by 6×. That is why the tuned baseline has it. Whether the ordering
-  holds on real listmode floats is a separate question this fixture cannot answer.
+- **The periodic fixture's size, by 6.2×.** Explained above, and it is the only place that gap
+  appears: on the continuous fixture and on real data Tessera is ahead. Investigated in full in
+  #493 — the container and stats account for 0.4 % of the file, and the integer column compresses
+  2213×; it is entirely the two periodic float columns.
 - **Writing is ~9× slower than uncompressed HDF5** (0.3179s vs 0.0361s). Tessera hashes and seals;
   HDF5 memcpys. That is the cost of the integrity guarantee, not a tuning bug.
 - **Uncompressed HDF5 wins the small, raw-speed reads** — the single-column read (0.0017s vs 0.0024s)
@@ -122,8 +139,8 @@ It is built to be checkable rather than flattering:
   comparable to (0.0506s).
 
 Against the **compressed** configuration, which is the fair comparison for a format that always
-compresses, Tessera reads the table 11× faster (0.0062s vs 0.0682s), a column 6.8× faster, and the
-volume 2× faster.
+compresses, Tessera reads the periodic table 11× faster (0.0062s vs 0.0682s), a column 6.8× faster,
+and the volume 2× faster.
 
 #### Integrity is not one number
 

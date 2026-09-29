@@ -18,37 +18,44 @@ tessera bench compare — .tsra vs HDF5 (#388)
            timings, so warm rows start with the file in page cache; cold rows evict first
   cache    warm only (pass --cold to add best-effort cold-cache rows)
   note     Parquet lands once #460 puts the arrow/parquet crates on dev (#388 stage 2)
-  CAVEAT   the synthetic data is a smooth gradient + monotonic counters (verbatim from the
-           #143 harness, for comparability). It is FAR more compressible than real
-           acquisitions, so read the size rows as a RATIO BETWEEN FORMATS on identical
-           input, never as a compression ratio you will see on clinical data.
+  fixtures table (periodic)   = the original #388 fixture: f32 columns of period 7 and 5.
+           ADVERSARIAL for value-distribution codecs — deflate's LZ77 locks onto the
+           repeating byte block; Pco/dict/bitpacking model values, not repetition (#493).
+           table (continuous) = shaped after REAL DUPLET listmode: a coarse ms clock
+           (~99.6% zero deltas) + continuous energies. Both are reported, always: showing
+           only one of them would be choosing the answer.
+  CAVEAT   the VOLUME is a smooth gradient (verbatim from the #143 harness, for
+           comparability), and the PERIODIC table is adversarial by construction. Both
+           are far more compressible than a real acquisition, so read every size row as
+           a RATIO BETWEEN FORMATS on identical input, not as a compression ratio to
+           expect clinically. The CONTINUOUS table is the one shaped after real listmode.
 
 format             settings                                                 data    op             cache       size          median [min..max]
-Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  size[..]
-Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  write+seal[..]
-Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  read full[..]
-Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  read ROI[..]
-Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  verify[..]
-Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  size[..]
-Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  write+seal[..]
-Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  read full[..]
-Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  read ROI[..]
-Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  verify[..]
-HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  size[..]
-HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  write+seal[..]
-HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  read full[..]
-HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  read ROI[..]
-HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  verify[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  size[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  write+seal[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  read full[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  read ROI[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  verify[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  size[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  write+sea[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  read full[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  read ROI[..]
-HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  verify[..]
+Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  size           -       10.[..]
+Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  write+seal     warm[..]
+Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  read full      warm[..]
+Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  read ROI       warm[..]
+Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  verify         warm[..]
+Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  size           -        9.[..]
+Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  write+seal     warm[..]
+Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  read full      warm[..]
+Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  read ROI       warm[..]
+Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  verify         warm[..]
+HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  size           -      514.[..]
+HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  write+seal     warm[..]
+HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  read full      warm[..]
+HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  read ROI       warm[..]
+HDF5 (hdf5-metno)  default: contiguous, uncompressed                        volume  verify         -[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  size           -       15.[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  write+seal     warm[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  read full      warm[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  read ROI       warm[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4        volume  verify         -[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  size           -[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  write+seal     warm[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  read full      warm[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  read ROI       warm[..]
+HDF5 (hdf5-metno)  tuned: chunked 64^3 (= tessera's), shuffle+gzip-4, fletcher32 volume  verify         warm[..]
 
 What each row supports:
   size           smaller on disk than the alternatives
