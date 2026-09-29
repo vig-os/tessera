@@ -1557,50 +1557,102 @@ mod tests {
         buf.freeze().to_vec()
     }
 
-    /// **#468 — a KNOWN UPSTREAM LIMITATION, pinned so it cannot be forgotten.**
+    /// **#472 — a persisted float `Sum` must not carry the platform's default NaN.**
     ///
-    /// vortex 0.75.0 writes **different container bytes** for an integer column whose encoding
-    /// produces *patches*, depending on whether `debug_assertions` is enabled. The minimal case is
-    /// `[i64::MIN, 0, i64::MAX]`: it zigzags to `[u64::MAX, 0, u64::MAX - 1]`, which bitpacks with
-    /// exactly one exception, and the file comes out 2796 bytes with `debug_assertions` on and 2772
-    /// with it off — a constant 24-byte delta, stable across runs within a profile.
+    /// A column holding both `+inf` and `-inf` makes vortex's `Sum` statistic evaluate `inf + -inf`,
+    /// an IEEE 754 *invalid* operation. IEEE leaves the resulting bit pattern unspecified and the
+    /// targets disagree — x86_64 produces `0xfff8_0000_0000_0000` (sign bit set), aarch64
+    /// `0x7ff8_0000_0000_0000` (clear). `Stat::Sum` is persisted, so those bits reached the sealed
+    /// bytes and the same logical table sealed to a different `content_hash` per host.
     ///
-    /// The cause is an **assertion with a side effect**: `vortex-array/src/patches.rs` guards patch
-    /// construction with a `#[cfg(debug_assertions)]` `is_sorted(&indices, …)` check, and evaluating
-    /// that aggregate executes and annotates the indices array, which the written container then
-    /// reflects. `overflow-checks` and the optimisation level are measured to have **no** effect; the
-    /// axis is `debug_assertions` alone.
+    /// Fixed upstream by canonicalising a NaN sum; carried here by the vortex fork pin (see the
+    /// `[patch.crates-io]` block in `tessera/Cargo.toml`, removal tracked in #480).
     ///
-    /// Why this matters for us: `content_hash` is a blake3 root over these bytes, so the sealed
-    /// identity of a product stops being a function of only its data. Release builds all agree with
-    /// each other, so *shipped* binaries are mutually consistent; a debug-built tool disagrees with
-    /// them. See ADR-0057 §5 — "a determinism argument about the codec does not cover the container".
+    /// **Asymmetry worth knowing before trusting this test.** aarch64 was always producing the
+    /// canonical value, so on aarch64 the sealed bytes are identical with and without the fix — no
+    /// test can detect a dropped pin there via this defect. The guard therefore bites on **x86_64**,
+    /// which is where it matters: that is the host whose bytes were wrong. #468's separate guard is
+    /// the profile-dependent half and fires on both arches.
     ///
-    /// **This test asserts the bug is STILL PRESENT, so it fails when upstream fixes it.** That
-    /// failure is the signal to drop whatever fixtures have been narrowed to avoid the shape and put
-    /// the integer extremes back. (At the time of writing that is the generic-ingest corpus's scalars
-    /// fixture, which arrives with the ingest lane and is not part of this crate — hence no reference
-    /// to it by name here, so this comment stays true wherever it is read.) A `#[ignore]` would let the
-    /// upstream fix land unnoticed and leave those fixtures permanently weakened.
+    /// Asserts byte *patterns* rather than a digest, following the same reasoning as the #468 guard:
+    /// a vortex bump legitimately moves bytes, and this test should fire for a determinism regression
+    /// rather than for every dependency update.
     #[test]
-    fn known_limitation_468_full_span_int_container_bytes() {
+    fn float_sum_stat_is_canonical_nan_not_the_platform_default() {
+        let data: TableData = vec![(
+            "x".into(),
+            ColumnData::F64(vec![f64::INFINITY, f64::NEG_INFINITY]),
+        )];
+        let spec = TableSpec {
+            columns: vec![col("x", "f8")],
+            rows: 2,
+            row_index: None,
+        };
+        let sealed = encode(&spec, &data).expect("encode");
+
+        let canonical = 0x7ff8_0000_0000_0000u64.to_le_bytes();
+        let x86_default = 0xfff8_0000_0000_0000u64.to_le_bytes();
+        let contains = |needle: &[u8]| sealed.windows(needle.len()).any(|w| w == needle);
+
+        assert!(
+            contains(&canonical),
+            "#472: the sealed bytes must carry the CANONICAL quiet NaN as the float Sum statistic"
+        );
+        assert!(
+            !contains(&x86_default),
+            "#472 regression: the sealed bytes carry x86_64's default NaN (0xfff8_0000_0000_0000). \
+             The vortex fork pin has most likely been dropped before the fix shipped upstream — see \
+             #480. Note this assertion cannot fire on aarch64, which always produced the canonical \
+             value, so a green aarch64 leg is not evidence against it."
+        );
+    }
+
+    /// **#468 — the container bytes must NOT depend on the build configuration.**
+    ///
+    /// This was a known upstream limitation, asserted as still-broken. It is now FIXED, and this test
+    /// is the positive guard that it stays fixed.
+    ///
+    /// vortex 0.75.0 wrote different container bytes for an integer column whose encoding produces
+    /// *patches*, depending on whether `debug_assertions` was enabled. `[i64::MIN, 0, i64::MAX]`
+    /// zigzags to `[u64::MAX, 0, u64::MAX - 1]`, which bitpacks with exactly one exception; the bare
+    /// vortex write came out 2796 bytes with `debug_assertions` on and 2772 with it off, a constant
+    /// 24-byte delta.
+    ///
+    /// The cause was an **assertion with a side effect**: the `#[cfg(debug_assertions)]`
+    /// `is_sorted(&indices, …)` check in `vortex-array/src/patches.rs` calls `cache_is_sorted`, which
+    /// *sets* `Stat::IsSorted` on the indices array. Cached statistics are serialised into the file,
+    /// so the assert changed the bytes it was only supposed to inspect. `overflow-checks` and the
+    /// optimisation level were measured to have no effect; the axis was `debug_assertions` alone.
+    ///
+    /// Fixed upstream by computing sortedness without caching it, carried here via the vortex fork
+    /// pin (see the `[patch.crates-io]` block in `tessera/Cargo.toml` and #480 for its removal).
+    ///
+    /// **The expectations below are deliberately NOT `cfg!(debug_assertions)`-dependent.** That is the
+    /// whole assertion: a single expected length per shape, so a re-divergence fails in exactly one
+    /// profile. `flake.nix` runs this test under both `cargo test` and `cargo test --release` so the
+    /// pair is actually exercised. Both profiles agreed on the former release-build numbers (bare
+    /// 2772, sealed 2916), which is the expected direction — the debug build was the one carrying the
+    /// extra 24 bytes of cached statistic.
+    ///
+    /// Why it matters: `content_hash` is a blake3 root over these bytes, so while this was broken the
+    /// sealed identity of a product was not a function of only its data.
+    #[test]
+    fn full_span_int_container_bytes_are_build_config_independent() {
         let pathological = encode_bare_i64_via_vortex(&[i64::MIN, 0, i64::MAX]);
 
         // The lengths, not the hashes: a vortex bump legitimately moves bytes, and this test should
-        // fire for the *determinism* change rather than for every dependency update.
-        let expected = if cfg!(debug_assertions) { 2796 } else { 2772 };
+        // fire for a *determinism* regression rather than for every dependency update.
         assert_eq!(
             pathological.len(),
-            expected,
-            "#468: expected {expected} bytes with debug_assertions={}. If both profiles now agree, \
-             upstream has FIXED this — delete this test and restore the full-span integer extremes in \
-             any fixture that was narrowed to avoid the shape (regenerating those goldens). If vortex \
-             was merely bumped, re-measure both profiles and check the divergence still exists.",
+            2772,
+            "#468 regression: the patch-producing shape must write 2772 bytes in EVERY build \
+             configuration (debug_assertions={}). 2796 here means the side-effecting assert is back \
+             — most likely the vortex fork pin was dropped before the fix shipped upstream (#480).",
             cfg!(debug_assertions)
         );
 
-        // Same shape through OUR seal path: the divergence reaches `content_hash`, which is the
-        // reason this is a format problem and not a curiosity.
+        // Same shape through OUR seal path: the divergence used to reach `content_hash`, which is why
+        // this was a format problem and not a curiosity.
         let sealed = encode(
             &TableSpec {
                 columns: vec![col("x", "i8")],
@@ -1612,23 +1664,23 @@ mod tests {
         .expect("encode");
         assert_eq!(
             sealed.len(),
-            if cfg!(debug_assertions) { 2940 } else { 2916 },
-            "#468 reaches the sealed table payload, not just a bare vortex write"
+            2916,
+            "#468 regression reached the sealed table payload, not just a bare vortex write"
         );
 
-        // A control that does NOT produce patches, and is byte-identical in both profiles. If this
-        // one ever diverges, the defect is broader than #468 describes.
+        // A control that does NOT produce patches, and was byte-identical in both profiles even while
+        // the bug was live. If this one ever diverges, the defect is broader than #468 described.
         assert_eq!(
             encode_bare_i64_via_vortex(&[i64::MIN, i64::MAX]).len(),
             2444
         );
 
-        // Within a single profile the bytes must still be stable — #468 is cross-configuration, not
+        // Within a single profile the bytes must still be stable — #468 was cross-configuration, not
         // nondeterminism. A failure here would be a much worse bug.
         assert_eq!(
             pathological,
             encode_bare_i64_via_vortex(&[i64::MIN, 0, i64::MAX]),
-            "#468 is a cross-configuration divergence; within one build it must be reproducible"
+            "within one build the write must be reproducible"
         );
     }
 

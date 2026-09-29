@@ -15,4 +15,4 @@
         |-- tessera-io feature "cloud" (command-line)
     `-- tessera-io vWORKSPACE
 `-- vortex-file feature "default"
-vortex-file v0.75.0
+vortex-file v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)

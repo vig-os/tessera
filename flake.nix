@@ -368,12 +368,20 @@
                 exit 1
               fi
 
-              # The #468 reproducer asserts the two known per-`debug_assertions` byte counts, so running
-              # it in both profiles pins both. It FAILS when upstream fixes the bug — deliberately, so
-              # the `tessera-ingest` fixture workaround gets removed rather than forgotten.
-              echo "[#468] the known-limitation reproducer under both profiles" >&2
-              cargo test -q -p tessera-io --lib known_limitation_468
-              cargo test -q --release -p tessera-io --lib known_limitation_468
+              # #468 is FIXED (carried by the vortex fork pin, #480). The test now asserts ONE byte
+              # count per shape with no `cfg!(debug_assertions)` branch, so running it in both profiles
+              # is what proves the two agree: a re-divergence fails in exactly one of these two lines.
+              echo "[#468] the build-config independence guard under both profiles" >&2
+              cargo test -q -p tessera-io --lib full_span_int_container_bytes_are_build_config_independent
+              cargo test -q --release -p tessera-io --lib full_span_int_container_bytes_are_build_config_independent
+
+              # #472's guard (the arch-dependent half): the persisted float Sum must be the canonical
+              # NaN, not x86_64's default. Run in both profiles for symmetry with the above, though
+              # this one's axis is the architecture — the aarch64 leg of this matrix is what pairs
+              # with it, and aarch64 cannot fail it (it always produced the canonical value).
+              echo "[#472] the canonical-NaN Sum guard under both profiles" >&2
+              cargo test -q -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
+              cargo test -q --release -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
             '';
           });
 
