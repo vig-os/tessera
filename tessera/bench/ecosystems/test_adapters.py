@@ -168,3 +168,31 @@ def test_name_does_not_claim_a_container_the_writer_does_not_produce(name):
         assert claimed in actual, (
             f"root/{variant}: settings say {claimed!r} but the file contains {actual!r}"
         )
+
+
+@pytest.mark.parametrize("name", ADAPTERS)
+def test_reads_materialise_rather_than_returning_a_lazy_view(name, tmp_path):
+    """No format may win by returning something cheaper than the others.
+
+    nibabel's ArrayProxy over an uncompressed `.nii` is MEMORY-MAPPED, so `np.asarray` returned a
+    view whose `.base` is a `np.memmap` — no bytes read, no decode, nothing faulted until something
+    later touched the pages. It timed at 96,407 MB/s warm and 63,342 MB/s cold, which are not
+    measurements. Every other adapter materialises a real array, so the comparison was not
+    like-for-like and the cold row was vacuous.
+
+    mmap is a genuine NIfTI capability; it is simply not what a full-read row measures.
+    """
+    mod = _mod(name)
+    if not mod.CAPS.get("volume"):
+        pytest.skip(f"{name}: no volume modality")
+    for variant in mod.VARIANTS:
+        base = str(tmp_path / f"{name}_{variant}_lazy")
+        mod.write_volume(base, _VOL, variant)
+        got = mod.read_volume(base, variant)
+        assert not isinstance(got, np.memmap), (
+            f"{name}/{variant}: read returned a memmap"
+        )
+        assert not isinstance(got.base, np.memmap), (
+            f"{name}/{variant}: read returned a view backed by a memmap — the bytes were never "
+            "read, so its timing is not comparable with the other adapters"
+        )

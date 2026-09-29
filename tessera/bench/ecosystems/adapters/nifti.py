@@ -46,14 +46,27 @@ def write_volume(base: str, vol: np.ndarray, variant: str = "tuned") -> None:
 
 def read_volume(base: str, variant: str = "tuned") -> np.ndarray:
     img = nib.load(path_for(base, "volume", variant))
-    # asarray over dataobj preserves the on-disk dtype (int16); get_fdata would force float64.
-    return np.asarray(img.dataobj)
+    # `np.array`, NOT `np.asarray` — and the difference is a fairness bug, not a style choice.
+    #
+    # For an UNCOMPRESSED `.nii`, nibabel's ArrayProxy is memory-mapped, so `np.asarray` returns a
+    # view whose `.base` is a `np.memmap`: no bytes are read and no decode happens until something
+    # touches the pages. It timed at 96,407 MB/s warm and 63,342 MB/s cold — not measurements, just
+    # the cost of constructing a mapping. Every other adapter here materialises a real in-memory
+    # array, so NIfTI was being timed doing strictly less work, and its COLD row was meaningless
+    # because faulting would have happened later, on access, outside the timed region.
+    #
+    # `np.array` forces the copy, which is the contract (`read_volume -> ndarray, full`). NIfTI's
+    # mmap capability is real and an advantage in practice; it is simply not what this row measures,
+    # and crediting it here would let one format win by returning something cheaper.
+    # `dataobj` (not `get_fdata`) still preserves the on-disk dtype — get_fdata would force float64.
+    return np.array(img.dataobj)
 
 
 def read_volume_zslice(base: str, z: int, variant: str = "tuned") -> np.ndarray:
     img = nib.load(path_for(base, "volume", variant))
     # Lazy slice through the ArrayProxy — only the gzip blocks covering plane z are decoded.
-    return np.asarray(img.dataobj[z])
+    # `np.array` for the same reason as above: the slice of a memmap-backed proxy is itself a view.
+    return np.array(img.dataobj[z])
 
 
 # ---- table (unsupported by NIfTI) ----
