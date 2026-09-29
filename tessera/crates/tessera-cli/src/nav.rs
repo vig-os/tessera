@@ -1359,13 +1359,113 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
     Ok((level + 1) as usize)
 }
 
-/// Min / max / mean / std over an [`ArrayData`], computed in `f64` (one pass). Empty → all zero.
-fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize) {
-    macro_rules! reduce {
+/// Min / max / mean / std over an [`ArrayData`], plus the sample count and whether the reduction
+/// was **exact**.
+///
+/// **Integer dtypes reduce in exact integer arithmetic** (`i128`/`u128` sums, like
+/// [`ChunkStats`](tessera_core::chunk_index::ChunkStats)), not `f64`. That matters: an `f64` running
+/// sum stops accumulating once it passes 2^53, so a large volume silently loses the low bits of
+/// `sum`/`sum_sq` and reports a slightly wrong mean/std. Reducing the same way the chunk-index monoid
+/// does also makes this path agree BIT-FOR-BIT with `ChunkIndex::aggregate()`, which is what lets
+/// `stats` serve either source and claim `exact` for both (#347).
+///
+/// Two cases cannot be exact, and both report `false` rather than pretending:
+///   - **floats**, which have no exact integer form;
+///   - **64-bit integers whose `sum_sq` overflows the accumulator.** `i64::MAX²` is ~8.5e37 and
+///     `i128::MAX` is ~1.7e38, so three such samples overflow; `u64::MAX²` is ~3.4e38 against a
+///     `u128::MAX` of ~3.4e38, so two do. Narrower dtypes cannot overflow (`i32::MAX²` is 2^62, and
+///     you would need >2^65 samples), so they keep the unchecked fast path.
+///
+/// Empty → all zero, and exact.
+fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize, bool) {
+    /// Exact integer reduction for dtypes that provably cannot overflow `i128`.
+    /// The final `f64` conversions mirror `ChunkStats::mean`/`variance` exactly, so both paths
+    /// produce identical bits.
+    macro_rules! reduce_int {
         ($v:expr) => {{
             let n = $v.len();
             if n == 0 {
-                (0.0, 0.0, 0.0, 0.0, 0)
+                (0.0, 0.0, 0.0, 0.0, 0, true)
+            } else {
+                let mut mn = i64::MAX;
+                let mut mx = i64::MIN;
+                let mut sum: i128 = 0;
+                let mut sum_sq: i128 = 0;
+                for &x in $v.iter() {
+                    let x = x as i64;
+                    if x < mn {
+                        mn = x;
+                    }
+                    if x > mx {
+                        mx = x;
+                    }
+                    let x = x as i128;
+                    sum += x;
+                    sum_sq += x * x;
+                }
+                match moments_exact(sum, sum_sq, n) {
+                    Some((mean, std)) => (mn as f64, mx as f64, mean, std, n, true),
+                    // Cannot happen for these dtypes (see the overflow note above), but fail closed
+                    // rather than assume it.
+                    None => (mn as f64, mx as f64, f64::NAN, f64::NAN, n, false),
+                }
+            }
+        }};
+    }
+    /// Checked variant for 64-bit dtypes, where `sum_sq` genuinely can overflow. `None` on overflow,
+    /// so the caller can fall back to `f64` and label the result inexact instead of wrapping (release)
+    /// or panicking (debug) — both of which would be silent corruption of a reported statistic.
+    macro_rules! reduce_checked {
+        ($v:expr, $acc:ty, $lo:expr, $hi:expr) => {{
+            let n = $v.len();
+            if n == 0 {
+                Some((0.0, 0.0, 0.0, 0.0, 0, true))
+            } else {
+                let mut mn = $hi;
+                let mut mx = $lo;
+                let mut sum: $acc = 0;
+                let mut sum_sq: $acc = 0;
+                let mut ok = true;
+                for &x in $v.iter() {
+                    if x < mn {
+                        mn = x;
+                    }
+                    if x > mx {
+                        mx = x;
+                    }
+                    let w = x as $acc;
+                    match (
+                        sum.checked_add(w),
+                        w.checked_mul(w).and_then(|q| sum_sq.checked_add(q)),
+                    ) {
+                        (Some(a), Some(b)) => {
+                            sum = a;
+                            sum_sq = b;
+                        }
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    // `sum`/`sum_sq` fit; the variance numerator still might not, so this can
+                    // legitimately return None and send the caller to the f64 fallback.
+                    moments_exact(sum as i128, sum_sq as i128, n)
+                        .map(|(mean, std)| (mn as f64, mx as f64, mean, std, n, true))
+                } else {
+                    None
+                }
+            }
+        }};
+    }
+    /// The `f64` reduction — for float dtypes, and as the inexact fallback when an integer
+    /// accumulator overflows.
+    macro_rules! reduce_f64 {
+        ($v:expr, $exact:expr) => {{
+            let n = $v.len();
+            if n == 0 {
+                (0.0, 0.0, 0.0, 0.0, 0, true)
             } else {
                 let mut mn = f64::INFINITY;
                 let mut mx = f64::NEG_INFINITY;
@@ -1378,38 +1478,274 @@ fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize) {
                     sum += x;
                     sumsq += x * x;
                 }
-                let mean = sum / n as f64;
-                let var = (sumsq / n as f64) - mean * mean;
-                (mn, mx, mean, var.max(0.0).sqrt(), n)
+                let (mean, std) = moments_f64(sum, sumsq, n);
+                (mn, mx, mean, std, n, $exact)
             }
         }};
     }
     match d {
-        ArrayData::I8(v) => reduce!(v),
-        ArrayData::U8(v) => reduce!(v),
-        ArrayData::I16(v) => reduce!(v),
-        ArrayData::I32(v) => reduce!(v),
-        ArrayData::I64(v) => reduce!(v),
-        ArrayData::U16(v) => reduce!(v),
-        ArrayData::U32(v) => reduce!(v),
-        ArrayData::U64(v) => reduce!(v),
-        ArrayData::F32(v) => reduce!(v),
-        ArrayData::F64(v) => reduce!(v),
-        // f16/bool have no `as f64` cast — go through the lossless f64 view.
-        ArrayData::F16(_) | ArrayData::Bool(_) => {
+        ArrayData::I8(v) => reduce_int!(v),
+        ArrayData::U8(v) => reduce_int!(v),
+        ArrayData::I16(v) => reduce_int!(v),
+        ArrayData::I32(v) => reduce_int!(v),
+        ArrayData::U16(v) => reduce_int!(v),
+        ArrayData::U32(v) => reduce_int!(v),
+        ArrayData::Bool(v) => reduce_int!(v),
+        ArrayData::I64(v) => {
+            reduce_checked!(v, i128, i64::MIN, i64::MAX).unwrap_or_else(|| reduce_f64!(v, false))
+        }
+        ArrayData::U64(v) => {
+            reduce_checked!(v, u128, u64::MIN, u64::MAX).unwrap_or_else(|| reduce_f64!(v, false))
+        }
+        ArrayData::F32(v) => reduce_f64!(v, false),
+        ArrayData::F64(v) => reduce_f64!(v, false),
+        // f16 has no `as f64` cast — go through the lossless f64 view.
+        ArrayData::F16(_) => {
             let v = d.as_f64();
-            reduce!(v)
+            reduce_f64!(v, false)
         }
     }
 }
 
+/// Mean and population standard deviation from **exact integer** raw moments.
+///
+/// Delegates to [`ChunkStats`] so the decode path and the chunk-index path are the same arithmetic
+/// by construction and cannot drift. That means the variance is `(n·Σx² − (Σx)²) / n²` with the
+/// numerator in `i128`, NOT the textbook `E[x²] − E[x]²`: converting the moments to `f64` before
+/// subtracting two nearly-equal huge numbers cancels catastrophically — for `[10¹⁵, 10¹⁵+1]` the
+/// true variance is 0.25 and the `f64` form returns 0.0.
+///
+/// Returns `None` when the variance cannot be computed exactly (overflow, #523), so the caller
+/// falls back rather than reporting a wrong number as exact.
+fn moments_exact(sum: i128, sum_sq: i128, n: usize) -> Option<(f64, f64)> {
+    let cs = tessera_core::chunk_index::ChunkStats {
+        count: n as u64,
+        min: None,
+        max: None,
+        sum,
+        sum_sq,
+    };
+    Some((cs.mean()?, cs.std_dev()?))
+}
+
+/// The `f64` moments, for float dtypes only — inherently not correctly rounded, hence never `exact`.
+fn moments_f64(sum: f64, sum_sq: f64, n: usize) -> (f64, f64) {
+    let nf = n as f64;
+    let mean = sum / nf;
+    let var = (sum_sq / nf - mean * mean).max(0.0);
+    (mean, var.sqrt())
+}
+
+/// How `stats` obtained its numbers, and whether they are exact.
+///
+/// The distinction is reported, never assumed: an approximation must never be presented as exact
+/// (#347). Today only the float full-decode path is inexact — it accumulates in `f64` — while both
+/// integer paths reduce through the same `i128` monoid and agree bit-for-bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StatsSource {
+    /// Machine-readable tag for the `--json` `method` field.
+    method: &'static str,
+    /// True when the numbers are exact for the block's dtype.
+    exact: bool,
+}
+
+const SRC_INDEX: StatsSource = StatsSource {
+    method: "chunk-index-aggregate",
+    exact: true,
+};
+const SRC_DECODE_INT: StatsSource = StatsSource {
+    method: "full-decode-exact-integer",
+    exact: true,
+};
+/// A float array: reduced by `f64` accumulation, which is not correctly rounded (each addition
+/// rounds, and the error grows with the sample count). Never `exact`.
+const SRC_DECODE_F64: StatsSource = StatsSource {
+    method: "full-decode-f64-float",
+    exact: false,
+};
+/// An INTEGER array whose exact accumulator overflowed, so the reduction fell back to `f64`. A
+/// distinct tag from the float case: same arithmetic, entirely different cause, and a consumer that
+/// sees this on integer data is looking at a #523-class input worth knowing about.
+const SRC_DECODE_OVERFLOW: StatsSource = StatsSource {
+    method: "full-decode-f64-integer-overflow",
+    exact: false,
+};
+
+/// Read `block`'s chunk-index sidecar and return its exact aggregate — **without touching the data
+/// block** (ADR-0028 §3, #347).
+///
+/// `None` (fall back to a full decode) unless every one of these holds. The index is a *derived*
+/// sidecar bound to its data block only by NAME, so each check exists to stop a mismatched index
+/// being served as `exact`. Being slow is recoverable; confidently reporting the wrong `min`/`max`
+/// is not.
+///
+///  - the sidecar exists and declares `indexes: <block>`;
+///  - the data block's dtype is an **integer narrower than 64 bits**. `ChunkStats` folds `sum_sq`
+///    in `i128`, which a 64-bit sample can overflow — and until #523 lands the write path *wraps
+///    silently*, so a sealed `.cidx` for an `int64`/`uint64` array may already contain a wrong
+///    `sum_sq`. A float block can never have an integer index (the writer emits none), so a `.cidx`
+///    sitting next to one is stale by construction;
+///  - the aggregate covers exactly the array's voxel count — catching a stale or partial index;
+///  - the aggregate itself does not overflow ([`ChunkIndex::checked_aggregate`]).
+///
+/// **Known gap, deliberately not papered over here:** the sidecar records the *name* of the block it
+/// indexes, not its content digest, so an index cannot be proven to describe the current bytes of
+/// that block. `tessera commit --remove-block volume --add-block other.tsra:volume` used to leave a
+/// stale `volume.cidx`; that specific hole is closed in `version.rs` (the sidecar is removed with its
+/// block) and the dtype/shape checks below catch the mismatched-shape cases. Binding the index to
+/// `BlockRef.digest` is a sealed-layout change and is a mandatory item of the single format event
+/// being specified for #522/P1.
+fn stats_from_chunk_index<R: std::io::Read + std::io::Seek>(
+    r: &mut tessera_io::Reader<R>,
+    block: &str,
+    spec: &tessera_core::block::array::ArraySpec,
+) -> Option<tessera_core::chunk_index::ChunkStats> {
+    // Only integer dtypes narrower than 64 bits have a trustworthy integer index (see above).
+    let dtype_ok = matches!(
+        spec.dtype.as_str(),
+        "int8" | "uint8" | "int16" | "uint16" | "int32" | "uint32" | "bool"
+    );
+    if !dtype_ok {
+        return None;
+    }
+    let sidecar = format!("{block}.cidx");
+    let bref = r.manifest().blocks.iter().find(|b| b.name == sidecar)?;
+    // The sidecar's own spec records which block it indexes; refuse an index about something else.
+    if bref.spec.get("indexes").and_then(|v| v.as_str()) != Some(block) {
+        return None;
+    }
+    let bytes = r.read_block(&sidecar).ok()?;
+    let index = tessera_core::chunk_index::ChunkIndex::from_bytes(&bytes).ok()?;
+
+    // Shape binding: the index is built by walking the chunk grid, so its entry count is a pure
+    // function of shape+chunks. A mismatch means the index describes a differently-shaped array.
+    let nchunks: u64 = spec
+        .shape
+        .iter()
+        .zip(spec.chunks.iter())
+        .map(|(&d, &c)| d.div_ceil(c.max(1)).max(1))
+        .product();
+    if index.len() as u64 != nchunks {
+        tracing::warn!(
+            block,
+            entries = index.len(),
+            expected = nchunks,
+            "chunk-index entry count does not match the array's chunk grid — falling back"
+        );
+        return None;
+    }
+
+    // Overflow must not be wrapped into a number we are about to call exact (#523).
+    let agg = index.checked_aggregate()?;
+    let voxels: u64 = spec.shape.iter().product();
+    if agg.count != voxels {
+        tracing::warn!(
+            block,
+            indexed = agg.count,
+            voxels,
+            "chunk-index does not cover the whole array — falling back to a full decode"
+        );
+        return None;
+    }
+    // And the derived stats must be computable exactly, or this is not an exact path.
+    agg.std_dev()?;
+    Some(agg)
+}
+
 /// `tessera stats FILE BLOCK` — a numeric overview of an **array** block: shape · dtype · chunks ·
 /// codec · value range (min/max/mean/std, raw and — when a rescale is present — physical) · unit ·
-/// spatial referencing. Decodes the block once; the "general looking at it" for a volume.
-pub fn stats(file: &Path, block: &str, out: &mut dyn Write) -> Result<()> {
-    let (spec, blob) = open_array(file, block)?;
-    let data = tessera_io::array::decode(&spec, &blob)?;
-    let (mn, mx, mean, std, n) = array_stats(&data);
+/// spatial referencing. The "general looking at it" for a volume.
+///
+/// Prefers the block's `{hash, stats}` **chunk-index sidecar** when one is present: `count/min/max/
+/// mean/std` are exact monoid roll-ups, so they come straight off `ChunkIndex::aggregate()` with **no
+/// block read and no decode** (#347). Falls back to decoding the block when there is no usable index.
+/// Either way the output says which path ran and whether the numbers are exact.
+pub fn stats(file: &Path, block: &str, json: bool, out: &mut dyn Write) -> Result<()> {
+    let mut r = tessera_io::Reader::open(file)?;
+    let bref = r
+        .manifest()
+        .blocks
+        .iter()
+        .find(|b| b.name == block)
+        .ok_or_else(|| tessera_core::Error::Invalid(format!("no block '{block}' in this .tsra")))?;
+    if bref.kind != BlockKind::Array {
+        return Err(tessera_core::Error::Invalid(format!(
+            "block '{block}' is a {:?}, not an array — `stats`/`slice` are for array blocks",
+            bref.kind
+        )));
+    }
+    let spec: tessera_core::block::array::ArraySpec = serde_json::from_value(bref.spec.clone())
+        .map_err(|e| tessera_core::Error::Invalid(format!("bad array spec for '{block}': {e}")))?;
+
+    // Decode-free path first: the sidecar's aggregate is exact for the integer core.
+    let (mn, mx, mean, std, n, src) = match stats_from_chunk_index(&mut r, block, &spec) {
+        Some(agg) => (
+            agg.min.unwrap_or(0) as f64,
+            agg.max.unwrap_or(0) as f64,
+            agg.mean().unwrap_or(0.0),
+            agg.std_dev().unwrap_or(0.0),
+            agg.count as usize,
+            SRC_INDEX,
+        ),
+        None => {
+            let blob = r.read_block(block)?;
+            let data = tessera_io::array::decode(&spec, &blob)?;
+            // Integer dtypes reduce exactly (see `array_stats`); floats do not.
+            let (mn, mx, mean, std, n, exact) = array_stats(&data);
+            // `array_stats` reports its own exactness. Distinguish the two inexact causes: a float
+            // array (inherent) from an integer array whose accumulator overflowed (#523-class).
+            let is_float = matches!(
+                &data,
+                ArrayData::F16(_) | ArrayData::F32(_) | ArrayData::F64(_)
+            );
+            let src = match (exact, is_float) {
+                (true, _) => SRC_DECODE_INT,
+                (false, true) => SRC_DECODE_F64,
+                (false, false) => SRC_DECODE_OVERFLOW,
+            };
+            (mn, mx, mean, std, n, src)
+        }
+    };
+
+    let physical = spec
+        .rescale_slope
+        .zip(spec.rescale_intercept)
+        .map(|(sl, ic)| (sl, ic, sl * mn + ic, sl * mx + ic));
+
+    if json {
+        let doc = serde_json::json!({
+            "block": block,
+            "shape": spec.shape,
+            "axes": spec.axes,
+            "dtype": spec.dtype,
+            "codec": spec.codec,
+            "chunks": spec.chunks,
+            "count": n,
+            // The honesty contract (#347): say where the numbers came from and whether they are
+            // exact, so a consumer never has to guess whether it may trust them.
+            //
+            // `exact: true` means the value is the correctly-rounded result of exact arithmetic over
+            // every sample. An `f64` accumulation is NOT that — its error grows with the sample
+            // count — so every float array reports `exact: false` however small its error looks.
+            //
+            // JSON has no NaN or Infinity: `serde_json` serialises a non-finite `f64` as `null`.
+            // That is reachable here (an all-NaN float block, or ±inf values), so a consumer must
+            // read a null statistic as "not available", never as zero.
+            "exact": src.exact,
+            "method": src.method,
+            "raw": { "min": mn, "max": mx, "mean": mean, "std": std },
+            "physical": physical.map(|(sl, ic, pmn, pmx)| serde_json::json!({
+                "min": pmn, "max": pmx, "slope": sl, "intercept": ic,
+                "unit": spec.unit.clone().unwrap_or_default(),
+            })),
+            "world": spec.world_frame.as_ref().map(|wf| serde_json::json!({
+                "convention": wf.convention, "unit": wf.unit,
+            })),
+        });
+        writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)
+            .map_err(tessera_core::Error::from)?;
+        return Ok(());
+    }
 
     let shape: Vec<String> = spec.shape.iter().map(u64::to_string).collect();
     let axes = if spec.axes.is_empty() {
@@ -1434,16 +1770,19 @@ pub fn stats(file: &Path, block: &str, out: &mut dyn Write) -> Result<()> {
         "raw       min {mn}  max {mx}  mean {mean:.3}  std {std:.3}"
     )
     .map_err(tessera_core::Error::from)?;
+    writeln!(
+        out,
+        "source    {} ({})",
+        src.method,
+        if src.exact { "exact" } else { "approximate" }
+    )
+    .map_err(tessera_core::Error::from)?;
     // Physical units (CT→HU, PET→Bq/mL) when the array carries a rescale.
-    if let (Some(sl), Some(ic)) = (spec.rescale_slope, spec.rescale_intercept) {
+    if let Some((sl, ic, pmn, pmx)) = physical {
         let unit = spec.unit.as_deref().unwrap_or("");
         writeln!(
             out,
-            "physical  min {}  max {}  ({}·raw + {}) {unit}",
-            sl * mn + ic,
-            sl * mx + ic,
-            sl,
-            ic
+            "physical  min {pmn}  max {pmx}  ({sl}·raw + {ic}) {unit}"
         )
         .map_err(tessera_core::Error::from)?;
     }
@@ -2702,9 +3041,320 @@ mod tests {
         // Wrong rank is a clear error, not a panic.
         assert!(parse_index("1,:", &shape).is_err());
 
-        let (mn, mx, mean, std, n) = array_stats(&ArrayData::I16(vec![0, 2, 4, 6]));
+        let (mn, mx, mean, std, n, _) = array_stats(&ArrayData::I16(vec![0, 2, 4, 6]));
         assert_eq!((mn, mx, n), (0.0, 6.0, 4));
         assert!((mean - 3.0).abs() < 1e-9 && (std - 5f64.sqrt()).abs() < 1e-9);
+    }
+
+    /// Integer arrays must reduce in EXACT integer arithmetic, not `f64` (#347).
+    ///
+    /// `array_stats` accumulated `sum`/`sum_sq` as `f64`. Once a running sum passes 2^53 the
+    /// increments stop landing: adding 1 to 2^53 rounds back to 2^53 (ties-to-even), so this input
+    /// loses all 1000 of its trailing ones and reports a mean ~1.0 too low. On a real 127.7M-voxel
+    /// int16 volume the same effect puts `sum_sq` past 2^53 and moves `std` in the 4th decimal.
+    ///
+    /// This also makes the full-decode path agree BIT-FOR-BIT with the chunk-index aggregate, which
+    /// reduces through the same `i128` monoid — the property #347's equivalence test rests on.
+    #[test]
+    fn array_stats_reduces_integers_exactly_past_two_pow_53() {
+        let mut v: Vec<i64> = vec![1i64 << 53];
+        v.extend(std::iter::repeat_n(1i64, 1000));
+        let n = v.len();
+
+        let (mn, mx, mean, _std, got_n, exact) = array_stats(&ArrayData::I64(v.clone()));
+        assert!(exact, "i64 within accumulator range must reduce exactly");
+        assert_eq!((mn, mx, got_n), (1.0, (1u64 << 53) as f64, n));
+
+        // Exact reference, computed in i128 the way ChunkStats does.
+        let sum: i128 = v.iter().map(|&x| x as i128).sum();
+        let want_mean = sum as f64 / n as f64;
+        assert_eq!(
+            sum,
+            (1i128 << 53) + 1000,
+            "the 1000 ones must all be counted"
+        );
+        assert_eq!(
+            mean, want_mean,
+            "integer reduction must be exact: f64 accumulation stalls at 2^53 and drops the ones"
+        );
+
+        // And it must equal the chunk-index monoid exactly — same reduction, same answer.
+        let cs = tessera_core::chunk_index::ChunkStats::from_values(&v);
+        assert_eq!(mean, cs.mean().unwrap());
+        assert_eq!(_std, cs.std_dev().unwrap());
+    }
+
+    /// Seal an integer array twice — with and without its chunk-index sidecar — and return both paths.
+    ///
+    /// Non-divisible chunking on purpose: `array_chunk_index` clips edge chunks, so this exercises
+    /// the case where the chunk grid does not tile the shape evenly and the aggregate must still
+    /// cover every voxel exactly.
+    fn seal_with_and_without_index(
+        dir: &std::path::Path,
+        shape: Vec<u64>,
+        chunks: Vec<u64>,
+        dtype: &str,
+        data: ArrayData,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        let mut spec = ArraySpec::new(shape, dtype);
+        spec.chunks = chunks;
+
+        let indexed = dir.join("indexed.tsra");
+        let ((bref, payload), sidecar) =
+            tessera_io::array::array_block_with_index("volume", &spec, &data).unwrap();
+        let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        let mut payloads = vec![payload];
+        if let Some((sref, spayload)) = sidecar {
+            b.add_block_ref(sref);
+            payloads.push(spayload);
+        }
+        tessera_io::pack(&b.seal().unwrap(), &payloads, &indexed).unwrap();
+
+        let plain = dir.join("plain.tsra");
+        let (bref2, payload2) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+        let mut b2 = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+        b2.add_block_ref(bref2);
+        tessera_io::pack(&b2.seal().unwrap(), &[payload2], &plain).unwrap();
+
+        (indexed, plain)
+    }
+
+    fn stats_json(file: &std::path::Path) -> serde_json::Value {
+        let mut buf = Vec::new();
+        stats(file, "volume", true, &mut buf).unwrap();
+        serde_json::from_slice(&buf).unwrap()
+    }
+
+    /// #347 equivalence: the chunk-index aggregate and the full decode must agree EXACTLY, and both
+    /// must equal an exact-integer reference.
+    ///
+    /// The reference is computed in `i128` in the test, not taken from either path — asserting that
+    /// two implementations agree proves only that they agree. Integer extremes and negative values
+    /// are included because `i64::MIN`/`MAX` are where a careless widening or an `abs()` breaks.
+    #[test]
+    fn index_and_decode_stats_agree_and_match_an_exact_integer_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        // 5x7x3 = 105 voxels with 4^3 chunks: the grid does NOT tile the shape (edge chunks clip).
+        let n = 5usize * 7 * 3;
+        let vals: Vec<i32> = (0..n)
+            .map(|k| match k {
+                0 => i32::MIN,                           // integer extreme, negative
+                1 => i32::MAX,                           // integer extreme, positive
+                _ => (k as i32 * 2_097_143) - 1_000_000, // spread, crosses zero
+            })
+            .collect();
+        let (indexed, plain) = seal_with_and_without_index(
+            dir.path(),
+            vec![5, 7, 3],
+            vec![4, 4, 4],
+            "int32",
+            ArrayData::I32(vals.clone()),
+        );
+
+        let a = stats_json(&indexed);
+        let b = stats_json(&plain);
+
+        // The two paths really are different paths.
+        assert_eq!(a["method"], "chunk-index-aggregate");
+        assert_eq!(b["method"], "full-decode-exact-integer");
+        assert_eq!(a["exact"], true);
+        assert_eq!(b["exact"], true);
+
+        // Exact reference, independent of both implementations — and deliberately NOT the
+        // `E[x²] − E[x]²` form, which is the thing under test. The first version of this test
+        // derived its expectation with that same f64 formula, so it agreed vacuously: an
+        // expectation derived from the same wrong thing as the result proves nothing (the same
+        // shape as the #503 row-window bug).
+        let sum: i128 = vals.iter().map(|&x| x as i128).sum();
+        let sum_sq: i128 = vals.iter().map(|&x| (x as i128) * (x as i128)).sum();
+        let ni = n as i128;
+        let want_mean = sum as f64 / n as f64;
+        // variance = (n·Σx² − (Σx)²) / n², numerator in exact integers.
+        let want_std = ((ni * sum_sq - sum * sum) as f64 / (ni as f64 * ni as f64)).sqrt();
+        let want_min = *vals.iter().min().unwrap() as f64;
+        let want_max = *vals.iter().max().unwrap() as f64;
+
+        for (label, v) in [("index", &a), ("decode", &b)] {
+            assert_eq!(v["count"].as_u64().unwrap() as usize, n, "{label} count");
+            assert_eq!(v["raw"]["min"].as_f64().unwrap(), want_min, "{label} min");
+            assert_eq!(v["raw"]["max"].as_f64().unwrap(), want_max, "{label} max");
+            assert_eq!(
+                v["raw"]["mean"].as_f64().unwrap(),
+                want_mean,
+                "{label} mean"
+            );
+            assert_eq!(v["raw"]["std"].as_f64().unwrap(), want_std, "{label} std");
+        }
+        // ...and bit-for-bit with each other.
+        assert_eq!(
+            a["raw"], b["raw"],
+            "index and decode must agree bit-for-bit"
+        );
+    }
+
+    /// A `u64` array holding values above `i64::MAX` gets NO sidecar (`as_i64` refuses), so `stats`
+    /// must fall back to the decode path — and still be exact, via the `u128` reduction.
+    #[test]
+    fn u64_beyond_i64_max_has_no_index_and_still_reduces_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let vals: Vec<u64> = vec![u64::MAX, 0, 1 << 63, 7];
+        let (indexed, _plain) = seal_with_and_without_index(
+            dir.path(),
+            vec![4],
+            vec![2],
+            "uint64",
+            ArrayData::U64(vals.clone()),
+        );
+        let v = stats_json(&indexed);
+        // No sidecar was emitted (`as_i64` refuses these values), so even the "indexed" file falls
+        // back to a decode. And `sum_sq` here overflows u128 — `u64::MAX²` alone is ~3.4e38 against
+        // a `u128::MAX` of ~3.4e38 — so the reduction cannot be exact and must NOT claim to be.
+        assert_eq!(v["method"], "full-decode-f64-integer-overflow");
+        assert_eq!(
+            v["exact"], false,
+            "an overflowed integer accumulator must fall back and report inexact, not wrap"
+        );
+        // min/max are still exact (they never accumulate), and are what a viewer windows on.
+        assert_eq!(v["raw"]["max"].as_f64().unwrap(), u64::MAX as f64);
+        assert_eq!(v["raw"]["min"].as_f64().unwrap(), 0.0);
+
+        // A u64 array whose sum_sq FITS reduces exactly, through the u128 path.
+        let small: Vec<u64> = vec![1, 2, 3, 4];
+        let (_, _, mean, _, n, exact) = array_stats(&ArrayData::U64(small.clone()));
+        assert!(exact, "u64 within accumulator range must reduce exactly");
+        assert_eq!(n, 4);
+        assert_eq!(mean, 2.5);
+    }
+
+    /// Float arrays have no integer monoid: no sidecar, and the result is labelled NOT exact.
+    /// Never present an approximation as exact (#347).
+    #[test]
+    fn float_arrays_are_labelled_inexact() {
+        let dir = tempfile::tempdir().unwrap();
+        let (indexed, _) = seal_with_and_without_index(
+            dir.path(),
+            vec![4],
+            vec![2],
+            "float32",
+            ArrayData::F32(vec![1.5, 2.5, -3.25, 0.0]),
+        );
+        let v = stats_json(&indexed);
+        assert_eq!(v["method"], "full-decode-f64-float");
+        assert_eq!(
+            v["exact"], false,
+            "an f64 reduction must not claim exactness"
+        );
+    }
+
+    /// A sidecar whose aggregate does not cover the array must be REFUSED, not served as exact.
+    ///
+    /// Being slow is recoverable; confidently reporting the wrong min/max is not. This forges a
+    /// short index (one chunk's worth) against a larger array and asserts `stats` falls back.
+    #[test]
+    fn a_partial_chunk_index_is_refused_and_falls_back() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("short.tsra");
+        let mut spec = ArraySpec::new(vec![8], "int16");
+        spec.chunks = vec![4];
+        let data = ArrayData::I16((0..8).collect());
+
+        let (bref, payload) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+        // An index covering only the FIRST half of the array — stale/partial, exactly what must
+        // not be trusted.
+        let mut short = tessera_core::chunk_index::ChunkIndex::new();
+        short.push(tessera_core::hash::digest(b"chunk-0"), &[0, 1, 2, 3]);
+        let (sref, spayload) =
+            tessera_io::chunk_index::chunk_index_block("volume", &short).unwrap();
+
+        let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        b.add_block_ref(sref);
+        tessera_io::pack(&b.seal().unwrap(), &[payload, spayload], &p).unwrap();
+
+        let v = stats_json(&p);
+        assert_eq!(
+            v["method"], "full-decode-exact-integer",
+            "a partial index must be refused, not served as exact"
+        );
+        // The real values are 0..8, which the short index would have reported as max 3.
+        assert_eq!(v["raw"]["max"].as_f64().unwrap(), 7.0);
+        assert_eq!(v["count"].as_u64().unwrap(), 8);
+    }
+
+    /// A 64-bit integer array's index is REFUSED until #523's write-path overflow is fixed.
+    ///
+    /// `ChunkStats` folds `sum_sq` in `i128`, which a 64-bit sample overflows, and the write path
+    /// currently WRAPS in release — so a sealed `.cidx` for an int64 array may already hold a wrong
+    /// `sum_sq`. Reading it and calling the result exact would launder that corruption. The index is
+    /// there (the writer emitted one); `stats` must decline to use it.
+    #[test]
+    fn a_64_bit_integer_index_is_refused_until_the_write_path_is_fixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (indexed, _) = seal_with_and_without_index(
+            dir.path(),
+            vec![4],
+            vec![2],
+            "int64",
+            ArrayData::I64(vec![1, 2, 3, 4]),
+        );
+        // The sidecar exists...
+        let r = tessera_io::Reader::open(&indexed).unwrap();
+        assert!(
+            r.manifest().blocks.iter().any(|b| b.name == "volume.cidx"),
+            "the writer should have emitted an index for an integer array"
+        );
+        drop(r);
+        // ...and is deliberately not used.
+        let v = stats_json(&indexed);
+        assert_eq!(
+            v["method"], "full-decode-exact-integer",
+            "a 64-bit index must be refused while #523 is open"
+        );
+        assert_eq!(v["raw"]["mean"].as_f64().unwrap(), 2.5);
+    }
+
+    /// An index whose entry count does not match the block's chunk grid is refused.
+    ///
+    /// This is the shape-binding half of "the index is bound to its block only by name": a `.cidx`
+    /// built for a differently-shaped array cannot describe this one, and serving its min/max as
+    /// exact would be a confident wrong answer.
+    #[test]
+    fn an_index_for_a_different_shape_is_refused() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("mismatch.tsra");
+
+        // The data block: 8 voxels, chunks of 2 -> a 4-entry chunk grid.
+        let mut spec = ArraySpec::new(vec![8], "int16");
+        spec.chunks = vec![2];
+        let data = ArrayData::I16((0..8).collect());
+        let (bref, payload) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+
+        // An index built for a 2-chunk array — wrong grid, and its max (1) is wrong for this block.
+        let mut other = tessera_core::chunk_index::ChunkIndex::new();
+        other.push(tessera_core::hash::digest(b"c0"), &[0, 1]);
+        other.push(tessera_core::hash::digest(b"c1"), &[0, 1]);
+        let (sref, spayload) =
+            tessera_io::chunk_index::chunk_index_block("volume", &other).unwrap();
+
+        let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        b.add_block_ref(sref);
+        tessera_io::pack(&b.seal().unwrap(), &[payload, spayload], &p).unwrap();
+
+        let v = stats_json(&p);
+        assert_eq!(v["method"], "full-decode-exact-integer");
+        assert_eq!(
+            v["raw"]["max"].as_f64().unwrap(),
+            7.0,
+            "the real max, not the index's 1"
+        );
     }
 
     /// Default text-CSV grid options — the shape almost every test wants.
@@ -3503,7 +4153,7 @@ mod tests {
 
         // stats reports the shape + value range.
         let mut s = Vec::new();
-        stats(&p, "volume", &mut s).unwrap();
+        stats(&p, "volume", false, &mut s).unwrap();
         let s = String::from_utf8(s).unwrap();
         assert!(s.contains("shape     [2, 3]"), "{s}");
         assert!(s.contains("min 0  max 12"), "{s}");

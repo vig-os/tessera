@@ -62,20 +62,63 @@ impl ChunkStats {
         (self.count > 0).then(|| self.sum as f64 / self.count as f64)
     }
 
-    /// Population variance `E[x²] − E[x]²`, or `None` for an empty chunk — **derived** from the `sum_sq`,
-    /// `sum`, `count` monoids (the other half of the §3 factory: a *new monoid* `sum_sq` unlocks new
-    /// stats). Clamped at 0 to absorb floating-point round-off near zero.
+    /// Population variance, or `None` when it cannot be computed exactly (an empty chunk, or an
+    /// overflow — see below).
+    ///
+    /// Computed as `(n·Σx² − (Σx)²) / n²`, with the **numerator evaluated in `i128`**, not as the
+    /// textbook `E[x²] − E[x]²`. The textbook form converts `Σx²` and `Σx` to `f64` *before*
+    /// subtracting two nearly-equal huge numbers, and catastrophic cancellation then destroys the
+    /// answer — not merely its last bits. For `[10¹⁵, 10¹⁵+1]` the true variance is `0.25` and the
+    /// `f64` form returns **`0.0`**. Doing the subtraction in exact integers and dividing once at the
+    /// end removes the cancellation entirely.
+    ///
+    /// `None` on overflow rather than a wrapped answer (the #523 rule: fail closed, never report a
+    /// wrong statistic as if it were right). `n·Σx²` and `(Σx)²` can both exceed `i128` for 64-bit
+    /// samples.
     pub fn variance(&self) -> Option<f64> {
-        (self.count > 0).then(|| {
-            let n = self.count as f64;
-            let mean = self.sum as f64 / n;
-            (self.sum_sq as f64 / n - mean * mean).max(0.0)
-        })
+        if self.count == 0 {
+            return None;
+        }
+        let n = self.count as i128;
+        // Exact numerator: n·Σx² − (Σx)². Checked, because either term can overflow i128 for
+        // 64-bit samples (see #523).
+        let n_sum_sq = n.checked_mul(self.sum_sq)?;
+        let sum_sq_of_sum = self.sum.checked_mul(self.sum)?;
+        let numerator = n_sum_sq.checked_sub(sum_sq_of_sum)?;
+        // The numerator is non-negative in exact arithmetic (Cauchy–Schwarz); clamp defensively.
+        let numerator = numerator.max(0);
+        // One division, at the end, in f64. n² is exact here: n ≤ 2^64 so n² ≤ 2^128, and the
+        // f64 conversion of each side is a single correctly-rounded step.
+        Some(numerator as f64 / (n as f64 * n as f64))
     }
 
-    /// Population standard deviation = `sqrt(variance)`; `None` for an empty chunk.
+    /// Population standard deviation = `sqrt(variance)`; `None` when [`Self::variance`] is `None`.
     pub fn std_dev(&self) -> Option<f64> {
         self.variance().map(f64::sqrt)
+    }
+
+    /// [`Monoid::combine`] with overflow **detected** rather than wrapped (#523).
+    ///
+    /// `combine` uses plain `+`, which panics in debug and **wraps silently in release** once
+    /// `sum_sq` exceeds `i128` — and a wrapped `sum_sq` written into a sealed `.cidx` is a wrong
+    /// statistic with a content hash over it. Callers that must not serve a wrong number use this
+    /// and fall back when it returns `None`.
+    pub fn checked_combine(&self, other: &Self) -> Option<Self> {
+        let min = match (self.min, other.min) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let max = match (self.max, other.max) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        Some(ChunkStats {
+            count: self.count.checked_add(other.count)?,
+            min,
+            max,
+            sum: self.sum.checked_add(other.sum)?,
+            sum_sq: self.sum_sq.checked_add(other.sum_sq)?,
+        })
     }
 
     /// True if some sample in the chunk *could* lie in the inclusive range `[lo, hi]` — i.e. the chunk
@@ -206,6 +249,17 @@ impl ChunkIndex {
         self.entries
             .iter()
             .fold(ChunkStats::identity(), |acc, e| acc.combine(&e.stats))
+    }
+
+    /// [`Self::aggregate`] with overflow detected rather than wrapped — `None` if any step would
+    /// exceed `i128` (#523). A reader that reports statistics as *exact* must use this: `aggregate`
+    /// wraps silently in release, and a wrapped total is a wrong number with no outward sign.
+    pub fn checked_aggregate(&self) -> Option<ChunkStats> {
+        self.entries
+            .iter()
+            .try_fold(ChunkStats::identity(), |acc, e| {
+                acc.checked_combine(&e.stats)
+            })
     }
 
     /// The **aggregate stat pyramid** (ADR-0028 §3, the table multiscale overview): level 0 is each
@@ -360,6 +414,72 @@ impl MerkleStatsAccumulator {
 
 #[cfg(test)]
 mod tests {
+
+    /// Variance must not be computed as `E[x²] − E[x]²` in `f64` — that cancels catastrophically.
+    ///
+    /// For `[10¹⁵, 10¹⁵+1]` the true population variance is exactly 1/4. The textbook form converts
+    /// `Σx²` (2e30) and `Σx` to `f64` and subtracts two nearly-equal huge numbers, which returns
+    /// **0.0** — not a rounding error, the wrong answer. The exact numerator `n·Σx² − (Σx)²` is 1,
+    /// and 1/n² = 0.25.
+    #[test]
+    fn variance_is_exact_where_the_textbook_f64_form_cancels_to_zero() {
+        let v = vec![1_000_000_000_000_000i64, 1_000_000_000_000_001];
+        let s = ChunkStats::from_values(&v);
+
+        // Independent exact reference, in integers only.
+        let n = v.len() as i128;
+        let sum: i128 = v.iter().map(|&x| x as i128).sum();
+        let sum_sq: i128 = v.iter().map(|&x| (x as i128) * (x as i128)).sum();
+        assert_eq!(n * sum_sq - sum * sum, 1, "exact numerator is 1");
+
+        assert_eq!(s.variance(), Some(0.25));
+        assert_eq!(s.std_dev(), Some(0.5));
+
+        // What the old formula produced, for contrast — it is not a near miss.
+        let mean_f = sum as f64 / n as f64;
+        let old = (sum_sq as f64 / n as f64 - mean_f * mean_f).max(0.0);
+        assert_eq!(old, 0.0, "the f64 form cancels to zero on this input");
+    }
+
+    /// Overflow must be reported as "cannot compute", never wrapped (#523).
+    #[test]
+    fn checked_combine_and_variance_fail_closed_on_overflow() {
+        let big = ChunkStats {
+            count: 1,
+            min: Some(i64::MAX),
+            max: Some(i64::MAX),
+            sum: i64::MAX as i128,
+            sum_sq: (i64::MAX as i128) * (i64::MAX as i128),
+        };
+        // Two fit; three overflow i128 on sum_sq.
+        let two = big.checked_combine(&big).expect("two must fit");
+        assert_eq!(two.count, 2);
+        assert_eq!(
+            two.checked_combine(&big),
+            None,
+            "a third must fail closed, not wrap"
+        );
+
+        // And a variance whose numerator overflows reports None rather than a wrapped number.
+        let wide = ChunkStats {
+            count: u64::MAX,
+            min: Some(0),
+            max: Some(i64::MAX),
+            sum: 0,
+            sum_sq: i128::MAX,
+        };
+        assert_eq!(wide.variance(), None, "n·sum_sq overflows -> None");
+
+        let mut idx = ChunkIndex::new();
+        idx.push_entry("blake3:a", big.clone());
+        idx.push_entry("blake3:b", big.clone());
+        idx.push_entry("blake3:c", big);
+        assert_eq!(
+            idx.checked_aggregate(),
+            None,
+            "checked_aggregate must refuse an overflowing roll-up"
+        );
+    }
     use super::*;
     use crate::hash::{digest, merkle_root};
 

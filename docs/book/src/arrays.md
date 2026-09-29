@@ -7,7 +7,7 @@ and ROI reads only touch the chunks they intersect — a single voxel decodes on
 
 - `stats` — shape, dtype, chunking, and **both** the raw stored range and the *physical* (rescaled)
   range. For CT that's Hounsfield units (`1·raw + −1024 HU`); the rescale is carried on the block so the
-  overview is physically meaningful without decoding.
+  overview is physically meaningful without decoding. `--json` adds `exact` and `method` (below).
 - `slice --index z,y,x` — pull a point, line (`0,0,:`), or plane (`z,:,:`) as CSV. Only the intersecting
   chunks are read.
 - `project` — collapse one axis into a 2-D image: `--mode max` (MIP, the classic PET/CT overview),
@@ -15,6 +15,62 @@ and ROI reads only touch the chunks they intersect — a single voxel decodes on
 - `pyramid` — build a multiscale overview (full-res + 2× downsampled levels) into a new **derived**
   `.tsra`, each level carrying its `at_level` affine (OME-Zarr `multiscales` geometry) and a
   `derived_from` provenance edge back to the source.
+
+## Stats without decoding
+
+`count`, `min`, `max`, `sum` are **monoids**: a chunk's value folds from its voxels, and a parent's
+folds from its children. So when an array block carries a `{hash, stats}` chunk-index sidecar
+(`<block>.cidx`, [ADR-0028](https://github.com/vig-os/tessera/blob/dev/docs/adr/0028-unified-hierarchy.md)
+§3), the whole-array statistics are already computed — `stats` reads them off
+`ChunkIndex::aggregate()` and never touches the data block. `mean` and `std` come free with them.
+
+On a 127.7 M-voxel int16 volume (487×512×512, 64³ chunks, 151 MiB sealed) the difference is not subtle:
+
+| | warm | cold | peak RSS |
+|---|---|---|---|
+| with `.cidx` (index aggregate) | **0.0061s** | **0.0079s** | **12.4 MiB** |
+| without (full decode) | 0.5795s | 0.7113s | 876.5 MiB |
+
+**95× faster warm, 90× cold, 71× less memory** — and the sidecar that buys it is 85 KiB, 0.06 % of the
+file. Both paths report identical `min`/`max`/`mean`/`std` to the last bit, because the full-decode path
+reduces through the same `i128` monoid the index does.
+
+The output always says which path ran, because an approximation must never be mistaken for an exact
+answer:
+
+| `method` | `exact` | when |
+| --- | --- | --- |
+| `chunk-index-aggregate` | `true` | a usable sidecar was present — no decode |
+| `full-decode-exact-integer` | `true` | integer array, decoded and reduced in exact integer arithmetic |
+| `full-decode-f64-float` | `false` | float array — `f64` accumulation is never correctly rounded |
+| `full-decode-f64-integer-overflow` | `false` | integer array whose exact accumulator overflowed |
+
+`exact: true` means the value is the correctly-rounded result of exact arithmetic over every sample.
+An `f64` accumulation is not that — its error grows with the sample count — so a float array reports
+`exact: false` however small the error looks. (JSON has no NaN or Infinity, so a non-finite statistic
+serialises as `null`: read that as "not available", never as zero.)
+
+A sidecar is **refused**, and `stats` falls back to decoding, unless *all* of these hold:
+
+- it declares `indexes: <block>`;
+- the block's dtype is an integer **narrower than 64 bits** — `sum_sq` folds in `i128`, which a 64-bit
+  sample can overflow, and until [#523](https://github.com/vig-os/tessera/issues/523) is fixed the
+  *write* path wraps silently, so such an index may already be wrong;
+- its entry count matches the block's chunk grid, and its aggregate covers every voxel;
+- the roll-up itself does not overflow.
+
+Being slow is recoverable; confidently reporting a wrong `min`/`max` is not.
+
+> The index is currently bound to its block by **name**, not by content digest, so it cannot be
+> *proved* to describe the block's current bytes. `tessera commit` therefore removes `<name>.cidx`
+> whenever `<name>` is removed or replaced. Binding the index to the block's digest is a sealed-layout
+> change and is a mandatory part of the one format event being specified for
+> [#522](https://github.com/vig-os/tessera/issues/522).
+
+> Integer arrays only, for now. Float arrays have no exact integer monoid, and a value **histogram**
+> needs a monoid that does not exist yet — tracked in
+> [#522](https://github.com/vig-os/tessera/issues/522), which has to settle the bin edges at write time
+> to stay decode-free.
 
 Coordinates: an array optionally carries a voxel→world affine (`world_frame`, LPS mm); when present,
 `slice`/`stats` become world-aware (`--world`). When absent — as in this corpus fixture — the tools stay
