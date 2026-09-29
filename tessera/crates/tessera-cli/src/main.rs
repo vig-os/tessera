@@ -109,7 +109,7 @@ Inspect & navigate:
   ls          List one node's children (meta / a block / sources)
   read        Read table data as CSV/TSV/NDJSON (cross-block)
   stats       Numeric overview of an array block (shape, dtype, value range)
-  slice       Pull a plane/line/point of an array block as CSV (--index z,:,:)
+  slice       Pull a plane/line/point of an array block (--index z,:,: · --format csv|json|npy|png)
   project     Collapse an array along an axis → 2-D image (--mode max|mean|sum)
   pyramid     Build a multiscale pyramid of an array block → a new .tsra
   export      Emit a FAIR discovery record (JSON to stdout)
@@ -180,6 +180,22 @@ enum Cmd {
     ///
     /// With the `cloud` feature enabled, `file` also accepts `s3://<bucket>/<key>` or
     /// `http(s)://<host>/<key>` — the manifest is read via range-GET over the wire.
+    ///
+    /// `--json` emits exactly the serialized sealed manifest — the same object the seal hashes
+    /// cover, not a CLI-shaped view of it. Two things to know before parsing it:
+    ///
+    /// * `producer` is polymorphic. It is a JSON OBJECT
+    ///   (`{tool, version, git_commit?, git_repo?, dirty?}`) on anything sealed since ADR-0058, and
+    ///   a bare STRING (`"tessera/0.0.0"`) on older products, which round-trip unchanged. It is
+    ///   an untagged enum, so consumers must accept both; it is absent entirely on pre-stamp files.
+    ///   `generation`, `study`, `schema` and the other optional fields are omitted when unset
+    ///   rather than emitted as null.
+    ///
+    /// * Its stability is the FORMAT's, tracked by the `tessera_version` field the dump itself
+    ///   carries — this is the spec version, not the CLI's. Fields are added compatibly (readers
+    ///   default them, which is how `producer`/`generation` arrived); a rename or a removal is a
+    ///   major-version break, and a reader refuses a manifest whose major exceeds the one it
+    ///   understands. So pin behaviour to `tessera_version`, not to the tessera binary's version.
     Inspect {
         /// The `.tsra` to summarise (or an `s3://` / `http(s)://` URL with the `cloud` feature).
         file: PathBuf,
@@ -207,6 +223,11 @@ enum Cmd {
     Verify {
         /// The `.tsra` to verify (or an `s3://` / `http(s)://` URL with the `cloud` feature).
         file: PathBuf,
+        /// Worker threads for the parallel payload probe. Overrides `TESSERA_WORKERS` and
+        /// `.tessera/config.toml`; omitted, the resource-cap resolver picks the machine default.
+        /// Ignored for a URL, which verifies serially.
+        #[arg(long)]
+        workers: Option<usize>,
     },
     /// Render a `.tsra` as a navigable hierarchy tree.
     ///
@@ -266,9 +287,10 @@ enum Cmd {
         /// Emit every row (overrides `--limit`).
         #[arg(long)]
         all: bool,
-        /// Default max rows when no `--rows`/`--head`/`--tail`/`--at`/`--all` is given.
-        #[arg(long, default_value_t = 20)]
-        limit: u64,
+        /// Max rows when no `--rows`/`--head`/`--tail`/`--at`/`--all` is given. Omitted, a **terminal**
+        /// gets a 20-row preview while a pipe or redirect gets every row.
+        #[arg(long)]
+        limit: Option<u64>,
         /// Output format: `csv` (default) | `tsv` | `ndjson`.
         #[arg(long, default_value = "csv")]
         format: String,
@@ -283,7 +305,7 @@ enum Cmd {
         /// The array block to summarise (e.g. `volume`).
         block: String,
     },
-    /// Pull a rectangular sub-region (2-D plane / 1-D line / point) of an **array** block as CSV.
+    /// Pull a rectangular sub-region (2-D plane / 1-D line / point) of an **array** block.
     ///
     /// `--index` is numpy-style, C-order, per axis: `N` (one index, negative from end), `:` (whole
     /// axis), or `A:B` (half-open). Only intersecting chunks are decoded. Axial CT plane example:
@@ -303,9 +325,21 @@ enum Cmd {
         /// Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples.
         #[arg(long)]
         physical: bool,
-        /// Output format: `csv` (default) | `tsv`.
-        #[arg(long, default_value = "csv")]
-        format: String,
+        /// Output format. `npy` is the lossless path for analysis; `png` is a **lossy** 8-bit preview.
+        #[arg(long, value_enum, default_value = "csv")]
+        format: nav::GridFormat,
+        /// Max rows for **text** output (csv/tsv/json). Omitted, a **terminal** gets a 20-row preview
+        /// while a pipe or redirect gets every row. Not valid with `npy`/`png`, which always write the
+        /// whole plane.
+        #[arg(long)]
+        limit: Option<u64>,
+        /// Write every row (text formats; `npy`/`png` always do).
+        #[arg(long)]
+        all: bool,
+        /// `png` only: explicit intensity window `lo,hi` mapped to black..white. Default: the plane's
+        /// own min/max.
+        #[arg(long, allow_hyphen_values = true)]
+        window: Option<String>,
     },
     /// Collapse an **array** block along one axis into a projection image (MIP / mean / sum).
     ///
@@ -325,9 +359,21 @@ enum Cmd {
         /// Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples.
         #[arg(long)]
         physical: bool,
-        /// Output format: `csv` (default) | `tsv`.
-        #[arg(long, default_value = "csv")]
-        format: String,
+        /// Output format. `npy` is the lossless path for analysis; `png` is a **lossy** 8-bit preview.
+        #[arg(long, value_enum, default_value = "csv")]
+        format: nav::GridFormat,
+        /// Max rows for **text** output (csv/tsv/json). Omitted, a **terminal** gets a 20-row preview
+        /// while a pipe or redirect gets every row. Not valid with `npy`/`png`, which always write the
+        /// whole plane.
+        #[arg(long)]
+        limit: Option<u64>,
+        /// Write every row (text formats; `npy`/`png` always do).
+        #[arg(long)]
+        all: bool,
+        /// `png` only: explicit intensity window `lo,hi` mapped to black..white. Default: the plane's
+        /// own min/max.
+        #[arg(long, allow_hyphen_values = true)]
+        window: Option<String>,
     },
     /// Build a multiscale pyramid of an array block (full-res + 2× downsampled levels) → a new `.tsra`.
     ///
@@ -993,6 +1039,79 @@ enum IngestSrc {
     },
 }
 
+/// Build the grid options for `slice`/`project` from the parsed flags, refusing binary output to a
+/// terminal.
+///
+/// A `.npy`/`.png` written to a TTY is a screenful of garbage, which is the same class of foot-gun as a
+/// flag that silently does nothing — so it is an error naming the fix, rather than a surprise. Pipes and
+/// redirections are not terminals, so the useful cases are unaffected (#387).
+fn grid_opts(
+    format: nav::GridFormat,
+    limit: Option<u64>,
+    all: bool,
+    window: Option<&str>,
+) -> tessera_core::Result<nav::GridOpts> {
+    if !format.is_text() && stdout_is_terminal() {
+        return Err(tessera_core::Error::Invalid(format!(
+            "--format {format:?} writes binary data — redirect it to a file \
+             (e.g. `> plane.{}`) or pipe it onward",
+            format!("{format:?}").to_lowercase()
+        )));
+    }
+    let window = match window {
+        None => None,
+        Some(w) => {
+            let (lo, hi) = w.split_once(',').ok_or_else(|| {
+                tessera_core::Error::Invalid(
+                    "--window expects `lo,hi` (e.g. `--window -1000,2000`)".into(),
+                )
+            })?;
+            let parse = |s: &str, which: &str| {
+                s.trim().parse::<f64>().map_err(|_| {
+                    tessera_core::Error::Invalid(format!("--window {which} '{s}' is not a number"))
+                })
+            };
+            let (lo, hi) = (parse(lo, "lo")?, parse(hi, "hi")?);
+            // Written as positive comparisons, not `!(lo < hi)`: a negated partial-order compare reads
+            // badly AND silently accepts NaN, which `is_finite` has to rule out explicitly.
+            if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+                return Err(tessera_core::Error::Invalid(format!(
+                    "--window needs finite lo < hi (got lo {lo}, hi {hi})"
+                )));
+            }
+            Some((lo, hi))
+        }
+    };
+    Ok(nav::GridOpts {
+        format,
+        limit,
+        all,
+        interactive: stdout_is_terminal(),
+        window,
+    })
+}
+
+/// Is stdout a terminal? The one place that asks, so the default-cap rule and the refuse-binary-to-a-TTY
+/// rule cannot disagree about what "interactive" means.
+fn stdout_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+}
+
+/// Print a grid write's advisories to stderr — the row-cap note (same wording as `read`'s) and the
+/// `png` lossy-preview line. stdout stays pure data so `| head` and `> file` keep working.
+fn grid_notes(res: &nav::GridResult) {
+    if res.truncated {
+        eprintln!(
+            "note: showed {} of {} rows — pass --all or --limit N for more",
+            res.shown, res.total
+        );
+    }
+    if let Some(n) = &res.note {
+        eprintln!("note: {n}");
+    }
+}
+
 fn main() -> ExitCode {
     // Restore the default SIGPIPE disposition so piping tessera's output into `head`, `less`, etc.
     // terminates it quietly — like every standard Unix tool — instead of erroring. Rust's runtime
@@ -1117,14 +1236,15 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             }
             Ok(())
         }
-        Cmd::Verify { file } => {
+        Cmd::Verify { file, workers } => {
             let label = file.display().to_string();
             // Payload half of verification: re-derive every block's digest from its stored bytes at
             // bounded RSS + typed, located errors (#268 parts 3+4). `open` already checked the seal.
             // A local `.tsra` fans the probe across the worker pool — each block is independently
             // addressable in the STORED zip (#367); a URL verifies serially (no cheap multi-handle
-            // reopen). Worker count is the machine default for now; #368 will feed it from the
-            // resource-cap resolver.
+            // reopen). The worker count comes from the resource-cap resolver (#368/#373), so
+            // `--workers` > `TESSERA_WORKERS` > `.tessera/config.toml` > machine default applies
+            // here exactly as it does on ingest — one cap for the whole CLI, not a per-verb default.
             #[cfg(feature = "cloud")]
             let is_url = cloud_url(&file).is_some();
             #[cfg(not(feature = "cloud"))]
@@ -1135,7 +1255,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 r.verify_payloads(&label)?;
                 println!("OK  {label} verified ({n} blocks)");
             } else {
-                let workers = tessera_io::WriteConfig::for_system().worker_count();
+                let workers = resource::resolve_write_config(workers, None)?.worker_count();
                 // Returns the block count (verified with L1 seal + L2 payloads) — no extra reopen.
                 let n = tessera_io::verify_payloads_parallel(&file, &label, workers)?;
                 println!("OK  {label} verified ({n} blocks)");
@@ -1214,6 +1334,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                     rows,
                     all,
                     limit,
+                    interactive: stdout_is_terminal(),
                     format: fmt,
                 },
                 &mut out,
@@ -1237,18 +1358,23 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             world,
             physical,
             format,
+            limit,
+            all,
+            window,
         } => {
-            let fmt = nav::Format::parse(&format)?;
+            let opts = grid_opts(format, limit, all, window.as_deref())?;
             let mut out = std::io::stdout().lock();
-            nav::slice(
+            let res = nav::slice(
                 &file,
                 &block,
                 index.as_deref(),
                 world.as_deref(),
                 physical,
-                fmt,
+                &opts,
                 &mut out,
-            )
+            )?;
+            grid_notes(&res);
+            Ok(())
         }
         Cmd::Project {
             file,
@@ -1257,10 +1383,15 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             mode,
             physical,
             format,
+            limit,
+            all,
+            window,
         } => {
-            let fmt = nav::Format::parse(&format)?;
+            let opts = grid_opts(format, limit, all, window.as_deref())?;
             let mut out = std::io::stdout().lock();
-            nav::project(&file, &block, &axis, &mode, physical, fmt, &mut out)
+            let res = nav::project(&file, &block, &axis, &mode, physical, &opts, &mut out)?;
+            grid_notes(&res);
+            Ok(())
         }
         Cmd::Pyramid {
             file,
@@ -2198,13 +2329,71 @@ mod tests {
         pack(&sealed, &[BlockPayload::new("volume", payload)], path).unwrap();
     }
 
+    /// #373: `tessera verify`'s parallel payload probe must take its worker count from the
+    /// resource-cap resolver (#368), not from a per-verb `WriteConfig::for_system()`, so one cap
+    /// governs the whole CLI. Asserts the flag tier the new `--workers` feeds, and that the verb
+    /// still verifies end to end through that path.
+    ///
+    /// The env tier is deliberately NOT exercised by mutating `TESSERA_WORKERS`: the process
+    /// environment is global, so it races every other test in this binary. `resource`'s own
+    /// `precedence_is_flag_over_env_over_conf_over_default_per_field` already covers env through
+    /// the pure `resolve()` seam, which is the right place for it.
+    #[test]
+    fn verify_worker_cap_comes_from_the_resource_resolver() {
+        // The flag tier — the same call `Cmd::Verify` now makes — wins over every lower tier.
+        let cfg = resource::resolve_write_config(Some(3), None).unwrap();
+        assert_eq!(cfg.worker_count(), 3, "--workers must reach the resolver");
+
+        // And with no flag it still resolves to something usable rather than panicking.
+        assert!(
+            resource::resolve_write_config(None, None)
+                .unwrap()
+                .worker_count()
+                >= 1
+        );
+
+        // End to end: the verb runs over that path and still verifies.
+        let dir = tempfile::tempdir().unwrap();
+        let tsra = dir.path().join("p.tsra");
+        sample_tsra(&tsra);
+        run(Cmd::Verify {
+            file: tsra.clone(),
+            workers: Some(2),
+        })
+        .unwrap();
+        run(Cmd::Verify {
+            file: tsra.clone(),
+            workers: None,
+        })
+        .unwrap();
+
+        // ...and the flag REACHES the resolver rather than being dropped on the floor. `0` is the
+        // observable probe: the resolver rejects it, while the old `WriteConfig::for_system()` path
+        // (and `WriteConfig::workers`, which clamps to >= 1) would have swallowed it and verified
+        // happily. So this failing is the proof of pass-through, not merely of validation.
+        let err = run(Cmd::Verify {
+            file: tsra,
+            workers: Some(0),
+        })
+        .expect_err("--workers 0 must be refused through the verb, not clamped");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--workers") && msg.contains(">= 1"),
+            "error must name the flag and the bound, got: {msg}"
+        );
+    }
+
     #[test]
     fn verify_inspect_unpack_pack_all_succeed() {
         let dir = tempfile::tempdir().unwrap();
         let tsra = dir.path().join("p.tsra");
         sample_tsra(&tsra);
 
-        run(Cmd::Verify { file: tsra.clone() }).unwrap();
+        run(Cmd::Verify {
+            file: tsra.clone(),
+            workers: None,
+        })
+        .unwrap();
         run(Cmd::Inspect {
             file: tsra.clone(),
             full: false,
@@ -2233,7 +2422,11 @@ mod tests {
             out: repacked.clone(),
         })
         .unwrap();
-        run(Cmd::Verify { file: repacked }).unwrap();
+        run(Cmd::Verify {
+            file: repacked,
+            workers: None,
+        })
+        .unwrap();
     }
 
     #[test]
@@ -2241,7 +2434,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("bad.tsra");
         std::fs::write(&bad, b"not a zip at all").unwrap();
-        assert!(run(Cmd::Verify { file: bad }).is_err());
+        assert!(run(Cmd::Verify {
+            file: bad,
+            workers: None
+        })
+        .is_err());
     }
 
     /// #268 parts 3+4: a corrupt block payload makes `verify` fail with a typed `BlockIntegrity`
@@ -2272,7 +2469,12 @@ mod tests {
         })
         .unwrap();
 
-        match run(Cmd::Verify { file: bad }).unwrap_err() {
+        match run(Cmd::Verify {
+            file: bad,
+            workers: None,
+        })
+        .unwrap_err()
+        {
             tessera_core::Error::BlockIntegrity {
                 file,
                 block,
@@ -2401,7 +2603,11 @@ mod tests {
         // the ingested product verifies (seal + block digest) and is schema-valid. The engine adds
         // an `ingested_via_spec` edge on every member it produces (including the synthesised
         // 1-product spec the per-format CLI builds), so the source count goes from 1 to 2.
-        run(Cmd::Verify { file: out.clone() }).unwrap();
+        run(Cmd::Verify {
+            file: out.clone(),
+            workers: None,
+        })
+        .unwrap();
         run(Cmd::Inspect {
             file: out.clone(),
             full: false,
@@ -2501,7 +2707,11 @@ streaming = "batch"
         for m in &coll.members {
             let p = out_dir.join(member_filename(&m.reference, MemberKind::Product));
             assert!(p.exists(), "missing {}", p.display());
-            run(Cmd::Verify { file: p.clone() }).unwrap();
+            run(Cmd::Verify {
+                file: p.clone(),
+                workers: None,
+            })
+            .unwrap();
             let r = Reader::open(&p).unwrap();
             assert!(r
                 .manifest()
@@ -2706,7 +2916,11 @@ streaming = "batch"
         .unwrap();
 
         // The sealed product opens + verifies + carries the clean source label (NOT a slice path).
-        run(Cmd::Verify { file: out.clone() }).unwrap();
+        run(Cmd::Verify {
+            file: out.clone(),
+            workers: None,
+        })
+        .unwrap();
         let m = Reader::open(&out).unwrap().manifest().clone();
         let ingested_from = m
             .sources
@@ -2827,6 +3041,7 @@ streaming = "batch"
         // patient name / id (they live only in the encrypted envelope).
         run(Cmd::Verify {
             file: shredded.clone(),
+            workers: None,
         })
         .unwrap();
         let raw = std::fs::read(&shredded).unwrap();
@@ -2884,6 +3099,7 @@ streaming = "batch"
         .unwrap();
         run(Cmd::Verify {
             file: shredded.clone(),
+            workers: None,
         })
         .unwrap();
         let r = Reader::open(&shredded).unwrap();

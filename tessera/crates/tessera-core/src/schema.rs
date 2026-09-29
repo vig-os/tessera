@@ -1266,6 +1266,49 @@ mod tests {
             .is_empty());
     }
 
+    /// The book's product-schema reference (#389) is GENERATED from this registry, so it cannot be
+    /// allowed to drift: a schema gaining a required field must show up on the published page in the same
+    /// commit. This asserts the committed copy still matches what the generator emits.
+    ///
+    /// Regenerate with
+    /// `cd tessera && cargo run -q -p tessera-core --example schema_reference > tests/derived-docs/schema-reference.md`.
+    ///
+    /// The comparison lives in a *test* rather than in the `derived-docs` gate because that gate runs in a
+    /// nix sandbox with no cargo on PATH — a cargo-backed marker command cannot work there.
+    #[test]
+    fn schema_reference_matches_the_committed_copy() {
+        // The example is the single renderer; re-running it here would duplicate the format, so the test
+        // shells out to it exactly as the regenerate command does.
+        let out = std::process::Command::new(env!("CARGO"))
+            .args([
+                "run",
+                "-q",
+                "-p",
+                "tessera-core",
+                "--example",
+                "schema_reference",
+            ])
+            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .output()
+            .expect("run the schema_reference example");
+        assert!(
+            out.status.success(),
+            "generator failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let generated = String::from_utf8(out.stdout).expect("utf-8");
+        let committed = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/derived-docs/schema-reference.md"
+        ))
+        .expect("the committed reference must exist");
+        assert_eq!(
+            generated.trim_end(),
+            committed.trim_end(),
+            "the committed product-schema reference is out of date — regenerate it (see this test's docs)"
+        );
+    }
+
     /// ADR-0058 §3: the "needs a recipe" rule is schema data — a schema with `requires_generation`
     /// blocks a product carrying no (or an empty) generation record, and accepts one with a config.
     /// A schema that does not opt in never blocks (the permissive back-compat default).

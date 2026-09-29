@@ -55,7 +55,11 @@
             || (pkgs.lib.hasInfix "/docs/examples/" path)
             || (pkgs.lib.hasInfix "/docs/dictionaries/" path)
             || (pkgs.lib.hasInfix "/tests/cmd/" path)
-            || (pkgs.lib.hasInfix "/tests/feature-snapshots/" path);
+            || (pkgs.lib.hasInfix "/tests/feature-snapshots/" path)
+            # The GENERATED product-schema reference the book includes (#389). Its drift test compares
+            # this committed copy against `SchemaRegistry::builtin()`, so the file has to reach the
+            # sandbox — the `derived-docs` gate cannot do the job here because it runs without cargo.
+            || (pkgs.lib.hasInfix "/tests/derived-docs/" path);
           name = "source";
         };
         # Every feature declared anywhere in the workspace **except `static-hdf5`** (ADR-0057 §4), in
@@ -351,6 +355,74 @@
             cargoTestExtraArgs = "--doc";
           });
           workspace-fmt = craneLib.cargoFmt { inherit src; };
+
+          # **The third determinism axis — the build configuration** (ADR-0057 §5, #468).
+          #
+          # Gate A varies the *feature configuration*; Gate B varies the *dependency graph*. Neither
+          # varies the compiler's own cfg flags, and that is where #468 hid: vortex 0.75.0 writes
+          # different container bytes for an integer column whose encoding produces patches, depending
+          # on whether `debug_assertions` is enabled (an assertion with a side effect —
+          # `vortex-array/src/patches.rs` evaluates `is_sorted` on the patch indices, which annotates
+          # that array, and the written file reflects it).
+          #
+          # This gate closes the axis for the sealed corpus: the goldens are regenerated under BOTH the
+          # dev and the release profile and must agree with each other and with the committed file. Note
+          # that the committed `corpus/corpus.json` was historically produced by a bare `cargo run`
+          # (dev profile) while `workspace-test` runs the same code release-built — so before #468 the
+          # two halves of our own CI were checking different builds and neither compared them.
+          #
+          # Scoped to `-p tessera-io` on purpose: the point is the seal path, and a second full-workspace
+          # profile would roughly double this leg's build time for no extra coverage.
+          #
+          # COST, stated rather than discovered later: `cargoArtifacts` (`buildDepsOnly`) pre-builds the
+          # **release** dependency graph, so the release half of this check is warm while the dev half
+          # compiles vortex and friends from source on every run. That is the bulk of this leg's time.
+          # The fix would be a second `buildDepsOnly` pinned to the dev profile, which crane does not
+          # make convenient (a derivation inherits one `cargoArtifacts`), so it is left as a known cost
+          # rather than a speculative nix refactor. If this leg becomes the critical path, the cheaper
+          # move is to run it release-only on PRs and keep both profiles for `main`.
+          seal-profile-determinism = craneLib.mkCargoDerivation (commonArgs // {
+            inherit cargoArtifacts;
+            doInstallCargoArtifacts = false;
+            pnameSuffix = "-seal-profile-determinism";
+            buildPhaseCargoCommand = ''
+              echo "[#468] conformance corpus under the dev and release profiles" >&2
+              cargo run -q -p tessera-io --example gen_corpus > "$TMPDIR/corpus.dev.json"
+              cargo run -q --release -p tessera-io --example gen_corpus > "$TMPDIR/corpus.release.json"
+
+              if ! diff -u "$TMPDIR/corpus.dev.json" "$TMPDIR/corpus.release.json"; then
+                echo "" >&2
+                echo "The sealed corpus DEPENDS ON THE BUILD PROFILE (ADR-0057 §5, #468)." >&2
+                echo "A content_hash must be a function of the data alone. Two builds of one commit" >&2
+                echo "disagreeing means the format's identity is a function of how it was compiled." >&2
+                echo "This is not a golden to regenerate — find what made the bytes configuration-" >&2
+                echo "dependent. #468 is the worked example: an assertion with a side effect." >&2
+                exit 1
+              fi
+              if ! cmp -s "$TMPDIR/corpus.dev.json" corpus/corpus.json; then
+                echo "" >&2
+                echo "Both profiles agree with each other but NOT with corpus/corpus.json." >&2
+                echo "That is an ordinary moved golden — regenerate deliberately with:" >&2
+                echo "    cargo run -p tessera-io --example gen_corpus > corpus/corpus.json" >&2
+                exit 1
+              fi
+
+              # #468 is FIXED (carried by the vortex fork pin, #480). The test now asserts ONE byte
+              # count per shape with no `cfg!(debug_assertions)` branch, so running it in both profiles
+              # is what proves the two agree: a re-divergence fails in exactly one of these two lines.
+              echo "[#468] the build-config independence guard under both profiles" >&2
+              cargo test -q -p tessera-io --lib full_span_int_container_bytes_are_build_config_independent
+              cargo test -q --release -p tessera-io --lib full_span_int_container_bytes_are_build_config_independent
+
+              # #472's guard (the arch-dependent half): the persisted float Sum must be the canonical
+              # NaN, not x86_64's default. Run in both profiles for symmetry with the above, though
+              # this one's axis is the architecture — the aarch64 leg of this matrix is what pairs
+              # with it, and aarch64 cannot fail it (it always produced the canonical value).
+              echo "[#472] the canonical-NaN Sum guard under both profiles" >&2
+              cargo test -q -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
+              cargo test -q --release -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
+            '';
+          });
 
           # **Gate B — the feature-snapshot determinism gate** (ADR-0057 §5). Regenerates the resolved
           # feature graph of every crate on the seal path and diffs it against the committed baseline
@@ -715,6 +787,9 @@
             # Docstring-vs-behaviour drift gate (#412): probes every dtype code against the live
             # module and asserts the accepted sets exactly match what the docstrings advertise.
             python3 ${./tessera/crates/tessera-py/tests/api_drift.py}
+            # The WRITE path as documentation (#389): the book `{{#include}}`s anchored regions of this
+            # script, so running it here means a snippet that stopped working cannot reach the docs.
+            python3 ${./tessera/crates/tessera-py/tests/write_example.py}
             touch $out
           '';
 
@@ -736,6 +811,8 @@
             python3 ${./tessera/crates/tessera-py/tests/smoke.py} ${./tessera/corpus/files}
             # Same drift gate as tessera-py-import, proven through the installed wheel.
             python3 ${./tessera/crates/tessera-py/tests/api_drift.py}
+            # …and the documented write path, so the book's example works through the real wheel too.
+            python3 ${./tessera/crates/tessera-py/tests/write_example.py}
             touch $out
           '';
 

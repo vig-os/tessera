@@ -100,20 +100,31 @@ fn config_resources() -> Result<ResourcesTable> {
     Ok(merge_resources(tables))
 }
 
-/// Parse a worker-count string (from a flag, env, or config); a present-but-garbage value — or an
-/// explicit `0`, which would silently clamp to 1 — is an error, so a typo'd or nonsensical cap is
-/// loud rather than silently ignored. `source` names where the value came from.
-fn parse_workers(s: &str, source: &str) -> Result<usize> {
-    let n = s
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| Error::Invalid(format!("{source}: expected a positive integer, got {s:?}")))?;
+/// Reject a non-positive worker count, naming where it came from.
+///
+/// Shared by the **string** tiers ([`parse_workers`], for env + config) and the already-typed
+/// **flag** tier, which clap hands over as a `usize` and so never passes through a parser. Without
+/// this the two disagreed: `TESSERA_WORKERS=0` was a hard error while `--workers 0` was silently
+/// clamped to 1 by `WriteConfig::workers`, so the stricter tier was the one the user did not type.
+fn validate_workers(n: usize, source: &str) -> Result<usize> {
     if n == 0 {
         return Err(Error::Invalid(format!(
             "{source}: worker count must be >= 1, got 0"
         )));
     }
     Ok(n)
+}
+
+/// Parse a worker-count string from the **env or config** tiers; a present-but-garbage value — or
+/// an explicit `0`, which would silently clamp to 1 — is an error, so a typo'd or nonsensical cap
+/// is loud rather than silently ignored. `source` names where the value came from. The flag tier
+/// arrives already typed and is checked with [`validate_workers`] directly.
+fn parse_workers(s: &str, source: &str) -> Result<usize> {
+    let n = s
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| Error::Invalid(format!("{source}: expected a positive integer, got {s:?}")))?;
+    validate_workers(n, source)
 }
 
 /// Parse a RAM-budget size string (from a flag, env, or config), labeling the parse error with its
@@ -153,6 +164,13 @@ pub fn resolve_write_config(
     flag_ram: Option<&str>,
 ) -> Result<WriteConfig> {
     let conf = config_resources()?;
+
+    // The flag tier skips the string parsers, so validate it here or `--workers 0` slips past the
+    // check every other tier gets and is quietly clamped to 1.
+    let flag_workers = match flag_workers {
+        Some(n) => Some(validate_workers(n, "--workers")?),
+        None => None,
+    };
 
     let env_workers = match std::env::var(ENV_WORKERS) {
         Ok(s) => Some(parse_workers(&s, ENV_WORKERS)?),

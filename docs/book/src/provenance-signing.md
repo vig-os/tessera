@@ -40,7 +40,17 @@ so re-ingesting the same bytes stays byte-identical — ADR-0042.)
 {{#include ../../../tessera/crates/tessera-cli/tests/cmd/provenance.trycmd}}
 
 For scripting, `inspect --json` dumps the whole sealed manifest — provenance included — so you never
-have to reach into the container format to read it.
+have to reach into the container format to read it. It is exactly the serialized manifest, so two
+things are worth knowing before you parse it:
+
+- **`producer` is polymorphic.** An object (`{tool, version, git_commit?, git_repo?, dirty?}`) on
+  anything sealed since ADR-0058, and a bare string (`"tessera/0.0.0"`) on older products, which
+  round-trip unchanged. Accept both. Optional fields (`generation`, `study`, `schema`, the optional
+  producer keys) are omitted when unset rather than emitted as `null`.
+- **Its stability is the format's, not the CLI's.** The dump carries `tessera_version`, the spec
+  version; fields are added compatibly (that is how `producer` and `generation` arrived), while a
+  rename or removal is a major break, and a reader refuses a manifest whose major exceeds its own.
+  Key your parser off `tessera_version`, not off the tessera binary's version.
 
 ## Signing & trust
 

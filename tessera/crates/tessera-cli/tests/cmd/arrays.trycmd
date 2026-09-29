@@ -54,12 +54,48 @@ Options:
           Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples
 
       --format <FORMAT>
-          Output format: `csv` (default) | `tsv`
+          Output format. `npy` is the lossless path for analysis; `png` is a **lossy** 8-bit preview
+
+          Possible values:
+          - csv:  Comma-separated rows (default)
+          - tsv:  Tab-separated rows
+          - json: One self-describing object: `{shape, dtype, values: [[row], …]}`
+          - npy:  NumPy `.npy` (float64) — the **lossless** path for analysis
+          - png:  8-bit greyscale PNG — a **lossy preview**, windowed to 0–255. Not data
           
           [default: csv]
 
+      --limit <LIMIT>
+          Max rows for **text** output (csv/tsv/json). Omitted, a **terminal** gets a 20-row preview while a pipe or redirect gets every row. Not valid with `npy`/`png`, which always write the whole plane
+
+      --all
+          Write every row (text formats; `npy`/`png` always do)
+
+      --window <WINDOW>
+          `png` only: explicit intensity window `lo,hi` mapped to black..white. Default: the plane's own min/max
+
   -h, --help
           Print help (see a summary with '-h')
+
+```
+
+# === Non-CSV array output (#387): `json` is self-describing — shape + dtype travel with the numbers, ===
+# === so an analyst does not have to remember what the cells were. `npy` is the lossless path for      ===
+# === analysis and `png` a windowed preview; both are binary, so they must be redirected to a file.    ===
+
+```
+$ tessera slice ../../corpus/files/recon_int16.tsra volume --index "0,0:2,0:4" --format json
+{"shape":[2,4],"rows_emitted":2,"truncated":false,"dtype":"int16","source_dtype":"int16","values":[[-1024,-1023,-1022,-1021],[-960,-959,-958,-957]]}
+
+```
+
+# === The size guard: text output caps so a 512-wide plane cannot spew, and says what it held back.  ===
+
+```
+$ tessera slice ../../corpus/files/recon_int16.tsra volume --index "0,0:5,0:4" --limit 2
+-1024,-1023,-1022,-1021
+-960,-959,-958,-957
+note: showed 2 of 5 rows — pass --all or --limit N for more
 
 ```
 

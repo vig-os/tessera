@@ -54,8 +54,8 @@
         "H4"
       ],
       "id": "blake3:c39298c514aefd0fd55bc60baf9a214ff4aebbcd7f7ef2108128d51323462619",
-      "content_hash": "blake3:2ee5bf4d1b337ed58d8f4bdd315ae637a00fddb74919070bd02c59caa8707474",
-      "manifest_hash": "blake3:3e85dc05c2752ecefff018e0cf649e0f88af5196c2dade3c97f3ef9738d4d7fe",
+      "content_hash": "blake3:33b065510f5ed496113e700521aa9e10340b758011a5e04d458589d36240b948",
+      "manifest_hash": "blake3:fe2795b2b836e8cedac8b280272af32a18646c9e2b82dc07cd863b4a2a095897",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
         "version": "=58.3.0",
