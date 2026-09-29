@@ -9,20 +9,30 @@ seal, and verification logic.
 
 ## Python (`pyo3`, abi3)
 
-`import tessera` gives a `Reader` (open / manifest / blocks / `read_array` → NumPy / `read_array_subset`
-for an ROI / `read_table` / `read_table_column` / `verify`) and a `Builder` (`add_array` / `add_table` /
-`set_field` / `add_source` / `pack`), with a typed `TesseraError`.
+`import tessera` gives `tessera.open()` → a `Reader` (manifest / blocks / `array` → NumPy / `array_roi`
+for an ROI / `table` → polars / `table_arrow` / `table_dict` / `column` / `verify`) and a `Builder`
+(`add_array` / `add_table` / `set_field` / `add_source` / `pack`), with a typed `TesseraError`.
+
+Reading:
 
 ```python
-import tessera
-r = tessera.Reader("study.tsra")
-r.verify()                      # raises TesseraError on tamper
-vol = r.read_array("volume")    # -> numpy.ndarray, native dtype
-roi = r.read_array_subset("volume", [(0, 32), (0, 32), (0, 32)])   # ROI, only the chunks it needs
+{{#include ../../../tessera/crates/tessera-py/tests/write_example.py:read}}
 ```
 
-*Referenced check:* the `tessera-py-import` flake check does a full NumPy **write → read → verify**
-round-trip over the corpus (numpy + polars + pyarrow).
+Writing — the half that used to be advertised but never shown:
+
+```python
+{{#include ../../../tessera/crates/tessera-py/tests/write_example.py:array}}
+```
+
+The [ingest cookbook](./ingest-cookbook.md#2-writing-from-python) has the table and string-column cases,
+and the dtype asymmetries worth knowing.
+
+*Every snippet above is `{{#include}}`d from `tessera/crates/tessera-py/tests/write_example.py`, which the
+`tessera-py-import` and `tessera-wheel-import` flake checks execute on every build — so a call that stopped
+working could not reach this page.* (The previous version of this section documented
+`tessera.Reader("study.tsra")` and `read_array`/`read_array_subset`/`read_table`/`read_table_column`, none
+of which exist — exactly the drift that including from a tested file prevents.)
 
 ## WASM (`wasm-bindgen`)
 

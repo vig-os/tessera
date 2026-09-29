@@ -109,7 +109,7 @@ Inspect & navigate:
   ls          List one node's children (meta / a block / sources)
   read        Read table data as CSV/TSV/NDJSON (cross-block)
   stats       Numeric overview of an array block (shape, dtype, value range)
-  slice       Pull a plane/line/point of an array block as CSV (--index z,:,:)
+  slice       Pull a plane/line/point of an array block (--index z,:,: · --format csv|json|npy|png)
   project     Collapse an array along an axis → 2-D image (--mode max|mean|sum)
   pyramid     Build a multiscale pyramid of an array block → a new .tsra
   export      Emit a FAIR discovery record (JSON to stdout)
@@ -284,7 +284,7 @@ enum Cmd {
         /// The array block to summarise (e.g. `volume`).
         block: String,
     },
-    /// Pull a rectangular sub-region (2-D plane / 1-D line / point) of an **array** block as CSV.
+    /// Pull a rectangular sub-region (2-D plane / 1-D line / point) of an **array** block.
     ///
     /// `--index` is numpy-style, C-order, per axis: `N` (one index, negative from end), `:` (whole
     /// axis), or `A:B` (half-open). Only intersecting chunks are decoded. Axial CT plane example:

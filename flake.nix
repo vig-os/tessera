@@ -665,6 +665,9 @@
             # Docstring-vs-behaviour drift gate (#412): probes every dtype code against the live
             # module and asserts the accepted sets exactly match what the docstrings advertise.
             python3 ${./tessera/crates/tessera-py/tests/api_drift.py}
+            # The WRITE path as documentation (#389): the book `{{#include}}`s anchored regions of this
+            # script, so running it here means a snippet that stopped working cannot reach the docs.
+            python3 ${./tessera/crates/tessera-py/tests/write_example.py}
             touch $out
           '';
 
@@ -686,6 +689,8 @@
             python3 ${./tessera/crates/tessera-py/tests/smoke.py} ${./tessera/corpus/files}
             # Same drift gate as tessera-py-import, proven through the installed wheel.
             python3 ${./tessera/crates/tessera-py/tests/api_drift.py}
+            # …and the documented write path, so the book's example works through the real wheel too.
+            python3 ${./tessera/crates/tessera-py/tests/write_example.py}
             touch $out
           '';
 

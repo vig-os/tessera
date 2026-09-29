@@ -1,0 +1,5 @@
+# trycmd 0.15 runs walkthroughs IN PLACE in this directory, so generated output is not tracked —
+# only the inputs above are. See the versioning.in / persona_signing.in precedent.
+*.tsra
+study/
+roundtrip.txt
