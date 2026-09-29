@@ -47,9 +47,8 @@
         # fixtures) + Gate B's committed feature snapshots (`tests/feature-snapshots/*.txt`, ADR-0057
         # §5) — cleanCargoSource would otherwise strip these non-Rust files, so the trycmd
         # docs-as-tests would silently run ZERO cases in the hermetic gate.
-        src = pkgs.lib.cleanSourceWith {
-          src = ./tessera;
-          filter = path: type:
+        # Named so `test-coverage` (below) asks the SAME predicate the build uses, rather than a copy.
+        srcFilter = path: type:
             (craneLib.filterCargoSources path type)
             || (pkgs.lib.hasInfix "/corpus/" path)
             || (pkgs.lib.hasInfix "/docs/examples/" path)
@@ -60,7 +59,35 @@
             # this committed copy against `SchemaRegistry::builtin()`, so the file has to reach the
             # sandbox — the `derived-docs` gate cannot do the job here because it runs without cargo.
             || (pkgs.lib.hasInfix "/tests/derived-docs/" path);
+        src = pkgs.lib.cleanSourceWith {
+          src = ./tessera;
+          filter = srcFilter;
           name = "source";
+        };
+
+        # ── Test files that live OUTSIDE the crane `src` filter, and the check that runs each. ──
+        #
+        # A test the build sandbox cannot see passes locally and gates nothing, silently. That has
+        # happened twice: ef240cb (trycmd cases ran ZERO in CI — `/tests/cmd/` was not in the filter)
+        # and #520 (the ecosystem bench's tests were referenced by nothing). The `test-coverage` check
+        # fails if any test-like tracked file is neither admitted by `srcFilter` nor listed here.
+        #
+        # Exact FILES, not directories: a new script dropped into one of these directories without
+        # being wired into its check is exactly the failure this exists to catch.
+        testsRunOutsideCraneSrc = {
+          "/bench/ecosystems/test_common.py" = "bench-ecosystems";
+          "/crates/tessera-py/tests/smoke.py" = "tessera-py-import, tessera-wheel-import";
+          "/crates/tessera-py/tests/api_drift.py" = "tessera-py-import, tessera-wheel-import";
+          "/crates/tessera-py/tests/codec_roundtrip.py" = "tessera-py-import, tessera-wheel-import";
+          "/crates/tessera-py/tests/write_example.py" = "tessera-py-import";
+          "/crates/tessera-ingest/tests/producer_equality.py" = "ingest-producer-equality";
+          "/crates/tessera-wasm/tests/smoke.cjs" = "wasm-bindgen-smoke";
+        };
+        # Deliberately NOT in CI, with the reason stated — a declared decision, not a silent gap.
+        testsDeferredFromCi = {
+          "/bench/ecosystems/test_adapters.py" =
+            "needs h5py, zarr, pyarrow, nibabel, pydicom, uproot AND a built tessera-py — a heavy new "
+            + "derivation, deferred until the CI memory work (#495) lands (#520)";
         };
         # Every feature declared anywhere in the workspace **except `static-hdf5`** (ADR-0057 §4), in
         # cargo's `package/feature` form so one invocation from the virtual-manifest root covers all
@@ -819,6 +846,82 @@
             # fail to link, not to test.
             cargoExtraArgs = "-p tessera-cli --features sql sql::";
           });
+
+          # The ecosystem bench's method tests (#485/#520): median+spread, MEASURED cold-cache
+          # eviction, and both table/volume fixtures. Pure Python + numpy — no ecosystem libraries,
+          # no tessera-py — so it is cheap. Its source is ONLY common.py + test_common.py, so editing
+          # an adapter or the driver neither rebuilds this nor touches the crane `src` hash.
+          # (test_adapters.py is deferred: see `testsDeferredFromCi`.)
+          bench-ecosystems =
+            let
+              benchSrc = builtins.path {
+                name = "bench-ecosystems-src";
+                path = ./tessera/bench/ecosystems;
+                filter = path: _type:
+                  builtins.elem (baseNameOf path) [ "common.py" "test_common.py" ];
+              };
+            in
+            pkgs.runCommand "bench-ecosystems"
+              {
+                nativeBuildInputs =
+                  [ (pkgs.python312.withPackages (ps: [ ps.numpy ps.pytest ])) ];
+              } ''
+              cp ${benchSrc}/common.py ${benchSrc}/test_common.py .
+              # The eviction tests need a page cache to evict FROM: on a tmpfs the pages ARE the
+              # storage and DONTNEED is a no-op, so they would fail for the wrong reason. Report the
+              # filesystem so a failure here is diagnosable rather than mysterious.
+              echo "bench-ecosystems: tests run on $(stat -f -c %T .)" >&2
+              python3 -m pytest -q -p no:cacheprovider test_common.py
+              touch $out
+            '';
+
+          # Every test-like tracked file must be visible to a check (#520). Test-like = anything under
+          # a `tests/` directory, `test_*.py`, `*_test.py`, or `*.trycmd`. Each must be admitted by
+          # `srcFilter` (so the crane checks see it), OR listed in `testsRunOutsideCraneSrc` with the
+          # check that runs it, OR declared in `testsDeferredFromCi` with a reason. Listed entries
+          # that no longer exist fail too, so the lists cannot rot into false reassurance.
+          test-coverage =
+            let
+              lib = pkgs.lib;
+              root = toString ./tessera;
+              walk = dir: lib.concatLists (lib.mapAttrsToList
+                (n: t: if t == "directory" then walk (dir + "/${n}") else [ (toString (dir + "/${n}")) ])
+                (builtins.readDir dir));
+              files = walk ./tessera;
+              rel = f: lib.removePrefix root f;
+              isTest = f:
+                let b = baseNameOf f; in
+                lib.hasInfix "/tests/" (rel f)
+                || builtins.match "test_.*[.]py" b != null
+                || builtins.match ".*_test[.]py" b != null
+                || lib.hasSuffix ".trycmd" b;
+              listed = f: testsRunOutsideCraneSrc ? ${rel f} || testsDeferredFromCi ? ${rel f};
+              orphans = builtins.filter
+                (f: isTest f && !(srcFilter f "regular") && !(listed f)) files;
+              relFiles = map rel files;
+              stale = builtins.filter (k: !(builtins.elem k relFiles))
+                (builtins.attrNames testsRunOutsideCraneSrc ++ builtins.attrNames testsDeferredFromCi);
+              deferred = lib.concatStringsSep "\n" (lib.mapAttrsToList
+                (k: v: "  DEFERRED ${k}: ${v}") testsDeferredFromCi);
+            in
+            pkgs.runCommand "test-coverage" { } (
+              if orphans == [ ] && stale == [ ] then ''
+                echo "test-coverage: every test-like file is visible to a check" >&2
+                printf '%s\n' "${deferred}" >&2
+                touch $out
+              '' else ''
+                echo "test-coverage FAILED (#520)" >&2
+                ${lib.concatMapStrings (f: ''
+                  echo "  ORPHAN ${rel f}: not admitted by srcFilter and run by no check" >&2
+                '') orphans}
+                ${lib.concatMapStrings (k: ''
+                  echo "  STALE  ${k}: listed in flake.nix but no such file" >&2
+                '') stale}
+                echo "Fix: admit it in srcFilter, run it from a check and list it in" >&2
+                echo "testsRunOutsideCraneSrc, or declare it in testsDeferredFromCi with a reason." >&2
+                exit 1
+              ''
+            );
 
           # guardrails agent-drift gates over the Rust source (code gates) + repo-wide structural
           # gates. cargo-deny stays a pre-commit gate (needs network for the advisory DB).
