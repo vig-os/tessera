@@ -266,9 +266,10 @@ enum Cmd {
         /// Emit every row (overrides `--limit`).
         #[arg(long)]
         all: bool,
-        /// Default max rows when no `--rows`/`--head`/`--tail`/`--at`/`--all` is given.
-        #[arg(long, default_value_t = 20)]
-        limit: u64,
+        /// Max rows when no `--rows`/`--head`/`--tail`/`--at`/`--all` is given. Omitted, a **terminal**
+        /// gets a 20-row preview while a pipe or redirect gets every row.
+        #[arg(long)]
+        limit: Option<u64>,
         /// Output format: `csv` (default) | `tsv` | `ndjson`.
         #[arg(long, default_value = "csv")]
         format: String,
@@ -306,8 +307,9 @@ enum Cmd {
         /// Output format. `npy` is the lossless path for analysis; `png` is a **lossy** 8-bit preview.
         #[arg(long, value_enum, default_value = "csv")]
         format: nav::GridFormat,
-        /// Max rows for **text** output (csv/tsv/json); omit for 20. Not valid with `npy`/`png`, which
-        /// always write the whole plane.
+        /// Max rows for **text** output (csv/tsv/json). Omitted, a **terminal** gets a 20-row preview
+        /// while a pipe or redirect gets every row. Not valid with `npy`/`png`, which always write the
+        /// whole plane.
         #[arg(long)]
         limit: Option<u64>,
         /// Write every row (text formats; `npy`/`png` always do).
@@ -339,8 +341,9 @@ enum Cmd {
         /// Output format. `npy` is the lossless path for analysis; `png` is a **lossy** 8-bit preview.
         #[arg(long, value_enum, default_value = "csv")]
         format: nav::GridFormat,
-        /// Max rows for **text** output (csv/tsv/json); omit for 20. Not valid with `npy`/`png`, which
-        /// always write the whole plane.
+        /// Max rows for **text** output (csv/tsv/json). Omitted, a **terminal** gets a 20-row preview
+        /// while a pipe or redirect gets every row. Not valid with `npy`/`png`, which always write the
+        /// whole plane.
         #[arg(long)]
         limit: Option<u64>,
         /// Write every row (text formats; `npy`/`png` always do).
@@ -962,8 +965,7 @@ fn grid_opts(
     all: bool,
     window: Option<&str>,
 ) -> tessera_core::Result<nav::GridOpts> {
-    use std::io::IsTerminal;
-    if !format.is_text() && std::io::stdout().is_terminal() {
+    if !format.is_text() && stdout_is_terminal() {
         return Err(tessera_core::Error::Invalid(format!(
             "--format {format:?} writes binary data — redirect it to a file \
              (e.g. `> plane.{}`) or pipe it onward",
@@ -998,8 +1000,16 @@ fn grid_opts(
         format,
         limit,
         all,
+        interactive: stdout_is_terminal(),
         window,
     })
+}
+
+/// Is stdout a terminal? The one place that asks, so the default-cap rule and the refuse-binary-to-a-TTY
+/// rule cannot disagree about what "interactive" means.
+fn stdout_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
 }
 
 /// Print a grid write's advisories to stderr — the row-cap note (same wording as `read`'s) and the
@@ -1221,6 +1231,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                     rows,
                     all,
                     limit,
+                    interactive: stdout_is_terminal(),
                     format: fmt,
                 },
                 &mut out,

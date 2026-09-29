@@ -51,9 +51,25 @@ impl Format {
     }
 }
 
-/// Default row cap for **text** grid output when neither `--limit` nor `--all` is given — the same
-/// number `read` uses, so one cap idiom covers every data-emitting verb.
+/// Default row cap for text output when the user asks for no particular number — a preview length, not a
+/// limit on what the tool can emit. Shared by `read`, `slice` and `project`.
 pub const DEFAULT_GRID_ROWS: u64 = 20;
+
+/// Resolve the row cap for a data-emitting verb. `None` means "no cap — write everything".
+///
+/// An explicit request (`--limit`, or `read`'s `--rows`/`--head`/`--tail`/`--at`) always wins, anywhere.
+/// The **default** cap applies only when stdout is a **terminal**: a human at a prompt wants a preview,
+/// but `> out.csv` or `| wc -l` is a script, and handing a script 20 of 4097 rows with nothing but a
+/// stderr note is silent data loss rather than a courtesy. Found by the #387 review; `read` had shipped
+/// that way since #391, so the rule is applied there too.
+pub fn row_cap(explicit: Option<u64>, all: bool, interactive: bool) -> Option<u64> {
+    match (all, explicit) {
+        (true, _) => None,
+        (false, Some(n)) => Some(n),
+        (false, None) if interactive => Some(DEFAULT_GRID_ROWS),
+        (false, None) => None,
+    }
+}
 
 /// What `slice`/`project` write.
 ///
@@ -99,6 +115,50 @@ impl GridFormat {
     }
 }
 
+/// The dtype of a grid, which is **two** facts: what the array stores, and what these particular values
+/// are. They diverge whenever the values were computed rather than read — `--physical` applies a rescale,
+/// and `project --mode mean` averages — and a document that reported only the stored type would be
+/// describing something other than the numbers beside it (#387 review).
+pub struct GridDtype {
+    stored: String,
+    /// `true` when the emitted values are no longer the stored integers (a rescale or a reducing
+    /// projection), so they are reported as `float64`.
+    computed_float: bool,
+}
+
+impl GridDtype {
+    /// Values read straight out of the array: emitted dtype == stored dtype.
+    pub fn stored_as(dtype: &str) -> Self {
+        GridDtype {
+            stored: dtype.to_string(),
+            computed_float: false,
+        }
+    }
+    /// Values the CLI computed (rescale / mean / sum): emitted as `float64` whatever the array holds.
+    pub fn computed_from(dtype: &str) -> Self {
+        GridDtype {
+            stored: dtype.to_string(),
+            computed_float: true,
+        }
+    }
+    /// The array's own dtype.
+    fn stored(&self) -> &str {
+        &self.stored
+    }
+    /// The dtype of the values actually emitted.
+    fn emitted(&self) -> &str {
+        if self.computed_float {
+            "float64"
+        } else {
+            &self.stored
+        }
+    }
+    /// Does the emitted grid hold floats? Drives the JSON number rendering.
+    fn is_float(&self) -> bool {
+        self.computed_float || self.stored.starts_with("float")
+    }
+}
+
 /// How much of a grid to write, and how to window a preview image.
 pub struct GridOpts {
     pub format: GridFormat,
@@ -107,6 +167,8 @@ pub struct GridOpts {
     pub limit: Option<u64>,
     /// `--all`: write every row (text formats; binary already does).
     pub all: bool,
+    /// Is stdout a terminal? Decides whether the **default** cap applies at all — see [`row_cap`].
+    pub interactive: bool,
     /// `png` only: an explicit intensity window `(lo, hi)`. `None` auto-windows on the plane's own
     /// finite min/max.
     pub window: Option<(f64, f64)>,
@@ -857,8 +919,11 @@ pub struct ReadOpts<'a> {
     pub rows: Option<RowSpec>,
     /// Emit every row (overrides `limit`).
     pub all: bool,
-    /// Default row cap when neither `rows` nor `all` is given.
-    pub limit: u64,
+    /// The user's explicit `--limit`, if any. `None` falls back to the shared [`row_cap`] rule, where the
+    /// default applies **only** to an interactive terminal.
+    pub limit: Option<u64>,
+    /// Is stdout a terminal? See [`row_cap`] — piping or redirecting gets every row.
+    pub interactive: bool,
     /// Output format.
     pub format: Format,
 }
@@ -934,13 +999,16 @@ pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
     };
 
     // Resolve the row window: explicit selection (resolved vs the row count), or all, or the cap.
+    // The default cap is a preview for a human, not a limit on what a script may receive (#387 review):
+    // `read … > out.csv` used to hand over 20 of 4097 rows with only a stderr note. An explicit
+    // `--rows`/`--head`/`--tail`/`--at`/`--limit` still applies everywhere.
+    let cap = row_cap(opts.limit, opts.all, opts.interactive);
     let (lo, hi) = match opts.rows {
         Some(spec) => spec.resolve(total),
-        None if opts.all => (0, total),
-        None => (0, opts.limit.min(total)),
+        None => (0, cap.map_or(total, |n| n.min(total))),
     };
     // Only the default-cap path is a silent truncation worth warning about.
-    let truncated = opts.rows.is_none() && !opts.all && hi < total;
+    let truncated = opts.rows.is_none() && hi < total;
     let nrows = hi.saturating_sub(lo);
 
     // Decode each selected column (projected), slice to the window, stringify to JSON cells.
@@ -1395,8 +1463,14 @@ pub fn slice(
     };
     let values = region_to_f64(&region, rescale);
 
-    // Grid: the last region axis is the column count; everything before it flattens to rows.
-    write_grid(&values, &len, &spec.dtype, opts, out)
+    // Grid: the last region axis is the column count; everything before it flattens to rows. `--physical`
+    // means the values are rescaled floats, not the stored integers.
+    let dtype = if physical {
+        GridDtype::computed_from(&spec.dtype)
+    } else {
+        GridDtype::stored_as(&spec.dtype)
+    };
+    write_grid(&values, &len, &dtype, opts, out)
 }
 
 /// Reduce mode for [`project`].
@@ -1518,7 +1592,15 @@ pub fn project(
     };
     let values = region_to_f64(&data, rescale);
     let (out_shape, out_vals) = project_axis(&values, &spec.shape, ax, mode);
-    write_grid(&out_vals, &out_shape, &spec.dtype, opts, out)
+    // `max` picks existing samples, so they keep the stored dtype. `mean` averages and `sum` can leave the
+    // stored type's range, so both are reported as the floats they were computed as — and `--physical`
+    // rescales whatever the mode.
+    let dtype = if physical || !matches!(mode, ProjMode::Max) {
+        GridDtype::computed_from(&spec.dtype)
+    } else {
+        GridDtype::stored_as(&spec.dtype)
+    };
+    write_grid(&out_vals, &out_shape, &dtype, opts, out)
 }
 
 /// Does this path address the manifest's `extra/` namespace (the fd5 extension fields)?
@@ -1575,7 +1657,7 @@ fn write_extra(
 fn write_grid(
     values: &[f64],
     shape: &[u64],
-    dtype: &str,
+    dtype: &GridDtype,
     opts: &GridOpts,
     out: &mut dyn Write,
 ) -> Result<GridResult> {
@@ -1589,10 +1671,12 @@ fn write_grid(
     }
     let cols = shape.last().copied().unwrap_or(1).max(1) as usize;
     let total = values.len().div_ceil(cols) as u64;
-    // Text output caps at --limit, else the default; --all lifts it. Binary always writes everything.
-    let cap = match (opts.format.is_text(), opts.all) {
-        (false, _) | (true, true) => total,
-        (true, false) => opts.limit.unwrap_or(DEFAULT_GRID_ROWS).min(total),
+    // Binary formats never cap (a truncated artifact is corrupt, not a preview); text formats follow the
+    // shared rule, where the *default* only bites an interactive terminal.
+    let cap = if opts.format.is_text() {
+        row_cap(opts.limit, opts.all, opts.interactive).map_or(total, |n| n.min(total))
+    } else {
+        total
     };
     let shown_vals = &values[..(cap as usize * cols).min(values.len())];
     let mut res = GridResult {
@@ -1611,59 +1695,71 @@ fn write_grid(
             }
         }
         GridFormat::Json => {
-            // Self-describing: an analyst gets the shape and source dtype with the numbers, not bare
-            // cells. Non-finite values become JSON `null`, which is the only thing JSON can say.
+            // Self-describing AND honest about what it is: `shape` is the FULL region, so a saved
+            // document can never masquerade as the complete plane; `rows_emitted`/`truncated` say what
+            // was actually written; `dtype` describes the VALUES and `source_dtype` the stored array.
             let rows: Vec<Value> = shown_vals
                 .chunks(cols)
-                .map(|r| Value::Array(r.iter().map(|v| json_num(*v)).collect()))
+                .map(|r| Value::Array(r.iter().map(|v| json_num(*v, dtype.is_float())).collect()))
                 .collect();
             let doc = serde_json::json!({
-                "shape": [rows.len() as u64, cols as u64],
-                "dtype": dtype,
+                "shape": [total, cols as u64],
+                "rows_emitted": rows.len() as u64,
+                "truncated": res.truncated,
+                "dtype": dtype.emitted(),
+                "source_dtype": dtype.stored(),
                 "values": rows,
             });
             writeln!(out, "{}", serde_json::to_string(&doc)?).map_err(tessera_core::Error::from)?;
         }
-        GridFormat::Npy => write_npy(shown_vals, &[total, cols as u64], out)?,
+        GridFormat::Npy => write_npy(shown_vals, total, cols as u64, out)?,
         GridFormat::Png => {
-            let (lo, hi) = write_png(shown_vals, cols, dtype, opts.window, out)?;
+            let (lo, hi) = write_png(shown_vals, cols, dtype.stored(), opts.window, out)?;
             res.note = Some(format!(
-                "png is a lossy 8-bit preview (window {lo} … {hi}, source dtype {dtype}) — \
-                 use --format npy for the data"
+                "png is a lossy 8-bit preview (window {lo} … {hi}, source dtype {}) — \
+                 use --format npy for the data",
+                dtype.stored()
             ));
         }
     }
     Ok(res)
 }
 
-/// A grid cell as JSON: a number, or `null` for NaN/±inf (which JSON cannot represent).
+/// A grid cell as JSON, keyed off the **emitted** dtype rather than the value's shape.
 ///
-/// An integral value renders as an **integer**, the same rule [`fmt_f64`] applies to the CSV/TSV path —
-/// so the two text formats agree, and an `int16` array does not come back as `0.0` while the same
-/// document reports `"dtype": "int16"`.
+/// For an integer grid an integral value renders as an integer — the rule [`fmt_f64`] already applies to
+/// CSV/TSV, so the two text formats agree and an `int16` array does not come back as `0.0`. For a float
+/// grid the float-ness is preserved (`3.0` stays `3.0`, `-0.0` keeps its sign), because collapsing a
+/// float column to integers whenever it happens to hold whole numbers would contradict the `dtype` the
+/// same document declares.
+///
+/// NaN and ±inf become JSON `null`: JSON cannot spell them, and `null` is the standard mapping.
 #[allow(clippy::cast_possible_truncation)]
-fn json_num(v: f64) -> Value {
-    if v.fract() == 0.0 && v.abs() < 1e15 {
+fn json_num(v: f64, float_grid: bool) -> Value {
+    if !float_grid && v.fract() == 0.0 && v.abs() < 1e15 {
         return Value::Number((v as i64).into());
     }
     serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number)
 }
 
-/// Write a NumPy `.npy` v1.0 array: the magic + version, a padded header dict, then the values.
+/// Write a 2-D NumPy `.npy` v1.0 array: the magic + version, a padded header dict, then the values.
 ///
-/// `'<f8'` (little-endian float64) regardless of the source dtype, because every value here has already
-/// been through `region_to_f64` — so `f8` is exactly what the CLI computed rather than a widening
-/// introduced at the door, and `--physical` output is floating-point anyway. The header is space-padded so
-/// `10 + header_len` is a multiple of 64, which is the alignment numpy's own writer produces.
-fn write_npy(values: &[f64], shape: &[u64], out: &mut dyn Write) -> Result<()> {
-    let dims: Vec<String> = shape.iter().map(u64::to_string).collect();
-    // numpy needs a 1-tuple to keep its trailing comma: `(6,)` not `(6)`.
-    let tuple = if dims.len() == 1 {
-        format!("{},", dims[0])
-    } else {
-        dims.join(", ")
-    };
-    let dict = format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({tuple}), }}");
+/// Always `'<f8'` (little-endian float64), because this whole code path is `f64`: `region_to_f64` converts
+/// on the way in, shared with the CSV and `stats` paths. So `f8` is *exactly* what the CLI computed rather
+/// than a widening introduced here.
+///
+/// **The fidelity caveat, stated precisely:** that is exact for every dtype whose values fit in an `f64`
+/// mantissa — `int8/16/32`, `uint8/16/32`, `float16/32`, `bool` — i.e. every dtype a Tessera array is
+/// likely to hold, and `--physical` output is floating-point regardless. It is **not** exact for `int64` /
+/// `uint64` magnitudes above 2^53, where `f64` cannot represent every integer. Emitting a native `'<i8'`
+/// descr would not fix that, only relabel it, because the precision is already gone before this function
+/// sees the values; a faithful integer path means carrying `ArrayData` through instead of `f64`, which is
+/// tracked separately. For full-fidelity 64-bit integers use the Python bindings or `tessera export`.
+///
+/// The header is space-padded so `10 + header_len` is a multiple of 64 — the alignment numpy's own writer
+/// produces, and what its reader expects.
+fn write_npy(values: &[f64], rows: u64, cols: u64, out: &mut dyn Write) -> Result<()> {
+    let dict = format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({rows}, {cols}), }}");
     let pad = (64 - ((10 + dict.len() + 1) % 64)) % 64;
     let mut header = dict.into_bytes();
     header.extend(std::iter::repeat_n(b' ', pad));
@@ -1720,8 +1816,9 @@ fn write_png(
         .iter()
         .map(|&v| {
             if !v.is_finite() || span <= 0.0 {
-                // A flat plane (or a non-finite sample) has no contrast to show; black is the honest
-                // rendering rather than an arbitrary mid-grey.
+                // A flat plane, or a non-finite sample, has no contrast to show. Black, and said out
+                // loud in the tEXt comment below — because a black pixel is otherwise indistinguishable
+                // from a legitimate sample sitting at the window's low end.
                 0
             } else {
                 (((v - lo) / span).clamp(0.0, 1.0) * 255.0).round() as u8
@@ -1746,7 +1843,8 @@ fn write_png(
     enc.add_text_chunk(
         "Comment".into(),
         "lossy 8-bit preview of a Tessera array; not the data \
-         (use `tsra slice|project --format npy`)"
+         (use `tsra slice|project --format npy`). NaN/inf samples render as black, \
+         indistinguishable from the window's low end."
             .into(),
     )
     .map_err(text)?;
@@ -2269,6 +2367,7 @@ mod tests {
             format: GridFormat::Csv,
             limit: None,
             all: true,
+            interactive: false,
             window: None,
         }
     }
@@ -2308,6 +2407,7 @@ mod tests {
                 format: fmt,
                 limit: None,
                 all: true,
+                interactive: false,
                 window,
             };
             let res = slice(&p, "volume", Some(":,:"), None, false, &opts, &mut buf).unwrap();
@@ -2401,6 +2501,163 @@ mod tests {
         assert_eq!(pixels[..frame.buffer_size()][5], 128);
     }
 
+    /// **#387 review** — the default cap must not silently truncate a **script**. `read … > out.csv` had
+    /// handed over 20 of 4097 rows since #391 with nothing but a stderr note, and the first version of
+    /// this PR copied that rule to `slice`/`project`. The default now applies only to an interactive
+    /// terminal; an explicit request applies anywhere.
+    #[test]
+    fn the_default_row_cap_only_applies_to_an_interactive_terminal() {
+        // the rule itself, in one place both read and the grid writer consult
+        assert_eq!(
+            row_cap(None, false, true),
+            Some(DEFAULT_GRID_ROWS),
+            "a terminal previews"
+        );
+        assert_eq!(
+            row_cap(None, false, false),
+            None,
+            "a pipe or redirect gets everything"
+        );
+        assert_eq!(
+            row_cap(Some(5), false, false),
+            Some(5),
+            "an explicit cap applies when piped"
+        );
+        assert_eq!(row_cap(Some(5), false, true), Some(5), "…and at a terminal");
+        assert_eq!(
+            row_cap(None, true, true),
+            None,
+            "--all lifts it even at a terminal"
+        );
+        assert_eq!(
+            row_cap(Some(5), true, true),
+            None,
+            "--all wins over an explicit cap"
+        );
+
+        // and end-to-end through `slice`: 30 rows, more than the 20-row default
+        let dir = tempfile::tempdir().unwrap();
+        let p = sealed_grid(dir.path(), vec![30, 2], (0..60).collect());
+        let run = |interactive: bool, limit: Option<u64>| {
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: GridFormat::Csv,
+                limit,
+                all: false,
+                interactive,
+                window: None,
+            };
+            let res = slice(&p, "volume", Some(":,:"), None, false, &opts, &mut buf).unwrap();
+            (String::from_utf8(buf).unwrap().lines().count(), res)
+        };
+        let (lines, res) = run(true, None);
+        assert_eq!(lines, 20, "a terminal gets the preview");
+        assert!(res.truncated);
+        let (lines, res) = run(false, None);
+        assert_eq!(lines, 30, "a redirect must NOT lose 10 rows silently");
+        assert!(!res.truncated);
+        let (lines, _) = run(false, Some(3));
+        assert_eq!(lines, 3, "an explicit --limit still applies when piped");
+    }
+
+    /// **#387 review** — the JSON document must describe *itself*, or a saved file can lie: the stored
+    /// dtype is not the dtype of computed values, and a capped write is not the whole plane.
+    #[test]
+    fn json_describes_the_values_it_actually_emitted() {
+        let dir = tempfile::tempdir().unwrap();
+        // 4 rows × 2, values 0..8, with a rescale so `--physical` produces genuine floats
+        let p = {
+            use tessera_core::block::array::ArraySpec;
+            use tessera_core::ProductBuilder;
+            use tessera_io::{array::ArrayData, pack};
+            let path = dir.path().join("r.tsra");
+            let spec = ArraySpec::new(vec![4, 2], "int16").with_rescale(0.5, -1.0);
+            let (bref, payload) =
+                tessera_io::array::array_block("volume", &spec, &ArrayData::I16((0..8).collect()))
+                    .unwrap();
+            let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+            b.add_block_ref(bref);
+            pack(&b.seal().unwrap(), &[payload], &path).unwrap();
+            path
+        };
+        let doc = |physical: bool, limit: Option<u64>| {
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: GridFormat::Json,
+                limit,
+                all: false,
+                interactive: false,
+                window: None,
+            };
+            slice(&p, "volume", Some(":,:"), None, physical, &opts, &mut buf).unwrap();
+            serde_json::from_slice::<Value>(&buf).unwrap()
+        };
+
+        // stored values: the dtype IS the array's, and integers stay integers
+        let v = doc(false, None);
+        assert_eq!(v["dtype"], "int16");
+        assert_eq!(v["source_dtype"], "int16");
+        assert_eq!(v["shape"], serde_json::json!([4, 2]));
+        assert_eq!(v["rows_emitted"], 4);
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["values"][0], serde_json::json!([0, 1]));
+
+        // --physical: the emitted values are floats, so THAT is the dtype; the stored one is kept
+        // separately. 0 → -1.0 and 1 → -0.5 under (slope 0.5, intercept -1).
+        let v = doc(true, None);
+        assert_eq!(v["dtype"], "float64", "a rescaled read emits floats");
+        assert_eq!(
+            v["source_dtype"], "int16",
+            "…and still says what was stored"
+        );
+        assert_eq!(v["values"][0], serde_json::json!([-1.0, -0.5]));
+        // float-ness is preserved rather than collapsed: 2 → 0.0, not 0
+        assert_eq!(v["values"][1][0].as_f64(), Some(0.0));
+        assert!(
+            v["values"][1][0].is_f64(),
+            "3.0 must stay a float in a float grid"
+        );
+
+        // a capped write says so, and `shape` stays the FULL region so it cannot pose as complete
+        let v = doc(false, Some(2));
+        assert_eq!(
+            v["shape"],
+            serde_json::json!([4, 2]),
+            "the full region shape"
+        );
+        assert_eq!(v["rows_emitted"], 2);
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["values"].as_array().unwrap().len(), 2);
+    }
+
+    /// **#387 review** — `project --mode mean` computes averages, so the emitted dtype is `float64` even
+    /// though the array holds int16; `max` picks existing samples, so it keeps the stored dtype.
+    #[test]
+    fn a_reducing_projection_reports_the_dtype_it_computed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = sealed_grid(dir.path(), vec![2, 2, 2], vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        let doc = |mode: &str| {
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: GridFormat::Json,
+                limit: None,
+                all: true,
+                interactive: false,
+                window: None,
+            };
+            project(&p, "volume", "0", mode, false, &opts, &mut buf).unwrap();
+            serde_json::from_slice::<Value>(&buf).unwrap()
+        };
+        assert_eq!(doc("max")["dtype"], "int16", "max picks stored samples");
+        let mean = doc("mean");
+        assert_eq!(mean["dtype"], "float64", "mean computes floats");
+        assert_eq!(mean["source_dtype"], "int16");
+        // (0+4)/2 = 2.0 — and it stays a float, matching the declared dtype
+        assert!(mean["values"][0][0].is_f64(), "{mean}");
+        // `sum` can leave the stored type's range, so it is reported as computed too
+        assert_eq!(doc("sum")["dtype"], "float64");
+    }
+
     /// **#387** — the size guard. Text output caps like `read` does; binary output never does, because a
     /// truncated `.npy`/`.png` is a corrupt artifact rather than a preview — and an explicit `--limit`
     /// with a binary format is therefore an **error**, since a flag that silently does nothing is its own
@@ -2419,6 +2676,7 @@ mod tests {
             format: GridFormat::Csv,
             limit,
             all,
+            interactive: false,
             window: None,
         };
 
@@ -2444,6 +2702,7 @@ mod tests {
                 format: fmt,
                 limit: Some(2),
                 all: false,
+                interactive: false,
                 window: None,
             })
             .unwrap_err();
@@ -2460,6 +2719,7 @@ mod tests {
             format: GridFormat::Npy,
             limit: None,
             all: true,
+            interactive: false,
             window: None,
         })
         .unwrap();
@@ -2478,6 +2738,7 @@ mod tests {
             format: GridFormat::Json,
             limit: None,
             all: true,
+            interactive: false,
             window: None,
         };
         project(&p, "volume", "0", "max", false, &opts, &mut buf).unwrap();
@@ -2496,6 +2757,7 @@ mod tests {
                 format: GridFormat::Png,
                 limit: Some(1),
                 all: false,
+                interactive: false,
                 window: None,
             },
             &mut Vec::new(),
@@ -2542,7 +2804,8 @@ mod tests {
                     columns: vec![],
                     rows: None,
                     all: false,
-                    limit: 20,
+                    limit: None,
+                    interactive: false,
                     format: Format::Csv,
                 },
                 &mut buf,
@@ -2622,7 +2885,8 @@ mod tests {
                 columns: vec![],
                 rows: None,
                 all: false,
-                limit: 20,
+                limit: None,
+                interactive: false,
                 format: Format::Csv,
             },
             &mut Vec::new(),
@@ -2668,7 +2932,8 @@ mod tests {
                 columns: vec!["ms".into()],
                 rows: None,
                 all: false,
-                limit: 2,
+                limit: Some(2),
+                interactive: false,
                 format: Format::Csv,
             },
             &mut buf,
@@ -2695,7 +2960,8 @@ mod tests {
                 columns: vec![],
                 rows: None,
                 all: true,
-                limit: 2,
+                limit: Some(2),
+                interactive: false,
                 format: Format::Ndjson,
             },
             &mut buf,

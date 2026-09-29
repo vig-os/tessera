@@ -66,7 +66,7 @@ Options:
           [default: csv]
 
       --limit <LIMIT>
-          Max rows for **text** output (csv/tsv/json); omit for 20. Not valid with `npy`/`png`, which always write the whole plane
+          Max rows for **text** output (csv/tsv/json). Omitted, a **terminal** gets a 20-row preview while a pipe or redirect gets every row. Not valid with `npy`/`png`, which always write the whole plane
 
       --all
           Write every row (text formats; `npy`/`png` always do)
@@ -85,7 +85,7 @@ Options:
 
 ```
 $ tessera slice ../../corpus/files/recon_int16.tsra volume --index "0,0:2,0:4" --format json
-{"shape":[2,4],"dtype":"int16","values":[[-1024,-1023,-1022,-1021],[-960,-959,-958,-957]]}
+{"shape":[2,4],"rows_emitted":2,"truncated":false,"dtype":"int16","source_dtype":"int16","values":[[-1024,-1023,-1022,-1021],[-960,-959,-958,-957]]}
 
 ```
 
