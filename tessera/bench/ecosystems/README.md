@@ -77,8 +77,15 @@ land them together.
 ```sh
 # inside `nix develop` (provides python + libstdc++ on LD_LIBRARY_PATH)
 cd tessera/bench/ecosystems
+# Build the extension and assemble the `tessera` package next to the driver.
+# NOTE: the cdylib is `lib_native.so`, NOT `libtessera.so` -- tessera-py's module was renamed to
+# `tessera._native` and is wrapped by a pure-Python `tessera/__init__.py`. Copying a file called
+# `libtessera.so` (as an earlier version of this README said) silently yields no importable
+# `tessera`, the reference adapter is then SKIPPED, and the suite still reports green.
 cargo build -p tessera-py --release            # from tessera/
-cp "$CARGO_TARGET_DIR/release/libtessera.so" ./tessera.so
+mkdir -p tessera
+cp ../../crates/tessera-py/python/tessera/{__init__.py,py.typed} tessera/
+cp "${CARGO_TARGET_DIR:-../../target}/release/lib_native.so" tessera/_native.so
 uv sync
 uv run python -m pytest -q                     # contract + bit-exactness first
 

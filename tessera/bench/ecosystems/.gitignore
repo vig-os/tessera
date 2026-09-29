@@ -4,3 +4,4 @@ tessera.so
 .venv/
 *results.json
 __pycache__/
+tessera/

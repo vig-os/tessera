@@ -1,7 +1,8 @@
 """Tessera `.tsra` adapter — the subject of the comparison, not one of the ecosystems.
 
-Uses the real `tessera` Python extension (tessera.so, built from tessera-py) — the same read/write
-path a user gets. Volume → pcodec array block; table → Vortex table block; both sealed in a zip64
+Uses the real `tessera` Python package (the pure-Python ergonomic layer over `tessera._native`,
+built from tessera-py) — the same read/write path a user gets, via its PUBLIC API (`array`,
+`array_roi`, `table_dict`, `column`), not the raw extension entry points underneath it. Volume → pcodec array block; table → Vortex table block; both sealed in a zip64
 `.tsra` with a blake3 manifest. Volume slicing uses the real chunked partial-read
 (`read_array_subset`); the table column read uses Vortex projection (`read_table_column`), which
 touches only that column's segments.
@@ -22,8 +23,6 @@ knobs that a Tessera user driving it from Python does not.
 """
 
 from __future__ import annotations
-
-import json
 
 import numpy as np
 
@@ -63,20 +62,19 @@ def write_volume(base: str, vol: np.ndarray, variant: str = "default") -> None:
 
 
 def read_volume(base: str, variant: str = "default") -> np.ndarray:
-    buf, shape, code = tessera.open(path_for(base, "volume")).read_array("volume")
-    return np.frombuffer(buf, "<" + code).reshape(tuple(shape))
+    return tessera.open(path_for(base, "volume")).array("volume")
 
 
 def read_volume_zslice(base: str, z: int, variant: str = "default") -> np.ndarray:
     r = tessera.open(path_for(base, "volume"))
     _d, h, w = _shape(r)
-    buf, sshape, code = r.read_array_subset("volume", [z, 0, 0], [1, h, w])
-    return np.frombuffer(buf, "<" + code).reshape(tuple(sshape))[0]
+    # Real chunked partial read — only the chunks intersecting plane z are fetched and decoded.
+    return r.array_roi("volume", [z, 0, 0], [1, h, w])[0]
 
 
 def _shape(r):
-    m = json.loads(r.manifest_json())
-    return tuple(b["spec"]["shape"] for b in m["blocks"] if b["name"] == "volume")[0]
+    blocks = r.manifest()["blocks"]
+    return tuple(b["spec"]["shape"] for b in blocks if b["name"] == "volume")[0]
 
 
 # ---- table ----
@@ -90,14 +88,12 @@ def write_table(base: str, cols: dict, variant: str = "default") -> None:
 
 
 def read_table(base: str, variant: str = "default") -> dict:
-    cols = tessera.open(path_for(base, "table")).read_table("events")
-    return {name: np.frombuffer(buf, "<" + code) for name, buf, code in cols}
+    return tessera.open(path_for(base, "table")).table_dict("events")
 
 
 def read_table_column(base: str, name: str, variant: str = "default") -> np.ndarray:
     # Vortex projection — reads only this column's segments.
-    buf, code = tessera.open(path_for(base, "table")).read_table_column("events", name)
-    return np.frombuffer(buf, "<" + code)
+    return tessera.open(path_for(base, "table")).column("events", name)
 
 
 # ---- integrity ----
