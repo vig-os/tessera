@@ -56,8 +56,8 @@ mod tests {
 
     fn sample_index() -> ChunkIndex {
         let mut idx = ChunkIndex::new();
-        idx.push(digest(b"chunk-0"), &[1, 2, 3]);
-        idx.push(digest(b"chunk-1"), &[10, 20]);
+        assert!(idx.push(digest(b"chunk-0"), &[1, 2, 3]));
+        assert!(idx.push(digest(b"chunk-1"), &[10, 20]));
         idx
     }
 

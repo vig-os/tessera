@@ -41,16 +41,28 @@ pub struct ChunkStats {
 }
 
 impl ChunkStats {
-    /// Fold a chunk's samples into its statistics (the leaf stat).
-    pub fn from_values(values: &[i64]) -> Self {
-        values.iter().fold(Self::identity(), |acc, &v| {
+    /// Fold a chunk's samples into its statistics (the leaf stat), or `None` if the fold cannot be
+    /// exact.
+    ///
+    /// **Fails closed** (ADR-0059 M2, #523). `sum_sq` accumulates in `i128`, which 64-bit samples
+    /// overflow: `i64::MAX²` is ~8.5e37 against an `i128::MAX` of ~1.7e38, so three such samples are
+    /// enough. Before this returned `Self` and used plain `+`, which panics in debug and — far worse
+    /// — **wraps silently in release**, where the wrapped `sum_sq` was then written into a sealed
+    /// `.cidx` and content-hashed. A wrong statistic with a hash over it is indistinguishable from a
+    /// right one.
+    ///
+    /// `None` means "this chunk has no exact statistics", and every caller turns that into *no
+    /// index* rather than an approximate one — the same fail-closed shape as `ArrayData::as_i64`
+    /// declining a `u64` array that will not fit `i64`.
+    pub fn from_values(values: &[i64]) -> Option<Self> {
+        values.iter().try_fold(Self::identity(), |acc, &v| {
             let v128 = v as i128;
-            acc.combine(&ChunkStats {
+            acc.checked_combine(&ChunkStats {
                 count: 1,
                 min: Some(v),
                 max: Some(v),
                 sum: v128,
-                sum_sq: v128 * v128,
+                sum_sq: v128.checked_mul(v128)?,
             })
         })
     }
@@ -202,11 +214,20 @@ impl ChunkIndex {
     }
 
     /// Append a sub-block by its content `digest` and its samples (which fold into the leaf stat).
-    pub fn push(&mut self, digest: impl Into<String>, values: &[i64]) {
-        self.entries.push(ChunkEntry {
-            digest: digest.into(),
-            stats: ChunkStats::from_values(values),
-        });
+    /// Append a sub-block by its content `digest` and its samples. `false` — and nothing appended —
+    /// when the samples cannot be folded exactly (ADR-0059 M2); the caller must then emit no index.
+    #[must_use = "a refused push means the index is incomplete and must not be emitted"]
+    pub fn push(&mut self, digest: impl Into<String>, values: &[i64]) -> bool {
+        match ChunkStats::from_values(values) {
+            Some(stats) => {
+                self.entries.push(ChunkEntry {
+                    digest: digest.into(),
+                    stats,
+                });
+                true
+            }
+            None => false,
+        }
     }
 
     /// Append a sub-block whose stats are already computed (the streaming path — stats come off the
@@ -347,8 +368,9 @@ impl ChunkIndex {
 /// let mut batch = ChunkIndex::new();
 /// for i in 0..5i64 {
 ///     let d = digest(format!("chunk{i}").as_bytes());
-///     acc.push(&d, ChunkStats::from_values(&[i, i * 2])); // live: hash + stats fold up the tree
-///     batch.push(d, &[i, i * 2]);
+///     // `from_values` / `push` return None / false if the fold cannot be exact (ADR-0059 M2).
+///     acc.push(&d, ChunkStats::from_values(&[i, i * 2]).unwrap()); // live: hash + stats fold up
+///     assert!(batch.push(d, &[i, i * 2]));
 /// }
 /// // the live streamed root + aggregate equal the batch index over the same leaves (§5 determinism).
 /// assert_eq!(acc.leaves(), 5);
@@ -415,6 +437,42 @@ impl MerkleStatsAccumulator {
 #[cfg(test)]
 mod tests {
 
+    /// `from_values` must FAIL CLOSED on overflow, never wrap (ADR-0059 M2, #523).
+    ///
+    /// `i64::MAX²` is ~8.5e37 against an `i128::MAX` of ~1.7e38, so two such samples fit and the
+    /// third overflows `sum_sq`. Before this, the fold used plain `+`: a debug build panicked and a
+    /// **release build wrapped silently**, writing the wrapped value into a sealed, content-hashed
+    /// `.cidx`. A wrong statistic under a hash is indistinguishable from a right one.
+    #[test]
+    fn from_values_fails_closed_rather_than_wrapping() {
+        let two = vec![i64::MAX, i64::MAX];
+        assert!(
+            ChunkStats::from_values(&two).is_some(),
+            "two i64::MAX values still fit i128"
+        );
+
+        let three = vec![i64::MAX, i64::MAX, i64::MAX];
+        assert_eq!(
+            ChunkStats::from_values(&three),
+            None,
+            "the third must be refused, not wrapped"
+        );
+
+        // And the refusal propagates through `push`, so an index cannot be built from it.
+        let mut idx = ChunkIndex::new();
+        assert!(
+            !idx.push("blake3:x", &three),
+            "push must report the refusal"
+        );
+        assert!(idx.is_empty(), "a refused push must append nothing");
+
+        // i64::MIN squares to the same magnitude — the negative side overflows too.
+        assert_eq!(
+            ChunkStats::from_values(&[i64::MIN, i64::MIN, i64::MIN]),
+            None
+        );
+    }
+
     /// Variance must not be computed as `E[x²] − E[x]²` in `f64` — that cancels catastrophically.
     ///
     /// For `[10¹⁵, 10¹⁵+1]` the true population variance is exactly 1/4. The textbook form converts
@@ -424,7 +482,7 @@ mod tests {
     #[test]
     fn variance_is_exact_where_the_textbook_f64_form_cancels_to_zero() {
         let v = vec![1_000_000_000_000_000i64, 1_000_000_000_000_001];
-        let s = ChunkStats::from_values(&v);
+        let s = ChunkStats::from_values(&v).expect("fits i128");
 
         // Independent exact reference, in integers only.
         let n = v.len() as i128;
@@ -484,7 +542,7 @@ mod tests {
     use crate::hash::{digest, merkle_root};
 
     fn stats(vs: &[i64]) -> ChunkStats {
-        ChunkStats::from_values(vs)
+        ChunkStats::from_values(vs).expect("test values fit i128")
     }
 
     #[test]
@@ -504,13 +562,12 @@ mod tests {
         let mut acc = MerkleStatsAccumulator::new();
         assert!(acc.is_empty());
         for (i, (d, vs)) in leaves.iter().enumerate() {
-            batch.push(d.clone(), vs);
-            acc.push(d, stats(vs));
-            // the live values advance per leaf and always equal a batch index over the prefix so far.
+            assert!(batch.push(d.clone(), vs), "test values fit i128");
+            acc.push(d, stats(vs)); // the live values advance per leaf and always equal a batch index over the prefix so far.
             let prefix = {
                 let mut b = ChunkIndex::new();
                 for (pd, pvs) in &leaves[..=i] {
-                    b.push(pd.clone(), pvs);
+                    assert!(b.push(pd.clone(), pvs), "test values fit i128");
                 }
                 b
             };
@@ -598,10 +655,16 @@ mod tests {
     #[test]
     fn pruning_keeps_overlapping_chunks_only_and_never_drops_a_hit() {
         let mut idx = ChunkIndex::new();
-        idx.push(digest(b"c0"), &[0, 1, 2]); // [0,2]
-        idx.push(digest(b"c1"), &[10, 11, 12]); // [10,12]
-        idx.push(digest(b"c2"), &[20, 25, 30]); // [20,30]
-                                                // range [11,21] overlaps c1 (11∈[10,12]) and c2 (20∈[20,30]); excludes c0.
+        assert!(idx.push(digest(b"c0"), &[0, 1, 2]), "test values fit i128"); // [0,2]
+        assert!(
+            idx.push(digest(b"c1"), &[10, 11, 12]),
+            "test values fit i128"
+        ); // [10,12]
+        assert!(
+            idx.push(digest(b"c2"), &[20, 25, 30]),
+            "test values fit i128"
+        ); // [20,30]
+           // range [11,21] overlaps c1 (11∈[10,12]) and c2 (20∈[20,30]); excludes c0.
         assert_eq!(idx.prune(11, 21), vec![1, 2]);
         // a range outside everything prunes all.
         assert_eq!(idx.prune(100, 200), Vec::<usize>::new());
@@ -620,9 +683,8 @@ mod tests {
     fn root_is_the_mmr_over_chunk_digests() {
         let mut idx = ChunkIndex::new();
         let (d0, d1) = (digest(b"chunk-0"), digest(b"chunk-1"));
-        idx.push(d0.clone(), &[1, 2]);
-        idx.push(d1.clone(), &[3, 4]);
-        // the index root IS the product's sub-block Merkle root (ties to ADR-0028 §1/§2)
+        assert!(idx.push(d0.clone(), &[1, 2]), "test values fit i128");
+        assert!(idx.push(d1.clone(), &[3, 4]), "test values fit i128"); // the index root IS the product's sub-block Merkle root (ties to ADR-0028 §1/§2)
         assert_eq!(idx.root(), merkle_root(&[d0, d1]));
         // empty index → empty MMR root
         assert_eq!(ChunkIndex::new().root(), merkle_root(&[]));
@@ -631,9 +693,8 @@ mod tests {
     #[test]
     fn aggregate_is_combine_of_all_chunks() {
         let mut idx = ChunkIndex::new();
-        idx.push(digest(b"a"), &[1, 2, 3]);
-        idx.push(digest(b"b"), &[4, 5]);
-        // block-level stat == stat over the whole concatenation
+        assert!(idx.push(digest(b"a"), &[1, 2, 3]), "test values fit i128");
+        assert!(idx.push(digest(b"b"), &[4, 5]), "test values fit i128"); // block-level stat == stat over the whole concatenation
         assert_eq!(idx.aggregate(), stats(&[1, 2, 3, 4, 5]));
         assert_eq!(idx.aggregate().count, 5);
         assert_eq!(idx.aggregate().min, Some(1));
@@ -645,7 +706,10 @@ mod tests {
         use crate::hash::verify_inclusion;
         let mut idx = ChunkIndex::new();
         for k in 0..6u8 {
-            idx.push(digest(&[k, 7]), &[k as i64]);
+            assert!(
+                idx.push(digest(&[k, 7]), &[k as i64]),
+                "test values fit i128"
+            );
         }
         let root = idx.root();
         for i in 0..idx.len() {
@@ -669,8 +733,8 @@ mod tests {
         let mut incr = ChunkIndex::new();
         for (i, c) in chunks.iter().enumerate() {
             let d = digest(&[i as u8]);
-            batch.push(d.clone(), c); // folds values now
-            incr.push_entry(d, ChunkStats::from_values(c)); // stats arrived with the fragment
+            assert!(batch.push(d.clone(), c), "test values fit i128"); // folds values now
+            incr.push_entry(d, ChunkStats::from_values(c).expect("fits")); // stats arrived with the fragment
         }
         assert_eq!(incr.root(), batch.root());
         assert_eq!(incr.aggregate(), batch.aggregate());
@@ -681,7 +745,10 @@ mod tests {
     fn stat_pyramid_rolls_up_to_the_aggregate() {
         let mut idx = ChunkIndex::new();
         for k in 0..5u8 {
-            idx.push(digest(&[k]), &[k as i64, k as i64 + 10]);
+            assert!(
+                idx.push(digest(&[k]), &[k as i64, k as i64 + 10]),
+                "test values fit i128"
+            );
         }
         let p = idx.stat_pyramid();
         // level 0 = per-chunk stats; levels halve (ceil) down to one summary node.
@@ -689,7 +756,7 @@ mod tests {
             p.iter().map(|l| l.len()).collect::<Vec<_>>(),
             vec![5, 3, 2, 1]
         );
-        assert_eq!(p[0][0], ChunkStats::from_values(&[0, 10]));
+        assert_eq!(p[0][0], ChunkStats::from_values(&[0, 10]).expect("fits"));
         // the summit equals the flat aggregate (the monoid law: combine is associative).
         assert_eq!(p.last().unwrap()[0], idx.aggregate());
         // empty index → no levels.
@@ -699,8 +766,8 @@ mod tests {
     #[test]
     fn index_to_bytes_is_deterministic_and_roundtrips() {
         let mut idx = ChunkIndex::new();
-        idx.push(digest(b"c0"), &[1, 2, 3]);
-        idx.push(digest(b"c1"), &[-5, 9]);
+        assert!(idx.push(digest(b"c0"), &[1, 2, 3]), "test values fit i128");
+        assert!(idx.push(digest(b"c1"), &[-5, 9]), "test values fit i128");
         let bytes = idx.to_bytes().unwrap();
         // same index → identical bytes (the block-digest determinism requirement)
         assert_eq!(idx.to_bytes().unwrap(), bytes);
@@ -713,7 +780,7 @@ mod tests {
     #[test]
     fn entry_roundtrips_through_serde() {
         let mut idx = ChunkIndex::new();
-        idx.push(digest(b"x"), &[7, 8, 9]);
+        assert!(idx.push(digest(b"x"), &[7, 8, 9]), "test values fit i128");
         let json = serde_json::to_string(&idx).unwrap();
         let back: ChunkIndex = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entries, idx.entries);

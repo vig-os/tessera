@@ -721,11 +721,12 @@ pub fn array_block_with_index(
     data: &ArrayData,
 ) -> Result<(EncodedBlock, Option<EncodedBlock>)> {
     let block = array_block(name, spec, data)?;
-    let sidecar = if data.as_i64().is_some() {
-        let index = array_chunk_index(spec, data)?;
-        Some(crate::chunk_index::chunk_index_block(name, &index)?)
-    } else {
-        None // non-integer array → no integer chunk stats (ADR-0028 §3 integer core)
+    let sidecar = match array_chunk_index(spec, data)? {
+        // `None` = the values are not exactly foldable (non-integer dtype, or an accumulator that
+        // would overflow). Either way the block is written WITHOUT an index rather than with an
+        // approximate one (ADR-0028 §3 integer core; ADR-0059 M2).
+        Some(index) => Some(crate::chunk_index::chunk_index_block(name, &index)?),
+        None => None,
     };
     Ok((block, sidecar))
 }
@@ -745,17 +746,19 @@ pub fn array_block_with_index(
 ///
 /// let mut spec = ArraySpec::new(vec![4, 4, 4], "int16");
 /// spec.chunks = vec![2, 2, 2]; // 8 chunks of 2³ over a 4³ volume
-/// let idx = array_chunk_index(&spec, &ArrayData::I16((0..64).map(|k| k as i16).collect())).unwrap();
+/// let idx = array_chunk_index(&spec, &ArrayData::I16((0..64).map(|k| k as i16).collect())).unwrap().expect("an indexable fixture");
 ///
 /// assert_eq!(idx.len(), 8);
 /// assert_eq!(idx.aggregate().max, Some(63)); // stats roll up to the whole array
 /// assert_eq!(idx.prune(0, 0), vec![0]); // value 0 lives only in the first chunk
 /// assert!(idx.root().starts_with("blake3:")); // sub-block MMR root (ADR-0028 §1)
 /// ```
-pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkIndex> {
-    let vals = data
-        .as_i64()
-        .ok_or_else(|| Error::Codec("array dtype is not integer for chunk stats".into()))?;
+pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<Option<ChunkIndex>> {
+    // A non-integer array has no integer chunk stats — `None`, not an error: callers ask for an
+    // index and are told there is none, exactly as for an overflowing one.
+    let Some(vals) = data.as_i64() else {
+        return Ok(None);
+    };
     let shape: Vec<usize> = spec.shape.iter().map(|&d| d as usize).collect();
     let chunks: Vec<usize> = spec.chunks.iter().map(|&c| (c as usize).max(1)).collect();
     if shape.len() != chunks.len() {
@@ -814,7 +817,12 @@ pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkInde
                 v[ax] = lo[ax];
             }
         }
-        idx.push_entry(digest(&bytes), ChunkStats::from_values(&chunk_vals));
+        // Fail closed (ADR-0059 M2, #523): a chunk whose stats cannot be folded exactly yields NO
+        // index at all, rather than an index carrying a wrapped `sum_sq` under a content hash.
+        let Some(stats) = ChunkStats::from_values(&chunk_vals) else {
+            return Ok(None);
+        };
+        idx.push_entry(digest(&bytes), stats);
 
         // advance the chunk multi-index in C-order (last axis fastest).
         for ax in (0..rank).rev() {
@@ -825,7 +833,7 @@ pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkInde
             cidx[ax] = 0;
         }
     }
-    Ok(idx)
+    Ok(Some(idx))
 }
 
 /// Convert a dense **integer** array to its **COO** (coordinate-list) table form (ADR-0031 §2): one row
@@ -1909,7 +1917,9 @@ mod tests {
         assert_eq!(blk.name, "vol");
         // the sidecar == the separate composition chunk_index_block(name, &array_chunk_index(..)).
         let (scar, _) = sidecar.expect("integer array gets a chunk-index sidecar");
-        let idx = array_chunk_index(&spec, &data).unwrap();
+        let idx = array_chunk_index(&spec, &data)
+            .unwrap()
+            .expect("an indexable fixture");
         let (expect_ref, _) = crate::chunk_index::chunk_index_block("vol", &idx).unwrap();
         assert_eq!(scar.digest, expect_ref.digest);
         assert_eq!(scar.name, expect_ref.name); // the "<name>.cidx" companion
@@ -1959,13 +1969,44 @@ mod tests {
         assert!(to_coo(&ArrayData::F32(vec![1.0, 0.0]), 0).is_none());
     }
 
+    /// An array whose statistics overflow the exact accumulator gets NO index (ADR-0059 M2, #523).
+    ///
+    /// Fail closed: the block is still written, just without a sidecar — the same shape as a float
+    /// array, and the same precedent as `ArrayData::as_i64` declining a `u64` that will not fit.
+    /// The alternative is a sealed `.cidx` carrying a wrapped `sum_sq` under a content hash.
+    #[test]
+    fn an_overflowing_array_gets_no_chunk_index() {
+        let mut spec = ArraySpec::new(vec![4], "int64");
+        spec.chunks = vec![4]; // one chunk, so the overflow is inside a single fold
+        let data = ArrayData::I64(vec![i64::MAX, i64::MAX, i64::MAX, i64::MAX]);
+
+        assert!(
+            array_chunk_index(&spec, &data).unwrap().is_none(),
+            "an overflowing fold must yield no index"
+        );
+
+        // The data block is still produced — only the sidecar is withheld.
+        let ((blk, _), sidecar) = array_block_with_index("vol", &spec, &data).unwrap();
+        assert_eq!(blk.name, "vol");
+        assert!(
+            sidecar.is_none(),
+            "no sidecar rather than one with wrapped statistics"
+        );
+
+        // A value range that DOES fit still gets its index, so this is not blanket refusal of int64.
+        let ok = ArrayData::I64(vec![1, 2, 3, 4]);
+        assert!(array_chunk_index(&spec, &ok).unwrap().is_some());
+    }
+
     #[test]
     fn array_chunk_index_walks_the_3d_chunk_grid() {
         // 4×4×4 C-order 0..63, chunks 2×2×2 → 8 chunks of 8 voxels each.
         let mut spec = ArraySpec::new(vec![4, 4, 4], "int16");
         spec.chunks = vec![2, 2, 2];
         let data = ArrayData::I16((0..64).map(|k| k as i16).collect());
-        let idx = array_chunk_index(&spec, &data).unwrap();
+        let idx = array_chunk_index(&spec, &data)
+            .unwrap()
+            .expect("an indexable fixture");
 
         assert_eq!(idx.len(), 8);
         // stats roll up to the whole array [0, 63]
@@ -1982,9 +2023,18 @@ mod tests {
         assert_eq!(idx.prune(63, 63), vec![7]);
         // deterministic sub-block MMR root over the per-chunk digests
         assert!(idx.root().starts_with("blake3:"));
-        assert_eq!(array_chunk_index(&spec, &data).unwrap().root(), idx.root());
+        assert_eq!(
+            array_chunk_index(&spec, &data)
+                .unwrap()
+                .expect("an indexable fixture")
+                .root(),
+            idx.root()
+        );
         // a float array can't supply integer stats
-        assert!(array_chunk_index(&spec, &ArrayData::F32(vec![0.0; 64])).is_err());
+        // A float array is not an ERROR, it is "no index" (ADR-0059 M2 shape).
+        assert!(array_chunk_index(&spec, &ArrayData::F32(vec![0.0; 64]))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1994,7 +2044,9 @@ mod tests {
         let mut spec = ArraySpec::new(vec![5, 5, 5], "int32");
         spec.chunks = vec![2, 2, 2];
         let data = ArrayData::I32((0..125).collect());
-        let idx = array_chunk_index(&spec, &data).unwrap();
+        let idx = array_chunk_index(&spec, &data)
+            .unwrap()
+            .expect("an indexable fixture");
         assert_eq!(idx.len(), 27);
         // every voxel is gathered exactly once → counts sum to 125, stats span the whole array.
         let agg = idx.aggregate();

@@ -3079,7 +3079,8 @@ mod tests {
         );
 
         // And it must equal the chunk-index monoid exactly — same reduction, same answer.
-        let cs = tessera_core::chunk_index::ChunkStats::from_values(&v);
+        let cs = tessera_core::chunk_index::ChunkStats::from_values(&v)
+            .expect("2^53 + 1000 ones fits i128");
         assert_eq!(mean, cs.mean().unwrap());
         assert_eq!(_std, cs.std_dev().unwrap());
     }
@@ -3267,7 +3268,7 @@ mod tests {
         // An index covering only the FIRST half of the array — stale/partial, exactly what must
         // not be trusted.
         let mut short = tessera_core::chunk_index::ChunkIndex::new();
-        short.push(tessera_core::hash::digest(b"chunk-0"), &[0, 1, 2, 3]);
+        assert!(short.push(tessera_core::hash::digest(b"chunk-0"), &[0, 1, 2, 3]));
         let (sref, spayload) =
             tessera_io::chunk_index::chunk_index_block("volume", &short).unwrap();
 
@@ -3338,8 +3339,8 @@ mod tests {
 
         // An index built for a 2-chunk array — wrong grid, and its max (1) is wrong for this block.
         let mut other = tessera_core::chunk_index::ChunkIndex::new();
-        other.push(tessera_core::hash::digest(b"c0"), &[0, 1]);
-        other.push(tessera_core::hash::digest(b"c1"), &[0, 1]);
+        assert!(other.push(tessera_core::hash::digest(b"c0"), &[0, 1]));
+        assert!(other.push(tessera_core::hash::digest(b"c1"), &[0, 1]));
         let (sref, spayload) =
             tessera_io::chunk_index::chunk_index_block("volume", &other).unwrap();
 
