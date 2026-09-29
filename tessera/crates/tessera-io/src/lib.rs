@@ -46,9 +46,9 @@ pub use collection::{
 };
 pub use config::{parse_byte_size, WriteConfig, DEFAULT_RAM_BUDGET};
 pub use container::{
-    add_aux_members, pack, pack_dir, pack_streaming, pack_streaming_verified, unpack,
-    verify_payloads_parallel, write_aux_members, AuxMember, BlockPayload, Reader, AUX_PREFIX,
-    AUX_PROVENANCE_ENTRY, AUX_SIGNATURES_PREFIX, MIMETYPE,
+    add_aux_members, pack, pack_dir, pack_streaming, pack_streaming_verified,
+    read_manifest_unverified, unpack, verify_payloads_parallel, write_aux_members, AuxMember,
+    BlockPayload, Reader, AUX_PREFIX, AUX_PROVENANCE_ENTRY, AUX_SIGNATURES_PREFIX, MIMETYPE,
 };
 pub use multiblock::{ColumnBlockIter, LogicalTableView};
 pub use provenance::{

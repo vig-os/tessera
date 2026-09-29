@@ -1278,10 +1278,16 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 full,
             };
             let mut out = std::io::stdout().lock();
-            let complete = provenance::run(&file, &opts, &mut out)?;
-            // The chain is already rendered; `--require-complete` only decides the exit code, so the
-            // operator sees WHICH hops are missing either way rather than just that something is.
-            if require_complete && !complete {
+            let verdict = provenance::run(&file, &opts, &mut out)?;
+            // The chain is already rendered either way, so these only decide the exit code — the operator
+            // sees WHICH hops are unproven rather than just that something is. Corruption is
+            // unconditional: a broken seal in the store is never a "you may want to check for that" state
+            // that a gate opts into. An incomplete chain is, because resolving one from a single directory
+            // routinely fails and a verb that died on it would be useless in a pipeline.
+            if verdict.corrupt > 0 {
+                return Err(provenance::corruption_error(verdict.corrupt));
+            }
+            if require_complete && !verdict.complete {
                 return Err(provenance::incomplete_error(&file));
             }
             Ok(())
@@ -2280,6 +2286,212 @@ mod tests {
         }
     }
 
+    /// A cycle below the root must fail the **verb**, not just the library (#452 review).
+    ///
+    /// `r → b → c → b`: the loop never revisits the root, which is exactly the shape the diamond
+    /// optimisation masked — the edge closing it looked like a shared parent's second arm, so the walk
+    /// returned a clean-looking chain. Rendering a malformed DAG as if it were fine is worse than any
+    /// gap, so this asserts the operator surface exits nonzero.
+    ///
+    /// The pins are deliberately stale: content hashes make a mutually-pinned cycle unsealable, and they
+    /// do not matter here. Resolution is by lineage `id`, so the descent — and therefore the cycle —
+    /// happens regardless of whether each edge pinned the right version.
+    #[test]
+    fn a_cycle_below_the_root_fails_the_provenance_verb() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        const TS: &str = "2024-01-01T00:00:00Z";
+        // Ids are hashed over the identity inputs, so each product's id is known before it is sealed —
+        // which is what lets `b` and `c` name each other.
+        let id_of = |name: &str| tessera_core::Manifest::new("recon", name, "d", TS).id;
+
+        let mut written = Vec::new();
+        for (name, parent) in [("r", "b"), ("b", "c"), ("c", "b")] {
+            let mut b = ProductBuilder::new("recon", name, "d", TS);
+            let vol = ArrayBlock::new("volume", ArraySpec::new(vec![2, 2, 2], "int16"));
+            b.add_block(&vol).unwrap();
+            b.add_source(
+                tessera_core::provenance::Source::new("derived_from", id_of(parent))
+                    .with_content_hash("blake3:staleonpurpose"),
+            );
+            let sealed = b.seal().unwrap();
+            let path = d.join(format!("{name}.tsra"));
+            pack(
+                &sealed,
+                &[BlockPayload::new(
+                    "volume",
+                    serde_json::to_vec(&vol.spec).unwrap(),
+                )],
+                &path,
+            )
+            .unwrap();
+            written.push(path);
+        }
+
+        let opts = provenance::Opts {
+            collection: None,
+            search: vec![],
+            depth: None,
+            json: false,
+            full: false,
+        };
+        let err = provenance::run(&written[0], &opts, &mut Vec::new())
+            .expect_err("r -> b -> c -> b must not walk cleanly");
+        assert!(
+            matches!(&err, tessera_core::Error::Invalid(m) if m.contains("cycle")),
+            "expected a cycle error, got {err:?}"
+        );
+        assert!(
+            run(Cmd::Provenance {
+                file: written[0].clone(),
+                search: vec![],
+                collection: None,
+                depth: None,
+                json: false,
+                full: false,
+                require_complete: false,
+            })
+            .is_err(),
+            "the verb must exit nonzero on a malformed DAG, with or without --require-complete"
+        );
+    }
+
+    /// A pinned parent that is **corrupt** must not be reported as merely *missing* (#452 review).
+    ///
+    /// The two invite opposite responses. "I could not find it" sends an operator looking for another
+    /// copy; "what I found does not verify" is the end of the search and the start of an incident. The
+    /// discovery pass used to swallow every file `Reader::open` rejected, which collapsed the second into
+    /// the first — and at exit 0, so a pipeline sailed past a tampered parent.
+    #[test]
+    fn a_tampered_pinned_parent_is_reported_as_corrupt_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let parent_path = d.join("parent.tsra");
+        sample_tsra(&parent_path);
+        let parent = Reader::open(&parent_path).unwrap().manifest().clone();
+
+        let mut cb = ProductBuilder::new("recon", "child", "d", "2024-01-01T00:00:00Z");
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![4, 4, 4], "int16"));
+        cb.add_block(&vol).unwrap();
+        cb.add_source(
+            tessera_core::provenance::Source::new("derived_from", &parent.id)
+                .with_content_hash(parent.manifest_hash.clone().unwrap()),
+        );
+        let child = cb.seal().unwrap();
+        pack(
+            &child,
+            &[BlockPayload::new(
+                "volume",
+                serde_json::to_vec(&vol.spec).unwrap(),
+            )],
+            &d.join("child.tsra"),
+        )
+        .unwrap();
+
+        let opts = provenance::Opts {
+            collection: None,
+            search: vec![],
+            depth: None,
+            json: false,
+            full: false,
+        };
+
+        // Baseline: intact sibling, chain proven, nothing corrupt.
+        let mut out = Vec::new();
+        let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
+        assert!(
+            v.complete && v.corrupt == 0,
+            "{}",
+            String::from_utf8_lossy(&out)
+        );
+
+        // Tamper the parent's sealed manifest: still a valid `.tsra` container (right magic, manifest
+        // present), but the seal no longer covers its contents.
+        tamper_manifest_metadata(&parent_path);
+        assert!(
+            matches!(
+                Reader::open(&parent_path),
+                Err(tessera_core::Error::Integrity { .. })
+            ),
+            "the fixture must produce a seal failure, not a container failure"
+        );
+
+        let mut out = Vec::new();
+        let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(v.corrupt, 1, "the tampered sibling must be named:\n{text}");
+        assert!(
+            !v.complete,
+            "a corrupt store is never a complete chain:\n{text}"
+        );
+        assert!(
+            text.contains("CORRUPT") && text.contains("parent.tsra"),
+            "the render must name the corrupt file:\n{text}"
+        );
+        // And it must say so ON THE EDGE that needed the parent, not only in a footnote: the hop reads
+        // CORRUPT rather than "unresolved", so nobody goes hunting for a copy that is already here.
+        assert!(
+            text.contains("[CORRUPT]"),
+            "the hop itself must be marked corrupt, not merely unresolved:\n{text}"
+        );
+        assert!(
+            !text.contains("no product with this lineage was found"),
+            "a corrupt parent must not also be described as missing:\n{text}"
+        );
+        // And the exit is nonzero WITHOUT --require-complete: corruption is not opt-in.
+        assert!(
+            run(Cmd::Provenance {
+                file: d.join("child.tsra"),
+                search: vec![],
+                collection: None,
+                depth: None,
+                json: false,
+                full: false,
+                require_complete: false,
+            })
+            .is_err(),
+            "a corrupt candidate must fail the verb on its own"
+        );
+
+        // A file that is not a Tessera product at all stays silently ignored — otherwise `--search` is
+        // unusable on any real directory.
+        std::fs::write(d.join("notes.tsra"), b"this is not a container").unwrap();
+        std::fs::remove_file(&parent_path).unwrap();
+        let mut out = Vec::new();
+        let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
+        assert_eq!(v.corrupt, 0, "a non-product must not be called corrupt");
+    }
+
+    /// Rewrite a sealed `.tsra`'s `manifest.json` so its recorded `manifest_hash` no longer matches its
+    /// contents, leaving the container itself well-formed. Repacks the zip STORED, as the format requires.
+    fn tamper_manifest_metadata(path: &std::path::Path) {
+        let bytes = std::fs::read(path).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut entries = Vec::new();
+        for i in 0..zip.len() {
+            let mut f = zip.by_index(i).unwrap();
+            let name = f.name().to_string();
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut f, &mut buf).unwrap();
+            if name == "manifest.json" {
+                let mut m: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+                // Change sealed content while leaving `manifest_hash` as recorded.
+                m["description"] = serde_json::json!("edited after sealing");
+                buf = serde_json::to_vec_pretty(&m).unwrap();
+            }
+            entries.push((name, buf));
+        }
+        let f = std::fs::File::create(path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, buf) in entries {
+            zw.start_file(name, stored).unwrap();
+            std::io::Write::write_all(&mut zw, &buf).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
     /// The `--require-complete` gate must tell **version skew** from **corruption** end to end, on two
     /// versions of one parent made the way a user makes them: `tessera commit`.
     ///
@@ -2329,7 +2541,9 @@ mod tests {
         };
         let mut out = Vec::new();
         assert!(
-            provenance::run(&handover.join("child.tsra"), &opts, &mut out).unwrap(),
+            provenance::run(&handover.join("child.tsra"), &opts, &mut out)
+                .unwrap()
+                .complete,
             "the pinned parent is present: {}",
             String::from_utf8_lossy(&out)
         );
@@ -2370,11 +2584,15 @@ mod tests {
 
         // Same lineage, different version: a rendered gap, exit-0-worthy, and NOT an integrity error.
         let mut out = Vec::new();
-        let complete = provenance::run(&handover.join("child.tsra"), &opts, &mut out).unwrap();
+        let verdict = provenance::run(&handover.join("child.tsra"), &opts, &mut out).unwrap();
         let text = String::from_utf8_lossy(&out);
         assert!(
-            !complete,
+            !verdict.complete,
             "the pinned version is no longer on disk:\n{text}"
+        );
+        assert_eq!(
+            verdict.corrupt, 0,
+            "a superseded parent is a version difference, never corruption:\n{text}"
         );
         assert!(
             text.contains("different version"),
@@ -2394,7 +2612,9 @@ mod tests {
         .unwrap();
     }
 
-    fn sample_tsra(path: &std::path::Path) {
+    /// A minimal sealed `recon` product. `pub(crate)` so sibling modules' test fixtures reuse it rather
+    /// than each hand-rolling a product (the `provenance` symlink test needs a real, openable `.tsra`).
+    pub(crate) fn sample_tsra(path: &std::path::Path) {
         let vol = ArrayBlock::new("volume", ArraySpec::new(vec![16, 16, 16], "int16"));
         let payload = serde_json::to_vec(&vol.spec).unwrap();
         let mut b = ProductBuilder::new("recon", "DP06", "d", "2024-01-01T00:00:00Z");

@@ -240,18 +240,33 @@ pub enum EdgeOutcome {
     Unpinned,
 }
 
+/// The role `publish` writes for its version breadcrumb (ADR-0036) — the one version-pointer role the
+/// format itself emits.
+pub const SNAPSHOT_OF_ROLE: &str = "snapshot_of";
+
 /// Is this edge a **version pointer** rather than a derivation edge?
 ///
 /// A derivation edge references a parent's *lineage* `id` and pins that parent's `manifest_hash`, so
 /// the two values differ. ADR-0036's `snapshot_of` breadcrumb instead references the version itself, so
-/// reference and pin are the same string. That structural equality is the signal — read off the edge's
-/// shape, never its role name, because roles are free-form strings the format never constrains.
+/// reference and pin are the same string.
 ///
-/// [`walk`] reports such an edge but does **not** recurse through it, and that is load-bearing: a
-/// published artifact keeps its lineage `id` while pointing back at an earlier version of *itself*, so
-/// descending would re-walk the same product and trip the cycle guard on a perfectly well-formed DAG.
+/// Both halves are required, and the role half is the security-relevant one. Shape alone is **forgeable**:
+/// a crafted `derived_from` whose reference equals its pin would be exempted from descent and from
+/// completeness, quietly passing a `--require-complete` gate it never satisfied (#452 review). So the
+/// role must be the one the format writes for this purpose. That is not "guessing semantics from a
+/// free-form label" — it is recognising *our own* emitted breadcrumb; a producer's arbitrary role gets no
+/// exemption. [`is_self_snapshot`] adds the third check once a parent actually resolves.
 pub fn is_version_pointer(s: &Source) -> bool {
-    s.content_hash.as_deref() == Some(s.reference.as_str())
+    s.role == SNAPSHOT_OF_ROLE && s.content_hash.as_deref() == Some(s.reference.as_str())
+}
+
+/// A resolved version pointer that really points **into its own lineage** — the case [`walk`] must not
+/// recurse through, because a published artifact keeps its lineage `id` while naming an earlier version
+/// of *itself*, so descending re-walks the same product and trips the cycle guard on a well-formed DAG.
+/// An edge that resolves to a *different* lineage is not a self-snapshot whatever it is called, and is
+/// walked like any other parent.
+fn is_self_snapshot(s: &Source, from: &Manifest, parent: &Manifest) -> bool {
+    is_version_pointer(s) && parent.id == from.id
 }
 
 /// A node reached during a [`walk`], with the edge that led to it.
@@ -263,6 +278,10 @@ pub struct Step<'a> {
     pub source: &'a Source,
     /// What resolving it produced.
     pub outcome: EdgeOutcome,
+    /// The parent this edge resolved to, when one did. Carried so a visitor never has to resolve the
+    /// edge a second time — a second lookup is a second chance for the walk and the render to disagree
+    /// about what the DAG is, which is the whole reason there is only one traversal.
+    pub parent: Option<&'a Manifest>,
     /// Hops from the root (the root's own edges are depth 1).
     pub depth: usize,
     /// True when this parent was already reached by another path — a diamond. Reported once so a
@@ -286,8 +305,8 @@ pub trait Visit {
 ///   rather than something to render.
 /// - **Diamonds are visited once**, flagged via [`Step::revisited`]. Re-walking a shared subtree can
 ///   only reach the same verdict, so skipping it is both cheaper and what a reader wants to see.
-/// - **Version pointers are not recursed through** (see [`is_version_pointer`]) — they name a version,
-///   not a parent product, and a published artifact points back at its own lineage.
+/// - **Self-lineage version pointers are not recursed through** (see [`is_self_snapshot`]) — they name a
+///   version of the walked product's own lineage, not a parent to visit.
 /// - `max_depth` caps how far to descend (`None` = unlimited). Edges *at* the cap are still reported;
 ///   their children are not.
 pub fn walk<R: Resolver, V: Visit>(
@@ -309,16 +328,27 @@ pub fn walk<R: Resolver, V: Visit>(
     )
 }
 
+/// A node's identity for traversal bookkeeping: lineage `id` **plus** version.
+///
+/// Keyed by the pair, not the `id`, because an `id` addresses many versions (ADR-0036). Two paths that
+/// pin *different* versions of one lineage are different nodes and both deserve a walk, and a cycle then
+/// means the same **version** re-entered — unambiguously a loop, rather than a lineage that legitimately
+/// appears twice at different versions.
+fn node_key(m: &Manifest) -> (String, String) {
+    (m.id.clone(), m.manifest_hash.clone().unwrap_or_default())
+}
+
 fn walk_inner<R: Resolver, V: Visit>(
     m: &Manifest,
     resolver: &R,
     max_depth: Option<usize>,
     visitor: &mut V,
-    on_stack: &mut BTreeSet<String>,
-    seen: &mut BTreeSet<String>,
+    on_stack: &mut BTreeSet<(String, String)>,
+    seen: &mut BTreeSet<(String, String)>,
     depth: usize,
 ) -> Result<()> {
-    if !on_stack.insert(m.id.clone()) {
+    let key = node_key(m);
+    if !on_stack.insert(key.clone()) {
         return Err(Error::Invalid(format!(
             "provenance cycle detected at product '{}'",
             m.id
@@ -341,24 +371,33 @@ fn walk_inner<R: Resolver, V: Visit>(
                 }
             }
         };
-        // A diamond's second arrival is reported (so it can be marked) but not descended into.
-        let revisited = resolved.as_ref().is_some_and(|p| seen.contains(&p.id));
+        let parent_key = resolved.as_ref().map(node_key);
+        // **Cycle before diamond.** A parent enters `seen` before we descend into it, so every ancestor
+        // on the current stack is in `seen` too. Testing `seen` first therefore makes the edge that
+        // *closes* a loop look like the second arm of a diamond — reported, skipped, walk returns Ok,
+        // cycle masked (#452 review). The real distinction: a diamond's shared parent is **finished**,
+        // a cycle's target is **still on the stack**. So exclude on-stack nodes from `revisited` and let
+        // them fall through to the recursive entry guard, which is the one place a cycle is raised.
+        let on_stack_now = parent_key.as_ref().is_some_and(|k| on_stack.contains(k));
+        let revisited = !on_stack_now && parent_key.as_ref().is_some_and(|k| seen.contains(k));
         visitor.edge(&Step {
             from: m,
             source: s,
             outcome,
+            parent: resolved.as_ref(),
             depth: depth + 1,
             revisited,
         })?;
-        let Some(parent) = resolved else { continue };
-        // A version pointer is reported, never descended into: it names a version of a lineage rather
-        // than a parent to walk, and for a published artifact that lineage is its OWN.
-        if revisited || is_version_pointer(s) || max_depth.is_some_and(|d| depth + 1 >= d) {
+        let Some(parent) = resolved.as_ref() else {
+            continue;
+        };
+        if revisited || is_self_snapshot(s, m, parent) || max_depth.is_some_and(|d| depth + 1 >= d)
+        {
             continue;
         }
-        seen.insert(parent.id.clone());
+        seen.insert(parent_key.expect("a resolved parent always has a key"));
         walk_inner(
-            &parent,
+            parent,
             resolver,
             max_depth,
             visitor,
@@ -367,7 +406,7 @@ fn walk_inner<R: Resolver, V: Visit>(
             depth + 1,
         )?;
     }
-    on_stack.remove(&m.id); // pop: only a genuine cycle fails, a diamond does not
+    on_stack.remove(&key); // pop: only a genuine cycle fails, a diamond does not
     Ok(())
 }
 
@@ -640,6 +679,94 @@ mod tests {
             seen,
             vec![EdgeOutcome::Pinned],
             "the edge is reported once, and not recursed through"
+        );
+    }
+
+    /// The version-pointer exemption must not be **forgeable**. Skipping descent and skipping
+    /// completeness is a real privilege, so shape alone cannot earn it: a crafted `derived_from` whose
+    /// reference happens to equal its pin would otherwise go unwalked and pass a `--require-complete`
+    /// gate it never satisfied (#452 review). Two further checks close that: the role must be the one
+    /// the format itself writes, and a resolved pointer must land in the walked product's OWN lineage.
+    #[test]
+    fn the_version_pointer_exemption_is_not_forgeable() {
+        let parent = sealed("a-real-parent");
+        let pin = parent.manifest_hash.clone().unwrap();
+
+        // Forged: pointer SHAPE (reference == pin) but a derivation role. Not exempt.
+        let forged = Source::new("derived_from", &pin).with_content_hash(&pin);
+        assert!(!is_version_pointer(&forged));
+        // The format's own breadcrumb role, same shape. Exempt by shape+role.
+        let genuine = Source::new(SNAPSHOT_OF_ROLE, &pin).with_content_hash(&pin);
+        assert!(is_version_pointer(&genuine));
+
+        // …but only into its OWN lineage. Pointing at a different lineage is an ordinary parent, so it
+        // is still walked — the `snapshot_of` label buys nothing on someone else's product.
+        let mut child = ProductBuilder::new("recon", "child", "d", TS);
+        child.add_source(genuine.clone());
+        let child = child.seal().unwrap();
+        assert_ne!(child.id, parent.id);
+        assert!(!is_self_snapshot(&genuine, &child, &parent));
+        assert!(is_self_snapshot(&genuine, &parent, &parent));
+
+        // End to end: a forged edge is walked, so the parent it names is verified rather than waved
+        // through. Resolving the forged reference (a manifest_hash) to a DIFFERENT version proves the
+        // walk really descended instead of exempting it.
+        let mut skewed = parent.clone();
+        skewed.manifest_hash = Some("blake3:adifferentversion".into());
+        struct ByRef(String, Manifest);
+        impl Resolver for ByRef {
+            fn resolve(&self, reference: &str) -> Option<Manifest> {
+                (reference == self.0).then(|| self.1.clone())
+            }
+        }
+        let mut forged_child = ProductBuilder::new("recon", "forged", "d", TS);
+        forged_child.add_source(forged);
+        let forged_child = forged_child.seal().unwrap();
+        assert!(
+            matches!(
+                verify_chain(&forged_child, &ByRef(pin.clone(), skewed)),
+                Err(Error::ProvenanceVersionSkew { .. })
+            ),
+            "a forged version pointer must be checked like any other edge"
+        );
+    }
+
+    /// A cycle that does **not** pass through the root must still be a hard error: `r → b → c → b`.
+    ///
+    /// Regression guard for the diamond optimisation (#452 review). Marking a parent "already seen"
+    /// before descending into it puts every *ancestor* in that set too, so testing it before the
+    /// cycle guard makes the edge that closes a loop look like the second arm of a diamond — reported,
+    /// skipped, and the walk returns `Ok`. The distinction is that a diamond's shared parent has been
+    /// *finished*, while a cycle's target is still on the stack. Cycle first, diamond second.
+    #[test]
+    fn a_cycle_below_the_root_is_still_rejected() {
+        // r → b → c → b, all edges pinning the seal each parent carries.
+        let mut r = Manifest::new("recon", "r", "d", TS);
+        let mut b = Manifest::new("recon", "b", "d", TS);
+        let mut c = Manifest::new("recon", "c", "d", TS);
+        r.manifest_hash = Some("blake3:rrr".into());
+        b.manifest_hash = Some("blake3:bbb".into());
+        c.manifest_hash = Some("blake3:ccc".into());
+        r.sources
+            .push(Source::new("derived_from", &b.id).with_content_hash("blake3:bbb"));
+        b.sources
+            .push(Source::new("derived_from", &c.id).with_content_hash("blake3:ccc"));
+        c.sources
+            .push(Source::new("derived_from", &b.id).with_content_hash("blake3:bbb"));
+        let mut store = BTreeMap::new();
+        for m in [&r, &b, &c] {
+            store.insert(m.id.clone(), m.clone());
+        }
+
+        assert!(
+            matches!(verify_chain(&r, &store), Err(Error::Invalid(m)) if m.contains("cycle")),
+            "r -> b -> c -> b is a cycle even though it never revisits the root"
+        );
+        // And a visitor-driven walk must not quietly succeed either.
+        let mut seen = Vec::new();
+        assert!(
+            walk(&r, &store, None, &mut Collector(&mut seen)).is_err(),
+            "the operator walk must surface the cycle, not render a clean chain"
         );
     }
 

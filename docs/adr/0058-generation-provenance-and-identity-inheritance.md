@@ -242,8 +242,21 @@ Three consequences follow, each a structural rule rather than a special case:
   pinned hash names a version rather than a lineage (ADR-0036's `snapshot_of`). A published artifact
   keeps its lineage `id` while pointing back at an earlier version of *itself*, so descending re-walks
   the same product and trips the cycle guard — a well-formed published artifact rejected as a
-  malformed DAG. Read off the edge's *shape*, never its role name: roles are free-form strings the
-  format never constrains.
+  malformed DAG. The exemption requires **three** conditions, because skipping both descent and
+  completeness is a privilege and shape alone is forgeable: reference equals pin, the role is the one
+  `publish` writes, and a resolved pointer lands in the walked product's own lineage. Requiring the
+  role is not inferring semantics from a free-form label — it is recognising the format's *own*
+  emitted breadcrumb, and a producer's arbitrary role gets no exemption.
+- **A cycle is checked before a diamond.** A parent enters the visited set before it is descended into,
+  so every ancestor on the stack is also "visited"; testing that first makes the edge which *closes* a
+  loop look like a diamond's second arm, and the walk returns `Ok` on a malformed DAG. A diamond's
+  shared parent is finished; a cycle's target is still on the stack. Bookkeeping is keyed by
+  `(id, manifest_hash)`, so two paths pinning different versions of one lineage are distinct nodes and
+  a cycle means the same *version* re-entered.
+- **A candidate that fails verification is corruption, not absence.** Discovery distinguishes "not a
+  Tessera product" (skipped in silence, so a search root stays usable) from "a product whose manifest
+  does not verify" (named, and always a nonzero exit). Collapsing the second into the first reported a
+  tampered parent as merely missing, at exit 0.
 - **Verification and the operator view share one traversal** (`provenance::walk` + a `Visit`
   visitor). Two walks would drift, and then the verifier and the view would disagree about what the
   DAG is. They differ only in the visitor: strict refuses what it cannot prove, the operator view

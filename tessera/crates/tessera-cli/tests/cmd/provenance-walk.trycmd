@@ -227,6 +227,7 @@ $ tessera provenance --json --depth 1 handover.tsra
   },
   "complete": false,
   "gaps": 1,
+  "corrupt": [],
   "hops": [
     {
       "depth": 1,

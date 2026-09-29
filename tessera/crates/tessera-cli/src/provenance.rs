@@ -42,6 +42,20 @@ struct Candidate {
 #[derive(Default)]
 pub struct FileResolver {
     by_id: BTreeMap<String, Vec<Candidate>>,
+    corrupt: Vec<Corrupt>,
+}
+
+/// A candidate file that **is** a `.tsra` but whose manifest does not verify. Kept separately because it
+/// cannot be indexed — its manifest is exactly the thing we cannot trust — and because it must never be
+/// reported as a merely *missing* parent: "I could not find it" invites another `--search`, while "what I
+/// found is broken" is the end of the search and the start of an incident.
+struct Corrupt {
+    path: PathBuf,
+    detail: String,
+    /// The lineage `id` the file *claims*, read without verifying (`read_manifest_unverified`). Untrusted
+    /// by construction — used only to point the operator at the file from the edge that needed it, never
+    /// to satisfy that edge. `None` when even the claim is unreadable.
+    claims_id: Option<String>,
 }
 
 impl FileResolver {
@@ -73,12 +87,33 @@ impl FileResolver {
         }
     }
 
-    /// Open a `.tsra` and index its manifest. A file that will not open is skipped, not fatal: a
-    /// search directory is allowed to hold unrelated or half-written files, and failing the whole walk
-    /// because one neighbour is unreadable would make `--search` unusable on a real staging dir.
+    /// Open a `.tsra` and index its manifest, splitting the two very different ways that can fail.
+    ///
+    /// A search directory is allowed to hold unrelated or half-written files, so "this is not a Tessera
+    /// product" is skipped silently — otherwise `--search` would be unusable on a real staging dir. But a
+    /// file that **is** a product (right magic, manifest present) whose manifest fails verification is
+    /// corruption, and swallowing it reported a tampered parent as merely *absent*, at exit 0 (#452
+    /// review). The split is exact, from `Reader::from_reader`: bad magic / no mimetype / missing
+    /// `manifest.json` raise `Container`, while a manifest that does not verify raises `Integrity` and a
+    /// malformed one raises `Serde`.
     fn add_path(&mut self, path: &Path) {
-        if let Ok(r) = Reader::open(path) {
-            self.add(r.manifest().clone(), path.to_path_buf());
+        match Reader::open(path) {
+            Ok(r) => self.add(r.manifest().clone(), path.to_path_buf()),
+            Err(e @ (Error::Integrity { .. } | Error::BlockIntegrity { .. } | Error::Serde(_))) => {
+                // Read the identity it claims so the edge that needed this parent can name the file.
+                // Untrusted: a claim by something that already failed verification, good for pointing
+                // and nothing else.
+                let claims_id = tessera_io::read_manifest_unverified(path)
+                    .ok()
+                    .map(|m| m.id);
+                self.corrupt.push(Corrupt {
+                    path: path.to_path_buf(),
+                    detail: e.to_string(),
+                    claims_id,
+                });
+            }
+            // Not a `.tsra`, or unreadable: not this walk's business.
+            Err(_) => {}
         }
     }
 
@@ -88,10 +123,18 @@ impl FileResolver {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
+        // A search root names where to look, so a symlink must not quietly widen it: resolve each
+        // candidate and keep only what still lives under the (resolved) root. Without this, one link in a
+        // staging dir turns `--search` into a read of somewhere the operator never named.
+        let root = dir.canonicalize().ok();
         let mut paths: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "tsra"))
+            .filter(|p| match (&root, p.canonicalize()) {
+                (Some(root), Ok(real)) => real.starts_with(root),
+                _ => false,
+            })
             .collect();
         paths.sort(); // deterministic indexing order, so the render is reproducible
         for p in &paths {
@@ -107,6 +150,14 @@ impl FileResolver {
             .find(|c| c.manifest.manifest_hash.as_deref() == manifest_hash)
             .or_else(|| versions.first())
             .map(|c| c.path.as_path())
+    }
+
+    /// A corrupt file claiming to be this lineage, if one was found. What makes an unresolved edge
+    /// reportable as corruption rather than absence.
+    fn corrupt_claiming(&self, reference: &str) -> Option<&Corrupt> {
+        self.corrupt
+            .iter()
+            .find(|c| c.claims_id.as_deref() == Some(reference))
     }
 
     /// How many distinct versions of this lineage were found — the number that explains a skew.
@@ -180,10 +231,13 @@ pub fn discover(
 /// reference's *shape* rather than the role: roles are free-form strings the format never constrains,
 /// and a producer is free to invent one.
 fn looks_like_product_id(reference: &str) -> bool {
-    let Some((alg, hex)) = reference.split_once(':') else {
+    // Specifically `blake3:<64 hex>`: that is the only shape a product `id` takes, so a digest-shaped
+    // external reference (an OCI `sha256:…`, a vendor checksum) is an external leaf rather than a parent
+    // this walk failed to find. Accepting any `<alg>:<hex>` turned those into phantom gaps.
+    let Some(hex) = reference.strip_prefix("blake3:") else {
         return false;
     };
-    !alg.is_empty() && hex.len() >= 32 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// How a hop resolved, in the taxonomy the render and the exit code both key off. Five distinct
@@ -197,6 +251,10 @@ enum HopKind {
     Skew,
     /// A product-shaped reference nothing could be found for. Fetch it and the gap closes.
     Missing,
+    /// The parent this edge needs **is** on disk and is a Tessera product, but its manifest does not
+    /// verify. Distinct from `Missing` because the responses differ: absence sends you looking for another
+    /// copy, corruption ends the search and starts an incident.
+    CorruptParent,
     /// A product-shaped reference whose edge pins no version, so there is nothing to prove against.
     Unpinned,
     /// Acquisition provenance: a vendor path / filename / SOP UID, never a Tessera product. This is
@@ -214,7 +272,10 @@ impl HopKind {
     /// legitimately ends, so counting it would make every real chain permanently incomplete and the
     /// flag worthless.
     fn is_gap(self) -> bool {
-        matches!(self, HopKind::Skew | HopKind::Missing | HopKind::Unpinned)
+        matches!(
+            self,
+            HopKind::Skew | HopKind::Missing | HopKind::Unpinned | HopKind::CorruptParent
+        )
     }
 
     fn label(self) -> &'static str {
@@ -222,6 +283,7 @@ impl HopKind {
             HopKind::Proven => "pinned",
             HopKind::Skew => "different version",
             HopKind::Missing => "unresolved",
+            HopKind::CorruptParent => "CORRUPT",
             HopKind::Unpinned => "no pinned version",
             HopKind::ExternalLeaf => "external leaf",
             HopKind::VersionPointer => "version not present",
@@ -234,6 +296,7 @@ impl HopKind {
             HopKind::Proven => "proven",
             HopKind::Skew => "version_skew",
             HopKind::Missing => "unresolved",
+            HopKind::CorruptParent => "corrupt_parent",
             HopKind::Unpinned => "unpinned",
             HopKind::ExternalLeaf => "external_leaf",
             HopKind::VersionPointer => "version_not_present",
@@ -256,6 +319,8 @@ struct Hop {
     path: Option<PathBuf>,
     /// Other versions of this lineage the resolver holds — what makes a skew explicable.
     versions: usize,
+    /// The corrupt file that claims this lineage, when that is why nothing resolved.
+    corrupt_file: Option<PathBuf>,
 }
 
 /// Collects the walk into hops and never fails, so the whole reachable chain is rendered even when
@@ -288,7 +353,18 @@ impl Visit for Collect<'_> {
                 None,
             ),
             EdgeOutcome::Unresolved if looks_like_product_id(&step.source.reference) => {
-                (HopKind::Missing, step.source.content_hash.clone(), None)
+                // Nothing resolved because the only candidate for this lineage failed verification: say
+                // so on the edge that needed it, rather than calling the parent absent.
+                let kind = if self
+                    .resolver
+                    .corrupt_claiming(&step.source.reference)
+                    .is_some()
+                {
+                    HopKind::CorruptParent
+                } else {
+                    HopKind::Missing
+                };
+                (kind, step.source.content_hash.clone(), None)
             }
             EdgeOutcome::Unresolved => (
                 HopKind::ExternalLeaf,
@@ -296,14 +372,19 @@ impl Visit for Collect<'_> {
                 None,
             ),
         };
-        let parent = self
-            .resolver
-            .resolve_pinned(&step.source.reference, step.source.content_hash.as_deref());
+        // The parent the walk already resolved, carried on the `Step`. Resolving it again here would be
+        // a second lookup that could disagree with the one the traversal made — the exact drift a single
+        // shared walk exists to prevent.
+        let parent = step.parent.cloned();
         let path = parent
             .as_ref()
             .and_then(|p| self.resolver.path_of(&p.id, p.manifest_hash.as_deref()))
             .map(Path::to_path_buf);
         let versions = self.resolver.versions(&step.source.reference);
+        let corrupt_file = self
+            .resolver
+            .corrupt_claiming(&step.source.reference)
+            .map(|c| c.path.clone());
         self.hops.push(Hop {
             depth: step.depth,
             role: step.source.role.clone(),
@@ -315,6 +396,7 @@ impl Visit for Collect<'_> {
             parent,
             path,
             versions,
+            corrupt_file,
         });
         Ok(())
     }
@@ -330,14 +412,23 @@ pub struct Opts {
     pub full: bool,
 }
 
-/// Walk `file`'s provenance DAG and render it. Returns `true` when the chain is **complete** — every
-/// hop either proven or a legitimate external leaf.
+/// What a walk concluded. Two independent facts, because they warrant different responses: an
+/// incomplete chain is usually "fetch more and look again", while corruption is "stop and investigate".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verdict {
+    /// Every hop proven or a legitimate leaf.
+    pub complete: bool,
+    /// Candidate files that are Tessera products whose manifests do not verify.
+    pub corrupt: usize,
+}
+
+/// Walk `file`'s provenance DAG and render it.
 ///
 /// Exit policy (the caller maps this to a code): a rendered gap is **not** a failure, because a chain
 /// you cannot fully resolve from one directory is the normal case and exiting non-zero would make the
 /// verb useless in a pipeline. `--require-complete` is the strict mode for a gate. A cycle is a
 /// malformed DAG and always propagates as `Err`.
-pub fn run(file: &Path, opts: &Opts, out: &mut impl Write) -> Result<bool> {
+pub fn run(file: &Path, opts: &Opts, out: &mut impl Write) -> Result<Verdict> {
     let root = Reader::open(file)?.manifest().clone();
     let resolver = discover(file, opts.collection.as_deref(), &opts.search)?;
     let mut collect = Collect {
@@ -347,14 +438,27 @@ pub fn run(file: &Path, opts: &Opts, out: &mut impl Write) -> Result<bool> {
     // A cycle aborts the walk mid-way. Render what was collected first, so the operator sees where the
     // loop is instead of a bare error, then surface the error (the caller exits non-zero).
     let walked = walk(&root, &resolver, opts.depth, &mut collect);
-    let complete = collect.hops.iter().all(|h| !h.kind.is_gap());
+    // A chain cannot be called complete while the store it was resolved against holds a product whose
+    // seal is broken: the parent that file was meant to supply is, at best, unaccounted for.
+    let complete = collect.hops.iter().all(|h| !h.kind.is_gap()) && resolver.corrupt.is_empty();
+    let verdict = Verdict {
+        complete,
+        corrupt: resolver.corrupt.len(),
+    };
     if opts.json {
-        write_json(&root, &collect.hops, complete, out)?;
+        write_json(&root, &collect.hops, &resolver.corrupt, verdict, out)?;
     } else {
-        write_text(&root, &collect.hops, complete, opts.full, out)?;
+        write_text(
+            &root,
+            &collect.hops,
+            &resolver.corrupt,
+            verdict,
+            opts.full,
+            out,
+        )?;
     }
     walked?;
-    Ok(complete)
+    Ok(verdict)
 }
 
 /// Indent for a hop at `depth` — the DAG is a tree once diamonds are collapsed.
@@ -365,7 +469,8 @@ fn indent(depth: usize) -> String {
 fn write_text(
     root: &Manifest,
     hops: &[Hop],
-    complete: bool,
+    corrupt: &[Corrupt],
+    verdict: Verdict,
     full: bool,
     out: &mut impl Write,
 ) -> Result<()> {
@@ -398,6 +503,22 @@ fn write_text(
                      none at the pinned version",
                     nav::short_hash(h.resolved.as_deref().unwrap_or("-")),
                     h.versions
+                )?;
+            }
+            HopKind::CorruptParent => {
+                writeln!(
+                    out,
+                    "{pad}    pins      {}",
+                    nav::short_hash(h.pinned.as_deref().unwrap_or("-"))
+                )?;
+                writeln!(
+                    out,
+                    "{pad}    CORRUPT   {} — this file claims the lineage but its manifest does not \
+                     verify; do not trust it",
+                    h.corrupt_file
+                        .as_deref()
+                        .unwrap_or(Path::new("-"))
+                        .display()
                 )?;
             }
             HopKind::Missing => {
@@ -456,14 +577,33 @@ fn write_text(
         .iter()
         .filter(|h| h.kind == HopKind::ExternalLeaf)
         .count();
+    // Named before the summary line, and never folded into the gap count: an operator must not read
+    // "1 gap" and reach for another `--search` when the answer is already on disk and broken.
+    if !corrupt.is_empty() {
+        writeln!(
+            out,
+            "\nCORRUPT candidate(s) — a .tsra whose manifest does not verify:"
+        )?;
+        for c in corrupt {
+            writeln!(out, "  ! {}", c.path.display())?;
+            writeln!(out, "      {}", c.detail)?;
+        }
+    }
+    let mut verdicts = Vec::new();
+    if verdict.corrupt > 0 {
+        verdicts.push(format!("{} CORRUPT candidate(s)", verdict.corrupt));
+    }
+    if gaps > 0 {
+        verdicts.push(format!("{gaps} gap(s)"));
+    }
     writeln!(
         out,
         "\n{} hop(s) · {leaves} external leaf/leaves · {}",
         hops.len(),
-        if complete {
+        if verdict.complete {
             "chain complete".to_string()
         } else {
-            format!("{gaps} gap(s) — chain INCOMPLETE")
+            format!("{} — chain INCOMPLETE", verdicts.join(" · "))
         }
     )?;
     Ok(())
@@ -524,7 +664,13 @@ fn inherited_lines(parent: &Manifest, depth: usize, hops: &[Hop], root: &Manifes
     vec![format!("identity  {} (matches parent)", shared.join(" · "))]
 }
 
-fn write_json(root: &Manifest, hops: &[Hop], complete: bool, out: &mut impl Write) -> Result<()> {
+fn write_json(
+    root: &Manifest,
+    hops: &[Hop],
+    corrupt: &[Corrupt],
+    verdict: Verdict,
+    out: &mut impl Write,
+) -> Result<()> {
     let hops_json: Vec<serde_json::Value> = hops
         .iter()
         .map(|h| {
@@ -544,6 +690,12 @@ fn write_json(root: &Manifest, hops: &[Hop], complete: bool, out: &mut impl Writ
             }
             if let Some(p) = &h.path {
                 m.insert("file".into(), serde_json::json!(p.display().to_string()));
+            }
+            if let Some(p) = &h.corrupt_file {
+                m.insert(
+                    "corrupt_file".into(),
+                    serde_json::json!(p.display().to_string()),
+                );
             }
             if let Some(p) = &h.parent {
                 m.insert(
@@ -570,12 +722,28 @@ fn write_json(root: &Manifest, hops: &[Hop], complete: bool, out: &mut impl Writ
             "product": root.product,
             "name": root.name,
         },
-        "complete": complete,
+        "complete": verdict.complete,
         "gaps": hops.iter().filter(|h| h.kind.is_gap()).count(),
+        "corrupt": corrupt
+            .iter()
+            .map(|c| serde_json::json!({"file": c.path.display().to_string(), "detail": c.detail}))
+            .collect::<Vec<_>>(),
         "hops": hops_json,
     });
     writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
     Ok(())
+}
+
+/// The `Err` a caller raises when a searched location holds a product whose manifest does not verify.
+///
+/// Unconditional, unlike the incomplete-chain error: corruption is not a "you may want more data" state
+/// that a gate opts into checking. The chain has already been rendered, so this only decides the code.
+pub fn corruption_error(n: usize) -> Error {
+    Error::Invalid(format!(
+        "{n} candidate .tsra file(s) in the searched locations are Tessera products whose manifests do \
+         not verify — listed above. This is corruption or tampering, not a missing parent: do not \
+         resolve provenance against these files until they are re-fetched from a trusted source."
+    ))
 }
 
 /// The `Err` a caller raises when `--require-complete` meets an incomplete chain — named so the message
@@ -594,23 +762,31 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use tessera_core::provenance::Source;
 
-    /// The two structural predicates the whole taxonomy rests on. They read the *shape* of an edge
-    /// rather than its role, because `role` is a free-form string the format never constrains — keying
-    /// off `"derived_from"` would silently misclassify any producer that names its edges differently.
+    /// Whether "nothing found" is a **gap** or a **leaf** is read off the reference's shape, because the
+    /// alternative is reading the `role`, and roles are free-form strings the format never constrains — a
+    /// producer that names its edges differently would have every one misclassified.
+    ///
+    /// The shape is specifically `blake3:<64 hex>`, the only form a product `id` takes. Accepting any
+    /// `<alg>:<hex>` turned a `sha256:…` OCI digest or a vendor checksum into a phantom missing parent
+    /// (#452 review).
     #[test]
-    fn edge_classification_reads_shape_not_role_names() {
-        // A product id is `<alg>:<hex>`; a vendor path, filename or SOP UID is not.
-        assert!(looks_like_product_id(
-            "blake3:ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81"
-        ));
+    fn a_product_reference_is_blake3_shaped_and_nothing_else_is() {
+        let hex64 = "ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81";
+        assert!(looks_like_product_id(&format!("blake3:{hex64}")));
         for external in [
+            // Other digest algorithms are not product ids, however digest-shaped they look.
+            &format!("sha256:{hex64}") as &str,
+            &format!("md5:{hex64}"),
+            &format!("BLAKE3:{hex64}"), // the prefix is exact, not case-folded
+            // Wrong width, even with the right prefix.
+            "blake3:abc",
+            &format!("blake3:{hex64}ff"),
+            // Acquisition provenance: paths, filenames, SOP UIDs.
             "acq.cfg",
             "/scanner/raw.dcm",
             "1.2.840.113619.2.55.3.1234",
             "spec.toml",
-            "blake3:short",
             "nocolon",
             "",
         ] {
@@ -619,18 +795,49 @@ mod tests {
                 "{external:?} must not read as a product id"
             );
         }
+    }
 
-        // A derivation edge references a LINEAGE while pinning a DIFFERENT value, that lineage's
-        // seal. ADR-0036's `snapshot_of` breadcrumb references the version itself, so the two match.
-        let derived = Source::new("derived_from", "blake3:aa").with_content_hash("blake3:bb");
-        let snapshot = Source::new("snapshot_of", "blake3:aa").with_content_hash("blake3:aa");
-        assert!(!is_version_pointer(&derived));
-        assert!(is_version_pointer(&snapshot));
-        // An unpinned edge cannot be a version pointer — there is no version on it.
-        assert!(!is_version_pointer(&Source::new(
-            "derived_from",
-            "blake3:aa"
-        )));
+    /// A search root names *where to look*, so a symlink must not quietly widen it (#452 review). Without
+    /// the check, one link in a staging directory makes `provenance --search` read products from somewhere
+    /// the operator never named.
+    #[test]
+    fn a_symlink_out_of_the_search_root_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let inside = dir.path().join("inside");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // A real product outside the root, and a link to it from within.
+        let real = outside.join("elsewhere.tsra");
+        crate::tests::sample_tsra(&real);
+        std::os::unix::fs::symlink(&real, inside.join("linked.tsra")).unwrap();
+        // A copy genuinely inside the root, to prove the filter is not simply rejecting everything.
+        std::fs::copy(&real, inside.join("local.tsra")).unwrap();
+
+        let mut r = FileResolver::default();
+        r.add_dir(&inside);
+        // Distinct paths: one manifest is indexed under both its lineage id and its version, so the
+        // index holds two entries per file.
+        let indexed: BTreeSet<&Path> = r
+            .by_id
+            .values()
+            .flatten()
+            .map(|c| c.path.as_path())
+            .collect();
+        assert_eq!(
+            indexed.len(),
+            1,
+            "only the file that really lives in the root may be indexed, got {indexed:?}"
+        );
+        assert!(
+            indexed.iter().all(|p| p.ends_with("local.tsra")),
+            "got {indexed:?}"
+        );
+        assert!(
+            r.corrupt.is_empty(),
+            "an excluded symlink is not corruption"
+        );
     }
 
     /// Which hops count against `--require-complete`. The load-bearing claim is the *negative* one:
@@ -639,7 +846,12 @@ mod tests {
     /// and the flag stops meaning anything.
     #[test]
     fn only_unprovable_derivation_hops_count_as_gaps() {
-        for k in [HopKind::Skew, HopKind::Missing, HopKind::Unpinned] {
+        for k in [
+            HopKind::Skew,
+            HopKind::Missing,
+            HopKind::CorruptParent,
+            HopKind::Unpinned,
+        ] {
             assert!(k.is_gap(), "{k:?} leaves the chain unproven");
         }
         for k in [
@@ -650,18 +862,21 @@ mod tests {
             assert!(!k.is_gap(), "{k:?} must not count against completeness");
         }
         // Every kind has a distinct machine token, so a `--json` consumer can switch on it.
-        let tokens: BTreeSet<&str> = [
+        let all = [
             HopKind::Proven,
             HopKind::Skew,
             HopKind::Missing,
+            HopKind::CorruptParent,
             HopKind::Unpinned,
             HopKind::ExternalLeaf,
             HopKind::VersionPointer,
-        ]
-        .iter()
-        .map(|k| k.token())
-        .collect();
-        assert_eq!(tokens.len(), 6, "hop outcome tokens must be distinct");
+        ];
+        let tokens: BTreeSet<&str> = all.iter().map(|k| k.token()).collect();
+        assert_eq!(
+            tokens.len(),
+            all.len(),
+            "hop outcome tokens must be distinct"
+        );
     }
 
     /// Which identity fields a hop reports as matching its parent is the **schema's** call, not the

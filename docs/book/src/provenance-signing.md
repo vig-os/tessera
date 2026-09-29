@@ -78,6 +78,7 @@ What the walk reports per hop, and whether it counts against `--require-complete
 | `pinned` | no | the parent on disk is the exact version the edge committed to |
 | `different version` | yes | the right lineage, another version — see below |
 | `unresolved` | yes | a product-shaped reference nothing was found for |
+| `CORRUPT` | yes | the parent is on disk but its manifest does not verify |
 | `no pinned version` | yes | names a parent but pins no version, so nothing to prove against |
 | `external leaf` | no | a vendor path, filename or SOP UID — where a chain *should* end |
 | `version not present` | no | a `snapshot_of` breadcrumb whose version is absent |
@@ -85,6 +86,22 @@ What the walk reports per hop, and whether it counts against `--require-complete
 The last two are deliberately not gaps. A real chain ends at vendor files, and `publish` deliberately
 drops history, so counting either would leave every product permanently "incomplete" and make the flag
 worthless.
+
+**Corruption is not opt-in.** A candidate file that *is* a Tessera product but whose manifest fails
+verification always exits nonzero, with or without `--require-complete`, and is reported **on the edge
+that needed it** — the hop reads `CORRUPT` and names the file, rather than calling the parent absent. The
+two states invite opposite responses: "I could not find that parent" sends you looking for another copy,
+while "what I found does not verify" ends the search and starts an incident. A file that is not a Tessera
+product at all is ignored in silence, so pointing `--search` at a real directory stays practical.
+
+Naming the file means reading the identity it *claims*, which is why `tessera-io` exposes
+`read_manifest_unverified`. What it returns is untrusted by construction — a claim by something that has
+already failed verification — and is used only to point at the file, never to satisfy the edge.
+
+A version pointer earns its exemption from **three** checks, not one: the reference equals the pinned
+hash, the role is the one `publish` writes, and — once it resolves — the parent is in the walked product's
+own lineage. Shape alone is forgeable, and skipping both descent and completeness is too much to hand to
+any edge that can be crafted to look the part.
 
 A gap is **rendered, not raised**: the exit stays 0, because a chain you cannot resolve from one
 directory is the normal case and a verb that failed on it would be useless in a pipeline. Pass
