@@ -508,40 +508,45 @@
           # crate's own resolved feature set, so a build without the CSV lane sealed a different
           # `manifest_hash` for the same Parquet — and this configuration is what surfaced it. Keeping it
           # in CI is what stops that class of bug coming back.
+          #
+          # **All the reduced configurations share ONE derivation, deliberately** (#495). `nix flake check`
+          # schedules derivations concurrently under a `max-jobs` cap, so an extra check does not raise
+          # concurrency past that cap — but it does change *which* checks can be co-scheduled, and a new
+          # one can create a heavier overlap than the previous mix allowed. Measured: splitting the
+          # `npy`-without-`npz` configuration into its own derivation coincided with aarch64 peak memory
+          # rising 11536M -> 15095M and free memory falling 4410M -> 852M, against runners that evict at
+          # ~15.6G. Folding is not a *bound* — the next derivation can recreate it, which is what
+          # `--max-jobs` is for — but it costs nothing here and removes one scheduling permutation.
+          #
+          # The trade accepted in exchange: these run sequentially, so a failure in an earlier
+          # configuration hides the later ones until it is fixed. Cheap, because each is seconds of
+          # `cargo test` against an already-built dependency graph, and the configurations are
+          # independent enough that one failing rarely predicts another.
           ingest-gate-a-reduced = craneLib.mkCargoDerivation (commonArgs // {
             inherit cargoArtifacts;
             doInstallCargoArtifacts = false;
             pnameSuffix = "-ingest-gate-a-reduced";
             buildPhaseCargoCommand = ''
+              # (1) The columnar lane without the text one — the leg described above.
               cargo test -p tessera-ingest --no-default-features --features parquet \
                 --test ingest_corpus
-            '';
-          });
 
-          # **The array lane with NO archive reader** (#386) — `npy` compiled without `npz`.
-          #
-          # `.npy` is parsed in-tree and `.npz` is that same parser behind `dep:zip`, so they are two
-          # lanes rather than one feature (ADR-0056 §386 amendment): while they shared a feature, every
-          # plain `.npy` seal committed to a zip library that never read its bytes — #477's defect one
-          # scale down. Two lanes only mean something if the split is *exercised*, and this is the one
-          # configuration where `zip` is genuinely absent from the graph.
-          #
-          # It earned its place immediately: nothing had ever built `npy` without a table lane, and the
-          # configuration did not compile. `generic_column_meta` and
-          # `warn_unclassified_identifying_columns` were gated on `any(parquet, arrow, csv)` while the
-          # array arm calls both, and three targets (the corpus example and two integration tests) hard-
-          # require a Parquet reader — now declared with `required-features` so cargo skips rather than
-          # fails them. A gate nobody runs is a claim nobody checks.
-          ingest-gate-a-npy-only = craneLib.mkCargoDerivation (commonArgs // {
-            inherit cargoArtifacts;
-            doInstallCargoArtifacts = false;
-            pnameSuffix = "-ingest-gate-a-npy-only";
-            buildPhaseCargoCommand = ''
-              # Two configurations, because they fail differently. `npy` alone proves the parser needs no
-              # archive reader. `parquet,npy` is the one that exercises the CORPUS without `npz`: the
-              # corpus module is gated on `parquet`, so `npy` alone never compiles it and the
-              # `ingest_npz_member` fixture — whose builder calls `zip` — stayed invisible. That
-              # combination did not compile when this gate was written.
+              # (2)+(3) **The array lane with NO archive reader** (#386) — `npy` compiled without `npz`.
+              #
+              # `.npy` is parsed in-tree and `.npz` is that same parser behind `dep:zip`, so they are two
+              # lanes rather than one feature (ADR-0056's #386 amendment): while they shared a feature,
+              # every plain `.npy` seal committed to a zip library that never read its bytes — #477's
+              # defect one scale down. Two lanes only mean something if the split is *exercised*, and
+              # these are the only configurations where `zip` is genuinely absent from the graph.
+              #
+              # Two of them, because they fail differently. `npy` alone proves the parser needs no
+              # archive reader; it caught `generic_column_meta` and
+              # `warn_unclassified_identifying_columns` being gated on `any(parquet, arrow, csv)` while
+              # the array arm calls both, plus three targets that hard-require a Parquet reader and now
+              # declare `required-features`. `parquet,npy` is the one that reaches the CORPUS without
+              # `npz` — the corpus module is gated on `parquet`, so `npy` alone never compiles it — and
+              # it caught the `ingest_npz_member` fixture being declared `requires: ["npy"]` while its
+              # builder calls `zip`. Neither configuration had ever been built before it was gated.
               cargo test -p tessera-ingest --no-default-features --features npy --lib
               cargo test -p tessera-ingest --no-default-features --features parquet,npy \
                 --lib --test ingest_corpus
