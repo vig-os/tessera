@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-09-28T21:40:00Z
-updated: 2026-09-29T06:53:15Z
+updated: 2026-09-29T13:07:55Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/467
-comments: 0
+comments: 1
 labels: none
 assignees: none
 milestone: backlog / research
 projects: none
 parent: none
 children: none
-synced: 2026-09-29T07:52:28.569Z
+synced: 2026-09-30T07:57:13.408Z
 ---
 
 # [Issue 467]: [deps: both Renovate and Dependabot are configured, but only Dependabot runs](https://github.com/vig-os/tessera/issues/467)
@@ -60,3 +60,11 @@ So `renovate.json` is currently inert config.
 
 Recommending (1), but it is a settings-level decision, so filing rather than acting. Not blocking
 #466, which is being unblocked with the local patch now either way.
+---
+
+# [Comment #1]() by [c-vigo]()
+
+_Posted on September 29, 2026 at 01:07 PM_
+
+Done in #512 (merged to dev, the default branch): Renovate covers cargo, and dependabot.yml is removed. Renovate is now enabled in Mend (Dependency Dashboard #515). The out-of-range Cargo alerts are tracked in #513.
+

@@ -1,8 +1,8 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-09-29T02:35:19Z
-updated: 2026-09-29T02:35:19Z
+updated: 2026-09-29T19:13:43Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/485
@@ -13,7 +13,7 @@ milestone: 0.1.0-alpha.2
 projects: none
 parent: none
 children: none
-synced: 2026-09-29T07:52:25.464Z
+synced: 2026-09-30T07:57:12.602Z
 ---
 
 # [Issue 485]: [bench(ecosystems): backport median+spread, cold-cache and seal/verify into the #143 cross-ecosystem harness](https://github.com/vig-os/tessera/issues/485)
@@ -55,3 +55,57 @@ matrix, not to re-litigate what it measures.
 - `tessera/bench/ecosystems/common.py` (`best()`, the warm-only note), `run.py`
 
 Refs: #388
+
+---
+
+## Scope amendment (2026-09-29)
+
+The **Not in scope** section above is superseded in two specific ways. It was written before the
+#487 / #497 / #503 reviews, and those reviews established the reasons:
+
+1. **The adapter contract DOES change** — each adapter now exposes `VARIANTS` (a sensible default
+   *and* its standard tuning), each with a printed settings string. This is required by the rule that
+   every format be shown at both settings; it cannot be satisfied by the current one-`CODEC`-per-adapter
+   contract.
+2. **A second table fixture IS added** — #497's *continuous* (listmode-like) fixture alongside the
+   existing *periodic* one, both reported, each labelled.
+
+### Why these are not optional, and why they must land together
+
+An audit of the harness found it already carries the fairness omission that #487 and #503 each caught
+once, in three places — all favouring Tessera on size:
+
+- `adapters/hdf5.py:40`, `:67` — `shuffle=False` with gzip-4, on both volume and table. #487 measured
+  this: adding shuffle took HDF5's tuned table 5.9 MiB → 155.3 KiB and inverted the headline.
+- `adapters/parquet.py:45` — `compression="zstd"` with no BYTE_STREAM_SPLIT and the dictionary left on.
+  #503 measured this: 39.3 → 23.4 MiB, turning a claimed 2.0× win into 1.19×.
+- `adapters/zarr_.py:48`, `:76` — bare `ZstdCodec`, no shuffle.
+
+**And the existing table fixture is #497's periodic one** (`common.py:55-56`, `% 7` and `% 5`) — the
+fixture established as adversarial for value-distribution codecs, where HDF5 shuffle+gzip wins 6.2×.
+
+So the harness today pairs a fixture that favours deflate with a deflate configuration that has
+shuffle disabled. **The two errors partially cancel.** Fixing the shuffle omission alone would swing
+the table hard toward HDF5 on a fixture already chosen against us; adding the continuous fixture alone
+would swing it back. Either single fix relocates the bias rather than removing it — so no commit or
+published result in this work may show shuffle-fixed, periodic-only numbers.
+
+That is the scope argument: this is not a methodology upgrade to correct numbers, it is a correction
+to numbers that are wrong now, and the correction is only sound if both halves land together.
+
+### Also corrected here
+
+#503 recorded that Parquet page CRCs could not be timed because "parquet-rs 58's writer emits none".
+That is a property of **parquet-rs**, not of Parquet. Verified in this harness's environment:
+
+```
+pyarrow 24.0.0 | write_page_checksum in write_table: True
+                 page_checksum_verification in read_table: True
+```
+
+So the integrity row here **can** measure Parquet, and will. The output states both facts — parquet-rs
+writes none, pyarrow writes and verifies them — so the asymmetry is attributed to the implementation
+rather than to the format.
+
+Refs: #388
+
