@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-09-29T12:56:59Z
+updated: 2026-10-03T12:16:51Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-09-30T07:57:07.236Z
+synced: 2026-10-04T07:45:24.397Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -25,7 +25,7 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 The following updates are awaiting their schedule. To get an update now, click on a checkbox below.
 
  - [ ] <!-- unschedule-branch=renovate/pin-dependencies -->build(pip): pin dependencies (`h5py`, `nibabel`, `numcodecs`, `numpy`, `pyarrow`, `pydicom`, `uproot`, `zarr`)
- - [ ] <!-- unschedule-branch=renovate/dtolnay-rust-toolchain-digest -->chore(deps): update dtolnay/rust-toolchain digest to 6bed076
+ - [ ] <!-- unschedule-branch=renovate/dtolnay-rust-toolchain-digest -->chore(deps): update dtolnay/rust-toolchain digest to 89b1218
  - [ ] <!-- unschedule-branch=renovate/release-plz-action-digest -->chore(deps): update release-plz/action digest to b8d6b54
  - [ ] <!-- unschedule-branch=renovate/blake3-1.x-lockfile -->chore(deps): update rust crate blake3 to v1.8.7
  - [ ] <!-- unschedule-branch=renovate/bytes-1.x-lockfile -->chore(deps): update rust crate bytes to v1.12.1
@@ -33,9 +33,9 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/flate2-1.x-lockfile -->chore(deps): update rust crate flate2 to v1.1.10
  - [ ] <!-- unschedule-branch=renovate/rust-futures-monorepo -->chore(deps): update rust crate futures to v0.3.34
  - [ ] <!-- unschedule-branch=renovate/hdf5-metno-sys-0.x-lockfile -->chore(deps): update rust crate hdf5-metno-sys to v0.12.4
- - [ ] <!-- unschedule-branch=renovate/libc-0.x-lockfile -->chore(deps): update rust crate libc to v0.2.189
+ - [ ] <!-- unschedule-branch=renovate/libc-0.x-lockfile -->chore(deps): update rust crate libc to v0.2.190
  - [ ] <!-- unschedule-branch=renovate/object_store-0.x-lockfile -->chore(deps): update rust crate object_store to v0.14.2
- - [ ] <!-- unschedule-branch=renovate/pyo3-0.x-lockfile -->chore(deps): update rust crate pyo3 to v0.29.2
+ - [ ] <!-- unschedule-branch=renovate/pyo3-0.x-lockfile -->chore(deps): update rust crate pyo3 to v0.29.3
  - [ ] <!-- unschedule-branch=renovate/serde-monorepo -->chore(deps): update rust crate serde to v1.0.229
  - [ ] <!-- unschedule-branch=renovate/serde_json-1.x-lockfile -->chore(deps): update rust crate serde_json to v1.0.151
  - [ ] <!-- unschedule-branch=renovate/thiserror-2.x-lockfile -->chore(deps): update rust crate thiserror to v2.0.21
@@ -51,15 +51,15 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/hdf5-metno-0.x -->chore(deps): update rust crate hdf5-metno to 0.15
  - [ ] <!-- unschedule-branch=renovate/png-0.x -->chore(deps): update rust crate png to 0.18
  - [ ] <!-- unschedule-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
- - [ ] <!-- unschedule-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.53.1
+ - [ ] <!-- unschedule-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.53.2
  - [ ] <!-- unschedule-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
- - [ ] <!-- unschedule-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.86
- - [ ] <!-- unschedule-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.86
- - [ ] <!-- unschedule-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.86
- - [ ] <!-- unschedule-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.86
- - [ ] <!-- unschedule-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.86
- - [ ] <!-- unschedule-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.86
- - [ ] <!-- unschedule-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.86
+ - [ ] <!-- unschedule-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.87
  - [ ] <!-- unschedule-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unschedule-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
  - [ ] <!-- unschedule-branch=renovate/ed25519-dalek-3.x -->chore(deps): update rust crate ed25519-dalek to v3
@@ -95,13 +95,13 @@ The following updates are awaiting their schedule. To get an update now, click o
  - `zarrs 0.23` → [Updates: `0.23`]
  - `bytes 1` → [Updates: `1`]
  - `half 2`
- - `vortex-file 0.75` → [Updates: `0.86`]
- - `vortex-array 0.75` → [Updates: `0.86`]
- - `vortex-btrblocks 0.75` → [Updates: `0.86`]
- - `vortex-buffer 0.75` → [Updates: `0.86`]
- - `vortex-io 0.75` → [Updates: `0.86`]
- - `vortex-layout 0.75` → [Updates: `0.86`]
- - `vortex-session 0.75` → [Updates: `0.86`]
+ - `vortex-file 0.75` → [Updates: `0.87`]
+ - `vortex-array 0.75` → [Updates: `0.87`]
+ - `vortex-btrblocks 0.75` → [Updates: `0.87`]
+ - `vortex-buffer 0.75` → [Updates: `0.87`]
+ - `vortex-io 0.75` → [Updates: `0.87`]
+ - `vortex-layout 0.75` → [Updates: `0.87`]
+ - `vortex-session 0.75` → [Updates: `0.87`]
  - `futures 0.3` → [Updates: `0.3`]
  - `clap 4` → [Updates: `4`]
  - `png 0.17` → [Updates: `0.18`]
