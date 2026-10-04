@@ -108,6 +108,57 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
 
+      # ── Dependency cache (#507) ────────────────────────────────────────────────────────────────
+      # There is no nix store cache in CI, so every leg rebuilds `tessera-deps` (crane buildDepsOnly)
+      # from source: a 19.4-minute SERIAL prefix — nothing heavy starts until it finishes. Its runtime
+      # closure (793 paths: the artifact, the vendored crate sources, the rust-overlay toolchain) is
+      # almost entirely absent from cache.nixos.org — 2.11 of 2.47 GiB — so it is exported as a
+      # zstd-compressed `file://` binary cache (~1.1 GiB) into the GitHub Actions cache. No external
+      # account, no secret, and no substituter configuration (which devkit#773 governs).
+      #
+      # KEY = the hash of the deps DERIVATION, so it changes exactly when the artifact would: a new
+      # Cargo.lock, flake.lock, toolchain, or crane argument. Keying on lockfiles would miss the last two.
+      #
+      # This step can only ever SAVE TIME. A miss, a failed import or an untrusted user falls through
+      # to building as before; nothing here may fail the leg.
+      - name: Locate the dependency artifacts
+        id: deps
+        run: |
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          drv=$(nix eval --raw ".#legacyPackages.${sys}.cargoArtifacts.drvPath")
+          out=$(nix eval --raw ".#legacyPackages.${sys}.cargoArtifacts.outPath")
+          hash=$(basename "$drv" | cut -d- -f1)
+          {
+            echo "key=nix-deps-v1-${sys}-${hash}"
+            echo "out=${out}"
+            echo "dir=${RUNNER_TEMP}/nix-deps-cache"
+          } >> "$GITHUB_OUTPUT"
+          echo "deps artifact ${out}"
+          echo "cache key     nix-deps-v1-${sys}-${hash}"
+          # Importing an UNSIGNED binary cache needs a trusted nix user (verified locally: without
+          # --no-check-sigs the import exits 1). Record what this runner grants, for diagnosis.
+          echo "trusted-users: $(nix config show trusted-users 2>/dev/null || echo '?')"
+
+      - name: Restore the dependency cache
+        id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.deps.outputs.dir }}
+          key: ${{ steps.deps.outputs.key }}
+
+      - name: Import the dependency cache
+        if: steps.restore.outputs.cache-hit == 'true'
+        env:
+          DEPS_DIR: ${{ steps.deps.outputs.dir }}
+          DEPS_OUT: ${{ steps.deps.outputs.out }}
+        run: |
+          t0=$(date +%s)
+          if nix copy --no-check-sigs --from "file://${DEPS_DIR}" "${DEPS_OUT}"; then
+            echo "imported ${DEPS_OUT} and its closure in $(( $(date +%s) - t0 )) s"
+          else
+            echo "::warning title=dependency cache::import failed; building tessera-deps from source as before (#507)"
+          fi
+
       # `--keep-going` is the fix for #483. Without it the FIRST failing derivation cancels every
       # other check, so a leg goes red with all 17 checks reporting `(cancelled)` and nothing naming
       # a real failure. That is exactly what happened on #481: an unrelated `minio` substitution
@@ -211,6 +262,34 @@ jobs:
 
       # Per-check verdicts, so a red leg always names what failed (#483).
       #
+      # Save only on a MISS, and only if the leg actually produced the artifact. `always()` so a red
+      # leg with a good tessera-deps still warms the cache for the next run.
+      - name: Export the dependency cache
+        id: export
+        if: always() && steps.restore.outputs.cache-hit != 'true'
+        env:
+          DEPS_DIR: ${{ steps.deps.outputs.dir }}
+          DEPS_OUT: ${{ steps.deps.outputs.out }}
+        run: |
+          if ! nix path-info "${DEPS_OUT}" > /dev/null 2>&1; then
+            echo "tessera-deps was not built on this leg; nothing to save"
+            exit 0
+          fi
+          t0=$(date +%s)
+          if nix copy --to "file://${DEPS_DIR}?compression=zstd&parallel-compression=true" "${DEPS_OUT}"; then
+            echo "exported $(du -sm "${DEPS_DIR}" | cut -f1) MiB in $(( $(date +%s) - t0 )) s"
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=dependency cache::export failed; not saving (#507)"
+          fi
+
+      - name: Save the dependency cache
+        if: always() && steps.export.outputs.ready == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.deps.outputs.dir }}
+          key: ${{ steps.deps.outputs.key }}
+
       # Derived from the STORE, not by parsing nix's human-readable output: a check whose output path
       # is valid was built and therefore passed. `--keep-going` above is what makes that inference
       # sound, because every check is attempted, so a missing output means that check failed rather

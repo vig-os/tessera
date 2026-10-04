@@ -1154,6 +1154,10 @@
           ''
           else allChecks;
 
+        # The shared dependency build (crane `buildDepsOnly`), exposed so CI can key and restore it
+        # (#507). `legacyPackages` is not built by `nix flake check`, so this costs nothing there.
+        legacyPackages = { inherit cargoArtifacts; };
+
         formatter = pkgs.nixpkgs-fmt;
       });
 }
