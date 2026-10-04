@@ -378,7 +378,12 @@ pub fn is_seekable(path: &std::path::Path) -> bool {
     std::fs::metadata(path).is_ok_and(|md| md.is_file())
 }
 
-/// Two-pass streaming ingest of a re-openable batch source into a sealed `table` product.
+/// Two-pass streaming ingest of a re-openable chunk source into a sealed `table` product.
+///
+/// The source yields **already-canonicalised** [`CanonicalTable`] chunks rather than `RecordBatch`es, so
+/// each lane canonicalises the way it already does and this driver stays out of it. That is not merely
+/// tidier: ADR-0056 §12a decided the CSV lane needs **no arrow at all** (`&str` → `ColumnData` directly),
+/// so a RecordBatch-shaped contract would have forced CSV through a type map it deliberately avoids.
 ///
 /// `open` is called **twice** — once for the shape pass and once to encode — which is why it is a
 /// closure rather than an iterator. See the module docs for why one pass cannot work.
@@ -388,22 +393,20 @@ pub fn is_seekable(path: &std::path::Path) -> bool {
 /// spills full row groups to durable fragments under `stage`.
 pub fn stream_to_table_product<F, I>(
     open: F,
-    exclude: &[String],
     ingest: &crate::canonical::GenericIngest<'_>,
     opts: &StreamOpts<'_>,
 ) -> Result<tessera_core::Manifest>
 where
     F: Fn() -> Result<I>,
-    I: Iterator<Item = Result<arrow_array::RecordBatch>>,
+    I: Iterator<Item = Result<CanonicalTable>>,
 {
     let before = InputFingerprint::of(ingest.source_path)?;
 
     // ── Pass 1: the shape. Every batch is canonicalised with the SAME entry point the batch fold uses,
     //    inspected, and dropped.
     let mut scan = ShapeScan::new();
-    for batch in open()? {
-        let batch = batch?;
-        scan.push(&crate::arrow_table::canonicalise_batch(&batch, exclude)?)?;
+    for chunk in open()? {
+        scan.push(&chunk?)?;
     }
     let mut shape = scan.finish();
     if shape.columns.is_empty() {
@@ -456,10 +459,8 @@ where
         )?;
         // ── Pass 2: encode. Each batch is canonicalised, coerced to the file-wide schema so every block
         //    encodes alike, and pushed.
-        for batch in open()? {
-            let batch = batch?;
-            let table = crate::arrow_table::canonicalise_batch(&batch, exclude)?;
-            let data = coerce_to_shape(&shape, table)?;
+        for chunk in open()? {
+            let data = coerce_to_shape(&shape, chunk?)?;
             let named: tessera_io::TableData = shape
                 .columns
                 .iter()

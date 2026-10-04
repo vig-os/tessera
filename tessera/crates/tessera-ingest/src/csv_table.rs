@@ -139,58 +139,60 @@ impl CsvOptions {
 }
 
 /// Read + canonicalise a CSV under an operator-declared schema.
-pub fn read_table(path: &Path, opts: &CsvOptions) -> Result<CanonicalTable> {
-    if opts.columns.is_empty() {
-        return Err(no_schema_error());
+/// Per-declared-column accumulator — the shared half of the whole-file and chunked readers.
+///
+/// Extracted so the rules that are easy to get subtly wrong exist **once**: which columns are trimmed
+/// (everything but `str`, because trimming text would be a silent unrecorded transformation ADR-0056 §2
+/// forbids), which field texts count as NULL, the declared-non-nullable refusal, and
+/// nullable-by-presence. A chunked reader that reimplemented any of them would make a streamed CSV
+/// disagree with a batch one for reasons no `content_hash` comparison could explain.
+struct CsvAccum {
+    /// Owned, not borrowed: the chunked reader returns a self-contained iterator, and a borrow here
+    /// would make that iterator borrow its own captures.
+    opts: CsvOptions,
+    values: Vec<ColumnData>,
+    validity: Vec<Vec<bool>>,
+    saw_null: Vec<bool>,
+    rows: usize,
+}
+
+impl CsvAccum {
+    fn new(opts: CsvOptions) -> Result<Self> {
+        Ok(Self {
+            values: opts
+                .columns
+                .iter()
+                .map(|c| empty_column(&c.dtype, 0))
+                .collect::<Result<_>>()?,
+            validity: vec![Vec::new(); opts.columns.len()],
+            saw_null: vec![false; opts.columns.len()],
+            rows: 0,
+            opts,
+        })
     }
-    let file =
-        std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
-    let mut rdr = csv::ReaderBuilder::new()
-        .delimiter(opts.delimiter)
-        .has_headers(opts.header)
-        // `flexible(true)` does NOT mean ragged rows are tolerated — the per-row length check below
-        // rejects them. It means *we* reject them, with our own message: the row number matches the
-        // one every other error in this module reports, and the text names the declared column count,
-        // which the reader's own "found record with 1 fields, but the previous record has 2" does not.
-        // One error vocabulary per surface is worth the explicit check.
-        .flexible(true)
-        .from_reader(std::io::BufReader::new(file));
 
-    if opts.header {
-        let header = rdr
-            .headers()
-            .map_err(|e| he(format!("read header of {}: {e}", path.display())))?
-            .clone();
-        check_header(&header, &opts.columns)?;
+    fn rows(&self) -> usize {
+        self.rows
     }
 
-    // Accumulate per declared column. Validity is tracked separately and only materialises into a
-    // `Nullable` wrapper if a NULL actually occurred — the same nullable-by-presence rule the Arrow
-    // lane uses, so a CSV and the Parquet DuckDB would make from it seal alike.
-    let mut values: Vec<ColumnData> = opts
-        .columns
-        .iter()
-        .map(|c| empty_column(&c.dtype, 0))
-        .collect::<Result<_>>()?;
-    let mut validity: Vec<Vec<bool>> = vec![Vec::new(); opts.columns.len()];
-    let mut saw_null = vec![false; opts.columns.len()];
-
-    let mut record = csv::StringRecord::new();
-    let mut row = 0usize;
-    while rdr
-        .read_record(&mut record)
-        .map_err(|e| he(format!("{}: {e}", path.display())))?
-    {
-        if record.len() != opts.columns.len() {
+    /// Absorb one record. `row_no` is the 1-based file row, so every error in this module reports the
+    /// same number whether the read is chunked or not.
+    fn push_record(
+        &mut self,
+        path: &Path,
+        record: &csv::StringRecord,
+        row_no: usize,
+    ) -> Result<()> {
+        if record.len() != self.opts.columns.len() {
             return Err(he(format!(
                 "{}: row {} has {} fields but {} columns were declared",
                 path.display(),
-                row + 1,
+                row_no,
                 record.len(),
-                opts.columns.len()
+                self.opts.columns.len()
             )));
         }
-        for (i, decl) in opts.columns.iter().enumerate() {
+        for (i, decl) in self.opts.columns.iter().enumerate() {
             let raw = record.get(i).unwrap_or_default();
             // Surrounding whitespace is insignificant to a *number* and significant to a *string*.
             // Trimming a `str` column would be a silent, unrecorded transformation (` foo ` → `foo`) of
@@ -198,37 +200,86 @@ pub fn read_table(path: &Path, opts: &CsvOptions) -> Result<CanonicalTable> {
             // artifact. So text columns are taken verbatim and everything else is trimmed, which is what
             // also makes ` 1.5 ` parse rather than fail.
             let text = if decl.dtype == "str" { raw } else { raw.trim() };
-            if opts.is_null(text, &decl.dtype) {
+            if self.opts.is_null(text, &decl.dtype) {
                 if !decl.nullable {
                     return Err(he(format!(
                         "{}: row {}, column '{}' is empty but was declared non-nullable — append '?' \
                          to allow NULLs ({}:{}?)",
                         path.display(),
-                        row + 1,
+                        row_no,
                         decl.name,
                         decl.name,
                         decl.dtype
                     )));
                 }
-                push_default(&mut values[i]);
-                validity[i].push(false);
-                saw_null[i] = true;
+                push_default(&mut self.values[i]);
+                self.validity[i].push(false);
+                self.saw_null[i] = true;
                 continue;
             }
-            push_parsed(&mut values[i], text).map_err(|e| {
+            push_parsed(&mut self.values[i], text).map_err(|e| {
                 he(format!(
                     "{}: row {}, column '{}' (declared {}): {e}",
                     path.display(),
-                    row + 1,
+                    row_no,
                     decl.name,
                     decl.dtype
                 ))
             })?;
-            validity[i].push(true);
+            self.validity[i].push(true);
         }
-        row += 1;
+        self.rows += 1;
+        Ok(())
     }
 
+    /// Finish the rows absorbed so far into a canonical table, leaving the accumulator empty and ready
+    /// for the next chunk.
+    ///
+    /// Nullable-by-presence applies to what this call saw. For the whole-file reader that is the file;
+    /// for a chunked one it is the chunk, which is exactly what the streaming shape pass folds over.
+    fn finish_chunk(&mut self) -> Result<CanonicalTable> {
+        let mut b = TableBuilder::new();
+        b.record(IngestTransform::new(transform::CSV_EXPLICIT_SCHEMA));
+        if !self.opts.null_tokens.is_empty() {
+            // Which field texts were read as absent is a recorded transform: it changes what the values
+            // mean, and a reader comparing back to the CSV cannot otherwise tell a NULL from the literal
+            // string "NA".
+            b.record(
+                IngestTransform::new(transform::CSV_NULL_TOKENS)
+                    .with("tokens", serde_json::json!(self.opts.null_tokens)),
+            );
+        }
+        for (i, decl) in self.opts.columns.iter().enumerate() {
+            if self.opts.exclude.iter().any(|e| e == &decl.name) {
+                continue;
+            }
+            let mut data = std::mem::replace(&mut self.values[i], empty_column(&decl.dtype, 0)?);
+            if self.saw_null[i] {
+                data = ColumnData::Nullable {
+                    values: Box::new(data),
+                    validity: std::mem::take(&mut self.validity[i]),
+                };
+            }
+            canonicalise(&mut b, &decl.name, &mut data);
+            let column: Column = if self.saw_null[i] {
+                unclassified_column(&decl.name, &decl.dtype).nullable()
+            } else {
+                unclassified_column(&decl.name, &decl.dtype)
+            };
+            b.push(column, data)?;
+        }
+        for v in &mut self.validity {
+            v.clear();
+        }
+        self.saw_null.iter_mut().for_each(|f| *f = false);
+        self.rows = 0;
+        Ok(b.finish())
+    }
+}
+
+/// Validate `--exclude` against the declaration. A name that matches nothing is a typo, and a typo that
+/// silently does nothing is the worst outcome: the operator believes they dropped a PHI column.
+fn check_exclude(opts: &CsvOptions) -> Result<()> {
     if let Some(unknown) = opts
         .exclude
         .iter()
@@ -243,37 +294,97 @@ pub fn read_table(path: &Path, opts: &CsvOptions) -> Result<CanonicalTable> {
                 .join(" · ")
         )));
     }
-    let mut b = TableBuilder::new();
-    b.record(IngestTransform::new(transform::CSV_EXPLICIT_SCHEMA));
-    if !opts.null_tokens.is_empty() {
-        // Which field texts were read as absent is a recorded transform: it changes what the values
-        // mean, and a reader comparing back to the CSV cannot otherwise tell a NULL from the literal
-        // string "NA".
-        b.record(
-            IngestTransform::new(transform::CSV_NULL_TOKENS)
-                .with("tokens", serde_json::json!(opts.null_tokens)),
-        );
+    Ok(())
+}
+
+/// Open a CSV, honouring the declared delimiter and header, and check the header against the
+/// declaration before any value is read.
+fn open_csv(
+    path: &Path,
+    opts: &CsvOptions,
+) -> Result<csv::Reader<std::io::BufReader<std::fs::File>>> {
+    let file =
+        std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(opts.delimiter)
+        .has_headers(opts.header)
+        // `flexible(true)` does NOT mean ragged rows are tolerated — the per-row length check in
+        // `push_record` rejects them. It means *we* reject them, with our own message: the row number
+        // matches the one every other error in this module reports, and the text names the declared
+        // column count, which the reader's own "found record with 1 fields, but the previous record has
+        // 2" does not. One error vocabulary per surface is worth the explicit check.
+        .flexible(true)
+        .from_reader(std::io::BufReader::new(file));
+    if opts.header {
+        let header = rdr
+            .headers()
+            .map_err(|e| he(format!("read header of {}: {e}", path.display())))?
+            .clone();
+        check_header(&header, &opts.columns)?;
     }
-    for (i, decl) in opts.columns.iter().enumerate() {
-        if opts.exclude.iter().any(|e| e == &decl.name) {
-            continue;
-        }
-        let mut data = std::mem::replace(&mut values[i], ColumnData::Bool(Vec::new()));
-        if saw_null[i] {
-            data = ColumnData::Nullable {
-                values: Box::new(data),
-                validity: std::mem::take(&mut validity[i]),
-            };
-        }
-        canonicalise(&mut b, &decl.name, &mut data);
-        let column: Column = if saw_null[i] {
-            unclassified_column(&decl.name, &decl.dtype).nullable()
-        } else {
-            unclassified_column(&decl.name, &decl.dtype)
-        };
-        b.push(column, data)?;
+    Ok(rdr)
+}
+
+pub fn read_table(path: &Path, opts: &CsvOptions) -> Result<CanonicalTable> {
+    if opts.columns.is_empty() {
+        return Err(no_schema_error());
     }
-    Ok(b.finish())
+    check_exclude(opts)?;
+    let mut rdr = open_csv(path, opts)?;
+    let mut accum = CsvAccum::new(opts.clone())?;
+    let mut record = csv::StringRecord::new();
+    let mut row = 0usize;
+    while rdr
+        .read_record(&mut record)
+        .map_err(|e| he(format!("{}: {e}", path.display())))?
+    {
+        row += 1;
+        accum.push_record(path, &record, row)?;
+    }
+    accum.finish_chunk()
+}
+
+/// Lazily canonicalised CSV chunks of at most `rows_per_chunk` rows — what the streaming driver consumes.
+///
+/// CSV is sequential, so each traversal is a fresh open; the two passes are two reads of the file. The
+/// explicit-schema requirement, the header cross-check, the `--exclude` typo check and every per-field
+/// rule are the whole-file reader's, because both go through [`CsvAccum`] and [`open_csv`].
+pub fn csv_chunks(
+    path: &Path,
+    opts: &CsvOptions,
+    rows_per_chunk: usize,
+) -> Result<impl Iterator<Item = Result<CanonicalTable>> + use<>> {
+    if opts.columns.is_empty() {
+        return Err(no_schema_error());
+    }
+    check_exclude(opts)?;
+    let mut rdr = open_csv(path, opts)?;
+    let mut accum = CsvAccum::new(opts.clone())?;
+    let display = path.display().to_string();
+    let mut record = csv::StringRecord::new();
+    let mut row = 0usize;
+    let chunk = rows_per_chunk.max(1);
+    Ok(std::iter::from_fn(move || {
+        loop {
+            match rdr.read_record(&mut record) {
+                Err(e) => return Some(Err(he(format!("{display}: {e}")))),
+                Ok(false) => {
+                    // End of file: emit the partial tail, then stop.
+                    return (accum.rows() > 0).then(|| accum.finish_chunk());
+                }
+                Ok(true) => {
+                    row += 1;
+                    if let Err(e) = accum.push_record(std::path::Path::new(&display), &record, row)
+                    {
+                        return Some(Err(e));
+                    }
+                    if accum.rows() >= chunk {
+                        return Some(accum.finish_chunk());
+                    }
+                }
+            }
+        }
+    }))
 }
 
 /// Check the file's header row against the declaration.

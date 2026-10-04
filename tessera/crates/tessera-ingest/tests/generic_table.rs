@@ -840,8 +840,7 @@ fn stream_parquet(
     let cfg = tessera_io::WriteConfig::default().workers(workers);
     let column_meta = ColumnMeta::default();
     tessera_ingest::stream_table::stream_to_table_product(
-        || tessera_ingest::parquet_table::parquet_batches(input, batch_rows),
-        &[],
+        || tessera_ingest::parquet_table::parquet_chunks(input, batch_rows, &[]),
         &tessera_ingest::canonical::GenericIngest {
             name: "gen-01",
             timestamp: TS,
@@ -1016,8 +1015,7 @@ fn a_null_only_in_the_last_row_group_streams_identically() {
     let out = dir.path().join("late.tsra");
     let cfg = tessera_io::WriteConfig::default();
     let got = tessera_ingest::stream_table::stream_to_table_product(
-        || tessera_ingest::parquet_table::parquet_batches(&input, 1),
-        &[],
+        || tessera_ingest::parquet_table::parquet_chunks(&input, 1, &[]),
         &ingest,
         &tessera_ingest::stream_table::StreamOpts {
             stage: &stage,
@@ -1034,5 +1032,129 @@ fn a_null_only_in_the_last_row_group_streams_identically() {
         (&expected.content_hash, &expected.manifest_hash),
         (&got.content_hash, &got.manifest_hash),
         "a null in only the last row group must not change what streaming seals"
+    );
+}
+
+/// Seal one lane's chunk source both ways and assert the two products are identical.
+///
+/// Parameterised over the lane because the requirement is per-lane: a driver that agrees with batch on
+/// Parquet proves nothing about CSV, whose decode shares no code with it (ADR-0056 §12a keeps arrow out
+/// of that lane entirely).
+fn assert_batch_equals_stream(
+    dir: &Path,
+    input: &Path,
+    source_format: &str,
+    decoder: decoder::Decoder,
+    batch_table: tessera_ingest::canonical::CanonicalTable,
+    open: impl Fn() -> tessera_core::Result<
+        Box<dyn Iterator<Item = tessera_core::Result<tessera_ingest::canonical::CanonicalTable>>>,
+    >,
+) {
+    let column_meta = ColumnMeta::default();
+    let ingest = tessera_ingest::canonical::GenericIngest {
+        name: "lane-eq",
+        timestamp: TS,
+        description: "generically-ingested table",
+        source_format,
+        source_path: input,
+        source_label: None,
+        extra_sources: &[],
+        decoder,
+        generation: None,
+        column_meta: &column_meta,
+    };
+    let (expected, _) =
+        tessera_ingest::canonical::to_table_product(&batch_table, &ingest).expect("batch seal");
+
+    let tag = uniq();
+    let stage = dir.join(format!("stage-{tag}"));
+    std::fs::create_dir_all(&stage).unwrap();
+    let out = dir.join(format!("streamed-{tag}.tsra"));
+    let cfg = tessera_io::WriteConfig::default();
+    let got = tessera_ingest::stream_table::stream_to_table_product(
+        &open,
+        &ingest,
+        &tessera_ingest::stream_table::StreamOpts {
+            stage: &stage,
+            out: &out,
+            cfg: &cfg,
+            batch_rows: 2,
+            block_rows: tessera_io::BLOCK_ROWS as u64,
+            column_meta: &column_meta,
+        },
+    )
+    .unwrap_or_else(|e| panic!("stream the {source_format} lane: {e}"));
+
+    assert_eq!(
+        (&expected.content_hash, &expected.manifest_hash),
+        (&got.content_hash, &got.manifest_hash),
+        "the {source_format} lane must seal the same product streamed as batched"
+    );
+    assert_eq!(expected.ingest_transform, got.ingest_transform);
+    assert_eq!(expected.sources, got.sources);
+}
+
+/// The Arrow IPC lane streams to the same product it batches.
+#[test]
+fn streamed_and_batch_arrow_ipc_seal_the_same_product() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.arrow");
+    {
+        let batch = logical_batch();
+        let file = std::fs::File::create(&input).unwrap();
+        let mut w = arrow_ipc::writer::FileWriter::try_new(file, &batch.schema()).unwrap();
+        w.write(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let table = tessera_ingest::arrow_table::read_arrow_table(&input, &[]).expect("batch read");
+    let p = input.clone();
+    assert_batch_equals_stream(
+        dir.path(),
+        &input,
+        "arrow",
+        decoder::Decoder::ARROW_IPC,
+        table,
+        move || {
+            Ok(Box::new(tessera_ingest::arrow_table::arrow_ipc_chunks(
+                &p,
+                &[],
+            )?))
+        },
+    );
+}
+
+/// The CSV lane streams to the same product it batches — including its explicit schema, its null tokens
+/// and the `csv_explicit_schema` / `csv_null_tokens` receipt entries, which are recorded per chunk and
+/// must still appear once.
+#[test]
+fn streamed_and_batch_csv_seal_the_same_product() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.csv");
+    // `energy` is NULL only on the last row, via a declared null token, so the streamed path exercises
+    // both the late-null coercion and the token rule.
+    std::fs::write(
+        &input,
+        "id,label,energy\n1,red,511.0\n2,green,7.25\n3,red,-0.5\n4,blue,NA\n",
+    )
+    .unwrap();
+    let mut opts = tessera_ingest::csv_table::CsvOptions::from_decls(&[
+        "id:i4".to_string(),
+        "label:str".to_string(),
+        "energy:f8?".to_string(),
+    ])
+    .expect("decls");
+    opts.header = true;
+    opts.null_tokens = vec!["NA".to_string()];
+
+    let table = tessera_ingest::csv_table::read_table(&input, &opts).expect("batch read");
+    let p = input.clone();
+    let o = opts.clone();
+    assert_batch_equals_stream(
+        dir.path(),
+        &input,
+        "csv",
+        decoder::Decoder::CSV,
+        table,
+        move || Ok(Box::new(tessera_ingest::csv_table::csv_chunks(&p, &o, 2)?)),
     );
 }

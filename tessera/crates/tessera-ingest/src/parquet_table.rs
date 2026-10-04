@@ -126,6 +126,21 @@ pub fn parquet_size_estimate(path: &Path) -> Result<u64> {
     Ok(u64::try_from(bytes.max(rows)).unwrap_or(0))
 }
 
+/// Lazily canonicalised Parquet chunks — what the streaming driver consumes.
+///
+/// The canonicalisation lives here, in the lane, so the driver never has to know a lane's decode shape
+/// (ADR-0056 §12a keeps arrow out of the CSV lane entirely, so a RecordBatch-shaped contract would not
+/// have fit all three). Uses the same `canonicalise_batch` the batch fold uses — reused, not repeated.
+pub fn parquet_chunks(
+    path: &Path,
+    batch_rows: usize,
+    exclude: &[String],
+) -> Result<impl Iterator<Item = Result<CanonicalTable>> + use<>> {
+    let exclude = exclude.to_vec();
+    Ok(parquet_batches(path, batch_rows)?
+        .map(move |b| b.and_then(|b| crate::arrow_table::canonicalise_batch(&b, &exclude))))
+}
+
 /// Read + canonicalise a Parquet file into a flat Tessera table.
 pub fn read_table(path: &Path, exclude: &[String]) -> Result<CanonicalTable> {
     let batches = read_parquet(path)?;
