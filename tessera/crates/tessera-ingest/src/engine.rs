@@ -1632,6 +1632,42 @@ mod tests {
         }
     }
 
+    /// Parquet on a pipe must say *why*, not "not a readable Parquet file".
+    ///
+    /// The two table lanes diverge here for a reason the format dictates: CSV is a forward scan and a
+    /// pipe is fine, while Parquet keeps its schema and row groups in a FOOTER, so the reader seeks to
+    /// the end before reading the start. Arrow's own error for that is indistinguishable from "this is
+    /// not Parquet", which sends an operator to inspect their data when the problem is their shell.
+    #[cfg(feature = "parquet")]
+    #[test]
+    fn parquet_on_a_pipe_explains_the_footer_rather_than_blaming_the_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("rows.parquet");
+        if !mkfifo(&fifo) {
+            return; // no `mkfifo` here; the claim is unobservable rather than false
+        }
+        // Opening a fifo for reading blocks until a writer appears, so give it one that writes
+        // nothing and closes. The reader then gets a seek failure, which is the case under test.
+        let w = std::thread::spawn({
+            let fifo = fifo.clone();
+            move || {
+                let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+            }
+        });
+        let err = crate::parquet_table::read_table(&fifo, &[])
+            .expect_err("a fifo cannot satisfy a footer read")
+            .to_string();
+        let _ = w.join();
+        assert!(
+            err.contains("not a regular file") && err.contains("FOOTER"),
+            "the message must name the cause and the fix, not just the symptom: {err}"
+        );
+        assert!(
+            err.contains("Materialise it first"),
+            "and it must say what to do: {err}"
+        );
+    }
+
     /// Create a FIFO at `path`, returning false when the platform has no `mkfifo` to call.
     ///
     /// Nothing is read from it, so no writer is needed and nothing can block: the routing decision

@@ -47,19 +47,38 @@ pub fn read_parquet(path: &Path) -> Result<Vec<RecordBatch>> {
     read_parquet_batched(path, BATCH_ROWS)
 }
 
+/// Explain a failure to open `path` as Parquet, naming the cause an operator can act on.
+///
+/// Parquet describes its schema and row groups in a **footer**, so a reader must seek to the end of
+/// the file before it can read the beginning — which a pipe, fifo or `<(…)` process substitution
+/// cannot do. The underlying arrow error for that case says only that the file is not Parquet, which
+/// sends the operator to look at their data when the problem is their shell. The CSV lane has no
+/// footer and does not care, so this asymmetry is real and worth spelling out rather than inferring.
+fn not_parquet(path: &Path, e: impl std::fmt::Display) -> tessera_core::Error {
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return he(format!(
+            "{} is not a regular file, and Parquet cannot be read from a stream: its schema and row \
+             groups live in a FOOTER, so the reader must seek to the end before it can read the \
+             start. Materialise it first (`zcat data.parquet.gz > data.parquet`) and ingest that.\n  \
+             underlying error: {e}",
+            path.display()
+        ));
+    }
+    he(format!(
+        "{} is not a readable Parquet file: {e}\n  \
+         if it is Arrow IPC / Feather:  tessera ingest table <FILE> --from arrow\n  \
+         if it is un-parseable:        tessera ingest blob <FILE>",
+        path.display()
+    ))
+}
+
 /// [`read_parquet`] with an explicit batch size — the test seam that proves the batch size is not a
 /// determinism input.
 pub fn read_parquet_batched(path: &Path, batch_rows: usize) -> Result<Vec<RecordBatch>> {
     let file =
         std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-        he(format!(
-            "{} is not a readable Parquet file: {e}\n  \
-             if it is Arrow IPC / Feather:  tessera ingest table <FILE> --from arrow\n  \
-             if it is un-parseable:        tessera ingest blob <FILE>",
-            path.display()
-        ))
-    })?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| not_parquet(path, e))?;
     let reader = builder
         .with_batch_size(batch_rows)
         .build()
@@ -87,14 +106,8 @@ pub fn parquet_batches(
 ) -> Result<impl Iterator<Item = Result<RecordBatch>> + use<>> {
     let file =
         std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-        he(format!(
-            "{} is not a readable Parquet file: {e}\n  \
-             if it is Arrow IPC / Feather:  tessera ingest table <FILE> --from arrow\n  \
-             if it is un-parseable:        tessera ingest blob <FILE>",
-            path.display()
-        ))
-    })?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| not_parquet(path, e))?;
     let display = path.display().to_string();
     let reader = builder
         .with_batch_size(batch_rows)
@@ -112,12 +125,8 @@ pub fn parquet_batches(
 pub fn parquet_size_estimate(path: &Path) -> Result<u64> {
     let file =
         std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-        he(format!(
-            "{} is not a readable Parquet file: {e}",
-            path.display()
-        ))
-    })?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| not_parquet(path, e))?;
     let md = builder.metadata();
     let rows: i64 = md.file_metadata().num_rows();
     // Uncompressed size across every column chunk — what a decode actually has to hold, unlike the
