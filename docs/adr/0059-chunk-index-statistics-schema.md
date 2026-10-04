@@ -157,7 +157,7 @@ fold is the same, only the persistence differs.
 ```
 span = max − min + 1                       (from the scalars, already computed)
 bins = span            if span ≤ MAX_BINS  → one bin per value: EXACT quantiles
-     = MAX_BINS        otherwise           → linear bins, error ≤ one bin width
+     = MAX_BINS        otherwise           → linear bins, error ≤ the widest bin
 MAX_BINS = 4096 (default; 8.2 KB dense, 1.13× the sidecar)
 ```
 
@@ -175,10 +175,16 @@ This is specification of the ratified "linear bins", not a change to it — but 
 worth stating, because "linear" invites the wrong assumption: **when `span` is not divisible by
 `bins`, the bins are not all the same width.** They differ by at most one value, as integer division
 requires. Example: `lo = 0`, `hi = 12288` (`span = 12289`), `bins = 4096` puts `v = 4096` in bin
-**1365**, not 1364 — `floor(4096 × 4096 / 12289) = 1365`. Anything that assumed `bin = (v − lo) /
-(span / bins)` with real division would disagree. Equal-width bins would require either a span padded
-to a multiple of `bins` or a non-integer edge table, and neither is worth the complication while
-`exact` covers the case that matters.
+**1365**, not 1364 — `floor(4096 × 4096 / 12289) = 1365`.
+
+The hazard is **not** real-versus-integer division: `(v − lo) / (span / bins)` in real arithmetic is
+the *same quantity* as the formula above, so a reader doing that gets the same answer. The hazard is a
+reader assuming a single **fixed integer width** `span / bins`. Here that width is `12289 / 4096 = 3`,
+and the top value gives `12288 / 3 = 4096` — a bin index that **does not exist** in a 4096-bin
+histogram. The formula above keeps every value in `[0, bins)` by construction.
+
+Equal-width bins would require either a span padded to a multiple of `bins` or a non-integer edge
+table, and neither is worth the complication while `exact` covers the case that matters.
 
 `exact == true` means `bins == span` — one bin per representable value — and then the formula reduces
 to `bin(v) = v − lo` and the histogram is a complete description of the distribution.
@@ -198,8 +204,15 @@ sparse map even at 31 % density, and dense has no key-ordering question to get w
 be interpretable without its manifest. The rule: **the payload is authoritative**; the `spec`
 descriptor exists so `inspect` can report a histogram's shape without reading the block. A writer
 derives both from the same value in one place, so they cannot diverge when written, and a hand-edited
-manifest fails the content hash. A reader that nonetheless finds them disagreeing must treat the index
-as corrupt and fall back as if it were absent — never prefer one silently.
+`spec` fails **`manifest_hash`** — note: *not* `content_hash`, which is the Merkle root over block
+digests only and so is blind to a spec edit. A reader that nonetheless finds them disagreeing must
+treat the index as corrupt and fall back as if it were absent — never prefer one silently.
+
+**This rule is enforced by the reader in C5**, together with the rest of the index's validation: the
+payload is rejected (and the index treated as absent) when `lo > hi`, when `counts` is empty, or when
+a stored `exact` disagrees with `bins == span` — `exact` is **recomputed**, never trusted as written.
+`ChunkIndex::from_bytes` itself is a deserializer and validates none of this, so an unvalidated caller
+would inherit whatever the bytes claimed.
 
 **The two-level ordering is real but already paid for.** Fixing edges from the observed range needs
 the global `min`/`max` first, i.e. a second pass over the data. The write path *already* makes a full
@@ -365,8 +378,13 @@ by default would pay 2.25–3.2× on every seal for a value most users never rea
    Bump `recipe` `chunk_index@1` → `@2`; a missing field reads as **absent**, never as zero (the
    `sum_sq` `#[serde(default)]` precedent — "absent" and "all-zero bins" must not be confusable).
 2. `tessera-io`: two-pass build (scalars → edges → histogram), writer opt-out for the histogram.
-3. Reader: verify `indexed_digest`; serve quantiles/fences from the histogram; keep #524's
-   `exact`/`method` contract and extend it with the histogram's `exact` flag.
+3. Reader (C5): verify `indexed_digest` and the `recipe` (`@1` must not be read as `@2`); serve
+   quantiles/fences from the histogram; keep #524's `exact`/`method` contract and extend it with the
+   histogram's `exact` flag. **Validate the payload rather than trusting it** — `ChunkIndex::from_bytes`
+   is a deserializer and checks none of this. Reject the index (treating it as absent) when `lo > hi`,
+   when `counts` is empty, when `counts.len()` disagrees with the recorded `bins`, or when a stored
+   `exact` disagrees with `bins == span`; **`exact` is recomputed, never trusted as written**. The
+   payload-versus-`spec` disagreement rule of §5 is enforced here too: disagree ⇒ corrupt ⇒ fall back.
 4. Flip the default on for integer array blocks (#347 P1) **and regenerate the corpus in the same
    PR**, with the golden movement stated as the declared format event.
 5. `#526`/`#527` only if §9 is included.

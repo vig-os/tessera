@@ -226,7 +226,14 @@ impl Monoid for ChunkStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HistKind {
-    /// Equal-width integer bins spanning `[lo, hi]` inclusive.
+    /// Integer bins spanning `[lo, hi]` inclusive, under the ADR-0059 §5 formula
+    /// `bin(v) = floor((clamp(v, lo, hi) − lo) × bins / span)` with `span = hi − lo + 1`.
+    ///
+    /// **Not equal-width.** When `span` is not divisible by `bins` the widths differ by one, as
+    /// integer division requires; a quantile read from such a histogram is bounded by *the widest*
+    /// bin, not by a single uniform width. Only when `exact` (`bins == span`) is every bin one
+    /// value wide. A reader must use the formula, not a fixed width `span / bins` — that width
+    /// would put the top value at a bin index outside the histogram.
     LinearInt,
 }
 
@@ -403,6 +410,12 @@ impl ChunkIndex {
     }
 
     /// The block-level aggregate stat (the level-0 pyramid root) = `combine` of every chunk stat.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the roll-up overflows `i128` — it folds with [`Monoid::combine`], which fails
+    /// closed loudly rather than wrapping (ADR-0059 M2). Three `i64::MAX` chunks are enough. Use
+    /// [`Self::checked_aggregate`] on data you did not produce, and handle `None`.
     pub fn aggregate(&self) -> ChunkStats {
         self.entries
             .iter()
@@ -425,6 +438,13 @@ impl ChunkIndex {
     /// unchanged) until a single summary node. A reader can answer a coarse query at level *L* without
     /// touching the data. The top node equals [`Self::aggregate`]; an empty index yields no levels. This
     /// is the *stats* overview (the integrity hash tree is the sub-block MMR, [`Self::root`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if any level's roll-up overflows `i128` — it folds with [`Monoid::combine`] (see
+    /// [`Self::aggregate`]). There is no checked variant yet; build the pyramid only over stats you
+    /// produced, or pre-check with [`Self::checked_aggregate`], whose success implies every level
+    /// below it also fits.
     pub fn stat_pyramid(&self) -> Vec<Vec<ChunkStats>> {
         if self.entries.is_empty() {
             return Vec::new();
@@ -476,7 +496,13 @@ impl ChunkIndex {
         Ok(serde_json::to_vec(self)?)
     }
 
-    /// Reconstruct an index from [`Self::to_bytes`] output.
+    /// Parse an index from its deterministic bytes.
+    ///
+    /// **This is a deserializer and validates nothing semantic.** `lo > hi`, an empty `counts`, a
+    /// `counts` length that disagrees with the edges, and a stored `exact` that is simply false are
+    /// all accepted as written. A reader that will *report* these values must validate them and
+    /// recompute `exact` from `bins == span` rather than trusting the field — ADR-0059 §5; the
+    /// reader-side validation lands in C5. Deserializing is not vouching.
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
         Ok(serde_json::from_slice(bytes)?)
     }
@@ -555,6 +581,13 @@ impl MerkleStatsAccumulator {
 
     /// The **live** aggregate stats over every leaf so far — bag the stat peaks (monoid-combine),
     /// matching [`ChunkIndex::aggregate`]. Order-independent: the stats monoid is commutative.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the roll-up overflows `i128`, for the same reason as [`ChunkIndex::aggregate`]:
+    /// it folds with [`Monoid::combine`], which fails closed loudly rather than wrapping. This one
+    /// sits on the streaming write path, so a caller folding adversarial 64-bit values should check
+    /// with [`ChunkStats::checked_combine`] before pushing them.
     pub fn aggregate(&self) -> ChunkStats {
         self.stat_peaks
             .iter()
