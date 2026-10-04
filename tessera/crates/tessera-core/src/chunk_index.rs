@@ -206,25 +206,18 @@ impl Monoid for ChunkStats {
     }
 
     fn combine(&self, other: &Self) -> Self {
-        let min = match (self.min, other.min) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-        let max = match (self.max, other.max) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (a, b) => a.or(b),
-        };
-        ChunkStats {
-            count: self.count + other.count,
-            min,
-            max,
-            sum: self.sum + other.sum,
-            sum_sq: self.sum_sq + other.sum_sq,
-            masked: add_opt(self.masked, other.masked),
-            nan: add_opt(self.nan, other.nan),
-            pos_inf: add_opt(self.pos_inf, other.pos_inf),
-            neg_inf: add_opt(self.neg_inf, other.neg_inf),
-        }
+        // Delegates to `checked_combine` and PANICS on overflow rather than wrapping.
+        //
+        // Plain `+` wrapped silently in release, and this method feeds `aggregate`,
+        // `stat_pyramid` and the live `MerkleStatsAccumulator` — so a wrapped total could reach a
+        // reported statistic or a live integrity root with nothing to show for it. A panic is loud
+        // and fail-closed; a wrong number under a content hash is neither (ADR-0059 M2, #523).
+        //
+        // Every seal path in-tree already goes through `from_values` / `checked_combine`, so this
+        // is a guard for read paths and future callers, not an expected outcome. Callers that can
+        // receive adversarial data should use `checked_combine` and handle `None`.
+        self.checked_combine(other)
+            .expect("ChunkStats::combine overflowed i128 — use checked_combine to handle this")
     }
 }
 
@@ -607,6 +600,99 @@ mod tests {
         assert_eq!(unknown.combine(&a).masked, None);
         // and it does not contaminate the other fields
         assert_eq!(a.combine(&unknown).count, 3);
+    }
+
+    /// The bin rule is EXACTLY the ADR-0059 §5 formula, re-derived here independently.
+    ///
+    /// `kind: "linear-int"` names one formula and a reader must be able to reconstruct every edge
+    /// from `lo`/`hi`/`bins` alone. Deriving it separately catches the case the review flagged: for
+    /// a span not divisible by `bins` the widths differ by one, so anything assuming real division
+    /// disagrees.
+    #[test]
+    fn bin_of_matches_the_adr_formula_including_unequal_widths() {
+        // The ADR formula, written out independently of `bin_of`.
+        fn adr_bin(v: i64, lo: i64, hi: i64, bins: usize) -> usize {
+            let span = hi as i128 - lo as i128 + 1;
+            let off = (v as i128).clamp(lo as i128, hi as i128) - lo as i128;
+            ((off * bins as i128) / span) as usize
+        }
+
+        // The review's example: span 12289 over 4096 bins is NOT divisible.
+        let h = Histogram::empty(0, 12288, 4096);
+        assert!(
+            !h.exact,
+            "4096 bins over a 12289 span cannot be one-per-value"
+        );
+        assert_eq!(h.bin_of(4096), 1365, "the review's worked example");
+        // The hazard is not real-vs-integer division (those are the same quantity); it is a reader
+        // assuming bins of one FIXED width `span / bins`. With span 12289 over 4096 bins that width
+        // would be 3, and the top value would fall outside the histogram entirely.
+        let fixed_width = (12289usize) / 4096; // == 3
+        assert_eq!(
+            12288usize / fixed_width,
+            4096,
+            "a fixed-width reader computes a bin index that does not exist"
+        );
+        assert_eq!(
+            h.bin_of(12288),
+            4095,
+            "the ADR formula keeps every value in range"
+        );
+        for v in [0i64, 1, 3, 4095, 4096, 4097, 6144, 12287, 12288] {
+            assert_eq!(h.bin_of(v), adr_bin(v, 0, 12288, 4096), "v={v}");
+        }
+
+        // Widths really are unequal, by exactly one.
+        let mut widths = std::collections::BTreeSet::new();
+        let mut counts = vec![0usize; 4096];
+        for v in 0..=12288i64 {
+            counts[h.bin_of(v)] += 1;
+        }
+        for c in &counts {
+            widths.insert(*c);
+        }
+        assert_eq!(
+            widths.len(),
+            2,
+            "a non-divisible span yields two bin widths, differing by one: {widths:?}"
+        );
+        let w: Vec<_> = widths.iter().copied().collect();
+        assert_eq!(w[1] - w[0], 1);
+        assert_eq!(
+            counts.iter().sum::<usize>(),
+            12289,
+            "every value lands once"
+        );
+
+        // When exact, the formula collapses to `v - lo`.
+        let e = Histogram::empty(-1024, 3071, 4096);
+        assert!(e.exact);
+        for v in [-1024i64, -1023, 0, 3070, 3071] {
+            assert_eq!(e.bin_of(v), (v + 1024) as usize);
+            assert_eq!(e.bin_of(v), adr_bin(v, -1024, 3071, 4096));
+        }
+        // Out-of-range clamps rather than panicking or wrapping.
+        assert_eq!(e.bin_of(-9999), 0);
+        assert_eq!(e.bin_of(9999), 4095);
+    }
+
+    /// `Monoid::combine` must FAIL LOUDLY on overflow, never wrap (ADR-0059 review nit).
+    ///
+    /// It feeds `aggregate`, `stat_pyramid` and the live accumulator, so a wrapped total could
+    /// reach a reported statistic or a live integrity root. A panic is fail-closed; wrapping is not.
+    #[test]
+    #[should_panic(expected = "use checked_combine")]
+    fn combine_panics_rather_than_wrapping() {
+        let big = ChunkStats {
+            count: 1,
+            min: Some(i64::MAX),
+            max: Some(i64::MAX),
+            sum: i64::MAX as i128,
+            sum_sq: (i64::MAX as i128) * (i64::MAX as i128),
+            ..ChunkStats::identity()
+        };
+        let two = big.combine(&big); // fits
+        let _ = two.combine(&big); // must panic, not wrap
     }
 
     /// A histogram merges only over identical edges, and refuses otherwise.

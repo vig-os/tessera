@@ -1541,8 +1541,14 @@ pub fn table_block_with_index(
         Some(col) if data.iter().any(|(n, _)| n == col) => {
             match table_chunk_index(spec, data, col)? {
                 Some(index) => {
-                    // M1: bind the index to the digest of the very block it was built from.
-                    let data_digest = block.0.digest.as_deref().unwrap_or_default();
+                    // M1: see `array_block_with_index` — an empty `indexed_digest` would look
+                    // bound while binding to nothing.
+                    let data_digest = block.0.digest.as_deref().ok_or_else(|| {
+                        Error::Codec(format!(
+                            "table_block_with_index('{name}'): the data block has no digest to \
+                             bind the chunk-index to"
+                        ))
+                    })?;
                     Some(crate::chunk_index::chunk_index_block(
                         name,
                         data_digest,

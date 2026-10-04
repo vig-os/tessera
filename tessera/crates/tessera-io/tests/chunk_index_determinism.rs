@@ -7,11 +7,13 @@
 //!
 //! Three axes, covered deliberately:
 //!
-//!  - **architecture** and **build profile**: the pinned literals below. CI runs this file on
-//!    `x86_64-linux` AND `aarch64-linux`, under the dev-profile `ingest-gate-a` check and the
-//!    release-profile `workspace-test` check, so a byte difference on any of those four
-//!    combinations fails the gate. #472 is why this is checked and not assumed: a persisted float
-//!    NaN diverged across architectures by a single bit.
+//!  - **architecture** and **build profile**: the pinned literals below. The wiring is the
+//!    `seal-profile-determinism` flake check, which runs this file under the dev profile AND
+//!    `--release`; CI runs that check on `x86_64-linux` AND `aarch64-linux`, so a byte difference
+//!    on any of those four combinations fails the gate. (It is NOT `ingest-gate-a` /
+//!    `workspace-test` — those happen to use different profiles, which would leave this axis
+//!    resting on a coincidence.) #472 is why this is checked and not assumed: a persisted float NaN
+//!    diverged across architectures by a single bit.
 //!  - **worker count**: asserted directly, by sealing the same data through the streaming writer at
 //!    1, 4 and 16 encode threads and comparing the resulting sidecar bytes.
 //!  - **the encoding itself**: re-derived inside the test from first principles, so the literals
@@ -83,6 +85,51 @@ fn the_per_chunk_digest_is_over_native_little_endian_elements() {
         "chunk digest must be over the chunk's NATIVE little-endian element bytes (ADR-0059 M3)"
     );
 
+    // ...and EVERY chunk, in the index's own order — including the two that clip on one axis and
+    // the one that clips on two. Deriving only chunk 0 would leave the chunk ORDER and the clipping
+    // of the trailing chunks unproven.
+    let nchunks = [
+        shape[0].div_ceil(chunks[0]),
+        shape[1].div_ceil(chunks[1]),
+        shape[2].div_ceil(chunks[2]),
+    ];
+    let mut derived = Vec::new();
+    for cx in 0..nchunks[0] {
+        for cy in 0..nchunks[1] {
+            for cz in 0..nchunks[2] {
+                let lo = [cx * chunks[0], cy * chunks[1], cz * chunks[2]];
+                let hi = [
+                    (lo[0] + chunks[0]).min(shape[0]),
+                    (lo[1] + chunks[1]).min(shape[1]),
+                    (lo[2] + chunks[2]).min(shape[2]),
+                ];
+                let mut bytes = Vec::new();
+                for x in lo[0]..hi[0] {
+                    for y in lo[1]..hi[1] {
+                        for z in lo[2]..hi[2] {
+                            let flat = x * strides[0] + y * strides[1] + z * strides[2];
+                            bytes.extend_from_slice(&vals[flat].to_le_bytes());
+                        }
+                    }
+                }
+                derived.push(digest(&bytes));
+            }
+        }
+    }
+    let actual: Vec<String> = idx.entries.iter().map(|e| e.digest.clone()).collect();
+    assert_eq!(
+        actual, derived,
+        "all chunk digests AND their order must match the ADR's C-order walk with clipping"
+    );
+    // The clipped chunks really are smaller: 4x4x3, 4x3x3, 1x4x3, 1x3x3 elements.
+    assert_eq!(
+        idx.entries
+            .iter()
+            .map(|e| e.stats.count)
+            .collect::<Vec<_>>(),
+        vec![48, 36, 12, 9]
+    );
+
     // And it is NOT the old i64-widened encoding.
     let widened: Vec<u8> = {
         let mut w = Vec::new();
@@ -101,6 +148,106 @@ fn the_per_chunk_digest_is_over_native_little_endian_elements() {
         digest(&widened),
         "the i64-widened buffer must no longer be what is hashed"
     );
+}
+
+/// The native width is the DTYPE's width, for every integer dtype — 1, 2, 4, 8 and bool.
+///
+/// A single-dtype test would not catch a width table that is right for `int16` and wrong elsewhere.
+/// `i8 -1` must be one byte `0xFF`, `bool` must be `0x00`/`0x01` and never the host's `bool`
+/// representation, and a `u64` above `i64::MAX` must yield NO index rather than a truncated one.
+#[test]
+fn every_integer_width_hashes_at_its_own_width() {
+    fn one_chunk(dtype: &str, data: ArrayData, expect: &[u8]) {
+        let mut spec = ArraySpec::new(vec![data_len(&data) as u64], dtype);
+        spec.chunks = vec![data_len(&data) as u64]; // a single chunk
+        let idx = array_chunk_index(&spec, &data)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{dtype} must be indexable"));
+        assert_eq!(idx.len(), 1);
+        assert_eq!(
+            idx.entries[0].digest,
+            digest(expect),
+            "{dtype}: digest must be over {} bytes",
+            expect.len()
+        );
+    }
+    fn data_len(d: &ArrayData) -> usize {
+        match d {
+            ArrayData::I8(v) => v.len(),
+            ArrayData::U8(v) => v.len(),
+            ArrayData::I16(v) => v.len(),
+            ArrayData::I32(v) => v.len(),
+            ArrayData::I64(v) => v.len(),
+            ArrayData::U16(v) => v.len(),
+            ArrayData::U32(v) => v.len(),
+            ArrayData::U64(v) => v.len(),
+            ArrayData::Bool(v) => v.len(),
+            _ => panic!("integer dtypes only"),
+        }
+    }
+
+    // width 1, signed: -1 is 0xFF, not 0xFFFFFFFFFFFFFFFF.
+    one_chunk("int8", ArrayData::I8(vec![-1, 0, 127]), &[0xFF, 0x00, 0x7F]);
+    one_chunk("uint8", ArrayData::U8(vec![0, 255]), &[0x00, 0xFF]);
+    // width 2
+    one_chunk(
+        "int16",
+        ArrayData::I16(vec![-2, 256]),
+        &[0xFE, 0xFF, 0x00, 0x01],
+    );
+    // width 4
+    one_chunk("int32", ArrayData::I32(vec![-2]), &[0xFE, 0xFF, 0xFF, 0xFF]);
+    // width 8
+    one_chunk(
+        "int64",
+        ArrayData::I64(vec![-2]),
+        &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+    );
+    // bool is exactly 0x00 / 0x01, one byte each — never the host's `bool` layout.
+    one_chunk(
+        "bool",
+        ArrayData::Bool(vec![true, false, true]),
+        &[0x01, 0x00, 0x01],
+    );
+
+    // A u64 above i64::MAX cannot be represented exactly, so there is NO index — not a truncated
+    // one. Fail closed (ADR-0059 M2).
+    let mut spec = ArraySpec::new(vec![2], "uint64");
+    spec.chunks = vec![2];
+    assert!(
+        array_chunk_index(&spec, &ArrayData::U64(vec![u64::MAX, 0]))
+            .unwrap()
+            .is_none(),
+        "u64 beyond i64::MAX must yield no index rather than a truncated digest"
+    );
+}
+
+/// A block whose `sum_sq` roll-up overflows must STILL get its histogram (review blocker 3).
+///
+/// The histogram needs only `min`/`max`, which cannot overflow. Gating it on the full aggregate
+/// meant the sidecar was written with no histogram and no stated reason.
+#[test]
+fn an_overflowing_aggregate_still_gets_a_histogram() {
+    let mut spec = ArraySpec::new(vec![6], "int64");
+    spec.chunks = vec![2]; // 3 chunks: each folds, the block-level roll-up does not
+    let data = ArrayData::I64(vec![i64::MAX; 6]);
+
+    let idx = array_chunk_index(&spec, &data)
+        .unwrap()
+        .expect("per-chunk folds succeed, so there IS an index");
+    assert_eq!(idx.len(), 3);
+    assert_eq!(
+        idx.checked_aggregate(),
+        None,
+        "precondition: the block-level roll-up really does overflow"
+    );
+    let h = idx
+        .histogram
+        .as_ref()
+        .expect("the histogram needs only min/max and must survive an overflowing aggregate");
+    assert_eq!(h.lo, i64::MAX);
+    assert_eq!(h.hi, i64::MAX);
+    assert_eq!(h.total(), 6, "every value counted");
 }
 
 /// Pinned per-chunk digests and index root — the cross-architecture / cross-profile assertion.

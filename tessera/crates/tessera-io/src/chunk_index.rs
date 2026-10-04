@@ -54,10 +54,18 @@ pub fn chunk_index_block(
         "entries": index.len(),       // number of sub-block entries
         "root": index.root(),         // sub-block Merkle (MMR) root, ADR-0028 §1
     });
-    // Self-describe the histogram's edges so a reader never has to guess them (ADR-0059 §5).
-    // Omitted entirely when there is none: absent and all-zero must not be confusable.
+    // Self-describe the histogram's edges so a reader never has to guess them (ADR-0059 §5), under
+    // the ratified key `hist`. Omitted when there is none: absent and all-zero must not be
+    // confusable.
+    //
+    // This duplicates edges the PAYLOAD also carries, deliberately and with a stated authority: the
+    // payload is AUTHORITATIVE (it is the content-hashed block, and `counts` is meaningless without
+    // its edges, so the block must be interpretable without the manifest), while this descriptor
+    // lets `inspect` report the histogram's shape without reading the block. Both are written from
+    // `index.histogram` by the one expression below, so they cannot diverge at write time, and a
+    // hand-edited manifest fails the content hash. ADR-0059 §5 records the rule.
     if let Some(h) = &index.histogram {
-        spec["histogram"] = serde_json::json!({
+        spec["hist"] = serde_json::json!({
             "kind": h.kind,
             "lo": h.lo,
             "hi": h.hi,

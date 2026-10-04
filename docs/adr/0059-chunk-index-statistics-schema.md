@@ -161,6 +161,28 @@ bins = span            if span ≤ MAX_BINS  → one bin per value: EXACT quanti
 MAX_BINS = 4096 (default; 8.2 KB dense, 1.13× the sidecar)
 ```
 
+**The bin rule is exact, not "linear".** `kind: "linear-int"` names this formula and nothing else:
+
+```
+bin(v) = floor( (clamp(v, lo, hi) − lo) × bins / span )        (integer arithmetic)
+span   = hi − lo + 1
+```
+
+So bin `b` covers the values `v` with `ceil(b × span / bins) ≤ v − lo < ceil((b+1) × span / bins)`,
+and a reader can reconstruct every edge from `lo`, `hi` and `bins` alone.
+
+This is specification of the ratified "linear bins", not a change to it — but it has a consequence
+worth stating, because "linear" invites the wrong assumption: **when `span` is not divisible by
+`bins`, the bins are not all the same width.** They differ by at most one value, as integer division
+requires. Example: `lo = 0`, `hi = 12288` (`span = 12289`), `bins = 4096` puts `v = 4096` in bin
+**1365**, not 1364 — `floor(4096 × 4096 / 12289) = 1365`. Anything that assumed `bin = (v − lo) /
+(span / bins)` with real division would disagree. Equal-width bins would require either a span padded
+to a multiple of `bins` or a non-integer edge table, and neither is worth the complication while
+`exact` covers the case that matters.
+
+`exact == true` means `bins == span` — one bin per representable value — and then the formula reduces
+to `bin(v) = v − lo` and the histogram is a complete description of the distribution.
+
 Recorded in the `.cidx` block `spec`, so a reader is never guessing:
 
 ```json
@@ -170,6 +192,14 @@ Recorded in the `.cidx` block `spec`, so a reader is never guessing:
 `kind` is what makes §8's float story additive later. `exact` is computed (`bins == span`), not
 asserted. Counts are stored **dense** — at 4096 bins a dense array is 8.2 KB against 11.5 KB for a
 sparse map even at 31 % density, and dense has no key-ordering question to get wrong.
+
+**Two copies, one authority.** The `hist` descriptor above duplicates edges that the `.cidx`
+**payload** also carries, because `counts` is meaningless without them and a content-hashed block must
+be interpretable without its manifest. The rule: **the payload is authoritative**; the `spec`
+descriptor exists so `inspect` can report a histogram's shape without reading the block. A writer
+derives both from the same value in one place, so they cannot diverge when written, and a hand-edited
+manifest fails the content hash. A reader that nonetheless finds them disagreeing must treat the index
+as corrupt and fall back as if it were absent — never prefer one silently.
 
 **The two-level ordering is real but already paid for.** Fixing edges from the observed range needs
 the global `min`/`max` first, i.e. a second pass over the data. The write path *already* makes a full

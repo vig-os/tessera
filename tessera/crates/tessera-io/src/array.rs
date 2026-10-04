@@ -731,14 +731,33 @@ pub fn array_block_with_index(
     spec: &ArraySpec,
     data: &ArrayData,
 ) -> Result<(EncodedBlock, Option<EncodedBlock>)> {
+    array_block_with_index_opts(name, spec, data, &IndexOptions::default())
+}
+
+/// [`array_block_with_index`] with explicit [`IndexOptions`] — the histogram opt-out reaches the
+/// emitter, not just the direct `array_chunk_index_with` caller.
+pub fn array_block_with_index_opts(
+    name: &str,
+    spec: &ArraySpec,
+    data: &ArrayData,
+    opts: &IndexOptions,
+) -> Result<(EncodedBlock, Option<EncodedBlock>)> {
     let block = array_block(name, spec, data)?;
-    let sidecar = match array_chunk_index(spec, data)? {
+    let sidecar = match array_chunk_index_with(spec, data, opts)? {
         // `None` = the values are not exactly foldable (non-integer dtype, or an accumulator that
         // would overflow). Either way the block is written WITHOUT an index rather than with an
         // approximate one (ADR-0028 §3 integer core; ADR-0059 M2).
         Some(index) => {
-            // M1: bind the index to the digest of the very block it was built from.
-            let data_digest = block.0.digest.as_deref().unwrap_or_default();
+            // M1: bind the index to the digest of the very block it was built from. A missing digest
+            // is a programming error, not something to paper over with `""` — an empty
+            // `indexed_digest` would bind the index to nothing while LOOKING bound, which is worse
+            // than having no field at all.
+            let data_digest = block.0.digest.as_deref().ok_or_else(|| {
+                Error::Codec(format!(
+                    "array_block_with_index('{name}'): the data block has no digest to bind the \
+                     chunk-index to"
+                ))
+            })?;
             Some(crate::chunk_index::chunk_index_block(
                 name,
                 data_digest,
@@ -903,8 +922,16 @@ pub fn array_chunk_index_with(
     // already materialised. That is why the measured cost is ~20 % of the index fold rather than a
     // second full traversal.
     if opts.histogram {
-        if let Some(agg) = idx.checked_aggregate() {
-            if let (Some(lo), Some(hi)) = (agg.min, agg.max) {
+        // Edges come from a plain min/max fold over the per-chunk stats, NOT from
+        // `checked_aggregate`. A histogram needs only the range, and min/max cannot overflow —
+        // gating it on the full aggregate meant a block whose `sum_sq` roll-up overflowed got a
+        // sidecar with NO histogram and no stated reason (ADR-0059 review blocker 3). Reproduced
+        // with `int64 [6]`, chunks `[2]`, every value `i64::MAX`: each chunk folds, the block-level
+        // roll-up does not, and the histogram silently vanished.
+        let lo = idx.entries.iter().filter_map(|e| e.stats.min).min();
+        let hi = idx.entries.iter().filter_map(|e| e.stats.max).max();
+        {
+            if let (Some(lo), Some(hi)) = (lo, hi) {
                 let span = (hi as i128 - lo as i128 + 1).max(1);
                 // One bin per value when the span allows — then `exact` is true and quantiles taken
                 // from this histogram are exact rather than bounded by a bin width.
