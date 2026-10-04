@@ -70,7 +70,7 @@ use bytes::Bytes;
 use tessera_core::block::array::{ArraySpec, WorldFrame};
 use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::block::{BlockKind, BlockRef};
-use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
+use tessera_core::chunk_index::{ChunkIndex, ChunkStats, Histogram};
 use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
 
@@ -772,7 +772,38 @@ pub fn array_block_with_index(
 /// assert_eq!(idx.prune(0, 0), vec![0]); // value 0 lives only in the first chunk
 /// assert!(idx.root().starts_with("blake3:")); // sub-block MMR root (ADR-0028 §1)
 /// ```
+/// The most bins a block-level histogram may have (ADR-0059 §5).
+///
+/// 4096 is chosen against the measured cost: a dense 4096-bin count vector adds ~10.5 KiB to a
+/// `.cidx`, taking the sidecar from 0.056 % to 0.061 % of a 151 MiB product. It is also exactly the
+/// span of a 12-bit CT reconstruction, which is the common case — there, one bin per value makes the
+/// histogram a COMPLETE description of the distribution, so quantiles off it are exact.
+pub const MAX_HIST_BINS: usize = 4096;
+
+/// Knobs for building a chunk index. `Default` builds the histogram; a writer that does not want to
+/// pay for it (ADR-0059 §6 measured ~20 % on top of the index fold) opts out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexOptions {
+    /// Build the block-level value histogram (ADR-0059 S3).
+    pub histogram: bool,
+}
+
+impl Default for IndexOptions {
+    fn default() -> Self {
+        Self { histogram: true }
+    }
+}
+
 pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<Option<ChunkIndex>> {
+    array_chunk_index_with(spec, data, &IndexOptions::default())
+}
+
+/// [`array_chunk_index`] with explicit [`IndexOptions`].
+pub fn array_chunk_index_with(
+    spec: &ArraySpec,
+    data: &ArrayData,
+    opts: &IndexOptions,
+) -> Result<Option<ChunkIndex>> {
     // A non-integer array has no integer chunk stats — `None`, not an error: callers ask for an
     // index and are told there is none, exactly as for an overflowing one.
     let Some(vals) = data.as_i64() else {
@@ -862,6 +893,28 @@ pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<Option<Ch
                 break;
             }
             cidx[ax] = 0;
+        }
+    }
+    // ---- the block-level histogram (ADR-0059 §3/§5), pass 2 of 2.
+    //
+    // Pass 1 is the chunk loop above, whose aggregate gives the global min/max the bin edges are
+    // fixed from. Pass 2 is this linear scan: a histogram does not care about element ORDER (integer
+    // counts commute), so it needs no odometer and no re-gather — it walks `vals`, which `as_i64`
+    // already materialised. That is why the measured cost is ~20 % of the index fold rather than a
+    // second full traversal.
+    if opts.histogram {
+        if let Some(agg) = idx.checked_aggregate() {
+            if let (Some(lo), Some(hi)) = (agg.min, agg.max) {
+                let span = (hi as i128 - lo as i128 + 1).max(1);
+                // One bin per value when the span allows — then `exact` is true and quantiles taken
+                // from this histogram are exact rather than bounded by a bin width.
+                let bins = span.min(MAX_HIST_BINS as i128) as usize;
+                let mut h = Histogram::empty(lo, hi, bins);
+                for &v in &vals {
+                    h.add(v);
+                }
+                idx.histogram = Some(h);
+            }
         }
     }
     Ok(Some(idx))
