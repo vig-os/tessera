@@ -47,9 +47,8 @@
         # fixtures) + Gate B's committed feature snapshots (`tests/feature-snapshots/*.txt`, ADR-0057
         # §5) — cleanCargoSource would otherwise strip these non-Rust files, so the trycmd
         # docs-as-tests would silently run ZERO cases in the hermetic gate.
-        src = pkgs.lib.cleanSourceWith {
-          src = ./tessera;
-          filter = path: type:
+        # Named so `test-coverage` (below) asks the SAME predicate the build uses, rather than a copy.
+        srcFilter = path: type:
             (craneLib.filterCargoSources path type)
             || (pkgs.lib.hasInfix "/corpus/" path)
             || (pkgs.lib.hasInfix "/docs/examples/" path)
@@ -60,8 +59,111 @@
             # this committed copy against `SchemaRegistry::builtin()`, so the file has to reach the
             # sandbox — the `derived-docs` gate cannot do the job here because it runs without cargo.
             || (pkgs.lib.hasInfix "/tests/derived-docs/" path);
+        src = pkgs.lib.cleanSourceWith {
+          src = ./tessera;
+          filter = srcFilter;
           name = "source";
         };
+
+        isLinux = pkgs.stdenv.hostPlatform.isLinux;
+
+        # ── Every SCRIPT under ./tessera, and what happens to it (#520). ──────────────────────────
+        #
+        # A test the build sandbox cannot see passes locally and gates nothing, silently. That has
+        # happened twice: ef240cb (trycmd cases ran ZERO in CI — `/tests/cmd/` was not in the filter)
+        # and #520 (the ecosystem bench's tests were referenced by nothing).
+        #
+        # The first version of this guard matched "test-like" NAMES (test_*.py, tests/…). Names are a
+        # proxy: `corpus/reference_reader/run.py` — an independent conformance reader — matched no
+        # pattern and ran nowhere. So the rule is now about FILE TYPE, not name: every tracked
+        # script (.py .js .cjs .mjs .sh) must appear in EXACTLY ONE map below, and being admitted by
+        # `srcFilter` does NOT count for a script (the filter admits whole directories such as
+        # /corpus/ and /tests/cmd/, so a script there would pass unrun). Exact FILES, never dirs.
+        # Check names are asserted to exist (see the `checks` wrapper), so a rename cannot leave a
+        # file "run by" a check that is gone.
+        scriptsRunByChecks = {
+          "/crates/tessera-py/tests/smoke.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/api_drift.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/codec_roundtrip.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/write_example.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-ingest/tests/producer_equality.py" = [ "ingest-producer-equality" ];
+          "/crates/tessera-wasm/tests/smoke.cjs" = [ "wasm-bindgen-smoke" ];
+          "/corpus/reference_reader/run.py" = [ "reference-reader" ];
+        } // pkgs.lib.optionalAttrs isLinux {
+          "/bench/ecosystems/test_common.py" = [ "bench-ecosystems" ];
+        };
+        # Deliberately NOT run in CI — each with its reason. A declared decision, not a silent gap.
+        scriptsNotRunInCi = {
+          "/bench/ecosystems/test_adapters.py" =
+            "needs h5py, zarr, pyarrow, nibabel, pydicom, uproot AND a built tessera-py — a heavy new "
+            + "derivation, deferred until the CI memory work lands (#495, #520)";
+          "/bench/ecosystems/run.py" =
+            "the benchmark DRIVER, not a test: it produces timings for humans and is run by hand "
+            + "(bench/ecosystems/README.md). Numbers from a shared CI runner would not be meaningful";
+        } // pkgs.lib.optionalAttrs (!isLinux) {
+          "/bench/ecosystems/test_common.py" =
+            "Linux-only: common.py uses CDLL('libc.so.6'), mincore(2) and posix_fadvise";
+        };
+        # Imported by an entry point above, never run directly. Each value is the list of ENTRY
+        # POINTS that import it, and every one must be a key of scriptsRunByChecks or
+        # scriptsNotRunInCi (asserted in the `checks` wrapper) — so "a library" cannot become a
+        # third way of declaring a script without saying what runs it.
+        scriptLibraries =
+          let
+            bench = [ "/bench/ecosystems/run.py" "/bench/ecosystems/test_adapters.py" ];
+            py = [
+              "/crates/tessera-py/tests/smoke.py"
+              "/crates/tessera-py/tests/api_drift.py"
+              "/crates/tessera-py/tests/codec_roundtrip.py"
+              "/crates/tessera-py/tests/write_example.py"
+            ];
+          in
+          {
+            "/bench/ecosystems/common.py" = bench ++ [ "/bench/ecosystems/test_common.py" ];
+            "/bench/ecosystems/adapters/__init__.py" = bench;
+            "/bench/ecosystems/adapters/dicom.py" = bench;
+            "/bench/ecosystems/adapters/hdf5.py" = bench;
+            "/bench/ecosystems/adapters/nexus.py" = bench;
+            "/bench/ecosystems/adapters/nifti.py" = bench;
+            "/bench/ecosystems/adapters/parquet.py" = bench;
+            "/bench/ecosystems/adapters/root.py" = bench;
+            "/bench/ecosystems/adapters/tessera.py" = bench;
+            "/bench/ecosystems/adapters/zarr_.py" = bench;
+            "/corpus/reference_reader/reader.py" = [ "/corpus/reference_reader/run.py" ];
+            "/crates/tessera-py/python/tessera/__init__.py" = py;
+          };
+
+        # The ecosystem bench's method tests (#485/#520): median+spread, MEASURED cold-cache
+        # eviction, and both table/volume fixtures. Pure Python + numpy — no ecosystem libraries,
+        # no tessera-py — so it is cheap. Its source is ONLY common.py + test_common.py, so editing
+        # an adapter or the driver neither rebuilds this nor touches the crane `src` hash.
+        # LINUX ONLY: common.py uses CDLL('libc.so.6'), mincore(2) and posix_fadvise, none of which
+        # exist on Darwin, and `eachDefaultSystem` evaluates the darwin systems too.
+        linuxOnlyChecks = pkgs.lib.optionalAttrs isLinux {
+          bench-ecosystems =
+            let
+              benchSrc = builtins.path {
+                name = "bench-ecosystems-src";
+                path = ./tessera/bench/ecosystems;
+                filter = path: _type:
+                  builtins.elem (baseNameOf path) [ "common.py" "test_common.py" ];
+              };
+            in
+            pkgs.runCommand "bench-ecosystems"
+              {
+                nativeBuildInputs =
+                  [ (pkgs.python312.withPackages (ps: [ ps.numpy ps.pytest ])) ];
+              } ''
+              cp ${benchSrc}/common.py ${benchSrc}/test_common.py .
+              # The eviction tests need a page cache to evict FROM: on a tmpfs the pages ARE the
+              # storage and DONTNEED is a no-op, so they would fail for the wrong reason. Report the
+              # filesystem so a failure here is diagnosable rather than mysterious.
+              echo "bench-ecosystems: tests run on $(stat -f -c %T .)" >&2
+              python3 -m pytest -q -p no:cacheprovider test_common.py
+              touch $out
+            '';
+        };
+
         # Every feature declared anywhere in the workspace **except `static-hdf5`** (ADR-0057 §4), in
         # cargo's `package/feature` form so one invocation from the virtual-manifest root covers all
         # members. This is what the PR clippy gate builds instead of `--all-features`.
@@ -831,6 +933,114 @@
             cargoExtraArgs = "-p tessera-cli --features sql sql::";
           });
 
+          # The independent conformance reader (corpus/reference_reader): a SECOND implementation of
+          # the `.tsra` verification, in pure Python, checked against corpus.json's goldens. It was
+          # run by nothing until #520's review found it. ~0.4 s. `jcs` (RFC 8785 canonical JSON) is
+          # not in nixpkgs, so it is packaged here from its PyPI wheel (pure Python, py3-none-any,
+          # Apache-2.0) at the version PINNED in corpus/reference_reader/requirements.txt — and
+          # evaluation fails if the two ever disagree, so CI cannot drift from what a human
+          # running the reader by hand installs.
+          #
+          # Vacuous-pass guard: an empty corpus.json would print "0/0 fixtures passed" and exit 0.
+          # So the pass line must read N/N with N == the number of .tsra files actually on disk.
+          reference-reader =
+            let
+              jcs = pkgs.python312Packages.buildPythonPackage rec {
+                pname = "jcs";
+                version = "0.2.1";
+                format = "wheel";
+                src = pkgs.python312Packages.fetchPypi {
+                  inherit pname version;
+                  format = "wheel";
+                  dist = "py3";
+                  python = "py3";
+                  hash = "sha256-4jo+HeYPgy0zzYEbucOzvnkhnN+V9juI8JcnMsP6hHY=";
+                };
+              };
+              reqs = builtins.readFile ./tessera/corpus/reference_reader/requirements.txt;
+              py =
+                if builtins.match "(.*\n)?jcs==${jcs.version}(\n.*)?" reqs != null
+                then pkgs.python312.withPackages (ps: [ ps.blake3 jcs ])
+                else throw ''
+                  reference-reader packages jcs ${jcs.version}, but
+                  tessera/corpus/reference_reader/requirements.txt does not pin jcs==${jcs.version}.
+                  Keep them in step so CI runs the reader against the version a human installs.
+                '';
+            in
+            pkgs.runCommand "reference-reader" { nativeBuildInputs = [ py ]; } ''
+              cp -r ${./tessera/corpus} corpus
+              chmod -R u+w corpus
+              want=$(find corpus/files -name '*.tsra' | wc -l)
+              ( cd corpus/reference_reader && python3 run.py ) | tee out.txt
+              if [ "$want" -lt 1 ] || ! grep -qx "$want/$want fixtures passed" out.txt; then
+                echo "reference-reader: expected '$want/$want fixtures passed' over $want .tsra files" >&2
+                # Say WHICH fixtures the goldens do not cover, rather than only that the count is off.
+                python3 - <<'EOF' >&2
+              import json, os
+              names = {e["name"] for e in json.load(open("corpus/corpus.json"))}
+              files = sorted(f[:-5] for f in os.listdir("corpus/files") if f.endswith(".tsra"))
+              for f in files:
+                  if f not in names:
+                      print(f"  NO corpus.json ENTRY for files/{f}.tsra")
+              for n in sorted(names - set(files)):
+                  print(f"  corpus.json entry {n!r} has NO files/{n}.tsra")
+              EOF
+                exit 1
+              fi
+              touch $out
+            '';
+
+          # Every tracked SCRIPT must be in exactly one of scriptsRunByChecks / scriptsNotRunInCi /
+          # scriptLibraries (#520). Every other test-like file (under `tests/`, or `*.trycmd`) must be
+          # admitted by `srcFilter`, so the crane checks see it — for Rust, trycmd, toml and fixture
+          # data, admission is what "run" means. Entries that name no existing file fail too, so the
+          # maps cannot rot into false reassurance. (Check NAMES are validated in the `checks`
+          # wrapper, where the full set of checks is known.)
+          test-coverage =
+            let
+              lib = pkgs.lib;
+              root = toString ./tessera;
+              walk = dir: lib.concatLists (lib.mapAttrsToList
+                (n: t: if t == "directory" then walk (dir + "/${n}") else [ (toString (dir + "/${n}")) ])
+                (builtins.readDir dir));
+              files = walk ./tessera;
+              rel = f: lib.removePrefix root f;
+              isScript = f: builtins.match ".*[.](py|js|cjs|mjs|sh)" (baseNameOf f) != null;
+              isTestData = f: lib.hasInfix "/tests/" (rel f) || lib.hasSuffix ".trycmd" (baseNameOf f);
+              maps = [ scriptsRunByChecks scriptsNotRunInCi scriptLibraries ];
+              hits = f: builtins.length (builtins.filter (m: m ? ${rel f}) maps);
+              orphanScripts = builtins.filter (f: isScript f && hits f == 0) files;
+              doubleListed = builtins.filter (f: isScript f && hits f > 1) files;
+              unseenData = builtins.filter
+                (f: !(isScript f) && isTestData f && !(srcFilter f "regular")) files;
+              relFiles = map rel files;
+              stale = builtins.filter (k: !(builtins.elem k relFiles))
+                (lib.concatMap builtins.attrNames maps);
+              # Every path and reason reaches the shell through escapeShellArg: reasons contain
+              # quotes (CDLL('libc.so.6')), and a path is attacker-shaped input to a build script.
+              notRun = lib.concatStrings (lib.mapAttrsToList (k: v: ''
+                echo ${lib.escapeShellArg "  NOT RUN IN CI ${k}: ${v}"} >&2
+              '') scriptsNotRunInCi);
+              say = tag: why: xs: lib.concatMapStrings (x: ''
+                echo ${lib.escapeShellArg "  ${tag} ${x}: ${why}"} >&2
+              '') xs;
+              bad = orphanScripts ++ doubleListed ++ unseenData ++ stale;
+            in
+            pkgs.runCommand "test-coverage" { } (
+              if bad == [ ] then ''
+                echo "test-coverage: every script is declared and every test file is visible" >&2
+                ${notRun}
+                touch $out
+              '' else ''
+                echo "test-coverage FAILED (#520)" >&2
+                ${say "ORPHAN" "a script in none of scriptsRunByChecks/scriptsNotRunInCi/scriptLibraries" (map rel orphanScripts)}
+                ${say "DOUBLE" "a script listed in more than one map" (map rel doubleListed)}
+                ${say "UNSEEN" "a test file srcFilter does not admit, so no crane check sees it" (map rel unseenData)}
+                ${say "STALE " "listed in flake.nix but no such file" stale}
+                exit 1
+              ''
+            );
+
           # guardrails agent-drift gates over the Rust source (code gates) + repo-wide structural
           # gates. cargo-deny stays a pre-commit gate (needs network for the advisory DB).
           guardrails-gates = pkgs.runCommand "guardrails-gates"
@@ -905,16 +1115,35 @@
 
           # The dev shell itself must build (toolbelt + toolchain resolve).
           dev-shell = self.devShells.${system}.default;
-        };
+        } // linuxOnlyChecks;
           names = map (c: c.name) (builtins.attrValues allChecks);
           dupes = pkgs.lib.unique (builtins.filter (n: pkgs.lib.count (m: m == n) names > 1) names);
+          # Every check that `scriptsRunByChecks` claims runs a script must EXIST (#520). Attribute
+          # NAMES only — no derivation is forced — so this costs nothing and catches a renamed or
+          # removed check leaving a script "run by" something that is gone.
+          claimed = pkgs.lib.unique (pkgs.lib.concatLists (builtins.attrValues scriptsRunByChecks));
+          missing = builtins.filter (c: !(allChecks ? ${c})) claimed;
+          entryPoints = builtins.attrNames scriptsRunByChecks ++ builtins.attrNames scriptsNotRunInCi;
+          danglingLibs = pkgs.lib.concatLists (pkgs.lib.mapAttrsToList
+            (lib: users: map (u: "${lib} -> ${u}") (builtins.filter (u: !(builtins.elem u entryPoints)) users))
+            scriptLibraries);
         in
-          if dupes == [ ] then allChecks
-          else throw ''
+          if dupes != [ ] then throw ''
             flake checks share derivation names: ${builtins.concatStringsSep ", " dupes}
             `nix flake check -L` labels log lines by derivation name, so these checks would be
             indistinguishable in CI logs. Give each a distinct `pname`/`pnameSuffix` (#535).
-          '';
+          ''
+          else if missing != [ ] then throw ''
+            scriptsRunByChecks names checks that do not exist: ${builtins.concatStringsSep ", " missing}
+            A script listed as run by a missing check runs nowhere (#520). Fix the name, or move the
+            script to scriptsNotRunInCi with a reason.
+          ''
+          else if danglingLibs != [ ] then throw ''
+            scriptLibraries names entry points that are in neither scriptsRunByChecks nor
+            scriptsNotRunInCi: ${builtins.concatStringsSep ", " danglingLibs}
+            A library is only accounted for if what imports it is (#520).
+          ''
+          else allChecks;
 
         formatter = pkgs.nixpkgs-fmt;
       });
