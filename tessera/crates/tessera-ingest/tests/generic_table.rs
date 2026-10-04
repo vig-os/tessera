@@ -202,6 +202,8 @@ fn the_same_logical_table_seals_identically_however_it_was_physically_written() 
                 input: p,
                 exclude: Vec::new(),
                 column_meta: ColumnMeta::empty(),
+                streaming: Default::default(),
+                batch_rows: 64 * 1024,
             },
             "table",
         )
@@ -292,6 +294,8 @@ fn worker_count_and_ram_budget_do_not_reach_the_hash() {
         input: p.clone(),
         exclude: Vec::new(),
         column_meta: ColumnMeta::empty(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     };
     let one = tessera_io::WriteConfig::default().workers(1);
     let many = tessera_io::WriteConfig::default().workers(8);
@@ -315,6 +319,8 @@ fn re_running_the_same_ingest_is_byte_identical() {
         input: p.clone(),
         exclude: Vec::new(),
         column_meta: ColumnMeta::empty(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     };
     let a = ingest(dir.path(), opts(), "table").unwrap();
     let b = ingest(dir.path(), opts(), "table").unwrap();
@@ -349,6 +355,8 @@ fn a_csv_and_its_parquet_equivalent_seal_to_the_same_hash() {
             input: pq,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -363,6 +371,8 @@ fn a_csv_and_its_parquet_equivalent_seal_to_the_same_hash() {
             null_tokens: Vec::new(),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -397,6 +407,8 @@ fn the_sealed_product_carries_the_decoder_triple_the_receipt_and_the_source_dige
             input: p.clone(),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -465,6 +477,8 @@ fn sealed_columns_are_stamped_unclassified_unless_the_operator_says_otherwise() 
             input: p.clone(),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -497,6 +511,8 @@ fn sealed_columns_are_stamped_unclassified_unless_the_operator_says_otherwise() 
                 "#,
             )
             .unwrap(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -538,6 +554,8 @@ fn values_round_trip_through_the_seal() {
             input: p,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     );
@@ -631,6 +649,8 @@ fn a_generic_backend_cannot_launder_a_vendor_schema() {
             input: p,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "listmode",
     )
@@ -652,6 +672,8 @@ fn the_laundering_rule_fires_before_the_file_is_opened() {
             input: dir.path().join("does-not-exist.parquet"),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "recon",
     )
@@ -674,6 +696,8 @@ fn a_rejected_spec_creates_no_output_directory() {
             input: dir.path().join("whatever.parquet"),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "listmode",
     );
@@ -706,6 +730,8 @@ fn the_primitive_schema_is_accepted() {
             input: p,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -739,6 +765,8 @@ fn arrow_ipc_and_parquet_produce_the_same_payload() {
             input: pq,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -749,6 +777,8 @@ fn arrow_ipc_and_parquet_produce_the_same_payload() {
             input: ipc,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -783,6 +813,8 @@ fn a_hand_written_ingest_decoder_is_refused_for_every_backend() {
             input: p.clone(),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     );
@@ -812,6 +844,8 @@ fn a_hand_written_ingest_decoder_is_refused_for_every_backend() {
             input: p,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     );

@@ -401,6 +401,8 @@ fn parquet_opts(input: PathBuf) -> FormatOptions {
         input,
         exclude: Vec::new(),
         column_meta: Default::default(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     }
 }
 
@@ -409,6 +411,8 @@ fn arrow_opts(input: PathBuf) -> FormatOptions {
         input,
         exclude: Vec::new(),
         column_meta: Default::default(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     }
 }
 
@@ -421,6 +425,8 @@ fn csv_opts(input: PathBuf) -> FormatOptions {
         null_tokens: Vec::new(),
         exclude: Vec::new(),
         column_meta: Default::default(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     }
 }
 
@@ -433,6 +439,8 @@ fn csv_nulls_opts(input: PathBuf) -> FormatOptions {
         null_tokens: vec!["NA".into()],
         exclude: Vec::new(),
         column_meta: Default::default(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     }
 }
 

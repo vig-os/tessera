@@ -2437,12 +2437,16 @@ fn ingest_src_to_spec(
                     input,
                     exclude,
                     column_meta,
-                },
+                                    streaming: Default::default(),
+                    batch_rows: 64 * 1024,
+},
                 "arrow" => FormatOptions::Arrow {
                     input,
                     exclude,
                     column_meta,
-                },
+                                    streaming: Default::default(),
+                    batch_rows: 64 * 1024,
+},
                 "csv" => {
                     if column.is_empty() {
                         return Err(ingest_spec::csv_needs_declarations());
@@ -2455,7 +2459,9 @@ fn ingest_src_to_spec(
                         null_tokens: null_token,
                         exclude,
                         column_meta,
-                    }
+                                            streaming: Default::default(),
+                        batch_rows: 64 * 1024,
+}
                 }
                 // Unreachable via clap's value_parser, but the CLI is not the only caller of this
                 // function (the tests construct `IngestSrc` directly), so it stays total.
