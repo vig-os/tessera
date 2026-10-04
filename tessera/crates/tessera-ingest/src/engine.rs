@@ -771,7 +771,7 @@ pub fn decode_generic_table(
             #[cfg(feature = "arrow")]
             {
                 Some((
-                    crate::parquet_table::read_arrow_table(input, exclude)?,
+                    crate::arrow_table::read_arrow_table(input, exclude)?,
                     "arrow",
                     crate::decoder::Decoder::ARROW_IPC,
                 ))

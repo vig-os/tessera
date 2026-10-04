@@ -1024,6 +1024,19 @@ fn gather(values: &ArrayRef, indices: &[Option<usize>], name: &str) -> Result<Co
     })
 }
 
+/// Read + canonicalise an Arrow IPC / Feather file into a flat Tessera table.
+///
+/// Lives here rather than beside the Parquet entry point, which is where it started. Keeping the two
+/// `--from` entry points side by side read better, but it gated the **Arrow IPC** reader behind the
+/// `parquet` feature and so made `--features arrow` a configuration nobody could build (#509) — which
+/// also meant the `arrow-rs/arrow-ipc` decoder digest described a build that could not exist. Nothing
+/// in it ever needed Parquet: it calls [`read_arrow_ipc`] and [`canonicalise_batches`], both right
+/// here. Readability of a pair of call sites is not worth a lane that cannot be selected.
+pub fn read_arrow_table(path: &std::path::Path, exclude: &[String]) -> Result<CanonicalTable> {
+    let batches = read_arrow_ipc(path)?;
+    canonicalise_batches(&batches, exclude)
+}
+
 /// Read an **Arrow IPC / Feather** file into record batches.
 ///
 /// The `--from arrow` source. Arrow IPC is the one container whose on-disk logical types are exactly

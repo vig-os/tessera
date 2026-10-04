@@ -76,13 +76,3 @@ pub fn read_table(path: &Path, exclude: &[String]) -> Result<CanonicalTable> {
     let batches = read_parquet(path)?;
     crate::arrow_table::canonicalise_batches(&batches, exclude)
 }
-
-/// Read + canonicalise an Arrow IPC / Feather file into a flat Tessera table.
-///
-/// Lives here beside the Parquet entry point rather than in [`crate::arrow_table`] so that the two
-/// `--from` values a user can pass have their entry points side by side, and it is obvious that the
-/// only difference between them is the container.
-pub fn read_arrow_table(path: &Path, exclude: &[String]) -> Result<CanonicalTable> {
-    let batches = crate::arrow_table::read_arrow_ipc(path)?;
-    crate::arrow_table::canonicalise_batches(&batches, exclude)
-}
