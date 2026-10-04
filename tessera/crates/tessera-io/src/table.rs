@@ -1460,17 +1460,16 @@ pub fn table_chunk_index(
     stat_column: &str,
 ) -> Result<Option<ChunkIndex>> {
     validate(spec, data)?;
-    let stat_vals = data
+    let stat_col = &data
         .iter()
         .find(|(name, _)| name == stat_column)
         .ok_or_else(|| Error::Codec(format!("table has no column '{stat_column}'")))?
-        .1
-        .as_i64();
+        .1;
     // Not an integer column → no index (`None`), consistent with the array path: callers ask for an
     // index and are told there is none, rather than getting an error for a legitimate shape.
-    let Some(stat_vals) = stat_vals else {
+    if stat_col.as_i64().is_none() {
         return Ok(None);
-    };
+    }
     let rows = data.first().map(|(_, c)| c.len()).unwrap_or(0);
     let n_groups = rows.div_ceil(ROWS_PER_GROUP).max(1);
     let mut idx = ChunkIndex::new();
@@ -1482,11 +1481,25 @@ pub fn table_chunk_index(
         for (_, col) in data.iter() {
             bytes.extend_from_slice(&col.slice(start, end).to_le_bytes());
         }
-        // Fail closed (ADR-0059 M2, #523) — see `array_chunk_index`.
-        let Some(stats) = ChunkStats::from_values(&stat_vals[start..end]) else {
+        // Slice the COLUMN and then filter, never the filtered vector by row indices.
+        //
+        // This used to be `stat_vals[start..end]`, where `stat_vals` was the whole column already
+        // null-filtered by `as_i64`. For a nullable column with any nulls that vector is SHORTER
+        // than the row count, so row indices addressed the wrong elements and ran off the end:
+        // a 4-row column with 2 nulls panicked with "range end index 4 out of range for slice of
+        // length 2". Per-group filtering is also what makes `masked` computable, so the fix and
+        // ADR-0059 S2 are the same change.
+        let group = stat_col.slice(start, end);
+        let group_rows = end.saturating_sub(start) as u64;
+        let Some(vals) = group.as_i64() else {
             return Ok(None);
         };
-        idx.push_entry(digest(&bytes), stats);
+        let masked = group_rows.saturating_sub(vals.len() as u64);
+        // Fail closed (ADR-0059 M2, #523) — see `array_chunk_index`.
+        let Some(stats) = ChunkStats::from_values(&vals) else {
+            return Ok(None);
+        };
+        idx.push_entry(digest(&bytes), stats.with_masked(masked));
     }
     Ok(Some(idx))
 }
@@ -1527,7 +1540,15 @@ pub fn table_block_with_index(
     let sidecar = match stat_column {
         Some(col) if data.iter().any(|(n, _)| n == col) => {
             match table_chunk_index(spec, data, col)? {
-                Some(index) => Some(crate::chunk_index::chunk_index_block(name, &index)?),
+                Some(index) => {
+                    // M1: bind the index to the digest of the very block it was built from.
+                    let data_digest = block.0.digest.as_deref().unwrap_or_default();
+                    Some(crate::chunk_index::chunk_index_block(
+                        name,
+                        data_digest,
+                        &index,
+                    )?)
+                }
                 // Not an integer column, or an accumulator that would overflow — no sidecar rather than
                 // an approximate one (ADR-0059 M2).
                 None => None,
@@ -2061,6 +2082,44 @@ mod tests {
 
     /// Chunk statistics must describe the values that are PRESENT: a NULL is skipped, not folded
     /// in as 0, or `min`/`max` pruning would exclude chunks that really do contain matches.
+    /// A nullable stat column with nulls must index, not panic — and must record `masked`.
+    ///
+    /// `table_chunk_index` sliced the already-null-FILTERED value vector by ROW indices. For a
+    /// nullable column that vector is shorter than the row count, so the indices addressed the
+    /// wrong elements and ran off the end: this exact 4-row / 2-null input panicked with
+    /// "range end index 4 out of range for slice of length 2" on `dev`.
+    #[test]
+    fn a_nullable_stat_column_indexes_and_records_masked() {
+        let spec = TableSpec {
+            columns: vec![Column {
+                name: "k".into(),
+                dtype: "i4".into(),
+                nullable: true,
+                ..Default::default()
+            }],
+            rows: 4,
+            row_index: None,
+        };
+        let data: TableData = vec![(
+            "k".into(),
+            ColumnData::Nullable {
+                values: Box::new(ColumnData::I32(vec![5, -3, 100, 7])),
+                validity: vec![true, false, true, false],
+            },
+        )];
+
+        let idx = table_chunk_index(&spec, &data, "k")
+            .expect("must not error")
+            .expect("a nullable integer column is indexable");
+        let agg = idx.aggregate();
+        // Only the two valid values are described...
+        assert_eq!(agg.count, 2);
+        assert_eq!((agg.min, agg.max), (Some(5), Some(100)));
+        // ...and the two nulls are accounted for, so count + masked recovers the row count.
+        assert_eq!(agg.masked, Some(2));
+        assert_eq!(agg.count + agg.masked.unwrap(), 4);
+    }
+
     #[test]
     fn as_i64_skips_nulls() {
         let c = ColumnData::Nullable {
@@ -2169,7 +2228,8 @@ mod tests {
         let idx = table_chunk_index(&spec, &data, "i8")
             .unwrap()
             .expect("an indexable fixture");
-        let (expect, _) = crate::chunk_index::chunk_index_block("t", &idx).unwrap();
+        let (expect, _) =
+            crate::chunk_index::chunk_index_block("t", "blake3:test-data-digest", &idx).unwrap();
         assert_eq!(scar.digest, expect.digest);
         assert_eq!(scar.name, expect.name);
         // None, a float column, or an absent column → no prunable-stats sidecar.

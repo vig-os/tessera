@@ -270,6 +270,17 @@ impl ArrayData {
 }
 
 /// Pack a typed slice into little-endian bytes via the element's `to_le_bytes`.
+/// The element width in bytes implied by a numpy type code (`i2` → 2, `b1` → 1, `f8` → 8).
+///
+/// The code's final character *is* the width, which is why the chunk-index digest can be defined
+/// against `numpy_code` rather than a second hand-maintained table that could drift from it.
+pub(crate) fn code_width(code: &str) -> usize {
+    code.as_bytes()
+        .last()
+        .and_then(|c| (*c as char).to_digit(10))
+        .unwrap_or(8) as usize
+}
+
 pub(crate) fn le_bytes<T: Copy, const N: usize>(v: &[T], f: fn(T) -> [u8; N]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * N);
     for &x in v {
@@ -725,7 +736,15 @@ pub fn array_block_with_index(
         // `None` = the values are not exactly foldable (non-integer dtype, or an accumulator that
         // would overflow). Either way the block is written WITHOUT an index rather than with an
         // approximate one (ADR-0028 §3 integer core; ADR-0059 M2).
-        Some(index) => Some(crate::chunk_index::chunk_index_block(name, &index)?),
+        Some(index) => {
+            // M1: bind the index to the digest of the very block it was built from.
+            let data_digest = block.0.digest.as_deref().unwrap_or_default();
+            Some(crate::chunk_index::chunk_index_block(
+                name,
+                data_digest,
+                &index,
+            )?)
+        }
         None => None,
     };
     Ok((block, sidecar))
@@ -801,13 +820,25 @@ pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<Option<Ch
         let count: usize = lo.iter().zip(&hi).map(|(&l, &h)| h - l).product();
 
         // gather this chunk's values by an odometer over voxel coords in [lo, hi) (last axis fastest).
-        let mut bytes = Vec::with_capacity(count * 8);
+        //
+        // ADR-0059 M3: the digest is over the chunk's elements in their NATIVE little-endian width,
+        // not over an `i64`-widened buffer. Two reasons. (1) An `int16` chunk was being hashed as 8
+        // bytes per voxel — 4x the necessary hashing over a representation that is not the data's
+        // own. (2) The TABLE path already hashed native per-column LE bytes, so the two index
+        // builders disagreed about what a chunk digest means; now they agree.
+        //
+        // Little-endian is fixed BY THE FORMAT, not by the host: taking the low `w` bytes of the
+        // two's-complement `i64` LE encoding is exactly the native `w`-byte LE encoding of the same
+        // value, on any architecture, because `to_le_bytes` is defined by the language and not by
+        // the machine's byte order. A big-endian host therefore byte-swaps rather than memcpy-ing.
+        let w = code_width(data.numpy_code());
+        let mut bytes = Vec::with_capacity(count * w);
         let mut chunk_vals = Vec::with_capacity(count);
         let mut v = lo.clone();
         for _ in 0..count {
             let flat: usize = v.iter().zip(&strides).map(|(&x, &s)| x * s).sum();
             let val = vals[flat];
-            bytes.extend_from_slice(&val.to_le_bytes());
+            bytes.extend_from_slice(&val.to_le_bytes()[..w]);
             chunk_vals.push(val);
             for ax in (0..rank).rev() {
                 v[ax] += 1;
@@ -1920,7 +1951,8 @@ mod tests {
         let idx = array_chunk_index(&spec, &data)
             .unwrap()
             .expect("an indexable fixture");
-        let (expect_ref, _) = crate::chunk_index::chunk_index_block("vol", &idx).unwrap();
+        let (expect_ref, _) =
+            crate::chunk_index::chunk_index_block("vol", "blake3:test-data-digest", &idx).unwrap();
         assert_eq!(scar.digest, expect_ref.digest);
         assert_eq!(scar.name, expect_ref.name); // the "<name>.cidx" companion
                                                 // a float array gets the data block but no integer chunk-index sidecar.

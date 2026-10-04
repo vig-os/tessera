@@ -38,6 +38,33 @@ pub struct ChunkStats {
     /// unlocks `variance`/`std_dev` (ADR-0028 §3: extend the factory by adding a monoid).
     #[serde(default)]
     pub sum_sq: i128,
+    /// Samples skipped because they were NULL / masked (ADR-0059 S2). `count + masked` recovers the
+    /// chunk's element count, which is otherwise **lost**: `ColumnData::as_i64` drops nulls (so a
+    /// chunk's `min`/`max` describe the values actually present, which pruning needs), and without
+    /// this field there is no way to tell a 100-row group with 40 nulls from a 60-row group.
+    ///
+    /// `None` means "a v1 index that never recorded it" — **absent, not zero**. Mixing `None` into a
+    /// roll-up yields `None`, because an unknown addend makes the total unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub masked: Option<u64>,
+    /// Samples that were NaN (ADR-0059 S2). Always `Some(0)` for the integer core — kept in the
+    /// schema because float arrays are the deferred §8 extension and adding a field later is a
+    /// second corpus event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nan: Option<u64>,
+    /// Samples that were `+inf` (ADR-0059 S2). See [`Self::nan`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pos_inf: Option<u64>,
+    /// Samples that were `-inf` (ADR-0059 S2). See [`Self::nan`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neg_inf: Option<u64>,
+}
+
+/// Add two "known or unknown" counters. `None` is **unknown**, not zero, so it propagates: a total
+/// that includes an unknown addend is itself unknown (ADR-0059's "absent, never zero" rule). `None`
+/// on overflow, like every other accumulator here (M2).
+fn add_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    a?.checked_add(b?)
 }
 
 impl ChunkStats {
@@ -63,8 +90,22 @@ impl ChunkStats {
                 max: Some(v),
                 sum: v128,
                 sum_sq: v128.checked_mul(v128)?,
+                // An integer sample is never NaN/±inf, and `from_values` only sees values that
+                // survived null-filtering, so the caller supplies `masked` via `with_masked`.
+                masked: Some(0),
+                nan: Some(0),
+                pos_inf: Some(0),
+                neg_inf: Some(0),
             })
         })
+    }
+
+    /// Record how many samples were skipped as NULL/masked. Builders call this after folding,
+    /// because [`Self::from_values`] only ever sees the values that survived null-filtering.
+    #[must_use]
+    pub fn with_masked(mut self, n: u64) -> Self {
+        self.masked = Some(n);
+        self
     }
 
     /// The arithmetic mean of the chunk's samples, or `None` for an empty chunk. **Derived** from the
@@ -130,6 +171,10 @@ impl ChunkStats {
             max,
             sum: self.sum.checked_add(other.sum)?,
             sum_sq: self.sum_sq.checked_add(other.sum_sq)?,
+            masked: add_opt(self.masked, other.masked),
+            nan: add_opt(self.nan, other.nan),
+            pos_inf: add_opt(self.pos_inf, other.pos_inf),
+            neg_inf: add_opt(self.neg_inf, other.neg_inf),
         })
     }
 
@@ -152,6 +197,11 @@ impl Monoid for ChunkStats {
             max: None,
             sum: 0,
             sum_sq: 0,
+            // Known-and-zero, so `combine(identity(), x) == x` holds for the counters too.
+            masked: Some(0),
+            nan: Some(0),
+            pos_inf: Some(0),
+            neg_inf: Some(0),
         }
     }
 
@@ -170,7 +220,95 @@ impl Monoid for ChunkStats {
             max,
             sum: self.sum + other.sum,
             sum_sq: self.sum_sq + other.sum_sq,
+            masked: add_opt(self.masked, other.masked),
+            nan: add_opt(self.nan, other.nan),
+            pos_inf: add_opt(self.pos_inf, other.pos_inf),
+            neg_inf: add_opt(self.neg_inf, other.neg_inf),
         }
+    }
+}
+
+/// How a [`Histogram`]'s bin edges are laid out. An enum rather than a bool so the deferred float
+/// story (ADR-0059 §8: log-buckets with a relative-error guarantee) is additive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HistKind {
+    /// Equal-width integer bins spanning `[lo, hi]` inclusive.
+    LinearInt,
+}
+
+/// A block-level value histogram with bin edges fixed at **write** time (ADR-0059 §3/§5).
+///
+/// Counts are integers, so merging is associative **and commutative** — the roll-up is identical
+/// under any worker count or merge order, by algebra rather than by a fixed fold order. That is why
+/// a histogram is the structure this format can afford: an order-dependent sketch (t-digest) or a
+/// randomised one (KLL) would make sealed bytes depend on how many workers happened to run.
+///
+/// Stored **once per block**, not per chunk: per-chunk histograms measured 4.6×–14.5× the sidecar
+/// for a consumer nobody has, while one block-level histogram is ~1.13× (ADR-0059 §5). Pruning is
+/// already served exactly by per-chunk `min`/`max`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Histogram {
+    pub kind: HistKind,
+    /// Inclusive lower edge of bin 0.
+    pub lo: i64,
+    /// Inclusive upper edge of the last bin.
+    pub hi: i64,
+    /// `true` when there is exactly one bin per representable value in `[lo, hi]`, i.e.
+    /// `bins == hi - lo + 1`. Then the histogram is a **complete** description of the distribution
+    /// and quantiles derived from it are exact, not estimated. Computed, never asserted.
+    pub exact: bool,
+    pub counts: Vec<u64>,
+}
+
+impl Histogram {
+    /// An all-zero histogram over `[lo, hi]` with `bins` bins — the identity for [`Self::combine`].
+    pub fn empty(lo: i64, hi: i64, bins: usize) -> Self {
+        let bins = bins.max(1);
+        let span = (hi as i128 - lo as i128 + 1).max(1);
+        Self {
+            kind: HistKind::LinearInt,
+            lo,
+            hi,
+            exact: span == bins as i128,
+            counts: vec![0; bins],
+        }
+    }
+
+    /// The bin a value falls in, saturating at the edges.
+    pub fn bin_of(&self, v: i64) -> usize {
+        let bins = self.counts.len().max(1) as i128;
+        let span = (self.hi as i128 - self.lo as i128 + 1).max(1);
+        let off = (v as i128 - self.lo as i128).clamp(0, span - 1);
+        ((off * bins) / span).clamp(0, bins - 1) as usize
+    }
+
+    /// Count one sample.
+    pub fn add(&mut self, v: i64) {
+        let b = self.bin_of(v);
+        self.counts[b] = self.counts[b].saturating_add(1);
+    }
+
+    /// Merge another histogram over the **same** edges. `None` if the edges differ — combining
+    /// mismatched bins would silently fabricate a distribution.
+    pub fn combine(&self, other: &Self) -> Option<Self> {
+        if self.kind != other.kind
+            || self.lo != other.lo
+            || self.hi != other.hi
+            || self.counts.len() != other.counts.len()
+        {
+            return None;
+        }
+        let mut out = self.clone();
+        for (o, b) in out.counts.iter_mut().zip(&other.counts) {
+            *o = o.checked_add(*b)?;
+        }
+        Some(out)
+    }
+
+    /// Total samples counted.
+    pub fn total(&self) -> u64 {
+        self.counts.iter().copied().fold(0u64, u64::saturating_add)
     }
 }
 
@@ -204,12 +342,18 @@ pub struct ChunkEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChunkIndex {
     pub entries: Vec<ChunkEntry>,
+    /// The block-level value histogram (ADR-0059 §3), when one was built. `None` = a v1 index, or a
+    /// writer that opted out — **absent, not an all-zero histogram**. Those must never be
+    /// confusable: all-zero means "measured, nothing there", absent means "not measured".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub histogram: Option<Histogram>,
 }
 
 impl ChunkIndex {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            histogram: None,
         }
     }
 
@@ -437,6 +581,66 @@ impl MerkleStatsAccumulator {
 #[cfg(test)]
 mod tests {
 
+    /// The S2 counters obey the monoid laws, and `None` means UNKNOWN — it propagates (ADR-0059).
+    #[test]
+    fn s2_counters_are_monoidal_and_unknown_propagates() {
+        let a = stats(&[1, 2]).with_masked(3);
+        let b = stats(&[5]).with_masked(4);
+
+        // identity
+        assert_eq!(ChunkStats::identity().combine(&a), a);
+        assert_eq!(a.combine(&ChunkStats::identity()), a);
+        // associativity
+        let c = stats(&[9]).with_masked(1);
+        assert_eq!(a.combine(&b).combine(&c), a.combine(&b.combine(&c)));
+        // commutativity of the counters (integer addition — the property that makes merge order,
+        // and therefore worker count, irrelevant to the sealed bytes)
+        assert_eq!(a.combine(&b).masked, b.combine(&a).masked);
+        assert_eq!(a.combine(&b).masked, Some(7));
+
+        // `None` is UNKNOWN, not zero: a total containing an unknown addend is unknown.
+        let unknown = ChunkStats {
+            masked: None,
+            ..stats(&[7])
+        };
+        assert_eq!(a.combine(&unknown).masked, None, "unknown must propagate");
+        assert_eq!(unknown.combine(&a).masked, None);
+        // and it does not contaminate the other fields
+        assert_eq!(a.combine(&unknown).count, 3);
+    }
+
+    /// A histogram merges only over identical edges, and refuses otherwise.
+    #[test]
+    fn histogram_merges_only_over_identical_edges() {
+        let mut a = Histogram::empty(0, 9, 10);
+        let mut b = Histogram::empty(0, 9, 10);
+        for v in [0, 5, 9, 5] {
+            a.add(v);
+        }
+        for v in [5, 5] {
+            b.add(v);
+        }
+        let m = a.combine(&b).expect("same edges merge");
+        assert_eq!(m.total(), 6);
+        assert_eq!(m.counts[5], 4);
+        // commutative, so merge order cannot change the bytes
+        assert_eq!(a.combine(&b), b.combine(&a));
+
+        // one bin per value -> exact, and a coarser histogram is not
+        assert!(Histogram::empty(0, 9, 10).exact);
+        assert!(!Histogram::empty(0, 99, 10).exact);
+
+        // mismatched edges are refused rather than silently fabricating a distribution
+        assert_eq!(a.combine(&Histogram::empty(0, 9, 5)), None);
+        assert_eq!(a.combine(&Histogram::empty(1, 10, 10)), None);
+
+        // out-of-range values saturate into the end bins rather than panicking
+        let mut h = Histogram::empty(0, 9, 10);
+        h.add(-100);
+        h.add(1000);
+        assert_eq!((h.counts[0], h.counts[9]), (1, 1));
+    }
+
     /// `from_values` must FAIL CLOSED on overflow, never wrap (ADR-0059 M2, #523).
     ///
     /// `i64::MAX²` is ~8.5e37 against an `i128::MAX` of ~1.7e38, so two such samples fit and the
@@ -508,6 +712,7 @@ mod tests {
             max: Some(i64::MAX),
             sum: i64::MAX as i128,
             sum_sq: (i64::MAX as i128) * (i64::MAX as i128),
+            ..ChunkStats::identity()
         };
         // Two fit; three overflow i128 on sum_sq.
         let two = big.checked_combine(&big).expect("two must fit");
@@ -525,6 +730,7 @@ mod tests {
             max: Some(i64::MAX),
             sum: 0,
             sum_sq: i128::MAX,
+            ..ChunkStats::identity()
         };
         assert_eq!(wide.variance(), None, "n·sum_sq overflows -> None");
 

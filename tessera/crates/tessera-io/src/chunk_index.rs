@@ -27,24 +27,49 @@ pub fn cidx_name(data_name: &str) -> String {
 /// [`BlockRef`] (kind [`BlockKind::ChunkIndex`], digest over the payload) and the [`BlockPayload`] to
 /// pack. Add the returned `BlockRef` to the product alongside the data block; the index's bytes roll
 /// into the content hash like any block.
-pub fn chunk_index_block(data_name: &str, index: &ChunkIndex) -> Result<(BlockRef, BlockPayload)> {
+pub fn chunk_index_block(
+    data_name: &str,
+    data_digest: &str,
+    index: &ChunkIndex,
+) -> Result<(BlockRef, BlockPayload)> {
     let name = cidx_name(data_name);
     let payload = index.to_bytes()?;
     let dg = digest(&payload);
+    let mut spec = serde_json::json!({
+        // ADR-0028 §4 derived-sidecar tag: this block is **regenerable** from the data block it
+        // indexes (via table_chunk_index / array_chunk_index), so it is `class: "derived"` with a
+        // versioned `recipe`. A consumer may drop + rebuild it; it is not canonical source data.
+        "class": "derived",
+        // `@2` = the ADR-0059 schema: native-LE per-chunk digests (M3), the S2 counters, an optional
+        // block histogram, and `indexed_digest` (M1). A reader must not assume a `@1` index carries
+        // any of them, and must not read a `@2` digest as if it were a `@1` one.
+        "recipe": "chunk_index@2",
+        "indexes": data_name,        // the data block this is the chunk-index of
+        // ADR-0059 M1. The index was bound to its block only by NAME, which cannot be checked: a
+        // `commit --remove-block volume --add-block other:volume` left the old `volume.cidx` in
+        // place and `stats` served the OLD block's numbers labelled exact. Recording the digest the
+        // index was built against makes the binding verifiable — a reader compares it to the block's
+        // own `BlockRef.digest` and refuses on a mismatch.
+        "indexed_digest": data_digest,
+        "entries": index.len(),       // number of sub-block entries
+        "root": index.root(),         // sub-block Merkle (MMR) root, ADR-0028 §1
+    });
+    // Self-describe the histogram's edges so a reader never has to guess them (ADR-0059 §5).
+    // Omitted entirely when there is none: absent and all-zero must not be confusable.
+    if let Some(h) = &index.histogram {
+        spec["histogram"] = serde_json::json!({
+            "kind": h.kind,
+            "lo": h.lo,
+            "hi": h.hi,
+            "bins": h.counts.len(),
+            "exact": h.exact,
+        });
+    }
     let block_ref = BlockRef {
         name: name.clone(),
         kind: BlockKind::ChunkIndex,
         digest: Some(dg),
-        spec: serde_json::json!({
-            // ADR-0028 §4 derived-sidecar tag: this block is **regenerable** from the data block it
-            // indexes (via table_chunk_index / array_chunk_index), so it is `class: "derived"` with a
-            // versioned `recipe`. A consumer may drop + rebuild it; it is not canonical source data.
-            "class": "derived",
-            "recipe": "chunk_index@1",
-            "indexes": data_name,        // the data block this is the chunk-index of
-            "entries": index.len(),       // number of sub-block entries
-            "root": index.root(),         // sub-block Merkle (MMR) root, ADR-0028 §1
-        }),
+        spec,
     };
     Ok((block_ref, BlockPayload::new(name, payload)))
 }
@@ -64,7 +89,7 @@ mod tests {
     #[test]
     fn block_digests_payload_and_payload_roundtrips() {
         let idx = sample_index();
-        let (br, payload) = chunk_index_block("volume", &idx).unwrap();
+        let (br, payload) = chunk_index_block("volume", "blake3:test-data-digest", &idx).unwrap();
         assert_eq!(br.name, "volume.cidx");
         assert_eq!(br.kind, BlockKind::ChunkIndex);
         // digest is over the exact payload bytes
@@ -73,7 +98,10 @@ mod tests {
         assert_eq!(br.spec["indexes"], "volume");
         assert_eq!(br.spec["root"], idx.root());
         assert_eq!(br.spec["class"], "derived");
-        assert_eq!(br.spec["recipe"], "chunk_index@1");
+        assert_eq!(br.spec["recipe"], "chunk_index@2");
+        // M1: the index records the digest of the block it was built against, so the binding is
+        // checkable rather than trusted by name.
+        assert_eq!(br.spec["indexed_digest"], "blake3:test-data-digest");
         // the payload reconstructs the index (same root + entries)
         let back = ChunkIndex::from_bytes(&payload.bytes).unwrap();
         assert_eq!(back.root(), idx.root());
@@ -82,7 +110,8 @@ mod tests {
 
     #[test]
     fn block_rolls_into_a_sealed_product_and_verifies() {
-        let (br, _payload) = chunk_index_block("volume", &sample_index()).unwrap();
+        let (br, _payload) =
+            chunk_index_block("volume", "blake3:test-data-digest", &sample_index()).unwrap();
         let mut b = ProductBuilder::new("recon", "p", "d", "2024-01-01T00:00:00Z");
         b.add_block_ref(br);
         let m = b.seal().unwrap();
