@@ -1132,6 +1132,21 @@ enum IngestSrc {
         /// Attach metadata `key=value` (value parsed as JSON, else string). Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
+        /// Bounded-memory streaming (#458): `auto` (default) streams when the input's estimated
+        /// decoded size exceeds `--stream-threshold`, `batch` reads the whole file, `stream` forces
+        /// the bounded path.
+        ///
+        /// A memory/time trade and never a format decision — both paths seal the same
+        /// `content_hash` AND `manifest_hash`, which the batch-equals-stream tests pin. Streaming
+        /// reads the input twice (nullability is decided over the whole file, ADR-0029), so a pipe
+        /// or process substitution falls back to `batch` whatever you ask for.
+        #[arg(long, value_parser = ["auto", "batch", "stream"], default_value = "auto")]
+        streaming: String,
+        /// Rows per decoded batch on the streaming path — the read-side memory unit, independent of
+        /// the block partition and of the seal. Arrow IPC ignores it: the container's own record
+        /// batches are the read unit, and re-cutting them would buffer what streaming avoids.
+        #[arg(long, value_name = "ROWS", default_value_t = 64 * 1024)]
+        batch_rows: usize,
     },
     /// Any dense numeric grid (NumPy `.npy`, or `.npz` → a collection) → an `array` product.
     ///
@@ -2041,6 +2056,22 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
     }
 }
 
+/// Parse `--streaming auto|batch|stream` into the spec's [`ingest_spec::StreamingMode`].
+///
+/// Clap's `value_parser` already rejects anything else, so the fallback arm is unreachable through
+/// the CLI — but `run_ingest_src` is also called directly by the tests, so it stays a typed error
+/// rather than a panic.
+fn parse_streaming_mode(s: &str) -> tessera_core::Result<ingest_spec::StreamingMode> {
+    match s {
+        "auto" => Ok(ingest_spec::StreamingMode::Auto),
+        "batch" => Ok(ingest_spec::StreamingMode::Batch),
+        "stream" => Ok(ingest_spec::StreamingMode::Stream),
+        other => Err(tessera_core::Error::Invalid(format!(
+            "tessera ingest table: unknown --streaming '{other}' (expected auto | batch | stream)"
+        ))),
+    }
+}
+
 /// Parse repeatable `--meta key=value` into the product's metadata map (the config-side supply that
 /// satisfies a schema's required/recommended fields). Each `value` is parsed as JSON, falling back to a
 /// bare string — same convention as `commit --set`. Shared by every `tessera ingest` subcommand so
@@ -2417,6 +2448,8 @@ fn ingest_src_to_spec(
             column_meta,
             source_label,
             meta,
+            streaming,
+            batch_rows,
         } => {
             // ADR-0056 §4: magic bytes when unambiguous, explicit when not. Sniffing happens HERE, in
             // the CLI, and never in the engine — the spec records the resolved backend, so a spec is
@@ -2432,21 +2465,22 @@ fn ingest_src_to_spec(
                 Some(p) => ingest_column_meta::ColumnMeta::load(p)?,
                 None => ingest_column_meta::ColumnMeta::empty(),
             };
+            let streaming = parse_streaming_mode(&streaming)?;
             let options = match from.as_str() {
                 "parquet" => FormatOptions::Parquet {
                     input,
                     exclude,
                     column_meta,
-                                    streaming: Default::default(),
-                    batch_rows: 64 * 1024,
-},
+                    streaming,
+                    batch_rows,
+                },
                 "arrow" => FormatOptions::Arrow {
                     input,
                     exclude,
                     column_meta,
-                                    streaming: Default::default(),
-                    batch_rows: 64 * 1024,
-},
+                    streaming,
+                    batch_rows,
+                },
                 "csv" => {
                     if column.is_empty() {
                         return Err(ingest_spec::csv_needs_declarations());
@@ -2459,9 +2493,9 @@ fn ingest_src_to_spec(
                         null_tokens: null_token,
                         exclude,
                         column_meta,
-                                            streaming: Default::default(),
-                        batch_rows: 64 * 1024,
-}
+                        streaming,
+                        batch_rows,
+                    }
                 }
                 // Unreachable via clap's value_parser, but the CLI is not the only caller of this
                 // function (the tests construct `IngestSrc` directly), so it stays total.
