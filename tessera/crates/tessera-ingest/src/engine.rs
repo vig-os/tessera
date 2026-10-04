@@ -521,25 +521,42 @@ fn dispatch(
         | FormatOptions::Csv { input, .. } => {
             #[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
             {
-                let (table, source_format, decoder) = decode_generic_table(&p.options)?
-                    .ok_or_else(|| {
-                        Error::Invalid(
-                            "ingest-engine: internal — a generic variant did not decode".into(),
-                        )
-                    })?;
-                let m = seal_generic_table(
-                    &table,
-                    p,
-                    input,
-                    source_format,
-                    decoder,
-                    generic_column_meta(&p.options),
-                    label,
-                    extra_sources,
-                    &timestamp,
-                    out_dir,
-                    parents,
-                )?;
+                // #458: bounded memory when the input earns it. Small inputs stay on the batch path,
+                // which is what keeps the conformance corpus from regenerating — and the two paths
+                // are pinned to the same `content_hash` AND `manifest_hash` by test either way, so
+                // this branch is a memory/time trade and never a format decision.
+                let m = if decide_stream_table(&p.options, stream_threshold)? {
+                    stream_generic_table(
+                        p,
+                        input,
+                        label,
+                        extra_sources,
+                        &timestamp,
+                        out_dir,
+                        parents,
+                        cfg,
+                    )?
+                } else {
+                    let (table, source_format, decoder) = decode_generic_table(&p.options)?
+                        .ok_or_else(|| {
+                            Error::Invalid(
+                                "ingest-engine: internal — a generic variant did not decode".into(),
+                            )
+                        })?;
+                    seal_generic_table(
+                        &table,
+                        p,
+                        input,
+                        source_format,
+                        decoder,
+                        generic_column_meta(&p.options),
+                        label,
+                        extra_sources,
+                        &timestamp,
+                        out_dir,
+                        parents,
+                    )?
+                };
                 Ok((m, ()))
             }
             // A build with every generic lane off still parses the spec and still computes its
@@ -751,16 +768,22 @@ pub fn decode_generic_table(
         crate::decoder::Decoder,
     )>,
 > {
-    Ok(match opts {
+    // Only the three TABLE lanes decode here. `generic_source_and_decoder` also names the two array
+    // lanes, which route to the array primitive instead, so they must come back as `None`.
+    if !is_generic_table_lane(opts) {
+        return Ok(None);
+    }
+    let Some((source_format, decoder)) = generic_source_and_decoder(opts) else {
+        return Ok(None);
+    };
+    let table = match opts {
         FormatOptions::Parquet { input, exclude, .. } => {
             #[cfg(feature = "parquet")]
             {
-                Some((
-                    crate::parquet_table::read_table(input, exclude)?,
-                    "parquet",
-                    crate::decoder::Decoder::PARQUET,
-                ))
+                crate::parquet_table::read_table(input, exclude)?
             }
+            // Kept as a typed error rather than an `unreachable!()` so a future reorder of these
+            // arms cannot turn a missing backend into a panic.
             #[cfg(not(feature = "parquet"))]
             {
                 let _ = (input, exclude);
@@ -770,11 +793,7 @@ pub fn decode_generic_table(
         FormatOptions::Arrow { input, exclude, .. } => {
             #[cfg(feature = "arrow")]
             {
-                Some((
-                    crate::arrow_table::read_arrow_table(input, exclude)?,
-                    "arrow",
-                    crate::decoder::Decoder::ARROW_IPC,
-                ))
+                crate::arrow_table::read_arrow_table(input, exclude)?
             }
             #[cfg(not(feature = "arrow"))]
             {
@@ -782,38 +801,51 @@ pub fn decode_generic_table(
                 return Err(Error::BackendNotCompiled("arrow"));
             }
         }
-        FormatOptions::Csv {
-            input,
-            columns,
-            delimiter,
-            header,
-            null_tokens,
-            exclude,
-            ..
-        } => {
+        FormatOptions::Csv { input, .. } => {
             #[cfg(feature = "csv")]
             {
-                let mut o = crate::csv_table::CsvOptions::from_decls(columns)?;
-                if let Some(d) = delimiter {
-                    o.delimiter = one_byte_delimiter(d)?;
-                }
-                o.header = *header;
-                o.null_tokens = null_tokens.clone();
-                o.exclude = exclude.clone();
-                Some((
-                    crate::csv_table::read_table(input, &o)?,
-                    "csv",
-                    crate::decoder::Decoder::CSV,
-                ))
+                crate::csv_table::read_table(input, &csv_options(opts)?)?
             }
             #[cfg(not(feature = "csv"))]
             {
-                let _ = (input, columns, delimiter, header, null_tokens, exclude);
+                let _ = input;
                 return Err(Error::BackendNotCompiled("csv"));
             }
         }
-        _ => None,
-    })
+        // `is_generic_table_lane` passed above, so the variant is one of the three arms here.
+        _ => return Ok(None),
+    };
+    Ok(Some((table, source_format, decoder)))
+}
+
+/// Resolve a `Csv` variant's spec fields into [`crate::csv_table::CsvOptions`].
+///
+/// One place, because the whole-file read and the chunked read must apply the same delimiter, header
+/// rule, null tokens and exclusions — ADR-0056 §8 makes all four part of what the declared schema
+/// MEANS, so a divergence here would decode the same file into two different tables.
+#[cfg(feature = "csv")]
+fn csv_options(opts: &FormatOptions) -> Result<crate::csv_table::CsvOptions> {
+    let FormatOptions::Csv {
+        columns,
+        delimiter,
+        header,
+        null_tokens,
+        exclude,
+        ..
+    } = opts
+    else {
+        return Err(Error::Invalid(
+            "ingest-engine: internal — csv_options on a non-csv variant".into(),
+        ));
+    };
+    let mut o = crate::csv_table::CsvOptions::from_decls(columns)?;
+    if let Some(d) = delimiter {
+        o.delimiter = one_byte_delimiter(d)?;
+    }
+    o.header = *header;
+    o.null_tokens = null_tokens.clone();
+    o.exclude = exclude.clone();
+    Ok(o)
 }
 
 /// Decode **and seal** one generic-ingest product, choosing the primitive the source implies.
@@ -869,7 +901,11 @@ fn seal_npy_content(
             crate::canonical::to_array_product(&a.spec, &a.data, &a.transforms, opts)
         }
         crate::npy::NpyContent::Table(table) => {
-            warn_unclassified_identifying_columns(&table, opts.column_meta, name);
+            crate::column_meta::warn_unclassified_identifying(
+                &table.column_names(),
+                opts.column_meta,
+                name,
+            );
             crate::canonical::to_table_product(&table, opts)
         }
     }
@@ -907,7 +943,11 @@ pub fn seal_generic_product(
     // The TABLE lane.
     #[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
     if let Some((table, _, _)) = decode_generic_table(options)? {
-        warn_unclassified_identifying_columns(&table, opts.column_meta, opts.name);
+        crate::column_meta::warn_unclassified_identifying(
+            &table.column_names(),
+            opts.column_meta,
+            opts.name,
+        );
         return Ok(Some(crate::canonical::to_table_product(&table, opts)?));
     }
     Ok(None)
@@ -934,6 +974,19 @@ pub fn generic_source_and_decoder(
     }
 }
 
+/// Is this one of the three generic **table** lanes?
+///
+/// Separate from [`generic_source_and_decoder`], which also names the `.npy`/`.npz` lanes: those are
+/// generic ingest too, but they route to the array primitive, and a reader of either function should
+/// not have to infer that distinction from a `match` arm's absence.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+fn is_generic_table_lane(opts: &FormatOptions) -> bool {
+    matches!(
+        opts,
+        FormatOptions::Parquet { .. } | FormatOptions::Arrow { .. } | FormatOptions::Csv { .. }
+    )
+}
+
 /// Seal a canonicalised generic table as a `table` product and write its `.tsra`.
 ///
 /// One helper for all three generic lanes, so the parts that must not drift between them — the
@@ -954,7 +1007,7 @@ fn seal_generic_table(
     out_dir: &Path,
     parents: &[&Manifest],
 ) -> Result<Manifest> {
-    warn_unclassified_identifying_columns(table, column_meta, &p.name);
+    crate::column_meta::warn_unclassified_identifying(&table.column_names(), column_meta, &p.name);
     let (m, payloads) = crate::canonical::to_table_product(
         table,
         &crate::canonical::GenericIngest {
@@ -976,6 +1029,274 @@ fn seal_generic_table(
     seal_to_tsra(m, &payloads, out_dir, p, parents, timestamp)
 }
 
+/// Should this generic table lane stream, rather than read the whole file into memory?
+///
+/// A **routing** decision and nothing more: both paths seal identical bytes — pinned on BOTH hashes
+/// by the batch-equals-stream tests — so a wrong answer here costs memory, or a second read of the
+/// input, and can never move a hash. That is precisely what licenses the `Auto` estimate below to
+/// come from a Parquet footer, which #502 forbids *identity* from trusting. The distinction is the
+/// point, not an inconsistency: a producer's unverified `num_rows`/column-chunk sizes are fine for
+/// choosing a path and not fine for deciding what a column IS.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+fn decide_stream_table(opts: &FormatOptions, stream_threshold: u64) -> Result<bool> {
+    let (mode, input) = match opts {
+        FormatOptions::Parquet {
+            streaming, input, ..
+        }
+        | FormatOptions::Arrow {
+            streaming, input, ..
+        }
+        | FormatOptions::Csv {
+            streaming, input, ..
+        } => (*streaming, input.as_path()),
+        _ => return Ok(false),
+    };
+    // Streaming reads the input TWICE (the shape pass decides nullability over the whole file — see
+    // `stream_table`'s module docs), so a pipe, fifo or character device cannot take this path: the
+    // second pass would read an exhausted stream and seal a silently truncated product.
+    //
+    // Falling back rather than refusing, because `tessera ingest table <(zcat big.csv.gz) …` passes
+    // `/dev/fd/63` and works today — refusing would regress behaviour that exists. An explicit
+    // `streaming = "stream"` gets a warning, since the operator asked for bounded memory and is not
+    // getting it.
+    if !crate::stream_table::is_seekable(input) {
+        if matches!(mode, StreamingMode::Stream) {
+            tracing::warn!(
+                target: "tessera::ingest::stream",
+                input = %input.display(),
+                "streaming = \"stream\" was requested but {} is not a regular file, so it cannot be \
+                 read twice; falling back to the whole-file path. Memory will scale with the input. \
+                 To stream, materialise it first (`zcat big.csv.gz > big.csv`).",
+                input.display()
+            );
+        }
+        return Ok(false);
+    }
+    Ok(match mode {
+        StreamingMode::Batch => false,
+        StreamingMode::Stream => true,
+        StreamingMode::Auto => generic_table_size_estimate(opts)? > stream_threshold,
+    })
+}
+
+/// A cheap upper-ish estimate of what decoding this input would have to hold, for routing only.
+///
+/// Each lane answers with the best number it can get without decoding: Parquet reads its footer's
+/// uncompressed column-chunk total (the on-disk size understates it by the compression ratio),
+/// Arrow IPC uses the file length (IPC is uncompressed by default, so that already *is* the decoded
+/// size), and CSV uses the file length too — text is a rough proxy either way, since `"511.0"` is
+/// five bytes on disk and eight in an `f64` while `"1"` is one and four.
+///
+/// Rough is sufficient and provably so: the number only picks between two paths that seal the same
+/// bytes.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+fn generic_table_size_estimate(opts: &FormatOptions) -> Result<u64> {
+    let file_len = |p: &Path| -> Result<u64> {
+        std::fs::metadata(p)
+            .map(|m| m.len())
+            .map_err(|e| Error::Invalid(format!("ingest-engine: stat {}: {e}", p.display())))
+    };
+    match opts {
+        FormatOptions::Parquet { input, .. } => {
+            #[cfg(feature = "parquet")]
+            {
+                crate::parquet_table::parquet_size_estimate(input)
+            }
+            #[cfg(not(feature = "parquet"))]
+            {
+                file_len(input)
+            }
+        }
+        FormatOptions::Arrow { input, .. } => {
+            #[cfg(feature = "arrow")]
+            {
+                crate::arrow_table::arrow_ipc_size_estimate(input)
+            }
+            #[cfg(not(feature = "arrow"))]
+            {
+                file_len(input)
+            }
+        }
+        FormatOptions::Csv { input, .. } => file_len(input),
+        _ => Ok(0),
+    }
+}
+
+/// Ingest one generic table product in bounded memory (#458), sealing the `.tsra` directly.
+///
+/// The streaming twin of [`seal_generic_table`], and the reason it is a separate function rather
+/// than a flag: the batch path builds a product and then re-seals it to apply the spec's metadata
+/// tiers, while this path writes the archive **once**, straight to disk, with no post-seal hook. So
+/// every tier has to be declared before the first block commits, which is what
+/// [`crate::canonical::declare_table_with_tiers`] is for. A tier plumbed any later is dropped
+/// silently and moves `manifest_hash` while leaving `content_hash` identical.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+#[allow(clippy::too_many_arguments)] // each argument is a distinct, load-bearing piece of context
+fn stream_generic_table(
+    p: &crate::spec::ProductSpec,
+    input: &Path,
+    label: Option<&str>,
+    extra_sources: &[Source],
+    timestamp: &str,
+    out_dir: &Path,
+    parents: &[&Manifest],
+    cfg: &tessera_io::WriteConfig,
+) -> Result<Manifest> {
+    let (source_format, decoder) = generic_source_and_decoder(&p.options).ok_or_else(|| {
+        Error::Invalid("ingest-engine: internal — a generic variant did not name a lane".into())
+    })?;
+    let column_meta = generic_column_meta(&p.options);
+    let ingest = crate::canonical::GenericIngest {
+        name: &p.name,
+        timestamp,
+        description: p
+            .description
+            .as_deref()
+            .unwrap_or("generically-ingested table"),
+        source_format,
+        source_path: input,
+        source_label: label,
+        extra_sources,
+        decoder,
+        generation: p.generation.clone(),
+        column_meta,
+    };
+    // ADR-0058 §5: the parents' schema-flagged identity, resolved here and passed as its own tier so
+    // the driver can lay it down UNDER the lane's own fields. Never pre-merged with `p.metadata` —
+    // the whole point of three tiers is that an inherited value loses to a product-own default while
+    // an explicit spec value beats both, which one flattened map cannot express.
+    let inherited = inherited_metadata(parents, "table");
+    let inherited_study = parents.iter().find_map(|m| m.study.as_deref());
+    let stage = out_dir.join(format!("__stage_{}", sanitize_reference(&p.name)));
+    let tmp_out = out_dir.join(format!("__pending_{}.tsra", sanitize_reference(&p.name)));
+    let stream_opts = crate::stream_table::StreamOpts {
+        stage: &stage,
+        out: &tmp_out,
+        cfg,
+        batch_rows: generic_batch_rows(&p.options),
+        block_rows: tessera_io::BLOCK_ROWS as u64,
+        tiers: crate::canonical::MetadataTiers {
+            inherited: Some(&inherited),
+            inherited_study,
+            metadata: Some(&p.metadata),
+            producer: p.producer.as_ref(),
+        },
+    };
+    let m = stream_generic_product(&p.options, &ingest, &stream_opts)?;
+    // The id is hashed over (product, name, timestamp), so the final path was computable up front —
+    // but the pending-then-rename is how the `hdf-compound` streaming path does it and it is
+    // crash-safe: same filesystem, so the rename is atomic and a crash here leaves either the old
+    // file or the new one, never a half-written archive under the name a reader will trust.
+    let final_path = out_dir.join(member_filename(&m.id, MemberKind::Product));
+    std::fs::rename(&tmp_out, &final_path).map_err(|e| {
+        Error::Invalid(format!(
+            "ingest-engine: rename {} -> {}: {e}",
+            tmp_out.display(),
+            final_path.display()
+        ))
+    })?;
+    // ADR-0042: the `aux/provenance.json` stamp the batch path applies in `seal_to_tsra`. Only
+    // stampable after the rename — before it, the file is `__pending_*.tsra` and still in flux.
+    stamp_ingest_provenance(&final_path, &ProvenanceOptions::default())?;
+    // Best-effort: a leftover stage dir does not make the sealed product any less correct.
+    let _ = std::fs::remove_dir_all(&stage);
+    Ok(m)
+}
+
+/// Ingest one generic **table** lane in bounded memory, sealing the `.tsra` at `stream_opts.out`.
+///
+/// The streaming twin of [`seal_generic_product`], and the seam the conformance corpus streams
+/// through — so a corpus fixture exercises the real streaming ingest rather than a parallel
+/// re-implementation that could drift from it.
+///
+/// Each arm builds a **re-openable** chunk source, because the driver calls it twice (shape pass,
+/// then encode pass); the sources are boxed so the three lanes share one iterator type.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+pub fn stream_generic_product(
+    opts: &FormatOptions,
+    ingest: &crate::canonical::GenericIngest<'_>,
+    stream_opts: &crate::stream_table::StreamOpts<'_>,
+) -> Result<Manifest> {
+    type Chunks = Box<dyn Iterator<Item = Result<crate::canonical::CanonicalTable>>>;
+    match opts {
+        FormatOptions::Parquet { input, exclude, .. } => {
+            #[cfg(feature = "parquet")]
+            {
+                let rows = stream_opts.batch_rows;
+                crate::stream_table::stream_to_table_product(
+                    || {
+                        Ok(
+                            Box::new(crate::parquet_table::parquet_chunks(input, rows, exclude)?)
+                                as Chunks,
+                        )
+                    },
+                    ingest,
+                    stream_opts,
+                )
+            }
+            #[cfg(not(feature = "parquet"))]
+            {
+                let _ = (input, exclude);
+                Err(Error::BackendNotCompiled("parquet"))
+            }
+        }
+        FormatOptions::Arrow { input, exclude, .. } => {
+            #[cfg(feature = "arrow")]
+            {
+                // No `batch_rows` knob: the IPC container's own record batches ARE the read unit, and
+                // re-cutting them would buffer exactly what streaming exists to avoid.
+                crate::stream_table::stream_to_table_product(
+                    || {
+                        Ok(
+                            Box::new(crate::arrow_table::arrow_ipc_chunks(input, exclude)?)
+                                as Chunks,
+                        )
+                    },
+                    ingest,
+                    stream_opts,
+                )
+            }
+            #[cfg(not(feature = "arrow"))]
+            {
+                let _ = (input, exclude);
+                Err(Error::BackendNotCompiled("arrow"))
+            }
+        }
+        FormatOptions::Csv { input, .. } => {
+            #[cfg(feature = "csv")]
+            {
+                let o = csv_options(opts)?;
+                let rows = stream_opts.batch_rows;
+                crate::stream_table::stream_to_table_product(
+                    || Ok(Box::new(crate::csv_table::csv_chunks(input, &o, rows)?) as Chunks),
+                    ingest,
+                    stream_opts,
+                )
+            }
+            #[cfg(not(feature = "csv"))]
+            {
+                let _ = input;
+                Err(Error::BackendNotCompiled("csv"))
+            }
+        }
+        _ => Err(Error::Invalid(
+            "ingest-engine: internal — streamed a non-generic variant".into(),
+        )),
+    }
+}
+
+/// The `batch_rows` of a generic variant — the read-side bounded-memory unit on the streaming path.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+fn generic_batch_rows(opts: &FormatOptions) -> usize {
+    match opts {
+        FormatOptions::Parquet { batch_rows, .. }
+        | FormatOptions::Arrow { batch_rows, .. }
+        | FormatOptions::Csv { batch_rows, .. } => *batch_rows,
+        // Unreachable from the generic dispatch; a harmless default beats a panic on a new variant.
+        _ => 64 * 1024,
+    }
+}
+
 /// The `column_meta` of a generic variant — the one field the collapsed dispatch arm still needs
 /// per-variant, and the `match` stays total so a new generic backend must declare it.
 #[cfg(any(
@@ -995,46 +1316,6 @@ fn generic_column_meta(opts: &FormatOptions) -> &crate::column_meta::ColumnMeta 
         | FormatOptions::Csv { column_meta, .. } => column_meta,
         _ => NONE.get_or_init(ColumnMeta::empty),
     }
-}
-
-/// ADR-0056 §7's suspect-column advisory: print **once**, to stderr, with the fix.
-///
-/// Never gates the ingest, and deliberately quiet when there is nothing an operator could act on.
-/// §9's loudness rule is why this is one aggregated line per product rather than one per column:
-/// someone running `find … -exec tessera ingest …` across 5000 files must not scroll 30k lines of
-/// advice. It goes through the `tracing` facade, so a non-TTY consumer can filter it out entirely.
-#[cfg(any(
-    feature = "parquet",
-    feature = "arrow",
-    feature = "csv",
-    feature = "npy"
-))]
-fn warn_unclassified_identifying_columns(
-    table: &crate::canonical::CanonicalTable,
-    column_meta: &crate::column_meta::ColumnMeta,
-    product: &str,
-) {
-    let classified = column_meta.classified();
-    let suspect: Vec<&str> = table
-        .columns
-        .iter()
-        .map(|(c, _)| c.name.as_str())
-        .filter(|n| crate::column_meta::looks_identifying(n))
-        .filter(|n| !classified.contains(n))
-        .collect();
-    if suspect.is_empty() {
-        return;
-    }
-    tracing::warn!(
-        target: "tessera::ingest::phi",
-        member = %product,
-        columns = %suspect.join(", "),
-        "column(s) '{}' match an identifying-name pattern (MRN / patient id / name / DOB / \
-         accession / UID) and no --column-meta gave them a tier; stamped: unknown. Classify before \
-         sharing: add a [<column>] sensitivity = \"identifying\" entry to a --column-meta file, or \
-         edit after the fact with `tessera commit --set`.",
-        suspect.join("', '")
-    );
 }
 
 /// Parse a spec's one-character `delimiter` string into a byte.
@@ -1282,6 +1563,255 @@ mod tests {
     use std::path::PathBuf;
 
     const TS: &str = "2024-01-01T00:00:00Z";
+
+    /// `streaming = "auto"` must send a small input to the BATCH path.
+    ///
+    /// Not a performance preference — a correctness fence. The conformance corpus' goldens were
+    /// sealed by the whole-file path, and `auto` promoting a small fixture to streaming would be a
+    /// regeneration event wearing a routing default as a disguise. Every fixture in this repo is
+    /// kilobytes against a 256 MiB threshold, so `auto` has to mean `batch` for all of them.
+    #[cfg(feature = "csv")]
+    #[test]
+    fn streaming_auto_routes_by_size_and_a_pipe_always_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("rows.csv");
+        std::fs::write(&input, "id,energy\n1,511.0\n2,7.25\n").unwrap();
+        let opts = |streaming| FormatOptions::Csv {
+            input: input.clone(),
+            columns: vec!["id:i4".into(), "energy:f8".into()],
+            delimiter: None,
+            header: true,
+            null_tokens: Vec::new(),
+            exclude: Vec::new(),
+            column_meta: crate::column_meta::ColumnMeta::empty(),
+            streaming,
+            batch_rows: 64 * 1024,
+        };
+
+        assert!(
+            !decide_stream_table(&opts(StreamingMode::Auto), DEFAULT_STREAM_THRESHOLD_BYTES)
+                .unwrap(),
+            "a few bytes under a 256 MiB threshold must route to batch — this is the guard that \
+             keeps `auto` from regenerating the corpus"
+        );
+        assert!(
+            decide_stream_table(&opts(StreamingMode::Auto), 4).unwrap(),
+            "and the same input must stream once it is over the threshold, or `auto` is inert"
+        );
+        // The explicit modes ignore the size entirely.
+        assert!(!decide_stream_table(&opts(StreamingMode::Batch), 4).unwrap());
+        assert!(
+            decide_stream_table(&opts(StreamingMode::Stream), DEFAULT_STREAM_THRESHOLD_BYTES)
+                .unwrap()
+        );
+
+        // A non-regular input cannot be read twice, so it falls back to batch even when the operator
+        // asked for `stream` — `tessera ingest table <(zcat big.csv.gz)` has to keep working.
+        let fifo = dir.path().join("rows.fifo");
+        if mkfifo(&fifo) {
+            let piped = |streaming| match opts(streaming) {
+                FormatOptions::Csv { columns, .. } => FormatOptions::Csv {
+                    input: fifo.clone(),
+                    columns,
+                    delimiter: None,
+                    header: true,
+                    null_tokens: Vec::new(),
+                    exclude: Vec::new(),
+                    column_meta: crate::column_meta::ColumnMeta::empty(),
+                    streaming,
+                    batch_rows: 64 * 1024,
+                },
+                other => other,
+            };
+            assert!(
+                !decide_stream_table(&piped(StreamingMode::Stream), 4).unwrap(),
+                "a fifo must not take the two-pass path: the second pass would read an exhausted \
+                 stream and seal a silently truncated product"
+            );
+            assert!(!decide_stream_table(&piped(StreamingMode::Auto), 4).unwrap());
+        }
+    }
+
+    /// Create a FIFO at `path`, returning false when the platform has no `mkfifo` to call.
+    ///
+    /// Nothing is read from it, so no writer is needed and nothing can block: the routing decision
+    /// is made from `stat`, which is the whole point — a path that is not a regular file is refused
+    /// the two-pass treatment before anything tries to open it twice.
+    fn mkfifo(path: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .is_ok_and(|s| s.success())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            false
+        }
+    }
+
+    /// The streamed and the batched sealer must produce the **same manifest** from one spec — every
+    /// metadata tier included.
+    ///
+    /// This is the test the streaming path's one structural hazard needs. The batch path applies the
+    /// spec's tiers *after* sealing (`seal_to_tsra` → `apply_spec_metadata` re-seals a built
+    /// product). A streamed `.tsra` is written once, straight to disk, with no post-seal hook — so a
+    /// tier the streaming path forgets to declare before the first block commits is dropped
+    /// **silently**, and the loss moves `manifest_hash` while leaving `content_hash` byte-identical.
+    /// A content-hash comparison, which is what "determinism test" usually means here, cannot see it
+    /// at all. Hence both hashes, and hence the field-by-field assertions underneath them: when this
+    /// fails, the hash tells you only *that* something diverged.
+    ///
+    /// Driving both sealers from ONE `ProductSpec` is deliberate. The end-to-end route cannot pin
+    /// this, because `streaming` and `batch_rows` are spec fields and `spec_hash` covers the whole
+    /// parsed spec: two specs that differ in which path they ask for are two different archival
+    /// documents, so their `ingested_via_spec` edges differ and their `manifest_hash`es *must* too.
+    /// That is the record working as intended, not a divergence — so the equality worth pinning is
+    /// over one spec, two sealers.
+    #[cfg(feature = "csv")]
+    #[test]
+    fn the_streamed_and_batched_sealers_agree_on_every_metadata_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("rows.csv");
+        std::fs::write(&input, "id,energy\n1,511.0\n2,7.25\n3,-0.5\n4,1.0\n").unwrap();
+
+        // A parent to inherit from, carrying a first-class `study` and a metadata field.
+        let parent = {
+            let mut b = tessera_core::ProductBuilder::new("table", "parent", "the parent", TS);
+            b.add_block_ref(tessera_core::block::BlockRef {
+                name: "data".into(),
+                kind: tessera_core::block::BlockKind::Table,
+                digest: Some("blake3:00".into()),
+                spec: serde_json::Value::Null,
+            });
+            b.with_study("STUDY-A");
+            b.with_field("modality", serde_json::json!("PT"));
+            b.seal().unwrap()
+        };
+        let parents: Vec<&Manifest> = vec![&parent];
+
+        let p = crate::spec::ProductSpec {
+            name: "tiers-01".into(),
+            role: tessera_core::collection::Role::Raw,
+            schema: "table".into(),
+            description: None,
+            derived_from: Vec::new(),
+            source_label: Some("fixture/rows.csv".into()),
+            // The HIGHEST tier: an explicit operator value, including one that collides with the
+            // lane's own `source_format` so the precedence is actually exercised and not just the
+            // presence of the key.
+            metadata: [
+                ("study".to_string(), serde_json::json!("STUDY-B")),
+                ("source_format".to_string(), serde_json::json!("csv")),
+            ]
+            .into_iter()
+            .collect(),
+            generation: Some(
+                tessera_core::provenance::Generation::default()
+                    .with("energy_window_kev", serde_json::json!([425, 650])),
+            ),
+            producer: Some(tessera_core::Producer::new("acme-sorter", "4.2")),
+            options: FormatOptions::Csv {
+                input: input.clone(),
+                columns: vec!["id:i4".into(), "energy:f8".into()],
+                delimiter: None,
+                header: true,
+                null_tokens: Vec::new(),
+                exclude: Vec::new(),
+                column_meta: crate::column_meta::ColumnMeta::empty(),
+                streaming: StreamingMode::Auto,
+                // Two rows per chunk, so the encode pass really does run over several chunks.
+                batch_rows: 2,
+            },
+        };
+        // The same spec edge both ways: this is what the engine threads in, and it rides the seal.
+        let extra = vec![Source::new(SPEC_PROVENANCE_ROLE, "inline-spec")
+            .with_content_hash("blake3:deadbeef".to_string())];
+        let cfg = tessera_io::WriteConfig::default();
+
+        let batched = {
+            let out = dir.path().join("batch-out");
+            std::fs::create_dir_all(&out).unwrap();
+            let (table, source_format, decoder) =
+                decode_generic_table(&p.options).unwrap().unwrap();
+            seal_generic_table(
+                &table,
+                &p,
+                &input,
+                source_format,
+                decoder,
+                generic_column_meta(&p.options),
+                p.source_label.as_deref(),
+                &extra,
+                TS,
+                &out,
+                &parents,
+            )
+            .expect("batch seal")
+        };
+        let streamed = {
+            let out = dir.path().join("stream-out");
+            std::fs::create_dir_all(&out).unwrap();
+            stream_generic_table(
+                &p,
+                &input,
+                p.source_label.as_deref(),
+                &extra,
+                TS,
+                &out,
+                &parents,
+                &cfg,
+            )
+            .expect("streamed seal")
+        };
+
+        // Each tier, named, so a failure says WHICH one was dropped rather than only that a hash moved.
+        assert_eq!(
+            streamed.metadata, batched.metadata,
+            "the spec's [product.metadata] rides the stream"
+        );
+        assert_eq!(
+            streamed.metadata.get("source_format"),
+            Some(&serde_json::json!("csv")),
+            "and an explicit operator value beats the lane's own default"
+        );
+        assert_eq!(
+            streamed.study, batched.study,
+            "the inherited study rides it"
+        );
+        assert_eq!(
+            streamed.generation, batched.generation,
+            "the spec recipe AND the decoder triple both ride it"
+        );
+        assert!(
+            streamed.generation.as_ref().is_some_and(|g| {
+                g.config.contains_key("energy_window_kev")
+                    && g.config.contains_key(crate::decoder::RECIPE_KEY)
+            }),
+            "both recipe facts, not one: {:?}",
+            streamed.generation
+        );
+        assert_eq!(
+            streamed.producer, batched.producer,
+            "the spec's [product.producer] rides it"
+        );
+        assert_eq!(
+            streamed.sources, batched.sources,
+            "and every provenance edge"
+        );
+
+        assert_eq!(
+            streamed.ingest_transform, batched.ingest_transform,
+            "and the ADR-0056 §6.2 canonicalisation receipt"
+        );
+        assert_eq!(
+            (&batched.content_hash, &batched.manifest_hash),
+            (&streamed.content_hash, &streamed.manifest_hash),
+            "one spec, two sealers, one product — on BOTH hashes"
+        );
+    }
 
     /// A `.npy` spec may declare `schema = "table"` — `spec::check_no_schema_laundering` permits it
     /// because a NumPy **structured** dtype genuinely is a table and an operator cannot know their own

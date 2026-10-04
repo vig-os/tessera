@@ -180,7 +180,7 @@ fn stream(dir: &std::path::Path, input: &std::path::Path, tag: &str) -> tessera_
             // One block per row group, so 4x the rows is 4x the BLOCKS and not a bigger one. Must be a
             // positive multiple of ROWS_PER_GROUP, which the sink asserts.
             block_rows: tessera_io::table::ROWS_PER_GROUP as u64,
-            column_meta: &column_meta,
+            tiers: Default::default(),
         },
     )
     .unwrap_or_else(|e| panic!("stream {tag}: {e}"))

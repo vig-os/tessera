@@ -909,7 +909,7 @@ fn stream_parquet(
             cfg: &cfg,
             batch_rows,
             block_rows,
-            column_meta: &column_meta,
+            tiers: Default::default(),
         },
     )
 }
@@ -1073,7 +1073,7 @@ fn a_null_only_in_the_last_row_group_streams_identically() {
             cfg: &cfg,
             batch_rows: 1,
             block_rows: tessera_io::BLOCK_ROWS as u64,
-            column_meta: &column_meta,
+            tiers: Default::default(),
         },
     )
     .expect("stream the late-null parquet");
@@ -1130,7 +1130,7 @@ fn assert_batch_equals_stream(
             cfg: &cfg,
             batch_rows: 2,
             block_rows: tessera_io::BLOCK_ROWS as u64,
-            column_meta: &column_meta,
+            tiers: Default::default(),
         },
     )
     .unwrap_or_else(|e| panic!("stream the {source_format} lane: {e}"));
@@ -1280,4 +1280,91 @@ fn a_spec_recipe_does_not_delete_the_sealed_decoder_record() {
         "and `{key}` is the SAME triple the no-recipe ingest sealed — before the fix declaring a \
          recipe dropped the key entirely: {declared_g:?}"
     );
+}
+
+// ── streaming=auto, end to end through the engine ──────────────────────────────────────────────
+
+/// Route a lane by `streaming`, end to end, and require the product to be the same one.
+///
+/// The hash this compares is `content_hash`, and the rest of the manifest field by field. It
+/// deliberately does **not** compare `manifest_hash`, and the reason is worth stating so nobody
+/// "fixes" it: `streaming` and `batch_rows` are spec fields, `spec_hash` covers the whole parsed
+/// spec, and every member pins that hash in an `ingested_via_spec` edge (ADR-0035). Two specs asking
+/// for different paths are two different archival documents, so their seals *must* differ — the
+/// record working as designed. The uncaveated one-spec/two-sealer equality is pinned in
+/// `engine`'s own `the_streamed_and_batched_sealers_agree_on_every_metadata_tier`.
+fn assert_routing_agrees(
+    dir: &Path,
+    options: impl Fn(tessera_ingest::spec::StreamingMode) -> FormatOptions,
+) {
+    use tessera_ingest::spec::StreamingMode;
+    let batched = ingest(dir, options(StreamingMode::Batch), "table").expect("batch route");
+    let streamed = ingest(dir, options(StreamingMode::Stream), "table").expect("stream route");
+
+    assert_eq!(
+        batched.content_hash, streamed.content_hash,
+        "the payload is the payload, whichever path read it"
+    );
+    assert_eq!(batched.blocks, streamed.blocks, "same blocks, same digests");
+    assert_eq!(batched.metadata, streamed.metadata);
+    assert_eq!(batched.generation, streamed.generation);
+    assert_eq!(batched.ingest_transform, streamed.ingest_transform);
+    assert_eq!(batched.schema, streamed.schema);
+    assert_eq!(
+        batched.id, streamed.id,
+        "the lineage handle is path-independent"
+    );
+    // Every provenance edge but the spec edge, which legitimately differs (see the doc above).
+    let edges = |m: &Manifest| -> Vec<(String, String)> {
+        m.sources
+            .iter()
+            .filter(|s| s.role != engine::SPEC_PROVENANCE_ROLE)
+            .map(|s| (s.role.clone(), s.reference.clone()))
+            .collect()
+    };
+    assert_eq!(edges(&batched), edges(&streamed));
+}
+
+/// The CSV lane routes by `streaming` without changing the product.
+#[test]
+fn the_csv_lane_routes_by_streaming_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rows.csv");
+    // A late null, so the streamed run must widen the column from a shape pass rather than a prefix.
+    std::fs::write(
+        &input,
+        "id,label,energy\n1,red,511.0\n2,green,7.25\n3,red,-0.5\n4,blue,\n",
+    )
+    .unwrap();
+    assert_routing_agrees(dir.path(), |streaming| FormatOptions::Csv {
+        input: input.clone(),
+        columns: vec!["id:i4".into(), "label:str".into(), "energy:f8?".into()],
+        delimiter: None,
+        header: true,
+        null_tokens: Vec::new(),
+        exclude: Vec::new(),
+        column_meta: ColumnMeta::empty(),
+        streaming,
+        batch_rows: 2,
+    });
+}
+
+/// The Parquet lane routes by `streaming` without changing the product.
+#[test]
+fn the_parquet_lane_routes_by_streaming_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rows.parquet");
+    write_parquet(
+        &input,
+        WriterProperties::builder()
+            .set_max_row_group_row_count(Some(2))
+            .build(),
+    );
+    assert_routing_agrees(dir.path(), |streaming| FormatOptions::Parquet {
+        input: input.clone(),
+        exclude: Vec::new(),
+        column_meta: ColumnMeta::empty(),
+        streaming,
+        batch_rows: 2,
+    });
 }

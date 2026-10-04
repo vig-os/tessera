@@ -116,6 +116,11 @@ pub struct CanonicalTable {
 }
 
 impl CanonicalTable {
+    /// Column names, in source order — the input the name-pattern checks work from.
+    pub fn column_names(&self) -> Vec<&str> {
+        self.columns.iter().map(|(c, _)| c.name.as_str()).collect()
+    }
+
     /// Row count — the shared length every column is checked against at insert time.
     pub fn rows(&self) -> usize {
         self.columns.first().map(|(_, d)| d.len()).unwrap_or(0)
@@ -462,6 +467,8 @@ pub trait DeclareTable {
     fn declare_generation(&mut self, generation: tessera_core::Generation) -> Result<()>;
     fn declare_ingest_transform(&mut self, transforms: Vec<IngestTransform>) -> Result<()>;
     fn declare_source(&mut self, source: tessera_core::provenance::Source) -> Result<()>;
+    fn declare_study(&mut self, study: &str) -> Result<()>;
+    fn declare_producer(&mut self, producer: tessera_core::Producer) -> Result<()>;
 }
 
 impl DeclareTable for ProductBuilder {
@@ -481,6 +488,14 @@ impl DeclareTable for ProductBuilder {
         self.add_source(source);
         Ok(())
     }
+    fn declare_study(&mut self, study: &str) -> Result<()> {
+        self.with_study(study);
+        Ok(())
+    }
+    fn declare_producer(&mut self, producer: tessera_core::Producer) -> Result<()> {
+        self.with_producer(producer);
+        Ok(())
+    }
 }
 
 impl DeclareTable for tessera_io::WriteSession {
@@ -498,6 +513,14 @@ impl DeclareTable for tessera_io::WriteSession {
     }
     fn declare_source(&mut self, source: tessera_core::provenance::Source) -> Result<()> {
         self.add_source(source)?;
+        Ok(())
+    }
+    fn declare_study(&mut self, study: &str) -> Result<()> {
+        self.with_study(study)?;
+        Ok(())
+    }
+    fn declare_producer(&mut self, producer: tessera_core::Producer) -> Result<()> {
+        self.with_producer(producer)?;
         Ok(())
     }
 }
@@ -535,6 +558,71 @@ pub fn declare_generic_table(
     // Order matters for the seal: `ingested_from` first, then whatever the engine threaded in.
     for s in opts.extra_sources {
         w.declare_source(s.clone())?;
+    }
+    Ok(())
+}
+
+/// The metadata tiers a `table` product's manifest layers, in **ascending** precedence.
+///
+/// Separate from [`GenericIngest`] (what the lane itself knows) because these come from the *spec*
+/// and from its resolved parents, and held as three fields rather than one pre-merged map because
+/// they must be **layered, not merged**: a value inherited from a parent must never clobber a
+/// product-own default, and a pre-merged map cannot express that difference.
+///
+/// The streaming path has no choice about applying these before the first block commits. A streamed
+/// `.tsra` is written once, straight to disk, with no post-seal hook — so a tier plumbed any later
+/// is dropped **silently**, and that moves `manifest_hash` while leaving `content_hash` identical,
+/// which is exactly the divergence class a content-hash comparison cannot see. The batch path
+/// reaches the same manifest from the other side (`engine::apply_spec_metadata` re-seals a built
+/// product), and the batch-equals-stream tests over BOTH hashes are what hold the two together.
+///
+/// **There is no `generation` field, deliberately.** A table's recipe already arrives on
+/// [`GenericIngest::generation`], where [`declare_generic_table`] folds the ADR-0056 §6a decoder
+/// triple into it. A second generation tier here would make two writers of one field, which is how
+/// that triple came to be deleted by a spec-declared recipe in the first place.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MetadataTiers<'a> {
+    /// Schema-flagged identity inherited from the `derived_from` parents (ADR-0058 §5) — the
+    /// LOWEST tier, applied before the lane's own fields so a product-own default overrides it.
+    pub inherited: Option<&'a BTreeMap<String, serde_json::Value>>,
+    /// The parents' first-class `study` grouping key, when this product declares none of its own.
+    pub inherited_study: Option<&'a str>,
+    /// The spec's `[product.metadata]` — the HIGHEST tier; an explicit operator value wins over
+    /// both the inherited identity and the lane's own default.
+    pub metadata: Option<&'a BTreeMap<String, serde_json::Value>>,
+    /// The spec's `[product.producer]` identity (ADR-0058 §1) — who/what made this product.
+    pub producer: Option<&'a tessera_core::Producer>,
+}
+
+/// Declare every `table` manifest fact **and** the spec's metadata tiers, in the one order that is
+/// correct.
+///
+/// One function rather than a before-hook and an after-hook, because the tiers are only right
+/// relative to [`declare_generic_table`]: the inherited floor has to go down first so the lane's own
+/// `source_format` survives it, and the spec's overrides have to go on last so an operator value
+/// wins. Two functions would make that ordering a convention a caller could get wrong, which on this
+/// path means a silently different `manifest_hash`.
+pub fn declare_table_with_tiers(
+    w: &mut impl DeclareTable,
+    opts: &GenericIngest<'_>,
+    transforms: &[IngestTransform],
+    tiers: &MetadataTiers<'_>,
+) -> Result<()> {
+    // (1) INHERITED — lowest. `study` is a first-class field, not metadata.
+    if let Some(s) = tiers.inherited_study {
+        w.declare_study(s)?;
+    }
+    for (k, v) in tiers.inherited.into_iter().flatten() {
+        w.declare_field(k, v.clone())?;
+    }
+    // (2) The lane's own facts, including any product-own default — beats inherited, loses to spec.
+    declare_generic_table(w, opts, transforms)?;
+    // (3) SPEC `[product.metadata]` — highest, so an explicit operator value wins over everything.
+    for (k, v) in tiers.metadata.into_iter().flatten() {
+        w.declare_field(k, v.clone())?;
+    }
+    if let Some(pr) = tiers.producer {
+        w.declare_producer(pr.clone())?;
     }
     Ok(())
 }

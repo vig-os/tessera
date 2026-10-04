@@ -328,9 +328,12 @@ pub struct StreamOpts<'a> {
     /// Rows per block. Production passes [`tessera_io::BLOCK_ROWS`]; tests lower it to exercise the
     /// multi-block path without materialising millions of rows.
     pub block_rows: u64,
-    /// `--column-meta`: operator semantics that land inside the seal, applied to the same columns the
-    /// batch path applies them to.
-    pub column_meta: &'a crate::column_meta::ColumnMeta,
+    /// The spec's metadata tiers (ADR-0058 §1/§5) and its parents' inherited identity.
+    ///
+    /// Here rather than reached for later because there is nowhere later: see
+    /// [`crate::canonical::MetadataTiers`]. The batch path applies these *after* sealing, by
+    /// re-sealing a built product; this path has one shot, before the first block commits.
+    pub tiers: crate::canonical::MetadataTiers<'a>,
 }
 
 /// A guard that the input did not change between the two passes.
@@ -416,7 +419,11 @@ where
         )));
     }
     // Operator semantics land inside the seal, on the same columns the batch path applies them to.
-    opts.column_meta.apply(&mut shape.columns)?;
+    ingest.column_meta.apply(&mut shape.columns)?;
+    // ADR-0056 §7's PHI advisory, on the same column set the batch path warns about. The shape pass is
+    // the first and only point where this path knows every column name.
+    let names: Vec<&str> = shape.columns.iter().map(|c| c.name.as_str()).collect();
+    crate::column_meta::warn_unclassified_identifying(&names, ingest.column_meta, ingest.name);
 
     // ── The change guard, between the passes.
     let after = InputFingerprint::of(ingest.source_path)?;
@@ -438,7 +445,7 @@ where
         ingest.description,
         ingest.timestamp,
     )?;
-    crate::canonical::declare_generic_table(&mut ws, ingest, &shape.transforms)?;
+    crate::canonical::declare_table_with_tiers(&mut ws, ingest, &shape.transforms, &opts.tiers)?;
 
     let row_bytes: u64 = shape
         .columns
