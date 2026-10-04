@@ -47,8 +47,14 @@
 //!
 //! Sixteen times the data added **nothing**, while repeating the *same* size added 1.9 MiB. So the
 //! residual is allocator warm-up and retention, not accumulation — the path is bounded. The test
-//! therefore discards a first run as warm-up and measures the step from a 1x to a 4x input after it, with
-//! a budget justified by that 1.9 MiB same-size noise floor rather than chosen to pass.
+//! therefore discards a first run as warm-up and measures the step from a 1x to a 4x input after it.
+//!
+//! The 1 M and 4 M rows of that table are the sizes the test now uses, and that is deliberate — see
+//! [`EXTRA_BUDGET`]. An earlier version measured the 250 k step against a flat 4 MiB budget and went
+//! **intermittent** under `cargo nextest`, where sibling test processes compete for memory: a budget
+//! the same order of magnitude as its own noise floor is not a measurement. The budget is now a
+//! fraction of what a file-proportional path would need, which both scales with the fixture and keeps
+//! the failure mode it exists to catch an order of magnitude away from the noise.
 
 #![cfg(feature = "parquet")]
 
@@ -62,18 +68,36 @@ use tessera_ingest::column_meta::ColumnMeta;
 use tessera_ingest::decoder;
 
 const TS: &str = "2024-03-01T12:00:00Z";
-/// The small run. 250 k rows x 2 x i64 = 4 MiB decoded.
-const SMALL_ROWS: i64 = 250_000;
-/// The large run: 4x the rows, so a file-proportional path would need ~12 MiB more than the small one.
+/// Bytes per row: two `i64` columns.
+const ROW_BYTES: u64 = 16;
+/// The small run. 1 M rows x 16 B = 16 MiB decoded, 16 blocks at `ROWS_PER_GROUP` per block.
+const SMALL_ROWS: i64 = 1_000_000;
+/// The large run: 4x the rows — 64 MiB decoded, ~62 blocks.
 const LARGE_ROWS: i64 = SMALL_ROWS * 4;
-/// How much the 4x-larger input may add to the high-water mark. Not zero, because the allocator is free
-/// to fragment and the reader's own batch buffers differ slightly in size; but far below the ~12 MiB a
-/// path that held its input would need.
-const EXTRA_BUDGET: u64 = 4 * 1024 * 1024;
+
+/// What a file-proportional path would have to add, going from the small input to the large one: the
+/// extra rows, decoded. ~48 MiB. The number the budget below is a fraction *of*, rather than an
+/// absolute chosen by hand.
+const EXTRA_DECODED: u64 = (LARGE_ROWS - SMALL_ROWS) as u64 * ROW_BYTES;
+
+/// How much the 4x input may add to the high-water mark: a **quarter** of what holding the extra rows
+/// would cost.
+///
+/// Expressed as a fraction, and these sizes chosen, because the first version of this test used a flat
+/// 4 MiB against a 4 MiB small fixture and went **intermittent** — it passed alone and failed under
+/// `cargo test --workspace` / `cargo nextest`, where ~20 sibling test processes compete for memory and
+/// the allocator stops returning pages. A budget the same order of magnitude as its own noise floor is
+/// not a measurement, and an intermittent gate is worse than a failing one: it teaches people to re-run.
+///
+/// The fix is signal, not slack. At these sizes the measured growth is ~0 (see the table above: 1 M to
+/// 4 M added **nothing**), a file-proportional path must add the full 48 MiB, and 12 MiB sits an order
+/// of magnitude above the few-MiB allocator noise while still failing such a path by 4x. The claim is
+/// unchanged and the margin is now justified by both bounds rather than by one.
+const EXTRA_BUDGET: u64 = EXTRA_DECODED / 4;
 
 /// Both runs must produce several blocks, or the comparison is about one block growing rather than about
 /// the partition bounding peak — which is what tripped the first two versions of this test.
-const MIN_BLOCKS: usize = 4;
+const MIN_BLOCKS: usize = 8;
 
 /// The encode pipeline's RAM budget, fixed so the bound under test is the declared one. At
 /// `ROWS_PER_GROUP` x 2 x i64 = 1 MiB per block, this permits ~8 blocks in flight for both runs.
@@ -215,8 +239,8 @@ fn streaming_a_table_is_bounded_by_a_batch_not_the_file() {
     );
     assert!(
         extra < EXTRA_BUDGET,
-        "a 4x larger input raised peak RSS by a further {extra} bytes (budget {EXTRA_BUDGET}, set from a \
-         measured same-size noise floor of ~1.9 MiB) — memory is tracking the FILE, not the batch and \
-         block, which is the bug #458 exists to fix"
+        "a 4x larger input raised peak RSS by a further {extra} bytes. Budget is {EXTRA_BUDGET} — a \
+         quarter of the {EXTRA_DECODED} bytes the extra rows occupy decoded. Memory is tracking the \
+         FILE, not the batch and the block, which is the bug #458 exists to fix."
     );
 }
