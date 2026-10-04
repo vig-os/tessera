@@ -1246,8 +1246,24 @@ fn apply_spec_metadata(
         b.with_field(k, v.clone());
     }
     // (3) The sealed generation recipe + producer identity (ADR-0058 §1/§2).
+    //
+    // LAYERED over whatever the lane already recorded, not written over it. `with_generation`
+    // replaces the whole bag, and several lanes seal a recipe of their own *before* this runs: the
+    // generic table/array lanes record the decoder triple ADR-0056 §6a requires
+    // (`Decoder::record_into`), and the NIfTI lane records which transform the geometry came from.
+    // A bare overwrite deleted those whenever — and only when — a spec happened to declare
+    // `[product.generation]`, which is invisible to a `content_hash` comparison and leaves the
+    // product claiming it was decoded by nothing in particular. Spec keys still win on a collision,
+    // because the spec is the highest tier.
     if let Some(g) = &p.generation {
-        b.with_generation(g.clone());
+        let mut merged = m.generation.clone().unwrap_or_default();
+        for (k, v) in &g.config {
+            merged = merged.with(k, v.clone());
+        }
+        if let Some(r) = &g.config_ref {
+            merged = merged.with_config_ref(r.clone());
+        }
+        b.with_generation(merged);
     }
     if let Some(pr) = &p.producer {
         b.with_producer(pr.clone());

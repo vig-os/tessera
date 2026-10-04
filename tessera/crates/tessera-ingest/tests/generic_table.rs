@@ -81,7 +81,6 @@ fn ingest_with_config(
     schema: &str,
     cfg: &tessera_io::WriteConfig,
 ) -> tessera_core::Result<Manifest> {
-    let out = dir.join(format!("out-{}", uniq()));
     let spec = IngestSpec {
         collection: CollectionMeta {
             name: "gen-01".into(),
@@ -106,8 +105,25 @@ fn ingest_with_config(
             options,
         }],
     };
+    run_spec_with_config(dir, &spec, cfg)
+}
+
+/// Run a whole `IngestSpec` through the real engine and return the first member's sealed manifest.
+///
+/// The seam the single-product helpers above are built on, exposed for the tests that need to reach
+/// a `ProductSpec` field those helpers do not take (`generation`, `producer`, `derived_from`).
+fn run_spec(dir: &Path, spec: &IngestSpec) -> tessera_core::Result<Manifest> {
+    run_spec_with_config(dir, spec, &tessera_io::WriteConfig::default())
+}
+
+fn run_spec_with_config(
+    dir: &Path,
+    spec: &IngestSpec,
+    cfg: &tessera_io::WriteConfig,
+) -> tessera_core::Result<Manifest> {
+    let out = dir.join(format!("out-{}", uniq()));
     let coll = engine::run(
-        &spec,
+        spec,
         Path::new("test-inline-spec"),
         &out,
         cfg,
@@ -1190,5 +1206,78 @@ fn streamed_and_batch_csv_seal_the_same_product() {
         decoder::Decoder::CSV,
         table,
         move || Ok(Box::new(tessera_ingest::csv_table::csv_chunks(&p, &o, 2)?)),
+    );
+}
+
+// ── the spec recipe vs the lane's own recipe ───────────────────────────────────────────────────
+
+/// A spec `[product.generation]` must not delete the decoder triple the lane already sealed.
+///
+/// ADR-0056 §6a puts the decoder's name, version and feature digest inside the seal, and
+/// `declare_generic_table` records it through `Decoder::record_into`, which folds the spec's own
+/// recipe keys in alongside. The engine then re-sealed with the spec's `[product.generation]` via
+/// `ProductBuilder::with_generation` — a whole-bag **replace** — so the triple survived only for
+/// products whose spec declared no recipe at all. The two facts live in one `Generation`, so
+/// "operator declared a recipe" and "we recorded which decoder read the bytes" were mutually
+/// exclusive.
+///
+/// Worth stating why this needed a test rather than a read: the loss is invisible to a
+/// `content_hash` comparison (the payload is untouched), the field is optional so nothing rejects
+/// its absence, and no corpus fixture declares a recipe — so every golden agreed either way.
+#[test]
+fn a_spec_recipe_does_not_delete_the_sealed_decoder_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("t.csv");
+    std::fs::write(&input, "id,energy\n1,511.0\n2,7.25\n").unwrap();
+
+    let csv = |generation: Option<tessera_core::provenance::Generation>| {
+        let mut spec = one_product_spec(
+            FormatOptions::Csv {
+                input: input.clone(),
+                columns: vec!["id:i4".into(), "energy:f8".into()],
+                delimiter: None,
+                header: true,
+                null_tokens: Vec::new(),
+                exclude: Vec::new(),
+                column_meta: ColumnMeta::empty(),
+                streaming: Default::default(),
+                batch_rows: 64 * 1024,
+            },
+            "table",
+        );
+        spec.products[0].generation = generation;
+        run_spec(dir.path(), &spec).expect("ingest")
+    };
+
+    // Baseline: with no spec recipe the triple is sealed. (If this ever fails, the regression below
+    // is meaningless — it would be asserting the absence of something never present.)
+    let key = tessera_ingest::decoder::RECIPE_KEY;
+    let plain = csv(None);
+    let plain_g = plain.generation.as_ref().expect("a recipe bag is sealed");
+    let plain_decoder = plain_g
+        .config
+        .get(key)
+        .unwrap_or_else(|| panic!("`{key}` rides the seal with no spec recipe: {plain_g:?}"));
+    assert_eq!(plain_decoder["name"], "rust-csv", "{plain_g:?}");
+
+    // The regression: declaring an operator recipe must ADD to that bag, not replace it.
+    let declared = csv(Some(
+        tessera_core::provenance::Generation::default()
+            .with("energy_window_kev", serde_json::json!([425, 650])),
+    ));
+    let declared_g = declared
+        .generation
+        .as_ref()
+        .expect("a recipe bag is sealed");
+    assert_eq!(
+        declared_g.config["energy_window_kev"],
+        serde_json::json!([425, 650]),
+        "the operator's own keys are sealed verbatim: {declared_g:?}"
+    );
+    assert_eq!(
+        declared_g.config.get(key),
+        Some(plain_decoder),
+        "and `{key}` is the SAME triple the no-recipe ingest sealed — before the fix declaring a \
+         recipe dropped the key entirely: {declared_g:?}"
     );
 }
