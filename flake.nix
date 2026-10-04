@@ -639,6 +639,15 @@
               cargo test -p tessera-ingest --no-default-features --features parquet \
                 --test ingest_corpus
 
+              # (1b) **The ARROW lane on its own** (#509). Until this was gated it had never been built:
+              # the Arrow IPC reader lived in `parquet_table`, which is `cfg(feature = "parquet")`, so
+              # `--features arrow` did not compile. That made the lane un-selectable, and therefore made
+              # the sealed `arrow-rs/arrow-ipc` decoder digest describe a configuration that could not
+              # exist — ADR-0057 §5 wants *which decoders could have produced this artifact* to be a
+              # build-time fact, and a fact about an unbuildable build is not one. The reader now lives in
+              # `arrow_table` beside `read_arrow_ipc`, where it never needed Parquet in the first place.
+              cargo test -p tessera-ingest --no-default-features --features arrow --lib
+
               # (2)+(3) **The array lane with NO archive reader** (#386) — `npy` compiled without `npz`.
               #
               # `.npy` is parsed in-tree and `.npz` is that same parser behind `dep:zip`, so they are two

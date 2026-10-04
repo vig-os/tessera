@@ -324,10 +324,20 @@ mod tests {
         // third-party decode path and deliberately carries no digest. If a second such lane appears,
         // this fails — because two digest-less lanes would be indistinguishable in the seal, which is
         // the property the assertion above exists to protect.
+        // Derived from the build, not hardcoded: a configuration without the array lane has NO
+        // digest-less lane, and `--features arrow` is such a configuration now that it builds at all
+        // (#509). The property being guarded is "at most one lane may be digest-less, and only the
+        // in-tree parser may be it" — two would be indistinguishable in the seal — and that is what
+        // this says in every configuration rather than only in the default one.
+        let expected_in_tree: Vec<&str> = if cfg!(feature = "npy") {
+            vec!["tessera/npy"]
+        } else {
+            vec![]
+        };
         assert_eq!(
             in_tree.iter().map(|d| d.name).collect::<Vec<_>>(),
-            vec!["tessera/npy"],
-            "exactly one lane may be digest-less, and it is the in-tree NPY parser"
+            expected_in_tree,
+            "only the in-tree NPY parser may be digest-less, and only when it is compiled in"
         );
     }
 
