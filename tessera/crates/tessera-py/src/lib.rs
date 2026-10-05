@@ -280,10 +280,16 @@ impl Builder {
         // `ArraySpec` defaults to zstd; the array backend's own default is pcodec, and
         // `array_block` validates the value and rejects anything other than pcodec/zstd/auto.
         spec.codec = codec.into();
-        let (block_ref, payload) =
-            tessera_io::array::array_block(name, &spec, &arr).map_err(err)?;
+        // ADR-0059 C4: an integer array carries its `{hash, stats}` chunk-index by default, so a
+        // consumer gets count/min/max/mean/std and a histogram without decoding the block (#347).
+        let ((block_ref, payload), sidecar) =
+            tessera_io::array::array_block_with_index(name, &spec, &arr).map_err(err)?;
         self.builder()?.add_block_ref(block_ref);
         self.payloads.push(payload);
+        if let Some((cidx_ref, cidx_payload)) = sidecar {
+            self.builder()?.add_block_ref(cidx_ref);
+            self.payloads.push(cidx_payload);
+        }
         Ok(())
     }
 
