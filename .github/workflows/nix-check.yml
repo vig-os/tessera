@@ -12,6 +12,15 @@
 # Run it yourself with the SAME flags CI uses:
 #   nix flake check -L --keep-going --fallback --max-jobs 2 --cores 4
 #
+# CI SHAPE (#517). The checks run as ONE JOB PER GROUP PER ARCH, not all on one runner: the old legs
+# were throughput-bound (~95 min of check work through two max-jobs slots, against a ~19.5-min
+# longest single check). Groups live in the flake (`ciGroupsDeclared` / `legacyPackages.<sys>.ciGroups`,
+# asserted exhaustive, with at most one Gate A check each) — nothing here hard-codes a check name.
+#   plan                 -> the matrix, read from the flake
+#   check (<arch>, <g>)  -> `nix build` of that group's checks; per-check verdicts uploaded
+#   nix flake check      -> the single required status: every check's verdict, asserted complete
+# Locally, `nix flake check` is unchanged: same flake, same checks.
+#
 # Checks (see flake.nix): workspace-clippy · workspace-test · workspace-fmt ·
 # guardrails-gates · dev-shell. cargo-deny + the full pre-commit gate set run via `prek`
 # locally (they need network / the working tree).
@@ -61,9 +70,50 @@ permissions:
   contents: read
 
 jobs:
+  # The matrix is READ FROM THE FLAKE, never written here: a check added to the flake lands in a group
+  # (`rest`, if nobody lists it) and therefore in CI without touching this file.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      expected: ${{ steps.plan.outputs.expected }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
+
+      - name: Plan the check matrix
+        id: plan
+        run: |
+          set -euo pipefail
+          include='[]'; expected='[]'
+          for pair in x86_64-linux:ubuntu-latest aarch64-linux:ubuntu-24.04-arm; do
+            sys=${pair%%:*}; runner=${pair#*:}
+            # Evaluating ciGroups goes through the asserting `checks` wrapper, so an unknown name, a
+            # check in two groups, or two Gate A checks in one group fails HERE, before any build.
+            groups=$(nix eval --json ".#legacyPackages.${sys}.ciGroups")
+            include=$(jq -c --arg sys "$sys" --arg runner "$runner" --argjson g "$groups" \
+              '. + [$g | to_entries[] | select(.value | length > 0)
+                    | {arch: $sys, runner: $runner, group: .key, checks: (.value | join(" "))}]' <<<"$include")
+            expected=$(jq -c --arg sys "$sys" --argjson g "$groups" \
+              '. + [$g | to_entries[] | .value[] | "\($sys)/\(.)"]' <<<"$expected")
+          done
+          n=$(jq 'length' <<<"$expected")
+          # A plan with no checks would make every later assertion vacuously true.
+          [ "$n" -gt 0 ] || { echo "::error::plan produced no checks"; exit 1; }
+          echo "matrix={\"include\":${include}}" >> "$GITHUB_OUTPUT"
+          echo "expected=${expected}" >> "$GITHUB_OUTPUT"
+          echo "planned $(jq 'length' <<<"$include") jobs covering $n arch/check pairs"
+          jq -r '.[] | "  \(.arch) \(.group): \(.checks)"' <<<"$include"
+
   check:
-    name: nix flake check (${{ matrix.arch }})
+    name: nix check (${{ matrix.arch }}, ${{ matrix.group }})
     runs-on: ${{ matrix.runner }}
+    needs: [plan]
     # A cold build of the vortex/zarrs/hdf5 stack is slow on a GitHub-hosted runner and varies a
     # lot between them: observed 40m (x86) and 51m (aarch64) on one run, then >60m on x86 for the
     # very next one, which the previous 60-minute cap cancelled mid-build. A cancelled leg is not
@@ -92,15 +142,14 @@ jobs:
     # leg, so the next long draw can be diagnosed as I/O starvation, memory pressure or simply slow
     # silicon instead of guessed at. A concurrency cap (`--max-jobs`) must NOT land before this
     # change: at 89 of 90 minutes any slowdown converts an intermittent failure into a reliable one.
-    timeout-minutes: 120
+    #
+    # Per JOB since #517, not per leg: one group is at most ~20 min of check work (median; the longest,
+    # sql-tests, has drawn 27 min), plus up to ~14 min if the dependency cache misses. 60 is that plus
+    # the same ~35% headroom reasoning as above.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64-linux
-            runner: ubuntu-latest
-          - arch: aarch64-linux
-            runner: ubuntu-24.04-arm
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -178,8 +227,11 @@ jobs:
       #
       # `set +e` so a failure reaches the summary step below instead of ending the job here; the real
       # result is re-raised there, so the leg still fails when a check fails.
-      - name: nix flake check
+      - name: nix build (this group's checks)
         id: check
+        env:
+          SYS: ${{ matrix.arch }}
+          CHECKS: ${{ matrix.checks }}
         run: |
           set +e
           # Resource sampler, started INSIDE this step on purpose (#483). Three legs on #460/#461
@@ -210,11 +262,28 @@ jobs:
           # shellcheck disable=SC2064
           trap "kill $sampler 2>/dev/null" EXIT
 
-          nix flake check -L --keep-going --fallback --max-jobs 2 --cores 4
+          attrs=()
+          for c in $CHECKS; do attrs+=(".#checks.${SYS}.${c}"); done
+          echo "building ${#attrs[@]} checks: $CHECKS"
+          nix build -L --no-link --keep-going --fallback --max-jobs 2 --cores 4 "${attrs[@]}"
           rc=$?
           kill "$sampler" 2>/dev/null
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          echo "nix flake check exited $rc"
+          echo "nix build exited $rc"
+
+      # Evaluation parity (#517). Each old leg's `nix flake check` also EVALUATED every flake output
+      # for its system (devShells, packages, apps, formatter). Building checks per group does not, so
+      # one job per arch — `rest`, the lightest group, off the critical path — runs the same check
+      # without building. (`--all-systems` is not usable: x86_64-darwin no longer evaluates, #545.)
+      - name: Evaluate every flake output
+        if: always() && matrix.group == 'rest'
+        id: evalall
+        run: |
+          set +e
+          nix flake check --no-build
+          rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "nix flake check --no-build exited $rc"
 
       # Per-check verdicts, so a red leg always names what failed (#483).
       #
@@ -240,10 +309,14 @@ jobs:
         # repo-controlled today does not make interpolating it a habit worth keeping.
         env:
           SYS: ${{ matrix.arch }}
+          GROUP: ${{ matrix.group }}
+          CHECKS: ${{ matrix.checks }}
           CHECK_RC: ${{ steps.check.outputs.rc }}
+          EVAL_RC: ${{ steps.evalall.outputs.rc }}
         run: |
           set +e
           S="$GITHUB_STEP_SUMMARY"
+          V="${RUNNER_TEMP}/verdicts.tsv"; : > "$V"
 
           # One evaluation for every check's output path, instead of `attrNames` followed by an
           # `outPath` eval per check: 17 nix evaluations became 1, and the name and the path can no
@@ -255,7 +328,7 @@ jobs:
             # Without this, a failed evaluation reported "0 passed, 0 failed or not built", which
             # reads like an empty-but-fine result rather than a broken one.
             {
-              echo "## nix flake check — ${SYS}"
+              echo "## nix check — ${SYS} / ${GROUP}"
               echo ""
               echo ":warning: **Could not evaluate \`.#checks.${SYS}\`** — no per-check summary."
               echo "The flake may have failed to evaluate; the job log is authoritative."
@@ -265,11 +338,14 @@ jobs:
           fi
 
           {
-            echo "## nix flake check — ${SYS}"
+            echo "## nix check — ${SYS} / ${GROUP}"
             echo ""
             echo "| check | result |"
             echo "|---|---|"
           } >> "$S"
+          # Only THIS group's checks: the others are verdicts of other jobs.
+          paths_json=$(jq -c --arg want "$CHECKS" \
+            'with_entries(select(.key as $k | ($want | split(" ") | index($k))))' <<< "$paths_json")
 
           pass=0; fail=0; failed_names=""
           while IFS=$'\t' read -r name outp; do
@@ -280,28 +356,47 @@ jobs:
             # substituter is configured today, so this is closing a latent trap, not a live bug.
             if [ -n "$outp" ] && nix-store --check-validity "$outp" >/dev/null 2>&1; then
               echo "| \`$name\` | :white_check_mark: passed |" >> "$S"
+              printf '%s/%s\tpassed\n' "$SYS" "$name" >> "$V"
               pass=$((pass+1))
             else
               echo "| \`$name\` | :x: failed or not built |" >> "$S"
+              printf '%s/%s\tfailed\n' "$SYS" "$name" >> "$V"
               fail=$((fail+1)); failed_names="$failed_names $name"
             fi
           done <<< "$(jq -r 'to_entries[] | "\(.key)\t\(.value)"' <<< "$paths_json")"
 
           {
             echo ""
-            echo "**$pass passed, $fail failed or not built** (\`nix flake check\` exited \`${CHECK_RC:-?}\`)."
+            echo "**$pass passed, $fail failed or not built** (\`nix build\` exited \`${CHECK_RC:-?}\`)."
             if [ "$fail" -gt 0 ]; then
               echo ""
               echo "Not built:$failed_names"
               echo ""
               echo "A check listed here either failed or never produced an output. With \`--keep-going\`"
               echo "every check is attempted, so the usual reading is a real failure — unless the leg hit"
-              echo "its 90-minute cap, in which case the tail of the job log says so."
+              echo "its time cap, in which case the tail of the job log says so."
             fi
           } >> "$S"
-          echo "summary: $pass passed, $fail failed or not built; check rc=${CHECK_RC:-?}"
-          # Re-raise the real result: the check step swallowed it so this summary could run.
+          echo "summary: $pass passed, $fail failed or not built; build rc=${CHECK_RC:-?}"
+          if [ -n "${EVAL_RC:-}" ] && [ "$EVAL_RC" != "0" ]; then
+            echo ":x: \`nix flake check --no-build\` (evaluation of every output) exited \`$EVAL_RC\`." >> "$S"
+            printf '%s/%s\tfailed\n' "$SYS" "<flake-eval>" >> "$V"
+          elif [ -n "${EVAL_RC:-}" ]; then
+            printf '%s/%s\tpassed\n' "$SYS" "<flake-eval>" >> "$V"
+          fi
+          # Re-raise the real result: the build step swallowed it so this summary could run.
+          [ "${EVAL_RC:-0}" = "0" ] || exit "$EVAL_RC"
           exit "${CHECK_RC:-1}"
+
+      # Every job hands its per-check verdicts to the gate, which asserts the union is COMPLETE.
+      - name: Upload per-check verdicts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: verdicts-${{ matrix.arch }}-${{ matrix.group }}
+          path: ${{ runner.temp }}/verdicts.tsv
+          retention-days: 7
+          if-no-files-found: error
 
   # ── The single REQUIRED status check ──────────────────────────────────────────────────────
   # Branch protection matches context names EXACTLY. A matrix job is reported per-leg as
@@ -317,13 +412,62 @@ jobs:
   gate:
     name: nix flake check
     runs-on: ubuntu-latest
-    needs: [check]
+    needs: [plan, check]
     if: always()
     steps:
-      - name: Assert every matrix leg passed
+      - name: Collect per-check verdicts
+        if: needs.plan.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: verdicts-*
+          path: verdicts
+          merge-multiple: false
+
+      # The REFERENT, not a proxy (#517): pass iff every arch/check the plan scheduled has a verdict,
+      # every verdict is `passed`, and each arch's flake evaluated. A matrix that silently dropped a
+      # job, or a job that verdicted nothing, cannot pass by being absent.
+      - name: Assert every check passed on every arch
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          CHECK_RESULT: ${{ needs.check.result }}
+          EXPECTED: ${{ needs.plan.outputs.expected }}
         run: |
-          echo "aggregate result of 'check' matrix: ${{ needs.check.result }}"
-          if [ "${{ needs.check.result }}" != "success" ]; then
-            echo "::error::nix flake check did not pass on every arch"
+          set -uo pipefail
+          S="$GITHUB_STEP_SUMMARY"
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "::error::plan did not succeed ($PLAN_RESULT) — the flake's CI groups failed to evaluate"
             exit 1
           fi
+          # The expected set must itself be non-empty and parseable. `plan` already refuses to emit an
+          # empty one, but the gate must not depend on that: an empty or truncated EXPECTED would make
+          # "nothing missing" true of nothing, and every check below would pass vacuously.
+          want=$(jq 'length' <<<"$EXPECTED" 2>/dev/null)
+          case "$want" in ''|*[!0-9]*|0)
+            echo "::error::the plan's expected check set is empty or unreadable — refusing to pass vacuously"
+            exit 1 ;;
+          esac
+          cat verdicts/*/verdicts.tsv 2>/dev/null | sort -u > all.tsv
+          got=$(cut -f1 all.tsv | grep -vc '/<flake-eval>$')
+          missing=$(jq -r '.[]' <<<"$EXPECTED" | sort | comm -23 - <(cut -f1 all.tsv | sort))
+          failed=$(awk -F'\t' '$2 != "passed" {print $1}' all.tsv)
+          evals=$(grep -c '/<flake-eval>' all.tsv)
+          {
+            echo "## nix flake check — every check, every arch"
+            echo ""
+            echo "| arch / check | result |"
+            echo "|---|---|"
+            while IFS=$'\t' read -r k v; do
+              [ "$v" = passed ] && m=":white_check_mark: passed" || m=":x: $v"
+              echo "| \`$k\` | $m |"
+            done < all.tsv
+            for k in $missing; do echo "| \`$k\` | :x: **no verdict** |"; done
+            echo ""
+            echo "**$got of $want planned checks reported; matrix result: $CHECK_RESULT.**"
+          } >> "$S"
+          echo "verdicts: $got of $want planned; flake evaluations: $evals of 2; matrix: $CHECK_RESULT"
+          rc=0
+          [ -z "$missing" ] || { echo "::error::checks with NO verdict: $(tr '\n' ' ' <<<"$missing")"; rc=1; }
+          [ -z "$failed" ]  || { echo "::error::failed: $(tr '\n' ' ' <<<"$failed")"; rc=1; }
+          [ "$evals" -eq 2 ] || { echo "::error::expected 2 flake evaluations (one per arch), got $evals"; rc=1; }
+          [ "$CHECK_RESULT" = "success" ] || { echo "::error::check matrix result: $CHECK_RESULT"; rc=1; }
+          exit $rc
