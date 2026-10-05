@@ -11,7 +11,7 @@
 //! run.
 //!
 //! So [`EXPECTED_COUNTS`] is a **declared count per named configuration**, and the test asserts the
-//! count *before* comparing any hash. A `full` build that expects nine fixtures and runs three fails
+//! count *before* comparing any hash. A `full` build that expects fifteen fixtures and runs three fails
 //! loudly instead of passing quietly.
 //!
 //! # Source files are generated, never committed
@@ -82,22 +82,22 @@ pub const LIVE_HAZARDS: &[&str] = &["H1", "H3", "H4", "H6", "H8", "H9", "H10", "
 /// build is loud, while a corpus that builds and silently runs three of nine fixtures is not.
 pub const EXPECTED_COUNTS: &[(&str, usize)] = &[
     // `default` = arrow + parquet + csv, which is every generic lane P1 ships.
-    ("default", 14),
+    ("default", 15),
     // `full` and `--all-features` add vendor decoders and the `sql`/`cloud` surfaces; neither adds a
     // generic lane, so the count is unchanged. That invariance is itself the claim: a feature may
     // decide whether a format is readable, never how one encodes.
-    ("full", 14),
-    ("all-features", 14),
+    ("full", 15),
+    ("all-features", 15),
     // `--no-default-features --features parquet` — a real configuration for an embedder who wants the
     // columnar lane without the text one. The two CSV fixtures and the five array ones drop out, and
     // the count says so, which is exactly the case that would otherwise pass while quietly testing less.
-    ("parquet-no-csv", 7),
+    ("parquet-no-csv", 8),
     // `--no-default-features --features parquet,npy` — the columnar lane plus the IN-TREE array parser
-    // and no archive reader. 7 + the four `.npy` fixtures; `ingest_npz_member` needs `zip` and drops out.
+    // and no archive reader. 8 + the four `.npy` fixtures; `ingest_npz_member` needs `zip` and drops out.
     // This is the configuration that exposed the `.npy`/`.npz` split as a real one rather than a
     // bookkeeping change: it did not compile until the `.npz` fixture stopped being built by an
     // `npy`-gated helper.
-    ("parquet-npy-no-npz", 11),
+    ("parquet-npy-no-npz", 12),
 ];
 
 /// The committed golden record for one fixture.
@@ -206,6 +206,18 @@ pub fn fixtures() -> Vec<IngestFixture> {
             requires: &["parquet"],
             hazards: &["H9"],
             build: write_tiny_row_groups,
+            options: parquet_opts,
+        },
+        IngestFixture {
+            name: "ingest_parquet_late_null",
+            requires: &["parquet"],
+            // H10, like `ingest_parquet_nulls`, but pinning the half that only a CHUNKED reader can
+            // get wrong: nullability is by presence over the WHOLE file (ADR-0029), so a reader that
+            // decided the schema from its first chunk would seal this column non-nullable and lose
+            // the last row's null — with a `content_hash` that is merely *different*, not obviously
+            // wrong. The null sits alone in the final row group for exactly that reason.
+            hazards: &["H10"],
+            build: write_late_null,
             options: parquet_opts,
         },
         IngestFixture {
@@ -335,28 +347,86 @@ pub fn enabled_fixtures() -> Vec<IngestFixture> {
 pub fn golden(f: &IngestFixture, dir: &Path) -> Result<IngestGolden> {
     let input = (f.build)(dir)?;
     let options = (f.options)(input.clone());
-    let (source_format, decoder) = crate::engine::generic_source_and_decoder(&options)
-        .ok_or_else(|| he(format!("fixture '{}' is not a generic backend", f.name)))?;
+    let meta = crate::column_meta::ColumnMeta::empty();
     let (m, _payloads) = crate::engine::seal_generic_product(
         &options,
-        &crate::canonical::GenericIngest {
-            name: f.name,
-            timestamp: TS,
-            description: "ingest conformance fixture",
-            source_format,
-            source_path: &input,
-            // The generated source lives in a temp dir whose path differs every run; the label is what
-            // keeps the sealed `ingested_from` reference stable. (ADR-0040 wants this for PHI hygiene
-            // anyway — here it is also what makes the golden reproducible.)
-            source_label: Some(LABEL),
-            extra_sources: &[],
-            decoder,
-            generation: None,
-            column_meta: &crate::column_meta::ColumnMeta::empty(),
-        },
+        &fixture_ingest(f, &options, &input, &meta)?,
     )?
     .ok_or_else(|| he(format!("fixture '{}' produced no product", f.name)))?;
     Ok(record(f, &m))
+}
+
+/// The `GenericIngest` a fixture is sealed with — **one** constructor, shared by the batch golden
+/// above and the streamed one below.
+///
+/// Shared on purpose: the streamed-equals-batch claim is only worth anything if the two runs differ
+/// in the *decode path* and in nothing else. Two hand-written copies of this struct would let the
+/// claim be satisfied, or broken, by a manifest fact instead — and a mismatched `description` or
+/// `source_label` would move `manifest_hash` while `content_hash` sat still, which is the exact
+/// divergence class the streaming work spent its time on.
+fn fixture_ingest<'a>(
+    f: &'a IngestFixture,
+    options: &FormatOptions,
+    input: &'a Path,
+    column_meta: &'a crate::column_meta::ColumnMeta,
+) -> Result<crate::canonical::GenericIngest<'a>> {
+    let (source_format, decoder) = crate::engine::generic_source_and_decoder(options)
+        .ok_or_else(|| he(format!("fixture '{}' is not a generic backend", f.name)))?;
+    Ok(crate::canonical::GenericIngest {
+        name: f.name,
+        timestamp: TS,
+        description: "ingest conformance fixture",
+        source_format,
+        source_path: input,
+        // The generated source lives in a temp dir whose path differs every run; the label is what
+        // keeps the sealed `ingested_from` reference stable. (ADR-0040 wants this for PHI hygiene
+        // anyway — here it is also what makes the golden reproducible.)
+        source_label: Some(LABEL),
+        extra_sources: &[],
+        decoder,
+        generation: None,
+        column_meta,
+    })
+}
+
+/// The same fixture, sealed through the **bounded-memory streaming** path (#458).
+///
+/// `None` for a fixture with no streaming path — the `.npy`/`.npz` array lanes, which are generic
+/// ingest but not table ingest. Returning `None` rather than erroring is what lets the caller assert
+/// over "every fixture that *can* stream" without enumerating which those are by hand.
+///
+/// `batch_rows` is deliberately tiny. The point of streaming a corpus fixture is to cross chunk
+/// boundaries: at the production 64Ki rows every fixture here is a single chunk, and a single-chunk
+/// "stream" cannot fail the thing this exists to catch (a schema decided from a prefix — see
+/// `ingest_parquet_late_null`).
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+pub fn golden_streamed(f: &IngestFixture, dir: &Path) -> Result<Option<IngestGolden>> {
+    let input = (f.build)(dir)?;
+    let options = (f.options)(input.clone());
+    if !matches!(
+        options,
+        FormatOptions::Parquet { .. } | FormatOptions::Arrow { .. } | FormatOptions::Csv { .. }
+    ) {
+        return Ok(None);
+    }
+    let meta = crate::column_meta::ColumnMeta::empty();
+    let ingest = fixture_ingest(f, &options, &input, &meta)?;
+    let stage = dir.join(format!("__stream_stage_{}", f.name));
+    let out = dir.join(format!("__streamed_{}.tsra", f.name));
+    let cfg = tessera_io::WriteConfig::default();
+    let m = crate::engine::stream_generic_product(
+        &options,
+        &ingest,
+        &crate::stream_table::StreamOpts {
+            stage: &stage,
+            out: &out,
+            cfg: &cfg,
+            batch_rows: 2,
+            block_rows: tessera_io::BLOCK_ROWS as u64,
+            tiers: Default::default(),
+        },
+    )?;
+    Ok(Some(record(f, &m)))
 }
 
 /// Project a sealed manifest into its golden record.
@@ -401,6 +471,8 @@ fn parquet_opts(input: PathBuf) -> FormatOptions {
         input,
         exclude: Vec::new(),
         column_meta: Default::default(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     }
 }
 
@@ -409,6 +481,8 @@ fn arrow_opts(input: PathBuf) -> FormatOptions {
         input,
         exclude: Vec::new(),
         column_meta: Default::default(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     }
 }
 
@@ -421,6 +495,8 @@ fn csv_opts(input: PathBuf) -> FormatOptions {
         null_tokens: Vec::new(),
         exclude: Vec::new(),
         column_meta: Default::default(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     }
 }
 
@@ -433,6 +509,8 @@ fn csv_nulls_opts(input: PathBuf) -> FormatOptions {
         null_tokens: vec!["NA".into()],
         exclude: Vec::new(),
         column_meta: Default::default(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     }
 }
 
@@ -656,6 +734,38 @@ fn write_tiny_row_groups(dir: &Path) -> Result<PathBuf> {
         parquet::file::properties::WriterProperties::builder()
             .set_max_row_group_row_count(Some(2))
             .set_dictionary_enabled(false)
+            .build(),
+    )
+}
+
+/// **H10, the chunk-boundary half** — the only null is alone in the LAST row group.
+///
+/// Two-row row groups over six rows, so the file has three of them and a reader that inferred the
+/// schema from the first (or from any prefix) would see `energy` fully populated and seal it as a
+/// plain `F64`. The correct product is a `Nullable` column with its mask set on the final row —
+/// which is what the streaming ingest's separate shape pass exists to establish, and what this
+/// fixture turns into a committed hash rather than an argument.
+fn write_late_null(dir: &Path) -> Result<PathBuf> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("energy", DataType::Float64, true),
+    ]));
+    let id: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6]));
+    let energy: ArrayRef = Arc::new(Float64Array::from(vec![
+        Some(511.0),
+        Some(7.25),
+        Some(-0.5),
+        Some(1.0),
+        Some(0.125),
+        None,
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![id, energy]).map_err(he)?;
+    write_parquet_with(
+        dir,
+        "late_null",
+        &batch,
+        parquet::file::properties::WriterProperties::builder()
+            .set_max_row_group_row_count(Some(2))
             .build(),
     )
 }

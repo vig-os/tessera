@@ -350,3 +350,59 @@ fn the_array_lane_seals_the_primitive_the_file_implies() {
         "a record dtype is rows of typed fields, so it is a TABLE"
     );
 }
+
+/// **Streamed equals batched equals golden**, over every fixture that has a streaming path (#458).
+///
+/// The strongest form of the batch-equals-stream claim available here, and the reason it lives in the
+/// corpus rather than only in `generic_table.rs`: this runs in all four of Gate A's configurations,
+/// against the *committed* goldens, so a streaming regression cannot hide behind a locally
+/// regenerated expectation. Both hashes are compared — `content_hash` says the decoders extracted
+/// the same values, `manifest_hash` says nothing in the sealed manifest drifted, and only the second
+/// can see a dropped provenance fact.
+///
+/// `ingest_parquet_late_null` is the fixture that makes this bite: its only null sits alone in the
+/// final row group, so a reader that settled the schema from any prefix seals a different — and
+/// quietly plausible — product.
+#[test]
+fn every_streamable_fixture_streams_to_its_golden() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = committed();
+    let mut streamed = 0usize;
+    for f in corpus::enabled_fixtures() {
+        let Some(got) = corpus::golden_streamed(&f, dir.path())
+            .unwrap_or_else(|e| panic!("stream fixture '{}': {e}", f.name))
+        else {
+            continue; // an array lane: generic ingest, but not table ingest
+        };
+        let want = c
+            .fixtures
+            .iter()
+            .find(|w| w.name == got.name)
+            .unwrap_or_else(|| panic!("fixture '{}' has no committed golden", got.name));
+        assert_eq!(
+            (&got.content_hash, &got.manifest_hash),
+            (&want.content_hash, &want.manifest_hash),
+            "fixture '{}': the STREAMED seal differs from the committed (batched) one. Memory \
+             bounding is a runtime choice and must not reach a hash — if the batch goldens were \
+             deliberately regenerated, this is the assertion that proves the streaming path \
+             followed them.",
+            got.name
+        );
+        assert_eq!(&got.id, &want.id, "fixture '{}': id moved", got.name);
+        streamed += 1;
+    }
+    // Anti-vacuity, same reasoning as the count guard at the top of this file: a loop that streamed
+    // nothing reports the same green as one that streamed everything.
+    let expected: usize = corpus::enabled_fixtures()
+        .iter()
+        .filter(|f| {
+            f.requires
+                .iter()
+                .any(|r| matches!(*r, "parquet" | "arrow" | "csv"))
+        })
+        .count();
+    assert_eq!(
+        streamed, expected,
+        "streamed {streamed} of {expected} table fixtures; a skipped lane is a silent gap"
+    );
+}

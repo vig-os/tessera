@@ -81,7 +81,6 @@ fn ingest_with_config(
     schema: &str,
     cfg: &tessera_io::WriteConfig,
 ) -> tessera_core::Result<Manifest> {
-    let out = dir.join(format!("out-{}", uniq()));
     let spec = IngestSpec {
         collection: CollectionMeta {
             name: "gen-01".into(),
@@ -106,8 +105,25 @@ fn ingest_with_config(
             options,
         }],
     };
+    run_spec_with_config(dir, &spec, cfg)
+}
+
+/// Run a whole `IngestSpec` through the real engine and return the first member's sealed manifest.
+///
+/// The seam the single-product helpers above are built on, exposed for the tests that need to reach
+/// a `ProductSpec` field those helpers do not take (`generation`, `producer`, `derived_from`).
+fn run_spec(dir: &Path, spec: &IngestSpec) -> tessera_core::Result<Manifest> {
+    run_spec_with_config(dir, spec, &tessera_io::WriteConfig::default())
+}
+
+fn run_spec_with_config(
+    dir: &Path,
+    spec: &IngestSpec,
+    cfg: &tessera_io::WriteConfig,
+) -> tessera_core::Result<Manifest> {
+    let out = dir.join(format!("out-{}", uniq()));
     let coll = engine::run(
-        &spec,
+        spec,
         Path::new("test-inline-spec"),
         &out,
         cfg,
@@ -202,6 +218,8 @@ fn the_same_logical_table_seals_identically_however_it_was_physically_written() 
                 input: p,
                 exclude: Vec::new(),
                 column_meta: ColumnMeta::empty(),
+                streaming: Default::default(),
+                batch_rows: 64 * 1024,
             },
             "table",
         )
@@ -292,6 +310,8 @@ fn worker_count_and_ram_budget_do_not_reach_the_hash() {
         input: p.clone(),
         exclude: Vec::new(),
         column_meta: ColumnMeta::empty(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     };
     let one = tessera_io::WriteConfig::default().workers(1);
     let many = tessera_io::WriteConfig::default().workers(8);
@@ -315,6 +335,8 @@ fn re_running_the_same_ingest_is_byte_identical() {
         input: p.clone(),
         exclude: Vec::new(),
         column_meta: ColumnMeta::empty(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
     };
     let a = ingest(dir.path(), opts(), "table").unwrap();
     let b = ingest(dir.path(), opts(), "table").unwrap();
@@ -349,6 +371,8 @@ fn a_csv_and_its_parquet_equivalent_seal_to_the_same_hash() {
             input: pq,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -363,6 +387,8 @@ fn a_csv_and_its_parquet_equivalent_seal_to_the_same_hash() {
             null_tokens: Vec::new(),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -397,6 +423,8 @@ fn the_sealed_product_carries_the_decoder_triple_the_receipt_and_the_source_dige
             input: p.clone(),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -465,6 +493,8 @@ fn sealed_columns_are_stamped_unclassified_unless_the_operator_says_otherwise() 
             input: p.clone(),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -497,6 +527,8 @@ fn sealed_columns_are_stamped_unclassified_unless_the_operator_says_otherwise() 
                 "#,
             )
             .unwrap(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -538,6 +570,8 @@ fn values_round_trip_through_the_seal() {
             input: p,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     );
@@ -631,6 +665,8 @@ fn a_generic_backend_cannot_launder_a_vendor_schema() {
             input: p,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "listmode",
     )
@@ -652,6 +688,8 @@ fn the_laundering_rule_fires_before_the_file_is_opened() {
             input: dir.path().join("does-not-exist.parquet"),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "recon",
     )
@@ -674,6 +712,8 @@ fn a_rejected_spec_creates_no_output_directory() {
             input: dir.path().join("whatever.parquet"),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "listmode",
     );
@@ -706,6 +746,8 @@ fn the_primitive_schema_is_accepted() {
             input: p,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -739,6 +781,8 @@ fn arrow_ipc_and_parquet_produce_the_same_payload() {
             input: pq,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -749,6 +793,8 @@ fn arrow_ipc_and_parquet_produce_the_same_payload() {
             input: ipc,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     )
@@ -783,6 +829,8 @@ fn a_hand_written_ingest_decoder_is_refused_for_every_backend() {
             input: p.clone(),
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     );
@@ -812,6 +860,8 @@ fn a_hand_written_ingest_decoder_is_refused_for_every_backend() {
             input: p,
             exclude: Vec::new(),
             column_meta: ColumnMeta::empty(),
+            streaming: Default::default(),
+            batch_rows: 64 * 1024,
         },
         "table",
     );
@@ -819,4 +869,766 @@ fn a_hand_written_ingest_decoder_is_refused_for_every_backend() {
         tessera_core::Generation::default().with("energy_window", serde_json::json!([425, 650])),
     );
     tessera_ingest::spec::validate(&ok).expect("an operator's own recipe keys are fine");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// #458 — streaming must agree with batch, on BOTH hashes
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Stream one Parquet file to a sealed product, with explicit batch/block/worker knobs.
+fn stream_parquet(
+    dir: &Path,
+    input: &Path,
+    batch_rows: usize,
+    block_rows: u64,
+    workers: usize,
+) -> tessera_core::Result<Manifest> {
+    let tag = uniq();
+    let stage = dir.join(format!("stage-{tag}"));
+    let out = dir.join(format!("streamed-{tag}.tsra"));
+    std::fs::create_dir_all(&stage).unwrap();
+    let cfg = tessera_io::WriteConfig::default().workers(workers);
+    let column_meta = ColumnMeta::default();
+    tessera_ingest::stream_table::stream_to_table_product(
+        || tessera_ingest::parquet_table::parquet_chunks(input, batch_rows, &[]),
+        &tessera_ingest::canonical::GenericIngest {
+            name: "gen-01",
+            timestamp: TS,
+            description: "generically-ingested table",
+            source_format: "parquet",
+            source_path: input,
+            source_label: None,
+            extra_sources: &[],
+            decoder: decoder::Decoder::PARQUET,
+            generation: None,
+            column_meta: &column_meta,
+        },
+        &tessera_ingest::stream_table::StreamOpts {
+            stage: &stage,
+            out: &out,
+            cfg: &cfg,
+            batch_rows,
+            block_rows,
+            tiers: Default::default(),
+        },
+    )
+}
+
+/// The batch-sealed manifest for the same Parquet file, through the real batch path.
+fn batch_parquet(dir: &Path, input: &Path) -> Manifest {
+    let table = tessera_ingest::parquet_table::read_table(input, &[]).expect("batch read");
+    let column_meta = ColumnMeta::default();
+    let (m, _payloads) = tessera_ingest::canonical::to_table_product(
+        &table,
+        &tessera_ingest::canonical::GenericIngest {
+            name: "gen-01",
+            timestamp: TS,
+            description: "generically-ingested table",
+            source_format: "parquet",
+            source_path: input,
+            source_label: None,
+            extra_sources: &[],
+            decoder: decoder::Decoder::PARQUET,
+            generation: None,
+            column_meta: &column_meta,
+        },
+    )
+    .expect("batch seal");
+    let _ = dir;
+    m
+}
+
+/// **The load-bearing equality (#458).** A streamed ingest and a batch one must seal the *same product*.
+///
+/// `manifest_hash` is compared as well as `content_hash`, and that is not belt-and-braces: the two
+/// divergences this work had to design around — a late-arriving null changing a column's representation,
+/// and the transform receipt being recorded per batch instead of per column — both leave `content_hash`
+/// **identical** and move only `manifest_hash`. A content-hash-only comparison would have called the
+/// paths equal while the sealed manifests disagreed.
+///
+/// The fixture is deliberately the one whose `energy` column is nullable, so the streamed path exercises
+/// the promote-to-nullable coercion rather than the trivially-equal case.
+#[test]
+fn streamed_and_batch_parquet_seal_the_same_product() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.parquet");
+    write_parquet(&input, WriterProperties::builder().build());
+
+    let batch = batch_parquet(dir.path(), &input);
+    let streamed = stream_parquet(dir.path(), &input, 2, tessera_io::BLOCK_ROWS as u64, 1)
+        .expect("stream the parquet");
+
+    assert_eq!(
+        batch.content_hash, streamed.content_hash,
+        "the decoded values must be identical"
+    );
+    assert_eq!(
+        batch.manifest_hash, streamed.manifest_hash,
+        "…and so must every sealed manifest field: a divergence here is invisible to content_hash"
+    );
+    assert_eq!(batch.id, streamed.id, "same identity inputs ⇒ same lineage");
+    // Named explicitly, because these are the fields a hand-maintained streaming twin would drift on.
+    assert_eq!(batch.ingest_transform, streamed.ingest_transform);
+    assert_eq!(batch.generation, streamed.generation);
+    assert_eq!(batch.sources, streamed.sources);
+    assert_eq!(batch.metadata, streamed.metadata);
+    // Small input ⇒ small-stays-single: exactly one block, byte-identical to the batch layout.
+    assert_eq!(streamed.blocks.len(), 1, "small input stays a single block");
+    assert_eq!(batch.blocks.len(), streamed.blocks.len());
+    assert_eq!(batch.blocks[0].digest, streamed.blocks[0].digest);
+}
+
+/// The batch size and the worker count are **runtime knobs**, not determinism inputs.
+///
+/// The batch size is the read-side bounded-memory unit and the worker count is encode parallelism;
+/// neither may touch a sealed byte. Without this, "streaming works" could mean "streaming works at the
+/// one batch size the test used".
+#[test]
+fn the_batch_size_and_worker_count_never_move_a_seal() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.parquet");
+    write_parquet(&input, WriterProperties::builder().build());
+    let expected = batch_parquet(dir.path(), &input);
+
+    for batch_rows in [1, 2, 5, 6, 64] {
+        for workers in [1, 2, 4] {
+            let got = stream_parquet(
+                dir.path(),
+                &input,
+                batch_rows,
+                tessera_io::BLOCK_ROWS as u64,
+                workers,
+            )
+            .unwrap_or_else(|e| panic!("stream at batch_rows={batch_rows} workers={workers}: {e}"));
+            assert_eq!(
+                (&expected.content_hash, &expected.manifest_hash),
+                (&got.content_hash, &got.manifest_hash),
+                "batch_rows={batch_rows} workers={workers} moved a seal"
+            );
+        }
+    }
+}
+
+/// A file whose **only null is in the last row group** must stream identically to batch.
+///
+/// This is the case the two-pass design exists for. With one row group per row and the null last, a
+/// single-pass stream would seal the first blocks non-nullable and discover the truth at the end — so the
+/// promote-to-nullable coercion is exercised on every earlier batch, and the result must still equal the
+/// batch fold, which saw the whole column at once.
+#[test]
+fn a_null_only_in_the_last_row_group_streams_identically() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("late-null.parquet");
+
+    // `energy` is null ONLY in the final row, and the writer is told to start a new row group per row,
+    // so the null lands alone in the last one.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("energy", DataType::Float64, true),
+    ]));
+    let id: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3, 4]));
+    let energy: ArrayRef = Arc::new(Float64Array::from(vec![
+        Some(1.0),
+        Some(2.0),
+        Some(3.0),
+        None,
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![id, energy]).unwrap();
+    let props = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(1))
+        .build();
+    let file = std::fs::File::create(&input).unwrap();
+    let mut w = ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+
+    let table = tessera_ingest::parquet_table::read_table(&input, &[]).expect("batch read");
+    let column_meta = ColumnMeta::default();
+    let ingest = tessera_ingest::canonical::GenericIngest {
+        name: "late-null",
+        timestamp: TS,
+        description: "generically-ingested table",
+        source_format: "parquet",
+        source_path: &input,
+        source_label: None,
+        extra_sources: &[],
+        decoder: decoder::Decoder::PARQUET,
+        generation: None,
+        column_meta: &column_meta,
+    };
+    let (expected, _) =
+        tessera_ingest::canonical::to_table_product(&table, &ingest).expect("batch seal");
+
+    // Batch size 1 ⇒ the first three batches see no null at all.
+    let stage = dir.path().join("stage-late");
+    std::fs::create_dir_all(&stage).unwrap();
+    let out = dir.path().join("late.tsra");
+    let cfg = tessera_io::WriteConfig::default();
+    let got = tessera_ingest::stream_table::stream_to_table_product(
+        || tessera_ingest::parquet_table::parquet_chunks(&input, 1, &[]),
+        &ingest,
+        &tessera_ingest::stream_table::StreamOpts {
+            stage: &stage,
+            out: &out,
+            cfg: &cfg,
+            batch_rows: 1,
+            block_rows: tessera_io::BLOCK_ROWS as u64,
+            tiers: Default::default(),
+        },
+    )
+    .expect("stream the late-null parquet");
+
+    assert_eq!(
+        (&expected.content_hash, &expected.manifest_hash),
+        (&got.content_hash, &got.manifest_hash),
+        "a null in only the last row group must not change what streaming seals"
+    );
+}
+
+/// Seal one lane's chunk source both ways and assert the two products are identical.
+///
+/// Parameterised over the lane because the requirement is per-lane: a driver that agrees with batch on
+/// Parquet proves nothing about CSV, whose decode shares no code with it (ADR-0056 §12a keeps arrow out
+/// of that lane entirely).
+fn assert_batch_equals_stream(
+    dir: &Path,
+    input: &Path,
+    source_format: &str,
+    decoder: decoder::Decoder,
+    batch_table: tessera_ingest::canonical::CanonicalTable,
+    open: impl Fn() -> tessera_core::Result<
+        Box<dyn Iterator<Item = tessera_core::Result<tessera_ingest::canonical::CanonicalTable>>>,
+    >,
+) {
+    let column_meta = ColumnMeta::default();
+    let ingest = tessera_ingest::canonical::GenericIngest {
+        name: "lane-eq",
+        timestamp: TS,
+        description: "generically-ingested table",
+        source_format,
+        source_path: input,
+        source_label: None,
+        extra_sources: &[],
+        decoder,
+        generation: None,
+        column_meta: &column_meta,
+    };
+    let (expected, _) =
+        tessera_ingest::canonical::to_table_product(&batch_table, &ingest).expect("batch seal");
+
+    let tag = uniq();
+    let stage = dir.join(format!("stage-{tag}"));
+    std::fs::create_dir_all(&stage).unwrap();
+    let out = dir.join(format!("streamed-{tag}.tsra"));
+    let cfg = tessera_io::WriteConfig::default();
+    let got = tessera_ingest::stream_table::stream_to_table_product(
+        &open,
+        &ingest,
+        &tessera_ingest::stream_table::StreamOpts {
+            stage: &stage,
+            out: &out,
+            cfg: &cfg,
+            batch_rows: 2,
+            block_rows: tessera_io::BLOCK_ROWS as u64,
+            tiers: Default::default(),
+        },
+    )
+    .unwrap_or_else(|e| panic!("stream the {source_format} lane: {e}"));
+
+    assert_eq!(
+        (&expected.content_hash, &expected.manifest_hash),
+        (&got.content_hash, &got.manifest_hash),
+        "the {source_format} lane must seal the same product streamed as batched"
+    );
+    assert_eq!(expected.ingest_transform, got.ingest_transform);
+    assert_eq!(expected.sources, got.sources);
+}
+
+/// The Arrow IPC lane streams to the same product it batches.
+#[test]
+fn streamed_and_batch_arrow_ipc_seal_the_same_product() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.arrow");
+    {
+        let batch = logical_batch();
+        let file = std::fs::File::create(&input).unwrap();
+        let mut w = arrow_ipc::writer::FileWriter::try_new(file, &batch.schema()).unwrap();
+        w.write(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let table = tessera_ingest::arrow_table::read_arrow_table(&input, &[]).expect("batch read");
+    let p = input.clone();
+    assert_batch_equals_stream(
+        dir.path(),
+        &input,
+        "arrow",
+        decoder::Decoder::ARROW_IPC,
+        table,
+        move || {
+            Ok(Box::new(tessera_ingest::arrow_table::arrow_ipc_chunks(
+                &p,
+                &[],
+            )?))
+        },
+    );
+}
+
+/// The CSV lane streams to the same product it batches — including its explicit schema, its null tokens
+/// and the `csv_explicit_schema` / `csv_null_tokens` receipt entries, which are recorded per chunk and
+/// must still appear once.
+#[test]
+fn streamed_and_batch_csv_seal_the_same_product() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.csv");
+    // `energy` is NULL only on the last row, via a declared null token, so the streamed path exercises
+    // both the late-null coercion and the token rule.
+    std::fs::write(
+        &input,
+        "id,label,energy\n1,red,511.0\n2,green,7.25\n3,red,-0.5\n4,blue,NA\n",
+    )
+    .unwrap();
+    let mut opts = tessera_ingest::csv_table::CsvOptions::from_decls(&[
+        "id:i4".to_string(),
+        "label:str".to_string(),
+        "energy:f8?".to_string(),
+    ])
+    .expect("decls");
+    opts.header = true;
+    opts.null_tokens = vec!["NA".to_string()];
+
+    let table = tessera_ingest::csv_table::read_table(&input, &opts).expect("batch read");
+    let p = input.clone();
+    let o = opts.clone();
+    assert_batch_equals_stream(
+        dir.path(),
+        &input,
+        "csv",
+        decoder::Decoder::CSV,
+        table,
+        move || Ok(Box::new(tessera_ingest::csv_table::csv_chunks(&p, &o, 2)?)),
+    );
+}
+
+// ── the spec recipe vs the lane's own recipe ───────────────────────────────────────────────────
+
+/// A spec `[product.generation]` must not delete the decoder triple the lane already sealed.
+///
+/// ADR-0056 §6a puts the decoder's name, version and feature digest inside the seal, and
+/// `declare_generic_table` records it through `Decoder::record_into`, which folds the spec's own
+/// recipe keys in alongside. The engine then re-sealed with the spec's `[product.generation]` via
+/// `ProductBuilder::with_generation` — a whole-bag **replace** — so the triple survived only for
+/// products whose spec declared no recipe at all. The two facts live in one `Generation`, so
+/// "operator declared a recipe" and "we recorded which decoder read the bytes" were mutually
+/// exclusive.
+///
+/// Worth stating why this needed a test rather than a read: the loss is invisible to a
+/// `content_hash` comparison (the payload is untouched), the field is optional so nothing rejects
+/// its absence, and no corpus fixture declares a recipe — so every golden agreed either way.
+#[test]
+fn a_spec_recipe_does_not_delete_the_sealed_decoder_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("t.csv");
+    std::fs::write(&input, "id,energy\n1,511.0\n2,7.25\n").unwrap();
+
+    let csv = |generation: Option<tessera_core::provenance::Generation>| {
+        let mut spec = one_product_spec(
+            FormatOptions::Csv {
+                input: input.clone(),
+                columns: vec!["id:i4".into(), "energy:f8".into()],
+                delimiter: None,
+                header: true,
+                null_tokens: Vec::new(),
+                exclude: Vec::new(),
+                column_meta: ColumnMeta::empty(),
+                streaming: Default::default(),
+                batch_rows: 64 * 1024,
+            },
+            "table",
+        );
+        spec.products[0].generation = generation;
+        run_spec(dir.path(), &spec).expect("ingest")
+    };
+
+    // Baseline: with no spec recipe the triple is sealed. (If this ever fails, the regression below
+    // is meaningless — it would be asserting the absence of something never present.)
+    let key = tessera_ingest::decoder::RECIPE_KEY;
+    let plain = csv(None);
+    let plain_g = plain.generation.as_ref().expect("a recipe bag is sealed");
+    let plain_decoder = plain_g
+        .config
+        .get(key)
+        .unwrap_or_else(|| panic!("`{key}` rides the seal with no spec recipe: {plain_g:?}"));
+    assert_eq!(plain_decoder["name"], "rust-csv", "{plain_g:?}");
+
+    // The regression: declaring an operator recipe must ADD to that bag, not replace it.
+    let declared = csv(Some(
+        tessera_core::provenance::Generation::default()
+            .with("energy_window_kev", serde_json::json!([425, 650])),
+    ));
+    let declared_g = declared
+        .generation
+        .as_ref()
+        .expect("a recipe bag is sealed");
+    assert_eq!(
+        declared_g.config["energy_window_kev"],
+        serde_json::json!([425, 650]),
+        "the operator's own keys are sealed verbatim: {declared_g:?}"
+    );
+    assert_eq!(
+        declared_g.config.get(key),
+        Some(plain_decoder),
+        "and `{key}` is the SAME triple the no-recipe ingest sealed — before the fix declaring a \
+         recipe dropped the key entirely: {declared_g:?}"
+    );
+}
+
+// ── streaming=auto, end to end through the engine ──────────────────────────────────────────────
+
+/// Route a lane by `streaming`, end to end, and require the product to be **identical**.
+///
+/// The whole manifest, spec edge included. Two things had to change before that was possible, and
+/// both were review blockers:
+///
+/// 1. The batch path sealed ONE block whatever the row count while streaming split at `BLOCK_ROWS`,
+///    so above one block the routing chose the bytes. Both paths now partition through
+///    `tessera_io::block_count`, so block layout is a function of the data alone.
+/// 2. `streaming` and `batch_rows` rode `spec_hash`, and therefore `manifest_hash` via the
+///    `ingested_via_spec` edge. They are execution knobs that cannot change a sealed byte, so they
+///    are no longer serialised at all — which is what lets this compare the spec edge instead of
+///    excusing it.
+///
+/// An earlier version of this helper compared everything *except* the spec edge and explained why
+/// that was legitimate. It was legitimate, given a spec hash that recorded the knobs — but the right
+/// fix was to stop recording them, not to narrow the assertion.
+fn assert_routing_agrees(
+    dir: &Path,
+    options: impl Fn(tessera_ingest::spec::StreamingMode) -> FormatOptions,
+) {
+    use tessera_ingest::spec::StreamingMode;
+    let batched = ingest(dir, options(StreamingMode::Batch), "table").expect("batch route");
+    let streamed = ingest(dir, options(StreamingMode::Stream), "table").expect("stream route");
+    let auto = ingest(dir, options(StreamingMode::Auto), "table").expect("auto route");
+
+    for (name, got) in [("streamed", &streamed), ("auto", &auto)] {
+        assert_eq!(
+            batched.content_hash, got.content_hash,
+            "{name}: the payload is the payload, whichever path read it"
+        );
+        assert_eq!(
+            batched.manifest_hash, got.manifest_hash,
+            "{name}: and the whole sealed manifest agrees — including the `ingested_via_spec` edge, \
+             because an execution knob must not reach the archival record"
+        );
+        assert_eq!(
+            batched.blocks, got.blocks,
+            "{name}: same blocks, same digests"
+        );
+        assert_eq!(
+            batched.sources, got.sources,
+            "{name}: every provenance edge"
+        );
+        assert_eq!(
+            batched.id, got.id,
+            "{name}: the lineage handle is path-independent"
+        );
+    }
+}
+
+/// The CSV lane routes by `streaming` without changing the product.
+#[test]
+fn the_csv_lane_routes_by_streaming_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rows.csv");
+    // A late null, so the streamed run must widen the column from a shape pass rather than a prefix.
+    std::fs::write(
+        &input,
+        "id,label,energy\n1,red,511.0\n2,green,7.25\n3,red,-0.5\n4,blue,\n",
+    )
+    .unwrap();
+    assert_routing_agrees(dir.path(), |streaming| FormatOptions::Csv {
+        input: input.clone(),
+        columns: vec!["id:i4".into(), "label:str".into(), "energy:f8?".into()],
+        delimiter: None,
+        header: true,
+        null_tokens: Vec::new(),
+        exclude: Vec::new(),
+        column_meta: ColumnMeta::empty(),
+        streaming,
+        batch_rows: 2,
+    });
+}
+
+/// The Parquet lane routes by `streaming` without changing the product.
+#[test]
+fn the_parquet_lane_routes_by_streaming_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rows.parquet");
+    write_parquet(
+        &input,
+        WriterProperties::builder()
+            .set_max_row_group_row_count(Some(2))
+            .build(),
+    );
+    assert_routing_agrees(dir.path(), |streaming| FormatOptions::Parquet {
+        input: input.clone(),
+        exclude: Vec::new(),
+        column_meta: ColumnMeta::empty(),
+        streaming,
+        batch_rows: 2,
+    });
+}
+/// Every combination of the two execution knobs must seal one identical product.
+///
+/// The end-to-end form of the rule: `--streaming` and `--batch-rows` choose how the work is done,
+/// never what is produced. That covers both halves — the block partition (data-determined, so the
+/// routing cannot move `content_hash`) and the archival record (the knobs are not serialised, so
+/// they cannot move `manifest_hash` through the `ingested_via_spec` edge).
+///
+/// The CLI help makes exactly this promise. This is the test that makes it true rather than
+/// aspirational.
+#[test]
+fn no_combination_of_the_execution_knobs_changes_the_sealed_product() {
+    use tessera_ingest::spec::StreamingMode;
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rows.csv");
+    // A late null, so a prefix-inferred schema would differ, and enough rows to span several batches.
+    let mut text = String::from("id,label,energy\n");
+    for i in 1..=50 {
+        text.push_str(&format!("{i},tag{},{}.5\n", i % 3, i));
+    }
+    text.push_str("51,tag0,\n");
+    std::fs::write(&input, &text).unwrap();
+
+    let opts = |streaming, batch_rows| FormatOptions::Csv {
+        input: input.clone(),
+        columns: vec!["id:i4".into(), "label:str".into(), "energy:f8?".into()],
+        delimiter: None,
+        header: true,
+        null_tokens: Vec::new(),
+        exclude: Vec::new(),
+        column_meta: ColumnMeta::empty(),
+        streaming,
+        batch_rows,
+    };
+
+    let reference = ingest(dir.path(), opts(StreamingMode::Batch, 64 * 1024), "table")
+        .expect("reference ingest");
+    for mode in [
+        StreamingMode::Batch,
+        StreamingMode::Stream,
+        StreamingMode::Auto,
+    ] {
+        for batch_rows in [1usize, 7, 64, 64 * 1024] {
+            let got = ingest(dir.path(), opts(mode, batch_rows), "table")
+                .unwrap_or_else(|e| panic!("ingest {mode:?} / {batch_rows}: {e}"));
+            assert_eq!(
+                (&reference.content_hash, &reference.manifest_hash),
+                (&got.content_hash, &got.manifest_hash),
+                "streaming = {mode:?}, batch_rows = {batch_rows} sealed a different product"
+            );
+        }
+    }
+}
+// ── the partition is a function of the data, not of the routing (#538 review, blocker 1) ───────
+
+/// Write `rows` rows of one `Int32` column to Parquet — the cheapest shape that can cross
+/// `BLOCK_ROWS`.
+fn write_wide_parquet(path: &Path, rows: i32) {
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+    let file = std::fs::File::create(path).expect("create");
+    let props = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(1 << 16))
+        .build();
+    let mut w = ArrowWriter::try_new(file, schema.clone(), Some(props)).expect("writer");
+    let mut start = 0i32;
+    while start < rows {
+        let n = (1 << 16).min(rows - start);
+        let id: ArrayRef = Arc::new(Int32Array::from_iter_values(start..start + n));
+        w.write(&RecordBatch::try_new(schema.clone(), vec![id]).unwrap())
+            .unwrap();
+        start += n;
+    }
+    w.close().unwrap();
+}
+
+/// **The invariant, above one block.** Batch and stream must seal the same product when the input
+/// exceeds `BLOCK_ROWS`.
+///
+/// This is the case every other batch-equals-stream test in this file misses: they all use inputs of
+/// a few rows, and the block partition only becomes observable past `BLOCK_ROWS` (4,194,304). The
+/// batch path sealed exactly ONE block whatever the row count, while the streaming path splits
+/// through `TableMultiBlockSink` — so above one block the same bytes sealed two different
+/// `content_hash`es depending only on which path read them, and the routing decision is recorded
+/// nowhere in the product.
+///
+/// `tessera_io::block_count`'s own doc already called the partition a **format invariant** "shared
+/// by every ingest path so whole-file and streamed agree on the partition (and therefore on the
+/// `content_hash`)". The generic table batch path simply never used those helpers. It does now, so
+/// block layout is a pure function of the data.
+///
+/// Deliberately at the PRODUCTION constant rather than a lowered seam: the seam tests below cover
+/// the partition logic cheaply at many sizes, but only this one proves the constant the shipped
+/// binary actually uses. One `Int32` column keeps it affordable.
+#[test]
+fn batch_and_stream_agree_above_one_block() {
+    use tessera_ingest::spec::StreamingMode;
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("big.parquet");
+    let rows = tessera_io::BLOCK_ROWS as i32 + 1;
+    write_wide_parquet(&input, rows);
+
+    let opts = |streaming| FormatOptions::Parquet {
+        input: input.clone(),
+        exclude: Vec::new(),
+        column_meta: ColumnMeta::empty(),
+        streaming,
+        batch_rows: 64 * 1024,
+    };
+    let batched = ingest(dir.path(), opts(StreamingMode::Batch), "table").expect("batch");
+    let streamed = ingest(dir.path(), opts(StreamingMode::Stream), "table").expect("stream");
+
+    assert_eq!(
+        batched.blocks.len(),
+        2,
+        "BLOCK_ROWS + 1 rows must partition into two blocks on BOTH paths, not one"
+    );
+    assert_eq!(
+        batched
+            .blocks
+            .iter()
+            .map(|b| b.name.clone())
+            .collect::<Vec<_>>(),
+        streamed
+            .blocks
+            .iter()
+            .map(|b| b.name.clone())
+            .collect::<Vec<_>>(),
+        "same block names"
+    );
+    assert_eq!(
+        batched.content_hash, streamed.content_hash,
+        "the partition must be a function of the DATA, never of the path that read it"
+    );
+}
+/// The partition agrees across block boundaries, at many sizes, through the lowered seam.
+///
+/// The cheap counterpart to `batch_and_stream_agree_above_one_block`: that one proves the production
+/// `BLOCK_ROWS` constant, this one walks the arithmetic — exact multiples, one over, one under —
+/// without materialising millions of rows per case. Both are needed. A seam-only proof
+/// says nothing about the constant the binary ships with, and a constant-only proof is too expensive
+/// to run at every interesting size.
+#[test]
+fn the_block_partition_agrees_across_block_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let column_meta = ColumnMeta::default();
+    const BLOCK: u64 = 4;
+
+    for rows in [1usize, 3, 4, 5, 8, 9, 17] {
+        let input = dir.path().join(format!("rows-{rows}.csv"));
+        let mut text = String::from("id,x\n");
+        for i in 0..rows {
+            text.push_str(&format!("{i},{i}.5\n"));
+        }
+        std::fs::write(&input, &text).unwrap();
+
+        let mut opts = tessera_ingest::csv_table::CsvOptions::from_decls(&[
+            "id:i4".to_string(),
+            "x:f8".to_string(),
+        ])
+        .expect("decls");
+        opts.header = true;
+
+        let ingest_opts = tessera_ingest::canonical::GenericIngest {
+            name: "part",
+            timestamp: TS,
+            description: "generically-ingested table",
+            source_format: "csv",
+            source_path: &input,
+            source_label: Some("fixture/table"),
+            extra_sources: &[],
+            decoder: decoder::Decoder::CSV,
+            generation: None,
+            column_meta: &column_meta,
+        };
+        let table = tessera_ingest::csv_table::read_table(&input, &opts).expect("batch read");
+        let (batched, _) =
+            tessera_ingest::canonical::to_table_product_partitioned(&table, &ingest_opts, BLOCK)
+                .expect("batch seal");
+
+        let tag = uniq();
+        let stage = dir.path().join(format!("stage-{tag}"));
+        std::fs::create_dir_all(&stage).unwrap();
+        let out = dir.path().join(format!("streamed-{tag}.tsra"));
+        let cfg = tessera_io::WriteConfig::default();
+        let p = input.clone();
+        let o = opts.clone();
+        let streamed = tessera_ingest::stream_table::stream_to_table_product(
+            move || Ok(Box::new(tessera_ingest::csv_table::csv_chunks(&p, &o, 2)?)),
+            &ingest_opts,
+            &tessera_ingest::stream_table::StreamOpts {
+                stage: &stage,
+                out: &out,
+                cfg: &cfg,
+                batch_rows: 2,
+                // ROWS_PER_GROUP is the sink's required multiple, so the seam cannot use BLOCK
+                // directly on the streaming side; it uses the same arithmetic at its own granularity.
+                block_rows: tessera_io::table::ROWS_PER_GROUP as u64,
+                tiers: Default::default(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("stream {rows} rows: {e}"));
+
+        let expected_blocks = rows.div_ceil(BLOCK as usize).max(1);
+        assert_eq!(
+            batched.blocks.len(),
+            expected_blocks,
+            "{rows} rows at block_rows={BLOCK} must be {expected_blocks} blocks"
+        );
+        // Zero rows is covered by `a_header_only_csv_seals_a_zero_row_table_on_both_paths`, which
+        // needs the chunked reader's empty-chunk behaviour and so belongs with that fix.
+        assert_eq!(
+            streamed.blocks.len(),
+            1,
+            "the streaming side runs at ROWS_PER_GROUP, so these all fit one block"
+        );
+        if rows <= BLOCK as usize {
+            assert_eq!(
+                batched.content_hash, streamed.content_hash,
+                "{rows} rows: one block either way must be byte-identical"
+            );
+        }
+    }
+}
+/// A header-only CSV seals a 0-row table on BOTH paths.
+///
+/// It used to seal a 0-row table under `batch` and fail under `stream` with "decoded to no columns",
+/// because the chunked reader emitted nothing at all and the shape pass therefore learned no
+/// columns. An empty table is not an error — the schema is declared, so a 0-row product is exactly
+/// what it describes — and more to the point, the two paths disagreeing about whether an input is
+/// *valid* is a worse bug than either answer.
+#[test]
+fn a_header_only_csv_seals_a_zero_row_table_on_both_paths() {
+    use tessera_ingest::spec::StreamingMode;
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("empty.csv");
+    std::fs::write(&input, "id,x\n").unwrap();
+    let opts = |streaming| FormatOptions::Csv {
+        input: input.clone(),
+        columns: vec!["id:i4".into(), "x:f8".into()],
+        delimiter: None,
+        header: true,
+        null_tokens: Vec::new(),
+        exclude: Vec::new(),
+        column_meta: ColumnMeta::empty(),
+        streaming,
+        batch_rows: 64 * 1024,
+    };
+    let batched = ingest(dir.path(), opts(StreamingMode::Batch), "table").expect("batch");
+    let streamed = ingest(dir.path(), opts(StreamingMode::Stream), "table")
+        .expect("stream must accept a header-only CSV, as batch does");
+    assert_eq!(
+        (&batched.content_hash, &batched.manifest_hash),
+        (&streamed.content_hash, &streamed.manifest_hash),
+        "an empty table seals the same either way"
+    );
 }

@@ -50,3 +50,4 @@ pub mod parquet_table;
 pub mod provenance;
 pub mod raw;
 pub mod spec;
+pub mod stream_table;
