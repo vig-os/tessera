@@ -902,6 +902,7 @@ fn stream_parquet(
             decoder: decoder::Decoder::PARQUET,
             generation: None,
             column_meta: &column_meta,
+            source_digest: None,
         },
         &tessera_ingest::stream_table::StreamOpts {
             stage: &stage,
@@ -931,6 +932,7 @@ fn batch_parquet(dir: &Path, input: &Path) -> Manifest {
             decoder: decoder::Decoder::PARQUET,
             generation: None,
             column_meta: &column_meta,
+            source_digest: None,
         },
     )
     .expect("batch seal");
@@ -1055,6 +1057,7 @@ fn a_null_only_in_the_last_row_group_streams_identically() {
         decoder: decoder::Decoder::PARQUET,
         generation: None,
         column_meta: &column_meta,
+        source_digest: None,
     };
     let (expected, _) =
         tessera_ingest::canonical::to_table_product(&table, &ingest).expect("batch seal");
@@ -1112,6 +1115,7 @@ fn assert_batch_equals_stream(
         decoder,
         generation: None,
         column_meta: &column_meta,
+        source_digest: None,
     };
     let (expected, _) =
         tessera_ingest::canonical::to_table_product(&batch_table, &ingest).expect("batch seal");
@@ -1549,6 +1553,7 @@ fn the_block_partition_agrees_across_block_boundaries() {
             decoder: decoder::Decoder::CSV,
             generation: None,
             column_meta: &column_meta,
+            source_digest: None,
         };
         let table = tessera_ingest::csv_table::read_table(&input, &opts).expect("batch read");
         let (batched, _) =
@@ -1630,5 +1635,165 @@ fn a_header_only_csv_seals_a_zero_row_table_on_both_paths() {
         (&batched.content_hash, &batched.manifest_hash),
         (&streamed.content_hash, &streamed.manifest_hash),
         "an empty table seals the same either way"
+    );
+}
+
+// ── the source digest on an input that cannot be read twice (#542) ─────────────────────────────
+
+/// Run `f` with a path naming an **already-open pipe** that holds `bytes`.
+///
+/// This is the shape `tessera ingest table <(zcat big.csv.gz)` passes — bash hands the child a
+/// `/dev/fd/63`, which is a pipe. Deliberately NOT a fifo created with `mkfifo`: opening a fifo for
+/// reading *blocks* until a writer appears, so a second open would hang the test instead of
+/// reproducing the defect. Re-opening `/dev/fd/N` duplicates the existing open file description, so
+/// the second reader sees the drained stream — which is precisely the bug.
+///
+/// The write end is closed before `f` runs, so every read ends in EOF rather than blocking. The
+/// fixtures are a few hundred bytes, far under the 64 KiB pipe buffer, so nothing has to drain it.
+#[cfg(unix)]
+fn with_piped_input<T>(bytes: &[u8], f: impl FnOnce(&Path) -> T) -> T {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    let (reader, mut writer) = std::io::pipe().expect("pipe");
+    writer.write_all(bytes).expect("fill the pipe");
+    drop(writer);
+    let path = std::path::PathBuf::from(format!("/dev/fd/{}", reader.as_raw_fd()));
+    let out = f(&path);
+    drop(reader);
+    out
+}
+
+/// The `ingested_from` edge's `content_hash` — the integrity link back to the source-of-record.
+fn source_digest_of(m: &Manifest) -> &str {
+    m.sources
+        .iter()
+        .find(|s| s.role == "ingested_from")
+        .and_then(|s| s.content_hash.as_deref())
+        .expect("every ingest seals an ingested_from edge with a digest")
+}
+
+/// A CSV spec over `input`, with a stable label so the digest is the only thing that can differ.
+#[cfg(unix)]
+fn csv_opts_for(input: &Path) -> FormatOptions {
+    FormatOptions::Csv {
+        input: input.to_path_buf(),
+        columns: vec!["id:i4".into(), "x:f8".into()],
+        delimiter: None,
+        header: true,
+        null_tokens: Vec::new(),
+        exclude: Vec::new(),
+        column_meta: ColumnMeta::empty(),
+        streaming: Default::default(),
+        batch_rows: 64 * 1024,
+    }
+}
+
+/// Two DIFFERENT piped inputs must not seal the same source digest.
+///
+/// The batch path read its input twice: once to decode, then again in `provenance::source_digest`,
+/// which does its own `File::open`. On a pipe the second open hands back the already-drained
+/// descriptor, so the digest was taken over **zero bytes** — one constant for every piped ingest,
+/// whatever the data.
+///
+/// That makes `ingested_from.content_hash` a false claim rather than a missing one, which is the
+/// worse failure: `Source::content_hash` is optional, so recording nothing would have been honest.
+/// It is also invisible to everything that normally catches this — `content_hash` is correct (the
+/// decode saw the real bytes), the product verifies, and `tessera ingest` exits 0.
+#[cfg(unix)]
+#[test]
+fn two_different_piped_inputs_seal_different_source_digests() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = b"id,x\n1,1.5\n2,2.5\n";
+    let b = b"id,x\n9,99.5\n8,88.5\n7,77.5\n";
+
+    let da = with_piped_input(a, |p| {
+        let m = ingest(dir.path(), csv_opts_for(p), "table").expect("ingest a");
+        source_digest_of(&m).to_string()
+    });
+    let db = with_piped_input(b, |p| {
+        let m = ingest(dir.path(), csv_opts_for(p), "table").expect("ingest b");
+        source_digest_of(&m).to_string()
+    });
+
+    assert_ne!(
+        da, db,
+        "two different inputs sealed the SAME ingested_from digest, so the digest is a function of \
+         nothing — it is taken over an already-drained pipe"
+    );
+}
+
+/// The same bytes must seal the same source digest whether they arrived as a file or a pipe.
+///
+/// The other half of the claim, and the one that says the fix is a *fix* rather than a different
+/// wrong answer: hashing in-flight has to reproduce exactly what `provenance::source_digest`
+/// computes for a regular file, MMR wrapper included. A digest that merely varies with the content
+/// would still make the same bytes unrecognisable across two ways of feeding them in.
+#[cfg(unix)]
+#[test]
+fn a_piped_input_and_a_file_of_the_same_bytes_agree_on_the_source_digest() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = b"id,x\n1,1.5\n2,2.5\n3,-0.5\n";
+
+    let on_disk = dir.path().join("rows.csv");
+    std::fs::write(&on_disk, bytes).unwrap();
+    let from_file = {
+        let m = ingest(dir.path(), csv_opts_for(&on_disk), "table").expect("ingest file");
+        source_digest_of(&m).to_string()
+    };
+    let from_pipe = with_piped_input(bytes, |p| {
+        let m = ingest(dir.path(), csv_opts_for(p), "table").expect("ingest pipe");
+        source_digest_of(&m).to_string()
+    });
+
+    assert_eq!(
+        from_file, from_pipe,
+        "the same bytes must hash to the same source digest however they were handed over"
+    );
+}
+
+/// The `.npy` lane has the same defect, and the same fix.
+///
+/// Asking the mirror question rather than fixing only the lane the bug report happened to name:
+/// `read_npy` is `fs::read` of the whole file, so it works on a pipe exactly as the CSV lane does,
+/// and `to_array_product` reached for the same second pass to compute its source digest. Parquet and
+/// Arrow IPC are genuinely exempt — both seek to a footer, so a pipe never reaches them — and `.npz`
+/// is too, because a zip central directory needs seeking.
+#[cfg(all(unix, feature = "npy"))]
+#[test]
+fn two_different_piped_npy_inputs_seal_different_source_digests() {
+    let dir = tempfile::tempdir().unwrap();
+    // Two `<f8` arrays of the same shape and different values: same header, different payload, so
+    // only a digest over the real bytes can tell them apart.
+    let npy = |vals: &[f64]| {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"\x93NUMPY\x01\x00");
+        let header = format!(
+            "{{'descr': '<f8', 'fortran_order': False, 'shape': ({},), }}\n",
+            vals.len()
+        );
+        b.extend_from_slice(&(header.len() as u16).to_le_bytes());
+        b.extend_from_slice(header.as_bytes());
+        for v in vals {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b
+    };
+    let dig = |bytes: Vec<u8>| {
+        with_piped_input(&bytes, |p| {
+            let m = ingest(
+                dir.path(),
+                FormatOptions::Npy {
+                    input: p.to_path_buf(),
+                },
+                "array",
+            )
+            .expect("ingest a piped .npy");
+            source_digest_of(&m).to_string()
+        })
+    };
+    assert_ne!(
+        dig(npy(&[1.0, 2.0, 3.0])),
+        dig(npy(&[9.0, 8.0, 7.0])),
+        "the array lane sealed one constant digest for two different piped inputs too"
     );
 }

@@ -299,10 +299,10 @@ fn check_exclude(opts: &CsvOptions) -> Result<()> {
 
 /// Open a CSV, honouring the declared delimiter and header, and check the header against the
 /// declaration before any value is read.
-fn open_csv(
-    path: &Path,
-    opts: &CsvOptions,
-) -> Result<csv::Reader<std::io::BufReader<std::fs::File>>> {
+type DigestedCsv =
+    csv::Reader<tessera_core::hash::DigestingReader<std::io::BufReader<std::fs::File>>>;
+
+fn open_csv(path: &Path, opts: &CsvOptions) -> Result<DigestedCsv> {
     let file =
         std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
     let mut rdr = csv::ReaderBuilder::new()
@@ -314,7 +314,13 @@ fn open_csv(
         // column count, which the reader's own "found record with 1 fields, but the previous record has
         // 2" does not. One error vocabulary per surface is worth the explicit check.
         .flexible(true)
-        .from_reader(std::io::BufReader::new(file));
+        // Digested as it is read (#542): CSV is a forward scan, so the source digest comes out of the
+        // same pass. The alternative — re-opening the path afterwards, as `provenance::source_digest`
+        // does — is not merely a second read but a WRONG one on a pipe, where the re-open hands back
+        // the drained stream and hashes zero bytes.
+        .from_reader(tessera_core::hash::DigestingReader::new(
+            std::io::BufReader::new(file),
+        ));
     if opts.header {
         let header = rdr
             .headers()
@@ -326,6 +332,15 @@ fn open_csv(
 }
 
 pub fn read_table(path: &Path, opts: &CsvOptions) -> Result<CanonicalTable> {
+    read_table_digested(path, opts).map(|(table, _)| table)
+}
+
+/// [`read_table`], also returning the `blake3` of the bytes it read.
+///
+/// The one implementation of both, so the digest cannot be computed over a different read than the
+/// one that produced the table. The digest is the raw content hash; a caller sealing it onto an
+/// `ingested_from` edge wraps it with [`crate::provenance::single_source_digest`].
+pub fn read_table_digested(path: &Path, opts: &CsvOptions) -> Result<(CanonicalTable, String)> {
     if opts.columns.is_empty() {
         return Err(no_schema_error());
     }
@@ -341,7 +356,9 @@ pub fn read_table(path: &Path, opts: &CsvOptions) -> Result<CanonicalTable> {
         row += 1;
         accum.push_record(path, &record, row)?;
     }
-    accum.finish_chunk()
+    let table = accum.finish_chunk()?;
+    // The loop ran to EOF, so the reader has seen every byte of the source.
+    Ok((table, rdr.into_inner().digest()))
 }
 
 /// Lazily canonicalised CSV chunks of at most `rows_per_chunk` rows — what the streaming driver consumes.

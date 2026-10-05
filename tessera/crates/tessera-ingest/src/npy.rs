@@ -546,8 +546,20 @@ fn swap_to_native(buf: &mut [u8], width: usize) {
 
 /// Read an `.npy` file into whichever primitive its dtype implies.
 pub fn read_npy(path: &Path) -> Result<NpyContent> {
+    read_npy_digested(path).map(|(c, _)| c)
+}
+
+/// [`read_npy`], also returning the `blake3` of the bytes it read.
+///
+/// `.npy` is a forward read of the whole file, so it works on a pipe — and therefore shares the
+/// defect #542 is about: a second pass to compute the source digest re-opens an already-drained
+/// stream and hashes nothing. The bytes are in hand here, so the digest costs one hash of a buffer
+/// that was read anyway. The returned value is the raw content hash; a caller sealing it onto an
+/// `ingested_from` edge wraps it with [`crate::provenance::single_source_digest`].
+pub fn read_npy_digested(path: &Path) -> Result<(NpyContent, String)> {
     let bytes = std::fs::read(path).map_err(|e| he(format!("read {}: {e}", path.display())))?;
-    read_npy_bytes(&bytes, &path.display().to_string())
+    let digest = tessera_core::hash::digest(&bytes);
+    Ok((read_npy_bytes(&bytes, &path.display().to_string())?, digest))
 }
 
 /// [`read_npy`] over an in-memory buffer — the seam the `.npz` members go through.

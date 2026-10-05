@@ -50,6 +50,48 @@ impl StreamHasher {
     }
 }
 
+/// A [`std::io::Read`] that digests every byte it hands on.
+///
+/// For a decoder that reads its input exactly once, the source digest falls out of the same pass.
+/// That is not only a saved read: a second pass is **impossible** on a pipe, where re-opening the
+/// path yields the already-drained stream and hashes nothing at all — so the digest becomes a
+/// constant independent of the data (#542).
+///
+/// Wrap the innermost reader, so the digest covers the bytes as they leave the source rather than
+/// whatever a parser happened to consume. Read to EOF before calling [`Self::digest`]; a partial
+/// read digests only the prefix it saw, which is a true statement about less than you wanted.
+pub struct DigestingReader<R> {
+    inner: R,
+    hasher: StreamHasher,
+}
+
+impl<R> DigestingReader<R> {
+    pub fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hasher: StreamHasher::new(),
+        }
+    }
+
+    /// The `"blake3:<hex>"` digest of everything read so far.
+    pub fn digest(&self) -> String {
+        self.hasher.finalize()
+    }
+
+    /// Give the wrapped reader back.
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for DigestingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+}
+
 /// Domain-separated **leaf** hash of a block digest string (`0x00` prefix).
 fn leaf_hash(block_digest: &str) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
@@ -374,6 +416,46 @@ impl Default for MerkleAccumulator {
 
 #[cfg(test)]
 mod tests {
+
+    /// `DigestingReader` must agree with hashing the same bytes directly, across read boundaries.
+    ///
+    /// The point is that the digest does not depend on HOW the consumer chose to read: a parser that
+    /// pulls one byte at a time and one that takes a big buffer must produce the same answer, or the
+    /// source digest would vary with the reader's buffering.
+    #[test]
+    fn a_digesting_reader_matches_a_direct_digest_whatever_the_read_sizes() {
+        use std::io::Read;
+        let bytes: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let want = digest(&bytes);
+
+        for chunk in [1usize, 7, 64, 4096, 1 << 20] {
+            let mut r = DigestingReader::new(std::io::Cursor::new(bytes.clone()));
+            let mut buf = vec![0u8; chunk];
+            let mut total = 0usize;
+            loop {
+                let n = r.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                total += n;
+            }
+            assert_eq!(total, bytes.len(), "read everything at chunk {chunk}");
+            assert_eq!(r.digest(), want, "digest differed at read size {chunk}");
+        }
+    }
+
+    /// An empty source digests to the digest of nothing, not to a panic — and, importantly, that
+    /// value is DISTINCT from any non-empty one, which is the property #542 turned on: a drained pipe
+    /// used to produce this digest for every input.
+    #[test]
+    fn a_digesting_reader_over_nothing_is_the_empty_digest() {
+        use std::io::Read;
+        let mut r = DigestingReader::new(std::io::Cursor::new(Vec::new()));
+        let mut buf = [0u8; 16];
+        assert_eq!(r.read(&mut buf).unwrap(), 0);
+        assert_eq!(r.digest(), digest(b""));
+        assert_ne!(r.digest(), digest(b"x"));
+    }
     use super::*;
 
     #[test]
