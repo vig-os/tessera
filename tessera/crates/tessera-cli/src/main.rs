@@ -1151,8 +1151,13 @@ enum IngestSrc {
         /// Rows per decoded batch on the streaming path — the read-side memory unit, independent of
         /// the block partition and of the seal. Arrow IPC ignores it: the container's own record
         /// batches are the read unit, and re-cutting them would buffer what streaming avoids.
-        #[arg(long, value_name = "ROWS", default_value_t = 64 * 1024)]
-        batch_rows: usize,
+        ///
+        /// Must be at least 1. Rejected at parse rather than left to fail later, because what `0`
+        /// used to do depended on the route: streaming Parquet reported "decoded to no columns",
+        /// blaming the data for a bad flag, while the batch path ignored it and succeeded.
+        #[arg(long, value_name = "ROWS", default_value_t = 64 * 1024,
+              value_parser = clap::value_parser!(u64).range(1..))]
+        batch_rows: u64,
     },
     /// Any dense numeric grid (NumPy `.npy`, or `.npz` → a collection) → an `array` product.
     ///
@@ -2472,6 +2477,13 @@ fn ingest_src_to_spec(
                 None => ingest_column_meta::ColumnMeta::empty(),
             };
             let streaming = parse_streaming_mode(&streaming)?;
+            // clap's range(1..) already refused 0, so this cannot truncate to a meaningless value.
+            let batch_rows = usize::try_from(batch_rows).map_err(|_| {
+                tessera_core::Error::Invalid(format!(
+                    "tessera ingest table: --batch-rows {batch_rows} does not fit this platform's \
+                     usize"
+                ))
+            })?;
             let options = match from.as_str() {
                 "parquet" => FormatOptions::Parquet {
                     input,

@@ -394,6 +394,31 @@ pub fn parse_str(toml_text: &str) -> Result<IngestSpec> {
 /// Validate the spec: unique product names; every `derived_from` reference resolves; the product
 /// DAG is acyclic (Kahn's topological sort). Returns the topo order (parents-first) on success —
 /// callers that don't need the order can ignore the `Vec`.
+/// `batch_rows` must be positive.
+///
+/// Zero was accepted, and what went wrong then depended on the ROUTE rather than on the value: the
+/// streaming Parquet lane produced no batches and failed with "decoded to no columns" — which blames
+/// the data for a bad flag — while the batch path ignored the knob entirely and succeeded. A
+/// meaningless value should be refused once, where it is read, rather than surfacing as a different
+/// symptom per path, or as none.
+fn check_batch_rows(p: &ProductSpec) -> Result<()> {
+    let rows = match &p.options {
+        FormatOptions::Parquet { batch_rows, .. }
+        | FormatOptions::Arrow { batch_rows, .. }
+        | FormatOptions::Csv { batch_rows, .. } => *batch_rows,
+        _ => return Ok(()),
+    };
+    if rows == 0 {
+        return Err(Error::Invalid(format!(
+            "ingest-spec: product '{}' sets batch_rows = 0; it is the number of rows per decoded \
+             batch and must be at least 1 (omit it for the default of {})",
+            p.name,
+            default_batch_rows()
+        )));
+    }
+    Ok(())
+}
+
 pub fn validate(spec: &IngestSpec) -> Result<Vec<usize>> {
     let n = spec.products.len();
     // 1. unique names — duplicates would silently shadow each other in any name→index map.
@@ -461,6 +486,7 @@ pub fn validate(spec: &IngestSpec) -> Result<Vec<usize>> {
     for p in &spec.products {
         check_no_schema_laundering(p)?;
         check_no_handwritten_decoder(p)?;
+        check_batch_rows(p)?;
     }
     Ok(order)
 }
@@ -683,6 +709,45 @@ pub fn spec_hash(spec: &IngestSpec) -> Result<String> {
 #[cfg(test)]
 mod streaming_knob_tests {
     use super::*;
+
+    /// `batch_rows = 0` is refused where it is read, not left to fail differently per route.
+    ///
+    /// It used to be accepted, and the symptom then depended on the routing rather than on the
+    /// value: the streaming Parquet lane produced no batches and reported "decoded to no columns",
+    /// which blames the data for a bad flag, while the batch path ignored the knob and succeeded. One
+    /// meaningless input should give one answer.
+    #[test]
+    fn batch_rows_zero_is_refused_by_the_spec() {
+        let spec = |n: &str| {
+            parse_str(&format!(
+                r#"
+[collection]
+name = "c"
+timestamp = "2024-01-01T00:00:00Z"
+
+[[product]]
+name = "p"
+role = "raw"
+schema = "table"
+format = "csv"
+input = "x.csv"
+columns = ["a:i4"]
+batch_rows = {n}
+"#
+            ))
+        };
+        // Parse succeeds (it is a well-formed integer); `validate` is the gate.
+        let zero = spec("0").expect("0 parses — it is validate's job to refuse it");
+        let err = validate(&zero).expect_err("batch_rows = 0 must not validate").to_string();
+        assert!(
+            err.contains("batch_rows = 0") && err.contains("at least 1"),
+            "the error must name the field and the rule: {err}"
+        );
+        // And a legitimate value still validates, so the guard is not refusing everything.
+        validate(&spec("1").expect("parse")).expect("batch_rows = 1 is valid");
+        validate(&spec("4096").expect("parse")).expect("batch_rows = 4096 is valid");
+    }
+
 
     /// The streaming knobs must not reach `spec_hash` **at any value**.
     ///
