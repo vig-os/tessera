@@ -1510,26 +1510,37 @@ fn batch_and_stream_agree_above_one_block() {
         "the partition must be a function of the DATA, never of the path that read it"
     );
 }
-/// The partition agrees across block boundaries, at many sizes, through the lowered seam.
+/// The partition agrees across block boundaries — **both paths at the same block size**.
 ///
 /// The cheap counterpart to `batch_and_stream_agree_above_one_block`: that one proves the production
-/// `BLOCK_ROWS` constant, this one walks the arithmetic — exact multiples, one over, one under —
-/// without materialising millions of rows per case. Both are needed. A seam-only proof
-/// says nothing about the constant the binary ships with, and a constant-only proof is too expensive
-/// to run at every interesting size.
+/// `BLOCK_ROWS` constant, this one walks the arithmetic at a smaller unit — one under a boundary, a
+/// boundary exactly, one over, and an exact multiple.
+///
+/// An earlier version of this test ran batch at a block size of 4 while streaming ran at
+/// `ROWS_PER_GROUP`, so the streaming side was ALWAYS one block and the two were only ever compared
+/// for `rows <= 4`. It was named for a property it did not test; review caught the overclaim. Both
+/// sides now partition at `ROWS_PER_GROUP`, which is the smallest size the sink accepts, so a
+/// disagreement at a boundary actually shows up.
 #[test]
 fn the_block_partition_agrees_across_block_boundaries() {
     let dir = tempfile::tempdir().unwrap();
     let column_meta = ColumnMeta::default();
-    const BLOCK: u64 = 4;
+    // The smallest block size `TableMultiBlockSink` accepts (it requires a positive multiple of
+    // ROWS_PER_GROUP), so this is as cheap as a real boundary test can be.
+    const BLOCK: u64 = tessera_io::table::ROWS_PER_GROUP as u64;
 
-    for rows in [1usize, 3, 4, 5, 8, 9, 17] {
+    for rows in [BLOCK - 1, BLOCK, BLOCK + 1, BLOCK * 2] {
+        let rows = rows as usize;
         let input = dir.path().join(format!("rows-{rows}.csv"));
-        let mut text = String::from("id,x\n");
-        for i in 0..rows {
-            text.push_str(&format!("{i},{i}.5\n"));
+        {
+            use std::io::Write;
+            let f = std::fs::File::create(&input).unwrap();
+            let mut w = std::io::BufWriter::new(f);
+            writeln!(w, "id,x").unwrap();
+            for i in 0..rows {
+                writeln!(w, "{i},{i}.5").unwrap();
+            }
         }
-        std::fs::write(&input, &text).unwrap();
 
         let mut opts = tessera_ingest::csv_table::CsvOptions::from_decls(&[
             "id:i4".to_string(),
@@ -1563,16 +1574,19 @@ fn the_block_partition_agrees_across_block_boundaries() {
         let p = input.clone();
         let o = opts.clone();
         let streamed = tessera_ingest::stream_table::stream_to_table_product(
-            move || Ok(Box::new(tessera_ingest::csv_table::csv_chunks(&p, &o, 2)?)),
+            move || {
+                Ok(Box::new(tessera_ingest::csv_table::csv_chunks(
+                    &p, &o, 4096,
+                )?))
+            },
             &ingest_opts,
             &tessera_ingest::stream_table::StreamOpts {
                 stage: &stage,
                 out: &out,
                 cfg: &cfg,
-                batch_rows: 2,
-                // ROWS_PER_GROUP is the sink's required multiple, so the seam cannot use BLOCK
-                // directly on the streaming side; it uses the same arithmetic at its own granularity.
-                block_rows: tessera_io::table::ROWS_PER_GROUP as u64,
+                batch_rows: 4096,
+                // The SAME block size as the batch side above. That equality is the whole test.
+                block_rows: BLOCK,
                 tiers: Default::default(),
             },
         )
@@ -1582,23 +1596,34 @@ fn the_block_partition_agrees_across_block_boundaries() {
         assert_eq!(
             batched.blocks.len(),
             expected_blocks,
-            "{rows} rows at block_rows={BLOCK} must be {expected_blocks} blocks"
+            "{rows} rows at block_rows={BLOCK}: batch must be {expected_blocks} blocks"
         );
-        // Zero rows is covered by `a_header_only_csv_seals_a_zero_row_table_on_both_paths`, which
-        // needs the chunked reader's empty-chunk behaviour and so belongs with that fix.
         assert_eq!(
             streamed.blocks.len(),
-            1,
-            "the streaming side runs at ROWS_PER_GROUP, so these all fit one block"
+            expected_blocks,
+            "{rows} rows at block_rows={BLOCK}: stream must be {expected_blocks} blocks"
         );
-        if rows <= BLOCK as usize {
-            assert_eq!(
-                batched.content_hash, streamed.content_hash,
-                "{rows} rows: one block either way must be byte-identical"
-            );
-        }
+        assert_eq!(
+            batched
+                .blocks
+                .iter()
+                .map(|b| b.name.clone())
+                .collect::<Vec<_>>(),
+            streamed
+                .blocks
+                .iter()
+                .map(|b| b.name.clone())
+                .collect::<Vec<_>>(),
+            "{rows} rows: same block names"
+        );
+        assert_eq!(
+            (&batched.content_hash, &batched.manifest_hash),
+            (&streamed.content_hash, &streamed.manifest_hash),
+            "{rows} rows: batch and stream must seal one product at every boundary"
+        );
     }
 }
+
 /// A header-only CSV seals a 0-row table on BOTH paths.
 ///
 /// It used to seal a 0-row table under `batch` and fail under `stream` with "decoded to no columns",
