@@ -483,38 +483,23 @@ fn qform_rows(r: &Raw) -> [[f64; 4]; 3] {
     rows
 }
 
-/// Is every entry of the affine finite? A NaN/inf entry is **corruption**, not absent geometry:
-/// `WorldFrame::is_nondegenerate` only checks that the column norms are non-zero, and a NaN norm
-/// compares false against `> 0.0` in a way that silently reads as "degenerate".
+/// Is every entry of the affine finite? A NaN/inf entry is **corruption**, not absent geometry.
+///
+/// Delegates to [`WorldFrame::is_finite`]: this decoder needs the finite/singular distinction
+/// *separately* (a singular-but-finite sform falls through to the qform, a non-finite one is an
+/// error), which the one-boolean gate could not express. #459 promoted both to core, so the rule and
+/// its epsilon are a format constant rather than this decoder's private choice.
 fn affine_is_finite(wf: &WorldFrame) -> bool {
-    wf.affine.iter().all(|v| v.is_finite())
+    wf.is_finite()
 }
 
-/// How far the 3×3 block is from singular, **scale-invariantly**: `|det| / Π‖column‖`. That ratio is 1
-/// for an orthogonal frame and → 0 as the columns become parallel, so it does not mistake a
-/// micron-spacing affine (tiny `det`, perfectly good geometry) for a degenerate one — which an absolute
-/// `det` threshold would. Parallel columns are the case `WorldFrame::is_nondegenerate` misses: their
-/// norms are non-zero, yet there is no invertible voxel→world map.
-fn affine_conditioning(wf: &WorldFrame) -> f64 {
-    let a = &wf.affine;
-    let at = |r: usize, c: usize| a[r * 4 + c];
-    let det = at(0, 0) * (at(1, 1) * at(2, 2) - at(1, 2) * at(2, 1))
-        - at(0, 1) * (at(1, 0) * at(2, 2) - at(1, 2) * at(2, 0))
-        + at(0, 2) * (at(1, 0) * at(2, 1) - at(1, 1) * at(2, 0));
-    let scale: f64 = wf.spacing().iter().product();
-    if scale > 0.0 {
-        det.abs() / scale
-    } else {
-        0.0 // a zero-norm column: degenerate by definition
-    }
-}
-
-/// A usable voxel→world affine: non-degenerate per ADR-0030 **and** genuinely invertible. Kept local to
-/// this decoder rather than tightening `WorldFrame::is_nondegenerate`, which is the format-wide
-/// `ArraySpec::validate` gate — narrowing that would change what every other product may seal, which is
-/// a format decision, not a NIfTI bug fix (raised as a follow-up instead).
+/// A usable voxel→world affine: finite, non-collapsed and genuinely invertible — ADR-0030 §2a.
+///
+/// Exactly the format-wide gate now, so a sealed NIfTI product and `ArraySpec::validate` cannot
+/// disagree about what counts as usable geometry. The epsilon lives in core as
+/// `WORLD_FRAME_MIN_CONDITIONING`.
 fn affine_is_usable(wf: &WorldFrame) -> bool {
-    wf.is_nondegenerate() && affine_conditioning(wf) > 1.0e-6
+    wf.is_nondegenerate()
 }
 
 /// RAS rows `[Mi, Mj, Mk, offset]` → the Tessera LPS `world_frame`: reorder the columns
@@ -591,7 +576,7 @@ fn parse_geometry(r: &Raw) -> Result<(Option<WorldFrame>, Option<GeometrySource>
         tracing::warn!(
             target: "tessera::ingest",
             sform_code,
-            conditioning = affine_conditioning(&wf),
+            conditioning = wf.conditioning(),
             "nifti: sform_code is set but the sform is singular (no invertible geometry) — falling back to the qform"
         );
     }

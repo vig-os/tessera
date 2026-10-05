@@ -355,7 +355,31 @@ fn build_series_world_frame(
         unit: "mm".into(),
         space: "patient".into(),
     };
-    frame.is_nondegenerate().then_some(frame)
+    // #459: a defect here is "present but unusable", never "absent" — every absent input already
+    // returned `None` through a `?` above. So it is worth saying out loud: the series HAD orientation,
+    // spacing and origins, and we are discarding the geometry they describe. Silently returning `None`
+    // would be indistinguishable from a series that never carried geometry at all.
+    //
+    // Still `None` rather than an error, which is this function's documented contract (`slice --world`
+    // stays index-only rather than emitting a bogus affine) and the safer answer for a modality whose
+    // series vary this much. The newly-caught case is the singular one: a slice vector coplanar with
+    // the in-plane cosines — a mis-sorted or interleaved series, or an `ipp_second` from another stack
+    // — whose three columns all have healthy norms while the determinant is zero.
+    match frame.defect() {
+        None => Some(frame),
+        Some(defect) => {
+            tracing::warn!(
+                target: "tessera::ingest",
+                ?defect,
+                conditioning = frame.conditioning(),
+                spacing = ?frame.spacing(),
+                "dicom: orientation, spacing and origins were all present but describe an unusable \
+                 voxel→world affine — sealing without geometry (index space). A slice vector coplanar \
+                 with the in-plane cosines usually means a mis-sorted or interleaved series."
+            );
+            None
+        }
+    }
 }
 
 /// Serialize the full DICOM header (every top-level element **except** PixelData) into a

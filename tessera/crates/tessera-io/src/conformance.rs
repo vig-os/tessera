@@ -11,7 +11,7 @@
 //! `cargo run -p tessera-io --example gen_corpus`.
 
 use serde::{Deserialize, Serialize};
-use tessera_core::block::array::ArraySpec;
+use tessera_core::block::array::{ArraySpec, WorldFrame};
 use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::manifest::Manifest;
 use tessera_core::provenance::Source;
@@ -319,6 +319,63 @@ pub fn fixtures() -> Vec<Fixture> {
             name: "segmentation_uint8",
             manifest: b.seal().unwrap(),
             payloads: vec![l_pl, m_pl, p_pl],
+        });
+    }
+
+    // 9 — recon carrying a real `world_frame`: OBLIQUE and ANISOTROPIC (#459).
+    //
+    // Added because the corpus had **no geometry at all** — not one sealed fixture carried a
+    // `world_frame`, so ADR-0030's non-degeneracy gate had zero conformance coverage in either
+    // direction. #459 tightened that gate (non-finite => corrupt, singular => degenerate); a gate
+    // nothing exercises cannot catch its own regression, so this fixture is the coverage.
+    //
+    // Oblique and anisotropic on purpose. A diagonal affine would pass every candidate predicate
+    // including the broken one, so it would pin nothing: the interesting properties are that spacing
+    // is DERIVED from column norms (ADR-0030 §2) rather than stored, and that an off-diagonal
+    // rotation survives a seal/read round-trip unchanged.
+    //
+    // The rotation is written as exact f64 literals rather than computed with `.cos()`/`.sin()`:
+    // this corpus is the cross-arch determinism gate, and libm transcendentals are not guaranteed
+    // bit-identical between platforms. A fixture whose own bytes depend on the host's libm would
+    // make every cross-arch comparison suspect.
+    {
+        // 30° about world x, columns [z, y, x] scaled to 5.0 / 0.5 / 0.5 mm. cos30 and sin30·cos30
+        // are spelled out; conditioning is exactly 1.0 (orthogonal columns), |det| = 1.25.
+        let spec = ArraySpec::new(vec![16, 32, 32], "int16")
+            .with_unit("HU")
+            .with_axes(vec!["z".into(), "y".into(), "x".into()]);
+        let spec = ArraySpec {
+            world_frame: Some(WorldFrame {
+                affine: [
+                    0.0,
+                    0.0,
+                    0.5,
+                    -120.0, //
+                    -2.5,
+                    0.433_012_701_892_219_35,
+                    0.0,
+                    -118.5, //
+                    4.330_127_018_922_193,
+                    0.25,
+                    0.0,
+                    -60.25,
+                ],
+                convention: "LPS".into(),
+                unit: "mm".into(),
+                space: "patient".into(),
+            }),
+            ..spec
+        };
+        let mut b = ProductBuilder::new("recon", "recon-oblique", "oblique anisotropic CT", TS);
+        let pl = push_array(&mut b, "volume", &spec, ramp_i16(16 * 32 * 32));
+        b.with_field(
+            "modality",
+            serde_json::json!({"_vocabulary": "DICOM", "_code": "CT"}),
+        );
+        out.push(Fixture {
+            name: "recon_oblique_world_frame",
+            manifest: b.seal().unwrap(),
+            payloads: vec![pl],
         });
     }
 

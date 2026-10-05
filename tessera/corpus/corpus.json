@@ -54,5 +54,12 @@
     "id": "blake3:70900b373daacb02d47855efbb1d01134881bab74603b3c34b47710d467974b6",
     "content_hash": "blake3:8e2d917e6f414710c4d845a9a09922fc782314b1d547c8c63b1ca5e39277986a",
     "manifest_hash": "blake3:458165b6587b7e7fd3e616e45df122264567f4b6fc76201cfa159c4a3f69d76a"
+  },
+  {
+    "name": "recon_oblique_world_frame",
+    "product": "recon",
+    "id": "blake3:8e523bb6446fad39bcdb43401fed537cf8b636d1c4406661e64ff52b7c360efb",
+    "content_hash": "blake3:04b662aa043655dbf9ed0df70a485f78d64d1a9ed68aeb769439a7ca5c84b4a4",
+    "manifest_hash": "blake3:c0d87ab78ab00e9679f04a22e9b64978967b55487a3815d73aa755c676fa5f08"
   }
 ]

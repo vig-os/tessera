@@ -52,6 +52,27 @@ pub struct ArraySpec {
     pub axis_referencing: Option<Vec<Option<Referenced>>>,
 }
 
+/// The minimum scale-invariant conditioning ([`WorldFrame::conditioning`]) a sealed `world_frame`
+/// may have — a **format constant** (ADR-0030 §2a), not a per-decoder choice.
+///
+/// `1e-6` is ten orders of magnitude above `f64::EPSILON`, so it rejects only frames that are
+/// degenerate by corruption or construction, never ones that are merely rounded. It is also the value
+/// the NIfTI decoder already shipped locally, so promoting it here changes nothing on the one path
+/// that was already checking.
+pub const WORLD_FRAME_MIN_CONDITIONING: f64 = 1.0e-6;
+
+/// Why a [`WorldFrame`] is unusable. Three verdicts, because they are three different statements and
+/// an operator acts differently on each.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FrameDefect {
+    /// An entry is `NaN` or `±inf`: the bytes are **damaged**. Not "no geometry" — unreadable.
+    NonFinite,
+    /// An axis has zero spacing: a collapsed column, so there is no geometry along that axis.
+    ZeroSpacing,
+    /// Finite, non-zero columns, but linearly dependent — no invertible voxel→world map exists.
+    Singular { conditioning: f64 },
+}
+
 /// A voxel→world spatial frame (ADR-0030). The affine maps an index vector **in declared-axis order**
 /// to world coordinates; spacing/orientation/origin live **only** here (spacing is derived — §2). The
 /// world handedness is **LPS canonical** (§6); RAS sources are normalised at the door (ADR-0025).
@@ -78,10 +99,67 @@ impl WorldFrame {
         [col(0), col(1), col(2)]
     }
 
-    /// A frame is valid iff every axis has a non-zero spacing (non-degenerate affine) — the ADR-0030
-    /// "affine non-degenerate" gate.
+    /// Is every entry of the affine finite?
+    ///
+    /// Separate from non-degeneracy because the two are different claims about different problems: a
+    /// `NaN`/`inf` affine is **damaged bytes**, while a singular one is **no usable geometry**. The
+    /// old single gate conflated them — a `NaN` column norm compares `false` against `> 0.0`, so a
+    /// corrupt affine was reported as merely degenerate, and an `inf` norm passed `> 0.0` outright.
+    pub fn is_finite(&self) -> bool {
+        self.affine.iter().all(|v| v.is_finite())
+    }
+
+    /// How far the 3×3 block is from singular, **scale-invariantly**: `|det| / Π‖column‖`.
+    ///
+    /// 1 for an orthogonal frame, → 0 as the columns become linearly dependent. Scale-invariance is
+    /// the whole point, and an absolute `|det|` threshold fails in both directions:
+    ///
+    /// - 1 µm isotropic voxels give `|det| = 1e-9` with perfectly good geometry — an absolute gate
+    ///   rejects real micrograph data. Here the ratio is exactly 1.
+    /// - metre-scale columns 1e-7 rad from coplanar give `|det| ≈ 100` — an absolute gate accepts an
+    ///   affine no consumer can invert. Here the ratio is 1e-7, below
+    ///   [`WORLD_FRAME_MIN_CONDITIONING`].
+    ///
+    /// Returns 0 for a zero-norm column (degenerate by definition) and for a non-finite affine, where
+    /// the ratio is meaningless — callers must test [`Self::is_finite`] first, which
+    /// [`Self::defect`] does.
+    pub fn conditioning(&self) -> f64 {
+        if !self.is_finite() {
+            return 0.0;
+        }
+        let a = &self.affine;
+        let at = |r: usize, c: usize| a[r * 4 + c];
+        let det = at(0, 0) * (at(1, 1) * at(2, 2) - at(1, 2) * at(2, 1))
+            - at(0, 1) * (at(1, 0) * at(2, 2) - at(1, 2) * at(2, 0))
+            + at(0, 2) * (at(1, 0) * at(2, 1) - at(1, 1) * at(2, 0));
+        let scale: f64 = self.spacing().iter().product();
+        if scale > 0.0 && scale.is_finite() {
+            det.abs() / scale
+        } else {
+            0.0
+        }
+    }
+
+    /// What is wrong with this frame, if anything — the ADR-0030 non-degeneracy gate, as two
+    /// distinguishable verdicts rather than one boolean.
+    pub fn defect(&self) -> Option<FrameDefect> {
+        if !self.is_finite() {
+            return Some(FrameDefect::NonFinite);
+        }
+        if !self.spacing().iter().all(|&s| s > 0.0) {
+            return Some(FrameDefect::ZeroSpacing);
+        }
+        let c = self.conditioning();
+        if c <= WORLD_FRAME_MIN_CONDITIONING {
+            return Some(FrameDefect::Singular { conditioning: c });
+        }
+        None
+    }
+
+    /// A frame is valid iff it is finite, every axis has non-zero spacing, and the affine is
+    /// genuinely invertible — the ADR-0030 "affine non-degenerate" gate.
     pub fn is_nondegenerate(&self) -> bool {
-        self.spacing().iter().all(|&s| s > 0.0)
+        self.defect().is_none()
     }
 
     /// The voxel→world affine for multiscale pyramid **level `level`** (a `2^level` downsample),
@@ -356,11 +434,30 @@ impl ArraySpec {
         // ADR-0030 post-Accept gate: a present `world_frame` must be **non-degenerate** — every axis
         // needs non-zero spacing, else the voxel→world affine is singular (no invertible geometry).
         if let Some(wf) = &self.world_frame {
-            if !wf.is_nondegenerate() {
-                return Err(crate::Error::Invalid(format!(
-                    "degenerate world_frame: an axis has zero spacing (spacing = {:?})",
-                    wf.spacing()
-                )));
+            match wf.defect() {
+                None => {}
+                Some(FrameDefect::NonFinite) => {
+                    return Err(crate::Error::Invalid(
+                        "corrupt world_frame: the affine contains a non-finite entry (NaN or inf), \
+                         so these geometry bytes are damaged rather than absent — an array with no \
+                         geometry omits `world_frame` entirely (ADR-0029 feature-by-presence)"
+                            .into(),
+                    ));
+                }
+                Some(FrameDefect::ZeroSpacing) => {
+                    return Err(crate::Error::Invalid(format!(
+                        "degenerate world_frame: an axis has zero spacing (spacing = {:?})",
+                        wf.spacing()
+                    )));
+                }
+                Some(FrameDefect::Singular { conditioning }) => {
+                    return Err(crate::Error::Invalid(format!(
+                        "degenerate world_frame: the affine columns are linearly dependent, so no \
+                         invertible voxel→world map exists (conditioning {conditioning:.3e} <= \
+                         {WORLD_FRAME_MIN_CONDITIONING:.0e}; spacing = {:?})",
+                        wf.spacing()
+                    )));
+                }
             }
         }
         // ADR-0032 post-Accept gate: per-axis referencing, when present, carries exactly one entry per
