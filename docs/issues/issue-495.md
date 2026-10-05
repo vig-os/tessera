@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-09-29T05:43:29Z
-updated: 2026-09-29T11:43:45Z
+updated: 2026-10-04T21:15:52Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/495
-comments: 8
+comments: 9
 labels: none
 assignees: none
 milestone: 0.1.0-alpha.2
 projects: none
 parent: none
 children: none
-synced: 2026-09-30T07:57:12.198Z
+synced: 2026-10-05T08:17:46.507Z
 ---
 
 # [Issue 495]: [ci(nix-check): the x86_64 leg's runtime varies 2.1x and its bad draws hit the cap](https://github.com/vig-os/tessera/issues/495)
@@ -404,5 +404,53 @@ Run on scratch branches via `workflow_dispatch` (`exp/495-maxjobs2-cores4-on497`
 **A prediction of mine that was wrong, in the useful direction.** I argued this combination would keep wall-clock *roughly neutral*, reasoning that total CPU stays at ~8 (2×4 vs 4×2). Wall-clock instead improved on all four legs: −2, −12, −9, −14 minutes. The likely mechanism is that lower memory pressure removes reclaim/swap stalls, so the box spends more of its time doing work — i.e. the memory fix paid a wall-clock dividend rather than costing one. Max load1 held at 8.3–8.6 across all four, confirming total CPU was in fact unchanged.
 
 **Recommendation:** adopt `--max-jobs 2 --cores 4`, with the caveat stated rather than buried — **#461's x86 leg does not clear the bar**, and 3.0 GB of headroom on the heaviest branch means the ceiling risk is *reduced, not eliminated*. #506's paths filter does **not** help that branch (it matches the encoder-surface filter, correctly). The remaining levers for it are a larger runner class, or `--max-jobs 2 --cores 2` at a wall-clock cost that these numbers suggest may be smaller than feared.
+
+
+---
+
+# [Comment #9]() by [gerchowl]()
+
+_Posted on October 4, 2026 at 09:15 PM_
+
+### The test phase is not the memory problem — measured, and the #524 OOM wasn't during tests
+
+**Hypothesis tested:** that nextest's own parallelism (`test-threads` = nproc) plus memory-heavy tests explained #524's exit-137 kill "inside tessera-nextest's checkPhase". **It does not.** No change to `test-threads` is warranted.
+
+#### 1 · Test execution — per-test peak RSS, all 631 tests
+
+Every test process run through a target-runner that records `RUSAGE_CHILDREN.ru_maxrss` (nextest runs one process per test). Release profile, as CI (crane's setup hook sets `CARGO_PROFILE=release` at build time), and **pinned to 4 cores**. That pinning matters: rayon sizes its pools from CPU affinity, so an unpinned test on an 88-core box would use more memory than it ever does on a 4-vCPU runner.
+
+| | MiB |
+|---|---:|
+| median test | 13 |
+| heaviest test (`schema_reference_matches_the_committed_copy`) | 300 |
+| 2nd (`nifti::reads_every_volume_of_a_4d_series`) | 282 |
+| worst possible overlap at `test-threads=4` (top 4 summed) | **752** |
+| … at `test-threads=2` | 582 |
+
+All 631 tests run in **17 s**. A `test-threads` cap could save ~170 MiB against a 15.5 GB peak.
+
+#### 2 · Test-binary compile + link — the actual checkPhase work
+
+Deps warm (the `cargoArtifacts` equivalent), only the 6 workspace crates rebuilt in release, sccache **off** (CI has none), 4 cores, inside its own cgroup, sampling **anonymous** memory (page cache excluded, matching the CI sampler's `used`):
+
+| cargo jobs | anon peak | time |
+|---|---:|---:|
+| `-j 2` | 1108 MiB | 147 s |
+| `-j 4` (today, under #514's `--cores 4`) | 1460 MiB | 76 s |
+
+`-j 4` is the right setting: +350 MiB buys half the time. The whole nextest derivation stays under ~2.2 GB.
+
+#### 3 · What #524's log actually shows
+
+#524 x86 (run 36590225820, job 109481738945, **pre-#514**: max-jobs 4, `--cores 2`). `tessera-nextest` entered its checkPhase at 16:06:37 and was killed at 16:08:59 with **zero tests started** — it was compiling and linking. In the same window `tessera-test` (= `workspace-doctest`) was compiling and running doctests and `tessera-cli-cloud` was in its final link/strip. Memory went **14080 → 15714 MB in 30 s** as the third heavy derivation joined. That is the pre-#514 three-way overlap, which #514's `--max-jobs 2` removes.
+
+#### 4 · Post-#514: 12 legs, 0 evictions — but the margin is thin, and it is Gate A
+
+All 6 completed nix-check runs since #514 merged (annotations checked on every leg and attempt): **0 evictions, 0 failures**. x86 77–80 min, aarch64 58–63 min. #524's own branch (`feature/347-…`) — the one that was OOM-killed — now passes at 80/63 min.
+
+Peak used across the 12 legs: **9.6 – 14.1 GB**. The worst leg (run 36608750748 x86) reached **14075 MB, 1914 MB free**. At that moment the two active derivations were `ingest-gate-a-reduced` and `ingest-gate-a-sql`: memory went 8.9 → 14.1 → 7.5 GB in ~60 s as they overlapped, falling the moment `-reduced` finished. Gate A builds are **dev-profile** and compile their feature configuration's whole dependency graph (`-sql` includes DataFusion), so they — not nextest — are now the margin-eaters.
+
+**Disposition:** no change to `test-threads` or cargo `-j`. The nextest-OOM in #524 was a pre-#514 artifact. #495 stays open as a watch item with a new governing number — **worst post-#514 peak 14.1 GB / 1.9 GB margin, driven by two Gate A builds overlapping** — and a new target if the margin needs widening.
 
 

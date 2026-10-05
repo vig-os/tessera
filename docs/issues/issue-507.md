@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-09-29T10:24:46Z
-updated: 2026-09-29T10:24:46Z
+updated: 2026-10-05T07:38:47Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/507
-comments: 0
+comments: 1
 labels: none
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-09-30T07:57:09.347Z
+synced: 2026-10-05T08:17:46.066Z
 ---
 
 # [Issue 507]: [ci(nix): no nix store cache — every run recompiles the dependency graph from source (~19.4 min, 23% of each leg, measured)](https://github.com/vig-os/tessera/issues/507)
@@ -93,4 +93,19 @@ belongs as a devkit issue with this measurement attached, rather than only here.
 3. Raise the substituter-based options with the owner and with devkit only if (1) rules the free path out.
 
 Refs: #495, #506
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 5, 2026 at 07:38 AM_
+
+**Watch item: cache budget** (from the #544/#548 review). Repo Actions cache is at **6.92 GB of 10 GB** (33 entries). Five of them are `nix-deps-v1` entries at 1.09–1.15 GB each, all branch-scoped by-products of this work: `perf/507`, `perf/517` and `pull/544`. The rest are ~0.05 GB nix-installer entries.
+
+Steady state after #544 merges:
+- **dev scope:** one entry per arch, 2.24 GB in total. It's refreshed only when the deps derivation changes, and touched by every PR's restore, so LRU eviction keeps it.
+- **PR scope:** only PRs that **change** the deps derivation save their own entry (~2.2 GB for both arches). A hit never saves. The obvious source is Renovate's Cargo.lock bumps: about 3–4 of them open at once would push the cache past 10 GB, and GitHub then evicts least-recently-used entries.
+- **Evicting the branch entries above:** harmless. They're unused 7 days after these PRs land and age out.
+
+No change for now. If the cap bites, skip the PR-scope save on `pull_request` runs, so only the warmer writes. Re-runs of a deps-changing PR would then go cold.
 
