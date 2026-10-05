@@ -386,6 +386,10 @@ fn fixture_ingest<'a>(
         decoder,
         generation: None,
         column_meta,
+        // Left for the decode to fill in: `seal_generic_product` injects whatever digest the lane
+        // captured in flight. The value is identical either way, which is what keeps the goldens
+        // still.
+        source_digest: None,
     })
 }
 

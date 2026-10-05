@@ -35,6 +35,17 @@ pub fn ingested_from(paths: &[&Path], reference: impl Into<String>) -> Result<So
     Ok(Source::new("ingested_from", reference).with_content_hash(digest))
 }
 
+/// Wrap one source's own `blake3(bytes)` into the digest [`source_digest`] would have produced.
+///
+/// [`source_digest`] takes an MMR root over the per-file digests **even for a single file**, and
+/// `merkle_root` of one leaf is a domain-separated leaf hash rather than the digest itself. So a
+/// caller that hashed its input in flight has to wrap the result the same way, or the very same bytes
+/// would seal two different `ingested_from` digests depending on which code path read them — trading
+/// one wrong answer for a different one (#542).
+pub fn single_source_digest(content_hash: &str) -> String {
+    tessera_core::hash::merkle_root(&[content_hash.to_string()])
+}
+
 /// Like [`ingested_from`] but with a **precomputed** source digest — for backends (DICOM series) that
 /// already hashed the files while decoding them, so the bytes are read only once.
 pub fn ingested_from_digest(reference: impl Into<String>, digest: String) -> Source {

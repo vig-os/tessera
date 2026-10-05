@@ -537,18 +537,15 @@ fn dispatch(
                         cfg,
                     )?
                 } else {
-                    let (table, source_format, decoder) = decode_generic_table(&p.options)?
-                        .ok_or_else(|| {
-                            Error::Invalid(
-                                "ingest-engine: internal — a generic variant did not decode".into(),
-                            )
-                        })?;
+                    let decoded = decode_generic_table(&p.options)?.ok_or_else(|| {
+                        Error::Invalid(
+                            "ingest-engine: internal — a generic variant did not decode".into(),
+                        )
+                    })?;
                     seal_generic_table(
-                        &table,
+                        &decoded,
                         p,
                         input,
-                        source_format,
-                        decoder,
                         generic_column_meta(&p.options),
                         label,
                         extra_sources,
@@ -578,6 +575,11 @@ fn dispatch(
         FormatOptions::Npy { input } | FormatOptions::NpzMember { input, .. } => {
             #[cfg(feature = "npy")]
             {
+                // `.npy` is a forward read of the whole file, so it works on a pipe and shares #542's
+                // defect; the bytes are in hand, so the digest is free. `.npz` goes through a zip
+                // central directory, which needs to seek — a pipe never reaches it, so the re-read
+                // fallback is always over a real file there.
+                let mut npy_digest: Option<String> = None;
                 let content = match &p.options {
                     // The enum stays closed and total (ADR-0057 §6); only the handler is gated. A
                     // build with `npy` but not `npz` can still read a bare `.npy`, and says so about
@@ -592,7 +594,11 @@ fn dispatch(
                             &p.options,
                         )))
                     }
-                    _ => crate::npy::read_npy(input)?,
+                    _ => {
+                        let (content, digest) = crate::npy::read_npy_digested(input)?;
+                        npy_digest = Some(digest);
+                        content
+                    }
                 };
                 let source_format = match &p.options {
                     FormatOptions::NpzMember { .. } => "npz",
@@ -618,6 +624,7 @@ fn dispatch(
                     },
                     generation: p.generation.clone(),
                     column_meta: generic_column_meta(&p.options),
+                    source_digest: npy_digest.as_deref(),
                 };
                 // One dispatch, shared with `seal_generic_product`, so the declared-vs-actual check
                 // cannot be present in one copy and missing in the other.
@@ -759,15 +766,7 @@ fn dispatch(
 /// Returns `None` for a non-generic (vendor) backend — the caller is expected to have dispatched it
 /// elsewhere, and the `match` is total so a new variant cannot be silently forgotten.
 #[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
-pub fn decode_generic_table(
-    opts: &FormatOptions,
-) -> Result<
-    Option<(
-        crate::canonical::CanonicalTable,
-        &'static str,
-        crate::decoder::Decoder,
-    )>,
-> {
+pub fn decode_generic_table(opts: &FormatOptions) -> Result<Option<DecodedTable>> {
     // Only the three TABLE lanes decode here. `generic_source_and_decoder` also names the two array
     // lanes, which route to the array primitive instead, so they must come back as `None`.
     if !is_generic_table_lane(opts) {
@@ -776,6 +775,12 @@ pub fn decode_generic_table(
     let Some((source_format, decoder)) = generic_source_and_decoder(opts) else {
         return Ok(None);
     };
+    // `Some` only where the lane reads its input in ONE forward pass and can therefore hash it as it
+    // goes. Parquet and Arrow IPC do random-access reads through a footer index, so an in-flight hash
+    // would cover their bytes out of order and partially — and neither can read a non-seekable input
+    // at all, so the re-read `provenance::ingested_from` falls back to is always over a real file for
+    // them. CSV is a forward scan, reads a pipe happily, and so MUST supply one (#542).
+    let mut source_digest: Option<String> = None;
     let table = match opts {
         FormatOptions::Parquet { input, exclude, .. } => {
             #[cfg(feature = "parquet")]
@@ -804,7 +809,10 @@ pub fn decode_generic_table(
         FormatOptions::Csv { input, .. } => {
             #[cfg(feature = "csv")]
             {
-                crate::csv_table::read_table(input, &csv_options(opts)?)?
+                let (table, digest) =
+                    crate::csv_table::read_table_digested(input, &csv_options(opts)?)?;
+                source_digest = Some(digest);
+                table
             }
             #[cfg(not(feature = "csv"))]
             {
@@ -815,7 +823,27 @@ pub fn decode_generic_table(
         // `is_generic_table_lane` passed above, so the variant is one of the three arms here.
         _ => return Ok(None),
     };
-    Ok(Some((table, source_format, decoder)))
+    Ok(Some(DecodedTable {
+        table,
+        source_format,
+        decoder,
+        source_digest,
+    }))
+}
+
+/// What a generic table lane produced: the table, the two facts only the lane knows, and the digest
+/// only it could capture.
+///
+/// A struct rather than a tuple because the fourth member is an `Option` whose meaning is not
+/// obvious from its position, and silently swapping it with `source_format` would still compile.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+pub struct DecodedTable {
+    pub table: crate::canonical::CanonicalTable,
+    pub source_format: &'static str,
+    pub decoder: crate::decoder::Decoder,
+    /// `blake3` of the source bytes, captured DURING the decode — `None` for a lane that cannot hash
+    /// in one forward pass. See the comment at the top of [`decode_generic_table`].
+    pub source_digest: Option<String>,
 }
 
 /// Resolve a `Csv` variant's spec fields into [`crate::csv_table::CsvOptions`].
@@ -942,13 +970,25 @@ pub fn seal_generic_product(
     }
     // The TABLE lane.
     #[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
-    if let Some((table, _, _)) = decode_generic_table(options)? {
+    if let Some(decoded) = decode_generic_table(options)? {
         crate::column_meta::warn_unclassified_identifying(
-            &table.column_names(),
+            &decoded.table.column_names(),
             opts.column_meta,
             opts.name,
         );
-        return Ok(Some(crate::canonical::to_table_product(&table, opts)?));
+        // The caller cannot know the digest — only the decode that read the bytes can — so it is
+        // injected here rather than threaded through every caller. The VALUE is identical to what a
+        // re-read would produce (`single_source_digest` applies the same MMR wrapper
+        // `provenance::source_digest` does), so no golden moves; what changes is that a source which
+        // cannot be read twice now gets the right answer instead of the digest of zero bytes.
+        let opts = crate::canonical::GenericIngest {
+            source_digest: decoded.source_digest.as_deref(),
+            ..opts.clone()
+        };
+        return Ok(Some(crate::canonical::to_table_product(
+            &decoded.table,
+            &opts,
+        )?));
     }
     Ok(None)
 }
@@ -995,11 +1035,9 @@ fn is_generic_table_lane(opts: &FormatOptions) -> bool {
 #[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
 #[allow(clippy::too_many_arguments)] // the dispatch context, same as every other backend seam
 fn seal_generic_table(
-    table: &crate::canonical::CanonicalTable,
+    decoded: &DecodedTable,
     p: &crate::spec::ProductSpec,
     input: &Path,
-    source_format: &str,
-    decoder: crate::decoder::Decoder,
     column_meta: &crate::column_meta::ColumnMeta,
     label: Option<&str>,
     extra_sources: &[Source],
@@ -1007,6 +1045,12 @@ fn seal_generic_table(
     out_dir: &Path,
     parents: &[&Manifest],
 ) -> Result<Manifest> {
+    let DecodedTable {
+        table,
+        source_format,
+        decoder,
+        source_digest,
+    } = decoded;
     crate::column_meta::warn_unclassified_identifying(&table.column_names(), column_meta, &p.name);
     let (m, payloads) = crate::canonical::to_table_product(
         table,
@@ -1021,9 +1065,10 @@ fn seal_generic_table(
             source_path: input,
             source_label: label,
             extra_sources,
-            decoder,
+            decoder: *decoder,
             generation: p.generation.clone(),
             column_meta,
+            source_digest: source_digest.as_deref(),
         },
     )?;
     seal_to_tsra(m, &payloads, out_dir, p, parents, timestamp)
@@ -1160,6 +1205,10 @@ fn stream_generic_table(
         decoder,
         generation: p.generation.clone(),
         column_meta,
+        // No in-flight digest: this path already reads the input twice and routes any input it
+        // cannot re-read to the batch path, so `ingested_from`'s own read is always over a real
+        // file here. Hashing in pass 2 would also be wrong for Parquet, whose reader seeks.
+        source_digest: None,
     };
     // ADR-0058 §5: the parents' schema-flagged identity, resolved here and passed as its own tier so
     // the driver can lay it down UNDER the lane's own fields. Never pre-merged with `p.metadata` —
@@ -1770,14 +1819,11 @@ mod tests {
         let batched = {
             let out = dir.path().join("batch-out");
             std::fs::create_dir_all(&out).unwrap();
-            let (table, source_format, decoder) =
-                decode_generic_table(&p.options).unwrap().unwrap();
+            let decoded = decode_generic_table(&p.options).unwrap().unwrap();
             seal_generic_table(
-                &table,
+                &decoded,
                 &p,
                 &input,
-                source_format,
-                decoder,
                 generic_column_meta(&p.options),
                 p.source_label.as_deref(),
                 &extra,

@@ -171,6 +171,7 @@ fn stream(dir: &std::path::Path, input: &std::path::Path, tag: &str) -> tessera_
             decoder: decoder::Decoder::PARQUET,
             generation: None,
             column_meta: &column_meta,
+            source_digest: None,
         },
         &tessera_ingest::stream_table::StreamOpts {
             stage: &stage,

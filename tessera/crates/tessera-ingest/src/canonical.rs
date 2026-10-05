@@ -422,7 +422,11 @@ pub fn concat_columns(name: &str, acc: ColumnData, next: ColumnData) -> Result<C
 ///
 /// A struct rather than a dozen positional arguments because every generic backend passes the same
 /// set and a positional seam of this width is where a `source_label` silently ends up in the `name`
-/// slot. The lifetimes are all borrows — nothing here is owned.
+/// slot. Almost every field is a borrow.
+///
+/// `Clone` so a decoder can hand back a copy carrying the `source_digest` it captured in flight,
+/// rather than every caller having to thread a digest it cannot compute (#542).
+#[derive(Clone)]
 pub struct GenericIngest<'a> {
     /// Product name (the human handle, and an identity input).
     pub name: &'a str,
@@ -450,6 +454,14 @@ pub struct GenericIngest<'a> {
     /// Operator-supplied per-column semantics (ADR-0056 §7's `--column-meta`), applied to the
     /// columns before seal.
     pub column_meta: &'a crate::column_meta::ColumnMeta,
+    /// `blake3` of the source bytes, captured **during** the decode, when the lane could do so.
+    ///
+    /// `None` means "re-read the path to hash it", which is correct only for a lane that cannot read
+    /// a non-seekable input anyway: Parquet and Arrow IPC both need to seek to a footer, so a pipe
+    /// never reaches them. The CSV lane is a forward scan, reads a pipe happily, and so MUST supply
+    /// this — re-opening a drained pipe hashes zero bytes and seals a digest that is a function of
+    /// nothing (#542).
+    pub source_digest: Option<&'a str>,
 }
 
 /// The manifest facts a generic-table ingest declares, independent of how its blocks get written.
@@ -550,10 +562,17 @@ pub fn declare_generic_table(
         .source_label
         .map(str::to_string)
         .unwrap_or_else(|| opts.source_path.display().to_string());
-    w.declare_source(crate::provenance::ingested_from(
-        &[opts.source_path],
-        source_ref,
-    )?)?;
+    // An in-flight digest when the lane captured one, otherwise a second pass over the path. The
+    // wrapper is not optional: `source_digest` takes an MMR root even over a single file, so a raw
+    // content hash sealed directly here would differ from the one a file-path ingest produces for
+    // the very same bytes.
+    w.declare_source(match opts.source_digest {
+        Some(d) => crate::provenance::ingested_from_digest(
+            source_ref,
+            crate::provenance::single_source_digest(d),
+        ),
+        None => crate::provenance::ingested_from(&[opts.source_path], source_ref)?,
+    })?;
     // Order matters for the seal: `ingested_from` first, then whatever the engine threaded in.
     for s in opts.extra_sources {
         w.declare_source(s.clone())?;
@@ -740,10 +759,13 @@ pub fn to_array_product(
         .source_label
         .map(str::to_string)
         .unwrap_or_else(|| opts.source_path.display().to_string());
-    b.add_source(crate::provenance::ingested_from(
-        &[opts.source_path],
-        source_ref,
-    )?);
+    b.add_source(match opts.source_digest {
+        Some(d) => crate::provenance::ingested_from_digest(
+            source_ref,
+            crate::provenance::single_source_digest(d),
+        ),
+        None => crate::provenance::ingested_from(&[opts.source_path], source_ref)?,
+    });
     for s in opts.extra_sources {
         b.add_source(s.clone());
     }
