@@ -5,7 +5,7 @@
 ```
 $ tessera info
 tessera [..]
-backends:   arrow 58.3.0 · blob · blob-series · csv 1.4.0 · dicom 0.9.1 · dicom-series 0.9.1 · hdf-compound 1.14.6 · nifti · npy · npz-member 2.4.2 · parquet 58.3.0 · raw
+backends:   arrow 58.3.0 · blob · blob-series · csv 1.4.0 · dicom 0.10.0 · dicom-series 0.10.0 · hdf-compound 1.14.6 · nifti · npy · npz-member 2.4.2 · parquet 58.3.0 · raw
 disabled:   (none)
 build:      static-hdf5=[..] · cloud=[..] · sql=[..]
 
