@@ -1,8 +1,10 @@
 # Repo-owned (NOT devkit-managed — devkit regenerates only its own actions): the dependency cache
 # for `nix flake check` (#507).
 #
-# Every leg used to rebuild `tessera-deps` (crane buildDepsOnly) from source: an 8.8–14-minute
-# SERIAL prefix — nothing heavy starts until it finishes. Its runtime closure (793 paths: the
+# Every leg used to rebuild `tessera-deps` (crane buildDepsOnly) from source: a SERIAL prefix of
+# 8.8–14.7 min — nothing heavy starts until it finishes. Measured as first to last `tessera-deps>`
+# log line over 14 legs (12 post-#514 nix-check legs and #544's two cold dispatch runs): x86
+# 14.0–14.7, aarch64 10.1–10.6, one fast x86 runner 8.8. Its runtime closure (793 paths: the
 # artifact, the vendored crate sources, the rust-overlay toolchain) is almost entirely absent from
 # cache.nixos.org (2.11 of 2.47 GiB), so it is exported as a zstd `file://` binary cache (~1.1 GiB)
 # into the GitHub Actions cache. Measured warm: restore 6–7 s + import 7–11 s replaces the prefix.
@@ -11,7 +13,9 @@
 # exactly when the artifact would: Cargo.lock, flake.lock, toolchain, or a crane argument.
 #
 # This can only ever SAVE time. A miss, a failed import or a failed export falls through to building
-# as before, with a warning annotation — never a failure.
+# as before, with a warning annotation. A flake that does not EVALUATE is not this action's failure
+# either: Locate warns and skips the cache, so the error is reported by the build step that follows,
+# under its own name, instead of by "Locate the dependency artifacts".
 #
 #   - uses: ./.github/actions/nix-deps-cache          # restore (+ import)
 #     id: deps
@@ -61,9 +65,14 @@ runs:
       if: inputs.mode == 'restore'
       shell: bash
       run: |
-        sys=$(nix eval --impure --raw --expr builtins.currentSystem)
-        drv=$(nix eval --raw ".#legacyPackages.${sys}.cargoArtifacts.drvPath")
-        out=$(nix eval --raw ".#legacyPackages.${sys}.cargoArtifacts.outPath")
+        # Non-fatal by design: with no key, restore/import/save all skip, and the build step that
+        # follows evaluates the same flake and fails with the real error under its own name.
+        if ! { sys=$(nix eval --impure --raw --expr builtins.currentSystem) \
+            && drv=$(nix eval --raw ".#legacyPackages.${sys}.cargoArtifacts.drvPath") \
+            && out=$(nix eval --raw ".#legacyPackages.${sys}.cargoArtifacts.outPath"); }; then
+          echo "::warning title=dependency cache::the flake did not evaluate; skipping the cache (the build step reports the error) (#507)"
+          exit 0
+        fi
         hash=$(basename "$drv" | cut -d- -f1)
         {
           echo "key=nix-deps-v1-${sys}-${hash}"
@@ -78,7 +87,7 @@ runs:
 
     - name: Restore the dependency cache
       id: restore
-      if: inputs.mode == 'restore'
+      if: inputs.mode == 'restore' && steps.locate.outputs.key != ''
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
       with:
         path: ${{ steps.locate.outputs.dir }}
@@ -86,7 +95,9 @@ runs:
         lookup-only: ${{ inputs.lookup-only }}
 
     - name: Import the dependency cache
-      if: inputs.mode == 'restore' && inputs.lookup-only != 'true' && steps.restore.outputs.cache-hit == 'true'
+      if: >-
+        inputs.mode == 'restore' && steps.locate.outputs.key != ''
+        && inputs.lookup-only != 'true' && steps.restore.outputs.cache-hit == 'true'
       shell: bash
       env:
         DEPS_DIR: ${{ steps.locate.outputs.dir }}
@@ -107,6 +118,10 @@ runs:
         DEPS_DIR: ${{ inputs.dir }}
         DEPS_OUT: ${{ inputs.out }}
       run: |
+        if [ -z "${DEPS_OUT}" ]; then
+          echo "no dependency artifact was located (the flake did not evaluate); nothing to save"
+          exit 0
+        fi
         if ! nix path-info "${DEPS_OUT}" > /dev/null 2>&1; then
           echo "tessera-deps was not built here; nothing to save"
           exit 0

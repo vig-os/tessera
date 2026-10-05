@@ -171,10 +171,10 @@ jobs:
       # no binary-cache substituter where they were previously downloaded. Removing the pin later
       # should give headroom back, at which point these flags can be revisited.
       #
-      # Related, measured, and NOT fixed by these flags: there is no nix store cache (#507), so every
-      # run recompiles the dependency graph from source — `tessera-deps` alone is a 19.4-minute serial
-      # prefix, 23% of a leg. That is a wall-clock issue, not a memory one: the deps phase peaks at
-      # 4.6 GB against a leg peak of 12.0 GB, so caching it would not lower the peak.
+      # Related, measured, and NOT addressed by these flags: the `tessera-deps` serial prefix (8.8-14.7
+      # min, provenance in the nix-deps-cache action), which the dependency cache above now skips on a
+      # hit (#507). That is a wall-clock fix, not a memory one: the deps phase peaks at 4.6 GB against
+      # a leg peak of 12.0 GB, so caching it does not lower the peak.
       #
       # `set +e` so a failure reaches the summary step below instead of ending the job here; the real
       # result is re-raised there, so the leg still fails when a check fails.

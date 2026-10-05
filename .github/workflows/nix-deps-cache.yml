@@ -7,7 +7,8 @@
 #
 # On every push to dev (and main): look the key up WITHOUT downloading. Unchanged deps — the common
 # case — cost one flake eval and a lookup. Only when the key is missing is `tessera-deps` built
-# (8.8–14 min, measured) and saved, once per change of the dependency derivation.
+# (8.8–14.7 min, measured; provenance in the nix-deps-cache action) and saved, once per change of
+# the dependency derivation.
 name: nix-deps-cache
 
 on:  # yamllint disable-line rule:truthy
