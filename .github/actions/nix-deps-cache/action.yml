@@ -1,0 +1,142 @@
+# Repo-owned (NOT devkit-managed — devkit regenerates only its own actions): the dependency cache
+# for `nix flake check` (#507).
+#
+# Every leg used to rebuild `tessera-deps` (crane buildDepsOnly) from source: a SERIAL prefix of
+# 8.8–14.7 min — nothing heavy starts until it finishes. Measured as first to last `tessera-deps>`
+# log line over 14 legs (12 post-#514 nix-check legs and #544's two cold dispatch runs): x86
+# 14.0–14.7, aarch64 10.1–10.6, one fast x86 runner 8.8. Its runtime closure (793 paths: the
+# artifact, the vendored crate sources, the rust-overlay toolchain) is almost entirely absent from
+# cache.nixos.org (2.11 of 2.47 GiB), so it is exported as a zstd `file://` binary cache (~1.1 GiB)
+# into the GitHub Actions cache. Measured warm: restore 6–7 s + import 7–11 s replaces the prefix.
+#
+# KEY = the hash of the deps DERIVATION (`legacyPackages.<system>.cargoArtifacts`), so it changes
+# exactly when the artifact would: Cargo.lock, flake.lock, toolchain, or a crane argument.
+#
+# This can only ever SAVE time. A miss, a failed import or a failed export falls through to building
+# as before, with a warning annotation. A flake that does not EVALUATE is not this action's failure
+# either: Locate warns and skips the cache, so the error is reported by the build step that follows,
+# under its own name, instead of by "Locate the dependency artifacts".
+#
+#   - uses: ./.github/actions/nix-deps-cache          # restore (+ import)
+#     id: deps
+#   … build …
+#   - uses: ./.github/actions/nix-deps-cache          # export + save, only on a miss
+#     if: always() && steps.deps.outputs.hit != 'true'
+#     with: { mode: save, key: …, out: …, dir: … }
+name: nix-deps-cache
+description: Restore or save the tessera-deps closure through the GitHub Actions cache.
+
+inputs:
+  mode:
+    description: "`restore` (locate, restore, import) or `save` (export, save)."
+    default: restore
+  lookup-only:
+    description: "restore mode: only check whether the key exists; download nothing, import nothing."
+    default: "false"
+  key:
+    description: "save mode: the key from the restore step."
+    default: ""
+  out:
+    description: "save mode: the store path to export."
+    default: ""
+  dir:
+    description: "save mode: the directory to export into."
+    default: ""
+
+outputs:
+  key:
+    description: The cache key (deps derivation hash).
+    value: ${{ steps.locate.outputs.key }}
+  out:
+    description: The tessera-deps store path.
+    value: ${{ steps.locate.outputs.out }}
+  dir:
+    description: The binary-cache directory.
+    value: ${{ steps.locate.outputs.dir }}
+  hit:
+    description: "'true' on an exact key hit."
+    value: ${{ steps.restore.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Locate the dependency artifacts
+      id: locate
+      if: inputs.mode == 'restore'
+      shell: bash
+      run: |
+        # Non-fatal by design: with no key, restore/import/save all skip, and the build step that
+        # follows evaluates the same flake and fails with the real error under its own name.
+        if ! { sys=$(nix eval --impure --raw --expr builtins.currentSystem) \
+            && drv=$(nix eval --raw ".#legacyPackages.${sys}.cargoArtifacts.drvPath") \
+            && out=$(nix eval --raw ".#legacyPackages.${sys}.cargoArtifacts.outPath"); }; then
+          echo "::warning title=dependency cache::the flake did not evaluate; skipping the cache (the build step reports the error) (#507)"
+          exit 0
+        fi
+        hash=$(basename "$drv" | cut -d- -f1)
+        {
+          echo "key=nix-deps-v1-${sys}-${hash}"
+          echo "out=${out}"
+          echo "dir=${RUNNER_TEMP}/nix-deps-cache"
+        } >> "$GITHUB_OUTPUT"
+        echo "deps artifact ${out}"
+        echo "cache key     nix-deps-v1-${sys}-${hash}"
+        # Importing an UNSIGNED binary cache needs a trusted nix user. Hosted runners report
+        # `root runner` (measured, #507); recorded so a future change of runner is diagnosable.
+        echo "trusted-users: $(nix config show trusted-users 2>/dev/null || echo '?')"
+
+    - name: Restore the dependency cache
+      id: restore
+      if: inputs.mode == 'restore' && steps.locate.outputs.key != ''
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ${{ steps.locate.outputs.dir }}
+        key: ${{ steps.locate.outputs.key }}
+        lookup-only: ${{ inputs.lookup-only }}
+
+    - name: Import the dependency cache
+      if: >-
+        inputs.mode == 'restore' && steps.locate.outputs.key != ''
+        && inputs.lookup-only != 'true' && steps.restore.outputs.cache-hit == 'true'
+      shell: bash
+      env:
+        DEPS_DIR: ${{ steps.locate.outputs.dir }}
+        DEPS_OUT: ${{ steps.locate.outputs.out }}
+      run: |
+        t0=$(date +%s)
+        if nix copy --no-check-sigs --from "file://${DEPS_DIR}" "${DEPS_OUT}"; then
+          echo "imported ${DEPS_OUT} and its closure in $(( $(date +%s) - t0 )) s"
+        else
+          echo "::warning title=dependency cache::import failed; building tessera-deps from source as before (#507)"
+        fi
+
+    - name: Export the dependency cache
+      id: export
+      if: inputs.mode == 'save'
+      shell: bash
+      env:
+        DEPS_DIR: ${{ inputs.dir }}
+        DEPS_OUT: ${{ inputs.out }}
+      run: |
+        if [ -z "${DEPS_OUT}" ]; then
+          echo "no dependency artifact was located (the flake did not evaluate); nothing to save"
+          exit 0
+        fi
+        if ! nix path-info "${DEPS_OUT}" > /dev/null 2>&1; then
+          echo "tessera-deps was not built here; nothing to save"
+          exit 0
+        fi
+        t0=$(date +%s)
+        if nix copy --to "file://${DEPS_DIR}?compression=zstd&parallel-compression=true" "${DEPS_OUT}"; then
+          echo "exported $(du -sm "${DEPS_DIR}" | cut -f1) MiB in $(( $(date +%s) - t0 )) s"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning title=dependency cache::export failed; not saving (#507)"
+        fi
+
+    - name: Save the dependency cache
+      if: inputs.mode == 'save' && steps.export.outputs.ready == 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ${{ inputs.dir }}
+        key: ${{ inputs.key }}

@@ -108,6 +108,13 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
 
+      # Dependency cache (#507): restore + import `tessera-deps` before the build. Details, measurements
+      # and the can-only-save-time guarantee are in the action itself. The matching save is after the
+      # build; `nix-deps-cache.yml` warms the same key on pushes to dev, which nix-check never sees.
+      - name: Restore the dependency cache
+        id: deps
+        uses: ./.github/actions/nix-deps-cache
+
       # `--keep-going` is the fix for #483. Without it the FIRST failing derivation cancels every
       # other check, so a leg goes red with all 17 checks reporting `(cancelled)` and nothing naming
       # a real failure. That is exactly what happened on #481: an unrelated `minio` substitution
@@ -164,10 +171,10 @@ jobs:
       # no binary-cache substituter where they were previously downloaded. Removing the pin later
       # should give headroom back, at which point these flags can be revisited.
       #
-      # Related, measured, and NOT fixed by these flags: there is no nix store cache (#507), so every
-      # run recompiles the dependency graph from source — `tessera-deps` alone is a 19.4-minute serial
-      # prefix, 23% of a leg. That is a wall-clock issue, not a memory one: the deps phase peaks at
-      # 4.6 GB against a leg peak of 12.0 GB, so caching it would not lower the peak.
+      # Related, measured, and NOT addressed by these flags: the `tessera-deps` serial prefix (8.8-14.7
+      # min, provenance in the nix-deps-cache action), which the dependency cache above now skips on a
+      # hit (#507). That is a wall-clock fix, not a memory one: the deps phase peaks at 4.6 GB against
+      # a leg peak of 12.0 GB, so caching it does not lower the peak.
       #
       # `set +e` so a failure reaches the summary step below instead of ending the job here; the real
       # result is re-raised there, so the leg still fails when a check fails.
@@ -211,6 +218,17 @@ jobs:
 
       # Per-check verdicts, so a red leg always names what failed (#483).
       #
+      # Save only on a MISS, and only if this leg actually produced the artifact. `always()` so a red
+      # leg with a good tessera-deps still warms the cache for the next run.
+      - name: Save the dependency cache
+        if: always() && steps.deps.outputs.hit != 'true'
+        uses: ./.github/actions/nix-deps-cache
+        with:
+          mode: save
+          key: ${{ steps.deps.outputs.key }}
+          out: ${{ steps.deps.outputs.out }}
+          dir: ${{ steps.deps.outputs.dir }}
+
       # Derived from the STORE, not by parsing nix's human-readable output: a check whose output path
       # is valid was built and therefore passed. `--keep-going` above is what makes that inference
       # sound, because every check is attempted, so a missing output means that check failed rather

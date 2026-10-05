@@ -1,0 +1,70 @@
+# Repo-owned (NOT devkit-managed). Warms the nix dependency cache for every PR (#507).
+#
+# GitHub Actions caches are scoped: a pull_request run can restore caches from ITS OWN ref and from
+# its BASE branch. nix-check runs on pull_request and push-to-main only — never on push-to-dev — so
+# without this workflow no cache would ever exist at the `dev` scope, every PR's FIRST nix-check run
+# would be cold, and only re-runs of the same PR would benefit.
+#
+# On every push to dev (and main): look the key up WITHOUT downloading. Unchanged deps — the common
+# case — cost one flake eval and a lookup. Only when the key is missing is `tessera-deps` built
+# (8.8–14.7 min, measured; provenance in the nix-deps-cache action) and saved, once per change of
+# the dependency derivation.
+name: nix-deps-cache
+
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: nix-deps-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    name: warm nix deps cache (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64-linux
+            runner: ubuntu-latest
+          - arch: aarch64-linux
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
+
+      - name: Look up the dependency cache
+        id: deps
+        uses: ./.github/actions/nix-deps-cache
+        with:
+          lookup-only: "true"
+
+      - name: Build tessera-deps
+        if: steps.deps.outputs.hit != 'true'
+        env:
+          DEPS_OUT: ${{ steps.deps.outputs.out }}
+        run: |
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          nix build -L --no-link --cores 4 ".#legacyPackages.${sys}.cargoArtifacts"
+          nix path-info "${DEPS_OUT}"
+
+      - name: Save the dependency cache
+        if: steps.deps.outputs.hit != 'true'
+        uses: ./.github/actions/nix-deps-cache
+        with:
+          mode: save
+          key: ${{ steps.deps.outputs.key }}
+          out: ${{ steps.deps.outputs.out }}
+          dir: ${{ steps.deps.outputs.dir }}
