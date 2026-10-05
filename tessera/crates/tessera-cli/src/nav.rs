@@ -1524,6 +1524,12 @@ fn moments_exact(sum: i128, sum_sq: i128, n: usize) -> Option<(f64, f64)> {
         max: None,
         sum,
         sum_sq,
+        // This is a scratch value built only to reuse the exact mean/variance arithmetic; it does
+        // not describe a real chunk, so the S2 counters are genuinely unknown rather than zero.
+        masked: None,
+        nan: None,
+        pos_inf: None,
+        neg_inf: None,
     };
     Some((cs.mean()?, cs.std_dev()?))
 }
@@ -3079,7 +3085,8 @@ mod tests {
         );
 
         // And it must equal the chunk-index monoid exactly — same reduction, same answer.
-        let cs = tessera_core::chunk_index::ChunkStats::from_values(&v);
+        let cs = tessera_core::chunk_index::ChunkStats::from_values(&v)
+            .expect("2^53 + 1000 ones fits i128");
         assert_eq!(mean, cs.mean().unwrap());
         assert_eq!(_std, cs.std_dev().unwrap());
     }
@@ -3267,9 +3274,13 @@ mod tests {
         // An index covering only the FIRST half of the array — stale/partial, exactly what must
         // not be trusted.
         let mut short = tessera_core::chunk_index::ChunkIndex::new();
-        short.push(tessera_core::hash::digest(b"chunk-0"), &[0, 1, 2, 3]);
-        let (sref, spayload) =
-            tessera_io::chunk_index::chunk_index_block("volume", &short).unwrap();
+        assert!(short.push(tessera_core::hash::digest(b"chunk-0"), &[0, 1, 2, 3]));
+        let (sref, spayload) = tessera_io::chunk_index::chunk_index_block(
+            "volume",
+            bref.digest.as_deref().unwrap(),
+            &short,
+        )
+        .unwrap();
 
         let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
         b.add_block_ref(bref);
@@ -3338,10 +3349,14 @@ mod tests {
 
         // An index built for a 2-chunk array — wrong grid, and its max (1) is wrong for this block.
         let mut other = tessera_core::chunk_index::ChunkIndex::new();
-        other.push(tessera_core::hash::digest(b"c0"), &[0, 1]);
-        other.push(tessera_core::hash::digest(b"c1"), &[0, 1]);
-        let (sref, spayload) =
-            tessera_io::chunk_index::chunk_index_block("volume", &other).unwrap();
+        assert!(other.push(tessera_core::hash::digest(b"c0"), &[0, 1]));
+        assert!(other.push(tessera_core::hash::digest(b"c1"), &[0, 1]));
+        let (sref, spayload) = tessera_io::chunk_index::chunk_index_block(
+            "volume",
+            bref.digest.as_deref().unwrap(),
+            &other,
+        )
+        .unwrap();
 
         let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
         b.add_block_ref(bref);

@@ -70,7 +70,7 @@ use bytes::Bytes;
 use tessera_core::block::array::{ArraySpec, WorldFrame};
 use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::block::{BlockKind, BlockRef};
-use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
+use tessera_core::chunk_index::{ChunkIndex, ChunkStats, Histogram};
 use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
 
@@ -270,6 +270,17 @@ impl ArrayData {
 }
 
 /// Pack a typed slice into little-endian bytes via the element's `to_le_bytes`.
+/// The element width in bytes implied by a numpy type code (`i2` → 2, `b1` → 1, `f8` → 8).
+///
+/// The code's final character *is* the width, which is why the chunk-index digest can be defined
+/// against `numpy_code` rather than a second hand-maintained table that could drift from it.
+pub(crate) fn code_width(code: &str) -> usize {
+    code.as_bytes()
+        .last()
+        .and_then(|c| (*c as char).to_digit(10))
+        .unwrap_or(8) as usize
+}
+
 pub(crate) fn le_bytes<T: Copy, const N: usize>(v: &[T], f: fn(T) -> [u8; N]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * N);
     for &x in v {
@@ -720,12 +731,40 @@ pub fn array_block_with_index(
     spec: &ArraySpec,
     data: &ArrayData,
 ) -> Result<(EncodedBlock, Option<EncodedBlock>)> {
+    array_block_with_index_opts(name, spec, data, &IndexOptions::default())
+}
+
+/// [`array_block_with_index`] with explicit [`IndexOptions`] — the histogram opt-out reaches the
+/// emitter, not just the direct `array_chunk_index_with` caller.
+pub fn array_block_with_index_opts(
+    name: &str,
+    spec: &ArraySpec,
+    data: &ArrayData,
+    opts: &IndexOptions,
+) -> Result<(EncodedBlock, Option<EncodedBlock>)> {
     let block = array_block(name, spec, data)?;
-    let sidecar = if data.as_i64().is_some() {
-        let index = array_chunk_index(spec, data)?;
-        Some(crate::chunk_index::chunk_index_block(name, &index)?)
-    } else {
-        None // non-integer array → no integer chunk stats (ADR-0028 §3 integer core)
+    let sidecar = match array_chunk_index_with(spec, data, opts)? {
+        // `None` = the values are not exactly foldable (non-integer dtype, or an accumulator that
+        // would overflow). Either way the block is written WITHOUT an index rather than with an
+        // approximate one (ADR-0028 §3 integer core; ADR-0059 M2).
+        Some(index) => {
+            // M1: bind the index to the digest of the very block it was built from. A missing digest
+            // is a programming error, not something to paper over with `""` — an empty
+            // `indexed_digest` would bind the index to nothing while LOOKING bound, which is worse
+            // than having no field at all.
+            let data_digest = block.0.digest.as_deref().ok_or_else(|| {
+                Error::Codec(format!(
+                    "array_block_with_index('{name}'): the data block has no digest to bind the \
+                     chunk-index to"
+                ))
+            })?;
+            Some(crate::chunk_index::chunk_index_block(
+                name,
+                data_digest,
+                &index,
+            )?)
+        }
+        None => None,
     };
     Ok((block, sidecar))
 }
@@ -745,17 +784,48 @@ pub fn array_block_with_index(
 ///
 /// let mut spec = ArraySpec::new(vec![4, 4, 4], "int16");
 /// spec.chunks = vec![2, 2, 2]; // 8 chunks of 2³ over a 4³ volume
-/// let idx = array_chunk_index(&spec, &ArrayData::I16((0..64).map(|k| k as i16).collect())).unwrap();
+/// let idx = array_chunk_index(&spec, &ArrayData::I16((0..64).map(|k| k as i16).collect())).unwrap().expect("an indexable fixture");
 ///
 /// assert_eq!(idx.len(), 8);
 /// assert_eq!(idx.aggregate().max, Some(63)); // stats roll up to the whole array
 /// assert_eq!(idx.prune(0, 0), vec![0]); // value 0 lives only in the first chunk
 /// assert!(idx.root().starts_with("blake3:")); // sub-block MMR root (ADR-0028 §1)
 /// ```
-pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkIndex> {
-    let vals = data
-        .as_i64()
-        .ok_or_else(|| Error::Codec("array dtype is not integer for chunk stats".into()))?;
+/// Re-export of the normative bin budget for `equal-width-int` histograms (ADR-0059 §5).
+///
+/// It lives in `tessera-core` beside `HistKind`, because it is part of what that kind MEANS rather
+/// than a knob this crate chooses: a reader recomputes `width`/`bins` with this exact value.
+pub use tessera_core::chunk_index::EQUAL_WIDTH_INT_BINS as MAX_HIST_BINS;
+
+/// Knobs for building a chunk index. `Default` builds the histogram; a writer that does not want to
+/// pay for it (ADR-0059 §6 measured ~20 % on top of the index fold) opts out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexOptions {
+    /// Build the block-level value histogram (ADR-0059 S3).
+    pub histogram: bool,
+}
+
+impl Default for IndexOptions {
+    fn default() -> Self {
+        Self { histogram: true }
+    }
+}
+
+pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<Option<ChunkIndex>> {
+    array_chunk_index_with(spec, data, &IndexOptions::default())
+}
+
+/// [`array_chunk_index`] with explicit [`IndexOptions`].
+pub fn array_chunk_index_with(
+    spec: &ArraySpec,
+    data: &ArrayData,
+    opts: &IndexOptions,
+) -> Result<Option<ChunkIndex>> {
+    // A non-integer array has no integer chunk stats — `None`, not an error: callers ask for an
+    // index and are told there is none, exactly as for an overflowing one.
+    let Some(vals) = data.as_i64() else {
+        return Ok(None);
+    };
     let shape: Vec<usize> = spec.shape.iter().map(|&d| d as usize).collect();
     let chunks: Vec<usize> = spec.chunks.iter().map(|&c| (c as usize).max(1)).collect();
     if shape.len() != chunks.len() {
@@ -798,13 +868,25 @@ pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkInde
         let count: usize = lo.iter().zip(&hi).map(|(&l, &h)| h - l).product();
 
         // gather this chunk's values by an odometer over voxel coords in [lo, hi) (last axis fastest).
-        let mut bytes = Vec::with_capacity(count * 8);
+        //
+        // ADR-0059 M3: the digest is over the chunk's elements in their NATIVE little-endian width,
+        // not over an `i64`-widened buffer. Two reasons. (1) An `int16` chunk was being hashed as 8
+        // bytes per voxel — 4x the necessary hashing over a representation that is not the data's
+        // own. (2) The TABLE path already hashed native per-column LE bytes, so the two index
+        // builders disagreed about what a chunk digest means; now they agree.
+        //
+        // Little-endian is fixed BY THE FORMAT, not by the host: taking the low `w` bytes of the
+        // two's-complement `i64` LE encoding is exactly the native `w`-byte LE encoding of the same
+        // value, on any architecture, because `to_le_bytes` is defined by the language and not by
+        // the machine's byte order. A big-endian host therefore byte-swaps rather than memcpy-ing.
+        let w = code_width(data.numpy_code());
+        let mut bytes = Vec::with_capacity(count * w);
         let mut chunk_vals = Vec::with_capacity(count);
         let mut v = lo.clone();
         for _ in 0..count {
             let flat: usize = v.iter().zip(&strides).map(|(&x, &s)| x * s).sum();
             let val = vals[flat];
-            bytes.extend_from_slice(&val.to_le_bytes());
+            bytes.extend_from_slice(&val.to_le_bytes()[..w]);
             chunk_vals.push(val);
             for ax in (0..rank).rev() {
                 v[ax] += 1;
@@ -814,7 +896,12 @@ pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkInde
                 v[ax] = lo[ax];
             }
         }
-        idx.push_entry(digest(&bytes), ChunkStats::from_values(&chunk_vals));
+        // Fail closed (ADR-0059 M2, #523): a chunk whose stats cannot be folded exactly yields NO
+        // index at all, rather than an index carrying a wrapped `sum_sq` under a content hash.
+        let Some(stats) = ChunkStats::from_values(&chunk_vals) else {
+            return Ok(None);
+        };
+        idx.push_entry(digest(&bytes), stats);
 
         // advance the chunk multi-index in C-order (last axis fastest).
         for ax in (0..rank).rev() {
@@ -825,7 +912,37 @@ pub fn array_chunk_index(spec: &ArraySpec, data: &ArrayData) -> Result<ChunkInde
             cidx[ax] = 0;
         }
     }
-    Ok(idx)
+    // ---- the block-level histogram (ADR-0059 §3/§5), pass 2 of 2.
+    //
+    // Pass 1 is the chunk loop above, whose aggregate gives the global min/max the bin edges are
+    // fixed from. Pass 2 is this linear scan: a histogram does not care about element ORDER (integer
+    // counts commute), so it needs no odometer and no re-gather — it walks `vals`, which `as_i64`
+    // already materialised. That is why the measured cost is ~20 % of the index fold rather than a
+    // second full traversal.
+    if opts.histogram {
+        // Edges come from a plain min/max fold over the per-chunk stats, NOT from
+        // `checked_aggregate`. A histogram needs only the range, and min/max cannot overflow —
+        // gating it on the full aggregate meant a block whose `sum_sq` roll-up overflowed got a
+        // sidecar with NO histogram and no stated reason (ADR-0059 review blocker 3). Reproduced
+        // with `int64 [6]`, chunks `[2]`, every value `i64::MAX`: each chunk folds, the block-level
+        // roll-up does not, and the histogram silently vanished.
+        let lo = idx.entries.iter().filter_map(|e| e.stats.min).min();
+        let hi = idx.entries.iter().filter_map(|e| e.stats.max).max();
+        {
+            if let (Some(lo), Some(hi)) = (lo, hi) {
+                // Strictly equal-width bins (ADR-0059 §5): `Histogram::new` derives `width` first
+                // and the bin COUNT second, so every bin is the same width and only the count
+                // absorbs the remainder. One bin per value (`width == 1`) whenever the span allows,
+                // and then quantiles off this histogram are exact rather than bounded by a width.
+                let mut h = Histogram::new(lo, hi);
+                for &v in &vals {
+                    h.add(v);
+                }
+                idx.histogram = Some(h);
+            }
+        }
+    }
+    Ok(Some(idx))
 }
 
 /// Convert a dense **integer** array to its **COO** (coordinate-list) table form (ADR-0031 §2): one row
@@ -1909,8 +2026,11 @@ mod tests {
         assert_eq!(blk.name, "vol");
         // the sidecar == the separate composition chunk_index_block(name, &array_chunk_index(..)).
         let (scar, _) = sidecar.expect("integer array gets a chunk-index sidecar");
-        let idx = array_chunk_index(&spec, &data).unwrap();
-        let (expect_ref, _) = crate::chunk_index::chunk_index_block("vol", &idx).unwrap();
+        let idx = array_chunk_index(&spec, &data)
+            .unwrap()
+            .expect("an indexable fixture");
+        let (expect_ref, _) =
+            crate::chunk_index::chunk_index_block("vol", "blake3:test-data-digest", &idx).unwrap();
         assert_eq!(scar.digest, expect_ref.digest);
         assert_eq!(scar.name, expect_ref.name); // the "<name>.cidx" companion
                                                 // a float array gets the data block but no integer chunk-index sidecar.
@@ -1959,13 +2079,44 @@ mod tests {
         assert!(to_coo(&ArrayData::F32(vec![1.0, 0.0]), 0).is_none());
     }
 
+    /// An array whose statistics overflow the exact accumulator gets NO index (ADR-0059 M2, #523).
+    ///
+    /// Fail closed: the block is still written, just without a sidecar — the same shape as a float
+    /// array, and the same precedent as `ArrayData::as_i64` declining a `u64` that will not fit.
+    /// The alternative is a sealed `.cidx` carrying a wrapped `sum_sq` under a content hash.
+    #[test]
+    fn an_overflowing_array_gets_no_chunk_index() {
+        let mut spec = ArraySpec::new(vec![4], "int64");
+        spec.chunks = vec![4]; // one chunk, so the overflow is inside a single fold
+        let data = ArrayData::I64(vec![i64::MAX, i64::MAX, i64::MAX, i64::MAX]);
+
+        assert!(
+            array_chunk_index(&spec, &data).unwrap().is_none(),
+            "an overflowing fold must yield no index"
+        );
+
+        // The data block is still produced — only the sidecar is withheld.
+        let ((blk, _), sidecar) = array_block_with_index("vol", &spec, &data).unwrap();
+        assert_eq!(blk.name, "vol");
+        assert!(
+            sidecar.is_none(),
+            "no sidecar rather than one with wrapped statistics"
+        );
+
+        // A value range that DOES fit still gets its index, so this is not blanket refusal of int64.
+        let ok = ArrayData::I64(vec![1, 2, 3, 4]);
+        assert!(array_chunk_index(&spec, &ok).unwrap().is_some());
+    }
+
     #[test]
     fn array_chunk_index_walks_the_3d_chunk_grid() {
         // 4×4×4 C-order 0..63, chunks 2×2×2 → 8 chunks of 8 voxels each.
         let mut spec = ArraySpec::new(vec![4, 4, 4], "int16");
         spec.chunks = vec![2, 2, 2];
         let data = ArrayData::I16((0..64).map(|k| k as i16).collect());
-        let idx = array_chunk_index(&spec, &data).unwrap();
+        let idx = array_chunk_index(&spec, &data)
+            .unwrap()
+            .expect("an indexable fixture");
 
         assert_eq!(idx.len(), 8);
         // stats roll up to the whole array [0, 63]
@@ -1982,9 +2133,18 @@ mod tests {
         assert_eq!(idx.prune(63, 63), vec![7]);
         // deterministic sub-block MMR root over the per-chunk digests
         assert!(idx.root().starts_with("blake3:"));
-        assert_eq!(array_chunk_index(&spec, &data).unwrap().root(), idx.root());
+        assert_eq!(
+            array_chunk_index(&spec, &data)
+                .unwrap()
+                .expect("an indexable fixture")
+                .root(),
+            idx.root()
+        );
         // a float array can't supply integer stats
-        assert!(array_chunk_index(&spec, &ArrayData::F32(vec![0.0; 64])).is_err());
+        // A float array is not an ERROR, it is "no index" (ADR-0059 M2 shape).
+        assert!(array_chunk_index(&spec, &ArrayData::F32(vec![0.0; 64]))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1994,7 +2154,9 @@ mod tests {
         let mut spec = ArraySpec::new(vec![5, 5, 5], "int32");
         spec.chunks = vec![2, 2, 2];
         let data = ArrayData::I32((0..125).collect());
-        let idx = array_chunk_index(&spec, &data).unwrap();
+        let idx = array_chunk_index(&spec, &data)
+            .unwrap()
+            .expect("an indexable fixture");
         assert_eq!(idx.len(), 27);
         // every voxel is gathered exactly once → counts sum to 125, stats span the whole array.
         let agg = idx.aggregate();

@@ -53,16 +53,28 @@ impl Fixture {
 
 /// Encode a real array block (Zarr v3 + pcodec), register its digested ref on the builder, and
 /// return the payload to pack. The digest is over the encoded bytes (not the spec).
+/// Encode a real array block and, for an integer array, its `{hash, stats}` chunk-index sidecar —
+/// the ADR-0059 default (#347 P1). Returns every payload to pack: one block, or a block plus its
+/// `<name>.cidx`.
+///
+/// This is where the format event is visible: a fixture whose array is integer now carries an extra
+/// block, whose digest rolls into `content_hash`. Float arrays get no sidecar (no integer chunk
+/// stats), so their hashes do not move.
 fn push_array(
     b: &mut ProductBuilder,
     name: &str,
     spec: &ArraySpec,
     data: ArrayData,
-) -> BlockPayload {
-    let (block_ref, payload) =
-        array::array_block(name, spec, &data).expect("fixture array encodes");
+) -> Vec<BlockPayload> {
+    let ((block_ref, payload), sidecar) =
+        array::array_block_with_index(name, spec, &data).expect("fixture array encodes");
     b.add_block_ref(block_ref);
-    payload
+    let mut out = vec![payload];
+    if let Some((cidx_ref, cidx_payload)) = sidecar {
+        b.add_block_ref(cidx_ref);
+        out.push(cidx_payload);
+    }
+    out
 }
 
 /// Encode a real table block (Vortex), register its digested ref on the builder, and return the
@@ -129,7 +141,7 @@ pub fn fixtures() -> Vec<Fixture> {
         out.push(Fixture {
             name: "recon_int16",
             manifest: b.seal().unwrap(),
-            payloads: vec![pl],
+            payloads: pl,
         });
     }
 
@@ -145,7 +157,7 @@ pub fn fixtures() -> Vec<Fixture> {
         out.push(Fixture {
             name: "recon_float32_mumap",
             manifest: b.seal().unwrap(),
-            payloads: vec![pl],
+            payloads: pl,
         });
     }
 
@@ -202,7 +214,7 @@ pub fn fixtures() -> Vec<Fixture> {
         out.push(Fixture {
             name: "spectrum_lifetime",
             manifest: b.seal().unwrap(),
-            payloads: vec![pl],
+            payloads: pl,
         });
     }
 
@@ -231,7 +243,8 @@ pub fn fixtures() -> Vec<Fixture> {
         out.push(Fixture {
             name: "multiblock_study",
             manifest: b.seal().unwrap(),
-            payloads: vec![vol_pl, roi_pl],
+            // `vol_pl` is the volume plus its sidecar; `roi_pl` is a single table payload.
+            payloads: [vol_pl, vec![roi_pl]].into_iter().flatten().collect(),
         });
     }
 
@@ -318,7 +331,8 @@ pub fn fixtures() -> Vec<Fixture> {
         out.push(Fixture {
             name: "segmentation_uint8",
             manifest: b.seal().unwrap(),
-            payloads: vec![l_pl, m_pl, p_pl],
+            // Each array contributes its block and, when integer, its sidecar.
+            payloads: [l_pl, m_pl, p_pl].into_iter().flatten().collect(),
         });
     }
 

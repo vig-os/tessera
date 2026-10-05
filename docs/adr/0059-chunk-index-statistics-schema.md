@@ -103,8 +103,9 @@ structure is **mergeable and deterministic**.
 t-digest and KLL are rejected on the §1 constraint alone, before accuracy is even discussed: under
 them the sealed bytes would depend on how many workers happened to run.
 
-**Error guarantee of the recommendation.** A quantile read from a linear histogram lies in a known
-bin, so the absolute error is **at most one bin width**, with no probabilistic caveat. And in the
+**Error guarantee of the recommendation.** A quantile read from an equal-width histogram lies in a
+known bin, so the absolute error is **at most `width`** — one number, not "the widest bin" — with no
+probabilistic caveat. And in the
 case that matters most it is not approximate at all:
 
 > On the measured CT volume the values span exactly **4096 distinct levels** (a 12-bit
@@ -152,24 +153,89 @@ only sub-region histograms, which nothing asks for. Pruning is already served ex
 `min`/`max`. The block histogram is still *computed* as the monoid roll-up of per-chunk folds — the
 fold is the same, only the persistence differs.
 
-**Edges, for integer arrays:**
+**Edges, for integer arrays — STRICTLY EQUAL WIDTHS** (owner decision, 2026-10-05):
 
 ```
-span = max − min + 1                       (from the scalars, already computed)
-bins = span            if span ≤ MAX_BINS  → one bin per value: EXACT quantiles
-     = MAX_BINS        otherwise           → linear bins, error ≤ one bin width
-MAX_BINS = 4096 (default; 8.2 KB dense, 1.13× the sidecar)
+span  = hi − lo + 1                  (in i128: a full i64 range is 2^64, which i64 cannot hold)
+width = ceil(span / MAX_BINS)        (at least 1)
+bins  = ceil(span / width)           (≤ MAX_BINS)
+MAX_BINS = 4096 — NORMATIVE for kind "equal-width-int" (~10.5 KiB dense, 1.13× the sidecar)
+
+bin(v) = (clamp(v, lo, hi) − lo) / width            (exact integer division)
+bin b  covers [lo + b·width, lo + (b+1)·width − 1]  (computed in i128)
 ```
+
+**`width` is derived first and `bins` second.** That ordering is the whole decision: every bin is
+then exactly `width` wide and only the *count* of bins absorbs the remainder. Fixing
+`bins = MAX_BINS` and deriving a width is what produces bins of differing widths.
+
+**`MAX_BINS = 4096` is normative, not a default** (owner decision, 2026-10-05). A reader recomputes
+`width`/`bins` from `lo`/`hi` with this exact value and rejects an index that disagrees, so the budget
+is part of what `kind: "equal-width-int"` *means*. A different budget is a different layout under the
+same declared kind — two valid-looking indexes that cannot be compared — so it requires a **new kind
+name**. In code the constant lives beside `HistKind` as `EQUAL_WIDTH_INT_BINS`, not as a parameter;
+that also makes the stored field widths provably safe, since `width ≤ ceil(2^64 / 4096) = 2^52` fits
+`u64` and `bins ≤ 4096` fits `u32` for every possible `lo`/`hi`. (A configurable budget could produce
+`width = 0` or a `bins` past `u32`, which an earlier revision silently truncated.)
+
+**The binned range is widened, so the last bin may reach past `hi`.** For `[0, 12288]` (span 12289)
+the layout is `width = 4`, `bins = 3073`, and the top bin covers `12288..12291` — three values
+beyond anything observed. This is why **the observed range is stored separately from the bin
+geometry**: `lo`/`hi` are the extremes actually seen, `width`/`bins` are the layout, and conflating
+them is exactly what makes an edge unreconstructible. A reader needs `lo`, `width` and `bins` to
+recover every edge, and `hi` to know where the real data stopped.
+
+**Everything is integer arithmetic, in `i128`.** No float math appears anywhere in the layout or the
+lookup, so there is no rounding mode to agree on. `i128` is not belt-and-braces: `hi − lo + 1` for
+the full `i64` range is `2^64`, and `lo + bins·width` passes `i64::MAX` near the top of the range —
+`Histogram::new(i64::MIN, i64::MAX, 4096)` gives `width = 2^52`, `bins = 4096`, and a top edge of
+exactly `i64::MAX`. Both are pinned by test.
+
+**What this costs, stated plainly — and the worst case is not small.** Equal widths mean `bins` is
+usually *below* `MAX_BINS`. The worst case is a span of **4097**: `width = 2` forces
+`bins = 2049`, which is **barely half** the resolution a near-equal layout would give for the same
+byte budget. (The example above, span 12289, gives 3073 bins — three quarters.) Resolution is lost
+whenever the span is just past a multiple of the budget. In exchange, a quantile's error bound is a single number
+(`width`) instead of "the widest bin", and an implementer cannot get the edges wrong. The case that
+matters most is unaffected: when `span ≤ MAX_BINS` the layout is `width = 1`, one bin per value, and
+the histogram is a **complete** description of the distribution — quantiles off it are exact, not
+estimated.
+
+**`exact` is derived, not stored.** It is exactly `width == 1`. A stored boolean that is a pure
+function of a stored integer is a field that can disagree with itself, and one more thing a reader
+must validate rather than compute; `Histogram::exact()` computes it, and the `spec` descriptor does
+not carry it either.
 
 Recorded in the `.cidx` block `spec`, so a reader is never guessing:
 
 ```json
-"hist": { "kind": "linear-int", "lo": -1024, "hi": 3071, "bins": 4096, "exact": true }
+"hist": { "kind": "equal-width-int", "lo": -1024, "hi": 3071, "width": 1, "bins": 4096 }
 ```
 
-`kind` is what makes §8's float story additive later. `exact` is computed (`bins == span`), not
-asserted. Counts are stored **dense** — at 4096 bins a dense array is 8.2 KB against 11.5 KB for a
-sparse map even at 31 % density, and dense has no key-ordering question to get wrong.
+`kind` names the equal-width rule and is what makes §8's float story additive later. `bins` is stored
+explicitly as a cross-check on `counts.len()`, which the reader validates. **There is no `exact`
+field** (owner decision, 2026-10-05): it is exactly `width == 1`, so `inspect` computes it — a
+descriptor field that merely restates another field is one more thing that can disagree with itself.
+Counts are stored **dense** — at 4096 bins a dense array is ~8.2 KB against ~11.5 KB for a
+sparse map at the same density, and dense has no key-ordering question to get wrong. (Both figures
+are for a per-chunk histogram of a few thousand samples; the block-level histogram quoted above at
+~10.5 KiB holds larger counts, hence more digits per entry — the §5 table is the one to read for the
+sidecar's actual cost.)
+
+**Two copies, one authority.** The `hist` descriptor above duplicates edges that the `.cidx`
+**payload** also carries, because `counts` is meaningless without them and a content-hashed block must
+be interpretable without its manifest. The rule: **the payload is authoritative**; the `spec`
+descriptor exists so `inspect` can report a histogram's shape without reading the block. A writer
+derives both from the same value in one place, so they cannot diverge when written, and a hand-edited
+`spec` fails **`manifest_hash`** — note: *not* `content_hash`, which is the Merkle root over block
+digests only and so is blind to a spec edit. A reader that nonetheless finds them disagreeing must
+treat the index as corrupt and fall back as if it were absent — never prefer one silently.
+
+**This rule is enforced by the reader in C5**, together with the rest of the index's validation: the
+payload is rejected (and the index treated as absent) when `lo > hi`, when `counts` is empty, or when
+a stored `exact` disagrees with `bins == span` — `exact` is **recomputed**, never trusted as written.
+`ChunkIndex::from_bytes` itself is a deserializer and validates none of this, so an unvalidated caller
+would inherit whatever the bytes claimed.
 
 **The two-level ordering is real but already paid for.** Fixing edges from the observed range needs
 the global `min`/`max` first, i.e. a second pass over the data. The write path *already* makes a full
@@ -335,8 +401,15 @@ by default would pay 2.25–3.2× on every seal for a value most users never rea
    Bump `recipe` `chunk_index@1` → `@2`; a missing field reads as **absent**, never as zero (the
    `sum_sq` `#[serde(default)]` precedent — "absent" and "all-zero bins" must not be confusable).
 2. `tessera-io`: two-pass build (scalars → edges → histogram), writer opt-out for the histogram.
-3. Reader: verify `indexed_digest`; serve quantiles/fences from the histogram; keep #524's
-   `exact`/`method` contract and extend it with the histogram's `exact` flag.
+3. Reader (C5): verify `indexed_digest` and the `recipe` (`@1` must not be read as `@2`); serve
+   quantiles/fences from the histogram; keep #524's `exact`/`method` contract and extend it with the
+   histogram's `exact` flag. **Validate the payload rather than trusting it** — `ChunkIndex::from_bytes`
+   is a deserializer and checks none of this. Reject the index (treating it as absent) when `lo > hi`,
+   when `counts` is empty, when `counts.len()` disagrees with the recorded `bins`, when `width` is 0,
+   or when `width`/`bins` do not match the §5 layout recomputed from `lo`/`hi` with the **normative**
+   4096-bin budget; **`exact` is derived
+   from `width == 1`, never read from the wire**. The
+   payload-versus-`spec` disagreement rule of §5 is enforced here too: disagree ⇒ corrupt ⇒ fall back.
 4. Flip the default on for integer array blocks (#347 P1) **and regenerate the corpus in the same
    PR**, with the golden movement stated as the declared format event.
 5. `#526`/`#527` only if §9 is included.

@@ -6,7 +6,7 @@ read-only and run against a conformance-corpus product (`recon_int16.tsra`). Dig
 
 ```
 $ tessera verify ../../corpus/files/recon_int16.tsra
-OK  ../../corpus/files/recon_int16.tsra verified (1 blocks)
+OK  ../../corpus/files/recon_int16.tsra verified (2 blocks)
 
 ```
 
@@ -19,9 +19,10 @@ id            [..]
 name          recon-int16
 timestamp     2024-01-01T00:00:00Z
 producer      tessera/0.0.0
-content_hash  blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9
-manifest_hash blake3:4fd0b90d0aa3c2bddbaefec7e244b16dc444e08b3730b5747a0a970a549e3b91
-blocks        1
+content_hash  blake3:07a99aa4d75e55a0a4aedaba6fb94358281af4a4598cef9c10e65eedbbb7cbd1
+manifest_hash blake3:5ab629d6517fb2fb811d4b3d6f883182685c172380bef2229180239e6b3236ee
+blocks        2
   - volume               Array blake3:dcbc6f3b0a1922d0f7ecc3197fc45d383f7e47b1cb5373597d0b4a61eab7a26e
+  - volume.cidx          ChunkIndex blake3:2f956e50db68882024f9978e897fe7857644b8b0b1b0889283c0988aade2f553
 
 ```
