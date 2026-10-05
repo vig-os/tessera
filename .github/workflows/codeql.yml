@@ -9,7 +9,7 @@
 # subprocess execution.
 #
 # Triggers:
-#   - Pull requests to dev, release/**, and main
+#   - Pull requests to any base branch (stacked PRs verified)
 #   - Pushes to main (post-merge analysis)
 #   - Weekly schedule (catch newly disclosed patterns)
 #
@@ -37,18 +37,9 @@ name: CodeQL
 
 on:  # yamllint disable-line rule:truthy
   pull_request:
+    # Any base, so a PR stacked on a topic branch is verified too; the
+    # concurrency group cancels superseded runs (#1759).
     branches:
-      - dev
-      - 'release/**'
-      - main
-      # Stacked PRs (#463): a PR based on another topic branch matched none of
-      # the bases above, so it got no lint/test/commit-message/nix checks at all
-      # and stayed untested until its base merged and GitHub retargeted it.
-      # '**' matches any base, including the three named above (a PR matches the
-      # filter once, so this adds no duplicate runs). Safe to widen now that the
-      # workflow has the concurrency group added below: a superseded stacked run
-      # cancels instead of accumulating. NOTE devkit-managed file -- upstream
-      # vig-os/devkit#1759; a devkit upgrade regenerating it drops both edits.
       - '**'
   push:
     branches:
@@ -58,12 +49,10 @@ on:  # yamllint disable-line rule:truthy
   schedule:
     - cron: '15 2 * * 1'  # Monday at 02:15 UTC
 
-# Added with the stacked-PR trigger widening (#463): the base filter above now
-# matches any base, so a force-push to a stacked branch would otherwise leave the
-# superseded analysis running. Keyed per workflow AND per ref so distinct refs stay
-# independent. `!= 'push'` mirrors ci.yml: the push-to-main leg is post-merge
-# analysis feeding the security tab, and two rapid merges must both report rather
-# than the first being cancelled. NOTE devkit-managed file -- vig-os/devkit#1759.
+# Cancel a superseded CodeQL analysis run (#1759): same rationale as ci.yml
+# (#1602). The cancel condition is != 'push' rather than a bare true: post-merge
+# analysis feeds the security tab, so two merges landing quickly should each
+# report instead of the first being cancelled.
 concurrency:
   group: codeql-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
