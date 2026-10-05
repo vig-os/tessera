@@ -4,14 +4,14 @@ version = "0.0.0"
 description = "Cross-ecosystem I/O comparison for Tessera .tsra vs HDF5/Zarr/NIfTI/DICOM/Parquet/NeXus (#143)"
 requires-python = ">=3.12"
 dependencies = [
-    "numpy>=2",
-    "h5py>=3.11",
-    "zarr>=3",
-    "numcodecs>=0.13",
-    "nibabel>=5.2",
-    "pydicom>=3",
-    "pyarrow>=17",
-    "uproot>=5",
+    "numpy==2.5.0",
+    "h5py==3.16.0",
+    "zarr==3.2.1",
+    "numcodecs==0.16.5",
+    "nibabel==5.4.2",
+    "pydicom==3.0.2",
+    "pyarrow==24.0.0",
+    "uproot==5.7.4",
 ]
 
 [tool.uv]
