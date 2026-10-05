@@ -1657,3 +1657,82 @@ fn a_header_only_csv_seals_a_zero_row_table_on_both_paths() {
         "an empty table seals the same either way"
     );
 }
+/// An input that changes DURING the encode pass is refused, and nothing is sealed.
+///
+/// The guard originally compared the input's metadata only around pass 1, which is the wrong window:
+/// the file is open and being read throughout pass 2, and that is when a concurrent writer does the
+/// damage. A mutation landing after the between-passes check used to sail straight through and seal a
+/// product built from two different versions of the file, under one `ingested_from` digest.
+///
+/// No production seam is needed to test it: the driver already calls the caller's `open` closure
+/// twice — once per pass — so the closure itself is the hook. Mutating on the second call is exactly
+/// "the file changed between the shape pass and the encode pass".
+#[test]
+fn an_input_that_changes_during_the_encode_pass_is_refused_with_nothing_sealed() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("mutating.csv");
+    std::fs::write(&input, "id,x\n1,1.5\n2,2.5\n3,3.5\n").unwrap();
+
+    let column_meta = ColumnMeta::default();
+    let mut opts =
+        tessera_ingest::csv_table::CsvOptions::from_decls(&["id:i4".into(), "x:f8".into()])
+            .expect("decls");
+    opts.header = true;
+
+    let stage = dir.path().join("stage");
+    std::fs::create_dir_all(&stage).unwrap();
+    let out = dir.path().join("mutating.tsra");
+    let cfg = tessera_io::WriteConfig::default();
+
+    let calls = AtomicUsize::new(0);
+    let p = input.clone();
+    let o = opts.clone();
+    let open = move || {
+        // Call 0 is the shape pass. Call 1 is the encode pass — grow the file just before it reads,
+        // which is the window the original guard did not cover.
+        if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+            writeln!(f, "4,4.5").unwrap();
+        }
+        Ok(Box::new(tessera_ingest::csv_table::csv_chunks(&p, &o, 2)?)
+            as Box<dyn Iterator<Item = tessera_core::Result<_>>>)
+    };
+
+    let err = tessera_ingest::stream_table::stream_to_table_product(
+        open,
+        &tessera_ingest::canonical::GenericIngest {
+            name: "mutating",
+            timestamp: TS,
+            description: "generically-ingested table",
+            source_format: "csv",
+            source_path: &input,
+            source_label: Some("fixture/table"),
+            extra_sources: &[],
+            decoder: decoder::Decoder::CSV,
+            generation: None,
+            column_meta: &column_meta,
+        },
+        &tessera_ingest::stream_table::StreamOpts {
+            stage: &stage,
+            out: &out,
+            cfg: &cfg,
+            batch_rows: 2,
+            block_rows: tessera_io::table::ROWS_PER_GROUP as u64,
+            tiers: Default::default(),
+        },
+    )
+    .expect_err("an input that changed mid-encode must not seal");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("changed during the encode pass"),
+        "the error must name WHEN it changed, so an operator knows a retry is the fix: {msg}"
+    );
+    assert!(
+        !out.exists(),
+        "nothing may be sealed from a mixture of two versions of the input"
+    );
+}
