@@ -1136,10 +1136,16 @@ enum IngestSrc {
         /// decoded size exceeds `--stream-threshold`, `batch` reads the whole file, `stream` forces
         /// the bounded path.
         ///
-        /// A memory/time trade and never a format decision — both paths seal the same
-        /// `content_hash` AND `manifest_hash`, which the batch-equals-stream tests pin. Streaming
-        /// reads the input twice (nullability is decided over the whole file, ADR-0029), so a pipe
-        /// or process substitution falls back to `batch` whatever you ask for.
+        /// A memory/time trade and never a format decision: both paths seal the same
+        /// `content_hash` AND `manifest_hash`. Two things make that true rather than hopeful — the
+        /// block partition is a function of the row count alone (ADR-0026), and this flag is an
+        /// execution knob that never enters the spec hash, so it cannot reach `manifest_hash`
+        /// through the `ingested_via_spec` edge either. Pinned by test, at the production
+        /// `BLOCK_ROWS` as well as across block boundaries.
+        ///
+        /// Streaming reads the input twice (nullability is decided over the whole file, ADR-0029),
+        /// so a pipe or process substitution falls back to `batch` whatever you ask for — which
+        /// seals the same product, just without the memory bound.
         #[arg(long, value_parser = ["auto", "batch", "stream"], default_value = "auto")]
         streaming: String,
         /// Rows per decoded batch on the streaming path — the read-side memory unit, independent of

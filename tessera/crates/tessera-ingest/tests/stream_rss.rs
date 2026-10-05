@@ -1,4 +1,4 @@
-//! #458's load-bearing measurement: streaming a table ingest is bounded by a **batch**, not the file.
+//! #458's load-bearing measurement: streaming a table ingest is bounded by a **block**, not the file.
 //!
 //! # Why this is its own test file
 //!
@@ -187,7 +187,7 @@ fn stream(dir: &std::path::Path, input: &std::path::Path, tag: &str) -> tessera_
 }
 
 #[test]
-fn streaming_a_table_is_bounded_by_a_batch_not_the_file() {
+fn streaming_a_table_is_bounded_by_a_block_not_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let warm = dir.path().join("warm.parquet");
     let small = dir.path().join("small.parquet");
