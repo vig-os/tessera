@@ -452,7 +452,6 @@ pub struct GenericIngest<'a> {
     pub column_meta: &'a crate::column_meta::ColumnMeta,
 }
 
-/// Seal a canonicalised table as a generic `table` product (ADR-0056 §7's builtin schema).
 /// The manifest facts a generic-table ingest declares, independent of how its blocks get written.
 ///
 /// Two writers implement it — [`ProductBuilder`] for the batch path and `tessera_io::WriteSession` for
@@ -627,23 +626,76 @@ pub fn declare_table_with_tiers(
     Ok(())
 }
 
+/// Seal a canonicalised table as a generic `table` product (ADR-0056 §7's builtin schema).
+///
+/// Partitioned at the [`tessera_io::BLOCK_ROWS`] format invariant, the same split the streaming path
+/// uses, so the block layout is a function of the data and never of the path that read it.
 pub fn to_table_product(
     table: &CanonicalTable,
     opts: &GenericIngest<'_>,
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
+    to_table_product_partitioned(table, opts, tessera_io::BLOCK_ROWS as u64)
+}
+
+/// [`to_table_product`] with the block partition configurable — the seam the partition tests use.
+///
+/// Production goes through [`to_table_product`], pinned at the [`tessera_io::BLOCK_ROWS`] format
+/// invariant. This exists so the partition can be exercised across several block boundaries without
+/// materialising four million rows per case; one test still runs at the real constant, because a
+/// seam-only proof says nothing about the number the shipped binary uses.
+pub fn to_table_product_partitioned(
+    table: &CanonicalTable,
+    opts: &GenericIngest<'_>,
+    block_rows: u64,
+) -> Result<(Manifest, Vec<BlockPayload>)> {
+    if block_rows == 0 {
+        return Err(he("to_table_product: block_rows must be positive"));
+    }
     let mut spec = table.spec()?;
     // Operator semantics land INSIDE the seal, which is the half of §7 that keeps generic ingest from
     // being a wrapper: "annotate it later" is a real path (the content-addressed metadata edit), but
     // it must not be the only one.
     opts.column_meta.apply(&mut spec.columns)?;
     let data = table.data();
-    let (block_ref, payload) = tessera_io::table::table_block(GENERIC_BLOCK, &spec, &data)?;
+    let total_rows = spec.rows;
+    // ── The partition, through the format SSoT.
+    //
+    // `tessera_io::block_count`'s own doc states the rule this implements: the split is a "format
+    // invariant ... shared by every ingest path so whole-file and streamed agree on the partition
+    // (and therefore on the content_hash)". This path used to seal exactly ONE block whatever the row
+    // count, while the streaming path split through `TableMultiBlockSink` — so above BLOCK_ROWS the
+    // same bytes sealed two different products, chosen by `streaming` / `stream_threshold` / whether
+    // the input happened to be a pipe. None of which is recorded in the product, so a reader could
+    // not even tell which had happened.
+    //
+    // `block_name` keeps small-stays-single: one block is named `GENERIC_BLOCK` exactly as before, so
+    // every input under one block — which is every conformance fixture — is byte-identical.
+    let total_blocks = tessera_io::partition_blocks(total_rows, block_rows);
+    let block_rows_u = usize::try_from(block_rows)
+        .map_err(|e| he(format!("block_rows does not fit usize: {e}")))?;
     let mut b = ProductBuilder::new("table", opts.name, opts.description, opts.timestamp);
-    b.add_block_ref(block_ref);
+    let mut payloads = Vec::with_capacity(total_blocks as usize);
+    for blk in 0..total_blocks {
+        let start = (blk as usize) * block_rows_u;
+        let end = ((blk as usize + 1) * block_rows_u).min(total_rows as usize);
+        let block_spec = tessera_core::block::table::TableSpec {
+            columns: spec.columns.clone(),
+            rows: u64::try_from(end - start).map_err(|e| he(format!("row count: {e}")))?,
+            row_index: spec.row_index.clone(),
+        };
+        let block_data: TableData = data
+            .iter()
+            .map(|(name, c)| (name.clone(), c.slice(start, end)))
+            .collect();
+        let nm = tessera_io::block_name(GENERIC_BLOCK, blk, total_blocks);
+        let (block_ref, payload) = tessera_io::table::table_block(&nm, &block_spec, &block_data)?;
+        b.add_block_ref(block_ref);
+        payloads.push(payload);
+    }
     // Every manifest fact goes through the shared applier, so the streaming path cannot declare a
     // different set (#458).
     declare_generic_table(&mut b, opts, &table.transforms)?;
-    Ok((b.seal()?, vec![payload]))
+    Ok((b.seal()?, payloads))
 }
 
 /// Seal a canonicalised dense grid as a generic `array` product (ADR-0056 §7's builtin schema).

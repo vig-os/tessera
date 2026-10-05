@@ -111,6 +111,34 @@ bounded by workers not dataset; throughput 4.9 M→14.9 M events/s (~3×), satur
 (SPIKE-RESULTS #203 → "Multi-block result"). Determinism preserved: `content_hash` worker-count-independent
 (ordered commit), small products (≤ BLOCK_ROWS) stay single-block byte-identical (no corpus regen).
 
+## The block partition is a function of the DATA, not of the path that read it (2026-10-05, #458)
+
+**Rule.** Every ingest path that produces a table product MUST partition it into `BLOCK_ROWS`-sized
+blocks through the format SSoT (`tessera_io::block_count` / `partition_blocks` / `block_name`),
+whether it read the input whole or streamed it. Block count, block names and therefore `content_hash`
+are a function of the row count alone.
+
+**Why it needs saying.** Generic table ingest (#458, ADR-0056 §11) shipped a whole-file path that
+sealed exactly ONE block regardless of row count, while its streaming path split at `BLOCK_ROWS`
+through `TableMultiBlockSink`. Below one block the two agree, which is every conformance fixture and
+every test that existed — so the divergence was invisible until an input exceeded 4,194,304 rows, at
+which point the same bytes sealed two different `content_hash`es. Worse, *which* one you got was
+decided by things that are not the data: `streaming = "batch" | "stream"`, the `stream_threshold`
+against an estimated size, and even whether the input happened to be a pipe (a pipe cannot be read
+twice, so it falls back to the whole-file path). None of that is recorded in the product, so a reader
+holding two differing archives could not tell which path had produced either.
+
+The corollary, for the same reason: **the streaming knobs are not content.** `streaming` and
+`batch_rows` choose how the work is done and cannot change a sealed byte, so they are excluded from
+`spec_hash` entirely (ADR-0035 hashes the parsed spec into every member's `ingested_via_spec` edge,
+so anything in `spec_hash` is in `manifest_hash`). Otherwise re-running an archived ingest with
+`streaming = "stream"` — on a smaller machine, which is exactly when an operator reaches for it —
+could not reproduce the archived `manifest_hash` for byte-identical data.
+
+`block_count`'s doc already stated the invariant ("shared by every ingest path so whole-file and
+streamed agree on the partition"); it was a comment on a helper rather than a rule a reviewer could
+cite. It is a rule now, pinned by tests at the production constant as well as at a lowered seam.
+
 **Remaining before an Accepted flip:** **cross-env / cross-arch determinism re-validation**
 (dev==release==hermetic, x86==ARM — the ADR-0024 caveat; the x86+aarch64-linux CI matrix is wired, needs a
 green ARM run). The functional + memory + parallelism gates are now met.
