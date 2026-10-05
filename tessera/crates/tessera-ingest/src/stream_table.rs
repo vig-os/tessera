@@ -351,6 +351,14 @@ pub struct StreamOpts<'a> {
 struct InputFingerprint {
     len: u64,
     modified: Option<std::time::SystemTime>,
+    /// **Inode change time** on unix — `ctime`, which advances on a write or a metadata change.
+    ///
+    /// Not `Metadata::created()`: that is the file's *birth* time, which by definition does not move
+    /// when a file is modified, so it detects nothing a change guard is for. (It is also unsupported
+    /// on several filesystems, where it would silently be `None` on both sides and compare equal.)
+    #[cfg(unix)]
+    ctime: (i64, i64),
+    #[cfg(not(unix))]
     created: Option<std::time::SystemTime>,
     #[cfg(unix)]
     inode: u64,
@@ -364,6 +372,12 @@ impl InputFingerprint {
         Ok(Self {
             len: md.len(),
             modified: md.modified().ok(),
+            #[cfg(unix)]
+            ctime: {
+                use std::os::unix::fs::MetadataExt;
+                (md.ctime(), md.ctime_nsec())
+            },
+            #[cfg(not(unix))]
             created: md.created().ok(),
             #[cfg(unix)]
             inode: std::os::unix::fs::MetadataExt::ino(&md),
@@ -428,11 +442,10 @@ where
     // ── The change guard, between the passes.
     let after = InputFingerprint::of(ingest.source_path)?;
     if before != after {
-        return Err(shape_error(format!(
-            "{} changed during ingest (size, mtime or inode moved between the shape pass and the \
-             encode pass) — re-run on a stable input rather than sealing a mixture of two files",
-            ingest.source_path.display()
-        )));
+        return Err(changed_during_ingest(
+            ingest.source_path,
+            "between the two passes",
+        ));
     }
 
     // ── The session. Every manifest fact goes through the shared applier, so this declares exactly what
@@ -456,6 +469,7 @@ where
         .sum();
     let unit_bytes = opts.block_rows.saturating_mul(row_bytes.max(1));
     let mut sw = tessera_io::StreamWriter::with_config(ws, opts.cfg, unit_bytes);
+    let mut encoded_rows = 0u64;
     {
         let mut sink = tessera_io::TableMultiBlockSink::with_block_rows(
             shape.columns.clone(),
@@ -467,7 +481,9 @@ where
         // ── Pass 2: encode. Each batch is canonicalised, coerced to the file-wide schema so every block
         //    encodes alike, and pushed.
         for chunk in open()? {
-            let data = coerce_to_shape(&shape, chunk?)?;
+            let chunk = chunk?;
+            encoded_rows += chunk.rows() as u64;
+            let data = coerce_to_shape(&shape, chunk)?;
             let named: tessera_io::TableData = shape
                 .columns
                 .iter()
@@ -478,5 +494,38 @@ where
         }
         sink.finish()?;
     }
+
+    // ── The guard again, on the far side of pass 2.
+    //
+    // Checking only *around* pass 1 proves the input was stable up to the moment encoding began,
+    // which is the wrong window: the file is open and being read throughout pass 2, and that is when
+    // a concurrent writer would do the damage. The row count is checked as well as the metadata,
+    // because it is the one cross-check that comes free — the two passes must have seen the same
+    // number of rows, and a mismatch means the product about to be sealed is a mixture of two inputs
+    // under one `ingested_from` digest.
+    let after_encode = InputFingerprint::of(ingest.source_path)?;
+    if before != after_encode {
+        return Err(changed_during_ingest(
+            ingest.source_path,
+            "during the encode pass",
+        ));
+    }
+    if encoded_rows != shape.rows {
+        return Err(shape_error(format!(
+            "{} yielded {} rows in the shape pass and {encoded_rows} in the encode pass — the input \
+             changed between them, so the sealed product would be a mixture of two files",
+            ingest.source_path.display(),
+            shape.rows
+        )));
+    }
     sw.finish(opts.out)
+}
+
+/// The change-guard failure, worded once so both checks say the same thing.
+fn changed_during_ingest(path: &std::path::Path, when: &str) -> tessera_core::Error {
+    shape_error(format!(
+        "{} changed {when} (size, mtime, ctime or inode moved between the shape pass and the encode \
+         pass) — re-run on a stable input rather than sealing a mixture of two files",
+        path.display()
+    ))
 }
