@@ -139,6 +139,31 @@
         # an adapter or the driver neither rebuilds this nor touches the crane `src` hash.
         # LINUX ONLY: common.py uses CDLL('libc.so.6'), mincore(2) and posix_fadvise, none of which
         # exist on Darwin, and `eachDefaultSystem` evaluates the darwin systems too.
+        # ── CI job groups (#517) ──────────────────────────────────────────────────────────────────
+        # CI runs the checks as one job per group per arch, instead of every check on one runner.
+        # The legs were THROUGHPUT-bound (~95 min of check work through two max-jobs slots), not
+        # critical-path-bound: the longest single check (sql-tests) is ~19.5 min against a ~78-min
+        # leg. Groups are balanced against that, from measured per-check medians (#517).
+        #
+        # Rules, all ASSERTED in the `checks` wrapper below:
+        #   - `rest` is computed: every check not listed elsewhere. Adding a check cannot drop it from CI.
+        #   - a listed name must be a check, and no check may be in two groups;
+        #   - at most ONE `ingest-gate-a*` check per group. Two dev-profile Gate A builds overlapping
+        #     were every post-#514 memory peak (13.7-14.1 GB of 16, #495); one per job makes that
+        #     overlap impossible rather than a scheduling accident.
+        #   - tessera-py-import and tessera-wheel-import share a group: both need `tessera-py`, the only
+        #     intermediate two checks share, so splitting them would build it twice.
+        ciGroupsDeclared = {
+          sql = [ "sql-tests" ];
+          seal = [ "seal-profile-determinism" "workspace-clippy" ];
+          cloud = [ "minio-range-read" "ingest-gate-a-sql" ];
+          registry = [ "registry-roundtrip" "ingest-gate-a-reduced" ];
+          python = [ "ingest-gate-a-workspace" "tessera-py-import" "tessera-wheel-import" "workspace-test" ];
+        };
+        resolveCiGroups = names:
+          let listed = pkgs.lib.concatLists (builtins.attrValues ciGroupsDeclared);
+          in ciGroupsDeclared // { rest = builtins.filter (n: !(builtins.elem n listed)) names; };
+
         linuxOnlyChecks = pkgs.lib.optionalAttrs isLinux {
           bench-ecosystems =
             let
@@ -1133,6 +1158,14 @@
           claimed = pkgs.lib.unique (pkgs.lib.concatLists (builtins.attrValues scriptsRunByChecks));
           missing = builtins.filter (c: !(allChecks ? ${c})) claimed;
           entryPoints = builtins.attrNames scriptsRunByChecks ++ builtins.attrNames scriptsNotRunInCi;
+          groups = resolveCiGroups (builtins.attrNames allChecks);
+          groupListed = pkgs.lib.concatLists (builtins.attrValues ciGroupsDeclared);
+          unknownInGroups = builtins.filter (n: !(allChecks ? ${n})) groupListed;
+          inTwoGroups = pkgs.lib.unique (builtins.filter
+            (n: pkgs.lib.count (m: m == n) groupListed > 1) groupListed);
+          gateAClash = builtins.filter (g: builtins.length
+            (builtins.filter (n: pkgs.lib.hasPrefix "ingest-gate-a" n) groups.${g}) > 1)
+            (builtins.attrNames groups);
           danglingLibs = pkgs.lib.concatLists (pkgs.lib.mapAttrsToList
             (lib: users: map (u: "${lib} -> ${u}") (builtins.filter (u: !(builtins.elem u entryPoints)) users))
             scriptLibraries);
@@ -1152,11 +1185,28 @@
             scriptsNotRunInCi: ${builtins.concatStringsSep ", " danglingLibs}
             A library is only accounted for if what imports it is (#520).
           ''
+          else if unknownInGroups != [ ] then throw ''
+            ciGroupsDeclared lists names that are not checks: ${builtins.concatStringsSep ", " unknownInGroups} (#517)
+          ''
+          else if inTwoGroups != [ ] then throw ''
+            ciGroupsDeclared lists checks in more than one group: ${builtins.concatStringsSep ", " inTwoGroups} (#517)
+          ''
+          else if gateAClash != [ ] then throw ''
+            CI groups with more than one ingest-gate-a* check: ${builtins.concatStringsSep ", " gateAClash}
+            Two dev-profile Gate A builds overlapping were every post-#514 memory peak (#495) — give each
+            its own group (#517). An unlisted Gate A check lands in `rest`, so this also catches a NEW one.
+          ''
           else allChecks;
 
         # The shared dependency build (crane `buildDepsOnly`), exposed so CI can key and restore it
         # (#507). `legacyPackages` is not built by `nix flake check`, so this costs nothing there.
-        legacyPackages = { inherit cargoArtifacts; };
+        legacyPackages = {
+          inherit cargoArtifacts;
+          # The resolved CI groups (#517), read by nix-check's `plan` job. Derived from the SAME
+          # check set as `checks` (through the asserting wrapper), so CI cannot schedule a check
+          # that does not exist or miss one that does.
+          ciGroups = resolveCiGroups (builtins.attrNames self.checks.${system});
+        };
 
         formatter = pkgs.nixpkgs-fmt;
       });

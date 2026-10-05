@@ -12,6 +12,15 @@
 # Run it yourself with the SAME flags CI uses:
 #   nix flake check -L --keep-going --fallback --max-jobs 2 --cores 4
 #
+# CI SHAPE (#517). The checks run as ONE JOB PER GROUP PER ARCH, not all on one runner: the old legs
+# were throughput-bound (~95 min of check work through two max-jobs slots, against a ~19.5-min
+# longest single check). Groups live in the flake (`ciGroupsDeclared` / `legacyPackages.<sys>.ciGroups`,
+# asserted exhaustive, with at most one Gate A check each) — nothing here hard-codes a check name.
+#   plan                 -> the matrix, read from the flake
+#   check (<arch>, <g>)  -> `nix build` of that group's checks; per-check verdicts uploaded
+#   nix flake check      -> the single required status: every check's verdict, asserted complete
+# Locally, `nix flake check` is unchanged: same flake, same checks.
+#
 # Checks (see flake.nix): workspace-clippy · workspace-test · workspace-fmt ·
 # guardrails-gates · dev-shell. cargo-deny + the full pre-commit gate set run via `prek`
 # locally (they need network / the working tree).
@@ -61,9 +70,120 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: nix flake check (${{ matrix.arch }})
+  # The matrix is READ FROM THE FLAKE, never written here: a check added to the flake lands in a group
+  # (`rest`, if nobody lists it) and therefore in CI without touching this file.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      expected: ${{ steps.plan.outputs.expected }}
+      deps: ${{ steps.plan.outputs.deps }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
+
+      # Is each arch's dependency closure already cached? Looked up from HERE, without downloading:
+      # the key is a derivation hash and evaluation is pure, so this runner computes the aarch64 key
+      # exactly. Only the arches that miss get a `deps` job.
+      - name: Look up the x86_64 dependency cache
+        id: deps-x86_64-linux
+        uses: ./.github/actions/nix-deps-cache
+        with:
+          lookup-only: "true"
+          system: x86_64-linux
+
+      - name: Look up the aarch64 dependency cache
+        id: deps-aarch64-linux
+        uses: ./.github/actions/nix-deps-cache
+        with:
+          lookup-only: "true"
+          system: aarch64-linux
+
+      - name: Plan the check matrix
+        id: plan
+        env:
+          HIT_X86_64_LINUX: ${{ steps.deps-x86_64-linux.outputs.hit }}
+          HIT_AARCH64_LINUX: ${{ steps.deps-aarch64-linux.outputs.hit }}
+        run: |
+          set -euo pipefail
+          include='[]'; expected='[]'; deps='[]'
+          for pair in x86_64-linux:ubuntu-latest aarch64-linux:ubuntu-24.04-arm; do
+            sys=${pair%%:*}; runner=${pair#*:}
+            # Evaluation parity with `nix flake check`: every output of this system (devShells,
+            # packages, apps, formatter — not only checks) must evaluate. `--system` evaluates the
+            # aarch64 outputs from this x86 runner; `--all-systems` is unusable (x86_64-darwin no
+            # longer evaluates, #545). Here, before any build, a broken flake fails in seconds.
+            nix flake check --no-build --system "$sys"
+            echo "evaluated every ${sys} output"
+            # Evaluating ciGroups goes through the asserting `checks` wrapper, so an unknown name, a
+            # check in two groups, or two Gate A checks in one group fails HERE, before any build.
+            groups=$(nix eval --json ".#legacyPackages.${sys}.ciGroups")
+            include=$(jq -c --arg sys "$sys" --arg runner "$runner" --argjson g "$groups" \
+              '. + [$g | to_entries[] | select(.value | length > 0)
+                    | {arch: $sys, runner: $runner, group: .key, checks: (.value | join(" "))}]' <<<"$include")
+            expected=$(jq -c --arg sys "$sys" --argjson g "$groups" \
+              '. + [$g | to_entries[] | .value[] | "\($sys)/\(.)"]' <<<"$expected")
+            hitvar="HIT_$(tr 'a-z-' 'A-Z_' <<<"$sys")"
+            if [ "${!hitvar:-}" = "true" ]; then
+              echo "${sys}: dependency cache hit"
+            else
+              echo "${sys}: dependency cache MISS — a deps job builds it once, ahead of the checks"
+              deps=$(jq -c --arg sys "$sys" --arg runner "$runner" '. + [{arch: $sys, runner: $runner}]' <<<"$deps")
+            fi
+          done
+          n=$(jq 'length' <<<"$expected")
+          # A plan with no checks would make every later assertion vacuously true.
+          [ "$n" -gt 0 ] || { echo "::error::plan produced no checks"; exit 1; }
+          {
+            echo "matrix={\"include\":${include}}"
+            echo "expected=${expected}"
+            echo "deps={\"include\":${deps}}"
+          } >> "$GITHUB_OUTPUT"
+          echo "planned $(jq 'length' <<<"$include") jobs covering $n arch/check pairs"
+          jq -r '.[] | "  \(.arch) \(.group): \(.checks)"' <<<"$include"
+
+  # A cold dependency key is built ONCE per arch, here, before the check matrix starts. Without this
+  # every check job built `tessera-deps` itself (6 per arch, 8.8-14.7 min each) and all of them raced
+  # to save one key, so 5 of 6 lost ("Unable to reserve cache"). Skipped entirely on a hit, which is
+  # the common case: `plan` already looked the key up.
+  deps:
+    name: nix deps (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    needs: [plan]
+    if: fromJSON(needs.plan.outputs.deps).include[0] != null
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.deps) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
+
+      - name: Ensure the dependency cache
+        uses: ./.github/actions/nix-deps-cache
+        with:
+          mode: ensure
+
+  check:
+    name: nix check (${{ matrix.arch }}, ${{ matrix.group }})
+    runs-on: ${{ matrix.runner }}
+    needs: [plan, deps]
+    # `deps` is skipped on a warm key, and a job whose need was skipped is itself skipped unless its
+    # `if` calls a status function — hence `!cancelled()`, then the real conditions, enumerated
+    # POSITIVELY: the plan succeeded, and deps either built the closure or had nothing to build. A
+    # FAILED deps build stops here rather than letting 12 jobs each rebuild and fail the same way;
+    # the gate names it.
+    if: >-
+      !cancelled() && needs.plan.result == 'success'
+      && (needs.deps.result == 'success' || needs.deps.result == 'skipped')
     # A cold build of the vortex/zarrs/hdf5 stack is slow on a GitHub-hosted runner and varies a
     # lot between them: observed 40m (x86) and 51m (aarch64) on one run, then >60m on x86 for the
     # very next one, which the previous 60-minute cap cancelled mid-build. A cancelled leg is not
@@ -92,15 +212,15 @@ jobs:
     # leg, so the next long draw can be diagnosed as I/O starvation, memory pressure or simply slow
     # silicon instead of guessed at. A concurrency cap (`--max-jobs`) must NOT land before this
     # change: at 89 of 90 minutes any slowdown converts an intermittent failure into a reliable one.
-    timeout-minutes: 120
+    #
+    # Per JOB since #517, not per leg: one group is at most ~20 min of check work (median; the longest,
+    # sql-tests, has drawn 33.6 min on a cold run), and the dependency closure is RESTORED (the `deps`
+    # job built it) — unless the restore itself fails, when the job builds it: up to ~15 min more. 60
+    # covers that with the same headroom reasoning as above.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64-linux
-            runner: ubuntu-latest
-          - arch: aarch64-linux
-            runner: ubuntu-24.04-arm
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -109,8 +229,8 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
 
       # Dependency cache (#507): restore + import `tessera-deps` before the build. Details, measurements
-      # and the can-only-save-time guarantee are in the action itself. The matching save is after the
-      # build; `nix-deps-cache.yml` warms the same key on pushes to dev, which nix-check never sees.
+      # and the can-only-save-time guarantee are in the action itself. Nothing here SAVES: the `deps`
+      # job did, once per arch, if the key was missing; `nix-deps-cache.yml` warms the dev scope.
       - name: Restore the dependency cache
         id: deps
         uses: ./.github/actions/nix-deps-cache
@@ -178,8 +298,11 @@ jobs:
       #
       # `set +e` so a failure reaches the summary step below instead of ending the job here; the real
       # result is re-raised there, so the leg still fails when a check fails.
-      - name: nix flake check
+      - name: nix build (this group's checks)
         id: check
+        env:
+          SYS: ${{ matrix.arch }}
+          CHECKS: ${{ matrix.checks }}
         run: |
           set +e
           # Resource sampler, started INSIDE this step on purpose (#483). Three legs on #460/#461
@@ -210,40 +333,37 @@ jobs:
           # shellcheck disable=SC2064
           trap "kill $sampler 2>/dev/null" EXIT
 
-          nix flake check -L --keep-going --fallback --max-jobs 2 --cores 4
+          attrs=()
+          for c in $CHECKS; do attrs+=(".#checks.${SYS}.${c}"); done
+          echo "building ${#attrs[@]} checks: $CHECKS"
+          nix build -L --no-link --keep-going --fallback --max-jobs 2 --cores 4 "${attrs[@]}"
           rc=$?
           kill "$sampler" 2>/dev/null
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          echo "nix flake check exited $rc"
+          echo "nix build exited $rc"
 
-      # Per-check verdicts, so a red leg always names what failed (#483).
+      # Per-check verdicts, so a red job always names what failed (#483).
       #
-      # Save only on a MISS, and only if this leg actually produced the artifact. `always()` so a red
-      # leg with a good tessera-deps still warms the cache for the next run.
-      - name: Save the dependency cache
-        if: always() && steps.deps.outputs.hit != 'true'
-        uses: ./.github/actions/nix-deps-cache
-        with:
-          mode: save
-          key: ${{ steps.deps.outputs.key }}
-          out: ${{ steps.deps.outputs.out }}
-          dir: ${{ steps.deps.outputs.dir }}
-
       # Derived from the STORE, not by parsing nix's human-readable output: a check whose output path
       # is valid was built and therefore passed. `--keep-going` above is what makes that inference
       # sound, because every check is attempted, so a missing output means that check failed rather
       # than that it was skipped. No output format to drift against.
+      # `!cancelled()`, not `always()`: a CANCELLED job has no verdict worth reporting, and uploading
+      # none can only make the gate fail (a missing verdict is an error there), never pass.
       - name: Summarise per-check results
-        if: always()
+        if: ${{ !cancelled() }}
         # Through `env:` rather than inline `${{ }}` in the run block: a workflow expression expanded
         # into shell is the template-injection shape the zizmor gate flags, and `matrix.arch` being
         # repo-controlled today does not make interpolating it a habit worth keeping.
         env:
           SYS: ${{ matrix.arch }}
+          GROUP: ${{ matrix.group }}
+          CHECKS: ${{ matrix.checks }}
           CHECK_RC: ${{ steps.check.outputs.rc }}
         run: |
           set +e
           S="$GITHUB_STEP_SUMMARY"
+          V="${RUNNER_TEMP}/verdicts.tsv"; : > "$V"
 
           # One evaluation for every check's output path, instead of `attrNames` followed by an
           # `outPath` eval per check: 17 nix evaluations became 1, and the name and the path can no
@@ -255,7 +375,7 @@ jobs:
             # Without this, a failed evaluation reported "0 passed, 0 failed or not built", which
             # reads like an empty-but-fine result rather than a broken one.
             {
-              echo "## nix flake check — ${SYS}"
+              echo "## nix check — ${SYS} / ${GROUP}"
               echo ""
               echo ":warning: **Could not evaluate \`.#checks.${SYS}\`** — no per-check summary."
               echo "The flake may have failed to evaluate; the job log is authoritative."
@@ -265,11 +385,14 @@ jobs:
           fi
 
           {
-            echo "## nix flake check — ${SYS}"
+            echo "## nix check — ${SYS} / ${GROUP}"
             echo ""
             echo "| check | result |"
             echo "|---|---|"
           } >> "$S"
+          # Only THIS group's checks: the others are verdicts of other jobs.
+          paths_json=$(jq -c --arg want "$CHECKS" \
+            'with_entries(select(.key as $k | ($want | split(" ") | index($k))))' <<< "$paths_json")
 
           pass=0; fail=0; failed_names=""
           while IFS=$'\t' read -r name outp; do
@@ -280,28 +403,40 @@ jobs:
             # substituter is configured today, so this is closing a latent trap, not a live bug.
             if [ -n "$outp" ] && nix-store --check-validity "$outp" >/dev/null 2>&1; then
               echo "| \`$name\` | :white_check_mark: passed |" >> "$S"
+              printf '%s/%s\tpassed\n' "$SYS" "$name" >> "$V"
               pass=$((pass+1))
             else
               echo "| \`$name\` | :x: failed or not built |" >> "$S"
+              printf '%s/%s\tfailed\n' "$SYS" "$name" >> "$V"
               fail=$((fail+1)); failed_names="$failed_names $name"
             fi
           done <<< "$(jq -r 'to_entries[] | "\(.key)\t\(.value)"' <<< "$paths_json")"
 
           {
             echo ""
-            echo "**$pass passed, $fail failed or not built** (\`nix flake check\` exited \`${CHECK_RC:-?}\`)."
+            echo "**$pass passed, $fail failed or not built** (\`nix build\` exited \`${CHECK_RC:-?}\`)."
             if [ "$fail" -gt 0 ]; then
               echo ""
               echo "Not built:$failed_names"
               echo ""
               echo "A check listed here either failed or never produced an output. With \`--keep-going\`"
               echo "every check is attempted, so the usual reading is a real failure — unless the leg hit"
-              echo "its 90-minute cap, in which case the tail of the job log says so."
+              echo "its time cap, in which case the tail of the job log says so."
             fi
           } >> "$S"
-          echo "summary: $pass passed, $fail failed or not built; check rc=${CHECK_RC:-?}"
-          # Re-raise the real result: the check step swallowed it so this summary could run.
+          echo "summary: $pass passed, $fail failed or not built; build rc=${CHECK_RC:-?}"
+          # Re-raise the real result: the build step swallowed it so this summary could run.
           exit "${CHECK_RC:-1}"
+
+      # Every job hands its per-check verdicts to the gate, which asserts the union is COMPLETE.
+      - name: Upload per-check verdicts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: verdicts-${{ matrix.arch }}-${{ matrix.group }}
+          path: ${{ runner.temp }}/verdicts.tsv
+          retention-days: 7
+          if-no-files-found: error
 
   # ── The single REQUIRED status check ──────────────────────────────────────────────────────
   # Branch protection matches context names EXACTLY. A matrix job is reported per-leg as
@@ -310,20 +445,86 @@ jobs:
   # every PR looks mergeable. This aggregate leg has a name that does NOT vary with the matrix,
   # so protection stays correct when an arch is added or renamed: point it at THIS job only.
   #
-  # `if: always()` + an explicit result assertion is required — without it the job is *skipped*
-  # when a leg fails, and a skipped required check is treated as neutral (i.e. passing) by
-  # branch protection. `needs.check.result` is the aggregate over every matrix leg: it is
+  # A status function + an explicit result assertion is required — without one the job is
+  # *skipped* when a leg fails, and a skipped required check is treated as neutral (i.e. passing)
+  # by branch protection. `needs.check.result` is the aggregate over every matrix leg: it is
   # 'success' only when all of them succeeded.
+  #
+  # `!cancelled()` rather than `always()` (#517 review). With `always()`, a run superseded by a new
+  # push still ran this gate, which failed on the cancelled matrix and posted a RED status on the old
+  # SHA. With `!cancelled()` the gate of a cancelled run is not SKIPPED, it is CANCELLED: measured
+  # on a probe run cancelled mid-`deps`, both the job and its check-run on the head SHA read
+  # `completed/cancelled`. A cancelled conclusion does NOT satisfy a required check (only success,
+  # skipped and neutral do), so a cancelled run — superseded, or cancelled by hand on the head SHA —
+  # still blocks the merge; it just stops reporting itself as a failure. A failure or timeout in a
+  # job does not cancel the RUN, so this gate still runs and fails on it.
   gate:
     name: nix flake check
     runs-on: ubuntu-latest
-    needs: [check]
-    if: always()
+    needs: [plan, deps, check]
+    if: ${{ !cancelled() }}
     steps:
-      - name: Assert every matrix leg passed
+      - name: Collect per-check verdicts
+        if: needs.plan.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: verdicts-*
+          path: verdicts
+          merge-multiple: false
+
+      # The REFERENT, not a proxy (#517): pass iff the plan succeeded (it also evaluated every output
+      # of both arches), the dependency build succeeded or was not needed, every arch/check the plan
+      # scheduled has a verdict, and every verdict is `passed`. A matrix that silently dropped a job,
+      # or a job that verdicted nothing, cannot pass by being absent.
+      - name: Assert every check passed on every arch
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          DEPS_RESULT: ${{ needs.deps.result }}
+          CHECK_RESULT: ${{ needs.check.result }}
+          EXPECTED: ${{ needs.plan.outputs.expected }}
         run: |
-          echo "aggregate result of 'check' matrix: ${{ needs.check.result }}"
-          if [ "${{ needs.check.result }}" != "success" ]; then
-            echo "::error::nix flake check did not pass on every arch"
+          set -uo pipefail
+          S="$GITHUB_STEP_SUMMARY"
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "::error::plan did not succeed ($PLAN_RESULT) — the flake failed to evaluate, or its CI groups are invalid; see the plan job"
             exit 1
           fi
+          # Enumerated POSITIVELY: `skipped` means every arch was already cached.
+          case "$DEPS_RESULT" in success|skipped) ;; *)
+            echo "::error::the dependency build did not succeed ($DEPS_RESULT), so no check ran; see the nix deps job"
+            exit 1 ;;
+          esac
+          # The expected set must itself be non-empty and parseable. `plan` already refuses to emit an
+          # empty one, but the gate must not depend on that: an empty or truncated EXPECTED would make
+          # "nothing missing" true of nothing, and every check below would pass vacuously.
+          # Only an ARRAY OF STRINGS counts: `length` alone would pass a string or an object.
+          want=$(jq 'if type == "array" and all(.[]; type == "string") then length else empty end' \
+            <<<"$EXPECTED" 2>/dev/null || true)
+          case "$want" in ''|*[!0-9]*|0)
+            echo "::error::the plan's expected check set is empty or unreadable — refusing to pass vacuously"
+            exit 1 ;;
+          esac
+          # No verdict files at all must reach the "NO verdict" report below, not die here silently.
+          { cat verdicts/*/verdicts.tsv 2>/dev/null || true; } | sort -u > all.tsv
+          got=$(wc -l < all.tsv)
+          missing=$(jq -r '.[]' <<<"$EXPECTED" | sort | comm -23 - <(cut -f1 all.tsv | sort))
+          failed=$(awk -F'\t' '$2 != "passed" {print $1}' all.tsv)
+          {
+            echo "## nix flake check — every check, every arch"
+            echo ""
+            echo "| arch / check | result |"
+            echo "|---|---|"
+            while IFS=$'\t' read -r k v; do
+              [ "$v" = passed ] && m=":white_check_mark: passed" || m=":x: $v"
+              echo "| \`$k\` | $m |"
+            done < all.tsv
+            for k in $missing; do echo "| \`$k\` | :x: **no verdict** |"; done
+            echo ""
+            echo "**$got of $want planned checks reported; matrix result: $CHECK_RESULT.**"
+          } >> "$S"
+          echo "verdicts: $got of $want planned; deps: $DEPS_RESULT; matrix: $CHECK_RESULT"
+          rc=0
+          [ -z "$missing" ] || { echo "::error::checks with NO verdict: $(tr '\n' ' ' <<<"$missing")"; rc=1; }
+          [ -z "$failed" ]  || { echo "::error::failed: $(tr '\n' ' ' <<<"$failed")"; rc=1; }
+          [ "$CHECK_RESULT" = "success" ] || { echo "::error::check matrix result: $CHECK_RESULT"; rc=1; }
+          exit $rc

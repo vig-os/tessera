@@ -45,26 +45,8 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
 
-      - name: Look up the dependency cache
-        id: deps
+      # Look up; on a miss, build tessera-deps and save it. The same step nix-check's `deps` job runs.
+      - name: Ensure the dependency cache
         uses: ./.github/actions/nix-deps-cache
         with:
-          lookup-only: "true"
-
-      - name: Build tessera-deps
-        if: steps.deps.outputs.hit != 'true'
-        env:
-          DEPS_OUT: ${{ steps.deps.outputs.out }}
-        run: |
-          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
-          nix build -L --no-link --cores 4 ".#legacyPackages.${sys}.cargoArtifacts"
-          nix path-info "${DEPS_OUT}"
-
-      - name: Save the dependency cache
-        if: steps.deps.outputs.hit != 'true'
-        uses: ./.github/actions/nix-deps-cache
-        with:
-          mode: save
-          key: ${{ steps.deps.outputs.key }}
-          out: ${{ steps.deps.outputs.out }}
-          dir: ${{ steps.deps.outputs.dir }}
+          mode: ensure
