@@ -364,13 +364,24 @@ pub fn csv_chunks(
     let mut record = csv::StringRecord::new();
     let mut row = 0usize;
     let chunk = rows_per_chunk.max(1);
+    // Whether any chunk has been handed out yet — see the EOF arm.
+    let mut emitted = false;
     Ok(std::iter::from_fn(move || {
         loop {
             match rdr.read_record(&mut record) {
                 Err(e) => return Some(Err(he(format!("{display}: {e}")))),
                 Ok(false) => {
-                    // End of file: emit the partial tail, then stop.
-                    return (accum.rows() > 0).then(|| accum.finish_chunk());
+                    // End of file: emit the partial tail. A source with NO data rows still emits
+                    // exactly ONE empty chunk, because a header-only CSV is a legitimate 0-row table
+                    // with a declared schema — which is precisely what the whole-file path seals. A
+                    // lane that yielded nothing would leave the shape pass with no columns at all, so
+                    // streaming would fail ("decoded to no columns") where batch succeeds, and the
+                    // two paths would disagree about whether an empty file is an error.
+                    if accum.rows() > 0 || !emitted {
+                        emitted = true;
+                        return Some(accum.finish_chunk());
+                    }
+                    return None;
                 }
                 Ok(true) => {
                     row += 1;
@@ -379,6 +390,7 @@ pub fn csv_chunks(
                         return Some(Err(e));
                     }
                     if accum.rows() >= chunk {
+                        emitted = true;
                         return Some(accum.finish_chunk());
                     }
                 }

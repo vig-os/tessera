@@ -1599,3 +1599,36 @@ fn the_block_partition_agrees_across_block_boundaries() {
         }
     }
 }
+/// A header-only CSV seals a 0-row table on BOTH paths.
+///
+/// It used to seal a 0-row table under `batch` and fail under `stream` with "decoded to no columns",
+/// because the chunked reader emitted nothing at all and the shape pass therefore learned no
+/// columns. An empty table is not an error — the schema is declared, so a 0-row product is exactly
+/// what it describes — and more to the point, the two paths disagreeing about whether an input is
+/// *valid* is a worse bug than either answer.
+#[test]
+fn a_header_only_csv_seals_a_zero_row_table_on_both_paths() {
+    use tessera_ingest::spec::StreamingMode;
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("empty.csv");
+    std::fs::write(&input, "id,x\n").unwrap();
+    let opts = |streaming| FormatOptions::Csv {
+        input: input.clone(),
+        columns: vec!["id:i4".into(), "x:f8".into()],
+        delimiter: None,
+        header: true,
+        null_tokens: Vec::new(),
+        exclude: Vec::new(),
+        column_meta: ColumnMeta::empty(),
+        streaming,
+        batch_rows: 64 * 1024,
+    };
+    let batched = ingest(dir.path(), opts(StreamingMode::Batch), "table").expect("batch");
+    let streamed = ingest(dir.path(), opts(StreamingMode::Stream), "table")
+        .expect("stream must accept a header-only CSV, as batch does");
+    assert_eq!(
+        (&batched.content_hash, &batched.manifest_hash),
+        (&streamed.content_hash, &streamed.manifest_hash),
+        "an empty table seals the same either way"
+    );
+}
