@@ -1055,11 +1055,6 @@ pub fn read_arrow_table(path: &std::path::Path, exclude: &[String]) -> Result<Ca
     canonicalise_batches(&batches, exclude)
 }
 
-/// Read an **Arrow IPC / Feather** file into record batches.
-///
-/// The `--from arrow` source. Arrow IPC is the one container whose on-disk logical types are exactly
-/// Arrow's, so it needs no format-specific mapping at all beyond this read — the whole of §2 above is
-/// shared with Parquet.
 /// A **lazy** Arrow IPC batch reader — the streaming counterpart to [`read_arrow_ipc`], which collects.
 ///
 /// Returns a fresh reader per call, because streaming needs two traversals: nullability is a whole-file
@@ -1089,16 +1084,28 @@ pub fn arrow_ipc_batches(
 /// Metadata only: the footer's schema gives the row width and each record-batch block its length, so no
 /// buffer is decoded. As with Parquet, reading the footer to choose a code path is sound where trusting it
 /// for *identity* would not be (#502) — a wrong estimate costs speed, and batch==stream is pinned by test.
+/// **Routing only**, and a deliberate under-estimate for compressed IPC — see the comment inside.
 pub fn arrow_ipc_size_estimate(path: &std::path::Path) -> Result<u64> {
     let file =
         std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
     let md =
         std::fs::File::metadata(&file).map_err(|e| he(format!("stat {}: {e}", path.display())))?;
-    // The on-disk size is the honest floor here: IPC is uncompressed by default, so bytes-on-disk is
-    // already the decoded size, unlike Parquet where it understates by the compression ratio.
+    // On-disk size, which is a FLOOR and is documented as one. IPC is uncompressed by default, so for
+    // the common file it already IS the decoded size — but the format permits per-buffer LZ4_FRAME or
+    // ZSTD compression, and a compressed file therefore under-estimates. Reading the footer's
+    // compression field per record batch would tighten it; it is not worth the open, because the only
+    // consequence of under-estimating is that a large compressed IPC file routes to the whole-file
+    // path when streaming would have served it better. Routing cannot move a hash (the
+    // batch-equals-stream tests pin that), so a conservative floor is the right trade and a wrong
+    // guess costs memory, never correctness.
     Ok(md.len())
 }
 
+/// Read an **Arrow IPC / Feather** file into record batches.
+///
+/// The `--from arrow` source. Arrow IPC is the one container whose on-disk logical types are exactly
+/// Arrow's, so it needs no format-specific mapping at all beyond this read — the whole of §2 above is
+/// shared with Parquet.
 pub fn read_arrow_ipc(path: &std::path::Path) -> Result<Vec<RecordBatch>> {
     let file =
         std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
