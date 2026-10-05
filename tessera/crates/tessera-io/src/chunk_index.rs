@@ -69,8 +69,10 @@ pub fn chunk_index_block(
             "kind": h.kind,
             "lo": h.lo,
             "hi": h.hi,
-            "bins": h.counts.len(),
-            "exact": h.exact,
+            "width": h.width,
+            "bins": h.bins,
+            // Derived from `width`, never stored on the histogram itself — see `Histogram::exact`.
+            "exact": h.exact(),
         });
     }
     let block_ref = BlockRef {

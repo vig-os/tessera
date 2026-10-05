@@ -288,7 +288,7 @@ fn serialized_index_bytes_are_pinned_and_round_trip() {
 
     assert_eq!(
         digest(&bytes),
-        "blake3:761a1e41593bbc0e17286b6b82b70ac9c61f94ec358b30b35b4b262ba626162c",
+        "blake3:e0085cdb4acc2ed6df7435e5bbe44699afd05dba3af41c640fb47d91d42eef4c",
         "the sealed .cidx bytes must be a pure function of the input"
     );
 
@@ -302,9 +302,16 @@ fn serialized_index_bytes_are_pinned_and_round_trip() {
     // The fixture's span is small enough for one bin per value, so the histogram is EXACT and
     // describes every sample.
     let h = idx.histogram.as_ref().expect("histogram built by default");
-    assert!(h.exact, "one bin per value for this span");
+    assert!(h.exact(), "one bin per value for this span");
+    assert_eq!(h.width, 1);
     assert_eq!(h.total(), 105, "every voxel counted exactly once");
-    assert_eq!(h.counts.len() as i128, h.hi as i128 - h.lo as i128 + 1);
+    // Exact means width 1, so bins span the observed range exactly with nothing widened.
+    assert_eq!(h.bins as i128, h.hi as i128 - h.lo as i128 + 1);
+    assert_eq!(
+        h.counts.len(),
+        h.bins as usize,
+        "bins must match counts.len()"
+    );
 }
 
 /// WORKER COUNT MUST NOT CHANGE A SINGLE BYTE.

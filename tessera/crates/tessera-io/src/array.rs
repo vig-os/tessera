@@ -932,11 +932,11 @@ pub fn array_chunk_index_with(
         let hi = idx.entries.iter().filter_map(|e| e.stats.max).max();
         {
             if let (Some(lo), Some(hi)) = (lo, hi) {
-                let span = (hi as i128 - lo as i128 + 1).max(1);
-                // One bin per value when the span allows — then `exact` is true and quantiles taken
-                // from this histogram are exact rather than bounded by a bin width.
-                let bins = span.min(MAX_HIST_BINS as i128) as usize;
-                let mut h = Histogram::empty(lo, hi, bins);
+                // Strictly equal-width bins (ADR-0059 §5): `Histogram::new` derives `width` first
+                // and the bin COUNT second, so every bin is the same width and only the count
+                // absorbs the remainder. One bin per value (`width == 1`) whenever the span allows,
+                // and then quantiles off this histogram are exact rather than bounded by a width.
+                let mut h = Histogram::new(lo, hi, MAX_HIST_BINS);
                 for &v in &vals {
                     h.add(v);
                 }
