@@ -71,8 +71,9 @@ pub fn chunk_index_block(
             "hi": h.hi,
             "width": h.width,
             "bins": h.bins,
-            // Derived from `width`, never stored on the histogram itself — see `Histogram::exact`.
-            "exact": h.exact(),
+            // No `exact` here: it is exactly `width == 1`, so `inspect` computes it. A descriptor
+            // field that merely restates another field is one more thing that can disagree with
+            // itself (owner decision 2026-10-05).
         });
     }
     let block_ref = BlockRef {

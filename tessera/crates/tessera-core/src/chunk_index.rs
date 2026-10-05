@@ -236,6 +236,15 @@ pub enum HistKind {
     EqualWidthInt,
 }
 
+/// The bin budget for [`HistKind::EqualWidthInt`] — **normative, not a default** (ADR-0059 §5,
+/// owner decision 2026-10-05).
+///
+/// A reader recomputes `width`/`bins` from `lo`/`hi` with this exact value and rejects an index that
+/// disagrees, so it is part of what the kind *means*. A different budget is a different layout for
+/// the same declared `kind`, which would make two valid-looking indexes incomparable — so it
+/// requires a NEW kind name instead.
+pub const EQUAL_WIDTH_INT_BINS: usize = 4096;
+
 /// A block-level value histogram with **strictly equal-width** bins fixed at write time
 /// (ADR-0059 §5).
 ///
@@ -267,33 +276,39 @@ pub struct Histogram {
 }
 
 impl Histogram {
-    /// Lay out strictly equal-width bins covering the observed `[lo, hi]`, using at most
-    /// `max_bins` of them.
+    /// Lay out strictly equal-width bins covering the observed `[lo, hi]`, under
+    /// [`HistKind::EqualWidthInt`]'s normative [`EQUAL_WIDTH_INT_BINS`] budget.
     ///
     /// ```text
-    /// span  = hi - lo + 1                  (in i128 — a full i64 range is 2^64, which i64 cannot hold)
-    /// width = ceil(span / max_bins)        (at least 1)
-    /// bins  = ceil(span / width)           (<= max_bins)
+    /// span  = hi - lo + 1                     (in i128 — a full i64 range is 2^64)
+    /// width = ceil(span / EQUAL_WIDTH_INT_BINS)   (at least 1)
+    /// bins  = ceil(span / width)                  (<= EQUAL_WIDTH_INT_BINS)
     /// ```
     ///
     /// `width` is computed first and `bins` second, so every bin is exactly `width` wide and only
-    /// the COUNT of bins absorbs the remainder. The alternative — fixing `bins = max_bins` and
-    /// deriving a width — is what produces unequal bins.
-    pub fn new(lo: i64, hi: i64, max_bins: usize) -> Self {
+    /// the COUNT of bins absorbs the remainder. The alternative — fixing `bins` and deriving a
+    /// width — is what produces unequal bins.
+    ///
+    /// **The budget is not a parameter.** It is normative for this `kind`, which also makes the
+    /// field widths provably safe: `width <= ceil(2^64 / 4096) = 2^52` fits `u64`, and
+    /// `bins <= 4096` fits `u32`, for every possible `lo`/`hi`. A configurable budget could yield
+    /// `width = 0` (budget above the span) or `bins` past `u32`, which earlier silently truncated.
+    pub fn new(lo: i64, hi: i64) -> Self {
         let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-        let max_bins = max_bins.max(1) as i128;
         // i128 throughout: `hi - lo + 1` for the full i64 range is 2^64, and `lo + bins*width` can
         // likewise pass i64::MAX near the top of the range.
         let span = hi as i128 - lo as i128 + 1;
         // `i128::div_ceil` is unstable, and both operands are >= 1 here, so the closed form is exact.
         let ceil_div = |a: i128, b: i128| (a + b - 1) / b;
-        let width = ceil_div(span, max_bins).max(1);
+        let width = ceil_div(span, EQUAL_WIDTH_INT_BINS as i128).max(1);
         let bins = ceil_div(span, width);
-        debug_assert!(bins <= max_bins);
+        debug_assert!((1..=EQUAL_WIDTH_INT_BINS as i128).contains(&bins));
+        debug_assert!((1..=(1i128 << 52)).contains(&width));
         Self {
             kind: HistKind::EqualWidthInt,
             lo,
             hi,
+            // Safe by the bounds above, not by hope: width <= 2^52 and bins <= 4096.
             width: width as u64,
             bins: bins as u32,
             counts: vec![0; bins as usize],
@@ -545,10 +560,12 @@ impl ChunkIndex {
     /// Parse an index from its deterministic bytes.
     ///
     /// **This is a deserializer and validates nothing semantic.** `lo > hi`, an empty `counts`, a
-    /// `counts` length that disagrees with the edges, and a stored `exact` that is simply false are
-    /// all accepted as written. A reader that will *report* these values must validate them and
-    /// recompute `exact` from `bins == span` rather than trusting the field — ADR-0059 §5; the
-    /// reader-side validation lands in C5. Deserializing is not vouching.
+    /// `counts` length that disagrees with `bins`, a `width` of 0, and a `width`/`bins` pair that
+    /// does not match the ADR-0059 §5 layout recomputed from `lo`/`hi` are all accepted as written.
+    /// A reader that will *report* these values must validate them — ADR-0059 §5; the reader-side
+    /// validation lands in C5. Deserializing is not vouching.
+    ///
+    /// (There is no `exact` on the wire to mistrust: it is derived from `width == 1`.)
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
         Ok(serde_json::from_slice(bytes)?)
     }
@@ -689,18 +706,27 @@ mod tests {
     /// equal widths remove that entirely at the cost of a top bin that may reach past `hi`.
     #[test]
     fn bins_are_strictly_equal_width_and_edges_reconstruct() {
-        // The ADR layout, written out independently.
-        fn adr(lo: i64, hi: i64, max_bins: i128) -> (i128, i128) {
-            let span = hi as i128 - lo as i128 + 1;
-            let ceil_div = |a: i128, b: i128| (a + b - 1) / b;
-            let width = ceil_div(span, max_bins).max(1);
-            (width, ceil_div(span, width))
+        // HARDCODED expectations, not a re-implementation of the formula — a helper that copies
+        // `new()`'s arithmetic would agree with a wrong `new()`. These were worked out by hand from
+        // ADR-0059 §5 with the normative 4096-bin budget.
+        for (lo, hi, want_width, want_bins) in [
+            (0i64, 0i64, 1u64, 1u32), // span 1    -> one bin of one value
+            (0, 4095, 1, 4096),       // span 4096 -> exactly the budget, width 1
+            (0, 4096, 2, 2049),       // span 4097 -> width 2, and only 2049 bins
+            (0, 12288, 4, 3073),      // span 12289 -> width 4
+        ] {
+            let g = Histogram::new(lo, hi);
+            assert_eq!(
+                (g.width, g.bins),
+                (want_width, want_bins),
+                "span {} must lay out as width {want_width} x {want_bins} bins",
+                hi as i128 - lo as i128 + 1
+            );
+            assert_eq!(g.counts.len(), g.bins as usize);
         }
 
-        // The old worked example, now under equal widths: span 12289 over at most 4096 bins.
-        let h = Histogram::new(0, 12288, 4096);
-        let (w, b) = adr(0, 12288, 4096);
-        assert_eq!((h.width as i128, h.bins as i128), (w, b));
+        // The worked example from the review, in detail.
+        let h = Histogram::new(0, 12288);
         assert_eq!(
             (h.width, h.bins),
             (4, 3073),
@@ -740,7 +766,7 @@ mod tests {
         assert_eq!(last_end, 12291, "widened from 12288 to divide by 4");
 
         // One bin per value when the span allows: width 1, and bin_of collapses to v - lo.
-        let e = Histogram::new(-1024, 3071, 4096);
+        let e = Histogram::new(-1024, 3071);
         assert_eq!((e.width, e.bins), (1, 4096));
         assert!(e.exact());
         for v in [-1024i64, -1023, 0, 3070, 3071] {
@@ -751,7 +777,7 @@ mod tests {
         assert_eq!(e.bin_of(9999), 4095);
 
         // A degenerate single-value range is one bin of width 1.
-        let one = Histogram::new(7, 7, 4096);
+        let one = Histogram::new(7, 7);
         assert_eq!((one.width, one.bins), (1, 1));
         assert!(one.exact());
         assert_eq!(one.bin_of(7), 0);
@@ -760,7 +786,7 @@ mod tests {
     /// The full i64 range must not overflow: `span` is 2^64 and `lo + bins*width` passes i64::MAX.
     #[test]
     fn the_full_i64_range_lays_out_without_overflow() {
-        let h = Histogram::new(i64::MIN, i64::MAX, 4096);
+        let h = Histogram::new(i64::MIN, i64::MAX);
         // span = 2^64, which i64 cannot hold at all — the layout must be done in i128.
         let span = i64::MAX as i128 - i64::MIN as i128 + 1;
         assert_eq!(span, 1i128 << 64);
@@ -777,9 +803,25 @@ mod tests {
             "zero sits at the midpoint of a symmetric range"
         );
 
-        // The top edge genuinely exceeds i64::MAX, so `bin_range` must be i128.
+        // Here the top edge lands exactly ON i64::MAX.
         let (_, last_end) = h.bin_range(4095).unwrap();
         assert_eq!(last_end, i64::MAX as i128);
+
+        // And here it genuinely EXCEEDS it — which is the reason `bin_range` returns i128 at all.
+        // A span of 12289 at the very top: width 4, 3073 bins, so the widened top bin ends three
+        // values past i64::MAX and simply could not be expressed as an i64.
+        let top = Histogram::new(i64::MAX - 12288, i64::MAX);
+        assert_eq!((top.width, top.bins), (4, 3073));
+        let (_, over) = top.bin_range(3072).unwrap();
+        assert_eq!(
+            over,
+            i64::MAX as i128 + 3,
+            "the top bin must be allowed to pass i64::MAX"
+        );
+        assert!(over > i64::MAX as i128);
+        // Lookups at the real extreme still work and stay in range.
+        assert_eq!(top.bin_of(i64::MAX), 3072);
+        assert_eq!(top.bin_of(i64::MAX - 12288), 0);
 
         // And counting at both extremes is safe.
         let mut h = h;
@@ -811,8 +853,8 @@ mod tests {
     /// A histogram merges only over identical edges, and refuses otherwise.
     #[test]
     fn histogram_merges_only_over_identical_edges() {
-        let mut a = Histogram::new(0, 9, 10);
-        let mut b = Histogram::new(0, 9, 10);
+        let mut a = Histogram::new(0, 9);
+        let mut b = Histogram::new(0, 9);
         for v in [0, 5, 9, 5] {
             a.add(v);
         }
@@ -825,27 +867,26 @@ mod tests {
         // commutative, so merge order cannot change the bytes
         assert_eq!(a.combine(&b), b.combine(&a));
 
-        // one bin per value -> exact, and a coarser histogram is not
-        assert!(Histogram::new(0, 9, 10).exact());
+        // One bin per value -> exact. Under the normative 4096-bin budget any span up to 4096 is
+        // exact, so the coarse case needs a span past it.
+        assert!(Histogram::new(0, 9).exact());
         assert!(
-            !Histogram::new(0, 99, 10).exact(),
-            "width 10 is not one-per-value"
+            Histogram::new(0, 4095).exact(),
+            "span 4096 is still width 1"
         );
+        assert!(!Histogram::new(0, 8191).exact(), "span 8192 needs width 2");
 
-        // mismatched edges are refused rather than silently fabricating a distribution
+        // Mismatched geometry is refused rather than silently fabricating a distribution. A span
+        // past the budget gives a different `width`, so the layouts genuinely differ.
         assert_eq!(
-            a.combine(&Histogram::new(0, 9, 5)),
+            a.combine(&Histogram::new(0, 8191)),
             None,
-            "different geometry"
+            "different width/bins"
         );
-        assert_eq!(
-            a.combine(&Histogram::new(1, 10, 10)),
-            None,
-            "different edges"
-        );
+        assert_eq!(a.combine(&Histogram::new(1, 10)), None, "different edges");
 
         // out-of-range values saturate into the end bins rather than panicking
-        let mut h = Histogram::new(0, 9, 10);
+        let mut h = Histogram::new(0, 9);
         h.add(-100);
         h.add(1000);
         assert_eq!((h.counts[0], h.counts[9]), (1, 1));

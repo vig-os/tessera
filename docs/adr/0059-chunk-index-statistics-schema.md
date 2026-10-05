@@ -159,7 +159,7 @@ fold is the same, only the persistence differs.
 span  = hi − lo + 1                  (in i128: a full i64 range is 2^64, which i64 cannot hold)
 width = ceil(span / MAX_BINS)        (at least 1)
 bins  = ceil(span / width)           (≤ MAX_BINS)
-MAX_BINS = 4096 (default; ~10.5 KiB dense, 1.13× the sidecar)
+MAX_BINS = 4096 — NORMATIVE for kind "equal-width-int" (~10.5 KiB dense, 1.13× the sidecar)
 
 bin(v) = (clamp(v, lo, hi) − lo) / width            (exact integer division)
 bin b  covers [lo + b·width, lo + (b+1)·width − 1]  (computed in i128)
@@ -168,6 +168,15 @@ bin b  covers [lo + b·width, lo + (b+1)·width − 1]  (computed in i128)
 **`width` is derived first and `bins` second.** That ordering is the whole decision: every bin is
 then exactly `width` wide and only the *count* of bins absorbs the remainder. Fixing
 `bins = MAX_BINS` and deriving a width is what produces bins of differing widths.
+
+**`MAX_BINS = 4096` is normative, not a default** (owner decision, 2026-10-05). A reader recomputes
+`width`/`bins` from `lo`/`hi` with this exact value and rejects an index that disagrees, so the budget
+is part of what `kind: "equal-width-int"` *means*. A different budget is a different layout under the
+same declared kind — two valid-looking indexes that cannot be compared — so it requires a **new kind
+name**. In code the constant lives beside `HistKind` as `EQUAL_WIDTH_INT_BINS`, not as a parameter;
+that also makes the stored field widths provably safe, since `width ≤ ceil(2^64 / 4096) = 2^52` fits
+`u64` and `bins ≤ 4096` fits `u32` for every possible `lo`/`hi`. (A configurable budget could produce
+`width = 0` or a `bins` past `u32`, which an earlier revision silently truncated.)
 
 **The binned range is widened, so the last bin may reach past `hi`.** For `[0, 12288]` (span 12289)
 the layout is `width = 4`, `bins = 3073`, and the top bin covers `12288..12291` — three values
@@ -182,9 +191,11 @@ the full `i64` range is `2^64`, and `lo + bins·width` passes `i64::MAX` near th
 `Histogram::new(i64::MIN, i64::MAX, 4096)` gives `width = 2^52`, `bins = 4096`, and a top edge of
 exactly `i64::MAX`. Both are pinned by test.
 
-**What this costs, stated plainly.** Equal widths mean `bins` is usually *below* `MAX_BINS` — 3073
-rather than 4096 in the example above — so the resolution is slightly coarser than a near-equal
-layout would give for the same budget. In exchange, a quantile's error bound is a single number
+**What this costs, stated plainly — and the worst case is not small.** Equal widths mean `bins` is
+usually *below* `MAX_BINS`. The worst case is a span of **4097**: `width = 2` forces
+`bins = 2049`, which is **barely half** the resolution a near-equal layout would give for the same
+byte budget. (The example above, span 12289, gives 3073 bins — three quarters.) Resolution is lost
+whenever the span is just past a multiple of the budget. In exchange, a quantile's error bound is a single number
 (`width`) instead of "the widest bin", and an implementer cannot get the edges wrong. The case that
 matters most is unaffected: when `span ≤ MAX_BINS` the layout is `width = 1`, one bin per value, and
 the histogram is a **complete** description of the distribution — quantiles off it are exact, not
@@ -192,19 +203,24 @@ estimated.
 
 **`exact` is derived, not stored.** It is exactly `width == 1`. A stored boolean that is a pure
 function of a stored integer is a field that can disagree with itself, and one more thing a reader
-must validate rather than compute; `Histogram::exact()` computes it. The `spec` descriptor below
-still reports it, for `inspect`'s benefit.
+must validate rather than compute; `Histogram::exact()` computes it, and the `spec` descriptor does
+not carry it either.
 
 Recorded in the `.cidx` block `spec`, so a reader is never guessing:
 
 ```json
-"hist": { "kind": "equal-width-int", "lo": -1024, "hi": 3071, "width": 1, "bins": 4096, "exact": true }
+"hist": { "kind": "equal-width-int", "lo": -1024, "hi": 3071, "width": 1, "bins": 4096 }
 ```
 
 `kind` names the equal-width rule and is what makes §8's float story additive later. `bins` is stored
-explicitly as a cross-check on `counts.len()`, which the reader validates. `exact` is computed
-(`width == 1`), never asserted. Counts are stored **dense** — at 4096 bins a dense array is 8.2 KB against 11.5 KB for a
-sparse map even at 31 % density, and dense has no key-ordering question to get wrong.
+explicitly as a cross-check on `counts.len()`, which the reader validates. **There is no `exact`
+field** (owner decision, 2026-10-05): it is exactly `width == 1`, so `inspect` computes it — a
+descriptor field that merely restates another field is one more thing that can disagree with itself.
+Counts are stored **dense** — at 4096 bins a dense array is ~8.2 KB against ~11.5 KB for a
+sparse map at the same density, and dense has no key-ordering question to get wrong. (Both figures
+are for a per-chunk histogram of a few thousand samples; the block-level histogram quoted above at
+~10.5 KiB holds larger counts, hence more digits per entry — the §5 table is the one to read for the
+sidecar's actual cost.)
 
 **Two copies, one authority.** The `hist` descriptor above duplicates edges that the `.cidx`
 **payload** also carries, because `counts` is meaningless without them and a content-hashed block must
@@ -390,7 +406,8 @@ by default would pay 2.25–3.2× on every seal for a value most users never rea
    histogram's `exact` flag. **Validate the payload rather than trusting it** — `ChunkIndex::from_bytes`
    is a deserializer and checks none of this. Reject the index (treating it as absent) when `lo > hi`,
    when `counts` is empty, when `counts.len()` disagrees with the recorded `bins`, when `width` is 0,
-   or when `width`/`bins` do not match the §5 layout recomputed from `lo`/`hi`; **`exact` is derived
+   or when `width`/`bins` do not match the §5 layout recomputed from `lo`/`hi` with the **normative**
+   4096-bin budget; **`exact` is derived
    from `width == 1`, never read from the wire**. The
    payload-versus-`spec` disagreement rule of §5 is enforced here too: disagree ⇒ corrupt ⇒ fall back.
 4. Flip the default on for integer array blocks (#347 P1) **and regenerate the corpus in the same

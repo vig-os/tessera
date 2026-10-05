@@ -791,13 +791,11 @@ pub fn array_block_with_index_opts(
 /// assert_eq!(idx.prune(0, 0), vec![0]); // value 0 lives only in the first chunk
 /// assert!(idx.root().starts_with("blake3:")); // sub-block MMR root (ADR-0028 §1)
 /// ```
-/// The most bins a block-level histogram may have (ADR-0059 §5).
+/// Re-export of the normative bin budget for `equal-width-int` histograms (ADR-0059 §5).
 ///
-/// 4096 is chosen against the measured cost: a dense 4096-bin count vector adds ~10.5 KiB to a
-/// `.cidx`, taking the sidecar from 0.056 % to 0.061 % of a 151 MiB product. It is also exactly the
-/// span of a 12-bit CT reconstruction, which is the common case — there, one bin per value makes the
-/// histogram a COMPLETE description of the distribution, so quantiles off it are exact.
-pub const MAX_HIST_BINS: usize = 4096;
+/// It lives in `tessera-core` beside `HistKind`, because it is part of what that kind MEANS rather
+/// than a knob this crate chooses: a reader recomputes `width`/`bins` with this exact value.
+pub use tessera_core::chunk_index::EQUAL_WIDTH_INT_BINS as MAX_HIST_BINS;
 
 /// Knobs for building a chunk index. `Default` builds the histogram; a writer that does not want to
 /// pay for it (ADR-0059 §6 measured ~20 % on top of the index fold) opts out.
@@ -936,7 +934,7 @@ pub fn array_chunk_index_with(
                 // and the bin COUNT second, so every bin is the same width and only the count
                 // absorbs the remainder. One bin per value (`width == 1`) whenever the span allows,
                 // and then quantiles off this histogram are exact rather than bounded by a width.
-                let mut h = Histogram::new(lo, hi, MAX_HIST_BINS);
+                let mut h = Histogram::new(lo, hi);
                 for &v in &vals {
                     h.add(v);
                 }
