@@ -2,21 +2,21 @@
 type: issue
 state: open
 created: 2026-09-28T21:39:40Z
-updated: 2026-09-29T06:52:56Z
+updated: 2026-10-05T09:40:31Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/466
-comments: 0
+comments: 1
 labels: none
 assignees: none
 milestone: 0.1.0-alpha.2
 projects: none
 parent: none
 children: none
-synced: 2026-09-29T07:52:28.877Z
+synced: 2026-10-06T08:33:16.314Z
 ---
 
-# [Issue 466]: [ci: every Dependabot PR fails the Commit Messages job — branch-name gate has no dependabot/** clause](https://github.com/vig-os/tessera/issues/466)
+# [Issue 466]: [ci: drop the local dependabot/** branch-name allowlist patch once the devkit supports extra branch patterns (devkit#1755)](https://github.com/vig-os/tessera/issues/466)
 
 ## Symptom
 
@@ -73,4 +73,16 @@ the local patch once devkit#1755 lands.
 Related: #467 — this repo has both `renovate.json` and `.github/dependabot.yml` configured for the
 same ecosystems, and standardising on Renovate would make this class of problem go away, since
 devkit's allowlist already covers `renovate/*`.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 5, 2026 at 09:40 AM_
+
+Re-scoped (2026-10-05). **The symptom is currently unreachable:** `automated-security-fixes` is `{"enabled":false}` and `.github/dependabot.yml` was retired by #512, so Dependabot can't open a PR by either route (it still *reports* alerts, since `vulnerability-alerts` is 204). There are no open `dependabot/**` branches.
+
+The issue stays open because the local `ci.yml` patch (`ALLOWED+="|^dependabot/.+$"`) is the only thing that would let a first bot PR pass. That would be the case if security updates are switched back on, which is plausible while `thrift` remains an alert no bot can fix in range. `ci.yml` is devkit-scaffolded and regenerates on upgrade: `DEVKIT_UPGRADE_EXCLUDE` lists only `release.yml`. So **the patch will be silently dropped at the next devkit upgrade.** There's no devkit knob: `DEVKIT_BRANCH_TYPES` only feeds the `<type>` alternation, so it can't match `dependabot/github_actions/...`.
+
+Standing action: when the devkit gains an extra-branch-pattern input (devkit#1755, or a dedicated issue), move the `dependabot/` clause there and drop the local patch. Until then, re-check this patch after every devkit upgrade.
 

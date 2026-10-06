@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-05T07:34:38Z
+updated: 2026-10-05T10:03:42Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,68 +13,64 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-05T08:17:44.769Z
+synced: 2026-10-06T08:33:06.462Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
 
 This issue lists Renovate updates and detected dependencies. Read the [Dependency Dashboard](https://docs.renovatebot.com/key-concepts/dashboard/) docs to learn more.<br>[View this repository on the Mend.io Web Portal](https://developer.mend.io/github/vig-os/tessera).
 
-## Rate-Limited
+## Awaiting Schedule
 
-The following updates are currently rate-limited. To force their creation now, click on a checkbox below.
+The following updates are awaiting their schedule. To get an update now, click on a checkbox below.
 
- - [ ] <!-- unlimit-branch=renovate/bytes-1.x-lockfile -->chore(deps): update rust crate bytes to v1.12.1
- - [ ] <!-- unlimit-branch=renovate/clap-4.x-lockfile -->chore(deps): update rust crate clap to v4.6.7
- - [ ] <!-- unlimit-branch=renovate/flate2-1.x-lockfile -->chore(deps): update rust crate flate2 to v1.1.10
- - [ ] <!-- unlimit-branch=renovate/rust-futures-monorepo -->chore(deps): update rust crate futures to v0.3.34
- - [ ] <!-- unlimit-branch=renovate/hdf5-metno-sys-0.x-lockfile -->chore(deps): update rust crate hdf5-metno-sys to v0.12.4
- - [ ] <!-- unlimit-branch=renovate/libc-0.x-lockfile -->chore(deps): update rust crate libc to v0.2.190
- - [ ] <!-- unlimit-branch=renovate/object_store-0.x-lockfile -->chore(deps): update rust crate object_store to v0.14.2
- - [ ] <!-- unlimit-branch=renovate/pyo3-0.x-lockfile -->chore(deps): update rust crate pyo3 to v0.29.3
- - [ ] <!-- unlimit-branch=renovate/serde-monorepo -->chore(deps): update rust crate serde to v1.0.229
- - [ ] <!-- unlimit-branch=renovate/serde_json-1.x-lockfile -->chore(deps): update rust crate serde_json to v1.0.151
- - [ ] <!-- unlimit-branch=renovate/thiserror-2.x-lockfile -->chore(deps): update rust crate thiserror to v2.0.21
- - [ ] <!-- unlimit-branch=renovate/time-0.x-lockfile -->chore(deps): update rust crate time to v0.3.55
- - [ ] <!-- unlimit-branch=renovate/zarrs-0.x-lockfile -->chore(deps): update rust crate zarrs to v0.23.14
- - [ ] <!-- unlimit-branch=renovate/rust-wasm-bindgen-monorepo -->fix(deps): update rust crate wasm-bindgen to v0.2.129
- - [ ] <!-- unlimit-branch=renovate/python-(minor-and-patch) -->build(pip): update python (minor and patch) (`numcodecs`, `numpy`, `uproot`, `zarr`)
- - [ ] <!-- unlimit-branch=renovate/arrow-rs-monorepo -->chore(deps): update arrow-rs monorepo to v58.4.0 (`arrow`, `arrow-array`, `arrow-buffer`, `arrow-ipc`, `arrow-schema`, `parquet`)
- - [ ] <!-- unlimit-branch=renovate/age-0.x -->chore(deps): update rust crate age to 0.12
- - [ ] <!-- unlimit-branch=renovate/criterion-0.x -->chore(deps): update rust crate criterion to 0.8
- - [ ] <!-- unlimit-branch=renovate/datafusion-monorepo -->chore(deps): update rust crate datafusion to v54.1.0
- - [ ] <!-- unlimit-branch=renovate/hdf5-metno-0.x -->chore(deps): update rust crate hdf5-metno to 0.15
- - [ ] <!-- unlimit-branch=renovate/png-0.x -->chore(deps): update rust crate png to 0.18
- - [ ] <!-- unlimit-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
- - [ ] <!-- unlimit-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.53.2
- - [ ] <!-- unlimit-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
- - [ ] <!-- unlimit-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.87
- - [ ] <!-- unlimit-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.87
- - [ ] <!-- unlimit-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.87
- - [ ] <!-- unlimit-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.87
- - [ ] <!-- unlimit-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.87
- - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.87
- - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.87
- - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
- - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
- - [ ] <!-- unlimit-branch=renovate/pyarrow-25.x -->build(pip): update dependency pyarrow to v25
- - [ ] <!-- unlimit-branch=renovate/ed25519-dalek-3.x -->chore(deps): update rust crate ed25519-dalek to v3
- - [ ] <!-- unlimit-branch=renovate/toml-1.x -->chore(deps): update rust crate toml to v1
- - [ ] <!-- unlimit-branch=renovate/trycmd-1.x -->chore(deps): update rust crate trycmd to v1
- - [ ] <!-- unlimit-branch=renovate/zip-8.x -->chore(deps): update rust crate zip to v8
- - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-3.x -->ci(actions): update actions/create-github-app-token action to v3
- - [ ] <!-- unlimit-branch=renovate/major-arrow-rs-monorepo -->fix(deps): update arrow-rs monorepo to v60 (`arrow`, `arrow-array`, `arrow-buffer`, `arrow-ipc`, `arrow-schema`, `parquet`)
- - [ ] <!-- unlimit-branch=renovate/major-datafusion-monorepo -->fix(deps): update rust crate datafusion to v55
- - [ ] <!-- unlimit-branch=renovate/lock-file-maintenance -->build(pip): lock file maintenance
- - [ ] <!-- create-all-rate-limited-prs -->🔐 **Create all rate-limited PRs at once** 🔐
+ - [ ] <!-- unschedule-branch=renovate/flate2-1.x-lockfile -->chore(deps): update rust crate flate2 to v1.1.10
+ - [ ] <!-- unschedule-branch=renovate/rust-futures-monorepo -->chore(deps): update rust crate futures to v0.3.34
+ - [ ] <!-- unschedule-branch=renovate/hdf5-metno-sys-0.x-lockfile -->chore(deps): update rust crate hdf5-metno-sys to v0.12.4
+ - [ ] <!-- unschedule-branch=renovate/libc-0.x-lockfile -->chore(deps): update rust crate libc to v0.2.190
+ - [ ] <!-- unschedule-branch=renovate/object_store-0.x-lockfile -->chore(deps): update rust crate object_store to v0.14.2
+ - [ ] <!-- unschedule-branch=renovate/pyo3-0.x-lockfile -->chore(deps): update rust crate pyo3 to v0.29.3
+ - [ ] <!-- unschedule-branch=renovate/serde-monorepo -->chore(deps): update rust crate serde to v1.0.229
+ - [ ] <!-- unschedule-branch=renovate/serde_json-1.x-lockfile -->chore(deps): update rust crate serde_json to v1.0.151
+ - [ ] <!-- unschedule-branch=renovate/thiserror-2.x-lockfile -->chore(deps): update rust crate thiserror to v2.0.21
+ - [ ] <!-- unschedule-branch=renovate/time-0.x-lockfile -->chore(deps): update rust crate time to v0.3.55
+ - [ ] <!-- unschedule-branch=renovate/zarrs-0.x-lockfile -->chore(deps): update rust crate zarrs to v0.23.14
+ - [ ] <!-- unschedule-branch=renovate/rust-wasm-bindgen-monorepo -->fix(deps): update rust crate wasm-bindgen to v0.2.129
+ - [ ] <!-- unschedule-branch=renovate/python-(minor-and-patch) -->build(pip): update python (minor and patch) (`numcodecs`, `numpy`, `uproot`, `zarr`)
+ - [ ] <!-- unschedule-branch=renovate/arrow-rs-monorepo -->chore(deps): update arrow-rs monorepo to v58.4.0 (`arrow`, `arrow-array`, `arrow-buffer`, `arrow-ipc`, `arrow-schema`, `parquet`)
+ - [ ] <!-- unschedule-branch=renovate/age-0.x -->chore(deps): update rust crate age to 0.12
+ - [ ] <!-- unschedule-branch=renovate/criterion-0.x -->chore(deps): update rust crate criterion to 0.8
+ - [ ] <!-- unschedule-branch=renovate/datafusion-monorepo -->chore(deps): update rust crate datafusion to v54.1.0
+ - [ ] <!-- unschedule-branch=renovate/hdf5-metno-0.x -->chore(deps): update rust crate hdf5-metno to 0.15
+ - [ ] <!-- unschedule-branch=renovate/png-0.x -->chore(deps): update rust crate png to 0.18
+ - [ ] <!-- unschedule-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
+ - [ ] <!-- unschedule-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.53.2
+ - [ ] <!-- unschedule-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
+ - [ ] <!-- unschedule-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.87
+ - [ ] <!-- unschedule-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
+ - [ ] <!-- unschedule-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
+ - [ ] <!-- unschedule-branch=renovate/pyarrow-25.x -->build(pip): update dependency pyarrow to v25
+ - [ ] <!-- unschedule-branch=renovate/ed25519-dalek-3.x -->chore(deps): update rust crate ed25519-dalek to v3
+ - [ ] <!-- unschedule-branch=renovate/toml-1.x -->chore(deps): update rust crate toml to v1
+ - [ ] <!-- unschedule-branch=renovate/trycmd-1.x -->chore(deps): update rust crate trycmd to v1
+ - [ ] <!-- unschedule-branch=renovate/zip-8.x -->chore(deps): update rust crate zip to v8
+ - [ ] <!-- unschedule-branch=renovate/actions-create-github-app-token-3.x -->ci(actions): update actions/create-github-app-token action to v3
+ - [ ] <!-- unschedule-branch=renovate/major-arrow-rs-monorepo -->fix(deps): update arrow-rs monorepo to v60 (`arrow`, `arrow-array`, `arrow-buffer`, `arrow-ipc`, `arrow-schema`, `parquet`)
+ - [ ] <!-- unschedule-branch=renovate/major-datafusion-monorepo -->fix(deps): update rust crate datafusion to v55
+ - [ ] <!-- unschedule-branch=renovate/lock-file-maintenance -->build(pip): lock file maintenance
+ - [ ] <!-- create-all-awaiting-schedule-prs -->🔐 **Create all awaiting schedule PRs at once** 🔐
 
 ## Open
 
 The following updates have all been created. To force a retry/rebase of any, click on a checkbox below.
 
- - [ ] <!-- rebase-branch=renovate/release-plz-action-digest -->[chore(deps): update release-plz/action digest to b8d6b54](../pull/549)
  - [ ] <!-- rebase-branch=renovate/blake3-1.x-lockfile -->[chore(deps): update rust crate blake3 to v1.8.7](../pull/550)
- - [ ] <!-- rebase-all-open-prs -->**Click on this checkbox to rebase all open PRs at once**
 
 ## Detected Dependencies
 
@@ -97,7 +93,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `proptest 1`
  - `zip 2` → [Updates: `8`]
  - `zarrs 0.23` → [Updates: `0.23`]
- - `bytes 1` → [Updates: `1`]
+ - `bytes 1`
  - `half 2`
  - `vortex-file 0.75` → [Updates: `0.87`]
  - `vortex-array 0.75` → [Updates: `0.87`]
@@ -107,7 +103,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `vortex-layout 0.75` → [Updates: `0.87`]
  - `vortex-session 0.75` → [Updates: `0.87`]
  - `futures 0.3` → [Updates: `0.3`]
- - `clap 4` → [Updates: `4`]
+ - `clap 4`
  - `png 0.17` → [Updates: `0.18`]
  - `dicom 0.10`
  - `dicom-transfer-syntax-registry 0.10`
@@ -177,8 +173,15 @@ The following updates have all been created. To force a retry/rebase of any, cli
 </blockquote>
 </details>
 
-<details><summary>github-actions (10)</summary>
+<details><summary>github-actions (12)</summary>
 <blockquote>
+
+<details><summary>.github/actions/nix-deps-cache/action.yml (2)</summary>
+
+ - `actions/cache v6.1.0@55cc8345863c7cc4c66a329aec7e433d2d1c52a9`
+ - `actions/cache v6.1.0@55cc8345863c7cc4c66a329aec7e433d2d1c52a9`
+
+</details>
 
 <details><summary>.github/actions/setup-devkit-toolchain/action.yml</summary>
 
@@ -207,6 +210,13 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 </details>
 
+<details><summary>.github/workflows/nix-deps-cache.yml (2)</summary>
+
+ - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
+ - `DeterminateSystems/nix-installer-action v23@3138316df39ed29be04236d7ffc686fa525866aa`
+
+</details>
+
 <details><summary>.github/workflows/release-nix.yml (2)</summary>
 
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
@@ -219,7 +229,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
  - `dtolnay/rust-toolchain stable@89b12181fb390509a0842a86cc55eeb8eb928c1d`
  - `actions/create-github-app-token v1.12.0@d72941d797fd3113feb6b93fd0dec494b13a2547` → [Updates: `v3.2.0`]
- - `release-plz/action v0.5@a80d79efe0a195618acb02a4089d55fe74d2505f` → [Updates: `v0.5`]
+ - `release-plz/action v0.5@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5`
 
 </details>
 
