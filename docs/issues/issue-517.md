@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-09-29T13:03:08Z
-updated: 2026-10-05T01:04:05Z
+updated: 2026-10-07T11:10:26Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/517
-comments: 4
+comments: 5
 labels: none
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-05T08:17:44.218Z
+synced: 2026-10-08T08:24:20.744Z
 ---
 
 # [Issue 517]: [ci(nix): split nix flake check into parallel jobs — measured design (it is a memory fix; the cache is the wall-clock fix)](https://github.com/vig-os/tessera/issues/517)
@@ -222,4 +222,12 @@ Implemented in #548, stacked on #544. Measured on GitHub-hosted runners via `wor
 | runner-min warm (x86 / arm) | 78 / 60 | 41 / 45 | — | 70.5 / 56.3 |
 
 Both runs passed the gate with 50/50 verdicts and 2/2 flake evaluations (runs 37246299669 and 37248665133). On the warm run, every job restored `tessera-deps` and built it 0 times. The critical path is now `sql-tests` (17.4 min on x86). One Gate A build per job is asserted at eval time, which removes the #495 overlap.
+
+---
+
+# [Comment #5]() by [DerDennisOP]()
+
+_Posted on October 7, 2026 at 11:10 AM_
+
+Hey, you might want to look into [Gradient](https://github.com/wavelens/gradient) :)
 

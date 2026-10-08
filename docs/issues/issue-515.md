@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-07T01:48:52Z
+updated: 2026-10-08T04:36:14Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-07T08:08:29.970Z
+synced: 2026-10-08T08:24:21.306Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -24,6 +24,7 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 
 The following updates are awaiting their schedule. To get an update now, click on a checkbox below.
 
+ - [ ] <!-- unschedule-branch=renovate/release-plz-action-digest -->chore(deps): update release-plz/action digest to 18641b6
  - [ ] <!-- unschedule-branch=renovate/flate2-1.x-lockfile -->chore(deps): update rust crate flate2 to v1.1.10
  - [ ] <!-- unschedule-branch=renovate/rust-futures-monorepo -->chore(deps): update rust crate futures to v0.3.34
  - [ ] <!-- unschedule-branch=renovate/hdf5-metno-sys-0.x-lockfile -->chore(deps): update rust crate hdf5-metno-sys to v0.12.4
@@ -55,7 +56,6 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.87
  - [ ] <!-- unschedule-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unschedule-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
- - [ ] <!-- unschedule-branch=renovate/pyarrow-25.x -->build(pip): update dependency pyarrow to v25
  - [ ] <!-- unschedule-branch=renovate/ed25519-dalek-3.x -->chore(deps): update rust crate ed25519-dalek to v3
  - [ ] <!-- unschedule-branch=renovate/toml-1.x -->chore(deps): update rust crate toml to v1
  - [ ] <!-- unschedule-branch=renovate/trycmd-1.x -->chore(deps): update rust crate trycmd to v1
@@ -65,6 +65,17 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/major-datafusion-monorepo -->fix(deps): update rust crate datafusion to v55
  - [ ] <!-- unschedule-branch=renovate/lock-file-maintenance -->build(pip): lock file maintenance
  - [ ] <!-- create-all-awaiting-schedule-prs -->🔐 **Create all awaiting schedule PRs at once** 🔐
+
+
+---
+
+> [!WARNING]
+> Renovate failed to look up the following dependencies: `Failed to look up pypi package pyarrow: no-result`.
+> 
+> Files affected: `tessera/bench/ecosystems/pyproject.toml`
+
+---
+
 
 ## Open
 
@@ -229,7 +240,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
  - `dtolnay/rust-toolchain stable@89b12181fb390509a0842a86cc55eeb8eb928c1d`
  - `actions/create-github-app-token v1.12.0@d72941d797fd3113feb6b93fd0dec494b13a2547` → [Updates: `v3.2.0`]
- - `release-plz/action v0.5@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5`
+ - `release-plz/action v0.5@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5` → [Updates: `v0.5`]
 
 </details>
 
@@ -262,7 +273,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `numcodecs ==0.16.5` → [Updates: `==0.17.0`]
  - `nibabel ==5.4.2`
  - `pydicom ==3.0.2`
- - `pyarrow ==24.0.0` → [Updates: `==25.0.1`]
+ - `pyarrow ==24.0.0`
  - `uproot ==5.7.4` → [Updates: `==5.7.7`]
 
 </details>
