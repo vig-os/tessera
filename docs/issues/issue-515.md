@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-08T04:36:14Z
+updated: 2026-10-09T04:36:34Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-08T08:24:21.306Z
+synced: 2026-10-09T08:28:11.465Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -24,6 +24,7 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 
 The following updates are awaiting their schedule. To get an update now, click on a checkbox below.
 
+ - [ ] <!-- unschedule-branch=renovate/dtolnay-rust-toolchain-digest -->chore(deps): update dtolnay/rust-toolchain digest to 686976e
  - [ ] <!-- unschedule-branch=renovate/release-plz-action-digest -->chore(deps): update release-plz/action digest to 18641b6
  - [ ] <!-- unschedule-branch=renovate/flate2-1.x-lockfile -->chore(deps): update rust crate flate2 to v1.1.10
  - [ ] <!-- unschedule-branch=renovate/rust-futures-monorepo -->chore(deps): update rust crate futures to v0.3.34
@@ -47,15 +48,16 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unschedule-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.53.2
  - [ ] <!-- unschedule-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
- - [ ] <!-- unschedule-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.87
- - [ ] <!-- unschedule-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.87
- - [ ] <!-- unschedule-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.87
- - [ ] <!-- unschedule-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.87
- - [ ] <!-- unschedule-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.87
- - [ ] <!-- unschedule-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.87
- - [ ] <!-- unschedule-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.87
+ - [ ] <!-- unschedule-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.88
+ - [ ] <!-- unschedule-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.88
+ - [ ] <!-- unschedule-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.88
+ - [ ] <!-- unschedule-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.88
+ - [ ] <!-- unschedule-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.88
+ - [ ] <!-- unschedule-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.88
+ - [ ] <!-- unschedule-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.88
  - [ ] <!-- unschedule-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unschedule-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
+ - [ ] <!-- unschedule-branch=renovate/pyarrow-25.x -->build(pip): update dependency pyarrow to v25
  - [ ] <!-- unschedule-branch=renovate/ed25519-dalek-3.x -->chore(deps): update rust crate ed25519-dalek to v3
  - [ ] <!-- unschedule-branch=renovate/toml-1.x -->chore(deps): update rust crate toml to v1
  - [ ] <!-- unschedule-branch=renovate/trycmd-1.x -->chore(deps): update rust crate trycmd to v1
@@ -65,17 +67,6 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/major-datafusion-monorepo -->fix(deps): update rust crate datafusion to v55
  - [ ] <!-- unschedule-branch=renovate/lock-file-maintenance -->build(pip): lock file maintenance
  - [ ] <!-- create-all-awaiting-schedule-prs -->🔐 **Create all awaiting schedule PRs at once** 🔐
-
-
----
-
-> [!WARNING]
-> Renovate failed to look up the following dependencies: `Failed to look up pypi package pyarrow: no-result`.
-> 
-> Files affected: `tessera/bench/ecosystems/pyproject.toml`
-
----
-
 
 ## Open
 
@@ -106,13 +97,13 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `zarrs 0.23` → [Updates: `0.23`]
  - `bytes 1`
  - `half 2`
- - `vortex-file 0.75` → [Updates: `0.87`]
- - `vortex-array 0.75` → [Updates: `0.87`]
- - `vortex-btrblocks 0.75` → [Updates: `0.87`]
- - `vortex-buffer 0.75` → [Updates: `0.87`]
- - `vortex-io 0.75` → [Updates: `0.87`]
- - `vortex-layout 0.75` → [Updates: `0.87`]
- - `vortex-session 0.75` → [Updates: `0.87`]
+ - `vortex-file 0.75` → [Updates: `0.88`]
+ - `vortex-array 0.75` → [Updates: `0.88`]
+ - `vortex-btrblocks 0.75` → [Updates: `0.88`]
+ - `vortex-buffer 0.75` → [Updates: `0.88`]
+ - `vortex-io 0.75` → [Updates: `0.88`]
+ - `vortex-layout 0.75` → [Updates: `0.88`]
+ - `vortex-session 0.75` → [Updates: `0.88`]
  - `futures 0.3` → [Updates: `0.3`]
  - `clap 4`
  - `png 0.17` → [Updates: `0.18`]
@@ -238,7 +229,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 <details><summary>.github/workflows/release-plz.yml (4)</summary>
 
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
- - `dtolnay/rust-toolchain stable@89b12181fb390509a0842a86cc55eeb8eb928c1d`
+ - `dtolnay/rust-toolchain stable@89b12181fb390509a0842a86cc55eeb8eb928c1d` → [Updates: `stable`]
  - `actions/create-github-app-token v1.12.0@d72941d797fd3113feb6b93fd0dec494b13a2547` → [Updates: `v3.2.0`]
  - `release-plz/action v0.5@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5` → [Updates: `v0.5`]
 
@@ -269,11 +260,11 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
  - `numpy ==2.5.0` → [Updates: `==2.5.3`]
  - `h5py ==3.16.0`
- - `zarr ==3.2.1` → [Updates: `==3.4.0`]
+ - `zarr ==3.2.1` → [Updates: `==3.4.1`]
  - `numcodecs ==0.16.5` → [Updates: `==0.17.0`]
  - `nibabel ==5.4.2`
  - `pydicom ==3.0.2`
- - `pyarrow ==24.0.0`
+ - `pyarrow ==24.0.0` → [Updates: `==25.0.1`]
  - `uproot ==5.7.4` → [Updates: `==5.7.7`]
 
 </details>
