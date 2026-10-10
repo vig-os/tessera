@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-09T04:36:34Z
+updated: 2026-10-09T08:48:25Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-09T08:28:11.465Z
+synced: 2026-10-10T08:05:57.342Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -57,11 +57,11 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.88
  - [ ] <!-- unschedule-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unschedule-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
- - [ ] <!-- unschedule-branch=renovate/pyarrow-25.x -->build(pip): update dependency pyarrow to v25
+ - [ ] <!-- unschedule-branch=renovate/pyarrow-26.x -->build(pip): update dependency pyarrow to v26
  - [ ] <!-- unschedule-branch=renovate/ed25519-dalek-3.x -->chore(deps): update rust crate ed25519-dalek to v3
  - [ ] <!-- unschedule-branch=renovate/toml-1.x -->chore(deps): update rust crate toml to v1
  - [ ] <!-- unschedule-branch=renovate/trycmd-1.x -->chore(deps): update rust crate trycmd to v1
- - [ ] <!-- unschedule-branch=renovate/zip-8.x -->chore(deps): update rust crate zip to v8
+ - [ ] <!-- unschedule-branch=renovate/zip-9.x -->chore(deps): update rust crate zip to v9
  - [ ] <!-- unschedule-branch=renovate/actions-create-github-app-token-3.x -->ci(actions): update actions/create-github-app-token action to v3
  - [ ] <!-- unschedule-branch=renovate/major-arrow-rs-monorepo -->fix(deps): update arrow-rs monorepo to v60 (`arrow`, `arrow-array`, `arrow-buffer`, `arrow-ipc`, `arrow-schema`, `parquet`)
  - [ ] <!-- unschedule-branch=renovate/major-datafusion-monorepo -->fix(deps): update rust crate datafusion to v55
@@ -93,7 +93,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `age 0.11` → [Updates: `0.12`]
  - `time 0.3` → [Updates: `0.3`]
  - `proptest 1`
- - `zip 2` → [Updates: `8`]
+ - `zip 2` → [Updates: `9`]
  - `zarrs 0.23` → [Updates: `0.23`]
  - `bytes 1`
  - `half 2`
@@ -264,7 +264,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `numcodecs ==0.16.5` → [Updates: `==0.17.0`]
  - `nibabel ==5.4.2`
  - `pydicom ==3.0.2`
- - `pyarrow ==24.0.0` → [Updates: `==25.0.1`]
+ - `pyarrow ==24.0.0` → [Updates: `==26.0.0`]
  - `uproot ==5.7.4` → [Updates: `==5.7.7`]
 
 </details>
