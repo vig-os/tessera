@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-09T08:48:25Z
+updated: 2026-10-11T02:10:57Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-10T08:05:57.342Z
+synced: 2026-10-11T08:16:32.728Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -25,7 +25,7 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 The following updates are awaiting their schedule. To get an update now, click on a checkbox below.
 
  - [ ] <!-- unschedule-branch=renovate/dtolnay-rust-toolchain-digest -->chore(deps): update dtolnay/rust-toolchain digest to 686976e
- - [ ] <!-- unschedule-branch=renovate/release-plz-action-digest -->chore(deps): update release-plz/action digest to 18641b6
+ - [ ] <!-- unschedule-branch=renovate/release-plz-action-digest -->chore(deps): update release-plz/action digest to f393a7b
  - [ ] <!-- unschedule-branch=renovate/flate2-1.x-lockfile -->chore(deps): update rust crate flate2 to v1.1.10
  - [ ] <!-- unschedule-branch=renovate/rust-futures-monorepo -->chore(deps): update rust crate futures to v0.3.34
  - [ ] <!-- unschedule-branch=renovate/hdf5-metno-sys-0.x-lockfile -->chore(deps): update rust crate hdf5-metno-sys to v0.12.4
@@ -33,7 +33,7 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/object_store-0.x-lockfile -->chore(deps): update rust crate object_store to v0.14.2
  - [ ] <!-- unschedule-branch=renovate/pyo3-0.x-lockfile -->chore(deps): update rust crate pyo3 to v0.29.3
  - [ ] <!-- unschedule-branch=renovate/serde-monorepo -->chore(deps): update rust crate serde to v1.0.229
- - [ ] <!-- unschedule-branch=renovate/serde_json-1.x-lockfile -->chore(deps): update rust crate serde_json to v1.0.151
+ - [ ] <!-- unschedule-branch=renovate/serde_json-1.x-lockfile -->chore(deps): update rust crate serde_json to v1.0.152
  - [ ] <!-- unschedule-branch=renovate/thiserror-2.x-lockfile -->chore(deps): update rust crate thiserror to v2.0.21
  - [ ] <!-- unschedule-branch=renovate/time-0.x-lockfile -->chore(deps): update rust crate time to v0.3.55
  - [ ] <!-- unschedule-branch=renovate/zarrs-0.x-lockfile -->chore(deps): update rust crate zarrs to v0.23.14
@@ -45,6 +45,7 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/datafusion-monorepo -->chore(deps): update rust crate datafusion to v54.1.0
  - [ ] <!-- unschedule-branch=renovate/hdf5-metno-0.x -->chore(deps): update rust crate hdf5-metno to 0.15
  - [ ] <!-- unschedule-branch=renovate/png-0.x -->chore(deps): update rust crate png to 0.18
+ - [ ] <!-- unschedule-branch=renovate/proptest-1.x-lockfile -->chore(deps): update rust crate proptest to v1.12.0
  - [ ] <!-- unschedule-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unschedule-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.53.2
  - [ ] <!-- unschedule-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
@@ -92,7 +93,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `sha2 0.10` → [Updates: `0.11`]
  - `age 0.11` → [Updates: `0.12`]
  - `time 0.3` → [Updates: `0.3`]
- - `proptest 1`
+ - `proptest 1` → [Updates: `1`]
  - `zip 2` → [Updates: `9`]
  - `zarrs 0.23` → [Updates: `0.23`]
  - `bytes 1`
@@ -258,7 +259,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 <details><summary>tessera/bench/ecosystems/pyproject.toml (8)</summary>
 
- - `numpy ==2.5.0` → [Updates: `==2.5.3`]
+ - `numpy ==2.5.0` → [Updates: `==2.5.4`]
  - `h5py ==3.16.0`
  - `zarr ==3.2.1` → [Updates: `==3.4.1`]
  - `numcodecs ==0.16.5` → [Updates: `==0.17.0`]
