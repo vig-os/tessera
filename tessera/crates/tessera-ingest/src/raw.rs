@@ -47,9 +47,15 @@ pub fn to_recon_product(
     extra_sources: &[tessera_core::provenance::Source],
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
     let (spec, data) = read_raw(path, shape, numpy_code)?;
-    let (block_ref, payload) = array::array_block("volume", &spec, &data)?;
+    // ADR-0059 C4: an integer array block carries its `{hash, stats}` chunk-index by default, so a
+    // reader answers count/min/max/mean/std and a histogram without decoding the volume (#347).
+    let ((block_ref, payload), sidecar) = array::array_block_with_index("volume", &spec, &data)?;
     let mut b = ProductBuilder::new("recon", name, "raw binary volume", timestamp);
     b.add_block_ref(block_ref);
+    let sidecar = sidecar.map(|(r, pl)| {
+        b.add_block_ref(r);
+        pl
+    });
     let source_ref = source_label
         .map(str::to_string)
         .unwrap_or_else(|| path.display().to_string());
@@ -58,7 +64,9 @@ pub fn to_recon_product(
         b.add_source(s.clone());
     }
     let sealed = b.seal()?;
-    Ok((sealed, vec![payload]))
+    let mut payloads = vec![payload];
+    payloads.extend(sidecar);
+    Ok((sealed, payloads))
 }
 
 #[cfg(test)]

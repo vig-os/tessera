@@ -1322,8 +1322,24 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
     let mut cur_spec = spec.clone();
     let mut data = tessera_io::array::decode(&spec, &blob)?;
     let mut blocks: Vec<(tessera_core::block::BlockRef, tessera_io::BlockPayload)> = Vec::new();
+    // ADR-0059 C4: every level is an array block, so every INTEGER level carries its own
+    // `{hash, stats}` chunk-index. A pyramid is exactly the shape that wants it — a viewer picks a
+    // level and asks for its range, which is then decode-free at any level.
+    let mut push_level =
+        |blocks: &mut Vec<(tessera_core::block::BlockRef, tessera_io::BlockPayload)>,
+         lname: &str,
+         lspec: &tessera_core::block::array::ArraySpec,
+         ldata: &ArrayData|
+         -> Result<()> {
+            let (block, sidecar) =
+                tessera_io::array::array_block_with_index(lname, lspec, ldata)?;
+            blocks.push(block);
+            blocks.extend(sidecar);
+            Ok(())
+        };
+
     // Level 0 — the full-resolution volume.
-    blocks.push(tessera_io::array::array_block(block, &cur_spec, &data)?);
+    push_level(&mut blocks, block, &cur_spec, &data)?;
 
     let cap = levels.unwrap_or(8);
     let mut level = 0u32;
@@ -1334,7 +1350,7 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
         };
         level += 1;
         let lname = format!("{block}/{level}");
-        blocks.push(tessera_io::array::array_block(&lname, &ds_spec, &ds_data)?);
+        push_level(&mut blocks, &lname, &ds_spec, &ds_data)?;
         cur_spec = ds_spec;
         data = ds_data;
         // Stop once the coarsest level is a single overview tile.
