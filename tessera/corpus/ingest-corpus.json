@@ -1,10 +1,10 @@
 {
   "expected_counts": {
-    "all-features": 14,
-    "default": 14,
-    "full": 14,
-    "parquet-no-csv": 7,
-    "parquet-npy-no-npz": 11
+    "all-features": 15,
+    "default": 15,
+    "full": 15,
+    "parquet-no-csv": 8,
+    "parquet-npy-no-npz": 12
   },
   "fixtures": [
     {
@@ -111,6 +111,24 @@
       "id": "blake3:b013dc4f302e78ad8ab37b64f4c9e703e055de21a03f7f566b3859d61dadd878",
       "content_hash": "blake3:eec3ef309b2cec055b6cae5930c950d47eede7d44f723e9034eb51105da9ed3b",
       "manifest_hash": "blake3:7d5657612d4fbc5214a990f982381d93c8f6f83827ce5e503de191261699a8fd",
+      "ingest_decoder": {
+        "name": "arrow-rs/parquet",
+        "version": "=58.3.0",
+        "features": "blake3:ea756bfa8d6d226b0a26f673e126f703a6eaff1c1a4325d0bad347afd389e196"
+      }
+    },
+    {
+      "name": "ingest_parquet_late_null",
+      "product": "table",
+      "requires": [
+        "parquet"
+      ],
+      "hazards": [
+        "H10"
+      ],
+      "id": "blake3:02a830a8d0bb299e15c419146693f9fc80c6cf8994d5bd192bc0f52245a0627d",
+      "content_hash": "blake3:c78a54087056d4c9fdacad9a2a6bbcb920c78769b92c0992bb488f2df61bb3f7",
+      "manifest_hash": "blake3:0957c6f620ca2020b3eb15b3992bdae892ee779edd24714b57c04d3a3be40e58",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
         "version": "=58.3.0",

@@ -549,10 +549,6 @@ impl ColumnData {
 pub type TableData = Vec<(String, ColumnData)>;
 
 /// An empty column of the dtype named by a numpy code (the decode accumulator).
-fn empty_column(code: &str) -> Result<ColumnData> {
-    empty_column_with_capacity(code, 0)
-}
-
 /// An empty accumulator column, pre-sized for `cap` rows.
 ///
 /// **This is the dominant cost of a full-materialise read.** Profiling (`examples/read_profile`)
@@ -956,9 +952,15 @@ where
 {
     let (rt, s) = runtime_session();
     // The struct dtype, taken from an empty struct of the declared columns.
+    //
+    // Built with `empty_column_for` — from the `Column`, NOT from its dtype string — for the reason that
+    // helper documents: the dtype string ("f8") cannot express nullability, so a bare accumulator makes
+    // the struct dtype non-nullable and Vortex then rejects the first nullable chunk. Every other
+    // accumulator site already did this; this one was missed, and no streaming lane had a nullable column
+    // to expose it until the generic table lanes arrived (#458).
     let mut empty: TableData = Vec::with_capacity(spec.columns.len());
     for c in &spec.columns {
-        empty.push((c.name.clone(), empty_column(&c.dtype)?));
+        empty.push((c.name.clone(), empty_column_for(c, 0)?));
     }
     let efields: Vec<(&str, ArrayRef)> = empty
         .iter()

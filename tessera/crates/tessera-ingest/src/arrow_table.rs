@@ -1024,6 +1024,24 @@ fn gather(values: &ArrayRef, indices: &[Option<usize>], name: &str) -> Result<Co
     })
 }
 
+/// Lazily canonicalised Arrow IPC chunks — the streaming counterpart to [`read_arrow_table`], and
+/// the IPC twin of `parquet_table::parquet_chunks`.
+///
+/// Here rather than beside the Parquet chunker for the reason #509/#540 moved [`read_arrow_table`]
+/// here: `parquet_table` is `#[cfg(feature = "parquet")]`, so an IPC reader living there makes
+/// `--features arrow` a configuration nobody can build. Nothing in it needs Parquet — it calls
+/// [`arrow_ipc_batches`] and [`canonicalise_batch`], both right here.
+///
+/// There is no `batch_rows` knob, deliberately: the IPC container's own record batches ARE the read
+/// unit, and re-cutting them would buffer exactly what streaming exists to avoid.
+pub fn arrow_ipc_chunks(
+    path: &std::path::Path,
+    exclude: &[String],
+) -> Result<impl Iterator<Item = Result<CanonicalTable>> + use<>> {
+    let exclude = exclude.to_vec();
+    Ok(arrow_ipc_batches(path)?.map(move |b| b.and_then(|b| canonicalise_batch(&b, &exclude))))
+}
+
 /// Read + canonicalise an Arrow IPC / Feather file into a flat Tessera table.
 ///
 /// Lives here rather than beside the Parquet entry point, which is where it started. Keeping the two
@@ -1035,6 +1053,52 @@ fn gather(values: &ArrayRef, indices: &[Option<usize>], name: &str) -> Result<Co
 pub fn read_arrow_table(path: &std::path::Path, exclude: &[String]) -> Result<CanonicalTable> {
     let batches = read_arrow_ipc(path)?;
     canonicalise_batches(&batches, exclude)
+}
+
+/// A **lazy** Arrow IPC batch reader — the streaming counterpart to [`read_arrow_ipc`], which collects.
+///
+/// Returns a fresh reader per call, because streaming needs two traversals: nullability is a whole-file
+/// property (ADR-0029 by-presence), so the shape pass must finish before the encode pass knows what
+/// schema to declare. An IPC *file* carries a footer with the record-batch index, so it is seekable and a
+/// second pass is I/O rather than a correctness problem. (The IPC *stream* format has no footer and would
+/// not be re-openable; `FileReader` already refuses it, which is why that distinction stays out of here.)
+pub fn arrow_ipc_batches(
+    path: &std::path::Path,
+) -> Result<impl Iterator<Item = Result<RecordBatch>> + use<>> {
+    let file =
+        std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
+    let reader = arrow_ipc::reader::FileReader::try_new(std::io::BufReader::new(file), None)
+        .map_err(|e| {
+            he(format!(
+                "{} is not a readable Arrow IPC file: {e} (a Feather v1 file is not Arrow IPC; \
+                 re-save it as Feather v2 / .arrow)",
+                path.display()
+            ))
+        })?;
+    let display = path.display().to_string();
+    Ok(reader.map(move |b| b.map_err(|e| he(format!("read {display}: {e}")))))
+}
+
+/// The decoded size an Arrow IPC file implies, for the streaming threshold.
+///
+/// Metadata only: the footer's schema gives the row width and each record-batch block its length, so no
+/// buffer is decoded. As with Parquet, reading the footer to choose a code path is sound where trusting it
+/// for *identity* would not be (#502) — a wrong estimate costs speed, and batch==stream is pinned by test.
+/// **Routing only**, and a deliberate under-estimate for compressed IPC — see the comment inside.
+pub fn arrow_ipc_size_estimate(path: &std::path::Path) -> Result<u64> {
+    let file =
+        std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
+    let md =
+        std::fs::File::metadata(&file).map_err(|e| he(format!("stat {}: {e}", path.display())))?;
+    // On-disk size, which is a FLOOR and is documented as one. IPC is uncompressed by default, so for
+    // the common file it already IS the decoded size — but the format permits per-buffer LZ4_FRAME or
+    // ZSTD compression, and a compressed file therefore under-estimates. Reading the footer's
+    // compression field per record batch would tighten it; it is not worth the open, because the only
+    // consequence of under-estimating is that a large compressed IPC file routes to the whole-file
+    // path when streaming would have served it better. Routing cannot move a hash (the
+    // batch-equals-stream tests pin that), so a conservative floor is the right trade and a wrong
+    // guess costs memory, never correctness.
+    Ok(md.len())
 }
 
 /// Read an **Arrow IPC / Feather** file into record batches.

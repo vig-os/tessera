@@ -1132,6 +1132,32 @@ enum IngestSrc {
         /// Attach metadata `key=value` (value parsed as JSON, else string). Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
+        /// Bounded-memory streaming (#458): `auto` (default) streams when the input's estimated
+        /// decoded size exceeds `--stream-threshold`, `batch` reads the whole file, `stream` forces
+        /// the bounded path.
+        ///
+        /// A memory/time trade and never a format decision: both paths seal the same
+        /// `content_hash` AND `manifest_hash`. Two things make that true rather than hopeful — the
+        /// block partition is a function of the row count alone (ADR-0026), and this flag is an
+        /// execution knob that never enters the spec hash, so it cannot reach `manifest_hash`
+        /// through the `ingested_via_spec` edge either. Pinned by test, at the production
+        /// `BLOCK_ROWS` as well as across block boundaries.
+        ///
+        /// Streaming reads the input twice (nullability is decided over the whole file, ADR-0029),
+        /// so a pipe or process substitution falls back to `batch` whatever you ask for — which
+        /// seals the same product, just without the memory bound.
+        #[arg(long, value_parser = ["auto", "batch", "stream"], default_value = "auto")]
+        streaming: String,
+        /// Rows per decoded batch on the streaming path — the read-side memory unit, independent of
+        /// the block partition and of the seal. Arrow IPC ignores it: the container's own record
+        /// batches are the read unit, and re-cutting them would buffer what streaming avoids.
+        ///
+        /// Must be at least 1. Rejected at parse rather than left to fail later, because what `0`
+        /// used to do depended on the route: streaming Parquet reported "decoded to no columns",
+        /// blaming the data for a bad flag, while the batch path ignored it and succeeded.
+        #[arg(long, value_name = "ROWS", default_value_t = 64 * 1024,
+              value_parser = clap::value_parser!(u64).range(1..))]
+        batch_rows: u64,
     },
     /// Any dense numeric grid (NumPy `.npy`, or `.npz` → a collection) → an `array` product.
     ///
@@ -2041,6 +2067,22 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
     }
 }
 
+/// Parse `--streaming auto|batch|stream` into the spec's [`ingest_spec::StreamingMode`].
+///
+/// Clap's `value_parser` already rejects anything else, so the fallback arm is unreachable through
+/// the CLI — but `run_ingest_src` is also called directly by the tests, so it stays a typed error
+/// rather than a panic.
+fn parse_streaming_mode(s: &str) -> tessera_core::Result<ingest_spec::StreamingMode> {
+    match s {
+        "auto" => Ok(ingest_spec::StreamingMode::Auto),
+        "batch" => Ok(ingest_spec::StreamingMode::Batch),
+        "stream" => Ok(ingest_spec::StreamingMode::Stream),
+        other => Err(tessera_core::Error::Invalid(format!(
+            "tessera ingest table: unknown --streaming '{other}' (expected auto | batch | stream)"
+        ))),
+    }
+}
+
 /// Parse repeatable `--meta key=value` into the product's metadata map (the config-side supply that
 /// satisfies a schema's required/recommended fields). Each `value` is parsed as JSON, falling back to a
 /// bare string — same convention as `commit --set`. Shared by every `tessera ingest` subcommand so
@@ -2417,6 +2459,8 @@ fn ingest_src_to_spec(
             column_meta,
             source_label,
             meta,
+            streaming,
+            batch_rows,
         } => {
             // ADR-0056 §4: magic bytes when unambiguous, explicit when not. Sniffing happens HERE, in
             // the CLI, and never in the engine — the spec records the resolved backend, so a spec is
@@ -2432,16 +2476,28 @@ fn ingest_src_to_spec(
                 Some(p) => ingest_column_meta::ColumnMeta::load(p)?,
                 None => ingest_column_meta::ColumnMeta::empty(),
             };
+            let streaming = parse_streaming_mode(&streaming)?;
+            // clap's range(1..) already refused 0, so this cannot truncate to a meaningless value.
+            let batch_rows = usize::try_from(batch_rows).map_err(|_| {
+                tessera_core::Error::Invalid(format!(
+                    "tessera ingest table: --batch-rows {batch_rows} does not fit this platform's \
+                     usize"
+                ))
+            })?;
             let options = match from.as_str() {
                 "parquet" => FormatOptions::Parquet {
                     input,
                     exclude,
                     column_meta,
+                    streaming,
+                    batch_rows,
                 },
                 "arrow" => FormatOptions::Arrow {
                     input,
                     exclude,
                     column_meta,
+                    streaming,
+                    batch_rows,
                 },
                 "csv" => {
                     if column.is_empty() {
@@ -2455,6 +2511,8 @@ fn ingest_src_to_spec(
                         null_tokens: null_token,
                         exclude,
                         column_meta,
+                        streaming,
+                        batch_rows,
                     }
                 }
                 // Unreachable via clap's value_parser, but the CLI is not the only caller of this

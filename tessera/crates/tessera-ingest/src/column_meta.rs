@@ -227,6 +227,40 @@ pub fn looks_identifying(name: &str) -> bool {
     PHRASES.iter().any(|p| joined.contains(p))
 }
 
+/// ADR-0056 §7's suspect-column advisory: print **once**, to stderr, with the fix.
+///
+/// Never gates the ingest, and deliberately quiet when there is nothing an operator could act on.
+/// §9's loudness rule is why this is one aggregated line per product rather than one per column:
+/// someone running `find … -exec tessera ingest …` across 5000 files must not scroll 30k lines of
+/// advice. It goes through the `tracing` facade, so a non-TTY consumer can filter it out entirely.
+///
+/// Takes column **names** rather than a decoded table so the bounded-memory streaming path can call
+/// it too (#458): streaming never holds a whole `CanonicalTable`, and a PHI advisory that fired on
+/// only one of two paths to the same product would be worse than none — an operator would learn to
+/// trust its silence.
+pub fn warn_unclassified_identifying(names: &[&str], column_meta: &ColumnMeta, product: &str) {
+    let classified = column_meta.classified();
+    let suspect: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|n| looks_identifying(n))
+        .filter(|n| !classified.contains(n))
+        .collect();
+    if suspect.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        target: "tessera::ingest::phi",
+        member = %product,
+        columns = %suspect.join(", "),
+        "column(s) '{}' match an identifying-name pattern (MRN / patient id / name / DOB / \
+         accession / UID) and no --column-meta gave them a tier; stamped: unknown. Classify before \
+         sharing: add a [<column>] sensitivity = \"identifying\" entry to a --column-meta file, or \
+         edit after the fact with `tessera commit --set`.",
+        suspect.join("', '")
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
