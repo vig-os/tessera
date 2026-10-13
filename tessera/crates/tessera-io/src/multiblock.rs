@@ -320,7 +320,13 @@ impl LogicalTableView {
                 "select_blocks_overlapping: column '{column}' is not an integer column for stats"
             ))
         })?;
-        Ok(ChunkStats::from_values(&vals))
+        // Fail closed rather than return a wrapped statistic: these stats drive PRUNING, and a
+        // wrong bound drops real rows (ADR-0059 M2, #523).
+        ChunkStats::from_values(&vals).ok_or_else(|| {
+            Error::Codec(format!(
+                "block_stats: column '{column}' overflows the exact statistics accumulator"
+            ))
+        })
     }
 }
 

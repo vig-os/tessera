@@ -510,9 +510,16 @@ pub fn to_array_product(
              with --meta",
         ));
     }
-    let (block_ref, payload) = tessera_io::array::array_block(GENERIC_BLOCK, spec, data)?;
+    // ADR-0059 C4: an integer array block carries its `{hash, stats}` chunk-index by default, so a
+    // reader answers count/min/max/mean/std and a histogram without decoding the volume (#347).
+    let ((block_ref, payload), sidecar) =
+        tessera_io::array::array_block_with_index(GENERIC_BLOCK, spec, data)?;
     let mut b = ProductBuilder::new("array", opts.name, opts.description, opts.timestamp);
     b.add_block_ref(block_ref);
+    let sidecar = sidecar.map(|(r, pl)| {
+        b.add_block_ref(r);
+        pl
+    });
     b.with_field(
         "source_format",
         serde_json::Value::String(opts.source_format.to_string()),
@@ -532,7 +539,9 @@ pub fn to_array_product(
     for s in opts.extra_sources {
         b.add_source(s.clone());
     }
-    Ok((b.seal()?, vec![payload]))
+    let mut payloads = vec![payload];
+    payloads.extend(sidecar);
+    Ok((b.seal()?, payloads))
 }
 
 /// Parse a `name:dtype` column declaration (the CSV lane's `--column`, ADR-0056 §8).

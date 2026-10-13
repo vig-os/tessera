@@ -1,0 +1,381 @@
+//! ADR-0059 determinism gate for the `{hash, stats}` chunk index.
+//!
+//! The schema rests on one property: **the sealed `.cidx` bytes are a pure function of the input**,
+//! independent of worker count, build profile and architecture. M3 — the per-chunk digest over
+//! native little-endian element bytes — cannot be revised after the default-on seal, so it is
+//! pinned here rather than trusted.
+//!
+//! Three axes, covered deliberately:
+//!
+//!  - **architecture** and **build profile**: the pinned literals below. The wiring is the
+//!    `seal-profile-determinism` flake check, which runs this file under the dev profile AND
+//!    `--release`; CI runs that check on `x86_64-linux` AND `aarch64-linux`, so a byte difference
+//!    on any of those four combinations fails the gate. (It is NOT `ingest-gate-a` /
+//!    `workspace-test` — those happen to use different profiles, which would leave this axis
+//!    resting on a coincidence.) #472 is why this is checked and not assumed: a persisted float NaN
+//!    diverged across architectures by a single bit.
+//!  - **worker count**: asserted directly, by sealing the same data through the streaming writer at
+//!    1, 4 and 16 encode threads and comparing the resulting sidecar bytes.
+//!  - **the encoding itself**: re-derived inside the test from first principles, so the literals
+//!    cannot drift into agreeing with a wrong implementation.
+
+use tessera_core::block::array::ArraySpec;
+use tessera_core::chunk_index::ChunkIndex;
+use tessera_core::hash::digest;
+use tessera_io::array::{array_chunk_index, ArrayData};
+use tessera_io::stream::{array_job_indexed, StreamWriter};
+use tessera_io::{Reader, WriteSession};
+
+const TS: &str = "2024-01-01T00:00:00Z";
+
+/// A fixture with the properties that break careless encodings: negative values (two's complement),
+/// a chunk grid that does NOT tile the shape (edge chunks clip), and a dtype narrower than `i64`
+/// (so an `i64`-widened digest differs from a native-LE one).
+fn fixture() -> (ArraySpec, ArrayData) {
+    let mut spec = ArraySpec::new(vec![5, 7, 3], "int16");
+    spec.chunks = vec![4, 4, 4];
+    let n = 5 * 7 * 3;
+    let vals: Vec<i16> = (0..n).map(|k| (k as i16 * 37) - 512).collect();
+    (spec, ArrayData::I16(vals))
+}
+
+/// The encoding is re-derived here from the ADR's definition, independently of the builder.
+///
+/// This is the test that gives the pinned literals their meaning: a literal alone would still pass
+/// if the implementation and the literal were updated together in the wrong direction. Deriving the
+/// expected bytes from the spec — C-order odometer, last axis fastest, edge chunks clipped, each
+/// element in its native 2-byte little-endian width — and hashing *that* proves the digest is over
+/// the data's own bytes.
+///
+/// Cross-checked once more outside Rust entirely: the same byte sequence, generated in Python and
+/// hashed with `b3sum`, gives `57df27cd…` (and the old `i64`-widened buffer gives `52403b87…`, a
+/// different value, which is the evidence that M3 actually changed what is hashed).
+#[test]
+fn the_per_chunk_digest_is_over_native_little_endian_elements() {
+    let (spec, data) = fixture();
+    let idx = array_chunk_index(&spec, &data).unwrap().expect("indexable");
+
+    let shape = [5usize, 7, 3];
+    let chunks = [4usize, 4, 4];
+    let strides = [21usize, 3, 1]; // C-order
+    let ArrayData::I16(vals) = &data else {
+        panic!("fixture is i16")
+    };
+
+    // Chunk 0 spans x,y in 0..4 and z in 0..3 (clipped by the shape).
+    let hi = [
+        chunks[0].min(shape[0]),
+        chunks[1].min(shape[1]),
+        chunks[2].min(shape[2]),
+    ];
+    let mut expect = Vec::new();
+    for x in 0..hi[0] {
+        for y in 0..hi[1] {
+            for z in 0..hi[2] {
+                let flat = x * strides[0] + y * strides[1] + z * strides[2];
+                // NATIVE width, little-endian — two bytes for int16, not eight.
+                expect.extend_from_slice(&vals[flat].to_le_bytes());
+            }
+        }
+    }
+    assert_eq!(expect.len(), 4 * 4 * 3 * 2, "48 elements, 2 bytes each");
+    assert_eq!(
+        idx.entries[0].digest,
+        digest(&expect),
+        "chunk digest must be over the chunk's NATIVE little-endian element bytes (ADR-0059 M3)"
+    );
+
+    // ...and EVERY chunk, in the index's own order — including the two that clip on one axis and
+    // the one that clips on two. Deriving only chunk 0 would leave the chunk ORDER and the clipping
+    // of the trailing chunks unproven.
+    let nchunks = [
+        shape[0].div_ceil(chunks[0]),
+        shape[1].div_ceil(chunks[1]),
+        shape[2].div_ceil(chunks[2]),
+    ];
+    let mut derived = Vec::new();
+    for cx in 0..nchunks[0] {
+        for cy in 0..nchunks[1] {
+            for cz in 0..nchunks[2] {
+                let lo = [cx * chunks[0], cy * chunks[1], cz * chunks[2]];
+                let hi = [
+                    (lo[0] + chunks[0]).min(shape[0]),
+                    (lo[1] + chunks[1]).min(shape[1]),
+                    (lo[2] + chunks[2]).min(shape[2]),
+                ];
+                let mut bytes = Vec::new();
+                for x in lo[0]..hi[0] {
+                    for y in lo[1]..hi[1] {
+                        for z in lo[2]..hi[2] {
+                            let flat = x * strides[0] + y * strides[1] + z * strides[2];
+                            bytes.extend_from_slice(&vals[flat].to_le_bytes());
+                        }
+                    }
+                }
+                derived.push(digest(&bytes));
+            }
+        }
+    }
+    let actual: Vec<String> = idx.entries.iter().map(|e| e.digest.clone()).collect();
+    assert_eq!(
+        actual, derived,
+        "all chunk digests AND their order must match the ADR's C-order walk with clipping"
+    );
+    // The clipped chunks really are smaller: 4x4x3, 4x3x3, 1x4x3, 1x3x3 elements.
+    assert_eq!(
+        idx.entries
+            .iter()
+            .map(|e| e.stats.count)
+            .collect::<Vec<_>>(),
+        vec![48, 36, 12, 9]
+    );
+
+    // And it is NOT the old i64-widened encoding.
+    let widened: Vec<u8> = {
+        let mut w = Vec::new();
+        for x in 0..hi[0] {
+            for y in 0..hi[1] {
+                for z in 0..hi[2] {
+                    let flat = x * strides[0] + y * strides[1] + z * strides[2];
+                    w.extend_from_slice(&(vals[flat] as i64).to_le_bytes());
+                }
+            }
+        }
+        w
+    };
+    assert_ne!(
+        idx.entries[0].digest,
+        digest(&widened),
+        "the i64-widened buffer must no longer be what is hashed"
+    );
+}
+
+/// The native width is the DTYPE's width, for every integer dtype — 1, 2, 4, 8 and bool.
+///
+/// A single-dtype test would not catch a width table that is right for `int16` and wrong elsewhere.
+/// `i8 -1` must be one byte `0xFF`, `bool` must be `0x00`/`0x01` and never the host's `bool`
+/// representation, and a `u64` above `i64::MAX` must yield NO index rather than a truncated one.
+#[test]
+fn every_integer_width_hashes_at_its_own_width() {
+    fn one_chunk(dtype: &str, data: ArrayData, expect: &[u8]) {
+        let mut spec = ArraySpec::new(vec![data_len(&data) as u64], dtype);
+        spec.chunks = vec![data_len(&data) as u64]; // a single chunk
+        let idx = array_chunk_index(&spec, &data)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{dtype} must be indexable"));
+        assert_eq!(idx.len(), 1);
+        assert_eq!(
+            idx.entries[0].digest,
+            digest(expect),
+            "{dtype}: digest must be over {} bytes",
+            expect.len()
+        );
+    }
+    fn data_len(d: &ArrayData) -> usize {
+        match d {
+            ArrayData::I8(v) => v.len(),
+            ArrayData::U8(v) => v.len(),
+            ArrayData::I16(v) => v.len(),
+            ArrayData::I32(v) => v.len(),
+            ArrayData::I64(v) => v.len(),
+            ArrayData::U16(v) => v.len(),
+            ArrayData::U32(v) => v.len(),
+            ArrayData::U64(v) => v.len(),
+            ArrayData::Bool(v) => v.len(),
+            _ => panic!("integer dtypes only"),
+        }
+    }
+
+    // width 1, signed: -1 is 0xFF, not 0xFFFFFFFFFFFFFFFF.
+    one_chunk("int8", ArrayData::I8(vec![-1, 0, 127]), &[0xFF, 0x00, 0x7F]);
+    one_chunk("uint8", ArrayData::U8(vec![0, 255]), &[0x00, 0xFF]);
+    // width 2
+    one_chunk(
+        "int16",
+        ArrayData::I16(vec![-2, 256]),
+        &[0xFE, 0xFF, 0x00, 0x01],
+    );
+    // width 4
+    one_chunk("int32", ArrayData::I32(vec![-2]), &[0xFE, 0xFF, 0xFF, 0xFF]);
+    // width 8
+    one_chunk(
+        "int64",
+        ArrayData::I64(vec![-2]),
+        &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+    );
+    // bool is exactly 0x00 / 0x01, one byte each — never the host's `bool` layout.
+    one_chunk(
+        "bool",
+        ArrayData::Bool(vec![true, false, true]),
+        &[0x01, 0x00, 0x01],
+    );
+
+    // A u64 above i64::MAX cannot be represented exactly, so there is NO index — not a truncated
+    // one. Fail closed (ADR-0059 M2).
+    let mut spec = ArraySpec::new(vec![2], "uint64");
+    spec.chunks = vec![2];
+    assert!(
+        array_chunk_index(&spec, &ArrayData::U64(vec![u64::MAX, 0]))
+            .unwrap()
+            .is_none(),
+        "u64 beyond i64::MAX must yield no index rather than a truncated digest"
+    );
+}
+
+/// A block whose `sum_sq` roll-up overflows must STILL get its histogram (review blocker 3).
+///
+/// The histogram needs only `min`/`max`, which cannot overflow. Gating it on the full aggregate
+/// meant the sidecar was written with no histogram and no stated reason.
+#[test]
+fn an_overflowing_aggregate_still_gets_a_histogram() {
+    let mut spec = ArraySpec::new(vec![6], "int64");
+    spec.chunks = vec![2]; // 3 chunks: each folds, the block-level roll-up does not
+    let data = ArrayData::I64(vec![i64::MAX; 6]);
+
+    let idx = array_chunk_index(&spec, &data)
+        .unwrap()
+        .expect("per-chunk folds succeed, so there IS an index");
+    assert_eq!(idx.len(), 3);
+    assert_eq!(
+        idx.checked_aggregate(),
+        None,
+        "precondition: the block-level roll-up really does overflow"
+    );
+    let h = idx
+        .histogram
+        .as_ref()
+        .expect("the histogram needs only min/max and must survive an overflowing aggregate");
+    assert_eq!(h.lo, i64::MAX);
+    assert_eq!(h.hi, i64::MAX);
+    assert_eq!(h.total(), 6, "every value counted");
+}
+
+/// Pinned per-chunk digests and index root — the cross-architecture / cross-profile assertion.
+#[test]
+fn per_chunk_digests_and_root_are_pinned() {
+    let (spec, data) = fixture();
+    let idx = array_chunk_index(&spec, &data).unwrap().expect("indexable");
+
+    // ceil(5/4) * ceil(7/4) * ceil(3/4) = 2 * 2 * 1 = 4 chunks.
+    assert_eq!(
+        idx.len(),
+        4,
+        "a non-divisible grid must still tile the array"
+    );
+
+    let digests: Vec<&str> = idx.entries.iter().map(|e| e.digest.as_str()).collect();
+    assert_eq!(
+        digests,
+        vec![
+            "blake3:57df27cd32a202c5f8725531ea18a54f1f0c350b183dd8a346671bf562e9b6b2",
+            "blake3:6c04f82e52363096667fa47fc8afef11af11ae1960a1dc1e1849299e693c2a72",
+            "blake3:c61dd86e2857116a58b3818766073a93a20a912174c75eb308a27da4edd8ea47",
+            "blake3:0f34cf844ecf5f82124a82af66180b543f3f0ee62887f7ba0cc7999cc6bbff62",
+        ],
+    );
+    assert_eq!(
+        idx.root(),
+        "blake3:1da716a6fcb33adaa96653e9a678bf847c50b57b7d62804db4889afd3db82721",
+    );
+}
+
+/// The whole serialized sidecar — statistics, counters and histogram — is byte-stable.
+#[test]
+fn serialized_index_bytes_are_pinned_and_round_trip() {
+    let (spec, data) = fixture();
+    let idx = array_chunk_index(&spec, &data).unwrap().expect("indexable");
+    let bytes = idx.to_bytes().unwrap();
+
+    assert_eq!(
+        digest(&bytes),
+        "blake3:e0085cdb4acc2ed6df7435e5bbe44699afd05dba3af41c640fb47d91d42eef4c",
+        "the sealed .cidx bytes must be a pure function of the input"
+    );
+
+    let back = ChunkIndex::from_bytes(&bytes).unwrap();
+    assert_eq!(back.entries, idx.entries);
+    assert_eq!(
+        back.histogram, idx.histogram,
+        "the histogram must survive serialization"
+    );
+
+    // The fixture's span is small enough for one bin per value, so the histogram is EXACT and
+    // describes every sample.
+    let h = idx.histogram.as_ref().expect("histogram built by default");
+    assert!(h.exact(), "one bin per value for this span");
+    assert_eq!(h.width, 1);
+    assert_eq!(h.total(), 105, "every voxel counted exactly once");
+    // Exact means width 1, so bins span the observed range exactly with nothing widened.
+    assert_eq!(h.bins as i128, h.hi as i128 - h.lo as i128 + 1);
+    assert_eq!(
+        h.counts.len(),
+        h.bins as usize,
+        "bins must match counts.len()"
+    );
+}
+
+/// WORKER COUNT MUST NOT CHANGE A SINGLE BYTE.
+///
+/// The index is built per chunk and rolled up with integer monoids, so the merge is associative AND
+/// commutative — order-independent by algebra rather than by a fixed fold order. This drives the
+/// real streaming writer at 1, 4 and 16 encode threads and compares the sealed sidecar bytes, so the
+/// claim is tested through the production path rather than asserted about the arithmetic.
+#[test]
+fn worker_count_does_not_change_the_sidecar_bytes() {
+    let mut sealed_bytes: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut content_hashes: Vec<(usize, String)> = Vec::new();
+
+    for workers in [1usize, 4, 16] {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("s.tsra");
+        let ws = WriteSession::create(&dir.path().join("stage"), "recon", "det", "determinism", TS)
+            .unwrap();
+        let mut sw = StreamWriter::new(ws, workers, 3);
+        // Several blocks, so the committer really has concurrent work to order.
+        for i in 0..6 {
+            let mut spec = ArraySpec::new(vec![5, 7, 3], "int16");
+            spec.chunks = vec![4, 4, 4];
+            let n = 5 * 7 * 3;
+            let vals: Vec<i16> = (0..n).map(|k| (k as i16 * 37) - 512 + i as i16).collect();
+            sw.push(array_job_indexed(
+                format!("b{i:03}"),
+                spec,
+                ArrayData::I16(vals),
+            ))
+            .unwrap();
+        }
+        let sealed = sw.finish(&out).unwrap();
+        content_hashes.push((workers, sealed.content_hash.clone().unwrap()));
+
+        // Pull every sidecar's bytes back out of the sealed product.
+        let mut r = Reader::open(&out).unwrap();
+        let names: Vec<String> = r
+            .manifest()
+            .blocks
+            .iter()
+            .filter(|b| b.name.ends_with(".cidx"))
+            .map(|b| b.name.clone())
+            .collect();
+        assert_eq!(names.len(), 6, "every integer block gets a sidecar");
+        let mut all = Vec::new();
+        for n in &names {
+            all.extend_from_slice(&r.read_block(n).unwrap());
+        }
+        sealed_bytes.push((workers, all));
+    }
+
+    let (_, reference) = &sealed_bytes[0];
+    for (workers, bytes) in &sealed_bytes[1..] {
+        assert_eq!(
+            bytes, reference,
+            "the .cidx bytes changed at {workers} workers — the index is not worker-independent"
+        );
+    }
+    let (_, h0) = &content_hashes[0];
+    for (workers, h) in &content_hashes[1..] {
+        assert_eq!(
+            h, h0,
+            "content_hash changed at {workers} workers — the seal is not worker-independent"
+        );
+    }
+}

@@ -879,10 +879,17 @@ pub fn to_recon_product(
         .with_rescale(img.rescale_slope, img.rescale_intercept);
     spec.world_frame = img.world_frame.clone();
     spec.axis_referencing = img.axis_referencing.clone();
-    let (block_ref, payload) = array::array_block("volume", &spec, &img.data)?;
+    // ADR-0059 C4: an integer array block carries its `{hash, stats}` chunk-index by default, so a
+    // reader answers count/min/max/mean/std and a histogram without decoding the volume (#347).
+    let ((block_ref, payload), sidecar) =
+        array::array_block_with_index("volume", &spec, &img.data)?;
 
     let mut b = ProductBuilder::new("recon", name, "NIfTI recon volume", timestamp);
     b.add_block_ref(block_ref);
+    let sidecar = sidecar.map(|(r, pl)| {
+        b.add_block_ref(r);
+        pl
+    });
     // Which transform the geometry came from is a recipe fact, recorded in the sealed provenance bag
     // (ADR-0056 §6a). Absent for an index-space volume — feature-by-presence, so a file with no
     // geometry gains no bag.
@@ -903,7 +910,9 @@ pub fn to_recon_product(
         b.add_source(s.clone());
     }
     let sealed = b.seal()?;
-    Ok((sealed, vec![payload]))
+    let mut payloads = vec![payload];
+    payloads.extend(sidecar);
+    Ok((sealed, payloads))
 }
 
 #[cfg(test)]

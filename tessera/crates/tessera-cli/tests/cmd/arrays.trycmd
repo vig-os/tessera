@@ -11,7 +11,7 @@ shape     [64, 64, 64] (z,y,x)
 dtype     int16   codec pcodec
 chunks    [64, 64, 64]   voxels 262,144
 raw       min -1024  max 3071  mean 1023.500  std 1182.413
-source    full-decode-exact-integer (exact)
+source    chunk-index-aggregate (exact)
 physical  min -2048  max 2047  (1·raw + -1024) HU
 world     index space (no affine — use --index, not --world)
 
@@ -47,7 +47,7 @@ $ tessera stats ../../corpus/files/recon_int16.tsra volume --json
   ],
   "count": 262144,
   "exact": true,
-  "method": "full-decode-exact-integer",
+  "method": "chunk-index-aggregate",
   "raw": {
     "min": -1024.0,
     "max": 3071.0,

@@ -62,9 +62,21 @@ pub fn array_job_indexed(
     spec: tessera_core::block::array::ArraySpec,
     data: crate::array::ArrayData,
 ) -> EncodeJob {
+    array_job_indexed_opts(name, spec, data, crate::array::IndexOptions::default())
+}
+
+/// [`array_job_indexed`] with explicit [`IndexOptions`], so the histogram opt-out reaches the
+/// STREAMING path too. Without this the "writer opt-out" only held for direct API callers.
+pub fn array_job_indexed_opts(
+    name: impl Into<String>,
+    spec: tessera_core::block::array::ArraySpec,
+    data: crate::array::ArrayData,
+    opts: crate::array::IndexOptions,
+) -> EncodeJob {
     let name = name.into();
     Box::new(move || {
-        let (block, sidecar) = crate::array::array_block_with_index(&name, &spec, &data)?;
+        let (block, sidecar) =
+            crate::array::array_block_with_index_opts(&name, &spec, &data, &opts)?;
         Ok((block, sidecar.into_iter().collect()))
     })
 }

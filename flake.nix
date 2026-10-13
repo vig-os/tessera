@@ -530,6 +530,15 @@
               echo "[#472] the canonical-NaN Sum guard under both profiles" >&2
               cargo test -q -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
               cargo test -q --release -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
+
+              # ADR-0059: the chunk-index `.cidx` bytes must be a pure function of the input. M3 (the
+              # per-chunk digest over native little-endian element bytes) cannot be revised after the
+              # default-on seal, so its pinned digests are asserted under BOTH profiles here, and on
+              # BOTH architectures by this check's aarch64 leg. Running it in one profile only would
+              # leave the cross-profile axis resting on which other check happened to use `--release`.
+              echo "[ADR-0059] the chunk-index determinism gate under both profiles" >&2
+              cargo test -q -p tessera-io --test chunk_index_determinism
+              cargo test -q --release -p tessera-io --test chunk_index_determinism
             '';
           });
 

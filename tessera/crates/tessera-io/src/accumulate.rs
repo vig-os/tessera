@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tessera_core::block::table::{Column, TableSpec};
-use tessera_core::chunk_index::{ChunkStats, MerkleStatsAccumulator, Monoid};
+use tessera_core::chunk_index::{ChunkStats, MerkleStatsAccumulator};
 use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
 
@@ -236,12 +236,23 @@ impl TableStreamWriter {
             for (_, c) in &group {
                 bytes.extend_from_slice(&c.to_le_bytes());
             }
+            // Fail closed (ADR-0059 M2, #523). This was `.unwrap_or_else(ChunkStats::identity)`,
+            // which recorded an IDENTITY stat — count 0 — for a non-empty group whenever the column
+            // was not exactly foldable. That is a false statistic in the live integrity root, and it
+            // reconciles with the sealed index, so the lie would survive the seal. A caller that
+            // named a stat column and cannot get exact stats for it is told, not quietly given
+            // zeroes.
             let stats = group
                 .iter()
                 .find(|(n, _)| n == col)
                 .and_then(|(_, c)| c.as_i64())
-                .map(|v| ChunkStats::from_values(&v))
-                .unwrap_or_else(ChunkStats::identity);
+                .and_then(|v| ChunkStats::from_values(&v))
+                .ok_or_else(|| {
+                    Error::Codec(format!(
+                        "stat column '{col}': not an integer column, or its statistics overflow the \
+                         exact accumulator — refusing to fold a wrong statistic into the live root"
+                    ))
+                })?;
             self.fold.push(&digest(&bytes), stats);
         }
         // keep the remainder
@@ -906,7 +917,9 @@ mod tests {
             pushed += n;
         }
         // both groups flushed at the grid boundary → the live fold is complete (no finish needed).
-        let batch_idx = table::table_chunk_index(&spec, &full, "k").unwrap();
+        let batch_idx = table::table_chunk_index(&spec, &full, "k")
+            .unwrap()
+            .expect("an indexable fixture");
         assert_eq!(
             w.live_root().unwrap(),
             batch_idx.root(),

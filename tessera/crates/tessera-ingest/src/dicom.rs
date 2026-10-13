@@ -726,10 +726,16 @@ pub fn to_recon_product(
     // `tessera slice --world` / `stats` world-aware on real ingests (#271, ADR-0030).
     spec.world_frame = img.world_frame.clone();
     let data = ArrayData::I16(img.voxels.clone());
-    let (block_ref, payload) = array::array_block("volume", &spec, &data)?;
+    // ADR-0059 C4: integer array blocks carry their `{hash, stats}` chunk-index by default, so a
+    // reader can answer count/min/max/mean/std and a histogram without decoding the volume (#347).
+    let ((block_ref, payload), sidecar) = array::array_block_with_index("volume", &spec, &data)?;
 
     let mut b = ProductBuilder::new("recon", name, "DICOM recon volume", timestamp);
     b.add_block_ref(block_ref);
+    let sidecar = sidecar.map(|(cidx_ref, cidx_payload)| {
+        b.add_block_ref(cidx_ref);
+        cidx_payload
+    });
     b.with_field(
         "modality",
         serde_json::json!({"_vocabulary": "DICOM", "_code": img.modality}),
@@ -814,7 +820,10 @@ pub fn to_recon_product(
         b.add_source(s.clone());
     }
     let sealed = b.seal()?;
-    Ok((sealed, vec![payload]))
+    // The sidecar rides alongside the volume when one was built (integer dtype).
+    let mut payloads = vec![payload];
+    payloads.extend(sidecar);
+    Ok((sealed, payloads))
 }
 
 #[cfg(test)]
@@ -850,7 +859,10 @@ mod tests {
         .unwrap();
         assert_eq!(sealed.product, "recon");
         assert!(sealed.is_sealed());
-        assert_eq!(sealed.blocks.len(), 1);
+        // Two blocks since ADR-0059 C4: the int16 volume and its `volume.cidx` chunk-index.
+        assert_eq!(sealed.blocks.len(), 2);
+        assert_eq!(sealed.blocks[0].name, "volume");
+        assert_eq!(sealed.blocks[1].name, "volume.cidx");
         // rescale + unit live in the block spec; modality + provenance in the manifest
         let spec = &sealed.blocks[0].spec;
         assert_eq!(spec["rescale_intercept"], -1024.0);
@@ -1016,8 +1028,13 @@ mod tests {
             ha, hb,
             "content_hash must be independent of manifest metadata"
         );
+        // MOVED DELIBERATELY by ADR-0059 C4 (was
+        // blake3:b11c199ce147cf505159ddeff94ebda4c4861cb4a1ca3a124ec11f7aa8215627): a DICOM volume
+        // is int16, so it now carries a `volume.cidx` whose digest rolls into `content_hash`. This
+        // golden still guards what it was written to guard — that the decode/encode bytes do not
+        // drift — and would catch any further change.
         assert_eq!(
-            ha, "blake3:b11c199ce147cf505159ddeff94ebda4c4861cb4a1ca3a124ec11f7aa8215627",
+            ha, "blake3:77bc279020934ed85bc6c30d4d4d849a523d0649adb42def51ad10b323c25d49",
             "golden DICOM content_hash drifted (decode/encode bytes changed): {ha}"
         );
     }

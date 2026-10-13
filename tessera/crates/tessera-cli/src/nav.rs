@@ -1322,8 +1322,24 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
     let mut cur_spec = spec.clone();
     let mut data = tessera_io::array::decode(&spec, &blob)?;
     let mut blocks: Vec<(tessera_core::block::BlockRef, tessera_io::BlockPayload)> = Vec::new();
+    // ADR-0059 C4: every level is an array block, so every INTEGER level carries its own
+    // `{hash, stats}` chunk-index. A pyramid is exactly the shape that wants it — a viewer picks a
+    // level and asks for its range, which is then decode-free at any level.
+    let mut push_level =
+        |blocks: &mut Vec<(tessera_core::block::BlockRef, tessera_io::BlockPayload)>,
+         lname: &str,
+         lspec: &tessera_core::block::array::ArraySpec,
+         ldata: &ArrayData|
+         -> Result<()> {
+            let (block, sidecar) =
+                tessera_io::array::array_block_with_index(lname, lspec, ldata)?;
+            blocks.push(block);
+            blocks.extend(sidecar);
+            Ok(())
+        };
+
     // Level 0 — the full-resolution volume.
-    blocks.push(tessera_io::array::array_block(block, &cur_spec, &data)?);
+    push_level(&mut blocks, block, &cur_spec, &data)?;
 
     let cap = levels.unwrap_or(8);
     let mut level = 0u32;
@@ -1334,7 +1350,7 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
         };
         level += 1;
         let lname = format!("{block}/{level}");
-        blocks.push(tessera_io::array::array_block(&lname, &ds_spec, &ds_data)?);
+        push_level(&mut blocks, &lname, &ds_spec, &ds_data)?;
         cur_spec = ds_spec;
         data = ds_data;
         // Stop once the coarsest level is a single overview tile.
@@ -1524,6 +1540,12 @@ fn moments_exact(sum: i128, sum_sq: i128, n: usize) -> Option<(f64, f64)> {
         max: None,
         sum,
         sum_sq,
+        // This is a scratch value built only to reuse the exact mean/variance arithmetic; it does
+        // not describe a real chunk, so the S2 counters are genuinely unknown rather than zero.
+        masked: None,
+        nan: None,
+        pos_inf: None,
+        neg_inf: None,
     };
     Some((cs.mean()?, cs.std_dev()?))
 }
@@ -3079,7 +3101,8 @@ mod tests {
         );
 
         // And it must equal the chunk-index monoid exactly — same reduction, same answer.
-        let cs = tessera_core::chunk_index::ChunkStats::from_values(&v);
+        let cs = tessera_core::chunk_index::ChunkStats::from_values(&v)
+            .expect("2^53 + 1000 ones fits i128");
         assert_eq!(mean, cs.mean().unwrap());
         assert_eq!(_std, cs.std_dev().unwrap());
     }
@@ -3267,9 +3290,13 @@ mod tests {
         // An index covering only the FIRST half of the array — stale/partial, exactly what must
         // not be trusted.
         let mut short = tessera_core::chunk_index::ChunkIndex::new();
-        short.push(tessera_core::hash::digest(b"chunk-0"), &[0, 1, 2, 3]);
-        let (sref, spayload) =
-            tessera_io::chunk_index::chunk_index_block("volume", &short).unwrap();
+        assert!(short.push(tessera_core::hash::digest(b"chunk-0"), &[0, 1, 2, 3]));
+        let (sref, spayload) = tessera_io::chunk_index::chunk_index_block(
+            "volume",
+            bref.digest.as_deref().unwrap(),
+            &short,
+        )
+        .unwrap();
 
         let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
         b.add_block_ref(bref);
@@ -3338,10 +3365,14 @@ mod tests {
 
         // An index built for a 2-chunk array — wrong grid, and its max (1) is wrong for this block.
         let mut other = tessera_core::chunk_index::ChunkIndex::new();
-        other.push(tessera_core::hash::digest(b"c0"), &[0, 1]);
-        other.push(tessera_core::hash::digest(b"c1"), &[0, 1]);
-        let (sref, spayload) =
-            tessera_io::chunk_index::chunk_index_block("volume", &other).unwrap();
+        assert!(other.push(tessera_core::hash::digest(b"c0"), &[0, 1]));
+        assert!(other.push(tessera_core::hash::digest(b"c1"), &[0, 1]));
+        let (sref, spayload) = tessera_io::chunk_index::chunk_index_block(
+            "volume",
+            bref.digest.as_deref().unwrap(),
+            &other,
+        )
+        .unwrap();
 
         let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
         b.add_block_ref(bref);
