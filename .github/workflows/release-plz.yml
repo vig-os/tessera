@@ -44,7 +44,7 @@ jobs:
           app-id: ${{ secrets.RP_APP_ID }}
           private-key: ${{ secrets.RP_APP_PRIVATE_KEY }}
       - name: release-plz release-pr (held — no tag/publish)
-        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5  # v0.5
+        uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e  # v0.5
         with:
           command: release-pr
           # The Cargo workspace is nested under `tessera/`, not the repo root.
