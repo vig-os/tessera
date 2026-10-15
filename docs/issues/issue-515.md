@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-14T02:10:11Z
+updated: 2026-10-14T23:32:19Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-14T07:05:29.509Z
+synced: 2026-10-15T06:56:11.593Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -27,7 +27,6 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/hdf5-metno-sys-0.x-lockfile -->chore(deps): update rust crate hdf5-metno-sys to v0.12.4
  - [ ] <!-- unschedule-branch=renovate/libc-0.x-lockfile -->chore(deps): update rust crate libc to v0.2.190
  - [ ] <!-- unschedule-branch=renovate/object_store-0.x-lockfile -->chore(deps): update rust crate object_store to v0.14.2
- - [ ] <!-- unschedule-branch=renovate/pyo3-0.x-lockfile -->chore(deps): update rust crate pyo3 to v0.29.3
  - [ ] <!-- unschedule-branch=renovate/serde-monorepo -->chore(deps): update rust crate serde to v1.0.229
  - [ ] <!-- unschedule-branch=renovate/serde_json-1.x-lockfile -->chore(deps): update rust crate serde_json to v1.0.154
  - [ ] <!-- unschedule-branch=renovate/thiserror-2.x-lockfile -->chore(deps): update rust crate thiserror to v2.0.21
@@ -42,6 +41,7 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/hdf5-metno-0.x -->chore(deps): update rust crate hdf5-metno to 0.15
  - [ ] <!-- unschedule-branch=renovate/png-0.x -->chore(deps): update rust crate png to 0.18
  - [ ] <!-- unschedule-branch=renovate/proptest-1.x-lockfile -->chore(deps): update rust crate proptest to v1.12.0
+ - [ ] <!-- unschedule-branch=renovate/pyo3-0.x -->chore(deps): update rust crate pyo3 to 0.30
  - [ ] <!-- unschedule-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unschedule-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.53.3
  - [ ] <!-- unschedule-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
@@ -118,7 +118,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `arrow-ipc =58.3.0` → [Updates: `=58.4.0`, `=60.0.0`]
  - `parquet =58.3.0` → [Updates: `=58.4.0`, `=60.0.0`]
  - `csv =1.4.0`
- - `pyo3 0.29` → [Updates: `0.29`]
+ - `pyo3 0.29` → [Updates: `0.30`]
  - `flate2 1` → [Updates: `1`]
  - `toml 0.8` → [Updates: `0.9`, `1.0`]
 
