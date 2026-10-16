@@ -1089,7 +1089,7 @@
             # The WRITE path as documentation (#389): the book `{{#include}}`s anchored regions of this
             # script, so running it here means a snippet that stopped working cannot reach the docs.
             python3 ${./tessera/crates/tessera-py/tests/write_example.py}
-            # Python provenance surface (#563): pinned source edges, read back from the sealed file.
+            # Python provenance surface (#562, #563): pinned edges, producer, generation, read back sealed.
             python3 ${./tessera/crates/tessera-py/tests/provenance.py}
             touch $out
           '';
@@ -1116,7 +1116,7 @@
             python3 ${./tessera/crates/tessera-py/tests/codec_roundtrip.py}
             # …and the documented write path, so the book's example works through the real wheel too.
             python3 ${./tessera/crates/tessera-py/tests/write_example.py}
-            # Python provenance surface (#563): pinned source edges, read back from the sealed file.
+            # Python provenance surface (#562, #563): pinned edges, producer, generation, read back sealed.
             python3 ${./tessera/crates/tessera-py/tests/provenance.py}
             touch $out
           '';

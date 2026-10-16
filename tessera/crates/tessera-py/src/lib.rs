@@ -6,9 +6,12 @@
 //! extension module: one `tessera.so` works on any CPython ≥ 3.9, with no libpython link.
 
 use pyo3::create_exception;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{
+    PyException, PyRecursionError, PyTypeError, PyUnicodeEncodeError, PyValueError,
+};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use tessera_core::block::array::ArraySpec;
 use tessera_core::block::table::{Column, TableSpec};
@@ -368,6 +371,78 @@ impl Builder {
         Ok(())
     }
 
+    /// Declare the tool that **generated** this product (ADR-0058 §1): your DAQ, simulation, recon
+    /// or pipeline, not the packager. Sealed into `manifest_hash`, so it is tamper-evident and part
+    /// of the product's identity. Read it back as `manifest()["producer"]`, a dict with `tool` and
+    /// `version` plus whichever of `git_commit` / `git_repo` / `dirty` were given (an omitted one is
+    /// absent, not `None`).
+    ///
+    /// Without this call the product is stamped `{"tool": "tessera", "version": <format version>}`,
+    /// which names the packager. Calling it again replaces the earlier producer.
+    #[pyo3(signature = (tool, version, git_commit=None, git_repo=None, dirty=None))]
+    fn with_producer(
+        &mut self,
+        tool: &str,
+        version: &str,
+        git_commit: Option<&str>,
+        git_repo: Option<&str>,
+        dirty: Option<bool>,
+    ) -> PyResult<()> {
+        let builder = self.builder()?;
+        let mut producer = tessera_core::provenance::Producer::new(tool, version);
+        producer.git_commit = git_commit.map(str::to_string);
+        producer.git_repo = git_repo.map(str::to_string);
+        producer.dirty = dirty;
+        builder.with_producer(producer);
+        Ok(())
+    }
+
+    /// Record **how** this product was made (ADR-0058 §2): the generator's recipe, sealed into
+    /// `manifest_hash`. Read it back as `manifest()["generation"]`.
+    ///
+    /// - `config` is a dict of settings (`{"energy_window_keV": [425, 650], "agent": {...}}`). Its keys
+    ///   are yours: tessera never interprets them. Keys must be `str` at every level, and values must
+    ///   be JSON: `str`, `int` (64-bit), finite `float`, `bool`, `None`, `list`/`tuple` and `dict`.
+    ///   Anything else raises `TypeError` naming the offending key, rather than being coerced
+    ///   (`json.dumps` would turn `{1: ...}` into `{"1": ...}` without telling you). That includes a
+    ///   `str` holding a lone surrogate (`"\ud800"`), which has no UTF-8 form. A container that
+    ///   contains itself raises `ValueError`, and nesting deeper than `sys.getrecursionlimit()`
+    ///   raises `RecursionError`, both as `json.dumps` does. The manifest reader parses about
+    ///   125 levels of `config`; a deeper one seals but can't be opened (#589).
+    /// - `config_ref` is a `blake3:` digest of a config block carried in the same `.tsra`. It is not
+    ///   checked at seal; `tessera inspect --resolve-config` reports a reference that names no carried
+    ///   block. The Python `Builder` cannot yet carry the Blob block such a reference points at
+    ///   (#575), so from Python prefer `config`.
+    ///
+    /// Pass either or both. With neither, or with an empty `config` and no `config_ref`, this raises
+    /// `TesseraError`: an empty recipe counts as *absent* (`Generation::is_empty`), so sealing one
+    /// would let you believe a recipe was recorded when none was, and a schema with
+    /// `requires_generation` would still reject the product. Calling it again replaces the earlier
+    /// recipe.
+    #[pyo3(signature = (config=None, config_ref=None))]
+    fn with_generation(
+        &mut self,
+        config: Option<&Bound<'_, PyDict>>,
+        config_ref: Option<&str>,
+    ) -> PyResult<()> {
+        let builder = self.builder()?;
+        let mut generation = tessera_core::provenance::Generation::default();
+        if let Some(config) = config {
+            generation.config = config_to_json(config)?;
+        }
+        if let Some(digest) = config_ref {
+            generation = generation.with_config_ref(digest);
+        }
+        if generation.is_empty() {
+            return Err(TesseraError::new_err(
+                "with_generation needs a recipe: a non-empty `config` and/or a `config_ref` \
+                 (an empty generation record counts as absent, ADR-0058 §2)",
+            ));
+        }
+        builder.with_generation(generation);
+        Ok(())
+    }
+
     /// Seal (compute the three hashes) and write the sealed `.tsra` to `path`. Returns the content
     /// `id`. Consumes the builder — a second call raises `TesseraError`.
     fn pack(&mut self, path: PathBuf) -> PyResult<String> {
@@ -386,6 +461,265 @@ impl Builder {
         self.inner
             .as_mut()
             .ok_or_else(|| TesseraError::new_err("builder already packed"))
+    }
+}
+
+/// `"an"` before a vowel, for error messages that name a Python type (`an int`, `a set`).
+fn article(word: &str) -> &'static str {
+    if word.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    }
+}
+
+/// A `str` key or value at `path`, as UTF-8. A Python `str` can hold a lone surrogate
+/// (`"\ud800"`), which has no UTF-8 and so no JSON form; that is the caller's bad input, raised as
+/// the same `TypeError` as every other non-JSON value instead of a `UnicodeEncodeError`.
+fn json_str(s: &Bound<'_, PyAny>, path: &str, what: &str) -> PyResult<String> {
+    s.extract::<String>().map_err(|e| {
+        if e.is_instance_of::<PyUnicodeEncodeError>(s.py()) {
+            let repr = s.repr().map(|r| r.to_string()).unwrap_or_default();
+            PyTypeError::new_err(format!(
+                "generation {path}: {what} {repr} contains a lone surrogate, which has no UTF-8 \
+                 (so no JSON) form"
+            ))
+        } else {
+            e
+        }
+    })
+}
+
+/// A dict key inside the generation `config` at `path`, which must be a `str`: JSON object keys are
+/// strings, and coercing `1` to `"1"` would seal a different key than the caller wrote.
+fn json_key(key: &Bound<'_, PyAny>, path: &str) -> PyResult<String> {
+    if !key.is_instance_of::<PyString>() {
+        let ty = key.get_type().name()?.to_string();
+        return Err(PyTypeError::new_err(format!(
+            "generation {path}: key {} is {} {ty}, not a str",
+            key.repr()?,
+            article(&ty),
+        )));
+    }
+    json_str(key, path, "key")
+}
+
+/// Convert a generation `config` dict to JSON. Strict: only types with an exact JSON equivalent
+/// are accepted, so what is sealed is what the caller wrote.
+///
+/// The walk is **iterative**, with an explicit stack on the heap: the native stack stays the same
+/// depth however deeply `config` nests. A recursive walk overflowed it and killed the interpreter
+/// (SIGSEGV) on a self-referencing dict or a deep nesting. Guarding the recursion with
+/// `Py_EnterRecursiveCall` doesn't fix that on CPython 3.12, which counts calls against a fixed C
+/// limit rather than measuring the stack, and the native frames run out first. Nesting deeper than
+/// `sys.getrecursionlimit()` raises `RecursionError`, and a container that contains itself raises
+/// `ValueError`, both as `json.dumps` does.
+fn config_to_json(config: &Bound<'_, PyDict>) -> PyResult<BTreeMap<String, serde_json::Value>> {
+    let py = config.py();
+    let limit: usize = py
+        .import("sys")?
+        .getattr("getrecursionlimit")?
+        .call0()?
+        .extract()?;
+    let mut walk = JsonWalk {
+        // The config dict itself is depth 1 and an ancestor of everything in it.
+        ancestors: HashSet::from([config.as_ptr() as usize]),
+        limit,
+    };
+    let mut out = BTreeMap::new();
+    for (key, value) in config.iter() {
+        let key = json_key(&key, "config")?;
+        let path = format!("config[{key:?}]");
+        out.insert(key, walk.convert(&value, path)?);
+    }
+    Ok(out)
+}
+
+/// The state of one [`config_to_json`] walk.
+struct JsonWalk {
+    /// The containers open on the current path (by object identity). Meeting one again is a cycle.
+    /// Only ancestors count, so one object referenced twice (a DAG) converts twice, like
+    /// `json.dumps`.
+    ancestors: HashSet<usize>,
+    /// The deepest nesting accepted, counting the config dict as 1: `sys.getrecursionlimit()`.
+    limit: usize,
+}
+
+/// A converted value, or a container whose children still have to be converted.
+enum Step<'py> {
+    Leaf(serde_json::Value),
+    Open(OpenContainer<'py>),
+}
+
+/// A dict or list being converted: the explicit stack frame of [`JsonWalk::convert`].
+struct OpenContainer<'py> {
+    id: usize,
+    path: String,
+    /// The children still to convert: `(Some(key), value)` for a dict, `(None, item)` for a list.
+    children: std::vec::IntoIter<(Option<String>, Bound<'py, PyAny>)>,
+    /// The next list index (for error paths).
+    index: usize,
+    /// The key of the dict child being converted.
+    key: String,
+    out: Collected,
+}
+
+enum Collected {
+    Object(serde_json::Map<String, serde_json::Value>),
+    Array(Vec<serde_json::Value>),
+}
+
+impl<'py> OpenContainer<'py> {
+    /// The next child and its path, remembering its key for [`Self::attach`].
+    fn next_child(&mut self) -> Option<(Bound<'py, PyAny>, String)> {
+        let (key, child) = self.children.next()?;
+        let path = match key {
+            Some(key) => {
+                let path = format!("{}[{key:?}]", self.path);
+                self.key = key;
+                path
+            }
+            None => {
+                self.index += 1;
+                format!("{}[{}]", self.path, self.index - 1)
+            }
+        };
+        Some((child, path))
+    }
+
+    /// Store the converted value of the child [`Self::next_child`] last returned.
+    fn attach(&mut self, value: serde_json::Value) {
+        match &mut self.out {
+            Collected::Object(map) => {
+                map.insert(std::mem::take(&mut self.key), value);
+            }
+            Collected::Array(items) => items.push(value),
+        }
+    }
+
+    fn finish(self) -> serde_json::Value {
+        match self.out {
+            Collected::Object(map) => serde_json::Value::Object(map),
+            Collected::Array(items) => serde_json::Value::Array(items),
+        }
+    }
+}
+
+impl JsonWalk {
+    /// Convert `root` (at `path`, depth 2: a value inside the config dict) without recursing.
+    fn convert(&mut self, root: &Bound<'_, PyAny>, path: String) -> PyResult<serde_json::Value> {
+        let mut top = match self.step(root, path, 2)? {
+            Step::Leaf(value) => return Ok(value),
+            Step::Open(open) => open,
+        };
+        // `top` is the container being filled; `stack` holds its open ancestors.
+        let mut stack: Vec<OpenContainer<'_>> = Vec::new();
+        loop {
+            match top.next_child() {
+                Some((child, path)) => match self.step(&child, path, stack.len() + 3)? {
+                    Step::Leaf(value) => top.attach(value),
+                    Step::Open(open) => stack.push(std::mem::replace(&mut top, open)),
+                },
+                None => {
+                    self.ancestors.remove(&top.id);
+                    let value = top.finish();
+                    match stack.pop() {
+                        Some(parent) => {
+                            top = parent;
+                            top.attach(value);
+                        }
+                        None => return Ok(value),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Convert a scalar at `path`, or open a container at nesting `depth`.
+    fn step<'py>(
+        &mut self,
+        value: &Bound<'py, PyAny>,
+        path: String,
+        depth: usize,
+    ) -> PyResult<Step<'py>> {
+        use serde_json::Value;
+        let bad = |why: String| PyTypeError::new_err(format!("generation {path}: {why}"));
+        // `bool` first: in Python it is a subclass of `int`.
+        let leaf = if value.is_none() {
+            Value::Null
+        } else if value.is_instance_of::<PyBool>() {
+            Value::Bool(value.extract()?)
+        } else if value.is_instance_of::<PyInt>() {
+            if let Ok(i) = value.extract::<i64>() {
+                Value::from(i)
+            } else if let Ok(u) = value.extract::<u64>() {
+                Value::from(u)
+            } else {
+                return Err(bad(format!(
+                    "int {} does not fit in 64 bits",
+                    value.repr()?
+                )));
+            }
+        } else if value.is_instance_of::<PyFloat>() {
+            let f: f64 = value.extract()?;
+            let n = serde_json::Number::from_f64(f);
+            Value::Number(
+                n.ok_or_else(|| bad(format!("float {f} is not finite, and JSON has no NaN/inf")))?,
+            )
+        } else if value.is_instance_of::<PyString>() {
+            Value::String(json_str(value, &path, "str")?)
+        } else if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {
+            let items = value.try_iter()?.map(|item| item.map(|item| (None, item)));
+            let children = items.collect::<PyResult<Vec<_>>>()?;
+            return self.open(value, path, depth, children, Collected::Array(Vec::new()));
+        } else if let Ok(dict) = value.cast::<PyDict>() {
+            let mut children = Vec::with_capacity(dict.len());
+            for (key, item) in dict.iter() {
+                children.push((Some(json_key(&key, &path)?), item));
+            }
+            let out = Collected::Object(serde_json::Map::new());
+            return self.open(value, path, depth, children, out);
+        } else {
+            let ty = value.get_type().name()?.to_string();
+            return Err(bad(format!(
+                "{} {ty} is not a JSON value (use str, int, float, bool, None, list or dict)",
+                article(&ty),
+            )));
+        };
+        Ok(Step::Leaf(leaf))
+    }
+
+    /// Open the container `value` at `path` and nesting `depth`, refusing a cycle or a nesting
+    /// past the limit.
+    fn open<'py>(
+        &mut self,
+        value: &Bound<'py, PyAny>,
+        path: String,
+        depth: usize,
+        children: Vec<(Option<String>, Bound<'py, PyAny>)>,
+        out: Collected,
+    ) -> PyResult<Step<'py>> {
+        if depth > self.limit {
+            return Err(PyRecursionError::new_err(format!(
+                "generation {path}: maximum recursion depth exceeded while converting a generation \
+                 config to JSON (nesting deeper than sys.getrecursionlimit() = {})",
+                self.limit
+            )));
+        }
+        let id = value.as_ptr() as usize;
+        if !self.ancestors.insert(id) {
+            return Err(PyValueError::new_err(format!(
+                "generation {path}: circular reference (a container that contains itself)"
+            )));
+        }
+        Ok(Step::Open(OpenContainer {
+            id,
+            path,
+            children: children.into_iter(),
+            index: 0,
+            key: String::new(),
+            out,
+        }))
     }
 }
 
