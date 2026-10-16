@@ -106,6 +106,49 @@ else:  # pragma: no cover
     raise AssertionError("opening a missing file must raise TesseraError")
 
 # ---------------------------------------------------------------------------
+# ANCHOR: provenance
+# Record who made a product, how, and which sealed parent it came from (ADR-0058).
+parent = tessera.open(out_dir / "demo.tsra").manifest()
+
+d = tessera.Builder(
+    "recon", "demo-ct-01-masked", "a derived volume", "2024-01-01T00:00:00Z"
+)
+d.add_array("volume", "i2", list(volume.shape), (volume * 0).tobytes())
+d.set_field("modality", '{"_vocabulary": "DICOM", "_code": "CT"}')
+# The tool that generated it (not the packager), sealed into the product's identity.
+d.with_producer(
+    "my-pipeline",
+    "1.4.0",
+    git_commit="0855f5f",
+    git_repo="org/my-pipeline",
+    dirty=False,
+)
+# The recipe: your keys, any JSON. An empty recipe raises: it would read as "no recipe".
+d.with_generation(
+    config={"step": "mask", "threshold_HU": -500, "agent": {"model": "m"}}
+)
+# Pin the parent's SEAL on the edge, or `tessera provenance --require-complete` reports a gap.
+d.add_source("derived_from", parent["id"], content_hash=parent["manifest_hash"])
+d.pack(str(out_dir / "masked.tsra"))
+# ANCHOR_END: provenance
+# ---------------------------------------------------------------------------
+
+masked = tessera.open(out_dir / "masked.tsra").manifest()
+assert (
+    masked["producer"]["tool"] == "my-pipeline" and masked["producer"]["dirty"] is False
+)
+assert masked["generation"] == {
+    "config": {"step": "mask", "threshold_HU": -500, "agent": {"model": "m"}}
+}
+assert masked["sources"] == [
+    {
+        "role": "derived_from",
+        "reference": parent["id"],
+        "content_hash": parent["manifest_hash"],
+    }
+], masked["sources"]
+
+# ---------------------------------------------------------------------------
 # ANCHOR: read
 # The read surface, over a product you already have.
 r = tessera.open(out_dir / "demo.tsra")
