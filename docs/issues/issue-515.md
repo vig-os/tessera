@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-14T23:32:19Z
+updated: 2026-10-16T05:51:34Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-15T06:56:11.593Z
+synced: 2026-10-16T06:43:40.057Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -52,6 +52,7 @@ The following updates are awaiting their schedule. To get an update now, click o
  - [ ] <!-- unschedule-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.88
  - [ ] <!-- unschedule-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.88
  - [ ] <!-- unschedule-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.88
+ - [ ] <!-- unschedule-branch=renovate/zip-2.x-lockfile -->chore(deps): update rust crate zip to v2.6.1
  - [ ] <!-- unschedule-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unschedule-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
  - [ ] <!-- unschedule-branch=renovate/pyarrow-26.x -->build(pip): update dependency pyarrow to v26
@@ -69,7 +70,7 @@ The following updates are awaiting their schedule. To get an update now, click o
 
 The following updates have all been created. To force a retry/rebase of any, click on a checkbox below.
 
- - [ ] <!-- rebase-branch=renovate/dtolnay-rust-toolchain-digest -->[chore(deps): update dtolnay/rust-toolchain digest to 686976e](../pull/558)
+ - [ ] <!-- rebase-branch=renovate/dtolnay-rust-toolchain-digest -->[chore(deps): update dtolnay/rust-toolchain digest to b725eda](../pull/558)
  - [ ] <!-- rebase-branch=renovate/release-plz-action-digest -->[chore(deps): update release-plz/action digest to 8921286](../pull/559)
  - [ ] <!-- rebase-branch=renovate/flate2-1.x-lockfile -->[chore(deps): update rust crate flate2 to v1.1.10](../pull/560)
  - [ ] <!-- rebase-branch=renovate/rust-futures-monorepo -->[chore(deps): update rust crate futures to v0.3.34](../pull/561)
@@ -94,7 +95,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `age 0.11` → [Updates: `0.12`]
  - `time 0.3` → [Updates: `0.3`]
  - `proptest 1` → [Updates: `1`]
- - `zip 2` → [Updates: `9`]
+ - `zip 2` → [Updates: `2`, `9`]
  - `zarrs 0.23` → [Updates: `0.23`]
  - `bytes 1`
  - `half 2`
