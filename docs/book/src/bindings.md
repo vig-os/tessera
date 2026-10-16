@@ -11,7 +11,8 @@ seal, and verification logic.
 
 `import tessera` gives `tessera.open()` → a `Reader` (manifest / blocks / `array` → NumPy / `array_roi`
 for an ROI / `table` → polars / `table_arrow` / `table_dict` / `column` / `verify`) and a `Builder`
-(`add_array` / `add_table` / `set_field` / `add_source` / `pack`), with a typed `TesseraError`.
+(`add_array` / `add_table` / `set_field` / `add_source`, whose `content_hash=` pins the parent's seal /
+`pack`), with a typed `TesseraError`.
 
 Reading:
 

@@ -343,10 +343,28 @@ impl Builder {
         Ok(())
     }
 
-    /// Record a provenance edge (`relation`, e.g. `"ingested_from"`, → `reference`).
-    fn add_source(&mut self, relation: &str, reference: &str) -> PyResult<()> {
-        self.builder()?
-            .add_source(tessera_core::provenance::Source::new(relation, reference));
+    /// Record a provenance edge (`relation`, e.g. `"ingested_from"` or `"derived_from"`, →
+    /// `reference`).
+    ///
+    /// `reference` is the parent's lineage handle (a path, a URL, a product `id`). `content_hash`
+    /// **pins the parent's seal** on the edge (SPEC §8) and must be the parent's `manifest_hash`:
+    /// `tessera.open(parent).manifest()["manifest_hash"]`. It is what closes the integrity chain, so
+    /// `tessera provenance --require-complete` reports an edge without it as a gap. It is not
+    /// format-checked at write time (neither is the Rust `Source::with_content_hash`); a wrong value
+    /// surfaces when the chain is walked. Omitted, the key is absent from the manifest, so a product
+    /// written without it seals exactly as before.
+    #[pyo3(signature = (relation, reference, content_hash=None))]
+    fn add_source(
+        &mut self,
+        relation: &str,
+        reference: &str,
+        content_hash: Option<&str>,
+    ) -> PyResult<()> {
+        let mut source = tessera_core::provenance::Source::new(relation, reference);
+        if let Some(hash) = content_hash {
+            source = source.with_content_hash(hash);
+        }
+        self.builder()?.add_source(source);
         Ok(())
     }
 

@@ -10,6 +10,8 @@ Every product carries a `sources[]` DAG — typed-role edges (`ingested_from`, `
 seal, chain verification walks from a product back to its root, checking every hop
 (`provenance::verify_chain`; cycles are rejected). A derived product (a pyramid, a registration, a
 recon) always names its parents this way, so the lineage is a verifiable graph, not a string.
+From Python, `Builder.add_source(role, reference, content_hash=...)` pins the edge, where `content_hash`
+is the parent's `manifest_hash` (`tessera.open(parent).manifest()["manifest_hash"]`).
 
 De-identification is a first-class transform: `ingest dicom --deidentify` applies PS3.15, and
 `--crypto-shred` carries the *original* identity as an `age`-encrypted `aux/` envelope inside the one
