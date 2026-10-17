@@ -57,6 +57,12 @@ cloud = ["dep:object_store", "dep:tokio", "dep:reqwest"]
 # The #356 regression test in tests/ builds an ArraySpec, which tessera-io does not re-export.
 tessera-core.workspace = true
 tempfile = "3"
+# tests/stored_only.rs asserts every entry every writer emits is STORED **with a deflate codec compiled
+# in**, the condition tessera-ingest's `.npz` reader creates in any workspace build (#468, #588). The dev
+# edge makes `cargo test -p tessera-io` reproduce that condition on its own. Resolver 2 turns
+# dev-dependency features on only when this crate's tests, examples or benches are built, never in a
+# normal build of the writer.
+zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tracing-subscriber.workspace = true
 

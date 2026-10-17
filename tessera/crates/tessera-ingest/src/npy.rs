@@ -1294,6 +1294,9 @@ mod tests {
 pub fn npz_members(path: &Path) -> Result<Vec<String>> {
     let file =
         std::fs::File::open(path).map_err(|e| he(format!("open {}: {e}", path.display())))?;
+    // `ZipArchive::new` = `ArchiveOffset::Detect`, deliberately, unlike the `.tsra` reader's pinned
+    // offset 0: an `.npz` is a third-party archive that may carry a prefix, it is a local file, and ingest
+    // reads every member it names anyway, so Detect's forward scan buys leniency at no range-read cost.
     let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|e| {
         he(format!(
             "{} is not a readable .npz archive: {e}\n  \
@@ -1310,7 +1313,10 @@ pub fn npz_members(path: &Path) -> Result<Vec<String>> {
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|e| he(format!("{}: member {i}: {e}", path.display())))?
+            .into_owned();
         check_member_name(path, &name)?;
         // No duplicate-name check here on purpose: `ZipArchive` already collapses duplicate entries
         // to one, so a hand-crafted archive with two `x.npy` members is reported as a single member
@@ -1532,7 +1538,7 @@ mod npz_tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         {
             let mut w = zip::ZipWriter::new(&mut buf);
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
             for (name, bytes) in members {
                 zip::ZipWriter::start_file(&mut w, *name, opts).unwrap();
@@ -1659,7 +1665,7 @@ mod npz_tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         {
             let mut w = zip::ZipWriter::new(&mut buf);
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
             zip::ZipWriter::start_file(&mut w, "big.npy", opts).unwrap();
             // Highly compressible: 8 MiB of zeroes is a few KiB on disk. Not over the cap, but it is
@@ -1734,11 +1740,11 @@ mod npz_tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         {
             let mut w = zip::ZipWriter::new(&mut buf);
-            let stored: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            let stored: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
             zip::ZipWriter::start_file(&mut w, "mimetype", stored).unwrap();
             std::io::Write::write_all(&mut w, tessera_io::container::MIMETYPE.as_bytes()).unwrap();
-            let deflated: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            let deflated: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
             zip::ZipWriter::start_file(&mut w, "blocks/data", deflated).unwrap();
             std::io::Write::write_all(&mut w, &vec![0u8; 4096]).unwrap();
@@ -1771,7 +1777,7 @@ mod npz_tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         {
             let mut w = zip::ZipWriter::new(&mut buf);
-            let deflated: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            let deflated: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
             zip::ZipWriter::start_file(&mut w, "mimetype", deflated).unwrap();
             std::io::Write::write_all(&mut w, &vec![0u8; 100 << 20]).unwrap();
@@ -1886,7 +1892,7 @@ mod npz_tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         {
             let mut w = zip::ZipWriter::new(&mut buf);
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
             zip::ZipWriter::start_file(&mut w, "energy.npy", opts).unwrap();
             std::io::Write::write_all(&mut w, &member).unwrap();

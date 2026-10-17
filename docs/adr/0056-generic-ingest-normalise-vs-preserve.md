@@ -1262,6 +1262,10 @@ Adding it immediately paid for itself, by showing that zip's umbrella `deflate` 
 zopfli **compressor** for a capability nothing uses (we only read). `deflate-flate2` + `flate2` gets the
 decompressor alone.
 
+> **Amended (2026-10-17, #588):** zip ≥ 9 drops the separate `flate2` feature, and its `flate2` dependency
+> no longer names an inflate backend. The decompressor-only choice is now `deflate-flate2-zlib-rs`, whose
+> `zlib-rs` backend was already in-tree via parquet. Still no compressor, and no new crate.
+
 ### What the corpus pins, and one thing it deliberately does not
 
 `corpus/ingest-corpus.json` carries nine fixtures with a **declared per-configuration count** checked

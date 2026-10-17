@@ -809,8 +809,8 @@ fn write_npz(dir: &Path) -> Result<PathBuf> {
     let member = npy_bytes("'<f8'", false, &[3], &payload);
     let file = std::fs::File::create(&path).map_err(he)?;
     let mut w = zip::ZipWriter::new(file);
-    let opts: zip::write::FileOptions<'_, ()> =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let opts: zip::write::SimpleFileOptions =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     zip::ZipWriter::start_file(&mut w, "energy.npy", opts).map_err(he)?;
     std::io::Write::write_all(&mut w, &member).map_err(he)?;
     w.finish().map_err(he)?;

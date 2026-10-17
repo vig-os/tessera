@@ -247,10 +247,10 @@
       ],
       "id": "blake3:130378530be6153a668972e4f48e666d7aa09345300ff44cf840594b585d35e2",
       "content_hash": "blake3:27d36426f6dc2970ec2691ba0f25a39e644192d35aedc07c920d7adcea952bff",
-      "manifest_hash": "blake3:a76afcda067db3075b120abd46cc5a9889e862e34d1087d9c5159d26efb5c776",
+      "manifest_hash": "blake3:078c08fe71ae871e210fc7daaba4923fbe083c3e55ea087628f714e1b8b45d4c",
       "ingest_decoder": {
         "name": "tessera/npz",
-        "features": "blake3:14f0e6af539443f281a1664baa90e77ee5517bb0f9ed0b898a3443406ba2828a"
+        "features": "blake3:64350eefae0794bf3f3ab37dca26e2d61e56c61bb071b01bb53436af22046d6b"
       }
     }
   ]
