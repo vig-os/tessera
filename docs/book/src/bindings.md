@@ -11,7 +11,8 @@ seal, and verification logic.
 
 `import tessera` gives `tessera.open()` → a `Reader` (manifest / blocks / `array` → NumPy / `array_roi`
 for an ROI / `table` → polars / `table_arrow` / `table_dict` / `column` / `verify`) and a `Builder`
-(`add_array` / `add_table` / `set_field` / `add_source` / `pack`), with a typed `TesseraError`.
+(`add_array` / `add_table` / `set_field` / `add_source`, whose `content_hash=` pins the parent's seal /
+`with_producer` / `with_generation` / `pack`), with a typed `TesseraError`.
 
 Reading:
 
@@ -24,6 +25,26 @@ Writing — the half that used to be advertised but never shown:
 ```python
 {{#include ../../../tessera/crates/tessera-py/tests/write_example.py:array}}
 ```
+
+Provenance — who generated the product (`with_producer`), how (`with_generation`), and which sealed parent
+it derives from (`add_source(..., content_hash=)`). See [Provenance, signing & trust](./provenance-signing.md)
+for what each record means and how `tessera provenance` walks the chain:
+
+```python
+{{#include ../../../tessera/crates/tessera-py/tests/write_example.py:provenance}}
+```
+
+`with_generation` takes a `config` dict whose keys are `str` at every level and whose values are JSON
+(`str`, 64-bit `int`, finite `float`, `bool`, `None`, `list`/`tuple`, `dict`). Anything else raises
+`TypeError` naming the key, rather than being coerced, and that includes a `str` with a lone surrogate. As with
+`json.dumps`, a container that contains itself raises `ValueError`, and nesting deeper than
+`sys.getrecursionlimit()` raises `RecursionError`. Keep it shallow: a config nested deeper than about 125
+levels seals but can't be opened ([#589](https://github.com/vig-os/tessera/issues/589)). Its `config_ref=`
+digest must name a config block
+carried in the same file, which the Python `Builder` cannot add yet
+([#575](https://github.com/vig-os/tessera/issues/575)), so from Python use `config`. A product's schema
+can require a recipe (`requires_generation`, ADR-0058 §3), but no built-in schema does today, and the Python
+`Builder` cannot embed a custom one.
 
 The [ingest cookbook](./ingest-cookbook.md#2-writing-from-python) has the table and string-column cases,
 and the dtype asymmetries worth knowing.
