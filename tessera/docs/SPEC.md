@@ -269,6 +269,13 @@ A ZIP archive (zip64). Entries, in order:
 2. **`manifest.json`** — the manifest (§5), any valid JSON.
 3. **`blocks/<name>`** — one entry per block, the block's payload bytes.
 
+The archive MUST begin at byte 0 of the file: no prefix, so the first local file header is `mimetype`'s.
+Sniffing depends on this, and so does a cheap open. A reader may take the archive offset as 0 and check
+the one position the end-of-central-directory record names, never scanning the file for it. A reader
+MUST refuse an archive whose first central-directory entry is not `mimetype`, or whose `mimetype` local
+header is not at byte 0. The second rule also covers a prefix whose offsets were rewritten to include it
+(a self-extractor or a shell/zip polyglot), which is otherwise a well-formed zip.
+
 All entries MUST be **STORED** (payloads are pre-compressed by their codec; STORED keeps every block
 byte range directly addressable via the central directory). For **writer-determinism**, entry
 modification times MUST be pinned to the zip epoch (1980-01-01 00:00:00) — the same product MUST pack

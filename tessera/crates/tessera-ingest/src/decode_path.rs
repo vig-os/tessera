@@ -175,29 +175,17 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("syn", "compile-time parsing"),
     ("unicode-ident", "compile-time identifier validation"),
     ("version_check", "build-time toolchain probe"),
+    ("cfg_aliases", "build-time cfg naming (nix's build script)"),
     (
-        "arbitrary",
-        "zip's optional fuzzing-input trait; a fuzz harness constructs inputs, it does not read ours",
+        "typed-path",
+        "zip's path sanitiser for `enclosed_name`/`mangled_name`/`extract`: it decides where an \
+         extracted member would be WRITTEN, never which bytes it holds; we look members up by their \
+         raw name and never extract",
     ),
     (
-        "derive_arbitrary",
-        "compile-time derive for the above",
+        "nix",
+        "zip's macOS/BSD-only filesystem calls for `extract` (permission bits); we never extract",
     ),
-    (
-        "crossbeam-utils",
-        "concurrency primitives reached through zip; scheduling cannot change which bytes a member \
-         decodes to, only when",
-    ),
-    (
-        "displaydoc",
-        "compile-time derive of error DISPLAY strings; error text is not a decoded value",
-    ),
-    (
-        "thiserror",
-        "error types and their formatting; a decode either fails or yields bytes, and the wording of \
-         the failure is not part of the bytes",
-    ),
-    ("thiserror-impl", "compile-time derive for the above"),
     (
         "seq-macro",
         "generates parquet's bit-unpacking code AT COMPILE TIME; the behaviour of what it \

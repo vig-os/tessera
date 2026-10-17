@@ -48,18 +48,18 @@ csv = { workspace = true, optional = true }
 # `.npz` is a zip of `.npy` members (ADR-0056 §11). Deflate support on top of the workspace's STORED-only
 # default, because `np.savez_compressed` is the commoner call for anything large.
 #
-# `["deflate-flate2", "flate2"]`, NOT the umbrella `deflate`: the umbrella also enables
-# `deflate-zopfli`, which pulls the zopfli **compressor** — and we only ever *read* these archives.
-# `deflate-flate2` alone just sets zip's `_deflate-any` marker, so zip's own optional `flate2`
-# dependency has to be named too; flate2 is already in-tree via parquet, so the decompressor costs
-# nothing new while the umbrella would have added a crate for a capability nothing uses. (Caught by
-# Gate B, once `zip` was added to its snapshot list — which is the blind spot closing on its first day.)
+# `deflate-flate2-zlib-rs`, NOT the umbrella `deflate`: the umbrella also enables `deflate-zopfli`, which
+# pulls the zopfli **compressor** — and we only ever *read* these archives. zip ≥ 9 depends on flate2 with
+# `default-features = false`, so `deflate-flate2` alone names no inflate backend; `-zlib-rs` picks
+# flate2's `zlib-rs` one, which is already in-tree via parquet, so the decompressor costs nothing new
+# while the umbrella would have added a crate for a capability nothing uses. (Caught by Gate B, once
+# `zip` was added to its snapshot list — which is the blind spot closing on its first day.)
 #
 # Determinism-safe: Tessera never *writes* a zip through this dependency — the `.tsra` container is
 # tessera-io's and it writes `CompressionMethod::Stored` explicitly — so enabling a decompressor cannot
 # move a sealed byte. `zip` is now in Gate B's list, so that is a claim this gate checks rather than one
 # a comment asserts.
-zip = { workspace = true, features = ["deflate-flate2", "flate2"], optional = true }
+zip = { workspace = true, features = ["deflate-flate2-zlib-rs"], optional = true }
 
 [features]
 # `static-hdf5`: build libhdf5 from vendored source (via `hdf5-metno-src`, bundled HDF5 2.2.0) and link
