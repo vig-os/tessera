@@ -1,13 +1,17 @@
 # ADR-0060 — Agentic actors and the W3C PROV mapping
 
-**Status:** Proposed (2026-10-16, design for [#564](https://github.com/vig-os/tessera/issues/564)).
+**Status:** Proposed (2026-10-16, design for [#564](https://github.com/vig-os/tessera/issues/564); revised 2026-10-17 after a two-reviewer design audit).
 Extends **ADR-0058** (sealed `producer` + `generation`) with a third sealed slot, `actors`. Bounded by
 **ADR-0020** (canonical encoding and identity), **ADR-0036** (`id` is the lineage, `manifest_hash` the
 version), **ADR-0037** (the signature binds `signer`), **ADR-0040** (data protection), **ADR-0042**
-(sealed vs `aux/`) and **ADR-0048** (the provenance edge shape). Depends on two defects this design
-found and filed: [#573](https://github.com/vig-os/tessera/issues/573) (a reader misreports every newer
-additive field as tampering) and [#574](https://github.com/vig-os/tessera/issues/574) (`publish` and
-`commit` drop sealed provenance). The adopter is MorePET/anatomist#86.
+(sealed vs `aux/`), **ADR-0047** (crypto-shred) and **ADR-0048** (the provenance edge shape).
+Depends on defects this design found or that its audit found:
+[#573](https://github.com/vig-os/tessera/issues/573) (a reader misreports every newer additive field as
+tampering), [#574](https://github.com/vig-os/tessera/issues/574) (`publish` and `commit` drop sealed
+provenance), [#587](https://github.com/vig-os/tessera/issues/587) (the seal doesn't bind integers above
+2^53), [#590](https://github.com/vig-os/tessera/issues/590) (`--require-signer` checks a label the signer
+chooses) and [#591](https://github.com/vig-os/tessera/issues/591) (no verb erases one version of a
+lineage). The adopter is MorePET/anatomist#86.
 
 > Design only. **No sealed-layout code is written until the owner accepts this document.** Every claim
 > about current behaviour below is cited to `file:line` at `dev` `fa581f5`, or to a probe whose command
@@ -38,16 +42,16 @@ derived `.tsra` to say who did what. Today it can't do that honestly:
 | # | Question | Decision |
 |---|---|---|
 | 1 | Where agent identity lives | A new sealed, ordered `Manifest.actors` list. `producer` stays scalar. |
-| 2 | Compatibility | The field is **corpus-neutral** (omitted when empty; no `TESSERA_VERSION` bump). But today's reader rejects *any* newer additive field as tampering, so **#573 (P0) ships first**. |
-| 3 | Identity | `actors` is in `manifest_hash` (the version). It is not in `id` (the lineage) or `content_hash`. |
-| 4 | Sealed vs aux | Who, which software, which model, which settings, which brief → sealed. Wall-clock, URLs, tokens, cost, host → `aux/actors.json`. |
+| 2 | Compatibility | The field is **corpus-neutral** (omitted when empty; no `TESSERA_VERSION` bump). But today's reader rejects *any* newer additive field as tampering, so **#573 (P0) ships first**, and P0 depends on #587's integer rule. |
+| 3 | Identity | `actors` is in `manifest_hash` (the version). It is not in `id` (the lineage) or `content_hash`, and the seal refuses an `actors` key in `id_inputs`. |
+| 4 | Sealed vs aux | Who, which software, which model, which settings, which brief → sealed. Wall-clock, URLs, tokens, cost → `aux/actors.json`. Host, login and IP aren't recorded at all, because `aux/` ships unencrypted in the same file. |
 | 5 | Data model | `{id, role, kind, acted_on_behalf_of?, …kind fields}`. The kinds are `software_agent`, `person` and `organization`. Roles are an open token with a reserved vocabulary. `brief`/`receipt` are `blake3:` digests. Delegation points at another actor's local `id`. Order is significant and sealed. |
-| 6 | Producer and signer | Three distinct things. The signature binds `actors` through `manifest_hash`. It attests who asserted the record, never that the record is true. |
-| 7 | Privacy | A person's identity is an IRI. An ORCID iD is recommended, `mailto:` and bare emails are refused, and a pseudonymous `urn:` is allowed. Erasure means a new version plus `forget`/`gc`; copies already shared can't be recalled. |
-| 8 | Schema enforcement | Yes: `ProductSchema.required_actor_roles`. Built-in schemas ship it empty (P3). |
-| 9 | PROV | RO-Crate: a schema.org `CreateAction` plus PROV-O qualified associations for roles and delegation. DataCite: people and organisations become contributors, software becomes `TechnicalInfo`. No native PROV-JSON. P2 lands after PR #541. |
-| 10 | Surfaces | Rust `Actor` + `ProductBuilder::add_actor`. Python `add_software_agent`/`add_person`/`add_organization`. `[[product.actors]]` in the ingest spec. `commit --add-actor/--keep-actors/--remove-actor`. An `actors` section in `inspect`. |
-| 11 | Phasing | P0 (#573) → P1a-P1d → P2a-P2b → P3a-P3b → P4 (deferred). Each step stays under 400 lines. |
+| 6 | Producer and signer | Three distinct things. The signature binds `actors` through `manifest_hash`. It attests who asserted the record, never that the record is true. A person or organisation actor counts as **attested** only when a trusted key whose **pinned** identity is that actor's identity signed the version; every other one is shown as *unattested*. Approving a **change** (the code) and approving a **product** are different acts with different records (§6.5). |
+| 7 | Privacy | A person's identity is an IRI: an ORCID iD, a ROR id, or a random pseudonym `urn:tessera:actor:<26 base32>`. `mailto:` and email-shaped strings are refused in **every** string field. No verb can erase one version today (#591), so the guidance for now is pseudonyms for anyone who may withdraw consent. De-identifying ingests accept pseudonyms only, with no names. |
+| 8 | Schema enforcement | Yes: `ProductSchema.required_actor_roles`, a **claim** check. It ships in the same PR as the signer-binding check (P3). Built-in schemas ship it empty. |
+| 9 | PROV | RO-Crate: a schema.org `CreateAction` plus PROV-O qualified associations for roles and delegation, with collision-proof `@id`s. DataCite: people and organisations become contributors, software becomes `TechnicalInfo`. No native PROV-JSON. The exporters refuse invalid actors and newer fields. P2 lands after PR #541. |
+| 10 | Surfaces | Rust `Actor` + `ProductBuilder::add_actor`. Python `add_software_agent`/`add_person`/`add_organization` + `tessera.digest`. `[[product.actors]]` in the ingest spec. `commit --add-actor/--keep-actors/--remove-actor`. An `actors` section in `inspect` with attested/unattested marks. |
+| 11 | Phasing | #587 → P0 (#573) → #574 → P1a-P1e → P2a-P2b → P3 (claim check + signer binding, one PR) → P3c (change approval), P3d (`inspect` marks) → P4 (deferred). Erasing a sealed identity from your own store needs #591. Each step stays under 400 lines. |
 
 ## §1 — Where agent identity lives
 
@@ -157,12 +161,17 @@ SPEC §4 as written:
   so §2.1 case E verifies, and the view reads it as "no actors". So P0 readers and P1 readers agree on
   every encoding. The struct's own `#[serde(default)]` re-emission of absent `sources`/`blocks` as `[]`
   stops mattering for verification, because verification no longer re-serialises the struct.
-- **Numbers.** Object-level hashing inherits `serde_json::Value`'s number model: exact `i64`/`u64`,
-  and `f64` beyond that. JCS (RFC 8785 §3.2.2.3) serialises numbers as IEEE-754 doubles anyway, so an
-  integer above 2^53 is out of JCS's exact domain for every conformant reader. P0 pins the behaviour
-  with a test that asserts a **precomputed RFC 8785 digest** for such a value, run by both readers.
-  Agreement alone isn't enough, because two readers can agree and both be wrong. An integer outside
-  `u64`/`i64` is refused as `Error::Invalid` rather than hashed, so the two readers can't differ on it.
+- **Numbers: no integer above 2^53 in a sealed value** ([#587](https://github.com/vig-os/tessera/issues/587)).
+  JCS (RFC 8785 §3.2.2.3) serialises every number as an IEEE-754 double, so distinct integers above
+  2^53 canonicalise to the same bytes. #587's probe edited a sealed `9007199254740993` to `…992` and
+  `from_json_verified` still returned Ok with an unchanged seal. Hashing the object can't fix that,
+  because the ambiguity sits in the canonical form itself. So the rule, which #587 lands format-wide
+  and **P0 depends on**, is: an integer outside ±(2^53−1) anywhere in a sealed value (`metadata`,
+  `extra`, `generation.config`, `actors[].sampling`, unknown fields included) is refused at seal and
+  validate, with a typed error telling the caller to encode it as a string. It is also refused at
+  **verify**, so a crafted file can't use the ambiguity. Floats are unaffected: a double has exactly one
+  JCS form. P0's object-level verifier calls the same check. **Rejected: a precomputed-digest test for
+  values above 2^53** (this ADR's previous draft). It would pin the collision rather than remove it.
 - **Out of scope:** a newer writer that changes the *type* of a known field (for example a new
   `producer` shape outside the untagged `ProducerRef`) fails to parse instead of warning. Changing
   a field's type is a major-version change under RFC §13, never an additive one.
@@ -207,8 +216,13 @@ decides whether P0 ships at least one release ahead of P1 (Owner decision 1).
   `id_inputs` are `product`/`name`/`timestamp` (`manifest.rs:108`). `actors` is never added to them.
   ADR-0036 makes `id` the lineage handle: an approver appended later is a new *version* of the same
   product, not a new product. **The same data with different actors has the same `id` and a different
-  `manifest_hash`.** That is correct under ADR-0036. A caller may still put an actor into `id_inputs`
-  deliberately; this ADR recommends against it.
+  `manifest_hash`.** That is correct under ADR-0036.
+- **`actors` is forbidden in `id_inputs`.** A caller-built `id_inputs` holding actor data would make
+  a lineage that the next `commit` breaks: `from_manifest` rebuilds the manifest through
+  `Manifest::new` (`product.rs:39-44`), which resets `id_inputs` to the defaults (`manifest.rs:108`),
+  so a `commit` of such a product would mint a different `id`. `seal()` therefore refuses an
+  `id_inputs` key named `actors` with `Error::InvalidActor` (P1a, `actors_in_id_inputs_is_refused`).
+  It can't recognise actor *values* under another key, so the book states the rule.
 - **`content_hash` does not.** It is the Merkle root over block digests only (`manifest.rs:159-168`).
 - *Correction (not an edit to ADR-0058):* ADR-0058's Consequences say "you cannot alter the recorded
   config/producer without changing the product id. Different config ⇒ different id". That is true of
@@ -238,13 +252,24 @@ The rule is ADR-0058's: **deterministic, identity-bearing → sealed; non-determ
 | start/end wall-clock per actor | `aux/actors.json` | non-deterministic; the seal would change on every re-run |
 | PR / issue / session URLs | `aux/actors.json` | change on rename, merge or hosting move; not identity |
 | token counts, cost, latency | `aux/actors.json` | accounting, non-deterministic and run-noisy |
-| host, user login, IP | `aux/actors.json` | ADR-0042's own host precedent, and personal data |
+| host, user login, IP | **not recorded** | personal data, and `aux/` is no place to hide it (below) |
+
+**`aux/` is not confidential.** Aux members ride unencrypted inside the same shareable `.tsra`
+(ADR-0042). They are outside the seal, not outside the file. Whoever receives the product receives
+`aux/actors.json` too, unless an ADR-0055 whole-file encryption wraps the whole thing. So `aux/` is
+for data that is non-deterministic, never for data that is sensitive. The previous draft's "host,
+login, IP → aux as personal data" would have shipped personal data in the clear, so this design
+keeps those fields out of the file altogether. A pipeline that needs them for its own audit keeps them
+in its own logs.
 
 `aux/actors.json` is an object keyed by the sealed actor `id`, with an open bag per actor:
-`{"<id>": {"started_at", "finished_at", "url", "tokens", "cost", "host", …}}`. Unknown keys are
-ignored, because it is outside the seal. Adding or removing it leaves both hashes byte-identical
-(ADR-0042's invariant, enforced by `add_aux_members`). A key that names no sealed actor is a warning
-in `inspect`, not an error, because aux is unauthenticated by design.
+`{"<id>": {"started_at", "finished_at", "url", "tokens", "cost", …}}`. Unknown keys are kept, because
+the file is outside the seal. The P1d writer refuses the keys `host`, `user`, `login` and `ip`, and any
+email-shaped string value (§7.3). URLs can still name an account (a PR URL names its repository, not
+its author), and the book says so. Adding or removing the file leaves both hashes byte-identical
+(ADR-0042's invariant, enforced by `add_aux_members`). A key that names no sealed actor is a warning in
+`inspect`, not an error, because aux is unauthenticated by design. A de-identifying ingest refuses
+`--actors-aux` (§7.4).
 
 ## §5 — The data model
 
@@ -271,8 +296,8 @@ in `inspect`, not an error, because aux is unauthenticated by design.
 |---|---|---|
 | all kinds | `id`, `role`, `kind` | `acted_on_behalf_of` |
 | `software_agent` | `harness` | `harness_version`, `provider`, `model`, `sampling` (object), `brief`, `receipt` |
-| `person` | `identity` | `name` |
-| `organization` | `identity` | `name` |
+| `person` | `identity` | `name`, `identity_commitment` (P4, §7.5) |
+| `organization` | `identity` | `name`, `identity_commitment` (P4, §7.5) |
 
 Optional fields are omitted when absent, never written as `null`, and `sampling` is omitted when
 empty. That keeps one canonical encoding per value, as §2.2 requires.
@@ -407,8 +432,10 @@ the supported way to build a valid actor. P1a pins the JSON byte form of §5.1 w
 | `signer` (ADR-0037) | which **identity label** a key holder attached to a signature | one per signature, unsealed sidecar | the signer |
 
 A software agent is never the `producer`: the harness that drafted a parser isn't the parser build
-that sealed the bytes. The anatomist chain is: `producer = anatomist/0.3.0`; `actors = [implementer
-agent, reviewer agent, approver person]`; and the approver signs, with `signer` = their ORCID iD.
+that sealed the bytes. In the anatomist chain, each derived product has `producer = anatomist/0.3.0`
+at the approved revision, `actors = [operator]`, and the host's signature. The implementer agent, the
+reviewer agent and the approver person sit on the **change record** for that revision, which the approver
+signs (§6.5).
 
 ### 6.2 What a signature attests, and what it doesn't
 
@@ -430,63 +457,252 @@ sign their outputs, and a model id string is free text. A verifier **can** concl
 (nothing changed since sealing), signer accountability (via the trust store, ADR-0037), and digest
 binding (a brief or receipt found later is, or isn't, the one named). It **cannot** conclude which
 model executed. `inspect` and the book say this in those words. P3b adds the one check that *is*
-mechanical: whether the signer is the listed approver (§11).
+mechanical: whether the key that signed is pinned to the listed actor's identity (§6.4).
+
+### 6.4 Binding an actor to a key: the pinned identity, never the label
+
+The envelope's `signer` is chosen by the key holder. The signature binds it, so it can't be changed
+after signing, but whoever signs can write any identity there. Today's `verify-sig --require-signer`
+compares exactly that label (`tessera-cli/src/trust.rs:322-328`), so any trusted key can sign as
+`signer = <the approver's ORCID>` and pass. That defect is filed as
+[#590](https://github.com/vig-os/tessera/issues/590). The only identity a *verifier* controls is the
+one the operator **pinned** when trusting the key: `tessera trust add --signer` writes `<name>.signer`
+(`trust.rs:176`), which `entries()` loads into `TrustEntry.signer` (`trust.rs:156`, `trust.rs:207`).
+
+So the rule for every actor check in this ADR is:
+
+- **An actor is attested by a signature** only when (1) the signature verifies against a key found in
+  the trust store (not `--pubkey`, which carries no pin, `trust.rs:283-287`), (2) that entry has a
+  pinned identity, and (3) the pinned identity equals the actor's `identity`. If the envelope's
+  `signer` differs from the pin, the check refuses, because the label is wrong.
+- **P3b, `verify-sig --require-signer-role <role>`,** passes only if some actor with that role is
+  attested by the verifying signature under that rule. It refuses, with a typed error naming which
+  condition failed, when the key isn't in the trust store, has nothing pinned, or is pinned to an
+  identity no actor with the role holds. P3b fixes #590 in the same PR, because both checks need
+  the same pinned-identity lookup.
+- **`inspect` marks every `person`/`organization` actor** as `attested (key <name>)` or
+  `unattested`. It reads the embedded `aux/signatures/<key_id>.sig.json` or the detached
+  `<file>.tsra.sig.json` (`tessera-io/src/container.rs:31-32`) and the trust store, and applies the rule
+  above. An actor named in `acted_on_behalf_of` is a person or organisation actor too, so naming a
+  real ORCID iD as a principal without that person's signature shows up as `unattested`. The writer
+  made a claim *about* that person; the person didn't make it. Software agents are never marked: §6.3
+  already makes their fields claims.
+
+### 6.5 Approving a change is not approving a product
+
+The adopter's real flow (MorePET/anatomist#86, its dogfooding comment of 2026-10-16 and the
+owner's comments of 2026-10-17) has two acts that happen at different times, on different machines:
+
+1. **The change.** An agent implements a step, another agent reviews it, and a person approves and
+   merges the pull request, on their own machine. What they approve is a **code revision**.
+2. **The products.** Later, an automated job on the compute host (`$KSB_JOB_OUT`, decision 2 of #86)
+   runs that revision over data and writes one derived `.tsra` per step. The approver never sees
+   these products, and their key isn't on that host.
+
+The previous draft's §8 advice (`required_actor_roles = ["approver"]` on derived products) collapsed
+the two. It would stamp the pull request's approver onto outputs they never saw. And either the
+human's key would have to sit on the compute host, or `signer != approver` and P3b would fail by
+construction. So the two acts get two records:
+
+- **The change record.** A small product of the adopter's own type (for example `change_record`)
+  whose sealed `metadata` names the subject revision. Its `actors` are the implementer agent, the
+  reviewer agent and the approver person. Its blocks can carry the briefs and receipts as Blob blocks
+  (§5.5). The approver seals and signs it once, with their own key, on their own machine. Under §6.4
+  it is attested by that key's pinned identity. The adopter's schema puts
+  `required_actor_roles = ["implementer", "approver"]` on this type.
+- **The product.** Its `producer.git_commit` is the revision, sealed and `dirty = false`
+  (`provenance.rs:46-60`). Its `actors` name only who acted in *this* run: an `operator` (the pipeline,
+  as a `software_agent` or `organization` with a pseudonymous or ROR identity) and a `generator` if a
+  model produced content directly. The host signs it with the **host's** key, pinned in the
+  verifier's store to the operator's identity. A product may add a source edge
+  `{role: "approved_change", id: <change record id>, content_hash: <its manifest_hash>}`, so it
+  is self-describing. No approver actor appears on it.
+- **P3c: `tessera verify-change <product> --change <record.tsra> --role approver`.** It passes when
+  (a) the record's `approver` is attested under §6.4, (b) the record's sealed subject revision equals
+  the product's sealed `producer.git_commit` and `git_repo`, and (c) the product's `producer.dirty` is
+  `false`. If the product carries an `approved_change` edge, it must also pin this record. The
+  verifier learns "the code that made this product was approved by a person I trust" without any
+  person being named on the product, and without moving a key.
+- **Approving a product** is still possible and keeps its plain meaning. A person who reviewed
+  *this* output (say, a segmentation) adds themselves as `approver` with `commit --add-actor` and signs
+  that version with their own key. `required_actor_roles = ["approver"]` belongs on product types that
+  really need a human to look at each one.
+
+The subject's metadata keys (`subject_git_repo`, `subject_git_commit`) are the one convention P3c
+reads. They are named in the book's change-record section, and P3c refuses a record without them.
+The engine reads no other change-record content, and the type name is the adopter's.
 
 ## §7 — Privacy
 
 A person's `identity` sealed into an immutable, content-addressed product **can't be redacted without
-a new version**, and a copy that has already been shared can't be recalled at all.
+a new version**. No verb today can remove that old version from a store (§7.5), and a copy that has
+already been shared can't be recalled at all. Everything below follows from that.
 
-- **Which tier?** ADR-0040's tiers classify fields *about the data subject* (a patient's `patient_id`
-  is `identifying` and "never in the clear in a shareable artifact"). An actor is a **contributor**,
-  and naming them is the point (attribution, as with DataCite creators, RFC §13's
-  `creators: [{name, affiliation, orcid, role}]`, and ADR-0037's ORCID `signer`). So actor identities
-  are not PHI and don't use the subject tiers. They are still **personal data** under GDPR Art. 4(1).
-- **Allowed forms** (engine-validated in P1a): `identity` must be an absolute IRI (`scheme:rest`).
-  - **Recommended:** an ORCID iD (`https://orcid.org/…`) for people and a ROR id
-    (`https://ror.org/…`) for organisations. Both are persistent and public by the subject's own
-    choice, and the person controls their ORCID record's visibility.
-  - **Allowed:** an institutional `https:` URI, and a pseudonym `urn:tessera:actor:<opaque>` for
-    contributors who must not be named publicly.
-  - **Refused:** `mailto:` IRIs and anything without a scheme (bare emails, login names such as
-    `user@host`). Emails go stale, are linkable across contexts, and are the identifier most likely
-    to be harvested. That makes it a red line like ADR-0040's raw paths. (Owner decision 3.)
-  - `name` is optional and should be left out unless the person agreed to be named.
-- **Legal basis and erasure.** Recording a person needs a lawful basis (GDPR Art. 6, typically
-  consent or the research exemption in Art. 89). Art. 17(3)(d) limits erasure for archiving and
-  research, but this ADR doesn't treat that as automatic, and it isn't legal advice. The mechanical
-  answer to an erasure request is ADR-0040 §2.1, applied to actors: a `commit` that leaves them out
-  (the default, or `--keep-actors --remove-actor <id>`) makes a version without them, then `forget` + `gc` remove the old version from stores you control.
-  The lineage `id` survives (§3), and the old `manifest_hash` becomes a tombstone. **Copies already
-  distributed keep the identity forever**, because a sealed field can't be crypto-shredded (ADR-0040
-  §3's field encryption covers sidecars, not sealed values). The book says so before anyone seals a
-  person.
-- **The erasable form (P4, deferred).** The sealed identity is a pseudonym `urn:tessera:actor:<opaque>`.
-  The real identity rides in an `age` envelope in `aux/identity/actors.age`, which is ADR-0047's
-  offline crypto-shred pattern. Deleting the keys erases the mapping in every copy. It is deferred
-  until an adopter needs it, and it lands additively when it does: the sealed shape is already the
-  §7 pseudonym form.
-- **Software agents** carry no personal data by construction. Their `brief`/`receipt` *referents*
-  might, and a digest of a low-entropy referent can be confirmed by guessing. Treat referents with the
-  data's own policy.
+### 7.1 Which tier
 
-## §8 — Schema-driven enforcement: yes, as data (P3a)
+ADR-0040's tiers classify fields *about the data subject* (a patient's `patient_id` is `identifying`
+and "never in the clear in a shareable artifact"). An actor is a **contributor**, and naming one is
+often the point (attribution, as with DataCite creators, RFC §13's
+`creators: [{name, affiliation, orcid, role}]`, and ADR-0037's ORCID `signer`). So actor identities
+don't use the subject tiers. They are still **personal data** under GDPR Art. 4(1), and in a
+de-identified product they belong to a class PS3.15 strips (§7.4). The previous draft said they "are
+not PHI", which was too broad.
+
+### 7.2 Allowed identity forms (engine-validated in P1a)
+
+`identity` must be an absolute IRI (`scheme:rest`), and one of:
+
+- **An ORCID iD** (`https://orcid.org/` + the 16-character iD, checksum verified) for people, or a
+  **ROR id** (`https://ror.org/` + 9 characters) for organisations. Both are persistent and public by
+  the subject's own choice. Use these **only** for contributors who agreed to permanent, public
+  attribution, as an author of a paper does (§7.5).
+- **An institutional `https:` URI**, under the same consent condition.
+- **A pseudonym** `urn:tessera:actor:<26 chars>`, matching `^urn:tessera:actor:[a-z2-7]{26}$`. That is
+  130 bits in lowercase RFC 4648 base32. **Randomness rule:** a pseudonym MUST come from a CSPRNG and
+  MUST NOT be derived from any identifier. A hash of an email or an ORCID iD can be confirmed by
+  guessing, which is the reviewer's finding and the same weakness §7.6 names for low-entropy
+  digests. The engine checks the shape only, since randomness can't be tested from one value. So the
+  supported way to mint one is `tessera actor pseudonym` (P1e), from `getrandom` as `keygen` does.
+  **Linkability is the custodian's choice:** the same pseudonym on two products links them ("the
+  same reviewer"). The recommended scope is one pseudonym per person per project; one per product
+  gives unlinkability. The mapping from pseudonym to person stays with the custodian, never in the
+  product. That is the anatomist owner's 2026-10-17 rule for the clinic mapping: host-only and
+  encrypted.
+- **Refused:** `mailto:` IRIs and anything without a scheme (bare emails, `user@host`). Emails go
+  stale, are linkable across contexts, and are the identifier most likely to be harvested. That makes
+  it a red line like ADR-0040's raw paths (Owner decision 3).
+
+### 7.3 The email ban covers every string, not just `identity`
+
+`validate_actors` refuses, in **every** string of an actor (`name`, `harness`, `harness_version`,
+`provider`, `model`, and every string at any depth inside `sampling`), a case-insensitive `mailto:` and
+any email-shaped substring, `[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`. A
+`name` may contain no `@` at all. `id`, `role`, `brief` and `receipt` can't contain `@` by their own
+regexes (§5.3-§5.5).
+
+Login names (`user@host`) in software fields are **not** refused. They can't be told apart from
+version pins such as `tool@latest`, and refusing every `@` in `harness_version` would break npm-style
+versions such as `pkg@1.2.3`. The email pattern lets those through, because it needs an alphabetic
+top-level domain. The book says not to put logins there. This partly disputes the reviewer's "apply
+the login ban to every free-text field": it applies to `name` and `identity`, where nothing legitimate
+needs `@`.
+
+### 7.4 De-identifying ingests
+
+`--deidentify` and crypto-shred (`--recipient`, ADR-0047) set `PatientIdentityRemoved = YES`
+(`tessera-ingest/src/dicom.rs:684-693`), after stripping `InstitutionName` and
+`ReferringPhysicianName` among the PHI tags (`dicom.rs:659-660`). A ROR id for the clinic, or an
+operator's ORCID iD, sealed beside that marker would put back exactly the class of identifier PS3.15
+removes, while the product claims it's gone. So:
+
+- In both modes, the ingest **refuses** any `person`/`organization` actor whose `identity` isn't a
+  §7.2 pseudonym, any `name`, and `--actors-aux`. Software agents are allowed, and §7.3 applies to
+  them as everywhere.
+- **The rule persists past the ingest.** The scrubbed header lands in the sealed `extra.dicom_header`
+  (`dicom.rs:799-802`), so the element `(0012,0062) = YES` is a sealed marker. `commit --add-actor`,
+  `commit --keep-actors`, the ingest engine's re-seal and the CLI's `tessera validate` apply the same
+  refusal whenever that marker is present. The check is one function in `tessera-ingest`, which
+  owns `PHI_TAGS`; the CLI calls it, and `tessera-core` stays domain-agnostic. A library writer that
+  builds a de-identified product without the CLI is caught by `tessera validate`, not at seal.
+- Under crypto-shred, the real identities of pseudonymous actors may ride in the identity envelope
+  (§7.5, P4). They are never sealed.
+
+### 7.5 Erasure: what works today, and what needs a mechanism
+
+The previous draft's recipe ("`commit` without the person, then `forget` + `gc`") **doesn't work**,
+against the code as it stands:
+
+- `commit` pins the old tip in a `supersedes` edge *with* its `content_hash`
+  (`tessera-cli/src/version.rs:124`).
+- `gc` treats every source `content_hash` that names an in-repo object as reachable
+  (`tessera-io/src/repo.rs:389-394`), so the old version naming the person stays reachable from the
+  new tip and is never collected. §10.1's carry rule relies on that same reachability.
+- `forget` deletes the whole lineage's ref and log (`repo.rs:296-308`). A later `gc` then drops
+  **every** version, not just the one naming the person.
+
+So **today**, a store you control can only forget a sealed identity by dropping the whole lineage.
+Erasing one version needs a **redacting commit**: ADR-0040 §2.1's `tessera redact`, which no one has
+built. It is filed as [#591](https://github.com/vig-os/tessera/issues/591) (a tombstone edge that keeps
+the `manifest_hash` but drops the `content_hash` pin `gc` follows). Copies already shared are out of
+reach of any repository verb.
+
+**What is safe today** (the book's privacy section says this before anyone seals a person):
+
+1. Seal an ORCID iD, ROR id or `name` only for a contributor who agreed to **permanent**, public
+   attribution.
+2. Everyone else, and anyone who might withdraw consent, is a §7.2 **pseudonym**. Withdrawal then
+   means deleting the custodian's mapping entry. The pseudonym is random, so that erases the link in
+   every copy, including copies already shared, with no new version and no repository verb. It works
+   now, with neither #591 nor P4.
+3. A de-identified product carries pseudonyms only (§7.4).
+
+**Legal basis.** Recording a person needs a lawful basis (GDPR Art. 6, typically consent or the
+research exemption in Art. 89). Art. 17(3)(d) limits erasure for archiving and research, but this ADR
+doesn't treat that as automatic, and it isn't legal advice.
+
+**The in-file mapping (P4, deferred).** For an adopter who wants the mapping to travel with the
+product but stay erasable: the real `{identity, name}` rides in an `age` envelope, which is ADR-0047's
+pattern. Under a crypto-shred DICOM ingest it goes in the same `aux/identity/identity.age` under a new
+`actors` key, so one `shred` covers both. Otherwise it goes in `aux/identity/actors.age`.
+
+- **Binding.** The person's sealed actor gains
+  `identity_commitment = blake3(JCS({"identity", "name", "salt"}))`. `salt` is 32 random bytes that
+  exist **only inside the envelope**. A key holder decrypts the envelope, recomputes the commitment,
+  and compares, so a swapped envelope is detected. ADR-0047 §3 leaves its own envelope unbound; this
+  closes that gap for actors. Without the salt, the commitment of a public ORCID iD could be confirmed
+  by guessing. After a shred the salt is gone and the commitment reveals nothing.
+- **Determinism.** The salt and commitment are minted once by the custodian and supplied by the
+  caller, as the pseudonym is, so `seal` adds no randomness and S15 holds.
+- **Format.** `identity_commitment` is a new optional field, added additively under P0's rule. The
+  previous draft claimed "the sealed shape is already the pseudonym form", which was wrong without
+  this field, and the claim is withdrawn.
+
+The plain `aux/` members are unencrypted (§4). Only the `age` envelope is confidential.
+
+### 7.6 Software agents
+
+Software agents carry no personal data by construction, and §7.3 keeps it that way for their
+strings. Their `brief`/`receipt` *referents* might, and a digest of a low-entropy referent can be
+confirmed by guessing. Treat referents with the data's own policy.
+
+## §8 — Schema-driven enforcement: a claim check, shipped with the signer binding (P3)
 
 `ProductSchema` gains `required_actor_roles: Vec<String>`, with
 `#[serde(default, skip_serializing_if = "Vec::is_empty")]`. `validate()` then refuses a manifest that
-has no actor for a listed role, with `Error::Invalid("schema 'X' requires an actor with role
+has no actor for a listed role, with `Error::Invalid("schema 'X' requires an actor claiming role
 'approver' — ADR-0060 §8")`. That is the same mechanism and placement as `requires_generation`
 (`schema.rs:242`, `schema.rs:277-282`). **The built-in schemas ship it empty**, so nothing is
-blocked by default and the embedded schema bytes are unchanged, which keeps the corpus neutral. A
-domain schema opts in (anatomist: `required_actor_roles = ["approver"]` on its derived products).
+blocked by default and the embedded schema bytes are unchanged, which keeps the corpus neutral.
+
+**It is a claim check, and its documentation, error text and name say so.** It proves the record
+*claims* an actor in that role, nothing more. Anyone sealing a version can `--add-actor` an approver.
+The carry rule (§10.1) stops only *accidental* inheritance of an approval, not a deliberate false
+claim. So:
+
+- **P3a never ships alone.** It lands in one PR with P3b (§6.4's signer binding, which fixes #590),
+  as phase P3. A `validate` that passes therefore always has a command next to it that can check the
+  claim.
+- The book pairs them: `validate` answers "is the claim present?", and
+  `verify-sig --require-signer-role approver` (or P3c's `verify-change`, §6.5) answers "did the
+  claimed person sign?".
+- `inspect` marks the claim `unattested` until a signature binds it (§6.4).
+
+Domain schemas opt in. In anatomist's case, `required_actor_roles = ["implementer", "approver"]` goes on
+its **change record** type, and `["operator"]` on its derived products (§6.5), **not** `["approver"]` on
+derived products. `["approver"]` is for product types where a person really reviews each product.
 
 - Why yes: ADR-0058 §3 and ADR-0050 already established that "must carry X" is schema data, and the
-  engine needs no policy to read a list. Why not later: anatomist#86 decision 4 wants exactly this.
-  Without it, "every merged step had an approver" can only be checked by convention.
+  engine needs no policy to read a list. anatomist#86 decision 4 uses that same pattern
+  (`requires_generation` for derived steps), and the owner's comment of 2026-10-16 lists "approver"
+  among the agentic fields to record. Without the check, "every merged step had an approver" can only
+  be verified by convention.
 - **Rejected: `requires_actors: bool`.** Too coarse; the real requirement is always a role.
 - **Rejected: requiring kind or identity form per role** (for example "the approver must be a person
   with an ORCID iD"). That is real policy, but it is domain policy with no second user yet. It can be
   added later the same way. (§12.)
+- **Rejected: making `validate` itself check signatures.** `validate` is a pure function of the
+  manifest, while trust is the verifier's local store (ADR-0037). Mixing them would make validation
+  depend on the machine it runs on.
 - An older reader that doesn't know `required_actor_roles` refuses to validate under P0 rather than
   passing silently (§2.2). That is the only safe outcome for a gate.
 
@@ -504,7 +720,10 @@ domain schema opts in (anatomist: `required_actor_roles = ["approver"]` on its d
 - **Process Run Crate 0.6** (<https://w3id.org/ro/wfrun/process/0.6>): `instrument` MUST be the
   executed tool, `agent` SHOULD be "a Person or Organization", and `endTime` SHOULD be present.
   `SoftwareApplication` uses `softwareVersion` (consumers "SHOULD prioritize softwareVersion"). It
-  doesn't cover multiple agents or roles.
+  doesn't cover multiple agents or roles. The profile is built on **RO-Crate 1.3**: "This profile
+  uses terminology from the RO-Crate 1.3 specification"
+  ([profile page](https://www.researchobject.org/workflow-run-crate/profiles/0.6/process_run_crate/),
+  fetched 2026-10-17). So declaring Process Run Crate conformance means moving the crate to 1.3, not to 1.2.
 - **The RO-Crate JSON-LD context** (fetched for
   [1.1](https://w3id.org/ro/crate/1.1/context) and [1.2](https://w3id.org/ro/crate/1.2/context))
   defines the `prov:` prefix and maps `wasDerivedFrom` to `prov#wasDerivedFrom`. It maps
@@ -535,20 +754,24 @@ The exporter keeps everything it emits today. On top of that, the root `Dataset`
 { "@id": "#generation", "@type": ["CreateAction", "prov:Activity"],
   "result": {"@id": "./"},
   "object": [{"@id": "urn:tessera:source:…"}],
-  "instrument": [{"@id": "#producer"}, {"@id": "#actor-impl"}, {"@id": "#actor-rev"}],
+  "instrument": [{"@id": "#producer"}, {"@id": "#actor.impl"}, {"@id": "#actor.rev"}],
   "agent": [{"@id": "https://orcid.org/0000-0002-1825-0097"}],
   "participant": [{"@id": "https://ror.org/0example00"}],
-  "prov:qualifiedAssociation": [{"@id": "#assoc-impl"}, {"@id": "#assoc-rev"},
-                                {"@id": "#assoc-owner"}, {"@id": "#assoc-lab"}] },
+  "prov:qualifiedAssociation": [{"@id": "#assoc.impl"}, {"@id": "#assoc.rev"},
+                                {"@id": "#assoc.owner"}, {"@id": "#assoc.lab"}] },
 { "@id": "#producer", "@type": "SoftwareApplication", "name": "anatomist", "softwareVersion": "0.3.0" },
-{ "@id": "#actor-impl", "@type": ["SoftwareApplication", "prov:SoftwareAgent"],
+{ "@id": "#actor.impl", "@type": ["SoftwareApplication", "prov:SoftwareAgent"],
   "name": "agent-harness", "softwareVersion": "2.1.0",
-  "additionalProperty": [{"@id": "#actor-impl-model"}, {"@id": "#actor-impl-brief"}],
-  "prov:actedOnBehalfOf": {"@id": "https://orcid.org/0000-0002-1825-0097"} },
-{ "@id": "#actor-impl-model", "@type": "PropertyValue", "name": "model", "value": "model-x-1" },
-{ "@id": "#assoc-impl", "@type": "prov:Association",
-  "prov:agent": {"@id": "#actor-impl"}, "prov:hadRole": {"@id": "#role-implementer"} },
-{ "@id": "#role-implementer", "@type": "prov:Role", "name": "implementer" },
+  "additionalProperty": [{"@id": "#actor.impl.model"}, {"@id": "#actor.impl.brief"}],
+  "prov:actedOnBehalfOf": {"@id": "https://orcid.org/0000-0002-1825-0097"},
+  "prov:qualifiedDelegation": {"@id": "#delegation.impl"} },
+{ "@id": "#actor.impl.model", "@type": "PropertyValue", "name": "model", "value": "model-x-1" },
+{ "@id": "#delegation.impl", "@type": "prov:Delegation",
+  "prov:agent": {"@id": "https://orcid.org/0000-0002-1825-0097"},
+  "prov:hadActivity": {"@id": "#generation"} },
+{ "@id": "#assoc.impl", "@type": "prov:Association",
+  "prov:agent": {"@id": "#actor.impl"}, "prov:hadRole": {"@id": "#role.implementer"} },
+{ "@id": "#role.implementer", "@type": "prov:Role", "name": "implementer" },
 { "@id": "https://orcid.org/0000-0002-1825-0097", "@type": ["Person", "prov:Person"] }
 ```
 
@@ -559,30 +782,63 @@ Mapping rules:
   and `organization` actors with role `approver` are the `agent`, which is RO-Crate's "human agent
   who was responsible for authorizing". When there is no approver, `owner` is the `agent`. Every other
   person or organisation is a `participant`.
-- **PROV-O for what schema.org can't say.** A qualified association per actor carries the exact
-  `role`, and `prov:actedOnBehalfOf` carries delegation. Software agents are typed
-  `prov:SoftwareAgent`, people `prov:Person`, and organisations `prov:Organization`. The export is
-  lossless for roles and delegation, which plain schema.org isn't.
-- **`@id`s.** A `person` or `organization` uses its `identity` IRI, which is RO-Crate's ORCID-as-`@id`
-  convention. A `urn:tessera:actor:` pseudonym is used as-is. A software agent uses
-  `#actor-<local id>`. **One node per identity.** One person in two roles is two actor entries
-  (§5.3) but a single `@graph` node, so entities are de-duplicated by `@id` and each entry adds its
-  own qualified association pointing at that node. P2a's test asserts that no `@id` appears twice.
-  `model`, `provider`, `harness_version` (when not `softwareVersion`), `sampling.*`, `brief` and
-  `receipt` become flattened `PropertyValue` entities. Each digest's description names it as BLAKE3
-  over the referent's bytes, following PR #541's truthful-label rule.
+- **PROV-O for what schema.org can't say.** A qualified association per actor entry carries the
+  exact `role`. `prov:actedOnBehalfOf`, plus a `prov:Delegation` scoped to `#generation` with
+  `prov:hadActivity`, carries delegation. Software agents are typed `prov:SoftwareAgent`, people
+  `prov:Person`, and organisations `prov:Organization`.
+- **What the crate preserves, and what it doesn't.** The previous draft said "lossless for roles and
+  delegation", which was too strong. **Roles are exact:** one association per entry. **Delegation is
+  exact for software agents**, because each entry is its own `#actor.<id>` node. For a person or
+  organisation, **one identity is one node**, so if that identity appears in two entries with
+  different `acted_on_behalf_of` (reviewer on behalf of the lab, approver on behalf of nobody), the node
+  carries the **union** of the delegations. PROV-O relates delegation between two agents, optionally
+  within an activity, never per role. `prov:hadRole`'s narrower `rdfs:domain`, `Association ∪
+  InstantaneousEvent`, excludes `prov:Delegation`, so tagging a delegation with a role would be
+  outside PROV-O's OWL profile. The exact (role, principal) pairing lives in the sealed manifest,
+  which is the record of truth. The crate is a projection of it (RFC §0.6), and the book says so.
+- **`@id`s are collision-proof by construction.** The previous draft's `#actor-<id>` collided:
+  local ids may contain `-` (§5.4), so actor `impl-model` became `#actor-impl-model`, which is also the
+  `@id` of actor `impl`'s `model` property. Every generated id now joins its segments with `.`, a
+  character neither local ids (`[a-z0-9_-]`, §5.4) nor roles (`[a-z0-9_]`, §5.3) can contain:
+  `#actor.<id>`, `#actor.<id>.<property>`, `#assoc.<id>`, `#delegation.<id>`, `#role.<role>`. The
+  `<property>` segment is one of the fixed names (`model`, `provider`, `harness_version`, `brief`,
+  `receipt`) or `sampling.<key>`. A `sampling` key is caller data, so it is percent-encoded: every
+  byte outside `[A-Za-z0-9_-]` becomes `%XX`, including `.`. So a key can never forge another segment.
+  The fixed `#generation` and `#producer` contain no `.`. A `person` or `organization` uses its
+  `identity` IRI, which is RO-Crate's ORCID-as-`@id` convention and never starts with `#`. A
+  `urn:tessera:actor:` pseudonym is used as-is. One person in two roles is two actor entries (§5.3) but
+  a single `@graph` node, so entities are de-duplicated by `@id`, and each entry adds its own
+  association pointing at that node. P2a's test asserts that no `@id` appears twice, using the
+  reviewer's `impl` / `impl-model` pair as its fixture. `model`, `provider`, `harness_version` (when
+  not `softwareVersion`), `sampling.*`, `brief` and `receipt` become flattened `PropertyValue`
+  entities. Each digest's description names it as BLAKE3 over the referent's bytes, following PR
+  #541's truthful-label rule. schema.org doesn't list `SoftwareApplication` in `additionalProperty`'s
+  domain. That is advisory in schema.org, and the JSON-LD stays valid, but a strict schema.org
+  validator may warn.
+- **Invalid or newer input is refused, not exported.** `verify` checks hashes, not
+  `validate_actors` (§10.1), so a product can verify and still carry, say, a dangling
+  `acted_on_behalf_of`. Exported, that would be a crate referencing an entity that doesn't exist, and
+  the flattening assertion would fail. So both exporters run `validate_actors` first and refuse with
+  `Error::InvalidActor`. A manifest whose `newer_fields()` is non-empty (§2.2), which includes an
+  unknown actor kind (§5.2), is refused with `Error::NewerFormatFields`. A crate silently missing a
+  field it didn't understand would be the same silent loss P0 refuses on re-seal. The user upgrades
+  tessera, then exports. Attestation (§6.4) isn't exported: the crate states claims, as the manifest
+  does.
 - **Sources.** `isBasedOn` is unchanged. Edges with roles `derived_from` and `ingested_from`, and any
   domain derivation role, add `wasDerivedFrom` (already mapped by the context). `supersedes` and
   `snapshot_of` add `prov:wasRevisionOf`. `ingested_via_spec` is a plan, not a derivation, so it adds
   nothing beyond `object`.
 - **No time.** `endTime` (a SHOULD in RO-Crate and Process Run Crate) is omitted, because the export
   is a pure function of the sealed manifest (`export.rs:1-5`) and wall-clock is in `aux/`. So the
-  crate does **not** claim Process Run Crate conformance (no `conformsTo` profile). Declaring it,
-  with `endTime` read from `aux/actors.json`, is a separate decision (§12).
+  crate does **not** claim Process Run Crate conformance (no `conformsTo` profile). Declaring it
+  means moving to RO-Crate 1.3 (§9.1) and reading `endTime` from `aux/actors.json`. That is a
+  separate decision (§12).
 - The root `Dataset` isn't additionally typed `prov:Entity`, which #564 proposes. Everything with an
   `@id` is already a `prov:Entity` by PROV's own definition, and nothing reads the triple.
-- `conformsTo` stays `https://w3id.org/ro/crate/1.1`. Moving to 1.2 changes no mapping (verified
-  above), but it is its own decision (§12).
+- `conformsTo` stays `https://w3id.org/ro/crate/1.1`. Moving to 1.2 or 1.3 changes no mapping: the
+  [1.3 context](https://w3id.org/ro/crate/1.3/context), fetched 2026-10-17, maps `prov`,
+  `wasDerivedFrom` and every schema.org term above exactly as 1.1 and 1.2 do. But the move is its own
+  decision (§12).
 
 ### 9.3 DataCite (P2b)
 
@@ -608,7 +864,7 @@ Mapping rules:
 already JSON-LD, and therefore RDF. Its `prov:` triples (activity, associations, roles, delegation,
 derivation) form a PROV-O graph that any JSON-LD processor extracts. PROV-JSON is a W3C Member
 Submission, not a Recommendation. A native exporter would be a third serialiser to keep in agreement,
-with no adopter asking for it (Owner decision 4).
+with no adopter asking for it (Owner decision 7).
 
 ### 9.5 Sequencing against PR #541
 
@@ -647,15 +903,18 @@ pub fn validate_actors(actors: &[Actor]) -> crate::Result<()>;  // called by sea
 variant; `Error` is `#[non_exhaustive]`, `error.rs:13`), any of the following: a duplicate or
 malformed `id`; a malformed `role`; a dangling, self-pointing or cyclic `acted_on_behalf_of`; a
 `brief`/`receipt` that isn't `blake3:<64 hex>`; a missing kind-required field; a disallowed
-`identity` form (§7); or a builder method used on the wrong kind. `validate_manifest` runs the same
+`identity` form, including a malformed pseudonym (§7.2); an email-shaped string or `mailto:` in any
+actor string, or an `@` in `name` (§7.3); a builder method used on the wrong kind; or an `actors` key in
+`id_inputs` (§3). `validate_manifest` runs the same
 check, so `tessera validate` reports foreign-written violations. `verify` doesn't, because it is
 about hashes.
 
 **The carry rule** (P1a, on top of #574's fix). Actors record the acts that produced **this
 version**, and two reserved roles, `reviewer` and `approver`, **attest a version**. If they were
 carried, a `commit --set` by anyone would inherit the parent's approval, and §8's
-`required_actor_roles = ["approver"]` gate would pass for a version nobody approved. That would
-defeat the property anatomist#86 decision 4 needs. So:
+`required_actor_roles = ["approver"]` claim check would pass for a version nobody approved. §8 is a
+claim check either way; the carry rule makes sure the engine never manufactures the false claim
+itself. So:
 
 - `from_manifest` **does not carry** `actors`. This matches `producer` (re-stamped for each version,
   `product.rs:49-51`). The parent's actors stay reachable through the `supersedes` edge `commit`
@@ -667,11 +926,18 @@ defeat the property anatomist#86 decision 4 needs. So:
   reserved names. A domain role with attesting meaning isn't known to the engine, so it is carried;
   a schema-declared `attesting_roles` list is the extension point if a second adopter needs one
   (§12).
-- **The ingest engine's re-seal** (`apply_spec_metadata`, `engine.rs:1224-1234`) is a re-seal inside
-  the *same* act, not a new version. It re-attaches the incoming manifest's actors (those
-  supplied by `ingest --actors` or a decoder) and then appends the spec's `[[product.actors]]`, as it
-  already does for `generation`/`producer`. Its early-return guard (`engine.rs:1230-1233`) must
-  also count `!p.actors.is_empty()` as provenance, so a spec whose only provenance is actors isn't skipped (P1b).
+- **The ingest engine's re-seal** (`apply_spec_metadata`, `engine.rs:1224-1255`) is a re-seal inside
+  the *same* act, not a new version. Today it builds through `from_manifest` (`engine.rs:1234`),
+  which **drops** the incoming manifest's `producer` and `generation` (`product.rs:49-51`). It then
+  attaches the *spec's* `generation`/`producer` (`engine.rs:1249-1254`). So an incoming value is lost
+  whenever the spec doesn't restate it; #574 covers that loss. The previous draft said the re-seal
+  "already" re-attaches them, which was wrong. For actors, P1b does explicitly what the code doesn't
+  do for the other slots: it copies the incoming manifest's actors (from `ingest --actors` or a
+  decoder) onto the builder that `from_manifest` returns, then appends the spec's
+  `[[product.actors]]`. Its early-return guard (`engine.rs:1230-1233`) must also count
+  `!p.actors.is_empty()` as provenance, so a spec whose only provenance is actors isn't skipped. The
+  test `ingest_reseal_keeps_incoming_actors` pins the copy. Whether `producer`/`generation` get the
+  same treatment is #574's call (Owner decision 9).
 - The list is validated at seal, after keeps, removals and additions. If a kept actor is
   `acted_on_behalf_of` a dropped approver, the commit is refused unless that approver is re-added
   under the same local `id`. That is the operator saying, explicitly, that the principal approved
@@ -714,15 +980,28 @@ b.add_organization(id="lab", role="owner", identity="https://ror.org/…", name=
 whereas a keyword argument is a Python `TypeError` at the call. A validation failure at `pack()` is a
 `TesseraError` carrying the index and id. The Python `Reader` exposes `actors` as a list of dicts.
 `tests/write_example.py` gains an ANCHOR region, `bindings.md` `{{#include}}`s it, and
-`tests/api_drift.py` registers the three methods. P1c waits for #562, which is in flight on another
-branch and edits the same `Builder`.
+`tests/api_drift.py` registers the three methods.
 
-### 10.4 CLI (P1b, P1d)
+**`tessera.digest(data: bytes) -> str`** returns `blake3:<64 hex>`, the same function as
+`tessera_core::hash::digest`. Today `tessera-py` exposes only `open` and `verify` as module functions
+(`tessera-py/src/lib.rs:375-395`), so a Python caller filling `brief`/`receipt` would need a separate
+blake3 package and could get the prefix or case wrong, which `validate_actors` refuses. A test asserts
+that `tessera.digest(b"")` equals the Rust digest of the empty input.
+
+**P1c is blocked behind #562**, which is in flight on another branch and edits the same `Builder`.
+That isn't optional ordering: without #562's `with_producer`, Python can't write the `producer` that
+§6.5's change verification compares.
+
+### 10.4 CLI (P1b, P1d, P1e, P3d)
 
 - `tessera commit REPO LINEAGE` gains three repeatable flags. `--add-actor <JSON | @file.json>` appends.
   `--keep-actors` carries the parent's non-attesting actors (§10.1). `--remove-actor <id>` drops a
-  kept actor; it is the erasure path of §7. Each counts as a change for the "nothing to change"
-  check (`version.rs:63-67`). The seal-time validation names any delegation left dangling.
+  kept actor from the **new** version. It does not erase the old one, which stays reachable through
+  `supersedes` (§7.5; that is #591). Each counts as a change for the "nothing to change" check
+  (`version.rs:63-67`). The seal-time validation names any delegation left dangling. On a
+  de-identified product, `--add-actor` and `--keep-actors` apply §7.4's refusal.
+- `tessera actor pseudonym` (P1e) prints a fresh `urn:tessera:actor:<26 base32>` from `getrandom`
+  (§7.2). It is the supported way to mint one.
 - Every `tessera ingest <format>` subcommand gains `--actors @file.json` (a JSON array in §5.1's
   shape), next to the shared `--meta` (`main.rs:2043-2060`). Each actor has several fields, so a
   `key=value` flag would be the wrong tool.
@@ -733,10 +1012,15 @@ branch and edits the same `Builder`.
   actors        4 (implementer, reviewer, approver, owner)
     impl        software_agent  implementer  agent-harness/2.1.0  model=model-x-1  → owner
     rev         software_agent  reviewer     other-harness        model=model-y-2  → owner
-    owner       person          approver     https://orcid.org/0000-0002-1825-0097
-    lab         organization    owner        https://ror.org/0example00  "Example Lab"
+    owner       person          approver     https://orcid.org/0000-0002-1825-0097  attested (key alice)
+    lab         organization    owner        https://ror.org/0example00  "Example Lab"  unattested
                 (model and harness are self-reported claims; see ADR-0060 §6.3)
+                (unattested = claimed by the writer, not signed by a trusted key pinned to that identity; §6.4)
   ```
+
+  Every `person`/`organization` row ends in `attested (key <name>)` or `unattested`, by §6.4's rule.
+  With no signature or an empty trust store, every such row is `unattested`. That is the honest default,
+  not an error.
 
   `--full` adds `sampling`, `provider`, and the `brief`/`receipt` digests in full. `--resolve`
   dereferences a digest to a carried block (§5.5). `inspect --json` needs no change, because it is
@@ -753,42 +1037,62 @@ The pre-change failure is shown once in the PR.
 
 | Step | Scope | Acceptance criteria → proving test |
 |---|---|---|
-| **P0a** (#573) | Object-level verification of `Manifest`; `newer_fields()` by the declared-field-name walk (opaque maps exempt); warnings in `verify`/`inspect`; `inspect --json` prints the object; `from_manifest` becomes fallible with `NewerFormatFields` | §2.1 cases B and D now **verify Ok** and list `actors` / `producer.agents` → `forward_compat_newer_field_verifies_and_warns`. Case C now fails `Integrity` → `spliced_unsealed_field_is_tampering`. Case E, `"study": null` and an embedded `requires_generation: false` verify and list nothing → `known_keys_are_never_newer_fields`. `from_manifest` on case B → `NewerFormatFields`. All 8 corpus goldens unchanged (existing conformance test). An unknown field holding a float, a nested object and an integer above 2^53 has a pinned RFC 8785 digest that both readers reproduce → `unknown_field_seal_is_pinned` |
+| **#587** (prerequisite, format-wide) | Refuse integers outside ±(2^53−1) in sealed JSON at seal, validate and verify (§2.2) | #587's probe (`9007199254740993` edited to `…992`) now fails to seal on the write side, and the hand-edited manifest fails verify. The 8 corpus goldens are unchanged, because no corpus value exceeds 2^53 |
+| **P0a** (#573, after #587) | Object-level verification of `Manifest`; `newer_fields()` by the declared-field-name walk (opaque maps exempt); warnings in `verify`/`inspect`; `inspect --json` prints the object; `from_manifest` becomes fallible with `NewerFormatFields`; the verifier applies #587's integer rule | §2.1 cases B and D now **verify Ok** and list `actors` / `producer.agents` → `forward_compat_newer_field_verifies_and_warns`. Case C now fails `Integrity` → `spliced_unsealed_field_is_tampering`. Case E, `"study": null` and an embedded `requires_generation: false` verify and list nothing → `known_keys_are_never_newer_fields`. `from_manifest` on case B → `NewerFormatFields`. All 8 corpus goldens unchanged (existing conformance test). An unknown field holding a float and a nested object has a pinned RFC 8785 digest that both readers reproduce, and one holding `2^53 + 1` is refused by both → `unknown_field_seal_is_pinned` |
 | **P0b** (#573) | The same for `Collection`; `ProductSchema::from_value` reports unknown keys at any depth by the same walk and `validate_manifest` refuses; SPEC §5 missing rows and the §7 forward-reading rule; the reference reader still passes | An embedded schema with an unknown key at the top level, inside `fields[]` and inside `blocks[]` → `validate` = `NewerFormatFields`, while `inherit: false` / `requires_generation: false` validate → `unknown_schema_rule_is_not_validated`. A collection with an unknown key verifies → `collection_forward_compat`. `run.py` exit 0 |
-| **#574** | `publish` carries `producer`/`generation`/`ingest_transform`; `commit` carries `ingest_transform`/`generation` | #574's probe as a test, one assertion per slot, for both verbs |
-| **P1a** | `Actor` types, `validate_actors`, `add_actor`, the seal check, the carry rule, `Error::InvalidActor`, the role constants, `inspect` section, the SPEC `actors` row, the `actors_chain` corpus fixture, the book section (§6.3, §7 wording) | The JSON byte form of §5.1 = committed golden → `actor_json_shape_golden`. Each refusal in §10.1 → `invalid_actor_*` (one per rule). An empty list leaves all 8 goldens unchanged. Different actors, same `id`, different `manifest_hash` → `actors_are_version_not_lineage`. `commit` without `--keep-actors` carries none, `--keep-actors` drops `reviewer`/`approver`, and `publish` copies verbatim → `carry_rule_never_inherits_an_approval`. A kept delegation to a dropped approver is refused → `kept_delegation_needs_reapproval`. An unknown kind using only known field names (`identity`, `name`) round-trips and is listed, and `publish`/`--keep-actors` refuse it → `unknown_actor_kind_is_opaque`. The `inspect` rendering → a trycmd case |
-| **P1b** | Staging `Header.actors`; `[[product.actors]]`; `ingest --actors`; `commit --add-actor/--keep-actors/--remove-actor` | A spec whose only provenance is `[[product.actors]]` seals them through `apply_spec_metadata` → `spec_with_only_actors_seals_them`. A resumed stage with actors is refused by a header without the field → `stage_header_refuses_unknown_actors`. A `--keep-actors` commit keeps the implementer, drops the approver, and accepts a re-added approver → a trycmd case. A dangling delegation is refused, naming the actor |
-| **P1c** (after #562) | Python `add_software_agent`/`add_person`/`add_organization`; `Reader.actors`; anchor + `bindings.md`; `api_drift.py` | `write_example.py` anchor writes and reads back the §5.1 chain. A bad kwarg is a `TypeError`. A dangling delegation at `pack` is a `TesseraError` naming index and id. `tessera-py-import` check |
-| **P1d** | `aux/actors.json`: writer, `--actors-aux`, `inspect --full` join, orphan warning | Adding or removing it leaves both hashes byte-identical (ADR-0042's assertion) → `aux_actors_is_outside_the_seal`. Orphan key → warning in a trycmd case |
-| **P2a** (after #541) | RO-Crate `CreateAction`, producer `SoftwareApplication`, qualified associations, roles, delegation, `wasDerivedFrom` / `wasRevisionOf`, `PropertyValue`s | The whole-document flattening assertion holds with actors. Every actor and role is reachable from `#generation`. The approver is `agent`. Software is never `agent`. JSON-LD expansion against the pinned 1.1 context gives `prov#qualifiedAssociation` → an expansion test on a vendored context. No sealed byte changes |
-| **P2b** | DataCite contributors + `TechnicalInfo`; book sentence | A named person → `Personal` + ORCID scheme. A name-less person → not a contributor, present in the summary. A software agent → never a contributor. Mandatory-field test still green |
-| **P3a** | `ProductSchema.required_actor_roles` | A schema requiring `approver` refuses a manifest without one and accepts one with it. A `commit --keep-actors` of an approved version fails the gate until `--add-actor` re-approves → `approval_does_not_survive_commit`. Built-in embedded schema bytes unchanged (8 goldens) |
-| **P3b** | `verify-sig --require-signer-role <role>`: the signature's `signer` must equal the `identity` of an actor with that role | Matching signer → Ok. Signer not listed → typed refusal. Persona trycmd extended with the approver chain |
-| **P4** (deferred, filed when an adopter needs it) | The pseudonymous identity + `aux/identity/actors.age` envelope (§7) | Shred removes the mapping, and the seal is unchanged |
+| **#574** | `publish` carries `producer`/`generation`/`ingest_transform`; `commit` carries `ingest_transform` (and `generation`, per Owner decision 9) | #574's probe as a test, one assertion per slot, for both verbs |
+| **P1a** | `Actor` types, `validate_actors` (§7.2 forms and pseudonym shape, §7.3 email ban, `id_inputs` ban), `add_actor`, the seal check, the carry rule, `Error::InvalidActor`, the role constants, the SPEC `actors` row, the `actors_chain` corpus fixture, the book section (§6.3, §6.4, §6.5, §7.5's "what is safe today") | The JSON byte form of §5.1 = committed golden → `actor_json_shape_golden`. Each refusal in §10.1 → `invalid_actor_*`, one per rule, including `invalid_actor_email_in_sampling` (a nested `sampling` string), `invalid_actor_at_in_name`, `invalid_actor_pseudonym_shape` and `actors_in_id_inputs_is_refused`. `harness_version = "pkg@1.2.3"` and `"tool@latest"` are accepted → `version_pins_are_not_emails`. An empty list leaves all 8 goldens unchanged. Different actors, same `id`, different `manifest_hash` → `actors_are_version_not_lineage`. `commit` without `--keep-actors` carries none, `--keep-actors` drops `reviewer`/`approver`, and `publish` copies verbatim → `carry_rule_never_inherits_an_approval`. A kept delegation to a dropped approver is refused → `kept_delegation_needs_reapproval`. An unknown kind using only known field names (`identity`, `name`) round-trips and is listed, and `publish`/`--keep-actors` refuse it → `unknown_actor_kind_is_opaque` |
+| **P1b** | Staging `Header.actors`; `[[product.actors]]`; `ingest --actors`; `commit --add-actor/--keep-actors/--remove-actor` | A spec whose only provenance is `[[product.actors]]` seals them through `apply_spec_metadata` → `spec_with_only_actors_seals_them`. Incoming `--actors` survive the re-seal → `ingest_reseal_keeps_incoming_actors`. A resumed stage with actors is refused by a header without the field → `stage_header_refuses_unknown_actors`. A `--keep-actors` commit keeps the implementer, drops the approver, and accepts a re-added approver → a trycmd case |
+| **P1e** | `tessera actor pseudonym`; §7.4's de-identification refusal in `tessera-ingest`, called by ingest, `commit` and `tessera validate` | `dicom --deidentify` and `--recipient` with a ROR organisation, an ORCID operator, a `name` or `--actors-aux` are refused, and with pseudonyms only they seal → `deidentified_ingest_accepts_pseudonyms_only`. `commit --add-actor` of an ORCID person onto that product is refused → `deidentified_commit_refuses_named_actor`. `tessera validate` flags a library-written de-identified product with a named actor. `actor pseudonym` output matches §7.2's regex and two runs differ |
+| **P1c** (after #562) | Python `add_software_agent`/`add_person`/`add_organization`; `tessera.digest`; `Reader.actors`; anchor + `bindings.md`; `api_drift.py` | `write_example.py` anchor writes and reads back the §5.1 chain, with `brief` from `tessera.digest`. `tessera.digest(b"")` equals the Rust digest. A bad kwarg is a `TypeError`. A dangling delegation at `pack` is a `TesseraError` naming index and id. `tessera-py-import` check |
+| **P1d** | `aux/actors.json`: writer, `--actors-aux`, `inspect --full` join, orphan warning; the writer refuses `host`/`user`/`login`/`ip` and email-shaped values | Adding or removing it leaves both hashes byte-identical (ADR-0042's assertion) → `aux_actors_is_outside_the_seal`. A `host` key → refused → `aux_actors_refuses_personal_keys`. Orphan key → warning in a trycmd case |
+| **P2a** (after #541) | RO-Crate `CreateAction`, producer `SoftwareApplication`, qualified associations, roles, delegation (`actedOnBehalfOf` + scoped `prov:Delegation`), `wasDerivedFrom` / `wasRevisionOf`, `PropertyValue`s, the `.`-joined `@id` scheme, refusal of invalid or newer input | The whole-document flattening assertion holds with actors. Actors `impl` and `impl-model` plus a `sampling` key `a.b` produce no duplicate `@id` → `rocrate_ids_never_collide`. Every actor and role is reachable from `#generation`. The approver is `agent`. Software is never `agent`. A dangling `acted_on_behalf_of` that verifies → `InvalidActor`, and a newer field → `NewerFormatFields`, with no crate written → `export_refuses_invalid_or_newer_actors`. JSON-LD expansion against the pinned 1.1 context gives `prov#qualifiedAssociation` → an expansion test on a vendored context. No sealed byte changes |
+| **P2b** | DataCite contributors + `TechnicalInfo`; book sentence; the same refusals as P2a | A named person → `Personal` + ORCID scheme. A name-less person → not a contributor, present in the summary. A software agent → never a contributor. Invalid or newer actors → refused. Mandatory-field test still green |
+| **P3** (P3a + P3b, **one PR**) | P3a: `ProductSchema.required_actor_roles`, documented and worded as a claim check. P3b: §6.4's pinned-identity rule, `verify-sig --require-signer-role <role>`, and #590's fix to `--require-signer`, sharing one lookup | A schema requiring `approver` refuses a manifest without one and accepts one with it. A `commit --keep-actors` of an approved version fails the claim check until `--add-actor` re-approves → `approval_does_not_survive_commit`. Built-in embedded schema bytes unchanged (8 goldens). A key pinned to A that signs with label B fails `--require-signer-role approver` when the approver is B, and also when it is A (label/pin mismatch) → `signer_role_uses_the_pin_not_the_label`. An unpinned key, or `--pubkey`, refuses → `signer_role_needs_a_pinned_key`. The persona trycmd is extended with the approver chain |
+| **P3d** (after P3) | `inspect`'s attested/unattested marks (§6.4, §10.4), reusing P3b's lookup | `inspect` shows `attested (key …)` only for the pinned approver, `unattested` for an `acted_on_behalf_of` principal who didn't sign, and `unattested` for every row with no signature or an empty trust store → a trycmd case |
+| **P3c** | `tessera verify-change <product> --change <record> --role <role>` (§6.5); the book's change-record section with `subject_git_repo`/`subject_git_commit` | A host-signed product whose `producer.git_commit` matches an approver-signed change record → Ok, with no approver actor on the product → `change_approval_without_a_person_on_the_product`. A mismatched commit, `dirty = true`, an unattested approver, a record without subject keys, or an `approved_change` edge pinning a different record → typed refusals, one test each |
+| **P4** (deferred, filed when an adopter needs it) | `identity_commitment` + the `aux/identity/` envelope (§7.5) | A key holder recomputes the commitment from the decrypted envelope and matches it. A swapped envelope fails the match. A shred removes the mapping and leaves the seal unchanged |
+
+Erasing one version from a repository (§7.5) is **#591**, a repository verb that isn't specific to
+actors. Nothing in P0-P4 depends on it, because §7.5's "what is safe today" guidance needs no verb.
 
 ## Owner decisions needed
 
 1. **Does P0 ship one release ahead of P1?** *Recommended: yes.* Readers then exist that can verify
    an `actors` product before any is written. *Cost:* `actors` waits one release cycle. The
    alternative (same release) leaves every earlier install reporting new products as tampered, which
-   the release notes can only warn about.
-2. **Accept P0's rule ("verify the object, warn on newer fields, refuse re-seal and validate") as
-   the format's forward-compatibility policy.** It amends SPEC §4/§7 and corrects `inspect --help`.
-   *Recommended: yes.* It is RFC §13 and SPEC §4 as written, and it makes the Rust reader agree with
-   the reference reader. *Cost:* verification parses the manifest twice (as an object, then as the
-   view), which is cheap at manifest scale. `from_manifest` becomes fallible (a public API change).
-   Older binaries can no longer `commit`/`publish` newer products: they get a typed refusal instead
-   of silent loss.
-3. **Refuse `mailto:` and scheme-less person identities at seal.** *Recommended: yes.* *Cost:* an
-   adopter who already identifies people by email has to map them to an ORCID iD or a pseudonym
-   first. The alternative, allowing email with a warning, seals harvestable personal data into
-   immutable copies.
-4. **No native PROV-JSON/PROV-O exporter for now.** *Recommended: no exporter.* *Cost:* a consumer who
-   wants only PROV extracts the `prov:` triples from the RO-Crate JSON-LD.
-5. **Accept §10.1's carry rule for actors**: `commit` carries none by default, `--keep-actors` never
+   the release notes can only warn about. #587 lands before P0 either way (§2.2).
+2. **Accept P0's rule ("verify the object, warn on newer fields, refuse re-seal, validate and
+   export") as the format's forward-compatibility policy.** It amends SPEC §4/§7 and corrects
+   `inspect --help`. *Recommended: yes.* It is RFC §13 and SPEC §4 as written, and it makes the Rust
+   reader agree with the reference reader. *Cost:* verification parses the manifest twice (as an
+   object, then as the view), which is cheap at manifest scale. `from_manifest` becomes fallible (a
+   public API change). Older binaries can no longer `commit`, `publish` or export newer products:
+   they get a typed refusal instead of silent loss (§9.2).
+3. **The personal-data rules of §7**: refuse `mailto:` and scheme-less identities; refuse
+   email-shaped strings in every actor string and `@` in `name`; random pseudonyms only, and no names,
+   in de-identified products. *Recommended: yes.* *Cost:* an adopter who identifies people by email has
+   to mint pseudonyms first. Login names in software fields stay possible (§7.3's partial dispute).
+4. **Accept §7.5's interim privacy guidance**: seal a real identity only with consent to permanent
+   attribution, and use pseudonyms for everyone else, until #591 (redacting commit) exists.
+   *Recommended: yes, and schedule #591 independently of this ADR.* *Cost:* a product shows fewer
+   ORCID iDs than an adopter might like.
+5. **Accept §6.5's change record**: the person who approves a change signs a separate record for the
+   code revision, and P3c binds products to it through the sealed `producer.git_commit`. Derived
+   products carry no approver. *Recommended: yes.* *Cost:* one more product type per adopter, plus
+   a metadata-key convention (`subject_git_repo`/`subject_git_commit`) that P3c reads. The alternative,
+   a typed `subject` field in the format, is more format surface for one consumer.
+6. **P3b's strictness and #590**: `--require-signer-role` and the fixed `--require-signer` refuse
+   when the envelope label differs from the pinned identity, and refuse unpinned keys and `--pubkey`.
+   *Recommended: yes, both in P3.* *Cost:* a behaviour change for anyone using `--require-signer` with
+   a key trusted without `--signer`. They re-add it with `tessera trust add --signer`.
+7. **No native PROV-JSON/PROV-O exporter for now.** *Recommended: no exporter.* *Cost:* a consumer who
+   wants only PROV extracts the `prov:` triples from the RO-Crate JSON-LD, and accepts §9.2's union
+   of delegations for a person who appears in several roles.
+8. **Accept §10.1's carry rule for actors**: `commit` carries none by default, `--keep-actors` never
    carries `reviewer`/`approver`, and `publish` copies verbatim. *Recommended: yes.* *Cost:* an
    operator who edits metadata has to re-add an approval explicitly, which is the point.
-6. **Should `generation` be carried on `commit`?** ADR-0058 §1 restamps `producer` and
+9. **Should `generation` be carried on `commit`?** ADR-0058 §1 restamps `producer` and
    `product.rs:49-51` also drops `generation`. #574 argues that blocks carried unchanged keep their
    recipe. *Recommended: carry it unless the caller replaces it.* *Cost:* it amends ADR-0058's
    intent, so the owner should rule on it in #574.
@@ -803,15 +1107,20 @@ The pre-change failure is shown once in the PR.
 - Corpus-neutral: no golden changes, no `TESSERA_VERSION` bump, one fixture added.
 - New permanent format surface: one manifest field, three kinds, a reserved role vocabulary, and one
   schema key. All of them are additive under P0's rule.
-- Honest limits are written where users see them: a model name is a claim (§6.3), and a sealed person
-  can't be erased from copies already shared (§7).
+- Honest limits are written where users see them: a model name is a claim (§6.3); a person or
+  organisation actor is `unattested` unless a pinned key signed it (§6.4); a sealed identity can't be
+  erased from copies already shared, and today not even from your own store without dropping the
+  lineage (§7.5, #591).
+- The audit's spin-offs are filed rather than buried: #587 (integers above 2^53), #590
+  (`--require-signer` trusts a label) and #591 (no per-version erasure).
 
 ## Non-decisions / deferred
 
 - **Actors on collections.** Collections are assembled, too. The same type can be added to
   `Collection` additively under P0. File it when a collection-level act needs recording.
-- **Process Run Crate conformance** (`conformsTo` + `endTime` from `aux/actors.json`) and the
-  **RO-Crate 1.2 `conformsTo` bump**: export-only, with no seal impact.
+- **Process Run Crate conformance** (`conformsTo` + `endTime` from `aux/actors.json`), which
+  requires the **RO-Crate 1.3** `conformsTo` bump (§9.1): export-only, with no seal impact.
+- **Per-version erasure** in a repository: #591, a repository verb that isn't specific to actors (§7.5).
 - **Kind or identity-form requirements per role in schemas** (§8).
 - **Schema-declared `attesting_roles`** for domain roles that attest a version (§10.1). The engine
   knows only the two reserved ones until a second adopter needs more.
