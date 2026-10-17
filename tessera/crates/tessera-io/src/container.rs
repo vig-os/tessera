@@ -12,6 +12,7 @@ use std::path::Path;
 
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
+use zip::read::{ArchiveOffset, Config};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
@@ -64,6 +65,25 @@ fn tsra_entry_options() -> SimpleFileOptions {
         .compression_method(CompressionMethod::Stored)
         .last_modified_time(DateTime::default())
         .large_file(true)
+}
+
+/// Open a `.tsra` as a zip archive whose first byte is byte 0 of the source — the one way every
+/// `.tsra` reader in this crate opens the container.
+///
+/// A `.tsra` never carries a prefix: its first local header is the `mimetype` entry, which is what lets
+/// a sniffer identify it without unzipping (SPEC §6), and every writer here starts there. Saying so
+/// matters for more than strictness. With the default `ArchiveOffset::Detect`, zip ≥ 9 locates the
+/// archive by **scanning forward from byte 0** for the first central-directory header — a read of the
+/// whole file before the first entry is touched, which turns the cloud reader's ranged GETs of the
+/// central directory, the manifest and one block into a full download (#588; zip 2 did a single
+/// arithmetic check instead). A known offset makes zip check the one position the end-of-central-
+/// directory record names, so opening costs the tail of the file and nothing else
+/// (`range::tests::reading_one_block_does_not_read_the_whole_archive` pins that).
+fn open_tsra_archive<R: Read + Seek>(reader: R) -> Result<ZipArchive<R>> {
+    let config = Config {
+        archive_offset: ArchiveOffset::Known(0),
+    };
+    ZipArchive::with_config(config, reader).map_err(cz)
 }
 
 /// Pack a **sealed** manifest + its block payloads into a `.tsra` at `path` (STORED zip64).
@@ -267,7 +287,7 @@ impl<R: Read + Seek> Reader<R> {
     /// Build a reader from any seekable byte source. Checks the `mimetype` magic, parses
     /// `manifest.json`, and verifies all three hashes (id / content_hash / manifest_hash).
     pub fn from_reader(reader: R) -> Result<Self> {
-        let mut archive = ZipArchive::new(reader).map_err(cz)?;
+        let mut archive = open_tsra_archive(reader)?;
 
         // **Every entry must be STORED — checked before ANY member is read.**
         //
@@ -297,19 +317,23 @@ impl<R: Read + Seek> Reader<R> {
         //
         // On which compression method this is: `zip` takes it from the **central directory** for both
         // this check (`by_index_raw` → `get_metadata().compression_method`) and the actual decode
-        // (`by_index_with_optional_password` → `data.compression_method`). `find_data_start` parses the
-        // local header only to locate the payload, never to choose a codec. So a crafted file whose
+        // (`by_index_with_options` → `ZipFileData::make_reader` → `self.compression_method`).
+        // `ZipFileData::data_start` (via `find_content`) parses the local header only to locate the
+        // payload, never to choose a codec (re-checked against zip 9.0.4). So a crafted file whose
         // local header disagrees with its central directory cannot slip past this check and then be
         // decompressed anyway — there is one source of truth, and it is the one checked here.
         let mut has_mimetype = false;
         let mut compressed: Option<(String, CompressionMethod)> = None;
         for i in 0..archive.len() {
             let f = archive.by_index_raw(i).map_err(cz)?;
-            if f.name() == MIMETYPE_ENTRY {
+            // Decoding every name here is also what lets [`Reader::aux_names`] stay infallible: an
+            // archive with an undecodable entry name never becomes a `Reader`.
+            let name = f.name().map_err(cz)?;
+            if name == MIMETYPE_ENTRY {
                 has_mimetype = true;
             }
             if compressed.is_none() && f.compression() != CompressionMethod::Stored {
-                compressed = Some((f.name().to_string(), f.compression()));
+                compressed = Some((name.into_owned(), f.compression()));
             }
         }
         if !has_mimetype {
@@ -433,7 +457,9 @@ impl<R: Read + Seek> Reader<R> {
     /// caller iterating over `aux_names()` sees a stable listing.
     pub fn aux_names(&self) -> Vec<String> {
         (0..self.archive.len())
-            .filter_map(|i| self.archive.name_for_index(i).map(str::to_string))
+            // `.ok()` drops nothing: `from_reader` already decoded every entry name and refused the
+            // archive if one failed, so each `name_for_index` here is `Some(Ok(_))`.
+            .filter_map(|i| self.archive.name_for_index(i)?.ok().map(|n| n.into_owned()))
             .filter_map(|n| n.strip_prefix(AUX_PREFIX).map(str::to_string))
             .filter(|n| !n.is_empty()) // the bare `aux/` directory marker, if any, is not a member
             .collect()
@@ -682,7 +708,7 @@ pub fn write_aux_members(
                 .archive
                 .by_index(i)
                 .map_err(|e| Error::Container(format!("read existing entry #{i}: {e}")))?;
-            let name = zf.name().to_string();
+            let name = zf.name().map_err(cz)?.into_owned();
             let mut buf = Vec::with_capacity(zf.size() as usize);
             zf.read_to_end(&mut buf)?;
             if name == MANIFEST_ENTRY {
@@ -745,7 +771,7 @@ pub fn write_aux_members(
     }
     // Also assert the on-disk `manifest.json` entry itself was preserved byte-for-byte — a hash
     // match with different bytes would still count as a seal-ignore break (JSON reformatting).
-    let mut reopened_zip = ZipArchive::new(File::open(path)?).map_err(cz)?;
+    let mut reopened_zip = open_tsra_archive(File::open(path)?)?;
     let mut got = Vec::new();
     reopened_zip
         .by_name(MANIFEST_ENTRY)
@@ -818,7 +844,7 @@ fn write_repacked_archive(
 /// that has already failed verification, so use them to name and locate, never to decide. Anything that
 /// reads block payloads or acts on metadata must go through [`Reader::open`] and get the refusal.
 pub fn read_manifest_unverified(path: &Path) -> Result<Manifest> {
-    let mut archive = ZipArchive::new(File::open(path)?).map_err(cz)?;
+    let mut archive = open_tsra_archive(File::open(path)?)?;
     let mut mj = String::new();
     archive
         .by_name(MANIFEST_ENTRY)
@@ -1217,6 +1243,64 @@ mod tests {
         assert!(pack(&m, &[], &path).is_err());
         // pack_streaming refuses the same unsealed input — the SSoT options shouldn't bypass the gate.
         assert!(pack_streaming(&m, &[], &path).is_err());
+    }
+
+    /// SPEC §6: a `.tsra` begins at byte 0. A valid archive behind a prefix is refused rather than
+    /// located by scanning, which is what keeps `open` from reading the whole file (#588).
+    /// The zip64 half of [`open_tsra_archive`]'s no-scan guarantee. Every product the other tests build
+    /// is small enough that `zip` writes a plain zip32 end record (`large_file` only adds per-entry zip64
+    /// fields), so they never reach the zip64-EOCD branch, which `ArchiveOffset::Detect` also resolves
+    /// by scanning. More than 65 535 entries forces a zip64 end record. A large leading entry makes the
+    /// file mostly body, so reading it would show up in the count.
+    #[test]
+    fn opening_a_zip64_archive_reads_only_its_tail() {
+        use crate::range::CountingReader;
+        use std::sync::atomic::Ordering;
+
+        let mut zw = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let stored = tsra_entry_options();
+        zw.start_file(MIMETYPE_ENTRY, stored).unwrap();
+        zw.write_all(MIMETYPE.as_bytes()).unwrap();
+        zw.start_file("body", stored).unwrap();
+        zw.write_all(&vec![0u8; 32 << 20]).unwrap();
+        for i in 0..70_000u32 {
+            zw.start_file(format!("e{i}"), stored).unwrap();
+        }
+        let bytes = zw.finish().unwrap().into_inner();
+        let total = bytes.len() as u64;
+        let tail = &bytes[bytes.len() - 22 - 20 - 56..];
+        assert!(
+            tail.windows(4).any(|w| w == 0x0606_4b50u32.to_le_bytes()),
+            "fixture must carry a zip64 end-of-central-directory record"
+        );
+
+        let counter = CountingReader::new(std::io::Cursor::new(bytes));
+        let tally = counter.counter();
+        let archive = open_tsra_archive(counter).unwrap();
+        assert_eq!(archive.len(), 70_002);
+        let read = tally.load(Ordering::Relaxed);
+        assert!(
+            read < total / 2,
+            "opening read {read} of {total} bytes: the archive was scanned, not range-read"
+        );
+    }
+
+    #[test]
+    fn an_archive_behind_a_prefix_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi.tsra");
+        sealed_multiblock(&path, 3);
+        let bytes = std::fs::read(&path).unwrap();
+        // Control: the same bytes at offset 0 open, so the refusal below is the prefix's doing.
+        Reader::from_reader(std::io::Cursor::new(bytes.clone())).unwrap();
+
+        let mut prefixed = b"#!/bin/sh\nexit 0\n".to_vec();
+        prefixed.extend_from_slice(&bytes);
+        match Reader::from_reader(std::io::Cursor::new(prefixed)) {
+            Err(Error::Container(_)) => {}
+            Err(other) => panic!("expected a container error, got {other:?}"),
+            Ok(_) => panic!("a prefixed archive must not open as a .tsra"),
+        }
     }
 
     #[test]
