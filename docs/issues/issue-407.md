@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-08-21T09:27:46Z
-updated: 2026-09-28T17:59:04Z
+updated: 2026-10-16T17:15:53Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/407
-comments: 0
+comments: 1
 labels: none
 assignees: none
 milestone: 0.1.0-beta
 projects: none
 parent: none
 children: none
-synced: 2026-09-29T07:52:38.637Z
+synced: 2026-10-17T06:32:51.184Z
 ---
 
 # [Issue 407]: [Signed `aux/` appendix: bring forensic provenance into the ADR-0037 signature scope](https://github.com/vig-os/tessera/issues/407)
@@ -115,3 +115,22 @@ ordering (stamp provenance → compute digest → sign → embed signature) must
 - ADR-0037, ADR-0042, ADR-0056 §6a
 
 Refs: #403
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 16, 2026 at 05:15 PM_
+
+Dogfooding anatomist (MorePET/anatomist#91) at tessera `dev` `fa581f5`: a concrete use case for the signed-aux appendix beyond the ADR-0056 §6a decoder-id framing.
+
+**Scenario.** Each dog's products (ingest + derived) are wrapped by `age`-encrypted whole-file envelopes (anatomist #91's emulation of ADR-0055). The outer `.sig.json` binds `{ciphertext_hash, recipients, signer}` and lets an auditor who holds **no** decryption key still prove the ciphertext is the one the signer attested to.
+
+**What that auditor still can't prove without decrypting:** that a derived product descends from a specific parent. `derived_from <parent manifest_hash>` lives **inside** the sealed manifest, which is inside the ciphertext. So "lineage integrity" today reduces to "give me the key or trust me."
+
+**Why this maps to #407.** The signed-aux appendix would let a producer emit a non-identifying lineage projection into `aux/` (e.g. a canonical `aux/lineage.json` with `{self_manifest_hash, derived_from: [parent_manifest_hash, …], supersedes: […]}`) and have the ADR-0037 signature cover it. For whole-file encryption, that same aux projection can also travel **outside** the ciphertext (next to the outer `.sig.json`) and be bound into the outer envelope — same digest, two carriers, one chain. The decoder/`producer`/`host` motivation of #407 still stands; this adds the "lineage without decrypt" surface anatomist specifically needs for #86.
+
+Not asking to expand #407's scope — more that `aux/lineage.json` is a natural tenant of the covered namespace, and the whole-file encryption carrier (#378) is the second case where the appendix pays. If the aux namespace stays decoder/provenance-only, anatomist can file this as a sibling.
+
+Repro inputs: anatomist #91 spike comment. Synthetic data only, no PHI.
+
+
