@@ -51,7 +51,7 @@ derived `.tsra` to say who did what. Today it can't do that honestly:
 | 8 | Schema enforcement | Yes: `ProductSchema.required_actor_roles`, a **claim** check. It ships in the same PR as the signer-binding check (P3). Built-in schemas ship it empty. |
 | 9 | PROV | RO-Crate: a schema.org `CreateAction` plus PROV-O qualified associations for roles and delegation, with collision-proof `@id`s. DataCite: people and organisations become contributors, software becomes `TechnicalInfo`. No native PROV-JSON. The exporters refuse invalid actors and newer fields. P2 lands after PR #541. |
 | 10 | Surfaces | Rust `Actor` + `ProductBuilder::add_actor`. Python `add_software_agent`/`add_person`/`add_organization` + `tessera.digest`. `[[product.actors]]` in the ingest spec. `commit --add-actor/--keep-actors/--remove-actor`. An `actors` section in `inspect` with attested/unattested marks. |
-| 11 | Phasing | #587 → P0 (#573) → #574 → P1a-P1e → P2a-P2b → P3 (claim check + signer binding, one PR) → P3c (change approval), P3d (`inspect` marks) → P4 (deferred). Erasing a sealed identity from your own store needs #591. Each step stays under 400 lines. |
+| 11 | Phasing | #587 → P0 (#573) → #574 → P1a-P1e → P2a-P2b → P3 (claim check + signer binding, one PR) → P3d (`inspect` marks) → P3c (change approval) → P4 (deferred). Erasing a sealed identity from your own store needs #591. Each step stays under 400 lines. |
 
 ## §1 — Where agent identity lives
 
@@ -169,8 +169,14 @@ SPEC §4 as written:
   and **P0 depends on**, is: an integer outside ±(2^53−1) anywhere in a sealed value (`metadata`,
   `extra`, `generation.config`, `actors[].sampling`, unknown fields included) is refused at seal and
   validate, with a typed error telling the caller to encode it as a string. It is also refused at
-  **verify**, so a crafted file can't use the ambiguity. Floats are unaffected: a double has exactly one
-  JCS form. P0's object-level verifier calls the same check. **Rejected: a precomputed-digest test for
+  **verify**, so a crafted file can't use the ambiguity, but with a **distinct** error,
+  `Error::UnboundInteger { path }` ("the seal doesn't bind this value; it may have changed since
+  sealing"), never `Error::Integrity`. A product sealed by an older writer that holds such a value
+  is not tampered with. Its seal simply doesn't cover the value, and reporting it as tampering would
+  repeat the misdiagnosis §2.1 fixes. The consequence is real: every already-sealed product holding
+  such an integer stops verifying with that error. `inspect` and the readers still open it and name
+  the path. #587 owns that migration note (posted there). Floats are unaffected: a double has exactly
+  one JCS form. P0's object-level verifier calls the same check. **Rejected: a precomputed-digest test for
   values above 2^53** (this ADR's previous draft). It would pin the collision rather than remove it.
 - **Out of scope:** a newer writer that changes the *type* of a known field (for example a new
   `producer` shape outside the untagged `ProducerRef`) fails to parse instead of warning. Changing
@@ -486,7 +492,8 @@ So the rule for every actor check in this ADR is:
   above. An actor named in `acted_on_behalf_of` is a person or organisation actor too, so naming a
   real ORCID iD as a principal without that person's signature shows up as `unattested`. The writer
   made a claim *about* that person; the person didn't make it. Software agents are never marked: §6.3
-  already makes their fields claims.
+  already makes their fields claims, and they carry no `identity` to pin. An accountable party that
+  holds the key for an automated run, such as §6.5's operator, is an `organization`.
 
 ### 6.5 Approving a change is not approving a product
 
@@ -511,18 +518,33 @@ construction. So the two acts get two records:
   it is attested by that key's pinned identity. The adopter's schema puts
   `required_actor_roles = ["implementer", "approver"]` on this type.
 - **The product.** Its `producer.git_commit` is the revision, sealed and `dirty = false`
-  (`provenance.rs:46-60`). Its `actors` name only who acted in *this* run: an `operator` (the pipeline,
-  as a `software_agent` or `organization` with a pseudonymous or ROR identity) and a `generator` if a
-  model produced content directly. The host signs it with the **host's** key, pinned in the
-  verifier's store to the operator's identity. A product may add a source edge
+  (`provenance.rs:46-60`). Its `actors` name only who acted in *this* run: an `operator`, which is
+  the **organisation** that runs the pipeline (`kind: "organization"`, with a ROR id or a §7.2
+  pseudonym such as one for a lab's compute service), and a `generator` (a `software_agent`) if a
+  model produced content directly. The host signs the product with the **host's** key, which the
+  verifier's store pins to the operator organisation's identity. Several host keys may pin the same
+  identity, one `trust add --signer` each. A product may add a source edge
   `{role: "approved_change", id: <change record id>, content_hash: <its manifest_hash>}`, so it
   is self-describing. No approver actor appears on it.
 - **P3c: `tessera verify-change <product> --change <record.tsra> --role approver`.** It passes when
   (a) the record's `approver` is attested under §6.4, (b) the record's sealed subject revision equals
-  the product's sealed `producer.git_commit` and `git_repo`, and (c) the product's `producer.dirty` is
-  `false`. If the product carries an `approved_change` edge, it must also pin this record. The
-  verifier learns "the code that made this product was approved by a person I trust" without any
-  person being named on the product, and without moving a key.
+  the product's sealed `producer.git_commit` and `git_repo`, (c) the product's `producer.dirty` is
+  `false`, and (d) the product's `operator` is attested under §6.4 by the product's own signature.
+  Without (d), anyone could seal a product that claims the approved commit. If the product carries an
+  `approved_change` edge, it must also pin this record. The verifier learns "the code that made this
+  product was approved by a person I trust, and an operator I trust ran it" without any person being
+  named on the product, and without moving a key.
+- **Why the operator is an organisation, not a software agent.** The previous revision allowed "a
+  `software_agent` … with a pseudonymous or ROR identity", but `identity` exists only on `person` and
+  `organization` (§5.1), and §6.4 attests only those kinds. A software agent has nothing to pin. The
+  fix keeps the model as it is rather than giving software agents an identity. A signing key is held
+  by an **accountable party**, never by a model or a harness. The software that ran is already
+  sealed as `producer`, and the agent harness fields are claims (§6.3). An `identity` on a software
+  agent would invite the reading "this key attests the model ran", which no mechanism supports (§6.3). An
+  `operator` given as a `software_agent` is still valid to seal, because §8 keeps role→kind policy out
+  of the engine. P3c, however, refuses it with a typed error naming the kind
+  (`operator_must_be_attestable`). For anatomist: `operator` = the lab, as an organisation (ROR, or a
+  pseudonym for its compute service), and the host key on `$KSB_JOB_OUT`'s machine is pinned to it.
 - **Approving a product** is still possible and keeps its plain meaning. A person who reviewed
   *this* output (say, a segmentation) adds themselves as `approver` with `commit --add-actor` and signs
   that version with their own key. `required_actor_roles = ["approver"]` belongs on product types that
@@ -576,16 +598,41 @@ not PHI", which was too broad.
 
 `validate_actors` refuses, in **every** string of an actor (`name`, `harness`, `harness_version`,
 `provider`, `model`, and every string at any depth inside `sampling`), a case-insensitive `mailto:` and
-any email-shaped substring, `[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`. A
-`name` may contain no `@` at all. `id`, `role`, `brief` and `receipt` can't contain `@` by their own
-regexes (§5.3-§5.5).
+any substring matching the **email pattern**:
 
-Login names (`user@host`) in software fields are **not** refused. They can't be told apart from
-version pins such as `tool@latest`, and refusing every `@` in `harness_version` would break npm-style
-versions such as `pkg@1.2.3`. The email pattern lets those through, because it needs an alphabetic
-top-level domain. The book says not to put logins there. This partly disputes the reviewer's "apply
-the login ban to every free-text field": it applies to `name` and `identity`, where nothing legitimate
-needs `@`.
+```text
+[A-Za-z0-9._%+-]+@[A-Za-z][A-Za-z0-9-]*(\.[A-Za-z][A-Za-z0-9-]*)*\.[A-Za-z]{2,}
+```
+
+That is: a local part, `@`, then a domain of two or more dot-separated labels, **each starting with a
+letter**, the last being two or more letters. A `name` may contain no `@` at all. `id`, `role`,
+`brief` and `receipt` can't contain `@` by their own regexes (§5.3-§5.5).
+
+**What it refuses, exactly, and why semver pins pass.** A semver version is `MAJOR.MINOR.PATCH` with
+numeric fields (semver.org §2), optionally prefixed with `v`. So after `pkg@` comes a digit-led label
+(`1`), or a `v1` label followed by the digit-led label `0`. Either way the domain part can't match,
+whatever pre-release (`-alpha.beta`) or build metadata (`+exp.sha.5114f85`) follows. The previous
+revision's pattern allowed digit-led labels and wrongly claimed to pass semver pins: it refused
+`pkg@1.0.0-alpha.beta`, `pkg@1.0.0-beta.rc` and `pkg@v1.0.0-beta.rc`. The probe for this revision ran
+both patterns over the same strings (`python3 -I probe.py`, the output is in PR #586):
+
+| String | previous pattern | this pattern |
+|---|---|---|
+| `pkg@1.2.3`, `tool@latest`, `pkg@1.0.0-alpha` | passes | passes |
+| `pkg@1.0.0-alpha.beta`, `pkg@1.0.0-beta.rc`, `pkg@v1.0.0-beta.rc` | **refused** | passes |
+| `pkg@1.0.0-rc.1+build.5`, `pkg@1.0.0+exp.sha.5114f85`, `npm:@scope/pkg@2.1.0-next.3`, `pkg@^1.2.0-beta.x`, `pkg@~1.2.3-rc.a` | passes | passes |
+| `jane.doe@example.org`, `x@mail.example.co.uk`, `MAILBOX@Uni-Example.DE` | refused | refused |
+| `user@123mail.com`, `x@mail.163.com` | refused | **passes** |
+
+The cost is the last row. An email whose domain has a **digit-led label** isn't caught, which is a
+known false negative and is documented in the book. It is the price of never refusing a semver pin.
+Also refused, by design: a non-semver tag that looks like a domain, such as `tool@next.beta`. The
+book tells writers to use `tool@next` or a semver pin instead.
+
+Login names (`user@host`, no dot) in software fields are **not** refused. They can't be told apart
+from dist-tag pins such as `tool@latest`. The book says not to put logins there. This partly
+disputes the round-1 audit's "apply the login ban to every free-text field": the ban applies to `name`
+and `identity`, where nothing legitimate needs `@`.
 
 ### 7.4 De-identifying ingests
 
@@ -1041,7 +1088,7 @@ The pre-change failure is shown once in the PR.
 | **P0a** (#573, after #587) | Object-level verification of `Manifest`; `newer_fields()` by the declared-field-name walk (opaque maps exempt); warnings in `verify`/`inspect`; `inspect --json` prints the object; `from_manifest` becomes fallible with `NewerFormatFields`; the verifier applies #587's integer rule | §2.1 cases B and D now **verify Ok** and list `actors` / `producer.agents` → `forward_compat_newer_field_verifies_and_warns`. Case C now fails `Integrity` → `spliced_unsealed_field_is_tampering`. Case E, `"study": null` and an embedded `requires_generation: false` verify and list nothing → `known_keys_are_never_newer_fields`. `from_manifest` on case B → `NewerFormatFields`. All 8 corpus goldens unchanged (existing conformance test). An unknown field holding a float and a nested object has a pinned RFC 8785 digest that both readers reproduce, and one holding `2^53 + 1` is refused by both → `unknown_field_seal_is_pinned` |
 | **P0b** (#573) | The same for `Collection`; `ProductSchema::from_value` reports unknown keys at any depth by the same walk and `validate_manifest` refuses; SPEC §5 missing rows and the §7 forward-reading rule; the reference reader still passes | An embedded schema with an unknown key at the top level, inside `fields[]` and inside `blocks[]` → `validate` = `NewerFormatFields`, while `inherit: false` / `requires_generation: false` validate → `unknown_schema_rule_is_not_validated`. A collection with an unknown key verifies → `collection_forward_compat`. `run.py` exit 0 |
 | **#574** | `publish` carries `producer`/`generation`/`ingest_transform`; `commit` carries `ingest_transform` (and `generation`, per Owner decision 9) | #574's probe as a test, one assertion per slot, for both verbs |
-| **P1a** | `Actor` types, `validate_actors` (§7.2 forms and pseudonym shape, §7.3 email ban, `id_inputs` ban), `add_actor`, the seal check, the carry rule, `Error::InvalidActor`, the role constants, the SPEC `actors` row, the `actors_chain` corpus fixture, the book section (§6.3, §6.4, §6.5, §7.5's "what is safe today") | The JSON byte form of §5.1 = committed golden → `actor_json_shape_golden`. Each refusal in §10.1 → `invalid_actor_*`, one per rule, including `invalid_actor_email_in_sampling` (a nested `sampling` string), `invalid_actor_at_in_name`, `invalid_actor_pseudonym_shape` and `actors_in_id_inputs_is_refused`. `harness_version = "pkg@1.2.3"` and `"tool@latest"` are accepted → `version_pins_are_not_emails`. An empty list leaves all 8 goldens unchanged. Different actors, same `id`, different `manifest_hash` → `actors_are_version_not_lineage`. `commit` without `--keep-actors` carries none, `--keep-actors` drops `reviewer`/`approver`, and `publish` copies verbatim → `carry_rule_never_inherits_an_approval`. A kept delegation to a dropped approver is refused → `kept_delegation_needs_reapproval`. An unknown kind using only known field names (`identity`, `name`) round-trips and is listed, and `publish`/`--keep-actors` refuse it → `unknown_actor_kind_is_opaque` |
+| **P1a** | `Actor` types, `validate_actors` (§7.2 forms and pseudonym shape, §7.3 email ban, `id_inputs` ban), `add_actor`, the seal check, the carry rule, `Error::InvalidActor`, the role constants, the SPEC `actors` row, the `actors_chain` corpus fixture, the book section (§6.3, §6.4, §6.5, §7.5's "what is safe today") | The JSON byte form of §5.1 = committed golden → `actor_json_shape_golden`. Each refusal in §10.1 → `invalid_actor_*`, one per rule, including `invalid_actor_email_in_sampling` (a nested `sampling` string), `invalid_actor_at_in_name`, `invalid_actor_pseudonym_shape` and `actors_in_id_inputs_is_refused`. Every semver form in §7.3's table is accepted in `harness_version`, `harness` and a nested `sampling` string: `pkg@1.2.3`, `tool@latest`, `pkg@1.0.0-alpha`, `pkg@1.0.0-alpha.beta`, `pkg@1.0.0-beta.rc`, `pkg@v1.0.0-beta.rc`, `pkg@1.0.0-rc.1+build.5`, `pkg@1.0.0+exp.sha.5114f85`, `npm:@scope/pkg@2.1.0-next.3`, `pkg@^1.2.0-beta.x` and `pkg@~1.2.3-rc.a` → `version_pins_are_not_emails`. The three refused emails in the table are refused, and the two digit-led-domain emails pass, which pins the documented false negative → `email_pattern_matches_its_table`. `tool@next.beta` is refused → `domain_shaped_tag_is_refused`. An empty list leaves all 8 goldens unchanged. Different actors, same `id`, different `manifest_hash` → `actors_are_version_not_lineage`. `commit` without `--keep-actors` carries none, `--keep-actors` drops `reviewer`/`approver`, and `publish` copies verbatim → `carry_rule_never_inherits_an_approval`. A kept delegation to a dropped approver is refused → `kept_delegation_needs_reapproval`. An unknown kind using only known field names (`identity`, `name`) round-trips and is listed, and `publish`/`--keep-actors` refuse it → `unknown_actor_kind_is_opaque` |
 | **P1b** | Staging `Header.actors`; `[[product.actors]]`; `ingest --actors`; `commit --add-actor/--keep-actors/--remove-actor` | A spec whose only provenance is `[[product.actors]]` seals them through `apply_spec_metadata` → `spec_with_only_actors_seals_them`. Incoming `--actors` survive the re-seal → `ingest_reseal_keeps_incoming_actors`. A resumed stage with actors is refused by a header without the field → `stage_header_refuses_unknown_actors`. A `--keep-actors` commit keeps the implementer, drops the approver, and accepts a re-added approver → a trycmd case |
 | **P1e** | `tessera actor pseudonym`; §7.4's de-identification refusal in `tessera-ingest`, called by ingest, `commit` and `tessera validate` | `dicom --deidentify` and `--recipient` with a ROR organisation, an ORCID operator, a `name` or `--actors-aux` are refused, and with pseudonyms only they seal → `deidentified_ingest_accepts_pseudonyms_only`. `commit --add-actor` of an ORCID person onto that product is refused → `deidentified_commit_refuses_named_actor`. `tessera validate` flags a library-written de-identified product with a named actor. `actor pseudonym` output matches §7.2's regex and two runs differ |
 | **P1c** (after #562) | Python `add_software_agent`/`add_person`/`add_organization`; `tessera.digest`; `Reader.actors`; anchor + `bindings.md`; `api_drift.py` | `write_example.py` anchor writes and reads back the §5.1 chain, with `brief` from `tessera.digest`. `tessera.digest(b"")` equals the Rust digest. A bad kwarg is a `TypeError`. A dangling delegation at `pack` is a `TesseraError` naming index and id. `tessera-py-import` check |
@@ -1050,7 +1097,7 @@ The pre-change failure is shown once in the PR.
 | **P2b** | DataCite contributors + `TechnicalInfo`; book sentence; the same refusals as P2a | A named person → `Personal` + ORCID scheme. A name-less person → not a contributor, present in the summary. A software agent → never a contributor. Invalid or newer actors → refused. Mandatory-field test still green |
 | **P3** (P3a + P3b, **one PR**) | P3a: `ProductSchema.required_actor_roles`, documented and worded as a claim check. P3b: §6.4's pinned-identity rule, `verify-sig --require-signer-role <role>`, and #590's fix to `--require-signer`, sharing one lookup | A schema requiring `approver` refuses a manifest without one and accepts one with it. A `commit --keep-actors` of an approved version fails the claim check until `--add-actor` re-approves → `approval_does_not_survive_commit`. Built-in embedded schema bytes unchanged (8 goldens). A key pinned to A that signs with label B fails `--require-signer-role approver` when the approver is B, and also when it is A (label/pin mismatch) → `signer_role_uses_the_pin_not_the_label`. An unpinned key, or `--pubkey`, refuses → `signer_role_needs_a_pinned_key`. The persona trycmd is extended with the approver chain |
 | **P3d** (after P3) | `inspect`'s attested/unattested marks (§6.4, §10.4), reusing P3b's lookup | `inspect` shows `attested (key …)` only for the pinned approver, `unattested` for an `acted_on_behalf_of` principal who didn't sign, and `unattested` for every row with no signature or an empty trust store → a trycmd case |
-| **P3c** | `tessera verify-change <product> --change <record> --role <role>` (§6.5); the book's change-record section with `subject_git_repo`/`subject_git_commit` | A host-signed product whose `producer.git_commit` matches an approver-signed change record → Ok, with no approver actor on the product → `change_approval_without_a_person_on_the_product`. A mismatched commit, `dirty = true`, an unattested approver, a record without subject keys, or an `approved_change` edge pinning a different record → typed refusals, one test each |
+| **P3c** | `tessera verify-change <product> --change <record> --role <role>` (§6.5); the book's change-record section with `subject_git_repo`/`subject_git_commit` | A host-signed product whose `producer.git_commit` matches an approver-signed change record, with its `organization` operator attested by the host key → Ok, with no approver actor on the product → `change_approval_without_a_person_on_the_product`. A mismatched commit, `dirty = true`, an unattested approver, an unattested operator (host key unpinned or pinned to another identity), a `software_agent` operator (`operator_must_be_attestable`), a record without subject keys, or an `approved_change` edge pinning a different record → typed refusals, one test each |
 | **P4** (deferred, filed when an adopter needs it) | `identity_commitment` + the `aux/identity/` envelope (§7.5) | A key holder recomputes the commitment from the decrypted envelope and matches it. A swapped envelope fails the match. A shred removes the mapping and leaves the seal unchanged |
 
 Erasing one version from a repository (§7.5) is **#591**, a repository verb that isn't specific to
