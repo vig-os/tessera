@@ -339,8 +339,25 @@ jobs:
         env:
           HEAD_REF: ${{ github.head_ref }}
           BRANCH_TYPES: ${{ needs.resolve-toolchain.outputs.branch-types }}
+          PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
         run: |
           set -euo pipefail
+          # LOCAL PATCH (#629, upstream vig-os/devkit#1902): a PR opened by a bot account
+          # is exempt from the branch-name convention, the same exemption
+          # validate-commit-range already gives `[bot]` commit authors
+          # (docs/COMMIT_MESSAGE_STANDARD.md "Exemptions"). Bots name their own
+          # branches, and some cannot follow the convention: release-plz names its PR
+          # branch `<pr_branch_prefix><RFC 3339 timestamp>`, whose uppercase `T`/`Z`
+          # no slug accepts, and has no setting to change it. The exemption keys on
+          # the PR author's account type, which GitHub sets and a human account
+          # cannot claim, never on the branch name, so a human's branch is still
+          # checked whatever it is called. REMOVE once the upstream issue lands;
+          # until then a devkit upgrade regenerating ci.yml drops this block.
+          if [ "${PR_AUTHOR_TYPE}" = "Bot" ]; then
+            echo "Branch name not checked: '${HEAD_REF}' belongs to a PR opened by bot account ${PR_AUTHOR_LOGIN}."
+            exit 0
+          fi
           TYPES_ALTERNATION="${BRANCH_TYPES//,/|}"
           # Every alternative is individually ^...$-anchored:
           #   main|dev                 long-lived branches (committing on them

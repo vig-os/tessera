@@ -100,6 +100,10 @@ Additionally, the CI validator skips two classes of commit outright:
 - **Bot-authored commits** — Any commit whose author is a GitHub bot account (a name ending in `[bot]`: Renovate, Dependabot, `commit-action-bot`, …). These bots emit `build(pip): lock file maintenance` or `ci(actions): bump actions/checkout` and cannot know an issue number, so the `Refs:` requirement is waived for them regardless of type. The exemption is keyed on the author, so the same message from a human is still rejected.
 - **Merge commits** — Their subject is the pull request title, which is validated separately (see below).
 
+The CI branch-name gate (the `commit-checks` job's `Validate branch name` step) exempts the same accounts:
+
+- **Bot-authored pull requests** — A pull request opened by a GitHub bot account (`user.type` `Bot`, a login ending in `[bot]`, such as a GitHub App like `tessera-release-plz[bot]`) skips the branch-name check. Bots name their own branches and often cannot follow the convention: release-plz names its release branch `<prefix><timestamp>` (e.g. `chore/release-plz-2026-10-18T13-31-15Z`), and no slug accepts the timestamp's uppercase `T`/`Z`. The exemption is keyed on the pull request's author, so a human's branch with the same name is still rejected. In tessera this is a local patch to the devkit-managed `ci.yml` ([#629](https://github.com/vig-os/tessera/issues/629), upstream [vig-os/devkit#1902](https://github.com/vig-os/devkit/issues/1902)).
+
 ## Where the standard is enforced
 
 - **Locally** — the `commit-msg` hook (via `core.hooksPath` → `.githooks/commit-msg` → `prek run --hook-stage commit-msg`). Both sanctioned environments wire `core.hooksPath` → `.githooks` automatically: the devcontainer sets it during setup, and the direnv / `nix develop` dev-shell sets it on shell entry (guarded to the main worktree). So once you have entered the dev environment the guard is active. It is only silently absent before you have entered it (or in an ad-hoc checkout outside both modes), where `core.hooksPath` may be unset and git runs no hooks.

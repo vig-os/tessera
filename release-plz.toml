@@ -21,6 +21,17 @@
 # libhdf5 resolves (the nix dev shell) — tracked in #607.
 semver_check = false
 #
+# CONVENTIONS (#629). release-plz names the release PR branch `<pr_branch_prefix><RFC 3339 timestamp>`
+# (e.g. chore/release-plz-2026-10-18T13-31-15Z) and has no setting for the timestamp. Its uppercase `T`/`Z`
+# fit no branch shape in docs/COMMIT_MESSAGE_STANDARD.md, so the CI branch-name gate exempts PRs opened by a
+# bot account (this App), keyed on the PR author, never on the branch name. The `chore/` prefix keeps the
+# name readable as maintenance. It is also how release-plz FINDS its open PR (it matches open PRs by this
+# prefix): changing it orphans an open release PR, which then has to be closed by hand. The release
+# commit's message is the PR title (`chore: release v<version>`); release-plz has no separate commit-message
+# setting. It needs no `Refs:` line: `chore` is Refs-optional and the commit's author is the App's `[bot]`
+# account, both exempt in the standard. GitHub signs the commit (it is made through the API).
+pr_branch_prefix = "chore/release-plz-"
+#
 # HANDOFF → cargo-dist (the broad binary channel; see /dist-workspace.toml + /.github/workflows/
 # release.yml). release-plz owns the version bump and CHANGELOG; the operator pushes the tag. That tag
 # is the single cut trigger: cargo-dist's release.yml fires on any tag matching

@@ -22,6 +22,13 @@
 #
 # NOTE: run from a branch other than `dev` (workflow_dispatch --ref), release-plz opens the release
 # PR against THAT branch — it bases the PR on the checked-out branch. Such a PR is a test artefact.
+# release-plz finds "its" open PR by branch prefix alone, whatever the PR's base: a test run with
+# the same `pr_branch_prefix` as dev's would force-push the real release PR's branch. Close a test
+# PR before its config reaches dev, or dev's next run adopts it.
+#
+# CONVENTIONS (#629): the release PR branch is `chore/release-plz-<timestamp>` and the release
+# commit is `chore: release v<version>` with no `Refs:` line; /release-plz.toml says why both pass
+# the Commit Messages job (the bot-author exemptions in docs/COMMIT_MESSAGE_STANDARD.md).
 #
 # TOKEN: the release PR is opened with a GitHub App installation token (secrets.RP_APP_ID +
 # RP_APP_PRIVATE_KEY, #430): the repo's GITHUB_TOKEN cannot create PRs (Actions PR-creation is off) and
