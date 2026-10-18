@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2](https://github.com/vig-os/tessera/compare/tessera-py-v0.1.0-alpha.1...tessera-py-v0.1.0-alpha.2) - 2026-10-18
+
+### Added
+
+- *(py)* expose with_producer / with_generation on Builder
+- *(py)* pin a parent's seal on Builder.add_source
+- *(py)* expose the array codec on Builder.add_array
+
+### Other
+
+- *(py)* prove the codec knob round-trips and the default is unchanged
+- ingest cookbook, generated product-schema reference, tested Python write example, cli.md stubs ([#484](https://github.com/vig-os/tessera/pull/484))
+- clear the lint backlog the new CI gate surfaced
+
 ## [0.1.0-alpha.1](https://github.com/vig-os/tessera/releases/tag/tessera-py-v0.1.0-alpha.1) - 2026-09-23
 
 ### Added
