@@ -28,16 +28,20 @@
         |   |-- tessera-ingest feature "parquet" (command-line) (*)
         |-- tessera-cli vWORKSPACE
         |-- tessera-ingest vWORKSPACE
-    `-- tessera-ingest vWORKSPACE (*)
     `-- tessera-io feature "default" (command-line)
+    `-- zip feature "deflate-flate2-zlib-rs" (*)
     |   `-- tessera-cli feature "cloud" (command-line)
     |-- tessera-io feature "cloud" (command-line)
 [dev-dependencies]
 `-- tessera-cli vWORKSPACE (*)
 `-- tessera-io vWORKSPACE
 `-- zip feature "flate2"
-zip v2.4.2
-|       `-- tessera-ingest vWORKSPACE (*)
+zip v9.0.4
+|           [dev-dependencies]
+|           `-- tessera-ingest vWORKSPACE (*)
+|           `-- tessera-io vWORKSPACE (*)
+|       `-- zip feature "deflate-flate2-zlib-rs"
 |   `-- zip feature "deflate-flate2"
 |-- zip feature "_deflate-any"
 |-- zip feature "deflate-flate2" (*)
+|-- zip feature "deflate-flate2-zlib-rs" (*)

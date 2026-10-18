@@ -2924,7 +2924,7 @@ mod tests {
         let mut entries = Vec::new();
         for i in 0..zip.len() {
             let mut f = zip.by_index(i).unwrap();
-            let name = f.name().to_string();
+            let name = f.name().unwrap().into_owned();
             let mut buf = Vec::new();
             std::io::Read::read_to_end(&mut f, &mut buf).unwrap();
             if name == "manifest.json" {

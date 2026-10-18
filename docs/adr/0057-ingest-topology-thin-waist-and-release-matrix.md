@@ -430,6 +430,15 @@ the decompressor; it is not part of this PR, which is based on `dev` and adds no
 has to live in `tessera-ingest`, because `-p tessera-io` alone cannot even name
 `CompressionMethod::Deflated`, and that asymmetry is the hazard restated.
 
+> **Amended (2026-10-17, #588):** the writer side is now checked too, inside `tessera-io` itself.
+> `tessera-io/tests/stored_only.rs` takes a dev-dependency on `zip` with deflate enabled, so
+> `cargo test -p tessera-io` rebuilds the unified-feature condition on its own. The test first proves a
+> deflate codec is really compiled in, then asserts that every writer (`pack`, both streaming packers,
+> the aux rewrite, `pack_dir`) emits only STORED entries. It checks both the central-directory record
+> and the local header in the raw bytes. `conformance.rs` additionally pins the committed corpus
+> `.tsra` files byte-for-byte against a fresh `pack`, so a `zip` upgrade that reframed the container
+> would fail there even with every hash intact.
+
 Note also what the two determinism defects have in common. #468 and #472 both diverge in the metadata
 *around* the values — a container record and a persisted `Stat::Sum` respectively — while the encoded
 values are identical. That is exactly why `deterministic_table_compressor`'s exclusion list could not
