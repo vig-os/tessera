@@ -1128,6 +1128,16 @@
             mdbook build ${./.}/docs/book -d $out
           '';
 
+          # The release-plz baseline: which tag is "the last release" (#606). SemVer order with
+          # pre-releases, capped at the workspace version (the repo's v0.1.0 / v1.0.0-rc1 are format
+          # milestones), reachable from HEAD, and a loud failure when there is none — proven on
+          # throwaway repos, since the workflow itself only ever sees the real tag set.
+          release-tag-resolution = pkgs.runCommand "release-tag-resolution"
+            { nativeBuildInputs = [ pkgs.git ]; } ''
+            HOME=$TMPDIR bash ${./scripts/last-release-tag.sh} --self-test
+            touch $out
+          '';
+
           # The dev shell itself must build (toolbelt + toolchain resolve).
           dev-shell = self.devShells.${system}.default;
         } // linuxOnlyChecks;
