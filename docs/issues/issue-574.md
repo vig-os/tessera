@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-16T21:45:19Z
-updated: 2026-10-16T21:45:19Z
+updated: 2026-10-18T01:01:14Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/574
-comments: 0
+comments: 1
 labels: bug, area:core, audit-trail
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:45.064Z
+synced: 2026-10-18T06:56:51.294Z
 ---
 
 # [Issue 574]: [bug(cli): publish and commit drop sealed producer, generation and ingest_transform via from_manifest](https://github.com/vig-os/tessera/issues/574)
@@ -54,4 +54,12 @@ edge). `commit` carries every slot that describes carried blocks (`ingest_transf
 `generation` unless the caller replaces it), and restamps only `producer`. Each slot has a test that
 fails without the fix. ADR-0060 (#564) adds a fourth slot, `actors`, with the same carry rule, so the
 rule should be stated once, next to `from_manifest`.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 18, 2026 at 01:01 AM_
+
+Scope addition from ADR-0060's final review (PR #586 @644a832, §10.1): ADR-0060 §10.1 says preserving an incoming manifest's own `producer`/`generation` on the **ingest re-seal** (engine.rs ~1224-1255 attaches the *spec's* values; `from_manifest` product.rs:38-63 drops the incoming ones) is #574's scope. This issue currently covers only `publish`/`commit`. Include the ingest re-seal path here (same root cause: `from_manifest` dropping sealed provenance), or split it out explicitly.
 

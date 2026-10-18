@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-16T21:45:17Z
-updated: 2026-10-16T21:45:17Z
+updated: 2026-10-17T08:08:34Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/573
-comments: 0
+comments: 1
 labels: bug, area:core, area:integrity
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:45.489Z
+synced: 2026-10-18T06:56:51.974Z
 ---
 
 # [Issue 573]: [bug(core): a reader drops unknown manifest fields, so a correctly sealed newer product fails verify as tampering](https://github.com/vig-os/tessera/issues/573)
@@ -65,4 +65,15 @@ Designed in ADR-0060 §2 (proposed with #564): keep unknown fields verbatim (has
 per SPEC §4), surface them as a warning, refuse every **re-seal** operation on a manifest that carries
 fields this build does not understand, refuse `validate` on an embedded schema rule it does not
 understand, and pin the canonical form of empty collections. This is a prerequisite for #564 P1.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 17, 2026 at 08:08 AM_
+
+Two more cases from a fresh reviewer's probe on dev fa581f5 (PR #586 audit), likely the same root cause (Rust verifies by re-serialising its parsed struct, not the parsed JSON object):
+- A manifest that **omits `sources`**, and one with **`"study": null`**, are both valid per SPEC §4 (docs/SPEC.md:46-53). The Python reference reader verifies them; the Rust reader reports `Integrity` (manifest_hash mismatch), because serde defaults/normalises the field before re-hashing.
+- On the unknown-field cases the two readers disagree the other way: Rust B (field added + resealed) → Err, C (field added, old seal) → Ok (field silently dropped). Reference reader: B ok=True, C ok=False.
+The fix should hash the canonical form of the **received** JSON object, and its tests should include all four cases plus a cross-reader conformance check.
 
