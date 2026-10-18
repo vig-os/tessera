@@ -86,6 +86,7 @@
           "/crates/tessera-py/tests/api_drift.py" = [ "tessera-py-import" "tessera-wheel-import" ];
           "/crates/tessera-py/tests/codec_roundtrip.py" = [ "tessera-py-import" "tessera-wheel-import" ];
           "/crates/tessera-py/tests/write_example.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/provenance.py" = [ "tessera-py-import" "tessera-wheel-import" ];
           "/crates/tessera-ingest/tests/producer_equality.py" = [ "ingest-producer-equality" ];
           "/crates/tessera-wasm/tests/smoke.cjs" = [ "wasm-bindgen-smoke" ];
           "/corpus/reference_reader/run.py" = [ "reference-reader" ];
@@ -116,6 +117,7 @@
               "/crates/tessera-py/tests/api_drift.py"
               "/crates/tessera-py/tests/codec_roundtrip.py"
               "/crates/tessera-py/tests/write_example.py"
+              "/crates/tessera-py/tests/provenance.py"
             ];
           in
           {
@@ -1087,6 +1089,8 @@
             # The WRITE path as documentation (#389): the book `{{#include}}`s anchored regions of this
             # script, so running it here means a snippet that stopped working cannot reach the docs.
             python3 ${./tessera/crates/tessera-py/tests/write_example.py}
+            # Python provenance surface (#562, #563): pinned edges, producer, generation, read back sealed.
+            python3 ${./tessera/crates/tessera-py/tests/provenance.py}
             touch $out
           '';
 
@@ -1112,6 +1116,8 @@
             python3 ${./tessera/crates/tessera-py/tests/codec_roundtrip.py}
             # …and the documented write path, so the book's example works through the real wheel too.
             python3 ${./tessera/crates/tessera-py/tests/write_example.py}
+            # Python provenance surface (#562, #563): pinned edges, producer, generation, read back sealed.
+            python3 ${./tessera/crates/tessera-py/tests/provenance.py}
             touch $out
           '';
 
