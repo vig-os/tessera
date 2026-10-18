@@ -1,8 +1,8 @@
 # ADR-0061 — DICOM de-identification: the PS3.15 Annex E profile, table-driven
 
 **Status:** Proposed (2026-10-17, design for [#579](https://github.com/vig-os/tessera/issues/579), P0: it gates the
-first DICOM ingest of MorePET/anatomist; revised 2026-10-18 after the round-1 audit of PR #592, see the
-revision log at the end). **Amends** ADR-0047 §1 step 4, its "completeness by construction" claim and its §4
+first DICOM ingest of MorePET/anatomist; revised 2026-10-18 after the round-1 and round-2 audits of PR #592,
+see the revision log at the end). **Amends** ADR-0047 §1 step 4, its "completeness by construction" claim and its §4
 erasure claim (§0, §4.3), and ADR-0035's spec-hash pre-image for de-identifying runs (§9.5). Implements ADR-0040
 §1 (PS3.15 seeds the tiers) for DICOM. Builds on ADR-0042 (sealed vs `aux/`), ADR-0048 (the provenance edge),
 ADR-0056 §6 (the sealed `ingest_transform` record) and ADR-0058 (sealed `producer`, inheritance of `identifying`
@@ -93,14 +93,18 @@ The defect shipped: `v0.1.0-alpha.1` (`a35c61b`, published 2026-09-24) carries t
    depth. All private tags are removed (Retain Safe Private is opt-in). Groups 0000, 0002 and 0004 are removed
    from the dataset. A public tag the PS3.6 2026d dictionary does not know is removed. **Every UI value is
    replaced** unless its attribute is on a generated class/syntax/coding allowlist or the value is under the
-   DICOM root `1.2.840.10008.`. **Every DA/DT/TM value follows the date rule**, listed in E.1-1 or not.
+   DICOM root `1.2.840.10008.`. **Every DA/DT/TM value follows the date rule**, listed in E.1-1 or not, as do
+   the two alternative-calendar date fields. URI attributes that can carry instance UIDs are removed. **No UN
+   element is ever sealed**, so nothing reaches the seal as opaque bytes.
 3. **UIDs are replaced by keyed derivation**: `2.25.<UUIDv8(BLAKE3-keyed(K, uid))>`. This is deterministic,
    so S15 holds. It keeps referential integrity inside its keyspace, and nobody without K or the original files
    can link a replacement to its original. By default K is per ingest run, derived from the raw source bytes.
    A custodian key file widens the keyspace across runs, at a cost to erasure that is stated (§4).
 4. **Dates and times are removed by default**, which now includes the 15 DA/DT/TM attributes E.1-1 does not
-   list. Retain Full Dates keeps them. Retain Modified Dates shifts **every** DA and DT by a whole-day offset
-   keyed on (IssuerOfPatientID, PatientID), and refuses without a subject identity (§5).
+   list and the 2 alternative-calendar fields. Retain Full Dates keeps them. Retain Modified Dates shifts
+   **every** surviving DA and DT by a whole-day offset keyed on (IssuerOfPatientID, PatientID), and refuses
+   without a subject identity. The date mode **alone** governs every date-valued attribute: no other option can
+   leave a date unshifted next to shifted ones (§3.0, §5).
 5. **The seal carries the de-identified header, never the original.** The originals of every attribute the
    profile touched, on **every slice**, go into the ADR-0047 envelope with the UID map, the date offset and the
    source paths. Without recipients there is no envelope and that data is **dropped**. `header = "none"`
@@ -188,12 +192,12 @@ them, and they are handled like any other attribute.
 
 **R3 — every UI value is protected.** E.1.1: a de-identifier "shall always protect … the SOP Instance UID
 (0008,0018) Attribute as well as all references to other SOP Instances, whether contained in the main Data Set
-or embedded in an Item of a Sequence of Items". E.1-1 has 55 UI-VR rows (54 `U`, plus Annotation Group UID
-(006A,0003) as `D`). PS3.6 Table 6-1 has **92** UI-VR attributes (10 retired). **39** of them are not in
-E.1-1, and Basic, read literally, would keep them. They include Multi-frame Source SOP Instance UID (0008,1167),
-Radiopharmaceutical Administration Event UID (0008,3012), which every PET acquisition carries, and the
-Volume/Table Frame of Reference UIDs (0020,9312)/(0020,9313). The generator splits those 39 with one keyword
-rule. The attribute is **kept** only if its PS3.6 keyword matches
+or embedded in an Item of a Sequence of Items". E.1-1 has 55 UI-VR rows: 54 `U`, which are replaced, and
+Annotation Group UID (006A,0003) as `D`, which §2 resolves to **remove**. PS3.6 Table 6-1 has **92** UI-VR attributes
+(10 retired). **39** of them are not in E.1-1, and Basic, read literally, would keep them. They include Multi-frame
+Source SOP Instance UID (0008,1167), Radiopharmaceutical Administration Event UID (0008,3012), which every PET
+acquisition carries, and the Volume/Table Frame of Reference UIDs (0020,9312)/(0020,9313). The generator splits those 39
+with one keyword rule. The attribute is **kept** only if its PS3.6 keyword matches
 
 ```text
 SOPClass|TransferSyntaxUID$|^CodingSchemeUID$|^ContextUID$|^MappingResourceUID$
@@ -241,13 +245,59 @@ Modified Dates, every surviving DA/DT value is shifted.
 **R5 — VRs for every table row.** The fixture (§11) needs a VR for every E.1-1 row. Six rows have none in Table
 6-1. (0002,0003) and (0004,1511) resolve from Tables 7-1 and 8-1. (0000,1000) and (0000,1001) are command-group
 elements (PS3.7, UI). The generator declares them with that citation, and R1 removes them anyway. The two
-pattern rows are expanded into concrete member tags, each with the VR that Table 6-1 gives its pattern. R1-R5
-are the whole list of hand-written policy, and each sits in the generator with its citation.
+pattern rows are expanded into concrete member tags, each with the VR that Table 6-1 gives its pattern.
+
+**R6 — dates held in text VRs.** PS3.6 defines two public attributes that hold a date as text and are not in
+E.1-1: (0010,0033) Patient's Birth Date in Alternative Calendar and (0010,0034) Patient's Death Date in
+Alternative Calendar, both LO (PS3.6 2026d Table 6-1). The round-2 audit sealed (0010,0033) unchanged under every
+mode. The generator finds them with one rule: a public attribute not in E.1-1, whose VR is a text VR (LO SH ST LT
+UT UC), and whose keyword contains `Date`. In 2026d that rule matches exactly these two. A wider scan over every
+text-class VR with `Date|Time` in the keyword matches 56 attributes, and the other 54 are durations, counters,
+flags or names (for example (0018,0080) RepetitionTime DS, (0008,2132) EventTimerNames LO), not calendar dates.
+R6 attributes are **date-valued**. They are kept under Full Dates and **removed** under Basic and under Modified
+Dates, because free text in an arbitrary calendar cannot be shifted reliably. The calendar name (0010,0035) is CS
+and stays.
+
+**R7 — URI attributes.** E.1.1's "all references to other SOP Instances" includes references written as URLs:
+the round-2 audit sealed (0008,1190) RetrieveURL `https://pacs.invalid/studies/1.2.826…` verbatim. PS3.6 2026d has
+**15** UR attributes. (0010,0047), (0040,E012) and (0072,0071) are in E.1-1 (`X`, `X`, `D`, all removed). Of the
+**12** that are not, the generator **keeps** only those whose keyword matches `^CodingSchemeURL$|^URNCodeValue$`.
+Both name coding resources, which E.1.1 treats as safe ("coded sequence entries … do not contain identifying
+information"). It **removes** the other 10: (0008,0407) StoredInstanceBaseURI · (0008,0408) FolderAccessURI ·
+(0008,0409) FileAccessURI · (0008,040B) FilenameInContainer · (0008,1190) RetrieveURL · (0028,7FE0)
+PixelDataProviderURL · (0040,4073) StorageURL · (0040,E010) RetrieveURI · (0068,7005)
+RelativeURIReferenceWithinEncapsulatedDocument · (0074,100A) ContactURI. No UT or LT attribute in 2026d has a
+keyword naming a URI or URL. The scan for `UR[IL]` in non-UR keywords finds only (0008,010A) CodingSchemeURLType
+(CS, an enumeration) and (0074,1008) ProcedureStepCommunicationsURISequence (SQ, whose UR items R7 removes).
+**Remove, not rewrite:** rewriting would mean parsing every URL scheme and path layout (DICOMweb, WADO, XDS,
+vendor) to find embedded UIDs, and a URL also carries a host and path (institution identity, sometimes names)
+that a rewrite would keep. A retrieve location is also meaningless inside a sealed, offline product. URLs in
+free text remain a stated residual (§Consequences).
+
+**R8 — no UN element is ever sealed.** An implicit-VR file read without a dictionary entry yields UN. A private SQ
+then arrives as raw bytes, so a check for "absent by tag" cannot see inside it (round-2 audit). The rule:
+
+1. a public UN element: R2 removes it if the tag is unknown, otherwise it is re-typed to its PS3.6 VR;
+2. a private UN element under Basic: removed with all private tags;
+3. a private UN element under Retain Safe Private: if its (creator, element) is in E.3.10-1 with a concrete VR,
+   the bytes are re-parsed as that VR. An SQ is parsed as Implicit VR Little Endian: PS3.5 2026d §6.2.2 says an
+   application that knows the actual VR of a UN element "can assume that the Value Field … is encoded in Little
+   Endian byte ordering with Implicit VR encoding". It is then processed recursively like any other sequence. E.3.10-1's
+   `OW/OB` rows ((2001,xx7d), (2001,xxff)) are typed OB. Its 5 rows with no VR ((0119,xx11), (0119,xx12),
+   (0129,xx03-05)) and every pair not in E.3.10-1 are removed;
+4. after the profile runs, `apply` checks that no UN remains at any depth, and **fails** the ingest if one does
+   (an internal invariant, not a warning).
+
+So UI values in re-typed Safe Private elements reach R3 as UI and are replaced. That is how replacement inside
+formerly-UN bytes is defined (N6).
+
+R1-R8 are the whole list of hand-written policy, and each sits in the generator with its citation.
 
 **Edition drift.** Two checks:
 
 - *hermetic* (in the flake): the embedded TSVs parse, every action cell is one of the measured codes, the row
-  counts match the header (657 / 479 / 5268 / 22 / 19, and the §2.1 lists 16 / 23 / 15), and the header's source
+  counts match the header (657 / 479 / 5268 / 22 / 19; the §2.1 lists R3 16 / 23, R4 15, R6 2, R7 2 / 10; the
+  §3.0 override set 11), and the header's source
   sha256 equals the one this ADR records. A hand edit to a TSV fails, because the body digest no longer matches.
 - *scheduled* (non-hermetic, weekly CI, report-only): fetch `current`, re-run the generator, and open an issue
   when the edition, a table or a generated list changes. Moving to a new edition is a deliberate PR. It changes
@@ -275,8 +325,8 @@ parameters (reconstruction, dose, radiopharmaceutical) that make a DICOM-derived
 | Retain Device Identity | DCM 113109 | yes | `K` rows kept; its 11 `C` rows (AE titles etc.) keep the Basic action |
 | Retain Institution Identity | DCM 113112 | yes | 10 `K` rows |
 | Retain Patient Characteristics | DCM 113108 | yes | 14 `K` rows (sex, age, weight, size, …); 5 `C` rows stay Basic |
-| Retain Longitudinal Full Dates | DCM 113106 | yes | 169 rows + the 15 R4 attributes `K`; exclusive with Modified |
-| Retain Longitudinal Modified Dates | DCM 113107 | yes | the same 184 attributes shifted (§5) |
+| Retain Longitudinal Full Dates | DCM 113106 | yes | its 169 `K` rows + R4 15 + R6 2 kept (§5); excl. Modified |
+| Retain Longitudinal Modified Dates | DCM 113107 | yes | 169 `C` rows + R4 15: DA/DT shifted, TM kept, rest gone |
 | Clean Descriptors | DCM 113105 | **no** | needs a vetted text-cleaning dictionary |
 | Clean Structured Content | DCM 113104 | **no** | SR content-item cleaning |
 | Clean Graphics | DCM 113103 | **no** | overlays and curves are removed (Basic) |
@@ -285,9 +335,35 @@ parameters (reconstruction, dose, radiopharmaceutical) that make a DICOM-derived
 The codes and meanings were checked against PS3.16 2026d, CID 7050 ("De-identification Method", version
 20170914). The longest code meaning, for 113107, is 62 characters, which fits LO.
 
-**Where an option cell is `C`, Tessera keeps the Basic action (remove).** For example, Retain Device Identity
-cleans Station AE Title (0008,0055). Removing it is stricter than cleaning, so claiming the option stays
-truthful. This is documented beside the option list in the book.
+**Where an option cell is `C`, Tessera keeps the Basic action (remove)**, except for Modified Dates, whose `C`
+means shift (§5). For example, Retain Device Identity cleans Station AE Title (0008,0055). Removing it is stricter
+than cleaning, so claiming the option stays truthful. This is documented beside the option list in the book.
+
+### §3.0 — Option precedence
+
+174 E.1-1 rows carry a cell in more than one option column (generated): 158 are Full `K` + Modified `C`; 11 are
+Device Identity `K` + Full `K` + Modified `C`; 3 are Clean Descriptors `C` + Patient Characteristics `C`; and 2
+are Device Identity `K` + UIDs `K`. The resolution of one row, in order:
+
+1. **date-valued rows are governed by the date mode alone.** A row is date-valued if its VR is DA, DT or TM, if it
+   is a Full Dates `K` row (which adds the 2 OB timestamps (0400,0310) and (0034,0007) and the SH
+   TimezoneOffsetFromUTC (0008,0201)), or if it is an R4 or R6 attribute. Under Basic it takes the Basic action
+   (remove). Under Full Dates it is kept if Full marks it `K` or it is R4/R6, and otherwise takes its Basic action.
+   Under Modified Dates it is shifted if it is a DA/DT that Modified marks `C` or that R4 lists, a TM is kept, and
+   anything else (OB timestamps, the SH offset, R6 text) is removed. **No non-date option's `K` applies to a
+   date-valued row**;
+2. otherwise, `K` if any active option marks the row `K`;
+3. otherwise, the Basic action (an unsupported or non-date `C` resolves to it).
+
+Rule 1 overrides Retain Device Identity's `K` on 11 device dates, including (300C,0127) Beam Hold Transition
+DateTime (a treatment time, so a subject date), (0018,1200) Date of Last Calibration and (0018,1204) Date of
+Manufacture. Without a date option they are removed. Under Modified Dates they are shifted, and under Full Dates
+they are kept. This is stricter than E.3.8 read alone, which would retain them, so the attestation says so: when
+Device Identity is applied without Full Dates, (0012,0063) carries the extra value `Device dates follow the
+date option` (39 characters), and the record lists the 11 rows under `overridden`. Three E.1-1 date-VR rows have
+no Full/Modified cell at all, (0010,0030) PatientBirthDate, (0010,0032) PatientBirthTime and (0016,0077) GPS Time
+Stamp, so they are removed under every mode. This is the table's intent: age, not birth date, is what Patient
+Characteristics retains.
 
 **Default = Basic alone.** It is the most protective setting and needs no key. PET quantitation (SUV) needs body
 weight (`X` under Basic, `K` under Patient Characteristics) and radiopharmaceutical start time and series time
@@ -346,17 +422,26 @@ PS3.15 option, because only those are attestable.
 
 ### §4.1 — Coverage and derivation
 
-The protected UI values are those of the 55 E.1-1 UI rows, the 23 R3 `replace` attributes, and the 7 E.3.10-1 UI
-rows under Retain Safe Private, at any depth, on every slice, minus the DICOM-root guard (§2.1 R3). The UIDs inside
-the two `X/Z/U*` sequences are removed with their sequence. Each value is replaced with
+The protected UI values are those of the **54 `U` rows** of E.1-1 (Annotation Group UID (006A,0003) is `D` and
+is removed, §2.1 R3), the 23 R3 `replace` attributes, and the 7 E.3.10-1 UI rows under Retain Safe Private
+(re-typed from UN where needed, R8). That applies at any depth, on every slice, minus the DICOM-root guard. The
+UIDs inside the two `X/Z/U*` sequences are removed with their sequence. UIDs embedded in URLs are removed with
+their attribute (R7). Each value is replaced, byte-exactly:
 
 ```text
-h    = BLAKE3-keyed(K, "tessera/dicom-deid/uid/v1" ‖ uid)
-uid' = "2.25." + decimal(UUIDv8(h[0..16]))
+u    = the value as ASCII, trailing NUL/space padding removed
+h    = BLAKE3 keyed hash, key K (32 bytes),
+       input "tessera/dicom-deid/uid/v1" ‖ u; first 16 bytes
+h[6] = (h[6] & 0x0F) | 0x80        # UUID version 8
+h[8] = (h[8] & 0x3F) | 0x80        # RFC 9562 variant
+uid' = "2.25." + decimal(h as a 128-bit big-endian integer)
 ```
 
-`2.25.` is the PS3.5 B.2 UUID-derived root. Setting the RFC 9562 version (8) and variant bits makes the 128 bits
-a valid custom UUID, so the result is a valid UID of at most 44 characters. Multi-valued UI elements are mapped
+`2.25.` is the PS3.5 B.2 UUID-derived root, and the result is a valid UID of at most 44 characters. **Test
+vector**, with K = bytes `00 01 02 … 1f`: `1.2.826.0.1.3680043.99.4242.100` → bytes
+`7b899870689b8727963b2f3185ad639c` → `2.25.164209479983352343176970855835994252188`. It was computed with the
+`blake3` Python binding, which wraps the reference Rust crate and gives `6437b3ac…5bd9d85` for unkeyed `abc`, the
+published value. P2c pins it as a unit test. Multi-valued UI elements are mapped
 per value. The same `uid` maps to the same `uid'` everywhere: top level, nested items, every slice, public or
 private. That keeps referential integrity across a series, and keeps a shared FrameOfReferenceUID shared between
 PET and CT.
@@ -364,7 +449,8 @@ PET and CT.
 ### §4.2 — The key K, and why it is never derivable from the seal
 
 - *Per run (default).* K is BLAKE3 `derive_key` with the context `tessera 2026-10 dicom-deid per-run key v1`
-  over the raw source bytes of every DICOM member of the spec run, length-prefixed, in spec order. It is
+  over the raw source bytes of every DICOM member of the spec run: for each member in spec order, and each
+  input file in its listed order, `u64le(len) ‖ bytes`. It is
   computed in the same streaming pass as `source_digest`. The context string differs from the sealed
   `ingested_from.content_hash`, so the seal reveals nothing about K. Computing K requires **the original files**,
   and a holder of those can already link the product through the bit-identical pixels. Products in one spec run
@@ -393,7 +479,8 @@ recovering Δ needs the original files. It does **not** hold for a **custodian**
 still confirm any known original UID against its replacement, and can recompute Δ from a known PatientID (§5).
 That is the linkage the key exists for, and per-subject destruction inside one key is impossible. So:
 
-- a custodian keyspace is recorded (`keyspace: "custodian"`, `key_id`) and printed by `inspect`;
+- a custodian keyspace is recorded (`keyspace: "custodian"`, `key_id`) and printed by `inspect`, including in
+  `inspect --json` (the round-2 reviewer's ask);
 - `tessera shred` on such a product succeeds, but warns that erasure also requires destroying the custodian key,
   which affects every product in that keyspace;
 - ADR-0047 §4's claim is amended to say "in the per-run keyspace" (the P5 banner);
@@ -402,29 +489,44 @@ That is the linkage the key exists for, and per-subject destruction inside one k
 
 ## §5 — Dates and times
 
-| Mode | the 184 DA/DT/TM attributes (169 rows + 15 R4) | (0028,0303) | sealed `study_date` |
+The date-valued set (§3.0 rule 1, regenerated): the 169 E.1-1 rows with a DA/DT/TM VR (DA 55, DT 61, TM 53), the
+3 non-date-VR Full `K` rows (2 OB, 1 SH), the 15 R4 attributes and the 2 R6 attributes. The Full and Modified
+columns mark the same 169 rows: 166 of the date-VR rows plus the 3 non-date ones. The 3 date-VR rows they do not
+mark (birth date, birth time, GPS time stamp) are always removed.
+
+| Mode | the date-valued set | (0028,0303) | sealed `study_date` |
 |---|---|---|---|
-| Basic (default) | removed | `REMOVED` (E.2 requires adding it) | **absent** |
-| Retain Full Dates | kept | `UNMODIFIED` | original |
-| Retain Modified Dates | DA/DT shifted by −Δ days; TM kept | `MODIFIED` | shifted |
+| Basic (default) | all removed | `REMOVED` (E.2 requires adding it) | **absent** |
+| Retain Full Dates | 166 + 3 + 15 + 2 kept; the 3 unmarked removed | `UNMODIFIED` | original |
+| Retain Modified Dates | DA/DT shifted by −Δ days; TM kept; OB, SH, R6, unmarked removed | `MODIFIED` | shifted |
 
 **The subject key.** Δ is keyed on the subject, not on PatientID alone:
 
 ```text
-s = len(IssuerOfPatientID) ‖ IssuerOfPatientID ‖ len(PatientID) ‖ PatientID
-Δ = 1 + (BLAKE3-keyed(K, "tessera/dicom-deid/date-shift/v2" ‖ s) mod 3652)
+i, p = IssuerOfPatientID, PatientID: the original values, decoded per
+       SpecificCharacterSet, leading/trailing spaces and NULs removed,
+       UTF-8 encoded; an absent issuer is the empty string
+s    = u32be(len(i)) ‖ i ‖ u32be(len(p)) ‖ p
+h    = BLAKE3 keyed hash, key K (32 bytes),
+       input "tessera/dicom-deid/date-shift/v2" ‖ s
+n    = u64 from h[0..8], little endian
+Δ    = 1 + (n mod 3652)                # days
 ```
 
-That gives a shift between 1 and 3652 days (about 10 years) and never 0. Values are the trimmed originals, read
-before the profile runs. Modified Dates **refuses** when (0010,0020) PatientID is absent or empty on any slice,
-or differs between the slices of a product. If it did not, all unidentified subjects would collapse onto one Δ,
-and one known date would then reveal every subject's dates. Products of one run share Δ per subject, and a
-custodian key extends that across runs.
+That gives a shift between 1 and 3652 days (about 10 years) and never 0. The modulo bias is below 2⁻⁵⁰. **Test
+vectors**, with K = bytes `00 01 02 … 1f` (same binding as §4.1): (issuer `""`, PatientID `PID-FICTUS-42`) →
+`h[0..8]` = `31f956695789ce57` → Δ = **814**; (issuer `FICTUSHOSP`, same PatientID) → `4c8b4c2386e641e1` → Δ =
+**2733**. P2c pins both. Values are read before the profile runs. Modified Dates **refuses** when (0010,0020) PatientID
+is absent or empty on any slice, or differs between the slices of a product. If it did not, all unidentified subjects
+would collapse onto one Δ, and one known date would then reveal every subject's dates. Products of one run share Δ per
+subject, and a custodian key extends that across runs.
 
-**The shift.** Shifting by whole days keeps time-of-day and every interval inside the subject exactly. It also
-keeps SUV decay correction, which subtracts times. DT values lose their UTC-offset suffix under Modified Dates.
-TimezoneOffsetFromUTC (0008,0201) keeps its Basic action, because its `C` cell resolves to remove. Δ itself goes
-into the envelope.
+**The shift.** A DA becomes the date Δ days earlier (proleptic Gregorian). A DT has its date part shifted the
+same way, keeps its time part and precision, and loses any UTC-offset suffix. Values that cannot be shifted exactly (a
+DT of year or year-month precision, a malformed DA) are removed and counted. Shifting by whole days keeps time-of-day
+and every interval inside the subject exactly. It also keeps SUV decay correction, which subtracts times.
+TimezoneOffsetFromUTC (0008,0201) keeps its Basic action, because its `C` cell resolves to remove. Δ itself goes into
+the envelope.
 
 **Schema fields.** `study_date` is `Sensitive` (`schema.rs:569-575`) and follows the table above. Any field the
 schema marks `Identifying` is subject to the §9.1 gate. The §9.3 gate covers the operator's sealed
@@ -449,6 +551,13 @@ response measurement need, and a shift keeps them while matching protection. It 
 | UID map, date offset Δ, original source paths, original spec path | never | yes |
 | The `dicom_deidentify` record (§7) | yes | — |
 
+**Before P4 (envelope v1).** P3a already moves the source and spec paths out of the seal (§9.2, §9.5). So P3a adds
+two optional, additive fields to the v1 document: `source_references` and `spec_reference`, behind
+`#[serde(default, skip_serializing_if = …)]`. `IdentityDocument` sets no `deny_unknown_fields`
+(`identity.rs:30-41`), so an older reader ignores them, and `v` stays 1. The paths therefore go into the envelope
+from the first phase that removes them from the seal. They are dropped only when there are no recipients,
+exactly like everything else (below).
+
 **Identity document v2.** The new shape is `{ v: 2, slices: [{ modified_attributes: { "GGGG,EEEE": {vr, value} } }],
 uid_map, date_shift_days, source_references, spec_reference, curated_identifying }`. `modified_attributes` holds
 the original of every element whose action was not `K`, at its full sequence path. This is the content PS3.15
@@ -462,8 +571,11 @@ reads both versions.
 **dropped**, and that is the documented meaning of destructive de-identification. A custodian key does not
 change this. It only makes forward mapping reproducible (§4.3).
 
-**The keep-PHI default is unchanged by this ADR.** It warns, seals no header, and seals the curated fields in
-the clear. Making de-identification the default is the owner decision D1.
+**The default flips in P3d (owner decision D1).** From P3d, a DICOM ingest with no flag runs the Basic profile.
+Keeping identity requires the explicit `--keep-identity` CLI flag or the spec key `keep_identity = true`, which
+is mutually exclusive with `deidentify`, `recipients` and `[product.deidentify_profile]` (a hard error). That path
+keeps today's behaviour: it warns, seals no header, and seals the curated fields in the clear. Until P3d lands,
+the keep-PHI path stays the default and the book says so.
 
 ## §7 — Attestation: what the product says about itself
 
@@ -474,7 +586,8 @@ In the sealed header (unless `header = "none"`):
   book says so;
 - DeidentificationMethod (0012,0063) is LO with VM 1-n (PS3.6 6-1). It is **multi-valued**, with every value at
   most 64 characters. Value 1 is `PS3.15 2026d Basic Application Confidentiality Profile` (54 characters), and
-  each further value is the CID 7050 meaning of one applied option. It carries **no software version**. The
+  each further value is the CID 7050 meaning of one applied option, plus `Device dates follow the date option`
+  when §3.0 overrode Device Identity. It carries **no software version**. The
   producing tool and version are already sealed in ADR-0058's `producer`, and a version here would move
   `manifest_hash` at every release without any privacy gain;
 - DeidentificationMethodCodeSequence (0012,0064): one item `(113100, DCM, "Basic Application Confidentiality
@@ -501,6 +614,7 @@ params
   "header": "deidentified | none",
   "pseudonym_fields": ["…"],
   "pixel_review": "not-required | acknowledged",
+  "overridden": ["…§3.0 rule-1 rows, when Device Identity runs without Full Dates…"],
   "spec_preimage": "deid-redacted-v1",
   "counts": {
     "removed": 0,
@@ -541,7 +655,9 @@ The modality list in rule 2 is policy, stated in the book, and extending it is a
    pseudonym such as `patient_pseudonym`). Both kinds are listed in the record. This also covers the ADR-0058
    §5 inheritance: what a derived product inherits is the pseudonym.
 2. **Opaque source reference.** On a de-identifying ingest without `--source-label`, `ingested_from.reference` is
-   `urn:tessera:source:<content_hash>`, the ADR-0048 export form. The paths go into the envelope.
+   `urn:tessera:source:<content_hash>`, the ADR-0048 export form. The paths go into the envelope's
+   `source_references` field, which P3a adds to the v1 document (§6), so they are never silently dropped while a
+   recipient exists.
    `content_hash` (the merkle root over the raw files) stays as ADR-0048 decided. Only a holder of the original
    bytes can confirm it, and that holder can already compare pixels.
 3. **Timestamp.** Unless Full Dates is selected, the operator's `timestamp` must not fall on a calendar date
@@ -553,15 +669,15 @@ The modality list in rule 2 is policy, stated in the book, and extending it is a
    checked mechanically.
 5. **Opaque spec edge (§0 finding 8).** If any member of a spec run de-identifies, every member's
    `ingested_via_spec` edge changes. The reference becomes `urn:tessera:spec:<hash>` instead of the spec path,
-   and the original path goes into the envelope. The hash is BLAKE3 over a **redacted pre-image**, tagged
-   `tessera spec-hash deid-redacted v1`: the canonical spec with every `input`/`inputs` path replaced by that
-   source's sealed `content_hash`, and `key_file` replaced by `key_id`. Every other field of that pre-image is
-   either already sealed or operator text (name, timestamp, metadata, options, recipients). So guessing it gains
-   nothing beyond what the seal already shows, and the dictionary attack on paths is gone. A holder of the spec
+   and the original path goes into the envelope's `spec_reference` field (P3a, §6). The hash is BLAKE3 over a **redacted
+   pre-image**, tagged `tessera spec-hash deid-redacted v1`: the canonical spec with every `input`/`inputs` path
+   replaced by that source's sealed `content_hash`, and `key_file` replaced by `key_id`. Every other field of that
+   pre-image is either already sealed or operator text (name, timestamp, metadata, options, recipients). So guessing it
+   gains nothing beyond what the seal already shows, and the dictionary attack on paths is gone. A holder of the spec
    and the sources can still recompute the hash (`tessera ingest --spec … --print-spec-hash`), so provenance stays
-   verifiable. Runs with no de-identifying member keep the ADR-0035 pre-image unchanged, so existing products and
-   tests do not move. The CLI's synthesized inline spec (`reference = "cli-inline-spec"`) goes through the same
-   redaction. This amends ADR-0035 (owner decision D7).
+   verifiable. Runs with no de-identifying member keep the ADR-0035 pre-image unchanged, so existing products and tests
+   do not move. The CLI's synthesized inline spec (`reference = "cli-inline-spec"`) goes through the same redaction.
+   This amends ADR-0035 (owner decision D7).
 
 ## §10 — Back-compat and disclosure
 
@@ -608,10 +724,12 @@ each value `{vr, value}`, and for `SQ` an array of nested objects. Decode each e
 
 **Any VR the oracle cannot decode fails the test**, so an unknown rendering can never pass silently. A unit test
 round-trips `value_to_json` through the decoder for one element of every VR, which pins the oracle itself.
-Oracle A asserts **three** things at every depth: (a) every seeded element whose resolved action is remove is
+Oracle A asserts **four** things at every depth: (a) every seeded element whose resolved action is remove is
 **absent by tag**, whatever its value; (b) no decoded value, as text or bytes, contains any seeded marker; (c)
 every protected UI value is a `2.25.` replacement or under the DICOM root, and, under Modified Dates, every DA/DT
-is shifted by Δ.
+is shifted by Δ; (d) **no element has VR `UN`**. Check (d) closes the round-2 gap. An implicit-VR private SQ
+sealed as UN bytes would hide its items from check (a). R8 forbids any UN in the seal, so (d) failing is the
+signal, and every sequence that does reach the seal is structured and fully walked.
 
 **Oracle B (secondary).** A raw scan of every container member except `aux/identity/identity.age`, and after
 `shred` of every member, for the text markers and for each binary marker in both raw and decimal-rendered form.
@@ -620,14 +738,16 @@ The test also asserts the container is STORED.
 **Markers, one per seeded element, valid for its VR and unique.** Strings are `PHI<gggg><eeee>`, cut to the VR's
 maximum length and character set: CS upper-case, AE at most 16. DA is a unique date in 1901 (row index as day
 offset). TM is a unique time. DT combines the two. DS/IS are `9000000 + row`. AS is a unique `nnnD`. UI is
-`1.2.826.0.1.3680043.99.<row>`. UR is `https://phi.invalid/<row>`. Binary VRs get the 8 bytes `PHI\0` ‖
+`1.2.826.0.1.3680043.99.<row>`. UR is `https://phi.invalid/studies/1.2.826.0.1.3680043.99.<row>`, a URL carrying a
+marker UID. R6 attributes get a marker date in LO text. Binary VRs get the 8 bytes `PHI\0` ‖
 `u32le(row)`. Numeric VRs get a value unique to the row.
 
 ### §11.1 — The cases
 
 1. **Every row, generated.** The fixture seeds one element per E.1-1 row (VRs per §2.1 R5; each pattern row as
    at least two concrete members; the private rule as a private block of explicit- and implicit-VR elements,
-   including OB, PN and UI), plus: every R3 replace and keep attribute, every R4 attribute, a nested copy of
+   including OB, PN and UI, and an implicit-VR private SQ holding a PN and a UI), plus: every R3 replace and keep
+   attribute, every R4, R6 and R7 attribute, a nested copy of
    each inside a sequence two levels deep, group 0002/0004 elements in the dataset body, a File Meta
    SourceApplicationEntityTitle, and a PHI-bearing input and spec path. Ingest a 3-slice series through the
    engine three ways: `--deidentify`, crypto-shred, and crypto-shred then `shred`. Oracles A and B must pass. The
@@ -655,6 +775,13 @@ offset). TM is a unique time. DT combines the two. DS/IS are `9000000 + row`. AS
    the paths. v1 envelopes still decrypt.
 10. **Conformance-table drift** (§2), hermetic, including the §2.1 list counts.
 11. **Legacy detector.** A product built the old way is flagged by `inspect`/`verify`.
+12. **Precedence (§3.0).** Device Identity alone → the 11 device dates are absent, the extra (0012,0063) value and
+    `overridden` are present. Device Identity + Modified → they are shifted by Δ. Device Identity + Full → they
+    are kept. In no mode is an original subject date present next to a shifted one.
+13. **R7 / R8.** A RetrieveURL carrying a marker UID is absent in every mode, and CodingSchemeURL is kept. Under
+    Safe Private, a listed private SQ read as UN is re-typed, its UI replaced and its PN removed. An unlisted UN
+    is removed. A UN injected after `apply` makes the invariant fail the ingest.
+14. **Test vectors.** The §4.1 UID vector and the two §5 Δ vectors reproduce exactly.
 
 ## §12 — Phasing
 
@@ -663,74 +790,88 @@ about 400 hand-written lines or fewer (the generated TSVs are not counted). The 
 implementer splits a phase further if it comes out larger.
 
 - **P1 — Vendored tables and generated policy** (~300). The generator (E.1-1, E.3.10-1, the PS3.6 6-1/7-1/8-1
-  registry, and the R3/R4 lists with rules R1-R5 and their citations), the TSVs with provenance headers, a static
-  parser, and the hermetic drift test. *Acceptance:* §11.1.10 green; counts 657 / 479 / 5268 / 22 / 19 /
-  16 / 23 / 15; source sha256 equal to §2. No behaviour change.
-- **P2a — Profile engine: removal** (~350, `tessera-ingest::dicom::deid`). `Profile`,
-  `apply(obj) -> (obj', Record, Modified)`: compound-code resolution, recursion, private removal (Safe Private
-  table), R1 groups, R2 unknown public, R4 removal under Basic, the attestation attributes, record counts, the
-  `value_to_json` inverse and Oracle A. Pure, not wired. *Acceptance:* Oracle A round-trip test; §11.1.1-2 and
-  §11.1.6 at object level for Basic and for the non-keyed options.
-- **P2b — Profile engine: keyed transforms** (~350). UID derivation over the full R3 coverage with the
-  DICOM-root guard and Safe Private UIs; the per-run K derivation function; the subject key and Δ with its
-  refusals; Modified/Full Dates including R4; Retain UIDs. Pure, not wired. *Acceptance:* §11.1.3-4 at object
-  level.
-- **P3a — Provenance and pixel gates on today's path** (~300). The §9.5 redacted spec edge, the §9.2 opaque
-  source reference, and the §8 refusals with `pixel_review`, applied to the existing `--deidentify` /
-  `--recipient` paths. This adds no new attestation, and only tightens. Can land in parallel with P1-P2b.
-  *Acceptance:* §11.1.5 (pixel part) and §11.1.7 end to end.
-- **P3b — Wire the Basic profile** (~400, after P2b and P3a). Replace `PHI_TAGS`/`deidentify` with
-  `deid::apply` (Basic, per-run keyspace; `deidentify = true` / `recipients` select it), curated metadata from
-  `obj'`, the record and attestation, the §9.1 gate with `pseudonym_fields`, and the §9.3 gate. The envelope stays
-  v1 in this phase, so P3b rewrites the book/FEATURE-MATRIX line to say that the envelope holds slice 1's
-  original header only. *Acceptance:* §11.1.1, §11.1.5, §11.1.8 through `engine::run` and the CLI; S15 re-ingest
-  byte-identical.
-- **P3c — Option surface** (~350). The `[product.deidentify_profile]` table and CLI flags, `keygen --deid`, the
-  custodian keyspace with the §4.3 `shred` warning, `header = "none"`, `also_remove`, and
-  `timestamp = "from-source"`. *Acceptance:* §11.1.2-4 end to end.
-- **P4 — Envelope v2** (~300, after P3b). `IdentityDocument` v2 (per-slice modified attributes, UID map, Δ,
-  source and spec paths) and `reidentify` reading v1 and v2. It updates the slice-1 doc line to the full claim.
+  registry, the R3/R4/R6/R7 lists and the §3.0 override set, with rules R1-R8 and their citations), the TSVs with
+  provenance headers, a static parser, and the hermetic drift test. *Acceptance:* §11.1.10 green; counts 657 /
+  479 / 5268 / 22 / 19, R3 16 / 23, R4 15, R6 2, R7 2 / 10, override 11; source sha256 equal to §2. No behaviour
+  change.
+- **P2a — Engine structure** (~300, `tessera-ingest::dicom::deid`). `Profile`,
+  `apply(obj) -> (obj', Record, Modified)`: compound-code resolution, recursion, private removal and the Safe
+  Private table, R1 groups, R2 unknown public, R8 UN re-typing (including the implicit-VR SQ parse) and its
+  invariant, record counts. Pure, not wired. *Acceptance:* §11.1.6 and §11.1.13 at object level.
+- **P2b — Engine rules and the oracle** (~350). §3.0 precedence; R4/R6 date-valued removal (Basic) and retention
+  (Full); R7; the attestation attributes, including the multi-valued (0012,0063); the `value_to_json` inverse and
+  Oracle A with check (d). Pure, not wired. *Acceptance:* the oracle round-trip test; §11.1.1-2, §11.1.8 and
+  §11.1.12 (Basic/Full parts) at object level.
+- **P2c — Keyed transforms** (~300). UID derivation over the full coverage with the DICOM-root guard; the per-run
+  K derivation; the subject key, Δ and its refusals; the Modified Dates shift; Retain UIDs. Pure, not wired.
+  *Acceptance:* §11.1.3-4, §11.1.12 (Modified part) and §11.1.14 at object level.
+- **P3a — Provenance and pixel gates on today's path** (~350). The §9.5 redacted spec edge with
+  `--print-spec-hash`, the §9.2 opaque source reference, the two additive v1 envelope fields that receive both
+  paths (§6, N4), and the §8 refusals with `pixel_review`. All of it applies to the existing `--deidentify` /
+  `--recipient` paths. It adds no attestation and only tightens. Can land in parallel with P1-P2c.
+  *Acceptance:* §11.1.5 (pixel part) and §11.1.7 end to end; `reidentify` returns the paths from a v1 envelope.
+- **P3b — Wire the Basic profile** (~350, after P2c and P3a). `engine.rs` dispatch to `deid::apply` (Basic,
+  per-run keyspace, selected by `deidentify = true` / `recipients`), curated metadata from `obj'`, the record and
+  attestation, the §9.1 gate with `pseudonym_fields`, and the §9.3 gate. The attestation and every gate it relies
+  on land together. *Acceptance:* §11.1.1, §11.1.5 and §11.1.8 through `engine::run`; S15 re-ingest byte-identical.
+- **P3c — Public surface catch-up** (~250, after P3b). Remove `PHI_TAGS`/`phi_present`/`deidentify` (a
+  `feat(ingest)!` change); rewrite the CLI help (`--deidentify`, `--timestamp`); regenerate the affected trycmd
+  snapshots; rewrite the book/FEATURE-MATRIX line to state that the v1 envelope holds slice 1's original header
+  plus the paths only. *Acceptance:* the same cases through the CLI; `guardrails-gates` green.
+- **P3d — Default flip (D1)** (~200, after P3c). No flag means Basic; `--keep-identity` / `keep_identity = true`
+  (exclusive with every de-identification key) keeps today's keep-PHI path and its warning; the docs follow.
+  *Acceptance:* a flagless ingest is de-identified (Oracle A); `--keep-identity` reproduces the pre-flip bytes; a
+  combination with a de-identification key is a hard error.
+- **P4 — Envelope v2** (~300, after P3b). `IdentityDocument` v2 (per-slice modified attributes, UID map, Δ, source
+  and spec paths), and `reidentify` reading v1 and v2. It updates the slice-1 doc line to the full claim.
   *Acceptance:* §11.1.9.
-- **P5 — Legacy detection and docs** (~300). The `inspect`/`verify` warning; the book (`ingest.md`,
-  `provenance-signing.md`, a de-identification page with the option table, the §2.1 rules, the PET recipe, the
-  §8 modality list and the custodian-keyspace erasure caveat); the FEATURE-MATRIX rows; the security note; the
-  ADR-0047 amendment banner (§1 step 4, §4) and an ADR-0035 note (§9.5); the scheduled edition-drift workflow.
-  *Acceptance:* §11.1.11; `guardrails-gates` green.
+- **P4b — Option surface** (~350, after P4, because its date and UID cases read Δ and the map back from the v2
+  envelope). The `[product.deidentify_profile]` table and CLI flags, `keygen --deid`, the custodian keyspace with
+  the §4.3 `shred` warning and `inspect --json` keyspace output, `header = "none"`, `also_remove`, and
+  `timestamp = "from-source"`. *Acceptance:* §11.1.2-4 and §11.1.12 end to end.
+- **P5 — Legacy detection and docs** (~300, after P3d and P4b). The `inspect`/`verify` warning; the book
+  (`ingest.md`, `provenance-signing.md`, a de-identification page with the option table, §2.1 R1-R8, §3.0, the
+  PET recipe, the §8 modality list and the custodian-keyspace erasure caveat); the FEATURE-MATRIX rows; the
+  security note; the ADR-0047 amendment banner (§1 step 4, §4) and an ADR-0035 note (§9.5); the scheduled
+  edition-drift workflow. *Acceptance:* §11.1.11; `guardrails-gates` green.
 
-**Order:** P1 → P2a → P2b → P3b → {P3c, P4} → P5. P3a is independent and must land before P3b. **Follow-up
-issues** (filed with the plan, not built here): Clean Descriptors; Clean Pixel Data / Recognizable Visual
-Features; DICOM egress resolving the IOD-conformance qualifiers; the schema `dicom_tag` binding (blocked on
-consumer-schema registration); date aggregation as a Modified Dates method; per-subject custodian keys;
-`header = "none"` as a default (if D2 goes that way).
+**Order:** P1 → P2a → P2b → P2c → P3b → P3c → P3d; P3b → P4 → P4b; {P3d, P4b} → P5. P3a is independent and must
+land before P3b. Every acceptance criterion depends only on phases ordered before it. **Follow-up issues**
+(filed with the plan, not built here): Clean Descriptors; Clean Pixel Data / Recognizable Visual Features; DICOM
+egress resolving the IOD-conformance qualifiers; the schema `dicom_tag` binding (blocked on consumer-schema
+registration); date aggregation as a Modified Dates method; per-subject custodian keys; URL rewriting instead of
+R7 removal, if a consumer needs retrieve locations; `header = "none"` as a default (if D2 goes that way).
 
 ## Owner decisions needed
 
-Each decision lists my recommendation and the round-1 reviewer's.
+Each decision lists my recommendation and the reviewers' (round 1 and round 2).
 
-- **D1. Is de-identification the default for DICOM ingest?** *Mine:* yes from P3b (Basic). Keep-PHI becomes an
-  explicit `--keep-identity`. *Reviewer:* the same. Cost: a breaking CLI change, and every internal script that
-  relied on PHI in the clear must add the flag. Today the unsafe path is the default, and a forgotten flag ships
-  identity.
+- **D1. Is de-identification the default for DICOM ingest?** *Mine:* yes, in phase P3d (Basic). Keep-PHI becomes
+  the explicit `--keep-identity`. *Reviewers:* the same, with the flip placed in a phase, which P3d does. Cost: a
+  breaking CLI change, and every internal script that relied on PHI in the clear must add the flag. Today the unsafe
+  path is the default, and a forgotten flag ships identity.
 - **D2. Default sealed header: de-identified or `none`.** *Mine:* de-identified, sealed only from P3b, after
-  P2a/P2b have closed the UI and date gaps. *Reviewer:* de-identified only after defects 1 and 2 are fixed, which
-  that ordering satisfies. Cost: Tessera's privacy is exactly Annex E plus §2.1, no stronger, and free text in
+  P2a-P2c have closed the UI, URI (R7), date (R4/R6) and UN (R8) gaps. *Reviewers:* de-identified only once the
+  UI and date gaps (round 1), then the URI and alternative-calendar gaps (round 2), are closed. The ordering
+  satisfies both. Cost: Tessera's privacy is exactly Annex E plus §2.1, no stronger, and free text in
   attributes Annex E retains stays a residual. `none` is strictly safer but discards most DICOM-derived context.
 - **D3. The anatomist extension.** *Mine:* `also_remove` in the spec now, and a schema `dicom_tag` binding once
-  schemas are registrable. *Reviewer:* the same. Waiting for the schema route alone blocks anatomist's first
+  schemas are registrable. *Reviewers:* the same. Waiting for the schema route alone blocks anatomist's first
   ingest on an unbuilt feature.
 - **D4. Disclosure.** *Mine:* a GitHub security advisory for `v0.1.0-alpha.1` plus a book security note.
-  *Reviewer:* the same, because the published `YES` attestations are false. The cost is public acknowledgement.
+  *Reviewers:* the same, because the published `YES` attestations are false. The cost is public acknowledgement.
 - **D5. Pixels.** *Mine (adopting the reviewer's):* refuse on a `YES` flag with no override. Also refuse an absent
   BurnedInAnnotation for US/OT/XC/DOC/SC and the Secondary Capture classes unless `pixel_review = "acknowledged"`.
   Cost: an extra acknowledgement step for those modalities, and Tessera has no means to verify the
   acknowledgement.
 - **D6 (new). Custodian key with crypto-shred** (§4.3). *Mine:* allow it, record the keyspace, warn on `shred`,
   and amend ADR-0047 §4. The alternative is to refuse the combination, which gives up cross-run linkage for
-  crypto-shred users. *Reviewer:* asked only that it be addressed. Cost of mine: erasure in a custodian keyspace
+  crypto-shred users. *Reviewers:* allow, warn on `shred`, and record the keyspace in `inspect --json` (round 2), which
+  P4b does. Cost of mine: erasure in a custodian keyspace
   requires destroying a key that serves every subject.
 - **D7 (new). Redacted spec-hash pre-image for de-identifying runs** (§9.5, amends ADR-0035). *Mine:* adopt it.
   The alternative is to drop the `ingested_via_spec` edge on de-identifying runs, which loses spec provenance.
-  *Reviewer:* the fix direction (no PHI and no unkeyed path hash in the seal) without a mechanism. Cost of mine:
+  *Reviewers:* agree (round 2). Cost of mine:
   two spec-hash pre-images exist, chosen by whether the run de-identifies, and `--print-spec-hash` is needed to
   verify one.
 
@@ -739,14 +880,15 @@ Each decision lists my recommendation and the round-1 reviewer's.
 - One coherent, edition-pinned, testable claim replaces a 12-tag list. Every de-identified product says, inside
   its seal, which standard edition and options produced it.
 - No new crate dependency. About 20 KB of generated, provenance-stamped data, and one stdlib Python generator
-  whose five hand-written rules (§2.1) are each cited.
+  whose eight hand-written rules (§2.1 R1-R8) are each cited.
 - The de-identified seal now leaks less than the keep-PHI seal, not more (§0 finding 1). Neither provenance edge
   carries a path.
 - Determinism is unchanged: every derived value is a keyed function of the inputs.
 - `manifest_hash` changes for de-identified DICOM ingests. There is no corpus regen.
-- Residual risk, stated: free text in attributes Annex E retains; pixel content, including an acknowledged
-  review (§8); linkage by anyone holding the original files (pixels and `content_hash`); the custodian key
-  (§4.3); the operator's `name`/`study`; and the ADR-0047 §4 limits (no revocation, no audit) for the envelope.
+- Residual risk, stated: free text in attributes Annex E retains (including URLs or dates typed into it); pixel
+  content, including an acknowledged review (§8); linkage by anyone holding the original files (pixels and
+  `content_hash`); the custodian key (§4.3); the operator's `name`/`study`; and the ADR-0047 §4 limits (no revocation,
+  no audit) for the envelope.
 
 ## Revision log
 
@@ -767,14 +909,30 @@ Each decision lists my recommendation and the round-1 reviewer's.
 | P coarsening rejection wrong | §5 corrected: conformant, deferred for utility |
 | Phasing: P3 attests before P4 gates; P2 too big | §12: the rule, P2a/P2b, P3a/P3b/P3c, gates with the attestation |
 
-One refinement to the audit, not a dispute: of the six E.1-1 rows without a VR in PS3.6 Table 6-1, two
+**r3 (2026-10-18), after the round-2 audit of `8ebe318`** (the auditor's regeneration of the R3/R4 sets matched):
+
+| Audit item | Resolution |
+|---|---|
+| C1 UIDs inside UR fields | §2.1 R7: 15 UR generated (3 in E.1-1; 12 unlisted: keep 2, remove 10); §11.1.13 |
+| C2 alternative-calendar LO dates | §2.1 R6 (generated rule, exactly 2 attributes); §3.0; §5; §11.1.1 |
+| C4 gap: implicit-VR private SQ as UN | §2.1 R8 (re-type or remove, no UN sealed); §11.0 check (d); §11.1.13 |
+| N1 option precedence | §3.0: the date mode alone governs date rows; 11 overrides attested and recorded; §11.1.12 |
+| N2 date counts | §3, §5 regenerated: 169 date-VR rows; Full/Modified 169 = 166 + 2 OB + 1 SH; 3 unmarked |
+| N3 (006A,0003) | §2.1 R3, §4.1: 54 `U` rows replaced, the `D` row removed |
+| N4 paths before envelope v2 | §6: two additive v1 fields in P3a; §9.2, §9.5 |
+| N5 D1 not in any phase | §6, §12 P3d, D1 |
+| N6 Δ and UN-UID encodings | §5 byte-exact Δ with 2 vectors; §4.1 byte-exact UID with a vector; R8 for UN |
+| Phasing | §12: P2a/P2b/P2c, P3a-P3d, P4 before P4b; every criterion depends only on earlier phases |
+
+One refinement to the round-1 audit, not a dispute: of the six E.1-1 rows without a VR in PS3.6 Table 6-1, two
 ((0002,0003), (0004,1511)) resolve from Tables 7-1/8-1. Only the two command-group rows and the two patterns
 need the R5 handling.
 
 ## Appendix — the probe that generated the §2.1 lists
 
 This uses the Python standard library only, and runs over `part06.xml` / `part15.xml` (2026d, digests in §2).
-It prints the R3 keep and replace sets and the R4 date set. P1 turns it into the vendored generator.
+It prints the R3 keep and replace sets, the R4 date set, the R6 text-date set and the R7 UR split. P1 turns it
+into the vendored generator.
 
 ```python
 import re, sys, xml.etree.ElementTree as ET
@@ -798,4 +956,10 @@ ui = [r for r in reg if r[3] == "UI"]
 print("keep", [r[0] for r in ui if KEEP.search(kw(r))])
 print("replace", [r[0] for r in ui if not KEEP.search(kw(r))])
 print("dates", [r[0] for r in reg if r[3] in ("DA", "DT", "TM")])
+TEXT = ("LO", "SH", "ST", "LT", "UT", "UC")
+print("r6", [r[0] for r in reg if r[3] in TEXT and "Date" in kw(r)])
+UR_KEEP = re.compile(r"^CodingSchemeURL$|^URNCodeValue$")
+ur = [r for r in reg if r[3] == "UR"]
+print("r7_keep", [r[0] for r in ur if UR_KEEP.search(kw(r))])
+print("r7_remove", [r[0] for r in ur if not UR_KEEP.search(kw(r))])
 ```
