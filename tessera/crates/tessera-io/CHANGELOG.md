@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.1...tessera-io-v0.1.0-alpha.2) - 2026-10-18
+
+### Added
+
+- *(cli)* serve array stats from the chunk-index with no decode, and add stats --json
+- *(ingest)* generic array ingest — NumPy .npy and .npz (ADR-0056 P1)
+- *(cli,core)* tessera provenance walk and inspect --resolve-config ([#490](https://github.com/vig-os/tessera/pull/490))
+
+### Fixed
+
+- *(deps)* upgrade rustls and zip past RUSTSEC-2026-0346..0349/0367..0369
+- *(cli,io)* pin inspect --json, guard stage-dir downgrade resume, route verify through the resource cap, 5.5x single-column reads ([#479](https://github.com/vig-os/tessera/pull/479))
+- *(io)* gate seal determinism across build profiles and pin the #468 vortex limitation ([#474](https://github.com/vig-os/tessera/pull/474))
+- *(io)* close the encode-trace callsite race under CPU contention ([#465](https://github.com/vig-os/tessera/pull/465))
+- *(ingest)* seal the ADR-0058 recipe on the streaming path and surface it in inspect ([#453](https://github.com/vig-os/tessera/pull/453))
+
+### Other
+
+- *(deps)* pin vortex to a patched fork for #468/#472 ([#481](https://github.com/vig-os/tessera/pull/481))
+
 ## [0.1.0-alpha.1](https://github.com/vig-os/tessera/releases/tag/tessera-io-v0.1.0-alpha.1) - 2026-09-23
 
 ### Added
