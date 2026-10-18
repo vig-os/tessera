@@ -1,8 +1,8 @@
 # ADR-0061 — DICOM de-identification: the PS3.15 Annex E profile, table-driven
 
-**Status:** Proposed (2026-10-17, design for [#579](https://github.com/vig-os/tessera/issues/579), P0: it gates the
-first DICOM ingest of MorePET/anatomist; revised 2026-10-18 after the round-1, round-2 and round-3 audits of PR #592,
-see the revision log at the end). **Amends** ADR-0047 §1 step 4, its "completeness by construction" claim and its §4
+**Status:** Accepted (2026-10-18, owner; design for [#579](https://github.com/vig-os/tessera/issues/579), P0: it
+gates the first DICOM ingest of MorePET/anatomist). Proposed 2026-10-17, revised 2026-10-18 after four audits of
+PR #592 (see the revision log at the end); the owner accepted all seven recommended decisions (see *Decisions*). **Amends** ADR-0047 §1 step 4, its "completeness by construction" claim and its §4
 erasure claim (§0, §4.3), and ADR-0035's spec-hash pre-image for de-identifying runs (§9.5). Implements ADR-0040
 §1 (PS3.15 seeds the tiers) for DICOM. Builds on ADR-0042 (sealed vs `aux/`), ADR-0048 (the provenance edge),
 ADR-0056 §6 (the sealed `ingest_transform` record) and ADR-0058 (sealed `producer`, inheritance of `identifying`
@@ -12,7 +12,7 @@ fields).
 > replaces and attests, and what it cannot do. Whether a de-identified product is "anonymous" or
 > "pseudonymous" under GDPR / FADP / HIPAA is the DPO's call, not a flag.
 >
-> Design-only. No code changes until the owner accepts this document. Every claim about current behaviour
+> Design document. Code lands through the §12 sub-issues. Every claim about current behaviour
 > below is pinned to a `file:line` on `dev` at `fa581f5` or to a probe whose command and output are quoted.
 > Every claim about the standard cites PS3.6 / PS3.15 / PS3.16 edition 2026d.
 
@@ -99,7 +99,7 @@ The defect shipped: `v0.1.0-alpha.1` (`a35c61b`, published 2026-09-24) carries t
    the two alternative-calendar date fields. URI attributes that can carry instance UIDs are removed. **No UN
    element is ever sealed**, so nothing reaches the seal as opaque bytes. **Every PN value** is removed, as are
    person and organization names held in text VRs, text-VR copies of instance or document identifiers, and
-   unlisted free-text comment fields (R9-R11).
+   unlisted comment and free-text fields (R9-R11).
 3. **UIDs are replaced by keyed derivation**: `2.25.<UUIDv8(BLAKE3-keyed(K, uid))>`. This is deterministic,
    so S15 holds. It keeps referential integrity inside its keyspace, and nobody without K or the original files
    can link a replacement to its original. By default K is per ingest run, derived from the raw source bytes.
@@ -318,11 +318,12 @@ formerly-UN bytes is defined (N6).
    (0072,0010) HangingProtocolUserGroupName ("Group or site …") · (0076,0003) ImplantAssemblyTemplateIssuer ·
    (0078,0020) ImplantTemplateGroupIssuer ("Person or Organization …") · (2100,0160) OwnerID ("owner of the film
    session"). **Kept, with the reason recorded:** (0008,0116) CodingSchemeResponsibleOrganization (a coding
-   authority); (0010,0217) StrainSource (a strain supplier, shared by many animals); the four private-creator
-   reference attributes (0008,0302), (0020,9213), (0020,9238), (0072,0054)/(0072,0056) (vendor names); and the
-   comment fields among the pass-B hits, which R11 removes. All 59 pass-A hits other than (0074,100C) and
-   (0072,0010) name an object, not a person: models, coils, protocols, algorithms, fonts, beams, wedges, printers,
-   machines.
+   authority); (0010,0217) StrainSource (a strain supplier, shared by many animals); the five private-creator
+   reference attributes (0008,0302), (0020,9213), (0020,9238), (0072,0054) and (0072,0056) (vendor names); and the
+   comment fields among the pass-B hits, which R11 removes. Of the 59 pass-A hits, (0074,100C) and (0072,0010) are
+   removed here, and (0040,0031) LocalNamespaceEntityID (its keyword matches on `Namespace`) is an issuer, which
+   R10 removes. Every other pass-A hit names an object, not a person: models, coils, protocols, algorithms, fonts,
+   beams, wedges, printers, machines.
 
 **R10 — identifiers copied into text VRs** (round-3 audit B1). An instance or document identifier written into
 an ST/LT/UT/LO/SH/UC value escapes R3, which acts on the UI VR. The audit's case: (0040,E001)
@@ -343,7 +344,7 @@ D  identif|\bID\b
 
 (Each pattern is one line in the generator; the breaks here are for width.) Each hit was classified by one
 criterion: *can the value identify, or copy the identifier of, a specific SOP instance, document, subject, person
-or issuing organization?* **Removed (10 tags):** (0040,A390) HL7StructuredDocumentReferenceSequence (whole) and
+or issuing organization?* **Removed (11 tags):** (0040,A390) HL7StructuredDocumentReferenceSequence (whole) and
 (0040,E001) HL7InstanceIdentifier (in every context: it also occurs in encapsulated-document references) ·
 (0040,0031) LocalNamespaceEntityID and (0040,0032) UniversalEntityID (issuing-authority identifiers) ·
 (0062,0020) TrackingID (a cross-report tracking label; its UI twin (0062,0021) TrackingUID is `U` in E.1-1) ·
@@ -351,7 +352,12 @@ or issuing organization?* **Removed (10 tags):** (0040,A390) HL7StructuredDocume
 generated Image identifier") · (0044,0001) ProductPackageIdentifier (a package bar code, linkable to dispensing
 records) · **(0010,2294) BreedRegistrationSequence with (0010,2295) BreedRegistrationNumber**: "Identification
 number of a non-human organism within the registry", a direct identifier of the animal itself, which matters
-for the veterinary case and which E.1-1 does not list. **Kept, by class, with each tag's class recorded in the
+for the veterinary case and which E.1-1 does not list · **(0072,006F) SelectorUCValue** (round-4 audit): "the
+Value(s) of the Attribute identified by Selector Attribute (0072,0026)", so it can be a straight copy of another
+attribute's value, and PS3.3 also uses it for "the text value(s) of the cell(s)" of a table item. Its text-VR
+siblings (0072,0066) LO, (0072,0068) LT, (0072,006A) PN, (0072,006C) SH, (0072,006E) ST and (0072,0070) UT are
+all `D` in E.1-1, so the omission is a gap in the list. It was a pattern-D hit that r4 misclassified as a label;
+its UI sibling (0072,007F) is not in E.1-1 and is replaced by R3. **Kept, by class, with each tag's class recorded in the
 TSV:** codes and coding schemes (CodeValue, LongCodeValue, CodingSchemeDesignator/Version/Registry/ExternalID);
 private-creator attributes; device, accessory and equipment identifiers (DeviceID, GridID, WedgeID, BolusID,
 CompensatorID, SnoutID, …: PS3.15 lists the device identifiers it protects, and Retain Device Identity governs
@@ -362,17 +368,26 @@ FilmSessionLabel); software and algorithm versions; product, lot and part number
 *descriptions* among the hits, such as ContentDescription (0070,0081) and LensDescription (0046,0012), are Clean
 Descriptors territory, so they stay a stated residual (§Consequences).
 
-**R11 — unlisted free-text comment fields.** E.1-1 lists 23 comment/notes attributes (keyword matching
+**R11 — unlisted free text.** Two parts, removed in every mode:
+
+1. *comment fields* (generated). E.1-1 lists 23 comment/notes attributes (keyword matching
 `Comment|Notes?$|Remark`). It gives all 23 a remove action (`X` 20, `Z` 3) and no option keeps any of them, so
 the standard treats operator comments as identifying. PS3.6 2026d has **23 more** text-VR attributes with such a
 keyword that E.1-1 does not list (generated), for example (0040,0400) CommentsOnTheScheduledProcedureStep,
 (0044,0011) SubstanceAdministrationNotes, (0024,0044) CommentsOnPatientPerformanceOfVisualField and (3004,0006)
-DoseComment. The search for R9 surfaced them, and R11 removes them all in every mode, like their listed
-siblings.
+DoseComment. The search for R9 surfaced them, and R11 removes them all, like their listed siblings.
+2. *free-text values and titles* (named, round-4 audit): (0040,A160) TextValue (UT, the text of a content item
+   wherever one occurs; E.1-1 removes the whole ContentSequence, `D`, but not the attribute elsewhere),
+   (0042,0010) DocumentTitle (ST; the document it titles, (0042,0011) EncapsulatedDocument, is `D`) and
+   (0040,0255) PerformedProcedureTypeDescription (LO; its siblings (0040,0254) PerformedProcedureStepDescription
+   and (0008,1030) StudyDescription are `X`). None is in E.1-1.
+
+R11 therefore removes **26** attributes: 23 generated plus 3 named.
 
 R1-R11 are the whole list of hand-written policy, and each sits in the generator with its citation. R1-R8 and
-R11 are mechanical rules over PS3.6. R9 part 2 and R10 are mechanical **searches** whose candidates are then
-classified by hand against the stated criterion, with the class of every candidate recorded in the vendored TSV.
+R11 part 1 are mechanical rules over PS3.6. R9 part 2 and R10 are mechanical **searches** whose candidates are
+then classified by hand against the stated criterion, with the class of every candidate recorded in the vendored
+TSV. R11 part 2 names three attributes, each with its reason in the TSV.
 A reviewer can therefore audit each decision, and an edition bump re-runs the searches and shows the new
 candidates.
 
@@ -380,7 +395,7 @@ candidates.
 
 - *hermetic* (in the flake): the embedded TSVs parse, every action cell is one of the measured codes, the row
   counts match the header (657 / 479 / 5268 / 22 / 19; the §2.1 lists R3 16 / 23, R4 15, R6 2, R7 2 / 10, R9 3
-  PN + 6 text, R10 10, R11 23; the §3.0 override set 11), and the header's source
+  PN + 6 text, R10 11, R11 23 + 3; the §3.0 override set 11), and the header's source
   sha256 equals the one this ADR records. A hand edit to a TSV fails, because the body digest no longer matches.
 - *scheduled* (non-hermetic, weekly CI, report-only): fetch `current`, re-run the generator, and open an issue
   when the edition, a table or a generated list changes. Moving to a new edition is a deliberate PR. It changes
@@ -505,8 +520,7 @@ schema marks `identifying`". That needs a binding from a schema field to a DICOM
 - **now**, `also_remove` in the spec. It is sealed in the record (§7), it is additive only, and it needs no code
   change per consumer;
 - **later**, when consumer product schemas become registrable, an optional `dicom_tag` on an `Identifying`
-  `FieldSpec` feeds the **same** set. That is a follow-up issue gated on schema registration, and the
-  owner decision D3 below.
+  `FieldSpec` feeds the **same** set. That is a follow-up issue gated on schema registration (decision D3).
 
 There is deliberately **no `also_keep`**. A caller cannot weaken the standard profile except through a named
 PS3.15 option, because only those are attestable.
@@ -577,7 +591,7 @@ That is the linkage the key exists for, and per-subject destruction inside one k
 - `tessera shred` on such a product succeeds, but warns that erasure also requires destroying the custodian key,
   which affects every product in that keyspace;
 - ADR-0047 §4's claim is amended to say "in the per-run keyspace" (the P5 banner);
-- whether a custodian key may be combined with crypto-shred at all is owner decision D6. Per-subject custodian
+- a custodian key may be combined with crypto-shred (decision D6). Per-subject custodian
   keys, which would make per-subject erasure possible, are a follow-up.
 
 ## §5 — Dates and times
@@ -664,7 +678,7 @@ reads both versions.
 **dropped**, and that is the documented meaning of destructive de-identification. A custodian key does not
 change this. It only makes forward mapping reproducible (§4.3).
 
-**The default flips in P3d (owner decision D1).** From P3d, a DICOM ingest with no flag runs the Basic profile.
+**The default flips in P3d (decision D1).** From P3d, a DICOM ingest with no flag runs the Basic profile.
 Keeping identity requires the explicit `--keep-identity` CLI flag or the spec key `keep_identity = true`, which
 is mutually exclusive with `deidentify`, `recipients` and `[product.deidentify_profile]` (a hard error). That path
 keeps today's behaviour: it warns, seals no header, and seals the curated fields in the clear. Until P3d lands,
@@ -775,7 +789,7 @@ The modality list in rule 2 is policy, stated in the book, and extending it is a
    verifiable. The redaction covers **every** member's `input`/`inputs` path in such a run, DICOM or not. Runs with
    no de-identifying member keep both the ADR-0035 pre-image and path references unchanged, so existing products
    and tests do not move. The CLI's synthesized inline spec (`reference = "cli-inline-spec"`) goes through the same
-   redaction. This amends ADR-0035 (owner decision D7).
+   redaction. This amends ADR-0035 (decision D7).
 
 ## §10 — Back-compat and disclosure
 
@@ -792,7 +806,7 @@ The modality list in rule 2 is policy, stated in the book, and extending it is a
   `extra.dicom_header` has (0012,0062) = `YES` and no `dicom_deidentify` record exists. This is a warning, not a
   failure, because the seal is still valid.
 - **Disclosure:** a "DICOM de-identification before ADR-0061" security note in the book and FEATURE-MATRIX, and
-  a GitHub security advisory for the published pre-release (owner decision D4).
+  a GitHub security advisory for the published pre-release (decision D4).
 - **API.** `PHI_TAGS`, `phi_present` and `deidentify` are public in `tessera-ingest` (pre-1.0). They are
   **removed**, not deprecated, because keeping a public "PHI tag list" that is wrong is the defect. Their
   replacements are `deid::Profile`, `deid::apply` and `deid::Record`. The `CHANGELOG` is release-plz's, so the
@@ -856,152 +870,213 @@ marker UID. R6 attributes get a marker date in LO text. Binary VRs get the 8 byt
    end (P3b: through `engine::run`, Oracles A and B).
 2. **Option matrix.** For each supported option alone, and for the PET recipe: the rows that option turns into
    `K` keep their marker, every other marker is absent, and (0012,0064) lists exactly the applied codes.
-3. **UIDs.** Same input + same K → same bytes (S15). Per-run key differs from custodian key. One original UID on
-   two slices, in a nested reference and in a Safe Private UI element → one replacement. A DICOM-root value is
-   kept. Every R3 keep attribute is kept. PET+CT sharing FrameOfReferenceUID in one spec → still shared. The
-   replacement is valid (`2.25.` prefix, at most 64 characters, UUIDv8 bits).
-4. **Dates.** Basic → no DA/DT/TM element anywhere. Modified → every DA/DT shifted by the same Δ, including the
-   R4 attributes, intervals preserved, Δ ≠ 0, Δ recoverable from the envelope. Two subjects with equal PatientID
-   and different IssuerOfPatientID → different Δ. An absent PatientID → refused. The timestamp gate refuses a
-   removed date.
-5. **Gates.** BurnedInAnnotation `YES` → refused. Absent flag on `US` → refused; with `pixel_review` → accepted
-   and recorded. An unregistered `Identifying` metadata field → refused. A declared pseudonym → allowed and
-   recorded.
+3. **UIDs.** (a) Same input + same K → same bytes (S15). (b) The per-run key differs from the custodian key.
+   (c) One original UID on two slices, in a nested reference and in a Safe Private UI element → one
+   replacement. (d) A DICOM-root value is kept, and every R3 keep attribute is kept. (e) The replacement is valid
+   (`2.25.` prefix, at most 64 characters, UUIDv8 bits). (f) PET and CT sharing a FrameOfReferenceUID → still
+   shared (at object level under one K; end to end through one spec).
+4. **Dates.** (a) Basic → no DA/DT/TM element anywhere. (b) Modified → every DA/DT shifted by the same Δ,
+   including the R4 attributes, intervals preserved, Δ ≠ 0. (c) Two subjects with equal PatientID and different
+   IssuerOfPatientID → different Δ. (d) An absent PatientID → refused. (e) Δ is recoverable from the v2
+   envelope. (f) The timestamp gate refuses a removed date.
+5. **Gates.** (a) BurnedInAnnotation `YES` → refused. (b) An absent flag on `US` → refused; with `pixel_review`
+   → accepted and recorded. (c) An unregistered `Identifying` metadata field → refused. (d) A declared pseudonym
+   → allowed and recorded.
 6. **Groups and file meta.** No group 0000/0002/0004 element and no File Meta value appears in the seal.
 7. **Spec edge.** On a de-identifying run, the sealed `ingested_via_spec` reference is `urn:tessera:spec:…`. Its
    hash equals the redacted pre-image hash and differs from the ADR-0035 hash of the same spec. No spec or input
    path string is in the seal. A non-de-identifying run is unchanged.
 8. **Attestation shape.** Every (0012,0063) value is at most 64 characters, and none contains a version string.
-9. **Envelope v2.** `reidentify` returns the originals of every slice's touched attributes, the UID map, Δ and
-   the paths. v1 envelopes still decrypt.
+9. **Envelope v2.** `reidentify` returns (a) the originals of every slice's touched attributes, the UID map
+   and the paths, and (b) Δ. (c) v1 envelopes still decrypt.
 10. **Conformance-table drift** (§2), hermetic, including the §2.1 list counts.
 11. **Legacy detector.** A product built the old way is flagged by `inspect`/`verify`.
-12. **Precedence (§3.0).** Device Identity alone → the 11 device dates are absent, the extra (0012,0063) value and
-    `overridden` are present. Device Identity + Modified → they are shifted by Δ. Device Identity + Full → they
-    are kept. In no mode is an original subject date present next to a shifted one.
-13. **R7 / R8.** A RetrieveURL carrying a marker UID is absent in every mode, and CodingSchemeURL is kept. Under
-    Safe Private, a listed private SQ read as UN is re-typed, its UI replaced and its PN removed. An unlisted UN
-    is removed. A UN injected after `apply` makes the invariant fail the ingest.
+12. **Precedence (§3.0).** Device Identity alone → (a) the 11 device dates are absent, (b) the record's
+    `overridden` lists them and (c) the extra (0012,0063) value is present. (d) Device Identity + Modified →
+    they are shifted by Δ. (e) Device Identity + Full → they are kept. (f) In no mode is an original subject date
+    present next to a shifted one.
+13. **R7 / R8.** (a) A RetrieveURL carrying a marker UID is absent in every mode, and CodingSchemeURL is kept.
+    (b) Under Safe Private, a listed private SQ read as UN is re-typed and its PN removed; an unlisted UN is
+    removed; a UN injected after `apply` makes the invariant fail the ingest. (c) The re-typed UI is replaced.
 14. **Test vectors.** The §4.1 UID vector (raw and masked bytes) and the two §5 Δ vectors reproduce exactly.
-15. **R9-R11.** Under every mode and option: every PN element is absent (including the 3 unlisted ones and a PN
-    inside a nested item); the 6 R9 text names, the 10 R10 identifiers and the 23 R11 comment fields are absent;
-    the replaced ReferencedSOPInstanceUID never sits next to its original in any text VR (the round-3 `^PHIEXT`
-    case); a BreedRegistrationNumber is absent while species and breed descriptions stay; the kept classes
-    (CodeValue, DeviceID, StackID) are present.
+15. **R9-R11.** Under every mode and option: (a) every PN element is absent, including the 3 unlisted ones and
+    a PN inside a nested item; (b) the 6 R9 text names, the 11 R10 identifiers (with a SelectorUCValue copying a
+    PatientName marker) and the 26 R11 fields (23 comment fields, TextValue outside a ContentSequence,
+    DocumentTitle, PerformedProcedureTypeDescription) are absent; (c) no text-VR element holds a copy of any UI
+    value of the input (the round-3 `^PHIEXT` case); (d) a BreedRegistrationNumber is absent while species and
+    breed descriptions stay; (e) the kept classes (CodeValue, DeviceID, StackID) are present.
 16. **Surface options.** `header = "none"` seals no `extra["dicom_header"]` but does seal the record; `also_remove
     = ["0010,2298"]` removes ResponsiblePersonRole and is recorded; `also_remove` on an `X` tag is a hard error;
     `timestamp = "from-source"` yields the shifted StudyDate+StudyTime under Modified Dates and is refused under
     Basic; `--pseudonym-field` on a field no `--meta` supplies is a hard error.
 
-## §12 — Phasing
+## §12 — Implementation plan (ready-to-file sub-issues)
 
-**Rules:** (1) no phase ships an attestation or a doc claim stronger than what that phase enforces; (2) every
-phase's acceptance is satisfiable with that phase and earlier ones only, so no criterion names a later surface;
-(3) each phase is about 400 hand-written lines or fewer (the generated TSVs are not counted). The line estimates
-are mine, so the implementer splits a phase further if it comes out larger.
-
-- **P1 — Vendored tables and generated policy** (~300). The generator (E.1-1, E.3.10-1, the PS3.6 6-1/7-1/8-1
-  registry; the R3/R4/R6/R7/R11 lists, the R9/R10 searches with per-candidate classes, and the §3.0 override
-  set; rules R1-R11 with their citations), the TSVs with provenance headers, a static parser, and the hermetic
-  drift test. *Acceptance:* §11.1.10 green with every §2 count; source sha256 equal to §2. No behaviour change.
-- **P2a — Engine skeleton** (~250, `tessera-ingest::dicom::deid`). `Profile`,
-  `apply(obj) -> (obj', Record, Modified)`: compound-code resolution, recursion, private removal under Basic, R1
-  groups, R2 unknown public, record counts. Pure, not wired. *Acceptance:* §11.1.6 at object level; a nested
-  private and a nested group-0004 element are removed.
-- **P2a-ii — UN handling** (~250). R8 rules 1-4: re-typing public UN, the Safe Private table lookup, the
-  Implicit VR SQ re-parse with per-item creator lookup, and the no-UN invariant. *Acceptance:* §11.1.13 (R8 part)
-  at object level.
-- **P2b — Engine rules** (~300). §3.0 precedence; R4/R6 date-valued removal (Basic) and retention (Full); R7; R9;
-  R10; R11. *Acceptance:* §11.1.12 (Basic and Full parts), §11.1.13 (R7 part) and §11.1.15 (Basic, Full and the
-  non-keyed options) at object level.
-- **P2b-ii — Attestation and the oracle** (~250). The attestation attributes (multi-valued (0012,0063), the
-  §3.0 extra value, (0012,0064), (0028,0303)), the `value_to_json` inverse, and Oracle A with check (d).
-  *Acceptance:* the oracle round-trip test for every VR; §11.1.8 at object level.
-- **P2c — Keyed transforms** (~300). UID derivation over the full coverage with the DICOM-root guard; the per-run
-  K derivation; the subject key, Δ and its refusals; the Modified Dates shift; Retain UIDs. Pure, not wired.
-  *Acceptance:* §11.1.1 (object-level form), §11.1.2-3, §11.1.4 (all but its timestamp-gate sentence),
-  §11.1.12 (Modified part), §11.1.14 and §11.1.15 (Modified part) at object level.
-- **P3a — Provenance and pixel gates on today's path** (~350). The §9.5 redacted spec edge with
-  `--print-spec-hash`; the §9.2 opaque source reference for every member of a de-identifying run; the two
-  additive v1 envelope fields; the §8 refusals **with their surface** (`pixel_review` product key and
-  `--deid-pixel-review`). All of it applies to the existing `--deidentify` / `--recipient` paths. It adds no
-  attestation and only tightens. Can land in parallel with P1-P2c. *Acceptance:* §11.1.5 (pixel part) and
-  §11.1.7 end to end; `reidentify` returns the paths from a v1 envelope; a mixed DICOM+NIfTI run seals no path.
-- **P3b — Wire the Basic profile** (~350, after P2c and P3a). `engine.rs` dispatch to `deid::apply` (Basic,
-  per-run keyspace, selected by `deidentify = true` / `recipients`), curated metadata from `obj'`, the record and
-  attestation, the §9.1 gate **with its surface** (`pseudonym_fields` product key and `--pseudonym-field`), and
-  the §9.3 gate. The attestation and every gate it relies on land together. *Acceptance:* §11.1.1 (end-to-end form,
-  Basic), §11.1.4's timestamp-gate sentence, §11.1.5 and §11.1.8 through `engine::run` and the CLI; S15 re-ingest
-  byte-identical.
-- **P3c — Public surface catch-up** (~250, after P3b). Remove `PHI_TAGS`/`phi_present`/`deidentify` (a
-  `feat(ingest)!` change); rewrite the CLI help (`--deidentify`, `--timestamp`); regenerate the affected trycmd
-  snapshots; rewrite the book/FEATURE-MATRIX line to state that the v1 envelope holds slice 1's original header
-  plus the paths only. *Acceptance:* trycmd snapshots green; `guardrails-gates` green.
-- **P3d — Default flip (D1)** (~200, after P3c). No flag means Basic; `--keep-identity` / `keep_identity = true`
-  (exclusive with every de-identification key) keeps today's keep-PHI path and its warning; the docs follow.
-  *Acceptance:* a flagless ingest is de-identified (Oracle A); `--keep-identity` reproduces the pre-flip bytes; a
-  combination with a de-identification key is a hard error.
-- **P4 — Envelope v2** (~300, after P3b). `IdentityDocument` v2 (per-slice modified attributes, UID map, Δ when
-  present, source and spec paths), and `reidentify` reading v1 and v2. It updates the slice-1 doc line to the
-  full claim. *Acceptance:* §11.1.9 **under Basic**: per-slice originals, UID map and paths recovered. The Δ part
-  of §11.1.9 moves to P4b, the first phase with a Modified Dates surface.
-- **P4b — Option selection** (~300, after P4). The `[product.deidentify_profile]` table with `options`,
-  `--deid-option`, and the exclusivity and unknown-option errors. *Acceptance:* §11.1.2, §11.1.4 and §11.1.12
-  end to end, plus §11.1.9's Δ part (Δ read back from the v2 envelope).
-- **P4c — Keyspace and header surface** (~300, after P4b). `key_file`, `--deid-key`, `keygen --deid`, the
-  custodian keyspace with the §4.3 `shred` warning and `inspect --json` keyspace output; `header = "none"`;
-  `also_remove`; `timestamp = "from-source"`. *Acceptance:* §11.1.3 (custodian part) and §11.1.16 end to end.
-- **P5 — Legacy detection and docs** (~300, after P3d and P4c). The `inspect`/`verify` warning; the book
-  (`ingest.md`, `provenance-signing.md`, a de-identification page with the option table, §2.1 R1-R11, §3.0, the
-  PET recipe, the §8 modality list and the custodian-keyspace erasure caveat); the FEATURE-MATRIX rows; the
-  security note; the ADR-0047 amendment banner (§1 step 4, §4) and an ADR-0035 note (§9.5); the scheduled
-  edition-drift workflow. *Acceptance:* §11.1.11 against a synthetic old-style manifest built in the test
-  ((0012,0062) = `YES`, no record), because P3c has removed the old code path; `guardrails-gates` green.
+Each phase below is one sub-issue of #579 and one PR, listed in phase order. **Rules:** (1) no phase ships an
+attestation or a doc claim stronger than what that phase enforces; (2) every acceptance criterion is
+satisfiable with that phase and earlier ones, so none names a later surface, and the lettered parts of §11.1
+exist so a phase can cite exactly the part it builds; (3) each phase is **≤ ~400 hand-written diff lines**
+(tests included; the generated TSVs are not counted). The estimates are mine; a phase that grows past the bound
+splits at its *Split if needed* seam. Each PR shows its first test failing once on `fa581f5` (§11).
 
 **Order:** P1 → P2a → P2a-ii → P2b → P2b-ii → P2c → P3b → P3c → P3d; P3b → P4 → P4b → P4c; {P3d, P4c} → P5.
-P3a is independent and must land before P3b. Each acceptance list above cites only cases whose surface exists by
-that phase: object-level cases use `deid::Profile` directly (P2*), CLI and spec cases start at P3a/P3b, options
-at P4b, keyspace and header at P4c. **Follow-up issues** (filed with the plan, not built here): Clean
-Descriptors (which would address the free-text description residual); Clean Pixel Data / Recognizable Visual
-Features; DICOM egress resolving the IOD-conformance qualifiers; the schema `dicom_tag` binding (blocked on
-consumer-schema registration); date aggregation as a Modified Dates method; per-subject custodian keys; URL
-rewriting instead of R7 removal, if a consumer needs retrieve locations; `header = "none"` as a default (if D2
-goes that way).
+P3a depends on nothing and must land before P3b. Object-level criteria use `deid::Profile` directly (P1-P2c);
+CLI and spec criteria start at P3a/P3b; option selection at P4b; keyspace and header surface at P4c.
 
-## Owner decisions needed
+### P1 — feat(ingest): vendored PS3.15 / PS3.6 tables and the policy generator (~300)
 
-Each decision lists my recommendation and the reviewers' (rounds 1-3).
+- **Scope:** the stdlib-Python generator over E.1-1, E.3.10-1 and the PS3.6 6-1/7-1/8-1 registry; the R3, R4,
+  R6, R7 and R11 lists, the R9/R10 searches with each candidate's class, and the §3.0 override set; rules R1-R11
+  with their citations; the TSVs with provenance headers; a static parser; the hermetic drift test. No
+  behaviour change.
+- **Acceptance:** §11.1.10 green with every §2 / §2.1 count; the source sha256 equals §2's; a hand edit to a
+  TSV fails the drift test.
+- **Depends on:** none.
 
-- **D1. Is de-identification the default for DICOM ingest?** *Mine:* yes, in phase P3d (Basic; round 3 agrees). Keep-PHI
-  becomes the explicit `--keep-identity`. *Reviewers:* the same, with the flip placed in a phase, which P3d does. Cost:
-  a breaking CLI change, and every internal script that relied on PHI in the clear must add the flag. Today the unsafe
-  path is the default, and a forgotten flag ships identity.
-- **D2. Default sealed header: de-identified or `none`.** *Mine:* de-identified, sealed only from P3b, after
-  P2a-P2c have closed the UI, URI (R7), date (R4/R6), UN (R8), name (R9), identifier-copy (R10) and comment (R11)
-  gaps. *Reviewers:* de-identified only once the UI and date gaps (round 1), the URI and alternative-calendar gaps
-  (round 2), and B1 + B2 (round 3: R10 and R9) are closed. P3b depends on P2b, so the header is first sealed after
-  all of them. Cost: Tessera's privacy is exactly Annex E plus §2.1, no stronger, and free text in
-  attributes Annex E retains stays a residual. `none` is strictly safer but discards most DICOM-derived context.
-- **D3. The anatomist extension.** *Mine:* `also_remove` in the spec now, and a schema `dicom_tag` binding once
-  schemas are registrable. *Reviewers:* the same. Waiting for the schema route alone blocks anatomist's first
-  ingest on an unbuilt feature.
-- **D4. Disclosure.** *Mine:* a GitHub security advisory for `v0.1.0-alpha.1` plus a book security note.
-  *Reviewers:* the same, because the published `YES` attestations are false. The cost is public acknowledgement.
-- **D5. Pixels.** *Mine (adopting the reviewer's):* refuse on a `YES` flag with no override. Also refuse an absent
-  BurnedInAnnotation for US/OT/XC/DOC/SC and the Secondary Capture classes unless `pixel_review = "acknowledged"`.
-  Cost: an extra acknowledgement step for those modalities, and Tessera has no means to verify the
-  acknowledgement.
-- **D6 (new). Custodian key with crypto-shred** (§4.3). *Mine:* allow it, record the keyspace, warn on `shred`,
-  and amend ADR-0047 §4. The alternative is to refuse the combination, which gives up cross-run linkage for
-  crypto-shred users. *Reviewers:* allow, warn on `shred`, and record the keyspace in `inspect --json` (round 2), which
-  P4c does. Cost of mine: erasure in a custodian keyspace
-  requires destroying a key that serves every subject.
-- **D7 (new). Redacted spec-hash pre-image for de-identifying runs** (§9.5, amends ADR-0035). *Mine:* adopt it.
-  It extends to **every member's** `ingested_from` reference and spec path in a de-identifying run, non-DICOM
-  members included (§9.2, round 3). The alternative is to drop the `ingested_via_spec` edge on de-identifying runs,
-  which loses spec provenance. *Reviewers:* agree (round 2), with the non-DICOM extension (round 3). Cost of mine:
-  two spec-hash pre-images exist, chosen by whether the run de-identifies, and `--print-spec-hash` is needed to
-  verify one.
+### P2a — feat(ingest): de-identification engine skeleton (~250)
+
+- **Scope:** `tessera-ingest::dicom::deid`: `Profile`, `apply(obj) -> (obj', Record, Modified)`, compound-code
+  resolution, recursion into sequences, private removal under Basic, R1 groups, R2 unknown public tags, record
+  counts. Pure, not wired.
+- **Acceptance:** §11.1.6 at object level; a nested private element and a nested group-0004 element are
+  removed.
+- **Depends on:** P1.
+
+### P2a-ii — feat(ingest): UN handling, with no UN ever sealed (~250)
+
+- **Scope:** R8 rules 1-4: re-typing public UN, the Safe Private table lookup, the Implicit VR SQ re-parse
+  with the per-item creator lookup, and the no-UN invariant.
+- **Acceptance:** §11.1.13(b) at object level.
+- **Depends on:** P2a.
+
+### P2b — feat(ingest): date, URI, name, identifier and free-text rules (~300)
+
+- **Scope:** §3.0 precedence and the record's `overridden` list; R4/R6 date-valued removal (Basic) and
+  retention (Full); R7; R9; R10; R11.
+- **Acceptance:** at object level: §11.1.4(a); §11.1.12(a), (b), (e) and (f) for Basic and Full; §11.1.13(a);
+  §11.1.15 under Basic, Full and the non-keyed options.
+- **Depends on:** P2a-ii.
+- **Split if needed:** R9-R11 as a second PR after the date and URI rules.
+
+### P2b-ii — feat(ingest): attestation attributes and the decoding oracle (~250)
+
+- **Scope:** the attestation attributes (multi-valued (0012,0063) including the §3.0 extra value, (0012,0064),
+  (0028,0303)); the `value_to_json` inverse; Oracle A with check (d).
+- **Acceptance:** the oracle round-trip test for every VR; §11.1.8 and §11.1.12(c) at object level.
+- **Depends on:** P2b.
+
+### P2c — feat(ingest): keyed UID replacement and the Modified Dates shift (~300)
+
+- **Scope:** UID derivation over the full §4.1 coverage with the DICOM-root guard; the per-run K derivation;
+  the subject key, Δ and its refusals; the Modified Dates shift; Retain UIDs. Pure, not wired.
+- **Acceptance:** at object level: §11.1.1 (object-level form); §11.1.2; §11.1.3(a) and (c)-(f); §11.1.4(b)-(d);
+  §11.1.12(d) and (f) under Modified; §11.1.13(c); §11.1.14; §11.1.15 under the keyed options.
+- **Depends on:** P2b-ii.
+- **Split if needed:** the Δ derivation and the date shift as a second PR after UID replacement.
+
+### P3a — fix(ingest): opaque provenance edges and pixel gates on today's path (~350)
+
+- **Scope:** the §9.5 redacted spec edge with `--print-spec-hash`; the §9.2 opaque source reference for every
+  member of a de-identifying run; the two additive v1 envelope fields, with `reidentify` returning them; the §8
+  refusals with their surface (the `pixel_review` product key and `--deid-pixel-review`). All of it applies to
+  the existing `--deidentify` / `--recipient` paths, adds no attestation and only tightens.
+- **Acceptance:** §11.1.5(a) and (b), and §11.1.7, end to end; `reidentify` returns the paths from a v1
+  envelope; a mixed DICOM+NIfTI de-identifying run seals no path.
+- **Depends on:** none (lands before P3b; can run in parallel with P1-P2c).
+- **Split if needed:** the §8 pixel gates as a second PR after the provenance edges.
+
+### P3b — feat(ingest): seal the Basic profile (~350)
+
+- **Scope:** the `engine.rs` dispatch to `deid::apply` (Basic, per-run keyspace, selected by
+  `deidentify = true` / `recipients`); curated metadata from `obj'`; the record and the attestation; the §9.1
+  gate with its surface (the `pseudonym_fields` product key and `--pseudonym-field`); the §9.3 gate. The
+  attestation and every gate it relies on land together.
+- **Acceptance:** §11.1.1 (end-to-end form, Basic); §11.1.3(f) through one spec; §11.1.4(f); §11.1.5(c) and (d);
+  §11.1.8 through `engine::run` and the CLI; an S15 re-ingest is byte-identical.
+- **Depends on:** P2c, P3a.
+
+### P3c — feat(ingest)!: remove `PHI_TAGS` and catch up the public surface (~250)
+
+- **Scope:** remove `PHI_TAGS` / `phi_present` / `deidentify`; rewrite the CLI help (`--deidentify`,
+  `--timestamp`); regenerate the affected trycmd snapshots; rewrite the book and FEATURE-MATRIX line to state
+  that the v1 envelope holds slice 1's original header plus the paths only.
+- **Acceptance:** trycmd snapshots green; `guardrails-gates` green; no public item named `PHI_TAGS`,
+  `phi_present` or `deidentify` remains in `tessera-ingest`.
+- **Depends on:** P3b.
+
+### P3d — feat(ingest)!: de-identify DICOM by default (decision D1) (~200)
+
+- **Scope:** no flag means Basic; `--keep-identity` / `keep_identity = true` (exclusive with every
+  de-identification key) keeps today's keep-PHI path and its warning; the docs follow.
+- **Acceptance:** a flagless ingest is de-identified (Oracle A); `--keep-identity` reproduces the pre-flip
+  bytes; combining it with a de-identification key is a hard error.
+- **Depends on:** P3c.
+
+### P4 — feat(ingest): identity envelope v2 (~300)
+
+- **Scope:** `IdentityDocument` v2 (per-slice modified attributes, the UID map, Δ when present, source and spec
+  paths) and `reidentify` reading v1 and v2; the slice-1 doc line becomes the full claim.
+- **Acceptance:** §11.1.9(a) and (c) under Basic.
+- **Depends on:** P3b.
+
+### P4b — feat(ingest,cli): select PS3.15 options (~300)
+
+- **Scope:** the `[product.deidentify_profile]` table with `options`; `--deid-option`; the exclusivity and
+  unknown-option errors.
+- **Acceptance:** end to end: §11.1.2; §11.1.4(a)-(e), with (e) reading Δ back from the v2 envelope;
+  §11.1.9(b); §11.1.12.
+- **Depends on:** P4.
+
+### P4c — feat(ingest,cli): custodian keyspace and header surface (~300)
+
+- **Scope:** `key_file`, `--deid-key`, `keygen --deid`; the custodian keyspace with the §4.3 `shred` warning and
+  the `inspect --json` keyspace output; `header = "none"`; `also_remove`; `timestamp = "from-source"`.
+- **Acceptance:** §11.1.3(b) and §11.1.16 end to end.
+- **Depends on:** P4b.
+- **Split if needed:** `header` / `also_remove` / `timestamp` as a second PR after the keyspace.
+
+### P5 — docs(ingest): legacy detection, the de-identification book page and disclosure (~300)
+
+- **Scope:** the `inspect` / `verify` legacy warning; the book (`ingest.md`, `provenance-signing.md`, a
+  de-identification page with the option table, §2.1 R1-R11, §3.0, the PET recipe, the §8 modality list and
+  the custodian-keyspace erasure caveat); the FEATURE-MATRIX row moves to ✓; the security note and advisory
+  (D4); the ADR-0047 amendment banner (§1 step 4, §4) and an ADR-0035 note (§9.5); the scheduled
+  edition-drift workflow.
+- **Acceptance:** §11.1.11 against a synthetic old-style manifest built in the test ((0012,0062) = `YES`, no
+  record), because P3c has removed the old code path; `guardrails-gates` green.
+- **Depends on:** P3d, P4c.
+
+**Follow-up issues** (filed with the plan, not built here): Clean Descriptors (which would address the
+free-text description residual); Clean Pixel Data / Recognizable Visual Features; DICOM egress resolving the
+IOD-conformance qualifiers; the schema `dicom_tag` binding (blocked on consumer-schema registration); date
+aggregation as a Modified Dates method; per-subject custodian keys; URL rewriting instead of R7 removal, if a
+consumer needs retrieve locations.
+
+## Decisions (owner, 2026-10-18)
+
+The owner accepted every recommendation as written. They are recorded here as decisions, each with its cost so
+the trade stays visible. The reviewers agreed with each (rounds 1-4).
+
+- **D1. De-identification is the default for DICOM ingest**, flipped in P3d (Basic). Keep-PHI becomes the
+  explicit `--keep-identity`. *Cost:* a breaking CLI change; every internal script that relied on PHI in the
+  clear must add the flag.
+- **D2. The default sealed header is the de-identified one**, sealed only from P3b, after P2a-P2c have closed
+  the UI, URI (R7), date (R4/R6), UN (R8), name (R9), identifier-copy (R10) and free-text (R11) gaps. *Cost:*
+  Tessera's privacy is exactly Annex E plus §2.1, no stronger, and free text in attributes Annex E retains stays
+  a residual. `header = "none"` (§6) stays available as the strictly safer choice.
+- **D3. The anatomist extension** is `also_remove` in the spec now, and a schema `dicom_tag` binding once
+  schemas are registrable. *Cost:* two routes into the same set while the schema route is unbuilt.
+- **D4. Disclosure:** a GitHub security advisory for `v0.1.0-alpha.1` plus a book security note, because the
+  published `YES` attestations are false. *Cost:* public acknowledgement.
+- **D5. Pixels:** refuse on a `YES` flag with no override, and refuse an absent BurnedInAnnotation for
+  US/OT/XC/DOC/SC and the Secondary Capture classes unless `pixel_review = "acknowledged"`. *Cost:* an extra
+  acknowledgement step for those modalities, which Tessera cannot verify.
+- **D6. A custodian key may be combined with crypto-shred** (§4.3): the keyspace is recorded (also in
+  `inspect --json`), `shred` warns, and ADR-0047 §4 is amended. *Cost:* erasure in a custodian keyspace requires
+  destroying a key that serves every subject.
+- **D7. Redacted spec-hash pre-image for de-identifying runs** (§9.5, amends ADR-0035), extended to every
+  member's `ingested_from` reference and spec path, non-DICOM members included (§9.2). *Cost:* two spec-hash
+  pre-images exist, chosen by whether the run de-identifies, and `--print-spec-hash` is needed to verify one.
 
 ## Consequences
 
@@ -1069,6 +1144,18 @@ Each decision lists my recommendation and the reviewers' (rounds 1-3).
 | §0 finding 1 overstated | §0 finding 1 reworded |
 | phasing forward references | §12 rules 1-3; P2a-ii, P2b-ii, P4c split out; surfaces in P3a/P3b; P4's Δ part to P4b |
 | CLI cannot declare a pseudonym | §3.1 `--pseudonym-field`, product-level keys; §11.1.16 |
+
+**r5 (2026-10-18), accepted by the owner after the round-4 audit of `314c9c8`** (mechanical amend, no other
+design change):
+
+| Audit item | Resolution |
+|---|---|
+| (0072,006F) SelectorUCValue survives | §2.1 R10: removed (11 tags); §11.1.15(b) |
+| TextValue, DocumentTitle, PerformedProcedureTypeDescription survive | §2.1 R11 part 2 (26 in all); §11.1.15(b) |
+| P2b cites §11.1.12's extra (0012,0063) value | §11.1 lettered parts; §11.1.12(c) moved to P2b-ii |
+| P2c requires Δ recoverable from the envelope | §11.1.4(e) moved to P4b |
+| R9 "four" private-creator attributes; (0040,0031) "names an object" | §2.1 R9: five; (0040,0031) is an issuer (R10) |
+| Acceptance | Status, *Decisions (owner, 2026-10-18)*, §12 as ready-to-file sub-issues, FEATURE-MATRIX row |
 
 One refinement to the round-1 audit, not a dispute: of the six E.1-1 rows without a VR in PS3.6 Table 6-1, two
 ((0002,0003), (0004,1511)) resolve from Tables 7-1/8-1. Only the two command-group rows and the two patterns
