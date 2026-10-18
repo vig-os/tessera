@@ -1,21 +1,30 @@
 # Release pipeline — ADR-0052. release-plz drives the workspace version + CHANGELOG from conventional
-# commits. The workflow runs ONLY `release-plz release-pr`, which opens/updates a HELD release PR
-# (version bump + CHANGELOG); it never tags or publishes. The first alpha (0.1.0-alpha.1) is cut only by
-# deliberately merging that PR — then a separate, token-gated `release-plz release` (not wired here).
+# commits. .github/workflows/release-plz.yml runs ONLY `release-plz release-pr`, which opens/updates a
+# HELD release PR (version bump + CHANGELOG); it never tags or publishes. A release is cut by merging
+# that PR and then pushing the unified `v<version>` tag on the merge commit (operator step).
+#
+# BASELINE: release-plz compares against the LAST `v*` RELEASE TAG (checked out and passed as
+# `--registry-manifest-path`), not against crates.io (#606). Tessera's crates are deliberately not
+# published to crates.io, so the default registry baseline saw every crate as never released and never
+# proposed a release. `git_only = true` is not an alternative: it opens the git repository at the
+# manifest's directory, and the workspace lives in `tessera/`.
 #
 # NB: do NOT set `release = false` here — that removes every package from release-plz's view
 # ("no public packages found") and breaks `release-pr` too. The HOLD comes from running only
-# `release-pr`, not from disabling release. When crates.io publishing is wired (CARGO_REGISTRY_TOKEN),
+# `release-pr`, not from disabling release. If crates.io publishing is ever wired (CARGO_REGISTRY_TOKEN),
 # set `publish = false` on `tessera-py` / `tessera-wasm` (cdylibs → PyPI / npm) to keep them off crates.io.
 [workspace]
-# Intentionally minimal — defaults are correct for a held `release-pr` flow. Tag naming + single-vs-
-# per-crate tags + crates.io `publish` scoping are release-time concerns, decided when the alpha is cut.
+# cargo-semver-checks is OFF. With a baseline, release-plz runs it on every library crate, building
+# rustdoc for the current AND the released tree — and tessera-ingest links the system libhdf5, which a
+# bare CI runner does not have. Its verdict also cannot change a pre-release bump (0.1.0-alpha.N →
+# alpha.N+1 regardless); it only annotates the release PR. Turning it on means running release-plz where
+# libhdf5 resolves (the nix dev shell) — tracked in #607.
+semver_check = false
 #
 # HANDOFF → cargo-dist (the broad binary channel; see /dist-workspace.toml + /.github/workflows/
-# release.yml). release-plz owns the version bump, CHANGELOG, and — once `release-plz release` is wired
-# — the git TAG. That tag is the single cut trigger: cargo-dist's release.yml fires on any tag matching
-# `**[0-9]+.[0-9]+.[0-9]+*` (that regex accepts BOTH a unified `v0.1.0-alpha.1` and a per-crate
-# `tessera-cli-v0.1.0-alpha.1`, so either release-plz tag scheme works) and attaches the prebuilt
-# `tessera` binaries + `curl | sh` installer to the same GitHub Release. The nix/crane channel attaches
-# its reproducible musl binary + maturin wheel to that same Release. So at cut time, whichever tag
-# scheme is chosen here must stay inside that regex — nothing else needs to change.
+# release.yml). release-plz owns the version bump and CHANGELOG; the operator pushes the tag. That tag
+# is the single cut trigger: cargo-dist's release.yml fires on any tag matching
+# `**[0-9]+.[0-9]+.[0-9]+*` and attaches the prebuilt `tessera` binaries + `curl | sh` installer to the
+# GitHub Release; release-nix.yml attaches the reproducible nix/crane musl binary + maturin wheel to the
+# same Release. Release tags are unified `v<version>` (as v0.1.0-alpha.1 was), which is also the shape
+# the baseline lookup (scripts/last-release-tag.sh) reads.
