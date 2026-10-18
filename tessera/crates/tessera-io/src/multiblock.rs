@@ -315,12 +315,11 @@ impl LogicalTableView {
         // decode the whole block to learn its min/max).
         let blob = reader.read_block(bname)?;
         let col = decode_column(spec, &blob, column)?;
-        let vals = col.as_i64().ok_or_else(|| {
+        col.chunk_stats().ok_or_else(|| {
             Error::Codec(format!(
                 "select_blocks_overlapping: column '{column}' is not an integer column for stats"
             ))
-        })?;
-        Ok(ChunkStats::from_values(&vals))
+        })
     }
 }
 

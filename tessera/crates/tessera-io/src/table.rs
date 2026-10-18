@@ -217,31 +217,75 @@ impl ColumnData {
     /// fits losslessly: `i1/i2/i4/i8`, `u1/u2/u4` always, and `u8` (u64) only when every value ≤
     /// `i64::MAX` (a monotonic cast → `min`/`max` stay exact). Float columns return `None` (they need
     /// canonical reduction before stats — ADR-0024).
+    ///
+    /// For a nullable column the result holds the **present values only**, so it is *not*
+    /// row-aligned: its length is the number of non-NULL rows, not [`Self::len`]. Never index it by
+    /// a row range — slice the column first ([`Self::slice`]) and convert the slice, which is what
+    /// [`Self::chunk_stats`] does (#627).
     pub fn as_i64(&self) -> Option<Vec<i64>> {
         match self {
-            ColumnData::I8(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::I16(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::I32(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::I64(v) => Some(v.clone()),
-            ColumnData::U8(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::U16(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::U32(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::U64(v) => v
-                .iter()
-                .all(|&x| x <= i64::MAX as u64)
-                .then(|| v.iter().map(|&x| x as i64).collect()),
-            ColumnData::F32(_) | ColumnData::F64(_) | ColumnData::Bool(_) | ColumnData::Utf8(_) => {
-                None
-            }
             // NULLs are SKIPPED, not coerced: a chunk min/max must describe the values that
             // are actually present, or pruning would exclude chunks that do contain matches.
-            ColumnData::Nullable { values, validity } => values.as_i64().map(|all| {
-                all.into_iter()
-                    .zip(validity)
-                    .filter_map(|(x, &ok)| ok.then_some(x))
-                    .collect()
-            }),
+            ColumnData::Nullable { values, validity } => values.ints_where(|i| validity[i]),
+            other => other.ints_where(|_| true),
         }
+    }
+
+    /// The integer values of the rows `keep` selects, widened to `i64` — the body of
+    /// [`Self::as_i64`]. Only the selected rows are inspected, so the value under a NULL can never
+    /// decide the outcome: a `u64` above `i64::MAX` makes the result `None` only when it is a
+    /// present value. `None` for a non-integer column (and for a nested `Nullable`, which
+    /// `validate_nullable` rejects anyway).
+    fn ints_where(&self, keep: impl Fn(usize) -> bool) -> Option<Vec<i64>> {
+        macro_rules! widen {
+            ($v:expr) => {
+                Some(
+                    $v.iter()
+                        .enumerate()
+                        .filter(|&(i, _)| keep(i))
+                        .map(|(_, &x)| x as i64)
+                        .collect(),
+                )
+            };
+        }
+        match self {
+            ColumnData::I8(v) => widen!(v),
+            ColumnData::I16(v) => widen!(v),
+            ColumnData::I32(v) => widen!(v),
+            ColumnData::I64(v) => widen!(v),
+            ColumnData::U8(v) => widen!(v),
+            ColumnData::U16(v) => widen!(v),
+            ColumnData::U32(v) => widen!(v),
+            // a monotonic cast only while every value fits; one that does not refuses the column
+            ColumnData::U64(v) => v
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| keep(i))
+                .map(|(_, &x)| i64::try_from(x).ok())
+                .collect(),
+            ColumnData::F32(_)
+            | ColumnData::F64(_)
+            | ColumnData::Bool(_)
+            | ColumnData::Utf8(_)
+            | ColumnData::Nullable { .. } => None,
+        }
+    }
+
+    /// The chunk statistics (ADR-0028 §3) of this column's rows — the single definition of a
+    /// row-group's stats, shared by the batch [`table_chunk_index`], the streaming live fold
+    /// ([`crate::accumulate::TableStreamWriter::with_live_index`]) and the multi-block fallback, so
+    /// the three cannot disagree. Pass the row-group's [`Self::slice`], not the whole column.
+    ///
+    /// `None` when the column cannot supply integer stats (see [`Self::as_i64`]).
+    ///
+    /// **NULLs are excluded**: `count`, `min`, `max`, `sum` and `sum_sq` describe the present values
+    /// only, and whatever sits under a NULL never reaches them. `count` is therefore the number of
+    /// non-NULL rows, not the row count, and [`ChunkStats`] carries no separate NULL count (that is a
+    /// format change, tracked by #522). A chunk whose rows are all NULL has the empty chunk's stats,
+    /// `ChunkStats::identity()` — no `min`/`max` — so range pruning skips it for every range, which is
+    /// exact: no NULL lies in any value range.
+    pub fn chunk_stats(&self) -> Option<ChunkStats> {
+        self.as_i64().map(|v| ChunkStats::from_values(&v))
     }
 
     /// Flatten the column to little-endian bytes for zero-copy reconstruction in another runtime —
@@ -1433,7 +1477,10 @@ pub fn decode_projected(spec: &TableSpec, blob: &[u8], names: &[&str]) -> Result
 /// (BLAKE3 over the group's little-endian column bytes — recomputable from the decoded group, independent
 /// of the Vortex byte layout) and the chunk statistics of `stat_column` (which must be an integer column,
 /// see [`ColumnData::as_i64`]). Other columns still feed each group's digest; only the stats come from
-/// `stat_column`. `index.root()` is the block's sub-block Merkle root (ADR-0028 §1), and `index.prune()`
+/// `stat_column`. A **nullable** `stat_column` is supported: NULLs are excluded from every statistic
+/// (so `count` counts the present values) and an all-NULL group carries the empty chunk's stats —
+/// see [`ColumnData::chunk_stats`], the definition this shares with the streaming live fold.
+/// `index.root()` is the block's sub-block Merkle root (ADR-0028 §1), and `index.prune()`
 /// skips row-groups a ranged read can't hit. Per #221-B, the *index* leaf may later be finer than
 /// `ROWS_PER_GROUP`; this first wiring uses the encoder's row-groups 1:1.
 ///
@@ -1460,17 +1507,11 @@ pub fn table_chunk_index(
     stat_column: &str,
 ) -> Result<ChunkIndex> {
     validate(spec, data)?;
-    let stat_vals = data
+    let stat_col = &data
         .iter()
         .find(|(name, _)| name == stat_column)
         .ok_or_else(|| Error::Codec(format!("table has no column '{stat_column}'")))?
-        .1
-        .as_i64()
-        .ok_or_else(|| {
-            Error::Codec(format!(
-                "column '{stat_column}' is not an integer column for stats"
-            ))
-        })?;
+        .1;
     let rows = data.first().map(|(_, c)| c.len()).unwrap_or(0);
     let n_groups = rows.div_ceil(ROWS_PER_GROUP).max(1);
     let mut idx = ChunkIndex::new();
@@ -1482,10 +1523,14 @@ pub fn table_chunk_index(
         for (_, col) in data.iter() {
             bytes.extend_from_slice(&col.slice(start, end).to_le_bytes());
         }
-        idx.push_entry(
-            digest(&bytes),
-            ChunkStats::from_values(&stat_vals[start..end]),
-        );
+        // Slice the ROWS, then take stats: a nullable column's `as_i64` drops its NULLs, so the
+        // whole-column values are not row-aligned and cannot be sliced by row range (#627).
+        let stats = stat_col.slice(start, end).chunk_stats().ok_or_else(|| {
+            Error::Codec(format!(
+                "column '{stat_column}' is not an integer column for stats"
+            ))
+        })?;
+        idx.push_entry(digest(&bytes), stats);
     }
     Ok(idx)
 }
@@ -1537,6 +1582,7 @@ pub fn table_block_with_index(
 mod tests {
     use super::*;
     use tessera_core::block::table::Column;
+    use tessera_core::chunk_index::Monoid;
 
     /// Encode one `i64` column through **vortex only**, with the stock strategy — no tessera types,
     /// no `deterministic_table_compressor`. Used by the #468 reproducer so the finding cannot be
@@ -2300,6 +2346,227 @@ mod tests {
         );
         // a float column can't supply integer stats
         assert!(table_chunk_index(&spec, &data, "e").is_err());
+    }
+
+    /// The value written under every NULL in the #627 tests: the dtype maximum, so a NULL that
+    /// leaked into the stats would show up as `max == 127` (no test puts a real 127 in the column).
+    const UNDER_NULL: i8 = i8::MAX;
+
+    /// A nullable `i1` column from `Option`s, with [`UNDER_NULL`] under every NULL.
+    fn nullable_i8(vals: &[Option<i8>]) -> ColumnData {
+        ColumnData::Nullable {
+            values: Box::new(ColumnData::I8(
+                vals.iter().map(|v| v.unwrap_or(UNDER_NULL)).collect(),
+            )),
+            validity: vals.iter().map(Option::is_some).collect(),
+        }
+    }
+
+    /// The per-row-group stats a chunk index over `vals` must carry, folded straight from the
+    /// `Option`s — independent of `ColumnData::as_i64`/`chunk_stats`, the code under test.
+    fn expected_group_stats(vals: &[Option<i8>]) -> Vec<ChunkStats> {
+        let groups: Vec<&[Option<i8>]> = if vals.is_empty() {
+            vec![&[]]
+        } else {
+            vals.chunks(ROWS_PER_GROUP).collect()
+        };
+        groups
+            .into_iter()
+            .map(|g| {
+                let present: Vec<i64> = g.iter().flatten().map(|&v| v as i64).collect();
+                ChunkStats::from_values(&present)
+            })
+            .collect()
+    }
+
+    /// `table_chunk_index` over a one-column table: the nullable `i1` column `k`, stats on `k`.
+    fn nullable_stat_index(vals: &[Option<i8>]) -> ChunkIndex {
+        let spec = TableSpec {
+            columns: vec![col("k", "i1").nullable()],
+            rows: vals.len() as u64,
+            row_index: None,
+        };
+        table_chunk_index(&spec, &vec![("k".into(), nullable_i8(vals))], "k").unwrap()
+    }
+
+    /// #627, the issue's minimal repro: 3 rows, 1 NULL, a nullable `i8` stat column. This panicked
+    /// with `range end index 3 out of range for slice of length 2` — the stats path sliced the
+    /// NULL-free values by the full row range.
+    #[test]
+    fn chunk_index_on_a_nullable_column_with_a_null_does_not_panic() {
+        let vals = [Some(-4), None, Some(9)];
+        let idx = nullable_stat_index(&vals);
+        assert_eq!(idx.len(), 1);
+        assert_eq!(idx.stat_pyramid()[0], expected_group_stats(&vals));
+        let agg = idx.aggregate();
+        assert_eq!((agg.count, agg.min, agg.max), (2, Some(-4), Some(9)));
+    }
+
+    /// #627: a NULL at the start, in the middle and at the end of a chunk is each excluded from
+    /// `count`/`min`/`max`/`sum`, and the value under it never reaches the stats.
+    #[test]
+    fn chunk_index_excludes_nulls_at_start_middle_and_end() {
+        let cases: [&[Option<i8>]; 4] = [
+            &[None, Some(1), Some(2), Some(3)],
+            &[Some(1), Some(2), None, Some(3)],
+            &[Some(1), Some(2), Some(3), None],
+            &[None, Some(1), None, Some(2), None],
+        ];
+        for vals in cases {
+            let idx = nullable_stat_index(vals);
+            assert_eq!(
+                idx.stat_pyramid()[0],
+                expected_group_stats(vals),
+                "{vals:?}"
+            );
+            assert_eq!(
+                idx.aggregate().max,
+                vals.iter().flatten().max().map(|&v| v as i64)
+            );
+            // the value under a NULL must not make the chunk look like it holds UNDER_NULL
+            assert!(
+                idx.prune(UNDER_NULL as i64, UNDER_NULL as i64).is_empty(),
+                "{vals:?}"
+            );
+        }
+    }
+
+    /// #627: a nullable float column carrying both a NaN (a real value) and a NULL feeds the group
+    /// digest alongside a nullable stat column with NULLs. The index builds, the stats come from the
+    /// stat column's present values only, and the digest is exactly "every column's LE bytes for
+    /// the group, in column order" — a nullable column's being `values ‖ packed validity`.
+    #[test]
+    fn chunk_index_with_a_nullable_float_holding_nan_and_null() {
+        let k = [Some(5), None, Some(-2)];
+        let f = ColumnData::Nullable {
+            values: Box::new(ColumnData::F64(vec![f64::NAN, 0.0, 1.5])),
+            validity: vec![true, false, true],
+        };
+        let spec = TableSpec {
+            columns: vec![col("k", "i1").nullable(), col("f", "f8").nullable()],
+            rows: 3,
+            row_index: None,
+        };
+        let data: TableData = vec![("k".into(), nullable_i8(&k)), ("f".into(), f.clone())];
+        let idx = table_chunk_index(&spec, &data, "k").unwrap();
+
+        let mut bytes = nullable_i8(&k).to_le_bytes();
+        bytes.extend_from_slice(&f.to_le_bytes());
+        let mut want = ChunkIndex::new();
+        want.push_entry(digest(&bytes), expected_group_stats(&k)[0].clone());
+        assert_eq!(idx.root(), want.root());
+        assert_eq!(idx.stat_pyramid(), want.stat_pyramid());
+
+        // A nullable float is not an integer stat column: a typed error, not a panic.
+        let err = table_chunk_index(&spec, &data, "f")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not an integer column"), "{err}");
+    }
+
+    /// #627: a nullable string column is not representable yet (#457), so building a chunk index
+    /// over a table holding one is rejected by the same `validate_nullable` door as `encode` — a
+    /// typed error naming the column, never a panic in the stats path.
+    #[test]
+    fn chunk_index_over_a_nullable_string_column_is_a_typed_error() {
+        let spec = TableSpec {
+            columns: vec![col("k", "i1").nullable(), col("s", "str").nullable()],
+            rows: 3,
+            row_index: None,
+        };
+        let data: TableData = vec![
+            ("k".into(), nullable_i8(&[Some(1), None, Some(3)])),
+            (
+                "s".into(),
+                ColumnData::Nullable {
+                    values: Box::new(ColumnData::Utf8(vec![
+                        "a".into(),
+                        String::new(),
+                        "c".into(),
+                    ])),
+                    validity: vec![true, false, true],
+                },
+            ),
+        ];
+        let err = table_chunk_index(&spec, &data, "k")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("column 's'") && err.contains("not supported yet"),
+            "{err}"
+        );
+    }
+
+    /// #627: an all-NULL chunk has no present values, so its stats are the EMPTY chunk's —
+    /// `ChunkStats::identity()` (count 0, no min/max) — and pruning skips it for every range.
+    #[test]
+    fn chunk_index_all_null_chunk_has_the_empty_chunk_stats() {
+        // one all-NULL chunk on its own
+        let idx = nullable_stat_index(&[None, None, None]);
+        assert_eq!(idx.stat_pyramid()[0], vec![ChunkStats::identity()]);
+        assert!(idx.prune(i64::MIN, i64::MAX).is_empty());
+
+        // an all-NULL first chunk next to a populated second one
+        let rows = ROWS_PER_GROUP + 10;
+        let vals: Vec<Option<i8>> = (0..rows)
+            .map(|k| (k >= ROWS_PER_GROUP).then_some((k % 50) as i8))
+            .collect();
+        let idx = nullable_stat_index(&vals);
+        let leaves = &idx.stat_pyramid()[0];
+        assert_eq!(leaves, &expected_group_stats(&vals));
+        assert_eq!(leaves[0], ChunkStats::identity());
+        assert_eq!(idx.prune(i64::MIN, i64::MAX), vec![1]);
+        assert_eq!(idx.aggregate().count, 10);
+    }
+
+    /// #627: a multi-chunk table where only the middle chunk has NULLs — each chunk's stats cover
+    /// exactly its own rows' present values (the NULL-free chunks are unaffected by the NULLs in
+    /// another), and the root is deterministic.
+    #[test]
+    fn chunk_index_multi_chunk_with_nulls_in_only_some_chunks() {
+        let rows = 2 * ROWS_PER_GROUP + 777; // 3 groups, the last a remainder
+        let vals: Vec<Option<i8>> = (0..rows)
+            .map(|k| {
+                let in_middle = (ROWS_PER_GROUP..2 * ROWS_PER_GROUP).contains(&k);
+                (!(in_middle && k % 3 == 0)).then_some((k % 100) as i8)
+            })
+            .collect();
+        let idx = nullable_stat_index(&vals);
+        assert_eq!(idx.len(), 3);
+        assert_eq!(idx.stat_pyramid()[0], expected_group_stats(&vals));
+        let present = vals.iter().flatten().count() as u64;
+        assert_eq!(idx.aggregate().count, present);
+        assert!(present < rows as u64);
+        assert!(idx.prune(UNDER_NULL as i64, UNDER_NULL as i64).is_empty());
+        assert_eq!(nullable_stat_index(&vals).root(), idx.root());
+    }
+
+    /// #627: the value under a NULL must not decide whether stats exist at all. A `u64` above
+    /// `i64::MAX` refuses a column only when it is PRESENT; under a NULL it is invisible, exactly as
+    /// any other value there is.
+    #[test]
+    fn chunk_index_ignores_an_out_of_range_u64_under_a_null() {
+        let k = ColumnData::Nullable {
+            values: Box::new(ColumnData::U64(vec![1, u64::MAX, 3])),
+            validity: vec![true, false, true],
+        };
+        assert_eq!(k.as_i64(), Some(vec![1, 3]));
+        let spec = TableSpec {
+            columns: vec![col("k", "u8").nullable()],
+            rows: 3,
+            row_index: None,
+        };
+        let idx = table_chunk_index(&spec, &vec![("k".into(), k)], "k").unwrap();
+        let agg = idx.aggregate();
+        assert_eq!((agg.count, agg.min, agg.max), (2, Some(1), Some(3)));
+
+        // ...while a PRESENT out-of-range u64 still refuses the column, nullable or not.
+        let present = ColumnData::Nullable {
+            values: Box::new(ColumnData::U64(vec![1, u64::MAX, 3])),
+            validity: vec![true, true, false],
+        };
+        assert_eq!(present.as_i64(), None);
+        assert_eq!(ColumnData::U64(vec![1, u64::MAX]).as_i64(), None);
     }
 
     #[test]
