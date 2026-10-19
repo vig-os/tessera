@@ -19,8 +19,16 @@ string** in `Source.reference`. That is a string hack (proper structure would be
 to make it a **structured list** so `ls` / `inspect` / `export` carry per-file detail.
 
 The export half shipped in #275: FAIR records emit one opaque `urn:tessera:source:<merkle>` entity per
-edge with the merkle `content_hash` as `sha256` — **no path, no PHI, valid JSON-LD.** This ADR settles
-the remaining "manifest data-model half."
+edge, carrying the edge's `content_hash` — **no path, no PHI, valid JSON-LD.** This ADR settles the
+remaining "manifest data-model half."
+
+> **Amended (#525).** That hash was originally emitted under schema.org's `sha256`, which is defined as
+> the SHA-2 SHA256 digest — a false claim for a BLAKE3 value, and on a `Dataset`, whose type is not even
+> in that property's domain. It is now a labelled `identifier` PropertyValue in `@graph` (RO-Crate
+> JSON-LD is flattened, so it is referenced by `@id` rather than nested), and the label states the
+> construction **per edge role**, because `Source.content_hash` is a parent `manifest_hash` for
+> `derived_from`/`supersedes`/`snapshot_of`, a source-files Merkle root for `ingested_from`, and a spec
+> hash for `ingested_via_spec`. No `sha256` is emitted, because none is computed.
 
 **The obvious data-model change is actively harmful.** Turning `reference` into
 `Vec<SourceFile { reference, digest, size }>` where `reference` is each source **path** would:
