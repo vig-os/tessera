@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2](https://github.com/vig-os/tessera/compare/tessera-ingest-v0.1.0-alpha.1...tessera-ingest-v0.1.0-alpha.2) - 2026-10-19
+
+### Added
+
+- *(ingest)* generic array ingest — NumPy .npy and .npz (ADR-0056 P1)
+- *(ingest)* generic table ingest — tessera ingest table <PARQUET|IPC|CSV> ([#460](https://github.com/vig-os/tessera/pull/460))
+
+### Fixed
+
+- *(deps)* upgrade rustls and zip past RUSTSEC-2026-0346..0349/0367..0369
+- *(ingest)* the arrow lane builds on its own, and the gate proves it
+- *(ingest)* a decode-path package is (name, version), not a name
+- *(ingest)* the decoder digest is per lane, carries each crate's source, and covers the whole decode path
+- *(ingest)* NIfTI spatial units to mm, big-endian NIfTI-1, FSL qform cross-check ([#470](https://github.com/vig-os/tessera/pull/470))
+- *(ingest)* close the five NIfTI decoder bugs and verify the .nii.gz gzip trailer ([#447](https://github.com/vig-os/tessera/pull/447))
+- *(ingest)* seal the ADR-0058 recipe on the streaming path and surface it in inspect ([#453](https://github.com/vig-os/tessera/pull/453))
+
+### Other
+
+- *(ingest)* align the hdf-compound streaming slab to the dataset chunking ([#464](https://github.com/vig-os/tessera/pull/464))
+
 ## [0.1.0-alpha.1](https://github.com/vig-os/tessera/releases/tag/tessera-ingest-v0.1.0-alpha.1) - 2026-09-23
 
 ### Added
