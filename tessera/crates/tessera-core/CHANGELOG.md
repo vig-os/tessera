@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2](https://github.com/vig-os/tessera/compare/tessera-core-v0.1.0-alpha.1...tessera-core-v0.1.0-alpha.2) - 2026-10-19
+
+### Added
+
+- *(cli,core)* tessera provenance walk and inspect --resolve-config ([#490](https://github.com/vig-os/tessera/pull/490))
+- *(ingest)* generic table ingest — tessera ingest table <PARQUET|IPC|CSV> ([#460](https://github.com/vig-os/tessera/pull/460))
+
+### Fixed
+
+- *(core,cli)* compute array statistics in exact integer arithmetic
+
+### Other
+
+- ingest cookbook, generated product-schema reference, tested Python write example, cli.md stubs ([#484](https://github.com/vig-os/tessera/pull/484))
+
 ## [0.1.0-alpha.1](https://github.com/vig-os/tessera/releases/tag/tessera-core-v0.1.0-alpha.1) - 2026-09-23
 
 ### Added

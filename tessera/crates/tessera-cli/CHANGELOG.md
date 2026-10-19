@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2](https://github.com/vig-os/tessera/compare/tessera-cli-v0.1.0-alpha.1...tessera-cli-v0.1.0-alpha.2) - 2026-10-19
+
+### Added
+
+- *(cli)* serve array stats from the chunk-index with no decode, and add stats --json
+- *(cli)* add Parquet to the bench compare head-to-head
+- *(cli)* bench compare reports BOTH table fixtures
+- *(ingest)* generic array ingest — NumPy .npy and .npz (ADR-0056 P1)
+- *(cli,core)* tessera provenance walk and inspect --resolve-config ([#490](https://github.com/vig-os/tessera/pull/490))
+- *(ingest)* generic table ingest — tessera ingest table <PARQUET|IPC|CSV> ([#460](https://github.com/vig-os/tessera/pull/460))
+- *(cli)* tessera bench compare — .tsra vs HDF5 head-to-head, every read verified, losses included ([#487](https://github.com/vig-os/tessera/pull/487))
+- *(cli)* native dtypes for npy grid output and native max reduction ([#486](https://github.com/vig-os/tessera/pull/486))
+- *(cli)* non-CSV grid output for slice/project, terminal-only preview caps, read on extra/ ([#476](https://github.com/vig-os/tessera/pull/476))
+
+### Fixed
+
+- *(deps)* upgrade rustls and zip past RUSTSEC-2026-0346..0349/0367..0369
+- *(core,cli)* compute array statistics in exact integer arithmetic
+- *(ingest)* the decoder digest is per lane, carries each crate's source, and covers the whole decode path
+- *(cli,io)* pin inspect --json, guard stage-dir downgrade resume, route verify through the resource cap, 5.5x single-column reads ([#479](https://github.com/vig-os/tessera/pull/479))
+- *(ingest)* seal the ADR-0058 recipe on the streaming path and surface it in inspect ([#453](https://github.com/vig-os/tessera/pull/453))
+- *(ci)* stop the whitespace autofixers rewriting trycmd snapshots
+- *(security)* generate the OpenSSH test key instead of committing one
+
+### Other
+
+- *(deps)* bump dicom-rs to 0.10 to clear the three jxl advisories
+- *(book)* put Parquet in the comparison table
+- *(book)* report both table fixtures and say which one tracks reality
+- *(test)* versioning walkthrough succeeds instead of documenting blessed errors ([#491](https://github.com/vig-os/tessera/pull/491))
+- ingest cookbook, generated product-schema reference, tested Python write example, cli.md stubs ([#484](https://github.com/vig-os/tessera/pull/484))
+- *(ingest)* align the hdf-compound streaming slab to the dataset chunking ([#464](https://github.com/vig-os/tessera/pull/464))
+- clear the lint backlog the new CI gate surfaced
+
 ## [0.1.0-alpha.1](https://github.com/vig-os/tessera/releases/tag/tessera-cli-v0.1.0-alpha.1) - 2026-09-23
 
 ### Added
