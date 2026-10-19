@@ -239,8 +239,7 @@ impl TableStreamWriter {
             let stats = group
                 .iter()
                 .find(|(n, _)| n == col)
-                .and_then(|(_, c)| c.as_i64())
-                .map(|v| ChunkStats::from_values(&v))
+                .and_then(|(_, c)| c.chunk_stats())
                 .unwrap_or_else(ChunkStats::identity);
             self.fold.push(&digest(&bytes), stats);
         }
@@ -917,5 +916,124 @@ mod tests {
         // a writer without with_live_index exposes no live index.
         let plain = TableStreamWriter::new(spec, &dir.path().join("stage2")).unwrap();
         assert!(plain.live_root().is_none());
+    }
+
+    /// Push `full` into `w` in 9999-row batches — NOT grid-aligned, so row-groups are cut inside
+    /// `push`, across batch boundaries.
+    fn push_in_batches(w: &mut TableStreamWriter, full: &TableData) {
+        let rows = full.first().map(|(_, c)| c.len()).unwrap_or(0);
+        let mut pushed = 0usize;
+        while pushed < rows {
+            let n = 9999.min(rows - pushed);
+            let batch: TableData = full
+                .iter()
+                .map(|(name, c)| (name.clone(), c.slice(pushed, pushed + n)))
+                .collect();
+            w.push(batch).unwrap();
+            pushed += n;
+        }
+    }
+
+    /// #627: the live fold reconciles with the batch `table_chunk_index` — root AND aggregate —
+    /// over a NULLABLE stat column whose NULLs sit in only one of the two row-groups, next to a
+    /// nullable float column holding NaN and NULL. The batch side used to panic on these rows.
+    #[test]
+    fn live_index_fold_matches_batch_chunk_index_over_nullable_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = ROWS_PER_GROUP * 2;
+        let spec = TableSpec {
+            columns: vec![col("k", "i8").nullable(), col("v", "f4").nullable()],
+            rows: rows as u64,
+            row_index: None,
+        };
+        // NULLs in the first row-group only; i64::MAX under each so a leak would show as the max.
+        let k_valid: Vec<bool> = (0..rows)
+            .map(|r| r >= ROWS_PER_GROUP || r % 5 != 0)
+            .collect();
+        let full: TableData = vec![
+            (
+                "k".into(),
+                ColumnData::Nullable {
+                    values: Box::new(ColumnData::I64(
+                        (0..rows)
+                            .map(|r| {
+                                if k_valid[r] {
+                                    r as i64 * 3 - 7
+                                } else {
+                                    i64::MAX
+                                }
+                            })
+                            .collect(),
+                    )),
+                    validity: k_valid.clone(),
+                },
+            ),
+            (
+                "v".into(),
+                ColumnData::Nullable {
+                    values: Box::new(ColumnData::F32(
+                        (0..rows)
+                            .map(|r| {
+                                if r % 11 == 0 {
+                                    f32::NAN
+                                } else {
+                                    (r % 17) as f32
+                                }
+                            })
+                            .collect(),
+                    )),
+                    validity: (0..rows).map(|r| r % 7 != 0).collect(),
+                },
+            ),
+        ];
+        let mut w = TableStreamWriter::new(spec.clone(), &dir.path().join("stage"))
+            .unwrap()
+            .with_live_index("k");
+        push_in_batches(&mut w, &full);
+        let batch_idx = table::table_chunk_index(&spec, &full, "k").unwrap();
+        assert_eq!(w.live_root().unwrap(), batch_idx.root());
+        let agg = w.live_aggregate().unwrap();
+        assert_eq!(agg, batch_idx.aggregate());
+        assert_eq!(agg.count, k_valid.iter().filter(|&&ok| ok).count() as u64);
+        assert_eq!(agg.max, Some((rows as i64 - 1) * 3 - 7));
+    }
+
+    /// #627: an all-NULL row-group, and a `u64::MAX` under a NULL, reconcile between the live fold
+    /// and the batch index. The all-NULL group folds the empty chunk's stats; the value under a
+    /// NULL is invisible to both paths, so neither errors nor drops the group.
+    #[test]
+    fn live_index_fold_matches_batch_over_an_all_null_group_and_u64_under_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = ROWS_PER_GROUP * 2;
+        let spec = TableSpec {
+            columns: vec![col("k", "u8").nullable()],
+            rows: rows as u64,
+            row_index: None,
+        };
+        // group 0: every row NULL; group 1: every 4th row NULL. u64::MAX under every NULL.
+        let validity: Vec<bool> = (0..rows)
+            .map(|r| r >= ROWS_PER_GROUP && r % 4 != 0)
+            .collect();
+        let values: Vec<u64> = (0..rows)
+            .map(|r| if validity[r] { r as u64 } else { u64::MAX })
+            .collect();
+        let full: TableData = vec![(
+            "k".into(),
+            ColumnData::Nullable {
+                values: Box::new(ColumnData::U64(values)),
+                validity: validity.clone(),
+            },
+        )];
+        let mut w = TableStreamWriter::new(spec.clone(), &dir.path().join("stage"))
+            .unwrap()
+            .with_live_index("k");
+        push_in_batches(&mut w, &full);
+        let batch_idx = table::table_chunk_index(&spec, &full, "k").unwrap();
+        assert_eq!(batch_idx.stat_pyramid()[0][0], ChunkStats::identity());
+        assert_eq!(w.live_root().unwrap(), batch_idx.root());
+        let agg = w.live_aggregate().unwrap();
+        assert_eq!(agg, batch_idx.aggregate());
+        assert_eq!(agg.count, validity.iter().filter(|&&ok| ok).count() as u64);
+        assert_eq!(agg.max, Some(rows as i64 - 1));
     }
 }
