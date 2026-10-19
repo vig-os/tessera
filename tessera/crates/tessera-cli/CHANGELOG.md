@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3](https://github.com/vig-os/tessera/compare/tessera-cli-v0.1.0-alpha.2...tessera-cli-v0.1.0-alpha.3) - 2026-10-19
+
+### Fixed
+
+- *(cli)* make bench compare --cold Linux-only and refuse it elsewhere
+
 ## [0.1.0-alpha.2](https://github.com/vig-os/tessera/compare/tessera-cli-v0.1.0-alpha.1...tessera-cli-v0.1.0-alpha.2) - 2026-10-19
 
 ### Added
