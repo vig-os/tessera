@@ -25,6 +25,13 @@ installers = ["shell"]
 # HDF5 2.2.0 from source). SAFE for determinism: HDF5 is read-only *input* (we encode to
 # Vortex/pcodec), never in the sealed byte-path, so the bundled libhdf5 can't move a content_hash.
 features = ["static-hdf5"]
+# Build ONLY the package that ships a binary (`cargo build --package tessera-cli`), not the whole
+# workspace (#647). The default `--workspace` build also compiled the `tessera-py` cdylib and
+# `tessera-wasm`, which this channel never ships (the wheel comes from the nix channel). Worse,
+# dist 0.32 never checks cargo's exit status, only that the expected binaries appeared, so the
+# `tessera-py` macOS link failure was silently ignored on the v0.1.0-alpha.1 run. A precise build
+# compiles exactly what ships, with the features `cargo install --features static-hdf5` would use.
+precise-builds = true
 # Linux + macOS, both arches. Windows-msvc is deferred for the alpha: building libhdf5 from source
 # under MSVC is the riskiest leg and is not worth blocking the first installable release on.
 targets = [

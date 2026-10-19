@@ -120,6 +120,9 @@ csv = "=1.4.0"
 # Python bindings (tessera-py). abi3 → one .so works across CPython ≥3.9; extension-module → no
 # libpython link (the build needs only the abi3 minimum, not a runtime interpreter).
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
+# tessera-py's build.rs: the macOS extension-module link args (#647). Same minor as `pyo3` (which pins
+# it `=`), so the lockfile keeps exactly one pyo3-build-config.
+pyo3-build-config = "0.29"
 # Transparent `.nii.gz` NIfTI decompression (#396 B2). `.nii.gz` is the majority of NIfTI on disk (FSL,
 # SPM and dcm2niix all emit it by default). `rust_backend` (miniz_oxide) keeps it pure-Rust — no system
 # zlib, so the hermetic nix build stays clean and the wasm-compatible tree is unaffected. Costs no new

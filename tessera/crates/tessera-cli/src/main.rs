@@ -932,6 +932,8 @@ enum BenchAction {
         format: String,
         /// Also measure cold-cache reads, evicting each file with `posix_fadvise(DONTNEED)` first.
         /// Best-effort: the kernel may keep pages, so the report says so and names the kernel.
+        /// Linux only: other OSes (macOS included) have no `posix_fadvise`, so `--cold` fails
+        /// there with an error instead of timing warm reads under a "cold" label.
         #[arg(long)]
         cold: bool,
         /// Volume edge (N^3 int16). Default 256 = 32 MiB raw, matching the #143 harness.

@@ -19,3 +19,7 @@ tessera-core.workspace = true
 tessera-io.workspace = true
 pyo3.workspace = true
 serde_json.workspace = true
+
+[build-dependencies]
+# build.rs: macOS `-undefined dynamic_lookup` for the extension-module dylib (#647).
+pyo3-build-config.workspace = true

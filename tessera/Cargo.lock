@@ -6737,6 +6737,7 @@ name = "tessera-py"
 version = "0.1.0-alpha.2"
 dependencies = [
  "pyo3",
+ "pyo3-build-config",
  "serde_json",
  "tessera-core",
  "tessera-io",

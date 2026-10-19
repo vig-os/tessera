@@ -68,7 +68,7 @@ reports on-disk size, write+seal, full read, projected-column read, ROI read and
 
 ```sh
 tessera bench compare                 # both datasets, warm, median of 7
-tessera bench compare --cold          # add best-effort cold-cache rows
+tessera bench compare --cold          # add best-effort cold-cache rows (Linux only: needs posix_fadvise)
 tessera bench compare --format json   # the CI shape
 ```
 

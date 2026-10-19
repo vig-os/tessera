@@ -1,0 +1,179 @@
+# macOS build gate: the cargo-dist release build for the darwin targets, at PR time (#647).
+#
+# REPO-OWNED (like nix-check.yml), not devkit-managed. Neither PR CI nor `nix flake check` compiles
+# for any Darwin target, so macOS breakage used to surface only on the release tag: v0.1.0-alpha.2's
+# Release run failed on both darwin legs after the release PR had merged, and published nothing.
+#
+# WHAT IT BUILDS, by construction rather than by copy: the `plan` job runs the same pinned `dist plan`
+# that release.yml's `plan` job runs, and the `build` legs are the darwin entries of the
+# `artifacts_matrix` it emits. So each leg gets release.yml's runner, release.yml's dist install
+# command and release.yml's `dist build` arguments (target, features, `dist` profile), and a change to
+# `dist-workspace.toml` moves this gate and the release together. The dist version is read from
+# `cargo-dist-version` in dist-workspace.toml, the same pin release.yml is generated from.
+#
+# It also builds the `tessera-py` cdylib for each darwin target. cargo-dist does not ship it, but the
+# v0.1.0-alpha.1 run showed why it is checked here explicitly: dist 0.32 never checks cargo's exit
+# status, only that the binaries it ships appeared, so a broken macOS link of `tessera-py` passed
+# silently. Finally it runs the built binary: `--version`, a tiny warm `bench compare`, and the
+# documented refusal of `bench compare --cold` off Linux.
+#
+# GitHub-hosted macOS runners: vig-os/tessera is PUBLIC (free hosted minutes, never self-hosted), and
+# the ksb runners are Linux-only. Making `macOS build` a required check is a branch-protection call
+# for the owner. Note that the path filter below means the workflow does not run on PRs that touch
+# none of those paths, and a required check that never reports blocks the merge.
+
+name: macOS build
+
+on:  # yamllint disable-line rule:truthy
+  pull_request:
+    branches:
+      - dev
+    paths:
+      - 'tessera/**'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'dist-workspace.toml'
+      - '.github/workflows/macos-build.yml'
+  push:
+    branches:
+      - dev
+    # Same list as pull_request above; keep the two in sync.
+    paths:
+      - 'tessera/**'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'dist-workspace.toml'
+      - '.github/workflows/macos-build.yml'
+  workflow_dispatch:
+
+# A superseded PR push cancels its in-flight legs (each is ~10-20 min of macOS runner); a push to dev
+# is never cancelled, mirroring nix-check.yml.
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: dist plan (darwin legs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install dist (the version pinned in dist-workspace.toml)
+        run: |
+          version=$(sed -nE 's/^cargo-dist-version = "([^"]+)"$/\1/p' dist-workspace.toml)
+          if [ -z "$version" ]; then
+            echo "::error::no cargo-dist-version in dist-workspace.toml"
+            exit 1
+          fi
+          echo "dist $version"
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${version}/cargo-dist-installer.sh" | sh
+      - name: dist plan
+        run: dist plan --output-format=json > plan.json
+      - name: Select the darwin legs of the release matrix
+        id: matrix
+        run: |
+          matrix=$(jq -c '{include: [.ci.github.artifacts_matrix.include[]
+                                     | select(.targets | all(endswith("-apple-darwin")))]}' plan.json)
+          # Assert the legs BY NAME: a filter that matched nothing (a renamed key, a dropped target)
+          # would otherwise give a green gate that built nothing.
+          got=$(jq -c '[.include[].targets[]] | sort' <<< "$matrix")
+          want='["aarch64-apple-darwin","x86_64-apple-darwin"]'
+          if [ "$got" != "$want" ]; then
+            echo "::error::darwin legs are $got, expected $want (dist-workspace.toml targets changed?)"
+            exit 1
+          fi
+          echo "$matrix" | jq .
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: dist build (${{ join(matrix.targets, ', ') }})
+    needs: [plan]
+    runs-on: ${{ matrix.runner }}
+    # alpha.1's release legs took ~11 min (aarch64) and ~21 min (x86_64, macos-15-intel), cold.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      TARGET: ${{ matrix.targets[0] }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install dist (release.yml's install command)
+        env:
+          INSTALL_DIST: ${{ matrix.install_dist.run }}
+        run: sh -c "$INSTALL_DIST"
+      - name: Install dependencies (release.yml's packages_install)
+        env:
+          PACKAGES_INSTALL: ${{ matrix.packages_install }}
+        run: |
+          if [ -n "$PACKAGES_INSTALL" ]; then sh -c "$PACKAGES_INSTALL"; else echo "none for $TARGET"; fi
+      - name: dist build (release.yml's build command)
+        env:
+          DIST_ARGS: ${{ matrix.dist_args }}
+        run: |
+          # DIST_ARGS is deliberately word-split: it is the flag list release.yml passes unquoted.
+          # shellcheck disable=SC2086
+          dist build --print=linkage --output-format=json $DIST_ARGS > dist-manifest.json
+          echo "dist ran successfully"
+      - name: Assert the shipped archive was produced
+        run: |
+          archive="tessera-cli-${TARGET}.tar.xz"
+          jq -e --arg a "$archive" '.artifacts | has($a)' dist-manifest.json > /dev/null \
+            || { echo "::error::$archive missing from dist-manifest.json"; exit 1; }
+          test -s "target/distrib/$archive" || { echo "::error::target/distrib/$archive not on disk"; exit 1; }
+          ls -l target/distrib/
+      - name: Build the tessera-py cdylib (not shipped by dist, so dist would not catch it)
+        working-directory: tessera
+        run: |
+          cargo build --locked --profile dist --package tessera-py --target "$TARGET"
+          test -s "target/$TARGET/dist/lib_native.dylib"
+      - name: Run the built binary
+        run: |
+          bin="tessera/target/$TARGET/dist/tessera"
+          "$bin" --version
+          # Warm mode builds AND works on macOS.
+          "$bin" bench compare --dataset volume --vol-n 64 --iters 1 > warm.txt
+          grep -F 'warm only' warm.txt
+          # --cold is refused up front, with the documented reason, never run warm under a cold label.
+          if "$bin" bench compare --cold --dataset volume --vol-n 64 --iters 1 > cold.txt 2>&1; then
+            echo "::error::bench compare --cold succeeded on macOS; it must refuse"
+            cat cold.txt
+            exit 1
+          fi
+          cat cold.txt
+          grep -F -- '--cold is not supported on macos' cold.txt
+          grep -F 'posix_fadvise' cold.txt
+
+  # One check name that does not vary with the matrix, for branch protection to point at. `if: always()`
+  # plus the explicit assertion: a skipped job counts as passing, so without it a failed leg (or a
+  # failed plan) would leave this check green.
+  gate:
+    name: macOS build
+    runs-on: ubuntu-latest
+    needs: [plan, build]
+    if: always()
+    steps:
+      - name: Assert every darwin leg passed
+        env:
+          PLAN: ${{ needs.plan.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          echo "plan: $PLAN · build: $BUILD"
+          if [ "$PLAN" != "success" ] || [ "$BUILD" != "success" ]; then
+            echo "::error::the macOS dist build did not pass on every darwin target"
+            exit 1
+          fi

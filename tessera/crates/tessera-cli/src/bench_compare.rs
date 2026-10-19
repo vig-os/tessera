@@ -16,6 +16,11 @@
 //!   at its default is a straw man; compared only when tuned, it flatters whoever tuned hardest.
 //! - **Median of N with spread**, never a single run. A single timing on a shared box is a rumour.
 //! - **Warm and cold** are labelled, never mixed. Cold eviction is best-effort (see [`evict`]).
+//! - **Cold is Linux-only, and says so.** Eviction is `posix_fadvise(POSIX_FADV_DONTNEED)`, which
+//!   only Linux (and Android) provide. Darwin has no `posix_fadvise`; its nearest primitives
+//!   (`fcntl(F_NOCACHE)`, `purge`) have different semantics. So on every other OS `--cold` fails up
+//!   front, before any work, naming the OS (see [`require_cold_support`]). Warm mode runs everywhere.
+//!   We never fall back to timing warm reads under a "cold" label (`bench/ecosystems/README.md`).
 //! - **Correctness gates timing**: every read is checked against the written data BEFORE its numbers
 //!   count, so a format cannot win by returning something cheaper than what it was given.
 //! - **No cherry-picking.** Tessera loses some rows here — notably write+seal, where it pays for the
@@ -210,11 +215,33 @@ fn table_spec(data: &TableData, rows: usize) -> TableSpec {
     }
 }
 
+/// Whether `--cold` can be honoured on `target_os` (a [`std::env::consts::OS`] value). The single
+/// source of truth for the cold-cache platform rule; [`evict`] is compiled for exactly these OSes, and
+/// a unit test ties the two together.
+fn cold_supported_on(target_os: &str) -> bool {
+    matches!(target_os, "linux" | "android")
+}
+
+/// Reject `--cold` up front on an OS without `posix_fadvise`, before any file is written or timed.
+/// The alternative — running and labelling warm reads "cold" — is the one result this harness must
+/// never print. `target_os` is a parameter (not read inside) so both branches are testable anywhere.
+fn require_cold_support(cold: bool, target_os: &str) -> Result<()> {
+    if cold && !cold_supported_on(target_os) {
+        return Err(err(&format!(
+            "bench compare: --cold is not supported on {target_os}: cold-cache measurement needs \
+             posix_fadvise(POSIX_FADV_DONTNEED), which only Linux provides. Run without --cold for \
+             warm-cache rows, or run --cold on Linux"
+        )));
+    }
+    Ok(())
+}
+
 /// Best-effort page-cache eviction for one file, so a "cold" read measures a first read rather than
 /// RAM. `posix_fadvise(POSIX_FADV_DONTNEED)` needs no privileges, unlike `drop_caches` — but the
 /// kernel is free to ignore it, and pages still referenced elsewhere (or dirty) survive. The report
 /// therefore labels cold rows best-effort and prints the kernel, rather than claiming a true cold
 /// cache it cannot guarantee.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn evict(path: &Path) {
     use std::os::unix::io::AsRawFd;
     let Ok(f) = std::fs::File::open(path) else {
@@ -233,6 +260,16 @@ fn evict(path: &Path) {
     unsafe {
         libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
     }
+}
+
+/// No `posix_fadvise` on this OS. [`run`] rejects `--cold` through [`require_cold_support`] before
+/// any timing, so no cold row (and no call here) can exist; reaching this is a broken invariant.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn evict(_path: &Path) {
+    unreachable!(
+        "bench compare: --cold reached eviction on {}, which require_cold_support rejects",
+        std::env::consts::OS
+    );
 }
 
 /// Fraction of `path`'s pages still resident, via `mincore`. Used to tell the reader whether the
@@ -263,7 +300,8 @@ fn resident_fraction(path: &Path) -> Option<f64> {
             return None;
         }
         let mut vec = vec![0u8; pages];
-        let rc = libc::mincore(addr, len, vec.as_mut_ptr());
+        // `.cast()`: the residency vector is `unsigned char*` on Linux but `char*` on Darwin/BSD.
+        let rc = libc::mincore(addr, len, vec.as_mut_ptr().cast());
         libc::munmap(addr, len);
         if rc != 0 {
             return None;
@@ -1529,6 +1567,7 @@ fn cold_verdict() -> String {
 
 /// Run the comparison and print the report.
 pub fn run(opts: CompareOpts) -> Result<()> {
+    require_cold_support(opts.cold, std::env::consts::OS)?;
     let dir = tempfile::tempdir().map_err(tessera_core::Error::from)?;
     let mut rows: Vec<Row> = Vec::new();
 
@@ -2137,5 +2176,68 @@ mod tests {
         );
         COLD_RESIDENT_PERMILLE.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
         assert!(cold_verdict().contains("unmeasured"));
+    }
+
+    /// `--cold` on an OS without `posix_fadvise` is refused with an error naming the OS and the
+    /// missing primitive, never run as warm reads labelled cold (#647). The OS is a parameter, so
+    /// every branch runs on every host.
+    #[test]
+    fn cold_is_refused_off_linux_with_a_named_reason() {
+        for os in ["macos", "ios", "freebsd", "windows"] {
+            let e = require_cold_support(true, os)
+                .expect_err("--cold must be refused off Linux")
+                .to_string();
+            assert!(
+                e.contains(&format!("--cold is not supported on {os}"))
+                    && e.contains("posix_fadvise"),
+                "{os}: {e}"
+            );
+            // Warm mode is never refused.
+            assert!(
+                require_cold_support(false, os).is_ok(),
+                "{os}: warm refused"
+            );
+        }
+        for os in ["linux", "android"] {
+            assert!(require_cold_support(true, os).is_ok(), "{os}: cold refused");
+            assert!(
+                require_cold_support(false, os).is_ok(),
+                "{os}: warm refused"
+            );
+        }
+    }
+
+    /// The runtime platform rule and the compile-time `cfg` that selects the real [`evict`] must
+    /// agree on THIS host, or `run` could reach the unreachable stub (or refuse a working OS).
+    #[test]
+    fn cold_rule_matches_the_compiled_eviction() {
+        assert_eq!(
+            cold_supported_on(std::env::consts::OS),
+            cfg!(any(target_os = "linux", target_os = "android"))
+        );
+    }
+
+    /// End to end through `run`: on this host `--cold` either passes the platform gate (Linux) or
+    /// fails before any work with the documented error (everything else). On Linux the check is made
+    /// against an invalid `--dataset` so the full benchmark is not run: getting the dataset error
+    /// proves the cold gate let it through.
+    #[test]
+    fn run_applies_the_cold_gate_first() {
+        let opts = CompareOpts {
+            dataset: "neither".into(),
+            iters: 1,
+            format: "table".into(),
+            cold: true,
+            vol_n: 8,
+            rows: 8,
+        };
+        let e = run(opts)
+            .expect_err("invalid dataset or unsupported --cold")
+            .to_string();
+        if cfg!(any(target_os = "linux", target_os = "android")) {
+            assert!(e.contains("--dataset must be"), "{e}");
+        } else {
+            assert!(e.contains("--cold is not supported on"), "{e}");
+        }
     }
 }
