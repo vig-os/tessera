@@ -6628,7 +6628,7 @@ checksum = "d4d1330fe7f7f872cd05165130b10602d667b205fd85be09be2814b115d4ced9"
 
 [[package]]
 name = "tessera-cli"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -6662,7 +6662,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-core"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -6676,7 +6676,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-ingest"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "age",
  "arrow-array",
@@ -6703,7 +6703,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-io"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "blake3",
  "bytes",
@@ -6734,7 +6734,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-py"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "pyo3",
  "pyo3-build-config",
@@ -6745,7 +6745,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-wasm"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "serde_json",
  "tessera-core",
