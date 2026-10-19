@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-16T23:16:46Z
-updated: 2026-10-16T23:31:40Z
+updated: 2026-10-18T12:50:41Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/579
-comments: 1
+comments: 2
 labels: bug
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:42.039Z
+synced: 2026-10-19T07:17:59.263Z
 ---
 
 # [Issue 579]: [bug(dicom de-id): PHI_TAGS is a 12-tag subset; veterinary owner tags and other PS3.15 tags survive into the sealed manifest even with --recipient](https://github.com/vig-os/tessera/issues/579)
@@ -46,4 +46,28 @@ Found by MorePET/anatomist's pre-mortem of its tessera adoption ADR (PR #103), w
 _Posted on October 16, 2026 at 11:31 PM_
 
 Design note from the consumer side: tessera's own schema already marks the Study and Series UIDs `identifying`, yet DICOM ingest seals them, because the strip list is the hard-coded `PHI_TAGS` rather than the schema. Suggest: the de-identification set = a full PS3.15 baseline ∪ every field the product schema marks `identifying`, so a consumer schema (ADR-0050 pattern, e.g. anatomist adding the veterinary owner tags 0010,2297–2299) extends it declaratively, with no code change. Anatomist will supply such a schema with its DICOM ingest (MorePET/anatomist#87).
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on October 18, 2026 at 12:50 PM_
+
+Phase → #N:
+
+- P1 → #611
+- P2a → #612
+- P2a-ii → #613
+- P2b → #614
+- P2b-ii → #615
+- P2c → #616
+- P3a → #617
+- P3b → #618
+- P3c → #619
+- P3d → #620
+- P4 → #621
+- P4b → #622
+- P4c → #623
+- P5 → #624
+
 

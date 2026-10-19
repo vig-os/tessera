@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-16T16:50:32Z
-updated: 2026-10-16T16:50:32Z
+updated: 2026-10-18T11:56:35Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/563
-comments: 0
+comments: 1
 labels: feature
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:49.939Z
+synced: 2026-10-19T07:18:05.260Z
 ---
 
 # [Issue 563]: [feat(py): Builder.add_source cannot pin content_hash — Python-written edges fail --require-complete](https://github.com/vig-os/tessera/issues/563)
@@ -113,3 +113,11 @@ Default stays `None` for back-compat — existing calls are unaffected.
 ## Related
 
 - #533 — Rust method hidden from Python, same pattern.
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 18, 2026 at 11:56 AM_
+
+Fixed on dev by #585 (merge eb12822): `Builder.add_source(relation, reference, content_hash=None)` pins the parent's content hash, so Python-written `derived_from` chains pass `provenance --require-complete`. Ships in 0.1.0-alpha.2.
+

@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-17T08:10:40Z
-updated: 2026-10-17T08:10:40Z
+updated: 2026-10-18T10:30:30Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/588
-comments: 0
+comments: 1
 labels: bug
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-18T06:56:50.490Z
+synced: 2026-10-19T07:17:56.731Z
 ---
 
 # [Issue 588]: [deps: RUSTSEC advisories in rustls 0.23.45 and zip 2.4.2 fail cargo-deny on every PR](https://github.com/vig-os/tessera/issues/588)
@@ -44,4 +44,12 @@ Since about 2026-10-16, `cargo-deny` (Lint & Format → CI Summary) fails on eve
   interim with an owner sign-off.
 
 Blocks: every open PR's CI Summary (#585, #586, …).
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 18, 2026 at 10:30 AM_
+
+Fixed by PR #593 (merged into dev as 2d4e8b7): rustls 0.23.46 + zip 9.0.4, .tsra bytes identical (verified by two fresh reviewers), and the reader now enforces SPEC §6 (mimetype first, at byte 0, STORED).
 

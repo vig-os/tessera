@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-16T16:50:27Z
-updated: 2026-10-16T16:50:27Z
+updated: 2026-10-18T11:56:33Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/562
-comments: 0
+comments: 1
 labels: feature
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:50.346Z
+synced: 2026-10-19T07:18:05.649Z
 ---
 
 # [Issue 562]: [feat(py): expose with_producer / with_generation on Builder — ADR-0058 §4 is unreachable from Python](https://github.com/vig-os/tessera/issues/562)
@@ -135,3 +135,11 @@ the shape stays undocumented.
 - #533 — same pattern (Rust method hidden from Python), different method.
 - #417 — same ADR-0058 ground, CLI side.
 - #210 — the P7 bindings epic this sits under.
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 18, 2026 at 11:56 AM_
+
+Fixed on dev by #585 (merge eb12822): `Builder.with_producer(tool, version, git_commit=None, git_repo=None, dirty=None)` and `Builder.with_generation(config=None, config_ref=None)` expose ADR-0058 from Python. Ships in 0.1.0-alpha.2.
+

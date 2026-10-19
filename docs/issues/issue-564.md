@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-16T16:50:36Z
-updated: 2026-10-16T16:50:36Z
+updated: 2026-10-18T11:53:42Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/564
-comments: 0
+comments: 1
 labels: feature, discussion
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:49.582Z
+synced: 2026-10-19T07:18:04.867Z
 ---
 
 # [Issue 564]: [feat: first-class agentic actors[] block + W3C PROV mapping — producer is scalar, generation.config is opaque](https://github.com/vig-os/tessera/issues/564)
@@ -153,3 +153,28 @@ provenance format.
 - ADR-0037 — signing (the signer identity, independent of actors).
 - #417 — `tessera inspect` for `generation` (same operator-surface pattern applies).
 - white-paper.md:1662 — the unimplemented PROV mapping promise.
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 18, 2026 at 11:53 AM_
+
+Filed §11 phase sub-issues from ADR-0060 (merged in #586):
+
+- #587 — refuse integers above 2^53 in sealed values
+- P0a/P0b → #573 — forward-compatible manifest/collection/schema
+- #574 — publish and commit keep sealed provenance
+- P1a → #596 — sealed `actors` with validation and the carry rule
+- P1b → #597 — write actors from the CLI and ingest specs
+- P1e → #598 — actors under de-identification, and pseudonym minting
+- P1c → #599 — actors and `tessera.digest` in the Python bindings
+- P1d → #600 — the `aux/actors.json` member
+- P2a → #601 — actors in the RO-Crate projection
+- P2b → #602 — actors in the DataCite projection
+- P3  → #603 — actor-role claim check plus pinned signer binding (closes #590)
+- P3d → #604 — attested and unattested actors in `inspect`
+- P3c → #605 — `tessera verify-change` binds products to an approved change
+
+Order: #587 → #573 → #574 → #596 → #597 → #598 → #599 → #600 → #601 → #602 → #603 → #604 → #605. Each sub-issue carries its own `## Dependencies` and the "do not dispatch before its predecessors merge" rule. P4 is deferred per the ADR.
+
+

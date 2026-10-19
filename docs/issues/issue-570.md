@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-16T21:39:09Z
-updated: 2026-10-16T21:39:09Z
+updated: 2026-10-18T12:29:46Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/570
-comments: 0
+comments: 1
 labels: feature, security
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:46.839Z
+synced: 2026-10-19T07:18:02.524Z
 ---
 
 # [Issue 570]: [feat: whole-file crypto-shred (erasure by key destruction) — ADR-0055 share is a grant, not erasure; define an at-rest erasure mode](https://github.com/vig-os/tessera/issues/570)
@@ -44,4 +44,27 @@ Until this is decided, anatomist's ADR-0007 treats per-dog encryption as gated o
 ## Linked
 
 #378 (ADR-0055 implementation), #566 (ADR-0047 from Python), #407 (signed `aux/`, lineage outside the ciphertext), ADR-0040 §2.2, ADR-0047, ADR-0055 §5.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 18, 2026 at 12:29 PM_
+
+A second consumer requirement for the same decision, with no product-specific detail. **Erasure must survive dedup.**
+
+The consumer stores many products and shares unchanged blocks between them by digest, the way the content-addressed repository (`objects/<digest>`, ADR-0036) already does. It must be able to erase one **erasure domain** (a tenant, a project, a person's data) by destroying one key, while products from other domains keep working.
+
+**Whole-file encryption alone doesn't cover this.** Two cases:
+- If two domains share a plaintext block and each holds its own whole-file ciphertext, nothing is deduplicated.
+- If the block is stored once in plaintext, destroying a domain key erases nothing.
+
+**What would cover it: a per-block envelope (ROADMAP D7, "per-block envelope").**
+1. Each block is encrypted under a data key, and that data key is wrapped by the key of each erasure domain that references the block.
+2. Dedup happens on the **ciphertext digest within one domain**, or on the plaintext digest with a per-domain wrap. Either is fine if documented; the second keeps cross-domain dedup but leaks equality of blocks across domains, which must be stated as a known leak.
+3. Shredding a domain key makes every block reachable only through that domain unreadable, including offline copies. Blocks still wrapped by another domain stay readable for that domain only.
+4. The semantics should be documented the same way #570 asks for whole files: what survives (digests, sizes, the wrap headers) and what doesn't.
+
+If D7 decides "non-goal (storage SSE/dm-crypt)", this consumer would have to stop sharing blocks between domains. That's a valid outcome too; it would just be good to know which way it goes.
+
 
