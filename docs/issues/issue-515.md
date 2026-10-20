@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-19T06:21:42Z
+updated: 2026-10-19T09:24:24Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,18 +13,12 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-19T07:18:07.493Z
+synced: 2026-10-20T07:08:36.329Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
 
 This issue lists Renovate updates and detected dependencies. Read the [Dependency Dashboard](https://docs.renovatebot.com/key-concepts/dashboard/) docs to learn more.<br>[View this repository on the Mend.io Web Portal](https://developer.mend.io/github/vig-os/tessera).
-
-## Repository Problems
-
-These problems occurred while renovating this repository. [View logs](https://developer.mend.io//github/vig-os/tessera).
-
- - ⚠️ WARN: Package lookup failures
 
 ## Rate-Limited
 
@@ -42,6 +36,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/png-0.x -->chore(deps): update rust crate png to 0.18
  - [ ] <!-- unlimit-branch=renovate/proptest-1.x-lockfile -->chore(deps): update rust crate proptest to v1.12.0
  - [ ] <!-- unlimit-branch=renovate/pyo3-0.x -->chore(deps): update rust crate pyo3 to 0.30
+ - [ ] <!-- unlimit-branch=renovate/pyo3-build-config-0.x -->chore(deps): update rust crate pyo3-build-config to 0.30
  - [ ] <!-- unlimit-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unlimit-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.53.3
  - [ ] <!-- unlimit-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
@@ -55,6 +50,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.26.0
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
+ - [ ] <!-- unlimit-branch=renovate/pyarrow-26.x -->build(pip): update dependency pyarrow to v26
  - [ ] <!-- unlimit-branch=renovate/ed25519-dalek-3.x -->chore(deps): update rust crate ed25519-dalek to v3
  - [ ] <!-- unlimit-branch=renovate/toml-1.x -->chore(deps): update rust crate toml to v1
  - [ ] <!-- unlimit-branch=renovate/trycmd-1.x -->chore(deps): update rust crate trycmd to v1
@@ -63,17 +59,6 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/major-datafusion-monorepo -->fix(deps): update rust crate datafusion to v55
  - [ ] <!-- unlimit-branch=renovate/lock-file-maintenance -->build(pip): lock file maintenance
  - [ ] <!-- create-all-rate-limited-prs -->🔐 **Create all rate-limited PRs at once** 🔐
-
-
----
-
-> [!WARNING]
-> Renovate failed to look up the following dependencies: `Failed to look up pypi package pyarrow: no-result`.
-> 
-> Files affected: `tessera/bench/ecosystems/pyproject.toml`
-
----
-
 
 ## Open
 
@@ -96,7 +81,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 <details><summary>cargo (7)</summary>
 <blockquote>
 
-<details><summary>tessera/Cargo.toml (39)</summary>
+<details><summary>tessera/Cargo.toml (40)</summary>
 
  - `serde 1` → [Updates: `1`]
  - `serde_json 1` → [Updates: `1`]
@@ -135,6 +120,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `parquet =58.3.0` → [Updates: `=58.4.0`, `=60.0.0`]
  - `csv =1.4.0`
  - `pyo3 0.29` → [Updates: `0.30`]
+ - `pyo3-build-config 0.29` → [Updates: `0.30`]
  - `flate2 1` → [Updates: `1`]
  - `toml 0.8` → [Updates: `0.9`, `1.0`]
 
@@ -192,7 +178,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 </blockquote>
 </details>
 
-<details><summary>github-actions (12)</summary>
+<details><summary>github-actions (13)</summary>
 <blockquote>
 
 <details><summary>.github/actions/nix-deps-cache/action.yml (2)</summary>
@@ -219,6 +205,13 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 <details><summary>.github/workflows/devkit-upgrade.yml</summary>
 
+
+</details>
+
+<details><summary>.github/workflows/macos-build.yml (2)</summary>
+
+ - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
+ - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
 
 </details>
 
@@ -282,7 +275,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `numcodecs ==0.16.5` → [Updates: `==0.17.0`]
  - `nibabel ==5.4.2`
  - `pydicom ==3.0.2`
- - `pyarrow ==24.0.0`
+ - `pyarrow ==24.0.0` → [Updates: `==26.0.0`]
  - `uproot ==5.7.4` → [Updates: `==5.7.7`]
 
 </details>

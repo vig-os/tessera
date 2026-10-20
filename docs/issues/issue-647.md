@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-19T05:32:37Z
-updated: 2026-10-19T05:32:37Z
+updated: 2026-10-19T11:09:52Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/647
-comments: 0
+comments: 2
 labels: bug
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-19T07:17:39.246Z
+synced: 2026-10-20T07:08:35.924Z
 ---
 
 # [Issue 647]: [fix(release): macOS dist builds fail — posix_fadvise in tessera-cli + tessera-py dylib link; no PR-time macOS gate](https://github.com/vig-os/tessera/issues/647)
@@ -56,4 +56,20 @@ Neither PR CI nor `nix flake check` compiles for any Darwin target, so macOS bre
 - [ ] The cold-cache behaviour on macOS is decided and documented, with a test.
 - [ ] A PR-time CI job builds the dist targets for macOS, so this class fails before merge. It must be shown to fail on current dev.
 - [ ] `v0.1.0-alpha.2` or its successor publishes with all cargo-dist assets.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 19, 2026 at 09:23 AM_
+
+Release decision (owner, 2026-10-19): the `v0.1.0-alpha.2` tag (075cfea) stays as a **failed cut**. Pushed tags are immutable, and no GitHub Release was ever created for it. Once the fix (#648) merges, release-plz proposes `0.1.0-alpha.3`, which ships the alpha.2 changes plus this fix. Install alpha.3, not the alpha.2 tag.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on October 19, 2026 at 11:09 AM_
+
+Fixed by #648 (aa99b87). Its last acceptance item is now met: **v0.1.0-alpha.3 is published** (https://github.com/vig-os/tessera/releases/tag/v0.1.0-alpha.3). Release run 39239676788 built all four targets, including both darwin legs, and produced 13 assets. Smoke test: the x86_64-linux archive checksum is OK, `tessera --version` reports 0.1.0-alpha.3, and `verify` passes on a corpus product. Follow-ups: #650 (MACOSX_DEPLOYMENT_TARGET), #651 (review nits), #653 (changelog compare links).
 
