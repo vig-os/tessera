@@ -76,6 +76,15 @@ struct Header {
     /// ADR-0058 §2 generation recipe, declared BEFORE seal (see `producer`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     generation: Option<tessera_core::Generation>,
+    /// The ingest transform receipt (ADR-0056 §6.2) — which canonicalisation rules actually fired.
+    ///
+    /// On the header, not applied at seal time, for the same reason as `producer` and `generation`: a
+    /// streamed `.tsra` is written once straight to disk, so anything declared later would be dropped.
+    /// And **persisted**, because a crash-resumed stream that lost its receipt would seal a product
+    /// claiming no transform fired — silently, and differing from a batch ingest of the same input only
+    /// in a manifest field no `content_hash` comparison would notice (#416's lesson, #458).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ingest_transform: Vec<tessera_core::provenance::IngestTransform>,
 }
 
 /// A crash-tolerant streaming writer over a staging directory.
@@ -127,6 +136,7 @@ impl WriteSession {
             sources: Vec::new(),
             producer: None,
             generation: None,
+            ingest_transform: Vec::new(),
         };
         write_durable(&dir.join(HEADER), &serde_json::to_vec_pretty(&header)?)?;
         let journal = OpenOptions::new()
@@ -191,6 +201,20 @@ impl WriteSession {
     /// survives crash recovery.
     pub fn with_generation(&mut self, generation: tessera_core::Generation) -> Result<&mut Self> {
         self.header.generation = Some(generation);
+        self.persist_header()?;
+        Ok(self)
+    }
+
+    /// Attach the ingest transform receipt (ADR-0056 §6.2) — which canonicalisation rules fired —
+    /// mirroring [`ProductBuilder::with_ingest_transform`].
+    ///
+    /// Persisted to the header on every call, so a resumed stream seals the same receipt a
+    /// crash-free one would. Without that, a resume would quietly claim nothing was normalised.
+    pub fn with_ingest_transform(
+        &mut self,
+        transforms: Vec<tessera_core::provenance::IngestTransform>,
+    ) -> Result<&mut Self> {
+        self.header.ingest_transform = transforms;
         self.persist_header()?;
         Ok(self)
     }
@@ -337,6 +361,9 @@ impl WriteSession {
         }
         if let Some(generation) = &self.header.generation {
             b.with_generation(generation.clone());
+        }
+        if !self.header.ingest_transform.is_empty() {
+            b.with_ingest_transform(self.header.ingest_transform.clone());
         }
         for r in &self.blocks {
             b.add_block_ref(r.clone());
@@ -556,6 +583,72 @@ mod tests {
             sealed.metadata.get("modality"),
             Some(&serde_json::json!({"_vocabulary": "DICOM", "_code": "CT"}))
         );
+    }
+
+    /// The ingest transform receipt must survive a crash-resume (#458, and #416's lesson).
+    ///
+    /// A receipt lost on resume seals a product claiming **no canonicalisation fired** — silently, and
+    /// differing from a crash-free run only in a manifest field, so `content_hash` is identical and any
+    /// comparison that checks only content_hash would call the two runs equal. That is exactly the class
+    /// of divergence `producer` and `generation` are persisted to avoid, so the receipt is persisted the
+    /// same way rather than being applied at seal time.
+    #[test]
+    fn the_ingest_transform_receipt_survives_a_resume() {
+        use tessera_core::provenance::IngestTransform;
+
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let mut ws = WriteSession::create(&stage, "table", "t", "d", TS).unwrap();
+        ws.with_ingest_transform(vec![
+            IngestTransform::new("null_slot_normalisation").on_column("x"),
+            IngestTransform::new("nan_canonicalisation").on_column("y"),
+        ])
+        .unwrap();
+        let (r, payload) = block("a", 0);
+        ws.append_block(r, &payload).unwrap();
+
+        // Simulate the crash: drop the session and resume from the staging directory alone.
+        drop(ws);
+        let recovered = WriteSession::recover(&stage).unwrap();
+        let sealed = recovered.seal(&dir.path().join("r.tsra")).unwrap();
+
+        let names: Vec<&str> = sealed
+            .ingest_transform
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["null_slot_normalisation", "nan_canonicalisation"],
+            "the receipt must come back from the durable header, in order"
+        );
+        assert_eq!(
+            sealed.ingest_transform[0].params.get("column"),
+            Some(&serde_json::json!("x")),
+            "…with its parameters intact, not just the rule names"
+        );
+    }
+
+    /// An empty receipt is absent from the header, not an empty array.
+    ///
+    /// `skip_serializing_if` matters beyond tidiness: a stage dir written by a binary that never set a
+    /// receipt must stay readable by one that knows the field, and the sealed manifest of a product where
+    /// nothing fired must not differ from one written before the field existed.
+    #[test]
+    fn an_empty_receipt_leaves_the_header_and_the_seal_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let mut ws = WriteSession::create(&stage, "table", "t", "d", TS).unwrap();
+        ws.with_ingest_transform(Vec::new()).unwrap();
+        let text = std::fs::read_to_string(stage.join(HEADER)).unwrap();
+        assert!(
+            !text.contains("ingest_transform"),
+            "an empty receipt must not be written: {text}"
+        );
+        let (r, payload) = block("a", 0);
+        ws.append_block(r, &payload).unwrap();
+        let sealed = ws.seal(&dir.path().join("r.tsra")).unwrap();
+        assert!(sealed.ingest_transform.is_empty());
     }
 
     #[test]

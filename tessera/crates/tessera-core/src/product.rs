@@ -46,9 +46,16 @@ impl ProductBuilder {
         manifest.schema = parent.schema.clone();
         manifest.metadata = parent.metadata.clone();
         manifest.extra = parent.extra.clone();
-        // `producer` and `generation` are intentionally NOT carried: a new version is sealed by
-        // *this* build (producer is re-stamped in `seal`), and its generation recipe is a property of
-        // how *this* revision was made — the caller re-attaches one via `with_generation` if needed.
+        // The ingest-transform receipt (ADR-0056 §6.2) describes how the BLOCKS were canonicalised at
+        // the door, and `refs` below carries those same blocks forward byte-for-byte — so the receipt
+        // has to come with them. Dropping it made a re-seal claim the data had been normalised by
+        // nothing, which is invisible to a `content_hash` comparison (the payload never moves) and
+        // showed up only as a shifted `manifest_hash`.
+        manifest.ingest_transform = parent.ingest_transform.clone();
+        // `producer` and `generation` are intentionally NOT carried, and the difference from the
+        // receipt above is the point: those describe how *this revision* was made, not what the
+        // blocks are. A new version is sealed by *this* build (producer is re-stamped in `seal`), and
+        // the caller re-attaches a recipe via `with_generation` if there is one.
         // Keep derivation/provenance edges; drop the parent's version edges (walked, not accumulated).
         manifest.sources = parent
             .sources
@@ -219,6 +226,47 @@ mod tests {
             digest: Some(digest.into()),
             spec: serde_json::json!({ "dtype": "int16", "shape": [2] }),
         }
+    }
+
+    /// A re-seal keeps the ingest-transform receipt, and still drops the producer and the recipe.
+    ///
+    /// The three are near neighbours and were treated alike, which was the bug. `ingest_transform`
+    /// (ADR-0056 §6.2) records how the **blocks** were canonicalised at the door, and `from_manifest`
+    /// carries those blocks forward byte-for-byte — so dropping the receipt left a product claiming
+    /// its data had been normalised by nothing. `producer` and `generation` describe how *this
+    /// revision* was made, so they correctly do not survive.
+    ///
+    /// The loss was invisible to every obvious check: `content_hash` cannot move (the payload is
+    /// identical), the field is optional so nothing rejects its absence, and it showed up only as a
+    /// `manifest_hash` that had shifted for no visible reason.
+    #[test]
+    fn a_re_seal_keeps_the_ingest_receipt_but_not_the_producer_or_recipe() {
+        let mut b = ProductBuilder::new("table", "t", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(block("data", "blake3:aa"));
+        b.with_ingest_transform(vec![crate::provenance::IngestTransform::new(
+            "csv_explicit_schema",
+        )]);
+        b.with_generation(crate::provenance::Generation::default().with("k", serde_json::json!(1)));
+        b.with_producer(crate::provenance::Producer::new("acme", "1.0"));
+        let v1 = b.seal().unwrap();
+        assert_eq!(v1.ingest_transform.len(), 1, "the receipt is sealed");
+
+        let mut e = ProductBuilder::from_manifest(&v1);
+        e.with_field("note", serde_json::json!("edited"));
+        let v2 = e.seal().unwrap();
+
+        assert_eq!(
+            v2.ingest_transform, v1.ingest_transform,
+            "the receipt describes the blocks, which came along — so it must too"
+        );
+        assert!(
+            v2.generation.is_none(),
+            "a recipe describes how THIS revision was made, so it does not inherit"
+        );
+        assert_ne!(
+            v2.producer, v1.producer,
+            "and the producer is re-stamped by whoever sealed this version"
+        );
     }
 
     #[test]

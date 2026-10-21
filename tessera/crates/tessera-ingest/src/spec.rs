@@ -125,8 +125,9 @@ pub struct ProductSpec {
     pub options: FormatOptions,
 }
 
-/// Streaming policy for an `hdf-compound` product. `Auto` = the engine decides per
-/// `stream_threshold`; explicit overrides force the path.
+/// Streaming policy for a bounded-memory-capable lane (`hdf-compound`, and the three table lanes
+/// since #458). `Auto` = the engine decides per `stream_threshold`; explicit overrides force the
+/// path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamingMode {
@@ -210,6 +211,27 @@ pub enum FormatOptions {
         /// Source columns to drop before mapping — the escape hatch every §2 rejection names.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exclude: Vec<String>,
+        /// Bounded-memory streaming (#458). `auto` streams when the input's estimated decoded size
+        /// exceeds `stream_threshold`, mirroring how `hdf-compound` decides.
+        ///
+        /// A **runtime execution knob, not content.** Both paths seal identical bytes — the block
+        /// partition is a function of the data alone (`tessera_io::block_count`), and the batch path
+        /// goes through those same helpers — so this trades memory against a second read of the input
+        /// and cannot move any sealed byte.
+        ///
+        /// Therefore **never serialised, at any value**: ADR-0035 hashes the parsed spec into every
+        /// member's `ingested_via_spec` edge, so a field that rides `spec_hash` rides
+        /// `manifest_hash`. Were this recorded, re-running an archived ingest with
+        /// `streaming = "stream"` — on a smaller machine, which is exactly when an operator reaches
+        /// for it — could not reproduce the archived `manifest_hash` for byte-identical data. A knob
+        /// that cannot change the product must not be able to change the product's identity. It
+        /// still parses, so an archived spec stays readable and the operator's choice is honoured.
+        #[serde(default, skip_serializing)]
+        streaming: StreamingMode,
+        /// Rows per decoded batch on the streaming path — the read-side memory unit, independent of
+        /// the block partition and of the seal. Never serialised, for the reason above.
+        #[serde(default = "default_batch_rows", skip_serializing)]
+        batch_rows: usize,
         /// Operator-declared per-column semantics (ADR-0056 §7), landing **inside the seal**.
         ///
         /// Inline rather than a path to a sidecar TOML, deliberately: ADR-0035 hashes the *parsed*
@@ -226,6 +248,27 @@ pub enum FormatOptions {
         input: PathBuf,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exclude: Vec<String>,
+        /// Bounded-memory streaming (#458). `auto` streams when the input's estimated decoded size
+        /// exceeds `stream_threshold`, mirroring how `hdf-compound` decides.
+        ///
+        /// A **runtime execution knob, not content.** Both paths seal identical bytes — the block
+        /// partition is a function of the data alone (`tessera_io::block_count`), and the batch path
+        /// goes through those same helpers — so this trades memory against a second read of the input
+        /// and cannot move any sealed byte.
+        ///
+        /// Therefore **never serialised, at any value**: ADR-0035 hashes the parsed spec into every
+        /// member's `ingested_via_spec` edge, so a field that rides `spec_hash` rides
+        /// `manifest_hash`. Were this recorded, re-running an archived ingest with
+        /// `streaming = "stream"` — on a smaller machine, which is exactly when an operator reaches
+        /// for it — could not reproduce the archived `manifest_hash` for byte-identical data. A knob
+        /// that cannot change the product must not be able to change the product's identity. It
+        /// still parses, so an archived spec stays readable and the operator's choice is honoured.
+        #[serde(default, skip_serializing)]
+        streaming: StreamingMode,
+        /// Rows per decoded batch on the streaming path — the read-side memory unit, independent of
+        /// the block partition and of the seal. Never serialised, for the reason above.
+        #[serde(default = "default_batch_rows", skip_serializing)]
+        batch_rows: usize,
         #[serde(
             default,
             skip_serializing_if = "crate::column_meta::ColumnMeta::is_empty"
@@ -253,6 +296,27 @@ pub enum FormatOptions {
         /// Declared columns to drop after reading (declarations stay positional).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exclude: Vec<String>,
+        /// Bounded-memory streaming (#458). `auto` streams when the input's estimated decoded size
+        /// exceeds `stream_threshold`, mirroring how `hdf-compound` decides.
+        ///
+        /// A **runtime execution knob, not content.** Both paths seal identical bytes — the block
+        /// partition is a function of the data alone (`tessera_io::block_count`), and the batch path
+        /// goes through those same helpers — so this trades memory against a second read of the input
+        /// and cannot move any sealed byte.
+        ///
+        /// Therefore **never serialised, at any value**: ADR-0035 hashes the parsed spec into every
+        /// member's `ingested_via_spec` edge, so a field that rides `spec_hash` rides
+        /// `manifest_hash`. Were this recorded, re-running an archived ingest with
+        /// `streaming = "stream"` — on a smaller machine, which is exactly when an operator reaches
+        /// for it — could not reproduce the archived `manifest_hash` for byte-identical data. A knob
+        /// that cannot change the product must not be able to change the product's identity. It
+        /// still parses, so an archived spec stays readable and the operator's choice is honoured.
+        #[serde(default, skip_serializing)]
+        streaming: StreamingMode,
+        /// Rows per decoded batch on the streaming path — the read-side memory unit, independent of
+        /// the block partition and of the seal. Never serialised, for the reason above.
+        #[serde(default = "default_batch_rows", skip_serializing)]
+        batch_rows: usize,
         #[serde(
             default,
             skip_serializing_if = "crate::column_meta::ColumnMeta::is_empty"
@@ -293,6 +357,15 @@ fn default_row_index() -> String {
 fn default_block_prefix() -> String {
     DEFAULT_BLOCK_PREFIX.into()
 }
+/// Rows per decoded batch on the streaming table path.
+///
+/// 64 Ki = `ROWS_PER_GROUP`, so a batch lines up with the sink's row-group flush and no partial group is
+/// carried between pushes. Not a determinism input — `the_batch_size_and_worker_count_never_move_a_seal`
+/// pins that — so it is tunable without a corpus event.
+fn default_batch_rows() -> usize {
+    64 * 1024
+}
+
 fn default_slab_rows() -> usize {
     DEFAULT_SLAB_ROWS
 }
@@ -321,6 +394,31 @@ pub fn parse_str(toml_text: &str) -> Result<IngestSpec> {
 /// Validate the spec: unique product names; every `derived_from` reference resolves; the product
 /// DAG is acyclic (Kahn's topological sort). Returns the topo order (parents-first) on success —
 /// callers that don't need the order can ignore the `Vec`.
+/// `batch_rows` must be positive.
+///
+/// Zero was accepted, and what went wrong then depended on the ROUTE rather than on the value: the
+/// streaming Parquet lane produced no batches and failed with "decoded to no columns" — which blames
+/// the data for a bad flag — while the batch path ignored the knob entirely and succeeded. A
+/// meaningless value should be refused once, where it is read, rather than surfacing as a different
+/// symptom per path, or as none.
+fn check_batch_rows(p: &ProductSpec) -> Result<()> {
+    let rows = match &p.options {
+        FormatOptions::Parquet { batch_rows, .. }
+        | FormatOptions::Arrow { batch_rows, .. }
+        | FormatOptions::Csv { batch_rows, .. } => *batch_rows,
+        _ => return Ok(()),
+    };
+    if rows == 0 {
+        return Err(Error::Invalid(format!(
+            "ingest-spec: product '{}' sets batch_rows = 0; it is the number of rows per decoded \
+             batch and must be at least 1 (omit it for the default of {})",
+            p.name,
+            default_batch_rows()
+        )));
+    }
+    Ok(())
+}
+
 pub fn validate(spec: &IngestSpec) -> Result<Vec<usize>> {
     let n = spec.products.len();
     // 1. unique names — duplicates would silently shadow each other in any name→index map.
@@ -388,6 +486,7 @@ pub fn validate(spec: &IngestSpec) -> Result<Vec<usize>> {
     for p in &spec.products {
         check_no_schema_laundering(p)?;
         check_no_handwritten_decoder(p)?;
+        check_batch_rows(p)?;
     }
     Ok(order)
 }
@@ -605,6 +704,142 @@ pub fn canonical_bytes(spec: &IngestSpec) -> Result<Vec<u8>> {
 /// Some(<spec_hash>) }`. Re-running the same TOML on the same data must produce the same hash.
 pub fn spec_hash(spec: &IngestSpec) -> Result<String> {
     Ok(tessera_core::hash::digest(&canonical_bytes(spec)?))
+}
+
+#[cfg(test)]
+mod streaming_knob_tests {
+    use super::*;
+
+    /// `batch_rows = 0` is refused where it is read, not left to fail differently per route.
+    ///
+    /// It used to be accepted, and the symptom then depended on the routing rather than on the
+    /// value: the streaming Parquet lane produced no batches and reported "decoded to no columns",
+    /// which blames the data for a bad flag, while the batch path ignored the knob and succeeded. One
+    /// meaningless input should give one answer.
+    #[test]
+    fn batch_rows_zero_is_refused_by_the_spec() {
+        let spec = |n: &str| {
+            parse_str(&format!(
+                r#"
+[collection]
+name = "c"
+timestamp = "2024-01-01T00:00:00Z"
+
+[[product]]
+name = "p"
+role = "raw"
+schema = "table"
+format = "csv"
+input = "x.csv"
+columns = ["a:i4"]
+batch_rows = {n}
+"#
+            ))
+        };
+        // Parse succeeds (it is a well-formed integer); `validate` is the gate.
+        let zero = spec("0").expect("0 parses — it is validate's job to refuse it");
+        let err = validate(&zero).expect_err("batch_rows = 0 must not validate").to_string();
+        assert!(
+            err.contains("batch_rows = 0") && err.contains("at least 1"),
+            "the error must name the field and the rule: {err}"
+        );
+        // And a legitimate value still validates, so the guard is not refusing everything.
+        validate(&spec("1").expect("parse")).expect("batch_rows = 1 is valid");
+        validate(&spec("4096").expect("parse")).expect("batch_rows = 4096 is valid");
+    }
+
+
+    /// The streaming knobs must not reach `spec_hash` **at any value**.
+    ///
+    /// ADR-0035 hashes the parsed spec into every member's `ingested_via_spec` edge, so a field in
+    /// `spec_hash` is a field in `manifest_hash`. `streaming` and `batch_rows` are runtime execution
+    /// knobs: the block partition is a function of the data alone, so neither can move a sealed
+    /// byte. Recording them would mean an operator who re-runs an archived ingest with
+    /// `--streaming stream` — on a smaller machine, which is precisely why one reaches for it —
+    /// could not reproduce the archived `manifest_hash` for byte-identical data.
+    ///
+    /// An earlier version of this test only required the *defaults* to be absent. That was too weak
+    /// in exactly the direction that mattered, and it let a knob stay identity-bearing whenever
+    /// somebody used it.
+    #[test]
+    fn the_streaming_knobs_never_reach_the_spec_hash() {
+        let spec = |extra: &str| {
+            parse_str(&format!(
+                r#"
+[collection]
+name = "c"
+timestamp = "2024-01-01T00:00:00Z"
+
+[[product]]
+name = "p"
+role = "raw"
+schema = "table"
+format = "csv"
+input = "x.csv"
+columns = ["a:i4"]
+{extra}
+"#
+            ))
+            .expect("parse")
+        };
+        let base = spec_hash(&spec("")).unwrap();
+        for extra in [
+            "streaming = \"auto\"",
+            "streaming = \"batch\"",
+            "streaming = \"stream\"",
+            "batch_rows = 4096",
+            "batch_rows = 65536",
+            "streaming = \"stream\"\nbatch_rows = 1024",
+        ] {
+            assert_eq!(
+                spec_hash(&spec(extra)).unwrap(),
+                base,
+                "`{extra}` changed the spec hash; it is an execution knob and must be invisible to \
+                 the archival record"
+            );
+        }
+        // The guard on the guard: a field that genuinely IS content still moves the hash, so the
+        // assertion above cannot be satisfied by a spec hash that ignores everything.
+        assert_ne!(
+            spec_hash(&spec("exclude = [\"a\"]")).unwrap(),
+            base,
+            "a real decoder option must still ride the spec hash"
+        );
+    }
+
+    /// The knobs still PARSE — "not recorded" must not become "not honoured".
+    #[test]
+    fn the_streaming_knobs_are_still_read_from_the_toml() {
+        let parsed = parse_str(
+            r#"
+[collection]
+name = "c"
+timestamp = "2024-01-01T00:00:00Z"
+
+[[product]]
+name = "p"
+role = "raw"
+schema = "table"
+format = "csv"
+input = "x.csv"
+columns = ["a:i4"]
+streaming = "stream"
+batch_rows = 4096
+"#,
+        )
+        .expect("parse");
+        match &parsed.products[0].options {
+            FormatOptions::Csv {
+                streaming,
+                batch_rows,
+                ..
+            } => {
+                assert_eq!(*streaming, StreamingMode::Stream);
+                assert_eq!(*batch_rows, 4096);
+            }
+            other => panic!("expected the csv lane, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]

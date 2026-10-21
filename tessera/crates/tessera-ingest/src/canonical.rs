@@ -116,6 +116,11 @@ pub struct CanonicalTable {
 }
 
 impl CanonicalTable {
+    /// Column names, in source order — the input the name-pattern checks work from.
+    pub fn column_names(&self) -> Vec<&str> {
+        self.columns.iter().map(|(c, _)| c.name.as_str()).collect()
+    }
+
     /// Row count — the shared length every column is checked against at insert time.
     pub fn rows(&self) -> usize {
         self.columns.first().map(|(_, d)| d.len()).unwrap_or(0)
@@ -336,7 +341,7 @@ pub fn canonicalise(b: &mut TableBuilder, name: &str, data: &mut ColumnData) {
 ///
 /// The half of [`concat_columns`] that makes the nullable-by-presence rule composable: a source whose
 /// first chunk has no nulls and whose second does must end up with one nullable column, not an error.
-fn promote_nullable(data: ColumnData) -> ColumnData {
+pub(crate) fn promote_nullable(data: ColumnData) -> ColumnData {
     match data {
         already @ ColumnData::Nullable { .. } => already,
         values => {
@@ -447,40 +452,250 @@ pub struct GenericIngest<'a> {
     pub column_meta: &'a crate::column_meta::ColumnMeta,
 }
 
+/// The manifest facts a generic-table ingest declares, independent of how its blocks get written.
+///
+/// Two writers implement it — [`ProductBuilder`] for the batch path and `tessera_io::WriteSession` for
+/// the streaming one — so [`declare_generic_table`] is the single place either path decides what a
+/// `table` product's manifest says. That matters because the two must seal the *same* manifest for the
+/// same input (#458), and a twin maintained by hand is exactly the drift this codebase keeps finding: a
+/// fact added to one and forgotten in the other moves `manifest_hash` while leaving `content_hash`
+/// identical, which a content-hash comparison cannot see. Add a fact here and both paths get it; add it
+/// to one writer only and it does not compile.
+pub trait DeclareTable {
+    fn declare_field(&mut self, id: &str, value: serde_json::Value) -> Result<()>;
+    fn declare_generation(&mut self, generation: tessera_core::Generation) -> Result<()>;
+    fn declare_ingest_transform(&mut self, transforms: Vec<IngestTransform>) -> Result<()>;
+    fn declare_source(&mut self, source: tessera_core::provenance::Source) -> Result<()>;
+    fn declare_study(&mut self, study: &str) -> Result<()>;
+    fn declare_producer(&mut self, producer: tessera_core::Producer) -> Result<()>;
+}
+
+impl DeclareTable for ProductBuilder {
+    fn declare_field(&mut self, id: &str, value: serde_json::Value) -> Result<()> {
+        self.with_field(id, value);
+        Ok(())
+    }
+    fn declare_generation(&mut self, generation: tessera_core::Generation) -> Result<()> {
+        self.with_generation(generation);
+        Ok(())
+    }
+    fn declare_ingest_transform(&mut self, transforms: Vec<IngestTransform>) -> Result<()> {
+        self.with_ingest_transform(transforms);
+        Ok(())
+    }
+    fn declare_source(&mut self, source: tessera_core::provenance::Source) -> Result<()> {
+        self.add_source(source);
+        Ok(())
+    }
+    fn declare_study(&mut self, study: &str) -> Result<()> {
+        self.with_study(study);
+        Ok(())
+    }
+    fn declare_producer(&mut self, producer: tessera_core::Producer) -> Result<()> {
+        self.with_producer(producer);
+        Ok(())
+    }
+}
+
+impl DeclareTable for tessera_io::WriteSession {
+    fn declare_field(&mut self, id: &str, value: serde_json::Value) -> Result<()> {
+        self.with_field(id, value)?;
+        Ok(())
+    }
+    fn declare_generation(&mut self, generation: tessera_core::Generation) -> Result<()> {
+        self.with_generation(generation)?;
+        Ok(())
+    }
+    fn declare_ingest_transform(&mut self, transforms: Vec<IngestTransform>) -> Result<()> {
+        self.with_ingest_transform(transforms)?;
+        Ok(())
+    }
+    fn declare_source(&mut self, source: tessera_core::provenance::Source) -> Result<()> {
+        self.add_source(source)?;
+        Ok(())
+    }
+    fn declare_study(&mut self, study: &str) -> Result<()> {
+        self.with_study(study)?;
+        Ok(())
+    }
+    fn declare_producer(&mut self, producer: tessera_core::Producer) -> Result<()> {
+        self.with_producer(producer)?;
+        Ok(())
+    }
+}
+
+/// Declare every generic-table manifest fact on `w`, in the order the seal depends on.
+///
+/// `transforms` is passed separately from `opts` because the streaming path accumulates it across
+/// batches (its receipt is only complete once the last one is read) while the batch path has it on the
+/// folded table. Everything else is identical by construction.
+pub fn declare_generic_table(
+    w: &mut impl DeclareTable,
+    opts: &GenericIngest<'_>,
+    transforms: &[IngestTransform],
+) -> Result<()> {
+    w.declare_field(
+        "source_format",
+        serde_json::Value::String(opts.source_format.to_string()),
+    )?;
+    w.declare_generation(opts.decoder.record_into(opts.generation.clone()))?;
+    // Empty stays ABSENT rather than an empty list: a product where nothing fired must seal exactly as
+    // it did before the receipt existed.
+    if !transforms.is_empty() {
+        w.declare_ingest_transform(transforms.to_vec())?;
+    }
+    // ADR-0040: `source_label` replaces the path in the sealed edge (an absolute clinical path is itself
+    // PHI); the bytes are still read from, and digested at, the real path.
+    let source_ref = opts
+        .source_label
+        .map(str::to_string)
+        .unwrap_or_else(|| opts.source_path.display().to_string());
+    w.declare_source(crate::provenance::ingested_from(
+        &[opts.source_path],
+        source_ref,
+    )?)?;
+    // Order matters for the seal: `ingested_from` first, then whatever the engine threaded in.
+    for s in opts.extra_sources {
+        w.declare_source(s.clone())?;
+    }
+    Ok(())
+}
+
+/// The metadata tiers a `table` product's manifest layers, in **ascending** precedence.
+///
+/// Separate from [`GenericIngest`] (what the lane itself knows) because these come from the *spec*
+/// and from its resolved parents, and held as three fields rather than one pre-merged map because
+/// they must be **layered, not merged**: a value inherited from a parent must never clobber a
+/// product-own default, and a pre-merged map cannot express that difference.
+///
+/// The streaming path has no choice about applying these before the first block commits. A streamed
+/// `.tsra` is written once, straight to disk, with no post-seal hook — so a tier plumbed any later
+/// is dropped **silently**, and that moves `manifest_hash` while leaving `content_hash` identical,
+/// which is exactly the divergence class a content-hash comparison cannot see. The batch path
+/// reaches the same manifest from the other side (`engine::apply_spec_metadata` re-seals a built
+/// product), and the batch-equals-stream tests over BOTH hashes are what hold the two together.
+///
+/// **There is no `generation` field, deliberately.** A table's recipe already arrives on
+/// [`GenericIngest::generation`], where [`declare_generic_table`] folds the ADR-0056 §6a decoder
+/// triple into it. A second generation tier here would make two writers of one field, which is how
+/// that triple came to be deleted by a spec-declared recipe in the first place.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MetadataTiers<'a> {
+    /// Schema-flagged identity inherited from the `derived_from` parents (ADR-0058 §5) — the
+    /// LOWEST tier, applied before the lane's own fields so a product-own default overrides it.
+    pub inherited: Option<&'a BTreeMap<String, serde_json::Value>>,
+    /// The parents' first-class `study` grouping key, when this product declares none of its own.
+    pub inherited_study: Option<&'a str>,
+    /// The spec's `[product.metadata]` — the HIGHEST tier; an explicit operator value wins over
+    /// both the inherited identity and the lane's own default.
+    pub metadata: Option<&'a BTreeMap<String, serde_json::Value>>,
+    /// The spec's `[product.producer]` identity (ADR-0058 §1) — who/what made this product.
+    pub producer: Option<&'a tessera_core::Producer>,
+}
+
+/// Declare every `table` manifest fact **and** the spec's metadata tiers, in the one order that is
+/// correct.
+///
+/// One function rather than a before-hook and an after-hook, because the tiers are only right
+/// relative to [`declare_generic_table`]: the inherited floor has to go down first so the lane's own
+/// `source_format` survives it, and the spec's overrides have to go on last so an operator value
+/// wins. Two functions would make that ordering a convention a caller could get wrong, which on this
+/// path means a silently different `manifest_hash`.
+pub fn declare_table_with_tiers(
+    w: &mut impl DeclareTable,
+    opts: &GenericIngest<'_>,
+    transforms: &[IngestTransform],
+    tiers: &MetadataTiers<'_>,
+) -> Result<()> {
+    // (1) INHERITED — lowest. `study` is a first-class field, not metadata.
+    if let Some(s) = tiers.inherited_study {
+        w.declare_study(s)?;
+    }
+    for (k, v) in tiers.inherited.into_iter().flatten() {
+        w.declare_field(k, v.clone())?;
+    }
+    // (2) The lane's own facts, including any product-own default — beats inherited, loses to spec.
+    declare_generic_table(w, opts, transforms)?;
+    // (3) SPEC `[product.metadata]` — highest, so an explicit operator value wins over everything.
+    for (k, v) in tiers.metadata.into_iter().flatten() {
+        w.declare_field(k, v.clone())?;
+    }
+    if let Some(pr) = tiers.producer {
+        w.declare_producer(pr.clone())?;
+    }
+    Ok(())
+}
+
 /// Seal a canonicalised table as a generic `table` product (ADR-0056 §7's builtin schema).
+///
+/// Partitioned at the [`tessera_io::BLOCK_ROWS`] format invariant, the same split the streaming path
+/// uses, so the block layout is a function of the data and never of the path that read it.
 pub fn to_table_product(
     table: &CanonicalTable,
     opts: &GenericIngest<'_>,
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
+    to_table_product_partitioned(table, opts, tessera_io::BLOCK_ROWS as u64)
+}
+
+/// [`to_table_product`] with the block partition configurable — the seam the partition tests use.
+///
+/// Production goes through [`to_table_product`], pinned at the [`tessera_io::BLOCK_ROWS`] format
+/// invariant. This exists so the partition can be exercised across several block boundaries without
+/// materialising four million rows per case; one test still runs at the real constant, because a
+/// seam-only proof says nothing about the number the shipped binary uses.
+pub fn to_table_product_partitioned(
+    table: &CanonicalTable,
+    opts: &GenericIngest<'_>,
+    block_rows: u64,
+) -> Result<(Manifest, Vec<BlockPayload>)> {
+    if block_rows == 0 {
+        return Err(he("to_table_product: block_rows must be positive"));
+    }
     let mut spec = table.spec()?;
     // Operator semantics land INSIDE the seal, which is the half of §7 that keeps generic ingest from
     // being a wrapper: "annotate it later" is a real path (the content-addressed metadata edit), but
     // it must not be the only one.
     opts.column_meta.apply(&mut spec.columns)?;
     let data = table.data();
-    let (block_ref, payload) = tessera_io::table::table_block(GENERIC_BLOCK, &spec, &data)?;
+    let total_rows = spec.rows;
+    // ── The partition, through the format SSoT.
+    //
+    // `tessera_io::block_count`'s own doc states the rule this implements: the split is a "format
+    // invariant ... shared by every ingest path so whole-file and streamed agree on the partition
+    // (and therefore on the content_hash)". This path used to seal exactly ONE block whatever the row
+    // count, while the streaming path split through `TableMultiBlockSink` — so above BLOCK_ROWS the
+    // same bytes sealed two different products, chosen by `streaming` / `stream_threshold` / whether
+    // the input happened to be a pipe. None of which is recorded in the product, so a reader could
+    // not even tell which had happened.
+    //
+    // `block_name` keeps small-stays-single: one block is named `GENERIC_BLOCK` exactly as before, so
+    // every input under one block — which is every conformance fixture — is byte-identical.
+    let total_blocks = tessera_io::partition_blocks(total_rows, block_rows);
+    let block_rows_u = usize::try_from(block_rows)
+        .map_err(|e| he(format!("block_rows does not fit usize: {e}")))?;
     let mut b = ProductBuilder::new("table", opts.name, opts.description, opts.timestamp);
-    b.add_block_ref(block_ref);
-    b.with_field(
-        "source_format",
-        serde_json::Value::String(opts.source_format.to_string()),
-    );
-    b.with_generation(opts.decoder.record_into(opts.generation.clone()));
-    if !table.transforms.is_empty() {
-        b.with_ingest_transform(table.transforms.clone());
+    let mut payloads = Vec::with_capacity(total_blocks as usize);
+    for blk in 0..total_blocks {
+        let start = (blk as usize) * block_rows_u;
+        let end = ((blk as usize + 1) * block_rows_u).min(total_rows as usize);
+        let block_spec = tessera_core::block::table::TableSpec {
+            columns: spec.columns.clone(),
+            rows: u64::try_from(end - start).map_err(|e| he(format!("row count: {e}")))?,
+            row_index: spec.row_index.clone(),
+        };
+        let block_data: TableData = data
+            .iter()
+            .map(|(name, c)| (name.clone(), c.slice(start, end)))
+            .collect();
+        let nm = tessera_io::block_name(GENERIC_BLOCK, blk, total_blocks);
+        let (block_ref, payload) = tessera_io::table::table_block(&nm, &block_spec, &block_data)?;
+        b.add_block_ref(block_ref);
+        payloads.push(payload);
     }
-    let source_ref = opts
-        .source_label
-        .map(str::to_string)
-        .unwrap_or_else(|| opts.source_path.display().to_string());
-    b.add_source(crate::provenance::ingested_from(
-        &[opts.source_path],
-        source_ref,
-    )?);
-    for s in opts.extra_sources {
-        b.add_source(s.clone());
-    }
-    Ok((b.seal()?, vec![payload]))
+    // Every manifest fact goes through the shared applier, so the streaming path cannot declare a
+    // different set (#458).
+    declare_generic_table(&mut b, opts, &table.transforms)?;
+    Ok((b.seal()?, payloads))
 }
 
 /// Seal a canonicalised dense grid as a generic `array` product (ADR-0056 §7's builtin schema).
