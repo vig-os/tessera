@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-22T01:53:47Z
+updated: 2026-10-23T16:07:32Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-22T07:04:04.858Z
+synced: 2026-10-24T06:51:53.997Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -40,13 +40,13 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unlimit-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.54.1
  - [ ] <!-- unlimit-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
- - [ ] <!-- unlimit-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.89
- - [ ] <!-- unlimit-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.89
- - [ ] <!-- unlimit-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.89
- - [ ] <!-- unlimit-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.89
- - [ ] <!-- unlimit-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.89
- - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.89
- - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.89
+ - [ ] <!-- unlimit-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.90
+ - [ ] <!-- unlimit-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.90
+ - [ ] <!-- unlimit-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.90
+ - [ ] <!-- unlimit-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.90
+ - [ ] <!-- unlimit-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.90
+ - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.90
+ - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.90
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.26.0
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
@@ -99,13 +99,13 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `zarrs 0.23` → [Updates: `0.23`]
  - `bytes 1`
  - `half 2`
- - `vortex-file 0.75` → [Updates: `0.89`]
- - `vortex-array 0.75` → [Updates: `0.89`]
- - `vortex-btrblocks 0.75` → [Updates: `0.89`]
- - `vortex-buffer 0.75` → [Updates: `0.89`]
- - `vortex-io 0.75` → [Updates: `0.89`]
- - `vortex-layout 0.75` → [Updates: `0.89`]
- - `vortex-session 0.75` → [Updates: `0.89`]
+ - `vortex-file 0.75` → [Updates: `0.90`]
+ - `vortex-array 0.75` → [Updates: `0.90`]
+ - `vortex-btrblocks 0.75` → [Updates: `0.90`]
+ - `vortex-buffer 0.75` → [Updates: `0.90`]
+ - `vortex-io 0.75` → [Updates: `0.90`]
+ - `vortex-layout 0.75` → [Updates: `0.90`]
+ - `vortex-session 0.75` → [Updates: `0.90`]
  - `futures 0.3` → [Updates: `0.3`]
  - `clap 4`
  - `png 0.17` → [Updates: `0.18`]
