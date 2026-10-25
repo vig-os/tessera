@@ -32,6 +32,15 @@ ignore = [
     # object_store release (track upstream apache/arrow-rs object_store quick-xml bump).
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # basic-toml v0.1.10 — UNMAINTAINED (not a vulnerability; advisory dated 2026-09-26, ignored
+    # 2026-10-25). There's no safe upgrade. It's a compile-time-only dep: i18n-config 0.4.8 (the latest
+    # release) uses it, and i18n-config is reached only through the i18n-embed-fl / i18n-embed-impl
+    # proc-macros of age 0.11 (the ADR-0047 crypto-shred encryption dep, via tessera-ingest).
+    # Those macros parse age's own bundled i18n.toml at build time. basic-toml isn't linked into any
+    # tessera binary and never sees runtime or user input. age 0.12 doesn't help (same
+    # i18n-config ^0.4.7). Upstream swapped it back to `toml` in kellpossible/cargo-i18n#176
+    # (merged, unreleased). Remove this ignore when that ships: vig-os/tessera#665.
+    "RUSTSEC-2026-0374",
 ]
 
 [licenses]
