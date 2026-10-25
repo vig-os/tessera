@@ -70,7 +70,9 @@ sign-time and embedded*. This is the single criterion that ranks the mechanisms 
     `--age-recipient` for at-rest encryption) — closes the deferred keygen verb.
   - A **file-based trust store** (`~/.config/tessera/trust/` + per-repo `.tessera/trust/`) with
     `tessera trust add/list/remove`; **`verify-sig` defaults to it** (`--require-signer <orcid>`
-    optional), instead of requiring `--pubkey`.
+    optional), instead of requiring `--pubkey`. *Amended 2026-10-25 (#576): the per-repo store is
+    consulted only when named with `--trust-dir`/`TESSERA_TRUST_DIR` — see
+    [the amendment](#amendment-576-2026-10-25--no-implicit-cwd-relative-trust-store).*
   - `ssh-ed25519` (done) — `tessera sign` auto-detects an OpenSSH `~/.ssh/id_ed25519` and signs with it,
     recording `key_format = "ssh-ed25519"`. It is a host-side key **loader**, *not* a second `alg`: the
     curve, the signed envelope, and verification are identical, so `key_id` (the raw-pubkey hex) and the
@@ -105,6 +107,68 @@ manifest field. Re-open if a regulated adopter blocks on hard-reject.
 
 ORCID-as-trust-anchor · running our own Fulcio/Rekor · X.509/PKI (CA archival is the wrong shape) ·
 PGP/WoT (no upside over local ed25519) · depending on `in-toto-rs` as a primary crate.
+
+## Amendment (#576, 2026-10-25) — no implicit cwd-relative trust store
+
+The alpha tier as built resolved `verify-sig`'s trust set as `./.tessera/trust/` **relative to the
+current directory**, then the user store. Whoever can write to the directory a verifier runs in (a shared
+job output directory, an unpacked archive, a dataset view) could therefore plant a `.pub` there and widen
+what that verifier trusts, and the forged `signer` attribution rode along with it. That violates the
+premise of §1: trust is what the verifier *already holds*, not what the data's surroundings say.
+
+**Decision.** `verify-sig` consults, in this order (the first store holding the signature's `key_id`
+wins):
+
+1. every `--trust-dir <path>` given (repeatable) — or, when none is given, every entry of
+   `TESSERA_TRUST_DIR`, a PATH-style list (`:`-separated, `;` on Windows; parsed like `PATH`, so a
+   directory whose name contains the separator cannot be listed there — name it with `--trust-dir`). The
+   flag **replaces** the env var; it does not add to it. Empty entries are ignored (unlike `PATH`, they
+   never mean the current directory). A named store that is not an existing directory is an error, not a
+   silently empty store. A named store is canonicalized, so the stderr report shows the absolute
+   directory that was read;
+2. the **user store**, `$XDG_CONFIG_HOME/tessera/trust` or `$HOME/.config/tessera/trust` (absent = no
+   keys). Only an **absolute** base counts: an empty or relative `XDG_CONFIG_HOME` is ignored (as the XDG
+   base-directory spec requires), and an empty or relative `HOME` means no user store. Otherwise
+   `XDG_CONFIG_HOME=` (set but empty, common in containers) would make the "user store" `./tessera/trust`
+   and reopen the same hole.
+
+Nothing else. In particular `./.tessera/trust/` is never consulted unless it is named, and there is
+**no git-root discovery**: any implicit lookup is a planted-key surface again.
+
+**`TESSERA_TRUST_DIR` takes absolute paths only.** A `--trust-dir` is typed for one run, so a relative
+one (resolved against the cwd of that run, then canonicalized) is a deliberate choice. An env var is set
+once — in a shell profile, a CI job — and then applies to every later run in every directory: a relative
+entry such as `.tessera/trust` would re-resolve inside each unpacked archive or job directory the
+verifier visits and trust whatever key that directory carries, which is this amendment's attack again.
+So any relative entry is a usage error (exit 1, naming the entry and asking for an absolute path), never
+a silent skip — a skip would leave the operator believing a store was consulted. To trust a repo store
+through the env var, name its absolute path on purpose: `TESSERA_TRUST_DIR=$PWD/.tessera/trust`.
+
+**Management verbs.** `tessera trust add/list/remove --repo` still manage `./.tessera/trust/` and say on
+stderr that the store has to be passed with `--trust-dir` (or by absolute path in `TESSERA_TRUST_DIR`)
+to take effect. `tessera trust list` prints each store with its keys; without `--repo` it shows the
+stores `verify-sig` would consult with the same flags and environment. `tessera trust remove` now acts
+on **one** store: the user store, or `./.tessera/trust/` with `--repo`. It used to search the repo store
+first and then the user store, so the same command removed a key from whichever held it; now a removal
+can never reach a store the operator did not select.
+
+**Every acceptance is attributed.** On success `verify-sig` writes one line to stderr naming the
+accepting key and where it came from — `accepted key_id <hex> via trust store <path> (<origin>)`, origin
+being `--trust-dir`, `TESSERA_TRUST_DIR` or `user store` — or `accepted key_id <hex> via --pubkey
+<file>`. `--pubkey` and `--trust-dir` are mutually exclusive.
+
+**Automated verifiers** (CI gates, ingest pipelines, anything running unattended in a directory it does
+not control) should pin the key **and** the attribution: `verify-sig --pubkey <key> --require-signer
+<id>`. That path consults no store at all and fails closed on an unsigned file, a wrong key or a wrong
+signer.
+
+**Not done:** a `--strict` flag. Once no store is implicit there is nothing left for it to guard.
+
+**Behaviour change.** A workflow that relied on running `verify-sig` from a repository root with its keys
+in `./.tessera/trust/` now gets `untrusted` (exit 1) until it passes `--trust-dir .tessera/trust` (or, if
+that store really should apply everywhere, sets `TESSERA_TRUST_DIR` to its absolute path). This fails
+closed, never open. `trust remove <handle>` no longer finds a key that lives only in the repo store; pass
+`--repo`.
 
 ## Why
 
