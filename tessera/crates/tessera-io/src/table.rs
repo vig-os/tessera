@@ -626,11 +626,6 @@ impl ColumnData {
 /// [`TableSpec`]). All columns have the same length (`rows`).
 pub type TableData = Vec<(String, ColumnData)>;
 
-/// An empty column of the dtype named by a numpy code (the decode accumulator).
-fn empty_column(code: &str) -> Result<ColumnData> {
-    empty_column_with_capacity(code, 0)
-}
-
 /// An empty accumulator column, pre-sized for `cap` rows.
 ///
 /// **This is the dominant cost of a full-materialise read.** Profiling (`examples/read_profile`)
@@ -1033,10 +1028,11 @@ where
     I::IntoIter: Send + 'static,
 {
     let (rt, s) = runtime_session();
-    // The struct dtype, taken from an empty struct of the declared columns.
+    // The struct dtype, taken from an empty struct of the declared columns. It must carry each
+    // column's nullability, or every chunk of a nullable column mismatches it (#658).
     let mut empty: TableData = Vec::with_capacity(spec.columns.len());
     for c in &spec.columns {
-        empty.push((c.name.clone(), empty_column(&c.dtype)?));
+        empty.push((c.name.clone(), ColumnData::empty_for(c)?));
     }
     let efields: Vec<(&str, ArrayRef)> = empty
         .iter()
@@ -1048,13 +1044,28 @@ where
         .dtype()
         .clone();
 
-    // Lazily turn each row-group into a Vortex StructArray chunk (one in flight at a time).
-    let chunk_iter = groups.into_iter().map(|td| {
+    // Lazily turn each row-group into a Vortex StructArray chunk (one in flight at a time). A chunk
+    // whose dtype is not the declared one is refused here, as an error the caller sees: inside vortex
+    // the mismatch panics in the write task (a `debug_assert` in debug builds, a hard assert in the
+    // layout writer in release), and that panic does not reach the caller, which got `Ok` with wrong
+    // bytes (#658).
+    let declared = dtype.clone();
+    let chunk_iter = groups.into_iter().map(move |td| {
         let fields: Vec<(&str, ArrayRef)> = td
             .iter()
             .map(|(n, c)| (n.as_str(), c.to_vortex()))
             .collect();
-        StructArray::from_fields(&fields).map(|s| s.into_array())
+        let chunk = StructArray::from_fields(&fields)?.into_array();
+        if chunk.dtype() != &declared {
+            // An io error only because that is the one `VortexError` source reachable without a
+            // direct vortex-error dependency; the message carries the actual cause.
+            return Err(std::io::Error::other(format!(
+                "encode_streaming: row-group dtype {} != declared {declared}",
+                chunk.dtype()
+            ))
+            .into());
+        }
+        Ok(chunk)
     });
     let array_iter = ArrayIteratorAdapter::new(dtype, chunk_iter);
 
@@ -2394,6 +2405,63 @@ mod tests {
             assert_eq!(back, c);
         }
         assert!(ColumnData::from_le_bytes("f4", &[0u8; 3]).is_err()); // not a multiple of width
+    }
+
+    /// Streaming a table with NULLABLE columns must produce the batch bytes, not a dtype panic:
+    /// `encode_streaming` derives its struct dtype from the spec, so it must honour
+    /// `Column::nullable`, or every chunk mismatches the declared dtype.
+    #[test]
+    fn encode_streaming_matches_batch_encode_over_nullable_columns() {
+        use super::under_null_fixture as fx;
+        let rows = ROWS_PER_GROUP * 2 + 777;
+        let spec = fx::spec(rows);
+        let (canonical, dirty) = fx::tables(rows);
+        let groups = |full: &TableData| -> Vec<TableData> {
+            (0..rows.div_ceil(ROWS_PER_GROUP))
+                .map(|g| {
+                    let (st, en) = (g * ROWS_PER_GROUP, ((g + 1) * ROWS_PER_GROUP).min(rows));
+                    full.iter()
+                        .map(|(name, c)| (name.clone(), c.slice(st, en)))
+                        .collect()
+                })
+                .collect()
+        };
+        let batch = encode(&spec, &canonical).unwrap();
+        let streamed = encode_streaming(&spec, groups(&canonical)).unwrap();
+        assert_eq!(streamed, batch, "streaming != batch over nullable columns");
+        // LE bytes, not `==`: the fixture holds a present NaN, and NaN != NaN.
+        let le =
+            |t: &TableData| -> Vec<Vec<u8>> { t.iter().map(|(_, c)| c.to_le_bytes()).collect() };
+        assert_eq!(
+            le(&decode(&spec, &streamed).unwrap()),
+            le(&canonical),
+            "streamed bytes decode"
+        );
+        assert_eq!(
+            encode_streaming(&spec, groups(&dirty)).unwrap(),
+            batch,
+            "streamed bytes depend on the values under a NULL"
+        );
+    }
+
+    /// A row-group whose dtype disagrees with the spec (here: a validity mask on a column the spec
+    /// declares non-nullable) is a typed error, not a debug-only panic or silently-written bytes.
+    #[test]
+    fn encode_streaming_refuses_a_row_group_that_mismatches_the_spec() {
+        let spec = TableSpec {
+            columns: vec![col("k", "i8")],
+            rows: 2,
+            row_index: None,
+        };
+        let group: TableData = vec![(
+            "k".into(),
+            ColumnData::Nullable {
+                values: Box::new(ColumnData::I64(vec![1, 0])),
+                validity: vec![true, false],
+            },
+        )];
+        let e = encode_streaming(&spec, vec![group]).unwrap_err();
+        assert!(format!("{e}").contains("!= declared"), "got: {e}");
     }
 
     #[test]
