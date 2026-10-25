@@ -40,6 +40,11 @@ pub fn chunk_index_block(data_name: &str, index: &ChunkIndex) -> Result<(BlockRe
             // indexes (via table_chunk_index / array_chunk_index), so it is `class: "derived"` with a
             // versioned `recipe`. A consumer may drop + rebuild it; it is not canonical source data.
             "class": "derived",
+            // Still @1 after #632, which took values under a NULL out of the table row-group digest.
+            // @1 was always a pure function of the indexed block's logical content (ADR-0028 §4), and
+            // the block never stores those bytes, so a root that moved with them was a defect, not a
+            // different recipe. Every canonical producer (all ingest, ADR-0056 H5) is byte-unchanged.
+            // The @2 bump is reserved for ADR-0059's schema event (§11 step 1: M1-M3 + new stats).
             "recipe": "chunk_index@1",
             "indexes": data_name,        // the data block this is the chunk-index of
             "entries": index.len(),       // number of sub-block entries

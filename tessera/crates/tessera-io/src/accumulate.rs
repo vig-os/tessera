@@ -19,7 +19,6 @@ use std::sync::{Arc, Mutex};
 
 use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::chunk_index::{ChunkStats, MerkleStatsAccumulator, Monoid};
-use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
 
 use crate::stream::{table_job_from_fragments, StreamWriter};
@@ -221,7 +220,7 @@ impl TableStreamWriter {
 
     /// Spill the first `n` buffered rows as a durable fragment; keep the remainder in the buffer.
     fn flush(&mut self, n: usize) -> Result<()> {
-        let group: TableData = self
+        let mut group: TableData = self
             .buf
             .iter()
             .map(|(name, c)| (name.clone(), c.slice(0, n)))
@@ -229,19 +228,20 @@ impl TableStreamWriter {
         write_fragment(&self.frag_path(self.n_frags), &group)?;
         self.n_frags += 1;
         // ADR-0028 §5: fold this group's {digest, stats} into the live MMR (bounded memory — the group
-        // is folded then dropped). The per-group digest matches `table_chunk_index` (every column's LE
-        // bytes for the group, in column order), so the live root reconciles with the batch index.
+        // is folded then dropped). The per-group digest is `table_chunk_index`'s own
+        // (`row_group_digest`), so the live root reconciles with the batch index. The fragment is
+        // already written with the producer's raw bytes, so the digest may canonicalise `group` in
+        // place.
         if let Some(col) = &self.stat_column {
-            let mut bytes = Vec::new();
-            for (_, c) in &group {
-                bytes.extend_from_slice(&c.to_le_bytes());
-            }
             let stats = group
                 .iter()
                 .find(|(n, _)| n == col)
                 .and_then(|(_, c)| c.chunk_stats())
                 .unwrap_or_else(ChunkStats::identity);
-            self.fold.push(&digest(&bytes), stats);
+            self.fold.push(
+                &table::row_group_digest(group.iter_mut().map(|(_, c)| c)),
+                stats,
+            );
         }
         // keep the remainder
         self.buf = self
@@ -1035,5 +1035,37 @@ mod tests {
         assert_eq!(agg, batch_idx.aggregate());
         assert_eq!(agg.count, validity.iter().filter(|&&ok| ok).count() as u64);
         assert_eq!(agg.max, Some(rows as i64 - 1));
+    }
+
+    /// #632: the streaming live fold honours the same invariant as `encode` — two producers that
+    /// differ ONLY beneath their NULLs stream to identical block bytes AND an identical live
+    /// chunk-index root, across a trailing partial row-group, and that root is the batch
+    /// `table_chunk_index` root of the canonical table.
+    #[test]
+    fn live_index_fold_is_independent_of_values_under_nulls() {
+        use crate::table::under_null_fixture as fx;
+        let dir = tempfile::tempdir().unwrap();
+        let rows = ROWS_PER_GROUP * 2 + 777; // two full groups + a partial one flushed by finish
+        let spec = fx::spec(rows);
+        let (canonical, dirty) = fx::tables(rows);
+        let stream = |data: &TableData, stage: &str| {
+            let mut w = TableStreamWriter::new(spec.clone(), &dir.path().join(stage))
+                .unwrap()
+                .with_live_index("k");
+            push_in_batches(&mut w, data);
+            // `finish` consumes the writer, so read the trailing group's fold through a flush first.
+            w.flush(w.buf_rows).unwrap();
+            let root = w.live_root().unwrap();
+            let aggregate = w.live_aggregate().unwrap();
+            (root, aggregate, w.finish().unwrap())
+        };
+        let (want_root, want_agg, want_bytes) = stream(&canonical, "canonical");
+        let (got_root, got_agg, got_bytes) = stream(&dirty, "dirty");
+        assert_eq!(got_bytes, want_bytes, "streamed block bytes");
+        assert_eq!(got_root, want_root, "live chunk-index root");
+        assert_eq!(got_agg, want_agg, "live stats");
+        let batch = table::table_chunk_index(&spec, &canonical, "k").unwrap();
+        assert_eq!(batch.len(), 3, "precondition: a multi-row-group index");
+        assert_eq!(want_root, batch.root(), "batch == streaming");
     }
 }

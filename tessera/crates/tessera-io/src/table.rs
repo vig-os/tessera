@@ -116,7 +116,8 @@ pub enum ColumnData {
     /// carries `0` (or `0.0`) wherever `validity` is false, whatever the producer had there. This
     /// is deliberate: it makes the encoded bytes — and therefore `content_hash` — independent of
     /// whatever happened to sit under a null, which the format's determinism guarantee requires.
-    /// Compare only the slots where `validity` is true.
+    /// The table chunk-index digest takes the same canonical form (#632), so a `.cidx` sidecar is
+    /// independent of it as well. Compare only the slots where `validity` is true.
     Nullable {
         values: Box<ColumnData>,
         validity: Vec<bool>,
@@ -324,9 +325,20 @@ impl ColumnData {
         }
     }
 
+    /// Put the column in **canonical form**, in place: every masked-out slot of a nullable column
+    /// takes the dtype default, which is what [`encode`] writes and [`decode`] returns. A no-op for
+    /// a non-nullable column. This is the form identity is computed over ([`row_group_digest`]), so
+    /// whatever a producer left under a NULL cannot reach a digest (#632); `to_le_bytes` stays raw
+    /// because the staging fragments and the zero-copy export carry the column as given.
+    fn canonicalise(&mut self) {
+        if let ColumnData::Nullable { values, validity } = self {
+            values.zero_masked(validity, 0);
+        }
+    }
+
     /// Set every slot at index `>= from` that `validity` marks absent to the dtype default (`0`,
-    /// `0.0`, `false`, `""`) — the canonical form of a nullable column's values, used by the
-    /// nullable decode arm (#659).
+    /// `0.0`, `false`, `""`) — the canonical form of a nullable column's values, shared by the
+    /// chunk-index digest ([`Self::canonicalise`]) and the nullable decode arm (#659).
     /// Slots beyond `validity` are left alone (`validate_nullable` makes the lengths agree).
     fn zero_masked(&mut self, validity: &[bool], from: usize) {
         let mask = validity.get(from..).unwrap_or_default();
@@ -1524,8 +1536,9 @@ pub fn decode_projected(spec: &TableSpec, blob: &[u8], names: &[&str]) -> Result
 
 /// Build the `{hash, stats}` chunk-index (ADR-0028 §3) for a table block, splitting on the **same**
 /// fixed [`ROWS_PER_GROUP`] row-groups [`encode`] uses. Each entry carries the row-group's content digest
-/// (BLAKE3 over the group's little-endian column bytes — recomputable from the decoded group, independent
-/// of the Vortex byte layout) and the chunk statistics of `stat_column` (which must be an integer column,
+/// ([`row_group_digest`]: BLAKE3 over the group's canonical little-endian column bytes, with every value
+/// under a NULL taken as the dtype default — recomputable from the decoded group, independent of the
+/// Vortex byte layout) and the chunk statistics of `stat_column` (which must be an integer column,
 /// see [`ColumnData::as_i64`]). Other columns still feed each group's digest; only the stats come from
 /// `stat_column`. A **nullable** `stat_column` is supported: NULLs are excluded from every statistic
 /// (so `count` counts the present values) and an all-NULL group carries the empty chunk's stats —
@@ -1568,11 +1581,7 @@ pub fn table_chunk_index(
     for g in 0..n_groups {
         let start = g * ROWS_PER_GROUP;
         let end = ((g + 1) * ROWS_PER_GROUP).min(rows);
-        // group content digest = every column's LE bytes for [start, end), in column order.
-        let mut bytes = Vec::new();
-        for (_, col) in data.iter() {
-            bytes.extend_from_slice(&col.slice(start, end).to_le_bytes());
-        }
+        let mut group: Vec<ColumnData> = data.iter().map(|(_, c)| c.slice(start, end)).collect();
         // Slice the ROWS, then take stats: a nullable column's `as_i64` drops its NULLs, so the
         // whole-column values are not row-aligned and cannot be sliced by row range (#627).
         let stats = stat_col.slice(start, end).chunk_stats().ok_or_else(|| {
@@ -1580,9 +1589,30 @@ pub fn table_chunk_index(
                 "column '{stat_column}' is not an integer column for stats"
             ))
         })?;
-        idx.push_entry(digest(&bytes), stats);
+        idx.push_entry(row_group_digest(&mut group), stats);
     }
     Ok(idx)
+}
+
+/// The content digest of one row-group: BLAKE3 over every column's little-endian bytes
+/// ([`ColumnData::to_le_bytes`]) in [canonical form](ColumnData::canonicalise), in column order. The
+/// single definition shared by the batch [`table_chunk_index`] and the streaming live fold
+/// ([`crate::accumulate::TableStreamWriter::with_live_index`]), so the two cannot disagree.
+///
+/// Values under a NULL are not identity (see [`ColumnData::Nullable`]): they enter the digest as the
+/// dtype default, so two producers of the same logical table get the same digest whatever they left
+/// in a masked-out slot, and the digest is recomputable from the decoded row-group (#632). The
+/// columns are canonicalised **in place**: both callers pass the row-group slice they already own,
+/// so the canonical form costs no further copy.
+pub(crate) fn row_group_digest<'a>(
+    columns: impl IntoIterator<Item = &'a mut ColumnData>,
+) -> String {
+    let mut bytes = Vec::new();
+    for c in columns {
+        c.canonicalise();
+        bytes.extend_from_slice(&c.to_le_bytes());
+    }
+    digest(&bytes)
 }
 
 /// Encode a table block and produce both the digested [`BlockRef`] (digest over the real Vortex
@@ -2202,6 +2232,54 @@ mod tests {
         }
     }
 
+    /// #632: the chunk index honours the same invariant as `encode` — two tables that differ ONLY
+    /// beneath their NULLs give an equal chunk-index root, equal per-group digests, and an equal
+    /// sidecar block, over a multi-row-group table with a nullable integer stat column and a
+    /// nullable float holding a present `NaN`. The index must also be recomputable from the
+    /// DECODED table, which carries the dtype default under every NULL.
+    #[test]
+    fn chunk_index_is_independent_of_values_under_nulls() {
+        use super::under_null_fixture as fx;
+        let rows = ROWS_PER_GROUP * 2 + 777; // three row-groups, the last one partial
+        let spec = fx::spec(rows);
+        let (canonical, dirty) = fx::tables(rows);
+        // LE bytes, not `!=`: the fixture holds a present NaN, so the tables are `!=` regardless.
+        let le =
+            |t: &TableData| -> Vec<Vec<u8>> { t.iter().map(|(_, c)| c.to_le_bytes()).collect() };
+        assert_ne!(
+            le(&canonical),
+            le(&dirty),
+            "precondition: the producers differ under a NULL"
+        );
+
+        let blob = encode(&spec, &canonical).unwrap();
+        assert_eq!(blob, encode(&spec, &dirty).unwrap(), "encode bytes");
+
+        let want = table_chunk_index(&spec, &canonical, "k").unwrap();
+        let got = table_chunk_index(&spec, &dirty, "k").unwrap();
+        assert_eq!(want.len(), 3, "precondition: a multi-row-group index");
+        let digests = |idx: &ChunkIndex| -> Vec<String> {
+            idx.entries.iter().map(|e| e.digest.clone()).collect()
+        };
+        assert_eq!(digests(&got), digests(&want), "per-group digests");
+        assert_eq!(got.root(), want.root(), "chunk-index root");
+        assert_eq!(got.aggregate(), want.aggregate(), "stats");
+        let decoded = decode(&spec, &blob).unwrap();
+        assert_eq!(
+            table_chunk_index(&spec, &decoded, "k").unwrap().root(),
+            want.root(),
+            "the index is recomputable from the decoded table"
+        );
+
+        let fused = |data: &TableData| {
+            let ((block, _), sidecar) =
+                table_block_with_index("events", &spec, data, Some("k")).unwrap();
+            let (sidecar, payload) = sidecar.expect("an integer stat column yields a sidecar");
+            (block, sidecar, payload.bytes)
+        };
+        assert_eq!(fused(&dirty), fused(&canonical), "fused block + sidecar");
+    }
+
     /// Row-index pushdown must be BIT-EXACT with decoding the block and slicing the same rows.
     ///
     /// This is the correctness contract for `decode_rows`: pushing the selection into Vortex reads
@@ -2655,8 +2733,9 @@ mod tests {
 
     /// #627: a nullable float column carrying both a NaN (a real value) and a NULL feeds the group
     /// digest alongside a nullable stat column with NULLs. The index builds, the stats come from the
-    /// stat column's present values only, and the digest is exactly "every column's LE bytes for
-    /// the group, in column order" — a nullable column's being `values ‖ packed validity`.
+    /// stat column's present values only, and the digest is exactly "every column's canonical LE
+    /// bytes for the group, in column order" — a nullable column's being `values ‖ packed validity`
+    /// with the dtype default under every NULL (#632), so `UNDER_NULL` never reaches it.
     #[test]
     fn chunk_index_with_a_nullable_float_holding_nan_and_null() {
         let k = [Some(5), None, Some(-2)];
@@ -2669,11 +2748,17 @@ mod tests {
             rows: 3,
             row_index: None,
         };
-        let data: TableData = vec![("k".into(), nullable_i8(&k)), ("f".into(), f.clone())];
+        let data: TableData = vec![("k".into(), nullable_i8(&k)), ("f".into(), f)];
         let idx = table_chunk_index(&spec, &data, "k").unwrap();
 
-        let mut bytes = nullable_i8(&k).to_le_bytes();
-        bytes.extend_from_slice(&f.to_le_bytes());
+        // Spelled out byte by byte rather than through the helper under test: `k` is [5, NULL, -2]
+        // with 0 (not UNDER_NULL) under the NULL, then its mask 0b101; `f` is NaN, 0.0, 1.5, then
+        // the same mask.
+        let mut bytes = vec![5u8, 0, (-2i8) as u8, 0b101];
+        for x in [f64::NAN, 0.0, 1.5] {
+            bytes.extend_from_slice(&x.to_le_bytes());
+        }
+        bytes.push(0b101);
         let mut want = ChunkIndex::new();
         want.push_entry(digest(&bytes), expected_group_stats(&k)[0].clone());
         assert_eq!(idx.root(), want.root());
