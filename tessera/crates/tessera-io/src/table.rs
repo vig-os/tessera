@@ -112,10 +112,12 @@ pub enum ColumnData {
     /// `values` is never itself `Nullable` — `validate_nullable` rejects nesting.
     ///
     /// **Values under a NULL are not preserved.** Encoding normalises every masked-out slot to the
-    /// dtype default, so a decoded column carries `0` (or `0.0`) wherever `validity` is false,
-    /// whatever the producer had there. This is deliberate: it makes the encoded bytes — and
-    /// therefore `content_hash` — independent of whatever happened to sit under a null, which the
-    /// format's determinism guarantee requires. Compare only the slots where `validity` is true.
+    /// dtype default, and decoding returns the dtype default there too (#659), so a decoded column
+    /// carries `0` (or `0.0`) wherever `validity` is false, whatever the producer had there. This
+    /// is deliberate: it makes the encoded bytes — and therefore `content_hash` — independent of
+    /// whatever happened to sit under a null, which the format's determinism guarantee requires.
+    /// The table chunk-index digest takes the same canonical form (#632), so a `.cidx` sidecar is
+    /// independent of it as well. Compare only the slots where `validity` is true.
     Nullable {
         values: Box<ColumnData>,
         validity: Vec<bool>,
@@ -320,6 +322,50 @@ impl ColumnData {
                 out.extend_from_slice(&pack_validity(validity));
                 out
             }
+        }
+    }
+
+    /// Put the column in **canonical form**, in place: every masked-out slot of a nullable column
+    /// takes the dtype default, which is what [`encode`] writes and [`decode`] returns. A no-op for
+    /// a non-nullable column. This is the form identity is computed over ([`row_group_digest`]), so
+    /// whatever a producer left under a NULL cannot reach a digest (#632); `to_le_bytes` stays raw
+    /// because the staging fragments and the zero-copy export carry the column as given.
+    fn canonicalise(&mut self) {
+        if let ColumnData::Nullable { values, validity } = self {
+            values.zero_masked(validity, 0);
+        }
+    }
+
+    /// Set every slot at index `>= from` that `validity` marks absent to the dtype default (`0`,
+    /// `0.0`, `false`, `""`) — the canonical form of a nullable column's values, shared by the
+    /// chunk-index digest ([`Self::canonicalise`]) and the nullable decode arm (#659).
+    /// Slots beyond `validity` are left alone (`validate_nullable` makes the lengths agree).
+    fn zero_masked(&mut self, validity: &[bool], from: usize) {
+        let mask = validity.get(from..).unwrap_or_default();
+        macro_rules! zero {
+            ($v:expr) => {{
+                let tail = $v.get_mut(from..).unwrap_or_default();
+                for (slot, _) in tail.iter_mut().zip(mask).filter(|(_, &ok)| !ok) {
+                    *slot = Default::default();
+                }
+            }};
+        }
+        match self {
+            ColumnData::I8(v) => zero!(v),
+            ColumnData::I16(v) => zero!(v),
+            ColumnData::I32(v) => zero!(v),
+            ColumnData::I64(v) => zero!(v),
+            ColumnData::U8(v) => zero!(v),
+            ColumnData::U16(v) => zero!(v),
+            ColumnData::U32(v) => zero!(v),
+            ColumnData::U64(v) => zero!(v),
+            ColumnData::F32(v) => zero!(v),
+            ColumnData::F64(v) => zero!(v),
+            ColumnData::Bool(v) => zero!(v),
+            ColumnData::Utf8(v) => zero!(v),
+            // Nesting is rejected by `validate_nullable`; were it to occur, a slot the outer mask
+            // marks absent is absent at every level.
+            ColumnData::Nullable { values, .. } => values.zero_masked(validity, from),
         }
     }
 
@@ -591,11 +637,6 @@ impl ColumnData {
 /// An ordered set of named columns — the decoded form of a table block (column order matches the
 /// [`TableSpec`]). All columns have the same length (`rows`).
 pub type TableData = Vec<(String, ColumnData)>;
-
-/// An empty column of the dtype named by a numpy code (the decode accumulator).
-fn empty_column(code: &str) -> Result<ColumnData> {
-    empty_column_with_capacity(code, 0)
-}
 
 /// An empty accumulator column, pre-sized for `cap` rows.
 ///
@@ -999,10 +1040,11 @@ where
     I::IntoIter: Send + 'static,
 {
     let (rt, s) = runtime_session();
-    // The struct dtype, taken from an empty struct of the declared columns.
+    // The struct dtype, taken from an empty struct of the declared columns. It must carry each
+    // column's nullability, or every chunk of a nullable column mismatches it (#658).
     let mut empty: TableData = Vec::with_capacity(spec.columns.len());
     for c in &spec.columns {
-        empty.push((c.name.clone(), empty_column(&c.dtype)?));
+        empty.push((c.name.clone(), ColumnData::empty_for(c)?));
     }
     let efields: Vec<(&str, ArrayRef)> = empty
         .iter()
@@ -1014,13 +1056,28 @@ where
         .dtype()
         .clone();
 
-    // Lazily turn each row-group into a Vortex StructArray chunk (one in flight at a time).
-    let chunk_iter = groups.into_iter().map(|td| {
+    // Lazily turn each row-group into a Vortex StructArray chunk (one in flight at a time). A chunk
+    // whose dtype is not the declared one is refused here, as an error the caller sees: inside vortex
+    // the mismatch panics in the write task (a `debug_assert` in debug builds, a hard assert in the
+    // layout writer in release), and that panic does not reach the caller, which got `Ok` with wrong
+    // bytes (#658).
+    let declared = dtype.clone();
+    let chunk_iter = groups.into_iter().map(move |td| {
         let fields: Vec<(&str, ArrayRef)> = td
             .iter()
             .map(|(n, c)| (n.as_str(), c.to_vortex()))
             .collect();
-        StructArray::from_fields(&fields).map(|s| s.into_array())
+        let chunk = StructArray::from_fields(&fields)?.into_array();
+        if chunk.dtype() != &declared {
+            // An io error only because that is the one `VortexError` source reachable without a
+            // direct vortex-error dependency; the message carries the actual cause.
+            return Err(std::io::Error::other(format!(
+                "encode_streaming: row-group dtype {} != declared {declared}",
+                chunk.dtype()
+            ))
+            .into());
+        }
+        Ok(chunk)
     });
     let array_iter = ArrayIteratorAdapter::new(dtype, chunk_iter);
 
@@ -1042,6 +1099,7 @@ where
 /// Numeric columns canonicalize to `PrimitiveArray`; `Bool` → `BoolArray`,
 /// `Utf8` → `VarBinViewArray` (the compressor's chosen scheme is transparent
 /// here — canonicalization undoes FSST/dict/bit-packing).
+/// Perf: a nullable column costs one extra pass over the decoded chunk, resetting its NULL slots (#659).
 fn extend_field(col: &mut ColumnData, field: ArrayRef, ctx: &mut ExecutionCtx) -> Result<()> {
     match col {
         ColumnData::Bool(v) => {
@@ -1069,8 +1127,12 @@ fn extend_field(col: &mut ColumnData, field: ArrayRef, ctx: &mut ExecutionCtx) -
                 .map_err(ze)?
                 .execute_mask(prim.len(), ctx)
                 .map_err(ze)?;
+            let from = validity.len();
             validity.extend(mask.iter());
             extend_column(values, &prim);
+            // The codec may decompress any fill value under a NULL; the documented decode is the
+            // dtype default there (see `ColumnData::Nullable`, #659).
+            values.zero_masked(validity, from);
         }
         _ => {
             let prim: PrimitiveArray = field.execute(ctx).map_err(ze)?;
@@ -1474,8 +1536,9 @@ pub fn decode_projected(spec: &TableSpec, blob: &[u8], names: &[&str]) -> Result
 
 /// Build the `{hash, stats}` chunk-index (ADR-0028 §3) for a table block, splitting on the **same**
 /// fixed [`ROWS_PER_GROUP`] row-groups [`encode`] uses. Each entry carries the row-group's content digest
-/// (BLAKE3 over the group's little-endian column bytes — recomputable from the decoded group, independent
-/// of the Vortex byte layout) and the chunk statistics of `stat_column` (which must be an integer column,
+/// ([`row_group_digest`]: BLAKE3 over the group's canonical little-endian column bytes, with every value
+/// under a NULL taken as the dtype default — recomputable from the decoded group, independent of the
+/// Vortex byte layout) and the chunk statistics of `stat_column` (which must be an integer column,
 /// see [`ColumnData::as_i64`]). Other columns still feed each group's digest; only the stats come from
 /// `stat_column`. A **nullable** `stat_column` is supported: NULLs are excluded from every statistic
 /// (so `count` counts the present values) and an all-NULL group carries the empty chunk's stats —
@@ -1518,11 +1581,7 @@ pub fn table_chunk_index(
     for g in 0..n_groups {
         let start = g * ROWS_PER_GROUP;
         let end = ((g + 1) * ROWS_PER_GROUP).min(rows);
-        // group content digest = every column's LE bytes for [start, end), in column order.
-        let mut bytes = Vec::new();
-        for (_, col) in data.iter() {
-            bytes.extend_from_slice(&col.slice(start, end).to_le_bytes());
-        }
+        let mut group: Vec<ColumnData> = data.iter().map(|(_, c)| c.slice(start, end)).collect();
         // Slice the ROWS, then take stats: a nullable column's `as_i64` drops its NULLs, so the
         // whole-column values are not row-aligned and cannot be sliced by row range (#627).
         let stats = stat_col.slice(start, end).chunk_stats().ok_or_else(|| {
@@ -1530,9 +1589,30 @@ pub fn table_chunk_index(
                 "column '{stat_column}' is not an integer column for stats"
             ))
         })?;
-        idx.push_entry(digest(&bytes), stats);
+        idx.push_entry(row_group_digest(&mut group), stats);
     }
     Ok(idx)
+}
+
+/// The content digest of one row-group: BLAKE3 over every column's little-endian bytes
+/// ([`ColumnData::to_le_bytes`]) in [canonical form](ColumnData::canonicalise), in column order. The
+/// single definition shared by the batch [`table_chunk_index`] and the streaming live fold
+/// ([`crate::accumulate::TableStreamWriter::with_live_index`]), so the two cannot disagree.
+///
+/// Values under a NULL are not identity (see [`ColumnData::Nullable`]): they enter the digest as the
+/// dtype default, so two producers of the same logical table get the same digest whatever they left
+/// in a masked-out slot, and the digest is recomputable from the decoded row-group (#632). The
+/// columns are canonicalised **in place**: both callers pass the row-group slice they already own,
+/// so the canonical form costs no further copy.
+pub(crate) fn row_group_digest<'a>(
+    columns: impl IntoIterator<Item = &'a mut ColumnData>,
+) -> String {
+    let mut bytes = Vec::new();
+    for c in columns {
+        c.canonicalise();
+        bytes.extend_from_slice(&c.to_le_bytes());
+    }
+    digest(&bytes)
 }
 
 /// Encode a table block and produce both the digested [`BlockRef`] (digest over the real Vortex
@@ -1576,6 +1656,84 @@ pub fn table_block_with_index(
         _ => None, // no integer stat column → no prunable-stats sidecar (ADR-0028 §3 integer core)
     };
     Ok((block, sidecar))
+}
+
+/// Fixture for the values-under-a-NULL tests (decode #659, streaming encode #658, chunk-index digest
+/// #632): one logical table written by two producers that agree on every present value and every
+/// validity flag, and differ ONLY in what sits under each NULL.
+#[cfg(test)]
+pub(crate) mod under_null_fixture {
+    use super::{ColumnData, TableData, TableSpec};
+    use tessera_core::block::table::Column;
+
+    fn col(name: &str, dtype: &str) -> Column {
+        Column {
+            name: name.into(),
+            dtype: dtype.into(),
+            codec: None,
+            ..Default::default()
+        }
+    }
+
+    /// The spec: a non-nullable `t` row index, a nullable integer stat column `k`, and a nullable
+    /// float `v` that also holds a present `NaN` (a value, not a NULL).
+    pub(crate) fn spec(rows: usize) -> TableSpec {
+        TableSpec {
+            columns: vec![
+                col("t", "u8"),
+                col("k", "i8").nullable(),
+                col("v", "f4").nullable(),
+            ],
+            rows: rows as u64,
+            row_index: Some("t".into()),
+        }
+    }
+
+    /// `(canonical, dirty)`: `canonical` carries the dtype default under every NULL; `dirty` carries
+    /// `i64::MAX`/`i64::MIN` under the integer NULLs and `NaN`/`-0.0`/`inf` under the float NULLs
+    /// (`-0.0` is the sharp one: it compares equal to `0.0` but its bytes do not).
+    pub(crate) fn tables(rows: usize) -> (TableData, TableData) {
+        let k_valid: Vec<bool> = (0..rows).map(|r| r % 5 != 0).collect();
+        let v_valid: Vec<bool> = (0..rows).map(|r| r % 7 != 0).collect();
+        let build = |dirty: bool| -> TableData {
+            vec![
+                ("t".into(), ColumnData::U64((0..rows as u64).collect())),
+                (
+                    "k".into(),
+                    ColumnData::Nullable {
+                        values: Box::new(ColumnData::I64(
+                            (0..rows)
+                                .map(|r| match (k_valid[r], dirty) {
+                                    (true, _) => r as i64 * 3 - 7,
+                                    (false, false) => 0,
+                                    (false, true) if r % 2 == 0 => i64::MAX,
+                                    (false, true) => i64::MIN,
+                                })
+                                .collect(),
+                        )),
+                        validity: k_valid.clone(),
+                    },
+                ),
+                (
+                    "v".into(),
+                    ColumnData::Nullable {
+                        values: Box::new(ColumnData::F32(
+                            (0..rows)
+                                .map(|r| match (v_valid[r], dirty) {
+                                    (true, _) if r % 11 == 0 => f32::NAN,
+                                    (true, _) => (r % 17) as f32,
+                                    (false, false) => 0.0,
+                                    (false, true) => [f32::NAN, -0.0, f32::INFINITY][r % 3],
+                                })
+                                .collect(),
+                        )),
+                        validity: v_valid.clone(),
+                    },
+                ),
+            ]
+        };
+        (build(false), build(true))
+    }
 }
 
 #[cfg(test)]
@@ -2037,6 +2195,91 @@ mod tests {
         assert_eq!(decode(&spec, &c).unwrap(), build(0));
     }
 
+    /// #659: decode returns the dtype default under every NULL, as the `Nullable` docs promise —
+    /// not whatever fill value the codec chose to store there. The fixture's `k` column makes the
+    /// compressor fill each NULL with a neighbouring value, so a verbatim copy of the decompressed
+    /// buffer shows up here, on every read entry point.
+    #[test]
+    fn decode_yields_the_dtype_default_under_every_null() {
+        use super::under_null_fixture as fx;
+        let rows = ROWS_PER_GROUP * 2 + 777;
+        let spec = fx::spec(rows);
+        let (canonical, _) = fx::tables(rows);
+        let blob = encode(&spec, &canonical).unwrap();
+        // LE bytes, not `==`: the fixture holds a present NaN, and NaN != NaN.
+        let le = |c: &ColumnData| c.to_le_bytes();
+        let full = decode(&spec, &blob).unwrap();
+        for (i, (name, want)) in canonical.iter().enumerate() {
+            assert_eq!(le(&full[i].1), le(want), "decode: {name}");
+            let one = decode_column(&spec, &blob, name).unwrap();
+            assert_eq!(le(&one), le(want), "decode_column: {name}");
+            let projected = decode_projected(&spec, &blob, &[name.as_str()]).unwrap();
+            assert_eq!(le(&projected[0].1), le(want), "decode_projected: {name}");
+        }
+        // Scattered rows across row-groups, including NULL rows of both nullable columns.
+        let picks: Vec<u64> = vec![0, 5, 7, 35, ROWS_PER_GROUP as u64, (rows - 1) as u64];
+        let got = decode_rows(&spec, &blob, &picks).unwrap();
+        for ((name, want), (_, got)) in canonical.iter().zip(&got) {
+            let want: Vec<ColumnData> = picks
+                .iter()
+                .map(|&r| want.slice(r as usize, r as usize + 1))
+                .collect();
+            let mut joined = want[0].clone();
+            for w in &want[1..] {
+                joined.extend(w).unwrap();
+            }
+            assert_eq!(le(got), le(&joined), "decode_rows: {name}");
+        }
+    }
+
+    /// #632: the chunk index honours the same invariant as `encode` — two tables that differ ONLY
+    /// beneath their NULLs give an equal chunk-index root, equal per-group digests, and an equal
+    /// sidecar block, over a multi-row-group table with a nullable integer stat column and a
+    /// nullable float holding a present `NaN`. The index must also be recomputable from the
+    /// DECODED table, which carries the dtype default under every NULL.
+    #[test]
+    fn chunk_index_is_independent_of_values_under_nulls() {
+        use super::under_null_fixture as fx;
+        let rows = ROWS_PER_GROUP * 2 + 777; // three row-groups, the last one partial
+        let spec = fx::spec(rows);
+        let (canonical, dirty) = fx::tables(rows);
+        // LE bytes, not `!=`: the fixture holds a present NaN, so the tables are `!=` regardless.
+        let le =
+            |t: &TableData| -> Vec<Vec<u8>> { t.iter().map(|(_, c)| c.to_le_bytes()).collect() };
+        assert_ne!(
+            le(&canonical),
+            le(&dirty),
+            "precondition: the producers differ under a NULL"
+        );
+
+        let blob = encode(&spec, &canonical).unwrap();
+        assert_eq!(blob, encode(&spec, &dirty).unwrap(), "encode bytes");
+
+        let want = table_chunk_index(&spec, &canonical, "k").unwrap();
+        let got = table_chunk_index(&spec, &dirty, "k").unwrap();
+        assert_eq!(want.len(), 3, "precondition: a multi-row-group index");
+        let digests = |idx: &ChunkIndex| -> Vec<String> {
+            idx.entries.iter().map(|e| e.digest.clone()).collect()
+        };
+        assert_eq!(digests(&got), digests(&want), "per-group digests");
+        assert_eq!(got.root(), want.root(), "chunk-index root");
+        assert_eq!(got.aggregate(), want.aggregate(), "stats");
+        let decoded = decode(&spec, &blob).unwrap();
+        assert_eq!(
+            table_chunk_index(&spec, &decoded, "k").unwrap().root(),
+            want.root(),
+            "the index is recomputable from the decoded table"
+        );
+
+        let fused = |data: &TableData| {
+            let ((block, _), sidecar) =
+                table_block_with_index("events", &spec, data, Some("k")).unwrap();
+            let (sidecar, payload) = sidecar.expect("an integer stat column yields a sidecar");
+            (block, sidecar, payload.bytes)
+        };
+        assert_eq!(fused(&dirty), fused(&canonical), "fused block + sidecar");
+    }
+
     /// Row-index pushdown must be BIT-EXACT with decoding the block and slicing the same rows.
     ///
     /// This is the correctness contract for `decode_rows`: pushing the selection into Vortex reads
@@ -2242,6 +2485,63 @@ mod tests {
         assert!(ColumnData::from_le_bytes("f4", &[0u8; 3]).is_err()); // not a multiple of width
     }
 
+    /// Streaming a table with NULLABLE columns must produce the batch bytes, not a dtype panic:
+    /// `encode_streaming` derives its struct dtype from the spec, so it must honour
+    /// `Column::nullable`, or every chunk mismatches the declared dtype.
+    #[test]
+    fn encode_streaming_matches_batch_encode_over_nullable_columns() {
+        use super::under_null_fixture as fx;
+        let rows = ROWS_PER_GROUP * 2 + 777;
+        let spec = fx::spec(rows);
+        let (canonical, dirty) = fx::tables(rows);
+        let groups = |full: &TableData| -> Vec<TableData> {
+            (0..rows.div_ceil(ROWS_PER_GROUP))
+                .map(|g| {
+                    let (st, en) = (g * ROWS_PER_GROUP, ((g + 1) * ROWS_PER_GROUP).min(rows));
+                    full.iter()
+                        .map(|(name, c)| (name.clone(), c.slice(st, en)))
+                        .collect()
+                })
+                .collect()
+        };
+        let batch = encode(&spec, &canonical).unwrap();
+        let streamed = encode_streaming(&spec, groups(&canonical)).unwrap();
+        assert_eq!(streamed, batch, "streaming != batch over nullable columns");
+        // LE bytes, not `==`: the fixture holds a present NaN, and NaN != NaN.
+        let le =
+            |t: &TableData| -> Vec<Vec<u8>> { t.iter().map(|(_, c)| c.to_le_bytes()).collect() };
+        assert_eq!(
+            le(&decode(&spec, &streamed).unwrap()),
+            le(&canonical),
+            "streamed bytes decode"
+        );
+        assert_eq!(
+            encode_streaming(&spec, groups(&dirty)).unwrap(),
+            batch,
+            "streamed bytes depend on the values under a NULL"
+        );
+    }
+
+    /// A row-group whose dtype disagrees with the spec (here: a validity mask on a column the spec
+    /// declares non-nullable) is a typed error, not a debug-only panic or silently-written bytes.
+    #[test]
+    fn encode_streaming_refuses_a_row_group_that_mismatches_the_spec() {
+        let spec = TableSpec {
+            columns: vec![col("k", "i8")],
+            rows: 2,
+            row_index: None,
+        };
+        let group: TableData = vec![(
+            "k".into(),
+            ColumnData::Nullable {
+                values: Box::new(ColumnData::I64(vec![1, 0])),
+                validity: vec![true, false],
+            },
+        )];
+        let e = encode_streaming(&spec, vec![group]).unwrap_err();
+        assert!(format!("{e}").contains("!= declared"), "got: {e}");
+    }
+
     #[test]
     fn encode_streaming_matches_batch_encode() {
         // The SSoT proof: feeding row-groups through the lazy streaming encoder produces bytes
@@ -2433,8 +2733,9 @@ mod tests {
 
     /// #627: a nullable float column carrying both a NaN (a real value) and a NULL feeds the group
     /// digest alongside a nullable stat column with NULLs. The index builds, the stats come from the
-    /// stat column's present values only, and the digest is exactly "every column's LE bytes for
-    /// the group, in column order" — a nullable column's being `values ‖ packed validity`.
+    /// stat column's present values only, and the digest is exactly "every column's canonical LE
+    /// bytes for the group, in column order" — a nullable column's being `values ‖ packed validity`
+    /// with the dtype default under every NULL (#632), so `UNDER_NULL` never reaches it.
     #[test]
     fn chunk_index_with_a_nullable_float_holding_nan_and_null() {
         let k = [Some(5), None, Some(-2)];
@@ -2447,11 +2748,17 @@ mod tests {
             rows: 3,
             row_index: None,
         };
-        let data: TableData = vec![("k".into(), nullable_i8(&k)), ("f".into(), f.clone())];
+        let data: TableData = vec![("k".into(), nullable_i8(&k)), ("f".into(), f)];
         let idx = table_chunk_index(&spec, &data, "k").unwrap();
 
-        let mut bytes = nullable_i8(&k).to_le_bytes();
-        bytes.extend_from_slice(&f.to_le_bytes());
+        // Spelled out byte by byte rather than through the helper under test: `k` is [5, NULL, -2]
+        // with 0 (not UNDER_NULL) under the NULL, then its mask 0b101; `f` is NaN, 0.0, 1.5, then
+        // the same mask.
+        let mut bytes = vec![5u8, 0, (-2i8) as u8, 0b101];
+        for x in [f64::NAN, 0.0, 1.5] {
+            bytes.extend_from_slice(&x.to_le_bytes());
+        }
+        bytes.push(0b101);
         let mut want = ChunkIndex::new();
         want.push_entry(digest(&bytes), expected_group_stats(&k)[0].clone());
         assert_eq!(idx.root(), want.root());

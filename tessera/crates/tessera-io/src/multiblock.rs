@@ -719,4 +719,97 @@ mod tests {
             Err(Error::Container(_))
         ));
     }
+
+    /// #632 on the multi-block path: two producers that differ ONLY beneath their NULLs seal to the
+    /// same `content_hash`, whether each block carries a chunk-index sidecar (`table_job_indexed`
+    /// per block, multi-row-group blocks) or the blocks come from [`TableMultiBlockSink`], which
+    /// emits none — so on both, a block's identity cannot depend on what sits under a NULL.
+    #[test]
+    fn multi_block_identity_is_independent_of_values_under_nulls() {
+        use crate::stream::table_job_indexed;
+        use crate::table::under_null_fixture as fx;
+        let dir = tempfile::tempdir().unwrap();
+        let block_rows = ROWS_PER_GROUP * 2;
+        let rows = block_rows * 2 + 777; // three blocks, two row-groups each, the last partial
+        let spec = fx::spec(rows);
+        let (canonical, dirty) = fx::tables(rows);
+
+        let indexed = |data: &TableData, tag: &str| {
+            let ws = WriteSession::create(
+                &dir.path().join(format!("ws-{tag}")),
+                "listmode",
+                "p",
+                "d",
+                TS,
+            )
+            .unwrap();
+            let mut sw = StreamWriter::new(ws, 2, 4);
+            let total = rows.div_ceil(block_rows) as u64;
+            for b in 0..total as usize {
+                let (lo, hi) = (b * block_rows, ((b + 1) * block_rows).min(rows));
+                let block_spec = TableSpec {
+                    rows: (hi - lo) as u64,
+                    ..spec.clone()
+                };
+                let slice: TableData = data
+                    .iter()
+                    .map(|(n, c)| (n.clone(), c.slice(lo, hi)))
+                    .collect();
+                let name = table::block_name("events", b as u64, total);
+                sw.push(table_job_indexed(name, block_spec, slice, Some("k".into())))
+                    .unwrap();
+            }
+            sw.finish(&dir.path().join(format!("indexed-{tag}.tsra")))
+                .unwrap()
+        };
+        let want = indexed(&canonical, "canonical");
+        let got = indexed(&dirty, "dirty");
+        let cidx = |m: &tessera_core::manifest::Manifest| -> Vec<(String, Option<String>)> {
+            m.blocks
+                .iter()
+                .filter(|b| b.name.ends_with(".cidx"))
+                .map(|b| (b.name.clone(), b.digest.clone()))
+                .collect()
+        };
+        assert_eq!(cidx(&want).len(), 3, "precondition: one sidecar per block");
+        assert_eq!(cidx(&got), cidx(&want), "per-block chunk-index sidecars");
+        assert!(want.content_hash.is_some(), "precondition: a sealed hash");
+        assert_eq!(
+            got.content_hash, want.content_hash,
+            "indexed multi-block content_hash"
+        );
+
+        let sunk = |data: &TableData, tag: &str| {
+            let ws = WriteSession::create(
+                &dir.path().join(format!("sws-{tag}")),
+                "listmode",
+                "p",
+                "d",
+                TS,
+            )
+            .unwrap();
+            let mut sw = StreamWriter::new(ws, 2, 4);
+            {
+                let mut sink = TableMultiBlockSink::with_block_rows(
+                    spec.columns.clone(),
+                    "events",
+                    &dir.path().join(format!("sink-{tag}")),
+                    &mut sw,
+                    block_rows as u64,
+                )
+                .unwrap()
+                .with_row_index("t");
+                sink.push(data.clone()).unwrap();
+                assert_eq!(sink.finish().unwrap(), 3, "precondition: three blocks");
+            }
+            sw.finish(&dir.path().join(format!("sunk-{tag}.tsra")))
+                .unwrap()
+        };
+        let (got, want) = (sunk(&dirty, "dirty"), sunk(&canonical, "canonical"));
+        assert!(want.content_hash.is_some(), "precondition: a sealed hash");
+        assert_eq!(
+            got.content_hash, want.content_hash,
+            "sink multi-block content_hash"
+        );
+    }
 }
