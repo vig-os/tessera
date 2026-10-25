@@ -112,10 +112,11 @@ pub enum ColumnData {
     /// `values` is never itself `Nullable` — `validate_nullable` rejects nesting.
     ///
     /// **Values under a NULL are not preserved.** Encoding normalises every masked-out slot to the
-    /// dtype default, so a decoded column carries `0` (or `0.0`) wherever `validity` is false,
-    /// whatever the producer had there. This is deliberate: it makes the encoded bytes — and
-    /// therefore `content_hash` — independent of whatever happened to sit under a null, which the
-    /// format's determinism guarantee requires. Compare only the slots where `validity` is true.
+    /// dtype default, and decoding returns the dtype default there too (#659), so a decoded column
+    /// carries `0` (or `0.0`) wherever `validity` is false, whatever the producer had there. This
+    /// is deliberate: it makes the encoded bytes — and therefore `content_hash` — independent of
+    /// whatever happened to sit under a null, which the format's determinism guarantee requires.
+    /// Compare only the slots where `validity` is true.
     Nullable {
         values: Box<ColumnData>,
         validity: Vec<bool>,
@@ -320,6 +321,39 @@ impl ColumnData {
                 out.extend_from_slice(&pack_validity(validity));
                 out
             }
+        }
+    }
+
+    /// Set every slot at index `>= from` that `validity` marks absent to the dtype default (`0`,
+    /// `0.0`, `false`, `""`) — the canonical form of a nullable column's values, used by the
+    /// nullable decode arm (#659).
+    /// Slots beyond `validity` are left alone (`validate_nullable` makes the lengths agree).
+    fn zero_masked(&mut self, validity: &[bool], from: usize) {
+        let mask = validity.get(from..).unwrap_or_default();
+        macro_rules! zero {
+            ($v:expr) => {{
+                let tail = $v.get_mut(from..).unwrap_or_default();
+                for (slot, _) in tail.iter_mut().zip(mask).filter(|(_, &ok)| !ok) {
+                    *slot = Default::default();
+                }
+            }};
+        }
+        match self {
+            ColumnData::I8(v) => zero!(v),
+            ColumnData::I16(v) => zero!(v),
+            ColumnData::I32(v) => zero!(v),
+            ColumnData::I64(v) => zero!(v),
+            ColumnData::U8(v) => zero!(v),
+            ColumnData::U16(v) => zero!(v),
+            ColumnData::U32(v) => zero!(v),
+            ColumnData::U64(v) => zero!(v),
+            ColumnData::F32(v) => zero!(v),
+            ColumnData::F64(v) => zero!(v),
+            ColumnData::Bool(v) => zero!(v),
+            ColumnData::Utf8(v) => zero!(v),
+            // Nesting is rejected by `validate_nullable`; were it to occur, a slot the outer mask
+            // marks absent is absent at every level.
+            ColumnData::Nullable { values, .. } => values.zero_masked(validity, from),
         }
     }
 
@@ -1042,6 +1076,7 @@ where
 /// Numeric columns canonicalize to `PrimitiveArray`; `Bool` → `BoolArray`,
 /// `Utf8` → `VarBinViewArray` (the compressor's chosen scheme is transparent
 /// here — canonicalization undoes FSST/dict/bit-packing).
+/// Perf: a nullable column costs one extra pass over the decoded chunk, resetting its NULL slots (#659).
 fn extend_field(col: &mut ColumnData, field: ArrayRef, ctx: &mut ExecutionCtx) -> Result<()> {
     match col {
         ColumnData::Bool(v) => {
@@ -1069,8 +1104,12 @@ fn extend_field(col: &mut ColumnData, field: ArrayRef, ctx: &mut ExecutionCtx) -
                 .map_err(ze)?
                 .execute_mask(prim.len(), ctx)
                 .map_err(ze)?;
+            let from = validity.len();
             validity.extend(mask.iter());
             extend_column(values, &prim);
+            // The codec may decompress any fill value under a NULL; the documented decode is the
+            // dtype default there (see `ColumnData::Nullable`, #659).
+            values.zero_masked(validity, from);
         }
         _ => {
             let prim: PrimitiveArray = field.execute(ctx).map_err(ze)?;
@@ -1578,6 +1617,84 @@ pub fn table_block_with_index(
     Ok((block, sidecar))
 }
 
+/// Fixture for the values-under-a-NULL tests (decode #659, streaming encode #658, chunk-index digest
+/// #632): one logical table written by two producers that agree on every present value and every
+/// validity flag, and differ ONLY in what sits under each NULL.
+#[cfg(test)]
+pub(crate) mod under_null_fixture {
+    use super::{ColumnData, TableData, TableSpec};
+    use tessera_core::block::table::Column;
+
+    fn col(name: &str, dtype: &str) -> Column {
+        Column {
+            name: name.into(),
+            dtype: dtype.into(),
+            codec: None,
+            ..Default::default()
+        }
+    }
+
+    /// The spec: a non-nullable `t` row index, a nullable integer stat column `k`, and a nullable
+    /// float `v` that also holds a present `NaN` (a value, not a NULL).
+    pub(crate) fn spec(rows: usize) -> TableSpec {
+        TableSpec {
+            columns: vec![
+                col("t", "u8"),
+                col("k", "i8").nullable(),
+                col("v", "f4").nullable(),
+            ],
+            rows: rows as u64,
+            row_index: Some("t".into()),
+        }
+    }
+
+    /// `(canonical, dirty)`: `canonical` carries the dtype default under every NULL; `dirty` carries
+    /// `i64::MAX`/`i64::MIN` under the integer NULLs and `NaN`/`-0.0`/`inf` under the float NULLs
+    /// (`-0.0` is the sharp one: it compares equal to `0.0` but its bytes do not).
+    pub(crate) fn tables(rows: usize) -> (TableData, TableData) {
+        let k_valid: Vec<bool> = (0..rows).map(|r| r % 5 != 0).collect();
+        let v_valid: Vec<bool> = (0..rows).map(|r| r % 7 != 0).collect();
+        let build = |dirty: bool| -> TableData {
+            vec![
+                ("t".into(), ColumnData::U64((0..rows as u64).collect())),
+                (
+                    "k".into(),
+                    ColumnData::Nullable {
+                        values: Box::new(ColumnData::I64(
+                            (0..rows)
+                                .map(|r| match (k_valid[r], dirty) {
+                                    (true, _) => r as i64 * 3 - 7,
+                                    (false, false) => 0,
+                                    (false, true) if r % 2 == 0 => i64::MAX,
+                                    (false, true) => i64::MIN,
+                                })
+                                .collect(),
+                        )),
+                        validity: k_valid.clone(),
+                    },
+                ),
+                (
+                    "v".into(),
+                    ColumnData::Nullable {
+                        values: Box::new(ColumnData::F32(
+                            (0..rows)
+                                .map(|r| match (v_valid[r], dirty) {
+                                    (true, _) if r % 11 == 0 => f32::NAN,
+                                    (true, _) => (r % 17) as f32,
+                                    (false, false) => 0.0,
+                                    (false, true) => [f32::NAN, -0.0, f32::INFINITY][r % 3],
+                                })
+                                .collect(),
+                        )),
+                        validity: v_valid.clone(),
+                    },
+                ),
+            ]
+        };
+        (build(false), build(true))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2035,6 +2152,43 @@ mod tests {
         assert_eq!(a, c, "bytes changed with the filler under nulls");
         // ...and the decode is the canonical form regardless of which one was written.
         assert_eq!(decode(&spec, &c).unwrap(), build(0));
+    }
+
+    /// #659: decode returns the dtype default under every NULL, as the `Nullable` docs promise —
+    /// not whatever fill value the codec chose to store there. The fixture's `k` column makes the
+    /// compressor fill each NULL with a neighbouring value, so a verbatim copy of the decompressed
+    /// buffer shows up here, on every read entry point.
+    #[test]
+    fn decode_yields_the_dtype_default_under_every_null() {
+        use super::under_null_fixture as fx;
+        let rows = ROWS_PER_GROUP * 2 + 777;
+        let spec = fx::spec(rows);
+        let (canonical, _) = fx::tables(rows);
+        let blob = encode(&spec, &canonical).unwrap();
+        // LE bytes, not `==`: the fixture holds a present NaN, and NaN != NaN.
+        let le = |c: &ColumnData| c.to_le_bytes();
+        let full = decode(&spec, &blob).unwrap();
+        for (i, (name, want)) in canonical.iter().enumerate() {
+            assert_eq!(le(&full[i].1), le(want), "decode: {name}");
+            let one = decode_column(&spec, &blob, name).unwrap();
+            assert_eq!(le(&one), le(want), "decode_column: {name}");
+            let projected = decode_projected(&spec, &blob, &[name.as_str()]).unwrap();
+            assert_eq!(le(&projected[0].1), le(want), "decode_projected: {name}");
+        }
+        // Scattered rows across row-groups, including NULL rows of both nullable columns.
+        let picks: Vec<u64> = vec![0, 5, 7, 35, ROWS_PER_GROUP as u64, (rows - 1) as u64];
+        let got = decode_rows(&spec, &blob, &picks).unwrap();
+        for ((name, want), (_, got)) in canonical.iter().zip(&got) {
+            let want: Vec<ColumnData> = picks
+                .iter()
+                .map(|&r| want.slice(r as usize, r as usize + 1))
+                .collect();
+            let mut joined = want[0].clone();
+            for w in &want[1..] {
+                joined.extend(w).unwrap();
+            }
+            assert_eq!(le(got), le(&joined), "decode_rows: {name}");
+        }
     }
 
     /// Row-index pushdown must be BIT-EXACT with decoding the block and slicing the same rows.
