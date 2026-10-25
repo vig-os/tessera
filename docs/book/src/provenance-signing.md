@@ -132,9 +132,47 @@ detached sidecar), so signing never mutates identity. Verification re-hashes the
 signature, and — being pure-Rust — runs in the WASM core with zero C dependencies.
 
 This walkthrough is the four-persona story — an instrument generates a key, signs a study, a custodian
-adds the signer to a trust store, and verification succeeds (and rejects a wrong key):
+adds the signer to a repo trust store that verification then names with `--trust-dir`, and verification
+succeeds (and rejects a wrong key, a wrong signer, and the same store when it is not named):
 
 {{#include ../../../tessera/crates/tessera-cli/tests/cmd/persona_signing.trycmd}}
+
+### Which keys `verify-sig` trusts
+
+Without `--pubkey`, `verify-sig` looks the signature's `key_id` up in these trust stores, in order, and the
+first store holding it wins:
+
+1. every `--trust-dir <path>` you pass (repeatable; a relative path is resolved against the current
+   directory). Without one, every entry of `TESSERA_TRUST_DIR`, a PATH-style list (`:`-separated, `;` on
+   Windows). A flag replaces the variable rather than adding to it, empty entries are ignored, and a named
+   store that does not exist is an error;
+2. your user store, `$XDG_CONFIG_HOME/tessera/trust` or `~/.config/tessera/trust`. Only an absolute
+   `XDG_CONFIG_HOME` or `HOME` counts; an empty or relative one is ignored rather than read under the
+   current directory.
+
+Nothing else. A `.tessera/trust/` in the current directory (what `tessera trust add --repo` writes) is
+**not** consulted unless you name it, because anyone who can write to the directory a verifier runs in
+could otherwise plant a key there and have it trusted. There is no lookup from the git root either.
+
+`TESSERA_TRUST_DIR` accepts **absolute paths only**; a relative entry is an error that names it. The
+variable is usually set once, in a shell profile or a CI job, and then applies to every run in every
+directory. A relative `.tessera/trust` would therefore resolve inside every unpacked archive or job
+directory the verifier runs in and trust whatever key was left there. `--trust-dir` may be relative because
+you type it for one run. To trust a repo store from the variable, give its absolute path on purpose, e.g.
+`export TESSERA_TRUST_DIR=$PWD/.tessera/trust`. Because the list is split like `PATH`, a directory whose
+name contains the separator can only be named with `--trust-dir`.
+
+`tessera trust remove` acts on one store: your user store, or `./.tessera/trust/` with `--repo`.
+
+Every success names the accepting key and where it came from on stderr, e.g.
+`accepted key_id 21a6… via trust store /srv/lab/.tessera/trust (--trust-dir)` or `accepted key_id 21a6…
+via --pubkey instrument.key.pub`, so a log shows which trust decision admitted each file. A named store is
+reported as the absolute directory that was read, whatever spelling it was passed as.
+
+For unattended verification (CI gates, ingest pipelines, anything running in a directory it does not
+control), pin the key **and** the signer: `tessera verify-sig FILE --pubkey KEY.pub --require-signer ID`.
+That consults no store and fails closed on an unsigned file, a wrong key or a wrong signer. The decision
+is recorded in ADR-0037's amendment of 2026-10-25 (#576).
 
 The signer identity can be an **ORCID** (attribution) or a trust-store handle (trust); ssh-ed25519 and
 sigstore-keyless are additive backends. The one thing Tessera can't provide is the *production trust
