@@ -118,7 +118,8 @@ fn foreign_resign_leaves_integrity_intact_but_untrusted() {
     let tsra = dir.path().join("data.tsra");
     sealed_tsra(&tsra);
 
-    // Repo-local trust store (`.tessera/trust/`, resolved relative to CWD) trusts key A as "lab".
+    // A repo-local trust store (`.tessera/trust/`) trusts key A as "lab". It counts only because every
+    // `verify-sig` below names it with `--trust-dir` — a cwd store is never consulted implicitly (#576).
     let lab = SigningKey::from_bytes(&[17u8; 32]);
     let lab_key = dir.path().join("lab.key");
     std::fs::write(&lab_key, hex32(&lab.to_bytes())).unwrap();
@@ -130,13 +131,15 @@ fn foreign_resign_leaves_integrity_intact_but_untrusted() {
     )
     .unwrap();
 
-    // Every invocation runs in the tempdir with an isolated HOME/XDG so ONLY this trust store is
-    // consulted — the host's real ~/.config/tessera can neither add nor remove trust.
+    // Every invocation runs in the tempdir with an isolated HOME/XDG (and no inherited
+    // TESSERA_TRUST_DIR) so ONLY this trust store is consulted — the host's real ~/.config/tessera
+    // can neither add nor remove trust.
     let mk = || {
         let mut c = tessera();
         c.current_dir(dir.path())
             .env("HOME", dir.path())
-            .env("XDG_CONFIG_HOME", dir.path().join(".config"));
+            .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+            .env_remove("TESSERA_TRUST_DIR");
         c
     };
 
@@ -151,7 +154,7 @@ fn foreign_resign_leaves_integrity_intact_but_untrusted() {
         .unwrap()
         .success());
     assert!(
-        mk().args(["verify-sig"])
+        mk().args(["verify-sig", "--trust-dir", ".tessera/trust"])
             .arg(&tsra)
             .status()
             .unwrap()
@@ -181,7 +184,7 @@ fn foreign_resign_leaves_integrity_intact_but_untrusted() {
     // But the signer is now untrusted — verify-sig against the trust store rejects it (non-zero).
     assert!(
         !mk()
-            .args(["verify-sig"])
+            .args(["verify-sig", "--trust-dir", ".tessera/trust"])
             .arg(&tsra)
             .status()
             .unwrap()
