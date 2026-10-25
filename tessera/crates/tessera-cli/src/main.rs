@@ -735,13 +735,24 @@ enum Cmd {
     /// Verify a sealed `.tsra` against its signature (embedded first, `<file>.tsra.sig.json` fallback).
     ///
     /// Defaults to the **trust store** (the signature's `key_id` must be a key you trust);
-    /// `--pubkey` checks against an explicit key.
+    /// `--pubkey` checks against an explicit key. The trust stores consulted are every
+    /// `--trust-dir` (or, without one, every `TESSERA_TRUST_DIR` entry — absolute paths only), then
+    /// the user store
+    /// (`$XDG_CONFIG_HOME/tessera/trust` or `~/.config/tessera/trust`). A repo store such as
+    /// `./.tessera/trust` is never consulted unless named. On success, stderr names the accepting
+    /// `key_id` and the store (or `--pubkey`) it came from. Automated verifiers should pin
+    /// `--pubkey` together with `--require-signer`.
     VerifySig {
         /// The sealed `.tsra` to verify.
         file: PathBuf,
         /// Explicit hex ed25519 public-key file (skips the trust store).
         #[arg(long)]
         pubkey: Option<PathBuf>,
+        /// A trust store directory to consult before the user store (repeatable; may be relative).
+        /// Replaces `TESSERA_TRUST_DIR` (a `:`-separated list of absolute paths, `;` on Windows)
+        /// when given.
+        #[arg(long = "trust-dir", value_name = "DIR", conflicts_with = "pubkey")]
+        trust_dir: Vec<PathBuf>,
         /// Also require the signature's `signer` to equal this identity (e.g. an ORCID iD URL).
         #[arg(long)]
         require_signer: Option<String>,
@@ -949,7 +960,8 @@ enum BenchAction {
 enum TrustAction {
     /// Trust a public key under a handle.
     ///
-    /// Stores it in the user store, or `--repo` for `.tessera/trust/`.
+    /// Stores it in the user store, or `--repo` for `./.tessera/trust/` — which `verify-sig`
+    /// consults only when passed with `--trust-dir` (or by absolute path in `TESSERA_TRUST_DIR`).
     Add {
         /// Hex ed25519 public-key file (e.g. `key.pub` from `tessera keygen`).
         pubkey: PathBuf,
@@ -959,16 +971,29 @@ enum TrustAction {
         /// The signer identity to record alongside it (e.g. an ORCID iD URL).
         #[arg(long)]
         signer: Option<String>,
-        /// Store in the repo-local `.tessera/trust/` instead of the user store.
+        /// Store in the repo-local `./.tessera/trust/` instead of the user store.
         #[arg(long)]
         repo: bool,
     },
-    /// List trusted keys.
-    List,
-    /// Remove a trusted key by handle or `key_id`.
+    /// List trusted keys, per store.
+    ///
+    /// Without `--repo`: the stores `verify-sig` would consult with the same `--trust-dir`
+    /// flags and environment, in lookup order.
+    List {
+        /// List the repo-local `./.tessera/trust/` instead.
+        #[arg(long, conflicts_with = "trust_dir")]
+        repo: bool,
+        /// A trust store directory to include, as for `verify-sig --trust-dir` (repeatable).
+        #[arg(long = "trust-dir", value_name = "DIR")]
+        trust_dir: Vec<PathBuf>,
+    },
+    /// Remove a trusted key by handle or `key_id` from the user store (or `--repo`).
     Remove {
         /// Handle or `key_id` of the key to remove.
         target: String,
+        /// Remove from the repo-local `./.tessera/trust/` instead of the user store.
+        #[arg(long)]
+        repo: bool,
     },
 }
 
@@ -1916,43 +1941,74 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
         }
         Cmd::Trust { action } => {
             let mut w = std::io::stdout().lock();
-            let dirs = trust::trust_dirs();
+            // The store `add`/`remove` manage: the user store, or the repo store with `--repo`.
+            let managed = |repo: bool| -> tessera_core::Result<trust::TrustStore> {
+                if repo {
+                    Ok(trust::TrustStore::repo())
+                } else {
+                    trust::TrustStore::user().ok_or_else(|| {
+                        tessera_core::Error::Invalid(format!(
+                            "no user config dir ($HOME/$XDG_CONFIG_HOME unset) — pass --repo \
+                             to use {}",
+                            trust::REPO_TRUST_DIR
+                        ))
+                    })
+                }
+            };
+            let repo = matches!(
+                action,
+                TrustAction::Add { repo: true, .. }
+                    | TrustAction::List { repo: true, .. }
+                    | TrustAction::Remove { repo: true, .. }
+            );
             match action {
                 TrustAction::Add {
                     pubkey,
                     name,
                     signer,
                     repo,
-                } => {
-                    let dir = if repo {
-                        PathBuf::from(".tessera/trust")
+                } => trust::add(
+                    &managed(repo)?.path,
+                    &pubkey,
+                    &name,
+                    signer.as_deref(),
+                    &mut w,
+                ),
+                TrustAction::List { repo, trust_dir } => {
+                    let stores = if repo {
+                        vec![trust::TrustStore::repo()]
                     } else {
-                        trust::trust_dirs().into_iter().nth(1).ok_or_else(|| {
-                            tessera_core::Error::Invalid(
-                                "no user config dir ($HOME/$XDG_CONFIG_HOME unset) — pass --repo \
-                                 to store in .tessera/trust"
-                                    .into(),
-                            )
-                        })?
+                        trust::trust_stores(&trust_dir)?
                     };
-                    trust::add(&dir, &pubkey, &name, signer.as_deref(), &mut w)
+                    trust::list(&stores, &mut w)
                 }
-                TrustAction::List => trust::list(&dirs, &mut w),
-                TrustAction::Remove { target } => trust::remove(&dirs, &target, &mut w),
+                TrustAction::Remove { target, repo } => {
+                    trust::remove(&managed(repo)?, &target, &mut w)
+                }
+            }?;
+            if repo {
+                trust::repo_store_note(&mut std::io::stderr().lock())?;
             }
+            Ok(())
         }
         Cmd::VerifySig {
             file,
             pubkey,
+            trust_dir,
             require_signer,
         } => {
-            let mut w = std::io::stdout().lock();
+            // `--pubkey` skips the store, so resolve it (and its env/dir checks) only without one.
+            let stores = match pubkey {
+                Some(_) => Vec::new(),
+                None => trust::trust_stores(&trust_dir)?,
+            };
             trust::verify_sig(
                 &file,
                 pubkey.as_deref(),
                 require_signer.as_deref(),
-                &trust::trust_dirs(),
-                &mut w,
+                &stores,
+                &mut std::io::stdout().lock(),
+                &mut std::io::stderr().lock(),
             )
         }
         Cmd::Sql {

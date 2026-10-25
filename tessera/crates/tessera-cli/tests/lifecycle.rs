@@ -4,7 +4,8 @@
 //!
 //!   instrument scientist  keygen + sign the freshly-acquired study (air-gapped)
 //!   data scientist        verify-sig refuses an UNKNOWN key (untrusted)
-//!   data custodian        trust the key → verify-sig passes; an IMPERSONATOR re-signing with their own
+//!   data custodian        trust the key in a repo store → verify-sig passes only once that store is
+//!                         named with `--trust-dir` (#576); an IMPERSONATOR re-signing with their own
 //!                         key + the same `signer` is still rejected (the trust-store defence)
 //!   researcher            version a metadata correction, diff it, publish a history-free artifact, verify
 //!
@@ -62,9 +63,14 @@ fn persona_lifecycle_e2e() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     // Sandbox the trust store + repo: cwd-local `.tessera/trust` + `repo`, and an empty user store.
+    // The repo store is passed explicitly with `--trust-dir` — it is never consulted implicitly (#576).
     std::env::set_current_dir(d).unwrap();
     std::env::set_var("HOME", d);
     std::env::remove_var("XDG_CONFIG_HOME");
+    std::env::remove_var("TESSERA_TRUST_DIR");
+    fn verify_sig(path: &str) -> [&str; 4] {
+        ["verify-sig", path, "--trust-dir", ".tessera/trust"]
+    }
 
     let study = d.join("study.tsra");
     sealed(&study, "DP06");
@@ -93,7 +99,9 @@ fn persona_lifecycle_e2e() {
         signer,
         "--repo",
     ]);
-    assert!(ok(&["verify-sig", study]).contains("trusted as 'instrument-lab'"));
+    // the repo store alone is not enough: it must be named.
+    fails(&["verify-sig", study]);
+    assert!(ok(&verify_sig(study)).contains("trusted as 'instrument-lab'"));
 
     // IMPERSONATION — an attacker re-signs with their OWN key + the same `signer`; the signature is
     // cryptographically valid but the key is NOT trusted, so verify-sig rejects it.
@@ -107,10 +115,10 @@ fn persona_lifecycle_e2e() {
         "--signer",
         signer,
     ]);
-    fails(&["verify-sig", study]);
+    fails(&verify_sig(study));
     // restore the genuine signature for the rest of the journey.
     ok(&["sign", study, "--key", keys, "--signer", signer]);
-    assert!(ok(&["verify-sig", study]).contains("trusted as"));
+    assert!(ok(&verify_sig(study)).contains("trusted as"));
 
     // 4. RESEARCHER — version a metadata correction, inspect it, publish a clean artifact, verify.
     ok(&["init", "repo"]);

@@ -8,8 +8,7 @@
 //! 1. **flag** — the per-invocation `--workers` / `--ram-budget` (explicit intent wins).
 //! 2. **env** — `TESSERA_WORKERS` / `TESSERA_RAM_BUDGET` (the latter takes a human size, e.g. `512MiB`).
 //! 3. **conf** — `[resources]` in a config file: repo-local `.tessera/config.toml` first, then the
-//!    user file (`$XDG_CONFIG_HOME/tessera/config.toml` or `~/.config/tessera/config.toml`) — the
-//!    same repo-then-user layering the trust store uses.
+//!    user file (`$XDG_CONFIG_HOME/tessera/config.toml` or `~/.config/tessera/config.toml`).
 //! 4. **default** — [`WriteConfig::for_system`] (machine-derived `available_parallelism` + 1 GiB).
 //!
 //! Determinism note: these are *runtime* knobs (thread count, RAM ceiling) — they never change the
@@ -48,9 +47,10 @@ struct ConfigFile {
 /// Config file search order (repo before user; first file to set a field wins it): repo-local
 /// `.tessera/config.toml`, then `$XDG_CONFIG_HOME/tessera/config.toml` or `~/.config/tessera/config.toml`.
 ///
-/// The repo-local file is resolved **relative to the current directory** — the same cwd-relative
-/// convention as the trust store's `.tessera/trust` — so it applies when tessera is run from the repo
-/// root; it is not discovered by walking up from a subdirectory.
+/// The repo-local file is resolved **relative to the current directory**, so it applies when tessera
+/// is run from the repo root; it is not discovered by walking up from a subdirectory. That is tolerable
+/// here only because `[resources]` tunes runtime knobs that never change output bytes or what is
+/// trusted — the trust store, by contrast, never reads a cwd-relative directory implicitly (#576).
 fn config_files() -> Vec<PathBuf> {
     let mut files = vec![PathBuf::from(".tessera/config.toml")];
     if let Some(base) = std::env::var_os("XDG_CONFIG_HOME")
