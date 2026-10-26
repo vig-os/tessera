@@ -41,6 +41,22 @@ ignore = [
     # i18n-config ^0.4.7). Upstream swapped it back to `toml` in kellpossible/cargo-i18n#176
     # (merged, unreleased). Remove this ignore when that ships: vig-os/tessera#665.
     "RUSTSEC-2026-0374",
+    # zstd 0.13.3 / zstd-safe 7.2.4 / zstd-sys 2.0.16: four advisories (ignored 2026-10-26, #683).
+    # NO UPGRADE PATH. zarrs 0.23.14 (latest) and zarrs main require zstd 0.13.3. The first parquet on
+    # zstd 0.14 is 60.0, and it needs arrow 60, which the vortex 0.75 fork (arrow 58.3) and datafusion
+    # 55 (arrow 59) can't take. tessera has no direct zstd calls. Its dependencies reach zstd only
+    # through the bulk codecs of parquet, zarrs and arrow-ipc (`sql` feature), plus zarrs'
+    # `decode_all`. clippy.toml bans the affected APIs in our code, and the
+    # [[bans.features]] entry below bans `seekable`. Reachability evidence and exit criteria are in
+    # vig-os/tessera#684. Re-verify it on every parquet or zarrs bump.
+    # 0391: `stream::*::with_context` reuses a context unreset. No dependency calls it.
+    "RUSTSEC-2026-0391",
+    # 0398: `Seekable::decompress` set_len past capacity. Unreachable: `seekable` feature is off.
+    "RUSTSEC-2026-0398",
+    # 0403: `DCtx::decompress_stream` exposes uninit memory via `stream::write::Decoder`. Unreachable: no dependency uses it.
+    "RUSTSEC-2026-0403",
+    # 0410: wasm32 allocator shim. Unreachable: zstd-sys isn't in the tessera-wasm wasm32 graph.
+    "RUSTSEC-2026-0410",
 ]
 
 [licenses]
@@ -68,6 +84,16 @@ allow = [
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"
+
+# RUSTSEC-2026-0398 (ignored above) lives in zstd's `seekable` code. It's unreachable only because no
+# crate in the graph enables that feature. Ban it so nothing can turn it on (vig-os/tessera#684).
+[[bans.features]]
+crate = "zstd-safe"
+deny = ["seekable"]
+
+[[bans.features]]
+crate = "zstd-sys"
+deny = ["seekable"]
 
 [sources]
 unknown-registry = "deny"
