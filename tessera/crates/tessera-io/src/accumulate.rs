@@ -4,8 +4,11 @@
 //! A device streams arbitrary-size transport batches; `TableStreamWriter` re-chunks them to Tessera's
 //! fixed [`ROWS_PER_GROUP`] grid, spills each full row-group to a **durable fragment** (so RAM stays
 //! bounded at ~2 row-groups no matter how many rows are pushed), and at `finish` **lazily** compacts
-//! the fragments through [`encode_streaming`] into the **one canonical chunked table block** —
-//! byte-identical to a batch encode of the same rows.
+//! the fragments through [`table::encode_streaming_to`] into the **one canonical chunked table
+//! block** — byte-identical to a batch encode of the same rows. The encoded block goes to any
+//! [`std::io::Write`] ([`TableStreamWriter::finish_to`]) or, as a staged job, into a
+//! [`StreamWriter`] ([`TableStreamWriter::into_job`]), so the encoded block is never collected in RAM
+//! (#677; the Vortex writer's own in-flight segments are a known limit, #681).
 //!
 //! The flush trigger (a full group, or — later — a timer for low-rate capture) only affects *staging*;
 //! the sealed block always re-compacts to the fixed grid, so the bytes are independent of how the data
@@ -21,7 +24,7 @@ use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::chunk_index::{ChunkStats, MerkleStatsAccumulator, Monoid};
 use tessera_core::{Error, Result};
 
-use crate::stream::{table_job_from_fragments, StreamWriter};
+use crate::stream::{table_job_from_fragments, StagedEncodeJob, StreamWriter};
 use crate::table::{
     self, block_name, partition_blocks, ColumnData, TableData, BLOCK_ROWS, ROWS_PER_GROUP,
 };
@@ -127,6 +130,50 @@ pub(crate) fn read_fragment(path: &Path, columns: &[Column]) -> Result<TableData
         off += len;
     }
     Ok(out)
+}
+
+/// The first read error of a [`fragment_groups`] iterator, checked after the encode consumed it.
+pub(crate) struct FragmentReadError(Arc<Mutex<Option<Error>>>);
+
+impl FragmentReadError {
+    /// `Err` with the first fragment read error, if any. The encode that consumed the iterator then
+    /// saw empty row-groups in place of the failed ones, so its output must be discarded.
+    pub(crate) fn check(self) -> Result<()> {
+        match self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The row-groups staged in `paths`, read lazily one fragment at a time — the input of every
+/// fragment compaction ([`TableStreamWriter`] and [`table_job_from_fragments`]). The encoder pulls
+/// infallible [`TableData`], so a read error is stashed in the returned [`FragmentReadError`] and
+/// empty row-groups are fed from then on; the caller must [`FragmentReadError::check`] it after the
+/// encode.
+pub(crate) fn fragment_groups(
+    columns: Vec<Column>,
+    paths: Vec<PathBuf>,
+) -> (
+    impl Iterator<Item = TableData> + Send + 'static,
+    FragmentReadError,
+) {
+    let err: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&err);
+    let groups = paths.into_iter().map(move |p| {
+        let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() {
+            return empty_cols(&columns);
+        }
+        match read_fragment(&p, &columns) {
+            Ok(td) => td,
+            Err(e) => {
+                *slot = Some(e);
+                empty_cols(&columns)
+            }
+        }
+    });
+    (groups, FragmentReadError(err))
 }
 
 /// Bounded-memory streaming writer that builds **one canonical chunked table block** from a stream of
@@ -254,34 +301,44 @@ impl TableStreamWriter {
     }
 
     /// Flush the trailing partial group, then **lazily** compact all fragments into the one canonical
-    /// chunked table block (byte-identical to a batch encode of every pushed row, in order).
-    pub fn finish(mut self) -> Result<Vec<u8>> {
+    /// chunked table block (byte-identical to a batch encode of every pushed row, in order),
+    /// returned in RAM. The whole encoded block is one `Vec`, so this is for tables that fit in
+    /// memory; [`Self::finish_to`] and [`Self::into_job`] keep it out of RAM.
+    pub fn finish(self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.finish_to(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// [`Self::finish`], writing the block to `sink` as it is encoded instead of returning it:
+    /// the encode holds one row-group of input and doesn't collect the output (see
+    /// [`table::encode_streaming_to`]). Returns the bytes written. The bytes are those of
+    /// [`Self::finish`]. On error, what `sink` received is not a valid block.
+    pub fn finish_to<W: Write>(mut self, sink: W) -> Result<u64> {
+        let paths = self.flush_trailing()?;
+        let (groups, read_error) = fragment_groups(self.spec.columns.clone(), paths);
+        let written = table::encode_streaming_to(&self.spec, groups, sink)?;
+        read_error.check()?;
+        Ok(written)
+    }
+
+    /// Flush the trailing partial group and hand the compaction to a [`StreamWriter`] as a
+    /// [`StagedEncodeJob`] for the block `name` ([`table_job_from_fragments`] over this writer's
+    /// fragments): it encodes on a worker into the session's staging directory and commits from
+    /// there, so the block's size doesn't count against the window (#677). Push it with
+    /// [`StreamWriter::push_staged`]. The fragments stay in this writer's stage directory until the
+    /// job has read them; removing them is the caller's, as with [`Self::finish`].
+    pub fn into_job(mut self, name: impl Into<String>) -> Result<StagedEncodeJob> {
+        let paths = self.flush_trailing()?;
+        Ok(table_job_from_fragments(name, self.spec.clone(), paths))
+    }
+
+    /// Spill the trailing partial row-group, then return every fragment's path in append order.
+    fn flush_trailing(&mut self) -> Result<Vec<PathBuf>> {
         if self.buf_rows > 0 {
             self.flush(self.buf_rows)?;
         }
-        let paths: Vec<PathBuf> = (0..self.n_frags).map(|i| self.frag_path(i)).collect();
-        let columns = self.spec.columns.clone();
-        // Fragment reads are fallible but `encode_streaming` pulls infallible `TableData`; stash the
-        // first I/O error and feed empties after it, then surface it (the produced block is discarded).
-        let err: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
-        let slot = Arc::clone(&err);
-        let iter = paths.into_iter().map(move |p| {
-            if slot.lock().unwrap().is_some() {
-                return empty_cols(&columns);
-            }
-            match read_fragment(&p, &columns) {
-                Ok(td) => td,
-                Err(e) => {
-                    *slot.lock().unwrap() = Some(e);
-                    empty_cols(&columns)
-                }
-            }
-        });
-        let bytes = table::encode_streaming(&self.spec, iter)?;
-        if let Some(e) = err.lock().unwrap().take() {
-            return Err(e);
-        }
-        Ok(bytes)
+        Ok((0..self.n_frags).map(|i| self.frag_path(i)).collect())
     }
 }
 
@@ -508,7 +565,7 @@ impl<'a> TableMultiBlockSink<'a> {
                 row_index: self.row_index.clone(),
             };
             self.sw
-                .push(table_job_from_fragments(nm, spec, frags_in_block))?;
+                .push_staged(table_job_from_fragments(nm, spec, frags_in_block))?;
         }
         Ok(total_blocks)
     }
@@ -662,6 +719,80 @@ mod tests {
         assert_eq!(streamed, batch, "accumulator output != batch encode");
         // and it decodes back to the original rows
         assert_eq!(table::decode(&spec, &streamed).unwrap(), full);
+    }
+
+    /// #677: the out-of-RAM compactions emit `finish`'s bytes — [`TableStreamWriter::finish_to`] into
+    /// a file, and [`TableStreamWriter::into_job`] as a staged block through a `StreamWriter` —
+    /// over a nullable column, and a fragment lost before the compaction is that error, not a
+    /// silently short block.
+    #[test]
+    fn finish_to_and_into_job_emit_the_bytes_of_finish() {
+        use crate::stream::{StreamWindow, StreamWriter};
+        let dir = tempfile::tempdir().unwrap();
+        let rows = ROWS_PER_GROUP * 2 + 5000;
+        let spec = TableSpec {
+            columns: vec![col("t", "u8"), col("k", "i8").nullable()],
+            rows: rows as u64,
+            row_index: Some("t".into()),
+        };
+        let full: TableData = vec![
+            ("t".into(), ColumnData::U64((0..rows as u64).collect())),
+            (
+                "k".into(),
+                ColumnData::Nullable {
+                    values: Box::new(ColumnData::I64((0..rows as i64).map(|k| k * 7).collect())),
+                    validity: (0..rows).map(|r| r % 3 != 0).collect(),
+                },
+            ),
+        ];
+        let writer = |tag: &str| {
+            let mut w = TableStreamWriter::new(spec.clone(), &dir.path().join(tag)).unwrap();
+            for start in (0..rows).step_by(9999) {
+                let end = (start + 9999).min(rows);
+                w.push(
+                    full.iter()
+                        .map(|(n, c)| (n.clone(), c.slice(start, end)))
+                        .collect(),
+                )
+                .unwrap();
+            }
+            w
+        };
+        let batch = table::encode(&spec, &full).unwrap();
+        assert_eq!(writer("vec").finish().unwrap(), batch);
+
+        let file = dir.path().join("block.vortex");
+        let written = writer("file")
+            .finish_to(std::io::BufWriter::new(File::create(&file).unwrap()))
+            .unwrap();
+        assert_eq!(written, batch.len() as u64);
+        assert!(
+            fs::read(&file).unwrap() == batch,
+            "finish_to bytes != finish"
+        );
+
+        let stage = dir.path().join("session");
+        let ws =
+            crate::WriteSession::create(&stage, "recon", "p", "d", "2024-01-01T00:00:00Z").unwrap();
+        let mut sw = StreamWriter::with_window(ws, 2, StreamWindow::new(2, 1));
+        sw.push_staged(writer("job").into_job("events").unwrap())
+            .unwrap();
+        let out = dir.path().join("p.tsra");
+        sw.finish(&out).unwrap();
+        let mut rdr = crate::Reader::open(&out).unwrap();
+        assert!(
+            rdr.read_block("events").unwrap() == batch,
+            "into_job block != finish"
+        );
+
+        // A fragment removed before the compaction reads it: the read error, nothing written.
+        let w = writer("lost");
+        fs::remove_file(dir.path().join("lost").join("g00000001.frag")).unwrap();
+        let err = w.finish_to(std::io::sink()).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("no such file"),
+            "{err}"
+        );
     }
 
     /// Build a TableData of `rows` rows for the spec `vec![col("t","u8"), col("e","f4")]`.
