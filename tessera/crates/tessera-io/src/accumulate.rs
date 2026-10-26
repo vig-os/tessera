@@ -133,12 +133,12 @@ pub(crate) fn read_fragment(path: &Path, columns: &[Column]) -> Result<TableData
 }
 
 /// The first read error of a [`fragment_groups`] iterator, checked after the encode consumed it.
-pub(crate) struct FragmentReadError(Arc<Mutex<Option<Error>>>);
+struct FragmentReadError(Arc<Mutex<Option<Error>>>);
 
 impl FragmentReadError {
     /// `Err` with the first fragment read error, if any. The encode that consumed the iterator then
     /// saw empty row-groups in place of the failed ones, so its output must be discarded.
-    pub(crate) fn check(self) -> Result<()> {
+    fn check(self) -> Result<()> {
         match self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
             Some(e) => Err(e),
             None => Ok(()),
@@ -146,12 +146,11 @@ impl FragmentReadError {
     }
 }
 
-/// The row-groups staged in `paths`, read lazily one fragment at a time — the input of every
-/// fragment compaction ([`TableStreamWriter`] and [`table_job_from_fragments`]). The encoder pulls
-/// infallible [`TableData`], so a read error is stashed in the returned [`FragmentReadError`] and
-/// empty row-groups are fed from then on; the caller must [`FragmentReadError::check`] it after the
-/// encode.
-pub(crate) fn fragment_groups(
+/// The row-groups staged in `paths`, read lazily one fragment at a time — the input of
+/// [`compact_fragments_to`]. The encoder pulls infallible [`TableData`], so a read error is stashed
+/// in the returned [`FragmentReadError`] and empty row-groups are fed from then on; the caller must
+/// [`FragmentReadError::check`] it after the encode.
+fn fragment_groups(
     columns: Vec<Column>,
     paths: Vec<PathBuf>,
 ) -> (
@@ -174,6 +173,24 @@ pub(crate) fn fragment_groups(
         }
     });
     (groups, FragmentReadError(err))
+}
+
+/// Encode the row-groups staged in `paths` as one table block of `spec` into `sink` — every fragment
+/// compaction ([`TableStreamWriter::finish_to`] and [`table_job_from_fragments`]). Returns the bytes
+/// written.
+///
+/// **A fragment read error wins over the encode's error.** After a failed read the encoder is fed
+/// empty row-groups, so the read error is the first cause, and whatever the encode then reports
+/// (its own failure, or a short block that is discarded) is downstream of it or beside the point.
+pub(crate) fn compact_fragments_to<W: Write>(
+    spec: &TableSpec,
+    paths: Vec<PathBuf>,
+    sink: W,
+) -> Result<u64> {
+    let (groups, read_error) = fragment_groups(spec.columns.clone(), paths);
+    let encoded = table::encode_streaming_to(spec, groups, sink);
+    read_error.check()?;
+    encoded
 }
 
 /// Bounded-memory streaming writer that builds **one canonical chunked table block** from a stream of
@@ -316,10 +333,7 @@ impl TableStreamWriter {
     /// [`Self::finish`]. On error, what `sink` received is not a valid block.
     pub fn finish_to<W: Write>(mut self, sink: W) -> Result<u64> {
         let paths = self.flush_trailing()?;
-        let (groups, read_error) = fragment_groups(self.spec.columns.clone(), paths);
-        let written = table::encode_streaming_to(&self.spec, groups, sink)?;
-        read_error.check()?;
-        Ok(written)
+        compact_fragments_to(&self.spec, paths, sink)
     }
 
     /// Flush the trailing partial group and hand the compaction to a [`StreamWriter`] as a
@@ -792,6 +806,56 @@ mod tests {
         assert!(
             err.to_string().to_lowercase().contains("no such file"),
             "{err}"
+        );
+    }
+
+    /// #677 r2 item 4: when a fragment can't be read AND the encode fails, the caller sees the
+    /// fragment read error, the first cause — not the encode's error, which hid it. Both
+    /// compactions ([`TableStreamWriter::finish_to`] and [`table_job_from_fragments`]) run
+    /// `compact_fragments_to`, so this covers both.
+    #[test]
+    fn a_fragment_read_error_is_what_the_caller_sees_when_the_encode_fails_too() {
+        /// A sink that fills up after its first 8 bytes (the file's leading magic), as a disk does.
+        struct Full(usize);
+        impl Write for Full {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.0 >= 8 {
+                    return Err(std::io::Error::other("sink is full"));
+                }
+                let n = buf.len().min(8 - self.0);
+                self.0 += n;
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let rows = ROWS_PER_GROUP * 2 + 77;
+        let spec = TableSpec {
+            columns: vec![col("t", "u8"), col("e", "f4")],
+            rows: rows as u64,
+            row_index: Some("t".into()),
+        };
+        let lost = |tag: &str| {
+            let stage = dir.path().join(tag);
+            let mut w = TableStreamWriter::new(spec.clone(), &stage).unwrap();
+            w.push(deterministic_rows(0, rows)).unwrap();
+            w.flush_trailing().unwrap();
+            fs::remove_file(stage.join("g00000000.frag")).unwrap();
+            w
+        };
+        let is_read_error = |err: &Error| err.to_string().to_lowercase().contains("no such file");
+
+        // The full sink alone fails the encode: that is the error that masked the read error.
+        let w = TableStreamWriter::new(spec.clone(), &dir.path().join("full")).unwrap();
+        let err = w.finish_to(Full(0)).unwrap_err();
+        assert!(err.to_string().contains("sink is full"), "{err}");
+
+        let err = lost("lost").finish_to(Full(0)).unwrap_err();
+        assert!(
+            is_read_error(&err),
+            "the encode error masked the read error: {err}"
         );
     }
 

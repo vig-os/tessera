@@ -190,44 +190,61 @@ change, no new ADR.
    `table_job_from_fragments` (staged fragments; used by `TableMultiBlockSink`) are staged jobs, and so is
    `TableStreamWriter::into_job`. One logical block stays **one canonical block**: no suffixed physical
    blocks.
-3. **Streaming commit.** `WriteSession::append_block_from(block_ref, reader)` copies the bytes through a
-   fixed 256 KiB buffer into a partial fragment in `staging/`, hashing them as they are written (ADR-0002
-   first-moment integrity); a set digest must match, a `None` digest is filled in. Then fsync, rename into
-   `blocks/`, fsync the directory, and the same journal line + Merkle leaf as `append_block`.
-   `append_staged` does that from a `StagedBlock` and deletes it.
-4. **RAII.** A staged file is deleted on commit, on a failed commit, and on drop (an encode error, a
-   panic, a pipeline shut down early). A failed `append_block_from` deletes its partial fragment (or, if it
-   fails after the rename, the renamed fragment), so it leaves no fragment, no Merkle leaf and no complete
-   journal line (a line torn by a failed write is dropped by `recover` like any torn tail).
+3. **Commit by rename, verified.** A `StagedBlock` hashes its bytes as the encoder writes them, so the
+   block's digest is born with the bytes (ADR-0002 first-moment integrity). `WriteSession::append_staged`
+   takes that digest (a set `block_ref.digest` must match it, a `None` one is filled in), fsyncs the file,
+   **renames** it into `blocks/` (no copy: `staging/` is inside the session directory, so on the same
+   filesystem; if it is on another one anyway, the rename fails with `CrossesDevices` and the file is
+   copied instead), fsyncs the directory, then **re-reads the fragment and checks it against the born
+   digest** before the same journal line + Merkle leaf as `append_block`. Scratch corruption between the
+   encode and the commit, or a bad copy, is refused (`Error::Integrity`, `what = "staged_block"`)
+   instead of being sealed under the digest of the corrupted bytes. `append_block_from(block_ref,
+   reader)` copies a reader into a `StagedBlock` and commits it the same way.
+4. **RAII.** A staged file is deleted on a failed commit and on drop (an encode error, a panic, a
+   pipeline shut down early); a committed one has become the fragment. Any append that fails before its
+   journal write leaves no staged file, no fragment, no journal line and no Merkle leaf.
    `WriteSession::create` and `recover` clear `staging/`, since nothing in it was committed.
    `StreamWriter::finish` joins every thread before it reports an error, so no staged encode is still
    running when it returns (#680 item 3).
+5. **A failed journal write poisons the session** (every append, through the one commit they share).
+   Once the journal write has begun, a failure (the write, or its fsync) leaves the journal's state
+   unknown: a torn line, or a complete line that may or may not be durable. The failed block's fragment
+   is deleted, so `recover` stops at such a line, and any block appended behind it would be dropped. So
+   the session refuses every later append and the seal, with an error that says to `recover`; `recover`
+   rereads the journal and keeps exactly the blocks committed before the failure. Truncating the journal
+   back instead was rejected: it would rest on the fsync that just failed (after an fsync error the kernel
+   may drop the dirty pages and clear the error, so a later fsync can succeed with the data lost). A
+   block name already committed is refused too, so a failed append can't delete a committed fragment.
 
 **The rule: table streaming jobs are always staged.** The encoded size isn't known until the encode ends,
 so a threshold would need a sink that starts in RAM and spills to disk; always staging keeps the RAM a
-table job holds independent of its size, for one extra sequential write and read of the encoded block on
-local disk. `table_job` (in-memory input) and `EncodeJob`s stay in RAM, as before.
+table job holds independent of its size, for one sequential read of the encoded block on local disk (the
+commit's verify pass; the write is the fragment's own, since the staged file becomes the fragment).
+`table_job` (in-memory input) and `EncodeJob`s stay in RAM, as before.
 
 **The bound, extended.** With the window's `J`, `B`, `W` and `P` as above, `P` now counts only what a job
 holds **in RAM**: a staged job's companions, i.e. `0` for the table jobs. So for a product written with
 staged table jobs, the encoded bytes held in RAM are `< B` (`StreamStats::peak_in_flight_bytes`; test
 `stream::tests::single_table_block_many_times_the_budget_stays_within_the_window`). What the window does
 **not** count, per encode worker: one row-group of input, the compressor's buffers, a `BufWriter` (8 KiB),
-and the encoded segments the Vortex writer holds before it writes them (below). The committer adds its
-fixed 256 KiB copy buffer.
+and the encoded segments the Vortex writer holds before it writes them (below). The committer's verify
+pass reads through a fixed 64 KiB buffer. That a staged job holds nothing beyond the encoder's own working
+set is checked on the real heap, not only the window's accounting: `tests/staged_job_memory.rs` (a counting
+allocator; each staged table job's peak heap is that of the same encode into `io::sink()`, within 1 MiB).
 
 **Disk is not bounded by the RAM budget.** Scratch needed in the session directory, with `S` the largest
 staged block (`StreamStats::max_staged_job_bytes`) and `T` the product's total size:
 
 - staged files of finished-but-uncommitted jobs `≤ J × S` (`StreamStats::peak_staged_bytes`), plus the
   files of the up to `min(W, J)` encodes in progress;
-- while a staged block commits, its staged file and its fragment coexist (`2 × S` for that block);
-- committed fragments (`blocks/`, up to `T`), and at seal the output `.tsra` (another `T`, written to a
-  sibling `.part` and renamed).
+- committed fragments (`blocks/`, up to `T`): a commit renames the staged file into place, so a block is
+  never on disk twice;
+- at seal, the output `.tsra` (another `T`, written to a sibling `.part` and renamed).
 
-So plan for about `2 × T + J × S` of scratch when the output `.tsra` is on the same filesystem. For a
-product that is one large block (`S ≈ T`) that is `2 × T`: the staged file and its fragment during the
-commit, then the fragment and the output during the seal (the staged file is gone by then).
+So plan for about `2 × T + J × S` of scratch when the output `.tsra` is on the same filesystem (`T + J × S`
+until the seal). For a product that is one large block (`S ≈ T`) that is `T` while it encodes and commits,
+and `2 × T` during the seal (the fragment and the output). A copying commit would add one `S` while a
+block commits (the staged file and its copy), `2 × T` already during the commit of one large block.
 
 **Determinism.** A staged block is byte-identical to the in-memory encode of the same table, so the
 sealed bytes, `content_hash` and `manifest_hash` don't depend on the job kind, the worker count or the
@@ -236,8 +253,9 @@ The conformance corpus is unchanged.
 
 **Measured (consumer reproducer, ksb job, 2026-10-26).** MorePET/visionx-rs `chore/39-tessera-677-repro`
 (exact nullable decoder shape, its single encode job switched to `table_job_streaming`), built against this
-change, `ksb run --cpu 4 --exclusive-cpus --mem 12Gi`, `--workers $KSB_CPUS`, peak `RssAnon` sampled every
-10 ms (anonymous memory, not page cache):
+change (at `37fe9d7`, which committed by a 256 KiB-buffered copy instead of the rename: the encode, which
+sets the peak, is the same), `ksb run --cpu 4 --exclusive-cpus --mem 12Gi`, `--workers $KSB_CPUS`, peak
+`RssAnon` sampled every 10 ms (anonymous memory, not page cache):
 
 | rows | packet-equivalent input | peak RssAnon | output | at `9424f90` |
 |---:|---:|---:|---:|---:|

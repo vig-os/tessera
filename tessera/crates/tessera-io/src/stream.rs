@@ -37,14 +37,15 @@
 //!
 //! An in-memory job ([`EncodeJob`]) still materialises its encoded payload in RAM (`P` above); a
 //! table block too large for that goes through a staged job. Staged blocks are committed with
-//! [`WriteSession::append_staged`], which streams the file into the fragment in bounded memory,
-//! hashing it as it is written, and deletes it. A staged block is byte-identical to the in-memory
-//! encode of the same table, so the sealed product does not depend on which kind of job wrote it.
+//! [`WriteSession::append_staged`], which renames the file into place as the fragment after checking
+//! it against the digest it was born with (hashed as the encoder wrote it). A staged block is
+//! byte-identical to the in-memory encode of the same table, so the sealed product does not depend on
+//! which kind of job wrote it.
 //!
 //! Neither bound counts the encoders' own working sets (one row-group of input, the compressor's
 //! buffers, and the encoded segments the Vortex writer holds before it writes them — about 0.4 × a
 //! table's encoded size at its peak, a known limit tracked in #681, see
-//! [`crate::table::encode_streaming_to`]) or the committer's fixed copy buffer.
+//! [`crate::table::encode_streaming_to`]) or the committer's fixed 64 KiB verify buffer.
 //!
 //! # How the window is enforced
 //!
@@ -90,16 +91,16 @@ pub type EncodeJob =
     Box<dyn FnOnce() -> Result<(EncodedBlock, Vec<EncodedBlock>)> + Send + 'static>;
 
 /// A data block whose encoded bytes are in a [`StagedBlock`] (a file), not in RAM. Its
-/// [`BlockRef::digest`] may be `None`: the commit hashes the bytes as it writes the fragment and
-/// fills it in (a digest that is set must match them).
+/// [`BlockRef::digest`] may be `None`: the commit fills in the digest the [`StagedBlock`] computed as
+/// the bytes were written (a digest that is set must match it).
 pub type StagedEncodedBlock = (BlockRef, StagedBlock);
 
 /// A unit of work like [`EncodeJob`] whose **data block is written to a file** in the write
 /// session's staging directory rather than returned in RAM: the worker hands the job the session's
 /// [`BlockStaging`], the job writes its block into a [`BlockStaging::create`]d [`StagedBlock`], and
-/// the committer streams that file into the product ([`WriteSession::append_staged`]) and deletes
-/// it. Companions stay in RAM. Push it with [`StreamWriter::push_staged`]. Use it for a block that
-/// may not fit in memory — [`table_job_streaming`] and [`table_job_from_fragments`] are staged jobs.
+/// the committer renames that file into the product ([`WriteSession::append_staged`]). Companions
+/// stay in RAM. Push it with [`StreamWriter::push_staged`]. Use it for a block that may not fit in
+/// memory — [`table_job_streaming`] and [`table_job_from_fragments`] are staged jobs.
 pub type StagedEncodeJob = Box<
     dyn FnOnce(&BlockStaging) -> Result<(StagedEncodedBlock, Vec<EncodedBlock>)> + Send + 'static,
 >;
@@ -217,11 +218,8 @@ pub fn table_job_from_fragments(
 ) -> StagedEncodeJob {
     let name = name.into();
     Box::new(move |staging| {
-        let (groups, read_error) =
-            crate::accumulate::fragment_groups(spec.columns.clone(), frag_paths);
         let mut staged = staging.create()?;
-        crate::table::encode_streaming_to(&spec, groups, &mut staged)?;
-        read_error.check()?;
+        crate::accumulate::compact_fragments_to(&spec, frag_paths, &mut staged)?;
         Ok(((staged_table_ref(name, &spec)?, staged), Vec::new()))
     })
 }
@@ -1326,6 +1324,10 @@ mod tests {
     /// Before the fix (`table_job_from_fragments` returned the encoded block as a `Vec`, pushed
     /// with `push`), the same run held the whole block in the window:
     /// `peak_in_flight_bytes` = the block's size, ~150× the budget.
+    ///
+    /// These checks are the window's accounting. The real heap, which would also catch a job that
+    /// buffered its encode before writing the staged file, is checked by
+    /// `tests/staged_job_memory.rs` (its own binary, for its counting allocator).
     #[test]
     fn single_table_block_many_times_the_budget_stays_within_the_window() {
         const BUDGET: u64 = 64 * 1024;
