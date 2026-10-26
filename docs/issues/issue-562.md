@@ -2,18 +2,18 @@
 type: issue
 state: closed
 created: 2026-10-16T16:50:27Z
-updated: 2026-10-18T11:56:33Z
+updated: 2026-10-25T14:43:42Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/562
-comments: 1
+comments: 2
 labels: feature
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-19T07:18:05.649Z
+synced: 2026-10-26T07:24:56.587Z
 ---
 
 # [Issue 562]: [feat(py): expose with_producer / with_generation on Builder — ADR-0058 §4 is unreachable from Python](https://github.com/vig-os/tessera/issues/562)
@@ -142,4 +142,12 @@ the shape stays undocumented.
 _Posted on October 18, 2026 at 11:56 AM_
 
 Fixed on dev by #585 (merge eb12822): `Builder.with_producer(tool, version, git_commit=None, git_repo=None, dirty=None)` and `Builder.with_generation(config=None, config_ref=None)` expose ADR-0058 from Python. Ships in 0.1.0-alpha.2.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on October 25, 2026 at 02:43 PM_
+
+Correction to the closing comment: the alpha.2 cut failed on macOS (#647), so the tag `v0.1.0-alpha.2` was never published as a release. This change ships in **[v0.1.0-alpha.3](https://github.com/vig-os/tessera/releases/tag/v0.1.0-alpha.3)** (tag at 9424f90, which contains the #585 merge eb12822).
 

@@ -2,18 +2,18 @@
 type: issue
 state: closed
 created: 2026-10-18T22:23:56Z
-updated: 2026-10-19T01:55:38Z
+updated: 2026-10-25T09:06:48Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/627
-comments: 1
+comments: 2
 labels: bug, priority:high, area:core
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-19T07:17:43.367Z
+synced: 2026-10-26T07:24:32.354Z
 ---
 
 # [Issue 627]: [fix(core): table_chunk_index panics on a nullable column with nulls (range end index out of range)](https://github.com/vig-os/tessera/issues/627)
@@ -35,4 +35,12 @@ range end index 3 out of range for slice of length 2
 _Posted on October 19, 2026 at 01:55 AM_
 
 Fixed by #634 (merge e244940): chunk statistics now slice each row group before taking stats and apply validity before the u64 range check, on the batch, streaming and multi-block paths. NULLs are excluded from min/max, and an all-NULL chunk uses the empty-chunk identity. Follow-ups: #632 (digest over the bytes under a NULL), #633, #642. Ships in 0.1.0-alpha.2.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on October 25, 2026 at 09:06 AM_
+
+Correction: the alpha.2 cut failed on macOS and was never published (#647). This fix ships in **v0.1.0-alpha.3**: https://github.com/vig-os/tessera/releases/tag/v0.1.0-alpha.3
 

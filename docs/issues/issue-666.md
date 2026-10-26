@@ -1,0 +1,51 @@
+---
+type: issue
+state: open
+created: 2026-10-25T11:18:51Z
+updated: 2026-10-25T12:56:27Z
+author: gerchowl
+author_url: https://github.com/gerchowl
+url: https://github.com/vig-os/tessera/issues/666
+comments: 0
+labels: feature, priority:high, effort:large, area:io
+assignees: none
+milestone: none
+projects: none
+parent: 654
+children: none
+synced: 2026-10-26T07:24:22.310Z
+---
+
+# [Issue 666]: [feat(query): streaming single-product TableProvider with chunk pruning and bounded memory (ADR-0062 PR1)](https://github.com/vig-os/tessera/issues/666)
+
+Phase 1 of #654, designed in ADR-0062 (§1–§4, §7, §8 "PR1"; `docs/adr/0062-streaming-table-provider.md`).
+
+- **Scope:**
+  - `tessera_io::scan`: `plan_scan`, scan units, `TableScan`, `ScanBudget`, the per-query scan-partition cap,
+    explicit row-range window scans with `SplitBy::RowCount`, the layout-reader cache and a fresh
+    `MokaSegmentCache` per opened block, tier-1 `.cidx` pruning, `Integrity::{VerifyBlocks, SealOnly}` with
+    verify-once per block, the local byte-range `VortexReadAt`, and metrics.
+  - A new `tessera-query` crate: `TableProvider` over one product's logical table, `Expr` → `Predicate` for the
+    closed class (every pushed filter `Inexact`), metrics surfaced through `EXPLAIN ANALYZE`, re-export of
+    `datafusion`.
+  - `tessera sql` migrated onto it; the materialising path survives only as the test oracle.
+- **Acceptance:**
+  - Equality: a query corpus (projections, every operator in the class, NULLs, aggregates, `LIMIT`) on single-
+    and multi-block (`events_NNNN`) fixtures equals the `MemTable` path's result.
+  - Pushdown safety: the pushdown-on vs pushdown-off differential property test passes (every dtype in the
+    class, NULLs, boundary values, data shaped so each integer/string encoding is chosen).
+  - Instrumented pruning: with the indexed column selecting *k* of *N* row groups, `row_groups_pruned = N − k`;
+    blocks that can't match have `bytes_fetched = 0`; a zone-prunable predicate reads fewer bytes than the same
+    projection without it.
+  - Window bytes: window scans read the same bytes as one scan of the block, on a table with a `utf8` and a
+    dictionary-encoded column.
+  - Bounded memory: the CI high-water test of ADR-0062 §3, on a runner with more cores than the budget; the ksb
+    run of §3 (anonymous-memory peak, pinned `target_partitions`, dedicated cores via `ksb run --exclusive-cpus`, scale invariance, and the
+    negative control: the materialising oracle path in the same cgroup must be OOM-killed), with its numbers in the performance book.
+  - Integrity: a flipped payload byte in a scanned block fails the query with `Error::Integrity` and no row of
+    that block is emitted; the same flip in a tier-1-pruned block does not fail it, and the docs say so.
+  - Gate B snapshots regenerated with the inert-delta proof.
+- **Depends on:** ADR-0062 accepted.
+- **Split if needed:** (a) `tessera_io::scan` + tests; (b) `tessera-query` + the `tessera sql` migration.
+
+

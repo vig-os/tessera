@@ -2,18 +2,18 @@
 type: issue
 state: closed
 created: 2026-10-16T16:50:32Z
-updated: 2026-10-18T11:56:35Z
+updated: 2026-10-25T14:43:43Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/563
-comments: 1
+comments: 2
 labels: feature
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-19T07:18:05.260Z
+synced: 2026-10-26T07:24:56.166Z
 ---
 
 # [Issue 563]: [feat(py): Builder.add_source cannot pin content_hash — Python-written edges fail --require-complete](https://github.com/vig-os/tessera/issues/563)
@@ -120,4 +120,12 @@ Default stays `None` for back-compat — existing calls are unaffected.
 _Posted on October 18, 2026 at 11:56 AM_
 
 Fixed on dev by #585 (merge eb12822): `Builder.add_source(relation, reference, content_hash=None)` pins the parent's content hash, so Python-written `derived_from` chains pass `provenance --require-complete`. Ships in 0.1.0-alpha.2.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on October 25, 2026 at 02:43 PM_
+
+Correction to the closing comment: the alpha.2 cut failed on macOS (#647), so the tag `v0.1.0-alpha.2` was never published as a release. This change ships in **[v0.1.0-alpha.3](https://github.com/vig-os/tessera/releases/tag/v0.1.0-alpha.3)** (tag at 9424f90, which contains the #585 merge eb12822).
 

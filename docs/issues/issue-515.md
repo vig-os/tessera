@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-24T18:10:53Z
+updated: 2026-10-26T02:30:13Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-25T07:15:49.796Z
+synced: 2026-10-26T07:24:56.976Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -46,7 +46,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.90
  - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.90
  - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.90
- - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.1.0
+ - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.1.1
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.26.1
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13

@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-18T22:23:57Z
-updated: 2026-10-18T22:51:54Z
+updated: 2026-10-25T09:11:24Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/628
-comments: 1
-labels: question, priority:medium, area:core, adr
+comments: 2
+labels: feature, question, priority:medium, effort:large, area:core, area:io, area:integrity, adr
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-19T07:17:42.994Z
+synced: 2026-10-26T07:24:31.922Z
 ---
 
 # [Issue 628]: [perf(format): string-heavy tables are ~3x larger than Parquet — normalize forbids Vortex's zstd compact encoding](https://github.com/vig-os/tessera/issues/628)
@@ -43,5 +43,21 @@ Triage (architect): this is a **format decision, not a fix**, so it goes through
   object storage). Please split it into its own issue. It relates to #225's cloud range reads and #347 (chunk-index pruning).
 
 Queued behind the adoption release (0.1.0-alpha.2) and the P0 items (#576, #587, #573).
+
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on October 25, 2026 at 09:11 AM_
+
+**Triage update (architect, 2026-10-25): still a format decision.** Added priority:medium and effort:large.
+
+Plan, in order:
+1. **A determinism spike, run as ksb jobs.** Is Vortex's zstd string encoding byte-identical across x86_64/aarch64, across feature sets (Gate B), and across dev/release profiles? Also measure the size win on the consumer's string-heavy tables against Parquet. Repeat for an FSST-only or dictionary-only option, which needs no zstd in the reader and stays WASM-friendly.
+2. **An ADR** that admits (or rejects) the encoding into the normalised set, with the reader/WASM consequences.
+3. Implementation, with goldens and a size ratchet (#637).
+
+Order: the spike is queued in the design wave after #632/#655. It's not started yet.
 
 
