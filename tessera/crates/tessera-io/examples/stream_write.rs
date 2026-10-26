@@ -12,7 +12,7 @@ use std::time::Instant;
 use tessera_core::block::array::ArraySpec;
 use tessera_core::ProductBuilder;
 use tessera_io::array::{self, ArrayData};
-use tessera_io::{array_job, StreamWriter, WriteSession};
+use tessera_io::{array_job, StreamStats, StreamWriter, WriteSession};
 
 const TS: &str = "2024-01-01T00:00:00Z";
 const N: usize = 256; // blocks
@@ -58,12 +58,13 @@ fn run_sync(blocks: &[(ArraySpec, ArrayData)], dir: &std::path::Path) -> f64 {
 }
 
 /// Pipelined: producer pushes raw blocks; `workers` threads encode in parallel; committer seals.
+/// Returns the wall time and the credit window's high-water marks.
 fn run_stream(
     blocks: &[(ArraySpec, ArrayData)],
     workers: usize,
     cap: usize,
     dir: &std::path::Path,
-) -> f64 {
+) -> (f64, StreamStats) {
     let stage = dir.join(format!("stream_stage_{workers}"));
     let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
     let mut sw = StreamWriter::new(ws, workers, cap);
@@ -72,9 +73,10 @@ fn run_stream(
         sw.push(array_job(format!("b{i:04}"), spec.clone(), data.clone()))
             .unwrap();
     }
-    sw.finish(&dir.join(format!("stream_{workers}.tsra")))
+    let (_, stats) = sw
+        .finish_with_stats(&dir.join(format!("stream_{workers}.tsra")))
         .unwrap();
-    t.elapsed().as_secs_f64()
+    (t.elapsed().as_secs_f64(), stats)
 }
 
 fn main() {
@@ -102,7 +104,7 @@ fn main() {
     );
 
     for workers in [1usize, 2, 4, 8] {
-        let s = run_stream(&blocks, workers, workers * 2, dir.path());
+        let (s, _) = run_stream(&blocks, workers, workers * 2, dir.path());
         println!(
             "{:<18} {:>8.3} {:>11.0} {:>10.0} {:>8.2}×",
             format!("stream w={workers} c={}", workers * 2),
@@ -114,13 +116,18 @@ fn main() {
     }
 
     // Bounded RAM: a tiny capacity must still complete (producer outruns encoders → backpressure
-    // blocks push; peak in-flight ≈ cap blocks, not N).
-    let tiny = run_stream(&blocks, 4, 2, dir.path());
+    // blocks push). The credit window is cap + workers jobs (#677): queued, encoding and waiting
+    // for an earlier job all count, so the peak is a window, not N.
+    let (tiny, stats) = run_stream(&blocks, 4, 2, dir.path());
     println!(
-        "\nbounded RAM: cap=2 with 4 workers completed in {tiny:.3}s — peak in-flight ≤ ~cap blocks \
-         (≈{} KiB), not all {N} ({:.0} MiB). Backpressure holds memory flat under burst.",
-        2 * EDGE * EDGE * EDGE * 2 / 1024,
+        "\nbounded RAM: cap=2 with 4 workers completed in {tiny:.3}s — peak {} jobs in flight \
+         (window 2 + 4 = 6, ≈{} KiB raw), not all {N} ({:.0} MiB); peak {} KiB encoded held, \
+         {} producer stalls. Backpressure holds memory flat under burst.",
+        stats.peak_in_flight_jobs,
+        6 * EDGE * EDGE * EDGE * 2 / 1024,
         mib,
+        stats.peak_in_flight_bytes / 1024,
+        stats.producer_stalls,
     );
 
     // Correctness reminder: streamed output is byte-identical to batch (proven in stream::tests).

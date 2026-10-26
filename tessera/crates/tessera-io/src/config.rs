@@ -4,9 +4,16 @@
 //! and the in-flight ring depth are derived.
 //!
 //! Model:
-//! - `ram_budget` is a **RAM ceiling** for in-flight encode work — it bounds the [`StreamWriter`]
-//!   ring depth regardless of how fast the producer pushes. Producer outruns encoders → backpressure
-//!   blocks `push` once `ring_depth` blocks are queued, so peak memory ≈ `ring_depth × unit_bytes`.
+//! - `ram_budget` is a **RAM ceiling** for in-flight encode work — it sizes the [`StreamWriter`]'s
+//!   credit window ([`StreamWindow`], #677) regardless of how fast the producer
+//!   pushes. [`StreamWriter::with_config`] admits `ring_depth(unit_bytes) + workers` jobs (the queued
+//!   raw blocks plus one encoding per worker) and budgets `ram_budget` bytes of encoded payloads;
+//!   a job holds its credit from `push` until its in-order commit, so producer outruns encoders →
+//!   backpressure blocks `push`, and a slow job can't let the reorder buffer grow past the window.
+//!   The budget is spent on both sides: the job window holds up to about `ram_budget + W × unit_bytes`
+//!   of raw input (queued + encoding) and the byte budget up to `ram_budget + W × P` of encoded
+//!   payloads (`P` = the largest job's encoded payload), so the worst case is about
+//!   `2 × ram_budget + W × (unit_bytes + P)` plus the encoders' working sets.
 //! - `workers` is the **encode-thread pool** (std threads — never tokio, per ADR-0034). On the
 //!   chunked array/block path ([`StreamWriter`]), more workers = more parallel encode = real
 //!   core-scaling. On the listmode [`crate::TableStreamWriter`] path it does **not**: that path
@@ -20,6 +27,7 @@
 
 use tessera_core::{Error, Result};
 
+use crate::stream::{StreamWindow, StreamWriter};
 use crate::write::WriteSession;
 
 /// One MiB in bytes — used by the suffix parser.
@@ -62,7 +70,7 @@ impl WriteConfig {
     /// `workers = ceil(read_rate / per_core_encode_rate)`, extra workers just sit idle (and grow
     /// the in-flight ring's peak RAM) for zero gain. This computes that knee:
     /// `workers = clamp(ceil(read / per_core).max(1), 1, available_parallelism())`. The
-    /// `ram_budget` keeps the [`for_system`] default.
+    /// `ram_budget` keeps the [`Self::for_system`] default.
     ///
     /// Storage tier shapes the answer. Slow read (e.g. cold HDD ~200 MB/s) → **read-bound** → few
     /// workers, since extra cores would starve at the read floor. Fast/cached read (≫ 1 GB/s) →
@@ -75,7 +83,7 @@ impl WriteConfig {
     /// knee. That's honest — better to feed the encode side and let one worker idle than to
     /// under-provision and leave the read pipe waiting.
     ///
-    /// Degenerate inputs (`0`, negative, NaN, infinite) fall back to [`for_system`] — the
+    /// Degenerate inputs (`0`, negative, NaN, infinite) fall back to [`Self::for_system`] — the
     /// pure-defaults answer — so a measurement glitch can't poison the engine.
     pub fn balanced(read_bytes_per_s: f64, per_core_encode_bytes_per_s: f64) -> WriteConfig {
         let base = WriteConfig::for_system();
@@ -129,6 +137,16 @@ impl WriteConfig {
         let per = unit_bytes.max(1);
         let depth = (self.ram_budget / per).max(1);
         usize::try_from(depth).unwrap_or(usize::MAX)
+    }
+
+    /// The [`StreamWriter`]'s credit window for a producer whose per-block encode-buffer size is
+    /// `unit_bytes`: `ring_depth(unit_bytes) + workers` jobs and `ram_budget` encoded bytes. This is
+    /// what [`StreamWriter::with_config`] uses.
+    pub fn stream_window(&self, unit_bytes: u64) -> StreamWindow {
+        StreamWindow::new(
+            self.ring_depth(unit_bytes).saturating_add(self.workers),
+            self.ram_budget,
+        )
     }
 }
 
@@ -197,19 +215,21 @@ pub fn parse_byte_size(s: &str) -> Result<u64> {
     Ok(v as u64)
 }
 
-impl crate::stream::StreamWriter {
-    /// Build a [`StreamWriter`](crate::stream::StreamWriter) from a [`WriteConfig`] and a per-block
-    /// `unit_bytes` estimate. Workers come from `config.worker_count()`; the in-flight ring depth
-    /// is `config.ring_depth(unit_bytes)` — so the RAM ceiling holds regardless of how fast the
-    /// producer pushes.
+impl StreamWriter {
+    /// Build a [`StreamWriter`] from a [`WriteConfig`] and a per-block
+    /// `unit_bytes` estimate. Workers come from `config.worker_count()` (`W`); the credit window
+    /// ([`StreamWindow`]) is
+    /// `max_in_flight = config.ring_depth(unit_bytes) + W` jobs — the queued ring plus one encoding
+    /// per worker, so every worker can be fed — and `max_in_flight_bytes = config.ram_budget_bytes()`
+    /// of encoded payloads. The RAM ceiling holds regardless of how fast the producer pushes or in
+    /// which order the encodes finish (the bound is in the [`crate::stream`] module docs).
     pub fn with_config(
         session: WriteSession,
         config: &WriteConfig,
         unit_bytes: u64,
-    ) -> crate::stream::StreamWriter {
+    ) -> StreamWriter {
         let workers = config.worker_count();
-        let capacity = config.ring_depth(unit_bytes);
-        crate::stream::StreamWriter::new(session, workers, capacity)
+        StreamWriter::with_window(session, workers, config.stream_window(unit_bytes))
     }
 }
 
@@ -365,6 +385,12 @@ mod tests {
         let ws = WriteSession::create(&stage, "recon", "p", "d", "2024-01-01T00:00:00Z").unwrap();
         let sw = crate::stream::StreamWriter::with_config(ws, &cfg, MIB);
         assert_eq!(sw.worker_count(), 3, "with_config must wire workers");
+        // The window: the 8-deep ring plus one job per worker, and the RAM budget as byte budget.
+        assert_eq!(
+            sw.window(),
+            crate::stream::StreamWindow::new(8 + 3, 8 * MIB)
+        );
+        assert_eq!(sw.window(), cfg.stream_window(MIB));
         let out = dir.path().join("s.tsra");
         // No blocks pushed → seals an empty product (proves the pipeline shuts down cleanly).
         sw.finish(&out).unwrap();

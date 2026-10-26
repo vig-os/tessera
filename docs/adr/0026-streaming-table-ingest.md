@@ -114,3 +114,57 @@ bounded by workers not dataset; throughput 4.9 M→14.9 M events/s (~3×), satur
 **Remaining before an Accepted flip:** **cross-env / cross-arch determinism re-validation**
 (dev==release==hermetic, x86==ARM — the ADR-0024 caveat; the x86+aarch64-linux CI matrix is wired, needs a
 green ARM run). The functional + memory + parallelism gates are now met.
+
+## Amendment (#677, 2026-10-25) — StreamWriter memory contract
+
+**Defect.** The `StreamWriter` bounded its *input* channel, but its committer drained the output channel
+into an unbounded `BTreeMap` reorder buffer. So the channel capacity did not bound the encoded payloads it
+held: if job 0 was slow while jobs 1..N finished, the committer kept all N payloads while the producer kept
+pushing. The memory bound this ADR depends on did not hold under reordering. The fix doesn't change any
+bytes or hashes, so it is not a format change and needs no new ADR.
+
+**Contract: a credit window** (`tessera_io::StreamWindow`). A job takes a credit when it is **pushed** and
+gives it back only when it is **committed in order**. So one window covers every job the pipeline holds:
+queued, encoding, and finished but waiting in the reorder buffer. `push` blocks while the window is full.
+
+The knobs:
+
+- `max_in_flight` (`J`): jobs pushed but not yet committed. Defaults: `StreamWriter::new(_, W, capacity)`
+  uses `capacity + W`; `StreamWriter::with_config` uses `ring_depth(unit_bytes) + W`.
+- `max_in_flight_bytes` (`B`): encoded payload bytes (data + companions) held in RAM. Defaults: `new` uses
+  `DEFAULT_RAM_BUDGET` (1 GiB); `with_config` uses the config's `ram_budget`.
+
+With `W` encode workers and `P` the largest single job's encoded payload:
+
+- jobs in flight `≤ J`, always;
+- encoded bytes held `< B + min(W, J) × P` (and trivially `≤ J × P`).
+
+Through `with_config`, `ram_budget` is spent on both sides: the job window holds about `ram_budget +
+W × unit_bytes` of raw input and the byte budget about `ram_budget + W × P` of encoded payloads, so the
+worst case is about `2 × ram_budget + W × (unit_bytes + P)` plus the encoders' working sets.
+
+The `+ W` in the default job window is the queue capacity plus one job per worker. A window of only the
+queue capacity would leave workers idle whenever `W > capacity`, which loses today's throughput.
+
+**Enforcement.** Two gates share one mutex and condvar. (1) *Submit*: a job is admitted while fewer than
+`J` jobs are in flight **and** fewer than `B` bytes are held. (2) *Encode start*: a worker starts a job only
+while fewer than `B` bytes are held, **except** for the job the committer waits on, which always runs. Gate
+2 is what makes `B` bind: once `B` is reached, only the encodes already in progress can add bytes.
+
+**Deadlock rule.** The window must never block the job the committer waits on (`next`). `next` has been
+pushed, the queue is FIFO so it is dequeued first, and gate 2 exempts it. A job whose payload alone
+exceeds `B` is admitted into an empty window (no bytes are held then) and runs alone once it is `next`. A
+failed encode, a failed commit or a panicking worker *closes* the window: `push` returns an error and the
+workers waiting at gate 2 exit (idle workers exit when `finish` closes the job queue), so nothing hangs.
+The committer also errors if any pushed job is missing at the end, instead of sealing a truncated product.
+
+**Determinism.** Commit order is still `seq`. Bytes and `content_hash` are identical across worker counts
+and window sizes (`stream::tests::content_hash_is_identical_across_workers_and_windows`).
+
+**Instrumentation.** `StreamWriter::stats()` (live) and `StreamWriter::finish_with_stats()` (final) return
+`StreamStats` with `peak_in_flight_jobs`, `peak_in_flight_bytes`, `max_job_bytes` (`P`), `jobs_pushed`,
+`jobs_committed` and `producer_stalls`, so a consumer can assert the bound.
+
+**Scope.** `P` is still one job's encoded payload in RAM. The second half of #677 (a file-backed encode
+sink for one canonical table block, and a streaming commit from the staged file) extends this contract to
+the encoded output itself, so a single block larger than RAM is bounded too.
