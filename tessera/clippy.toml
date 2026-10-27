@@ -1,0 +1,20 @@
+# Workspace clippy configuration. Clippy reads this file for every crate under `tessera/`.
+
+# zstd APIs affected by advisories we ignore in deny.toml (vig-os/tessera#684). The ignores hold only
+# while tessera never calls these. The bans keep that true for our own code; #684 covers dependencies.
+# zstd isn't a direct dependency of every crate, so a crate that can't see zstd can't resolve these
+# paths. `allow-invalid` keeps that from being a warning. Each path was checked to resolve (the ban
+# fires on a call) in a crate that does see zstd. #684 says how to repeat that check after a zstd bump.
+disallowed-methods = [
+    { path = "zstd::stream::raw::Encoder::with_context", allow-invalid = true, reason = "RUSTSEC-2026-0391: reused context isn't reset in zstd 0.13 (vig-os/tessera#684)" },
+    { path = "zstd::stream::raw::Decoder::with_context", allow-invalid = true, reason = "RUSTSEC-2026-0391: reused context isn't reset in zstd 0.13 (vig-os/tessera#684)" },
+    { path = "zstd::stream::read::Decoder::with_context", allow-invalid = true, reason = "RUSTSEC-2026-0391: reused context isn't reset in zstd 0.13 (vig-os/tessera#684)" },
+    { path = "zstd::stream::write::Encoder::with_context", allow-invalid = true, reason = "RUSTSEC-2026-0391: reused context isn't reset in zstd 0.13 (vig-os/tessera#684)" },
+    { path = "zstd_safe::DCtx::decompress_stream", allow-invalid = true, reason = "RUSTSEC-2026-0403: exposes uninitialised memory on a failed legacy frame in zstd-safe 7 (vig-os/tessera#684)" },
+]
+disallowed-types = [
+    # The raw stream decoder is what `write::Decoder` is built on. Driving it through `Operation::run`
+    # or `zio::Writer` reaches `decompress_stream` inside zstd, where the method ban above can't see it.
+    { path = "zstd::stream::raw::Decoder", allow-invalid = true, reason = "RUSTSEC-2026-0403 (decompress_stream onto a caller buffer) and RUSTSEC-2026-0391 (with_context) (vig-os/tessera#684)" },
+    { path = "zstd::stream::write::Decoder", allow-invalid = true, reason = "RUSTSEC-2026-0403: leaks uninitialised memory on a failed legacy frame in zstd-safe 7 (vig-os/tessera#684)" },
+]
