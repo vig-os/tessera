@@ -67,7 +67,7 @@ jobs:
           # release-plz authenticates with its own GIT_TOKEN; no credential is left in .git/config.
           persist-credentials: false
       - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d  # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
       - name: Check out the last release (release-plz's baseline)
         id: last-release
         run: |
