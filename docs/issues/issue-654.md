@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-21T00:01:03Z
-updated: 2026-10-25T09:11:14Z
+updated: 2026-10-26T18:12:52Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/654
-comments: 1
+comments: 2
 labels: feature, priority:high, effort:large, epic, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: 666, 667, 668, 669, 670, 671, 672, 673, 674, 675
-synced: 2026-10-26T07:24:26.254Z
+synced: 2026-10-27T07:16:31.012Z
 ---
 
 # [Issue 654]: [feat(query): streaming DataFusion TableProvider over table blocks (projection + filter pushdown, chunk-stat pruning, bounded memory)](https://github.com/vig-os/tessera/issues/654)
@@ -56,4 +56,16 @@ The issue's acceptance criteria (bounded RSS, instrumented chunk skipping, equal
 
 Order: the ADR is drafted in the next design wave, in parallel with #632/#655. #657 depends on this.
 
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on October 26, 2026 at 06:12 PM_
+
+Owner decisions on ADR-0062's open questions (2026-10-26). ADR-0062 merged as Proposed in #661 (41de440); acceptance records these:
+
+- **(a) Signed `aligned_to`:** not required in PR2 (same-producer zips, where the seal covers the claim). A signed alignment is **required** before any zip across producers ships, tied to #656/#566.
+- **(b) Local read default:** `VerifyBlocks` without a spool; the spool is opt-in (remote or untrusted sources).
+- **(c) Key mode under LIMIT / early stop:** today a row is released after only a neighbour check, so `[5,6][3,5]` zipped with a copy whose 5s are swapped returns a misaligned pair under `LIMIT 1` with no error. Decision: a key-mode zip **refuses** a pushed limit or early stop until a key-only pre-pass has verified strict increase over the whole scanned range; after that, LIMIT is allowed. This must be correct by construction, not a documented caveat. It goes into the ADR when it is accepted, and into #667's acceptance criteria.
 
