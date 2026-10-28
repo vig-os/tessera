@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-26T19:41:07Z
-updated: 2026-10-26T19:55:23Z
+updated: 2026-10-27T08:34:34Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/684
-comments: 0
+comments: 1
 labels: dependencies, security
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-27T07:16:19.402Z
+synced: 2026-10-28T07:54:45.476Z
 ---
 
 # [Issue 684]: [chore(deps): remove the zstd advisory ignores (RUSTSEC-2026-0391/0398/0403/0410)](https://github.com/vig-os/tessera/issues/684)
@@ -102,4 +102,12 @@ feature guards. A zstd bump moves the parquet lane's sealed decoder pre-image (`
 **Re-verify the reachability above on every parquet, zarrs, arrow-ipc or datafusion bump.** A Renovate or manual
 PR that touches any of them must cite this issue and confirm that the codec call sites above haven't moved to `with_context`, the
 `seekable` feature, or `stream::write::Decoder`.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 27, 2026 at 08:34 AM_
+
+Follow-up from the #687 review: `tessera/clippy.toml` sets `allow-invalid = true`, so a banned path that stops resolving after a zstd 0.14 bump would silently guard nothing. The manual re-check above is the only defence. Make it automatic: a small check crate in CI (or a flake check) that calls each banned API and is EXPECTED to fail clippy with exactly the listed `disallowed` errors. Also: the `deny.toml` reason mentions "datafusion 55 (arrow 59)" as the upgrade target, while the lock pins datafusion 54.0.0; reword it so it's clear 55 is the target, not the current version.
 

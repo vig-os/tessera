@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-26T23:45:45Z
+updated: 2026-10-28T01:05:03Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-27T07:17:02.631Z
+synced: 2026-10-28T07:54:46.356Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -24,6 +24,8 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 
 The following updates are currently rate-limited. To force their creation now, click on a checkbox below.
 
+ - [ ] <!-- unlimit-branch=renovate/dicom-0.x-lockfile -->chore(deps): update rust crate dicom to v0.10.1
+ - [ ] <!-- unlimit-branch=renovate/dicom-transfer-syntax-registry-0.x-lockfile -->chore(deps): update rust crate dicom-transfer-syntax-registry to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/zarrs-0.x-lockfile -->chore(deps): update rust crate zarrs to v0.23.14
  - [ ] <!-- unlimit-branch=renovate/rust-wasm-bindgen-monorepo -->fix(deps): update rust crate wasm-bindgen to v0.2.129
  - [ ] <!-- unlimit-branch=renovate/python-(minor-and-patch) -->build(pip): update python (minor and patch) (`numcodecs`, `numpy`, `uproot`, `zarr`)
@@ -46,7 +48,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.90
  - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.90
  - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.90
- - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.1.2
+ - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.1.3
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.26.1
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
@@ -109,8 +111,8 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `futures 0.3` → [Updates: `0.3`]
  - `clap 4`
  - `png 0.17` → [Updates: `0.18`]
- - `dicom 0.10`
- - `dicom-transfer-syntax-registry 0.10`
+ - `dicom 0.10` → [Updates: `0.10`]
+ - `dicom-transfer-syntax-registry 0.10` → [Updates: `0.10`]
  - `hdf5-metno 0.12` → [Updates: `0.15`]
  - `hdf5-metno-sys 0.12` → [Updates: `0.12`]
  - `arrow-array =58.3.0` → [Updates: `=58.4.1`, `=60.0.0`]
@@ -271,7 +273,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
  - `numpy ==2.5.0` → [Updates: `==2.5.4`]
  - `h5py ==3.16.0`
- - `zarr ==3.2.1` → [Updates: `==3.4.1`]
+ - `zarr ==3.2.1` → [Updates: `==3.4.2`]
  - `numcodecs ==0.16.5` → [Updates: `==0.17.1`]
  - `nibabel ==5.4.2`
  - `pydicom ==3.0.2`
