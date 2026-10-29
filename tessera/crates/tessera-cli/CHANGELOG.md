@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4](https://github.com/vig-os/tessera/compare/tessera-cli-v0.1.0-alpha.3...tessera-cli-v0.1.0-alpha.4) - 2026-10-29
+
+### Fixed
+
+- *(cli)* [**breaking**] verify-sig no longer trusts ./.tessera/trust/ implicitly
+
 ## [0.1.0-alpha.3](https://github.com/vig-os/tessera/compare/tessera-cli-v0.1.0-alpha.2...tessera-cli-v0.1.0-alpha.3) - 2026-10-19
 
 ### Fixed

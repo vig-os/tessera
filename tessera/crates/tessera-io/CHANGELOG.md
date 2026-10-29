@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.3...tessera-io-v0.1.0-alpha.4) - 2026-10-29
+
+### Fixed
+
+- *(io)* poison a write session on a failed journal write and commit staged blocks by a verified rename
+- *(io)* [**breaking**] stream one canonical table block to a staged file and commit it by a hashing streamed append
+- *(io)* bound every StreamWriter job with a credit window released on in-order commit
+- *(io)* keep values under a NULL out of the chunk-index digest
+- *(io)* honour Column::nullable in encode_streaming
+- *(io)* decode the dtype default under a NULL, not the codec fill
+
 ## [0.1.0-alpha.2](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.1...tessera-io-v0.1.0-alpha.2) - 2026-10-19
 
 ### Added

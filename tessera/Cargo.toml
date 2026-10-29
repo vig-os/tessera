@@ -8,7 +8,7 @@ license = "Apache-2.0"
 # Software SemVer (crates/CLI/bindings) — independent of the format-spec version `tessera_version`,
 # which stays `v0`/pre-1.0 (ADR-0052 §1). The sealed producer stamps TESSERA_VERSION, not this, so a
 # software bump costs no conformance-corpus regen (#336). Bootstrap baseline for release-plz (#337).
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 repository = "https://github.com/vig-os/tessera"
 authors = ["vig-os"]
 
