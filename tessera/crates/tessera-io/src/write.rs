@@ -21,6 +21,25 @@
 //! [`WriteSession::recover`] clears any a crash left behind, so staging never leaks. Every append
 //! commits the same fragment, journal line and Merkle leaf for the same bytes.
 //!
+//! **The crash-consistency contract (#695).** A journal line is written, and fsync'd, only once
+//! everything it names is durable, so a power loss at any point can't leave a line that names a
+//! fragment the disk lost. Durable means both halves: a file's bytes (`fsync` of the file) and its
+//! directory entry (`fsync` of the directory holding it), for the fragment and for every directory
+//! on its path. Every append keeps this order:
+//!
+//! 1. each directory missing on the fragment's path is created and fsync'd into its parent
+//!    (`create_dirs_durable`), before the fragment exists;
+//! 2. the fragment is written (or a staged file renamed into place) and fsync'd, and then its
+//!    directory, so its entry is durable (`durable_fragment`, the one way into `blocks/`);
+//! 3. only then is the journal line written and the journal fsync'd: the commit point.
+//!
+//! [`WriteSession::create`] makes the stage dir, `blocks/` and `staging/` the same way, fsyncs the
+//! stage dir's parent (so the stage dir's own entry is durable even when it already existed), and
+//! fsyncs the stage dir once the header and the journal exist in it. Every whole-file rewrite goes
+//! through `write_durable`. Removals (a failed append's fragment, scratch in `staging/`) are not
+//! made durable: a removal a crash undoes leaves a file no journal line names, which
+//! [`WriteSession::recover`] deletes.
+//!
 //! **A failed journal write poisons the session.** Once a commit has begun writing its journal line,
 //! a failure leaves the journal's state unknown (see [`WriteSession::append_block`]), so the session
 //! refuses every later append and the seal; [`WriteSession::recover`] is the way on.
@@ -52,12 +71,102 @@ const STAGING: &str = "staging";
 /// (`blocks/`). Nothing here is ever part of the product, and the names it holds stay taken.
 const QUARANTINE: &str = "quarantine";
 
+/// Test-only seams (#695): fault counters, and a recorder of the file-system steps the durability
+/// contract is about (a test can't drop the page cache, so it checks their order instead). Each is
+/// thread-local and armed through a guard that disarms it on drop, so a test that panics before a
+/// seam fires can't leave it armed for the next test on its thread.
 #[cfg(test)]
-thread_local! {
-    /// Test-only seam: when set to `n > 0`, fail this thread's `n`-th next [`write_durable`] once its
-    /// temp file is durable and before the rename, the point where a crash leaves both the old file
-    /// and the new one on disk.
-    static FAIL_NTH_DURABLE_RENAME: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+mod seam {
+    use std::cell::{Cell, RefCell};
+    use std::path::PathBuf;
+    use std::thread::LocalKey;
+
+    /// A fault counter: when armed with `n > 0`, the `n`-th next call through it fails.
+    pub type Counter = LocalKey<Cell<usize>>;
+
+    thread_local! {
+        /// Fail a [`super::write_durable`] once its temp file is durable and before the rename, the
+        /// point where a crash leaves both the old file and the new one on disk.
+        pub static FAIL_NTH_DURABLE_RENAME: Cell<usize> = const { Cell::new(0) };
+        /// Fail a [`super::sync_dir`] (the directory fsync).
+        pub static FAIL_NTH_SYNC_DIR: Cell<usize> = const { Cell::new(0) };
+        /// Fail the rename of a staged file into `blocks/` as crossing filesystems (`EXDEV`).
+        pub static CROSS_DEVICE_NTH_STAGED_RENAME: Cell<usize> = const { Cell::new(0) };
+        static LOG: RefCell<Option<Vec<Event>>> = const { RefCell::new(None) };
+    }
+
+    /// Keeps a fault counter armed; dropping it disarms the counter.
+    #[must_use = "the seam is disarmed when the guard is dropped"]
+    pub struct Armed(&'static Counter);
+
+    /// Arm `counter` to fire on its `nth` next call.
+    pub fn arm(counter: &'static Counter, nth: usize) -> Armed {
+        counter.with(|n| n.set(nth));
+        Armed(counter)
+    }
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            self.0.with(|n| n.set(0));
+        }
+    }
+
+    /// Count one call through `counter`: whether it is the call the counter is armed for.
+    pub fn fires(counter: &'static Counter) -> bool {
+        counter.with(|n| n.replace(n.get().saturating_sub(1)) == 1)
+    }
+
+    /// One completed file-system step, as the durability contract sees it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Event {
+        CreateFile(PathBuf),
+        CreateDir(PathBuf),
+        Rename {
+            from: PathBuf,
+            to: PathBuf,
+        },
+        SyncFile(PathBuf),
+        SyncDir(PathBuf),
+        /// A journal line is about to be written, committing the fragment at this path.
+        JournalLine(PathBuf),
+    }
+
+    /// Records this thread's events while it lives.
+    #[must_use = "recording stops when the guard is dropped"]
+    pub struct Recording;
+
+    /// Start recording this thread's events.
+    pub fn record_fs() -> Recording {
+        LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
+        Recording
+    }
+
+    impl Recording {
+        /// The events recorded so far, in order.
+        pub fn events(&self) -> Vec<Event> {
+            LOG.with(|l| l.borrow().clone().unwrap_or_default())
+        }
+    }
+
+    impl Drop for Recording {
+        fn drop(&mut self) {
+            LOG.with(|l| *l.borrow_mut() = None);
+        }
+    }
+
+    /// Whether this thread is recording.
+    pub fn recording() -> bool {
+        LOG.with(|l| l.borrow().is_some())
+    }
+
+    /// Log `event`, if this thread is recording.
+    pub fn record(event: Event) {
+        LOG.with(|l| {
+            if let Some(log) = l.borrow_mut().as_mut() {
+                log.push(event);
+            }
+        });
+    }
 }
 
 /// The manifest header captured at session creation — everything needed to seal except the blocks.
@@ -134,8 +243,6 @@ pub struct WriteSession {
 struct Faults {
     /// Fail the next journal fsync, after the journal line was written.
     journal_sync: bool,
-    /// Treat the next staged-file rename as crossing filesystems (`EXDEV`).
-    cross_device: bool,
 }
 
 /// Deletes a file when dropped, unless [`Self::disarm`]ed, and then the directories created for it
@@ -176,42 +283,131 @@ impl Drop for RemoveOnDrop {
     }
 }
 
-/// The guarded fragment path of block `name` in the session at `dir`: `blocks/<name>`, built from
-/// plain path components only ([`BlockName::path_under`], ADR-0063), so no name reaches outside
-/// `blocks/` (#685). The parent directories of a hierarchical name (`volume/0`) are created, each
-/// fsync'd into its parent so the path survives a crash, and are removed again with the fragment if
-/// the append fails.
-fn fragment_guard(dir: &Path, name: &BlockName) -> Result<RemoveOnDrop> {
+/// Put the fragment of block `name` in place in the session at `dir`, durably: the one way into
+/// `blocks/`, shared by every append (steps 1 and 2 of the module's crash-consistency contract).
+/// The path is `blocks/<name>`, built from plain path components only ([`BlockName::path_under`],
+/// ADR-0063), so no name reaches outside `blocks/` (#685). The directories missing on it (a
+/// hierarchical name's, `volume/0`) are created durably ([`create_dirs_durable`]); then `put`
+/// writes the fragment at the path it is given and makes its bytes durable (writes and fsyncs it,
+/// or renames a durable staged file there); then the fragment's directory is fsync'd, so its entry
+/// is durable too. Returns the guard on the fragment, which deletes it, and the directories created
+/// for it, unless the commit succeeds; a failure at any step does the same. A session whose
+/// `blocks/` is gone (its stage dir deleted under it) is refused with `NotFound` rather than
+/// given a new `blocks/` that no journal on disk would name.
+fn durable_fragment(
+    dir: &Path,
+    name: &BlockName,
+    put: impl FnOnce(&Path) -> Result<()>,
+) -> Result<RemoveOnDrop> {
     let blocks = dir.join(BLOCKS);
+    if !blocks.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "write session {}: {} is missing, so block '{name}' has nowhere to go",
+                dir.display(),
+                blocks.display()
+            ),
+        )
+        .into());
+    }
     let path = name.path_under(&blocks)?;
     let parent = path.parent().expect("under blocks/").to_path_buf();
     let mut guard = RemoveOnDrop::new(path);
-    create_dirs_durable(&blocks, &parent, &mut guard.created_dirs)?;
+    create_dirs_durable(&parent, &mut guard.created_dirs)?;
+    put(guard.path())?;
+    sync_dir(&parent)?;
     Ok(guard)
 }
 
-/// Create the directory `dir` and its missing ancestors below `base` (an existing ancestor), each
-/// fsync'd into its parent so the path survives a crash. Every directory created is recorded in
-/// `created` as soon as it exists, deepest first (the order to remove them in), so a caller can
-/// undo a partial creation.
-fn create_dirs_durable(base: &Path, dir: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
-    let mut missing = Vec::new();
-    let mut d = Some(dir);
-    while let Some(p) = d.filter(|p| *p != base && !p.exists()) {
-        missing.push(p.to_path_buf());
-        d = p.parent();
-    }
+/// Create the directory `dir` and every missing ancestor, each fsync'd into its parent so the path
+/// survives a crash: the one durable-directory path (#695), used for the stage dir, `blocks/`,
+/// `staging/`, a fragment's directories and a quarantine's. Every directory created is recorded
+/// in `created` as soon as it exists, before its fsync, deepest first (the order to remove them
+/// in), so a caller can undo a partial creation even when the fsync is what failed. A directory
+/// that already exists is left as it is: making its own entry durable is the caller's business
+/// ([`WriteSession::create`] fsyncs the stage dir's parent).
+fn create_dirs_durable(dir: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
+    let missing: Vec<&Path> = dir
+        .ancestors()
+        .take_while(|p| !p.as_os_str().is_empty() && !p.exists())
+        .collect();
     for p in missing.into_iter().rev() {
-        fs::create_dir(&p)?;
-        sync_dir(p.parent().expect("below base"))?;
-        created.insert(0, p);
+        create_dir(p)?;
+        created.insert(0, p.to_path_buf());
+        sync_dir(parent_dir(p))?;
     }
     Ok(())
 }
 
+/// The directory holding `path`'s entry: its parent, or `.` for a bare relative name.
+fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    }
+}
+
+// The file-system steps the durability contract is made of (see the module docs), each a thin
+// wrapper so that a test can record it (`seam::Event`) and, for the directory fsync, fail it.
+
+/// Create (or truncate) the file `path` for writing.
+fn create_file(path: &Path) -> std::io::Result<File> {
+    let file = File::create(path)?;
+    #[cfg(test)]
+    seam::record(seam::Event::CreateFile(path.to_path_buf()));
+    Ok(file)
+}
+
+/// fsync `file`, open at `path`, so its bytes survive a crash (not its directory entry: see
+/// [`sync_dir`]).
+#[cfg_attr(not(test), allow(unused_variables))]
+fn sync_file(file: &File, path: &Path) -> std::io::Result<()> {
+    file.sync_all()?;
+    #[cfg(test)]
+    seam::record(seam::Event::SyncFile(path.to_path_buf()));
+    Ok(())
+}
+
+/// Create the directory `path` (its parent must exist).
+fn create_dir(path: &Path) -> std::io::Result<()> {
+    fs::create_dir(path)?;
+    #[cfg(test)]
+    seam::record(seam::Event::CreateDir(path.to_path_buf()));
+    Ok(())
+}
+
+/// Rename `from` to `to` (atomic; durable only once both directories are fsync'd).
+fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::rename(from, to)?;
+    #[cfg(test)]
+    seam::record(seam::Event::Rename {
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
+    });
+    Ok(())
+}
+
+/// [`rename`] for a staged file's move into `blocks/` (with a test seam to fail it as crossing
+/// filesystems).
+fn rename_staged(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if seam::fires(&seam::CROSS_DEVICE_NTH_STAGED_RENAME) {
+        return Err(std::io::ErrorKind::CrossesDevices.into());
+    }
+    rename(from, to)
+}
+
 /// fsync the directory `dir`, so the entries created, renamed or removed in it survive a crash.
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
-    File::open(dir)?.sync_all()
+    #[cfg(test)]
+    if seam::fires(&seam::FAIL_NTH_SYNC_DIR) {
+        return Err(std::io::Error::other("injected directory fsync failure"));
+    }
+    File::open(dir)?.sync_all()?;
+    #[cfg(test)]
+    seam::record(seam::Event::SyncDir(dir.to_path_buf()));
+    Ok(())
 }
 
 /// Empty the staging directory of the session at `dir` (creating it if absent). Staged files are
@@ -223,8 +419,7 @@ fn reset_staging(dir: &Path) -> Result<()> {
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
     }
-    fs::create_dir_all(&staging)?;
-    Ok(())
+    create_dirs_durable(&staging, &mut Vec::new())
 }
 
 /// A handle on a [`WriteSession`]'s staging directory, for encoders that run apart from the
@@ -246,7 +441,7 @@ impl BlockStaging {
     pub fn create(&self) -> Result<StagedBlock> {
         let n = self.seq.fetch_add(1, Ordering::Relaxed);
         let guard = RemoveOnDrop::new(self.dir.join(format!("block-{n:010}.staged")));
-        let out = BufWriter::new(File::create(guard.path())?);
+        let out = BufWriter::new(create_file(guard.path())?);
         Ok(StagedBlock {
             out,
             hasher: Box::default(),
@@ -330,27 +525,29 @@ fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
     tmp_name.push(".tmp");
     let tmp = RemoveOnDrop::new(path.with_file_name(tmp_name));
     {
-        let mut f = File::create(tmp.path())?;
+        let mut f = create_file(tmp.path())?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        sync_file(&f, tmp.path())?;
     }
     #[cfg(test)]
-    if FAIL_NTH_DURABLE_RENAME.with(|n| n.replace(n.get().saturating_sub(1)) == 1) {
+    if seam::fires(&seam::FAIL_NTH_DURABLE_RENAME) {
         return Err(std::io::Error::other("injected crash before the durable rename").into());
     }
-    fs::rename(tmp.path(), path)?;
+    rename(tmp.path(), path)?;
     tmp.disarm();
-    sync_dir(match path.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => dir,
-        _ => Path::new("."),
-    })?;
+    sync_dir(parent_dir(path))?;
     Ok(())
 }
 
 impl WriteSession {
     /// Start a new session in `dir` (created if absent): writes the header and an empty journal. A
     /// recovery quarantine already in `dir` is left in place, and the names it holds stay taken (see
-    /// [`Self::recover`]).
+    /// [`Self::recover`]); one whose journal is corrupt is refused ([`Error::CorruptJournal`])
+    /// before anything on disk changes.
+    ///
+    /// **Durable on return** (#695): the stage dir (with any missing parent), `blocks/`,
+    /// `staging/`, the header and the journal, bytes and directory entries alike, so a power loss
+    /// after `create` returns can't leave a session without its journal.
     pub fn create(
         dir: &Path,
         product: impl Into<String>,
@@ -358,7 +555,10 @@ impl WriteSession {
         description: impl Into<String>,
         timestamp: impl Into<String>,
     ) -> Result<Self> {
-        fs::create_dir_all(dir.join(BLOCKS))?;
+        let quarantined = quarantined_names(dir)?;
+        create_dirs_durable(&dir.join(BLOCKS), &mut Vec::new())?;
+        // The stage dir's own entry, also when it already existed (a new one is already durable).
+        sync_dir(parent_dir(dir))?;
         reset_staging(dir)?;
         let header = Header {
             product: product.into(),
@@ -373,12 +573,10 @@ impl WriteSession {
             generation: None,
         };
         write_durable(&dir.join(HEADER), &serde_json::to_vec_pretty(&header)?)?;
-        let journal = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(dir.join(JOURNAL))?;
-        journal.sync_all()?;
+        let journal_path = dir.join(JOURNAL);
+        let journal = create_file(&journal_path)?;
+        sync_file(&journal, &journal_path)?;
+        sync_dir(dir)?;
         Ok(WriteSession {
             dir: dir.to_path_buf(),
             header,
@@ -387,7 +585,7 @@ impl WriteSession {
             merkle: MerkleAccumulator::new(),
             staged_seq: Arc::new(AtomicU64::new(0)),
             poisoned: None,
-            quarantined: quarantined_names(dir)?,
+            quarantined,
             #[cfg(test)]
             faults: Faults::default(),
         })
@@ -452,9 +650,10 @@ impl WriteSession {
         Ok(())
     }
 
-    /// Durably append one already-encoded block: write the fragment, fsync, then commit a journal
-    /// line (the atomic commit point), fsync, then fold the digest into the running Merkle root.
-    /// `block_ref` MUST carry a digest computed over `payload`.
+    /// Durably append one already-encoded block: write the fragment, fsync it and its directory
+    /// (and every directory created for it), then commit a journal line (the atomic commit point),
+    /// fsync, then fold the digest into the running Merkle root (the module's crash-consistency
+    /// contract). `block_ref` MUST carry a digest computed over `payload`.
     ///
     /// **Failure.** A failure before the journal line leaves no trace: the fragment is deleted
     /// again. A failure once the journal write has begun (the write itself, or its fsync)
@@ -476,13 +675,13 @@ impl WriteSession {
             .digest
             .clone()
             .ok_or_else(|| Error::MissingDigest(block_ref.name.to_string()))?;
-        // 1. fragment → durable (deleted again unless the commit succeeds)
-        let fragment = fragment_guard(&self.dir, &block_ref.name)?;
-        {
-            let mut w = File::create(fragment.path())?;
+        // 1. fragment → durable, bytes and entry (deleted again unless the commit succeeds)
+        let fragment = durable_fragment(&self.dir, &block_ref.name, |path| {
+            let mut w = create_file(path)?;
             w.write_all(payload)?;
-            w.sync_all()?;
-        }
+            sync_file(&w, path)?;
+            Ok(())
+        })?;
         self.commit(block_ref, digest, payload.len() as u64, fragment)
     }
 
@@ -543,7 +742,8 @@ impl WriteSession {
             Some(_) => {}
             None => block_ref.digest = Some(digest.clone()),
         }
-        out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+        let file = out.into_inner().map_err(|e| e.into_error())?;
+        sync_file(&file, guard.path())?;
         let fragment = self.place(guard, &block_ref.name)?;
         let on_disk = tessera_core::hash::digest_reader(File::open(fragment.path())?)?;
         if on_disk != digest {
@@ -611,33 +811,19 @@ impl WriteSession {
     /// Move the durable `staged` file to the fragment `blocks/<name>` and make the move durable.
     /// Returns the guard on the fragment, which deletes it unless the commit succeeds. A rename;
     /// across filesystems (`CrossesDevices`), a copy, and the staged file is deleted.
-    fn place(&mut self, staged: RemoveOnDrop, name: &BlockName) -> Result<RemoveOnDrop> {
-        let fragment = fragment_guard(&self.dir, name)?;
-        let parent = fragment
-            .path()
-            .parent()
-            .expect("a fragment is under blocks/")
-            .to_path_buf();
-        match self.rename(staged.path(), fragment.path()) {
-            Ok(()) => staged.disarm(),
-            Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
-                let mut copy = File::create(fragment.path())?;
-                std::io::copy(&mut File::open(staged.path())?, &mut copy)?;
-                copy.sync_all()?;
+    fn place(&self, staged: RemoveOnDrop, name: &BlockName) -> Result<RemoveOnDrop> {
+        durable_fragment(&self.dir, name, |path| {
+            match rename_staged(staged.path(), path) {
+                Ok(()) => staged.disarm(),
+                Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+                    let mut copy = create_file(path)?;
+                    std::io::copy(&mut File::open(staged.path())?, &mut copy)?;
+                    sync_file(&copy, path)?;
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
-        }
-        sync_dir(&parent)?;
-        Ok(fragment)
-    }
-
-    /// `fs::rename` (with a test seam to fail it as crossing filesystems).
-    fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
-        #[cfg(test)]
-        if std::mem::take(&mut self.faults.cross_device) {
-            return Err(std::io::ErrorKind::CrossesDevices.into());
-        }
-        fs::rename(from, to)
+            Ok(())
+        })
     }
 
     /// The commit every append shares, once the block's `fragment` is durable in `blocks/`: the
@@ -652,6 +838,8 @@ impl WriteSession {
         fragment: RemoveOnDrop,
     ) -> Result<()> {
         let line = serde_json::to_string(&block_ref)?;
+        #[cfg(test)]
+        seam::record(seam::Event::JournalLine(fragment.path().to_path_buf()));
         // 2. journal line → durable (this is the commit watermark advance)
         let journaled = writeln!(self.journal, "{line}").and_then(|()| self.sync_journal());
         if let Err(e) = journaled {
@@ -692,7 +880,7 @@ impl WriteSession {
         if std::mem::take(&mut self.faults.journal_sync) {
             return Err(std::io::Error::other("injected journal fsync failure"));
         }
-        self.journal.sync_all()
+        sync_file(&self.journal, &self.dir.join(JOURNAL))
     }
 
     /// The number of committed blocks (the crash-recovery watermark).
@@ -718,6 +906,8 @@ impl WriteSession {
     /// [`Error::BlockNameConflict`] (ADR-0063, #685; neither name is ever followed to a path), a
     /// line without a digest with [`Error::MissingDigest`], and a line that is not UTF-8, not JSON,
     /// not a block reference, or a block committed a second time with [`Error::CorruptJournal`].
+    /// The journals of the recovery quarantine are read, and held to the same format, before
+    /// anything changes too (#695).
     /// That strictness has a cost: if a crash leaves stale bytes that happen to end in a newline at
     /// the journal's end (possible on a filesystem that journals metadata but not data), recovery
     /// refuses the session rather than guess which lines are commits.
@@ -764,6 +954,7 @@ impl WriteSession {
         let journal_path = dir.join(JOURNAL);
         let raw = fs::read(&journal_path)?;
         let lines = parse_journal(&journal_path, &raw)?;
+        let mut quarantined = quarantined_names(dir)?;
         let blocks_dir = dir.join(BLOCKS);
         let mut replayed = 0;
         for line in &lines {
@@ -775,6 +966,7 @@ impl WriteSession {
         let (kept, unreplayed) = lines.split_at(replayed);
         if unreplayed.len() > 1 {
             quarantine(dir, unreplayed)?;
+            quarantined = quarantined_names(dir)?;
         }
         write_durable(
             &journal_path,
@@ -787,7 +979,6 @@ impl WriteSession {
         let journal = OpenOptions::new().append(true).open(&journal_path)?;
         reset_staging(dir)?;
         remove_orphan_fragments(dir, kept.iter().map(|l| &l.block.name))?;
-        let quarantined = quarantined_names(dir)?;
         let mut merkle = MerkleAccumulator::new();
         for line in kept {
             merkle.push(&line.digest);
@@ -959,7 +1150,7 @@ fn quarantine(dir: &Path, tail: &[JournalLine]) -> Result<()> {
     let q = dir
         .join(QUARANTINE)
         .join(id.strip_prefix("blake3:").unwrap_or(&id));
-    create_dirs_durable(dir, &q, &mut Vec::new())?;
+    create_dirs_durable(&q, &mut Vec::new())?;
     write_durable(&q.join(JOURNAL), &text)?;
     let (from, to) = (dir.join(BLOCKS), q.join(BLOCKS));
     for line in tail {
@@ -969,8 +1160,8 @@ fn quarantine(dir: &Path, tail: &[JournalLine]) -> Result<()> {
         }
         let dst = line.block.name.path_under(&to)?;
         let dst_dir = dst.parent().expect("under the quarantine's blocks/");
-        create_dirs_durable(&q, dst_dir, &mut Vec::new())?;
-        fs::rename(&src, &dst)?;
+        create_dirs_durable(dst_dir, &mut Vec::new())?;
+        rename(&src, &dst)?;
         sync_dir(dst_dir)?;
         sync_dir(src.parent().expect("under blocks/"))?;
     }
@@ -1635,7 +1826,7 @@ mod tests {
             let mut bytes = fs::read(&path).unwrap();
             bytes[pb.len() / 2] ^= 1;
             fs::write(&path, &bytes).unwrap();
-            ws.faults.cross_device = cross_device;
+            let _exdev = cross_device.then(|| seam::arm(&seam::CROSS_DEVICE_NTH_STAGED_RENAME, 1));
             let mut unset = rb.clone();
             unset.digest = None;
             let err = ws.append_staged(unset, s).unwrap_err();
@@ -1656,7 +1847,7 @@ mod tests {
             );
             assert_eq!((ws.watermark(), ws.running_root()), (1, root));
 
-            ws.faults.cross_device = cross_device;
+            let _exdev = cross_device.then(|| seam::arm(&seam::CROSS_DEVICE_NTH_STAGED_RENAME, 1));
             let s = staged(&ws, &pb);
             let committed = ws.append_staged(rb.clone(), s).unwrap();
             assert_eq!(committed.digest, rb.digest);
@@ -1865,7 +2056,7 @@ mod tests {
         drop(f);
         let before = fs::read(&jpath).unwrap();
 
-        FAIL_NTH_DURABLE_RENAME.with(|n| n.set(1));
+        let _crash = seam::arm(&seam::FAIL_NTH_DURABLE_RENAME, 1);
         let err = WriteSession::recover(&stage)
             .err()
             .expect("the injected crash");
@@ -2036,7 +2227,7 @@ mod tests {
         // Durable writes in order: 1 = the quarantine's journal, 2 = the session's journal.
         for nth in [1, 2] {
             let stage = stage_cut_short(&format!("crash-{nth}"));
-            FAIL_NTH_DURABLE_RENAME.with(|n| n.set(nth));
+            let _crash = seam::arm(&seam::FAIL_NTH_DURABLE_RENAME, nth);
             let err = WriteSession::recover(&stage)
                 .err()
                 .expect("the injected crash");
@@ -2138,5 +2329,264 @@ mod tests {
                 "{what}: the torn append's fragment"
             );
         }
+    }
+
+    /// Append block `r` (payload `p`) through the append path `via`: `append_block`, or
+    /// `append_staged` (`append_staged_copy`: with its rename failing as crossing filesystems).
+    fn append_via(via: &str, ws: &mut WriteSession, r: BlockRef, p: &[u8]) -> Result<()> {
+        match via {
+            "append_block" => ws.append_block(r, p),
+            "append_staged" | "append_staged_copy" => {
+                let _exdev = (via == "append_staged_copy")
+                    .then(|| seam::arm(&seam::CROSS_DEVICE_NTH_STAGED_RENAME, 1));
+                let s = staged(ws, p);
+                ws.append_staged(r, s).map(drop)
+            }
+            _ => unreachable!("append path {via}"),
+        }
+    }
+
+    /// What a power loss could still undo, replayed from a recorded event log (#695). An entry
+    /// (file or directory) is durable once its directory is fsync'd after the entry was last
+    /// created or renamed; an entry that no event created existed before the recording, and is
+    /// durable once its directory is fsync'd at all (or, for the recording's `root`, already).
+    /// A file's bytes are durable once it is fsync'd after it was created.
+    #[derive(Default)]
+    struct Replay {
+        step: usize,
+        touched: BTreeMap<PathBuf, usize>,
+        dir_synced: BTreeMap<PathBuf, usize>,
+        unsynced_bytes: std::collections::BTreeSet<PathBuf>,
+    }
+
+    impl Replay {
+        fn apply(&mut self, event: &seam::Event) {
+            use seam::Event::*;
+            self.step += 1;
+            match event {
+                CreateFile(p) => {
+                    self.touched.insert(p.clone(), self.step);
+                    self.unsynced_bytes.insert(p.clone());
+                }
+                CreateDir(p) => {
+                    self.touched.insert(p.clone(), self.step);
+                }
+                Rename { from, to } => {
+                    self.touched.insert(from.clone(), self.step);
+                    self.touched.insert(to.clone(), self.step);
+                    if self.unsynced_bytes.remove(from) {
+                        self.unsynced_bytes.insert(to.clone());
+                    }
+                }
+                SyncFile(p) => {
+                    self.unsynced_bytes.remove(p);
+                }
+                SyncDir(d) => {
+                    self.dir_synced.insert(d.clone(), self.step);
+                }
+                JournalLine(_) => {}
+            }
+        }
+
+        /// What a power loss could still undo of `path` below the pre-existing `root`: its bytes,
+        /// and its own entry and every ancestor's.
+        fn undoable(&self, root: &Path, path: &Path) -> Vec<String> {
+            let mut undoable = Vec::new();
+            if self.unsynced_bytes.contains(path) {
+                undoable.push(format!("the bytes of {}", path.display()));
+            }
+            for entry in path
+                .ancestors()
+                .take_while(|a| *a != root && a.starts_with(root))
+            {
+                let touched = self.touched.get(entry).copied().unwrap_or(0);
+                let synced = entry.parent().and_then(|d| self.dir_synced.get(d));
+                if synced.is_none_or(|s| *s <= touched) {
+                    undoable.push(format!("the entry of {}", entry.display()));
+                }
+            }
+            undoable
+        }
+    }
+
+    /// Replay `events` (recorded below the pre-existing `root`, for the session at `stage`) and check
+    /// the commit point at every journal line: the fragment it commits, every directory on the
+    /// fragment's path and the journal itself are already durable. Returns the replay and the number
+    /// of journal lines checked, so that a log without one can't pass by having nothing to check.
+    fn check_commit_points(root: &Path, stage: &Path, events: &[seam::Event]) -> (Replay, usize) {
+        use std::collections::BTreeSet;
+        let mut replay = Replay::default();
+        let mut lines = 0;
+        for event in events {
+            if let seam::Event::JournalLine(fragment) = event {
+                let undoable: BTreeSet<String> = [fragment.as_path(), &stage.join(JOURNAL)]
+                    .into_iter()
+                    .flat_map(|path| replay.undoable(root, path))
+                    .collect();
+                assert!(
+                    undoable.is_empty(),
+                    "the journal line of {} is written while a power loss could still undo {undoable:#?}",
+                    fragment.display()
+                );
+                lines += 1;
+            }
+            replay.apply(event);
+        }
+        (replay, lines)
+    }
+
+    /// #695: the journal line is the commit point, so a power loss must not be able to undo anything
+    /// it names once it is written. Recorded from `create` on: `create` returns with every entry it
+    /// made durable (the stage dir and its missing parent included, or a stage dir that already
+    /// existed), and at each append's journal
+    /// line, through every append path, the fragment's bytes and its entry, every directory on its
+    /// path, and the journal's entry are durable.
+    #[test]
+    fn every_entry_a_journal_line_names_is_durable_before_it() {
+        let cases = [
+            ("append_block", false),
+            ("append_block", true),
+            ("append_staged", false),
+            ("append_staged_copy", false),
+        ];
+        for (via, existing) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            // A new stage dir gets a missing parent too; an existing one sits right below `root`,
+            // so the only entry `create` must make durable for it is its own.
+            let stage = if existing {
+                fs::create_dir(root.join("stage")).unwrap();
+                root.join("stage")
+            } else {
+                root.join("parent").join("stage")
+            };
+            let recording = seam::record_fs();
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            let (replay, _) = check_commit_points(root, &stage, &recording.events());
+            let undoable: std::collections::BTreeSet<String> = tree(root)
+                .into_keys()
+                .flat_map(|rel| replay.undoable(root, &root.join(rel)))
+                .collect();
+            assert!(
+                undoable.is_empty(),
+                "{via} (existing stage dir: {existing}): create returns while a power loss could still undo {undoable:#?}"
+            );
+            for (i, name) in ["x/y/z", "x/w", "v"].into_iter().enumerate() {
+                let (r, p) = block(name, i as i16);
+                append_via(via, &mut ws, r, &p).unwrap();
+            }
+            let (_, lines) = check_commit_points(root, &stage, &recording.events());
+            assert_eq!(lines, 3, "{via}: every append writes one journal line");
+        }
+    }
+
+    /// #695 (PR #696 review, item 1): a directory made for a fragment is recorded for removal before
+    /// its fsync, so a failed fsync leaves no stray directory, and a later append whose fragment
+    /// needs that path (`c` after a failed `c/0`) commits instead of failing with EISDIR.
+    #[test]
+    fn a_failed_directory_fsync_leaves_no_stray_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        for via in ["append_block", "append_staged"] {
+            let stage = dir.path().join(via);
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            let (r, p) = block("c/0", 0);
+            let err = {
+                let _fault = seam::arm(&seam::FAIL_NTH_SYNC_DIR, 1);
+                append_via(via, &mut ws, r, &p).unwrap_err()
+            };
+            assert!(
+                err.to_string().contains("injected directory fsync failure"),
+                "{via}: {err}"
+            );
+            assert_eq!(
+                fs::read_dir(stage.join(BLOCKS)).unwrap().count(),
+                0,
+                "{via}: the failed append left blocks/c behind"
+            );
+            assert_eq!(
+                fs::read_dir(stage.join(STAGING)).unwrap().count(),
+                0,
+                "{via}: the failed append left its staged file behind"
+            );
+            let (r, p) = block("c", 1);
+            append_via(via, &mut ws, r, &p).unwrap();
+            assert_eq!(fs::read(stage.join("blocks/c")).unwrap(), p, "{via}");
+        }
+    }
+
+    /// #695: an append to a session whose `blocks/` is gone is refused with `NotFound`, and makes no
+    /// new `blocks/` that no journal on disk would name.
+    #[test]
+    fn an_append_without_blocks_dir_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for via in ["append_block", "append_staged"] {
+            let stage = dir.path().join(via);
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            fs::remove_dir(stage.join(BLOCKS)).unwrap();
+            let (r, p) = block("x/0", 0);
+            let err = append_via(via, &mut ws, r, &p).unwrap_err();
+            assert!(
+                matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::NotFound),
+                "{via}: {err}"
+            );
+            assert!(!stage.join(BLOCKS).exists(), "{via}: blocks/ was recreated");
+            assert_eq!(ws.watermark(), 0, "{via}");
+        }
+    }
+
+    /// #695 (PR #696 review, item 2): `recover` and `create` read the quarantine's journals before
+    /// they change anything, so a corrupt one is refused with the typed error and the stage dir is
+    /// left byte for byte as it was (`recover` would otherwise drop the torn tail and delete the
+    /// orphan fragment and the staged file, `create` would reset the journal and staging).
+    #[test]
+    fn a_corrupt_quarantine_journal_is_refused_before_anything_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        drop(session_with(&stage, &["a"]));
+        let q = stage.join(QUARANTINE).join("0123");
+        fs::create_dir_all(&q).unwrap();
+        fs::write(q.join(JOURNAL), b"not a journal line\n").unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(stage.join(JOURNAL))
+            .unwrap();
+        f.write_all(b"{\"name\":\"b\",\"ki").unwrap();
+        drop(f);
+        fs::write(stage.join("blocks/orphan"), b"orphan").unwrap();
+        fs::write(stage.join(STAGING).join("block-0000000000.staged"), b"x").unwrap();
+        let before = tree(&stage);
+        let corrupt = |err: &Error| matches!(err, Error::CorruptJournal { path, line: 1, .. } if *path == q.join(JOURNAL));
+
+        let err = WriteSession::recover(&stage)
+            .err()
+            .expect("a corrupt quarantine");
+        assert!(corrupt(&err), "recover: {err}");
+        assert!(tree(&stage) == before, "recover changed the stage dir");
+        let err = WriteSession::create(&stage, "recon", "p", "d", TS)
+            .err()
+            .expect("a corrupt quarantine");
+        assert!(corrupt(&err), "create: {err}");
+        assert!(tree(&stage) == before, "create changed the stage dir");
+    }
+
+    /// #695 (PR #696 review, item 3): a seam is disarmed when its guard drops, unwinding included, so
+    /// a test that panics before its seam fires can't leave it armed for the next test on its thread.
+    #[test]
+    fn a_panicking_test_leaves_every_seam_disarmed() {
+        let counters: [&'static seam::Counter; 3] = [
+            &seam::FAIL_NTH_DURABLE_RENAME,
+            &seam::FAIL_NTH_SYNC_DIR,
+            &seam::CROSS_DEVICE_NTH_STAGED_RENAME,
+        ];
+        let unwound = std::panic::catch_unwind(|| {
+            let _armed = counters.map(|c| seam::arm(c, 5));
+            let _recording = seam::record_fs();
+            panic!("a test that fails before its seams fire");
+        });
+        assert!(unwound.is_err());
+        for c in counters {
+            assert_eq!(c.with(std::cell::Cell::get), 0, "a seam is still armed");
+        }
+        assert!(!seam::recording(), "the recorder is still on");
     }
 }
