@@ -10,7 +10,10 @@
 
 pub mod array;
 pub mod blob;
+pub mod name;
 pub mod table;
+
+pub use name::{check_leaf_rule, BlockName};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +38,9 @@ pub enum BlockKind {
 /// A reference to a block, as recorded in the manifest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockRef {
-    pub name: String,
+    /// The block's name: validated by the block-name grammar (ADR-0063), on construction and on
+    /// deserialization alike.
+    pub name: BlockName,
     pub kind: BlockKind,
     /// Per-block content digest (rolled into the product Merkle root at seal time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,7 +61,7 @@ pub trait Block {
     /// Build the manifest reference for this block.
     fn block_ref(&self) -> crate::Result<BlockRef> {
         Ok(BlockRef {
-            name: self.name().to_string(),
+            name: BlockName::new(self.name())?,
             kind: self.kind(),
             digest: Some(self.digest()?),
             spec: self.spec_json()?,

@@ -13,6 +13,7 @@
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use tessera_core::block::BlockName;
 use tessera_io::conformance::{fixtures, Fixture};
 use tessera_io::{
     add_aux_members, pack, pack_dir, pack_streaming, pack_streaming_verified, unpack,
@@ -92,7 +93,7 @@ fn assert_all_stored(path: &Path) {
 }
 
 /// Write each payload of `f` to its own fragment file, for the streaming packers.
-fn fragments(f: &Fixture, dir: &Path) -> Vec<(String, PathBuf)> {
+fn fragments(f: &Fixture, dir: &Path) -> Vec<(BlockName, PathBuf)> {
     std::fs::create_dir_all(dir).unwrap();
     f.payloads
         .iter()
@@ -135,7 +136,7 @@ fn every_writer_emits_only_stored_entries() {
     for f in all {
         let d = dir.path().join(f.name);
         let frags = fragments(&f, &d.join("frags"));
-        let sources: Vec<(String, &Path)> = frags
+        let sources: Vec<(BlockName, &Path)> = frags
             .iter()
             .map(|(n, p)| (n.clone(), p.as_path()))
             .collect();

@@ -48,7 +48,7 @@
 
 use futures::StreamExt;
 use tessera_core::block::table::{Column, TableSpec};
-use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::block::{BlockKind, BlockName, BlockRef};
 use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
 use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
@@ -1656,10 +1656,11 @@ pub fn table_block(
     spec: &TableSpec,
     data: &TableData,
 ) -> Result<(BlockRef, BlockPayload)> {
+    let name = BlockName::new(name)?;
     let payload = encode(spec, data)?;
     let digest = tessera_core::hash::digest(&payload);
     let block_ref = BlockRef {
-        name: name.to_string(),
+        name: name.clone(),
         kind: BlockKind::Table,
         digest: Some(digest),
         spec: serde_json::to_value(spec)?,

@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tessera_core::block::BlockRef;
+use tessera_core::block::{BlockName, BlockRef};
 use tessera_core::hash::{MerkleAccumulator, StreamHasher};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, ProductBuilder, Result};
@@ -121,31 +121,66 @@ struct Faults {
     cross_device: bool,
 }
 
-/// Deletes a file when dropped, unless [`Self::disarm`]ed. Best effort: a drop can't report an
-/// error, and a file that is already gone is the goal.
+/// Deletes a file when dropped, unless [`Self::disarm`]ed, and then the directories created for it
+/// (a hierarchical block name's subdirectories), deepest first, if they are empty. Best effort: a
+/// drop can't report an error, and a file that is already gone is the goal.
 #[derive(Debug)]
-struct RemoveOnDrop(Option<PathBuf>);
+struct RemoveOnDrop {
+    path: Option<PathBuf>,
+    created_dirs: Vec<PathBuf>,
+}
 
 impl RemoveOnDrop {
     fn new(path: PathBuf) -> Self {
-        RemoveOnDrop(Some(path))
+        RemoveOnDrop {
+            path: Some(path),
+            created_dirs: Vec::new(),
+        }
     }
 
     fn path(&self) -> &Path {
-        self.0.as_deref().expect("armed")
+        self.path.as_deref().expect("armed")
     }
 
     fn disarm(mut self) {
-        self.0 = None;
+        self.path = None;
     }
 }
 
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
+        if let Some(path) = self.path.take() {
             let _ = fs::remove_file(path);
+            for dir in &self.created_dirs {
+                // `remove_dir` refuses a non-empty directory, so a sibling's fragment is never touched.
+                let _ = fs::remove_dir(dir);
+            }
         }
     }
+}
+
+/// The guarded fragment path of block `name` in the session at `dir`: `blocks/<name>`, built from
+/// plain path components only ([`BlockName::path_under`], ADR-0063), so no name reaches outside
+/// `blocks/` (#685). The parent directories of a hierarchical name (`volume/0`) are created, each
+/// fsync'd into its parent so the path survives a crash, and are removed again with the fragment if
+/// the append fails.
+fn fragment_guard(dir: &Path, name: &BlockName) -> Result<RemoveOnDrop> {
+    let blocks = dir.join(BLOCKS);
+    let path = name.path_under(&blocks)?;
+    let mut created_dirs = Vec::new();
+    let mut d = path.parent();
+    while let Some(p) = d.filter(|p| *p != blocks && !p.exists()) {
+        created_dirs.push(p.to_path_buf());
+        d = p.parent();
+    }
+    let mut guard = RemoveOnDrop::new(path);
+    // Deepest first, as the drop removes them; creation runs the other way.
+    for created in created_dirs.iter().rev() {
+        fs::create_dir(created)?;
+        guard.created_dirs.insert(0, created.clone());
+        File::open(created.parent().expect("under blocks/"))?.sync_all()?;
+    }
+    Ok(guard)
 }
 
 /// Empty the staging directory of the session at `dir` (creating it if absent). Staged files are
@@ -393,9 +428,9 @@ impl WriteSession {
         let digest = block_ref
             .digest
             .clone()
-            .ok_or_else(|| Error::MissingDigest(block_ref.name.clone()))?;
+            .ok_or_else(|| Error::MissingDigest(block_ref.name.to_string()))?;
         // 1. fragment → durable (deleted again unless the commit succeeds)
-        let fragment = RemoveOnDrop::new(self.dir.join(BLOCKS).join(&block_ref.name));
+        let fragment = fragment_guard(&self.dir, &block_ref.name)?;
         {
             let mut w = File::create(fragment.path())?;
             w.write_all(payload)?;
@@ -484,8 +519,11 @@ impl WriteSession {
         }
     }
 
-    /// Refuse an append the session can't take: any, once poisoned, and one whose name is already
-    /// committed (its fragment would be overwritten, and deleted again if the append failed).
+    /// Refuse an append the session can't take: any, once poisoned; one whose name is already
+    /// committed (its fragment would be overwritten, and deleted again if the append failed); and
+    /// one whose name and a committed name break the leaf rule (ADR-0063: one the parent of the
+    /// other, [`Error::BlockNameConflict`]), since the seal would refuse the pair and the fragments
+    /// can't be both a file and a directory.
     fn admit(&self, block_ref: &BlockRef) -> Result<()> {
         self.usable()?;
         if self.blocks.iter().any(|b| b.name == block_ref.name) {
@@ -494,7 +532,7 @@ impl WriteSession {
                 block_ref.name
             )));
         }
-        Ok(())
+        leaf_rule_against(&self.blocks, &block_ref.name)
     }
 
     /// `Err` once the session is poisoned (see [`Self::append_block`]).
@@ -513,9 +551,13 @@ impl WriteSession {
     /// Move the durable `staged` file to the fragment `blocks/<name>` and make the move durable.
     /// Returns the guard on the fragment, which deletes it unless the commit succeeds. A rename;
     /// across filesystems (`CrossesDevices`), a copy, and the staged file is deleted.
-    fn place(&mut self, staged: RemoveOnDrop, name: &str) -> Result<RemoveOnDrop> {
-        let blocks = self.dir.join(BLOCKS);
-        let fragment = RemoveOnDrop::new(blocks.join(name));
+    fn place(&mut self, staged: RemoveOnDrop, name: &BlockName) -> Result<RemoveOnDrop> {
+        let fragment = fragment_guard(&self.dir, name)?;
+        let parent = fragment
+            .path()
+            .parent()
+            .expect("a fragment is under blocks/")
+            .to_path_buf();
         match self.rename(staged.path(), fragment.path()) {
             Ok(()) => staged.disarm(),
             Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
@@ -525,7 +567,7 @@ impl WriteSession {
             }
             Err(e) => return Err(e.into()),
         }
-        File::open(&blocks)?.sync_all()?;
+        File::open(&parent)?.sync_all()?;
         Ok(fragment)
     }
 
@@ -607,6 +649,19 @@ impl WriteSession {
     /// Reopen a staging directory after a crash, replaying the journal to the last intact line. A
     /// torn final line (partial write) fails to parse and is dropped — the watermark is the last
     /// fully-committed block — and the journal is rewritten to that clean prefix so appends resume.
+    ///
+    /// A **complete** line is a commit, so it is held to the format rather than dropped as torn: a
+    /// name that fails the block-name grammar is refused with [`Error::InvalidBlockName`], and one
+    /// that breaks the leaf rule against an earlier line with [`Error::BlockNameConflict`] (ADR-0063,
+    /// #685). Neither is ever followed to a path; the session directory is left as it was.
+    ///
+    /// Once the journal is recovered, every file under `blocks/` that **no line of the journal
+    /// names** (the fragment of an append that never reached its journal line) is deleted, with any
+    /// directory left empty. Such a file is scratch, and left in place it would block a later append
+    /// whose name needs its path as a directory (`volume` vs `volume/0`), or the reverse. A fragment
+    /// that some line names is kept even when recovery stops before that line (a missing fragment
+    /// earlier, a line this build can't parse), so a journal cut short here can still be repaired by
+    /// hand.
     pub fn recover(dir: &Path) -> Result<Self> {
         // A header this build cannot parse in full is refused rather than silently narrowed (see
         // [`Header`]); say what to do about it, since "unknown field" alone reads like corruption.
@@ -623,21 +678,28 @@ impl WriteSession {
         let mut blocks = Vec::new();
         let mut merkle = MerkleAccumulator::new();
         for line in raw.lines() {
-            match serde_json::from_str::<BlockRef>(line) {
-                Ok(r) => {
-                    let digest = r
-                        .digest
-                        .clone()
-                        .ok_or_else(|| Error::MissingDigest(r.name.clone()))?;
-                    // a committed block must have its fragment on disk
-                    if !dir.join(BLOCKS).join(&r.name).exists() {
-                        break;
-                    }
-                    merkle.push(&digest);
-                    blocks.push(r);
-                }
-                Err(_) => break, // torn tail
+            // A torn tail is a line that is not complete JSON (a prefix of a JSON object never is).
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                break;
+            };
+            // Name first, so a bad one is refused by its own typed error, not mistaken for a tear.
+            if let Some(name) = value.get("name").and_then(Value::as_str) {
+                BlockName::new(name)?;
             }
+            let Ok(r) = serde_json::from_value::<BlockRef>(value) else {
+                break;
+            };
+            leaf_rule_against(&blocks, &r.name)?;
+            let digest = r
+                .digest
+                .clone()
+                .ok_or_else(|| Error::MissingDigest(r.name.to_string()))?;
+            // a committed block must have its fragment on disk
+            if !r.name.path_under(&dir.join(BLOCKS))?.is_file() {
+                break;
+            }
+            merkle.push(&digest);
+            blocks.push(r);
         }
         // Rewrite the journal to the clean recovered prefix (drops any torn tail), then reopen append.
         let clean: String = blocks
@@ -647,6 +709,7 @@ impl WriteSession {
         fs::write(dir.join(JOURNAL), &clean)?;
         let journal = OpenOptions::new().append(true).open(dir.join(JOURNAL))?;
         reset_staging(dir)?;
+        remove_orphan_fragments(dir, &journal_names(&raw))?;
         Ok(WriteSession {
             dir: dir.to_path_buf(),
             header,
@@ -713,12 +776,13 @@ impl WriteSession {
         // Stream each fragment from disk → zip entry via pack_streaming (no whole-product Vec). The
         // resulting archive is byte-identical to pack(&sealed, &<vec of read fragments>, out) over
         // the same inputs (proven by pack_streaming_equals_pack), so this swap is determinism-safe.
+        let blocks_dir = self.dir.join(BLOCKS);
         let frag_paths: Vec<PathBuf> = self
             .blocks
             .iter()
-            .map(|r| self.dir.join(BLOCKS).join(&r.name))
-            .collect();
-        let sources: Vec<(String, &Path)> = self
+            .map(|r| r.name.path_under(&blocks_dir))
+            .collect::<Result<_>>()?;
+        let sources: Vec<(BlockName, &Path)> = self
             .blocks
             .iter()
             .zip(frag_paths.iter())
@@ -727,6 +791,72 @@ impl WriteSession {
         pack_streaming(&sealed, &sources, out)?;
         Ok(sealed)
     }
+}
+
+/// Every valid block name any complete line of the journal text `raw` carries, whether or not
+/// recovery reached that line: the fragments [`remove_orphan_fragments`] must keep.
+fn journal_names(raw: &str) -> Vec<BlockName> {
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|v| BlockName::new(v.get("name")?.as_str()?).ok())
+        .collect()
+}
+
+/// Delete every file under the session's `blocks/` that is not the fragment of a block `named`,
+/// then every directory left empty (see [`WriteSession::recover`]). Paths are compared
+/// as built by [`BlockName::path_under`], so the walk never leaves `blocks/`, and it does not follow
+/// symlinks.
+fn remove_orphan_fragments(dir: &Path, named: &[BlockName]) -> Result<()> {
+    let blocks = dir.join(BLOCKS);
+    let keep = named
+        .iter()
+        .map(|n| n.path_under(&blocks))
+        .collect::<Result<std::collections::BTreeSet<PathBuf>>>()?;
+    /// Returns whether `d` is empty once its orphans are gone.
+    fn walk(d: &Path, keep: &std::collections::BTreeSet<PathBuf>) -> Result<bool> {
+        let mut empty = true;
+        for entry in fs::read_dir(d)? {
+            let entry = entry?;
+            let path = entry.path();
+            if keep.contains(&path) {
+                // Named by the journal: kept as it is, file or (never walked into) directory.
+                empty = false;
+            } else if entry.file_type()?.is_dir() {
+                if walk(&path, keep)? {
+                    fs::remove_dir(&path)?;
+                } else {
+                    empty = false;
+                }
+            } else {
+                fs::remove_file(&path)?;
+            }
+        }
+        Ok(empty)
+    }
+    if blocks.is_dir() {
+        walk(&blocks, &keep)?;
+        File::open(&blocks)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// The leaf rule (ADR-0063) between `name` and the names already in `committed`: neither may be the
+/// parent of the other ([`Error::BlockNameConflict`]).
+fn leaf_rule_against(committed: &[BlockRef], name: &BlockName) -> Result<()> {
+    for b in committed {
+        let (parent, child) = if b.name.is_parent_of(name) {
+            (&b.name, name)
+        } else if name.is_parent_of(&b.name) {
+            (name, &b.name)
+        } else {
+            continue;
+        };
+        return Err(Error::BlockNameConflict {
+            parent: parent.to_string(),
+            child: child.to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1416,5 +1546,91 @@ mod tests {
             WriteSession::create(&dir.path().join("stage2"), "recon", "p", "d", TS).unwrap();
         let (r2, p2) = block("v2", 1);
         ws2.append_block(r2, &p2).unwrap();
+    }
+
+    /// #685 / ADR-0063: a hierarchical name's fragment gets its parent directories under `blocks/`,
+    /// and an append that fails after creating them (here, its journal fsync) removes them again with
+    /// the fragment, through either append path.
+    #[test]
+    fn a_failed_append_removes_the_directories_it_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r, p) = block("x/y/z", 0);
+        for via in ["append_block", "append_staged"] {
+            let stage = dir.path().join(via);
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            ws.faults.journal_sync = true;
+            let err = if via == "append_block" {
+                ws.append_block(r.clone(), &p).unwrap_err()
+            } else {
+                let s = staged(&ws, &p);
+                ws.append_staged(r.clone(), s).unwrap_err()
+            };
+            assert!(
+                err.to_string().contains("injected journal fsync failure"),
+                "{via}: {err}"
+            );
+            assert!(
+                !stage.join(BLOCKS).join("x").exists(),
+                "{via}: blocks/x/ left behind"
+            );
+            assert_eq!(
+                fs::read_dir(stage.join(BLOCKS)).unwrap().count(),
+                0,
+                "{via}"
+            );
+        }
+    }
+
+    /// `recover` deletes fragments no recovered journal line names (an append that never reached its
+    /// line), so a leftover file can't block a later append whose name needs that path as a directory.
+    #[test]
+    fn recover_removes_orphan_fragments_so_a_hierarchical_append_can_follow() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let (ra, pa) = block("a/0", 0);
+        {
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            ws.append_block(ra, &pa).unwrap();
+        }
+        let blocks = stage.join(BLOCKS);
+        fs::write(blocks.join("volume"), b"orphan").unwrap();
+        fs::create_dir_all(blocks.join("deep/er")).unwrap();
+        fs::write(blocks.join("deep/er/orphan"), b"orphan").unwrap();
+        fs::write(blocks.join("a/1"), b"orphan beside a committed fragment").unwrap();
+
+        let mut ws = WriteSession::recover(&stage).unwrap();
+        assert_eq!(ws.watermark(), 1);
+        assert!(blocks.join("a/0").is_file(), "the committed fragment stays");
+        for gone in ["volume", "deep", "a/1"] {
+            assert!(!blocks.join(gone).exists(), "orphan {gone} left behind");
+        }
+        let (r, p) = block("volume/0", 1);
+        ws.append_block(r, &p).unwrap();
+        assert!(blocks.join("volume/0").is_file());
+    }
+
+    /// Recovery that stops early (here: the second of three fragments is missing) truncates the
+    /// journal but deletes no fragment a journal line named, so the third block can still be
+    /// recovered by hand.
+    #[test]
+    fn recover_cut_short_keeps_the_fragments_of_later_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        {
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            for (i, n) in ["a", "b/0", "c/0"].into_iter().enumerate() {
+                let (r, p) = block(n, i as i16);
+                ws.append_block(r, &p).unwrap();
+            }
+        }
+        let blocks = stage.join(BLOCKS);
+        fs::remove_file(blocks.join("b/0")).unwrap();
+        let ws = WriteSession::recover(&stage).unwrap();
+        assert_eq!(ws.watermark(), 1, "recovery stops at the missing fragment");
+        assert!(blocks.join("a").is_file());
+        assert!(
+            blocks.join("c/0").is_file(),
+            "a later line's fragment must survive"
+        );
     }
 }

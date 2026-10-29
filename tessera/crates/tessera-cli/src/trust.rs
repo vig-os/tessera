@@ -546,7 +546,12 @@ mod tests {
         b.add_block(&vol).unwrap();
         let sealed = b.seal().unwrap();
         let tsra = dir.join(format!("{name}.tsra"));
-        pack(&sealed, &[BlockPayload::new("volume", payload)], &tsra).unwrap();
+        pack(
+            &sealed,
+            &[BlockPayload::new("volume".parse().unwrap(), payload)],
+            &tsra,
+        )
+        .unwrap();
 
         let keyfile = dir.join(format!("{name}.key"));
         keygen(&keyfile, &mut Vec::new()).unwrap();

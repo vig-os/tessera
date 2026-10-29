@@ -10,6 +10,8 @@ use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 
+use tessera_core::block::name::join_checked;
+use tessera_core::block::{check_leaf_rule, BlockName};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
 use zip::read::{ArchiveOffset, Config};
@@ -37,18 +39,17 @@ pub const AUX_SIGNATURES_PREFIX: &str = "aux/signatures/";
 pub const AUX_PROVENANCE_ENTRY: &str = "aux/provenance.json";
 
 /// A block's encoded bytes, to be stored at `blocks/<name>`. `bytes` MUST be the exact bytes the
-/// block's recorded digest was computed over (so the reader can verify integrity on access).
+/// block's recorded digest was computed over (so the reader can verify integrity on access). The
+/// name is a validated [`BlockName`] (ADR-0063), so no writer can emit a zip member outside
+/// `blocks/`.
 pub struct BlockPayload {
-    pub name: String,
+    pub name: BlockName,
     pub bytes: Vec<u8>,
 }
 
 impl BlockPayload {
-    pub fn new(name: impl Into<String>, bytes: Vec<u8>) -> Self {
-        BlockPayload {
-            name: name.into(),
-            bytes,
-        }
+    pub fn new(name: BlockName, bytes: Vec<u8>) -> Self {
+        BlockPayload { name, bytes }
     }
 }
 
@@ -128,6 +129,11 @@ fn require_mimetype_at_byte_zero<R: Read + Seek>(archive: &ZipArchive<R>) -> Res
 }
 
 /// Pack a **sealed** manifest + its block payloads into a `.tsra` at `path` (STORED zip64).
+///
+/// Every payload name is a [`BlockName`], so every entry lands under `blocks/` (ADR-0063). The leaf
+/// rule is not re-checked: the manifest is already sealed ([`tessera_core::ProductBuilder::seal`]
+/// enforces it), and a product sealed before ADR-0063 (a `volume` + `volume/1` pyramid) is still a
+/// valid zip that readers open, so re-packaging it (e.g. to add an `aux/` member) keeps working.
 pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Result<()> {
     if !manifest.is_sealed() {
         return Err(Error::Container(
@@ -167,7 +173,11 @@ pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Resu
 /// refs). The output is **byte-identical** to `pack(manifest, &Vec<BlockPayload>::from(sources), out)`
 /// — proven by `pack_streaming_equals_pack` below — because both writers share [`tsra_entry_options`]
 /// and emit the mimetype/manifest/blocks in the same order.
-pub fn pack_streaming(manifest: &Manifest, sources: &[(String, &Path)], out: &Path) -> Result<()> {
+pub fn pack_streaming(
+    manifest: &Manifest,
+    sources: &[(BlockName, &Path)],
+    out: &Path,
+) -> Result<()> {
     pack_streaming_impl(manifest, sources, out, false)
 }
 
@@ -192,7 +202,7 @@ pub fn pack_streaming(manifest: &Manifest, sources: &[(String, &Path)], out: &Pa
 /// digest is a malformed input, not a verify miss).
 pub fn pack_streaming_verified(
     manifest: &Manifest,
-    sources: &[(String, &Path)],
+    sources: &[(BlockName, &Path)],
     out: &Path,
 ) -> Result<()> {
     pack_streaming_impl(manifest, sources, out, true)
@@ -203,7 +213,7 @@ pub fn pack_streaming_verified(
 /// so a failure never leaves a partial / known-bad `.tsra` at the destination.
 fn pack_streaming_impl(
     manifest: &Manifest,
-    sources: &[(String, &Path)],
+    sources: &[(BlockName, &Path)],
     out: &Path,
     verify: bool,
 ) -> Result<()> {
@@ -232,7 +242,7 @@ fn pack_streaming_impl(
 /// order / options / buffer size (a drift would change the on-disk bytes and break the corpus).
 fn pack_streaming_to(
     manifest: &Manifest,
-    sources: &[(String, &Path)],
+    sources: &[(BlockName, &Path)],
     out: &Path,
     verify: bool,
 ) -> Result<()> {
@@ -257,7 +267,7 @@ fn pack_streaming_to(
             let r = manifest
                 .blocks
                 .iter()
-                .find(|b| &b.name == name)
+                .find(|b| b.name == *name)
                 .ok_or_else(|| {
                     Error::Container(format!(
                         "pack_streaming_verified: no manifest block named '{name}'"
@@ -416,7 +426,7 @@ impl<R: Read + Seek> Reader<R> {
         self.manifest
             .blocks
             .iter()
-            .map(|b| b.name.clone())
+            .map(|b| b.name.to_string())
             .collect()
     }
 
@@ -431,7 +441,7 @@ impl<R: Read + Seek> Reader<R> {
             .iter()
             .filter_map(|b| {
                 if b.name == prefix {
-                    Some(b.name.clone())
+                    Some(b.name.to_string())
                 } else if let Some(rest) = b
                     .name
                     .strip_prefix(prefix)
@@ -439,7 +449,7 @@ impl<R: Read + Seek> Reader<R> {
                 {
                     // a 4-digit numeric suffix marks a partitioned shard (block_name's format).
                     if rest.len() == 4 && rest.bytes().all(|c| c.is_ascii_digit()) {
-                        Some(b.name.clone())
+                        Some(b.name.to_string())
                     } else {
                         None
                     }
@@ -725,11 +735,20 @@ pub fn add_aux_members(path: &Path, members: &[AuxMember]) -> Result<()> {
 /// [`crate::sign::read_signature`] (first-in-central-directory-order) would resolve to the stale
 /// entry. Pass `["signatures/"]` to clear the whole signature subtree; the caller adds the new one
 /// through `members`.
+///
+/// Each member name must obey the block-name grammar (ADR-0063: `/`-separated `[A-Za-z0-9._-]+`
+/// segments, no `.`/`..`), so no `aux/` entry this writes can escape `aux/` when the archive is
+/// unzipped or [`unpack`]ed. The `blocks/` and `aux/` entries it copies through from `path` are held
+/// to the same grammar, so a hostile input is refused rather than re-emitted. Either failure is
+/// [`Error::Container`], before anything is written.
 pub fn write_aux_members(
     path: &Path,
     members: &[AuxMember],
     remove_prefixes: &[&str],
 ) -> Result<()> {
+    for m in members {
+        check_aux_name(&m.name)?;
+    }
     // Read the existing archive once, gather (name → bytes) for every entry. `Reader::open`
     // verifies magic + manifest seal, so a corrupt input fails before we start rewriting.
     let mut existing: Vec<(String, Vec<u8>)> = Vec::new();
@@ -767,6 +786,16 @@ pub fn write_aux_members(
         .iter()
         .map(|p| format!("{AUX_PREFIX}{p}"))
         .collect();
+
+    // Every entry copied through is held to the grammar, before anything is written. An aux entry
+    // this call replaces or removes is not copied, so it is not checked.
+    for (name, _) in &existing {
+        let dropped = name.starts_with(AUX_PREFIX)
+            && (to_add.contains(name) || remove_full.iter().any(|p| name.starts_with(p.as_str())));
+        if !dropped {
+            check_passthrough_entry(name)?;
+        }
+    }
 
     // Stage the rewrite to a `.part`, atomic-rename on success.
     let mut tmp = path.as_os_str().to_os_string();
@@ -863,10 +892,6 @@ fn write_repacked_archive(
     Ok(())
 }
 
-/// Explode a `.tsra` into a directory: `manifest.json` + `blocks/<name>` + `aux/<name>` (the opt-in
-/// exploded form of ADR-0022; ADR-0042 adds the aux round-trip). Verifies the seal on open and each
-/// block against its digest. Aux members are copied verbatim under `aux/` (they carry no digest —
-/// seal-ignored). Returns the verified manifest.
 /// Read a `.tsra`'s manifest **without verifying its seal** — for diagnostics only.
 ///
 /// [`Reader::open`] refuses a product whose manifest does not verify, which is right for every read that
@@ -887,31 +912,91 @@ pub fn read_manifest_unverified(path: &Path) -> Result<Manifest> {
     Manifest::from_json(&mj)
 }
 
+/// Explode a `.tsra` into a directory: `manifest.json` + `blocks/<name>` + `aux/<name>` (the opt-in
+/// exploded form of ADR-0022; ADR-0042 adds the aux round-trip). Verifies the seal on open and each
+/// block against its digest. Aux members are copied verbatim under `aux/` (they carry no digest —
+/// seal-ignored). Returns the verified manifest.
+///
+/// Every name becomes a path under `outdir` by plain components only (ADR-0063, #685): a block
+/// name through [`BlockName::path_under`], an aux member name through the same grammar
+/// ([`join_checked`]; an aux name that fails it is [`Error::Container`]). A hierarchical name
+/// (`volume/0`) becomes a subdirectory. A product whose names break the **leaf rule** (one name the
+/// parent of another — a pyramid sealed before ADR-0063) is refused with
+/// [`Error::BlockNameConflict`] before anything is written, since a name can't be both a file and a
+/// directory; it still reads in-zip through [`Reader`].
 pub fn unpack(path: &Path, outdir: &Path) -> Result<Manifest> {
     let mut r = Reader::open(path)?;
     let manifest = r.manifest().clone();
-    std::fs::create_dir_all(outdir.join("blocks"))?;
+    check_leaf_rule(manifest.blocks.iter().map(|b| &b.name))?;
+    let blocks_dir = outdir.join("blocks");
+    let aux_dir = outdir.join("aux");
+    // Resolve every path before writing anything, so a refused name leaves no partial tree.
+    let block_paths = manifest
+        .blocks
+        .iter()
+        .map(|b| Ok((b.name.clone(), b.name.path_under(&blocks_dir)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let aux_paths = r
+        .aux_names()
+        .into_iter()
+        .map(|name| {
+            let p =
+                join_checked(&aux_dir, &name).map_err(|reason| aux_name_error(&name, reason))?;
+            Ok((name, p))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    std::fs::create_dir_all(&blocks_dir)?;
     std::fs::write(outdir.join("manifest.json"), manifest.to_json()?)?;
-    for name in manifest.blocks.iter().map(|b| b.name.clone()) {
+    for (name, out_path) in block_paths {
         let bytes = r.read_block(&name)?;
-        std::fs::write(outdir.join("blocks").join(&name), bytes)?;
+        write_creating_parents(&out_path, &bytes)?;
     }
     // ADR-0042: also explode any aux members so `unpack` → `pack` round-trips the whole file
     // (including the embedded signature + ingest provenance). Aux paths may contain sub-dirs
-    // (`signatures/<key_id>.sig.json`), so we create the parent tree per member.
-    let aux_names = r.aux_names();
-    if !aux_names.is_empty() {
-        std::fs::create_dir_all(outdir.join("aux"))?;
-    }
-    for name in aux_names {
+    // (`signatures/<key_id>.sig.json`).
+    for (name, out_path) in aux_paths {
         let bytes = r.read_aux(&name)?;
-        let out_path = outdir.join("aux").join(&name);
-        if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&out_path, bytes)?;
+        write_creating_parents(&out_path, &bytes)?;
     }
     Ok(manifest)
+}
+
+/// An entry [`write_aux_members`] copies through from an existing archive: a `blocks/` or `aux/`
+/// entry's name below its prefix obeys the block-name grammar (ADR-0063), or [`Error::Container`].
+/// (Entries outside `mimetype`, `manifest.json`, `blocks/` and `aux/` are not copied, see
+/// [`write_repacked_archive`].)
+fn check_passthrough_entry(name: &str) -> Result<()> {
+    let rest = name
+        .strip_prefix(BLOCKS_PREFIX)
+        .or_else(|| name.strip_prefix(AUX_PREFIX));
+    match rest {
+        Some(rest) => tessera_core::block::name::check_name(rest).map_err(|reason| {
+            Error::Container(format!(
+                "entry '{name}' is not a safe relative path (ADR-0063): {reason}"
+            ))
+        }),
+        None => Ok(()),
+    }
+}
+
+/// An aux member name obeys the block-name grammar (ADR-0063), or [`Error::Container`].
+fn check_aux_name(name: &str) -> Result<()> {
+    tessera_core::block::name::check_name(name).map_err(|reason| aux_name_error(name, reason))
+}
+
+fn aux_name_error(name: &str, reason: tessera_core::block::name::NameError) -> Error {
+    Error::Container(format!(
+        "aux member '{name}' is not a safe relative path: {reason}"
+    ))
+}
+
+/// Write `bytes` to `path`, creating its parent directories (a hierarchical name's subtree).
+fn write_creating_parents(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)?;
+    Ok(())
 }
 
 /// Pack an exploded directory (`manifest.json` + `blocks/<name>` + optional `aux/<name>`) back into
@@ -919,22 +1004,36 @@ pub fn unpack(path: &Path, outdir: &Path) -> Result<Manifest> {
 /// `blocks/`. If an `aux/` subtree is present it is appended as non-sealed aux members (ADR-0042) —
 /// round-trip counterpart of [`unpack`], so a `.tsra` that carried an embedded signature + ingest
 /// provenance survives an unpack/repack round with byte-identical seal AND the aux payload intact.
+///
+/// Each block is read from [`BlockName::path_under`] `dir/blocks` (plain components only, ADR-0063),
+/// and a manifest whose names break the leaf rule is refused with [`Error::BlockNameConflict`]: an
+/// exploded directory cannot hold it. An `aux/` file whose relative path fails the grammar (a space,
+/// a non-ASCII character) is [`Error::Container`]. Every check runs before `out` is written.
 pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
     let mj = std::fs::read_to_string(dir.join("manifest.json"))?;
     let manifest = Manifest::from_json_verified(&mj)?;
+    check_leaf_rule(manifest.blocks.iter().map(|b| &b.name))?;
+    // Collect and check the aux/ subtree first, so a member name the grammar refuses fails before
+    // `out` is written (not after, leaving a sealed archive without its aux members).
+    let aux_dir = dir.join("aux");
+    let members = if aux_dir.is_dir() {
+        collect_aux_members(&aux_dir)?
+    } else {
+        Vec::new()
+    };
+    for m in &members {
+        check_aux_name(&m.name)?;
+    }
+    let blocks_dir = dir.join("blocks");
     let mut payloads = Vec::with_capacity(manifest.blocks.len());
     for b in &manifest.blocks {
-        let bytes = std::fs::read(dir.join("blocks").join(&b.name))?;
+        let bytes = std::fs::read(b.name.path_under(&blocks_dir)?)?;
         payloads.push(BlockPayload::new(b.name.clone(), bytes));
     }
     pack(&manifest, &payloads, out)?;
-    // Re-attach any aux/ subtree. Absent → skip; a file present → embed under its relative path.
-    let aux_dir = dir.join("aux");
-    if aux_dir.is_dir() {
-        let members = collect_aux_members(&aux_dir)?;
-        if !members.is_empty() {
-            add_aux_members(out, &members)?;
-        }
+    // Re-attach the aux/ subtree, each file under its relative path.
+    if !members.is_empty() {
+        add_aux_members(out, &members)?;
     }
     Ok(())
 }
@@ -973,6 +1072,10 @@ fn collect_aux_members(aux_dir: &Path) -> Result<Vec<AuxMember>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bn(s: &str) -> BlockName {
+        s.parse().unwrap()
+    }
     use tessera_core::block::array::{ArrayBlock, ArraySpec};
     use tessera_core::ProductBuilder;
 
@@ -996,7 +1099,7 @@ mod tests {
         let path = dir.path().join("DP06.tsra");
         pack(
             &sealed,
-            &[BlockPayload::new("volume", payload.clone())],
+            &[BlockPayload::new(bn("volume"), payload.clone())],
             &path,
         )
         .unwrap();
@@ -1021,7 +1124,7 @@ mod tests {
         // store WRONG bytes for the block → digest mismatch on read
         pack(
             &sealed,
-            &[BlockPayload::new("volume", b"not the spec".to_vec())],
+            &[BlockPayload::new(bn("volume"), b"not the spec".to_vec())],
             &path,
         )
         .unwrap();
@@ -1047,7 +1150,7 @@ mod tests {
         let sealed = b.seal().unwrap();
         let payloads: Vec<BlockPayload> = out
             .iter()
-            .map(|(name, bytes)| BlockPayload::new(name.clone(), bytes.clone()))
+            .map(|(name, bytes)| BlockPayload::new(bn(name), bytes.clone()))
             .collect();
         pack(&sealed, &payloads, path).unwrap();
         out
@@ -1102,7 +1205,7 @@ mod tests {
                 bytes[0] ^= 0xFF; // corrupt vol3's payload
             }
             names.push(format!("vol{i}"));
-            payloads.push(BlockPayload::new(format!("vol{i}"), bytes));
+            payloads.push(BlockPayload::new(bn(&format!("vol{i}")), bytes));
         }
         let sealed = b.seal().unwrap();
         pack(&sealed, &payloads, &path).unwrap();
@@ -1162,7 +1265,7 @@ mod tests {
             if i == 2 {
                 bytes[0] ^= 0xFF;
             }
-            payloads.push(BlockPayload::new(format!("vol{i}"), bytes));
+            payloads.push(BlockPayload::new(bn(&format!("vol{i}")), bytes));
         }
         let sealed = b.seal().unwrap();
         pack(&sealed, &payloads, &path).unwrap();
@@ -1201,7 +1304,7 @@ mod tests {
         let good_path = dir.path().join("good.tsra");
         pack(
             &sealed,
-            &[BlockPayload::new("events_3p", good.clone())],
+            &[BlockPayload::new(bn("events_3p"), good.clone())],
             &good_path,
         )
         .unwrap();
@@ -1217,7 +1320,12 @@ mod tests {
         let mut bad = good.clone();
         bad[0] ^= 0xFF;
         let bad_path = dir.path().join("bad.tsra");
-        pack(&sealed, &[BlockPayload::new("events_3p", bad)], &bad_path).unwrap();
+        pack(
+            &sealed,
+            &[BlockPayload::new(bn("events_3p"), bad)],
+            &bad_path,
+        )
+        .unwrap();
         match Reader::open(&bad_path).unwrap().read_block("events_3p") {
             Err(Error::Integrity { what, .. }) => assert_eq!(what, "block_payload"),
             other => panic!("expected block_payload integrity error, got {other:?}"),
@@ -1254,7 +1362,12 @@ mod tests {
         // Pack a FLIPPED payload but leave the manifest — and its recorded digest — untouched.
         let mut flipped = good.clone();
         flipped[0] ^= 0xFF;
-        pack(&sealed, &[BlockPayload::new("events_3p", flipped)], &path).unwrap();
+        pack(
+            &sealed,
+            &[BlockPayload::new(bn("events_3p"), flipped)],
+            &path,
+        )
+        .unwrap();
 
         let mut r = Reader::open(&path).unwrap();
         // L1: the manifest itself still verifies — recorded digests, roots and seal are internally
@@ -1435,12 +1548,12 @@ mod tests {
                 let nm = format!("blob_{i}");
                 let digest = tessera_core::hash::digest(&bytes);
                 bldr.add_block_ref(tessera_core::block::BlockRef {
-                    name: nm.clone(),
+                    name: bn(&nm),
                     kind: tessera_core::block::BlockKind::Array,
                     digest: Some(digest),
                     spec: serde_json::json!({}),
                 });
-                BlockPayload::new(nm, bytes)
+                BlockPayload::new(bn(&nm), bytes)
             })
             .collect();
         let sealed = bldr.seal().unwrap();
@@ -1456,11 +1569,11 @@ mod tests {
         std::fs::create_dir_all(&stage).unwrap();
         let mut frag_paths = Vec::new();
         for p in &payloads {
-            let fp = stage.join(&p.name);
+            let fp = stage.join(p.name.as_str());
             std::fs::write(&fp, &p.bytes).unwrap();
             frag_paths.push((p.name.clone(), fp));
         }
-        let sources: Vec<(String, &Path)> = frag_paths
+        let sources: Vec<(BlockName, &Path)> = frag_paths
             .iter()
             .map(|(n, p)| (n.clone(), p.as_path()))
             .collect();
@@ -1491,12 +1604,12 @@ mod tests {
                 let nm = format!("blob_{i}");
                 let digest = tessera_core::hash::digest(&bytes);
                 bldr.add_block_ref(tessera_core::block::BlockRef {
-                    name: nm.clone(),
+                    name: bn(&nm),
                     kind: tessera_core::block::BlockKind::Array,
                     digest: Some(digest),
                     spec: serde_json::json!({}),
                 });
-                BlockPayload::new(nm, bytes)
+                BlockPayload::new(bn(&nm), bytes)
             })
             .collect();
         let sealed = bldr.seal().unwrap();
@@ -1505,11 +1618,11 @@ mod tests {
         std::fs::create_dir_all(&stage).unwrap();
         let mut frag_paths = Vec::new();
         for p in &payloads {
-            let fp = stage.join(&p.name);
+            let fp = stage.join(p.name.as_str());
             std::fs::write(&fp, &p.bytes).unwrap();
             frag_paths.push((p.name.clone(), fp));
         }
-        let sources: Vec<(String, &Path)> = frag_paths
+        let sources: Vec<(BlockName, &Path)> = frag_paths
             .iter()
             .map(|(n, p)| (n.clone(), p.as_path()))
             .collect();
@@ -1541,7 +1654,7 @@ mod tests {
         let digest_a = tessera_core::hash::digest(&bytes_a);
         let mut bldr = ProductBuilder::new("blob", "race", "x", "2024-01-01T00:00:00Z");
         bldr.add_block_ref(tessera_core::block::BlockRef {
-            name: "data".into(),
+            name: bn("data"),
             kind: tessera_core::block::BlockKind::Blob,
             digest: Some(digest_a.clone()),
             spec: serde_json::json!({}),
@@ -1551,7 +1664,7 @@ mod tests {
         let frag = dir.path().join("race.bin");
         std::fs::write(&frag, &bytes_b).unwrap(); // "the file changed between hash and pack"
         let out = dir.path().join("race.tsra");
-        let err = pack_streaming_verified(&sealed, &[("data".to_string(), frag.as_path())], &out)
+        let err = pack_streaming_verified(&sealed, &[(bn("data"), frag.as_path())], &out)
             .expect_err("mismatched fragment must fail the verifying pack");
         match err {
             Error::Integrity {
@@ -1572,7 +1685,7 @@ mod tests {
         // Sanity: the non-verifying packer happily seals the same race (proving the gap the
         // verifying packer closes — and that's the silent bad archive that surfaces only on read).
         let dead = dir.path().join("dead.tsra");
-        pack_streaming(&sealed, &[("data".to_string(), frag.as_path())], &dead).unwrap();
+        pack_streaming(&sealed, &[(bn("data"), frag.as_path())], &dead).unwrap();
         let mut rdr = Reader::open(&dead).unwrap();
         assert!(matches!(
             rdr.read_block("data"),
@@ -1592,7 +1705,7 @@ mod tests {
         let digest = tessera_core::hash::digest(&bytes);
         let mut bldr = ProductBuilder::new("blob", "x", "x", "2024-01-01T00:00:00Z");
         bldr.add_block_ref(tessera_core::block::BlockRef {
-            name: "data".into(),
+            name: bn("data"),
             kind: tessera_core::block::BlockKind::Blob,
             digest: Some(digest),
             spec: serde_json::json!({}),
@@ -1601,7 +1714,7 @@ mod tests {
         let frag = dir.path().join("f.bin");
         std::fs::write(&frag, &bytes).unwrap();
         let out = dir.path().join("x.tsra");
-        let err = pack_streaming_verified(&sealed, &[("typo".to_string(), frag.as_path())], &out)
+        let err = pack_streaming_verified(&sealed, &[(bn("typo"), frag.as_path())], &out)
             .expect_err("unknown block name must be rejected");
         assert!(
             matches!(err, Error::Container(ref m) if m.contains("no manifest block named 'typo'")),
@@ -1626,7 +1739,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("aux.tsra");
-        pack(&sealed, &[BlockPayload::new("volume", payload)], &path).unwrap();
+        pack(&sealed, &[BlockPayload::new(bn("volume"), payload)], &path).unwrap();
 
         // Snapshot the pre-aux hashes and the on-disk manifest.json bytes — the invariant is that
         // the SEALED region is byte-preserved, not merely that the hashes happen to match.
@@ -1726,7 +1839,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let orig = dir.path().join("orig.tsra");
-        pack(&sealed, &[BlockPayload::new("volume", payload)], &orig).unwrap();
+        pack(&sealed, &[BlockPayload::new(bn("volume"), payload)], &orig).unwrap();
         add_aux_members(
             &orig,
             &[
@@ -1778,7 +1891,7 @@ mod tests {
             let bytes = name.as_bytes().to_vec();
             let digest = tessera_core::hash::digest(&bytes);
             b.add_block_ref(tessera_core::block::BlockRef {
-                name: name.into(),
+                name: bn(name),
                 kind: tessera_core::block::BlockKind::Table,
                 digest: Some(digest),
                 spec: serde_json::json!({}),

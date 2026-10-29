@@ -161,7 +161,7 @@ impl Manifest {
         for b in &self.blocks {
             match &b.digest {
                 Some(d) => digests.push(d.clone()),
-                None => return Err(crate::Error::MissingDigest(b.name.clone())),
+                None => return Err(crate::Error::MissingDigest(b.name.to_string())),
             }
         }
         Ok(crate::hash::merkle_root(&digests))

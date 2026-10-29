@@ -100,7 +100,7 @@ fn seal_rejects_block_without_digest() {
     // A precomputed ref missing its digest must NOT be silently dropped from the Merkle root.
     let mut b = ProductBuilder::new("recon", "DP06", "x", "2023-12-08T00:00:00Z");
     b.add_block_ref(BlockRef {
-        name: "orphan".into(),
+        name: "orphan".parse().unwrap(),
         kind: BlockKind::Array,
         digest: None,
         spec: serde_json::Value::Null,

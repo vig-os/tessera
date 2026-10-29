@@ -29,9 +29,9 @@ pub fn import(repo: &Path, tsra: &Path, out: &mut dyn Write) -> Result<()> {
     let mut r = Reader::open(tsra)?;
     let manifest = r.manifest().clone();
     let mut payloads = Vec::with_capacity(manifest.blocks.len());
-    for name in r.block_names() {
-        let bytes = r.read_block(&name)?;
-        payloads.push(BlockPayload::new(name, bytes));
+    for b in &manifest.blocks {
+        let bytes = r.read_block(&b.name)?;
+        payloads.push(BlockPayload::new(b.name.clone(), bytes));
     }
     let mh = repo.commit(&manifest.id, &manifest, &payloads)?;
     writeln!(out, "imported lineage {}", manifest.id).map_err(Error::from)?;
@@ -75,7 +75,7 @@ pub fn commit(
     let mut b = ProductBuilder::from_manifest(&parent);
 
     // Track live block names so a duplicate `--add-block` is rejected (start from the parent's blocks).
-    let mut names: std::collections::BTreeSet<String> =
+    let mut names: std::collections::BTreeSet<tessera_core::block::BlockName> =
         parent.blocks.iter().map(|bl| bl.name.clone()).collect();
 
     // Removes first — manifest edit only; the data object is left for other versions / gc.
@@ -85,7 +85,7 @@ pub fn commit(
                 "--remove-block: no block '{name}' in this version"
             )));
         }
-        names.remove(name);
+        names.remove(name.as_str());
         // A `{hash, stats}` chunk-index sidecar describes ONE data block and is bound to it only by
         // name. Leaving `<name>.cidx` behind when `<name>` goes means the next
         // `--add-block …:<name>` silently inherits it, and `tessera stats` would then serve the OLD
@@ -93,7 +93,7 @@ pub fn commit(
         // — regenerable from the data — so removing it with its block loses nothing (#347 review).
         let sidecar = tessera_io::chunk_index::cidx_name(name);
         if b.remove_block(&sidecar) {
-            names.remove(&sidecar);
+            names.remove(sidecar.as_str());
         }
     }
 
@@ -149,7 +149,7 @@ fn load_block(spec: &str) -> Result<(tessera_core::block::BlockRef, BlockPayload
             "--add-block expects [NAME=]SOURCE.tsra:BLOCK, got '{spec}'"
         ))
     })?;
-    let newname = newname.unwrap_or(srcblock).to_string();
+    let newname = tessera_core::block::BlockName::new(newname.unwrap_or(srcblock))?;
     let mut r = Reader::open(Path::new(path))?;
     let src_ref = r
         .manifest()

@@ -155,7 +155,7 @@ note: showed 2 of 5 rows — pass --all or --limit N for more
 $ tessera pyramid ../../corpus/files/recon_int16.tsra volume --help
 Build a multiscale pyramid of an array block (full-res + 2× downsampled levels) → a new `.tsra`.
 
-Emits a `recon` product with `<block>`, `<block>/1`, `<block>/2`, … (each a 2× max-downsample carrying its `at_level` affine), `derived_from` the source. Coarse levels give fast overviews.
+Emits a `recon` product with `<block>/0` (full resolution), `<block>/1`, `<block>/2`, … (each a 2× max-downsample carrying its `at_level` affine), `derived_from` the source. Coarse levels give fast overviews.
 
 Usage: tessera pyramid [OPTIONS] <FILE> <BLOCK> <OUT>
 

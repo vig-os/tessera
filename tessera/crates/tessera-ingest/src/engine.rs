@@ -31,6 +31,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use tessera_core::block::BlockName;
 use tessera_core::collection::{
     member_filename, sanitize_reference, CollectionBuilder, MemberKind,
 };
@@ -362,7 +363,7 @@ fn dispatch(
             )?;
             let m = seal_streaming_to_tsra(
                 m,
-                &[("data".to_string(), input.as_path())],
+                &[(BlockName::new("data")?, input.as_path())],
                 out_dir,
                 p,
                 parents,
@@ -1175,7 +1176,7 @@ fn attach_identity_envelope(
 /// byte-identical to the unverified path (the conformance corpus is unaffected).
 fn seal_streaming_to_tsra(
     m: Manifest,
-    sources: &[(String, &Path)],
+    sources: &[(BlockName, &Path)],
     out_dir: &Path,
     p: &crate::spec::ProductSpec,
     parents: &[&Manifest],

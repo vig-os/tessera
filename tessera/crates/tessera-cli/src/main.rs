@@ -470,8 +470,9 @@ enum Cmd {
     },
     /// Build a multiscale pyramid of an array block (full-res + 2× downsampled levels) → a new `.tsra`.
     ///
-    /// Emits a `recon` product with `<block>`, `<block>/1`, `<block>/2`, … (each a 2× max-downsample
-    /// carrying its `at_level` affine), `derived_from` the source. Coarse levels give fast overviews.
+    /// Emits a `recon` product with `<block>/0` (full resolution), `<block>/1`, `<block>/2`, … (each a
+    /// 2× max-downsample carrying its `at_level` affine), `derived_from` the source. Coarse levels give
+    /// fast overviews.
     Pyramid {
         /// The source `.tsra`.
         file: PathBuf,
@@ -2789,7 +2790,7 @@ mod tests {
             pack(
                 &sealed,
                 &[BlockPayload::new(
-                    "volume",
+                    "volume".parse().unwrap(),
                     serde_json::to_vec(&vol.spec).unwrap(),
                 )],
                 &path,
@@ -2851,7 +2852,7 @@ mod tests {
         pack(
             &child,
             &[BlockPayload::new(
-                "volume",
+                "volume".parse().unwrap(),
                 serde_json::to_vec(&vol.spec).unwrap(),
             )],
             &d.join("child.tsra"),
@@ -3035,7 +3036,7 @@ mod tests {
         pack(
             &child,
             &[BlockPayload::new(
-                "volume",
+                "volume".parse().unwrap(),
                 serde_json::to_vec(&vol.spec).unwrap(),
             )],
             &handover.join("child.tsra"),
@@ -3133,7 +3134,12 @@ mod tests {
         b.add_block(&vol).unwrap();
         b.with_field("modality", serde_json::json!("CT"));
         let sealed = b.seal().unwrap();
-        pack(&sealed, &[BlockPayload::new("volume", payload)], path).unwrap();
+        pack(
+            &sealed,
+            &[BlockPayload::new("volume".parse().unwrap(), payload)],
+            path,
+        )
+        .unwrap();
     }
 
     /// #373: `tessera verify`'s parallel payload probe must take its worker count from the

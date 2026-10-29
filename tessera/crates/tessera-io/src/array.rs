@@ -69,7 +69,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tessera_core::block::array::{ArraySpec, WorldFrame};
 use tessera_core::block::table::{Column, TableSpec};
-use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::block::{BlockKind, BlockName, BlockRef};
 use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
 use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
@@ -689,13 +689,14 @@ pub fn array_block(
     spec: &ArraySpec,
     data: &ArrayData,
 ) -> Result<(BlockRef, BlockPayload)> {
+    let name = BlockName::new(name)?;
     let (resolved, payload) = encode_resolved(spec, data)?;
     let digest = tessera_core::hash::digest(&payload);
     // Record the concrete codec in the manifest's BlockRef.spec — readers never see "auto".
     let mut stored_spec = spec.clone();
     stored_spec.codec = resolved.to_string();
     let block_ref = BlockRef {
-        name: name.to_string(),
+        name: name.clone(),
         kind: BlockKind::Array,
         digest: Some(digest),
         spec: serde_json::to_value(&stored_spec)?,
