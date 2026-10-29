@@ -9,16 +9,31 @@
 //! batch writer uses, so a streamed product is byte-identical to a batch-sealed one (same `id` /
 //! `content_hash` / `manifest_hash`). The running [`MerkleAccumulator`] gives an integrity root at
 //! every watermark and is cross-checked against the sealed `content_hash`.
+//!
+//! **Blocks larger than RAM (#677).** [`WriteSession::append_block`] takes the encoded bytes as a
+//! slice. For a block too large for that, an encoder writes it into a [`StagedBlock`], a file in the
+//! session's staging directory ([`WriteSession::staging`]) that hashes the bytes as they are written
+//! (ADR-0002 first-moment integrity), and [`WriteSession::append_staged`] renames that file into
+//! place as the fragment, after checking its bytes against that digest; [`WriteSession::append_block_from`]
+//! does the same for bytes from a reader. A committed staged file becomes the fragment; an uncommitted one is deleted on error and on drop, and
+//! [`WriteSession::recover`] clears any a crash left behind, so staging never leaks. Every append
+//! commits the same fragment, journal line and Merkle leaf for the same bytes.
+//!
+//! **A failed journal write poisons the session.** Once a commit has begun writing its journal line,
+//! a failure leaves the journal's state unknown (see [`WriteSession::append_block`]), so the session
+//! refuses every later append and the seal; [`WriteSession::recover`] is the way on.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tessera_core::block::BlockRef;
-use tessera_core::hash::MerkleAccumulator;
+use tessera_core::hash::{MerkleAccumulator, StreamHasher};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, ProductBuilder, Result};
 
@@ -27,6 +42,9 @@ use crate::pack_streaming;
 const HEADER: &str = "header.json";
 const JOURNAL: &str = "journal.jsonl";
 const BLOCKS: &str = "blocks";
+/// Scratch files of blocks that are encoded but not yet committed ([`StagedBlock`]). Nothing here
+/// is ever part of the product: a commit renames its file into `blocks/`.
+const STAGING: &str = "staging";
 
 /// The manifest header captured at session creation — everything needed to seal except the blocks.
 ///
@@ -85,6 +103,150 @@ pub struct WriteSession {
     journal: File,
     blocks: Vec<BlockRef>,
     merkle: MerkleAccumulator,
+    /// Numbers the session's staged files, shared by every [`BlockStaging`] handle.
+    staged_seq: Arc<AtomicU64>,
+    /// Why the session refuses to go on, once a commit failed after its journal write began.
+    poisoned: Option<String>,
+    #[cfg(test)]
+    faults: Faults,
+}
+
+/// Test-only fault injection: seams on the steps whose failure a test must provoke (not timing).
+#[cfg(test)]
+#[derive(Default)]
+struct Faults {
+    /// Fail the next journal fsync, after the journal line was written.
+    journal_sync: bool,
+    /// Treat the next staged-file rename as crossing filesystems (`EXDEV`).
+    cross_device: bool,
+}
+
+/// Deletes a file when dropped, unless [`Self::disarm`]ed. Best effort: a drop can't report an
+/// error, and a file that is already gone is the goal.
+#[derive(Debug)]
+struct RemoveOnDrop(Option<PathBuf>);
+
+impl RemoveOnDrop {
+    fn new(path: PathBuf) -> Self {
+        RemoveOnDrop(Some(path))
+    }
+
+    fn path(&self) -> &Path {
+        self.0.as_deref().expect("armed")
+    }
+
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Empty the staging directory of the session at `dir` (creating it if absent). Staged files are
+/// never committed in place (a commit renames its file into `blocks/`), so whatever a crashed or abandoned writer left
+/// there is scratch, and would otherwise sit on disk for good. Called by [`WriteSession::create`]
+/// and [`WriteSession::recover`].
+fn reset_staging(dir: &Path) -> Result<()> {
+    let staging = dir.join(STAGING);
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    fs::create_dir_all(&staging)?;
+    Ok(())
+}
+
+/// A handle on a [`WriteSession`]'s staging directory, for encoders that run apart from the
+/// session (the [`crate::StreamWriter`]'s workers). Clone it freely; every [`StagedBlock`] it creates
+/// gets a fresh name.
+#[derive(Clone, Debug)]
+pub struct BlockStaging {
+    dir: PathBuf,
+    seq: Arc<AtomicU64>,
+}
+
+impl BlockStaging {
+    /// The staging directory (inside the session directory, so on the same filesystem).
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Create an empty staged file to write one encoded block into.
+    pub fn create(&self) -> Result<StagedBlock> {
+        let n = self.seq.fetch_add(1, Ordering::Relaxed);
+        let guard = RemoveOnDrop::new(self.dir.join(format!("block-{n:010}.staged")));
+        let out = BufWriter::new(File::create(guard.path())?);
+        Ok(StagedBlock {
+            out,
+            hasher: Box::default(),
+            len: 0,
+            guard,
+        })
+    }
+}
+
+/// One encoded block in a scratch file in the session's staging directory: write the block's bytes
+/// into it (it is an [`std::io::Write`], buffered), then commit it with
+/// [`WriteSession::append_staged`], which renames the file into place as the block's fragment. The
+/// file is deleted when the commit fails, and when the `StagedBlock` is dropped uncommitted (an
+/// encode error, a panic, a pipeline shut down early), so a staged file never outlives its block.
+///
+/// **The digest is born with the bytes** (ADR-0002 first-moment integrity): every byte is hashed as
+/// it passes through the [`std::io::Write`] impl, and the commit checks the file it moves into
+/// `blocks/` against that digest, so a staged file changed on disk between the encode and the
+/// commit is refused. Write the block **through this value**, then: [`Self::len`] and the digest
+/// cover only what passes through it (that count is also what a [`crate::StreamWriter`] reports as
+/// staged bytes), and [`Self::path`] is for diagnostics, not for writing the file behind its back.
+pub struct StagedBlock {
+    out: BufWriter<File>,
+    /// Boxed: a blake3 hasher is ~2 KB, and a `StagedBlock` travels by value through the pipeline.
+    hasher: Box<StreamHasher>,
+    len: u64,
+    guard: RemoveOnDrop,
+}
+
+impl StagedBlock {
+    /// Bytes written so far: the encoded block's size once its encoder is done.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether nothing has been written yet.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The scratch file's path (for diagnostics; the file goes away with the block).
+    pub fn path(&self) -> &Path {
+        self.guard.path()
+    }
+}
+
+impl std::fmt::Debug for StagedBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagedBlock")
+            .field("path", &self.path())
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Write for StagedBlock {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.out.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.len += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.out.flush()
+    }
 }
 
 /// Write `bytes` to `path` **durably + atomically**: write a temp file, fsync it, atomically rename it
@@ -116,6 +278,7 @@ impl WriteSession {
         timestamp: impl Into<String>,
     ) -> Result<Self> {
         fs::create_dir_all(dir.join(BLOCKS))?;
+        reset_staging(dir)?;
         let header = Header {
             product: product.into(),
             name: name.into(),
@@ -141,6 +304,10 @@ impl WriteSession {
             journal,
             blocks: Vec::new(),
             merkle: MerkleAccumulator::new(),
+            staged_seq: Arc::new(AtomicU64::new(0)),
+            poisoned: None,
+            #[cfg(test)]
+            faults: Faults::default(),
         })
     }
 
@@ -206,21 +373,198 @@ impl WriteSession {
     /// Durably append one already-encoded block: write the fragment, fsync, then commit a journal
     /// line (the atomic commit point), fsync, then fold the digest into the running Merkle root.
     /// `block_ref` MUST carry a digest computed over `payload`.
+    ///
+    /// **Failure.** A failure before the journal line leaves no trace: the fragment is deleted
+    /// again. A failure once the journal write has begun (the write itself, or its fsync)
+    /// **poisons** the session: this and every later append, and [`Self::seal`], return an error
+    /// that says to [`Self::recover`]. That is the only safe way on, because the journal's state is
+    /// then unknown — the write may have left a torn line, or a complete line that its failed fsync
+    /// did not make durable, or one it did — and a later append written behind such a line would be
+    /// lost: `recover` stops at the first line whose fragment is missing, and the failed block's
+    /// fragment is deleted. Truncating the journal back to its last good length instead would rest
+    /// on the very fsync that just failed (after an fsync error the kernel may have dropped the dirty
+    /// pages and cleared the error, so a later fsync can succeed without the data on disk), so the
+    /// session doesn't try: `recover` rereads the journal from disk and keeps exactly the blocks
+    /// before the failed one (or, if the deletion of the failed block's fragment doesn't reach the
+    /// disk — the process dies first, or the power fails before the directory is written — possibly
+    /// that block too, as for a crash during the append).
     pub fn append_block(&mut self, block_ref: BlockRef, payload: &[u8]) -> Result<()> {
+        self.admit(&block_ref)?;
         let digest = block_ref
             .digest
             .clone()
             .ok_or_else(|| Error::MissingDigest(block_ref.name.clone()))?;
-        // 1. fragment → durable
-        let frag = File::create(self.dir.join(BLOCKS).join(&block_ref.name))?;
+        // 1. fragment → durable (deleted again unless the commit succeeds)
+        let fragment = RemoveOnDrop::new(self.dir.join(BLOCKS).join(&block_ref.name));
         {
-            let mut w = frag;
+            let mut w = File::create(fragment.path())?;
             w.write_all(payload)?;
             w.sync_all()?;
         }
+        self.commit(block_ref, digest, payload.len() as u64, fragment)
+    }
+
+    /// Durably append one encoded block whose bytes come from `payload`, in bounded memory: the
+    /// streaming peer of [`Self::append_block`], for a block too large to hold in RAM. The bytes are
+    /// copied into a [`StagedBlock`] (hashing them as they are written) and committed with
+    /// [`Self::append_staged`]; see there. Returns the committed [`BlockRef`], digest included.
+    pub fn append_block_from(
+        &mut self,
+        block_ref: BlockRef,
+        mut payload: impl Read,
+    ) -> Result<BlockRef> {
+        self.admit(&block_ref)?;
+        let mut staged = self.staging().create()?;
+        std::io::copy(&mut payload, &mut staged)?;
+        self.append_staged(block_ref, staged)
+    }
+
+    /// Commit a [`StagedBlock`] as the block `block_ref` without copying it: the staged file
+    /// **becomes** the fragment. Returns the committed [`BlockRef`], digest included.
+    ///
+    /// 1. The digest the block was born with (hashed as it was written) is the block's: if
+    ///    `block_ref.digest` is set it must match (else [`Error::Integrity`] with
+    ///    `what = "block_payload"`), if it is `None` it is filled in.
+    /// 2. The file is fsync'd and renamed into `blocks/`, and the directory fsync'd. The staging
+    ///    directory is inside the session directory, so the rename stays on one filesystem; if
+    ///    `staging/` is on another filesystem anyway (a mount point or a symlink), the rename fails
+    ///    with `CrossesDevices` and the file is copied instead.
+    /// 3. **The bytes now in `blocks/` are checked against the born digest** (one read of the
+    ///    block, 64 KiB at a time), so scratch corruption between the encode and the commit, or a
+    ///    bad copy, is refused ([`Error::Integrity`] with `what = "staged_block"`) rather than sealed
+    ///    under the digest of the corrupted bytes.
+    /// 4. The journal line and Merkle leaf, as for [`Self::append_block`] (including its poisoning).
+    ///
+    /// **Failure before the journal write leaves no trace**: no staged file, no fragment, no journal
+    /// line, no Merkle leaf, and the session goes on.
+    pub fn append_staged(
+        &mut self,
+        mut block_ref: BlockRef,
+        staged: StagedBlock,
+    ) -> Result<BlockRef> {
+        self.admit(&block_ref)?;
+        let StagedBlock {
+            out,
+            hasher,
+            len,
+            guard,
+        } = staged;
+        let digest = hasher.finalize();
+        match &block_ref.digest {
+            Some(expected) if *expected != digest => {
+                return Err(Error::Integrity {
+                    what: "block_payload",
+                    expected: expected.clone(),
+                    actual: digest,
+                });
+            }
+            Some(_) => {}
+            None => block_ref.digest = Some(digest.clone()),
+        }
+        out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+        let fragment = self.place(guard, &block_ref.name)?;
+        let on_disk = tessera_core::hash::digest_reader(File::open(fragment.path())?)?;
+        if on_disk != digest {
+            return Err(Error::Integrity {
+                what: "staged_block",
+                expected: digest,
+                actual: on_disk,
+            });
+        }
+        self.commit(block_ref.clone(), digest, len, fragment)?;
+        Ok(block_ref)
+    }
+
+    /// A handle on this session's staging directory, for encoders that write a [`StagedBlock`]
+    /// on another thread (the [`crate::StreamWriter`]'s workers).
+    pub fn staging(&self) -> BlockStaging {
+        BlockStaging {
+            dir: self.dir.join(STAGING),
+            seq: Arc::clone(&self.staged_seq),
+        }
+    }
+
+    /// Refuse an append the session can't take: any, once poisoned, and one whose name is already
+    /// committed (its fragment would be overwritten, and deleted again if the append failed).
+    fn admit(&self, block_ref: &BlockRef) -> Result<()> {
+        self.usable()?;
+        if self.blocks.iter().any(|b| b.name == block_ref.name) {
+            return Err(Error::Invalid(format!(
+                "block '{}' is already committed to this write session",
+                block_ref.name
+            )));
+        }
+        Ok(())
+    }
+
+    /// `Err` once the session is poisoned (see [`Self::append_block`]).
+    fn usable(&self) -> Result<()> {
+        match &self.poisoned {
+            None => Ok(()),
+            Some(cause) => Err(Error::Invalid(format!(
+                "write session {} is poisoned: an earlier commit failed after its journal write \
+                 began ({cause}), so the journal's state is unknown; reopen the session with \
+                 WriteSession::recover, which keeps exactly the blocks committed before it",
+                self.dir.display()
+            ))),
+        }
+    }
+
+    /// Move the durable `staged` file to the fragment `blocks/<name>` and make the move durable.
+    /// Returns the guard on the fragment, which deletes it unless the commit succeeds. A rename;
+    /// across filesystems (`CrossesDevices`), a copy, and the staged file is deleted.
+    fn place(&mut self, staged: RemoveOnDrop, name: &str) -> Result<RemoveOnDrop> {
+        let blocks = self.dir.join(BLOCKS);
+        let fragment = RemoveOnDrop::new(blocks.join(name));
+        match self.rename(staged.path(), fragment.path()) {
+            Ok(()) => staged.disarm(),
+            Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+                let mut copy = File::create(fragment.path())?;
+                std::io::copy(&mut File::open(staged.path())?, &mut copy)?;
+                copy.sync_all()?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        File::open(&blocks)?.sync_all()?;
+        Ok(fragment)
+    }
+
+    /// `fs::rename` (with a test seam to fail it as crossing filesystems).
+    fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.faults.cross_device) {
+            return Err(std::io::ErrorKind::CrossesDevices.into());
+        }
+        fs::rename(from, to)
+    }
+
+    /// The commit every append shares, once the block's `fragment` is durable in `blocks/`: the
+    /// journal line (the atomic commit point), the running Merkle root, and the write trace. On
+    /// success the fragment is kept; on failure it is deleted, and a failure from the journal write
+    /// on poisons the session (see [`Self::append_block`] for why).
+    fn commit(
+        &mut self,
+        block_ref: BlockRef,
+        digest: String,
+        bytes: u64,
+        fragment: RemoveOnDrop,
+    ) -> Result<()> {
+        let line = serde_json::to_string(&block_ref)?;
         // 2. journal line → durable (this is the commit watermark advance)
-        writeln!(self.journal, "{}", serde_json::to_string(&block_ref)?)?;
-        self.journal.sync_all()?;
+        let journaled = writeln!(self.journal, "{line}").and_then(|()| self.sync_journal());
+        if let Err(e) = journaled {
+            self.poisoned = Some(format!("block '{}': {e}", block_ref.name));
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "journal commit of block '{}' failed: {e}; the write session accepts no more \
+                     appends — reopen it with WriteSession::recover",
+                    block_ref.name
+                ),
+            )
+            .into());
+        }
+        fragment.disarm();
         // 3. running integrity root
         self.merkle.push(&digest);
         // Write-path observability (SSoT): every durably-committed block — batch, stream, or ingest —
@@ -231,13 +575,22 @@ impl WriteSession {
             target: "tessera::write",
             name = %block_ref.name,
             kind = %kind,
-            bytes = payload.len(),
+            bytes = bytes,
             digest = %digest,
             watermark = self.merkle.watermark(),
             "committed block"
         );
         self.blocks.push(block_ref);
         Ok(())
+    }
+
+    /// fsync the journal (with a test seam to fail it).
+    fn sync_journal(&mut self) -> std::io::Result<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.faults.journal_sync) {
+            return Err(std::io::Error::other("injected journal fsync failure"));
+        }
+        self.journal.sync_all()
     }
 
     /// The number of committed blocks (the crash-recovery watermark).
@@ -293,18 +646,24 @@ impl WriteSession {
             .collect::<std::result::Result<_, _>>()?;
         fs::write(dir.join(JOURNAL), &clean)?;
         let journal = OpenOptions::new().append(true).open(dir.join(JOURNAL))?;
+        reset_staging(dir)?;
         Ok(WriteSession {
             dir: dir.to_path_buf(),
             header,
             journal,
             blocks,
             merkle,
+            staged_seq: Arc::new(AtomicU64::new(0)),
+            poisoned: None,
+            #[cfg(test)]
+            faults: Faults::default(),
         })
     }
 
     /// Compact + seal: build the manifest through [`ProductBuilder`] (identical to a batch writer),
     /// verify the running root matches the sealed `content_hash`, and pack the fragments into a
-    /// sealed `.tsra` at `out`. Returns the sealed manifest.
+    /// sealed `.tsra` at `out`. Returns the sealed manifest. A poisoned session (see
+    /// [`Self::append_block`]) refuses to seal: [`Self::recover`] it first.
     ///
     /// **Constant-memory.** Each fragment is streamed straight off disk into the zip via
     /// [`pack_streaming`] (one buffered `io::copy` per block), so the whole engine (encode, commit,
@@ -312,6 +671,7 @@ impl WriteSession {
     /// listmode path actually be bounded-memory end-to-end — otherwise seal would re-materialise
     /// every block in a `Vec<BlockPayload>` and defeat the rest of the pipeline.
     pub fn seal(self, out: &Path) -> Result<Manifest> {
+        self.usable()?;
         let mut b = ProductBuilder::new(
             &self.header.product,
             &self.header.name,
@@ -628,6 +988,392 @@ mod tests {
         for nm in rdr.block_names() {
             rdr.read_block(&nm).unwrap();
         }
+    }
+
+    /// A reader that yields `data` in uneven pieces, then fails once it has yielded `fail_after`
+    /// bytes (never, if `None`).
+    struct Flaky {
+        data: Vec<u8>,
+        pos: usize,
+        fail_after: Option<usize>,
+    }
+
+    impl Read for Flaky {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.fail_after.is_some_and(|n| self.pos >= n) {
+                return Err(std::io::Error::other("source went away"));
+            }
+            let n = buf.len().min(7919).min(self.data.len() - self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    /// An incompressible 1 MiB blob payload, so a streamed append takes many reads and writes.
+    fn big_block(name: &str) -> (BlockRef, Vec<u8>) {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let bytes: Vec<u8> = (0..1 << 20)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        let (r, payload) = crate::blob::blob_block(name, "synthetic", None, bytes).unwrap();
+        (r, payload.bytes)
+    }
+
+    /// Everything a session leaves on disk that a product or a recovery depends on.
+    fn session_files(stage: &Path) -> (String, Vec<(String, Vec<u8>)>, usize) {
+        let journal = fs::read_to_string(stage.join(JOURNAL)).unwrap();
+        let mut blocks: Vec<(String, Vec<u8>)> = fs::read_dir(stage.join(BLOCKS))
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                (
+                    e.file_name().into_string().unwrap(),
+                    fs::read(e.path()).unwrap(),
+                )
+            })
+            .collect();
+        blocks.sort();
+        let staged = fs::read_dir(stage.join(STAGING)).unwrap().count();
+        (journal, blocks, staged)
+    }
+
+    /// #677: the reader-based append commits exactly what the slice append commits — the same
+    /// fragment, journal line, Merkle root and sealed container bytes — whether the caller supplies
+    /// the digest (verified) or leaves it to the session (filled in while writing).
+    #[test]
+    fn append_block_from_commits_the_same_block_as_append_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r1, p1) = block("a", 0);
+        let (r2, p2) = big_block("b");
+        let seal = |tag: &str, streamed: bool, with_digest: bool| {
+            let stage = dir.path().join(tag);
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            for (r, p) in [(&r1, &p1), (&r2, &p2)] {
+                if streamed {
+                    let mut r = r.clone();
+                    if !with_digest {
+                        r.digest = None;
+                    }
+                    let reader = Flaky {
+                        data: p.clone(),
+                        pos: 0,
+                        fail_after: None,
+                    };
+                    let committed = ws.append_block_from(r, reader).unwrap();
+                    assert_eq!(committed.digest, Some(tessera_core::hash::digest(p)));
+                } else {
+                    ws.append_block(r.clone(), p).unwrap();
+                }
+            }
+            let root = ws.running_root();
+            let files = session_files(&stage);
+            let out = dir.path().join(format!("{tag}.tsra"));
+            let sealed = ws.seal(&out).unwrap();
+            (sealed, root, files, fs::read(&out).unwrap())
+        };
+        let reference = seal("slice", false, true);
+        for (tag, with_digest) in [("reader-verified", true), ("reader-filled", false)] {
+            let (sealed, root, files, bytes) = seal(tag, true, with_digest);
+            assert_eq!(sealed.manifest_hash, reference.0.manifest_hash, "{tag}");
+            assert_eq!(sealed.content_hash, reference.0.content_hash, "{tag}");
+            assert_eq!(root, reference.1, "{tag}: running root");
+            assert!(files == reference.2, "{tag}: journal/fragments differ");
+            assert_eq!(files.2, 0, "{tag}: the append left a partial fragment");
+            assert!(bytes == reference.3, "{tag}: sealed container bytes differ");
+        }
+    }
+
+    /// #677: an append whose reader fails mid-stream, or whose bytes don't match the declared
+    /// digest, leaves the session exactly as it was — no partial fragment in staging, no fragment
+    /// in `blocks/`, no journal line, no Merkle leaf — and the session keeps working: a retry of the
+    /// same block seals the same product as a session that never failed.
+    #[test]
+    fn failed_append_block_from_leaves_no_staged_file_and_no_half_committed_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r1, p1) = block("a", 0);
+        let (r2, p2) = big_block("b");
+        let stage = dir.path().join("stage");
+        let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        ws.append_block(r1.clone(), &p1).unwrap();
+        let before = session_files(&stage);
+        let root = ws.running_root();
+
+        // Mid-stream read error, halfway through the block.
+        let flaky = Flaky {
+            data: p2.clone(),
+            pos: 0,
+            fail_after: Some(p2.len() / 2),
+        };
+        let err = ws.append_block_from(r2.clone(), flaky).unwrap_err();
+        assert!(err.to_string().contains("source went away"), "{err}");
+        assert!(
+            session_files(&stage) == before,
+            "a failed append left a trace"
+        );
+        assert_eq!((ws.watermark(), ws.running_root()), (1, root.clone()));
+
+        // Bytes that don't match the declared digest.
+        let mut corrupt = p2.clone();
+        corrupt[1000] ^= 1;
+        let tampered = Flaky {
+            data: corrupt,
+            pos: 0,
+            fail_after: None,
+        };
+        let err = ws.append_block_from(r2.clone(), tampered).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Integrity {
+                    what: "block_payload",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(
+            session_files(&stage) == before,
+            "a rejected append left a trace"
+        );
+        assert_eq!((ws.watermark(), ws.running_root()), (1, root));
+
+        // The retry commits; the product is the one a clean session seals.
+        let staging = ws.staging();
+        let mut staged = staging.create().unwrap();
+        staged.write_all(&p2).unwrap();
+        let staged_path = staged.path().to_path_buf();
+        ws.append_staged(r2.clone(), staged).unwrap();
+        assert!(
+            !staged_path.exists(),
+            "a committed staged file must be deleted"
+        );
+        let sealed = ws.seal(&dir.path().join("retried.tsra")).unwrap();
+        let mut bb = ProductBuilder::new("recon", "p", "d", TS);
+        bb.add_block_ref(r1);
+        bb.add_block_ref(r2);
+        assert_eq!(sealed.manifest_hash, bb.seal().unwrap().manifest_hash);
+    }
+
+    /// A staged file is deleted when its block is dropped uncommitted, and `recover` clears the
+    /// staged files a crash left behind (they were never committed, so they are scratch).
+    #[test]
+    fn staged_files_never_outlive_their_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        let staging = ws.staging();
+        let mut a = staging.create().unwrap();
+        let b = staging.create().unwrap();
+        assert_ne!(a.path(), b.path(), "every staged file gets a fresh name");
+        a.write_all(b"partial").unwrap();
+        assert_eq!(a.len(), 7);
+        let a_path = a.path().to_path_buf();
+        drop(a);
+        assert!(
+            !a_path.exists(),
+            "an uncommitted staged file must be deleted on drop"
+        );
+
+        // A crash: the session and the staged block vanish without running their drops.
+        std::mem::forget(b);
+        drop(ws);
+        assert_eq!(session_files(&stage).2, 1);
+        let ws = WriteSession::recover(&stage).unwrap();
+        assert_eq!(
+            session_files(&stage).2,
+            0,
+            "recover must clear stale staged files"
+        );
+        assert_eq!(ws.watermark(), 0);
+    }
+
+    /// A staged block holding `bytes`, flushed to its file (as an encoder leaves it).
+    fn staged(ws: &WriteSession, bytes: &[u8]) -> StagedBlock {
+        let mut s = ws.staging().create().unwrap();
+        s.write_all(bytes).unwrap();
+        s.flush().unwrap();
+        s
+    }
+
+    /// #677 r2 item 1: a journal fsync that fails AFTER its line was written leaves a complete line
+    /// for a block the caller was told failed. Unless the session refuses to go on, a retry commits
+    /// more blocks behind that orphaned line, and `recover`, which stops at it (its fragment is
+    /// gone), drops every one of them. So the failure poisons the session: later appends are refused
+    /// with an error that says to `recover`, and `recover` yields exactly the blocks committed
+    /// before the failure and resumes from there. Both appends share the commit, so both are tested.
+    #[test]
+    fn a_failed_journal_sync_poisons_the_session_and_recover_keeps_the_blocks_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ra, pa) = block("a", 0);
+        let (rb, pb) = block("b", 1);
+        let (rc, pc) = block("c", 2);
+        for via in ["append_block", "append_staged"] {
+            let stage = dir.path().join(via);
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            ws.append_block(ra.clone(), &pa).unwrap();
+            let root = ws.running_root();
+
+            ws.faults.journal_sync = true;
+            let err = if via == "append_block" {
+                ws.append_block(rb.clone(), &pb).unwrap_err()
+            } else {
+                let s = staged(&ws, &pb);
+                ws.append_staged(rb.clone(), s).unwrap_err()
+            };
+            assert!(
+                err.to_string().contains("injected journal fsync failure"),
+                "{via}: {err}"
+            );
+            // The hazard is real: only the fsync failed, so the line for `b` is complete.
+            let journal = fs::read_to_string(stage.join(JOURNAL)).unwrap();
+            assert_eq!(journal.lines().count(), 2, "{via}: {journal}");
+            assert_eq!((ws.watermark(), ws.running_root()), (1, root.clone()));
+
+            // Poisoned: no later append is accepted, and the error names the way out.
+            let err = ws.append_block(rc.clone(), &pc).unwrap_err();
+            assert!(err.to_string().contains("recover"), "{via}: {err}");
+            let s = staged(&ws, &pc);
+            let err = ws.append_staged(rc.clone(), s).unwrap_err();
+            assert!(err.to_string().contains("recover"), "{via}: {err}");
+            assert_eq!(
+                session_files(&stage).2,
+                0,
+                "{via}: a refused append left a staged file"
+            );
+            let err = ws.seal(&dir.path().join("poisoned.tsra")).unwrap_err();
+            assert!(err.to_string().contains("recover"), "{via}: {err}");
+
+            // Recovery keeps exactly the blocks committed before the failure, then resumes.
+            let mut ws = WriteSession::recover(&stage).unwrap();
+            assert_eq!(
+                (ws.watermark(), ws.running_root()),
+                (1, root.clone()),
+                "{via}: recover kept a block the caller was told failed"
+            );
+            assert_eq!(
+                session_files(&stage).1.len(),
+                1,
+                "{via}: fragment of the failed block"
+            );
+            ws.append_block(rb.clone(), &pb).unwrap();
+            ws.append_block(rc.clone(), &pc).unwrap();
+            let sealed = ws.seal(&dir.path().join(format!("{via}.tsra"))).unwrap();
+            let mut bb = ProductBuilder::new("recon", "p", "d", TS);
+            for r in [&ra, &rb, &rc] {
+                bb.add_block_ref(r.clone());
+            }
+            assert_eq!(
+                sealed.manifest_hash,
+                bb.seal().unwrap().manifest_hash,
+                "{via}"
+            );
+        }
+    }
+
+    /// #677 r2 item 2 (ADR-0002 first-moment integrity): a staged block's digest is born as the
+    /// encoder writes it, and the commit checks the bytes it moved into `blocks/` against it. So
+    /// scratch corruption between the encode and the commit is refused (even with the digest left to
+    /// the session) — no block, no fragment, no staged file — and, since the journal was never
+    /// touched, the session goes on. Both ways into `blocks/` are checked: the rename, and the copy
+    /// across filesystems.
+    #[test]
+    fn a_staged_block_corrupted_before_its_commit_is_refused_and_leaves_no_trace() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ra, pa) = block("a", 0);
+        let (rb, pb) = big_block("b");
+        for cross_device in [false, true] {
+            let stage = dir.path().join(format!("stage-{cross_device}"));
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            ws.append_block(ra.clone(), &pa).unwrap();
+            let before = session_files(&stage);
+            let root = ws.running_root();
+
+            let s = staged(&ws, &pb);
+            let path = s.path().to_path_buf();
+            let mut bytes = fs::read(&path).unwrap();
+            bytes[pb.len() / 2] ^= 1;
+            fs::write(&path, &bytes).unwrap();
+            ws.faults.cross_device = cross_device;
+            let mut unset = rb.clone();
+            unset.digest = None;
+            let err = ws.append_staged(unset, s).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    Error::Integrity {
+                        what: "staged_block",
+                        ..
+                    }
+                ),
+                "cross_device={cross_device}: {err}"
+            );
+            assert!(!path.exists(), "the corrupted staged file was left");
+            assert!(
+                session_files(&stage) == before,
+                "a refused commit left a trace"
+            );
+            assert_eq!((ws.watermark(), ws.running_root()), (1, root));
+
+            ws.faults.cross_device = cross_device;
+            let s = staged(&ws, &pb);
+            let committed = ws.append_staged(rb.clone(), s).unwrap();
+            assert_eq!(committed.digest, rb.digest);
+            assert_eq!(fs::read(stage.join(BLOCKS).join("b")).unwrap(), pb);
+            assert_eq!((ws.watermark(), session_files(&stage).2), (2, 0));
+        }
+    }
+
+    /// #677 r2 item 3: the commit moves a staged file into `blocks/` by a rename (the staging
+    /// directory is inside the session directory, so on the same filesystem): the fragment IS the
+    /// staged file, not a copy of it.
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_block_is_renamed_into_place_not_copied() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (rb, pb) = big_block("b");
+        let stage = dir.path().join("stage");
+        let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        let s = staged(&ws, &pb);
+        let inode = fs::metadata(s.path()).unwrap().ino();
+        ws.append_staged(rb, s).unwrap();
+        let fragment = stage.join(BLOCKS).join("b");
+        assert_eq!(
+            fs::metadata(&fragment).unwrap().ino(),
+            inode,
+            "the commit copied the staged block instead of renaming it"
+        );
+        assert_eq!(fs::read(&fragment).unwrap(), pb);
+        assert_eq!(session_files(&stage).2, 0);
+    }
+
+    /// A block name is committed once: a second append of it is refused before it touches
+    /// `blocks/`, so it can neither overwrite the committed fragment nor, failing, delete it.
+    #[test]
+    fn a_committed_block_name_is_refused_and_its_fragment_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ra, pa) = block("a", 0);
+        let (other, po) = block("a", 7);
+        let stage = dir.path().join("stage");
+        let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        ws.append_block(ra, &pa).unwrap();
+        let before = session_files(&stage);
+        let err = ws.append_block(other.clone(), &po).unwrap_err();
+        assert!(err.to_string().contains("already committed"), "{err}");
+        let s = staged(&ws, &po);
+        let err = ws.append_staged(other, s).unwrap_err();
+        assert!(err.to_string().contains("already committed"), "{err}");
+        assert!(
+            session_files(&stage) == before,
+            "a refused append changed the session"
+        );
+        assert_eq!(ws.watermark(), 1);
     }
 
     #[test]

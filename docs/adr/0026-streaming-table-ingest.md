@@ -165,6 +165,111 @@ and window sizes (`stream::tests::content_hash_is_identical_across_workers_and_w
 `StreamStats` with `peak_in_flight_jobs`, `peak_in_flight_bytes`, `max_job_bytes` (`P`), `jobs_pushed`,
 `jobs_committed` and `producer_stalls`, so a consumer can assert the bound.
 
-**Scope.** `P` is still one job's encoded payload in RAM. The second half of #677 (a file-backed encode
-sink for one canonical table block, and a streaming commit from the staged file) extends this contract to
-the encoded output itself, so a single block larger than RAM is bounded too.
+**Scope.** `P` is one job's encoded payload in RAM. The second half of #677 (below) moves a table
+block's encoded output to disk, so a single block larger than RAM is bounded too.
+
+## Amendment (#677, 2026-10-26) — single-table output sink
+
+**Defect.** `table::encode_streaming` pulled its input lazily but wrote the encoded table into a
+`ByteBufferMut` and returned `freeze().to_vec()`, so the encoded output grew with the table (2 GiB of
+input → 4.76 GB anonymous RSS at `9424f90`, the consumer reproducer on #677). `TableStreamWriter::finish`
+and `table_job_from_fragments` reached that path, so neither the DAQ writer nor the multi-block sink could
+produce one canonical block larger than RAM. The fix doesn't change any bytes or hashes: not a format
+change, no new ADR.
+
+**Contract.**
+
+1. **File-backed encode.** `table::encode_streaming_to(spec, groups, sink)` writes the Vortex file to any
+   `std::io::Write`. At the pinned Vortex (0.75, rev `608d8a1`) that is
+   `VortexWriteOptions::blocking(&runtime).write<W: std::io::Write + Unpin>(sink, array_iterator)`
+   (`vortex-file/src/writer.rs`), which writes each segment buffer as soon as it is available and has no
+   buffering of its own. `encode_streaming` keeps its signature as `encode_streaming_to` into a `Vec`.
+2. **Staged jobs.** A `StagedEncodeJob` (`StreamWriter::push_staged`) receives the session's
+   `BlockStaging` and writes its data block into a `StagedBlock`, a file in the session's `staging/`
+   directory. `table_job_streaming(name, spec, groups)` (a lazy row-group iterator) and
+   `table_job_from_fragments` (staged fragments; used by `TableMultiBlockSink`) are staged jobs, and so is
+   `TableStreamWriter::into_job`. One logical block stays **one canonical block**: no suffixed physical
+   blocks.
+3. **Commit by rename, verified.** A `StagedBlock` hashes its bytes as the encoder writes them, so the
+   block's digest is born with the bytes (ADR-0002 first-moment integrity). `WriteSession::append_staged`
+   takes that digest (a set `block_ref.digest` must match it, a `None` one is filled in), fsyncs the file,
+   **renames** it into `blocks/` (no copy: `staging/` is inside the session directory, so on the same
+   filesystem; if it is on another one anyway, the rename fails with `CrossesDevices` and the file is
+   copied instead), fsyncs the directory, then **re-reads the fragment and checks it against the born
+   digest** before the same journal line + Merkle leaf as `append_block`. Scratch corruption between the
+   encode and the commit, or a bad copy, is refused (`Error::Integrity`, `what = "staged_block"`)
+   instead of being sealed under the digest of the corrupted bytes. `append_block_from(block_ref,
+   reader)` copies a reader into a `StagedBlock` and commits it the same way.
+4. **RAII.** A staged file is deleted on a failed commit and on drop (an encode error, a panic, a
+   pipeline shut down early); a committed one has become the fragment. Any append that fails before its
+   journal write leaves no staged file, no fragment, no journal line and no Merkle leaf.
+   `WriteSession::create` and `recover` clear `staging/`, since nothing in it was committed.
+   `StreamWriter::finish` joins every thread before it reports an error, so no staged encode is still
+   running when it returns (#680 item 3).
+5. **A failed journal write poisons the session** (every append, through the one commit they share).
+   Once the journal write has begun, a failure (the write, or its fsync) leaves the journal's state
+   unknown: a torn line, or a complete line that may or may not be durable. The failed block's fragment
+   is deleted, so `recover` stops at such a line, and any block appended behind it would be dropped. So
+   the session refuses every later append and the seal, with an error that says to `recover`; `recover`
+   rereads the journal and keeps exactly the blocks committed before the failure. Truncating the journal
+   back instead was rejected: it would rest on the fsync that just failed (after an fsync error the kernel
+   may drop the dirty pages and clear the error, so a later fsync can succeed with the data lost). A
+   block name already committed is refused too, so a failed append can't delete a committed fragment.
+
+**The rule: table streaming jobs are always staged.** The encoded size isn't known until the encode ends,
+so a threshold would need a sink that starts in RAM and spills to disk; always staging keeps the RAM a
+table job holds independent of its size, for one sequential read of the encoded block on local disk (the
+commit's verify pass; the write is the fragment's own, since the staged file becomes the fragment).
+`table_job` (in-memory input) and `EncodeJob`s stay in RAM, as before.
+
+**The bound, extended.** With the window's `J`, `B`, `W` and `P` as above, `P` now counts only what a job
+holds **in RAM**: a staged job's companions, i.e. `0` for the table jobs. So for a product written with
+staged table jobs, the encoded bytes held in RAM are `< B` (`StreamStats::peak_in_flight_bytes`; test
+`stream::tests::single_table_block_many_times_the_budget_stays_within_the_window`). What the window does
+**not** count, per encode worker: one row-group of input, the compressor's buffers, a `BufWriter` (8 KiB),
+and the encoded segments the Vortex writer holds before it writes them (below). The committer's verify
+pass reads through a fixed 64 KiB buffer. That a staged job holds nothing beyond the encoder's own working
+set is checked on the real heap, not only the window's accounting: `tests/staged_job_memory.rs` (a counting
+allocator; each staged table job's peak heap is that of the same encode into `io::sink()`, within 1 MiB).
+
+**Disk is not bounded by the RAM budget.** Scratch needed in the session directory, with `S` the largest
+staged block (`StreamStats::max_staged_job_bytes`) and `T` the product's total size:
+
+- staged files of finished-but-uncommitted jobs `≤ J × S` (`StreamStats::peak_staged_bytes`), plus the
+  files of the up to `min(W, J)` encodes in progress;
+- committed fragments (`blocks/`, up to `T`): a commit renames the staged file into place, so a block is
+  never on disk twice;
+- at seal, the output `.tsra` (another `T`, written to a sibling `.part` and renamed).
+
+So plan for about `2 × T + J × S` of scratch when the output `.tsra` is on the same filesystem (`T + J × S`
+until the seal). For a product that is one large block (`S ≈ T`) that is `T` while it encodes and commits,
+and `2 × T` during the seal (the fragment and the output). A copying commit would add one `S` while a
+block commits (the staged file and its copy), `2 × T` already during the commit of one large block.
+
+**Determinism.** A staged block is byte-identical to the in-memory encode of the same table, so the
+sealed bytes, `content_hash` and `manifest_hash` don't depend on the job kind, the worker count or the
+window (`stream::tests::staged_table_jobs_seal_the_in_memory_product_for_every_worker_count_and_window`).
+The conformance corpus is unchanged.
+
+**Measured (consumer reproducer, ksb job, 2026-10-26).** MorePET/visionx-rs `chore/39-tessera-677-repro`
+(exact nullable decoder shape, its single encode job switched to `table_job_streaming`), built against this
+change (at `37fe9d7`, which committed by a 256 KiB-buffered copy instead of the rename: the encode, which
+sets the peak, is the same), `ksb run --cpu 4 --exclusive-cpus --mem 12Gi`, `--workers $KSB_CPUS`, peak
+`RssAnon` sampled every 10 ms (anonymous memory, not page cache):
+
+| rows | packet-equivalent input | peak RssAnon | output | at `9424f90` |
+|---:|---:|---:|---:|---:|
+| 268,435,456 | 2.15 GB | 0.91 GB | 2.05 GB | 4.76 GB |
+| 1,600,000,000 | 12.8 GB | 5.15 GB | 12.21 GB | — |
+
+**Known limit: the Vortex writer's own buffering (#681).** The output Vec is gone, but RSS still grows
+during the encode (~3.2 bytes/row, about 0.4 × the encoded size at the peak) and drops when the footer is
+written. Root cause, measured with a counting allocator and a patched copy of the pinned Vortex: its
+`ChunkedLayoutStrategy` spawns one write task per chunk and polls them with `buffered(usize::MAX)`, and the
+segment sink writes segments in one global sequence order across all columns, so compressed chunks pile up
+in pending tasks ahead of the sink with nothing applying backpressure. A fixed cap is not a drop-in fix:
+`buffered(64)` bounds the heap, `buffered(2)` and `buffered(8)` deadlock on the cross-column order. So the
+bound this amendment gives is the tessera side (the window and the staged block); the encode's RAM is
+`≈ 0.4 × S` on top until #681 lands a deadlock-free bound inside Vortex. Projected for the consumer's full
+2.4 G-row (19.2 GB) acquisition: ≈ 7.7 GB peak RssAnon, under its 8 GiB budget but not independent of the
+input size, so #677 stays open on #681.

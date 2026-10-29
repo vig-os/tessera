@@ -56,7 +56,7 @@ use vortex_array::accessor::ArrayAccessor;
 use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::arrays::{BoolArray, ChunkedArray, PrimitiveArray, StructArray, VarBinViewArray};
 use vortex_array::expr::{root, select};
-use vortex_array::iter::{ArrayIteratorAdapter, ArrayIteratorExt};
+use vortex_array::iter::ArrayIteratorAdapter;
 use vortex_array::scalar_fn::session::ScalarFnSession;
 use vortex_array::session::ArraySession;
 use vortex_array::ExecutionCtx;
@@ -1025,11 +1025,11 @@ pub fn decode_rows(spec: &TableSpec, blob: &[u8], rows: &[u64]) -> Result<TableD
         .collect())
 }
 
-/// **Bounded-memory / >RAM variant of [`encode`]**: consume row-group [`TableData`] chunks from a
-/// *lazy* iterator (each ≤ [`ROWS_PER_GROUP`] rows) and write the chunked Vortex bytes **without ever
-/// holding the whole table** — the DAQ / streaming-compaction path. The iterator is pulled one chunk
-/// at a time as the writer consumes it (`ArrayIteratorAdapter` → `into_array_stream`), so a producer
-/// that reads one row-group fragment at a time stays at ~one-group RAM.
+/// The lazy streaming encoder collected into a `Vec<u8>`: [`encode_streaming_to`] with a vector as
+/// the sink. The input side is bounded (one row-group in flight), but the **output** is the whole
+/// encoded table in RAM, so this is for tables that fit in memory. A table of any size streams to a
+/// file (or any other [`std::io::Write`]) through [`encode_streaming_to`] instead, and into a
+/// [`crate::StreamWriter`] as one canonical block through [`crate::table_job_streaming`] (#677).
 ///
 /// Feeding the row-groups in fixed-grid order yields bytes **byte-identical to [`encode`]** of the
 /// concatenation — there is one logical encoder, so streaming-then-compact == batch (tested by
@@ -1038,6 +1038,41 @@ pub fn encode_streaming<I>(spec: &TableSpec, groups: I) -> Result<Vec<u8>>
 where
     I: IntoIterator<Item = TableData>,
     I::IntoIter: Send + 'static,
+{
+    let mut bytes = Vec::new();
+    encode_streaming_to(spec, groups, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// **Bounded-memory / >RAM variant of [`encode`]**: consume row-group [`TableData`] chunks from a
+/// *lazy* iterator (each ≤ [`ROWS_PER_GROUP`] rows) and write the chunked Vortex bytes to `sink`
+/// **without collecting either the table or the encoded output in a buffer** — the DAQ /
+/// streaming-compaction path. The iterator is pulled one chunk at a time as the writer consumes it
+/// (an `ArrayIteratorAdapter` handed to Vortex's blocking writer), so a producer that reads one
+/// row-group fragment at a time stays at ~one-group RAM, and the encoded segments go to `sink` as
+/// the Vortex writer releases them (see the known limit below). Returns the number of bytes
+/// written.
+///
+/// The sink is any [`std::io::Write`]: the pinned Vortex (0.75, `vortex-file`'s
+/// `VortexWriteOptions::blocking(..).write<W: std::io::Write + Unpin>`) writes each buffer through
+/// `write_all` as soon as it is available and calls `flush` once after the footer, with no buffering
+/// of its own — so wrap a [`std::fs::File`] in a [`std::io::BufWriter`].
+///
+/// **Known limit (#681).** The output no longer accumulates in a buffer, but the pinned Vortex
+/// writer itself still holds encoded segments in memory until it can write them: it spawns one
+/// task per chunk with no bound on how many are pending, and writes segments in one global order
+/// across all columns, so compressed chunks pile up ahead of the sink. Measured, the encode's
+/// anonymous memory is about 0.4 × the encoded size at its peak, released when the footer is
+/// written (ADR-0026, amendment "single-table output sink"). Bounding it needs a deadlock-free
+/// change inside Vortex; until then, size the RAM of a single huge table encode from that ratio.
+///
+/// The bytes are those of [`encode_streaming`] (and of [`encode`] of the concatenation) whatever the
+/// sink: the writer emits the same buffers in the same order, and the sink only receives them.
+pub fn encode_streaming_to<I, W>(spec: &TableSpec, groups: I, mut sink: W) -> Result<u64>
+where
+    I: IntoIterator<Item = TableData>,
+    I::IntoIter: Send + 'static,
+    W: std::io::Write,
 {
     let (rt, s) = runtime_session();
     // The struct dtype, taken from an empty struct of the declared columns. It must carry each
@@ -1084,14 +1119,13 @@ where
     let strategy = WriteStrategyBuilder::default()
         .with_btrblocks_builder(deterministic_table_compressor())
         .build();
-    let mut buf = ByteBufferMut::empty();
-    rt.block_on(
-        s.write_options()
-            .with_strategy(strategy)
-            .write(&mut buf, array_iter.into_array_stream()),
-    )
-    .map_err(ze)?;
-    Ok(buf.freeze().to_vec())
+    let summary = s
+        .write_options()
+        .with_strategy(strategy)
+        .blocking(&rt)
+        .write(&mut sink, array_iter)
+        .map_err(ze)?;
+    Ok(summary.size())
 }
 
 /// Append a decoded (canonicalized) Vortex column's values onto the matching output (bit-exact).
@@ -2519,6 +2553,33 @@ mod tests {
             encode_streaming(&spec, groups(&dirty)).unwrap(),
             batch,
             "streamed bytes depend on the values under a NULL"
+        );
+    }
+
+    /// #677: the sink variant writes `encode_streaming`'s bytes — the batch bytes — into any
+    /// `io::Write` (here a buffered file), over nullable columns, and returns the length written.
+    #[test]
+    fn encode_streaming_to_a_file_writes_the_batch_bytes() {
+        use super::under_null_fixture as fx;
+        let rows = ROWS_PER_GROUP * 2 + 777;
+        let spec = fx::spec(rows);
+        let (canonical, _) = fx::tables(rows);
+        let groups = (0..rows.div_ceil(ROWS_PER_GROUP)).map(move |g| {
+            let (st, en) = (g * ROWS_PER_GROUP, ((g + 1) * ROWS_PER_GROUP).min(rows));
+            canonical
+                .iter()
+                .map(|(name, c)| (name.clone(), c.slice(st, en)))
+                .collect::<TableData>()
+        });
+        let batch = encode(&spec, &fx::tables(rows).0).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.vortex");
+        let sink = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        let written = encode_streaming_to(&spec, groups, sink).unwrap();
+        assert_eq!(written, batch.len() as u64);
+        assert!(
+            std::fs::read(&path).unwrap() == batch,
+            "file sink != batch encode"
         );
     }
 

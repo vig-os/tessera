@@ -20,6 +20,14 @@
 //!   companions):
 //!   - jobs pushed but not yet committed `≤ J`, always;
 //!   - encoded payload bytes held in RAM `< B + min(W, J) × P` (and trivially `≤ J × P`).
+//!
+//!   A **staged** job ([`StagedEncodeJob`], pushed with [`StreamWriter::push_staged`]) writes its
+//!   data block to a file in the session's staging directory instead of RAM, so only its companions
+//!   count towards `P` — zero for [`table_job_streaming`] and [`table_job_from_fragments`]. That is
+//!   what makes ONE canonical table block of any size bounded (#677): its encoded bytes are on disk,
+//!   not in the window. Disk is not bounded by `B`: the staged files of finished-but-uncommitted
+//!   jobs hold `≤ J × S` bytes (`S` = the largest staged block, [`StreamStats::max_staged_job_bytes`]),
+//!   plus the files of the encodes in progress.
 //! - **Parallel encode:** `workers` threads encode concurrently (the expensive pcodec/Vortex step).
 //! - **Deterministic output:** the committer commits blocks in **push order** (a reorder buffer holds
 //!   out-of-order completions), so the running Merkle — and therefore the sealed `content_hash` /
@@ -27,8 +35,17 @@
 //!   the same order. Streaming changes *how* the bytes are produced, never *which* bytes; neither
 //!   the worker count nor the window changes them.
 //!
-//! The encoded payload of ONE job is still materialised in RAM (`P` above): a single table block
-//! larger than RAM needs the file-backed encode sink, the second half of #677 (out of scope here).
+//! An in-memory job ([`EncodeJob`]) still materialises its encoded payload in RAM (`P` above); a
+//! table block too large for that goes through a staged job. Staged blocks are committed with
+//! [`WriteSession::append_staged`], which renames the file into place as the fragment after checking
+//! it against the digest it was born with (hashed as the encoder wrote it). A staged block is
+//! byte-identical to the in-memory encode of the same table, so the sealed product does not depend on
+//! which kind of job wrote it.
+//!
+//! Neither bound counts the encoders' own working sets (one row-group of input, the compressor's
+//! buffers, and the encoded segments the Vortex writer holds before it writes them — about 0.4 × a
+//! table's encoded size at its peak, a known limit tracked in #681, see
+//! [`crate::table::encode_streaming_to`]) or the committer's fixed 64 KiB verify buffer.
 //!
 //! # How the window is enforced
 //!
@@ -60,7 +77,7 @@ use tessera_core::block::BlockRef;
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
 
-use crate::write::WriteSession;
+use crate::write::{BlockStaging, StagedBlock, WriteSession};
 use crate::BlockPayload;
 
 /// A committed block: its manifest reference paired with its payload bytes.
@@ -72,6 +89,58 @@ type EncodedBlock = (BlockRef, BlockPayload);
 /// order. Use [`array_job`]/[`table_job`] (no companions) or the `*_indexed` variants (with a sidecar).
 pub type EncodeJob =
     Box<dyn FnOnce() -> Result<(EncodedBlock, Vec<EncodedBlock>)> + Send + 'static>;
+
+/// A data block whose encoded bytes are in a [`StagedBlock`] (a file), not in RAM. Its
+/// [`BlockRef::digest`] may be `None`: the commit fills in the digest the [`StagedBlock`] computed as
+/// the bytes were written (a digest that is set must match it).
+pub type StagedEncodedBlock = (BlockRef, StagedBlock);
+
+/// A unit of work like [`EncodeJob`] whose **data block is written to a file** in the write
+/// session's staging directory rather than returned in RAM: the worker hands the job the session's
+/// [`BlockStaging`], the job writes its block into a [`BlockStaging::create`]d [`StagedBlock`], and
+/// the committer renames that file into the product ([`WriteSession::append_staged`]). Companions
+/// stay in RAM. Push it with [`StreamWriter::push_staged`]. Use it for a block that may not fit in
+/// memory — [`table_job_streaming`] and [`table_job_from_fragments`] are staged jobs.
+pub type StagedEncodeJob = Box<
+    dyn FnOnce(&BlockStaging) -> Result<(StagedEncodedBlock, Vec<EncodedBlock>)> + Send + 'static,
+>;
+
+/// The table block's manifest reference without a digest (a staged commit fills it in).
+fn staged_table_ref(
+    name: String,
+    spec: &tessera_core::block::table::TableSpec,
+) -> Result<BlockRef> {
+    Ok(BlockRef {
+        name,
+        kind: tessera_core::block::BlockKind::Table,
+        digest: None,
+        spec: serde_json::to_value(spec)?,
+    })
+}
+
+/// Wrap ONE canonical table block of **any size** as a [`StagedEncodeJob`]: the job pulls `groups`
+/// (row-groups of ≤ [`crate::table::ROWS_PER_GROUP`] rows, in order, totalling `spec.rows`) lazily
+/// through [`crate::table::encode_streaming_to`] into a staged file, so neither the input nor the
+/// encoded output is collected in RAM (#677; the Vortex writer's own in-flight segments are a known
+/// limit, #681). The committed block is byte-identical to
+/// [`crate::table::encode`] of the concatenated rows (and to [`table_job`] of them), so its digest
+/// and the product's `content_hash` do not depend on the job kind.
+pub fn table_job_streaming<I>(
+    name: impl Into<String>,
+    spec: tessera_core::block::table::TableSpec,
+    groups: I,
+) -> StagedEncodeJob
+where
+    I: IntoIterator<Item = crate::table::TableData> + Send + 'static,
+    I::IntoIter: Send + 'static,
+{
+    let name = name.into();
+    Box::new(move |staging| {
+        let mut staged = staging.create()?;
+        crate::table::encode_streaming_to(&spec, groups, &mut staged)?;
+        Ok(((staged_table_ref(name, &spec)?, staged), Vec::new()))
+    })
+}
 
 /// Wrap an array block as an [`EncodeJob`] (encoding deferred to a worker). No companion blocks — the
 /// streamed bytes stay byte-identical to a batch write.
@@ -125,79 +194,101 @@ pub fn table_job_indexed(
     })
 }
 
-/// Wrap a table block as an [`EncodeJob`] that **lazily reads fragments from disk** — the
-/// multi-block listmode peer of [`table_job`]. The job closure pulls one row-group fragment at a
-/// time via [`crate::accumulate::read_fragment`] and feeds [`crate::table::encode_streaming`], so the
-/// per-block encode peak ≈ one row-group's RAM (plus Vortex working set), never the whole block. This
-/// is the key piece that lets the multi-block sink dispatch one parallel encode job per block to
-/// [`StreamWriter`] without ever holding a full block payload off-disk.
+/// Wrap a table block as a [`StagedEncodeJob`] that **lazily reads row-group fragments from disk**
+/// — the multi-block listmode peer of [`table_job_streaming`]. The job pulls one fragment at a time
+/// (the crate's fragment reader) into [`crate::table::encode_streaming_to`], writing the
+/// encoded block to a staged file, so the per-block encode holds ≈ one row-group of input (plus the
+/// Vortex working set, #681) and doesn't collect the output. This is the piece that lets the multi-block sink
+/// dispatch one parallel encode job per block to [`StreamWriter`] without holding a block payload
+/// in RAM.
 ///
 /// Inputs:
 /// - `name`: the manifest block name (already chosen via [`crate::table::block_name`]).
 /// - `spec`: the per-block [`TableSpec`] — its `rows` MUST equal the sum of the fragments' rows.
-/// - `frag_paths`: row-group fragment file paths in append order (the order [`encode_streaming`]
-///   consumes them).
+/// - `frag_paths`: row-group fragment file paths in append order (the order the encoder consumes
+///   them).
+///
+/// A fragment that can't be read fails the job with that error (its staged file is deleted).
+///
+/// [`TableSpec`]: tessera_core::block::table::TableSpec
 pub fn table_job_from_fragments(
     name: impl Into<String>,
     spec: tessera_core::block::table::TableSpec,
     frag_paths: Vec<std::path::PathBuf>,
-) -> EncodeJob {
+) -> StagedEncodeJob {
     let name = name.into();
-    Box::new(move || {
-        // The lazy iterator pulled by encode_streaming: one fragment at a time, decoded just before
-        // Vortex consumes it. A read error must surface as an Err, but the iterator side is infallible
-        // (TableData) — stash the first error and feed empties after it, then return Err if set.
-        let columns = spec.columns.clone();
-        let err: std::sync::Arc<std::sync::Mutex<Option<tessera_core::Error>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
-        let slot = std::sync::Arc::clone(&err);
-        let empty_for = |columns: &[tessera_core::block::table::Column]| {
-            columns
-                .iter()
-                .map(|c| {
-                    (
-                        c.name.clone(),
-                        crate::table::ColumnData::empty_for(c).expect("validated dtype"),
-                    )
-                })
-                .collect::<crate::table::TableData>()
-        };
-        let iter = frag_paths.into_iter().map(move |p| {
-            if slot.lock().expect("err mutex").is_some() {
-                return empty_for(&columns);
-            }
-            match crate::accumulate::read_fragment(&p, &columns) {
-                Ok(td) => td,
-                Err(e) => {
-                    *slot.lock().expect("err mutex") = Some(e);
-                    empty_for(&columns)
-                }
-            }
-        });
-        let bytes = crate::table::encode_streaming(&spec, iter)?;
-        if let Some(e) = err.lock().expect("err mutex").take() {
-            return Err(e);
-        }
-        let digest = tessera_core::hash::digest(&bytes);
-        let block_ref = tessera_core::block::BlockRef {
-            name: name.clone(),
-            kind: tessera_core::block::BlockKind::Table,
-            digest: Some(digest),
-            spec: serde_json::to_value(&spec).map_err(tessera_core::Error::from)?,
-        };
-        Ok((
-            (block_ref, crate::BlockPayload::new(name.clone(), bytes)),
-            Vec::new(),
-        ))
+    Box::new(move |staging| {
+        let mut staged = staging.create()?;
+        crate::accumulate::compact_fragments_to(&spec, frag_paths, &mut staged)?;
+        Ok(((staged_table_ref(name, &spec)?, staged), Vec::new()))
     })
 }
 
-/// The encoded result of one job: the data block plus its companions.
-type JobOutput = (EncodedBlock, Vec<EncodedBlock>);
+/// A job of either kind, as the pipeline queues it.
+enum Job {
+    InMemory(EncodeJob),
+    Staged(StagedEncodeJob),
+}
 
-/// What a worker hands the committer: the job's `seq`, the encoded payload bytes it charged to the
-/// window (so the commit can give exactly that back), and the encode result.
-type Encoded = (usize, u64, Result<JobOutput>);
+impl Job {
+    fn run(self, staging: &BlockStaging) -> Result<JobOutput> {
+        match self {
+            Job::InMemory(job) => job().map(|(data, companions)| JobOutput {
+                data: DataBlock::InMemory(data),
+                companions,
+            }),
+            Job::Staged(job) => job(staging).map(|(data, companions)| JobOutput {
+                data: DataBlock::Staged(data),
+                companions,
+            }),
+        }
+    }
+}
+
+/// A job's data block: its bytes in RAM, or in a staged file.
+enum DataBlock {
+    InMemory(EncodedBlock),
+    Staged(StagedEncodedBlock),
+}
+
+/// The encoded result of one job: the data block plus its (in-RAM) companions.
+struct JobOutput {
+    data: DataBlock,
+    companions: Vec<EncodedBlock>,
+}
+
+impl JobOutput {
+    /// What the job holds until its commit: `(bytes in RAM, bytes in staged files)`.
+    fn held(&self) -> Held {
+        let companions: u64 = self
+            .companions
+            .iter()
+            .map(|(_, payload)| payload.bytes.len() as u64)
+            .sum();
+        match &self.data {
+            DataBlock::InMemory((_, payload)) => Held {
+                ram: companions + payload.bytes.len() as u64,
+                staged: 0,
+            },
+            DataBlock::Staged((_, staged)) => Held {
+                ram: companions,
+                staged: staged.len(),
+            },
+        }
+    }
+}
+
+/// The bytes a finished job holds until it is committed: encoded payloads in RAM (charged to the
+/// window's byte budget) and staged files on disk (reported, not budgeted).
+#[derive(Clone, Copy, Default)]
+struct Held {
+    ram: u64,
+    staged: u64,
+}
+
+/// What a worker hands the committer: the job's `seq`, the bytes it charged to the window (so the
+/// commit can give exactly that back), and the encode result.
+type Encoded = (usize, Held, Result<JobOutput>);
 
 /// The credit window bounding everything a [`StreamWriter`] holds between [`StreamWriter::push`]
 /// and the in-order commit of that job (#677). See the [module docs](self) for the bound it gives
@@ -243,7 +334,8 @@ pub struct StreamStats {
     /// The most encoded payload bytes (data blocks + companions) held at any one time by jobs that
     /// had finished encoding but were not yet committed.
     pub peak_in_flight_bytes: u64,
-    /// The largest encoded payload of a single job (data block + companions) — `P` in the bound.
+    /// The largest encoded payload a single job held in RAM (data block + companions; a staged
+    /// job's data block is on disk, so only its companions count) — `P` in the bound.
     pub max_job_bytes: u64,
     /// Jobs pushed so far.
     pub jobs_pushed: usize,
@@ -251,6 +343,11 @@ pub struct StreamStats {
     pub jobs_committed: usize,
     /// How many [`StreamWriter::push`] calls had to wait for a credit (backpressure events).
     pub producer_stalls: u64,
+    /// The most bytes held at any one time in the staged files of jobs that had finished encoding
+    /// but were not yet committed — disk, not RAM, so not part of `peak_in_flight_bytes`.
+    pub peak_staged_bytes: u64,
+    /// The largest staged data block of a single job (`S` in the disk bound `≤ J × S`).
+    pub max_staged_job_bytes: u64,
 }
 
 /// The window's mutable state, behind [`CreditWindow::state`].
@@ -259,6 +356,8 @@ struct WindowState {
     in_flight_jobs: usize,
     /// Encoded payload bytes of jobs that finished encoding and are not yet committed.
     in_flight_bytes: u64,
+    /// Staged-file bytes of jobs that finished encoding and are not yet committed.
+    staged_bytes: u64,
     /// The `seq` the committer commits next — the job the window must never stall.
     next_commit: usize,
     /// Set when the pipeline can no longer make progress (encode/commit error, worker panic,
@@ -283,6 +382,7 @@ impl CreditWindow {
             state: Mutex::new(WindowState {
                 in_flight_jobs: 0,
                 in_flight_bytes: 0,
+                staged_bytes: 0,
                 next_commit: 0,
                 closed: false,
                 gated_encodes: 0,
@@ -356,19 +456,23 @@ impl CreditWindow {
         turn
     }
 
-    /// A worker finished encoding a job whose payload is `bytes`: hold them until its commit.
-    fn charge(&self, bytes: u64) {
+    /// A worker finished encoding a job that holds `held`: hold it until the job's commit.
+    fn charge(&self, held: Held) {
         let mut st = self.lock();
-        st.in_flight_bytes += bytes;
+        st.in_flight_bytes += held.ram;
+        st.staged_bytes += held.staged;
         st.stats.peak_in_flight_bytes = st.stats.peak_in_flight_bytes.max(st.in_flight_bytes);
-        st.stats.max_job_bytes = st.stats.max_job_bytes.max(bytes);
+        st.stats.max_job_bytes = st.stats.max_job_bytes.max(held.ram);
+        st.stats.peak_staged_bytes = st.stats.peak_staged_bytes.max(st.staged_bytes);
+        st.stats.max_staged_job_bytes = st.stats.max_staged_job_bytes.max(held.staged);
     }
 
-    /// The committer appended job `next_commit` (whose payload was `bytes`): give its credit back.
-    fn release(&self, bytes: u64) {
+    /// The committer appended job `next_commit` (which held `held`): give its credit back.
+    fn release(&self, held: Held) {
         let mut st = self.lock();
         st.in_flight_jobs -= 1;
-        st.in_flight_bytes -= bytes;
+        st.in_flight_bytes -= held.ram;
+        st.staged_bytes -= held.staged;
         st.next_commit += 1;
         st.stats.jobs_committed += 1;
         drop(st);
@@ -408,21 +512,13 @@ impl Drop for CloseOnDrop {
     }
 }
 
-/// The encoded payload size of one job: its data block plus every companion.
-fn payload_bytes((data, companions): &JobOutput) -> u64 {
-    std::iter::once(data)
-        .chain(companions)
-        .map(|(_, payload)| payload.bytes.len() as u64)
-        .sum()
-}
-
 /// A bounded-memory, parallel-encode streaming writer over a [`WriteSession`].
 ///
 /// Every job holds a credit of the writer's [`StreamWindow`] from [`Self::push`] until it is
 /// committed in order, so the jobs and encoded bytes held stay within the bound in the
 /// [module docs](self), whatever the producer's pace or the encode order.
 pub struct StreamWriter {
-    input: Option<Sender<(usize, EncodeJob)>>,
+    input: Option<Sender<(usize, Job)>>,
     workers: Vec<JoinHandle<()>>,
     committer: Option<JoinHandle<Result<WriteSession>>>,
     window: Arc<CreditWindow>,
@@ -453,15 +549,17 @@ impl StreamWriter {
         // The channels only carry jobs; the window is what bounds them (at most `max_in_flight`
         // jobs sit in both together). Unbounded channels allocate nothing up front, so a window of
         // `usize::MAX` jobs (bound by bytes only) is fine.
-        let (in_tx, in_rx) = channel::<(usize, EncodeJob)>();
+        let (in_tx, in_rx) = channel::<(usize, Job)>();
         let in_rx = Arc::new(Mutex::new(in_rx));
         let (out_tx, out_rx) = channel::<Encoded>();
+        let staging = session.staging();
 
         let worker_handles = (0..workers)
             .map(|_| {
                 let rx = Arc::clone(&in_rx);
                 let tx = out_tx.clone();
                 let window = Arc::clone(&window);
+                let staging = staging.clone();
                 thread::spawn(move || {
                     let _close = CloseOnDrop {
                         window: Arc::clone(&window),
@@ -479,10 +577,10 @@ impl StreamWriter {
                         if !window.wait_encode_turn(seq) {
                             break; // pipeline closed
                         }
-                        let res = job();
-                        let bytes = res.as_ref().map_or(0, payload_bytes);
-                        window.charge(bytes);
-                        if tx.send((seq, bytes, res)).is_err() {
+                        let res = job.run(&staging);
+                        let held = res.as_ref().map_or(Held::default(), JobOutput::held);
+                        window.charge(held);
+                        if tx.send((seq, held, res)).is_err() {
                             break; // committer gone (it closed the window on its way out)
                         }
                     }
@@ -533,6 +631,17 @@ impl StreamWriter {
     /// manifest to record them. Errors once the pipeline died (a failed encode or commit, or a
     /// panicking worker); [`Self::finish`] then reports the cause.
     pub fn push(&mut self, job: EncodeJob) -> Result<()> {
+        self.submit(Job::InMemory(job))
+    }
+
+    /// Enqueue a [`StagedEncodeJob`]: like [`Self::push`] (same window, same commit order), but the
+    /// job writes its data block to a staged file, which the committer streams into the product and
+    /// deletes, so the block's bytes never count against the window's byte budget.
+    pub fn push_staged(&mut self, job: StagedEncodeJob) -> Result<()> {
+        self.submit(Job::Staged(job))
+    }
+
+    fn submit(&mut self, job: Job) -> Result<()> {
         let tx = self
             .input
             .as_ref()
@@ -554,16 +663,27 @@ impl StreamWriter {
     /// assert the memory contract against.
     pub fn finish_with_stats(mut self, out: &Path) -> Result<(Manifest, StreamStats)> {
         drop(self.input.take()); // close input → workers drain + exit → out_rx closes → committer returns
+                                 // Join EVERY thread before reporting anything (#680): a sibling worker may still be
+                                 // encoding into a staged file, and the committer may still hold staged results; returning
+                                 // early would let a caller reuse the session directory under them. A panic closes the
+                                 // window, so the others exit promptly. The first error wins, workers before the committer.
+        let mut first_error = None;
         for w in self.workers.drain(..) {
-            w.join()
-                .map_err(|_| Error::Container("encode worker panicked".into()))?;
+            if w.join().is_err() && first_error.is_none() {
+                first_error = Some(Error::Container("encode worker panicked".into()));
+            }
         }
-        let session = self
+        let committed = self
             .committer
             .take()
             .expect("committer present")
             .join()
-            .map_err(|_| Error::Container("committer thread panicked".into()))??;
+            .map_err(|_| Error::Container("committer thread panicked".into()))
+            .and_then(|r| r);
+        if let Some(e) = first_error {
+            return Err(e);
+        }
+        let session = committed?;
         let stats = self.window.stats();
         Ok((session.seal(out)?, stats))
     }
@@ -578,25 +698,32 @@ fn commit_loop(
     out_rx: Receiver<Encoded>,
     window: &CreditWindow,
 ) -> Result<WriteSession> {
-    let mut pending: BTreeMap<usize, (u64, JobOutput)> = BTreeMap::new();
+    let mut pending: BTreeMap<usize, (Held, JobOutput)> = BTreeMap::new();
     let mut next = 0usize;
     // Commit the data block then its additive companions (ADR-0028 §5 sidecars), in order, then
-    // give the job's credit back.
+    // give the job's credit back. A staged data block streams from its file, which is deleted.
     let mut commit_ready = |session: &mut WriteSession,
-                            pending: &mut BTreeMap<usize, (u64, JobOutput)>|
+                            pending: &mut BTreeMap<usize, (Held, JobOutput)>|
      -> Result<()> {
-        while let Some((bytes, ((bref, payload), companions))) = pending.remove(&next) {
-            session.append_block(bref, &payload.bytes)?;
-            for (cref, cpayload) in companions {
+        while let Some((held, out)) = pending.remove(&next) {
+            match out.data {
+                DataBlock::InMemory((bref, payload)) => {
+                    session.append_block(bref, &payload.bytes)?;
+                }
+                DataBlock::Staged((bref, staged)) => {
+                    session.append_staged(bref, staged)?;
+                }
+            }
+            for (cref, cpayload) in out.companions {
                 session.append_block(cref, &cpayload.bytes)?;
             }
-            window.release(bytes);
+            window.release(held);
             next += 1;
         }
         Ok(())
     };
-    while let Ok((seq, bytes, res)) = out_rx.recv() {
-        pending.insert(seq, (bytes, res?));
+    while let Ok((seq, held, res)) = out_rx.recv() {
+        pending.insert(seq, (held, res?));
         commit_ready(&mut session, &mut pending)?;
     }
     // Channel closed: all workers exited → every pushed block has arrived → drain the contiguous rest.
@@ -1093,6 +1220,345 @@ mod tests {
             "clamped to ≥ 1"
         );
         sw.finish(&dir.path().join("s.tsra")).unwrap();
+    }
+
+    /// A listmode-shaped table for the staged (#677 gap 1) tests: a sequential row index, a NULLABLE
+    /// timestamp whose first 1024 rows are NULL (the consumer's decoder shape), and an
+    /// incompressible 64-bit column so the encoded block is ~8 bytes a row, far above the budgets.
+    mod listmode {
+        use crate::table::{ColumnData, TableData, ROWS_PER_GROUP};
+        use tessera_core::block::table::{Column, TableSpec};
+
+        fn col(name: &str, dtype: &str) -> Column {
+            Column {
+                name: name.into(),
+                dtype: dtype.into(),
+                ..Default::default()
+            }
+        }
+
+        pub(super) fn spec(rows: u64) -> TableSpec {
+            TableSpec {
+                columns: vec![
+                    col("t", "u8"),
+                    col("ms", "u4").nullable(),
+                    col("r", "u8"),
+                    col("e", "u2"),
+                ],
+                rows,
+                row_index: Some("t".into()),
+            }
+        }
+
+        /// SplitMix64 of the absolute row, so values don't depend on how the rows are chunked.
+        fn mix(row: u64) -> u64 {
+            let mut x = row.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            x ^ (x >> 31)
+        }
+
+        /// Rows `start..start + n`.
+        pub(super) fn rows(start: u64, n: usize) -> TableData {
+            let rows = start..start + n as u64;
+            vec![
+                ("t".into(), ColumnData::U64(rows.clone().collect())),
+                (
+                    "ms".into(),
+                    ColumnData::Nullable {
+                        values: Box::new(ColumnData::U32(
+                            rows.clone().map(|i| (i / 1024) as u32).collect(),
+                        )),
+                        validity: rows.clone().map(|i| i >= 1024).collect(),
+                    },
+                ),
+                ("r".into(), ColumnData::U64(rows.clone().map(mix).collect())),
+                (
+                    "e".into(),
+                    ColumnData::U16(rows.map(|i| (mix(i ^ 0x55) & 0x1ff) as u16).collect()),
+                ),
+            ]
+        }
+
+        /// The table as a lazy iterator of canonical row-groups: nothing is held but the group the
+        /// encoder is consuming.
+        pub(super) fn groups(total: u64) -> impl Iterator<Item = TableData> + Send + 'static {
+            (0..total)
+                .step_by(ROWS_PER_GROUP)
+                .map(move |start| rows(start, (total - start).min(ROWS_PER_GROUP as u64) as usize))
+        }
+
+        /// The whole table in RAM (the batch reference).
+        pub(super) fn all(total: u64) -> TableData {
+            rows(0, total as usize)
+        }
+    }
+
+    /// Stage the listmode table's row-groups as fragments, as [`crate::TableMultiBlockSink`] does.
+    fn stage_fragments(dir: &Path, total: u64) -> Vec<std::path::PathBuf> {
+        std::fs::create_dir_all(dir).unwrap();
+        listmode::groups(total)
+            .enumerate()
+            .map(|(i, group)| {
+                let path = dir.join(format!("g{i:08}.frag"));
+                crate::accumulate::write_fragment(&path, &group).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    /// The staged files left in a session's staging directory.
+    fn staged_files(stage: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(stage.join("staging"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect()
+    }
+
+    /// #677 test (a): ONE named table block many times the window's byte budget streams through the
+    /// `StreamWriter` with its encoded bytes on disk, not in the window. The RAM high-water stays
+    /// within the documented bound `B + min(W, J) × P` with `P = 0` (a staged table job holds no
+    /// payload in RAM), the staged high-water is the block itself, and the sealed block is
+    /// byte-identical to the batch encode.
+    ///
+    /// Before the fix (`table_job_from_fragments` returned the encoded block as a `Vec`, pushed
+    /// with `push`), the same run held the whole block in the window:
+    /// `peak_in_flight_bytes` = the block's size, ~150× the budget.
+    ///
+    /// These checks are the window's accounting. The real heap, which would also catch a job that
+    /// buffered its encode before writing the staged file, is checked by
+    /// `tests/staged_job_memory.rs` (its own binary, for its counting allocator).
+    #[test]
+    fn single_table_block_many_times_the_budget_stays_within_the_window() {
+        const BUDGET: u64 = 64 * 1024;
+        let total = 16 * crate::table::ROWS_PER_GROUP as u64 + 4321; // 17 row-groups
+        let spec = listmode::spec(total);
+        let batch = crate::table::encode(&spec, &listmode::all(total)).unwrap();
+        assert!(
+            batch.len() as u64 > 100 * BUDGET,
+            "the block must dwarf the budget: {} bytes",
+            batch.len()
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let frags = stage_fragments(&dir.path().join("frags"), total);
+        for workers in [1usize, 4] {
+            let stage = dir.path().join(format!("stage-{workers}"));
+            let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            let window = StreamWindow::new(4, BUDGET);
+            let mut sw = StreamWriter::with_window(ws, workers, window);
+            sw.push_staged(table_job_from_fragments(
+                "events",
+                spec.clone(),
+                frags.clone(),
+            ))
+            .unwrap();
+            let out = dir.path().join(format!("w{workers}.tsra"));
+            let (manifest, stats) = sw.finish_with_stats(&out).unwrap();
+
+            // The RAM bound, as documented: peak < B + min(W, J) × P, where P (the RAM payload of
+            // the one job) is zero for a staged table job — so the peak is below the budget.
+            assert!(
+                stats.peak_in_flight_bytes < BUDGET,
+                "w{workers}: {} encoded bytes held in RAM, budget {BUDGET}",
+                stats.peak_in_flight_bytes
+            );
+            assert_eq!(
+                stats.max_job_bytes, 0,
+                "a staged table job holds no payload in RAM"
+            );
+            // The disk side: the staged high-water is this one block (≤ J × S).
+            assert_eq!(stats.max_staged_job_bytes, batch.len() as u64);
+            assert!(
+                stats.peak_staged_bytes <= window.max_in_flight as u64 * stats.max_staged_job_bytes
+            );
+            assert_eq!((stats.jobs_pushed, stats.jobs_committed), (1, 1));
+
+            // One canonical block, byte-identical to the batch encode, and no staged file left.
+            assert_eq!(manifest.blocks.len(), 1);
+            assert_eq!(manifest.blocks[0].name, "events");
+            assert_eq!(
+                manifest.blocks[0].digest.as_deref(),
+                Some(tessera_core::hash::digest(&batch).as_str())
+            );
+            let mut rdr = Reader::open(&out).unwrap();
+            assert!(
+                rdr.read_block("events").unwrap() == batch,
+                "w{workers}: block != batch encode"
+            );
+            assert!(
+                staged_files(&stage).is_empty(),
+                "w{workers}: staged file left behind"
+            );
+        }
+    }
+
+    /// A staged table job seals the same product as the in-memory `table_job` of the same rows —
+    /// bytes, `content_hash` and `manifest_hash` — for every worker count and window, so which
+    /// kind of job wrote a block is invisible in the product. Mixed with in-memory jobs, the commit
+    /// order is still push order.
+    #[test]
+    fn staged_table_jobs_seal_the_in_memory_product_for_every_worker_count_and_window() {
+        let total = 3 * crate::table::ROWS_PER_GROUP as u64 + 99;
+        let spec = listmode::spec(total);
+        let arrays = blocks(3);
+        let dir = tempfile::tempdir().unwrap();
+        let run = |tag: &str, workers: usize, window: StreamWindow, staged: bool| {
+            let stage = dir.path().join(tag);
+            let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            let mut sw = StreamWriter::with_window(ws, workers, window);
+            for (i, (_, aspec, adata)) in arrays.iter().enumerate() {
+                sw.push(array_job(format!("a{i}"), aspec.clone(), adata.clone()))
+                    .unwrap();
+                let name = format!("events{i}");
+                if staged {
+                    sw.push_staged(table_job_streaming(
+                        name,
+                        spec.clone(),
+                        listmode::groups(total),
+                    ))
+                    .unwrap();
+                } else {
+                    sw.push(table_job(name, spec.clone(), listmode::all(total)))
+                        .unwrap();
+                }
+            }
+            let out = dir.path().join(format!("{tag}.tsra"));
+            let m = sw.finish(&out).unwrap();
+            assert!(
+                staged_files(&stage).is_empty(),
+                "{tag}: staged file left behind"
+            );
+            (m, std::fs::read(&out).unwrap())
+        };
+        let (reference, reference_bytes) = run(
+            "in-memory",
+            1,
+            StreamWindow::new(usize::MAX, u64::MAX),
+            false,
+        );
+        for workers in [1usize, 4] {
+            for (label, window) in [
+                ("1", StreamWindow::new(1, u64::MAX)),
+                ("2-1B", StreamWindow::new(2, 1)),
+                ("wide", StreamWindow::new(64, u64::MAX)),
+            ] {
+                let tag = format!("staged-w{workers}-{label}");
+                let (m, bytes) = run(&tag, workers, window, true);
+                assert_eq!(m.content_hash, reference.content_hash, "{tag}");
+                assert_eq!(m.manifest_hash, reference.manifest_hash, "{tag}");
+                assert!(bytes == reference_bytes, "{tag}: sealed bytes differ");
+            }
+        }
+    }
+
+    /// A staged job that fails mid-encode (a fragment vanished) fails `finish` with that error and
+    /// leaves no staged file and no committed block behind.
+    #[test]
+    fn failed_staged_job_leaves_no_staged_file_and_no_block() {
+        let total = 3 * crate::table::ROWS_PER_GROUP as u64;
+        let dir = tempfile::tempdir().unwrap();
+        let mut frags = stage_fragments(&dir.path().join("frags"), total);
+        frags.insert(2, dir.path().join("frags").join("missing.frag"));
+        let stage = dir.path().join("stage");
+        let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::with_window(ws, 2, StreamWindow::new(4, 1024));
+        sw.push_staged(table_job_from_fragments(
+            "events",
+            listmode::spec(total),
+            frags,
+        ))
+        .unwrap();
+        let err = sw.finish(&dir.path().join("s.tsra")).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("no such file"),
+            "{err}"
+        );
+        assert!(staged_files(&stage).is_empty(), "staged file left behind");
+        assert_eq!(std::fs::read_dir(stage.join("blocks")).unwrap().count(), 0);
+        assert!(std::fs::read_to_string(stage.join("journal.jsonl"))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A staged job that writes part of its block and then panics: `finish` reports the panic only
+    /// after every thread is joined, so by then no staged file is left — not the panicking job's,
+    /// not a sibling's that was still encoding (#680).
+    #[test]
+    fn panicking_staged_job_leaves_no_staged_file_once_finish_returns() {
+        let total = 2 * crate::table::ROWS_PER_GROUP as u64;
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::with_window(ws, 4, StreamWindow::new(8, u64::MAX));
+        sw.push_staged(Box::new(|staging: &BlockStaging| {
+            let mut staged = staging.create().unwrap();
+            std::io::Write::write_all(&mut staged, b"half a block").unwrap();
+            panic!("encoder bug mid-block");
+        }))
+        .unwrap();
+        for i in 0..3 {
+            // Pushes after the panic closed the window fail; that is fine, the jobs already in the
+            // queue are what matters.
+            let _ = sw.push_staged(table_job_streaming(
+                format!("events{i}"),
+                listmode::spec(total),
+                listmode::groups(total),
+            ));
+        }
+        let err = sw.finish(&dir.path().join("s.tsra")).unwrap_err();
+        assert!(err.to_string().contains("worker panicked"), "{err}");
+        assert!(staged_files(&stage).is_empty(), "staged file left behind");
+    }
+
+    /// A commit that fails (here: a staged block whose declared digest is wrong) while later staged
+    /// results wait in the reorder buffer: `finish` reports the integrity error, and neither the
+    /// rejected block nor the waiting ones leave a staged file or a fragment behind.
+    #[test]
+    fn failed_staged_commit_drops_every_waiting_staged_file() {
+        let total = 2 * crate::table::ROWS_PER_GROUP as u64;
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::with_window(ws, 4, StreamWindow::new(8, u64::MAX));
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        sw.push_staged(Box::new(move |staging: &BlockStaging| {
+            // Held until the later jobs are encoded, so they wait in the reorder buffer.
+            gate_rx.recv().unwrap();
+            let mut staged = staging.create()?;
+            std::io::Write::write_all(&mut staged, b"payload")?;
+            let mut bref = staged_table_ref("bad".into(), &listmode::spec(0))?;
+            bref.digest = Some(tessera_core::hash::digest(b"something else"));
+            Ok(((bref, staged), Vec::new()))
+        }))
+        .unwrap();
+        for i in 0..3 {
+            sw.push_staged(table_job_streaming(
+                format!("events{i}"),
+                listmode::spec(total),
+                listmode::groups(total),
+            ))
+            .unwrap();
+        }
+        // Timing-free: release job 0 only once the three later jobs are encoded and charged.
+        let block = crate::table::encode(&listmode::spec(total), &listmode::all(total))
+            .unwrap()
+            .len() as u64;
+        spin_until(&sw.window, |st| st.staged_bytes == 3 * block);
+        gate_tx.send(()).unwrap();
+        let err = sw.finish(&dir.path().join("s.tsra")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Integrity {
+                    what: "block_payload",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(staged_files(&stage).is_empty(), "staged file left behind");
+        assert_eq!(std::fs::read_dir(stage.join("blocks")).unwrap().count(), 0);
     }
 
     #[test]
