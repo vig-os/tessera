@@ -1,8 +1,10 @@
 # Spike — a deadlock-free bound on the Vortex writer's pending segments (#681)
 
 > **Status:** design, for the implementation round of #681 (PR 3 of #677). No product code changes here.
-> Revision 2 answers an independent pre-mortem of revision 1 (§8): its memory claims were wrong, and are
-> replaced here by measured ones. Every Vortex claim cites `file:line` at the pinned fork
+> Revision 2 answered an independent pre-mortem of revision 1 (§8): its memory claims were wrong, and
+> were replaced by measured ones. Revision 3 answers a re-review of revision 2's recommendation (§8): it
+> adds P-logical (§5.1), the input side and the `min(W, n)` model of the per-block bound (§4.7), and the
+> writer-output change since alpha.4. Every Vortex claim cites `file:line` at the pinned fork
 > `gerchowl/vortex@608d8a1` (tessera's `[patch.crates-io]`, #480) unless it names upstream `develop`
 > (`vortex-data/vortex@40e0b1ccd`, 2026-10-28). The reproduction and the prototype ran in a scratch clone
 > at that SHA (`/mnt/HDD/larsgerchow/vortex-681`, branch `spike-681`, never pushed). The prototype diffs,
@@ -10,59 +12,104 @@
 
 ## Decision needed
 
-**#677's acceptance is a bounded RSS that does not depend on the input size.** The pre-mortem was right:
-the budget mechanism F (§2) does **not** meet it on its own. Measured per encode worker (§4):
+**The acceptance of #677 is a bounded RSS that does not depend on the input size, for one scan product
+with "single named `pairs`, `markers`, `ms_stats` table blocks".** #677 explicitly rejects
+`TableMultiBlockSink`, because it "changes the requested logical block into suffixed physical blocks". The
+triage made that a rule, recorded in ADR-0026: "One logical block stays **one canonical block**: no
+suffixed physical blocks" (`docs/adr/0026-streaming-table-ingest.md:190-191`). **So no partitioning
+option meets #677 as written.** Partitioning meets the memory half. The owner decides whether "one
+logical table" may replace "one canonical block".
 
-- **Order debt grows with width.** The order debt `D` is set by the table's width, and no budget pushes it
-  down. With 1 `bool` + `N` random `u64` columns it is 73 MB at `N = 1`, 287 MB at `N = 4`, 1,143 MB at
-  `N = 16` and 4,566 MB at `N = 64` (16.8 M rows). It is the same at `B = 0`, `1` and 64 MiB, except
-  `N = 1` at 64 MiB, which measures 74.5 MB.
-- **The heap still grows with the rows.** Under F the consumer shape needs 0.058 B/row, and that growth
-  sets the peak at the end of the write: 122.6 → 133.1 → 179.6 MB at 67 M → 268 M → 1.07 G rows. About
-  half of it is the zone-map statistics and about half is not attributed.
+**What does not bound it.** The writer fix F (§2) does not bound it on its own. Per encode worker it leaves
+two terms:
 
-Every in-Vortex change that keeps the bytes (F, spilling) leaves the per-row term. Zone maps are one
-segment per column, covering every zone, and the footer is built at the end. So **a bounded RSS with the
-same bytes is not possible for one canonical block of unbounded rows.** Something has to bound the rows
-one encode holds.
+- **The order debt grows with width.** The order debt `D` grows with the width and no budget pushes it
+  down. It is 73 MB → 4,566 MB for 1 → 64 random `u64` columns (§4.3).
+- **The heap grows with rows.** Under F the heap still grows by 0.058 B/row for the consumer shape. About
+  half of that is the zone-map statistics (§1.4).
 
-**Recommendation: bounded blocks (P) meet #677. F is a separate, worthwhile fix to the writer.**
+A single canonical block of unbounded rows cannot have a bounded RSS with the same bytes. Something must
+bound the rows one encode holds.
 
-- **The bounded blocks already exist in tessera.** They are the format law `BLOCK_ROWS` = 4 Mi rows
-  (`tessera-io/src/table.rs:845-852`), written per block by `TableMultiBlockSink`
-  (`accumulate.rs:382`).
-- **P alone makes the per-worker heap independent of the input size.** One block's encode measures
-  46.0 MB for the consumer shape, 106.3 MB for `mixed` and 527.0 MB for `wide:16` (stock Vortex,
-  4 CPUs, §4.4). For #677's shape F adds nothing inside a block: 46.0 MB either way.
-- **F cuts the per-block heap by a constant factor:** `mixed` 106.3 → 41.8 MB, `wide:4` 135.0 →
-  37.2 MB, `wide:16` 527.0 → 126.5 MB, up to 4.2×. It also fixes the stock writer's growth for every
-  writer that cannot partition. #677 does not need it, so #677 does not wait for it.
-- **Width is the only remaining factor.** It is set by the schema, not by the input. It is documented as
-  a limit, with the formula in §2.
+**The three options that bound it** (§5.2):
 
-**What this asks the owner to decide (open question 1).** `table_job_streaming` is documented as "ONE
-canonical table block of **any size**" (`tessera-io/src/stream.rs:121`). That contradicts `BLOCK_ROWS`'s
-"maximum rows per table block". The #677 consumer depends on it: one 2.4 G-row block. The recommendation
-is that tables larger than `BLOCK_ROWS` stream through the per-block partition. This is no format change:
-it is the existing law, and small tables stay single-block. The consumer's product then becomes
-`events_NNNN` blocks instead of one block.
+| | Bounds RSS | Keeps `pairs` as one name | One canonical block | Change |
+| --- | --- | --- | --- | --- |
+| **P**: `BLOCK_ROWS` blocks `pairs_0000`, … | yes | via the `_NNNN` match | no | writer output |
+| **P-logical**: `pairs/0000`, … (ADR-0063) | yes, as P | yes, a name-tree node | no | SPEC §5b + ADR |
+| **R**: Vortex row groups in one block | no: +0.014 B/row | yes | yes | Vortex patch + canonical bytes |
 
-The alternative is to keep one canonical block of unbounded rows and change its bytes with Vortex row
-groups (§5, option R). That is a format change for tessera, and it still leaves a 0.014 B/row footer
-term.
+Names follow the caller's prefix (`tessera-io/src/table.rs:890-896`), so P names the consumer's blocks
+`pairs_NNNN`, not `events_NNNN`.
 
-**The implementation rounds, if the recommendation is taken.** There are two independent tracks.
+**Measured bound of P and P-logical** (ksb `vortex-681-sweep-3`, exit 0, §4.7). The consumer shape uses
+4 Mi-row blocks, a reader thread, input staged to disk per block and `W` encode workers:
 
-- **Track 1 closes #677. It is tessera only and needs no Vortex change.**
-  1. Tables larger than `BLOCK_ROWS` stream through staged per-block jobs (§6.4).
-  2. Per-block tests (§6.2).
-  3. The ADR-0026 bound with `D(width)` and `K(width)`.
-  4. The ksb RSS proof with the consumer reproducer at 268 M and 1.6 G rows, which must be flat.
-- **Track 2 is F, the writer fix.**
-  1. A maintainer conversation on vortex-data/vortex#10046 (draft in §6.3).
-  2. The upstream PR.
-  3. The fork backport and the tessera pin bump, with its own tests (§6.1-§6.2).
-  4. It lowers the per-block constant and does not block track 1.
+```text
+peak heap  ≤  min(W, n_blocks) × p_block  +  s
+disk       ≤  (W + 1) × BLOCK_ROWS × record bytes
+```
+
+- These are heap numbers from the counting allocator. RSS adds allocator retention, thread stacks and
+  the binary, so the RSS proof (§6.4) measures its own `p_block` as RSS.
+- `p_block` is one block's encode peak: 46.1 MB at 8 CPUs.
+- `s` is the staging slack: one row-group of records plus the reader's buffers, measured at 0.0 MB above
+  `p_block` with `W = 1`.
+- With `W = 4` the peaks are 128.0, 142.0 and 143.1 MB at 67 M, 268 M and 1.07 G rows (16, 64 and 256
+  blocks). They are under `4 × 46.1 = 184.4`. They rise by 11% from 16 to 64 blocks and by 0.8% from
+  64 to 256, as more of the 4 workers overlap.
+- Disk is 402.7 MB, which is 4 staged blocks.
+- **The input side is a real term.** Building a block in memory before dispatch raises the peak to
+  391.3 MB. That is the term §6.4 of revision 2 left out.
+- **Disk staging is chosen on memory and structure, not on measured speed.** In this harness it was
+  slower than a bounded channel: 14.9 against 12.1 s at 16 blocks, and 45.4 against 26.1 s at 268 M rows.
+  The cause is the harness's single-threaded record writer.
+  - A channel serializes the encoders by construction: `W = 4` was 12.1 s against 14.8 s at `W = 1`.
+  - Decoupling the reader from the encoders is what lets them run in parallel. `fill` shows that
+    speed-up at 3.0×, but holds the blocks in RAM.
+  - The consumer reproducer's throughput run decides (§6.4). The bounded channel is the fallback if
+    disk staging does not beat it there.
+
+**F is separate.** It is the upstream writer fix, and it lowers `p_block` up to 4.2× (`wide:16`
+527.0 → 126.5 MB). For #677's shape it changes nothing inside a block (46.0 MB either way). It goes
+upstream after the #10046 conversation (§6.3), and #677 does not wait for it.
+
+**Writer output changes; readers don't.** alpha.4 (`v0.1.0-alpha.4`, `2e9f530`) shipped
+`table_job_streaming` as "ONE canonical table block of **any size**" (`tessera-io/src/stream.rs:121`).
+Under P or P-logical, a streamed table above `BLOCK_ROWS` is written as several blocks. That is a
+different layout, different block digests and a different `content_hash` from what alpha.4 wrote for the
+same rows.
+
+- Every product alpha.4 wrote still reads: no reader changes for P, and P-logical's readers will accept both
+  names.
+- Products of at most `BLOCK_ROWS` rows don't move.
+- P matches the partition SPEC §5b already requires of every writer (`tessera/docs/SPEC.md:156-170`).
+  alpha.4's single oversize block was the outlier.
+
+**Recommendation: P-logical.**
+
+- It keeps the consumer's one name with measured, bounded memory.
+- It makes the grouping a property of the name tree that ADR-0063 already enforces, rather than a
+  `_NNNN` convention a user's own `pairs_0003` block can join.
+- It costs a SPEC §5b wording change and one ADR.
+
+If the owner holds to one canonical block, R is the only option. It does not fully bound the RSS, and
+it needs a Vortex change the maintainers have not agreed to.
+
+**The implementation rounds, if P-logical is taken.**
+
+1. **ADR** (the first PR): "logical tables over bounded physical blocks".
+   - It retires ADR-0026's canonical-block rule for tables above `BLOCK_ROWS`.
+   - It amends ADR-0063 (a node with numbered leaves is a logical table) and SPEC §5b (names and the
+     logical-table definition).
+   - It records the writer-output change since alpha.4 and the bound above.
+2. **Tessera, track 1** (§6.4):
+   - `block_group` accepts `prefix/NNNN`;
+   - the partitioning job API with disk-staged blocks, dispatched as each block fills;
+   - the read paths in §5.1's table;
+   - per-block tests modelled as `min(W, n) × p_block` (§6.2);
+   - the ksb RSS proof with the consumer reproducer at 268 M and 1.6 G rows.
+3. **Track 2** is F upstream, independent of the rest (§6.1-§6.3).
 
 ## TL;DR
 
@@ -95,7 +142,8 @@ term.
   ```
 
   With bounded blocks, `rows ≤ BLOCK_ROWS` and `D ≤ BLOCK_ROWS × Σ bytes/row`, so the bound is
-  independent of the input size.
+  independent of the input size. With `W` encode workers, up to `min(W, n_blocks)` blocks are
+  encoded at once. The input must be staged to disk, or it adds up to `W + 1` blocks of rows (§4.7).
 
 ## 1. Root cause, at `608d8a1`
 
@@ -326,7 +374,8 @@ heap      ≲  B + D(width) + ε + K(width) + c · rows
 - **With W concurrent encode workers, the heap is about W × the per-worker bound.** The consumer shape at
   67 M rows: 122.6, 237.5 and 469.4 MB for W = 1, 2, 4.
 - **Bounded blocks bound the rows.** With them, `rows ≤ BLOCK_ROWS` and `D ≤ BLOCK_ROWS × Σ bytes/row`.
-  Measured per 4 Mi-row block, stock / F at 4 CPUs: 46.0 / 46.0 MB (consumer shape), 106.3 / 41.8 MB
+  The process peak is then `min(W, n_blocks) ×` one block's peak plus the input side (§4.7). Measured
+  per 4 Mi-row block, stock / F at 4 CPUs: 46.0 / 46.0 MB (consumer shape), 106.3 / 41.8 MB
   (`mixed`), 135.0 / 37.2 MB (`wide:4`) and 527.0 / 126.5 MB (`wide:16`).
 
 ## 3. Determinism
@@ -382,6 +431,9 @@ added).
   - `_BLOCK` and `_ROWGROUP` are the bytes-changing options;
   - `BP_WRITERS=W` runs W concurrent writers, one thread and executor each, like tessera's encode
     workers.
+  - `BP_BLOCKS=64` with `BP_FEED` = `lazy` | `fill` | `channel:K` | `disk` runs the per-block
+    partition (P): a reader thread feeds 4 Mi-row blocks, each its own Vortex file, to at most `W`
+    encode workers (§4.7).
 - **Shapes:**
   - `pairs`: the consumer's 12 columns, the same generator as MorePET/visionx-rs `stream_memory.rs`;
   - `random`: one random `u64` column;
@@ -397,6 +449,7 @@ the scratch clone, and its `sweep*.sh` scripts drive the release-built harness.
 | `vortex-681-sweep-1` | `ksb run --cpu 4 --mem 8Gi … job#default` | 0 | 64 runs: 61 OK, 3 DEADLOCK (exit 3) |
 | `vortex-681-sweep-2a` | `ksb run --cpu 4 --mem 8Gi … job#sweep2a` | 0 | 12 runs, all exit 0 |
 | `vortex-681-sweep-2b` | `ksb run --cpu 8 --mem 16Gi … job#sweep2b` | 0 | 54 runs, all exit 0 |
+| `vortex-681-sweep-3` | `ksb run --cpu 8 --mem 16Gi … job#sweep3` | 0 | 63 runs, all exit 0, 669 s |
 | local | `bp681 <shape> 64` / `32`, on the seat | 0 | `job/local-*.log`, each exit 0 |
 
 - **Prototype revisions.**
@@ -407,8 +460,10 @@ the scratch clone, and its `sweep*.sh` scripts drive the release-built harness.
     free them otherwise.
   - The local identity runs used `job/prototype-681-r2b.patch` (a raw row-group cut and an
     input-chunking knob).
+  - Sweep 3 used `job/prototype-681-r3.patch`: the same Vortex prototype, plus the harness's per-block
+    partition (`job/bp681-r3.rs`).
 - **Logs and tables.**
-  - Logs: `job/sweep-1.log`, `job/sweep-2a.log`, `job/sweep-2b.log`.
+  - Logs: `job/sweep-1.log`, `job/sweep-2a.log`, `job/sweep-2b.log`, `job/sweep-3.log`.
   - Tables: `job/sweep-1.table`, `job/sweep-2.table`.
 - **Units.** All numbers are MB (10⁶ bytes).
   - *heap* is the counting allocator's peak above the baseline.
@@ -538,6 +593,72 @@ The bytes-changing options produce other digests, as expected.
 - **`mixed` stock depends on the input chunking.** At 2 Mi rows, 65,536-row chunks give `5da6f5c0…`
   and one 2 Mi-row chunk gives `150418f9…`.
 
+### 4.7 The per-block partition with a real input side (sweep 3)
+
+Each block is 64 row-groups (4 Mi rows, `BLOCK_ROWS`) and its own Vortex file. A reader thread produces
+the row-groups in order and hands each block to one of at most `W` encode workers, each a single-threaded
+executor as in tessera. `BP_FEED` selects how a block's input reaches its encoder:
+
+- **`lazy`**: the encoder generates its own rows. There is no reader, so this is the encode-only
+  baseline, `p_block`.
+- **`fill`**: the reader builds the whole block in memory, then waits for a free worker.
+- **`channel:2`**: the reader takes a free worker first, then pushes the block's row-groups into a
+  bounded channel of 2 row-groups, which the encoder pulls as a stream.
+- **`disk`**: the reader writes the block's raw records to an unlinked temp file (24 B/row for the
+  consumer shape, so 100.7 MB per block), then waits for a free worker. The worker reads the file back
+  one row-group at a time.
+
+Consumer shape, stock Vortex, 8 CPUs. Peak heap in MB; the parentheses give the time in seconds:
+
+| Feed | `W` | 1 block | 2 blocks | 4 blocks | 16 blocks (67 M rows) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `lazy` | 1 | 46.1 | 46.1 | 46.1 | 46.1 (18.0) |
+| `lazy` | 2 | 46.1 | 90.8 | 91.9 | 91.3 (9.4) |
+| `lazy` | 4 | 46.1 | 88.9 | 162.2 | 159.0 (5.1) |
+| `fill` | 1 | 98.7 | 180.3 | 180.3 | 180.3 (14.5) |
+| `fill` | 4 | 98.7 | 176.3 | 324.7 | 391.3 (4.8) |
+| `channel:2` | 1 | 47.3 | 47.3 | 47.3 | 47.3 (14.8) |
+| `channel:2` | 4 | 47.3 | 63.8 | 65.3 | 68.5 (12.1) |
+| `disk` | 1 | 46.1 | 46.1 | 46.1 | 46.1 (16.9) |
+| `disk` | 2 | 46.1 | 78.0 | 86.2 | 86.5 (9.5) |
+| `disk` | 4 | 46.1 | 85.8 | 133.9 | 128.0 (14.9) |
+
+- **The `min(W, n)` model holds as an upper bound.** Every `lazy` and `disk` peak is ≤
+  `min(W, n) × 46.1`. The measured ratio is 0.69–1.00 (the highest is 91.9 against 92.2). One block is
+  one block's peak whatever `W` is, and `W` workers reach up to `W` blocks.
+- **`fill` adds the input side.** At `W = 1` the peak is 180.3 MB against 46.1: one block is being
+  encoded and the next is built in memory. A lone filled block measures 98.7 − 46.1 = 52.6 MB above the
+  encode alone. At `W = 4` it is 391.3 MB.
+- **`disk` adds nothing to RAM.** At `W = 1` the peak is 46.1 MB, the same as `lazy`. The staged bytes
+  on disk peak at 201.3, 302.0 and 402.7 MB for `W` = 1, 2, 4: at most `W + 1` blocks, freed once a
+  worker has read its block.
+- **`channel:2` is the leanest in RAM, but it serializes the encoders.** The reader cannot start block
+  `b + 1` until encoder `b` has taken all its rows, so `W = 4` is barely faster than `W = 1` (12.1 vs
+  14.8 s). `fill` gets 3.0× from the same workers.
+- **The harness's disk reader is the bottleneck.** In `disk` mode one thread generates and serializes
+  every record, so `W = 4` gains little time (16.9 → 14.9 s). The memory numbers are valid, but this
+  harness doesn't measure disk staging's throughput. The consumer reproducer must (§6.4).
+
+**Size independence with the input side** (`disk`, `W = 4`): 128.0, 142.0 and 143.1 MB at 67 M,
+268 M and 1.07 G rows (16, 64 and 256 blocks; 14.9, 45.4 and 205.4 s). Staged disk is 402.7 MB in each
+case.
+
+**Other shapes**, `W = 4`, 16 blocks (stock; `lazy` under F):
+
+| Shape | `lazy` | `fill` | `channel:2` | `lazy`, F (`gate:1`) | `4 × p_block` (§4.4, stock / F) |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `mixed` | 408.5 | 516.3 | 134.8 | 159.5 | 425.2 / 167.2 |
+| `wide:4` | 538.7 | 708.1 | 170.7 | 153.2 | 540.0 / 148.8 |
+
+`wide:4` under F is 3% above `4 × 37.2`, because §4.4's `p_block` was measured at `P` = 4 and this run
+has `P` = 8.
+
+Under F, the consumer shape with `disk` staging is 48.8 MB at `W = 1` and 138.3 MB at `W = 4` (16 blocks).
+
+**Bytes.** Every input gave one ordered list of block digests across all feeds, `W` values and F. Block 0
+of the consumer shape is `6f624a77…` in every run, the same as a plain single-block write of its 4 Mi
+rows. The block-list digests are 8 inputs, one each; they are in `job/sweep-3.log`.
+
 ## 5. Options that bound `D` and `c · rows`
 
 | Option | Same bytes? | Bounds | Measured cost | Where |
@@ -546,7 +667,8 @@ The bytes-changing options produce other digests, as expected.
 | G. Smaller coalescing block | no | `D` ∝ block | +0.15–0.35% size, more segments | Vortex |
 | Z. Incremental zone flush | no | half of `c` | not prototyped | Vortex |
 | R. Top-level row groups | no | `D`, zones | +25–27% wall, +0.05% size | Vortex |
-| P. `BLOCK_ROWS` blocks | existing law | `D`, all of `c` | `N` blocks; see below | tessera |
+| P. `BLOCK_ROWS` blocks | per block, yes | `D`, all of `c` | `N` blocks, disk staging; below | tessera |
+| P-logical (§5.1) | as P | as P | as P, plus a SPEC/ADR naming change | tessera |
 
 - **S. Spill** (revision 1's alternative D). It keeps the bytes and takes the in-RAM pending to `S`
   whatever the width.
@@ -583,29 +705,142 @@ The bytes-changing options produce other digests, as expected.
   written by `TableMultiBlockSink` (`accumulate.rs:382`). Small tables stay single-block, byte-identical
   (`accumulate.rs:371-375`). Each block is its own Vortex file, so `c · rows` is capped at one block and
   the footer state goes with it.
-  - **Cost: the product's shape.** A product larger than `BLOCK_ROWS` is `N` blocks, not one: what the
-    #677 consumer chose against via `table_job_streaming` (`stream.rs:121`).
+  - **Cost: the product's shape.** A product larger than `BLOCK_ROWS` is `N` blocks named
+    `pairs_0000`, … (the caller's prefix, `table.rs:890-896`), not one. #677 rejects exactly this
+    ("suffixed physical blocks"), and the consumer chose `table_job_streaming` (`stream.rs:121`) to
+    avoid it.
+  - **Cost: writer output.** alpha.4 shipped `table_job_streaming` as one block of any size. Under P a
+    streamed table above `BLOCK_ROWS` gets other bytes and another `content_hash`. Readers don't change.
   - **Cost: read before encode.** `TableMultiBlockSink` names its blocks only once it knows the total,
     so its workers start encoding after the whole input has been read and staged
     (`accumulate.rs:376-381`). Reading and encoding then don't overlap, and the whole input sits on
     disk first. `table_job_streaming` is told `spec.rows` up front, so a streaming partition knows its
     block count from the start and can dispatch each block as it fills. That is the variant track 1
-    builds (§6.4).
+    builds (§6.4). Its input is still staged to disk per block. Filling a block in memory instead was
+    measured at 391.3 MB for `W = 4` (§4.7).
   - **Width.** Width stays a factor: the per-block heap is ≤ the block's encoded size + `K(width)`. It is
     documented as a limit, with S as the escape hatch if a consumer ever needs it.
 
-**Recommendation: P meets #677; F is recommended separately.**
+### 5.1 P-logical: one logical table over bounded physical blocks (ADR-0063 names)
 
-- **P alone makes the per-worker RSS independent of the input size, without a format change.** The
-  width is fixed per product by its schema, and it is documented as a limit.
+**The option.** Partition exactly as P does, but name the physical blocks with ADR-0063's hierarchical
+grammar: `pairs/0000`, `pairs/0001`, … Under ADR-0063's leaf rule (`docs/adr/0063-block-name-grammar.md:45-51`,
+checked by `check_leaf_rule`, `tessera-core/src/block/name.rs:166-181`), `pairs` is then a node of the
+name tree and not a block. Readers resolve `pairs` to one logical table through the existing
+`LogicalTableView`. A product holding `pairs/0000` and `pairs/0001` and no `pairs` block is already
+valid for writers and readers today: `ProductBuilder::seal` (`tessera-core/src/product.rs:173`) and
+the write session (`tessera-io/src/write.rs:783,1239-1257`) accept it. The leaf-rule test accepts the
+same shape for `volume/0`, `volume/1` (`name.rs:406`).
+
+Code references are at `origin/dev` `4b3ac42`, under `tessera/crates/`.
+
+**Does it meet #677's literal need?** #677 asks for "one scan product with single named `pairs`,
+`markers`, `ms_stats` table blocks and a configurable buffer bound independent of input size". It
+rejects `TableMultiBlockSink` because it "changes the requested logical block into suffixed physical
+blocks". The triage comment and ADR-0026 make it a design rule: "One logical block stays **one
+canonical block**: no suffixed physical blocks" (`docs/adr/0026-streaming-table-ingest.md:190-191`).
+
+- **The name:** yes. The consumer addresses `pairs`, and every reader that resolves logical tables
+  answers `pairs`. The physical blocks are leaves under it, not renamed siblings.
+- **The memory:** yes. It has exactly P's bounded memory (§6.2, §6.4): the partition is the same and
+  only the names differ.
+- **"One canonical block":** no, by construction. Taking P-logical means the owner replaces that design
+  rule with "one **logical** table, any number of bounded physical blocks". Only R keeps one block.
+- **What the consumer (MorePET/visionx-rs) would change.**
+  - *Writer.* Its reproducer builds `pairs` by hand: `table::encode_streaming` plus
+    `BlockRef { name: "pairs" }` (`crates/visionx-tsra/examples/stream_memory.rs` ~`:248-266`, branch
+    `chore/39-tessera-677-repro`). ADR-0026 records that it moved to `table_job_streaming`
+    (`0026:254-256`). Under P-logical it calls the new partitioning job API with the name `pairs` and
+    lets tessera name the leaves. `markers` and `ms_stats` are small, so they stay single blocks.
+  - *Readers.* They change only if they read `pairs` through a single-block API (below). The
+    consumer's ADR-0001 needs a row-aligned `pair_group` (`:489`), DataFusion views over
+    `pairs ⋈ pair_group` (`:552`, waiting on tessera's streaming `TableProvider`, `:561-563`), and
+    chunk-stats subset reads (`:453`). All three are defined over a logical table in ADR-0062.
+    No consumer read code calls `logical_table` yet.
+
+**Read paths that resolve a name.** One function decides grouping: `Reader::block_group`
+(`tessera-io/src/container.rs:438-461`). It matches the bare `prefix` or `prefix_` + four digits. It
+does **not** match `pairs/0000`, so today `read pairs`, `sql … pairs` and `logical_column("pairs")` would
+fail with "no blocks for prefix" (`tessera-io/src/multiblock.rs:378-381`).
+
+| Path | Today | Under P-logical |
+| --- | --- | --- |
+| `Reader::block_group` | `prefix`, `prefix_NNNN` | also `prefix/NNNN` (the one core change) |
+| `LogicalTableView` (`multiblock.rs:376-416`) | via `block_group`; checks columns, dtypes | works with it |
+| CLI `read` (`tessera-cli/src/nav.rs:1160,1196`) | `logical_table(block)` | works |
+| CLI `sql` (`main.rs:2015`, `sql.rs:131,161`) | `logical_table` → DataFusion `MemTable` | works |
+| Py `read_logical_table_column` (`tessera-py/src/lib.rs:159-165`) | logical | works |
+| CLI `ls <node>` (`nav.rs:1048`) | exact block name | **needs work** (list the node) |
+| Py `read_block`/`read_table`/`read_table_column` (`lib.rs:71,116,139`) | single block | **needs work** |
+| Py `column`, `table*` (`tessera-py/python/tessera/__init__.py:106-127`) | single block | **needs work** |
+| CLI `tree` (`nav.rs:467,514`) | lists blocks | shows `pairs` as a node, no change |
+| ADR-0062 scan, `aligned_to`, positional zip | **not built** (ADR Proposed) | designed on `LogicalTableView` |
+| WASM reader | no logical reads | **needs work** if used |
+
+**`.cidx`, pruning and zip.**
+
+- **`.cidx`** is per block (`<block>.cidx`, `tessera-io/src/chunk_index.rs:21-23`). `pairs/0000.cidx` is a
+  sibling leaf, so it is grammar-valid and leaf-rule-clean.
+- **Pruning across blocks** already works for `prefix_NNNN`. `select_blocks_overlapping`
+  (`multiblock.rs:225-240`) iterates the group, and `block_stats` (`:271-323`) uses each block's
+  `.cidx` (`:290-297`). It needs nothing beyond `block_group`.
+- **Zip** (ADR-0062 `aligned_to`, `docs/adr/0062-streaming-table-provider.md:579-611`) is defined over a
+  logical prefix group: `RowAlignment.block` is "the source table's block prefix" and `source_digest`
+  covers the group's block digests. A `pairs` group under either naming fits it. It is unbuilt either
+  way.
+
+**Is it a format change, and which ADR?** Yes.
+
+- SPEC §5b defines the partition names as `<prefix>_0000` … (`tessera/docs/SPEC.md:165-166`), and the
+  logical table as "the ordered sequence of `prefix` / `prefix_NNNN` blocks" (`:191-198`). P-logical
+  rewords both to "a name prefix with numbered leaves", keeping the small-stays-single rule (one block
+  keeps the bare name, `table.rs:890-896`).
+- No ADR defines the `_NNNN` string today. It lives only in SPEC §5b and `table.rs:885-896`, and
+  `multiblock.rs:1` cites "ADR-0026 §4", which is about `row_index`.
+- So it needs a **new ADR**: "logical tables over bounded physical blocks". It amends:
+  - ADR-0026's "one canonical block" rule (`:190-191`);
+  - ADR-0063, to say what a numbered-leaf node means (§2 says only that blocks are leaves);
+  - SPEC §5b.
+- **Readers must keep accepting `prefix_NNNN`** for every product already written (GE ingest's
+  `events_NNNN`, `tessera-ingest/src/ge_hdf5.rs:976,1007`). Writers switch.
+- **Multi-block products written after the switch get new block names**, so a new `content_hash` for the
+  same rows. Single-block products don't move. The corpus's multi-block goldens move, or are pinned to
+  the old writer.
+
+### 5.2 P, P-logical and R side by side
+
+| | P (`pairs_NNNN`) | P-logical (`pairs/NNNN`) | R (Vortex row groups) |
+| --- | --- | --- | --- |
+| Bounded RSS, every term | yes (§6.2: `min(W, n) ×` block + input) | same as P | no: `0.014 B/row` footer term remains |
+| Consumer addresses `pairs` | via `block_group`'s `_NNNN` match | via a node of the name tree | one real block |
+| "One canonical block" (#677 triage) | no | no | yes |
+| Unambiguous grouping | no: a user block `pairs_0003` joins the group | yes: leaf rule, a subtree | n/a |
+| Exploded dir / S3 layout | flat siblings | `blocks/pairs/` directory | one object |
+| Parallel encode | `W` blocks at once | same | one writer |
+| Format change | names unchanged; streamed output moves | SPEC §5b + ADR; names move | large blocks' payload |
+| Vortex change | none | none | fork patch, then upstream |
+| Read-path work | `ls`, Python single-block calls, WASM | the same, plus `block_group` | none |
+
+**Recommendation: P-logical, decided by an ADR that is the first implementation PR.**
+
+- **It meets the consumer's two needs: one name, `pairs`, and a buffer bound independent of input
+  size.** Its memory is P's (§4.7, §6.2), with every term measured. It does not meet the triage's
+  "one canonical block", which is why the owner decides (next bullet).
+- **It fixes P's naming weakness.** `_NNNN` is a convention inside a flat name space, so a user's own
+  `pairs_0003` block silently joins the logical table. ADR-0063 has already given tessera a name tree
+  in which a numbered-leaf node *is* the grouping. The pyramid levels `volume/0`, `volume/1`, …
+  (ADR-0063 §3) are the same shape.
+- **It needs the owner to retire one design rule.** #677's triage and ADR-0026 say "one logical block
+  stays one canonical block". P-logical keeps the logical block and gives up the canonical-block half.
+  If that half is a hard requirement, the answer is R. R changes Vortex and tessera's canonical bytes
+  for large tables, needs a Vortex patch the maintainers have not agreed to (§6.3), encodes on one
+  writer, and still grows by 0.014 B/row (34 MB at the consumer's 2.4 G rows).
 - **F is a separate fix.** It lowers the per-block constant up to 4.2× (`wide:16`: 527.0 → 126.5 MB)
   and fixes the writer for everyone who can't partition (upstream). It is deadlock-free and
-  byte-identical. For #677's own shape it changes nothing inside a block, so #677 does not wait for
-  it.
+  byte-identical. For #677's own shape it changes nothing inside a block, so #677 does not wait for it.
 
-**R is the right long-term mechanism upstream** for single-file writers that can't partition. It is
-proposed in the maintainer conversation (§6.3), not built here. Tessera adopts it only if the owner wants
-one canonical block of unbounded rows enough to change the canonical encoding (open question 1).
+**R remains the right mechanism upstream** for single-file writers that can't partition. It is proposed in
+the maintainer conversation (§6.3), not built for tessera.
 
 ## 6. Plan for the implementation round
 
@@ -669,12 +904,29 @@ In Vortex, upstream:
 
 In tessera:
 
-1. `tests/staged_job_memory.rs` gets a **per-block** assertion (track 1): a streamed table job over
-   `4 × BLOCK_ROWS` rows has the same peak as over `1 × BLOCK_ROWS`, within a fixed slack. That is the
-   size-independence #677 requires, and it holds because P removes the linear term.
+1. `tests/staged_job_memory.rs` gets a **per-block** assertion (track 1). With `W` encode workers up to
+   `W` blocks encode at once, so the peak is not one block's. The test asserts the measured model (§4.7):
+
+   ```text
+   peak(n blocks, W)  ≤  min(W, n) × p_block + s
+   ```
+
+   - `p_block` is the peak of a one-block job in the same test binary.
+   - `s` is the staging slack, one row-group of records plus the reader's buffers, stated in the test.
+   - The model is an upper bound, not a prediction. Fewer than `W` blocks may overlap, so the peak
+     still rises with `n` until `n` is a few times `W`.
+   - The test runs `W = 2` at `n = 2W = 4` and `n = 8W = 16` blocks. It asserts the bound at both, and
+     `peak(16) ≤ peak(4) + s`.
+   - Measured with `disk` staging: 86.2 and 86.5 MB at `n` = 4 and 16, against `2 × 46.1 = 92.2`. At
+     `n = 2` the peak is 78.0 MB, which is why the test doesn't compare against `n = W`.
+   - A `W = 1` case pins the single-block peak: 46.1 MB at 1, 2, 4 and 16 blocks.
+   - That is the size independence #677 requires. It holds because the partition removes the linear
+     term and the staging is on disk.
 2. A single canonical block (`table_job_streaming`, if it remains) asserts the modelled linear bound
    `c_max × rows`, not "4× within fixed slack".
-3. The corpus goldens must not move.
+3. The corpus goldens. Under P none move. Under P-logical the multi-block goldens get the new names
+   (§5.1), or stay pinned to the old writer as reader-compatibility fixtures. Single-block goldens
+   never move.
 
 ### 6.3 Upstream: a maintainer conversation first
 
@@ -722,16 +974,32 @@ starvation. F does not conflict with it, and a revived push API would take F's g
 
 ### 6.4 Tessera
 
-**Track 1 (closes #677, no Vortex change):**
+**Track 1 (the memory half of #677, no Vortex change; the naming half is open question 1):**
 
 1. **Bounded blocks for streamed tables** (if open question 1 goes that way).
-   - `table_job_streaming` already gets `spec.rows`, so it knows the block count up front. It splits its
-     lazy row-groups into `BLOCK_ROWS` blocks, with the same names and bytes as `TableMultiBlockSink`
-     would give.
-   - It dispatches each block as a staged job as soon as the block is filled: no read-first pass and no
-     staged input.
+   - `table_job_streaming` already gets `spec.rows` (`stream.rs:128-136`), so it knows the block count
+     up front. It splits its lazy row-groups into `BLOCK_ROWS` blocks, with the same partition and bytes
+     as `TableMultiBlockSink`. The names follow open question 1: `pairs/NNNN` under P-logical,
+     `pairs_NNNN` under P.
+   - **The input side is staged to disk, per block.** The reader writes each block's row-groups as it
+     fills them. When the block is complete, it dispatches the block as a staged job that reads its
+     input back one row-group at a time.
+     - This is the mechanism `TableMultiBlockSink` already uses: fragment files, `accumulate.rs:485-528`.
+       The difference is that a block is dispatched as soon as it is full, not at `finish`
+       (`accumulate.rs:550-585`). That works because the block count is known up front.
+     - Measured: no RAM term (46.1 MB at `W = 1`, the same as the encode alone), and at most `W + 1`
+       blocks of raw input on disk (§4.7).
+   - **Rejected input mechanisms.**
+     - *Filling a block in memory* holds up to `W + 1` blocks of arrays: 391.3 MB at `W = 4` for the
+       consumer shape.
+     - *A bounded channel per block* is lean (68.5 MB at `W = 4`), but it serializes the encoders: the
+       reader can't move on until the current block's encoder has taken every row.
    - Small tables (≤ `BLOCK_ROWS`) stay one block, byte-identical.
-   - Its "any size" contract (`stream.rs:121`) is replaced by this.
+   - Its "any size" contract (`stream.rs:121`, shipped in alpha.4) is replaced. Streamed tables above
+     `BLOCK_ROWS` get other bytes and another `content_hash` than alpha.4 wrote; readers are unchanged.
+   - **New disk cost:** the input is written once more, at most `(W + 1) × BLOCK_ROWS × record bytes`
+     at a time. That is 402.7 MB at `W = 4` for the consumer's 24 B/row, under the session's
+     `staging/` directory.
 2. **ADR-0026.** The "single-table output sink" amendment's *Known limit* paragraph is replaced by the
    per-worker bound `B + D(width) + ε + K(width) + c · rows`, with each term and its measured size. It
    states that `rows ≤ BLOCK_ROWS` under the per-block partition, that `D` and `K` grow with width, and
@@ -740,7 +1008,12 @@ starvation. F does not conflict with it, and a revived push API would take F's g
    `chore/39-tessera-677-repro`), built against track 1's tessera at the current pin, at 268 M and
    1.6 G rows.
    - Job shape: `--cpu 4 --exclusive-cpus --mem 12Gi`, with peak `RssAnon` sampled every 10 ms.
-   - Acceptance: the two peaks agree within a stated slack. That closes #677.
+   - Acceptance: the two `RssAnon` peaks agree within a stated slack, and both are within
+     `min(W, n) × p_block + s`, with `p_block` measured as RSS by a one-block run of the same binary.
+   - A throughput run compares disk staging with the bounded channel. Disk staging stays only if it is
+     faster.
+   - With open question 1 decided, that closes #677. The reproducer also measures the throughput of
+     disk staging, which the harness could not (§4.7).
 
 **Track 2 (F, after the #10046 conversation):**
 
@@ -755,13 +1028,15 @@ starvation. F does not conflict with it, and a revived push API would take F's g
 
 ## 7. Open questions for the owner
 
-1. **One canonical block of unbounded rows, or `BLOCK_ROWS` blocks?** *Recommendation:* blocks (P).
-   - They meet #677 with no format change and no Vortex change, and they enforce the format law
-     `BLOCK_ROWS` already states.
-   - The #677 consumer's product becomes `events_NNNN` blocks, read as one table through
-     `LogicalTableView`.
-   - Keeping one unbounded block needs R, a change to tessera's canonical bytes for large tables, and
-     still grows by 0.014 B/row.
+1. **Retire "one logical block stays one canonical block" (#677 triage, ADR-0026 `:190-191`)?**
+   *Recommendation:* yes, in favour of one **logical** table over bounded physical blocks (P-logical,
+   §5.1).
+   - The consumer's `pairs` stays one name. Its physical blocks become `pairs/0000`, `pairs/0001`, …
+     (under P they would be `pairs_0000`, …, since the name is the caller's prefix,
+     `table.rs:890-896`).
+   - It needs no Vortex change, and its memory bound is measured term by term (§6.2).
+   - Keeping one canonical block needs R: a change to tessera's canonical bytes for large tables, a
+     Vortex patch, and still 0.014 B/row of growth.
 2. **Tessera's default budget.** *Recommendation:* `WriteConfig::encode_pending_bytes`, default 64 MiB,
    per encode worker. Below `D` it doesn't bind, and above ~64 MiB it only buys peak RAM.
 3. **Upstream default: on or opt-in?** *Recommendation:* propose a 64 MiB default for the gate. It never
@@ -783,6 +1058,25 @@ starvation. F does not conflict with it, and a revived push API would take F's g
 | 2. The peak grows with rows, at the end; zone stats? | Confirmed: §1.4, §4.2; zone stats = half |
 | 3. Sweep soundness: narrow shapes, process-wide counter | Fixed: wide/`mixed`/`B = 0`; W = 1–4 (§4) |
 | 4. Upstream: #10046, #9423, the tracker, `todo!()` | §6.1 (tracker, `todo!()`), §6.3 (#10046, #9423) |
+
+Re-review of revision 2 at `1f0e3ff` (blockers on the recommendation):
+
+| Blocker | Answer |
+| --- | --- |
+| 1. "P meets #677" contradicts its rejection of suffixed blocks; `pairs_NNNN` | Decision needed, §5.1, Q1 |
+| 2. P's bound leaves out the input side | Disk staging chosen and measured, §6.4; the bound in §6.2 |
+| 3. With W ≥ 2 the per-block test is mis-modelled | `min(W, n) ×` per block, measured, §6.2 |
+| 4. alpha.4 shipped "one block of any size"; "no format change" is readers-only | Decision needed, §6.4 |
+| P-logical (ADR-0063 names) | §5.1, §5.2, with `file:line` evidence |
+
+Withdrawn claims from revision 2:
+
+- "P meets #677". It meets the bounded-memory half and not #677's "no suffixed physical blocks". P-logical
+  keeps the name and needs the owner to retire the canonical-block rule.
+- "No staged input" for the per-block stream. A block that fills in memory holds its raw rows; the
+  measured choice is disk staging (§6.4).
+- "No format change". True for readers only. Writers of streamed tables above `BLOCK_ROWS` produce other
+  bytes than alpha.4 did.
 
 Withdrawn claims from revision 1:
 
