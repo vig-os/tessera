@@ -4,7 +4,9 @@
 //! format means a crash = total loss). Instead a [`WriteSession`] stages each already-encoded block
 //! as a durable **fragment** under a directory and records it in an append-only **journal**; the
 //! journal line is the commit point. A crash leaves the session consistent up to the last intact
-//! journal line (the **watermark**); [`WriteSession::recover`] replays to it, dropping any torn tail.
+//! journal line (the **watermark**); [`WriteSession::recover`] replays to it, dropping any torn tail,
+//! refusing a corrupt journal and quarantining a tail it can't replay, and rewrites the journal
+//! durably, so a crash during recovery loses nothing and recovering twice changes nothing.
 //! At completion [`WriteSession::seal`] builds the manifest through the same [`ProductBuilder`] a
 //! batch writer uses, so a streamed product is byte-identical to a batch-sealed one (same `id` /
 //! `content_hash` / `manifest_hash`). The running [`MerkleAccumulator`] gives an integrity root at
@@ -45,6 +47,18 @@ const BLOCKS: &str = "blocks";
 /// Scratch files of blocks that are encoded but not yet committed ([`StagedBlock`]). Nothing here
 /// is ever part of the product: a commit renames its file into `blocks/`.
 const STAGING: &str = "staging";
+/// The recovery quarantine (see [`WriteSession::recover`]): each `quarantine/<id>/` holds journal
+/// lines a recovery could not replay (`journal.jsonl`, verbatim) and the fragments they name
+/// (`blocks/`). Nothing here is ever part of the product, and the names it holds stay taken.
+const QUARANTINE: &str = "quarantine";
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only seam: when set to `n > 0`, fail this thread's `n`-th next [`write_durable`] once its
+    /// temp file is durable and before the rename, the point where a crash leaves both the old file
+    /// and the new one on disk.
+    static FAIL_NTH_DURABLE_RENAME: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// The manifest header captured at session creation — everything needed to seal except the blocks.
 ///
@@ -107,6 +121,9 @@ pub struct WriteSession {
     staged_seq: Arc<AtomicU64>,
     /// Why the session refuses to go on, once a commit failed after its journal write began.
     poisoned: Option<String>,
+    /// The names held in the recovery quarantine, each with its quarantine directory: an append
+    /// that collides with one is refused (see [`WriteSession::recover`]).
+    quarantined: Vec<(BlockName, PathBuf)>,
     #[cfg(test)]
     faults: Faults,
 }
@@ -167,20 +184,34 @@ impl Drop for RemoveOnDrop {
 fn fragment_guard(dir: &Path, name: &BlockName) -> Result<RemoveOnDrop> {
     let blocks = dir.join(BLOCKS);
     let path = name.path_under(&blocks)?;
-    let mut created_dirs = Vec::new();
-    let mut d = path.parent();
-    while let Some(p) = d.filter(|p| *p != blocks && !p.exists()) {
-        created_dirs.push(p.to_path_buf());
+    let parent = path.parent().expect("under blocks/").to_path_buf();
+    let mut guard = RemoveOnDrop::new(path);
+    create_dirs_durable(&blocks, &parent, &mut guard.created_dirs)?;
+    Ok(guard)
+}
+
+/// Create the directory `dir` and its missing ancestors below `base` (an existing ancestor), each
+/// fsync'd into its parent so the path survives a crash. Every directory created is recorded in
+/// `created` as soon as it exists, deepest first (the order to remove them in), so a caller can
+/// undo a partial creation.
+fn create_dirs_durable(base: &Path, dir: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut d = Some(dir);
+    while let Some(p) = d.filter(|p| *p != base && !p.exists()) {
+        missing.push(p.to_path_buf());
         d = p.parent();
     }
-    let mut guard = RemoveOnDrop::new(path);
-    // Deepest first, as the drop removes them; creation runs the other way.
-    for created in created_dirs.iter().rev() {
-        fs::create_dir(created)?;
-        guard.created_dirs.insert(0, created.clone());
-        File::open(created.parent().expect("under blocks/"))?.sync_all()?;
+    for p in missing.into_iter().rev() {
+        fs::create_dir(&p)?;
+        sync_dir(p.parent().expect("below base"))?;
+        created.insert(0, p);
     }
-    Ok(guard)
+    Ok(())
+}
+
+/// fsync the directory `dir`, so the entries created, renamed or removed in it survive a crash.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    File::open(dir)?.sync_all()
 }
 
 /// Empty the staging directory of the session at `dir` (creating it if absent). Staged files are
@@ -284,27 +315,42 @@ impl Write for StagedBlock {
     }
 }
 
-/// Write `bytes` to `path` **durably + atomically**: write a temp file, fsync it, atomically rename it
-/// over `path`, then fsync the directory so the rename itself is on disk. A crash therefore never leaves
-/// a torn or lost header — the metadata-first durability guarantee (the reader sees either the old header
-/// or the complete new one, never a partial write).
+/// Write `bytes` to `path` **durably + atomically**: the one path every whole-file write of a session
+/// takes (the header, the journal [`WriteSession::recover`] rewrites, a quarantine's journal). It writes
+/// a temp file beside `path` (`<file name>.tmp`, in the same directory, so the rename never crosses
+/// filesystems), fsyncs it, renames it over `path`, then fsyncs the directory so the rename itself is
+/// on disk. The rename is atomic, so a crash at any point leaves either the old file or the complete
+/// new one, never a torn, truncated or missing one. A failure removes the temp file again and leaves
+/// `path` as it was; a crash can leave the temp file, which the next write to `path` replaces.
 fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
+    let mut tmp_name = path
+        .file_name()
+        .expect("a durable write names a file")
+        .to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = RemoveOnDrop::new(path.with_file_name(tmp_name));
     {
-        let mut f = File::create(&tmp)?;
+        let mut f = File::create(tmp.path())?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
-    fs::rename(&tmp, path)?;
-    if let Some(dir) = path.parent() {
-        // fsync the directory entry so the rename survives a crash (Linux durability).
-        File::open(dir)?.sync_all()?;
+    #[cfg(test)]
+    if FAIL_NTH_DURABLE_RENAME.with(|n| n.replace(n.get().saturating_sub(1)) == 1) {
+        return Err(std::io::Error::other("injected crash before the durable rename").into());
     }
+    fs::rename(tmp.path(), path)?;
+    tmp.disarm();
+    sync_dir(match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    })?;
     Ok(())
 }
 
 impl WriteSession {
-    /// Start a new session in `dir` (created if absent): writes the header and an empty journal.
+    /// Start a new session in `dir` (created if absent): writes the header and an empty journal. A
+    /// recovery quarantine already in `dir` is left in place, and the names it holds stay taken (see
+    /// [`Self::recover`]).
     pub fn create(
         dir: &Path,
         product: impl Into<String>,
@@ -341,6 +387,7 @@ impl WriteSession {
             merkle: MerkleAccumulator::new(),
             staged_seq: Arc::new(AtomicU64::new(0)),
             poisoned: None,
+            quarantined: quarantined_names(dir)?,
             #[cfg(test)]
             faults: Faults::default(),
         })
@@ -520,19 +567,32 @@ impl WriteSession {
     }
 
     /// Refuse an append the session can't take: any, once poisoned; one whose name is already
-    /// committed (its fragment would be overwritten, and deleted again if the append failed); and
-    /// one whose name and a committed name break the leaf rule (ADR-0063: one the parent of the
+    /// committed (its fragment would be overwritten, and deleted again if the append failed); one
+    /// whose name and a committed name break the leaf rule (ADR-0063: one the parent of the
     /// other, [`Error::BlockNameConflict`]), since the seal would refuse the pair and the fragments
-    /// can't be both a file and a directory.
+    /// can't be both a file and a directory; and one whose name is, or is the parent or child of, a
+    /// name held in the recovery quarantine ([`Error::QuarantinedBlockName`], see [`Self::recover`]).
     fn admit(&self, block_ref: &BlockRef) -> Result<()> {
         self.usable()?;
-        if self.blocks.iter().any(|b| b.name == block_ref.name) {
+        let name = &block_ref.name;
+        if self.blocks.iter().any(|b| b.name == *name) {
             return Err(Error::Invalid(format!(
-                "block '{}' is already committed to this write session",
-                block_ref.name
+                "block '{name}' is already committed to this write session"
             )));
         }
-        leaf_rule_against(&self.blocks, &block_ref.name)
+        leaf_rule_against(self.blocks.iter().map(|b| &b.name), name)?;
+        let collision = self
+            .quarantined
+            .iter()
+            .find(|(held, _)| held == name || held.is_parent_of(name) || name.is_parent_of(held));
+        if let Some((held, quarantine)) = collision {
+            return Err(Error::QuarantinedBlockName {
+                name: name.to_string(),
+                quarantined: held.to_string(),
+                quarantine: quarantine.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// `Err` once the session is poisoned (see [`Self::append_block`]).
@@ -567,7 +627,7 @@ impl WriteSession {
             }
             Err(e) => return Err(e.into()),
         }
-        File::open(&parent)?.sync_all()?;
+        sync_dir(&parent)?;
         Ok(fragment)
     }
 
@@ -646,22 +706,49 @@ impl WriteSession {
         self.merkle.root()
     }
 
-    /// Reopen a staging directory after a crash, replaying the journal to the last intact line. A
-    /// torn final line (partial write) fails to parse and is dropped — the watermark is the last
-    /// fully-committed block — and the journal is rewritten to that clean prefix so appends resume.
+    /// Reopen a staging directory after a crash, replaying the journal to the last intact commit, and
+    /// leave it ready for appends. Running it again on its result changes nothing.
     ///
-    /// A **complete** line is a commit, so it is held to the format rather than dropped as torn: a
-    /// name that fails the block-name grammar is refused with [`Error::InvalidBlockName`], and one
-    /// that breaks the leaf rule against an earlier line with [`Error::BlockNameConflict`] (ADR-0063,
-    /// #685). Neither is ever followed to a path; the session directory is left as it was.
+    /// **The journal.** Every complete (newline-terminated) line is a commit; only an unterminated
+    /// last line is a **torn tail**, the line of an append that never returned success (its fsync
+    /// runs after the newline is written), and it is dropped whatever its bytes. A complete line is
+    /// held to the format, so a journal with one that is not a valid commit is refused, before
+    /// anything on disk changes: a name that fails the block-name grammar with
+    /// [`Error::InvalidBlockName`], a pair of names that breaks the leaf rule with
+    /// [`Error::BlockNameConflict`] (ADR-0063, #685; neither name is ever followed to a path), a
+    /// line without a digest with [`Error::MissingDigest`], and a line that is not UTF-8, not JSON,
+    /// not a block reference, or a block committed a second time with [`Error::CorruptJournal`].
+    /// That strictness has a cost: if a crash leaves stale bytes that happen to end in a newline at
+    /// the journal's end (possible on a filesystem that journals metadata but not data), recovery
+    /// refuses the session rather than guess which lines are commits.
     ///
-    /// Once the journal is recovered, every file under `blocks/` that **no line of the journal
-    /// names** (the fragment of an append that never reached its journal line) is deleted, with any
-    /// directory left empty. Such a file is scratch, and left in place it would block a later append
-    /// whose name needs its path as a directory (`volume` vs `volume/0`), or the reverse. A fragment
-    /// that some line names is kept even when recovery stops before that line (a missing fragment
-    /// earlier, a line this build can't parse), so a journal cut short here can still be repaired by
-    /// hand.
+    /// **Replay** keeps the lines up to the first whose fragment is missing (an append whose fragment
+    /// deletion reached the disk and whose line did too, see [`Self::append_block`]). The journal is
+    /// rewritten to exactly those lines, byte for byte, through the durable write path (temp file,
+    /// fsync, atomic rename, directory fsync), so a crash during recovery leaves the old journal or
+    /// the new one, never a truncated one, and recovering again gives the same blocks (#686).
+    ///
+    /// **Quarantine.** If complete lines follow the first one that can't be replayed, they are
+    /// commits recovery can't make sense of (only damage to `blocks/` produces them), so they are
+    /// neither replayed nor discarded: that line and every line after it are moved, verbatim, to
+    /// `quarantine/<id>/journal.jsonl`, and the fragments they name to `quarantine/<id>/blocks/`,
+    /// where `<id>` is the blake3 hex of those lines (a crash mid-quarantine is completed by the next
+    /// recovery, into the same directory). A quarantine is never sealed, and the names it holds stay
+    /// taken: an append whose name is one, or a parent or child of one, is refused with
+    /// [`Error::QuarantinedBlockName`], so a repair never meets two blocks of one name. To repair by
+    /// hand, put the missing fragment back, move the quarantined fragments into `blocks/`, append the
+    /// quarantined lines to `journal.jsonl`, delete the quarantine directory and recover again;
+    /// deleting the directory alone discards the tail and frees its names. A lone last line that
+    /// can't be replayed is dropped and not quarantined: its fragment is gone, so nothing of the block
+    /// is left to keep, and its block can be appended again. Usually it is the commit whose journal
+    /// fsync failed (see [`Self::append_block`]); it can also be an acknowledged commit whose fragment
+    /// was lost to damage to `blocks/`, and that block is then lost with it. [`Self::create`] on a
+    /// directory with a quarantine leaves it in place, and its names stay taken there too.
+    ///
+    /// **Clean-up.** Every file under `blocks/` that no replayed line names (the fragment of an
+    /// append that never reached its journal line) is deleted, with any directory left empty: such a
+    /// file is scratch, and left in place it would block a later append whose name needs its path as
+    /// a directory (`volume` vs `volume/0`), or the reverse. The staging directory is emptied.
     pub fn recover(dir: &Path) -> Result<Self> {
         // A header this build cannot parse in full is refused rather than silently narrowed (see
         // [`Header`]); say what to do about it, since "unknown field" alone reads like corruption.
@@ -674,50 +761,46 @@ impl WriteSession {
                 dir.display()
             ))
         })?;
-        let raw = fs::read_to_string(dir.join(JOURNAL))?;
-        let mut blocks = Vec::new();
-        let mut merkle = MerkleAccumulator::new();
-        for line in raw.lines() {
-            // A torn tail is a line that is not complete JSON (a prefix of a JSON object never is).
-            let Ok(value) = serde_json::from_str::<Value>(line) else {
-                break;
-            };
-            // Name first, so a bad one is refused by its own typed error, not mistaken for a tear.
-            if let Some(name) = value.get("name").and_then(Value::as_str) {
-                BlockName::new(name)?;
-            }
-            let Ok(r) = serde_json::from_value::<BlockRef>(value) else {
-                break;
-            };
-            leaf_rule_against(&blocks, &r.name)?;
-            let digest = r
-                .digest
-                .clone()
-                .ok_or_else(|| Error::MissingDigest(r.name.to_string()))?;
-            // a committed block must have its fragment on disk
-            if !r.name.path_under(&dir.join(BLOCKS))?.is_file() {
+        let journal_path = dir.join(JOURNAL);
+        let raw = fs::read(&journal_path)?;
+        let lines = parse_journal(&journal_path, &raw)?;
+        let blocks_dir = dir.join(BLOCKS);
+        let mut replayed = 0;
+        for line in &lines {
+            if !line.block.name.path_under(&blocks_dir)?.is_file() {
                 break;
             }
-            merkle.push(&digest);
-            blocks.push(r);
+            replayed += 1;
         }
-        // Rewrite the journal to the clean recovered prefix (drops any torn tail), then reopen append.
-        let clean: String = blocks
-            .iter()
-            .map(|r| serde_json::to_string(r).map(|s| s + "\n"))
-            .collect::<std::result::Result<_, _>>()?;
-        fs::write(dir.join(JOURNAL), &clean)?;
-        let journal = OpenOptions::new().append(true).open(dir.join(JOURNAL))?;
+        let (kept, unreplayed) = lines.split_at(replayed);
+        if unreplayed.len() > 1 {
+            quarantine(dir, unreplayed)?;
+        }
+        write_durable(
+            &journal_path,
+            &kept
+                .iter()
+                .flat_map(|l| l.raw)
+                .copied()
+                .collect::<Vec<u8>>(),
+        )?;
+        let journal = OpenOptions::new().append(true).open(&journal_path)?;
         reset_staging(dir)?;
-        remove_orphan_fragments(dir, &journal_names(&raw))?;
+        remove_orphan_fragments(dir, kept.iter().map(|l| &l.block.name))?;
+        let quarantined = quarantined_names(dir)?;
+        let mut merkle = MerkleAccumulator::new();
+        for line in kept {
+            merkle.push(&line.digest);
+        }
         Ok(WriteSession {
             dir: dir.to_path_buf(),
             header,
             journal,
-            blocks,
+            blocks: kept.iter().map(|l| l.block.clone()).collect(),
             merkle,
             staged_seq: Arc::new(AtomicU64::new(0)),
             poisoned: None,
+            quarantined,
             #[cfg(test)]
             faults: Faults::default(),
         })
@@ -793,23 +876,143 @@ impl WriteSession {
     }
 }
 
-/// Every valid block name any complete line of the journal text `raw` carries, whether or not
-/// recovery reached that line: the fragments [`remove_orphan_fragments`] must keep.
-fn journal_names(raw: &str) -> Vec<BlockName> {
-    raw.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|v| BlockName::new(v.get("name")?.as_str()?).ok())
-        .collect()
+/// One complete line of a journal: the commit it records, the commit's digest, and the line's
+/// bytes, newline included.
+struct JournalLine<'a> {
+    block: BlockRef,
+    digest: String,
+    raw: &'a [u8],
+}
+
+/// The commits of the journal bytes `raw` read from `path`, in order, each checked as
+/// [`WriteSession::recover`] documents. The unterminated last line, if any, is the torn tail and is
+/// not returned.
+fn parse_journal<'a>(path: &Path, raw: &'a [u8]) -> Result<Vec<JournalLine<'a>>> {
+    let mut lines: Vec<JournalLine<'a>> = Vec::new();
+    let mut names = std::collections::BTreeSet::<String>::new();
+    for (i, line) in raw.split_inclusive(|&b| b == b'\n').enumerate() {
+        // Only the last piece can lack its newline: the torn tail.
+        let Some(text) = line.strip_suffix(b"\n") else {
+            break;
+        };
+        let corrupt = |detail: String| Error::CorruptJournal {
+            path: path.to_path_buf(),
+            line: i + 1,
+            detail,
+        };
+        let text = std::str::from_utf8(text).map_err(|e| corrupt(format!("not UTF-8: {e}")))?;
+        let value: Value =
+            serde_json::from_str(text).map_err(|e| corrupt(format!("not JSON: {e}")))?;
+        // Name first, so a bad one is refused by its own typed error.
+        if let Some(name) = value.get("name").and_then(Value::as_str) {
+            BlockName::new(name)?;
+        }
+        let block: BlockRef = serde_json::from_value(value)
+            .map_err(|e| corrupt(format!("not a block reference: {e}")))?;
+        let digest = block
+            .digest
+            .clone()
+            .ok_or_else(|| Error::MissingDigest(block.name.to_string()))?;
+        let name = block.name.to_string();
+        if names.contains(&name) {
+            return Err(corrupt(format!(
+                "block '{name}' is committed a second time"
+            )));
+        }
+        // The leaf rule against the earlier lines, in O(segments · log n): an earlier parent is a
+        // `/`-prefix of the name, and earlier children sort contiguously from `<name>/`.
+        let parent = name
+            .match_indices('/')
+            .map(|(i, _)| &name[..i])
+            .find(|p| names.contains(*p));
+        let child_prefix = format!("{name}/");
+        let child = names
+            .range(child_prefix.clone()..)
+            .next()
+            .filter(|c| c.starts_with(&child_prefix));
+        let conflict = match (parent, child) {
+            (Some(parent), _) => Some((parent.to_string(), name.clone())),
+            (None, Some(child)) => Some((name.clone(), child.clone())),
+            (None, None) => None,
+        };
+        if let Some((parent, child)) = conflict {
+            return Err(Error::BlockNameConflict { parent, child });
+        }
+        names.insert(name);
+        lines.push(JournalLine {
+            block,
+            digest,
+            raw: line,
+        });
+    }
+    Ok(lines)
+}
+
+/// Move the journal lines `tail` (from the first a recovery can't replay on) and the fragments
+/// they name out of the session at `dir`, into `quarantine/<blake3 hex of the lines>/` (see
+/// [`WriteSession::recover`]). The quarantine's journal is written first, so its directory never
+/// holds a fragment without the line that names it; every step is durable, and a run cut short is
+/// completed by the next, which computes the same directory.
+fn quarantine(dir: &Path, tail: &[JournalLine]) -> Result<()> {
+    let text: Vec<u8> = tail.iter().flat_map(|l| l.raw).copied().collect();
+    let id = tessera_core::hash::digest(&text);
+    let q = dir
+        .join(QUARANTINE)
+        .join(id.strip_prefix("blake3:").unwrap_or(&id));
+    create_dirs_durable(dir, &q, &mut Vec::new())?;
+    write_durable(&q.join(JOURNAL), &text)?;
+    let (from, to) = (dir.join(BLOCKS), q.join(BLOCKS));
+    for line in tail {
+        let src = line.block.name.path_under(&from)?;
+        if !src.is_file() {
+            continue;
+        }
+        let dst = line.block.name.path_under(&to)?;
+        let dst_dir = dst.parent().expect("under the quarantine's blocks/");
+        create_dirs_durable(&q, dst_dir, &mut Vec::new())?;
+        fs::rename(&src, &dst)?;
+        sync_dir(dst_dir)?;
+        sync_dir(src.parent().expect("under blocks/"))?;
+    }
+    Ok(())
+}
+
+/// Every name held in the recovery quarantine of the session at `dir`, with its quarantine
+/// directory, read from each quarantine's journal. A quarantine directory without a journal holds
+/// no fragment (the journal is written first) and so no name.
+fn quarantined_names(dir: &Path) -> Result<Vec<(BlockName, PathBuf)>> {
+    let root = dir.join(QUARANTINE);
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut quarantines = fs::read_dir(&root)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    quarantines.sort();
+    let mut held = Vec::new();
+    for q in quarantines {
+        let journal = q.join(JOURNAL);
+        if !journal.is_file() {
+            continue;
+        }
+        for line in parse_journal(&journal, &fs::read(&journal)?)? {
+            held.push((line.block.name, q.clone()));
+        }
+    }
+    Ok(held)
 }
 
 /// Delete every file under the session's `blocks/` that is not the fragment of a block `named`,
 /// then every directory left empty (see [`WriteSession::recover`]). Paths are compared
 /// as built by [`BlockName::path_under`], so the walk never leaves `blocks/`, and it does not follow
 /// symlinks.
-fn remove_orphan_fragments(dir: &Path, named: &[BlockName]) -> Result<()> {
+fn remove_orphan_fragments<'n>(
+    dir: &Path,
+    named: impl IntoIterator<Item = &'n BlockName>,
+) -> Result<()> {
     let blocks = dir.join(BLOCKS);
     let keep = named
-        .iter()
+        .into_iter()
         .map(|n| n.path_under(&blocks))
         .collect::<Result<std::collections::BTreeSet<PathBuf>>>()?;
     /// Returns whether `d` is empty once its orphans are gone.
@@ -835,19 +1038,22 @@ fn remove_orphan_fragments(dir: &Path, named: &[BlockName]) -> Result<()> {
     }
     if blocks.is_dir() {
         walk(&blocks, &keep)?;
-        File::open(&blocks)?.sync_all()?;
+        sync_dir(&blocks)?;
     }
     Ok(())
 }
 
-/// The leaf rule (ADR-0063) between `name` and the names already in `committed`: neither may be the
+/// The leaf rule (ADR-0063) between `name` and the names already `committed`: neither may be the
 /// parent of the other ([`Error::BlockNameConflict`]).
-fn leaf_rule_against(committed: &[BlockRef], name: &BlockName) -> Result<()> {
-    for b in committed {
-        let (parent, child) = if b.name.is_parent_of(name) {
-            (&b.name, name)
-        } else if name.is_parent_of(&b.name) {
-            (name, &b.name)
+fn leaf_rule_against<'n>(
+    committed: impl IntoIterator<Item = &'n BlockName>,
+    name: &BlockName,
+) -> Result<()> {
+    for c in committed {
+        let (parent, child) = if c.is_parent_of(name) {
+            (c, name)
+        } else if name.is_parent_of(c) {
+            (name, c)
         } else {
             continue;
         };
@@ -1609,28 +1815,328 @@ mod tests {
         assert!(blocks.join("volume/0").is_file());
     }
 
-    /// Recovery that stops early (here: the second of three fragments is missing) truncates the
-    /// journal but deletes no fragment a journal line named, so the third block can still be
-    /// recovered by hand.
-    #[test]
-    fn recover_cut_short_keeps_the_fragments_of_later_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let stage = dir.path().join("stage");
-        {
-            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
-            for (i, n) in ["a", "b/0", "c/0"].into_iter().enumerate() {
-                let (r, p) = block(n, i as i16);
-                ws.append_block(r, &p).unwrap();
+    /// Every path under `root` (relative, `/`-separated) with a file's bytes, or `None` for a
+    /// directory: the whole on-disk state, to compare before and after.
+    fn tree(root: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
+        fn walk(root: &Path, d: &Path, out: &mut BTreeMap<String, Option<Vec<u8>>>) {
+            for e in fs::read_dir(d).unwrap() {
+                let path = e.unwrap().path();
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if path.is_dir() {
+                    out.insert(rel, None);
+                    walk(root, &path, out);
+                } else {
+                    out.insert(rel, Some(fs::read(&path).unwrap()));
+                }
             }
         }
-        let blocks = stage.join(BLOCKS);
-        fs::remove_file(blocks.join("b/0")).unwrap();
+        let mut out = BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    /// A session at `stage` with blocks `names` committed (block `i` built from seed `i`).
+    fn session_with(stage: &Path, names: &[&str]) -> WriteSession {
+        let mut ws = WriteSession::create(stage, "recon", "p", "d", TS).unwrap();
+        for (i, n) in names.iter().enumerate() {
+            let (r, p) = block(n, i as i16);
+            ws.append_block(r, &p).unwrap();
+        }
+        ws
+    }
+
+    /// #686: a crash while `recover` rewrites the journal (here: after the new journal is written
+    /// and before it replaces the old one) leaves the ORIGINAL journal in place, so no committed
+    /// block is lost, and a second `recover` gives the same blocks as an uninterrupted one.
+    #[test]
+    fn a_crash_while_recover_rewrites_the_journal_keeps_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let root = session_with(&stage, &["a", "b"]).running_root();
+        // A torn tail, so the recovery has to rewrite the journal.
+        let jpath = stage.join(JOURNAL);
+        let clean = fs::read(&jpath).unwrap();
+        let mut f = OpenOptions::new().append(true).open(&jpath).unwrap();
+        f.write_all(b"{\"name\":\"c\",\"kin").unwrap();
+        drop(f);
+        let before = fs::read(&jpath).unwrap();
+
+        FAIL_NTH_DURABLE_RENAME.with(|n| n.set(1));
+        let err = WriteSession::recover(&stage)
+            .err()
+            .expect("the injected crash");
+        assert!(err.to_string().contains("injected"), "{err}");
+        assert_eq!(
+            fs::read(&jpath).unwrap(),
+            before,
+            "the original journal must survive a crash during its rewrite"
+        );
+
+        // The seam returns an error, and the failed write removes its temp file again. A real crash
+        // leaves the temp file behind; the next durable write replaces it.
+        let tmp = stage.join("journal.jsonl.tmp");
+        assert!(
+            !tmp.exists(),
+            "a failed durable write removes its temp file"
+        );
+        fs::write(&tmp, b"stale bytes of a crashed rewrite\n").unwrap();
+
+        let ws = WriteSession::recover(&stage).unwrap();
+        assert_eq!((ws.watermark(), ws.running_root()), (2, root));
+        let names: Vec<_> = ws.blocks.iter().map(|b| b.name.to_string()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert!(
+            !tmp.exists(),
+            "the stale temp file is replaced and renamed away"
+        );
+        assert_eq!(fs::read(&jpath).unwrap(), clean, "the torn tail is gone");
+    }
+
+    /// #686 (PR #691 review, finding 1): a recovery that stops early (here: the second of three
+    /// fragments is missing) moves the journal lines from that point on, and the fragments they name,
+    /// into a quarantine, which a second `recover` leaves exactly as it is. The quarantined names
+    /// stay taken: an append that collides with one gets the typed error, never an I/O error (a kept
+    /// `c/0` directory made an append of `c` fail with EISDIR).
+    #[test]
+    fn recover_quarantines_an_unreplayable_tail_and_a_second_recover_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        drop(session_with(&stage, &["a", "b/0", "c/0"]));
+        let journal = fs::read_to_string(stage.join(JOURNAL)).unwrap();
+        let tail: String = journal.split_inclusive('\n').skip(1).collect();
+        let c0 = fs::read(stage.join("blocks/c/0")).unwrap();
+        fs::remove_file(stage.join("blocks/b/0")).unwrap();
+
         let ws = WriteSession::recover(&stage).unwrap();
         assert_eq!(ws.watermark(), 1, "recovery stops at the missing fragment");
-        assert!(blocks.join("a").is_file());
-        assert!(
-            blocks.join("c/0").is_file(),
-            "a later line's fragment must survive"
+        drop(ws);
+        let q = stage
+            .join(QUARANTINE)
+            .join(tessera_core::hash::digest(tail.as_bytes()).trim_start_matches("blake3:"));
+        assert_eq!(
+            fs::read_to_string(q.join(JOURNAL)).unwrap(),
+            tail,
+            "the quarantine holds the unreplayed lines verbatim"
         );
+        assert_eq!(
+            fs::read(q.join("blocks/c/0")).unwrap(),
+            c0,
+            "and their fragments"
+        );
+        assert!(
+            !stage.join("blocks/c").exists(),
+            "nothing of the tail is left in blocks/"
+        );
+        assert!(!stage.join("blocks/b").exists());
+
+        let after_first = tree(&stage);
+        let mut ws = WriteSession::recover(&stage).unwrap();
+        assert_eq!(ws.watermark(), 1);
+        assert_eq!(
+            tree(&stage),
+            after_first,
+            "a second recover changes nothing"
+        );
+
+        for (name, quarantined) in [
+            ("c", "c/0"),
+            ("c/0", "c/0"),
+            ("c/0/x", "c/0"),
+            ("b/0", "b/0"),
+        ] {
+            let (r, p) = block(name, 9);
+            match ws.append_block(r, &p) {
+                Err(Error::QuarantinedBlockName {
+                    name: n,
+                    quarantined: held,
+                    quarantine,
+                }) => {
+                    assert_eq!((n.as_str(), held.as_str()), (name, quarantined));
+                    assert_eq!(quarantine, q);
+                }
+                other => panic!("append of {name}: expected QuarantinedBlockName, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            tree(&stage),
+            after_first,
+            "a refused append leaves no trace"
+        );
+
+        // The session goes on beside the quarantine, which is never sealed.
+        let (rd, pd) = block("d", 3);
+        ws.append_block(rd.clone(), &pd).unwrap();
+        let sealed = ws.seal(&dir.path().join("out.tsra")).unwrap();
+        let names: Vec<_> = sealed.blocks.iter().map(|b| b.name.to_string()).collect();
+        assert_eq!(names, ["a", "d"]);
+
+        // A new session in the same directory keeps the quarantine, and its names stay taken.
+        let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        assert!(q.join(JOURNAL).is_file());
+        let (r, p) = block("c", 9);
+        assert!(matches!(
+            ws.append_block(r, &p),
+            Err(Error::QuarantinedBlockName { .. })
+        ));
+    }
+
+    /// The leaf rule over journal lines holds in both directions and only across a `/`: a name that
+    /// merely shares a prefix (`c-x`, `c.x`, which sort between `c` and `c/…`) is no conflict.
+    #[test]
+    fn parse_journal_applies_the_leaf_rule_both_ways_and_only_across_a_slash() {
+        let lines = |names: &[&str]| -> Vec<u8> {
+            names
+                .iter()
+                .enumerate()
+                .flat_map(|(i, n)| {
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&block(n, i as i16).0).unwrap()
+                    )
+                    .into_bytes()
+                })
+                .collect()
+        };
+        let path = Path::new("journal.jsonl");
+        for (names, conflict) in [
+            (&["c", "c-x", "c.x", "c/0"][..], Some(("c", "c/0"))),
+            (&["c-x", "c.x", "c/0", "c"][..], Some(("c", "c/0"))),
+            (&["a/b/c", "a"][..], Some(("a", "a/b/c"))),
+            (&["c", "c-x", "c.x", "cc/0", "d/c"][..], None),
+        ] {
+            match (parse_journal(path, &lines(names)), conflict) {
+                (Ok(parsed), None) => assert_eq!(parsed.len(), names.len()),
+                (Err(Error::BlockNameConflict { parent, child }), Some((p, c))) => {
+                    assert_eq!((parent.as_str(), child.as_str()), (p, c), "{names:?}");
+                }
+                (other, _) => panic!("{names:?}: got {:?}", other.map(|l| l.len())),
+            }
+        }
+    }
+
+    /// A crash in the middle of a quarantining recovery (after the quarantine's journal is written,
+    /// or after its fragments are moved but before the session's journal is rewritten) is completed
+    /// by the next recovery, into the same quarantine: the result is byte for byte that of a recovery
+    /// never interrupted.
+    #[test]
+    fn a_crash_while_recover_quarantines_is_completed_by_the_next_recover() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage_cut_short = |tag: &str| {
+            let stage = dir.path().join(tag);
+            drop(session_with(&stage, &["a", "b/0", "c/0", "d"]));
+            fs::remove_file(stage.join("blocks/b/0")).unwrap();
+            stage
+        };
+        let reference = stage_cut_short("reference");
+        drop(WriteSession::recover(&reference).unwrap());
+        // Durable writes in order: 1 = the quarantine's journal, 2 = the session's journal.
+        for nth in [1, 2] {
+            let stage = stage_cut_short(&format!("crash-{nth}"));
+            FAIL_NTH_DURABLE_RENAME.with(|n| n.set(nth));
+            let err = WriteSession::recover(&stage)
+                .err()
+                .expect("the injected crash");
+            assert!(err.to_string().contains("injected"), "{nth}: {err}");
+            if nth == 2 {
+                // Cut between the moves and the rewrite: the tail's fragments are already in the
+                // quarantine, and the journal still names them.
+                let journal = fs::read_to_string(stage.join(JOURNAL)).unwrap();
+                assert_eq!(journal.lines().count(), 4, "{journal}");
+                assert!(!stage.join("blocks/d").exists(), "the fragments were moved");
+            }
+            let ws = WriteSession::recover(&stage).unwrap();
+            assert_eq!(ws.watermark(), 1, "{nth}");
+            drop(ws);
+            assert_eq!(
+                tree(&stage),
+                tree(&reference),
+                "crash at durable write {nth}"
+            );
+        }
+    }
+
+    /// #686 (PR #691 review, finding 2): a complete journal line is a commit, so one that is not a
+    /// valid commit is refused with the typed error and nothing on disk changes (here an orphan
+    /// fragment and a later line's fragment would otherwise be deleted). Only an unterminated last
+    /// line is a torn tail.
+    #[test]
+    fn recover_refuses_a_complete_line_that_is_not_a_valid_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: [(&str, &[u8]); 5] = [
+            ("not a block reference", b"{\"name\":\"c\"}\n"),
+            ("not JSON", b"{\"name\":\"c\",\"kin\n"),
+            ("not UTF-8", b"\xff\xfe\n"),
+            ("an empty line", b"\n"),
+            ("committed twice", b""),
+        ];
+        let (rb, pb) = block("b", 1);
+        let line_b = format!("{}\n", serde_json::to_string(&rb).unwrap());
+        for (what, bad) in cases {
+            let stage = dir.path().join(what.replace(' ', "-"));
+            drop(session_with(&stage, &["a"]));
+            let jpath = stage.join(JOURNAL);
+            // `a`, the bad line (for "committed twice", `a` again), then a valid line for `b`.
+            let first = fs::read(&jpath).unwrap();
+            let bad = if bad.is_empty() {
+                first.as_slice()
+            } else {
+                bad
+            };
+            fs::write(&jpath, [first.as_slice(), bad, line_b.as_bytes()].concat()).unwrap();
+            fs::write(stage.join("blocks/b"), &pb).unwrap();
+            fs::write(stage.join("blocks/orphan"), b"orphan").unwrap();
+            let before = tree(&stage);
+
+            match WriteSession::recover(&stage) {
+                Err(Error::CorruptJournal { path, line, .. }) => {
+                    assert_eq!((path, line), (jpath.clone(), 2), "{what}");
+                }
+                Err(other) => panic!("{what}: expected CorruptJournal, got {other}"),
+                Ok(_) => {
+                    panic!("{what}: a complete invalid line must be refused, not dropped as torn")
+                }
+            }
+            assert_eq!(tree(&stage), before, "{what}: recover must change nothing");
+        }
+    }
+
+    /// The torn tail is exactly the unterminated last line, whatever its bytes: a cut-off prefix,
+    /// a whole JSON object whose newline never reached the disk (its fsync never ran, so the append
+    /// never returned success), or bytes cut inside a UTF-8 character. Each is dropped, with the
+    /// fragment its append left, and the blocks before it are kept.
+    #[test]
+    fn recover_drops_the_unterminated_last_line_whatever_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rc, pc) = block("c", 2);
+        let whole = serde_json::to_string(&rc).unwrap();
+        let cases: [(&str, Vec<u8>); 3] = [
+            ("prefix", whole.as_bytes()[..whole.len() / 2].to_vec()),
+            ("whole-object", whole.clone().into_bytes()),
+            ("split-utf8", b"{\"name\":\"\xc3".to_vec()),
+        ];
+        for (what, torn) in cases {
+            let stage = dir.path().join(what);
+            let root = session_with(&stage, &["a", "b"]).running_root();
+            let clean = fs::read(stage.join(JOURNAL)).unwrap();
+            fs::write(stage.join("blocks/c"), &pc).unwrap();
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(stage.join(JOURNAL))
+                .unwrap();
+            f.write_all(&torn).unwrap();
+            drop(f);
+
+            let ws = WriteSession::recover(&stage).unwrap();
+            assert_eq!((ws.watermark(), ws.running_root()), (2, root), "{what}");
+            assert_eq!(fs::read(stage.join(JOURNAL)).unwrap(), clean, "{what}");
+            assert!(
+                !stage.join("blocks/c").exists(),
+                "{what}: the torn append's fragment"
+            );
+        }
     }
 }
