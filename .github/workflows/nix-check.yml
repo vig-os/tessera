@@ -305,7 +305,8 @@ jobs:
       # Derived from the STORE, not by parsing nix's human-readable output: a check whose output path
       # is valid was built and therefore passed. `--keep-going` above is what makes that inference
       # sound, because every check is attempted, so a missing output means that check failed rather
-      # than that it was skipped. No output format to drift against.
+      # than that it was skipped — unless a substituter already had it, which nix counts as passed
+      # without building it (see the loop below). No output format to drift against.
       - name: Summarise per-check results
         if: always()
         # Through `env:` rather than inline `${{ }}` in the run block: a workflow expression expanded
@@ -344,16 +345,33 @@ jobs:
             echo "|---|---|"
           } >> "$S"
 
-          pass=0; fail=0; failed_names=""
+          pass=0; fail=0; cached=0; failed_names=""
+          subs=$(nix config show substituters 2>/dev/null)
           while IFS=$'\t' read -r name outp; do
             [ -n "$name" ] || continue
             # `--check-validity` is unambiguously LOCAL. Plain `nix path-info` may consult
             # substituters, which would report a path as present because a cache HAS it rather than
-            # because this leg built it — turning a failed check into a green row. No extra
-            # substituter is configured today, so this is closing a latent trap, not a live bug.
+            # because this leg built it — turning a failed check into a green row.
+            #
+            # A cached output is still a pass, though, and saying so is not that trap. Nix 2.34's
+            # `nix flake check` itself skips every check whose output a substituter already has
+            # (it builds only `queryMissing`'s `willBuild`: src/nix/flake.cc), so such a check is
+            # never built here and never downloaded. On ksb the shared cache holds outputs from earlier
+            # ksb runs of the SAME derivations, and the local test alone showed those checks as
+            # "failed or not built" on every ksb leg (#688). A check that nix did build and that
+            # failed is not in any cache, so it stays red. Each cached row names the cache.
             if [ -n "$outp" ] && nix-store --check-validity "$outp" >/dev/null 2>&1; then
               echo "| \`$name\` | :white_check_mark: passed |" >> "$S"
               pass=$((pass+1))
+              continue
+            fi
+            cache=""
+            for sub in $subs; do
+              if [ -n "$outp" ] && nix path-info --store "$sub" "$outp" >/dev/null 2>&1; then cache=$sub; break; fi
+            done
+            if [ -n "$cache" ]; then
+              echo "| \`$name\` | :white_check_mark: passed earlier (output in \`$cache\`, so nix skipped it) |" >> "$S"
+              pass=$((pass+1)); cached=$((cached+1))
             else
               echo "| \`$name\` | :x: failed or not built |" >> "$S"
               fail=$((fail+1)); failed_names="$failed_names $name"
@@ -362,7 +380,7 @@ jobs:
 
           {
             echo ""
-            echo "**$pass passed, $fail failed or not built** (\`nix flake check\` exited \`${CHECK_RC:-?}\`)."
+            echo "**$pass passed ($cached from a binary cache), $fail failed or not built** (\`nix flake check\` exited \`${CHECK_RC:-?}\`)."
             if [ "$fail" -gt 0 ]; then
               echo ""
               echo "Not built:$failed_names"
@@ -372,7 +390,15 @@ jobs:
               echo "its 90-minute cap, in which case the tail of the job log says so."
             fi
           } >> "$S"
-          echo "summary: $pass passed, $fail failed or not built; check rc=${CHECK_RC:-?}"
+          echo "summary: $pass passed ($cached of them from a binary cache), $fail failed or not built; check rc=${CHECK_RC:-?}"
+          # The summary must agree with nix. With `--keep-going`, rc 0 means every check passed, so a
+          # red row on a green run is this summary miscounting (as it did for cached checks, #688),
+          # and it fails the leg rather than publishing a wrong table. The converse is not asserted:
+          # rc != 0 with no red row is legitimate (an evaluation error, the job cap).
+          if [ "${CHECK_RC:-1}" -eq 0 ] && [ "$fail" -gt 0 ]; then
+            echo "::error title=check summary::nix flake check passed, but the summary counted $fail check(s) as failed or not built:$failed_names"
+            exit 1
+          fi
           # Re-raise the real result: the check step swallowed it so this summary could run.
           exit "${CHECK_RC:-1}"
 
