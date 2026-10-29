@@ -779,6 +779,21 @@ alignment**, in one of two forms:
    no error. Across two partitions, both copies of a key could likewise be released before either partition
    reached the other. The pre-pass meets the inversion before any row is released and fails the query.
 
+   **A failed check resolves the gate to its error.** The gate is a query-wide cell, resolved once, like a
+   verify-once cell (§7): to *passed* when the pre-pass of every partition and every boundary check have passed, or
+   to the error of the first pre-pass or boundary check that fails, whichever comes first. A pre-pass resolves it as
+   soon as it meets a tie, an inversion, a NULL key or a key that differs across inputs, and the boundary stage as
+   soon as an adjacent pair fails; the other pre-passes are not awaited. Every producer waiting at the gate, every
+   producer that reaches it later and the producer whose pre-pass resolved it each send that error on its own stream
+   and stop, releasing their pins and spool slots (§3 "How it is enforced"); a producer still in its pre-pass checks
+   the gate before each row group and goes to it once it has resolved. No row has passed the gate, so each
+   producer's channel is empty and the send never blocks. So whichever partition the consumer polls returns the
+   error, and a consumer that polls only one partition cannot hang on a failure in another. **No producer may wait
+   on the gate without also observing its failure state.** A gate that only signals passing would hang the query:
+   with `P = 2`, an inversion in the second partition's run and a consumer that executes and polls only the first
+   partition, the first producer finishes its pre-pass and waits at a gate that never passes, and the second
+   producer's error goes to a receiver the plan holds and nobody polls, so the polled stream never yields.
+
    The row pass decodes the key again with the projection and runs the same checks on it; when a partition's
    row pass reaches its first and its last row, each key must equal the one the pre-pass registered. A
    failure there fails the query; it is how §7's local second-pass caveat can show in a key-mode zip.
@@ -1166,6 +1181,16 @@ producers is not offered until a signed alignment is (§5).
   partitions, and with no `LIMIT` but a consumer that drops the stream after its first batch, returns no
   row either. On aligned inputs, the pre-pass has completed before the first batch is released, and
   `LIMIT n` then returns exactly `n` correctly paired rows.
+- **Gate failure (§5 "A failed check resolves the gate"), on an unspooled local source:** a key-mode zip with `k =
+  2` and `P = 2` whose consumer executes and polls only the first partition. With an inversion inside the second
+  partition's run, the polled stream returns that inversion's error, naming the input and the row, within the test's
+  timeout, and both producer threads join through the test hook of "Producer lifetime". The same holds for a failed
+  boundary check: each run strictly increasing and the first partition's last key equal to the second's first, a tie
+  on the partition boundary, whose error names the input and the row as every key-mode failure does (§5). A
+  gate-without-failure implementation (a gate that only signals passing, so a producer waits at it without observing
+  its failure state) leaves the first partition waiting at the gate, its stream never yields, and the test's timeout
+  fails it on every run in both cases. One that sends the error only on the failing partition's stream fails it too:
+  the polled stream never yields the error.
 - **Writers:** generic `ingest` and `commit --add-block` refuse a spec carrying `aligned_to`;
   `derive_aligned` refuses a transform that changes a batch's row count.
 - **Fill pool bound (§3 `mem(fills)`, §7), on an unspooled local source:** a declared-mode zip with `k = 2`
@@ -1281,6 +1306,10 @@ the spool (with the local spool opt-in of §7) and the `RangeSource` seam for a 
 - **Producer lifetime, read from the spool:** PR2's "Producer lifetime" repeated on an object store and on a
   local source with the opt-in; after both producers join, the spool holds no slot and no spooled file of the
   query, and an implementation whose stopped producer keeps its pins fails that assertion.
+- **Gate failure, read from the spool:** PR2's "Gate failure" repeated on an object store and on a local source with
+  the opt-in, in both cases; after the error, and once both producer threads have joined through the test hook of
+  "Producer lifetime" and the fill pool is idle, the spool holds no slot and no spooled file of the query, so every
+  pin and slot has been released. A gate-without-failure implementation times out as in PR2.
 - **Bounded memory:** the ksb run over a many-product collection.
 
 ## Alternatives considered and rejected (summary)
