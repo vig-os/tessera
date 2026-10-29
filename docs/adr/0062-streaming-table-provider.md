@@ -1,25 +1,26 @@
 # ADR-0062 — Streaming table provider: bounded-memory queries over sealed table blocks
 
-**Status:** Proposed (2026-10-25, design for epic [#654](https://github.com/vig-os/tessera/issues/654)).
-Builds on **ADR-0026** (fixed row groups, `BLOCK_ROWS` decomposition), **ADR-0034** (sync public API;
-tokio only where it earns its keep), **ADR-0049** (recursive collections), **ADR-0057** (the thin waist,
-the feature graph and Gates A/B) and **ADR-0059** (chunk-index statistics, in flight as PR #539). Consumes
-[#225](https://github.com/vig-os/tessera/issues/225) (object-store range reader),
+**Status:** Accepted (2026-10-29, design for epic [#654](https://github.com/vig-os/tessera/issues/654)).
+**History:** Proposed 2026-10-25 in #661; Accepted 2026-10-29 with the owner's decisions of 2026-10-26 on the
+signed alignment (§5, declared mode), the local integrity default (§7) and key mode under an early stop (§5,
+"The release gate"). Builds on **ADR-0026** (fixed row groups, `BLOCK_ROWS` decomposition), **ADR-0034** (sync
+public API; tokio only where it earns its keep), **ADR-0049** (recursive collections), **ADR-0057** (the thin
+waist, the feature graph and Gates A/B) and **ADR-0059** (chunk-index statistics, in flight as PR #539).
+Consumes [#225](https://github.com/vig-os/tessera/issues/225) (object-store range reader),
 [#627](https://github.com/vig-os/tessera/issues/627) / [#632](https://github.com/vig-os/tessera/issues/632)
 (NULLs in chunk statistics) and [#251](https://github.com/vig-os/tessera/issues/251) (`tessera sql`).
 [#657](https://github.com/vig-os/tessera/issues/657) (recipe-only products) will execute through this
-provider. The first consumer is MorePET list-mode: ~2.4×10⁹ rows per acquisition, joins of two
-row-aligned blocks, cohort queries over many `.tsra`.
+provider. The first consumer is MorePET list-mode: ~2.4×10⁹ rows per acquisition, joins of two row-aligned
+blocks, cohort queries over many `.tsra`.
 
-> Design only. No product code is written until the owner accepts this document; §8 is the landing plan.
-> Every claim about current behaviour is cited to `file:line` at `dev` `9424f90`. Every claim about
-> DataFusion or Vortex is cited to the crate version pinned in `tessera/Cargo.lock` (DataFusion
-> **54.0.0**, arrow **58.3.0**, the Vortex **0.75.0** fork at `608d8a1`, object_store **0.14.0** for
-> `tessera-io`, zip **9.0.4**) and an item path in that crate's source. Seven claims were **probed**
-> rather than read: Vortex's default split size, `SplitBy::RowCount`, the bytes a zone-pruned filter
-> reads, exact row filtering (including `IS NULL`), reuse of one opened `VortexFile` across scans, one
-> split per row-range window scan with its set-up cost, and the bytes window scans read with and without
-> Vortex's layout-reader and segment caches.
+> Design only; §8 is the landing plan. Every claim about current behaviour is cited to `file:line` at `dev`
+> `9424f90`. Every claim about DataFusion or Vortex is cited to the crate version pinned in
+> `tessera/Cargo.lock` (DataFusion **54.0.0**, arrow **58.3.0**, the Vortex **0.75.0** fork at `608d8a1`,
+> object_store **0.14.0** for `tessera-io`, zip **9.0.4**) and an item path in that crate's source. Seven
+> claims were **probed** rather than read: Vortex's default split size, `SplitBy::RowCount`, the bytes a
+> zone-pruned filter reads, exact row filtering (including `IS NULL`), reuse of one opened `VortexFile` across
+> scans, one split per row-range window scan with its set-up cost, and the bytes window scans read with and
+> without Vortex's layout-reader and segment caches.
 > The probe was a scratch crate outside the repository, depending on `tessera-io` at `9424f90` and the
 > same Vortex fork, and is not part of this change. It sealed one 1 049 353-row table block (17 row
 > groups; a monotone `i64`, a random `i32`, a nullable `i16` with 20 % NULLs, an `f64`) with
@@ -63,21 +64,22 @@ expensive to change once a Rust consumer depends on them.
 
 ## §0 — The decision, in one place
 
-| # | Question | Recommendation |
+| # | Question | Decision |
 |---|---|---|
 | 1 | Crate home | Engine-neutral sync `tessera_io::scan`; a new `tessera-query` holds only the DataFusion adapter |
 | 2 | DataFusion coupling | Only `tessera-query` exposes it, re-exported; one major at a time; a major breaks |
 | 3 | Bounded memory | Per query: ≤ `max_partitions` × a row budget of 65 536-row windows; anon-RSS test |
 | 4 | Pushdown, pruning | Projection; a closed filter class (no floats, casts) via `.cidx`, zone maps; `Inexact` |
-| 5 | Positional zip | Sealed `aligned_to` (derive paths only) or a strictly increasing key; else refuse |
+| 5 | Positional zip | Sealed `aligned_to` (derive paths only) or a key-only pre-pass proving a strict increase |
 | 6 | Multi-product | (product, block, row-group run) units; members pinned by `manifest_hash`; identical schemas |
-| 7 | Integrity | Default `VerifyBlocks`: hash a block before emitting its rows; `SealOnly` is an opt-out |
+| 7 | Integrity | Default `VerifyBlocks` (locally unspooled): hash before emitting; `SealOnly` an opt-out |
 | 8 | Phasing | #666 single product + pruning → #667 positional zip → #668 multi-product, local then S3 |
 
 Each row is argued in its section, with the options and the rejected alternatives. One limit belongs here,
-not only in §7: under **local** `VerifyBlocks` the rows are read in a second pass after the hash, so "no row
-from unverified bytes" holds against corruption at rest, **not against a concurrent writer** (open question
-(b)). Object-store scans read rows from the verified spool, so they have no such gap.
+not only in §7: under **local** `VerifyBlocks`, the default for local sources, the rows are read in a second
+pass after the hash, so "no row from unverified bytes" holds against corruption at rest, **not against a
+concurrent writer**; a caller reading a remote or untrusted local source opts into the spool (§7).
+Object-store scans read rows from the verified spool, so they have no such gap.
 
 ## §1 — Crate home and feature gating
 
@@ -309,8 +311,9 @@ warning, `vortex-file/src/open.rs:187-188`) with `with_layout_reader_cache()` an
 shared between blocks: its key is `SegmentId(u32)` (`vortex-layout/src/segments/mod.rs:26`), unique only
 within one file, so a shared cache would serve one block's segment to another, i.e. wrong rows. A
 partition keeps **at most two blocks open** (the current one, and the next while prefetching across a
-block boundary; a key-mode zip's boundary reads, §5, open one block at a time for one row each, outside
-any partition's slots, and close it before the next), and the cache is sized to hold the segments the in-flight windows share:
+block boundary; a key-mode zip's pre-pass, §5, uses the same two slots for the key column and finishes
+before the row pass opens any block, and a key-mode zip read from the spool does not prefetch across a
+block boundary, §5), and the cache is sized to hold the segments the in-flight windows share:
 `segment_cache_bytes = projected columns × 1 MiB × (windows_in_flight + 1)` per open block, which goes into
 the memory formula below. 1 MiB is a sound bound for a fixed-width column's compressed segment (the writer
 cuts at ≥ 1 MiB uncompressed in 8192-row steps, then compresses). It is **not** a bound for `utf8`: 8192
@@ -366,10 +369,13 @@ mem(p)         =  rows(p) * w(row)
                     (footer, layout tree, decoded zone
                      maps, decoded dictionary values)
                   + k * windows_in_flight * rows_per_window
-                      * w(key)            (key-mode zip, §5)
+                      * w(key)            (key-mode zip, §5:
+                                         pre-pass or row pass)
                   + 64 KiB hash ring    (VerifyBlocks, §7)
                   + spool_chunk_bytes   (object-store
-                                         spool download, §7)
+                                         spool download or
+                                         local spool opt-in,
+                                         §7)
 mem(scan)      =  P * mem(p)
 disk(spool)    =  spool_blocks * block_bytes
 ```
@@ -633,8 +639,24 @@ alignment**, in one of two forms:
    untouched keeps it with its `aligned_to` (a `commit --set` metadata edit re-seals the manifest but not the
    block); a commit that removes or replaces the *source* block needs no special case, because the zip's
    `source_digest` check then refuses. A hand-crafted, re-sealed manifest can still carry
-   the field, since the format can't tell who sealed it; whether a declared alignment must also be
-   **signed** to be trusted is open question (a), related to the identity-envelope work in #656 and #566.
+   the field, since the format can't tell who sealed it.
+
+   **Signing: required across producers, not within one.** A forged claim that names the right source, with
+   a correct `source_digest`, passes every check above and yields a **silently misaligned** zip; the digest
+   only stops a claim from being applied to a different version of its source. Forging one requires writing
+   and sealing the derived product outside the engine, and a party who can do that can equally forge the
+   derived values themselves. So:
+   - **PR2 (#667) ships same-producer zips, unsigned.** When the caller zips products it produced, the
+     derived product's seal covers the claim exactly as it covers the values, and no signature is required.
+   - **A zip across producers requires a signed alignment, and does not ship before it.** PR2 cannot tell
+     producers apart (the manifest's `producer` is a self-reported tool stamp, not a verified identity), so
+     in PR2 the same-producer scope is a documented usage scope, not a check: the docs state that zipping a
+     derived product the caller did not produce is not supported. The signed-alignment work, tied to the
+     identity-envelope claims of #656 and #566 (which need the same "signed claim, verified against the
+     trust store" path), makes it a check: the zip accepts a declared alignment from a product the caller
+     did not produce only when that product carries a valid signature from a trusted key (ADR-0037's trust
+     store) binding `aligned_to`, and refuses an unsigned one with an `AlignmentError`. Cross-producer zips
+     are offered only once that refusal exists.
 
    At query time the zip recomputes `source_digest` from the source manifest it was given and refuses a
    mismatch, so a derived table is never zipped with a different version of its source.
@@ -663,9 +685,13 @@ alignment**, in one of two forms:
    digest), but nothing checks that a sealed `.cidx` reports the data's real `min`/`max`. A writer that seals
    a lying index (a group of `5`s recorded with `max = 4`, then `WHERE key >= 5`) gets the swap above past
    every check. So under pruning, key mode rests on the writer's index, a claim of the same kind as declared
-   mode's `aligned_to`, and open question (a)'s reasoning applies to it: whoever can seal a lying index can
-   seal wrong values directly. A caller who will not trust the index runs the zip without a key predicate
-   tier 1 can use, which checks every row.
+   mode's `aligned_to`. Within one producer the seal covers it, as it covers `aligned_to` in PR2: whoever
+   can seal a lying index can seal wrong values directly. This ADR extends the cross-producer rule above to
+   the index on its own reasoning (the owner's decision names the alignment, not the index): a zip across
+   producers that prunes on another producer's `.cidx` waits for a signed claim covering that index too. A
+   caller who will not
+   trust the index runs the zip without a key predicate tier 1 can use, which checks every row and trusts
+   no writer claim.
 
    **Why that is enough.** Under a zip, tier 1 prunes the same row groups in every input and no row filter
    is pushed into any input (below), so every input emits the same positions, and a unit emits its whole
@@ -678,55 +704,74 @@ alignment**, in one of two forms:
    checked keys `…, 5, 5, …` match position by position, and only the tie between the two checked `5`s shows
    that the pairing is not determined.
 
-   **How it is checked.** Before any of a row group's zipped rows are released, the provider decodes that
-   group's key from every input and checks every row against the checked row before it: equal across
-   inputs, NULL-free, strictly greater. The chain runs across row groups within a unit and, across units,
-   on the **last checked key of the nearest preceding emitted unit** in table order, across pruned row
-   groups and block edges. A row is released only once **both** its comparisons have passed, the one with
-   its predecessor and the one with its successor, so the last row of a row group is held until the next
-   checked row's key has been checked. That keeps an adjacent tie, the counterexample above, from releasing
-   either of its rows.
+   **How it is checked: a key-only pre-pass, then the rows.** A key-mode zip scans in two passes. The
+   **pre-pass** decodes only the key column of every checked row group of every input and checks every key
+   against the checked key before it: equal across inputs, NULL-free, strictly greater. The chain runs across
+   row groups within a unit and, across units, on the **last checked key of the nearest preceding emitted
+   unit** in table order, across pruned row groups and block edges. The **row pass** then decodes the
+   projection, and only the row pass releases rows, behind the release gate below.
 
    §6 deals units to partitions as contiguous ranges, so a partition's units are one contiguous run of the
-   emitted sequence: within a partition the predecessor of a unit is the partition's previous unit, and the
-   scan thread carries the last checked key from one unit to the next. Across partitions, which run in
-   parallel, the chain is enforced by a query-wide **boundary stage**. When the plan is first executed (the
-   first `execute` of any partition), the stage registers, for **all P partitions**, regardless of which
-   have been executed, the first key of each partition's first unit and the last key of its last unit
-   (a one-row read per input in a block that partition scans anyway). Partition *p*'s first row is released
-   only once *p − 1*'s last key is less than *p*'s first key, and *p*'s last row only once the same holds
-   between *p* and *p + 1*. Registration depends on no partition's progress, so a consumer that drains one
-   partition before executing the next cannot hang it. When a partition's scan reaches its first and its last
-   row, each key must equal the registered one. The first emitted unit has no predecessor: its first key is
-   checked only against the row after it, and the last emitted unit's last key only against the row before
-   it.
+   emitted sequence: each partition's pre-pass checks its own run and carries the last checked key from one
+   unit to the next. Across partitions, which run in parallel, the chain is enforced by a query-wide
+   **boundary stage**. When the plan is first executed (the first `execute` of any partition), the query
+   starts the pre-pass of **all P partitions**, regardless of which have been executed, on at most `P`
+   threads, the scan's own bound. Each partition's pre-pass registers the first key of its run and the last,
+   and the stage checks that *p − 1*'s last key is less than *p*'s first key for every adjacent pair. The
+   pre-pass depends on no partition's consumer, so a consumer that drains one partition before executing the
+   next cannot hang it. The first emitted unit has no predecessor and the last emitted unit no successor.
 
-   Boundary keys are read through the same verify-once cell as the rows (§7): under `VerifyBlocks` from
-   hashed bytes (locally with §7's second-pass caveat), and under `SealOnly` from unhashed bytes, like every
-   row in that mode. On an object store under `VerifyBlocks` a boundary block is downloaded once, into the
-   spool, and stays there until every partition that scans it is done with it (§6 can split one block, so a
-   block may be one partition's last and the next one's first), so the scan never reads a boundary block's
-   rows from bytes it did not hash. Each partition then holds at most two spooled blocks per input, its first
-   and its last, so a key-mode zip needs at most `2 · k · P` spool slots; `plan_scan` counts the distinct
-   boundary blocks and refuses a `spool_blocks` below the slots they and the scans need, rather than wait on
-   it. The key-mode default is `2 · k · P`. A pruned block is never opened for key mode.
+   **The release gate.** No partition releases a row until the pre-pass of every partition and every
+   boundary check have passed, so a key-mode zip **refuses a pushed `LIMIT` or an early stop until the
+   pre-pass has verified strict increase over the whole scanned range**; after that, a pushed `LIMIT` is
+   honoured as in any scan. The gate sits inside the scan, so a `LIMIT` pushed into it (DataFusion's
+   `fetch`), a `LIMIT` above it, an operator that stops pulling and a consumer that drops the stream can only
+   ever see rows of a range the pre-pass has verified. The scan cannot know in advance whether a query will
+   stop early (an operator above it or a dropped stream ends the query without telling it), so the gate
+   applies to **every** key-mode zip, and there is no option to skip it. This is correct by construction,
+   not a documented caveat, and checking neighbours while streaming is not enough: let A have keys
+   `[5, 6] [3, 5]` in two row groups, and B the same with the two `5` rows swapped. A row-by-row check
+   releases A's first `5`, paired with B's copy of the other `5`, once its neighbours have passed, before
+   the inversion `6, 3` is reached; under `LIMIT 1` that misaligned pair is the whole result, returned with
+   no error. Across two partitions, both copies of a key could likewise be released before either partition
+   reached the other. The pre-pass meets the inversion before any row is released and fails the query.
+
+   The row pass decodes the key again with the projection and runs the same checks on it; when a partition's
+   row pass reaches its first and its last row, each key must equal the one the pre-pass registered. A
+   failure there fails the query; it is how §7's local second-pass caveat can show in a key-mode zip.
+
+   Keys are read through the same verify-once cell as the rows (§7): under `VerifyBlocks` from hashed bytes
+   (locally with §7's second-pass caveat), and under `SealOnly` from unhashed bytes, like every row in that
+   mode. When the zip reads from the spool (an object store under `VerifyBlocks`, or a local source with the
+   spool opt-in of §7), every block the pre-pass reads is copied into the spool and hashed first. A
+   partition's first and last block of each input stay spooled from its pre-pass until every partition that
+   scans them has finished its row pass (§6 can split one block, so a block may be one partition's last and
+   the next one's first); between them, one slot per input holds the block being scanned. A key-mode zip read
+   from the spool prefetches across a block boundary in neither pass (§3): the next middle block's slot is
+   taken only after the current one is released, because a prefetched block would need a fourth slot, and a
+   partition blocked on a full channel while holding it could starve a partition the consumer is draining. So
+   a key-mode zip needs at most `3 · k · P` spool slots; `plan_scan` counts the distinct boundary blocks and
+   refuses a `spool_blocks` below the slots they and the scans need, rather than wait on it. The key-mode
+   default is `3 · k · P`. A block between a partition's first and last is released after the pre-pass and
+   copied and hashed again for the row pass, so a key-mode zip read from the spool fetches those blocks twice;
+   it never reads a row or a key from bytes it did not hash. A pruned block is never opened for key mode.
 
    A tie, an inversion, a NULL key or a key that differs across inputs **fails the query** with an error
-   naming the input and the row; the provider never skips the row. A key that is not unique is not a key
-   for this purpose: the caller uses declared mode or writes a hash join explicitly.
+   naming the input and the row, in the pre-pass, before any row is released; the provider never skips the
+   row. A key that is not unique is not a key for this purpose: the caller uses declared mode or writes a
+   hash join explicitly.
 
-   **What a guarantee covers.** A query that reads every unit to the end and completes has passed every
-   check, so every row it returned is paired by a unique key. A query that fails has no result: DataFusion's
-   stream yields the error in place of the remaining batches, and `collect` returns only the error. Rows
-   released earlier passed both neighbour checks, which rules out an adjacent tie but not every wrong
-   pairing: with keys `[5, 6] [3, 5]` in two row groups the first `5` is released, paired with B's copy of
-   the other `5`, before the inversion `6, 3` is reached, and across two partitions both copies of a key can
-   be released. The same holds for a query that **stops early**, under a `LIMIT` or a consumer that drops
-   the stream: it completes without error, yet its rows have only been neighbour-checked. Excluding both
-   would need the whole key column checked before the first row, a full pre-pass the provider does not
-   make. So a key-mode result is guaranteed only for a query that runs to completion; a consumer that acts on
-   rows before then, or that limits the query, gets neighbour-checked rows, and declared mode is the one
-   that guarantees every row.
+   **What a guarantee covers.** Every row a key-mode zip releases lies in a range whose keys the pre-pass has
+   verified, so every row it returns is paired by a unique key, whether the query runs to completion, stops
+   early under a `LIMIT`, is stopped by an operator above the scan or has its stream dropped. On a local
+   source read unspooled (the default, §7) this holds against corruption at rest only: a concurrent writer
+   that swaps rows between the pre-pass and the row pass is not excluded, since the row pass checks keys row
+   by row; a caller facing that threat opts into the spool. A query that fails in the pre-pass returns no row.
+   A query that fails in the row pass (an integrity or I/O error, or a key the row pass reads differently) has
+   no result: DataFusion's stream yields the error in place of the remaining batches, and `collect` returns
+   only the error; batches streamed before the error were paired by verified keys. **Cost:** a read of the key
+   column over the scanned range before the first row (time to first row is one key pass), and, read from the
+   spool, the second fetch above. A consumer that needs the first rows sooner uses declared mode.
 
 ### Detection and refusal
 
@@ -745,9 +790,9 @@ Before the first row, in both modes, from manifests alone:
   them, and is emitted once.
 
 A failure is a typed `AlignmentError` naming the input, the check and both values, raised from
-`plan_scan`, so **no row is emitted**. In key mode a tie, an inversion, a NULL or a mismatch found mid-scan
-fails the query and names the input and the row; no row whose neighbour checks have not passed is
-released, and what that guarantees about batches already streamed is stated above.
+`plan_scan`, so **no row is emitted**. In key mode a tie, an inversion, a NULL or a mismatch is found by the
+pre-pass and fails the query naming the input and the row, also before any row is released (the release
+gate above).
 
 Zipping across a Collection (each member zipped with its own aligned partner) is not in PR1–PR3; it is tracked
 as #671.
@@ -856,7 +901,7 @@ runtime-agnostic. The Vortex runtime never polls a tokio-bound future, no multi-
 introduced, and tokio stays inside the object-store backend, where ADR-0034 §4 put it; the one change from
 today is that its runtime is driven by a dedicated thread instead of by each caller's `block_on`. Pruned
 blocks issue **zero** GETs, which PR3 proves with the request counter the `s3-range-read` check already
-uses, a key-mode zip (§5) included: its boundary checks read only blocks the scan touches.
+uses, a key-mode zip (§5) included: its pre-pass reads only blocks the scan touches.
 
 ## §7 — Integrity
 
@@ -879,17 +924,23 @@ projection, and it verifies decoded values, not stored bytes.
 
 ### `VerifyBlocks`, and its honest cost
 
-- **Local:** one streaming hash pass over the member's byte range with a 64 KiB ring (the `stream_block`
-  pattern), then the scan reads the rows **in a second pass**, normally served by the page cache. So
-  locally, "no row from unverified bytes" holds against **corruption at rest only**: a concurrent writer
-  that changes the file between the two passes is not detected. A caller who must defend against that uses
-  the spool below locally too. Whether the unspooled local mode should stay the default is open
-  question (b).
+- **Local, the default: unspooled.** One streaming hash pass over the member's byte range with a 64 KiB
+  ring (the `stream_block` pattern), then the scan reads the rows **in a second pass**, normally served by
+  the page cache. So locally, "no row from unverified bytes" holds against **corruption at rest only**: a
+  concurrent writer that changes the file between the two passes is not detected. This is the default for
+  local sources because a `.tsra` is immutable once sealed and the threat the default defends against is
+  corruption at rest; it costs one hash pass and no extra disk.
+- **Local, opt-in: spooled.** A caller reading a local path it does not trust to stay unchanged for the
+  query, such as a remote filesystem mounted locally or a shared, writable store, opts into the spool for
+  that source (a `ScanOptions` setting whose name is PR1's to finalise): each touched block is copied into
+  the spool while being hashed and its rows are read from the spool, exactly as on an object store below,
+  which closes the concurrent-writer gap at the cost of the spool's disk and a copy of each touched
+  block. It is never switched on implicitly.
 - **Object store:** each touched block is downloaded once into a spool file while being hashed, verified,
   then scanned from the spool, so rows are read from exactly the bytes that were hashed. The download
   streams through the 64 KiB hash ring in GET bodies of at most `spool_chunk_bytes` (default 8 MiB), and the
   spool is bounded on disk by `spool_blocks × block size` (`spool_blocks` is a query-level option, default
-  `P`, §3; `2 · k · P` for a key-mode zip, §5), never in RAM.
+  `P`, §3; `3 · k · P` for a key-mode zip, §5), never in RAM.
 - **The `.cidx` is always verified.** Tier 1 reads the sidecar with `read_block`, which checks its digest
   (`container.rs:456-489`), in **every** mode, `SealOnly` included, so pruning never acts on unverified
   statistics. `read_block` checks only when the manifest records a digest for the member (`if let
@@ -898,11 +949,12 @@ projection, and it verifies decoded values, not stored bytes.
 - **Once per block, not once per unit.** §6 can split one block into several units on different
   partitions. Verification is a query-wide, verify-once cell per (product, block): the first unit to touch
   the block hashes it (and fills the spool), the others wait for that result. A block is hashed once per
-  query however many partitions read it.
+  query however many partitions read it, with one exception: read from the spool, a key-mode zip fetches
+  and hashes a block between a partition's first and last again for the row pass (§5).
 - **Cost:** a touched block's I/O is the whole block, whatever the projection and whatever tier 2 would have
   skipped; CPU is blake3 at the measured 2930 MB/s single-thread (ADR-0059 §9), about 0.37 s per GiB per
   thread, parallel across partitions. Tier 1 is untouched: a pruned block is neither fetched nor hashed,
-  and no row from it is served, a key-mode zip's boundary checks (§5) included. So the price falls
+  and no row from it is served, a key-mode zip's pre-pass (§5) included. So the price falls
   on full scans of narrow projections and on object storage; selective queries on the indexed column pay
   little.
 - **"Verify offline forever" holds:** verification needs nothing but the file.
@@ -959,7 +1011,9 @@ migrated onto it. The current materialising path survives only as the test oracl
 ### PR2 — positional zip (#667)
 
 `zip` in `tessera_io::scan` and in `tessera-query`; the `aligned_to` field, `derive_aligned` (its only
-writer) and the seal-time checks; key mode with the strictly-increasing check.
+writer) and the seal-time checks; key mode with the key-only pre-pass, the release gate and the
+strictly-increasing check. Same-producer zips only: no signature check, and the docs say that a zip across
+producers is not offered until a signed alignment is (§5).
 
 - **Equality:** a zip equals the hash join on the key column for aligned inputs, with and without filters.
 - **Refusal before any row:** different total rows, different per-block rows, a missing or ambiguous
@@ -968,19 +1022,27 @@ writer) and the seal-time checks; key mode with the strictly-increasing check.
   `AlignmentError`.
 - **Key mode:** a tie, an inversion, a NULL key, a key altered in row group *g*, a tie on a unit boundary
   inside one partition and a tie on a partition boundary each fail the query with an error naming the row.
-  §5's counterexample (A with keys `[…, 5] [3] [5, …]`, B the same with the two `5` rows swapped, queried
-  with `WHERE key >= 5` so the middle group is pruned) is refused with the gap inside one block and with
-  the gap a whole pruned block, with both `5`s in one partition and in two; asserted on the released
-  batches, no swapped pair is ever zipped. An inversion across a pruned gap and across a partition edge is
-  refused the same way. Key mode reads no byte of a pruned block (its `bytes_fetched` is 0). The key column
-  is exempt from the collision refusal and emitted once. `WHERE key >= 5 AND e > 3` prunes on the key
-  conjunct only. An event-id key under `WHERE row_index <> 2` (the key is not the indexed column) switches
-  tier 1 off for the zip, so §5's `[1, 5] [5] [7]` swap is checked and refused. A scanned boundary key that
-  differs from the registered one fails the query. A consumer that executes the partitions one after
-  another completes without hanging. A boundary block shared by two partitions is spooled once, and a
-  key-mode object-store scan with fewer spool slots than it needs is refused by `plan_scan`. A `LIMIT`
-  query's rows are neighbour-checked as §5 states, and the docs say so, as they say that pruning in key mode
-  trusts the `.cidx` statistics.
+  §5's counterexample (A with keys `[…, 5] [3] [5, …]`, B the same with the two `5` rows swapped, queried with
+  `WHERE key >= 5` so the middle group is pruned) is refused with the gap inside one block and with the gap a
+  whole pruned block, with both `5`s in one partition and in two; asserted on the released batches, no swapped
+  pair is ever zipped. An inversion across a pruned gap and across a partition edge is refused the same way.
+  Key mode reads no byte of a pruned block (its `bytes_fetched` is 0). The key column is exempt from the
+  collision refusal and emitted once. `WHERE key >= 5 AND e > 3` prunes on the key conjunct only. An event-id
+  key under `WHERE row_index <> 2` (the key is not the indexed column) switches tier 1 off for the zip, so
+  §5's `[1, 5] [5] [7]` swap is checked and refused. A scanned boundary key that differs from the registered
+  one fails the query. A consumer that executes the partitions one after another completes without hanging,
+  including a key-mode zip read from the spool with `spool_blocks = 3 · k · P` whose consumer drains one
+  partition before the others, on an object store and on a local source with the spool opt-in. A boundary
+  block shared by two partitions is spooled once, and a key-mode scan read from the spool with fewer slots
+  than it needs is refused by `plan_scan`. The docs say that pruning in key mode trusts the `.cidx`
+  statistics.
+- **Release gate:** a key-mode zip with a pushed `LIMIT` or an early stop is refused until the key-only
+  pre-pass has verified the scanned range: §5's `[5, 6] [3, 5]` case (B the same with the two `5` rows
+  swapped) under `LIMIT 1` fails the query and returns no row, a test that fails on a neighbour-check-only
+  implementation, which returns the misaligned pair. The same case with the two row groups in two
+  partitions, and with no `LIMIT` but a consumer that drops the stream after its first batch, returns no
+  row either. On aligned inputs, the pre-pass has completed before the first batch is released, and
+  `LIMIT n` then returns exactly `n` correctly paired rows.
 - **Writers:** generic `ingest` and `commit --add-block` refuse a spec carrying `aligned_to`;
   `derive_aligned` refuses a transform that changes a batch's row count.
 - **Bounded memory:** the ksb run repeated on a zip of two blocks; the anonymous peak stays within the §3
@@ -989,7 +1051,8 @@ writer) and the seal-time checks; key mode with the strictly-increasing check.
 ### PR3 — multi-product and collections, local then object store (#668)
 
 Member resolution, partitioning, schema policy, the product column, then the object-store `VortexReadAt`,
-the spool and the `RangeSource` seam for a consumer's DataFusion `ObjectStoreRegistry`.
+the spool (with the local spool opt-in of §7) and the `RangeSource` seam for a consumer's DataFusion
+`ObjectStoreRegistry`.
 
 - **Equality:** a collection scan equals the `UNION ALL` of its products' single-product scans.
 - **Refusal:** a member `manifest_hash` mismatch, an unresolvable member and a schema mismatch are refused
@@ -997,6 +1060,8 @@ the spool and the `RangeSource` seam for a consumer's DataFusion `ObjectStoreReg
 - **Object store:** against versitygw (extending the `s3-range-read` flake check), results equal the local
   scan; pruned blocks issue zero GETs, in a key-mode zip too; the spool stays within its bound; a store
   taken from a DataFusion `ObjectStoreRegistry` reads the same rows as one opened by `open_url`.
+- **Local spool opt-in:** with the opt-in, a byte changed in the local file after its block was spooled and
+  hashed reaches no row; without it, a local scan creates no spool file.
 - **Bounded memory:** the ksb run over a many-product collection.
 
 ## Alternatives considered and rejected (summary)
@@ -1028,34 +1093,32 @@ the spool and the `RangeSource` seam for a consumer's DataFusion `ObjectStoreReg
   of the budget, not of the table.
 - Every query verifies the blocks it reads by default, which costs a full read of each touched block.
 - `TableSpec` gains one optional sealed field, `aligned_to`, corpus-neutral, written only by
-  `derive_aligned`.
+  `derive_aligned`. Zips ship for products of one producer; a zip across producers waits for a signed
+  alignment (#656, #566).
+- A key-mode zip reads its key column once more than the query needs and releases its first row only after
+  that pre-pass; in exchange every row it returns is correctly paired, however the query ends.
 - DataFusion majors become a recurring migration and a breaking `tessera-query` release.
 
-## Open questions for the owner
+## Open questions (do not block acceptance)
 
-(a) **Must a declared alignment be signed?** `aligned_to` is the writer's claim (§5). The engine's generic
-    paths never write it, but a hand-crafted, re-sealed manifest can. Should the zip trust a declared
-    alignment only when the product carries a signature from a trusted key (ADR-0037), as the identity
-    envelope work in #656 / #566 may need for its own claims? The risk is real: a forged claim that names
-    the right source, with a correct `source_digest`, passes every check and yields a **silently
-    misaligned** zip; the digest only stops a claim from being applied to a different version of the
-    source. **Recommendation:** not in PR2, because forging it requires writing and sealing the derived
-    product outside the engine, and a party who can do that can equally forge the derived values
-    themselves; require a trusted signature on the derived product before zipping as soon as a consumer
-    zips products it did not produce.
+Each is filed with a recommendation, and none changes a decision this ADR states as settled. Each gates the
+work named beside it, not the acceptance.
 
-(b) **Local `VerifyBlocks` without protection against concurrent writers, as the default?** Locally the rows
-    are read in a second pass after the hash (§7), so a writer changing the file in between goes
-    undetected. **Recommendation:** keep it as the default, since `.tsra` files are immutable once sealed
-    and the threat is at-rest corruption, and offer the spool locally as an opt-in for shared, writable
-    stores.
+| Issue | Question | Gates |
+|---|---|---|
+| #672 | Integrity default for object-store sources: `VerifyBlocks` (spooled) or `SealOnly` (§7) | PR3, #668 |
+| #673 | `tessera-query` keeps its own version line at 1.0, an exception to ADR-0052 §2 (§2) | 1.0 / API freeze |
+| #674 | A declared workspace MSRV now that DataFusion is public API (§2) | 1.0 / API freeze |
+| #675 | The indexed column recorded in the table `.cidx` spec at the ADR-0059 event (§4, §5) | `.cidx` spec change |
 
-Filed separately, each with a recommendation: the object-store integrity default (#672), `tessera-query`'s
-version line at 1.0 (#673), a workspace MSRV (#674), and recording the indexed column in the table `.cidx`
-spec during the ADR-0059 event (#675).
+#672 leaves every object-store rule of this ADR intact under either answer: the spool, its bound and the
+key-mode pre-pass are defined for `VerifyBlocks`, and `SealOnly` stays a labelled mode. Until #675 lands,
+key-mode pruning uses the `row_index` convention as §5 states.
 
 ## References
 
-Issue #654 and the architect's triage comment of 2026-10-25 · #251 · #225 · #627 · #632 · #657 ·
+Issue #654, the architect's triage comment of 2026-10-25 and the owner's decisions of 2026-10-26
+([comment](https://github.com/vig-os/tessera/issues/654#issuecomment-6423805993)) · #251 · #225 · #627 ·
+#632 · #657 ·
 ADR-0026 · ADR-0034 · ADR-0049 · ADR-0052 · ADR-0057 · ADR-0059 · `tessera-cli/src/sql.rs` ·
 `tessera-io/src/{table,multiblock,container,cloud}.rs` · `tessera-core/src/chunk_index.rs`.
