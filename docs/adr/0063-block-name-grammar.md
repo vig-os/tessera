@@ -71,7 +71,8 @@ It wrote `<block>`. Now every level, the full-resolution one included, is a leaf
 - **Orphan fragments.** `WriteSession::recover` deletes every file under `blocks/` that no line of the
   journal names, so a fragment left by an append that never reached its journal line can't block a
   later append whose name needs that path as a directory. A fragment some line names is kept even when
-  recovery stops before that line.
+  recovery stops before that line. *(Amended by #686, below: such a fragment is quarantined, not left
+  in `blocks/`.)*
 - **Writers enforce the leaf rule.** `ProductBuilder::seal` refuses a conflict, and so does a write
   session (on each append, against the blocks it has committed, and in `recover` against earlier
   journal lines). `unpack` and `pack_dir` refuse a conflict too, before they write anything.
@@ -83,7 +84,8 @@ It wrote `<block>`. Now every level, the full-resolution one included, is a leaf
 - **Typed errors.** `Error::InvalidBlockName { name, reason: NameError }` names the rule broken (empty,
   too long, empty segment, dot segment, disallowed character). `Error::BlockNameConflict
   { parent, child }` reports a leaf-rule conflict. `recover` returns these for a complete journal line;
-  a torn last line (not complete JSON) is still dropped as before. Reading a manifest with an invalid
+  a torn last line (not complete JSON) is still dropped as before. *(Amended by #686, below: the torn
+  tail is the unterminated last line, and any other invalid complete line is `Error::CorruptJournal`.)* Reading a manifest with an invalid
   name fails to parse (`Error::Serde`, message `invalid block name '<name>': <reason>`).
 
 ## Compatibility
@@ -125,3 +127,38 @@ obeys the grammar, so it unzips under its prefix.
   in `path_under` before a Windows build ships.
 - **Case-insensitive filesystems** (macOS default, Windows) treat `Volume` and `volume` as one file, so
   exploding a product holding both would collide. The leaf rule doesn't cover case; #690 tracks it too.
+
+## Amendment (#686, 2026-10-29) — recovery quarantines what it can't replay, and a complete line is a commit
+
+The orphan rule above kept the fragment of a journal line that recovery stopped before, so that a journal
+cut short could be repaired by hand. It did not hold: `recover` rewrote the journal to the replayed
+prefix and then removed orphans, so a second `recover` no longer saw the line and deleted the fragment;
+and a kept `c/0` directory made a later append of `c` fail with an I/O error (EISDIR) instead of a typed
+one. `WriteSession::recover` now does this instead (rustdoc on `recover` is the reference):
+
+- **Torn tail.** Only an unterminated last line is torn, and it is dropped whatever its bytes (a cut-off
+  prefix, a whole object whose newline never reached the disk, bytes cut inside a UTF-8 character). Every
+  complete line is a commit: one that is not UTF-8, not JSON, not a block reference, or that commits a
+  block a second time is refused with `Error::CorruptJournal { path, line, detail }`, before anything on
+  disk changes, like the grammar and leaf-rule errors above.
+- **Quarantine.** When complete lines follow the first line whose fragment is missing, that line and all
+  after it move, verbatim, to `quarantine/<blake3 hex of those lines>/journal.jsonl` in the stage
+  directory, and the fragments they name to `quarantine/<id>/blocks/`. The quarantine is outside
+  `blocks/`, so it is never sealed and never in the way of a path. The names it holds stay taken: an
+  append whose name is one of them, or a parent or child of one (the leaf rule), is refused with
+  `Error::QuarantinedBlockName { name, quarantined, quarantine }`. Repairing by hand (put the fragments and
+  lines back, delete the quarantine, recover) or deleting the quarantine frees them. `create` on the same
+  directory keeps the quarantine, and its names stay taken. A lone last line whose fragment is missing has
+  nothing left to keep and is dropped, as before: usually the commit whose journal fsync failed, but an
+  acknowledged commit whose fragment was lost to damage to `blocks/` is lost with it.
+- **Strictness.** A crash that leaves stale bytes ending in a newline at the journal's end (possible where
+  the filesystem journals metadata but not data) now makes `recover` refuse the session rather than guess
+  which lines are commits.
+- **Durable, idempotent.** The journal is rewritten through the session's one durable-write path (temp
+  file, fsync, atomic rename, directory fsync), so a crash during recovery leaves the old journal or the
+  new one. The quarantine's id is computed from its lines, so a crash part-way through quarantining is
+  completed by the next recovery into the same directory. Recovering a recovered session changes
+  nothing.
+
+This is internal to the staging directory, not the sealed format: no grammar, leaf-rule, manifest or
+`content_hash` change, and no corpus golden moves.

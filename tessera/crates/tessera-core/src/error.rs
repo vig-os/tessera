@@ -127,6 +127,34 @@ pub enum Error {
     )]
     BlockNameConflict { parent: String, child: String },
 
+    /// A line of a write-session journal that is **complete** (newline-terminated), so a commit,
+    /// but not a valid one: not UTF-8, not JSON, not a block reference, or a block committed a
+    /// second time. `WriteSession::recover` refuses the journal rather than drop such a line as a
+    /// torn tail (only an unterminated last line is torn), and changes nothing on disk. `line` is
+    /// 1-based; `path` is the journal file.
+    #[error("write-session journal {} line {line} is complete but not a valid commit: {detail}", path.display())]
+    CorruptJournal {
+        path: std::path::PathBuf,
+        line: usize,
+        detail: String,
+    },
+
+    /// An append to a write session whose block `name` is `quarantined`, or its parent or child (the
+    /// leaf rule, ADR-0063), where `quarantined` is held in the recovery quarantine directory
+    /// `quarantine`: a journal tail `WriteSession::recover` could not replay, kept for repair by
+    /// hand. The name stays taken until that quarantine is repaired or deleted and the session is
+    /// recovered again, so a repair never finds two blocks of one name.
+    #[error(
+        "block '{name}' collides with block '{quarantined}', held in the write-session quarantine \
+         {}: repair or delete that quarantine, then recover the session",
+        quarantine.display()
+    )]
+    QuarantinedBlockName {
+        name: String,
+        quarantined: String,
+        quarantine: std::path::PathBuf,
+    },
+
     /// An ingest backend whose **name is known but whose handler is not compiled into this build**
     /// (ADR-0057 §6/§7).
     ///
