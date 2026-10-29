@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-25T11:18:53Z
-updated: 2026-10-26T12:00:23Z
+updated: 2026-10-29T06:20:50Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/667
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: 654
 children: none
-synced: 2026-10-27T07:16:25.958Z
+synced: 2026-10-29T08:04:10.545Z
 ---
 
 # [Issue 667]: [feat(query): positional zip of row-aligned table blocks (ADR-0062 PR2)](https://github.com/vig-os/tessera/issues/667)
@@ -49,14 +49,22 @@ Phase 2 of #654, designed in ADR-0062 §5 and §8 "PR2".
     tier 1 off for the zip, so the `[1, 5] [5] [7]` swap of §5 is checked and refused. A scanned boundary key
     that differs from the registered one fails the query. A consumer that executes the partitions one after
     another completes without hanging. A boundary block shared by two partitions is spooled once, and a
-    key-mode object-store scan with fewer spool slots than it needs is refused by `plan_scan`. A `LIMIT`
-    query's rows are neighbour-checked as §5 states, and the docs say so, as they say that pruning in key
-    mode trusts the `.cidx` statistics.
+    key-mode object-store scan with fewer spool slots than it needs is refused by `plan_scan`. The docs say
+    that pruning in key mode trusts the `.cidx` statistics.
+  - Release gate (owner decision (c), ADR-0062 §5): a key-mode zip with a pushed `LIMIT` or an early stop is
+    refused until the key-only pre-pass has verified strict increase over the whole scanned range. Test:
+    A with keys `[5, 6] [3, 5]` in two row groups, B the same with the two `5` rows swapped, queried with
+    `LIMIT 1`, fails the query and returns no row; this test fails on a neighbour-check-only implementation,
+    which returns the misaligned pair. The same case with the two row groups in two partitions, and with no
+    `LIMIT` but a consumer that drops the stream after its first batch, returns no row either. On aligned
+    inputs the pre-pass completes before the first batch is released, and `LIMIT n` then returns exactly
+    `n` correctly paired rows.
   - Writer side: generic `ingest` and `commit --add-block` refuse a spec carrying `aligned_to`;
     `derive_aligned` refuses a transform that changes a batch's row count.
   - Bounded memory: the ksb run of ADR-0062 §3 repeated on a zip of two blocks; the anonymous peak stays within
     the per-query formula including the key-mode buffers.
 - **Depends on:** PR1.
+
 
 
 

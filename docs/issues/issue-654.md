@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-21T00:01:03Z
-updated: 2026-10-26T18:12:52Z
+updated: 2026-10-29T06:20:52Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/654
-comments: 2
+comments: 3
 labels: feature, priority:high, effort:large, epic, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: 666, 667, 668, 669, 670, 671, 672, 673, 674, 675
-synced: 2026-10-27T07:16:31.012Z
+synced: 2026-10-29T08:04:16.099Z
 ---
 
 # [Issue 654]: [feat(query): streaming DataFusion TableProvider over table blocks (projection + filter pushdown, chunk-stat pruning, bounded memory)](https://github.com/vig-os/tessera/issues/654)
@@ -68,4 +68,12 @@ Owner decisions on ADR-0062's open questions (2026-10-26). ADR-0062 merged as Pr
 - **(a) Signed `aligned_to`:** not required in PR2 (same-producer zips, where the seal covers the claim). A signed alignment is **required** before any zip across producers ships, tied to #656/#566.
 - **(b) Local read default:** `VerifyBlocks` without a spool; the spool is opt-in (remote or untrusted sources).
 - **(c) Key mode under LIMIT / early stop:** today a row is released after only a neighbour check, so `[5,6][3,5]` zipped with a copy whose 5s are swapped returns a misaligned pair under `LIMIT 1` with no error. Decision: a key-mode zip **refuses** a pushed limit or early stop until a key-only pre-pass has verified strict increase over the whole scanned range; after that, LIMIT is allowed. This must be correct by construction, not a documented caveat. It goes into the ADR when it is accepted, and into #667's acceptance criteria.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on October 29, 2026 at 06:20 AM_
+
+ADR-0062 acceptance is up in #698. It records owner decisions (a), (b) and (c) of 2026-10-26 as normative text: (a) in §5 declared mode, (b) in §7, and (c) as §5's key-only pre-pass and release gate, with the `[5, 6] [3, 5]` counterexample. #667's acceptance criteria now include the (c) release-gate test. Open questions #672–#675 are listed as not blocking acceptance. Review found #697 (the non-key spool default), filed against #668.
 

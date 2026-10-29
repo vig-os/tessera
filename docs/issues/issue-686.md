@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-26T19:45:16Z
-updated: 2026-10-26T19:47:04Z
+updated: 2026-10-29T06:06:39Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/686
-comments: 1
+comments: 2
 labels: bug, area:io
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-27T07:16:17.936Z
+synced: 2026-10-29T08:04:02.329Z
 ---
 
 # [Issue 686]: [fix(io): WriteSession::recover rewrites the journal non-atomically (crash during recovery loses it)](https://github.com/vig-os/tessera/issues/686)
@@ -37,4 +37,15 @@ survive, and a second `recover` must give the same blocks.
 _Posted on October 26, 2026 at 07:47 PM_
 
 Priority note from the #682 round-2 review: after #682, a session poisoned by a failed journal write can only continue through `recover`, so this non-atomic rewrite now sits on the error path that poisoning relies on.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on October 29, 2026 at 04:52 AM_
+
+Fold into #686 (from the PR #691 review at ff9d76f; `recover` is the same code #686 rewrites):
+
+1. `tessera-io/src/write.rs:709`/`:712`: the docs say a fragment named by a journal line *after* the recovery stop point "is kept … so a journal cut short can still be repaired by hand". But `recover` rewrites the journal to the clean prefix before it removes orphans, so a second `recover` deletes those kept fragments. A kept `c/0` directory also makes a later append of `c` fail with EISDIR instead of `BlockNameConflict`. Make the documented behaviour true, either by keeping the journal lines that name those fragments or with an explicit quarantine. Pin it with a test that runs recover twice.
+2. `write.rs:686`/`:689`: a complete JSON line that is not a valid `BlockRef` is treated as a torn tail (`break`) instead of being refused. That contradicts the rule that a complete line is a commit. Refuse it with a typed error, and test it.
 

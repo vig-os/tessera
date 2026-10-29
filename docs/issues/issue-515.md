@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-28T01:05:03Z
+updated: 2026-10-29T02:05:21Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-28T07:54:46.356Z
+synced: 2026-10-29T08:04:51.407Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -48,7 +48,6 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.90
  - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.90
  - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.90
- - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.1.3
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.26.1
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
@@ -66,6 +65,7 @@ The following updates are currently rate-limited. To force their creation now, c
 
 The following updates have all been created. To force a retry/rebase of any, click on a checkbox below.
 
+ - [ ] <!-- rebase-branch=renovate/crate-zip-vulnerability -->[chore(deps): update rust crate zip to v9.0.5 [security]](../pull/689)
  - [ ] <!-- rebase-branch=renovate/dtolnay-rust-toolchain-digest -->[chore(deps): update dtolnay/rust-toolchain digest to b725eda](../pull/558)
  - [ ] <!-- rebase-branch=renovate/flate2-1.x-lockfile -->[chore(deps): update rust crate flate2 to v1.1.10](../pull/560)
  - [ ] <!-- rebase-branch=renovate/rust-futures-monorepo -->[chore(deps): update rust crate futures to v0.3.34](../pull/561)
@@ -115,11 +115,11 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `dicom-transfer-syntax-registry 0.10` → [Updates: `0.10`]
  - `hdf5-metno 0.12` → [Updates: `0.15`]
  - `hdf5-metno-sys 0.12` → [Updates: `0.12`]
- - `arrow-array =58.3.0` → [Updates: `=58.4.1`, `=60.0.0`]
- - `arrow-buffer =58.3.0` → [Updates: `=58.4.1`, `=60.0.0`]
- - `arrow-schema =58.3.0` → [Updates: `=58.4.1`, `=60.0.0`]
- - `arrow-ipc =58.3.0` → [Updates: `=58.4.1`, `=60.0.0`]
- - `parquet =58.3.0` → [Updates: `=58.4.1`, `=60.0.0`]
+ - `arrow-array =58.3.0` → [Updates: `=58.4.1`, `=60.1.0`]
+ - `arrow-buffer =58.3.0` → [Updates: `=58.4.1`, `=60.1.0`]
+ - `arrow-schema =58.3.0` → [Updates: `=58.4.1`, `=60.1.0`]
+ - `arrow-ipc =58.3.0` → [Updates: `=58.4.1`, `=60.1.0`]
+ - `parquet =58.3.0` → [Updates: `=58.4.1`, `=60.1.0`]
  - `csv =1.4.0`
  - `pyo3 0.29` → [Updates: `0.30`]
  - `pyo3-build-config 0.29` → [Updates: `0.30`]
