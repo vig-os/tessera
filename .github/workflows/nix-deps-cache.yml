@@ -34,16 +34,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The same runners as nix-check.yml's legs (#688): a miss builds tessera-deps, a heavy
+          # build, so x86_64 takes ksb's large pool. The Actions cache it saves is keyed by the deps
+          # derivation, not the runner, so a hosted fork-PR leg restores the same entry.
+          # This workflow never runs on a pull request, so the fork predicate is always false here;
+          # it stays so every ksb label in the repo has the one checked shape
+          # (scripts/check-ksb-fork-guard.sh).
           - arch: x86_64-linux
-            runner: ubuntu-latest
+            runner: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-large' }}
           - arch: aarch64-linux
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Nothing here pushes, and on a self-hosted pod a token left in .git/config outlives the step.
+          persist-credentials: false
 
+      # As in nix-check.yml: a ksb pod ships its own Nix and cannot run the installer.
       - name: Install Nix
+        if: runner.environment == 'github-hosted'
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
+
+      - name: Check the runner's own Nix
+        if: runner.environment != 'github-hosted'
+        run: nix --version
 
       - name: Look up the dependency cache
         id: deps

@@ -16,13 +16,38 @@
 # guardrails-gates · dev-shell. cargo-deny + the full pre-commit gate set run via `prek`
 # locally (they need network / the working tree).
 #
-# vig-os/tessera is PUBLIC → GitHub-hosted runner. Never self-hosted on a public repo (untrusted
-# PRs = arbitrary code execution on your hardware). See guardrails docs/CONVENTIONS.md.
+# RUNNERS (#688). The x86_64 leg runs on ksb, vig-os's ARC scale sets on the ksb compute VM
+# (runner group `ksb-ci`): `ksb-vig-os-large` (8 CPU / 32 GiB, ephemeral pod, per-pod single-user
+# Nix store) instead of a 16 GB GitHub-hosted runner, where the leg was OOM-evicted (#495). The `gate`
+# job is one shell step and runs on `ksb-vig-os-small` (2 CPU / 8 GiB). The aarch64 leg stays on the
+# GitHub-hosted `ubuntu-24.04-arm`: ksb has no ARM runners.
+#
+# Trade-off, accepted: the required `nix flake check` context now depends on ksb even for its one-step
+# gate. A cold scale-up took ~4.5 min from queue to pickup in the #688 probe (a warm pool ~1 min), and
+# while ksb is down the gate stays queued rather than failing: `timeout-minutes` does not count queue
+# time. The gate needs the x86_64 leg, which is on ksb anyway, so hosting the gate alone would buy
+# nothing during an outage.
+#
+# FORKS. vig-os/tessera is PUBLIC. A pull request whose head is not this repository never routes to
+# ksb: each ksb label is the non-fork branch of
+#     ${{ (<fork predicate>) && 'ubuntu-latest' || 'ksb-vig-os-…' }}
+# so a fork PR runs on the GitHub-hosted fallback and its required checks still report. The
+# predicate is vig-os/devkit's (ADR-site-agnostic-projects §2). Three layers, each with its own job:
+#   1. this workflow guard keeps honest fork PRs off ksb, where they would be killed. It is NOT a
+#      security boundary: a fork PR runs the FORK's copy of this file and can delete the guard;
+#   2. the repo's fork-PR approval setting (`all_external_contributors`): a maintainer approves
+#      every outside contributor's run before anything executes;
+#   3. the security boundary: ksb's job-started fork-guard hook (exo-pet/exo-fleet#949), which
+#      SIGKILLs the runner worker for a `pull_request*` job whose head repo ID is not the base repo's
+#      (and for any event outside its allow-list), before a single step runs.
+# `scripts/check-ksb-fork-guard.sh` (a pre-commit hook, so CI's Lint lane runs it) fails any ksb
+# label without the guard, runner-group routing to ksb, and any trigger outside `push`,
+# `pull_request`, `workflow_dispatch` and `schedule` in a ksb-routed workflow. Its header says why.
 #
 # CROSS-ARCH DETERMINISM GATE (ADR-0020/0024 release gate). The flake is `eachDefaultSystem`, so the
-# checks already exist for aarch64-linux. Running `nix flake check` on BOTH `ubuntu-latest`
-# (x86_64-linux) and `ubuntu-24.04-arm` (aarch64-linux — a GitHub-HOSTED ARM64 runner, free for public
-# repos, so the no-self-hosted rule holds) makes the conformance gate
+# checks already exist for aarch64-linux. Running `nix flake check` on BOTH x86_64-linux (ksb, above)
+# and `ubuntu-24.04-arm` (aarch64-linux, a GitHub-HOSTED ARM64 runner, free for public repos) makes
+# the conformance gate
 # (`tessera-io/tests/conformance.rs`) re-derive the golden id/content_hash/manifest_hash and the
 # byte-identical `.tsra` on EACH arch. Green on both = the content-addressing is byte-reproducible
 # x86==ARM — the writer-determinism property the spec stakes identity on, validated not assumed.
@@ -71,6 +96,9 @@ jobs:
     # set above the observed spread rather than just above the median.
     #
     # Raised 90 -> 120 because the spread widened past 90 and the cap started cutting real work.
+    # HOSTED-ONLY FIGURES: everything below was measured on GitHub-hosted runners, before the x86_64
+    # leg moved to ksb (#688). The cap is kept as is for both arches; re-derive it (and the --max-jobs/--cores
+    # below) from ksb timings: #701.
     # Measured leg durations, same workflow, all on GitHub-hosted runners:
     #
     #     commit     x86_64            aarch64
@@ -97,16 +125,61 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # x86_64 runs on ksb's large pool (8 CPU / 32 GiB, #688), except for a fork PR: that takes
+          # the GitHub-hosted fallback. See RUNNERS at the top of this file.
+          #
+          # KNOWN LIMIT, REDUCED HERMETICITY: the ksb pods run Nix with `sandbox = false`, so on this
+          # leg a check is NOT isolated from the pod. It sees the pod's network namespace, its
+          # filesystem outside the store and every other build running beside it. The owner accepted
+          # this for now (#688, 2026-10-29). What keeps it honest:
+          #   - checks that start a loopback server do not depend on the sandbox. The registry
+          #     checks bind port 0 (the kernel picks a free port), keep their blobs in memory (a
+          #     filesystem registry stalled for 60 s under the pod's disk load: the root cause of
+          #     the first ksb failure), keep config and log in a private $TMPDIR dir, wait for
+          #     readiness with a bound and kill the server on exit (`loopbackRegistry` in
+          #     flake.nix). `s3-range-read` has the same shape: a versitygw server on a
+          #     kernel-picked port with private $TMPDIR dirs, a bounded readiness wait and exit
+          #     hooks that stop it (#702);
+          #   - the aarch64 leg below is GitHub-hosted WITH the sandbox, so cross-arch determinism is
+          #     still checked by a hermetic build on one side;
+          #   - moving back to sandboxed Nix on ksb is exo-pet/exo-fleet#1081. Once it lands, this
+          #     note goes.
           - arch: x86_64-linux
-            runner: ubuntu-latest
+            runner: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-large' }}
+          # aarch64 stays GitHub-hosted for EVERY event: ksb has no ARM runners, and the cross-arch
+          # determinism gate needs a real aarch64 machine, not emulation.
           - arch: aarch64-linux
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Nothing here pushes, and on a self-hosted pod a token left in .git/config outlives the step.
+          persist-credentials: false
 
+      # GitHub-hosted runners (aarch64, and x86_64 for a fork PR) get Nix from the installer. A ksb
+      # pod ships it: a per-pod single-user store seeded from a pinned image (Nix 2.34.8 in the #688
+      # probe), with `sandbox = false` because the pod itself is the isolation boundary. The installer
+      # cannot run there (no usable sudo: "no new privileges"), so it is skipped rather than left to
+      # stumble into "already installed"; the next step fails loudly if a pod ever ships without Nix.
       - name: Install Nix
+        if: runner.environment == 'github-hosted'
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
+
+      # Every runner prints its Nix config. A GitHub-hosted runner must also have the sandbox ON: the
+      # x86_64 leg on ksb runs without it (KNOWN LIMIT at the matrix above), so the hosted aarch64
+      # leg is the hermetic side of the cross-arch determinism gate, and this asserts that rather
+      # than assuming the installer's default.
+      - name: Check the runner's Nix
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          nix --version
+          nix config show | grep -E '^(sandbox|substituters|trusted-users|cores|max-jobs) '
+          if [ "$RUNNER_ENVIRONMENT" = github-hosted ] && [ "$(nix config show sandbox)" != true ]; then
+            echo "::error::the Nix sandbox is off on a GitHub-hosted runner; this leg must be hermetic"
+            exit 1
+          fi
 
       # Dependency cache (#507): restore + import `tessera-deps` before the build. Details, measurements
       # and the can-only-save-time guarantee are in the action itself. The matching save is after the
@@ -316,14 +389,18 @@ jobs:
   # 'success' only when all of them succeeded.
   gate:
     name: nix flake check
-    runs-on: ubuntu-latest
+    # Light (one shell step): ksb's small pool, with the same fork fallback as the legs.
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-small' }}
+    timeout-minutes: 5
     needs: [check]
     if: always()
     steps:
       - name: Assert every matrix leg passed
+        env:
+          RESULT: ${{ needs.check.result }}
         run: |
-          echo "aggregate result of 'check' matrix: ${{ needs.check.result }}"
-          if [ "${{ needs.check.result }}" != "success" ]; then
+          echo "aggregate result of 'check' matrix: $RESULT"
+          if [ "$RESULT" != "success" ]; then
             echo "::error::nix flake check did not pass on every arch"
             exit 1
           fi
