@@ -490,6 +490,23 @@
               return 1
             }
           '';
+          # Size the test runners from the build's CPU budget, $NIX_BUILD_CORES (`--cores`), not from
+          # what the machine reports (#688). A ksb pod has no CPU limit, so
+          # `available_parallelism()` there returns the node's 84 CPUs. Nix clears the builder's
+          # environment, so the runner's own pins (RAYON_NUM_THREADS etc., exo-pet/exo-fleet#1014)
+          # never reach a check. Unbudgeted, nextest ran up to 84 test processes, each starting
+          # 84-thread rayon and vortex pools, against the kubelet's 4096-PID cap per pod: thread
+          # creation failed with EAGAIN in two tests at once, and the narrow-table perf ratchet
+          # measured 1.14x against its own neighbours. On a GitHub-hosted runner the budget equals
+          # nproc (4), so nothing changes there. Applies to the libtest/nextest checks; tessera's own
+          # worker sizing still reads `available_parallelism()`: #703.
+          withCpuBudget = args: args // {
+            preCheck = ''
+              export NEXTEST_TEST_THREADS=$NIX_BUILD_CORES RUST_TEST_THREADS=$NIX_BUILD_CORES
+              export RAYON_NUM_THREADS=$NIX_BUILD_CORES
+              echo "test CPU budget: $NIX_BUILD_CORES (available to the build: $(nproc))"
+            '' + (args.preCheck or "");
+          };
           allChecks = {
           # Hermetic Rust gates over the tessera workspace.
           #
@@ -510,17 +527,17 @@
             cargoClippyExtraArgs =
               "--all-targets --features ${workspaceFeatures} -- -D warnings";
           });
-          workspace-test = craneLib.cargoNextest (commonArgs // {
+          workspace-test = craneLib.cargoNextest (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             partitions = 1;
             partitionType = "count";
-          });
+          }));
           # nextest does NOT run doctests, so gate them separately — the "docs-as-tests" layer: every
           # `///` example compiles + runs, so public-API docs can never drift from behaviour.
-          workspace-doctest = craneLib.cargoTest (commonArgs // {
+          workspace-doctest = craneLib.cargoTest (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             cargoTestExtraArgs = "--doc";
-          });
+          }));
           workspace-fmt = craneLib.cargoFmt { inherit src; };
 
           # **The third determinism axis — the build configuration** (ADR-0057 §5, #468).
@@ -1013,7 +1030,7 @@
           # the CLI's sql-feature tests only — same pattern as `s3-range-read` for the cloud
           # feature. Clippy already covers `--all-features` at compile-time, so this test is what
           # proves the query actually EXECUTES (WHERE + ORDER BY + LIMIT round-trip).
-          sql-tests = craneLib.cargoNextest (commonArgs // {
+          sql-tests = craneLib.cargoNextest (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             # Distinct from `workspace-test` so CI logs attribute its lines (#535). Via `pname`, not
             # `pnameSuffix`: crane's cargoNextest hard-sets `pnameSuffix = "-nextest${extraSuffix}"`
@@ -1025,7 +1042,7 @@
             # arrow-58 the workspace already has (via Vortex 0.75); a version mismatch would
             # fail to link, not to test.
             cargoExtraArgs = "-p tessera-cli --features sql sql::";
-          });
+          }));
 
           # The independent conformance reader (corpus/reference_reader): a SECOND implementation of
           # the `.tsra` verification, in pure Python, checked against corpus.json's goldens. It was
