@@ -23,7 +23,7 @@ acquisition through four personas:
    only works if they have a **trust store**, not an out-of-band pubkey. They sign their derived
    products with their **own** key, `signer` = their ORCID iD (attribution).
 
-3. **Data custodian** owns the institutional **S3/MinIO** store and is responsible for *both* the raw
+3. **Data custodian** owns the institutional **S3** store and is responsible for *both* the raw
    and derived datasets. They **gate ingress** on signatures (verify against an institutional trust
    policy), WORM-lock raw=Compliance / derived=Governance (ADR-0033), and **distribute via OCI**
    (`tessera push`) — which must keep the signature *with* the product. On accession they may

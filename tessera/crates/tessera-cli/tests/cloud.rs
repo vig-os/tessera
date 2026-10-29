@@ -1,10 +1,10 @@
 //! Integration test for the `tessera inspect <URL>` / `verify <URL>` cloud entry points (#225).
 //!
-//! Drives the real binary (resolved via `CARGO_BIN_EXE_tessera`) against a MinIO instance
+//! Drives the real binary (resolved via `CARGO_BIN_EXE_tessera`) against an S3 server
 //! seeded with a sealed `.tsra` — the binary opens it over the wire via `tessera_io::open_url`,
 //! verifies the seal + every block digest, and exits 0. Skipped when `TESSERA_S3_ENDPOINT` is
-//! unset so local `cargo test --features cloud` without MinIO doesn't fail; the
-//! `minio-range-read` flake check is the authoritative runner.
+//! unset so local `cargo test --features cloud` without a server doesn't fail; the
+//! `s3-range-read` flake check (versitygw on loopback) is the authoritative runner.
 
 #![cfg(feature = "cloud")]
 
@@ -33,7 +33,7 @@ fn sealed_tsra(out: &Path) {
     pack(&manifest, &[payload], out).unwrap();
 }
 
-/// End-to-end CLI cloud test: seed a `.tsra` to MinIO, then `tessera verify s3://<bucket>/<key>`
+/// End-to-end CLI cloud test: seed a `.tsra` to S3, then `tessera verify s3://<bucket>/<key>`
 /// must exit 0 with the same "OK ... verified" output the local-path verify produces.
 ///
 /// **Name carries `cloud_`** so a single `cargo nextest run ... cloud` filter (the flake check)

@@ -855,7 +855,7 @@ few) that sits in `block_on` on its current-thread tokio runtime for the life of
 runtime-agnostic. The Vortex runtime never polls a tokio-bound future, no multi-thread tokio runtime is
 introduced, and tokio stays inside the object-store backend, where ADR-0034 §4 put it; the one change from
 today is that its runtime is driven by a dedicated thread instead of by each caller's `block_on`. Pruned
-blocks issue **zero** GETs, which PR3 proves with the request counter the `minio-range-read` check already
+blocks issue **zero** GETs, which PR3 proves with the request counter the `s3-range-read` check already
 uses, a key-mode zip (§5) included: its boundary checks read only blocks the scan touches.
 
 ## §7 — Integrity
@@ -994,7 +994,7 @@ the spool and the `RangeSource` seam for a consumer's DataFusion `ObjectStoreReg
 - **Equality:** a collection scan equals the `UNION ALL` of its products' single-product scans.
 - **Refusal:** a member `manifest_hash` mismatch, an unresolvable member and a schema mismatch are refused
   before any row.
-- **Object store:** against MinIO (extending the `minio-range-read` flake check), results equal the local
+- **Object store:** against versitygw (extending the `s3-range-read` flake check), results equal the local
   scan; pruned blocks issue zero GETs, in a key-mode zip too; the spool stays within its bound; a store
   taken from a DataFusion `ObjectStoreRegistry` reads the same rows as one opened by `open_url`.
 - **Bounded memory:** the ksb run over a many-product collection.

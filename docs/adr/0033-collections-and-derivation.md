@@ -26,7 +26,7 @@ the derivation hierarchy that FAIR/WORM/distribution all want to act on.
 3. **One logical collection, three projections** (not opinionated — all three are emitted from the same
    descriptor): **RO-Crate** `ro-crate-metadata.json` (FAIR discovery; already the discovery-export
    target), **OCI image index** (native manifest-of-manifests referencing N `.tsra` artifacts), and an
-   **S3/MinIO prefix** (a prefix of independently range-readable `.tsra` objects).
+   **S3 prefix** (a prefix of independently range-readable `.tsra` objects).
 4. **The raw→derived boundary drives WORM** (ties to #209): **raw → Compliance-mode** (immutable
    forever); **derived → Governance-mode** (regenerable, looser retention).
 

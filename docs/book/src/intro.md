@@ -23,7 +23,7 @@ each chapter says which it is:
   binary (most chapters). What you see ran.
 - **Executed doctest** — a Rust/Python example run by `cargo test` / the bindings check (the API surface,
   [Bindings](./bindings.md)).
-- **Referenced check** — for features that need a live service (an OCI registry, a MinIO bucket, a WASM
+- **Referenced check** — for features that need a live service (an OCI registry, an S3 bucket, a WASM
   runtime), the example is **shown but marked not-inline-executed**, with a pointer to the Nix flake
   check that *does* exercise it end-to-end. These are called out explicitly so you're never misled that
   a service-dependent snippet ran in-page.

@@ -81,7 +81,7 @@ build is ~link time.
 - **Tests:** `cd tessera && cargo nextest run` — **346** tests. Two traps:
   - `tessera-cli` is **bin-only** (use `--bins`, not `--lib`) and its `sql` module is behind
     `--features sql`; bare `cargo test` silently covers neither the SQL nor the cloud paths. The
-    flake has dedicated `sql-tests` / `minio-range-read` checks for exactly this.
+    flake has dedicated `sql-tests` / `s3-range-read` checks for exactly this.
   - **nextest runs one process per test**, which hides cross-call regressions (a dropped runtime
     poisoning a cached session passed 345/345 and was caught only by `tessera-py-import`). Issue
     #356 is the mirror case — it fails only in shared-process `cargo test`. Both isolation modes

@@ -7,7 +7,7 @@ artifact transport (`tessera-io::oci` / `registry.rs`, #209), and the cloud rang
 
 ## Context — one canonical store, many compute hands
 
-Tessera's storage shape is *one S3/MinIO bucket is the truth* (ADR-0033's flat content-addressed product
+Tessera's storage shape is *one S3 bucket is the truth* (ADR-0033's flat content-addressed product
 prefix), distributed-as-OCI for naming/auth/replication (#209), and *every sealed `.tsra` opens directly
 over a range-GET* (#225 — `open_url("s3://…")` with a 64 KiB tail-prefetch + `select_blocks_overlapping`
 prune-before-fetch). That works because identity is content-addressed and every read verifies the seal +
@@ -15,8 +15,8 @@ the block digest end-to-end.
 
 Compute does NOT have the same shape. A real PET/CT site looks like:
 
-- one institutional **MinIO** behind a slow link (or, today, **no MinIO yet** — products live on a NAS or a
-  laptop's SSD, with MinIO arriving "later this quarter");
+- one institutional **S3 store** behind a slow link (or, today, **no S3 store yet** — products live on a NAS or a
+  laptop's SSD, with the S3 store arriving "later this quarter");
 - a small handful of **compute nodes** (workstations, an HPC head node, the recon box) on a fast local
   LAN with NVMe; the same dataset is opened by N notebooks per week, mostly from one researcher's hand;
 - a hard **archival anchor** — once a derived product is sealed and signed, the bytes are stable forever
@@ -27,8 +27,8 @@ The bug to avoid: **inventing a Tessera cache daemon, baking it into the format,
 *orthogonal* to the format. Tessera ships verbs that produce + consume content-addressed objects; how
 those objects get to a compute node's NVMe is a deployment question.
 
-The follow-on bug to avoid: **conflating "MinIO ILM by creation-age" with "cache eviction by access
-recency."** Object stores (MinIO/S3 ILM, AWS lifecycle) decay by *upload time*, which is the wrong axis
+The follow-on bug to avoid: **conflating "S3 lifecycle rules by creation-age" with "cache eviction by access
+recency."** Object stores (S3 lifecycle / ILM rules) decay by *upload time*, which is the wrong axis
 for a cache — a 6-month-old dataset queried twice this week must stay hot, and a yesterday-uploaded but
 never-touched product is the right thing to evict.
 
@@ -100,12 +100,12 @@ Why this is the default tier:
   `log/`), running both is safe: GC reclaims what the operator explicitly forgot; the sweep reclaims
   whatever hasn't been touched in N weeks regardless of reachability — a hard byte ceiling for the
   weeks-to-month decay window the workstation actually needs.
-- **It works *today*** — no MinIO required to start using Tessera; the cache is the local repository the
+- **It works *today*** — no S3 store required to start using Tessera; the cache is the local repository the
   user already has.
 
 #### Tier B — **Registry-grade: a `zot` pull-through cache on the compute host.** Multi-node, OCI-native.
 
-When products live in a registry-fronted MinIO and multiple compute nodes pull the same artifacts, the
+When products live in a registry-fronted S3 store and multiple compute nodes pull the same artifacts, the
 ergonomic substrate is **`zot` configured as a pull-through cache** of the upstream registry.
 [`zot`](https://zotregistry.dev/) is a CNCF OCI registry written in Go; `extensions.sync` with
 `onDemand: true` fetches an artifact (and all its referenced blobs) on first pull and serves subsequent
@@ -120,7 +120,7 @@ speak the OCI distribution API, and a sealed `.tsra` rides as an OCI 1.1 artifac
 The eviction shape that matches a cache (the key insight): zot's
 `storage.retention.policies[].keepTags[].pulledWithin` is **access-recency**, not creation-age. A tag
 that was last *pulled* > N days ago is eligible for eviction; a six-month-old artifact pulled this morning
-stays hot. This is the right axis for a cache (and exactly what MinIO ILM doesn't give you — see §2).
+stays hot. This is the right axis for a cache (and exactly what S3 lifecycle rules don't give you — see §2).
 
 Why a registry (zot) and not "a smarter S3 cache":
 
@@ -136,8 +136,8 @@ Why a registry (zot) and not "a smarter S3 cache":
 
 | Situation | Tier |
 |---|---|
-| One workstation, one researcher, no MinIO yet | **A** (start here) |
-| MinIO is live but only one node ever pulls | A (S3 range-read + a local Tessera repo cache) |
+| One workstation, one researcher, no S3 store yet | **A** (start here) |
+| The S3 store is live but only one node ever pulls | A (S3 range-read + a local Tessera repo cache) |
 | Multiple compute nodes share the same dataset | **B** (each node runs zot pull-through) |
 | HPC: one shared NVMe scratch + many job nodes | B (one zot on the scratch host, jobs pull from it) |
 | Air-gapped acquisition site | Neither — `tessera seal`/`publish` writes the local repo *is* the cache |
@@ -147,10 +147,10 @@ versioning repo on each compute node for the "I edited the metadata twice today,
 changes" inner loop. The same `tessera get` verb (§3) consults the local repo first, then falls through
 to a `pull localhost:5000/...` against zot.
 
-### §2 — Why `pulledWithin` beats MinIO ILM (the rejected alternative)
+### §2 — Why `pulledWithin` beats S3 lifecycle rules (the rejected alternative)
 
-The temptation is to skip a registry entirely: "just point MinIO at NVMe, set an ILM policy, done." It
-doesn't work as a cache. **MinIO ILM transitions / expires objects by their `LastModified` (upload
+The temptation is to skip a registry entirely: "just point the S3 store at NVMe, set a lifecycle policy, done." It
+doesn't work as a cache. **S3 lifecycle rules transition / expire objects by their `LastModified` (upload
 time), not by access time** — the `AccessTier` rules are about object class, and there is no
 "`accessedWithin`" predicate in the S3 lifecycle spec. (S3 has Intelligent-Tiering for *cost class*
 moves, but that's a transition, not an eviction by recency suitable for a deletable cache; and it's
@@ -164,7 +164,7 @@ AWS-only.) Concretely:
 
 `zot`'s `storage.retention.policies[].keepTags[].pulledWithin: 720h` (30 days) is exactly the predicate a
 cache needs: tag was last *pulled* (not pushed) within N hours → keep; otherwise eligible for sweep. It
-is the one feature MinIO doesn't have and the reason this ADR picks a registry-grade cache over an
+is the one feature an S3 store doesn't have and the reason this ADR picks a registry-grade cache over an
 S3-prefix cache for Tier B.
 
 Tier A's atime-LRU is the same principle implemented for the lighter case: `atime` *is* "pulled within"
@@ -237,7 +237,7 @@ flake — it's only ever evaluated standalone.
 - **Tessera-native cache daemon.** Hard NO. Would invent a new component, a new protocol, a new
   failure mode, and tie the format to a service. The two tiers compose every workflow we have, with
   zero new code on the format side.
-- **MinIO ILM as the cache eviction policy.** Rejected — wrong predicate (§2). MinIO is great as the
+- **S3 lifecycle rules as the cache eviction policy.** Rejected — wrong predicate (§2). S3 is great as the
   canonical store; it is not the cache tier.
 - **Squid / NGINX as an OCI proxy.** Possible but the eviction semantics aren't OCI-aware (no
   `pulledWithin`-on-tags, no manifest-vs-blob distinction for replication). `zot` is purpose-built for
@@ -255,16 +255,16 @@ flake — it's only ever evaluated standalone.
 
 A single rollout, not a flag day:
 
-1. **Today — no MinIO, one workstation.** `tessera init ~/.cache/tessera/repo` + `tessera import` the
+1. **Today — no S3 store, one workstation.** `tessera init ~/.cache/tessera/repo` + `tessera import` the
    `.tsra` files the researcher already has. The repo IS the cache. The atime-LRU sweep (Tier A in the
    example) bounds it.
-2. **MinIO comes online.** Add `tessera push file.tsra reg.example.com/lab/x:v1` on the producer side
-   (`reg.example.com` is the MinIO-backed upstream registry). Consumer behavior unchanged — they still
+2. **The S3 store comes online.** Add `tessera push file.tsra reg.example.com/lab/x:v1` on the producer side
+   (`reg.example.com` is the S3-backed upstream registry). Consumer behavior unchanged — they still
    `tessera get`/`open` local paths from the repo.
 3. **Second compute node joins.** Stand up `services.tessera-cache` (Tier B) on whichever node owns the
    shared NVMe; point both compute nodes at it via `tessera pull localhost:5000/lab/x:v1`. The first
    pull from each node populates the local zot; thereafter both nodes share LAN-speed pulls.
-4. **Cohort-wide query, no MinIO down.** `tessera read s3://bucket/cohort/* …` (#225 prune-before-fetch).
+4. **Cohort-wide query, no S3 store down.** `tessera read s3://bucket/cohort/* …` (#225 prune-before-fetch).
    The cache tier is irrelevant to this path — it's a *direct* range-read against the canonical store.
    This is the right shape when one query touches many products and only fetches the blocks it needs;
    pulling whole `.tsra`s through the cache would defeat that.
@@ -280,7 +280,7 @@ Two access paths coexist:
 - The two real shapes the field has (single workstation; multi-node lab) need *different* infra; one
   cache abstraction would either be a daemon (too much) or a script (too little). Picking one tier per
   deployment, both composable, is the smallest answer.
-- `pulledWithin` is the one piece of registry tech MinIO lacks and a cache needs — it's the entire
+- `pulledWithin` is the one piece of registry tech S3 lacks and a cache needs — it's the entire
   reason this ADR mentions zot by name rather than "a registry of your choice." (Harbor, GHCR, ECR
   retention is creation-age too, with policy hooks.)
 - Keeping the cache out of the `tessera` CLI keeps the format independent of any deployment choice. A
@@ -313,11 +313,11 @@ Two access paths coexist:
   `~/.cache/tessera/repo`) and whether `tessera get` should auto-`init` an absent cache repo. Auto-init
   is friendlier; explicit-only is safer for shared hosts.
 - **Tier B authentication.** The example flake passes basic-auth creds to zot's `extensions.sync` via
-  `credentialsFile`; the *upstream* MinIO-backed registry's auth shape (Harbor robot accounts? a
+  `credentialsFile`; the *upstream* S3-backed registry's auth shape (Harbor robot accounts? a
   static htpasswd?) is site-specific and noted in the README, not in this ADR.
 - **Decoded cache (chunk-level).** Out of scope here. If a workload re-decodes the same Vortex chunk
   thousands of times, an in-memory LRU at the `Reader` layer might earn its keep — but that's a
   reader-layer optimisation orthogonal to the *bytes* cache this ADR is about.
-- **WORM interaction.** Tier B's zot is *not* WORM (caches must evict). The upstream MinIO is the
+- **WORM interaction.** Tier B's zot is *not* WORM (caches must evict). The upstream S3 store is the
   WORM tier (ADR-0033 raw=Compliance). The compute node only ever has a cache copy; the canonical
   retention story lives on the storage server. Worth a sentence in the README.
