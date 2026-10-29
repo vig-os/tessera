@@ -71,6 +71,12 @@ differently from its absence — only the null/absent sentinel is dropped.
 | `manifest_hash` ✱ | string | §4; present once sealed |
 
 **BlockRef** = `{ name: string, kind: "array"|"table"|"chunk_index"|"blob", digest✱: string, spec: object }`.
+`name` MUST follow the block-name grammar of [ADR-0063](../../docs/adr/0063-block-name-grammar.md): one or
+more `/`-separated segments of `[A-Za-z0-9._-]+`, no segment `.` or `..`, at most 255 bytes. A reader MUST
+refuse a name outside it. A writer MUST also keep the **leaf rule**: no name in one product is a parent
+prefix of another (`volume` and `volume/1` can't both exist), so the zip members, an exploded directory
+and an object-store prefix mirror the names one-to-one. A reader accepts a product sealed before the leaf
+rule in-zip, but MUST NOT explode it to a directory.
 `digest` MUST be present in a sealed product. `spec` is shape-specific and opaque to the spine (an array
 spec carries `shape`/`dtype`/`chunks`/`axes`/`codec`/…; a table spec carries `columns`/`rows`/…; a
 `chunk_index` sidecar spec carries `class`/`recipe`/`indexes`/`entries`/`root` — see §5d; a `blob`

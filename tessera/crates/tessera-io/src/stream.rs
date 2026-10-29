@@ -111,7 +111,7 @@ fn staged_table_ref(
     spec: &tessera_core::block::table::TableSpec,
 ) -> Result<BlockRef> {
     Ok(BlockRef {
-        name,
+        name: tessera_core::block::BlockName::new(name)?,
         kind: tessera_core::block::BlockKind::Table,
         digest: None,
         spec: serde_json::to_value(spec)?,

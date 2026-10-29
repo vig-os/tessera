@@ -1078,7 +1078,7 @@ mod tests {
         // not required), yet surfaced as a recommendation (the warn tier).
         let mut b = ProductBuilder::new("blob", "junk", "d", "2024-01-01T00:00:00Z");
         b.add_block_ref(crate::block::BlockRef {
-            name: "data".into(),
+            name: "data".parse().unwrap(),
             kind: crate::block::BlockKind::Blob,
             digest: Some("blake3:00".into()),
             spec: serde_json::json!({"filename": "x.l64", "size": 1}),

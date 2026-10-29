@@ -165,12 +165,17 @@ impl ProductBuilder {
     /// Every block MUST carry a digest — a missing digest is a hard error, never silently
     /// dropped (otherwise a block would be invisible to the content hash yet present in the
     /// manifest, so two different products could hash identically).
+    ///
+    /// The block names must obey the **leaf rule** (ADR-0063): no name may be a parent prefix of
+    /// another, or the seal is refused with [`crate::Error::BlockNameConflict`]. (Each name is
+    /// already valid by its type, [`crate::block::BlockName`].)
     pub fn seal(mut self) -> crate::Result<Manifest> {
+        crate::block::check_leaf_rule(self.refs.iter().map(|r| &r.name))?;
         let mut digests = Vec::with_capacity(self.refs.len());
         for r in &self.refs {
             match &r.digest {
                 Some(d) => digests.push(d.clone()),
-                None => return Err(crate::Error::MissingDigest(r.name.clone())),
+                None => return Err(crate::Error::MissingDigest(r.name.to_string())),
             }
         }
         self.manifest.blocks = self.refs;
@@ -214,7 +219,7 @@ mod tests {
 
     fn block(name: &str, digest: &str) -> BlockRef {
         BlockRef {
-            name: name.into(),
+            name: name.parse().unwrap(),
             kind: BlockKind::Array,
             digest: Some(digest.into()),
             spec: serde_json::json!({ "dtype": "int16", "shape": [2] }),

@@ -10,7 +10,7 @@
 //! ignores it. The block's `spec` records the index `root` (the sub-block Merkle root, ADR-0028 §1) and
 //! its entry count for self-description.
 
-use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::block::{BlockKind, BlockName, BlockRef};
 use tessera_core::chunk_index::ChunkIndex;
 use tessera_core::hash::digest;
 use tessera_core::Result;
@@ -28,7 +28,7 @@ pub fn cidx_name(data_name: &str) -> String {
 /// pack. Add the returned `BlockRef` to the product alongside the data block; the index's bytes roll
 /// into the content hash like any block.
 pub fn chunk_index_block(data_name: &str, index: &ChunkIndex) -> Result<(BlockRef, BlockPayload)> {
-    let name = cidx_name(data_name);
+    let name = BlockName::new(cidx_name(data_name))?;
     let payload = index.to_bytes()?;
     let dg = digest(&payload);
     let block_ref = BlockRef {

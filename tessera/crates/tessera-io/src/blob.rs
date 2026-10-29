@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use tessera_core::block::blob::BlobSpec;
-use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::block::{BlockKind, BlockName, BlockRef};
 use tessera_core::{Error, Result};
 
 use crate::BlockPayload;
@@ -22,6 +22,7 @@ pub fn blob_block(
     media_type: Option<&str>,
     bytes: Vec<u8>,
 ) -> Result<(BlockRef, BlockPayload)> {
+    let name = BlockName::new(name)?;
     let size =
         u64::try_from(bytes.len()).map_err(|_| Error::Invalid("blob: size exceeds u64".into()))?;
     let mut spec = BlobSpec::new(filename, size);
@@ -30,7 +31,7 @@ pub fn blob_block(
     }
     let digest = tessera_core::hash::digest(&bytes);
     let block_ref = BlockRef {
-        name: name.to_string(),
+        name: name.clone(),
         kind: BlockKind::Blob,
         digest: Some(digest),
         spec: serde_json::to_value(&spec)?,
@@ -56,6 +57,7 @@ pub fn blob_ref_streaming(
     media_type: Option<&str>,
     path: &std::path::Path,
 ) -> Result<BlockRef> {
+    let name = BlockName::new(name)?;
     let file = std::fs::File::open(path).map_err(Error::from)?;
     let size = file.metadata().map_err(Error::from)?.len();
     let digest =
@@ -65,7 +67,7 @@ pub fn blob_ref_streaming(
         spec = spec.with_media_type(mt);
     }
     Ok(BlockRef {
-        name: name.to_string(),
+        name,
         kind: BlockKind::Blob,
         digest: Some(digest),
         spec: serde_json::to_value(&spec)?,
@@ -112,6 +114,7 @@ pub fn blob_ref_streaming_parallel(
     media_type: Option<&str>,
     path: &Path,
 ) -> Result<BlockRef> {
+    let name = BlockName::new(name)?;
     let size = std::fs::metadata(path).map_err(Error::from)?.len();
     let digest = digest_file_parallel(path)?;
     let mut spec = BlobSpec::new(filename, size);
@@ -119,7 +122,7 @@ pub fn blob_ref_streaming_parallel(
         spec = spec.with_media_type(mt);
     }
     Ok(BlockRef {
-        name: name.to_string(),
+        name,
         kind: BlockKind::Blob,
         digest: Some(digest),
         spec: serde_json::to_value(&spec)?,

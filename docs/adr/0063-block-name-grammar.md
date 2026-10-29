@@ -1,0 +1,127 @@
+# ADR-0063 — Block names: a hierarchical `/`-segment grammar, and blocks are the leaves
+
+**Status:** Accepted (owner decision 2026-10-29,
+[#685 comment](https://github.com/vig-os/tessera/issues/685#issuecomment-6486012695)). Fixes the path
+traversal in [#685](https://github.com/vig-os/tessera/issues/685). Refines the `BlockRef.name` field of
+SPEC §5, which was `string` with no rule. Keeps ADR-0043's hierarchy (pyramid levels, sidecars and
+collection members are nodes of one tree); keeps ADR-0022's layouts (sealed zip, exploded directory, S3
+prefix) mirroring one another.
+
+## Context
+
+A block's name is more than a label. It is the key of the `.tsra` zip member `blocks/<name>`, the file
+`blocks/<name>` of an exploded directory (`unpack`/`pack_dir`, ADR-0022), a write session's fragment
+`blocks/<name>` (ADR-0026), and an object-store key prefix. Until now the format said only
+`name: string`, and nothing checked it:
+
+- `WriteSession::append_block` created its fragment at `dir.join("blocks").join(&name)`, and `recover`
+  followed a journal line's name the same way. With `Path::join`, `../x` climbs out of `blocks/`, and an
+  absolute name replaces the base entirely. A name taken from caller input (an ingest spec,
+  `commit --add-block`, the Python and stream APIs) could create or overwrite any file the process can
+  write (#685).
+- `unpack` wrote `outdir/blocks/<name>` and `pack_dir` read `dir/blocks/<name>` for names taken from the
+  manifest of an untrusted `.tsra`, and `unpack` did the same for its `aux/` members.
+- `tessera pyramid` already wrote hierarchical names: level 0 as `volume`, the downsampled levels as
+  `volume/1`, `volume/2`, …. Such a product reads in-zip, but `unpack` failed on it, because `volume`
+  can't be both a file and the directory that holds `volume/1`.
+
+The corpus and every fixture use plain names (`volume`, `events_0007`, `volume.cidx`, `file_0000`,
+`gen-01`, `DP06-ct`). The pyramid is the only `/` user.
+
+## Decision
+
+### 1. Grammar
+
+```text
+name    = segment *( "/" segment )            ; at most 255 bytes in total
+segment = 1*( ALPHA / DIGIT / "." / "_" / "-" ) ; ASCII only; not "." and not ".."
+```
+
+So a name has no leading or trailing `/`, no empty segment (`//`), no `.` or `..` segment, no `\`, `:`,
+NUL, space or non-ASCII character, and is at most 255 bytes long. The ABNF is normative; as a regex
+(matching the whole string):
+`^(?!.{256})(?:(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)*$`.
+
+### 2. Leaf rule
+
+Within one product, no block name may be a parent prefix of another: `volume` and `volume/1` can't both
+exist, but `volume/0` and `volume/1` can. Blocks are the leaves of the name tree. That keeps the zip
+members, the exploded directory and an S3 prefix one-to-one with the names, since a name is then either
+a file or a directory, never both. The rule is a property of the set of names, so it is checked where a
+set is finalised (§4), not on a single name.
+
+### 3. `tessera pyramid` names level 0 `<block>/0`
+
+It wrote `<block>`. Now every level, the full-resolution one included, is a leaf under `<block>/`.
+
+### 4. Where it is enforced
+
+- **One type.** `tessera_core::block::BlockName` holds a name that passes the grammar. `BlockRef.name`,
+  `BlockPayload.name` and the `pack_streaming` sources are `BlockName`, so an invalid block reference
+  can't be represented. Deserializing one (a manifest, a journal line) applies the grammar too. It
+  serializes as the plain string, so no manifest byte, `content_hash` or corpus golden moves.
+- **The filesystem boundary.** `BlockName::path_under(base)` is the only way a block name becomes a
+  path. It pushes plain (`Component::Normal`) components onto `base` and refuses anything else. The
+  grammar already rules anything else out on every platform `std` supports (a segment can't hold a
+  separator, a drive or verbatim prefix, `.` or `..`); the boundary checks again rather than trusting
+  the grammar alone. `aux/` member names are joined through the same grammar
+  (`block::name::join_checked`). `write_aux_members` refuses an aux name that fails it, and so does
+  `pack_dir`, before writing; rewriting an archive refuses a `blocks/` or `aux/` entry it would copy
+  through that fails it.
+- **Orphan fragments.** `WriteSession::recover` deletes every file under `blocks/` that no line of the
+  journal names, so a fragment left by an append that never reached its journal line can't block a
+  later append whose name needs that path as a directory. A fragment some line names is kept even when
+  recovery stops before that line.
+- **Writers enforce the leaf rule.** `ProductBuilder::seal` refuses a conflict, and so does a write
+  session (on each append, against the blocks it has committed, and in `recover` against earlier
+  journal lines). `unpack` and `pack_dir` refuse a conflict too, before they write anything.
+- **Readers accept any grammar-valid name.** `Reader::open`, `verify`, `read_block` and the other
+  in-zip reads don't apply the leaf rule. A pyramid sealed before this ADR (`volume` + `volume/1`)
+  still opens, verifies and reads. It can't be exploded to a directory, and `unpack` says so with the
+  typed conflict. `pack` and `pack_streaming` package a manifest that is already sealed, so they accept
+  any sealed manifest, including such a pyramid.
+- **Typed errors.** `Error::InvalidBlockName { name, reason: NameError }` names the rule broken (empty,
+  too long, empty segment, dot segment, disallowed character). `Error::BlockNameConflict
+  { parent, child }` reports a leaf-rule conflict. `recover` returns these for a complete journal line;
+  a torn last line (not complete JSON) is still dropped as before. Reading a manifest with an invalid
+  name fails to parse (`Error::Serde`, message `invalid block name '<name>': <reason>`).
+
+## Compatibility
+
+Products whose names all pass the grammar and the leaf rule are unaffected, byte for byte; that is the
+whole corpus and every fixture (pinned by `tessera-io/tests/block_names.rs::every_corpus_and_fixture_name_validates`).
+An older pyramid (`volume` + `volume/1`) still reads in-zip but no longer explodes; re-run
+`tessera pyramid` to get the `volume/0` layout. A product with a name outside the grammar (a space,
+non-ASCII, `../`) is refused everywhere. No such product is known; one would come from a caller that
+named a block freely through `commit --add-block`, the Python builder or an ingest spec.
+
+`aux/` member names follow the same grammar. An archive carrying an aux member outside it (an older
+`pack_dir` embedded any file name, `aux/my notes.txt`) still opens and reads, but `unpack` refuses it,
+and rewriting it (`tessera sign`) refuses unless that member is the one being replaced or removed.
+
+## Alternatives rejected
+
+- **A single segment (`[A-Za-z0-9._-]+`, no `/`).** It gives up the hierarchy ADR-0043 builds on and
+  would rename every pyramid level.
+- **A flat on-disk encoding** (escape `/` in a file name, keep names free-form). The exploded and S3
+  layouts would stop mirroring the names, and every tool that lists them would need the encoding.
+- **Checking each `join` call site separately.** Every new call site would have to remember the check,
+  which is how #685 happened. The type and the single `path_under` make that unnecessary.
+
+## Security rationale (#685)
+
+Joining an untrusted name onto a directory is the classic path-traversal (zip-slip) bug, on both sides:
+a writer handed a name by its caller, and a reader handed a name by a file. Validating once into a type
+removes the class rather than the instance. Every block-name path in the code goes through
+`path_under`, and every entry name this crate writes into a `.tsra`, including the `blocks/` and
+`aux/` entries it copies through when it rewrites one (`write_aux_members`, used by `tessera sign`),
+obeys the grammar, so it unzips under its prefix.
+
+## Limitations
+
+- **Windows reserved device names** (`CON`, `NUL`, `AUX`, `COM1`, …) are grammar-valid. On Windows,
+  writing one as a file name opens a device. Tessera ships no Windows build today (`dist-workspace.toml`
+  defers Windows-msvc), and [#690](https://github.com/vig-os/tessera/issues/690) tracks refusing them
+  in `path_under` before a Windows build ships.
+- **Case-insensitive filesystems** (macOS default, Windows) treat `Volume` and `volume` as one file, so
+  exploding a product holding both would collide. The leaf rule doesn't cover case; #690 tracks it too.

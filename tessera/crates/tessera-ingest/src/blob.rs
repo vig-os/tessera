@@ -302,7 +302,7 @@ mod tests {
         tessera_io::pack(&in_ram, &payloads, &ram_tsra).unwrap();
         tessera_io::pack_streaming(
             &streamed,
-            &[("data".to_string(), src.as_path())],
+            &[("data".parse().unwrap(), src.as_path())],
             &stream_tsra,
         )
         .unwrap();

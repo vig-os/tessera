@@ -768,7 +768,7 @@ mod tests {
             m.blocks
                 .iter()
                 .filter(|b| b.name.ends_with(".cidx"))
-                .map(|b| (b.name.clone(), b.digest.clone()))
+                .map(|b| (b.name.to_string(), b.digest.clone()))
                 .collect()
         };
         assert_eq!(cidx(&want).len(), 3, "precondition: one sidecar per block");

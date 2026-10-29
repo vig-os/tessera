@@ -107,6 +107,26 @@ pub enum Error {
     #[error("invalid product: {0}")]
     Invalid(String),
 
+    /// A block name that fails the block-name grammar (ADR-0063, [`crate::block::name`]): empty,
+    /// `.` or `..`, an absolute path, an empty segment, a `\`, `:` or NUL, a character outside
+    /// `[A-Za-z0-9._-]`, or over 255 bytes. Refused wherever a name enters — a builder, a manifest,
+    /// a write-session journal — because a name becomes a path under a base directory (#685).
+    #[error("invalid block name '{name}': {reason}")]
+    InvalidBlockName {
+        name: String,
+        reason: crate::block::name::NameError,
+    },
+
+    /// Two block names of one product break the **leaf rule** (ADR-0063): `parent` is a parent
+    /// prefix of `child` (`volume` and `volume/1`), so the product cannot be laid out as files,
+    /// where a name is either a file or a directory. Refused at seal, by a write session, and when
+    /// exploding a product to a directory; reading such a product in-zip still works.
+    #[error(
+        "block names '{parent}' and '{child}' conflict: a block name cannot also be the parent of \
+         another (the leaf rule, ADR-0063)"
+    )]
+    BlockNameConflict { parent: String, child: String },
+
     /// An ingest backend whose **name is known but whose handler is not compiled into this build**
     /// (ADR-0057 §6/§7).
     ///

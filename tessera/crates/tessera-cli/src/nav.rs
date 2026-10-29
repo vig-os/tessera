@@ -729,7 +729,7 @@ pub(crate) fn locate_config(m: &tessera_core::Manifest, digest: &str) -> Option<
     let blob: Option<tessera_core::block::blob::BlobSpec> =
         serde_json::from_value(b.spec.clone()).ok();
     Some(ConfigBlock {
-        name: b.name.clone(),
+        name: b.name.to_string(),
         filename: blob.as_ref().map(|s| s.filename.clone()),
         media_type: blob.as_ref().and_then(|s| s.media_type.clone()),
         size: blob.as_ref().map(|s| s.size),
@@ -1302,10 +1302,14 @@ fn open_array(
 }
 
 /// `tessera pyramid FILE BLOCK --out OUT` — build a **multiscale pyramid** of the array `BLOCK`: the
-/// full-resolution level plus successive 2× max-downsampled levels (`BLOCK/1`, `BLOCK/2`, …, each with
-/// its `WorldFrame::at_level` affine), sealed as a new `recon` product `derived_from` the source. The
-/// coarse levels answer overview/zoom without decoding the full volume (#260 phase 2). Returns the
-/// number of levels written (including L0).
+/// full-resolution level `BLOCK/0` plus successive 2× max-downsampled levels (`BLOCK/1`, `BLOCK/2`, …,
+/// each with its `WorldFrame::at_level` affine), sealed as a new `recon` product `derived_from` the
+/// source. The coarse levels answer overview/zoom without decoding the full volume (#260 phase 2).
+/// Returns the number of levels written (including L0).
+///
+/// Every level, the full-resolution one included, is a leaf under `BLOCK/` (ADR-0063's leaf rule):
+/// before ADR-0063 level 0 was the bare `BLOCK`, the parent of the other levels, so such a product
+/// reads in-zip but cannot be unpacked to a directory.
 pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) -> Result<usize> {
     let (spec, blob) = open_array(file, block)?;
     if spec.shape.len() != 3 {
@@ -1323,7 +1327,11 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
     let mut data = tessera_io::array::decode(&spec, &blob)?;
     let mut blocks: Vec<(tessera_core::block::BlockRef, tessera_io::BlockPayload)> = Vec::new();
     // Level 0 — the full-resolution volume.
-    blocks.push(tessera_io::array::array_block(block, &cur_spec, &data)?);
+    blocks.push(tessera_io::array::array_block(
+        &format!("{block}/0"),
+        &cur_spec,
+        &data,
+    )?);
 
     let cap = levels.unwrap_or(8);
     let mut level = 0u32;
@@ -2951,7 +2959,8 @@ mod tests {
             "expected the full-res level + ≥1 downsample, got {n}"
         );
 
-        // L0 is the original 8³; L1 is the 4³ 2×-downsample.
+        // L0 is the original 8³; L1 is the 4³ 2×-downsample. Every level is a leaf under
+        // `volume/` (ADR-0063's leaf rule), level 0 included.
         let r = Reader::open(&out).unwrap();
         let names: Vec<&str> = r
             .manifest()
@@ -2959,10 +2968,10 @@ mod tests {
             .iter()
             .map(|b| b.name.as_str())
             .collect();
-        assert!(
-            names.contains(&"volume") && names.contains(&"volume/1"),
-            "{names:?}"
-        );
+        assert_eq!(&names[..2], ["volume/0", "volume/1"], "{names:?}");
+        assert!(names.iter().all(|n| n.starts_with("volume/")), "{names:?}");
+        let (s0, _) = open_array(&out, "volume/0").unwrap();
+        assert_eq!(s0.shape, vec![8, 8, 8]);
         // derived_from the source is recorded.
         assert!(r
             .manifest()
@@ -2973,6 +2982,21 @@ mod tests {
         let (s1, blob1) = open_array(&out, "volume/1").unwrap();
         assert_eq!(s1.shape, vec![4, 4, 4]);
         let _ = tessera_io::array::decode(&s1, &blob1).unwrap();
+        tessera_io::verify_payloads_parallel(&out, "pyr", 1).unwrap();
+
+        // #685 / ADR-0063: the hierarchical names explode to a directory tree under `blocks/` and
+        // pack back to the very same bytes.
+        let exploded = dir.path().join("exploded");
+        tessera_io::unpack(&out, &exploded).unwrap();
+        assert!(exploded.join("blocks/volume/0").is_file());
+        assert!(exploded.join("blocks/volume/1").is_file());
+        let repacked = dir.path().join("repacked.tsra");
+        tessera_io::pack_dir(&exploded, &repacked).unwrap();
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            std::fs::read(&repacked).unwrap(),
+            "a pyramid unpacks and re-packs byte-identically"
+        );
     }
 
     #[test]
