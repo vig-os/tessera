@@ -1,7 +1,8 @@
 # ADR-0026 — Streaming, chunked table writes for >RAM ingest
 
 Status: **Proposed** (2026-06-26) · Extends ADR-0024 (table payload), ADR-0025 (ingest), relates to
-S17 (`WriteSession`). Blocks the >RAM half of `#208` (GE listmode `events_2p` ≈ 10⁸ rows ≈ 5–7 GB).
+S17 (`WriteSession`). Blocks the >RAM half of `#208` (GE listmode `events_2p` ≈ 10⁸ rows ≈ 5–7 GB). Amended by
+ADR-0064 (2026-10-30): tables above `BLOCK_ROWS` are numbered leaves of one logical table.
 
 ## Context
 `tessera_io::table::encode` builds **one** Vortex `StructArray` from full in-memory column `Vec`s and
@@ -189,7 +190,7 @@ change, no new ADR.
    directory. `table_job_streaming(name, spec, groups)` (a lazy row-group iterator) and
    `table_job_from_fragments` (staged fragments; used by `TableMultiBlockSink`) are staged jobs, and so is
    `TableStreamWriter::into_job`. One logical block stays **one canonical block**: no suffixed physical
-   blocks.
+   blocks. *(Retired for tables above `BLOCK_ROWS` by ADR-0064, 2026-10-30: see the amendment at the end.)*
 3. **Commit by rename, verified.** A `StagedBlock` hashes its bytes as the encoder writes them, so the
    block's digest is born with the bytes (ADR-0002 first-moment integrity). `WriteSession::append_staged`
    takes that digest (a set `block_ref.digest` must match it, a `None` one is filled in), fsyncs the file,
@@ -273,3 +274,35 @@ bound this amendment gives is the tessera side (the window and the staged block)
 `≈ 0.4 × S` on top until #681 lands a deadlock-free bound inside Vortex. Projected for the consumer's full
 2.4 G-row (19.2 GB) acquisition: ≈ 7.7 GB peak RssAnon, under its 8 GiB budget but not independent of the
 input size, so #677 stays open on #681.
+
+## Amended by ADR-0064 (2026-10-30) — streamed tables are partitioned into numbered leaves
+
+[ADR-0064](0064-logical-tables-over-numbered-leaves.md) (Proposed) records the owner's decision on #677
+(2026-10-29, option P-logical of the #681 design note). It changes three things in this ADR:
+
+1. **"One logical block stays one canonical block" is retired for tables above `BLOCK_ROWS`.** Rule 2 of the
+   #677 amendment above ("no suffixed physical blocks") no longer holds for them. A table of more than
+   `BLOCK_ROWS` rows, streamed or not, is **one logical table over bounded physical blocks**: the leaves
+   `<table>/0000`, `<table>/0001`, … (ADR-0064 §1), each carrying a sealed partition marker (§2), which every
+   logical reader presents as one table (§3, §7). A table of at most `BLOCK_ROWS` rows stays one canonical block
+   with the bare name, byte-identical to before.
+2. **`table_job_streaming`'s "any size" contract (alpha.4) is withdrawn.** Above `BLOCK_ROWS` it fails with a
+   typed error naming `StreamWriter::push_table`, which partitions, stages each block's input on disk and
+   dispatches each block as it fills (ADR-0064 §5). At or below `BLOCK_ROWS` it is unchanged.
+3. **The *Known limit* paragraph of the #677 amendment is superseded by ADR-0064 §8's bound** for `push_table`
+   with `W` encode workers and `n` blocks:
+
+   ```text
+   peak heap     ≤  min(W, n) · p_block + s,   s = 2 · ROWS_PER_GROUP · r_mem + 4 MiB
+   staged input  ≤  W + 1 blocks, the partial one included
+   ```
+
+   `p_block` is one block's measured encode peak (46.1 MB for the consumer shape at 8 CPUs, #681 note §4.7);
+   it still holds the Vortex writer's width terms `D(width)` and `K(width)`, but no longer a term that grows with
+   the table's rows. Size independence is asserted with a 5% plateau tolerance from `16 W` blocks on (§8). The
+   staged input is page cache, which counts toward the cgroup's `memory.current` and is RAM on tmpfs, so the
+   session directory SHOULD be on a disk-backed filesystem; the ksb RSS proof samples `RssAnon`, `memory.current`
+   and `memory.stat` and refuses a tmpfs staging directory (ADR-0064 §8.1). Its results will be recorded here.
+
+The rest of this ADR (the encoder, the window, the staged commit, the RAII and journal rules, the disk paragraph)
+is unchanged; each leaf is one staged job under the window.

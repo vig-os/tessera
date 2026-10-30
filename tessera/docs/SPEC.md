@@ -162,8 +162,17 @@ optional `row_index`.
   - **One block total** (rows ≤ `BLOCK_ROWS`) — the manifest block is named with the bare prefix
     (e.g. `events`). This is byte-identical to the pre-partition layout, so existing single-block
     products are unchanged.
-  - **Two or more blocks total** — blocks are named with a zero-padded 4-digit suffix:
-    `<prefix>_0000`, `<prefix>_0001`, …, `<prefix>_NNNN` (in manifest order).
+  - **Two or more blocks total** — the blocks are the **leaves** `<prefix>/<leaf>` of the node `<prefix>`
+    (ADR-0063 names), where the leaf of the block with index `i` (from `0`) is the decimal `i` left-padded with
+    `0` to **at least** four digits and no more than needed: `<prefix>/0000`, `<prefix>/0001`, …,
+    `<prefix>/9999`, `<prefix>/10000`, …. The width depends on the index only, never on the block count, so
+    there is no ceiling and a writer can name a block before it knows how many follow. Every leaf's
+    `TableSpec` carries a **partition marker** `"partition": {"index": i, "last": b}` (both fields always
+    present; `last` is `true` on exactly the leaf with the highest index). A single block carries no marker.
+    Writers MUST emit the leaves consecutively, in index order. *(Amended by
+    [ADR-0064](../../docs/adr/0064-logical-tables-over-numbered-leaves.md), 2026-10-30: the leaves replace the
+    flat `<prefix>_0000` … `<prefix>_NNNN` names, which writers no longer produce and readers still accept,
+    below. ADR-0064 is Proposed; the writers switch in its PR D, until which they still write the flat names.)*
   Both whole-file and streaming writers MUST use the same partition function (`ceil(rows / BLOCK_ROWS)`,
   with `max(1)` so an empty table is still one block) and the same naming function — so streamed and
   batch ingest of the same rows produce byte-identical per-block bytes and therefore the same
@@ -172,6 +181,10 @@ optional `row_index`.
   row-groups (whole-multiple invariant). **Changing `BLOCK_ROWS` is a format-breaking change**
   (different partition → different per-block bytes → different `content_hash` for every product with
   more than one block).
+  The partition binds the engine's table writers (ingest, streaming writers, multi-block sinks). A low-level
+  constructor that writes one caller-named block from data already in memory (`table::table_block`, the
+  Python `Builder.add_table`) writes that one block at any row count, and readers MUST accept a single table
+  block of any row count (ADR-0064 §5.6).
 
 - **Dtypes.** Columns use the fd5 numpy-style codes: `i1/i2/i4/i8` (signed), `u1/u2/u4/u8` (unsigned),
   `f4/f8` (float). Each column is a Vortex primitive array; the columns form a `struct` in declared
@@ -188,8 +201,27 @@ optional `row_index`.
 
 A reader MAY project a subset of columns or random-`take` rows; the format supports O(1) random access.
 
-- **Logical reads (multi-block).** The ordered sequence of `prefix` / `prefix_NNNN` blocks is one
-  **logical table**: the logical column is the ordered concatenation of the per-block columns; a
+- **Logical reads (multi-block).** A table name `T` resolves, from the manifest alone, to one **logical
+  table** *(amended by [ADR-0064](../../docs/adr/0064-logical-tables-over-numbered-leaves.md) §3,
+  2026-10-30)*:
+  - **Partitioned.** If some block exactly one segment below `T` (a name `T/<segment>`, no further `/`)
+    carries a partition marker, `T` is a partitioned table, and it MUST be valid: every such marked block is a
+    `table` block whose segment is the canonical padded form of its own `index`; every other block under `T/`,
+    at any depth, is a `chunk_index` sidecar `T/<leaf>.cidx` of an existing leaf; the indices are unique and form
+    `0..=k` with `k ≥ 1`; exactly the leaf `k` has `last: true`; and every leaf has the same column names and
+    dtypes. Its blocks, in **index order**, are the logical table.
+    A reader MUST refuse an invalid partitioned table with an error, never skip or merge around a block.
+    Per-leaf row counts are taken from each `TableSpec.rows` and are not otherwise checked.
+  - **Legacy flat** (products written before ADR-0064). Otherwise, the blocks named `T` or `T_` followed by
+    exactly four ASCII digits, in **manifest order**, are the logical table; blocks under `T/` without a marker
+    take no part. Readers MUST keep accepting this form for format v0. Writers MUST NOT produce it once ADR-0064's
+    writer switch (its PR D) has landed; until then the writers still produce it.
+  - **Ambiguous.** If `T` has a marked block one segment below it and the legacy rule also matches some block, a
+    reader MUST refuse `T`.
+  - A marker on a block with no parent node is invalid; a node with no marked child one segment below it (an
+    array pyramid, `volume/0` …) is not a table.
+
+  The logical column is the ordered concatenation of the per-block columns; a
   global row maps to a `(block, local_row)` pair via the cumulative per-block row counts (drawn
   from each block's `TableSpec.rows` in the manifest, so the mapping needs no block read). A
   reader MAY answer ranged queries with **block-level pruning** — the per-block `[min, max]`

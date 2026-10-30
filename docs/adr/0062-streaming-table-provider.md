@@ -599,10 +599,12 @@ alignment**, in one of two forms:
        /// of this manifest's `sources` edge with that role; the
        /// edge's `content_hash` pins that product's seal.
        source: Option<String>,
-       /// The source table's block prefix (`events` = `events_NNNN`).
+       /// The source's logical table name, resolved as in ADR-0064 §3
+       /// (`events` = the leaves `events/NNNN`, or legacy `events_NNNN`).
        block: String,
-       /// blake3 over the source group's block digests, in manifest
-       /// order: which bytes the rows were derived from.
+       /// blake3 over the resolved blocks' digests, in logical order
+       /// (index order for numbered leaves, manifest order for a legacy
+       /// flat group): which bytes the rows were derived from.
        source_digest: String,
    }
    // Fields private, no public constructor (see "who may write it").
@@ -610,6 +612,11 @@ alignment**, in one of two forms:
    //   #[serde(default, skip_serializing_if = "Option::is_none")]
    //   pub aligned_to: Option<RowAlignment>,
    ```
+
+   *(Amended by [ADR-0064](0064-logical-tables-over-numbered-leaves.md) §9.3, 2026-10-30: `block` names a
+   logical table resolved by ADR-0064's rule, which reads numbered leaves `events/NNNN` and the legacy flat
+   `events_NNNN`; it was "the source table's block prefix (`events` = `events_NNNN`)", and `source_digest` was
+   "in manifest order".)*
 
    It is skipped when `None`, so every existing manifest serialises byte-identically: corpus-neutral, no
    `TESSERA_VERSION` bump.
