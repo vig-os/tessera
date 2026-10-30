@@ -120,7 +120,7 @@ nix-CI-mockable. **Decisions:** signing = scheme-agnostic envelope over `manifes
 ssh-ed25519** backends + **ORCID** as `signer_identity` + **age/sops** key-at-rest (in-test keypairs;
 only a *production trust identity* is external). WASM = **`tessera-core`→wasm32** (zero C deps — spine/
 verify/proofs/referencing) + **Arrow-JS as the RS↔TS boundary** for columnar data. WORM/OCI = build the
-**mechanism + nix-CI service mocks** (MinIO object-lock · zot registry); only *production* bucket/registry
+**mechanism + nix-CI service mocks** (S3 object-lock · zot registry); only *production* bucket/registry
 external. ADR-0026 = **MC-synthetic listmode + shrink the ring below the file** (no PHI needed for
 bounded-memory + determinism); only *cross-arch x86==ARM CI* external. Plus: **structured `tracing`
 write-path observability** (guardrails logging/trace style — SSoT on `append_block`, then encoders).
@@ -132,7 +132,7 @@ Program tracked as tasks #26–30; first landing `52133c7` (write-path tracing).
 The hybrid program shipped. **7 FEATURE-MATRIX rows flipped ✓ this run** (signing · pyo3+WASM bindings ·
 WORM · OCI · metadata-first durable header · RO-Crate/DataCite · Ingest NIfTI+raw), each via
 verify-before-build + audit-before-flip (the nix-service-mock pattern — a real `distribution` registry on
-loopback — was established for OCI and is reusable for MinIO). **Precise residual, all five criteria:**
+loopback — was established for OCI and is reusable for S3). **Precise residual, all five criteria:**
 - **(1) ADRs:** of 0020–0032, **only ADR-0026 is non-terminal** (all others Accepted; 0027 Superseded;
   0021 doesn't exist). 0026's Accept gate is the determinism-critical external set: **cross-arch x86==ARM
   determinism re-validation + real >RAM listmode + golden regen**. Its §3 streaming-reader *mechanism* is

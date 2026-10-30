@@ -33,7 +33,7 @@ cargo build --release -p tessera-cli
 ```
 
 The hermetic gate (`nix flake check`, run from the repo root) is the source of truth: workspace
-clippy `--all-features -D warnings`, nextest, doctests, fmt, the wasm build, MinIO range-read, OCI
+clippy `--all-features -D warnings`, nextest, doctests, fmt, the wasm build, S3 range-read, OCI
 round-trip, and the guardrails gates. Conformance fixtures live in `corpus/`.
 
 ## Docs

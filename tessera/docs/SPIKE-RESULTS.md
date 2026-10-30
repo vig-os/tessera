@@ -50,7 +50,7 @@ Compute axis works via pyarrow.dataset Expression in the scanner.
   (verified chunk addressing + pruning stats). Design in RFC §7; prototype pending.
 - **S5 zarrs array backend** — perf pre-validated by the earlier Zarr-vs-HDF5 bench (sharded Zarr
   competitive/faster, codec-dominated); remaining work is the Rust `write_zarr` impl.
-- **S6 object-store range-read** — needs MinIO/S3 infra; pending.
+- **S6 object-store range-read** — needs S3 infra; pending.
 
 ---
 
@@ -91,7 +91,7 @@ projection 3× + filter pushdown + zero-copy Arrow→DuckDB. **Tables keep Vorte
 ## Layout
 - Canonical: **single sealed `.tsra`** = STORED zip64 (central-dir index → cloud range-reads
   into one file; inseparable). Opt-in **exploded S3 prefix** (≈ OCI image-layout) for parallel
-  write / CoW versioning. **OCI artifact** (zot/registry:2 on MinIO, or bare OCI-layout objects)
+  write / CoW versioning. **OCI artifact** (zot/registry:2 on S3, or bare OCI-layout objects)
   for registry distribution. **RO-Crate** derived for discovery. One Merkle root across all forms.
 
 ---

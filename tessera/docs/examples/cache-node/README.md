@@ -2,7 +2,7 @@
 
 A standalone, deployable example of the **registry-grade** cache tier from
 [ADR-0039](../../../../docs/adr/0039-compute-node-caching.md): a single compute node fronts a slow upstream
-MinIO-backed OCI registry with a local [`zot`](https://zotregistry.dev) pull-through cache on NVMe. First
+S3-backed OCI registry with a local [`zot`](https://zotregistry.dev) pull-through cache on NVMe. First
 `tessera pull` hits the upstream once; subsequent pulls (and every peer node's pulls) are LAN-speed.
 
 ## What's in this directory
@@ -37,7 +37,7 @@ artifact (the whole `.tsra` + the signature sidecar layer) from the upstream reg
 NVMe (`storage.rootDirectory`). Every subsequent pull, from *any* compute node pointed at this cache, is
 LAN-speed. zot's `extensions.sync.onDemand: true` is what makes this transparent; the
 `storage.retention.policies[].keepTags[].pulledWithin` window is what evicts cold artifacts on
-access-recency (see ADR-0039 §2 for why this beats MinIO ILM).
+access-recency (see ADR-0039 §2 for why this beats S3 lifecycle rules).
 
 Right shape for: repeated reads of the same product (an analysis re-running over a fixed dataset all
 afternoon), shared datasets across N compute nodes, anything where "I already pulled this once today" is
@@ -106,11 +106,11 @@ The unit hardens zot under `DynamicUser` + `ProtectSystem=strict`, with `ReadWri
 
 Lifted from ADR-0039 §6 for at-a-glance reference:
 
-1. **Today — no MinIO, one workstation.** Tier *A* (a Tessera versioning repo as the cache).
+1. **Today — no S3 store, one workstation.** Tier *A* (a Tessera versioning repo as the cache).
    `tessera init ~/.cache/tessera/repo` + `tessera import` the files you have. The repo IS the cache;
    an `atime`-LRU + `du`-ceiling sweep (cron / systemd timer) caps it.
-2. **MinIO comes online.** Add `tessera push` on the producer side, pointing at a registry that fronts
-   MinIO. Consumer behavior unchanged — they still open local paths from their repo.
+2. **The S3 store comes online.** Add `tessera push` on the producer side, pointing at a registry that fronts
+   it. Consumer behavior unchanged — they still open local paths from their repo.
 3. **Second compute node joins.** Stand up *this example* on a node with shared NVMe. Both compute
    nodes `tessera pull localhost:5000/lab/x:v1`; first pull on each populates the local zot,
    thereafter LAN-speed.
@@ -120,7 +120,7 @@ Lifted from ADR-0039 §6 for at-a-glance reference:
 
 ## WORM interaction
 
-This is a **cache**, not a WORM store. The upstream MinIO is the WORM tier (ADR-0033:
+This is a **cache**, not a WORM store. The upstream S3 store is the WORM tier (ADR-0033:
 raw=Compliance-WORM / derived=Governance-WORM). The compute node only ever has cache copies, which are
 free to evict on access-recency; the canonical retention story lives on the storage server.
 
@@ -133,15 +133,15 @@ import subprocess
 import tessera
 
 # ----------------------------------------------------------------------
-# Path A — direct S3 range-read against the canonical MinIO store.
+# Path A — direct S3 range-read against the canonical S3 store.
 # Use for cohort-scale / one-shot reads; only the blocks the query
 # overlaps are fetched (prune-before-fetch). No cache is in the path.
 # ----------------------------------------------------------------------
 # Configure once; the Tessera cloud reader picks these up from the env.
 os.environ.setdefault("AWS_REGION", "us-east-1")
-os.environ.setdefault("AWS_ACCESS_KEY_ID", "minio-key")
-os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "minio-secret")
-os.environ.setdefault("TESSERA_S3_ENDPOINT", "http://minio.lab:9000")
+os.environ.setdefault("AWS_ACCESS_KEY_ID", "s3-key")
+os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "s3-secret")
+os.environ.setdefault("TESSERA_S3_ENDPOINT", "http://s3.lab:7070")
 
 # (Today: the Python `tessera.open()` takes a local path. The cloud-URL
 # entry point lives in the CLI / Rust API; the recommended ergonomic for

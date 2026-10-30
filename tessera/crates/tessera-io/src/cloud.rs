@@ -183,7 +183,7 @@ impl Seek for ObjectStoreReader {
 /// Supported schemes:
 /// - `s3://<bucket>/<key>`  → [`AmazonS3Builder::from_env`] (`AWS_ACCESS_KEY_ID` /
 ///   `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` / `AWS_SESSION_TOKEN`). When
-///   `TESSERA_S3_ENDPOINT` is set the builder is pointed at it (for local MinIO / dev
+///   `TESSERA_S3_ENDPOINT` is set the builder is pointed at it (for a local S3 server / dev
 ///   stand-ins); plain-`http://` endpoints additionally enable `with_allow_http(true)`.
 /// - `http://<host>/<key>`  → [`HttpBuilder`] with `allow_http=true`.
 /// - `https://<host>/<key>` → [`HttpBuilder`] (TLS).
@@ -295,7 +295,7 @@ mod tests {
         }
     }
 
-    /// Tail-prefetch end-to-end correctness, no MinIO required: serve a real `.tsra` from
+    /// Tail-prefetch end-to-end correctness, no S3 server required: serve a real `.tsra` from
     /// `object_store::memory::InMemory` and verify the GET count drops as advertised.
     ///
     /// Two regimes:
@@ -429,11 +429,11 @@ mod tests {
         (std::fs::read(&path).unwrap(), names)
     }
 
-    /// Build a MinIO-backed S3 store from the env vars the flake check sets — `None` (with a
+    /// Build an S3 store from the env vars the flake check sets — `None` (with a
     /// printed skip notice) when `TESSERA_S3_ENDPOINT` is unset, so local
-    /// `cargo test --features cloud` without a running MinIO doesn't fail. The
-    /// `minio-range-read` flake check IS the authoritative runner.
-    fn minio_store_or_skip(test: &str) -> Option<(Arc<dyn ObjectStore>, Runtime)> {
+    /// `cargo test --features cloud` without a running S3 server doesn't fail. The
+    /// `s3-range-read` flake check (versitygw on loopback) IS the authoritative runner.
+    fn s3_store_or_skip(test: &str) -> Option<(Arc<dyn ObjectStore>, Runtime)> {
         let endpoint = match std::env::var("TESSERA_S3_ENDPOINT") {
             Ok(v) => v,
             Err(_) => {
@@ -460,10 +460,10 @@ mod tests {
         Some((store, rt))
     }
 
-    /// Range-read an 8-block .tsra straight from MinIO — mirrors `range.rs:101-129` over the wire.
+    /// Range-read an 8-block .tsra straight from S3 — mirrors `range.rs:101-129` over the wire.
     #[test]
     fn s3_range_read_does_not_fetch_whole_archive() {
-        let (store, upload_rt) = match minio_store_or_skip("s3_range_read") {
+        let (store, upload_rt) = match s3_store_or_skip("s3_range_read") {
             Some(s) => s,
             None => return,
         };
@@ -579,7 +579,7 @@ mod tests {
         std::fs::read(&path).unwrap()
     }
 
-    /// **Cohort prune-before-fetch capstone (#225).** Two `.tsra` products in the same MinIO
+    /// **Cohort prune-before-fetch capstone (#225).** Two `.tsra` products in the same S3
     /// prefix, each with an `events` block whose `ms` range is disjoint from the other; a query
     /// window matches product A and misses product B. Open both via [`open_url`], drive the
     /// pruner over each — and assert (a) A's events block IS fetched (the prune kept it), and
@@ -587,7 +587,7 @@ mod tests {
     /// capstone: prune-before-fetch across a cohort over the wire, not just within one product.
     #[test]
     fn cohort_prune_before_fetch_skips_non_matching_product() {
-        let (store, upload_rt) = match minio_store_or_skip("cohort_prune") {
+        let (store, upload_rt) = match s3_store_or_skip("cohort_prune") {
             Some(s) => s,
             None => return,
         };
@@ -601,7 +601,7 @@ mod tests {
             let mut local = Reader::from_reader(Cursor::new(b_bytes.clone())).unwrap();
             local.read_block("events").unwrap().len()
         };
-        // Seed both into the same MinIO bucket under distinct keys.
+        // Seed both into the same S3 bucket under distinct keys.
         let a_key = ObjPath::from("cohort/a.tsra");
         let b_key = ObjPath::from("cohort/b.tsra");
         upload_rt

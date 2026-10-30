@@ -231,7 +231,7 @@ modality = {{ _vocabulary = "DICOM", _code = "CT" }}
 
     // ── Cohort-pruneable smoke: in-process filter on study= produces both members ──
     // (The wire-level `cohort_prune_before_fetch_skips_non_matching_product` capstone in
-    // tessera-io/src/cloud.rs proves the SAME metadata drives byte-saving over MinIO.
+    // tessera-io/src/cloud.rs proves the SAME metadata drives byte-saving over S3.
     // Here we just prove the metadata exists at the right place to be filtered.)
     let matching: Vec<_> = by_product
         .values()

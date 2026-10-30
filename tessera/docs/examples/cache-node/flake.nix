@@ -48,11 +48,11 @@
         let
           # zot allows multiple sync registries; we expose the simple "one upstream" shape
           # because that's what a single compute node points at. Operators with two
-          # upstreams (a public mirror + a private MinIO) edit the rendered file.
+          # upstreams (a public mirror + a private S3-backed one) edit the rendered file.
           syncRegistry = {
             urls = [ cfg.upstream.url ];
             onDemand = true;
-            # `tlsVerify = false` is for plain-http dev MinIO registries; production
+            # `tlsVerify = false` is for plain-http dev registries; production
             # leaves it true (the default).
             tlsVerify = cfg.upstream.tlsVerify;
           } // (lib.optionalAttrs (cfg.upstream.credentialsFile != null) {
@@ -72,7 +72,7 @@
             # `gc` enables zot's GC of orphaned blobs (separate from `retention`).
             gc = true;
             retention = {
-              # The whole point of Tier B vs MinIO ILM: `pulledWithin` is
+              # The whole point of Tier B vs S3 lifecycle rules: `pulledWithin` is
               # access-recency, not creation-age. A tag last *pulled* within the
               # window is kept; otherwise the sweep can evict it. See ADR-0039 §2.
               policies = [
@@ -140,7 +140,7 @@
                 type = lib.types.str;
                 example = "https://registry.example.com";
                 description = ''
-                  URL of the upstream OCI registry that fronts the canonical MinIO
+                  URL of the upstream OCI registry that fronts the canonical S3
                   store. The cache fetches artifacts from this registry on demand
                   (first pull) and serves subsequent pulls from `cacheDir`.
                 '';
@@ -148,7 +148,7 @@
               tlsVerify = lib.mkOption {
                 type = lib.types.bool;
                 default = true;
-                description = "Verify the upstream registry's TLS cert (set to false only for dev MinIO).";
+                description = "Verify the upstream registry's TLS cert (set to false only for a plain-http dev registry).";
               };
               credentialsFile = lib.mkOption {
                 type = lib.types.nullOr lib.types.path;
@@ -191,7 +191,7 @@
                 Access-recency retention window. A tag last *pulled* within this
                 window is kept; otherwise zot's retention sweep may evict it.
                 Format is Go's `time.Duration` (e.g. "720h" = 30d). This is the
-                predicate MinIO ILM lacks — see ADR-0039 §2.
+                predicate S3 lifecycle rules lack — see ADR-0039 §2.
               '';
             };
 

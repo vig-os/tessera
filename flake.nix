@@ -256,7 +256,7 @@
 
         # Cloud-featured `tessera` binary for the registry round-trip check (pulls reqwest — the
         # in-Rust OCI distribution client). Shares cargoArtifacts; the cloud-only crates build on top
-        # (same pattern as `minio-range-read`).
+        # (same pattern as `s3-range-read`).
         tessera-cli-cloud = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tessera-cli-cloud";
@@ -430,7 +430,7 @@
         # Every check must have a DISTINCT derivation name (#535). `nix flake check -L` prefixes each
         # log line with the derivation *name*, so two checks that share one are indistinguishable in
         # CI logs — nothing errors, the logs just interleave. That happened: `workspace-test`,
-        # `sql-tests` and `minio-range-read` were all `tessera-nextest-0.0.0` (crane's default
+        # `sql-tests` and the S3 range-read check were all `tessera-nextest-0.0.0` (crane's default
         # `-nextest` suffix), and a whole diagnosis (#517/#518/#519) was built on counting three
         # builds as one. This fails EVALUATION, so it runs on every `nix flake check`, locally too.
         checks = let
@@ -791,7 +791,7 @@
             {
               nativeBuildInputs = [ pkgs.distribution pkgs.curl ];
               # reqwest's client builder loads the system CA store even for a plain-http loopback
-              # target (same as `minio-range-read`); point it at the nixpkgs bundle.
+              # target (same as `s3-range-read`); point it at the nixpkgs bundle.
               SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             } ''
             export HOME=$TMPDIR
@@ -824,15 +824,15 @@
             touch $out
           '';
 
-          # **Cloud range-read** (#225, landed): a sealed `.tsra` is range-readable directly from
-          # object storage — prune-before-fetch over the wire, not a full download — AND a query
+          # **S3 range-read** (#225, landed; server #702): a sealed `.tsra` is range-readable directly
+          # from object storage — prune-before-fetch over the wire, not a full download — AND a query
           # that does not overlap a product's stat range never fetches that product's data block
           # (the cohort prune-before-fetch capstone, proven across two products in the same
-          # bucket). Spins up a local MinIO on loopback (S3-compatible; same "real service mock"
-          # pattern as `oci-roundtrip` above), creates a bucket, then runs every test in the
-          # `cloud` module of `tessera-io` PLUS the `tessera-cli` integration test that drives
-          # `tessera verify <s3://...>` against the real binary. Mirrors the `oci-roundtrip`
-          # idle-wait loop verbatim.
+          # bucket). Starts a versitygw (the S3 gateway the fleet deploys) with its posix backend on
+          # loopback, creates a bucket, then runs every test in the `cloud` module of `tessera-io`
+          # PLUS the `tessera-cli` integration test that drives `tessera verify <s3://...>` against
+          # the real binary.
+          # History: until #702 this was `minio-range-read`, run against MinIO (unmaintained upstream).
           #
           # The tests cover:
           #   - `cloud::tests::s3_range_read_does_not_fetch_whole_archive`  (single-product range)
@@ -840,41 +840,41 @@
           #   - `cloud::tests::tail_prefetch_*` (in-memory; runs always under the cloud feature)
           #   - `tessera-cli::tests/cloud.rs::cli_inspect_and_verify_over_s3_url` (CLI end-to-end)
           #
-          # NB: nixpkgs marks `minio` insecure (abandoned upstream); we whitelist *just here* by
-          # stripping `knownVulnerabilities`. The test mock isn't network-reachable — it binds
-          # 127.0.0.1 inside the nix sandbox — so the upstream-CVE exposure surface is nil.
-          minio-range-read = let
-            # nixpkgs marks this minio INSECURE (`knownVulnerabilities`), so evaluating it refuses
-            # outright: "Refusing to evaluate package 'minio-…' because it is marked as insecure".
-            # Stripping the marker is a deliberate, narrow decision, recorded here at the point it is
-            # made rather than left implicit (#483):
-            #
-            #   - it is a TEST FIXTURE, never shipped and never part of any tessera artifact. The
-            #     check starts a MinIO on 127.0.0.1:9101 inside the nix build sandbox, which has no
-            #     network access and no persistent state, and throws it away with the derivation.
-            #   - the CVEs are in minio's server/console surface reached over a network by untrusted
-            #     clients. Here the only client is the test itself, over loopback, with a throwaway
-            #     credential pair that is also in this file.
-            #   - the alternative is dropping the check, which would mean the cloud range-read path
-            #     (ADR-0002 §4, prune-before-fetch over real S3 semantics) has no test against a real
-            #     object store at all. A sandboxed known-CVE fixture is the lesser risk.
-            #
-            # `meta` is not part of the derivation, so this override changes no output hash: the
-            # binary built here is byte-identical to the one nixpkgs would give.
-            #
-            # Revisit if minio ever becomes reachable from outside the sandbox, or if the check starts
-            # handling anything that is not synthetic test data.
-            minio = pkgs.minio.overrideAttrs (old: {
-              meta = (old.meta or { }) // { knownVulnerabilities = [ ]; };
-            });
-          in
-          craneLib.cargoNextest (commonArgs // {
+          # SANDBOX-INDEPENDENT (#688, #702). ksb's ARC pods run Nix with `sandbox = false`, so the
+          # build shares the pod's network namespace and filesystem with whatever else runs there.
+          # The fixture therefore assumes nothing the sandbox would have given it:
+          #   - no fixed port: a free ephemeral loopback port is picked at runtime and handed to both
+          #     the server and `TESSERA_S3_ENDPOINT`, so concurrent builds on one host can't collide
+          #     (a fixed port is how a loopback check ends up talking to someone else's server, or to
+          #     nothing). The pick-then-bind window is closed by an ownership check: if another
+          #     process takes the port first, versitygw exits on the bind error, and the bucket we
+          #     create must then appear as a directory in OUR data dir, which no other server (not
+          #     even a concurrent copy of this check, holding the same credentials) can produce;
+          #   - readiness = a SIGNED `ListBuckets` answering 200, polled until a 30 s wall-clock
+          #     deadline (`$SECONDS`); timeout or the server exiting fails with the server log;
+          #   - data and metadata live under the build's private `$TMPDIR`. Metadata goes to a
+          #     `--sidecar` directory instead of extended attributes, so the check does not depend on
+          #     the build filesystem supporting user xattrs (tmpfs < 6.6, some overlayfs uppers);
+          #   - a fresh, random bucket per run;
+          #   - the server is stopped through stdenv's `exitHooks`/`failureHooks` (both run from the
+          #     builder's EXIT trap). A bare `trap … EXIT` would REPLACE stdenv's own `exitHandler`
+          #     trap; without the sandbox's process-tree teardown a leaked server would outlive the
+          #     build.
+          # versitygw's posix backend writes straight to the filesystem, with no drive-health or
+          # write-throttle layer of its own, so the 503 `SlowDownWrite` the previous server returned
+          # on ksb has no counterpart here: a write that cannot land fails with the concrete error.
+          #
+          # Addressing: object_store's `AmazonS3Builder` with an explicit endpoint uses path-style
+          # requests (`http://127.0.0.1:<port>/<bucket>/<key>`), which versitygw serves by default
+          # (virtual-hosted style would need `--virtual-domain`). Range GETs, ETags and the error
+          # codes the tests rely on behave the same as before; no assertion changed.
+          s3-range-read = craneLib.cargoNextest (commonArgs // {
             inherit cargoArtifacts;
             # Distinct from `workspace-test` so CI logs attribute its lines (#535). Via `pname`, not
             # `pnameSuffix`: crane's cargoNextest hard-sets `pnameSuffix = "-nextest${extraSuffix}"`
             # and silently discards a caller's value -> derivation name `tessera-cloud-nextest-0.0.0`.
             pname = "tessera-cloud";
-            # Run both crates' cloud tests in one MinIO session (shared bucket): the `cloud::`
+            # Run both crates' cloud tests in one server session (shared bucket): the `cloud::`
             # module in tessera-io for unit-level range/cohort/tail-prefetch coverage, AND the
             # `cloud_cli_inspect_and_verify_over_s3_url` test in tessera-cli for the binary
             # end-to-end. Single `cloud` positional filter catches both — every test name with
@@ -883,51 +883,95 @@
             # depends on the IO feature), so a single `--features` flag covers both crates.
             cargoExtraArgs = "-p tessera-io -p tessera-cli --features tessera-cli/cloud cloud";
             # Top-level env vars become derivation env vars (Nixpkgs stdenv default) — propagate to
-            # `cargo nextest run`, which the test reads via `std::env::var`.
-            TESSERA_S3_ENDPOINT = "http://127.0.0.1:9101";
-            TESSERA_S3_BUCKET = "tessera-test";
-            AWS_ACCESS_KEY_ID = "minioadmin";
-            AWS_SECRET_ACCESS_KEY = "minioadmin";
+            # `cargo nextest run`, which the test reads via `std::env::var`. Throwaway credentials:
+            # the server is started with the same pair (versitygw's root account) and dies with the
+            # build. `TESSERA_S3_ENDPOINT` / `TESSERA_S3_BUCKET` are exported by `preCheck` because
+            # the port and the bucket are only known at runtime.
+            AWS_ACCESS_KEY_ID = "tessera-test-access";
+            AWS_SECRET_ACCESS_KEY = "tessera-test-secret";
             AWS_REGION = "us-east-1";
             # object_store/aws is reqwest-backed; reqwest's client builder loads the system CA trust
             # store even for a plain-http (allow_http) loopback target, and the hermetic sandbox has
             # none → "No CA certificates were loaded". Point it at the nixpkgs CA bundle.
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-            # Start MinIO right before `cargo nextest run` (build doesn't need it). Same loopback +
-            # idle-wait pattern as `oci-roundtrip` above. Bucket creation via awscli2's `s3 mb` —
-            # MinIO requires the bucket to exist before `PutObject`.
+            # Start versitygw right before `cargo nextest run` (the build doesn't need it).
             preCheck = ''
               export HOME=$TMPDIR
-              export MINIO_ROOT_USER=minioadmin
-              export MINIO_ROOT_PASSWORD=minioadmin
-              mkdir -p $TMPDIR/miniodata
-              ${minio}/bin/minio server $TMPDIR/miniodata --address 127.0.0.1:9101 \
-                > $TMPDIR/minio.log 2>&1 &
-              for i in $(seq 1 160); do
-                ${pkgs.curl}/bin/curl -sf http://127.0.0.1:9101/minio/health/ready && break
+              vgw_log=$TMPDIR/versitygw.log
+              mkdir -p $TMPDIR/s3/data $TMPDIR/s3/meta
+
+              vgw_port=$(${pkgs.python3}/bin/python3 -c \
+                'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+              export TESSERA_S3_ENDPOINT=http://127.0.0.1:$vgw_port
+              export TESSERA_S3_BUCKET=tessera-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+
+              ROOT_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID ROOT_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+                ${pkgs.versitygw}/bin/versitygw --port 127.0.0.1:$vgw_port --region $AWS_REGION \
+                posix --sidecar $TMPDIR/s3/meta $TMPDIR/s3/data > $vgw_log 2>&1 &
+              vgw_pid=$!
+              stop_versitygw() {
+                kill $vgw_pid 2>/dev/null
+                wait $vgw_pid 2>/dev/null
+                return 0
+              }
+              dump_versitygw_log() {
+                echo "---- versitygw log ($vgw_log) ----"
+                cat $vgw_log
+              }
+              exitHooks+=(stop_versitygw)
+              failureHooks+=(dump_versitygw_log stop_versitygw)
+
+              s3() {
+                ${pkgs.curl}/bin/curl -sS --max-time 5 -o $TMPDIR/s3-response -w '%{http_code}' \
+                  --aws-sigv4 "aws:amz:$AWS_REGION:s3" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+                  "$@"
+              }
+
+              # Readiness: 30 s wall-clock deadline, 0.25 s poll. Fails on the deadline or on the
+              # server exiting.
+              ready=
+              deadline=$((SECONDS + 30))
+              while [ $SECONDS -lt $deadline ]; do
+                if ! kill -0 $vgw_pid 2>/dev/null; then
+                  echo "s3-range-read: versitygw exited before becoming ready" >&2
+                  exit 1
+                fi
+                if [ "$(s3 --max-time 1 "$TESSERA_S3_ENDPOINT/" 2>/dev/null)" = 200 ]; then
+                  ready=1
+                  break
+                fi
                 sleep 0.25
               done
-              # `health/ready` can go green before the S3 API actually accepts `CreateBucket`
-              # (notably on the slower aarch64 runner — `XMinioServerNotInitialized`), so retry the
-              # bucket op itself until it lands rather than firing it once and racing.
-              for i in $(seq 1 120); do
-                ${pkgs.awscli2}/bin/aws --endpoint-url http://127.0.0.1:9101 \
-                  s3 mb s3://tessera-test 2>/dev/null && break
-                sleep 0.5
-              done
-              # Fail the check clearly if the bucket never materialised (vs a confusing later error).
-              ${pkgs.awscli2}/bin/aws --endpoint-url http://127.0.0.1:9101 \
-                s3 ls s3://tessera-test > /dev/null
+              if [ -z "$ready" ]; then
+                echo "s3-range-read: versitygw not ready on $TESSERA_S3_ENDPOINT after 30 s" >&2
+                exit 1
+              fi
+
+              # `|| :` only keeps errexit from aborting before the report: curl's own failure shows
+              # up as code `000`, which the test below rejects with the response body.
+              code=$(s3 -X PUT "$TESSERA_S3_ENDPOINT/$TESSERA_S3_BUCKET") || :
+              if [ "$code" != 200 ]; then
+                echo "s3-range-read: CreateBucket $TESSERA_S3_BUCKET answered HTTP $code" >&2
+                if [ -f $TMPDIR/s3-response ]; then cat $TMPDIR/s3-response >&2; fi
+                exit 1
+              fi
+              # Ownership: the bucket must exist in OUR posix root, so the server that answered is
+              # the one this build started, not whatever else holds the port.
+              if [ ! -d $TMPDIR/s3/data/$TESSERA_S3_BUCKET ] || ! kill -0 $vgw_pid 2>/dev/null; then
+                echo "s3-range-read: the server on $TESSERA_S3_ENDPOINT is not this build's versitygw" >&2
+                exit 1
+              fi
+              echo "s3-range-read: versitygw on $TESSERA_S3_ENDPOINT, bucket $TESSERA_S3_BUCKET"
             '';
             nativeBuildInputs = commonArgs.nativeBuildInputs
-              ++ [ minio pkgs.awscli2 pkgs.curl pkgs.cacert ];
+              ++ [ pkgs.versitygw pkgs.curl pkgs.python3 pkgs.cacert ];
           });
 
           # **DataFusion SQL surface** (#251 spike): the `sql` feature adds `tessera sql <FILE>
           # "<QUERY>"` — Vortex → Arrow → DataFusion in-process. The unit tests under `sql::tests`
           # are `#[cfg(feature = "sql")]`, so the default `workspace-test` gate does NOT run them
           # (default features exclude the ~200-crate DataFusion tree). This dedicated check runs
-          # the CLI's sql-feature tests only — same pattern as `minio-range-read` for the cloud
+          # the CLI's sql-feature tests only — same pattern as `s3-range-read` for the cloud
           # feature. Clippy already covers `--all-features` at compile-time, so this test is what
           # proves the query actually EXECUTES (WHERE + ORDER BY + LIMIT round-trip).
           sql-tests = craneLib.cargoNextest (commonArgs // {
