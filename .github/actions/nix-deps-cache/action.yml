@@ -127,7 +127,13 @@ runs:
           exit 0
         fi
         t0=$(date +%s)
-        if nix copy --to "file://${DEPS_DIR}?compression=zstd&parallel-compression=true" "${DEPS_OUT}"; then
+        # Serial zstd per path (`parallel-compression=false`). Nix's parallel mode asks libarchive for
+        # `threads=0`, i.e. one worker per CPU ONLINE ON THE HOST, not per CPU the job may use. On a
+        # ksb pod that is the node's 84 CPUs inside a 16-CPU, 32 GiB pod, and since `nix copy`
+        # already compresses several paths at once, the export died with "Zstd compression failed:
+        # Allocation error : not enough memory" (#688). Measured on a ksb-vig-os-large pod, one 2 GiB
+        # path: parallel 14.4 s at 773 MiB peak RSS, serial 11.8 s at 46 MiB.
+        if nix copy --to "file://${DEPS_DIR}?compression=zstd&parallel-compression=false" "${DEPS_OUT}"; then
           echo "exported $(du -sm "${DEPS_DIR}" | cut -f1) MiB in $(( $(date +%s) - t0 )) s"
           echo "ready=true" >> "$GITHUB_OUTPUT"
         else

@@ -1,0 +1,8 @@
+# Fixture for scripts/check-ksb-fork-guard.sh --self-test: guarded label, but a trigger the predicate cannot see (must FAIL)
+on:  # yamllint disable-line rule:truthy
+  workflow_run:
+jobs:
+  j:
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-small' }}
+    steps:
+      - run: "true"

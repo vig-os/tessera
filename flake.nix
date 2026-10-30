@@ -434,6 +434,79 @@
         # `-nextest` suffix), and a whole diagnosis (#517/#518/#519) was built on counting three
         # builds as one. This fails EVALUATION, so it runs on every `nix flake check`, locally too.
         checks = let
+          # A loopback `distribution` registry for one check, safe WITHOUT the Nix sandbox (#688).
+          # On the ksb runners `sandbox = false`, so a check shares the pod's network namespace, disk
+          # and CPUs with every other build running there.
+          #
+          # ROOT CAUSE of `registry-roundtrip` failing on ksb ("error sending request for url
+          # …/blobs/uploads/"): the registry's FILESYSTEM storage stalls under disk write load. Its
+          # data lived in $TMPDIR, which on a ksb pod is `build-dir` on the pod's one /nix volume,
+          # written by every concurrent build (crane's multi-GiB `target.tar.zst`). Reproduced on a
+          # ksb-vig-os-large pod with 4 streaming writers on /nix: the filesystem registry's upload
+          # POST hit the 60 s curl cap three times in a row while `GET /v2/` took 1 ms, so the
+          # readiness probe passed and reqwest then timed out on the POST, as in the failed leg. Under
+          # the same load the `inmemory` driver answered every request in at most 8 ms, and CPU load
+          # alone stayed under 1 s (#688). Not a proxy (none in the pod, and Nix clears a builder's
+          # environment), not IPv6 (both sides use 127.0.0.1), and not a port clash (each pod has its
+          # own network namespace and nothing listened on the old ports). So:
+          #   - `inmemory` storage: these checks prove the OCI transport (push, pull, byte identity),
+          #     not disk durability, and a few KiB of blobs need no disk. This removes the stall;
+          #   - port 0: the kernel picks a free port at bind time and the registry logs the one it
+          #     got, so two registries can never race for a fixed port;
+          #   - a private `mktemp -d` dir under $TMPDIR for the config and the log;
+          #   - a bounded readiness wait that checks the registry is still ALIVE and answers on ITS
+          #     port, and on timeout fails loudly with the registry's log;
+          #   - an EXIT trap that kills the registry and, if the check failed, prints its log.
+          # Source it, call `start_registry`, then use "$REGISTRY" (host:port).
+          loopbackRegistry = pkgs.writeText "loopback-registry.sh" ''
+            start_registry() {
+              reg_dir=$(mktemp -d "$TMPDIR/registry.XXXXXX")
+              cat > "$reg_dir/config.yml" <<EOF
+            version: 0.1
+            storage:
+              inmemory: {}
+            http:
+              addr: 127.0.0.1:0
+            EOF
+              ${pkgs.distribution}/bin/registry serve "$reg_dir/config.yml" > "$reg_dir/reg.log" 2>&1 &
+              reg_pid=$!
+              # `wait` on the killed registry returns 143; under the builder's `set -e` that would
+              # become the check's exit status, so the trap exits with the check's own status.
+              trap 'rc=$?; kill "$reg_pid" 2>/dev/null || true; wait "$reg_pid" 2>/dev/null || true
+                    if [ "$rc" -ne 0 ]; then echo "----- registry log -----"; cat "$reg_dir/reg.log"; fi
+                    exit "$rc"' EXIT
+              REGISTRY=
+              for _ in $(seq 1 300); do  # 300 x 0.1 s = 30 s, then fail
+                kill -0 "$reg_pid" 2>/dev/null || { echo "registry exited during startup"; return 1; }
+                port=$(sed -nE 's/.*listening on 127\.0\.0\.1:([0-9]+).*/\1/p' "$reg_dir/reg.log" | head -n1)
+                if [ -n "$port" ] && ${pkgs.curl}/bin/curl -sf --max-time 2 "http://127.0.0.1:$port/v2/" > /dev/null; then
+                  REGISTRY=127.0.0.1:$port
+                  echo "registry ready on $REGISTRY"
+                  return 0
+                fi
+                sleep 0.1
+              done
+              echo "registry not ready after 30 s"
+              return 1
+            }
+          '';
+          # Size the test runners from the build's CPU budget, $NIX_BUILD_CORES (`--cores`), not from
+          # what the machine reports (#688). A ksb pod has no CPU limit, so
+          # `available_parallelism()` there returns the node's 84 CPUs. Nix clears the builder's
+          # environment, so the runner's own pins (RAYON_NUM_THREADS etc., exo-pet/exo-fleet#1014)
+          # never reach a check. Unbudgeted, nextest ran up to 84 test processes, each starting
+          # 84-thread rayon and vortex pools, against the kubelet's 4096-PID cap per pod: thread
+          # creation failed with EAGAIN in two tests at once, and the narrow-table perf ratchet
+          # measured 1.14x against its own neighbours. On a GitHub-hosted runner the budget equals
+          # nproc (4), so nothing changes there. Applies to the libtest/nextest checks; tessera's own
+          # worker sizing still reads `available_parallelism()`: #703.
+          withCpuBudget = args: args // {
+            preCheck = ''
+              export NEXTEST_TEST_THREADS=$NIX_BUILD_CORES RUST_TEST_THREADS=$NIX_BUILD_CORES
+              export RAYON_NUM_THREADS=$NIX_BUILD_CORES
+              echo "test CPU budget: $NIX_BUILD_CORES (available to the build: $(nproc))"
+            '' + (args.preCheck or "");
+          };
           allChecks = {
           # Hermetic Rust gates over the tessera workspace.
           #
@@ -454,17 +527,17 @@
             cargoClippyExtraArgs =
               "--all-targets --features ${workspaceFeatures} -- -D warnings";
           });
-          workspace-test = craneLib.cargoNextest (commonArgs // {
+          workspace-test = craneLib.cargoNextest (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             partitions = 1;
             partitionType = "count";
-          });
+          }));
           # nextest does NOT run doctests, so gate them separately — the "docs-as-tests" layer: every
           # `///` example compiles + runs, so public-API docs can never drift from behaviour.
-          workspace-doctest = craneLib.cargoTest (commonArgs // {
+          workspace-doctest = craneLib.cargoTest (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             cargoTestExtraArgs = "--doc";
-          });
+          }));
           workspace-fmt = craneLib.cargoFmt { inherit src; };
 
           # **The third determinism axis — the build configuration** (ADR-0057 §5, #468).
@@ -755,28 +828,20 @@
           # `distribution` registry on loopback (the nix-CI service mock — only a *production* registry is
           # external), so the OCI push/pull capability is gated, not just the manifest-construction unit.
           oci-roundtrip = pkgs.runCommand "oci-roundtrip"
-            { nativeBuildInputs = [ pkgs.distribution pkgs.oras pkgs.curl ]; } ''
+            { nativeBuildInputs = [ pkgs.oras ]; } ''
             export HOME=$TMPDIR
-            cat > $TMPDIR/config.yml <<EOF
-            version: 0.1
-            storage:
-              filesystem:
-                rootdirectory: $TMPDIR/data
-            http:
-              addr: 127.0.0.1:5050
-            EOF
-            registry serve $TMPDIR/config.yml > $TMPDIR/reg.log 2>&1 &
-            for i in $(seq 1 80); do curl -sf http://127.0.0.1:5050/v2/ > /dev/null && break; sleep 0.25; done
+            source ${loopbackRegistry}
+            start_registry
             cp ${./tessera/corpus/files}/recon_int16.tsra $TMPDIR/p.tsra
             cd $TMPDIR
-            oras push --plain-http 127.0.0.1:5050/tessera/recon:v1 \
+            oras push --plain-http $REGISTRY/tessera/recon:v1 \
               --artifact-type application/vnd.tessera.product.v1+json \
               p.tsra:application/vnd.tessera.tsra.v1
-            M=$(oras manifest fetch --plain-http 127.0.0.1:5050/tessera/recon:v1)
+            M=$(oras manifest fetch --plain-http $REGISTRY/tessera/recon:v1)
             echo "$M" | grep -q 'application/vnd.tessera.product.v1+json'   # ARTIFACT_TYPE
             echo "$M" | grep -q 'application/vnd.tessera.tsra.v1'           # TSRA_MEDIA_TYPE
             echo "$M" | grep -q 'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'  # OCI empty config
-            mkdir out && oras pull --plain-http 127.0.0.1:5050/tessera/recon:v1 -o out
+            mkdir out && oras pull --plain-http $REGISTRY/tessera/recon:v1 -o out
             cmp p.tsra out/p.tsra
             touch $out
           '';
@@ -789,22 +854,13 @@
           # our actual transport client end to end.
           registry-roundtrip = pkgs.runCommand "registry-roundtrip"
             {
-              nativeBuildInputs = [ pkgs.distribution pkgs.curl ];
               # reqwest's client builder loads the system CA store even for a plain-http loopback
               # target (same as `s3-range-read`); point it at the nixpkgs bundle.
               SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             } ''
             export HOME=$TMPDIR
-            cat > $TMPDIR/config.yml <<EOF
-            version: 0.1
-            storage:
-              filesystem:
-                rootdirectory: $TMPDIR/data
-            http:
-              addr: 127.0.0.1:5055
-            EOF
-            registry serve $TMPDIR/config.yml > $TMPDIR/reg.log 2>&1 &
-            for i in $(seq 1 80); do curl -sf http://127.0.0.1:5055/v2/ > /dev/null && break; sleep 0.25; done
+            source ${loopbackRegistry}
+            start_registry
             cp ${./tessera/corpus/files}/recon_int16.tsra $TMPDIR/p.tsra
             cd $TMPDIR
             # Sign with the LEGACY detached form (`--sidecar`), so push must carry `p.tsra.sig.json`
@@ -814,8 +870,8 @@
             printf '0101010101010101010101010101010101010101010101010101010101010101' > key.hex
             ${tessera-cli-cloud}/bin/tessera sign p.tsra --key key.hex --sidecar --signer https://orcid.org/0000-0002-1825-0097
             test -f p.tsra.sig.json
-            ${tessera-cli-cloud}/bin/tessera push p.tsra 127.0.0.1:5055/tessera/recon:v1 --plain-http
-            ${tessera-cli-cloud}/bin/tessera pull 127.0.0.1:5055/tessera/recon:v1 out.tsra --plain-http
+            ${tessera-cli-cloud}/bin/tessera push p.tsra $REGISTRY/tessera/recon:v1 --plain-http
+            ${tessera-cli-cloud}/bin/tessera pull $REGISTRY/tessera/recon:v1 out.tsra --plain-http
             ${tessera-cli-cloud}/bin/tessera verify out.tsra
             cmp p.tsra out.tsra
             # The signature sidecar survived the registry hop, byte-identical (bug #2 fixed).
@@ -974,7 +1030,7 @@
           # the CLI's sql-feature tests only — same pattern as `s3-range-read` for the cloud
           # feature. Clippy already covers `--all-features` at compile-time, so this test is what
           # proves the query actually EXECUTES (WHERE + ORDER BY + LIMIT round-trip).
-          sql-tests = craneLib.cargoNextest (commonArgs // {
+          sql-tests = craneLib.cargoNextest (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             # Distinct from `workspace-test` so CI logs attribute its lines (#535). Via `pname`, not
             # `pnameSuffix`: crane's cargoNextest hard-sets `pnameSuffix = "-nextest${extraSuffix}"`
@@ -986,7 +1042,7 @@
             # arrow-58 the workspace already has (via Vortex 0.75); a version mismatch would
             # fail to link, not to test.
             cargoExtraArgs = "-p tessera-cli --features sql sql::";
-          });
+          }));
 
           # The independent conformance reader (corpus/reference_reader): a SECOND implementation of
           # the `.tsra` verification, in pure Python, checked against corpus.json's goldens. It was

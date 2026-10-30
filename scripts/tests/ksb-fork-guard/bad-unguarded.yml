@@ -1,0 +1,8 @@
+# Fixture for scripts/check-ksb-fork-guard.sh --self-test: unguarded literal ksb label (must FAIL)
+on:  # yamllint disable-line rule:truthy
+  pull_request:
+jobs:
+  j:
+    runs-on: ksb-vig-os-large
+    steps:
+      - run: "true"

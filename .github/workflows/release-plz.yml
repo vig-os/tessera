@@ -56,6 +56,9 @@ env:
 jobs:
   release-pr:
     name: release-plz release-pr
+    # GitHub-hosted on purpose (#688): this job mints the release App token (RP_APP_*) with
+    # `contents: write`, and release-credential jobs stay off the shared ksb pods, the same line
+    # exo-pet/exo-fleet draws (release app keys stay on hosted jobs).
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

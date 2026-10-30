@@ -21,3 +21,11 @@ self-hosted-runner:
     # actionlint release knows them.
     - ubuntu-26.04
     - ubuntu-26.04-arm
+    # vig-os's ARC scale sets on ksb (runner group `ksb-ci`, #688): each scale-set NAME is its
+    # runs-on label, so actionlint cannot know it. large = 8 CPU / 32 GiB (the heavy x86_64 nix
+    # flake check), small = 2 CPU / 8 GiB (light Linux lanes). Both verified by a probe run that
+    # ARC picked up on runners `ksb-vig-os-{small,large}-runner-*`, group ksb-ci (#688,
+    # https://github.com/vig-os/tessera/actions/runs/40835940109).
+    # DELETE an entry when no repo-owned workflow names that label any more.
+    - ksb-vig-os-large
+    - ksb-vig-os-small

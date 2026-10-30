@@ -1,0 +1,8 @@
+# Fixture for scripts/check-ksb-fork-guard.sh --self-test: guarded label, but issue_comment is not on the trigger allow-list (must FAIL)
+on:  # yamllint disable-line rule:truthy
+  issue_comment:
+jobs:
+  j:
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-small' }}
+    steps:
+      - run: "true"
