@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.4...tessera-io-v0.1.0-alpha.5) - 2026-10-30
+
+### Fixed
+
+- *(io)* make every directory entry a journal line names durable before it
+- *(io)* make WriteSession::recover crash-safe and idempotent
+- *(core,io,ingest,cli)* [**breaking**] validate block names into one type and join them by plain components only
+
+### Other
+
+- *(io)* run the S3 range-read check against versitygw, sandbox-independent
+
 ## [0.1.0-alpha.4](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.3...tessera-io-v0.1.0-alpha.4) - 2026-10-29
 
 ### Fixed
