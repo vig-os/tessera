@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-26T13:46:38Z
-updated: 2026-10-26T13:46:38Z
+updated: 2026-10-30T01:38:41Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/681
-comments: 0
-labels: bug, priority:high, area:io
+comments: 3
+labels: bug, priority:backlog, area:io
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-27T07:16:20.378Z
+synced: 2026-10-30T08:02:26.213Z
 ---
 
 # [Issue 681]: [fix(io): Vortex 0.75 writer holds encoded segments until the footer (unbounded per-chunk fan-out)](https://github.com/vig-os/tessera/issues/681)
@@ -62,4 +62,37 @@ and so the bytes and `content_hash`, unchanged. Candidates: a byte-budgeted fan-
 chunk holding the lowest pending sequence id (the same rule as tessera's `StreamWriter` window, ADR-0026
 amendment), upstream in vortex and carried on the fork pin (#480). Until then, the RAM of a single huge
 table encode is ~0.4 x its encoded size, documented in ADR-0026's "single-table output sink" amendment.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 29, 2026 at 11:43 AM_
+
+Design note merged (PR #692, b6de2d1): `docs/spikes/681-vortex-writer-backpressure.md`, 3 rounds, an independent pre-mortem and 2 re-reviews. **Owner decision pending: P / P-logical (recommended) / R for #677.** Nits from the final re-review, to fix in the follow-up ADR (its first implementation PR):
+1. The decision table's cost column for P-logical must include §5.1 "writers switch": every multi-block writer's output is renamed (GE ingest `events_NNNN`, `TableMultiBlockSink`), so `content_hash`es change beyond #677 and the multi-block corpus goldens move. "Readers don't change" holds only for P.
+2. Grouping isn't unambiguous: a user's `pairs/0003` next to the writer's `pairs/0000…0002` joins the group. Reserve numbered leaves, or require a contiguous run from `0000`. Also define a product that mixes `pairs_NNNN` and `pairs/NNNN`.
+3. Disk staging's "no RAM term" ignores page cache, which counts toward cgroup `memory.current` and is RAM on tmpfs. The RSS proof must also sample `memory.current`, or require staging on a real disk.
+4. `staged_peak` is counted only for complete blocks, so it doesn't test the `W+1` bound. Give `peak(16) ≤ peak(4)+s` an explicit `s` (the measured rise at W=4 was 11% from 16 to 64 blocks).
+5. ADR-0062's `RowAlignment` doc ("`events` = `events_NNNN`") needs amending in the same ADR.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on October 30, 2026 at 01:26 AM_
+
+**Status update (2026-10-30).** The owner decided on **P-logical** for #677 (see the decision comment on #677). Streamed tables are written as `pairs/NNNN` leaves and read as one logical table. The bound is flat at 128–143 MB from 67 M to 1.07 G rows at W=4, without any Vortex change. ADR-0064 is being drafted, and it folds in the 5 nits above.
+
+So #677 no longer depends on this issue. What remains here is the **root cause in Vortex itself**: the 0.75 writer holds encoded segments until the footer, so one physical Vortex file's writer memory grows with its row count. That is option F in the design note, an upstream writer gate. The closest upstream report is vortex-data/vortex#10046 (DuckDB `COPY TO … FORMAT VORTEX` heap growth, open, last updated 2026-10-01). It is a related symptom, not a filed fix. Nobody is working on F yet.
+
+This issue stays open as the upstream track. With P-logical in place it no longer blocks tessera, because every physical block is bounded by `BLOCK_ROWS`.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on October 30, 2026 at 01:38 AM_
+
+**Owner decision (2026-10-30): no upstream contribution for now.** P-logical (ADR-0064) bounds memory without any Vortex change, so there's no case for one. This stays a backlog record of the Vortex writer behaviour, together with its measurements and the option-F design. Reopen the question only if a use case needs a single physical Vortex file larger than `BLOCK_ROWS`.
 

@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-25T11:53:24Z
-updated: 2026-10-25T12:12:38Z
+updated: 2026-10-29T12:09:49Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/677
-comments: 2
+comments: 3
 labels: bug, priority:high, effort:large, area:io
 assignees: none
 milestone: none
 projects: none
 parent: none
-children: none
-synced: 2026-10-26T07:24:17.083Z
+children: 709, 710, 711, 712, 713, 714, 715, 716, 717
+synced: 2026-10-30T08:02:27.148Z
 ---
 
 # [Issue 677]: [feat(io): bounded single-table output sink and end-to-end StreamWriter backpressure](https://github.com/vig-os/tessera/issues/677)
@@ -143,4 +143,12 @@ After #677 lands we must switch the example's single encode job to the new file-
 
 Consumer checks: release example tests (3) and precommit pass. `cargo deny` currently blocks `just rust-check` on Tessera-IO's transitive unmaintained `paste` (RUSTSEC-2024-0436); no policy exemption was added.
 
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on October 29, 2026 at 12:09 PM_
+
+**Owner decision (2026-10-29), from the #681 design note (PR #692, b6de2d1):** option **P-logical**. Streamed tables above `BLOCK_ROWS` are written as hierarchical leaves `pairs/0000`, `pairs/0001`, … (ADR-0063), and every logical reader presents `pairs` as one table. This retires ADR-0026's "one canonical block of any size" for streamed tables, and #677's literal "single physical block" requirement with it. The memory bound (flat 128–143 MB from 67 M to 1.07 G rows, W=4) is in the note. Next: a new ADR (amends SPEC §5b, ADR-0026, ADR-0062's `RowAlignment` and ADR-0063), which folds in the re-review nits recorded on #681, then the implementation. The Vortex writer gate F stays a separate upstream track (vortex#10046).
 
