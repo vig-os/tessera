@@ -5,7 +5,8 @@
 traversal in [#685](https://github.com/vig-os/tessera/issues/685). Refines the `BlockRef.name` field of
 SPEC §5, which was `string` with no rule. Keeps ADR-0043's hierarchy (pyramid levels, sidecars and
 collection members are nodes of one tree); keeps ADR-0022's layouts (sealed zip, exploded directory, S3
-prefix) mirroring one another.
+prefix) mirroring one another. Amended by ADR-0064 (2026-10-30): a node of numbered, marked table leaves is one
+logical table.
 
 ## Context
 
@@ -162,3 +163,27 @@ one. `WriteSession::recover` now does this instead (rustdoc on `recover` is the 
 
 This is internal to the staging directory, not the sealed format: no grammar, leaf-rule, manifest or
 `content_hash` change, and no corpus golden moves.
+
+## Amended by ADR-0064 (2026-10-30) — a node of numbered, marked leaves is one logical table
+
+[ADR-0064](0064-logical-tables-over-numbered-leaves.md) (Proposed) gives one kind of node a meaning. §2 above
+says only that blocks are the leaves of the name tree; that stays true, and the leaf rule doesn't change.
+Added:
+
+- **A partitioned table is a node.** A table of more than `BLOCK_ROWS` rows is written as the leaves
+  `<table>/0000`, `<table>/0001`, …: the leaf of index `i` is `i` padded with `0` to at least four digits
+  (`<table>/10000` follows `<table>/9999`). Each leaf's `TableSpec` carries a sealed partition marker
+  `{"index": i, "last": b}`. The node `<table>` is then **one logical table**, the leaves in index order, and
+  every logical reader answers to `<table>` (ADR-0064 §3, §7).
+- **Such a node holds nothing else.** A node with at least one marked block exactly one segment below it holds
+  only its marked `table` leaves (each named by the canonical padded form of its own index) and their chunk-index
+  sidecars `<table>/<leaf>.cidx`. The indices run `0..=k` with `k ≥ 1`, without a gap or a duplicate, and exactly
+  the leaf `k` is `last`. A foreign child, a gap or a second terminal makes the node invalid, and so does a marker
+  on a block with no parent node: readers refuse to resolve it with `Error::LogicalTable`, and the points that
+  check the leaf rule (§4: `ProductBuilder::seal`, a write session's seal, `unpack` and `pack_dir`) refuse it.
+  A block under such a node stays readable by its full name.
+- **Nodes without markers are unaffected.** `tessera pyramid`'s `volume/0`, `volume/1`, … (§3) carry no marker,
+  so they are array levels, not a logical table, and nothing about them changes.
+
+No grammar, leaf-rule or existing-manifest byte changes: every name in the corpus and the fixtures still
+validates, and no corpus golden moves.
