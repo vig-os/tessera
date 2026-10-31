@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-29T02:05:21Z
+updated: 2026-10-30T08:25:11Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-29T08:04:51.407Z
+synced: 2026-10-31T07:59:05.749Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -27,7 +27,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/dicom-0.x-lockfile -->chore(deps): update rust crate dicom to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/dicom-transfer-syntax-registry-0.x-lockfile -->chore(deps): update rust crate dicom-transfer-syntax-registry to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/zarrs-0.x-lockfile -->chore(deps): update rust crate zarrs to v0.23.14
- - [ ] <!-- unlimit-branch=renovate/rust-wasm-bindgen-monorepo -->fix(deps): update rust crate wasm-bindgen to v0.2.129
+ - [ ] <!-- unlimit-branch=renovate/rust-wasm-bindgen-monorepo -->fix(deps): update rust crate wasm-bindgen to v0.2.130
  - [ ] <!-- unlimit-branch=renovate/python-(minor-and-patch) -->build(pip): update python (minor and patch) (`numcodecs`, `numpy`, `uproot`, `zarr`)
  - [ ] <!-- unlimit-branch=renovate/arrow-rs-monorepo -->chore(deps): update arrow-rs monorepo to v58.4.1 (`arrow`, `arrow-array`, `arrow-buffer`, `arrow-ipc`, `arrow-schema`, `parquet`)
  - [ ] <!-- unlimit-branch=renovate/age-0.x -->chore(deps): update rust crate age to 0.12
@@ -173,7 +173,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 <details><summary>tessera/crates/tessera-wasm/Cargo.toml (1)</summary>
 
- - `wasm-bindgen =0.2.121` → [Updates: `=0.2.129`]
+ - `wasm-bindgen =0.2.121` → [Updates: `=0.2.130`]
 
 </details>
 
