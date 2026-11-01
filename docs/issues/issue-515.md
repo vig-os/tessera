@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-30T08:25:11Z
+updated: 2026-10-31T20:54:28Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-31T07:59:05.749Z
+synced: 2026-11-01T08:40:52.117Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -48,7 +48,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.90
  - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.90
  - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.90
- - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.26.1
+ - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.26.2
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
  - [ ] <!-- unlimit-branch=renovate/pyarrow-26.x -->build(pip): update dependency pyarrow to v26
@@ -243,8 +243,8 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
  - `dtolnay/rust-toolchain stable@89b12181fb390509a0842a86cc55eeb8eb928c1d` → [Updates: `stable`]
  - `actions/create-github-app-token v1.12.0@d72941d797fd3113feb6b93fd0dec494b13a2547` → [Updates: `v3.3.0`]
- - `cargo-bins/cargo-binstall v1.23.0@b874e25ea559687bec77e281e9b271aa1367b624` → [Updates: `v1.26.1`]
- - `cargo-bins/cargo-binstall 1.23.0` → [Updates: `1.26.1`]
+ - `cargo-bins/cargo-binstall v1.23.0@b874e25ea559687bec77e281e9b271aa1367b624` → [Updates: `v1.26.2`]
+ - `cargo-bins/cargo-binstall 1.23.0` → [Updates: `1.26.2`]
 
 </details>
 
