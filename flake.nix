@@ -523,6 +523,14 @@
               echo "test CPU budget: $NIX_BUILD_CORES (available to the build: $(nproc))"
             '' + (args.preCheck or "");
           };
+          # Vacuous-pass guard for the nextest checks (#726): a run that selects ZERO tests must fail,
+          # or a test filter that stops matching (a renamed test, a feature not enabled) leaves the
+          # check green while it runs nothing. nextest 0.9.137 already fails such a run by default
+          # (`--no-tests=auto` resolves to `fail` outside `--rerun`, exit code 4), but a default is
+          # not a guarantee: it can change upstream, and `NEXTEST_NO_TESTS=pass` in the environment
+          # turns it off. The explicit flag is the guarantee, and on the command line it overrides
+          # that variable. It does NOT catch a filter that matches FEWER tests than intended.
+          nextestFailOnNoTests = "--no-tests=fail";
           allChecks = {
           # Hermetic Rust gates over the tessera workspace.
           #
@@ -547,6 +555,7 @@
             inherit cargoArtifacts;
             partitions = 1;
             partitionType = "count";
+            cargoNextestExtraArgs = nextestFailOnNoTests;
           }));
           # nextest does NOT run doctests, so gate them separately — the "docs-as-tests" layer: every
           # `///` example compiles + runs, so public-API docs can never drift from behaviour.
@@ -949,11 +958,15 @@
             # Run both crates' cloud tests in one server session (shared bucket): the `cloud::`
             # module in tessera-io for unit-level range/cohort/tail-prefetch coverage, AND the
             # `cloud_cli_inspect_and_verify_over_s3_url` test in tessera-cli for the binary
-            # end-to-end. Single `cloud` positional filter catches both — every test name with
-            # cloud coverage starts with `cloud` (module or function), nothing unrelated does.
+            # end-to-end, plus the 5 tests of the shared S3 required/skip contract, which run in
+            # both crates (`cloud::s3_contract::tests` / `cloud_s3_contract::tests`, #726). Single
+            # `cloud` positional filter catches all of them — every test name with cloud coverage
+            # starts with `cloud` (module or function), nothing unrelated does. A filter that
+            # matches nothing fails the check (`nextestFailOnNoTests`).
             # `tessera-cli/cloud` transitively enables `tessera-io/cloud` (the CLI feature
             # depends on the IO feature), so a single `--features` flag covers both crates.
             cargoExtraArgs = "-p tessera-io -p tessera-cli --features tessera-cli/cloud cloud";
+            cargoNextestExtraArgs = nextestFailOnNoTests;
             # Top-level env vars become derivation env vars (Nixpkgs stdenv default) — propagate to
             # `cargo nextest run`, which the test reads via `std::env::var`. Throwaway credentials:
             # the server is started with the same pair (versitygw's root account) and dies with the
@@ -965,9 +978,10 @@
             # Vacuous-pass guard (#707): every S3 test skips (and nextest reports PASS) when
             # `TESSERA_S3_ENDPOINT` is unset, which is right for a plain `cargo test` without a
             # server and wrong here. This marker tells the tests a server was promised, so a lost
-            # endpoint export panics them instead (contract: `s3_endpoint` in tessera-io's
-            # `cloud::tests`). It is a static attribute, not a `preCheck` export, so the same edit
-            # that breaks the endpoint export cannot take the marker down with it.
+            # endpoint export panics them instead (contract: tessera-io's `cloud::s3_contract`, the
+            # one source both crates' tests compile, #726). It is a static attribute, not a
+            # `preCheck` export, so the same edit that breaks the endpoint export cannot take the
+            # marker down with it.
             TESSERA_S3_REQUIRED = "1";
             # object_store/aws is reqwest-backed; reqwest's client builder loads the system CA trust
             # store even for a plain-http (allow_http) loopback target, and the hermetic sandbox has
@@ -1071,6 +1085,7 @@
             # arrow-58 the workspace already has (via Vortex 0.75); a version mismatch would
             # fail to link, not to test.
             cargoExtraArgs = "-p tessera-cli --features sql sql::";
+            cargoNextestExtraArgs = nextestFailOnNoTests;
           }));
 
           # The independent conformance reader (corpus/reference_reader): a SECOND implementation of
