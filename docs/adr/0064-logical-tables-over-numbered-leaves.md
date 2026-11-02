@@ -233,6 +233,11 @@ The rule, in order:
    `events/notes` blob (valid under the leaf rule) resolves `events` as it does today. If any block of `flat` whose name has no
    parent node carries a marker, the result is `StrayMarker` (§2.2), for `Single` and `LegacyFlat` alike, so a
    reader refuses what the seal refuses; a marked leaf named in full (`pairs/0003`) is `Single`.
+   *Clarified (#733, 2026-11-02):* a marked block of `flat` that has a parent node (`a/pairs_0001`) is checked
+   the way the seal checks it: its parent node `a` is validated (§2.1), and its error is the result
+   (`LogicalTable { name: "a", .. }`; `pairs_0001` is never a canonical leaf, so `a` is always refused). A marked
+   block is refused by the same rule on both paths. The only exemption is a leaf named in full that is the whole
+   group: next to a `pairs/0001_0000` it is checked too, and that block is a foreign child of `pairs`.
 5. **Otherwise:** `NotATable` when `name` is a non-table block (`kind` is its block kind, `"array"`, `"blob"`, …)
    or a node with no marked child (`kind: "node"`; a `tessera pyramid` node such as `volume/` holds array
    levels), else `NotFound`.

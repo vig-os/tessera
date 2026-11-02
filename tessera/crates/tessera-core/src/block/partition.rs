@@ -233,11 +233,14 @@ pub fn table_group(blocks: &[BlockRef], name: &str) -> Result<TableGroup> {
     if !marked.is_empty() {
         return validate_node(blocks, name).map(|leaves| TableGroup::Partitioned { leaves });
     }
+    // A marked block in the legacy group is checked as the seal checks it, so a reader refuses
+    // what the seal refuses (§3 rule 4, #733). The one exception is a leaf named in full
+    // (`pairs/0003`) that is the whole group, which stays readable on its own. Next to a
+    // `pairs/0003_0000` it is not exempt: that block is a foreign child of `pairs`, not more rows.
     for b in &flat {
-        if !b.name.contains('/') && marker(b)?.is_some() {
-            return Err(fail(LogicalTableError::StrayMarker {
-                block: b.name.to_string(),
-            }));
+        let leaf_in_full = flat.len() == 1 && b.name == name && b.name.contains('/');
+        if !leaf_in_full && marker(b)?.is_some() {
+            check_marked(blocks, b)?;
         }
     }
     match flat.as_slice() {
@@ -273,24 +276,27 @@ pub fn check_partitions(blocks: &[BlockRef]) -> Result<()> {
         if marker(b)?.is_none() {
             continue;
         }
-        match b.name.rsplit_once('/') {
-            None => {
-                let reason = LogicalTableError::StrayMarker {
-                    block: b.name.to_string(),
-                };
-                return Err(Error::LogicalTable {
-                    name: b.name.to_string(),
-                    reason,
-                });
-            }
-            Some((node, _)) if !nodes.contains(&node) => nodes.push(node),
-            Some(_) => {}
+        let node = b.name.rsplit_once('/').map(|(node, _)| node);
+        if node.is_none_or(|n| !nodes.contains(&n)) {
+            check_marked(blocks, b)?;
+            nodes.extend(node);
         }
     }
-    for node in nodes {
-        table_group(blocks, node)?;
-    }
     Ok(())
+}
+
+/// The seal's rule for one marked block `b` (ADR-0064 §2.2, §2.4): with no parent node it is a
+/// stray marker; otherwise its parent node must be a valid partitioned table.
+fn check_marked(blocks: &[BlockRef], b: &BlockRef) -> Result<()> {
+    match b.name.rsplit_once('/') {
+        None => Err(Error::LogicalTable {
+            name: b.name.to_string(),
+            reason: LogicalTableError::StrayMarker {
+                block: b.name.to_string(),
+            },
+        }),
+        Some((node, _)) => table_group(blocks, node).map(drop),
+    }
 }
 
 /// Validate the partitioned node `node` (ADR-0064 §2.1, §2.5); its leaves in index order.
@@ -859,10 +865,57 @@ mod tests {
             let want = LogicalTableError::StrayMarker {
                 block: block.into(),
             };
-            assert_eq!(reason(&blocks, name), want);
-            assert!(
-                matches!(seal(blocks), Err(Error::LogicalTable { reason, .. }) if reason == want)
-            );
+            // Read and seal report the marked block itself as the name (#733: one rule).
+            for got in [table_group(&blocks, name).map(drop), seal(blocks).map(drop)] {
+                assert!(
+                    matches!(&got, Err(Error::LogicalTable { name: n, reason }) if n == block && *reason == want),
+                    "{got:?}"
+                );
+            }
+        }
+    }
+
+    /// #733: a marked legacy-named block under a node (`a/pairs_0001`) is a leaf of `a` that isn't
+    /// canonical. Reading `a/pairs` refuses it with the same error as the seal, from `a`'s
+    /// validation, instead of resolving a legacy flat group around it.
+    #[test]
+    fn a_marked_nested_legacy_block_is_refused_at_read_as_at_seal() {
+        let blocks = vec![
+            table("a/pairs_0000", None),
+            table("a/pairs_0001", Some((1, true))),
+        ];
+        let want = LogicalTableError::ForeignChild {
+            child: "a/pairs_0000".into(),
+        };
+        for got in [
+            table_group(&blocks, "a/pairs").map(drop),
+            seal(blocks).map(drop),
+        ] {
+            match got {
+                Err(Error::LogicalTable { name, reason }) => {
+                    assert_eq!((name.as_str(), &reason), ("a", &want))
+                }
+                other => panic!("expected node 'a' to be refused, got {other:?}"),
+            }
+        }
+        // A marked leaf named in full is exempt only when it is the whole group: an unmarked
+        // `pairs/0001_0000` next to it (an old binary's `commit --add-block`) would otherwise be
+        // read as its legacy continuation, while the seal refuses the node `pairs`.
+        let mut blocks = leaves(2);
+        blocks.push(table("pairs/0001_0000", None));
+        let want = LogicalTableError::ForeignChild {
+            child: "pairs/0001_0000".into(),
+        };
+        for got in [
+            table_group(&blocks, "pairs/0001").map(drop),
+            seal(blocks).map(drop),
+        ] {
+            match got {
+                Err(Error::LogicalTable { name, reason }) => {
+                    assert_eq!((name.as_str(), &reason), ("pairs", &want))
+                }
+                other => panic!("expected node 'pairs' to be refused, got {other:?}"),
+            }
         }
     }
 
