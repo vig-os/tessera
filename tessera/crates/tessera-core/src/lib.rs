@@ -178,6 +178,7 @@ mod tests {
             ],
             rows: 2_696_935,
             row_index: Some("ms".into()),
+            partition: None,
         };
         let events = TableBlock::new("events_3p", spec);
         let mut b = ProductBuilder::new(

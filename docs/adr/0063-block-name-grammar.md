@@ -166,8 +166,8 @@ This is internal to the staging directory, not the sealed format: no grammar, le
 
 ## Amended by ADR-0064 (2026-10-30) — a node of numbered, marked leaves is one logical table
 
-[ADR-0064](0064-logical-tables-over-numbered-leaves.md) (Proposed) gives one kind of node a meaning. §2 above
-says only that blocks are the leaves of the name tree; that stays true, and the leaf rule doesn't change.
+[ADR-0064](0064-logical-tables-over-numbered-leaves.md) (Accepted 2026-11-02) gives one kind of node a meaning.
+§2 above says only that blocks are the leaves of the name tree; that stays true, and the leaf rule doesn't change.
 Added:
 
 - **A partitioned table is a node.** From ADR-0064's writer switch (its PR D) on, a table of more than

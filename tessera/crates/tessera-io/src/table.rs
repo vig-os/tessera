@@ -1589,6 +1589,7 @@ pub fn decode_projected(spec: &TableSpec, blob: &[u8], names: &[&str]) -> Result
 ///     columns: vec![Column { name: "t".into(), dtype: "u8".into(), codec: None, ..Default::default() }],
 ///     rows: 3,
 ///     row_index: None,
+///     partition: None,
 /// };
 /// let data: TableData = vec![("t".into(), ColumnData::U64(vec![10, 20, 30]))];
 /// let idx = table_chunk_index(&spec, &data, "t").unwrap();
@@ -1721,6 +1722,7 @@ pub(crate) mod under_null_fixture {
             ],
             rows: rows as u64,
             row_index: Some("t".into()),
+            partition: None,
         }
     }
 
@@ -1826,6 +1828,7 @@ mod tests {
             columns: vec![col("x", "f8")],
             rows: 2,
             row_index: None,
+            partition: None,
         };
         let sealed = encode(&spec, &data).expect("encode");
 
@@ -1897,6 +1900,7 @@ mod tests {
                 columns: vec![col("x", "i8")],
                 rows: 3,
                 row_index: None,
+                partition: None,
             },
             &vec![("x".into(), ColumnData::I64(vec![i64::MIN, 0, i64::MAX]))],
         )
@@ -1981,6 +1985,7 @@ mod tests {
             columns,
             rows: rows as u64,
             row_index: None,
+            partition: None,
         };
         (spec, data)
     }
@@ -2001,6 +2006,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "i2").nullable()],
             rows: rows as u64,
             row_index: Some("t".into()),
+            partition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2056,6 +2062,7 @@ mod tests {
                 columns: vec![col("v", "f8").nullable()],
                 rows: rows as u64,
                 row_index: None,
+                partition: None,
             };
             let data: TableData = vec![(
                 "v".into(),
@@ -2093,6 +2100,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "f4")],
             rows: rows as u64,
             row_index: Some("t".into()),
+            partition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2120,11 +2128,13 @@ mod tests {
             columns: vec![col("v", dtype).nullable()],
             rows: 3,
             row_index: None,
+            partition: None,
         };
         let bare_spec = TableSpec {
             columns: vec![col("v", "i2")],
             rows: 3,
             row_index: None,
+            partition: None,
         };
         let nullable = |values: ColumnData, validity: Vec<bool>| ColumnData::Nullable {
             values: Box::new(values),
@@ -2206,6 +2216,7 @@ mod tests {
             columns: vec![col("v", "i4").nullable()],
             rows: rows as u64,
             row_index: None,
+            partition: None,
         };
         let validity: Vec<bool> = (0..rows).map(|k| k % 3 != 0).collect();
         let build = |filler: i32| -> TableData {
@@ -2592,6 +2603,7 @@ mod tests {
             columns: vec![col("k", "i8")],
             rows: 2,
             row_index: None,
+            partition: None,
         };
         let group: TableData = vec![(
             "k".into(),
@@ -2613,6 +2625,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "f4")],
             rows: rows as u64,
             row_index: Some("t".into()),
+            partition: None,
         };
         let full: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2651,6 +2664,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "f4")],
             rows: rows as u64,
             row_index: Some("t".into()),
+            partition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2680,6 +2694,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "f4")],
             rows: rows as u64,
             row_index: Some("t".into()),
+            partition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())), // monotonic → prunable
@@ -2747,6 +2762,7 @@ mod tests {
             columns: vec![col("k", "i1").nullable()],
             rows: vals.len() as u64,
             row_index: None,
+            partition: None,
         };
         table_chunk_index(&spec, &vec![("k".into(), nullable_i8(vals))], "k").unwrap()
     }
@@ -2809,6 +2825,7 @@ mod tests {
             columns: vec![col("k", "i1").nullable(), col("f", "f8").nullable()],
             rows: 3,
             row_index: None,
+            partition: None,
         };
         let data: TableData = vec![("k".into(), nullable_i8(&k)), ("f".into(), f)];
         let idx = table_chunk_index(&spec, &data, "k").unwrap();
@@ -2842,6 +2859,7 @@ mod tests {
             columns: vec![col("k", "i1").nullable(), col("s", "str").nullable()],
             rows: 3,
             row_index: None,
+            partition: None,
         };
         let data: TableData = vec![
             ("k".into(), nullable_i8(&[Some(1), None, Some(3)])),
@@ -2924,6 +2942,7 @@ mod tests {
             columns: vec![col("k", "u8").nullable()],
             rows: 3,
             row_index: None,
+            partition: None,
         };
         let idx = table_chunk_index(&spec, &vec![("k".into(), k)], "k").unwrap();
         let agg = idx.aggregate();
@@ -2995,6 +3014,7 @@ mod tests {
             columns: vec![Column::new("idx", "u4"), Column::new("en", "f4")],
             rows: 5,
             row_index: None,
+            partition: None,
         };
         let data: TableData = vec![
             ("idx".into(), ColumnData::U32((0..5u32).collect())),
@@ -3051,6 +3071,7 @@ mod tests {
             ],
             rows: n as u64,
             row_index: None,
+            partition: None,
         };
         let blob = encode(&spec, &data).unwrap();
         let whole = decode(&spec, &blob).unwrap();
@@ -3090,6 +3111,7 @@ mod tests {
             columns: vec![Column::new("flag", "b1"), Column::new("origin", "str")],
             rows: n as u64,
             row_index: None,
+            partition: None,
         };
         // Vortex round-trip (bit-packed bool + FSST/dict-chosen strings).
         let blob = encode(&spec, &data).unwrap();
@@ -3166,6 +3188,7 @@ mod tests {
             columns: vec![col("a", "f4"), col("b", "f8")],
             rows: 32,
             row_index: None,
+            partition: None,
         };
         let back = decode(&spec, &encode(&spec, &data).unwrap()).unwrap();
         let ColumnData::F32(ga) = &back[0].1 else {
@@ -3199,6 +3222,7 @@ mod tests {
             columns: vec![col("energy_ev", "f8")],
             rows: N as u64,
             row_index: None,
+            partition: None,
         };
         let encoded = encode(&spec, &data).unwrap();
         let raw = N * std::mem::size_of::<f64>();
@@ -3254,6 +3278,7 @@ mod tests {
             columns: vec![col("a", "f8"), col("b", "i8"), col("c", "u4")],
             rows: rows as u64,
             row_index: None,
+            partition: None,
         };
         let blob = encode(&spec, &data).unwrap();
         let grid = decode(&spec, &blob).unwrap(); // auto → grid (all numeric, over threshold)
@@ -3326,6 +3351,7 @@ mod tests {
                 columns: data.iter().map(|(n, c)| col(n, c.numpy_code())).collect(),
                 rows: rows as u64,
                 row_index: None,
+                partition: None,
             };
             let blob = encode(&spec, &data).unwrap();
             GRID_DECODES.with(|c| c.set(0));
@@ -3361,6 +3387,7 @@ mod tests {
                 columns: data.iter().map(|(n, c)| col(n, c.numpy_code())).collect(),
                 rows: rows as u64,
                 row_index: None,
+                partition: None,
             };
             (spec, data)
         };
@@ -3395,6 +3422,7 @@ mod tests {
             columns: data_m.iter().map(|(n, c)| col(n, c.numpy_code())).collect(),
             rows: big as u64,
             row_index: None,
+            partition: None,
         };
         let blob_m = encode(&spec_m, &data_m).unwrap();
         assert_eq!(
@@ -3432,6 +3460,7 @@ mod tests {
             columns: data.iter().map(|(n, c)| col(n, c.numpy_code())).collect(),
             rows: rows as u64,
             row_index: None,
+            partition: None,
         };
         let blob = encode(&spec, &data).unwrap();
         let best = |run: &dyn Fn()| -> f64 {
@@ -3509,6 +3538,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "f4")],
             rows: 4,
             row_index: None,
+            partition: None,
         };
         // wrong dtype for column 'e'
         let bad_dtype: TableData = vec![

@@ -130,6 +130,7 @@ impl CanonicalTable {
             // would be a semantic guess (ADR-0056 §1). An operator who knows better attaches it
             // with the metadata-edit path.
             row_index: None,
+            partition: None,
         })
     }
 

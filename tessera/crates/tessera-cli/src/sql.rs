@@ -246,6 +246,7 @@ mod tests {
             ],
             rows: 4,
             row_index: None,
+            partition: None,
         };
         let data: TableData = vec![
             ("ms".into(), ColumnData::U32(vec![10, 20, 30, 40])),
@@ -392,6 +393,7 @@ mod tests {
             columns: vec![Column::new("ms", "u4"), Column::new("en", "f4").nullable()],
             rows: 4,
             row_index: None,
+            partition: None,
         };
         let data: TableData = vec![
             ("ms".into(), ColumnData::U32(vec![10, 20, 30, 40])),
@@ -454,6 +456,7 @@ mod tests {
             columns: vec![Column::new("flag", "b1"), Column::new("origin", "str")],
             rows: 4,
             row_index: None,
+            partition: None,
         };
         let data: TableData = vec![
             (

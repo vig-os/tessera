@@ -142,6 +142,10 @@ pub struct TableSpec {
     /// Optional secondary index column enabling O(1)-ish random row `take`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_index: Option<String>,
+    /// Set on every leaf of a partitioned table (ADR-0064), never on a single block. Skipped when
+    /// `None`, so every single-block spec serializes byte for byte as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition: Option<super::Partition>,
 }
 
 pub struct TableBlock {

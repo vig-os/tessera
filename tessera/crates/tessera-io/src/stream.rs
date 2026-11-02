@@ -1247,6 +1247,7 @@ mod tests {
                 ],
                 rows,
                 row_index: Some("t".into()),
+                partition: None,
             }
         }
 
