@@ -1,6 +1,7 @@
 # ADR-0064 — Logical tables over numbered leaves: `<table>/NNNN`, a sealed partition marker, one logical reader
 
-**Status:** Proposed (2026-10-30). Records the owner's decision on
+**Status:** Accepted (2026-11-02), by the architect after a fresh review; proposed 2026-10-30. Implements the
+owner's decision on
 [#677](https://github.com/vig-os/tessera/issues/677) (comment of 2026-10-29: option **P-logical** of the
 [#681](https://github.com/vig-os/tessera/issues/681) design note, `docs/spikes/681-vortex-writer-backpressure.md`,
 merged in PR #692 at `b6de2d1`) and specifies it so that the implementation can be briefed from this ADR
@@ -154,8 +155,9 @@ legacy product serializes byte for byte as before.
 
    Adding a class (for example #719's write-time aggregation views as `pairs/<view>`) is an amendment of this ADR
    that adds a row, with a name pattern no canonical leaf can match (a canonical leaf segment is all digits). This
-   ADR doesn't assume a derived or canonical block class exists for it: #720, on how derived blocks relate to
-   `content_hash`, is open. The cost is stated: a reader older than the new row sees the new child as foreign and
+   ADR doesn't assume how #720 classifies derived blocks for identity (a `.cidx` spec already says
+   `"class": "derived"`, `tessera-io/src/chunk_index.rs:42`; whether such blocks belong in `content_hash` is #720's
+   open question). The cost is stated: a reader older than the new row sees the new child as foreign and
    refuses the logical name (`ForeignChild`), while every leaf stays readable by its full name. That is the safe
    failure, and the reason the list is closed rather than "anything not marked is ignored": an ignored child is
    how a user's `pairs/0003` would slip back in (nit 2).
@@ -584,8 +586,10 @@ the reader is serializing. With `ROWS_PER_GROUP` = 65 536 and `r_mem` = 24 B, `s
    - the correct writer holds at most the row-group it is serializing (1.5 MiB) plus its fixed bookkeeping, `≤ s`;
    - a writer that fills blocks in memory holds the `W` dispatched blocks and the full one waiting for a worker,
      `(W + 1) · A = 18 MiB`, which exceeds `s` by 11 MiB. It fails.
-2. **Ceiling.** `peak(n, W) ≤ min(W, n) · p_block + s` at `W = 2`, `n ∈ {4, 8}` and `W = 1`, `n ∈ {1, 4}`, with
-   `p_block` the peak of the `n = 1` write measured in the same binary (it depends on `P`, §8) and
+2. **Ceiling.** `peak(n, W) ≤ min(W, n) · p_block + s` at `W = 2`, `n ∈ {4, 8}` and `W = 1`, `n = 4`, with
+   `p_block` the peak of the `W = 1`, `n = 1` write measured in the same binary (it depends on `P`, §8). That run is
+   the **calibration** `p_block` is measured from, not a pass/fail point: it would compare `p_block` with itself and
+   could never fail. Every run uses
    `block_rows = 16 · ROWS_PER_GROUP` (`A = 1 048 576 × 24 B = 24 MiB`; 8 blocks are 8.4 M rows). The block size is
    chosen so that this part fails too. A writer that fills blocks in memory inflates its own `p_block` by one block,
    `A`, since it holds the block's arrays through the encode; at `n ≥ W + 1` its peak is
@@ -650,7 +654,7 @@ Ordered; each PR is one concern, at most ~400 diff lines, with the test that fai
 | C2 | #717 | Python `read_table*`/`column`/`table*` on logical names, `read_block` on a node (§7); `docs/book` bindings, `api_drift` | `tessera.open(p).table("pairs")` returns every row and `read_block("pairs")` is the typed error (both fail before); the bindings doc and `api_drift` pass |
 | D | #712 | Writers switch: `table::block_name` → `<table>/{idx:04}` + marker; GE whole-file and `TableMultiBlockSink` through it (and #538's lanes if landed); the §6 tests move; `feat(io)!` | a multi-block GE ingest and a `TableMultiBlockSink` product have leaves `events/0000…` with markers and pass the shared validation (fails before: `events_0000`); streamed and whole-file GE ingest seal equal block projections (per block `name`, `kind`, `digest`, `spec.rows`, `spec.row_index`, `spec.partition`, §6) and the same `content_hash`, and the `content_hash` equals the pre-switch writer's for the same rows; the comparison is shown failing once against a writer that misnames a leaf and once against one that drops the marker; the legacy fixture still reads |
 | E | #713 | `StreamWriter::push_table` (§5): per-block disk staging, dispatch on fill, names known from `spec.rows`, `peak_staged_input_*`; `table_job_streaming` refuses above `BLOCK_ROWS`, deprecated | the barrier test of §8 (`peak_staged_input_blocks == W + 1`, partial block counted); `push_table` seals a canonical manifest equal to `TableMultiBlockSink`'s (minus the §6 fields) and the same `content_hash` for `W ∈ {1, 2, 4}`, shown failing once against a `push_table` that misnames a leaf and once against one that drops the marker, including nullable columns; a table of ≤ `BLOCK_ROWS` rows is byte-identical to `table_job_streaming`'s |
-| F | #714 | The heap model in-tree (`tests/staged_job_memory.rs`), `push_table` rustdoc bound, the ADR-0026 *Known limit* replaced by §8 | the two parts of §8's in-tree test: held heap `≤ s` at `block_rows = 4 · ROWS_PER_GROUP`, `W = 2` (an in-memory fill holds 18 MiB against `s` = 7 MiB), and the ceiling `peak(n, W) ≤ min(W, n) · p_block + s` at `block_rows = 16 · ROWS_PER_GROUP`, `W = 2`, `n ∈ {4, 8}` and `W = 1`, `n ∈ {1, 4}` (an in-memory fill exceeds it by `A − s` = 17 MiB); both shown failing once against a `push_table` that fills blocks in memory |
+| F | #714 | The heap model in-tree (`tests/staged_job_memory.rs`), `push_table` rustdoc bound, the ADR-0026 *Known limit* replaced by §8 | the two parts of §8's in-tree test: held heap `≤ s` at `block_rows = 4 · ROWS_PER_GROUP`, `W = 2` (an in-memory fill holds 18 MiB against `s` = 7 MiB), and the ceiling `peak(n, W) ≤ min(W, n) · p_block + s` at `block_rows = 16 · ROWS_PER_GROUP`, `W = 2`, `n ∈ {4, 8}` and `W = 1`, `n = 4`, `p_block` calibrated from the `W = 1`, `n = 1` run, which is not a pass/fail point (an in-memory fill exceeds it by `A − s` = 17 MiB); both shown failing once against a `push_table` that fills blocks in memory |
 | G | #715 | The ksb RSS proof (§8.1): job flake and sampler script, results recorded in ADR-0026 and FEATURE-MATRIX | all six §8.1 criteria pass on ksb; the job exits non-zero on any failed criterion or a tmpfs staging dir |
 | H | #716 | Tell the consumer: a #677 comment and a MorePET/visionx-rs issue with the `push_table` switch, the new leaf names, the logical read APIs and the release carrying them; #677 closes after G and H | the visionx-rs issue is linked from #677 and names the tessera release |
 
