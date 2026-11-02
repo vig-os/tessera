@@ -412,7 +412,8 @@ every reader below and by the seal (§2.4), so a product the seal accepts is one
     `events/NNNN`, which `block_group` doesn't match, so it moves with PR D to `table_group` (it is in the list
     above);
   - `tessera-io/tests/block_names.rs:415` (an old-style pyramid's `volume` is a single block): migrated to
-    `table_group`, asserting `Single`.
+    `table_group`, asserting `Single`. *Erratum (#710, 2026-11-02):* that `volume` is an **array** block, so §3
+    resolves it to `NotATable { kind: "array" }` (`Single` is a table block), and the migrated test asserts that.
 
   These stay, as legacy-reader tests: `tessera-io/src/container.rs:1877-1916` (`block_group` over `events_NNNN`)
   and `tessera-core/src/block/name.rs:357` (grammar test names). PR B adds a committed legacy fixture written by
