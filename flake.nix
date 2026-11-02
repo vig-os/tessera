@@ -962,6 +962,13 @@
             AWS_ACCESS_KEY_ID = "tessera-test-access";
             AWS_SECRET_ACCESS_KEY = "tessera-test-secret";
             AWS_REGION = "us-east-1";
+            # Vacuous-pass guard (#707): every S3 test skips (and nextest reports PASS) when
+            # `TESSERA_S3_ENDPOINT` is unset, which is right for a plain `cargo test` without a
+            # server and wrong here. This marker tells the tests a server was promised, so a lost
+            # endpoint export panics them instead (contract: `s3_endpoint` in tessera-io's
+            # `cloud::tests`). It is a static attribute, not a `preCheck` export, so the same edit
+            # that breaks the endpoint export cannot take the marker down with it.
+            TESSERA_S3_REQUIRED = "1";
             # object_store/aws is reqwest-backed; reqwest's client builder loads the system CA trust
             # store even for a plain-http (allow_http) loopback target, and the hermetic sandbox has
             # none → "No CA certificates were loaded". Point it at the nixpkgs CA bundle.
@@ -972,6 +979,12 @@
               vgw_log=$TMPDIR/versitygw.log
               mkdir -p $TMPDIR/s3/data $TMPDIR/s3/meta
 
+              # python3 is here only for this kernel-assigned free port. versitygw cannot replace
+              # it: bound on `127.0.0.1:0` it reports "port 0" rather than the port it got
+              # (v1.3.1), so reading the port back means matching its socket inode in
+              # `/proc/net/tcp`, which is Linux-only, and this check is evaluated on Darwin too.
+              # A port drawn at random in shell would collide with a port in use, where this one
+              # was free when picked. The remaining pick-then-bind window is caught below.
               vgw_port=$(${pkgs.python3}/bin/python3 -c \
                 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
               export TESSERA_S3_ENDPOINT=http://127.0.0.1:$vgw_port
