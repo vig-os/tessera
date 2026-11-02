@@ -402,6 +402,9 @@ fn validate_node(blocks: &[BlockRef], node: &str) -> Result<Vec<BlockName>> {
 /// names and dtypes, in order, or the name is refused with [`LogicalTableError::SchemaMismatch`].
 /// The validation of a partitioned node already applies it; readers apply it to every group, the
 /// legacy flat form included, through this one function. Reads the manifest only.
+///
+/// `group` must come from [`table_group`] over the same `blocks`. A group naming a block that
+/// `blocks` lacks (resolved over another manifest) is [`LogicalTableError::NotFound`].
 pub fn group_specs(blocks: &[BlockRef], name: &str, group: &TableGroup) -> Result<Vec<TableSpec>> {
     let by_name: std::collections::HashMap<&str, &BlockRef> =
         blocks.iter().map(|b| (b.name.as_str(), b)).collect();
@@ -409,6 +412,9 @@ pub fn group_specs(blocks: &[BlockRef], name: &str, group: &TableGroup) -> Resul
         .blocks()
         .iter()
         .map(|n| {
+            // Unreachable for a `group` that `table_group` resolved over these same `blocks`: every
+            // name it returns is one of them. Only a group from another manifest misses, and that
+            // is the caller's error, reported as a typed `NotFound` rather than a panic.
             by_name
                 .get(n.as_str())
                 .copied()
