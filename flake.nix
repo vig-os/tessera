@@ -141,7 +141,9 @@
         # an adapter or the driver neither rebuilds this nor touches the crane `src` hash.
         # LINUX ONLY: common.py uses CDLL('libc.so.6'), mincore(2) and posix_fadvise, none of which
         # exist on Darwin, and `eachDefaultSystem` evaluates the darwin systems too.
-        linuxOnlyChecks = pkgs.lib.optionalAttrs isLinux {
+        # The set is defined on every system so its NAMES are known everywhere (the check list
+        # assertion in the `checks` wrapper needs them on Darwin); `linuxOnlyChecks` gates it.
+        linuxOnlyCheckSet = {
           bench-ecosystems =
             let
               benchSrc = builtins.path {
@@ -165,6 +167,7 @@
               touch $out
             '';
         };
+        linuxOnlyChecks = pkgs.lib.optionalAttrs isLinux linuxOnlyCheckSet;
 
         # Every feature declared anywhere in the workspace **except `static-hdf5`** (ADR-0057 §4), in
         # cargo's `package/feature` form so one invocation from the virtual-manifest root covers all
@@ -1251,6 +1254,16 @@
             touch $out
           '';
 
+          # The CI summary of a `nix flake check` leg (nix-check.yml) counts per-check verdicts and
+          # holds the evaluated set of checks to .github/nix-flake-checks.txt by name (#722). Its
+          # self-test stubs `nix`, so an empty, short, extra or substring-named set, a failed
+          # evaluation and a summary that disagrees with nix are each proven to fail the leg.
+          nix-check-summary = pkgs.runCommand "nix-check-summary"
+            { nativeBuildInputs = [ pkgs.jq ]; } ''
+            bash ${./scripts/nix-check-summary.sh} --self-test
+            touch $out
+          '';
+
           # The dev shell itself must build (toolbelt + toolchain resolve).
           dev-shell = self.devShells.${system}.default;
         } // linuxOnlyChecks;
@@ -1265,6 +1278,16 @@
           danglingLibs = pkgs.lib.concatLists (pkgs.lib.mapAttrsToList
             (lib: users: map (u: "${lib} -> ${u}") (builtins.filter (u: !(builtins.elem u entryPoints)) users))
             scriptLibraries);
+          # The checks must be exactly the ones listed in .github/nix-flake-checks.txt (#722), the
+          # list CI's summary holds the evaluated set to. That list is of the Linux CI systems, so
+          # elsewhere the Linux-only checks are dropped from it. Names only: no derivation is forced.
+          # Its `count:` line is checked by scripts/nix-check-summary.sh, the list's parser in CI.
+          listedChecks = builtins.filter
+            (l: l != "" && !(pkgs.lib.hasPrefix "#" l) && !(pkgs.lib.hasPrefix "count:" l))
+            (pkgs.lib.splitString "\n" (builtins.readFile ./.github/nix-flake-checks.txt));
+          expectedChecks = builtins.filter (c: isLinux || !(linuxOnlyCheckSet ? ${c})) listedChecks;
+          unlisted = builtins.filter (c: !(builtins.elem c expectedChecks)) (builtins.attrNames allChecks);
+          undefined = builtins.filter (c: !(allChecks ? ${c})) expectedChecks;
         in
           if dupes != [ ] then throw ''
             flake checks share derivation names: ${builtins.concatStringsSep ", " dupes}
@@ -1280,6 +1303,13 @@
             scriptLibraries names entry points that are in neither scriptsRunByChecks nor
             scriptsNotRunInCi: ${builtins.concatStringsSep ", " danglingLibs}
             A library is only accounted for if what imports it is (#520).
+          ''
+          else if unlisted != [ ] || undefined != [ ] then throw ''
+            the flake's checks differ from .github/nix-flake-checks.txt (#722):
+            not listed: ${builtins.concatStringsSep ", " unlisted}
+            listed but not defined: ${builtins.concatStringsSep ", " undefined}
+            CI's summary fails a leg whose checks differ from that list. Edit the list (names and
+            `count:`) together with the check.
           ''
           else allChecks;
 
