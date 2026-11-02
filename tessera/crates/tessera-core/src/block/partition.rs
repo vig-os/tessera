@@ -334,7 +334,9 @@ fn validate_node(blocks: &[BlockRef], node: &str) -> Result<Vec<BlockName>> {
             }
             continue;
         };
-        let expected = leaf_name(node, p.index)?;
+        // The canonical name as a string, not through `leaf_name`: a forged index can make it too
+        // long for the grammar, and that leaf is just as non-canonical as `pairs/00003` (#733).
+        let expected = format!("{node}/{}", leaf_segment(p.index));
         if b.kind != BlockKind::Table {
             return Err(fail(LogicalTableError::ForeignChild {
                 child: b.name.to_string(),
@@ -343,7 +345,7 @@ fn validate_node(blocks: &[BlockRef], node: &str) -> Result<Vec<BlockName>> {
         if b.name != expected {
             return Err(fail(LogicalTableError::NonCanonicalLeaf {
                 leaf: b.name.to_string(),
-                expected: expected.into(),
+                expected,
             }));
         }
         if let Some((pb, pp)) = prev {
@@ -823,6 +825,22 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// #733: a forged index whose canonical name would break the 255-byte limit is a leaf not
+    /// named for its index, so `NonCanonicalLeaf`, not a bare block-name error.
+    #[test]
+    fn a_forged_index_past_the_name_limit_is_non_canonical() {
+        let node = "t".repeat(240);
+        let leaf = format!("{node}/0001");
+        let blocks = vec![
+            table(&format!("{node}/0000"), Some((0, false))),
+            table(&leaf, Some((u64::MAX, true))),
+        ];
+        let expected = format!("{node}/{}", u64::MAX);
+        let want = LogicalTableError::NonCanonicalLeaf { leaf, expected };
+        assert_eq!(reason(&blocks, &node), want);
+        assert!(matches!(seal(blocks), Err(Error::LogicalTable { reason, .. }) if reason == want));
     }
 
     #[test]
