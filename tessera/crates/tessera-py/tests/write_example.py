@@ -1,6 +1,9 @@
 """The **write** path, as a runnable example the book includes verbatim (#389).
 
-Run as: python3 write_example.py
+Run as: python3 write_example.py <partitioned_pairs.tsra>
+
+The argument is the committed partitioned-table fixture (`tests/fixtures/`), which the `logical` region reads:
+the Python `Builder` writes one block per table, so it can't make one.
 
 The audit's complaint was that the Python bindings advertise "read/verify/**write**" while no
 documentation ever showed the write half. So this file is the documentation: `docs/book/src/bindings.md`
@@ -12,6 +15,8 @@ than a stale snippet.
 """
 
 import pathlib
+import shutil
+import sys
 import tempfile
 
 import numpy as np
@@ -169,6 +174,28 @@ events.table_dict("events")  # -> {column: np.ndarray}
 events.column("events", "ms")  # one column, as np.ndarray
 # ANCHOR_END: read
 # ---------------------------------------------------------------------------
+
+shutil.copy(sys.argv[1], out_dir / "pairs.tsra")
+
+# ---------------------------------------------------------------------------
+# ANCHOR: logical
+# A table is read by its logical name. This `pairs` is partitioned (ADR-0064): its blocks are the
+# leaves pairs/0000, pairs/0001 and pairs/0002, and every table read joins them in leaf order.
+p = tessera.open(out_dir / "pairs.tsra")
+p.block_names()  # ["pairs/0000", "pairs/0001", "pairs/0002"]
+pairs = p.table("pairs")  # all 8 rows, in leaf order
+i = p.column("pairs", "i")  # array([0, 1, 2, 3, 4, 5, 6, 7])
+leaf = p.table("pairs/0001")  # one leaf, by its full name
+try:
+    p.read_block("pairs")  # read_block takes one block, and `pairs` is a node
+except tessera.NotABlockError:  # a subclass of TesseraError
+    pass
+# ANCHOR_END: logical
+# ---------------------------------------------------------------------------
+
+assert p.block_names() == ["pairs/0000", "pairs/0001", "pairs/0002"]
+assert pairs.height == 8 and i.tolist() == list(range(8))
+assert leaf["i"].to_list() == [3, 4, 5]
 
 assert vol.shape == (4, 8, 8) and roi.shape == (2, 4, 4)
 assert np.array_equal(roi, volume[0:2, 0:4, 0:4]), (

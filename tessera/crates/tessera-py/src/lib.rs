@@ -24,6 +24,16 @@ create_exception!(
     "Raised on any Tessera format / integrity error (bad magic, broken seal, digest mismatch)."
 );
 
+create_exception!(
+    tessera,
+    NotABlockError,
+    TesseraError,
+    "Raised when a name passed where one block is expected (`read_block`, `array`, `array_roi`) is \
+     not a block of the archive: a node such as a partitioned table `pairs` (ADR-0064), whose \
+     leaves `pairs/0000`, `pairs/0001`, ... are the blocks, or a name nothing answers to. A \
+     subclass of `TesseraError`."
+);
+
 fn err<E: std::fmt::Display>(e: E) -> PyErr {
     TesseraError::new_err(e.to_string())
 }
@@ -67,8 +77,11 @@ impl Reader {
         self.inner.block_names()
     }
 
-    /// The raw encoded bytes of block `name` (digest-verified on read).
+    /// The raw encoded bytes of block `name` (digest-verified on read). `name` is one block: a
+    /// partitioned table's node (`pairs`) raises `NotABlockError`; its leaves (`pairs/0000`, …) are
+    /// the blocks.
     fn read_block<'py>(&mut self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyBytes>> {
+        self.blockref(name)?;
         let bytes = self.inner.read_block(name).map_err(err)?;
         Ok(PyBytes::new(py, &bytes))
     }
@@ -111,17 +124,36 @@ impl Reader {
         ))
     }
 
-    /// Decode a **table** block to an ordered list of `(column_name, le_bytes, numpy_code)`.
+    /// Decode the **table** `name` to an ordered list of `(column_name, le_bytes, numpy_code)`.
     /// Reconstruct each column with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
+    ///
+    /// `name` is a logical table name, resolved as every reader resolves it (ADR-0064): one block, a
+    /// partitioned table (`pairs` over `pairs/0000`, `pairs/0001`, …, concatenated in leaf order), or
+    /// a legacy `events_NNNN` group. One leaf can still be read by its full name. A name that is not
+    /// a table, or a partitioned table that is invalid, raises `TesseraError`. The whole table is
+    /// materialised: each block is decoded once and appended.
     fn read_table<'py>(
         &mut self,
         py: Python<'py>,
         name: &str,
     ) -> PyResult<Vec<(String, Bound<'py, PyBytes>, String)>> {
-        let spec = self.table_spec(name)?;
-        let blob = self.inner.read_block(name).map_err(err)?;
-        let data = tessera_io::table::decode(&spec, &blob).map_err(err)?;
+        let view = self.inner.logical_table(name).map_err(err)?;
+        let mut data: Option<TableData> = None;
+        for block in view.block_names() {
+            let spec = self.table_spec(block)?;
+            let blob = self.inner.read_block(block).map_err(err)?;
+            let part = tessera_io::table::decode(&spec, &blob).map_err(err)?;
+            match data.as_mut() {
+                None => data = Some(part),
+                Some(acc) => {
+                    for ((_, col), (_, more)) in acc.iter_mut().zip(&part) {
+                        col.extend(more).map_err(err)?;
+                    }
+                }
+            }
+        }
         Ok(data
+            .unwrap_or_default()
             .iter()
             .map(|(n, c)| {
                 (
@@ -133,29 +165,27 @@ impl Reader {
             .collect())
     }
 
-    /// Decode a **single column** `column` of table block `name` via Vortex projection — reads only
-    /// that column's segments, not the whole table. Returns `(le_bytes, numpy_code)`; reconstruct
-    /// with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
+    /// Decode a **single column** `column` of the table `name` via Vortex projection — reads only
+    /// that column's segments, not the whole table. `name` resolves as in [`Self::read_table`]: a
+    /// partitioned table's column is every leaf's, concatenated in leaf order. Returns
+    /// `(le_bytes, numpy_code)`; reconstruct with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
     fn read_table_column<'py>(
         &mut self,
         py: Python<'py>,
         name: &str,
         column: &str,
     ) -> PyResult<(Bound<'py, PyBytes>, String)> {
-        let spec = self.table_spec(name)?;
-        let blob = self.inner.read_block(name).map_err(err)?;
-        let c = tessera_io::table::decode_column(&spec, &blob, column).map_err(err)?;
+        let view = self.inner.logical_table(name).map_err(err)?;
+        let c = view.column(&mut self.inner, column).map_err(err)?;
         Ok((
             PyBytes::new(py, &c.to_le_bytes()),
             c.numpy_code().to_string(),
         ))
     }
 
-    /// Decode a **single column** of the *logical* multi-block table named by `prefix`
-    /// (`events` / `events_NNNN`) — the same surface as [`Self::read_table_column`] but spanning
-    /// every block in manifest order. Each per-block read uses Vortex column projection (only the
-    /// requested column's segments), then the per-block columns are concatenated. Returns
-    /// `(le_bytes, numpy_code)`; reconstruct with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
+    /// The same read as [`Self::read_table_column`], which resolves logical table names too (a
+    /// partitioned `pairs` over `pairs/0000`, …, or a legacy `events` over `events_NNNN`); kept so
+    /// existing callers keep working. Returns `(le_bytes, numpy_code)`.
     fn read_logical_table_column<'py>(
         &mut self,
         py: Python<'py>,
@@ -198,7 +228,29 @@ impl Reader {
             .blocks
             .iter()
             .find(|b| b.name == name)
-            .ok_or_else(|| TesseraError::new_err(format!("no block named '{name}'")))
+            .ok_or_else(|| self.not_a_block(name))
+    }
+
+    /// The `NotABlockError` for a `name` that is not a block: a node (a proper `/`-prefix of a
+    /// block name, such as a partitioned table) or a name nothing answers to.
+    fn not_a_block(&self, name: &str) -> PyErr {
+        let node = format!("{name}/");
+        let under = self
+            .inner
+            .manifest()
+            .blocks
+            .iter()
+            .filter(|b| b.name.as_str().starts_with(&node))
+            .count();
+        NotABlockError::new_err(if under > 0 {
+            format!(
+                "'{name}' is not a block: it is a node over {under} block(s) under '{node}' (a \
+                 partitioned table reads by its name through table() / column(), one block by its \
+                 full name)"
+            )
+        } else {
+            format!("'{name}' is not a block: no block named '{name}'")
+        })
     }
 
     fn array_spec(&self, name: &str) -> PyResult<ArraySpec> {
@@ -769,6 +821,7 @@ fn verify(path: PathBuf) -> PyResult<()> {
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("TesseraError", m.py().get_type::<TesseraError>())?;
+    m.add("NotABlockError", m.py().get_type::<NotABlockError>())?;
     m.add_class::<Reader>()?;
     m.add_class::<Builder>()?;
     m.add_function(wrap_pyfunction!(open, m)?)?;

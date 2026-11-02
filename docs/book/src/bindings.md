@@ -14,6 +14,19 @@ for an ROI / `table` → polars / `table_arrow` / `table_dict` / `column` / `ver
 (`add_array` / `add_table` / `set_field` / `add_source`, whose `content_hash=` pins the parent's seal /
 `with_producer` / `with_generation` / `pack`), with a typed `TesseraError`.
 
+Tables are read by their **logical name** (ADR-0064). `table`, `table_arrow`, `table_dict` and `column` take a
+name that is one block, a partitioned table (`pairs` over the leaves `pairs/0000`, `pairs/0001`, …, joined in
+leaf order) or a legacy `events_NNNN` group, the same name `tessera read` takes; one leaf still reads by its full
+name. `logical_column` is the same read as `column`, kept for existing callers. A partitioned table is
+materialised whole by `table*`; `column` reads only that column's segments of each leaf. `read_block`, `array`
+and `array_roi` take one block, and a name that is not one (a node such as `pairs`, or a name nothing answers
+to) raises `NotABlockError`, a subclass of `TesseraError`. A name that is not a table, or a partitioned table
+that is invalid (a gap, a foreign child, leaves out of order, ...), raises `TesseraError` naming the reason.
+
+```python
+{{#include ../../../tessera/crates/tessera-py/tests/write_example.py:logical}}
+```
+
 Reading:
 
 ```python
