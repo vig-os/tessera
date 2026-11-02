@@ -1,5 +1,5 @@
     `-- zarrs v0.23.13 (*)
-`-- parquet v58.3.0 (*)
+`-- parquet v58.4.1 (*)
 `-- zstd feature "zstdmt"
 zstd v0.13.3
 |               `-- tessera-io vWORKSPACE (*)
@@ -424,11 +424,11 @@ zstd v0.13.3
 |   |   |-- arrow v58.3.0
 |   |   |-- datafusion-common v54.0.0 (*)
 |   |   |-- datafusion-datasource-arrow v54.0.0 (*)
-|   |   |-- parquet v58.3.0
+|   |   |-- parquet v58.4.1
 |   |-- arrow-ipc feature "default"
 |   |-- arrow-ipc feature "lz4"
 |   |-- arrow-ipc feature "lz4_flex"
-|-- arrow-ipc v58.3.0
+|-- arrow-ipc v58.4.1
 |-- zstd feature "arrays"
 |-- zstd feature "default" (*)
 |-- zstd feature "experimental"

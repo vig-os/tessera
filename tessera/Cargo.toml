@@ -79,18 +79,21 @@ hdf5-metno-sys = "0.12"
 # determinism gate and treats a decoder bump as a *deliberate corpus event*; a `^` range would let one
 # happen on an unrelated `cargo update`, which is the same discipline as the ALP-exclusion pin.
 #
-# 58.3.0 is the version Vortex already resolves, so `arrow-array` / `-buffer` / `-schema` are ALREADY
-# in the default graph (Gate B snapshots all three) and these pins add no second arrow copy.
+# Vortex 0.75 asks for `^58.3` and resolves to these same versions, so `arrow-array` / `-buffer` /
+# `-schema` are ALREADY in the default graph (Gate B snapshots all three) and these pins add no second
+# arrow copy. The floor is 58.4.1 because that is the first parquet on `thrift` 0.23, which fixes
+# RUSTSEC-2026-0435 (unbounded allocation in thrift's binary-protocol `read_bytes`, #736); arrow and
+# parquet release in lockstep, so the arrow pins move with it.
 #
 # Deliberately NOT the `arrow` meta-crate that ADR-0056 §12 sketched: it reaches this tree only via
 # datafusion, under tessera-cli's optional `sql` feature. Depending on it would newly pull
 # arrow-cast / -ord / -string / -row / -json into *every* build — including the
 # `arrow-array/chrono-tz` surface ADR-0057 §5's probe identified as hazard H1's door. The sub-crates
 # are the whole decode surface we need and nothing more.
-arrow-array = "=58.3.0"
-arrow-buffer = "=58.3.0"
-arrow-schema = "=58.3.0"
-arrow-ipc = "=58.3.0"          # Arrow IPC / Feather source files (`--from arrow`)
+arrow-array = "=58.4.1"
+arrow-buffer = "=58.4.1"
+arrow-schema = "=58.4.1"
+arrow-ipc = "=58.4.1"          # Arrow IPC / Feather source files (`--from arrow`)
 # parquet = arrow-rs's reader. Defaults minus `simdutf8` (ADR-0056 §5 H7 — SIMD-dispatched decode
 # paths): UTF-8 *validation* is a yes/no answer that cannot change a value, so dropping it costs
 # nothing and removes one dispatch-dependent path from upstream of the seal.
@@ -100,7 +103,7 @@ arrow-ipc = "=58.3.0"          # Arrow IPC / Feather source files (`--from arrow
 # safety property: the source's compression never reaches our bytes, because ingest is a logical
 # re-encode through Vortex (ADR-0056 §2). `snap` + `brotli` + `zlib-rs` are the only genuinely new
 # crates; flate2 / lz4_flex / zstd are already in-tree.
-parquet = { version = "=58.3.0", default-features = false, features = [
+parquet = { version = "=58.4.1", default-features = false, features = [
     "arrow",
     "snap",
     "brotli",

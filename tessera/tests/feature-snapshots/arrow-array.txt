@@ -1,6 +1,6 @@
     `-- vortex-array v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
 `-- arrow-array feature "ffi"
-arrow-array v58.3.0
+arrow-array v58.4.1
 |       `-- datafusion-sql v54.0.0 (*)
 |       |               `-- datafusion v54.0.0 (*)
 |       |           `-- datafusion-functions-table feature "default"
@@ -365,7 +365,7 @@ arrow-array v58.3.0
 |   |       |-- arrow v58.3.0 (*)
 |   |       |-- arrow-cast v58.3.0 (*)
 |   |       |-- arrow-cast v58.3.0 (*)
-|   |       |-- arrow-ipc v58.3.0 (*)
+|   |       |-- arrow-ipc v58.4.1 (*)
 |   |       |-- arrow-json v58.3.0 (*)
 |   |       |-- arrow-json v58.3.0 (*)
 |   |       |-- arrow-ord v58.3.0 (*)
@@ -396,7 +396,7 @@ arrow-array v58.3.0
 |   |       |-- datafusion-physical-optimizer v54.0.0 (*)
 |   |       |-- datafusion-physical-plan v54.0.0 (*)
 |   |       |-- datafusion-pruning v54.0.0 (*)
-|   |       |-- parquet v58.3.0 (*)
+|   |       |-- parquet v58.4.1 (*)
 |   |   `-- arrow feature "prettyprint"
 |   |   `-- arrow-arith feature "default"
 |   |   `-- arrow-cast feature "prettyprint" (*)
@@ -504,7 +504,7 @@ arrow-array v58.3.0
 |   |   |   |-- arrow-json v58.3.0
 |   |   |   |-- datafusion-common v54.0.0 (*)
 |   |   |   |-- datafusion-datasource-arrow v54.0.0 (*)
-|   |   |   |-- parquet v58.3.0
+|   |   |   |-- parquet v58.4.1
 |   |   |-- arrow feature "arrow-csv"
 |   |   |-- arrow feature "arrow-ipc"
 |   |   |-- arrow feature "arrow-json"
@@ -524,13 +524,13 @@ arrow-array v58.3.0
 |   |-- arrow-arith v58.3.0
 |   |-- arrow-cast v58.3.0
 |   |-- arrow-csv v58.3.0 (*)
-|   |-- arrow-ipc v58.3.0
+|   |-- arrow-ipc v58.4.1
 |   |-- arrow-json v58.3.0 (*)
 |   |-- arrow-ord v58.3.0
 |   |-- arrow-row v58.3.0
-|   |-- arrow-select v58.3.0
+|   |-- arrow-select v58.4.1
 |   |-- arrow-string v58.3.0 (*)
-|   |-- parquet v58.3.0 (*)
+|   |-- parquet v58.4.1 (*)
 |   |-- tessera-cli vWORKSPACE (*)
 |   |-- tessera-ingest vWORKSPACE (*)
 |   |-- vortex-array v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)

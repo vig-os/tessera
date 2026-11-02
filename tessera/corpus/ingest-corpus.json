@@ -20,11 +20,11 @@
       ],
       "id": "blake3:330301c04c9a5aa6b15cd2182eeb345d2fa6fbdb98bec83d6920886c5b4bebd8",
       "content_hash": "blake3:64a62f5ef418a93686b7451183bb8fd9905c3e97a739d9e0be1f20fa9fd47e13",
-      "manifest_hash": "blake3:b373a41003a92b74a0dbee48fe038819ce1f6ca374f5308dc8d42094af767732",
+      "manifest_hash": "blake3:3d3713717ec69da1452c23e452f88848df9c3a384701115ac3996178182ca8a8",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
-        "version": "=58.3.0",
-        "features": "blake3:ea756bfa8d6d226b0a26f673e126f703a6eaff1c1a4325d0bad347afd389e196"
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
       }
     },
     {
@@ -38,11 +38,11 @@
       ],
       "id": "blake3:ba441f393dcdcb0c1bdcb05f33da5bcc6391573085e405e805b7890659993793",
       "content_hash": "blake3:e293af0a25773f122a6359dd63f25fd88377a80476cf46a7178ad48e509977e3",
-      "manifest_hash": "blake3:6972c016b00afd3607a5796cb9f60cd33e505aeb4c751d061f2fce44953d13fb",
+      "manifest_hash": "blake3:798255430ff5ce56417c30d7fbc78037aa7ddc57ed3c4560a095d80e2e5e6c35",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
-        "version": "=58.3.0",
-        "features": "blake3:ea756bfa8d6d226b0a26f673e126f703a6eaff1c1a4325d0bad347afd389e196"
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
       }
     },
     {
@@ -56,11 +56,11 @@
       ],
       "id": "blake3:c39298c514aefd0fd55bc60baf9a214ff4aebbcd7f7ef2108128d51323462619",
       "content_hash": "blake3:33b065510f5ed496113e700521aa9e10340b758011a5e04d458589d36240b948",
-      "manifest_hash": "blake3:def350acc53b8c1a19a03e4d7480747dec52f894b92b8a1610e73afcb5356731",
+      "manifest_hash": "blake3:225f9ebad5ccdb371e93d0fa234b8d961e521ac1b28bb84fdfedaabcf50bde08",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
-        "version": "=58.3.0",
-        "features": "blake3:ea756bfa8d6d226b0a26f673e126f703a6eaff1c1a4325d0bad347afd389e196"
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
       }
     },
     {
@@ -74,11 +74,11 @@
       ],
       "id": "blake3:4ff4ec8479944f7950add265f86237a240235bdd9865b06cd5d97b019b5b301a",
       "content_hash": "blake3:eec3ef309b2cec055b6cae5930c950d47eede7d44f723e9034eb51105da9ed3b",
-      "manifest_hash": "blake3:3e5181c749f80137e7452a467a348a47d71683eeda13e1f475df0a6ebd0ae92b",
+      "manifest_hash": "blake3:eb96a75308d31e442a8baae6549b9615a028bed94921f9336e69a34c71f86607",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
-        "version": "=58.3.0",
-        "features": "blake3:ea756bfa8d6d226b0a26f673e126f703a6eaff1c1a4325d0bad347afd389e196"
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
       }
     },
     {
@@ -92,11 +92,11 @@
       ],
       "id": "blake3:573329727757b9457e69e544f045718fd9282c186f0123499d73bc029499d66b",
       "content_hash": "blake3:eec3ef309b2cec055b6cae5930c950d47eede7d44f723e9034eb51105da9ed3b",
-      "manifest_hash": "blake3:b3be3b772485966f9ce48c798b3ed1316f171e406fc27762bdb966a0342e8231",
+      "manifest_hash": "blake3:52d8cf95f0e2955c5694f6f159e17ddd495abdd46f19bce54d467c8b16402cef",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
-        "version": "=58.3.0",
-        "features": "blake3:ea756bfa8d6d226b0a26f673e126f703a6eaff1c1a4325d0bad347afd389e196"
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
       }
     },
     {
@@ -110,11 +110,11 @@
       ],
       "id": "blake3:b013dc4f302e78ad8ab37b64f4c9e703e055de21a03f7f566b3859d61dadd878",
       "content_hash": "blake3:eec3ef309b2cec055b6cae5930c950d47eede7d44f723e9034eb51105da9ed3b",
-      "manifest_hash": "blake3:7d5657612d4fbc5214a990f982381d93c8f6f83827ce5e503de191261699a8fd",
+      "manifest_hash": "blake3:b3e22ebe140cdc41254acd950ed96012a2d903d9ee6d878f003ffc4b678b46f6",
       "ingest_decoder": {
         "name": "arrow-rs/parquet",
-        "version": "=58.3.0",
-        "features": "blake3:ea756bfa8d6d226b0a26f673e126f703a6eaff1c1a4325d0bad347afd389e196"
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
       }
     },
     {
@@ -128,11 +128,11 @@
       ],
       "id": "blake3:27bf5606aea01b68d666efbb052da69bd22e0b5af659be9a275ec6d13785064d",
       "content_hash": "blake3:eec3ef309b2cec055b6cae5930c950d47eede7d44f723e9034eb51105da9ed3b",
-      "manifest_hash": "blake3:5834b725187f3cda721c685f6f1afe63dd369a6397e305cce6870b2b02e56f1b",
+      "manifest_hash": "blake3:7bf63ab3f478284a7fcf7eb8f53040b58349fca23c18e1fd3d727b9852a60e7f",
       "ingest_decoder": {
         "name": "arrow-rs/arrow-ipc",
-        "version": "=58.3.0",
-        "features": "blake3:bdde66f3a5645d1ba1e4064c081640d613ebda7a265df6d1505727c2c19e91ac"
+        "version": "=58.4.1",
+        "features": "blake3:d1adf7f16db31fff51504384aff1cddb8a563e40fbb6b301c57fb5e30e27ee1e"
       }
     },
     {

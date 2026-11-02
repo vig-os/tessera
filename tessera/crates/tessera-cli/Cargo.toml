@@ -52,7 +52,7 @@ arrow-schema.workspace = true
 
 # `sql` feature (#251): `tessera sql <FILE> "<QUERY>"` runs DataFusion in-process over a table
 # block's Arrow projection. DataFusion 54 pins `arrow ^58` — the SAME major the workspace already
-# resolves through Vortex 0.75 (arrow-array 58.3.0), so cargo unifies into one arrow tree. Two
+# resolves through Vortex 0.75 (arrow-array 58.4.1), so cargo unifies into one arrow tree. Two
 # arrow majors in one graph would fail to link (`RecordBatch` has the same name but incompatible
 # reprs). Both deps are `optional`, so a default `cargo build -p tessera-cli` does NOT pull them.
 datafusion = { version = "54", default-features = false, features = ["sql", "recursive_protection"], optional = true }
@@ -84,7 +84,7 @@ sql = ["dep:datafusion", "dep:tokio", "dep:arrow"]
 #
 # Note the name collision that is NOT one: this crate also has an optional `arrow` *dependency* for
 # the `sql` surface. `tessera-cli/arrow` below is a feature that forwards to the ingest lane; they
-# resolve to the same single arrow 58.3.0 tree, which is why two arrow majors can never co-exist here.
+# resolve to the same single arrow 58 tree, which is why two arrow majors can never co-exist here.
 arrow = ["tessera-ingest/arrow"]
 parquet = ["tessera-ingest/parquet"]
 csv = ["tessera-ingest/csv"]

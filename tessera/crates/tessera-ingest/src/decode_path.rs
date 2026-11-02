@@ -187,6 +187,16 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "zip's macOS/BSD-only filesystem calls for `extract` (permission bits); we never extract",
     ),
     (
+        "uuid",
+        "thrift 0.23's type for Thrift's UUID wire type. parquet's footer and page-index reader does not \
+         use the `thrift` crate's protocols at all: it decodes with its own compact codec \
+         (`parquet_thrift::ThriftSliceInputProtocol`, which has no UUID field type). The `thrift` \
+         crate serves only parquet's public legacy `format::*` types, which declare no UUID-typed \
+         field, so its `read_uuid` (a 16-byte `Uuid::from_bytes` copy) is reached only by `skip` of an \
+         unknown field, which discards the value. Parquet's UUID *logical* type is a \
+         FIXED_LEN_BYTE_ARRAY page value and never touches this crate",
+    ),
+    (
         "seq-macro",
         "generates parquet's bit-unpacking code AT COMPILE TIME; the behaviour of what it \
          generates is parquet's own version, which IS pinned",
@@ -257,6 +267,11 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("crunchy", "loop unrolling for the above"),
     ("foldhash", "hash container keying"),
     ("getrandom", "hash seeds"),
+    (
+        "rand_core",
+        "getrandom 0.4's RNG traits (reached via thrift 0.23 -> uuid -> getrandom): generates \
+         randomness, never reads a byte of the file",
+    ),
     ("siphasher", "phf lookup hashing, not value decoding"),
     ("tiny-keccak", "const-random seeding"),
     ("futures-channel", "async plumbing"),
