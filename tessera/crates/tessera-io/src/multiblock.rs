@@ -1,7 +1,9 @@
-//! Logical view spanning the `prefix` / `prefix_NNNN` blocks of a partitioned table (ADR-0026 §4).
+//! Logical view over the blocks of one table name (ADR-0026 §4, ADR-0064 §3): a single table
+//! block, the leaves `pairs/0000`, `pairs/0001`, … of a partitioned table, or a legacy flat group
+//! `events_0000`, … written before ADR-0064.
 //!
 //! A logical table is the **ordered concatenation** of its per-block columns. This module composes
-//! the existing primitives — [`Reader::block_group`] for the manifest-order block list, the
+//! the existing primitives — [`Reader::table_group`] for the resolved block list, the
 //! per-block [`TableSpec`] carried in each [`BlockRef.spec`] for row counts (no block read), and
 //! [`crate::table::decode_column`] / [`crate::table::decode`] for the per-block payload reads —
 //! into a unified read/query surface that hides the partition. The reader path the cohort / cloud
@@ -13,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
 
+use tessera_core::block::group_specs;
 use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
 use tessera_core::{Error, Result};
@@ -21,15 +24,15 @@ use crate::chunk_index::cidx_name;
 use crate::container::Reader;
 use crate::table::{decode_column, decode_rows, ColumnData, TableData};
 
-/// A logical view over the partitioned table named by `prefix`: the ordered concatenation of every
-/// block in [`Reader::block_group`]'s result. Cheap to build (manifest-only; no block bytes read)
+/// A logical view over one table name: the ordered concatenation of the blocks
+/// [`Reader::table_group`] resolves it to. Cheap to build (manifest-only; no block bytes read)
 /// and reusable — methods take a reader by `&mut` so one view can drive many queries.
 ///
 /// **Schema contract.** Every block in the group MUST share the same column count, names, and
 /// dtypes — the constructor errors otherwise. The columns surface ([`Self::columns`]) is therefore
 /// the single shared schema.
 ///
-/// **Row addressing.** Global rows are `0..row_count()` in manifest order. A global row maps to
+/// **Row addressing.** Global rows are `0..row_count()` in the group's logical order. A global row maps to
 /// `(block_idx, local_row)` via the cumulative per-block row counts ([`Self::locate`]). Per-block
 /// `TableSpec.rows` comes from each [`BlockRef.spec`] in the manifest, so the addressing is exact
 /// without reading any block payload.
@@ -45,7 +48,7 @@ pub struct LogicalTableView {
 }
 
 impl LogicalTableView {
-    /// The block-name prefix this view was built from (e.g. `"events"`).
+    /// The table name this view was built from (e.g. `"events"` or `"pairs"`).
     pub fn prefix(&self) -> &str {
         &self.prefix
     }
@@ -69,7 +72,7 @@ impl LogicalTableView {
             .unwrap_or(&[])
     }
 
-    /// The manifest-order block names this view spans (the result of [`Reader::block_group`]).
+    /// The block names this view spans, in logical order (the blocks of [`Reader::table_group`]).
     pub fn block_names(&self) -> &[String] {
         &self.block_names
     }
@@ -365,55 +368,19 @@ impl<'a, R: Read + Seek> Iterator for ColumnBlockIter<'a, R> {
 }
 
 impl<R: Read + Seek> Reader<R> {
-    /// Build a [`LogicalTableView`] over the partitioned table named by `prefix` — the ordered
-    /// concatenation of every `prefix` / `prefix_NNNN` block returned by [`Self::block_group`].
-    /// Cheap (manifest-only; no block bytes read): parses each block's [`TableSpec`] from its
-    /// recorded [`BlockRef.spec`] to learn per-block row counts and verifies every block shares
-    /// the same column schema (count + names + dtypes).
+    /// Build a [`LogicalTableView`] over the table `name`, resolved by [`Self::table_group`]
+    /// (ADR-0064 §3): one table block, the leaves of a partitioned table (`pairs/0000`,
+    /// `pairs/0001`, … in index order), or a legacy flat group (`events_0000`, … in manifest
+    /// order). Cheap (manifest-only; no block bytes read): parses each block's [`TableSpec`] from
+    /// its recorded [`BlockRef.spec`] to learn the per-block row counts, and checks that every block
+    /// shares one schema ([`tessera_core::block::group_specs`]).
     ///
-    /// Errors if `prefix` matches no blocks in the manifest, or if the matched blocks disagree on
-    /// their schema (a corrupt or hand-built product).
-    pub fn logical_table(&mut self, prefix: &str) -> Result<LogicalTableView> {
-        let block_names = self.block_group(prefix);
-        if block_names.is_empty() {
-            return Err(Error::Container(format!(
-                "logical_table: no blocks for prefix '{prefix}'"
-            )));
-        }
-        let mut specs: Vec<TableSpec> = Vec::with_capacity(block_names.len());
-        for name in &block_names {
-            let br = self
-                .manifest()
-                .blocks
-                .iter()
-                .find(|b| &b.name == name)
-                .ok_or_else(|| {
-                    Error::Container(format!("logical_table: missing BlockRef for '{name}'"))
-                })?;
-            let spec: TableSpec = serde_json::from_value(br.spec.clone())?;
-            specs.push(spec);
-        }
-        // Schema consistency: every block MUST agree on column count, names, and dtypes. The
-        // logical column would otherwise be ill-defined (which dtype to concat under?).
-        let head = specs[0].clone();
-        for (i, s) in specs.iter().enumerate().skip(1) {
-            if s.columns.len() != head.columns.len() {
-                return Err(Error::Container(format!(
-                    "logical_table('{prefix}'): block {i} has {} columns, block 0 has {}",
-                    s.columns.len(),
-                    head.columns.len()
-                )));
-            }
-            for (j, (a, b)) in s.columns.iter().zip(&head.columns).enumerate() {
-                if a.name != b.name || a.dtype != b.dtype {
-                    return Err(Error::Container(format!(
-                        "logical_table('{prefix}'): block {i} column {j} \
-                         ({:?}/{:?}) != block 0 ({:?}/{:?})",
-                        a.name, a.dtype, b.name, b.dtype
-                    )));
-                }
-            }
-        }
+    /// A name that doesn't resolve, or blocks that disagree on their schema, is
+    /// [`Error::LogicalTable`] with the reason ([`tessera_core::block::LogicalTableError`]).
+    pub fn logical_table(&mut self, name: &str) -> Result<LogicalTableView> {
+        let group = self.table_group(name)?;
+        let specs = group_specs(&self.manifest().blocks, name, &group)?;
+        let block_names: Vec<String> = group.blocks().iter().map(|b| b.to_string()).collect();
         // Cumulative row offsets — drives the O(log block_count) global → (block, local) lookup.
         let mut cumulative_rows: Vec<u64> = Vec::with_capacity(block_names.len() + 1);
         cumulative_rows.push(0);
@@ -425,7 +392,7 @@ impl<R: Read + Seek> Reader<R> {
             cumulative_rows.push(acc);
         }
         Ok(LogicalTableView {
-            prefix: prefix.to_string(),
+            prefix: name.to_string(),
             block_names,
             specs,
             cumulative_rows,
@@ -437,10 +404,12 @@ impl<R: Read + Seek> Reader<R> {
 mod tests {
     use super::*;
     use crate::accumulate::TableMultiBlockSink;
-    use crate::stream::StreamWriter;
+    use crate::stream::{table_job_indexed, StreamWriter};
     use crate::table::{self, ROWS_PER_GROUP};
     use crate::write::WriteSession;
+    use std::path::PathBuf;
     use tessera_core::block::table::Column;
+    use tessera_core::block::{LogicalTableError, TableGroup};
 
     const TS: &str = "2024-01-01T00:00:00Z";
 
@@ -491,6 +460,61 @@ mod tests {
         out
     }
 
+    /// A partitioned product (ADR-0064): marked leaves `pairs/0000`, `pairs/0001`, …, each with
+    /// its `.cidx` sidecar over `t`, the global row index. `x` is incompressible, so a leaf's
+    /// payload is far larger than its sidecar.
+    fn build_partitioned(dir: &std::path::Path, rows: usize, block_rows: usize) -> PathBuf {
+        use tessera_core::block::partition::{leaf_name, Partition};
+        let ws = WriteSession::create(&dir.join("pws"), "listmode", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::new(ws, 2, 4);
+        let n = rows.div_ceil(block_rows);
+        for i in 0..n {
+            let (lo, hi) = (i * block_rows, ((i + 1) * block_rows).min(rows));
+            let t: Vec<u64> = (lo as u64..hi as u64).collect();
+            let e = (lo..hi).map(|k| 511.0 + (k % 13) as f32).collect();
+            let x = t
+                .iter()
+                .map(|k| k.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                .collect();
+            let data: TableData = vec![
+                ("t".into(), ColumnData::U64(t)),
+                ("e".into(), ColumnData::F32(e)),
+                ("x".into(), ColumnData::U64(x)),
+            ];
+            let spec = TableSpec {
+                columns: vec![col("t", "u8"), col("e", "f4"), col("x", "u8")],
+                rows: (hi - lo) as u64,
+                row_index: Some("t".into()),
+                partition: Some(Partition {
+                    index: i as u64,
+                    last: i + 1 == n,
+                }),
+            };
+            let name = leaf_name("pairs", i as u64).unwrap().into_string();
+            sw.push(table_job_indexed(name, spec, data, Some("t".into())))
+                .unwrap();
+        }
+        let out = dir.join("partitioned.tsra");
+        sw.finish(&out).unwrap();
+        out
+    }
+
+    #[test]
+    fn logical_table_concatenates_the_leaves_of_a_partitioned_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = ROWS_PER_GROUP * 2 + 4242;
+        let path = build_partitioned(dir.path(), rows, ROWS_PER_GROUP);
+        let mut rdr = Reader::open(&path).unwrap();
+        let view = rdr.logical_table("pairs").unwrap();
+        assert_eq!(
+            view.block_names(),
+            ["pairs/0000", "pairs/0001", "pairs/0002"]
+        );
+        assert_eq!(view.row_count(), rows as u64);
+        let t = view.column(&mut rdr, "t").unwrap();
+        assert_eq!(t, ColumnData::U64((0..rows as u64).collect()));
+    }
+
     #[test]
     fn logical_row_count_is_sum_of_blocks() {
         // 3 blocks at the test seam — and the single-block view (rows ≤ block_rows) behaves
@@ -521,8 +545,8 @@ mod tests {
         let rows = 5_000usize; // well under ROWS_PER_GROUP → exactly one `events` block
         let path = build_multi_block(dir.path(), rows, ROWS_PER_GROUP as u64);
         let mut rdr = Reader::open(&path).unwrap();
-        let names = rdr.block_group("events");
-        assert_eq!(names, vec!["events"]); // small-stays-single
+        let group = rdr.table_group("events").unwrap();
+        assert_eq!(group, TableGroup::Single("events".parse().unwrap())); // small-stays-single
         let view = rdr.logical_table("events").unwrap();
         assert_eq!(view.block_count(), 1);
         assert_eq!(view.row_count(), rows as u64);
@@ -709,14 +733,17 @@ mod tests {
 
     #[test]
     fn logical_table_errors_on_unknown_prefix() {
-        // An empty block_group MUST be a typed Container error, not a silent empty view (callers
+        // An unknown name MUST be a typed LogicalTable error, not a silent empty view (callers
         // distinguish "no such table" from "empty table" via this path).
         let dir = tempfile::tempdir().unwrap();
         let path = build_multi_block(dir.path(), 4_000, ROWS_PER_GROUP as u64);
         let mut rdr = Reader::open(&path).unwrap();
         assert!(matches!(
             rdr.logical_table("missing"),
-            Err(Error::Container(_))
+            Err(Error::LogicalTable {
+                reason: LogicalTableError::NotFound,
+                ..
+            })
         ));
     }
 

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use tessera_core::block::array::ArraySpec;
 use tessera_core::block::name::NameError;
-use tessera_core::block::{BlockName, BlockRef};
+use tessera_core::block::{BlockName, BlockRef, LogicalTableError};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, ProductBuilder};
 use tessera_io::array::{array_block, ArrayData};
@@ -412,7 +412,19 @@ fn an_old_style_pyramid_still_reads_but_does_not_explode() {
     for name in ["volume", "volume/1"] {
         r.read_block(name).unwrap();
     }
-    assert_eq!(r.block_group("volume"), vec!["volume".to_string()]);
+    // `volume` is one block, an array: the table resolver says so rather than grouping it.
+    match r.table_group("volume") {
+        Err(Error::LogicalTable { name, reason }) => assert_eq!(
+            (name.as_str(), reason),
+            (
+                "volume",
+                LogicalTableError::NotATable {
+                    kind: "array".into()
+                }
+            )
+        ),
+        other => panic!("an array block is not a table, got {other:?}"),
+    }
     drop(r);
 
     // It can still be re-packaged with aux members (the `tessera sign` path), seal untouched.
