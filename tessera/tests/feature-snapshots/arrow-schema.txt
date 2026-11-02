@@ -58,7 +58,7 @@
     `-- datafusion-physical-plan feature "default"
 `-- arrow-schema feature "ffi" (*)
 `-- datafusion-physical-plan v54.0.0
-arrow-schema v58.3.0
+arrow-schema v58.4.1
 |           `-- arrow-array feature "ffi" (*)
 |       `-- arrow-data feature "ffi"
 |       `-- datafusion-expr v54.0.0 (*)
@@ -308,7 +308,7 @@ arrow-schema v58.3.0
 |   |   |   |       |-- arrow v58.3.0 (*)
 |   |   |   |       |-- arrow-cast v58.3.0 (*)
 |   |   |   |       |-- arrow-cast v58.3.0 (*)
-|   |   |   |       |-- arrow-ipc v58.3.0 (*)
+|   |   |   |       |-- arrow-ipc v58.4.1 (*)
 |   |   |   |       |-- arrow-json v58.3.0 (*)
 |   |   |   |       |-- arrow-json v58.3.0 (*)
 |   |   |   |       |-- arrow-ord v58.3.0 (*)
@@ -316,7 +316,7 @@ arrow-schema v58.3.0
 |   |   |   |       |-- datafusion v54.0.0 (*)
 |   |   |   |       |-- datafusion-common v54.0.0 (*)
 |   |   |   |       |-- datafusion-datasource-arrow v54.0.0 (*)
-|   |   |   |       |-- parquet v58.3.0 (*)
+|   |   |   |       |-- parquet v58.4.1 (*)
 |   |   |   |       |-- vortex-alp v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
 |   |   |   |       |-- vortex-array v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
 |   |   |   |       |-- vortex-bytebool v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
@@ -452,7 +452,7 @@ arrow-schema v58.3.0
 |   |   |   |   |   |-- arrow-json v58.3.0
 |   |   |   |   |   |-- datafusion-common v54.0.0 (*)
 |   |   |   |   |   |-- datafusion-datasource-arrow v54.0.0 (*)
-|   |   |   |   |   |-- parquet v58.3.0
+|   |   |   |   |   |-- parquet v58.4.1
 |   |   |   |   |   |-- vortex-flatbuffers feature "ipc"
 |   |   |   |   |-- arrow-cast feature "comfy-table"
 |   |   |   |   |-- arrow-cast feature "default"
@@ -493,19 +493,19 @@ arrow-schema v58.3.0
 |   |   |   |-- arrow v58.3.0 (*)
 |   |   |   |-- arrow-arith v58.3.0 (*)
 |   |   |   |-- arrow-arith v58.3.0 (*)
-|   |   |   |-- arrow-array v58.3.0 (*)
+|   |   |   |-- arrow-array v58.4.1 (*)
 |   |   |   |-- arrow-cast v58.3.0
 |   |   |   |-- arrow-cast v58.3.0 (*)
 |   |   |   |-- arrow-csv v58.3.0 (*)
-|   |   |   |-- arrow-ipc v58.3.0
-|   |   |   |-- arrow-ipc v58.3.0 (*)
+|   |   |   |-- arrow-ipc v58.4.1
+|   |   |   |-- arrow-ipc v58.4.1 (*)
 |   |   |   |-- arrow-json v58.3.0 (*)
 |   |   |   |-- arrow-ord v58.3.0
 |   |   |   |-- arrow-ord v58.3.0 (*)
 |   |   |   |-- arrow-row v58.3.0
 |   |   |   |-- arrow-row v58.3.0 (*)
-|   |   |   |-- arrow-select v58.3.0
-|   |   |   |-- arrow-select v58.3.0 (*)
+|   |   |   |-- arrow-select v58.4.1
+|   |   |   |-- arrow-select v58.4.1 (*)
 |   |   |   |-- arrow-string v58.3.0 (*)
 |   |   |   |-- arrow-string v58.3.0 (*)
 |   |   |   |-- datafusion v54.0.0 (*)
@@ -570,8 +570,8 @@ arrow-schema v58.3.0
 |   |   |   |-- datafusion-physical-plan v54.0.0 (*)
 |   |   |   |-- datafusion-physical-plan v54.0.0 (*)
 |   |   |   |-- datafusion-pruning v54.0.0 (*)
-|   |   |   |-- parquet v58.3.0 (*)
-|   |   |   |-- parquet v58.3.0 (*)
+|   |   |   |-- parquet v58.4.1 (*)
+|   |   |   |-- parquet v58.4.1 (*)
 |   |   |   |-- tessera-cli vWORKSPACE (*)
 |   |   |   |-- tessera-ingest vWORKSPACE (*)
 |   |   |   |-- vortex-alp v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
@@ -667,20 +667,20 @@ arrow-schema v58.3.0
 |   |   |-- vortex-utils v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)
 |   |-- arrow v58.3.0
 |   |-- arrow-arith v58.3.0
-|   |-- arrow-array v58.3.0
+|   |-- arrow-array v58.4.1
 |   |-- arrow-cast v58.3.0 (*)
 |   |-- arrow-csv v58.3.0 (*)
-|   |-- arrow-data v58.3.0
-|   |-- arrow-ipc v58.3.0 (*)
+|   |-- arrow-data v58.4.1
+|   |-- arrow-ipc v58.4.1 (*)
 |   |-- arrow-json v58.3.0 (*)
 |   |-- arrow-ord v58.3.0 (*)
 |   |-- arrow-row v58.3.0 (*)
-|   |-- arrow-select v58.3.0 (*)
+|   |-- arrow-select v58.4.1 (*)
 |   |-- arrow-string v58.3.0 (*)
 |   |-- datafusion v54.0.0 (*)
 |   |-- datafusion-common v54.0.0
 |   |-- datafusion-expr v54.0.0 (*)
-|   |-- parquet v58.3.0 (*)
+|   |-- parquet v58.4.1 (*)
 |   |-- tessera-cli vWORKSPACE (*)
 |   |-- tessera-ingest vWORKSPACE (*)
 |   |-- vortex-array v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)

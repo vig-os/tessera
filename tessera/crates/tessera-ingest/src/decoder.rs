@@ -28,7 +28,7 @@
 //! # The triple, and why the feature digest is load-bearing
 //!
 //! ```json
-//! "ingest_decoder": { "name": "arrow-rs/parquet", "version": "=58.3.0", "features": "blake3:9f2c…" }
+//! "ingest_decoder": { "name": "arrow-rs/parquet", "version": "=58.4.1", "features": "blake3:9f2c…" }
 //! ```
 //!
 //! A bare semver names two differently-behaving decoders identically whenever an unrelated optional
