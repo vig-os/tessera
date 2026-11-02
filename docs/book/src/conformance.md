@@ -10,7 +10,9 @@ the spec alone* — is backed by a conformance corpus and an independent reader.
   `docs/SPEC.md` alone reproduces all the golden hashes. That's the real test that the SPEC is complete
   and the format isn't secretly defined by the Rust code.
 - **Determinism** — writer determinism (same input → same bytes) makes `content_hash` a stable identity,
-  and the cross-arch CI matrix (x86_64 + aarch64 Linux) re-derives the goldens on each architecture.
+  and CI re-derives the goldens on x86_64 and aarch64 Linux. Pull requests run the x86_64 leg only;
+  the aarch64 leg runs nightly on `dev`, on every release tag and on demand (`gh workflow run nix-check.yml
+  --ref <branch>`), so a cross-architecture drift is caught within a day, not before merge (#725).
 
 ## Release gates
 

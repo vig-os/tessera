@@ -1277,6 +1277,24 @@
             touch $out
           '';
 
+          # Which `nix flake check` legs run per event (aarch64 only nightly, on release tags and by
+          # hand) and the required gate's by-name assertion that exactly those legs passed (#725).
+          # Its self-test proves every plan rule, and that an empty plan, a skipped planned leg, an
+          # unplanned leg that ran or a missing result each fail the gate.
+          nix-check-legs = pkgs.runCommand "nix-check-legs" { } ''
+            bash ${./scripts/nix-check-legs.sh} --self-test
+            touch $out
+          '';
+
+          # Files or updates the issue for a failed nightly or release-tag run (#725). Its self-test
+          # stubs `gh`: an exact-title open issue gets a comment, a merely similar title does not,
+          # and a failed lookup writes nothing.
+          ci-failure-issue = pkgs.runCommand "ci-failure-issue"
+            { nativeBuildInputs = [ pkgs.jq ]; } ''
+            bash ${./scripts/ci-failure-issue.sh} --self-test
+            touch $out
+          '';
+
           # The dev shell itself must build (toolbelt + toolchain resolve).
           dev-shell = self.devShells.${system}.default;
         } // linuxOnlyChecks;
