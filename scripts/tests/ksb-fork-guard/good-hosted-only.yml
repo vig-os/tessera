@@ -1,0 +1,8 @@
+# Fixture for scripts/check-ksb-fork-guard.sh --self-test: no ksb label at all; pull_request_target is allowed here (must PASS)
+on:  # yamllint disable-line rule:truthy
+  pull_request_target:
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "true"

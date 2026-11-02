@@ -1,0 +1,8 @@
+# Fixture for scripts/check-ksb-fork-guard.sh --self-test: branches swapped, so forks get ksb and same-repo PRs get hosted (must FAIL)
+on:  # yamllint disable-line rule:truthy
+  pull_request:
+jobs:
+  j:
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ksb-vig-os-small' || 'ubuntu-latest' }}
+    steps:
+      - run: "true"

@@ -17,8 +17,17 @@
 # silently. Finally it runs the built binary: `--version`, a tiny warm `bench compare`, and the
 # documented refusal of `bench compare --cold` off Linux.
 #
-# GitHub-hosted macOS runners: vig-os/tessera is PUBLIC (free hosted minutes, never self-hosted), and
-# the ksb runners are Linux-only. Making `macOS build` a required check is a branch-protection call
+# RUNNERS (#688). The `build` legs are GitHub-hosted macOS runners: the ksb runners are Linux-only.
+# `plan` stays GitHub-hosted too, on purpose: it exists to reproduce release.yml's `plan` job, which
+# runs on a hosted Ubuntu image and leans on that image's cargo and xz. A ksb pod has neither (the
+# #688 probe: dist's installer died on `tar xf …tar.xz`, and `dist plan` needs `cargo metadata`), and
+# supplying them from Nix would make this plan differ from the release's by construction. The `gate`
+# job is one shell step and runs on ksb's small pool, GitHub-hosted for a fork PR: the fork predicate
+# and the three layers that keep fork code off ksb are described in nix-check.yml (RUNNERS, FORKS).
+# Accepted cost: while ksb is down this required-candidate gate stays queued even though nothing else
+# in this workflow needs ksb (queue time is not bounded by `timeout-minutes`).
+#
+# Making `macOS build` a required check is a branch-protection call
 # for the owner. Note that the path filter below means the workflow does not run on PRs that touch
 # none of those paths, and a required check that never reports blocks the merge.
 
@@ -58,6 +67,7 @@ permissions:
 jobs:
   plan:
     name: dist plan (darwin legs)
+    # GitHub-hosted on purpose, like release.yml's plan job (RUNNERS above).
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -163,7 +173,9 @@ jobs:
   # failed plan) would leave this check green.
   gate:
     name: macOS build
-    runs-on: ubuntu-latest
+    # Light: ksb's small pool, GitHub-hosted for a fork PR (RUNNERS above).
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-small' }}
+    timeout-minutes: 5
     needs: [plan, build]
     if: always()
     steps:

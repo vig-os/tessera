@@ -1,0 +1,13 @@
+# Fixture for scripts/check-ksb-fork-guard.sh --self-test: guarded runs-on and a guarded matrix value (must PASS)
+on:  # yamllint disable-line rule:truthy
+  pull_request:
+jobs:
+  j:
+    # A comment may name ksb-vig-os-large freely.
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-small' }}
+    strategy:
+      matrix:
+        include:
+          - runner: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-large' }}
+    steps:
+      - run: "true"

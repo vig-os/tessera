@@ -178,6 +178,26 @@ repos:
         files: ^\.github/(workflows/.*\.ya?ml|actions/.*/action\.ya?ml)$
         pass_filenames: false
 
+  # ksb fork guard (#688): every `ksb-…` runner label sits behind the fork predicate, with a
+  # GitHub-hosted fallback, so a fork PR into this PUBLIC repo never routes onto ksb (where the
+  # runner's own guard would kill it). The script's header says what this does and does not protect.
+  # Two hooks: the check over the real workflows, and the script's self-test over its fixtures, so a
+  # change to the script or a fixture cannot leave the check passing vacuously.
+  - repo: local
+    hooks:
+      - id: check-ksb-fork-guard
+        name: check-ksb-fork-guard (ksb runner labels sit behind the fork guard)
+        entry: scripts/check-ksb-fork-guard.sh
+        language: script
+        files: ^(\.github/workflows/.*\.ya?ml|scripts/check-ksb-fork-guard\.sh)$
+        pass_filenames: false
+      - id: check-ksb-fork-guard-self-test
+        name: check-ksb-fork-guard self-test (fixtures)
+        entry: scripts/check-ksb-fork-guard.sh --self-test
+        language: script
+        files: ^scripts/(check-ksb-fork-guard\.sh|tests/ksb-fork-guard/)
+        pass_filenames: false
+
   # Skill directory naming convention
   - repo: local
     hooks:

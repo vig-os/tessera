@@ -1,0 +1,10 @@
+# Fixture for scripts/check-ksb-fork-guard.sh --self-test: inline trigger list on the allow-list, and a
+# concurrency group that is not a runner group (must PASS)
+on: [push, workflow_dispatch]  # yamllint disable-line rule:truthy
+concurrency:
+  group: ksb-probe-${{ github.ref }}
+jobs:
+  j:
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-small' }}
+    steps:
+      - run: "true"

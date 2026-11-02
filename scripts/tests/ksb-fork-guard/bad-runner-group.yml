@@ -1,0 +1,9 @@
+# Fixture for scripts/check-ksb-fork-guard.sh --self-test: routing by runner group instead of a guarded label (must FAIL)
+on:  # yamllint disable-line rule:truthy
+  pull_request:
+jobs:
+  j:
+    runs-on:
+      group: ksb-ci
+    steps:
+      - run: "true"
