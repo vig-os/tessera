@@ -456,7 +456,11 @@
           #   - a private `mktemp -d` dir under $TMPDIR for the config and the log;
           #   - a bounded readiness wait that checks the registry is still ALIVE and answers on ITS
           #     port, and on timeout fails loudly with the registry's log;
-          #   - an EXIT trap that kills the registry and, if the check failed, prints its log.
+          #   - stdenv's `exitHooks`/`failureHooks` (both run from the builder's EXIT trap, as in
+          #     `s3-range-read`) stop the registry, and on a failure print its log first. A bare
+          #     `trap … EXIT` here would REPLACE stdenv's `exitHandler` trap, and every hook with it
+          #     (#722); without the sandbox's process-tree teardown a leaked registry would outlive
+          #     the build.
           # Source it, call `start_registry`, then use "$REGISTRY" (host:port).
           loopbackRegistry = pkgs.writeText "loopback-registry.sh" ''
             start_registry() {
@@ -470,11 +474,20 @@
             EOF
               ${pkgs.distribution}/bin/registry serve "$reg_dir/config.yml" > "$reg_dir/reg.log" 2>&1 &
               reg_pid=$!
-              # `wait` on the killed registry returns 143; under the builder's `set -e` that would
-              # become the check's exit status, so the trap exits with the check's own status.
-              trap 'rc=$?; kill "$reg_pid" 2>/dev/null || true; wait "$reg_pid" 2>/dev/null || true
-                    if [ "$rc" -ne 0 ]; then echo "----- registry log -----"; cat "$reg_dir/reg.log"; fi
-                    exit "$rc"' EXIT
+              # `wait` on the killed registry returns 143. stdenv's exitHandler runs the hooks under
+              # `set +e` and then exits with the check's own status, and `return 0` keeps a hook's
+              # status out of it regardless.
+              stop_registry() {
+                kill "$reg_pid" 2>/dev/null
+                wait "$reg_pid" 2>/dev/null
+                return 0
+              }
+              dump_registry_log() {
+                echo "----- registry log -----"
+                cat "$reg_dir/reg.log"
+              }
+              exitHooks+=(stop_registry)
+              failureHooks+=(dump_registry_log stop_registry)
               REGISTRY=
               for _ in $(seq 1 300); do  # 300 x 0.1 s = 30 s, then fail
                 kill -0 "$reg_pid" 2>/dev/null || { echo "registry exited during startup"; return 1; }
