@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one table, every leaf's rows in leaf order, as a legacy `events_NNNN` group does (ADR-0064 PR C2, #717). A name
   that is not a block passed to `read_block`, `array` or `array_roi` raises the new `tessera.NotABlockError`, a
   subclass of `TesseraError`.
+- `tessera-cli`: `ls` and `tree` show a partitioned table as one node, `pairs/  table, 3 blocks, 8 rows`, where they
+  listed each leaf; `ls FILE pairs` lists its columns and leaves, and `tree --full` lists the leaves under the node.
+  An invalid partitioned table shows its typed error instead. `read` and `sql` answer `pairs` as one table, and
+  `read` on a node that holds no table says so and points to its blocks (ADR-0064 PR C1, #711). Legacy
+  `events_NNNN` blocks are listed one per line, as before.
 
 ### Changed
 

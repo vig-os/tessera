@@ -5,7 +5,13 @@
 //! block is an array or a (possibly multi-block) table whose columns are the leaves. `tree` renders
 //! the whole hierarchy, `ls` lists one node's children, and `read` extracts table data — the latter
 //! over the **logical** table view (`tessera_io::LogicalTableView`), so a column read spans every
-//! `events_NNNN` block transparently (the cross-block query, on the command line).
+//! block of a multi-block table transparently (the cross-block query, on the command line).
+//!
+//! A table name means the same table in every verb (ADR-0064 §7): the leaves `pairs/0000`,
+//! `pairs/0001`, … of a partitioned table are one node `pairs/` in `ls` and `tree` (the leaves are
+//! listed by `ls FILE pairs` and `tree --full`), and `read pairs` reads them all in index order. The
+//! legacy `events_NNNN` blocks are still listed one per line, as they always were, and still read as
+//! one table `events`. Each leaf stays a block, addressable by its full name.
 //!
 //! Output goes to a caller-supplied `Write` (not `println!`) so the commands are unit-testable and
 //! the binary's `main` owns the actual stdout/stderr — `main.rs` is the CLI entrypoint that may print.
@@ -14,7 +20,9 @@ use std::io::Write;
 use std::path::Path;
 
 use serde_json::Value;
-use tessera_core::block::BlockKind;
+use tessera_core::block::partition::marker;
+use tessera_core::block::table::TableSpec;
+use tessera_core::block::{group_specs, table_group, BlockKind, BlockRef, LogicalTableError};
 use tessera_core::{Result, SchemaRegistry};
 use tessera_io::array::ArrayData;
 use tessera_io::{ColumnData, Reader};
@@ -428,6 +436,118 @@ fn block_children(kind: &BlockKind, spec: &Value) -> Vec<String> {
     }
 }
 
+/// A partitioned table (ADR-0064) as `ls` and `tree` show it: one node standing for its leaves and
+/// their registered children (a leaf's `.cidx`).
+struct TableNode<'a> {
+    /// The table's name (`pairs`); its blocks are the ones under `pairs/`.
+    name: &'a str,
+    /// The leaves' specs in index order, or why the name is refused (the typed error every reader
+    /// gives, shown rather than hidden).
+    specs: Result<Vec<TableSpec>>,
+}
+
+impl<'a> TableNode<'a> {
+    /// Does the block `name` belong to this node (any block under `<table>/`)?
+    fn holds(&self, name: &str) -> bool {
+        is_under(name, self.name)
+    }
+
+    /// Every block under the node, in manifest order: the leaves, and their sidecars.
+    fn blocks<'b>(
+        &self,
+        blocks: &'b [BlockRef],
+    ) -> impl Iterator<Item = &'b BlockRef> + use<'a, 'b> {
+        let name = self.name;
+        blocks
+            .iter()
+            .filter(move |b| is_under(b.name.as_str(), name))
+    }
+
+    /// `table, 3 blocks, 8 rows`, or the reason the name does not resolve.
+    fn headline(&self) -> String {
+        match &self.specs {
+            Ok(specs) => format!(
+                "table, {} blocks, {} rows",
+                specs.len(),
+                thousands(specs.iter().map(|s| s.rows).sum())
+            ),
+            Err(e) => format!("not a valid table: {e}"),
+        }
+    }
+
+    /// The table's columns, rendered like a single table block's (every leaf has the same ones).
+    fn columns(&self) -> Vec<String> {
+        match &self.specs {
+            Ok(specs) => specs
+                .first()
+                .and_then(|s| serde_json::to_value(s).ok())
+                .map(|spec| block_children(&BlockKind::Table, &spec))
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+/// Is the block `name` under the node `node` (`node/…`, at any depth)?
+fn is_under(name: &str, node: &str) -> bool {
+    name.strip_prefix(node).is_some_and(|r| r.starts_with('/'))
+}
+
+/// The partitioned tables of a manifest, in the manifest order of their first leaf: every node
+/// directly above a block that carries a partition marker. A malformed marker counts as one, so the
+/// node shows its error rather than its blocks passing as unrelated. A marker on a block with no
+/// parent (`StrayMarker`) makes no node: that block is listed as itself, and `read` refuses it.
+fn table_nodes(blocks: &[BlockRef]) -> Vec<TableNode<'_>> {
+    let mut nodes: Vec<TableNode> = Vec::new();
+    for b in blocks {
+        let Some((name, _)) = b.name.as_str().rsplit_once('/') else {
+            continue;
+        };
+        if matches!(marker(b), Ok(None)) || nodes.iter().any(|n| n.name == name) {
+            continue;
+        }
+        let specs = table_group(blocks, name).and_then(|g| group_specs(blocks, name, &g));
+        nodes.push(TableNode { name, specs });
+    }
+    nodes
+}
+
+/// One top-level entry of `ls` and `tree`: a block, or a partitioned table standing for its blocks.
+enum Entry<'a> {
+    /// A block outside every partitioned table.
+    Block(&'a BlockRef),
+    /// A partitioned table, at the place of its first block.
+    Table(&'a TableNode<'a>),
+}
+
+/// The blocks of a manifest as `ls` and `tree` list them: in manifest order, with every partitioned
+/// table of `tables` in one entry where its first block is.
+fn entries<'a>(blocks: &'a [BlockRef], tables: &'a [TableNode<'a>]) -> Vec<Entry<'a>> {
+    let mut out: Vec<Entry> = Vec::new();
+    let mut shown: Vec<&str> = Vec::new();
+    for b in blocks {
+        match tables.iter().find(|t| t.holds(b.name.as_str())) {
+            Some(t) if shown.contains(&t.name) => {}
+            Some(t) => {
+                shown.push(t.name);
+                out.push(Entry::Table(t));
+            }
+            None => out.push(Entry::Block(b)),
+        }
+    }
+    out
+}
+
+/// A block's `tree` line: name, headline, digest.
+fn block_line(b: &BlockRef) -> String {
+    format!(
+        "{:<18} {}   {}",
+        b.name,
+        block_headline(&b.kind, &b.spec),
+        short_digest(b.digest.as_deref())
+    )
+}
+
 /// `product` + schema-validity + seal + signature badges for the tree root / inspect header.
 /// Validation is against the **embedded** schema when the file carries one (self-describing), else
 /// the built-in registry (legacy / open-world) — see [`tessera_core::validate_manifest`].
@@ -511,14 +631,25 @@ pub fn tree(file: &Path, full: bool, verify: bool, out: &mut dyn Write) -> Resul
             .collect();
         nodes.push((format!("schema  ({} v{})", s.product, s.version), kids));
     }
-    for b in &m.blocks {
-        let header = format!(
-            "{:<18} {}   {}",
-            b.name,
-            block_headline(&b.kind, &b.spec),
-            short_digest(b.digest.as_deref())
-        );
-        nodes.push((header, block_children(&b.kind, &b.spec)));
+    // A partitioned table is one node, its columns as children; `--full` adds its blocks, and an
+    // invalid one always lists them, since they are all there is to show.
+    let tables = table_nodes(&m.blocks);
+    for entry in entries(&m.blocks, &tables) {
+        let t = match entry {
+            Entry::Block(b) => {
+                nodes.push((block_line(b), block_children(&b.kind, &b.spec)));
+                continue;
+            }
+            Entry::Table(t) => t,
+        };
+        let mut kids = t.columns();
+        if full || t.specs.is_err() {
+            kids.extend(t.blocks(&m.blocks).map(block_line));
+        }
+        nodes.push((
+            format!("{:<18} {}", format!("{}/", t.name), t.headline()),
+            kids,
+        ));
     }
     if !m.sources.is_empty() {
         let kids = m
@@ -955,8 +1086,14 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
                 )
                 .map_err(tessera_core::Error::from)?;
             }
-            for b in &m.blocks {
-                writeln!(out, "{:<18} {:?}", b.name, b.kind).map_err(tessera_core::Error::from)?;
+            // A partitioned table is one line, where its first leaf is; `ls FILE pairs` lists it.
+            let tables = table_nodes(&m.blocks);
+            for entry in entries(&m.blocks, &tables) {
+                match entry {
+                    Entry::Table(t) => writeln!(out, "{}/  {}", t.name, t.headline()),
+                    Entry::Block(b) => writeln!(out, "{:<18} {:?}", b.name, b.kind),
+                }
+                .map_err(tessera_core::Error::from)?;
             }
             if !m.sources.is_empty() {
                 writeln!(out, "sources/  ({} edges)", m.sources.len())
@@ -1045,6 +1182,12 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
             Ok(())
         }
         Some(node) => {
+            let table = node.trim_end_matches('/');
+            if !m.blocks.iter().any(|b| b.name == node) {
+                if let Some(t) = table_nodes(&m.blocks).into_iter().find(|t| t.name == table) {
+                    return ls_table(t, &m.blocks, out);
+                }
+            }
             let b = m.blocks.iter().find(|b| b.name == node).ok_or_else(|| {
                 tessera_core::Error::Invalid(format!(
                     "no node '{node}' in {} (try `tessera ls {}` for the top level)",
@@ -1060,6 +1203,27 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
             Ok(())
         }
     }
+}
+
+/// `ls FILE <table>` for a partitioned table: its columns, then every block under it (its leaves in
+/// index order, and their sidecars). An invalid table is refused with its typed error, as `read`
+/// refuses it.
+fn ls_table(t: TableNode, blocks: &[BlockRef], out: &mut dyn Write) -> Result<()> {
+    let header = format!("{}/   {}", t.name, t.headline());
+    let lines: Vec<String> = t
+        .columns()
+        .into_iter()
+        .chain(
+            t.blocks(blocks)
+                .map(|b| format!("{:<18} {}", b.name, block_headline(&b.kind, &b.spec))),
+        )
+        .collect();
+    t.specs?;
+    writeln!(out, "{header}").map_err(tessera_core::Error::from)?;
+    for line in lines {
+        writeln!(out, "  {line}").map_err(tessera_core::Error::from)?;
+    }
+    Ok(())
 }
 
 /// A row selection for [`read`], resolved against the table's row count **at read time** — so
@@ -1125,7 +1289,8 @@ impl RowSpec {
 pub struct ReadOpts<'a> {
     /// The `.tsra` to read.
     pub file: &'a Path,
-    /// The table block (or multi-block prefix like `events`) to extract.
+    /// The table to extract: a block, or the name of a multi-block table (`pairs` for the leaves
+    /// `pairs/NNNN`, `events` for the legacy `events_NNNN`).
     pub block: &'a str,
     /// Columns to project (empty = all columns, in schema order).
     pub columns: Vec<String>,
@@ -1155,9 +1320,12 @@ pub struct ReadResult {
 }
 
 /// `tessera read FILE BLOCK [--column C]… [--rows A:B | --all]` — extract table data over the
-/// **logical** view, so a read of `events` spans every `events_NNNN` block (cross-block query).
+/// **logical** view, so a read of `pairs` spans every leaf `pairs/NNNN` of a partitioned table, and a
+/// read of `events` every legacy `events_NNNN` block (cross-block query).
 /// Columns are projected (only the requested columns' segments are decoded per block).
-pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
+pub fn read(mut opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
+    // `pairs/`, as `ls` and `tree` print a table, names `pairs`: no block name ends in `/`.
+    opts.block = opts.block.trim_end_matches('/');
     let mut r = Reader::open(opts.file)?;
     // `extra/*` is manifest metadata rather than a block, so it matches neither the non-table-block
     // guard below nor any table prefix — it used to fall through to `logical_table` and surface
@@ -1190,6 +1358,35 @@ pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
                 block_headline(&b.kind, &b.spec),
                 opts.file.display(),
                 opts.block,
+            )));
+        }
+    }
+    // A node that holds no table (a `notes/` of blobs, a `tessera pyramid` `volume/` of array
+    // levels) gets the same pointer, naming what it does hold.
+    if let Err(tessera_core::Error::LogicalTable {
+        reason: LogicalTableError::NotATable { kind },
+        ..
+    }) = r.table_group(opts.block)
+    {
+        if kind == "node" {
+            // What the node holds, as `ls` lists it: a partitioned table under it is one `name/`.
+            let blocks = &r.manifest().blocks;
+            let tables = table_nodes(blocks);
+            let held: Vec<String> = entries(blocks, &tables)
+                .into_iter()
+                .filter_map(|e| match e {
+                    Entry::Table(t) => is_under(t.name, opts.block).then(|| format!("{}/", t.name)),
+                    Entry::Block(b) => {
+                        is_under(b.name.as_str(), opts.block).then(|| b.name.to_string())
+                    }
+                })
+                .collect();
+            return Err(tessera_core::Error::Invalid(format!(
+                "'{}' is a node that holds {}, not a table — `read` is for tables. Address one of \
+                 them by its full name, or `tsra ls {}` for the top level.",
+                opts.block,
+                elide(&held.join(", "), 120),
+                opts.file.display(),
             )));
         }
     }
@@ -2707,6 +2904,133 @@ mod tests {
         ls(&p, Some("events"), false, &mut cols).unwrap();
         let s = String::from_utf8(cols).unwrap();
         assert!(s.contains("ms") && s.contains("en"));
+    }
+
+    /// An invalid partitioned table (ADR-0064 §2.3) is never shown as a table: here `pairs/0000` and
+    /// `pairs/0002`, a gap at index 1 (hand-packed, since the seal refuses it). The top-level `ls`
+    /// line and the `tree` node say why, the `tree` node lists the blocks it does hold, and
+    /// `ls FILE pairs` refuses the name with the typed error `read` gives. Each leaf still lists
+    /// by its full name.
+    #[test]
+    fn an_invalid_partitioned_table_shows_its_error_not_a_table() {
+        use tessera_core::block::partition::Partition;
+        use tessera_core::block::table::{Column, TableSpec};
+        use tessera_io::{pack, table::table_block, BlockPayload};
+        let blocks: Vec<_> = [(0, false), (2, true)]
+            .into_iter()
+            .map(|(index, last)| {
+                let spec = TableSpec {
+                    columns: vec![Column::new("t", "u4")],
+                    rows: 2,
+                    row_index: None,
+                    partition: Some(Partition { index, last }),
+                };
+                let data = vec![("t".into(), ColumnData::U32(vec![1, 2]))];
+                table_block(&format!("pairs/{index:04}"), &spec, &data).unwrap()
+            })
+            .collect();
+        let mut m = tessera_core::Manifest::new("listmode", "gap", "d", "2024-01-01T00:00:00Z");
+        m.blocks = blocks.iter().map(|(r, _)| r.clone()).collect();
+        m.content_hash = Some(m.recompute_content_hash().unwrap());
+        m.manifest_hash = Some(m.compute_manifest_hash().unwrap());
+        let payloads: Vec<BlockPayload> = blocks.into_iter().map(|(_, p)| p).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("gap.tsra");
+        pack(&m, &payloads, &p).unwrap();
+        let text = |f: &dyn Fn(&mut Vec<u8>) -> Result<()>| {
+            let mut buf = Vec::new();
+            f(&mut buf).map(|()| String::from_utf8(buf).unwrap())
+        };
+        let why = "not a valid table: logical table 'pairs': no leaf for index 1";
+
+        let top = text(&|o| ls(&p, None, false, o)).unwrap();
+        assert_eq!(top, format!("pairs/  {why}\n"));
+        let tree_out = text(&|o| tree(&p, false, false, o)).unwrap();
+        assert!(
+            tree_out.contains(&format!("pairs/             {why}")),
+            "{tree_out}"
+        );
+        assert!(
+            tree_out.contains("pairs/0000") && tree_out.contains("pairs/0002"),
+            "{tree_out}"
+        );
+        let err = text(&|o| ls(&p, Some("pairs"), false, o)).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                tessera_core::Error::LogicalTable {
+                    reason: LogicalTableError::Gap { missing: 1 },
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(text(&|o| ls(&p, Some("pairs/0002"), false, o))
+            .unwrap()
+            .starts_with("pairs/0002   table"));
+    }
+
+    /// The legacy flat form (ADR-0064 §4) is listed as it always was, one line per `events_NNNN`
+    /// block, in `ls` and `tree`, and still reads as one table `events`; a table name with the
+    /// trailing `/` that `ls` prints for a partitioned table reads that table.
+    #[test]
+    fn legacy_flat_blocks_list_one_per_line_and_a_trailing_slash_names_the_table() {
+        use tessera_core::block::table::{Column, TableSpec};
+        use tessera_core::ProductBuilder;
+        use tessera_io::{pack, table::table_block};
+        let mut b = ProductBuilder::new("listmode", "legacy", "d", "2024-01-01T00:00:00Z");
+        let mut payloads = Vec::new();
+        for i in 0..3u32 {
+            let spec = TableSpec {
+                columns: vec![Column::new("t", "u4")],
+                rows: 1,
+                row_index: None,
+                partition: None,
+            };
+            let data = vec![("t".into(), ColumnData::U32(vec![i]))];
+            let (r, p) = table_block(&format!("events_{i:04}"), &spec, &data).unwrap();
+            b.add_block_ref(r);
+            payloads.push(p);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("legacy.tsra");
+        pack(&b.seal().unwrap(), &payloads, &p).unwrap();
+        let read_csv = |file: &std::path::Path, block: &str| {
+            let mut buf = Vec::new();
+            let opts = ReadOpts {
+                file,
+                block,
+                columns: vec![],
+                rows: None,
+                all: true,
+                limit: None,
+                interactive: false,
+                format: Format::Csv,
+            };
+            read(opts, &mut buf).map(|_| String::from_utf8(buf).unwrap())
+        };
+
+        let mut top = Vec::new();
+        ls(&p, None, false, &mut top).unwrap();
+        assert_eq!(
+            String::from_utf8(top).unwrap(),
+            "schema/  (listmode v1.0, 7 fields)\n\
+             events_0000        Table\nevents_0001        Table\nevents_0002        Table\n"
+        );
+        let mut t = Vec::new();
+        tree(&p, false, false, &mut t).unwrap();
+        let t = String::from_utf8(t).unwrap();
+        for i in 0..3 {
+            let line = format!("── {:<18} table  1 cols × 1 rows", format!("events_000{i}"));
+            assert!(t.contains(&line), "{t}");
+        }
+        assert_eq!(read_csv(&p, "events").unwrap(), "t\n0\n1\n2\n");
+
+        let scan = std::path::Path::new("tests/cmd/logical_tables.in/scan.tsra");
+        assert_eq!(
+            read_csv(scan, "pairs/").unwrap(),
+            read_csv(scan, "pairs").unwrap()
+        );
     }
 
     /// #417: the sealed producer's build fields must all be reachable. `ProducerRef::display()`
