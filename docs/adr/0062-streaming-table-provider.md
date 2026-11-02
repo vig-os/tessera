@@ -1,25 +1,26 @@
 # ADR-0062 — Streaming table provider: bounded-memory queries over sealed table blocks
 
-**Status:** Proposed (2026-10-25, design for epic [#654](https://github.com/vig-os/tessera/issues/654)).
-Builds on **ADR-0026** (fixed row groups, `BLOCK_ROWS` decomposition), **ADR-0034** (sync public API;
-tokio only where it earns its keep), **ADR-0049** (recursive collections), **ADR-0057** (the thin waist,
-the feature graph and Gates A/B) and **ADR-0059** (chunk-index statistics, in flight as PR #539). Consumes
-[#225](https://github.com/vig-os/tessera/issues/225) (object-store range reader),
+**Status:** Accepted (2026-10-29, design for epic [#654](https://github.com/vig-os/tessera/issues/654)).
+**History:** Proposed 2026-10-25 in #661; Accepted 2026-10-29 with the owner's decisions of 2026-10-26 on the
+signed alignment (§5, declared mode), the local integrity default (§7) and key mode under an early stop (§5,
+"The release gate"). Builds on **ADR-0026** (fixed row groups, `BLOCK_ROWS` decomposition), **ADR-0034** (sync
+public API; tokio only where it earns its keep), **ADR-0049** (recursive collections), **ADR-0057** (the thin
+waist, the feature graph and Gates A/B) and **ADR-0059** (chunk-index statistics, in flight as PR #539).
+Consumes [#225](https://github.com/vig-os/tessera/issues/225) (object-store range reader),
 [#627](https://github.com/vig-os/tessera/issues/627) / [#632](https://github.com/vig-os/tessera/issues/632)
 (NULLs in chunk statistics) and [#251](https://github.com/vig-os/tessera/issues/251) (`tessera sql`).
 [#657](https://github.com/vig-os/tessera/issues/657) (recipe-only products) will execute through this
-provider. The first consumer is MorePET list-mode: ~2.4×10⁹ rows per acquisition, joins of two
-row-aligned blocks, cohort queries over many `.tsra`.
+provider. The first consumer is MorePET list-mode: ~2.4×10⁹ rows per acquisition, joins of two row-aligned
+blocks, cohort queries over many `.tsra`.
 
-> Design only. No product code is written until the owner accepts this document; §8 is the landing plan.
-> Every claim about current behaviour is cited to `file:line` at `dev` `9424f90`. Every claim about
-> DataFusion or Vortex is cited to the crate version pinned in `tessera/Cargo.lock` (DataFusion
-> **54.0.0**, arrow **58.3.0**, the Vortex **0.75.0** fork at `608d8a1`, object_store **0.14.0** for
-> `tessera-io`, zip **9.0.4**) and an item path in that crate's source. Seven claims were **probed**
-> rather than read: Vortex's default split size, `SplitBy::RowCount`, the bytes a zone-pruned filter
-> reads, exact row filtering (including `IS NULL`), reuse of one opened `VortexFile` across scans, one
-> split per row-range window scan with its set-up cost, and the bytes window scans read with and without
-> Vortex's layout-reader and segment caches.
+> Design only; §8 is the landing plan. Every claim about current behaviour is cited to `file:line` at `dev`
+> `9424f90`. Every claim about DataFusion or Vortex is cited to the crate version pinned in
+> `tessera/Cargo.lock` (DataFusion **54.0.0**, arrow **58.3.0**, the Vortex **0.75.0** fork at `608d8a1`,
+> object_store **0.14.0** for `tessera-io`, zip **9.0.4**) and an item path in that crate's source. Seven
+> claims were **probed** rather than read: Vortex's default split size, `SplitBy::RowCount`, the bytes a
+> zone-pruned filter reads, exact row filtering (including `IS NULL`), reuse of one opened `VortexFile` across
+> scans, one split per row-range window scan with its set-up cost, and the bytes window scans read with and
+> without Vortex's layout-reader and segment caches.
 > The probe was a scratch crate outside the repository, depending on `tessera-io` at `9424f90` and the
 > same Vortex fork, and is not part of this change. It sealed one 1 049 353-row table block (17 row
 > groups; a monotone `i64`, a random `i32`, a nullable `i16` with 20 % NULLs, an `f64`) with
@@ -63,21 +64,26 @@ expensive to change once a Rust consumer depends on them.
 
 ## §0 — The decision, in one place
 
-| # | Question | Recommendation |
+| # | Question | Decision |
 |---|---|---|
 | 1 | Crate home | Engine-neutral sync `tessera_io::scan`; a new `tessera-query` holds only the DataFusion adapter |
 | 2 | DataFusion coupling | Only `tessera-query` exposes it, re-exported; one major at a time; a major breaks |
 | 3 | Bounded memory | Per query: ≤ `max_partitions` × a row budget of 65 536-row windows; anon-RSS test |
 | 4 | Pushdown, pruning | Projection; a closed filter class (no floats, casts) via `.cidx`, zone maps; `Inexact` |
-| 5 | Positional zip | Sealed `aligned_to` (derive paths only) or a strictly increasing key; else refuse |
+| 5 | Positional zip | Sealed `aligned_to` (derive paths only) or a key-only pre-pass proving a strict increase |
 | 6 | Multi-product | (product, block, row-group run) units; members pinned by `manifest_hash`; identical schemas |
-| 7 | Integrity | Default `VerifyBlocks`: hash a block before emitting its rows; `SealOnly` is an opt-out |
+| 7 | Integrity | `VerifyBlocks`: local default, unspooled; object-store default pending #672; `SealOnly` opt-out |
 | 8 | Phasing | #666 single product + pruning → #667 positional zip → #668 multi-product, local then S3 |
 
 Each row is argued in its section, with the options and the rejected alternatives. One limit belongs here,
-not only in §7: under **local** `VerifyBlocks` the rows are read in a second pass after the hash, so "no row
-from unverified bytes" holds against corruption at rest, **not against a concurrent writer** (open question
-(b)). Object-store scans read rows from the verified spool, so they have no such gap.
+not only in §7: under **local** `VerifyBlocks`, the default for local sources, the rows are read in a second
+pass after the hash, so "no row from unverified bytes" holds against corruption at rest, **not against a
+concurrent writer**; a caller reading a remote or untrusted local source opts into the spool (§7).
+That limit reaches the key-mode release gate of §5 too (decision (c) under (b)): on the default local
+unspooled path the pre-pass and the row pass read the file separately, so against a concurrent writer that
+swaps rows between them the row pass falls back to row-by-row key checks, which do not exclude a misaligned
+pair. The spool opt-in closes it. Object-store scans under `VerifyBlocks` (their default pending #672) read
+rows from the verified spool, so they have no such gap.
 
 ## §1 — Crate home and feature gating
 
@@ -308,9 +314,15 @@ warning, `vortex-file/src/open.rs:187-188`) with `with_layout_reader_cache()` an
 `MokaSegmentCache` of its own** (`vortex-layout/src/segments/cache.rs:46-62`). The cache must never be
 shared between blocks: its key is `SegmentId(u32)` (`vortex-layout/src/segments/mod.rs:26`), unique only
 within one file, so a shared cache would serve one block's segment to another, i.e. wrong rows. A
-partition keeps **at most two blocks open** (the current one, and the next while prefetching across a
-block boundary; a key-mode zip's boundary reads, §5, open one block at a time for one row each, outside
-any partition's slots, and close it before the next), and the cache is sized to hold the segments the in-flight windows share:
+partition keeps **at most two blocks open per input** (the current one, and the next while prefetching across a
+block boundary; a key-mode zip's pre-pass, §5, uses the same two slots for the key column and finishes
+before the row pass opens any block; on a spooled source each of them also holds a spool slot, which
+`plan_scan` counts, §7 "Spool slots"). A spooled copy a key-mode zip pins between its passes (§5), or a
+waiter holds before its cell resolves (§7), is **not an open block**: a pinned block's `VortexFile`, cache
+and reader state are dropped when the partition moves on, and the pin keeps only the spool file on disk; a
+waiter opens its copy only once the cell resolves, as its current block. So key mode's up to four spool
+slots per input do not contradict at most two open blocks per input. The cache is sized to hold the
+segments the in-flight windows share:
 `segment_cache_bytes = projected columns × 1 MiB × (windows_in_flight + 1)` per open block, which goes into
 the memory formula below. 1 MiB is a sound bound for a fixed-width column's compressed segment (the writer
 cuts at ≥ 1 MiB uncompressed in 8192-row steps, then compresses). It is **not** a bound for `utf8`: 8192
@@ -337,8 +349,10 @@ pub struct ScanBudget {
     /// Window scans started and not yet drained. Default 2:
     /// one decoding, one prefetching.
     pub windows_in_flight: NonZeroUsize,
-    /// Vortex pool threads decoding this partition's windows.
-    /// Default 1: parallelism comes from DataFusion partitions.
+    /// Vortex pool threads decoding this partition's windows,
+    /// besides its producer thread, which also decodes while it
+    /// drives the runtime in `block_on`. Default 1: parallelism
+    /// comes from DataFusion partitions.
     pub workers: NonZeroUsize,
     /// Batches buffered for the consumer. Default 2.
     pub batches_buffered: NonZeroUsize,
@@ -366,45 +380,67 @@ mem(p)         =  rows(p) * w(row)
                     (footer, layout tree, decoded zone
                      maps, decoded dictionary values)
                   + k * windows_in_flight * rows_per_window
-                      * w(key)            (key-mode zip, §5)
-                  + 64 KiB hash ring    (VerifyBlocks, §7)
-                  + spool_chunk_bytes   (object-store
-                                         spool download, §7)
-mem(scan)      =  P * mem(p)
+                      * w(key)            (key-mode zip, §5:
+                                         pre-pass or row pass)
+mem(fills)     =  P * ( 64 KiB hash ring   (VerifyBlocks, §7)
+                      + spool_chunk_bytes (object-store
+                                           spool download or
+                                           local spool opt-in,
+                                           §7) )
+mem(scan)      =  P * mem(p) + mem(fills)
 disk(spool)    =  spool_blocks * block_bytes
 ```
 
-A partition waiting on another partition's verification of the same block (§7) holds nothing extra: it opens
-the block only once the verify-once cell resolves, and its buffered batches are already in `rows(p)`.
+Block fills (§7, "Once per block": the hash pass, plus the copy or download into the spool when spooled) run
+on the scan's **fill pool** of `P` OS threads, created when the scan starts, not on a partition's thread, so
+`mem(fills)` is a term of the scan, not of a partition: each fill thread holds one hash ring and, when
+spooled, one `spool_chunk_bytes` buffer, and at most `P` fills run at once however many inputs and prefetches
+request one; the rest wait in the pool's queue, holding no buffer. On an object store a fill thread hands each
+GET to the store's I/O thread (§6) and hashes the body itself, so hashing runs on up to `P` threads, not on
+the one I/O thread. A partition waiting on another partition's verification of the same block holds nothing
+extra: it opens the block only once the verify-once cell resolves, and its buffered batches are already in
+`rows(p)`. The cell resolves even when the partition that started it is blocked on its channel, since no fill
+waits on a channel (§7). The pool runs **fills only**: it accepts a fill (a block, its source and its
+verify-once cell), not an arbitrary task, so **nothing that waits on a fill may run on the fill pool**. A
+fill itself waits on no cell, channel, consumer or slot, only on its source (a local read, or a GET on the
+store's I/O thread, which waits on nothing in the scan), so a queued fill waits only for running fills, each
+of which finishes. A key-mode zip's pre-pass (§5), which waits on fills, runs on its partition's producer
+thread, never on the pool.
 
 With the defaults (`rows_per_window = 65 536`, two windows, two buffered 8192-row batches, `P ≤ 8`) and a
 32-byte, four-column fixed-width list-mode projection, that is 147 456 rows ≈ 4.5 MiB of rows plus
-2 × 4 × 1 MiB × 3 = 24 MiB of segment caches per partition, ≈ 28.5 MiB, so **≈ 228 MiB for the query's
-scan** plus the reader state. Zone maps are one row of five statistics per 8192 rows per column, ~512 rows
-per column per block, so ~20 KiB per column per open block; dictionary values depend on the data. PR1
-measures `reader_state` on the test table, and the ksb job writes that number into its expected bound
-before the run. All
-of it is independent of the table's length **and of the host**, because `P` is capped by our knob and not by
-the core count. It grows with the projection's width and with `max_partitions`, linearly and by a stated
-amount.
+2 × 4 × 1 MiB × 3 = 24 MiB of segment caches per partition, ≈ 28.5 MiB, so **≈ 228 MiB for the query's scan** plus the
+reader state and `mem(fills)`: 0.5 MiB of hash rings unspooled, ≈ 64.5 MiB at `P = 8` with the spool and its
+default 8 MiB `spool_chunk_bytes`. Zone maps are one row of five statistics per 8192 rows per column, ~512
+rows per column per block, so ~20 KiB per column per open block; dictionary values depend on the data. PR1
+measures `reader_state` on the test table, and the ksb job writes that number into its expected bound before
+the run. All of it is independent of the table's length **and of the host**, because `P` is capped by our knob
+and not by the core count. It grows with the projection's width and with `max_partitions`, linearly and by a
+stated amount.
 
 A byte budget for the whole query, divided across its partitions, is rejected
 for the reason a byte bound is rejected above: a `utf8` column has no width to divide by.
 
-**Honest cost:** with `workers = 1` one partition decodes on one thread, and with `max_partitions = 8` a
-query decodes on at most eight threads however many cores the host has. A caller raises `max_partitions` or
+**Honest cost:** with `workers = 1` one partition decodes on at most two threads, its producer (which
+drives the runtime in `block_on`) and its one worker, so with `max_partitions = 8` a query decodes on at most
+`P · (1 + workers)` = 16 threads however many cores the host has. All threads a scan runs: `P` producer
+threads (one per partition, each running its `TableScan` and, in a key-mode zip, its pre-pass then its row
+pass, §5), each with its `workers` decode threads; the fill pool's `P` hashing threads; and on an
+object store one I/O thread per store (§6). So at most `P · (1 + workers) + P` threads plus the I/O threads,
+`3 · P` with the default `workers = 1`; a key-mode zip adds none. A caller raises `max_partitions` or
 `workers` and accepts the larger bound the formula states. A query over one small block decodes on as many
 partitions as it has units (§6).
 
 ### How it is enforced
 
-Each partition runs its `TableScan` on **its own OS thread**. It drives the window scans with `block_on` on
-a scan-local `CurrentThreadRuntime` with a pool of `workers` threads (ADR-0034's sync bridge), starts a new
-window only while fewer than `windows_in_flight` are undrained, and pushes Arrow batches into a bounded
-channel of `batches_buffered`. A full channel blocks the thread, and a blocked thread starts no window.
-The DataFusion side is a `RecordBatchStreamAdapter` over the channel's receiver
-(`datafusion-physical-plan-54.0.0/src/stream.rs:446`). This keeps the core sync (ADR-0034 §1) and needs no
-assumption about polling a Vortex-runtime stream from a tokio executor.
+Each partition runs its `TableScan` on **its own OS thread**, its producer, spawned by that partition's `execute`; in
+a key-mode zip the first `execute` spawns all `P` producers, which run the pre-passes (§5). A producer whose send
+fails, because its receiver was dropped, stops and releases its pins and spool slots. It drives the window scans with
+`block_on` on a scan-local `CurrentThreadRuntime` with a pool of `workers` threads (ADR-0034's sync bridge), starts a
+new window only while fewer than `windows_in_flight` are undrained, and pushes Arrow batches into a bounded channel of
+`batches_buffered`. A full channel blocks the thread, and a blocked thread starts no window. The DataFusion side is a
+`RecordBatchStreamAdapter` over the channel's receiver (`datafusion-physical-plan-54.0.0/src/stream.rs:446`). This
+keeps the core sync (ADR-0034 §1) and needs no assumption about polling a Vortex-runtime stream from a tokio executor.
 
 Vortex arrays become Arrow with `ArrowSession::execute_arrow(array, Some(field), ctx)`
 (`vortex-array/src/arrow/session.rs:410`), always with the **declared** field as target, so a `str` column
@@ -633,8 +669,24 @@ alignment**, in one of two forms:
    untouched keeps it with its `aligned_to` (a `commit --set` metadata edit re-seals the manifest but not the
    block); a commit that removes or replaces the *source* block needs no special case, because the zip's
    `source_digest` check then refuses. A hand-crafted, re-sealed manifest can still carry
-   the field, since the format can't tell who sealed it; whether a declared alignment must also be
-   **signed** to be trusted is open question (a), related to the identity-envelope work in #656 and #566.
+   the field, since the format can't tell who sealed it.
+
+   **Signing: required across producers, not within one.** A forged claim that names the right source, with
+   a correct `source_digest`, passes every check above and yields a **silently misaligned** zip; the digest
+   only stops a claim from being applied to a different version of its source. Forging one requires writing
+   and sealing the derived product outside the engine, and a party who can do that can equally forge the
+   derived values themselves. So:
+   - **PR2 (#667) ships same-producer zips, unsigned.** When the caller zips products it produced, the
+     derived product's seal covers the claim exactly as it covers the values, and no signature is required.
+   - **A zip across producers requires a signed alignment, and does not ship before it.** PR2 cannot tell
+     producers apart (the manifest's `producer` is a self-reported tool stamp, not a verified identity), so
+     in PR2 the same-producer scope is a documented usage scope, not a check: the docs state that zipping a
+     derived product the caller did not produce is not supported. The signed-alignment work, tied to the
+     identity-envelope claims of #656 and #566 (which need the same "signed claim, verified against the
+     trust store" path), makes it a check: the zip accepts a declared alignment from a product the caller
+     did not produce only when that product carries a valid signature from a trusted key (ADR-0037's trust
+     store) binding `aligned_to`, and refuses an unsigned one with an `AlignmentError`. Cross-producer zips
+     are offered only once that refusal exists.
 
    At query time the zip recomputes `source_digest` from the source manifest it was given and refuses a
    mismatch, so a derived table is never zipped with a different version of its source.
@@ -663,9 +715,13 @@ alignment**, in one of two forms:
    digest), but nothing checks that a sealed `.cidx` reports the data's real `min`/`max`. A writer that seals
    a lying index (a group of `5`s recorded with `max = 4`, then `WHERE key >= 5`) gets the swap above past
    every check. So under pruning, key mode rests on the writer's index, a claim of the same kind as declared
-   mode's `aligned_to`, and open question (a)'s reasoning applies to it: whoever can seal a lying index can
-   seal wrong values directly. A caller who will not trust the index runs the zip without a key predicate
-   tier 1 can use, which checks every row.
+   mode's `aligned_to`. Within one producer the seal covers it, as it covers `aligned_to` in PR2: whoever
+   can seal a lying index can seal wrong values directly. This ADR extends the cross-producer rule above to
+   the index on its own reasoning (the owner's decision names the alignment, not the index): a zip across
+   producers that prunes on another producer's `.cidx` waits for a signed claim covering that index too. A
+   caller who will not
+   trust the index runs the zip without a key predicate tier 1 can use, which checks every row and trusts
+   no writer claim.
 
    **Why that is enough.** Under a zip, tier 1 prunes the same row groups in every input and no row filter
    is pushed into any input (below), so every input emits the same positions, and a unit emits its whole
@@ -678,55 +734,101 @@ alignment**, in one of two forms:
    checked keys `…, 5, 5, …` match position by position, and only the tie between the two checked `5`s shows
    that the pairing is not determined.
 
-   **How it is checked.** Before any of a row group's zipped rows are released, the provider decodes that
-   group's key from every input and checks every row against the checked row before it: equal across
-   inputs, NULL-free, strictly greater. The chain runs across row groups within a unit and, across units,
-   on the **last checked key of the nearest preceding emitted unit** in table order, across pruned row
-   groups and block edges. A row is released only once **both** its comparisons have passed, the one with
-   its predecessor and the one with its successor, so the last row of a row group is held until the next
-   checked row's key has been checked. That keeps an adjacent tie, the counterexample above, from releasing
-   either of its rows.
+   **How it is checked: a key-only pre-pass, then the rows.** A key-mode zip scans in two passes. The
+   **pre-pass** decodes only the key column of every checked row group of every input and checks every key
+   against the checked key before it: equal across inputs, NULL-free, strictly greater. The chain runs across
+   row groups within a unit and, across units, on the **last checked key of the nearest preceding emitted
+   unit** in table order, across pruned row groups and block edges. The **row pass** then decodes the
+   projection, and only the row pass releases rows, behind the release gate below.
 
    §6 deals units to partitions as contiguous ranges, so a partition's units are one contiguous run of the
-   emitted sequence: within a partition the predecessor of a unit is the partition's previous unit, and the
-   scan thread carries the last checked key from one unit to the next. Across partitions, which run in
-   parallel, the chain is enforced by a query-wide **boundary stage**. When the plan is first executed (the
-   first `execute` of any partition), the stage registers, for **all P partitions**, regardless of which
-   have been executed, the first key of each partition's first unit and the last key of its last unit
-   (a one-row read per input in a block that partition scans anyway). Partition *p*'s first row is released
-   only once *p − 1*'s last key is less than *p*'s first key, and *p*'s last row only once the same holds
-   between *p* and *p + 1*. Registration depends on no partition's progress, so a consumer that drains one
-   partition before executing the next cannot hang it. When a partition's scan reaches its first and its last
-   row, each key must equal the registered one. The first emitted unit has no predecessor: its first key is
-   checked only against the row after it, and the last emitted unit's last key only against the row before
-   it.
+   emitted sequence: each partition's pre-pass checks its own run and carries the last checked key from one
+   unit to the next. Across partitions, which run in parallel, the chain is enforced by a query-wide
+   **boundary stage**. When the plan is first executed (the first `execute` of any partition), the query
+   starts the pre-pass of **all P partitions**, regardless of which have been executed, each on **its
+   partition's producer thread** (§3 "How it is enforced"), which that first `execute` spawns for all `P`
+   partitions at once; a partition executed later finds its producer already running and takes the receiver
+   of its channel. The receivers of partitions not yet executed are owned by the plan's shared scan state:
+   dropping the plan drops them, and each such producer's next send fails, so it stops and releases its pins
+   and slots (§3 "How it is enforced"). A second `execute` of a partition whose
+   receiver was taken returns an error naming the partition rather than starting a second producer, since
+   the pre-pass verified the range for one row pass; re-running the query re-plans it. The pre-pass decodes
+   the key column on the partition's producer and its `workers` (`1 + workers` threads), and the same
+   thread then runs the row pass behind the release gate, so a key-mode zip adds no thread. A pre-pass never
+   runs on the fill pool (§3): it waits on the verify-once cells of the blocks it reads, and **nothing that
+   waits on a fill may run on the fill pool**. Run there, the pre-passes could take every fill thread and
+   queue the fills they wait on behind themselves: with `k = 2`, `P = 2`, both pre-passes would occupy the
+   pool's two threads, each would request its first blocks' fills, those fills would wait in the queue for a
+   free thread, and the query would hang. Each partition's pre-pass registers the first key of its run and
+   the last, and the stage checks that *p − 1*'s last key is less than *p*'s first key for every adjacent pair. The
+   pre-pass depends on no partition's consumer, so a consumer that drains one partition before executing the
+   next cannot hang it. The first emitted unit has no predecessor and the last emitted unit no successor.
 
-   Boundary keys are read through the same verify-once cell as the rows (§7): under `VerifyBlocks` from
-   hashed bytes (locally with §7's second-pass caveat), and under `SealOnly` from unhashed bytes, like every
-   row in that mode. On an object store under `VerifyBlocks` a boundary block is downloaded once, into the
-   spool, and stays there until every partition that scans it is done with it (§6 can split one block, so a
-   block may be one partition's last and the next one's first), so the scan never reads a boundary block's
-   rows from bytes it did not hash. Each partition then holds at most two spooled blocks per input, its first
-   and its last, so a key-mode zip needs at most `2 · k · P` spool slots; `plan_scan` counts the distinct
-   boundary blocks and refuses a `spool_blocks` below the slots they and the scans need, rather than wait on
-   it. The key-mode default is `2 · k · P`. A pruned block is never opened for key mode.
+   **The release gate.** No partition releases a row until the pre-pass of every partition and every
+   boundary check have passed, so a key-mode zip **refuses a pushed `LIMIT` or an early stop until the
+   pre-pass has verified strict increase over the whole scanned range**; after that, a pushed `LIMIT` is
+   honoured as in any scan. The gate sits inside the scan, so a `LIMIT` pushed into it (DataFusion's
+   `fetch`), a `LIMIT` above it, an operator that stops pulling and a consumer that drops the stream can only
+   ever see rows of a range the pre-pass has verified. The scan cannot know in advance whether a query will
+   stop early (an operator above it or a dropped stream ends the query without telling it), so the gate
+   applies to **every** key-mode zip, and there is no option to skip it. This is correct by construction,
+   not a documented caveat, and checking neighbours while streaming is not enough: let A have keys
+   `[5, 6] [3, 5]` in two row groups, and B the same with the two `5` rows swapped. A row-by-row check
+   releases A's first `5`, paired with B's copy of the other `5`, once its neighbours have passed, before
+   the inversion `6, 3` is reached; under `LIMIT 1` that misaligned pair is the whole result, returned with
+   no error. Across two partitions, both copies of a key could likewise be released before either partition
+   reached the other. The pre-pass meets the inversion before any row is released and fails the query.
+
+   **A failed check resolves the gate to its error.** The gate is a query-wide cell, resolved once, like a
+   verify-once cell (§7): to *passed* when the pre-pass of every partition and every boundary check have passed, or
+   to the error of the first pre-pass or boundary check that fails, whichever comes first. A pre-pass resolves it as
+   soon as it meets a tie, an inversion, a NULL key or a key that differs across inputs, and the boundary stage as
+   soon as an adjacent pair fails; the other pre-passes are not awaited. Every producer waiting at the gate, every
+   producer that reaches it later and the producer whose pre-pass resolved it each send that error on its own stream
+   and stop, releasing their pins and spool slots (§3 "How it is enforced"); a producer still in its pre-pass checks
+   the gate before each row group and goes to it once it has resolved. No row has passed the gate, so each
+   producer's channel is empty and the send never blocks. So whichever partition the consumer polls returns the
+   error, and a consumer that polls only one partition cannot hang on a failure in another. **No producer may wait
+   on the gate without also observing its failure state.** A gate that only signals passing would hang the query:
+   with `P = 2`, an inversion in the second partition's run and a consumer that executes and polls only the first
+   partition, the first producer finishes its pre-pass and waits at a gate that never passes, and the second
+   producer's error goes to a receiver the plan holds and nobody polls, so the polled stream never yields.
+
+   The row pass decodes the key again with the projection and runs the same checks on it; when a partition's
+   row pass reaches its first and its last row, each key must equal the one the pre-pass registered. A
+   failure there fails the query; it is how §7's local second-pass caveat can show in a key-mode zip.
+
+   Keys are read through the same verify-once cell as the rows (§7): under `VerifyBlocks` from hashed bytes
+   (locally with §7's second-pass caveat), and under `SealOnly` from unhashed bytes, like every row in that
+   mode. When the zip reads from the spool (an object store under `VerifyBlocks`, or a local source with the
+   spool opt-in of §7), every block the pre-pass reads is copied into the spool and hashed first. A
+   partition's first and last block of each input stay spooled from its pre-pass until every partition that
+   scans them has finished or stopped its row pass (§6 can split one block, so a block may be one partition's last and
+   the next one's first); between them, two slots per input hold the block being scanned and the next one,
+   prefetched across the block boundary as in every scan (§3). So a key-mode zip needs at most `4 · k · P`
+   spool slots, and §7's slot rule applies: `plan_scan` computes the plan's need and refuses a `spool_blocks`
+   below it before any row, so every partition can hold its maximum at once and a consumer that drains one
+   partition first cannot starve another. A block between a partition's first and last is released after the
+   pre-pass and copied and hashed again for the row pass, so a key-mode zip read from the spool fetches those
+   blocks twice; it never reads a row or a key from bytes it did not hash. A pruned block is never opened for
+   key mode.
 
    A tie, an inversion, a NULL key or a key that differs across inputs **fails the query** with an error
-   naming the input and the row; the provider never skips the row. A key that is not unique is not a key
-   for this purpose: the caller uses declared mode or writes a hash join explicitly.
+   naming the input and the row, in the pre-pass, before any row is released; the provider never skips the
+   row. A key that is not unique is not a key for this purpose: the caller uses declared mode or writes a
+   hash join explicitly.
 
-   **What a guarantee covers.** A query that reads every unit to the end and completes has passed every
-   check, so every row it returned is paired by a unique key. A query that fails has no result: DataFusion's
-   stream yields the error in place of the remaining batches, and `collect` returns only the error. Rows
-   released earlier passed both neighbour checks, which rules out an adjacent tie but not every wrong
-   pairing: with keys `[5, 6] [3, 5]` in two row groups the first `5` is released, paired with B's copy of
-   the other `5`, before the inversion `6, 3` is reached, and across two partitions both copies of a key can
-   be released. The same holds for a query that **stops early**, under a `LIMIT` or a consumer that drops
-   the stream: it completes without error, yet its rows have only been neighbour-checked. Excluding both
-   would need the whole key column checked before the first row, a full pre-pass the provider does not
-   make. So a key-mode result is guaranteed only for a query that runs to completion; a consumer that acts on
-   rows before then, or that limits the query, gets neighbour-checked rows, and declared mode is the one
-   that guarantees every row.
+   **What a guarantee covers.** Every row a key-mode zip releases lies in a range whose keys the pre-pass has
+   verified, so every row it returns is paired by a unique key, whether the query runs to completion, stops
+   early under a `LIMIT`, is stopped by an operator above the scan or has its stream dropped. On a local
+   source read unspooled (the default, §7) this holds against corruption at rest only: a concurrent writer
+   that swaps rows between the pre-pass and the row pass is not excluded, since the row pass checks keys row
+   by row; a caller facing that threat opts into the spool. A query that fails in the pre-pass returns no row.
+   A query that fails in the row pass (an integrity or I/O error, or a key the row pass reads differently) has
+   no result: DataFusion's stream yields the error in place of the remaining batches, and `collect` returns
+   only the error; batches streamed before the error were paired by verified keys. **Cost:** a read of the key
+   column over the scanned range before the first row (time to first row is one key pass), and, read from the
+   spool, the second fetch above. A consumer that needs the first rows sooner uses declared mode.
 
 ### Detection and refusal
 
@@ -745,9 +847,9 @@ Before the first row, in both modes, from manifests alone:
   them, and is emitted once.
 
 A failure is a typed `AlignmentError` naming the input, the check and both values, raised from
-`plan_scan`, so **no row is emitted**. In key mode a tie, an inversion, a NULL or a mismatch found mid-scan
-fails the query and names the input and the row; no row whose neighbour checks have not passed is
-released, and what that guarantees about batches already streamed is stated above.
+`plan_scan`, so **no row is emitted**. In key mode a tie, an inversion, a NULL or a mismatch is found by the
+pre-pass and fails the query naming the input and the row, also before any row is released (the release
+gate above).
 
 Zipping across a Collection (each member zipped with its own aligned partner) is not in PR1–PR3; it is tracked
 as #671.
@@ -822,11 +924,11 @@ file names.
 ### Local first, then the object store
 
 Local sources read blocks with positional reads on the file through a `VortexReadAt` over the member's byte
-range (Context, point 4). Object-store sources open through `ObjectStoreReader`, whose tail prefetch
-makes "open + manifest" one HEAD and one GET (`tessera-io/src/cloud.rs:47`, `TAIL_PREFETCH`), and read
-blocks through a second `VortexReadAt` that issues `get_range` calls at the member's offset. Under the
-default `VerifyBlocks` (§7) each touched block is downloaded whole into the spool and scanned locally, so this
-ranged reader serves the `SealOnly` path and the spool download.
+range (Context, point 4). Object-store sources open through `ObjectStoreReader`, whose tail prefetch makes
+"open + manifest" one HEAD and one GET (`tessera-io/src/cloud.rs:47`, `TAIL_PREFETCH`), and read blocks
+through a second `VortexReadAt` that issues `get_range` calls at the member's offset. Under `VerifyBlocks`
+(§7; the object-store default, pending #672) each touched block is downloaded whole into the spool and scanned
+locally, so this ranged reader serves the `SealOnly` path and the spool download.
 
 **Two object_store versions, and the consumer's registry.** `tessera-io` uses object_store **0.14.0**;
 DataFusion 54 uses **0.13.2** (both locked today, §1 D). So a consumer's DataFusion `ObjectStoreRegistry`
@@ -856,7 +958,7 @@ runtime-agnostic. The Vortex runtime never polls a tokio-bound future, no multi-
 introduced, and tokio stays inside the object-store backend, where ADR-0034 §4 put it; the one change from
 today is that its runtime is driven by a dedicated thread instead of by each caller's `block_on`. Pruned
 blocks issue **zero** GETs, which PR3 proves with the request counter the `s3-range-read` check already
-uses, a key-mode zip (§5) included: its boundary checks read only blocks the scan touches.
+uses, a key-mode zip (§5) included: its pre-pass reads only blocks the scan touches.
 
 ## §7 — Integrity
 
@@ -872,39 +974,110 @@ projection, and it verifies decoded values, not stored bytes.
 
 | Option | Verdict |
 |---|---|
-| **`VerifyBlocks`:** hash every block the scan touches before emitting any of its rows | **recommended default** |
+| **`VerifyBlocks`:** hash every block the scan touches before emitting any of its rows | **default** (object store: #672) |
 | **`SealOnly`:** the manifest seal at open only (`container.rs:399-404`); payloads not hashed | explicit opt-out |
 | Verify after emitting a block's rows | rejected |
 | Verify per segment / per row group | rejected (no such digest in the format) |
 
 ### `VerifyBlocks`, and its honest cost
 
-- **Local:** one streaming hash pass over the member's byte range with a 64 KiB ring (the `stream_block`
-  pattern), then the scan reads the rows **in a second pass**, normally served by the page cache. So
-  locally, "no row from unverified bytes" holds against **corruption at rest only**: a concurrent writer
-  that changes the file between the two passes is not detected. A caller who must defend against that uses
-  the spool below locally too. Whether the unspooled local mode should stay the default is open
-  question (b).
-- **Object store:** each touched block is downloaded once into a spool file while being hashed, verified,
+- **Local, the default: unspooled.** One streaming hash pass over the member's byte range with a 64 KiB
+  ring (the `stream_block` pattern), then the scan reads the rows **in a second pass**, normally served by
+  the page cache. So locally, "no row from unverified bytes" holds against **corruption at rest only**: a
+  concurrent writer that changes the file between the two passes is not detected. This is the default for
+  local sources because a `.tsra` is immutable once sealed and the threat the default defends against is
+  corruption at rest; it costs one hash pass and no extra disk.
+- **Local, opt-in: spooled.** A caller reading a local path it does not trust to stay unchanged for the
+  query, such as a remote filesystem mounted locally or a shared, writable store, opts into the spool for
+  that source (a `ScanOptions` setting whose name is PR1's to finalise): each touched block is copied into
+  the spool while being hashed and its rows are read from the spool, exactly as on an object store below,
+  which closes the concurrent-writer gap at the cost of the spool's disk and a copy of each touched
+  block. It is never switched on implicitly.
+- **Object store:** each touched block is downloaded into a spool file while being hashed, verified,
   then scanned from the spool, so rows are read from exactly the bytes that were hashed. The download
   streams through the 64 KiB hash ring in GET bodies of at most `spool_chunk_bytes` (default 8 MiB), and the
-  spool is bounded on disk by `spool_blocks × block size` (`spool_blocks` is a query-level option, default
-  `P`, §3; `2 · k · P` for a key-mode zip, §5), never in RAM.
+  spool is bounded on disk by `spool_blocks × block size` (`spool_blocks` is a query-level option whose
+  default and floor are the plan's need, "Spool slots" below), never in RAM.
+- **Spool slots: every partition can hold its maximum at once.** A spooled scan (an object store under
+  `VerifyBlocks`, or a local source with the opt-in) opens a block only from the spool, so every block a
+  partition holds takes a slot. Per input, a partition holds the block it is scanning and the next one it
+  prefetches across the block boundary (§3), and a key-mode zip also pins its first and last block (§5). So a
+  plan needs at most `2 · k · P` slots, `4 · k · P` for a key-mode zip. `plan_scan` computes the plan's actual
+  need from its units (fewer when a partition's run has fewer blocks; a boundary block that both partitions
+  pin in key mode counted once; outside key mode a block two partitions share counts in each partition's need,
+  since one partition may still hold it while the other holds two other blocks, and its spooled copy is
+  released when the last partition holding it moves on, "Once per block" below), makes that the default, and
+  **refuses** a configured `spool_blocks` below it with a typed error naming both numbers (the name is PR3's
+  to finalise), before any row. Since every partition can hold its maximum at the same time, no partition ever
+  waits for a slot another partition holds, so a consumer that drains the partitions in any order cannot hang
+  the query. The rule replaces a default of `P`, which could hang: a declared-mode zip with `k = 2` and `P =
+  1` must hold a block of each input to emit a zipped row, and with one slot it spools A's block and waits
+  forever for B's. Even with `k = 1`, partitions that prefetch hold two slots each, so partitions blocked on
+  full channels can take every slot while the partition the consumer drains waits for one: take `P = 2`, runs
+  `{1, 2}` / `{3, 4}`, every block one window, two slots, block 1 yielding more than `batches_buffered`
+  batches, the first partition executed first and holding both slots before the second requests one, and a
+  consumer that then executes the second partition and polls only it. The first partition spools block 1,
+  prefetches block 2 into the second slot and blocks on its full channel, which nobody polls;
+  the second partition waits for a slot for block 3 that neither block 1 nor block 2 will ever free. Counted
+  per partition, the need is 4 and both partitions hold their two blocks at once. **Why count
+  prefetch rather than disable it:** the measured 2.6–8× re-read (§3) happens inside one block, between window
+  scans, and is fixed by the per-block caches whichever way this is decided. Cross-block prefetch is what
+  overlaps the next block's whole-block download and hash with decoding the current one, the largest single
+  wait on a spooled scan; without it every partition would stall for one block fetch at every block boundary.
+  Counting its slot costs one block of spool **disk** per input per partition (`disk(spool)`, §3) and no RAM;
+  a caller short on disk lowers `max_partitions`, which lowers the need.
 - **The `.cidx` is always verified.** Tier 1 reads the sidecar with `read_block`, which checks its digest
   (`container.rs:456-489`), in **every** mode, `SealOnly` included, so pruning never acts on unverified
   statistics. `read_block` checks only when the manifest records a digest for the member (`if let
   Some(expected)`, `container.rs:467-473`). A sidecar without one is not trusted unverified: tier-1 pruning
   is switched off for that block, which is then scanned as if it had no `.cidx`.
-- **Once per block, not once per unit.** §6 can split one block into several units on different
-  partitions. Verification is a query-wide, verify-once cell per (product, block): the first unit to touch
-  the block hashes it (and fills the spool), the others wait for that result. A block is hashed once per
-  query however many partitions read it.
+- **Once per block, not once per unit, while the block is held.** §6 can split one block into several units on
+  different partitions. Verification is a query-wide, verify-once cell per (product, block): the first unit to
+  touch the block hashes it (and fills the spool), and units that reach it while it is verified or held wait
+  for that result and read the same copy; a waiting unit holds the copy from the moment it reaches the cell,
+  so the copy cannot be released between the cell resolving and the waiter opening it. **The fill runs to
+  completion on its own.** The download or copy into the spool and the hash (or, unspooled, the hash pass) run
+  on the scan's fill pool (§3: `P` threads, their buffers counted in `mem(fills)`), never on the producer
+  thread of the partition that started them, and nothing that waits on a fill runs on the pool (§3), a
+  key-mode pre-pass included (§5). A fill waits on no partition's channel, no consumer and, when
+  spooled, no slot: the slot it fills is the one that partition's need already counts (its current or
+  prefetched block). A zip partition requests the fills of its `k` inputs' blocks together, not one after
+  another, so the pool can overlap them. A queued fill waits only for running fills, each of which finishes,
+  so every fill completes. Otherwise a waiter could hang: with `k = 1`, `P = 2`, runs `{1, 2, 3}` / `{3, 4,
+  5}` and a consumer that drains the second partition first, the first partition may start block 3's fill as
+  its prefetch and then block on its full channel inside block 2; if the fill ran on its producer, the cell
+  would never resolve and the second partition, waiting on it, would never emit. A fill that fails resolves
+  the cell to the error, which every waiter returns. Read unspooled (a local source by default), the cell
+  keeps its result for the query, so a block is hashed once per query however many partitions read it. Read
+  from the spool, the cell lasts only as long as the spooled copy, and two exceptions follow:
+  - **Outside key mode, a split block's spooled copy is released when the last partition holding it moves
+    on.**
+    A partition that reaches the block later fetches it into a slot of its own and hashes it again, so a
+    block split across partitions may be downloaded and hashed once per partition. Keeping the copy for a
+    later partition would hang the query: in "Spool slots" the plan counts a shared block in each
+    partition's need, not as a slot reserved for the whole query. Take `k = 1`, `P = 2`, runs `{1, 2, 3}`
+    / `{3, 4, 5}` and a need of 4, and a consumer that drains the second partition first. That partition
+    spools block 3, scans it and moves on to 4 and 5. Partition 1 has spooled 1 and 2 and is blocked on its
+    full channel. If block 3 stayed spooled for partition 1, slots 1, 2, 3 and 4 would all be in use, block
+    5 would never get a slot, and the query would hang. Released on move-on, block 3 frees its slot for
+    block 5. Partition 1 then fetches and hashes 3 again when the consumer reaches it, so the scan never
+    holds more than its need.
+  - **In a key-mode zip, a boundary block both partitions pin is counted once and stays spooled** from the first
+    pre-pass that reads it until both partitions have finished or stopped their row passes (§5). This cannot hang: the
+    pin is held from that first pre-pass until both row passes finish or stop, and counted once in `4 · k · P`, and
+    every other block a partition holds is counted in that partition's own need, so every partition can still hold its
+    maximum at once and never waits for a slot. What a key-mode zip read from the spool does fetch and hash again is a
+    block between a partition's first and last, for the row pass (§5), since only the first and last stay pinned
+    between the passes.
 - **Cost:** a touched block's I/O is the whole block, whatever the projection and whatever tier 2 would have
   skipped; CPU is blake3 at the measured 2930 MB/s single-thread (ADR-0059 §9), about 0.37 s per GiB per
-  thread, parallel across partitions. Tier 1 is untouched: a pruned block is neither fetched nor hashed,
-  and no row from it is served, a key-mode zip's boundary checks (§5) included. So the price falls
-  on full scans of narrow projections and on object storage; selective queries on the indexed column pay
-  little.
+  thread, parallel on the scan's fill pool (up to `P` threads, §3). Tier 1 is untouched: a pruned block is
+  neither fetched nor hashed, and no row from it is served, a key-mode zip's pre-pass (§5) included. So the
+  price falls on full scans of narrow projections and on object storage; selective queries on the indexed
+  column pay little. Read from the spool outside key mode, a block §6 splits across partitions may be fetched
+  and hashed once per partition that reaches it after the copy was released (the first exception above), at
+  most one extra fetch per partition boundary. A key-mode zip read from the spool fetches and hashes every
+  block between a partition's first and last twice, once for the pre-pass and once for the row pass (§5).
 - **"Verify offline forever" holds:** verification needs nothing but the file.
 
 ### `SealOnly`
@@ -937,9 +1110,10 @@ skipping, equality with the in-memory path) for its own scope. Deferred work, ea
 
 ### PR1 — single-product streaming + pruning (#666)
 
-`tessera_io::scan` (plan, units, `TableScan`, `ScanBudget`, `Integrity`, metrics, local `VortexReadAt`),
-the `tessera-query` crate with a `TableProvider` over one product's logical table, and `tessera sql`
-migrated onto it. The current materialising path survives only as the test oracle.
+`tessera_io::scan` (plan, units, `TableScan`, `ScanBudget`, `Integrity` with the verify-once cells and the
+fill pool of §3, metrics, local `VortexReadAt`), the `tessera-query` crate with a `TableProvider` over one
+product's logical table, and `tessera sql` migrated onto it. The current materialising path survives only as
+the test oracle.
 
 - **Equality:** for a query corpus (projections, every operator in the class, NULLs, aggregates, `LIMIT`)
   on single- and multi-block (`events_NNNN`) fixtures, results equal the `MemTable` path's.
@@ -954,12 +1128,33 @@ migrated onto it. The current materialising path survives only as the test oracl
   oracle path in the same cgroup must be OOM-killed), with its numbers recorded.
 - **Integrity:** a flipped payload byte in a scanned block fails the query with `Error::Integrity` and no
   row of that block is emitted; the same flip in a tier-1-pruned block does not fail it, and the docs say so.
+- **Fill pool (§3, §7 "Once per block"), on an unspooled local source:** with a test gate holding both
+  partitions' producers before their first fill request, the pool has created exactly `P` threads
+  (counted at creation) and no fill is submitted; after the query it has still created `P`. A
+  single-product scan with `k = 1`, `P = 2` and runs `{1, 2, 3}` / `{3, 4, 5}`, every block one window
+  (at most `rows_per_window` rows), block 1 no larger than a partition's channel and block 2 larger, and
+  a consumer that drains the second partition first, completes with block 3 hashed once when two more
+  test gates fix the order: one holds the second partition's producer before it touches block 3 until the
+  first partition has registered as the starter of block 3's verify-once cell (its prefetch from inside
+  block 2), and one holds block 3's hash pass until the first partition is observed blocked on its full
+  channel inside block 2. A hash pass run on the starting partition's producer, or as a future on its
+  runtime, never resolves the cell, and the test's timeout fails it on every run. With a corrupted byte
+  in block 3, the hash pass fails and resolves the cell to the error: the second partition, waiting on
+  that cell, returns `Error::Integrity` rather than hanging, the query fails with it, and no row of block
+  3 is returned; an implementation that resolves the cell only on success, or reports the error only to
+  the partition that started the fill, times out. PR3 repeats this test read from the spool. While their
+  fills are held, a single-product scan cannot submit more than `P` fills, so the pool's queue is first
+  exercised by PR2's "Fill pool bound". The pool's submission API takes a fill (a block, its source and its
+  verify-once cell), not a closure, so no task that waits on a fill can be scheduled on it (§3); PR2's
+  "Pre-pass threads" tests the one such task the ADR defines.
 - **Gates:** Gate B snapshots regenerated with the inert-delta proof (§1).
 
 ### PR2 — positional zip (#667)
 
 `zip` in `tessera_io::scan` and in `tessera-query`; the `aligned_to` field, `derive_aligned` (its only
-writer) and the seal-time checks; key mode with the strictly-increasing check.
+writer) and the seal-time checks; key mode with the key-only pre-pass, the release gate and the
+strictly-increasing check. Same-producer zips only: no signature check, and the docs say that a zip across
+producers is not offered until a signed alignment is (§5).
 
 - **Equality:** a zip equals the hash join on the key column for aligned inputs, with and without filters.
 - **Refusal before any row:** different total rows, different per-block rows, a missing or ambiguous
@@ -968,28 +1163,85 @@ writer) and the seal-time checks; key mode with the strictly-increasing check.
   `AlignmentError`.
 - **Key mode:** a tie, an inversion, a NULL key, a key altered in row group *g*, a tie on a unit boundary
   inside one partition and a tie on a partition boundary each fail the query with an error naming the row.
-  §5's counterexample (A with keys `[…, 5] [3] [5, …]`, B the same with the two `5` rows swapped, queried
-  with `WHERE key >= 5` so the middle group is pruned) is refused with the gap inside one block and with
-  the gap a whole pruned block, with both `5`s in one partition and in two; asserted on the released
-  batches, no swapped pair is ever zipped. An inversion across a pruned gap and across a partition edge is
-  refused the same way. Key mode reads no byte of a pruned block (its `bytes_fetched` is 0). The key column
-  is exempt from the collision refusal and emitted once. `WHERE key >= 5 AND e > 3` prunes on the key
-  conjunct only. An event-id key under `WHERE row_index <> 2` (the key is not the indexed column) switches
-  tier 1 off for the zip, so §5's `[1, 5] [5] [7]` swap is checked and refused. A scanned boundary key that
-  differs from the registered one fails the query. A consumer that executes the partitions one after
-  another completes without hanging. A boundary block shared by two partitions is spooled once, and a
-  key-mode object-store scan with fewer spool slots than it needs is refused by `plan_scan`. A `LIMIT`
-  query's rows are neighbour-checked as §5 states, and the docs say so, as they say that pruning in key mode
-  trusts the `.cidx` statistics.
+  §5's counterexample (A with keys `[…, 5] [3] [5, …]`, B the same with the two `5` rows swapped, queried with
+  `WHERE key >= 5` so the middle group is pruned) is refused with the gap inside one block and with the gap a
+  whole pruned block, with both `5`s in one partition and in two; asserted on the released batches, no swapped
+  pair is ever zipped. An inversion across a pruned gap and across a partition edge is refused the same way.
+  Key mode reads no byte of a pruned block (its `bytes_fetched` is 0). The key column is exempt from the
+  collision refusal and emitted once. `WHERE key >= 5 AND e > 3` prunes on the key conjunct only. An event-id
+  key under `WHERE row_index <> 2` (the key is not the indexed column) switches tier 1 off for the zip, so
+  §5's `[1, 5] [5] [7]` swap is checked and refused. A scanned boundary key that differs from the registered
+  one fails the query. A consumer that executes the partitions one after another completes without hanging.
+  The docs say that pruning in key mode trusts the `.cidx` statistics. (The spool lands in PR3, so the
+  key-mode spool tests are PR3's.)
+- **Release gate:** a key-mode zip with a pushed `LIMIT` or an early stop is refused until the key-only
+  pre-pass has verified the scanned range: §5's `[5, 6] [3, 5]` case (B the same with the two `5` rows
+  swapped) under `LIMIT 1` fails the query and returns no row, a test that fails on a neighbour-check-only
+  implementation, which returns the misaligned pair. The same case with the two row groups in two
+  partitions, and with no `LIMIT` but a consumer that drops the stream after its first batch, returns no
+  row either. On aligned inputs, the pre-pass has completed before the first batch is released, and
+  `LIMIT n` then returns exactly `n` correctly paired rows.
+- **Gate failure (§5 "A failed check resolves the gate"), on an unspooled local source:** a key-mode zip with `k =
+  2` and `P = 2` whose consumer executes and polls only the first partition. With an inversion inside the second
+  partition's run, the polled stream returns that inversion's error, naming the input and the row, within the test's
+  timeout, and both producer threads join through the test hook of "Producer lifetime". The same holds for a failed
+  boundary check: each run strictly increasing and the first partition's last key equal to the second's first, a tie
+  on the partition boundary, whose error names the input and the row as every key-mode failure does (§5). A
+  gate-without-failure implementation (a gate that only signals passing, so a producer waits at it without observing
+  its failure state) leaves the first partition waiting at the gate, its stream never yields, and the test's timeout
+  fails it on every run in both cases. One that sends the error only on the failing partition's stream fails it too:
+  the polled stream never yields the error.
 - **Writers:** generic `ingest` and `commit --add-block` refuse a spec carrying `aligned_to`;
   `derive_aligned` refuses a transform that changes a batch's row count.
+- **Fill pool bound (§3 `mem(fills)`, §7), on an unspooled local source:** a declared-mode zip with `k = 2`
+  and `P = 2` whose inputs each have at least two blocks, with both inputs sharing block boundaries and each
+  partition's run starting on a block boundary in every input (so the four first blocks are distinct and no
+  partition waits on another's cell), and a fill gate (a test gate that holds every fill). Once both
+  partitions are executed, each has requested its two inputs' first-block fills together (§7), four in all (no
+  partition decodes while its fills are held, so none prefetches). The pool exposes the number of OS threads
+  it has created during the query (counted by the pool when it creates a thread, before that thread runs), its
+  running count (fills that have reached the gate), its queued count (fills submitted that no thread has
+  taken; a fill a thread has taken but that has not reached the gate is neither) and its idle-thread count (a
+  created thread that holds no fill, whether or not it has run yet). The pool creates its `P` threads when the
+  scan starts, before any fill is submitted (§3). A second test gate holds both partitions' producers before
+  their first fill request; with it closed, the test asserts threads created = `P` and no fill submitted, then
+  opens it. The test then waits until running = `P`, queued = 4 − `P` and no thread is idle, or running > `P`,
+  or threads created ≠ `P`; it then asserts threads created = `P`, running ≤ `P` and queued = 4 − `P`, with
+  the queued fills holding no buffer, and after the fill gate opens and all four fills complete it asserts
+  threads created = `P` again. A pool of `P` threads always reaches the first condition and stays in it, since
+  the fill gate stops any fill from finishing, and passes. A pool that creates a different number of threads
+  (a spare thread, a dispatcher, one per fill, or fewer than `P`) ends the wait through threads created ≠ `P`
+  and fails on every run whatever the interleaving; one that creates threads lazily, on demand, fails the
+  check before the first fill, when it has created none, and one that creates them after a fill finishes fails
+  the final count; and one that runs more than `P` fills fails on running ≤ `P`. Any other pool that never
+  settles fails on the test's timeout.
+- **Pre-pass threads (§5, §3 "nothing that waits on a fill may run on the fill pool"), on an unspooled local source:**
+  a key-mode zip with `k = 2` and `P = 2` over aligned inputs, each partition's run starting on a block boundary in
+  every input, with the fill gate of "Fill pool bound" holding every fill. The consumer executes only the first
+  partition. The test waits until the pool's running count is `P` and both partitions' pre-passes are observed waiting
+  on a verify-once cell, the second partition's included, although it has not been executed. A pre-pass is not a fill
+  and never counts as running. It asserts that each pre-pass runs on its partition's producer thread (the pre-pass
+  records its thread id, which the test compares with the producer's and with every fill-pool thread's) and that the
+  pool has created exactly `P` threads. It then opens the fill gate and executes the second partition, and the query
+  completes with rows equal to the hash join. An implementation that schedules a pre-pass on the fill pool keeps that
+  pool thread while the pre-pass waits on its fills, so at most `P − 1` fills can run (none when both pre-passes are
+  there), running never reaches `P`, the fills the pre-passes wait on stay queued, and the test's timeout fails it on
+  every run whatever the interleaving.
+- **Producer lifetime (§5), on an unspooled local source:** a key-mode zip with `P = 2` over aligned inputs, each
+  partition's run yielding more than `batches_buffered` + 1 batches, whose consumer executes only the first
+  partition and reads one batch, then waits until both producers are observed blocked on a full channel; a second
+  `execute` of the first partition then returns the error naming it; the consumer then drops its stream and the
+  plan. Both producer threads, the unexecuted partition's included, join within the test's timeout, through a test
+  hook that exposes the producers' join handles. An implementation that keeps an unexecuted partition's receiver
+  alive after the plan is dropped leaves its producer blocked, and the join times out.
 - **Bounded memory:** the ksb run repeated on a zip of two blocks; the anonymous peak stays within the §3
   formula with `k = 2`, key-mode buffers included.
 
 ### PR3 — multi-product and collections, local then object store (#668)
 
 Member resolution, partitioning, schema policy, the product column, then the object-store `VortexReadAt`,
-the spool and the `RangeSource` seam for a consumer's DataFusion `ObjectStoreRegistry`.
+the spool (with the local spool opt-in of §7) and the `RangeSource` seam for a consumer's DataFusion
+`ObjectStoreRegistry`.
 
 - **Equality:** a collection scan equals the `UNION ALL` of its products' single-product scans.
 - **Refusal:** a member `manifest_hash` mismatch, an unresolvable member and a schema mismatch are refused
@@ -997,6 +1249,67 @@ the spool and the `RangeSource` seam for a consumer's DataFusion `ObjectStoreReg
 - **Object store:** against versitygw (extending the `s3-range-read` flake check), results equal the local
   scan; pruned blocks issue zero GETs, in a key-mode zip too; the spool stays within its bound; a store
   taken from a DataFusion `ObjectStoreRegistry` reads the same rows as one opened by `open_url`.
+- **Local spool opt-in:** with the opt-in, a byte changed in the local file after its block was spooled and
+  hashed reaches no row; without it, a local scan creates no spool file.
+- **Spool slots (§7), on an object store and on a local source with the opt-in:** at the default
+  `spool_blocks`, a declared-mode zip with `k = 2` and `P = 1`, a prefetching single-product scan and a
+  key-mode zip each complete when the consumer drains one partition before executing the others; a configured
+  `spool_blocks` one below the plan's need is refused by `plan_scan` with the typed error, before any row; a
+  block shared by two partitions is re-fetched and re-hashed by a partition that reaches it after the other
+  released it outside key mode (counted per partition), and pinned once in key mode (counted once); the
+  spool's high-water mark never exceeds the computed need (`2 · k · P`, `4 · k · P` in key mode, at most),
+  including a single-product scan with `k = 1`, `P = 2` and runs `{1, 2, 3}` / `{3, 4, 5}` whose first
+  partition is blocked on a full channel holding blocks 1 and 2 while the second holds 4 and 5 (need 4, not 3;
+  blocks of one window each and larger than a partition's channel, as in the next criterion).
+- **Split block outside key mode (§7 "Once per block"), on an object store and on a local source with the
+  opt-in:** a single-product scan with `k = 1`, `P = 2` and runs `{1, 2, 3}` / `{3, 4, 5}`, at the default
+  `spool_blocks` (`2 · k · P` = 4), with every block one window (at most `rows_per_window` rows, §3, so a
+  partition prefetches the next block while decoding the current one) and larger than a partition's channel
+  (more than `batches_buffered · batch_rows` rows), so the first partition blocks on its full channel inside
+  block 1 holding blocks 1 and 2. A test gate holds the second partition's producer before it touches block
+  3 until the first partition is observed in that state; the consumer then drains the second partition to its
+  end before reading the first. The query completes; block 3's hash is computed twice (counted at the
+  verify-once cell) and its bytes fetched twice. Under a hashed-once implementation that keeps block 3
+  spooled for the first partition, slots 1 to 4 stay held, the second partition never gets a slot for block
+  5, and the test's timeout fails it on every run.
+- **Fill independent of its owner (§7 "Once per block"), on an object store and on a local source with the
+  opt-in (PR1 tests the unspooled leg):** runs `{1, 2, 3}` / `{3, 4, 5}` with every block one window (at most
+  `rows_per_window` rows), block 1 no larger than a partition's channel and block 2 larger, so the first
+  partition empties block 1 into its channel, enters block 2 and starts block 3's fill as its prefetch. Two
+  test gates fix the order. Gate 1 holds the second partition's producer before it touches block 3 and opens
+  when the first partition has registered as the starter of block 3's verify-once cell. Gate 2, on the
+  `RangeSource` (or the local hash pass), holds block 3's fill and opens when the first partition is observed
+  blocked on its full channel inside block 2. The consumer drains the second partition first: its wait on
+  block 3's cell resolves and the query completes, with block 3 hashed once. A fill run on the starting
+  partition's producer keeps that producer inside the gated fill, so it never blocks on its channel, gate 2
+  never opens, the cell never resolves, and the test's timeout fails it on every run. With a corrupted byte in
+  block 3 the query fails with the integrity error and returns no row of block 3.
+- **Waiter holds the copy (§7 "Once per block"), on an object store and on a local source with the opt-in:**
+  runs `{1, 2, 3}` / `{3, 4, 5}`, every block one window, block 1 no larger than a partition's channel and
+  blocks 2 and 3 larger. Gate 1 holds the first partition before it touches block 3 until the second partition
+  has registered as the starter of block 3's cell; gate 2 holds the first partition after block 3's cell
+  resolves and before it opens block 3. The consumer starts draining the second partition only once the first
+  partition has registered as a waiter on block 3's cell (its prefetch from inside block 2) and is observed
+  blocked on its full channel inside block 2 or held at gate 2; until then the second partition is blocked on
+  its own full channel inside block 3. Drained to its end, the second partition scans block 3 and moves on to
+  blocks 4 and 5. The test asserts block 3's copy is still spooled after the second partition has moved past
+  it, then opens gate 2 and drains the first partition; the query's rows equal the unspooled scan's, with
+  block 3 hashed once and at most 4 slots in use. An implementation that counts the waiter as a holder only
+  when it opens the copy releases block 3 when the second partition moves on and reuses its slot for block 5,
+  so the assertion fails, and the first partition reads a missing or reused spool file.
+- **Fill pool bound, read from the spool:** PR2's criterion repeated on an object store and on a local
+  source with the opt-in.
+- **Pre-pass threads, read from the spool:** PR2's "Pre-pass threads" repeated on an object store and on a
+  local source with the opt-in, the fill gate holding each block's download or copy into the spool. The
+  specified design completes within the default `spool_blocks` (`4 · k · P`); a pre-pass scheduled on the
+  fill pool keeps running below `P`, and the test's timeout fails it on every run.
+- **Producer lifetime, read from the spool:** PR2's "Producer lifetime" repeated on an object store and on a
+  local source with the opt-in; after both producers join, the spool holds no slot and no spooled file of the
+  query, and an implementation whose stopped producer keeps its pins fails that assertion.
+- **Gate failure, read from the spool:** PR2's "Gate failure" repeated on an object store and on a local source with
+  the opt-in, in both cases; after the error, and once both producer threads have joined through the test hook of
+  "Producer lifetime" and the fill pool is idle, the spool holds no slot and no spooled file of the query, so every
+  pin and slot has been released. A gate-without-failure implementation times out as in PR2.
 - **Bounded memory:** the ksb run over a many-product collection.
 
 ## Alternatives considered and rejected (summary)
@@ -1026,36 +1339,38 @@ the spool and the `RangeSource` seam for a consumer's DataFusion `ObjectStoreReg
 - `tessera sql` stops materialising tables and gains `EXPLAIN ANALYZE` metrics; its output is unchanged.
 - A bounded query becomes possible on tables far larger than RAM; the bound is in rows and is a function
   of the budget, not of the table.
-- Every query verifies the blocks it reads by default, which costs a full read of each touched block.
+- Every local query verifies the blocks it reads by default (object-store default pending #672), which costs a
+  full read of each touched block.
 - `TableSpec` gains one optional sealed field, `aligned_to`, corpus-neutral, written only by
-  `derive_aligned`.
+  `derive_aligned`. Zips ship for products of one producer; a zip across producers waits for a signed
+  alignment (#656, #566).
+- A key-mode zip reads its key column once more than the query needs and releases its first row only after
+  that pre-pass; in exchange every row it returns is correctly paired, however the query ends.
 - DataFusion majors become a recurring migration and a breaking `tessera-query` release.
 
-## Open questions for the owner
+## Open questions (do not block acceptance)
 
-(a) **Must a declared alignment be signed?** `aligned_to` is the writer's claim (§5). The engine's generic
-    paths never write it, but a hand-crafted, re-sealed manifest can. Should the zip trust a declared
-    alignment only when the product carries a signature from a trusted key (ADR-0037), as the identity
-    envelope work in #656 / #566 may need for its own claims? The risk is real: a forged claim that names
-    the right source, with a correct `source_digest`, passes every check and yields a **silently
-    misaligned** zip; the digest only stops a claim from being applied to a different version of the
-    source. **Recommendation:** not in PR2, because forging it requires writing and sealing the derived
-    product outside the engine, and a party who can do that can equally forge the derived values
-    themselves; require a trusted signature on the derived product before zipping as soon as a consumer
-    zips products it did not produce.
+Each is filed with a recommendation, and none changes a decision this ADR states as settled. Each gates the
+work named beside it, not the acceptance.
 
-(b) **Local `VerifyBlocks` without protection against concurrent writers, as the default?** Locally the rows
-    are read in a second pass after the hash (§7), so a writer changing the file in between goes
-    undetected. **Recommendation:** keep it as the default, since `.tsra` files are immutable once sealed
-    and the threat is at-rest corruption, and offer the spool locally as an opt-in for shared, writable
-    stores.
+| Issue | Question | Gates |
+|---|---|---|
+| #672 | Integrity default for object-store sources: `VerifyBlocks` (spooled) or `SealOnly` (§7) | PR3, #668 |
+| #673 | `tessera-query` keeps its own version line at 1.0, an exception to ADR-0052 §2 (§2) | 1.0 / API freeze |
+| #674 | A declared workspace MSRV now that DataFusion is public API (§2) | 1.0 / API freeze |
+| #675 | The indexed column recorded in the table `.cidx` spec at the ADR-0059 event (§4, §5) | `.cidx` spec change |
 
-Filed separately, each with a recommendation: the object-store integrity default (#672), `tessera-query`'s
-version line at 1.0 (#673), a workspace MSRV (#674), and recording the indexed column in the table `.cidx`
-spec during the ADR-0059 event (#675).
+#672 decides only which mode an object-store source gets when the caller names none. Under either answer
+the spool, its slot rule and the key-mode pre-pass stay as stated, defined for `VerifyBlocks`, and
+`SealOnly` stays a labelled mode with its own costs (§7); if #672 picks `SealOnly`, the object-store
+statements of this ADR that call `VerifyBlocks` the object-store default change to name it an opt-in,
+and no other rule moves. Until #675 lands,
+key-mode pruning uses the `row_index` convention as §5 states.
 
 ## References
 
-Issue #654 and the architect's triage comment of 2026-10-25 · #251 · #225 · #627 · #632 · #657 ·
+Issue #654, the architect's triage comment of 2026-10-25 and the owner's decisions of 2026-10-26
+([comment](https://github.com/vig-os/tessera/issues/654#issuecomment-6423805993)) · #251 · #225 · #627 ·
+#632 · #657 ·
 ADR-0026 · ADR-0034 · ADR-0049 · ADR-0052 · ADR-0057 · ADR-0059 · `tessera-cli/src/sql.rs` ·
 `tessera-io/src/{table,multiblock,container,cloud}.rs` · `tessera-core/src/chunk_index.rs`.
