@@ -429,17 +429,62 @@ mod tests {
         (std::fs::read(&path).unwrap(), names)
     }
 
-    /// Build an S3 store from the env vars the flake check sets — `None` (with a
-    /// printed skip notice) when `TESSERA_S3_ENDPOINT` is unset, so local
-    /// `cargo test --features cloud` without a running S3 server doesn't fail. The
-    /// `s3-range-read` flake check (versitygw on loopback) IS the authoritative runner.
-    fn s3_store_or_skip(test: &str) -> Option<(Arc<dyn ObjectStore>, Runtime)> {
-        let endpoint = match std::env::var("TESSERA_S3_ENDPOINT") {
-            Ok(v) => v,
-            Err(_) => {
-                eprintln!("skipping {test}: TESSERA_S3_ENDPOINT not set (run under flake check)"); // guardrails-ok: deliberate conditional-skip notice, not a debug leftover
-                return None;
+    /// Set to `1` by the `s3-range-read` flake check, which starts an S3 server for these tests.
+    const S3_REQUIRED_ENV: &str = "TESSERA_S3_REQUIRED";
+
+    /// The S3 tests' **required/skip contract** (#707), as a pure function of the two env reads
+    /// (`TESSERA_S3_REQUIRED`, `TESSERA_S3_ENDPOINT`) so it is unit-tested without mutating the
+    /// process environment:
+    ///
+    /// | `TESSERA_S3_REQUIRED` | `TESSERA_S3_ENDPOINT` | outcome                               |
+    /// |-----------------------|-----------------------|---------------------------------------|
+    /// | unset                 | unset                 | `None`: skip (plain `cargo test`)     |
+    /// | unset or `1`          | set                   | `Some(endpoint)`: run against it      |
+    /// | `1`                   | unset                 | **panic**: the server was promised    |
+    /// | any                   | set, not UTF-8        | **panic**: set is never "unset"       |
+    /// | any other value       | any                   | **panic**: a typo must not mean skip  |
+    ///
+    /// Why a marker and not "skip iff the endpoint is unset": the flake check exports the endpoint
+    /// at runtime from `preCheck`, because the port is only known once the server is up. If that
+    /// export ever broke, every S3 test would early-return and nextest would report it PASS, so
+    /// the check would be green while testing nothing. `TESSERA_S3_REQUIRED` is a static
+    /// derivation attribute, independent of `preCheck`, so a lost endpoint is a red build.
+    ///
+    /// `tessera-cli`'s `tests/cloud.rs` applies the same contract to its S3 integration test.
+    fn s3_endpoint(
+        required: std::result::Result<String, std::env::VarError>,
+        endpoint: std::result::Result<String, std::env::VarError>,
+    ) -> Option<String> {
+        let required = match required {
+            Err(std::env::VarError::NotPresent) => false,
+            Ok(v) if v == "1" => true,
+            other => panic!("{S3_REQUIRED_ENV} must be unset or `1`, got {other:?}"),
+        };
+        match endpoint {
+            Ok(v) => Some(v),
+            Err(std::env::VarError::NotPresent) => {
+                assert!(
+                    !required,
+                    "{S3_REQUIRED_ENV}=1 but TESSERA_S3_ENDPOINT is not set: the S3 server these \
+                     tests were promised is missing, so they would pass without testing"
+                );
+                None
             }
+            Err(e) => panic!("TESSERA_S3_ENDPOINT is set but unreadable: {e}"),
+        }
+    }
+
+    /// Build an S3 store from the env vars the flake check sets, or `None` (with a printed skip
+    /// notice) when [`s3_endpoint`] says skip, so local `cargo test --features cloud` without an
+    /// S3 server doesn't fail. Panics where [`s3_endpoint`] does. The `s3-range-read` flake check
+    /// (versitygw on loopback) is the authoritative runner.
+    fn s3_store_or_skip(test: &str) -> Option<(Arc<dyn ObjectStore>, Runtime)> {
+        let Some(endpoint) = s3_endpoint(
+            std::env::var(S3_REQUIRED_ENV),
+            std::env::var("TESSERA_S3_ENDPOINT"),
+        ) else {
+            eprintln!("skipping {test}: TESSERA_S3_ENDPOINT not set (run under flake check)"); // guardrails-ok: deliberate conditional-skip notice, not a debug leftover
+            return None;
         };
         let bucket = std::env::var("TESSERA_S3_BUCKET").unwrap();
         let access_key = std::env::var("AWS_ACCESS_KEY_ID").unwrap();
@@ -458,6 +503,48 @@ mod tests {
         );
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
         Some((store, rt))
+    }
+
+    #[test]
+    fn s3_endpoint_skips_only_when_not_required() {
+        use std::env::VarError::NotPresent;
+        assert_eq!(s3_endpoint(Err(NotPresent), Err(NotPresent)), None);
+        let ep = || Ok("http://127.0.0.1:1".to_owned());
+        assert_eq!(
+            s3_endpoint(Err(NotPresent), ep()).as_deref(),
+            Some("http://127.0.0.1:1")
+        );
+        assert_eq!(
+            s3_endpoint(Ok("1".into()), ep()).as_deref(),
+            Some("http://127.0.0.1:1")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "TESSERA_S3_REQUIRED=1 but TESSERA_S3_ENDPOINT is not set")]
+    fn s3_endpoint_required_without_endpoint_panics() {
+        s3_endpoint(Ok("1".into()), Err(std::env::VarError::NotPresent));
+    }
+
+    #[test]
+    #[should_panic(expected = "TESSERA_S3_REQUIRED must be unset or `1`")]
+    fn s3_endpoint_rejects_a_misspelled_required_marker() {
+        s3_endpoint(Ok("true".into()), Err(std::env::VarError::NotPresent));
+    }
+
+    #[test]
+    #[should_panic(expected = "TESSERA_S3_REQUIRED must be unset or `1`")]
+    fn s3_endpoint_rejects_a_misspelled_required_marker_even_with_an_endpoint() {
+        s3_endpoint(Ok("true".into()), Ok("http://127.0.0.1:1".into()));
+    }
+
+    #[test]
+    #[should_panic(expected = "TESSERA_S3_ENDPOINT is set but unreadable")]
+    fn s3_endpoint_rejects_a_non_utf8_endpoint_instead_of_skipping() {
+        s3_endpoint(
+            Err(std::env::VarError::NotPresent),
+            Err(std::env::VarError::NotUnicode("\u{fffd}".into())),
+        );
     }
 
     /// Range-read an 8-block .tsra straight from S3 — mirrors `range.rs:101-129` over the wire.

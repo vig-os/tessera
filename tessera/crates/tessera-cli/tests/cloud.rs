@@ -3,7 +3,8 @@
 //! Drives the real binary (resolved via `CARGO_BIN_EXE_tessera`) against an S3 server
 //! seeded with a sealed `.tsra` — the binary opens it over the wire via `tessera_io::open_url`,
 //! verifies the seal + every block digest, and exits 0. Skipped when `TESSERA_S3_ENDPOINT` is
-//! unset so local `cargo test --features cloud` without a server doesn't fail; the
+//! unset so local `cargo test --features cloud` without a server doesn't fail, unless
+//! `TESSERA_S3_REQUIRED=1` says a server was promised (see `s3_endpoint`); the
 //! `s3-range-read` flake check (versitygw on loopback) is the authoritative runner.
 
 #![cfg(feature = "cloud")]
@@ -33,6 +34,54 @@ fn sealed_tsra(out: &Path) {
     pack(&manifest, &[payload], out).unwrap();
 }
 
+/// The S3 endpoint, or `None` to skip, from the `TESSERA_S3_REQUIRED` / `TESSERA_S3_ENDPOINT`
+/// reads. A copy of `tessera_io::cloud::tests::s3_endpoint` (#707), which documents the
+/// required/skip contract in full; the two cannot share code without new public API. In short:
+/// without an endpoint the test skips, unless `TESSERA_S3_REQUIRED=1` (set by the
+/// `s3-range-read` flake check) promised a server, in which case it panics instead of passing
+/// without testing. Any other marker value, or an endpoint that is set but not UTF-8, panics
+/// too, so neither a typo nor an unreadable value can turn into a skip.
+fn s3_endpoint(
+    required: Result<String, std::env::VarError>,
+    endpoint: Result<String, std::env::VarError>,
+) -> Option<String> {
+    let required = match required {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(v) if v == "1" => true,
+        other => panic!("TESSERA_S3_REQUIRED must be unset or `1`, got {other:?}"),
+    };
+    match endpoint {
+        Ok(v) => Some(v),
+        Err(std::env::VarError::NotPresent) => {
+            assert!(
+                !required,
+                "TESSERA_S3_REQUIRED=1 but TESSERA_S3_ENDPOINT is not set: the S3 server this \
+                 test was promised is missing, so it would pass without testing"
+            );
+            None
+        }
+        Err(e) => panic!("TESSERA_S3_ENDPOINT is set but unreadable: {e}"),
+    }
+}
+
+/// Names carry `cloud_` so the `s3-range-read` check's `cloud` filter runs them next to the test
+/// they guard.
+#[test]
+fn cloud_s3_endpoint_skips_only_when_not_required() {
+    use std::env::VarError::NotPresent;
+    assert_eq!(s3_endpoint(Err(NotPresent), Err(NotPresent)), None);
+    assert_eq!(
+        s3_endpoint(Ok("1".into()), Ok("http://127.0.0.1:1".into())).as_deref(),
+        Some("http://127.0.0.1:1")
+    );
+}
+
+#[test]
+#[should_panic(expected = "TESSERA_S3_REQUIRED=1 but TESSERA_S3_ENDPOINT is not set")]
+fn cloud_s3_endpoint_required_without_endpoint_panics() {
+    s3_endpoint(Ok("1".into()), Err(std::env::VarError::NotPresent));
+}
+
 /// End-to-end CLI cloud test: seed a `.tsra` to S3, then `tessera verify s3://<bucket>/<key>`
 /// must exit 0 with the same "OK ... verified" output the local-path verify produces.
 ///
@@ -40,12 +89,12 @@ fn sealed_tsra(out: &Path) {
 /// catches both this binary's tests and the `cloud::*` tessera-io unit tests in one pass.
 #[test]
 fn cloud_cli_inspect_and_verify_over_s3_url() {
-    let endpoint = match std::env::var("TESSERA_S3_ENDPOINT") {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("skipping: TESSERA_S3_ENDPOINT not set (run under flake check)"); // guardrails-ok: deliberate conditional-skip notice
-            return;
-        }
+    let Some(endpoint) = s3_endpoint(
+        std::env::var("TESSERA_S3_REQUIRED"),
+        std::env::var("TESSERA_S3_ENDPOINT"),
+    ) else {
+        eprintln!("skipping: TESSERA_S3_ENDPOINT not set (run under flake check)"); // guardrails-ok: deliberate conditional-skip notice
+        return;
     };
     let bucket = std::env::var("TESSERA_S3_BUCKET").unwrap();
     // Seal a `.tsra` locally then upload it via the same object_store builder open_url uses, so
