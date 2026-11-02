@@ -515,6 +515,37 @@ mod tests {
         assert_eq!(t, ColumnData::U64((0..rows as u64).collect()));
     }
 
+    /// `.cidx` pruning over a partitioned table reads the leaves' sidecars (`pairs/0001.cidx`)
+    /// and no leaf payload: the bytes read while pruning stay below one leaf's payload.
+    #[test]
+    fn cidx_pruning_skips_the_leaves_of_a_partitioned_table() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let path = build_partitioned(dir.path(), ROWS_PER_GROUP * 3, ROWS_PER_GROUP);
+        let mut local = Reader::open(&path).unwrap();
+        let smallest_leaf = ["pairs/0000", "pairs/0001", "pairs/0002"]
+            .map(|n| local.read_block(n).unwrap().len() as u64)
+            .into_iter()
+            .min()
+            .unwrap();
+        let counting =
+            crate::CountingReader::new(std::io::Cursor::new(std::fs::read(&path).unwrap()));
+        let tally = counting.counter();
+        let mut rdr = Reader::from_reader(counting).unwrap();
+        let view = rdr.logical_table("pairs").unwrap();
+        let before = tally.load(Ordering::Relaxed);
+        let lo = ROWS_PER_GROUP as i64 + 10;
+        let kept = view
+            .select_blocks_overlapping(&mut rdr, "t", lo, lo + 10)
+            .unwrap();
+        assert_eq!(kept, vec![1]);
+        let read = tally.load(Ordering::Relaxed) - before;
+        assert!(
+            read < smallest_leaf,
+            "pruning read {read} B, a leaf payload is {smallest_leaf} B: it read leaf data"
+        );
+    }
+
     #[test]
     fn logical_row_count_is_sum_of_blocks() {
         // 3 blocks at the test seam — and the single-block view (rows ≤ block_rows) behaves
