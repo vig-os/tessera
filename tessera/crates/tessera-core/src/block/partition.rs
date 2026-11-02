@@ -997,6 +997,22 @@ mod tests {
         seal(alpha).unwrap();
     }
 
+    /// `group_specs` applies the schema rule to a legacy flat group too: a block whose spec isn't a
+    /// `TableSpec` is `SchemaMismatch`, named by the block, not a bare `Error::Serde`.
+    #[test]
+    fn a_legacy_block_with_an_unparsable_spec_is_a_schema_mismatch() {
+        let mut blocks = vec![table("events_0000", None), table("events_0001", None)];
+        blocks[1].spec = json!({"rows": "many"});
+        let group = table_group(&blocks, "events").unwrap();
+        match group_specs(&blocks, "events", &group) {
+            Err(Error::LogicalTable {
+                name,
+                reason: LogicalTableError::SchemaMismatch { leaf, .. },
+            }) => assert_eq!((name.as_str(), leaf.as_str()), ("events", "events_0001")),
+            other => panic!("expected SchemaMismatch, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_malformed_marker_is_refused_not_ignored() {
         let mut blocks = leaves(2);
