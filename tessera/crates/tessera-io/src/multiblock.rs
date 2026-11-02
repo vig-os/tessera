@@ -37,7 +37,8 @@ use crate::table::{decode_column, decode_rows, ColumnData, TableData};
 /// `TableSpec.rows` comes from each [`BlockRef.spec`] in the manifest, so the addressing is exact
 /// without reading any block payload.
 pub struct LogicalTableView {
-    prefix: String,
+    /// The table name the view was resolved from ([`Reader::table_group`]'s argument).
+    name: String,
     block_names: Vec<String>,
     /// Parallel to [`Self::block_names`]: the per-block [`TableSpec`] decoded from each
     /// [`BlockRef.spec`] (read from the manifest, never from a block payload).
@@ -48,9 +49,20 @@ pub struct LogicalTableView {
 }
 
 impl LogicalTableView {
-    /// The table name this view was built from (e.g. `"events"` or `"pairs"`).
+    /// The table name this view was resolved from (e.g. `"events"` or `"pairs"`), as passed to
+    /// [`Reader::logical_table`]: a single block's name, a partitioned table's node, or the stem of
+    /// a legacy `events_NNNN` group. The view's blocks are [`Self::block_names`].
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The table name this view was resolved from: [`Self::name`], under its pre-ADR-0064 name.
+    #[deprecated(
+        note = "use `LogicalTableView::name`: the view is resolved from a table name, which \
+                         is no longer always a block-name prefix (ADR-0064)"
+    )]
     pub fn prefix(&self) -> &str {
-        &self.prefix
+        &self.name
     }
 
     /// Total logical rows = sum of every block's `rows`.
@@ -89,7 +101,7 @@ impl LogicalTableView {
         if global_row >= total {
             return Err(Error::Codec(format!(
                 "logical_table('{}'): global row {global_row} >= row_count {total}",
-                self.prefix
+                self.name
             )));
         }
         // partition_point returns the first index where the predicate fails — for a sorted
@@ -253,7 +265,7 @@ impl LogicalTableView {
             .ok_or_else(|| {
                 Error::Codec(format!(
                     "logical_table('{}'): no column '{name}'",
-                    self.prefix
+                    self.name
                 ))
             })
     }
@@ -266,7 +278,7 @@ impl LogicalTableView {
             .ok_or_else(|| {
                 Error::Codec(format!(
                     "logical_table('{}'): no column '{name}'",
-                    self.prefix
+                    self.name
                 ))
             })
     }
@@ -392,7 +404,7 @@ impl<R: Read + Seek> Reader<R> {
             cumulative_rows.push(acc);
         }
         Ok(LogicalTableView {
-            prefix: name.to_string(),
+            name: name.to_string(),
             block_names,
             specs,
             cumulative_rows,
@@ -506,6 +518,10 @@ mod tests {
         let path = build_partitioned(dir.path(), rows, ROWS_PER_GROUP);
         let mut rdr = Reader::open(&path).unwrap();
         let view = rdr.logical_table("pairs").unwrap();
+        assert_eq!(view.name(), "pairs");
+        #[allow(deprecated)]
+        let prefix = view.prefix();
+        assert_eq!(prefix, "pairs");
         assert_eq!(
             view.block_names(),
             ["pairs/0000", "pairs/0001", "pairs/0002"]
@@ -763,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn logical_table_errors_on_unknown_prefix() {
+    fn logical_table_errors_on_unknown_name() {
         // An unknown name MUST be a typed LogicalTable error, not a silent empty view (callers
         // distinguish "no such table" from "empty table" via this path).
         let dir = tempfile::tempdir().unwrap();

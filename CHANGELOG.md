@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller matching `Error::Container` for "no blocks for prefix" must match `LogicalTableError::NotFound`. A single
   non-table block (an array) is now `NotATable`. `Reader::block_group` is deprecated in favour of `table_group`;
   its behaviour (the legacy flat rule only) is unchanged.
+- `tessera-io`: `LogicalTableView::prefix` is deprecated in favour of `LogicalTableView::name`. The view is resolved
+  from a table name, which is no longer always a block-name prefix; both return the same string.
 - `tessera-io`: `unpack` and `pack_dir` refuse a product with an invalid partitioned table (`Error::LogicalTable`,
   ADR-0064 §2.4) before writing anything, as `ProductBuilder::seal` and so `WriteSession::seal` already do.
 
