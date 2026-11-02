@@ -1006,7 +1006,10 @@ mod tests {
         assert_eq!(h1, h8, "workers=1 vs 8 disagree on content_hash");
     }
 
+    // The sink still writes the legacy `events_NNNN` form, so this checks it against the legacy
+    // rule; ADR-0064 PR D renames the output and moves this to `table_group`.
     #[test]
+    #[allow(deprecated)]
     fn multi_block_above_ceiling_emits_partitioned_names_in_manifest_order() {
         // The naming + manifest-order proof at the test block size: 3 blocks → events_0000, events_0001, events_0002.
         let dir = tempfile::tempdir().unwrap();

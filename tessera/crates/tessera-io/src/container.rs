@@ -11,7 +11,8 @@ use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 use tessera_core::block::name::join_checked;
-use tessera_core::block::{check_leaf_rule, BlockName};
+use tessera_core::block::partition::is_legacy_flat_member;
+use tessera_core::block::{check_leaf_rule, BlockName, TableGroup};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
 use zip::read::{ArchiveOffset, Config};
@@ -430,33 +431,35 @@ impl<R: Read + Seek> Reader<R> {
             .collect()
     }
 
-    /// Names of all blocks in the manifest that belong to `prefix`'s partitioned group, in **manifest
-    /// order** — every block whose name is `prefix` (the single-block case) or `prefix_NNNN` where the
-    /// suffix is a 4-digit zero-padded number (the multi-block case from
-    /// [`crate::table::block_name`]). Used by readers that need to iterate over a logically-split
-    /// table without knowing whether it was partitioned (e.g. `events` vs `events_0000..events_NNNN`).
+    /// Resolve the table name `name` (ADR-0064 §3) over the manifest alone, reading no block: a
+    /// single table block, a partitioned table's leaves (`pairs/0000`, `pairs/0001`, … in index
+    /// order), or a legacy flat group (`events_0000`, …, products written before ADR-0064). Every
+    /// logical read ([`Self::logical_table`]) goes through it, and through
+    /// [`tessera_core::block::table_group`], the function the seal validates with, so `pairs`
+    /// means the same table everywhere.
+    ///
+    /// A name that doesn't resolve is [`Error::LogicalTable`], whose `reason` says why: not found,
+    /// not a table (an array, a blob, or a node with no marked leaf), ambiguous between the two
+    /// forms, or an invalid partitioned node (a gap, a missing terminal leaf, a foreign child, …).
+    /// Every block stays readable by its full name through [`Self::read_block`].
+    pub fn table_group(&self, name: &str) -> Result<TableGroup> {
+        tessera_core::block::table_group(&self.manifest.blocks, name)
+    }
+
+    /// Names of the blocks in the **legacy flat** group of `prefix`, in manifest order: `prefix`
+    /// itself and every `prefix_NNNN` (exactly four digits), the form written before ADR-0064. It
+    /// does not see a partitioned table (`prefix/0000`, …) and checks nothing; an unknown prefix is
+    /// an empty list.
+    #[deprecated(
+        note = "use `Reader::table_group`, which also resolves partitioned tables (`<table>/NNNN`, \
+                ADR-0064) and refuses an invalid or ambiguous name with a typed error"
+    )]
     pub fn block_group(&self, prefix: &str) -> Vec<String> {
         self.manifest
             .blocks
             .iter()
-            .filter_map(|b| {
-                if b.name == prefix {
-                    Some(b.name.to_string())
-                } else if let Some(rest) = b
-                    .name
-                    .strip_prefix(prefix)
-                    .and_then(|r| r.strip_prefix('_'))
-                {
-                    // a 4-digit numeric suffix marks a partitioned shard (block_name's format).
-                    if rest.len() == 4 && rest.bytes().all(|c| c.is_ascii_digit()) {
-                        Some(b.name.to_string())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
+            .filter(|b| is_legacy_flat_member(&b.name, prefix))
+            .map(|b| b.name.to_string())
             .collect()
     }
 
@@ -1875,7 +1878,10 @@ mod tests {
         assert!(names.contains(&"provenance.json".to_string()));
     }
 
+    // The deprecated legacy rule, kept under test (ADR-0064 §6): `block_group` delegates to
+    // `is_legacy_flat_member`, and these are its cases from before it did.
     #[test]
+    #[allow(deprecated)]
     fn block_group_collects_prefix_and_partitioned_shards_in_manifest_order() {
         // The reader-side counterpart of table::block_name: a single `events` block OR an ordered
         // sweep of `events_NNNN` blocks. Other names with similar prefixes (`events_index`, etc.)
