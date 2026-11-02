@@ -116,9 +116,10 @@ summarise() {
   echo "## nix flake check — ${sys}" >> "$S"
   echo "" >> "$S"
 
-  # The check step's `$?`, or empty when it never ran (then re-raised as 1). Anything else is a
-  # wiring error, not a status to pass through.
-  if ! [[ "$check_rc" =~ ^[0-9]*$ ]]; then
+  # The check step's `$?` (0-255), or empty when it never ran (then re-raised as 1). Anything else
+  # is a wiring error, not a status to pass through: `return` takes its argument modulo 256, so a
+  # 256 passed through would read as green.
+  if ! [[ "$check_rc" =~ ^(|0|[1-9][0-9]{0,2})$ ]] || [ "${check_rc:-0}" -gt 255 ]; then
     echo "::error title=check summary::CHECK_RC '$check_rc' is not an exit status"
     return 1
   fi
@@ -299,6 +300,9 @@ gamma"
   run_case "check step never ran" 1 "" "" 0 "$all" "alpha beta gamma" "" "$good"
   run_case "check status not a number" 1 "CHECK_RC 'abc' is not an exit status" abc 0 "$all" "alpha beta gamma" "" \
     "$good"
+  # `return` takes its status modulo 256, so 256 would leave the leg green: only 0-255 is a status.
+  run_case "check status above 255" 1 "CHECK_RC '256' is not an exit status" 256 0 "$all" "alpha beta gamma" "" \
+    "$good"
   run_case "count disagrees" 1 "lists 3 check name(s) but says count: 4" 0 0 "$all" "alpha beta gamma" "" \
     "count: 4
 alpha
@@ -314,8 +318,8 @@ alpha
 beta
 beta"
   # The exact number of cases, so a case deleted by accident fails here rather than shrinking the test.
-  if [ "$ran" -ne 18 ]; then
-    echo "self-test: ran $ran cases, expected 18" >&2
+  if [ "$ran" -ne 19 ]; then
+    echo "self-test: ran $ran cases, expected 19" >&2
     status=1
   fi
   [ "$status" -eq 0 ] && echo "self-test: $ran cases OK"
