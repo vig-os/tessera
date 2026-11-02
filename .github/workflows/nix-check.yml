@@ -3,7 +3,7 @@
 # REPO-OWNED, and deliberately NOT named ci.yml: adopting the vigOS devkit scaffold
 # (#364) brings a managed `.github/workflows/ci.yml` that would overwrite this file.
 # The cross-arch determinism gate below cannot live inside it (a `just` recipe cannot
-# express a two-arch runner matrix), so it keeps its own workflow. The `gate` job is
+# express legs on two runner architectures), so it keeps its own workflow. The `gate` job is
 # still named `nix flake check`, and branch protection matches the JOB name, not the
 # file, so the required context is unchanged by the rename.
 #
@@ -20,7 +20,8 @@
 # (runner group `ksb-ci`): `ksb-vig-os-large` (8 CPU / 32 GiB, ephemeral pod, per-pod single-user
 # Nix store) instead of a 16 GB GitHub-hosted runner, where the leg was OOM-evicted (#495). The `gate`
 # job is one shell step and runs on `ksb-vig-os-small` (2 CPU / 8 GiB). The aarch64 leg stays on the
-# GitHub-hosted `ubuntu-24.04-arm`: ksb has no ARM runners.
+# GitHub-hosted `ubuntu-24.04-arm`: ksb has no ARM runners. The `plan` and `report` jobs (#725) are
+# one shell step each on GitHub-hosted `ubuntu-latest`: nothing on the x86_64 path waits for them.
 #
 # Trade-off, accepted: the required `nix flake check` context now depends on ksb even for its one-step
 # gate. A cold scale-up took ~4.5 min from queue to pickup in the #688 probe (a warm pool ~1 min), and
@@ -47,11 +48,51 @@
 # CROSS-ARCH DETERMINISM GATE (ADR-0020/0024 release gate). The flake is `eachDefaultSystem`, so the
 # checks already exist for aarch64-linux. Running `nix flake check` on BOTH x86_64-linux (ksb, above)
 # and `ubuntu-24.04-arm` (aarch64-linux, a GitHub-HOSTED ARM64 runner, free for public repos) makes
-# the conformance gate
-# (`tessera-io/tests/conformance.rs`) re-derive the golden id/content_hash/manifest_hash and the
-# byte-identical `.tsra` on EACH arch. Green on both = the content-addressing is byte-reproducible
-# x86==ARM — the writer-determinism property the spec stakes identity on, validated not assumed.
-# `fail-fast: false` so a drift on one arch still reports the other.
+# the conformance gate (`tessera-io/tests/conformance.rs`) re-derive the golden
+# id/content_hash/manifest_hash and the byte-identical `.tsra` on EACH arch. Green on both = the
+# content-addressing is byte-reproducible x86==ARM: the writer-determinism property the spec stakes
+# identity on, validated not assumed. Each leg is its own job, so a drift on one arch still reports
+# the other.
+#
+# WHEN EACH LEG RUNS (#725, owner decision 2026-11-02). The aarch64 leg is the slowest (46-82 min
+# hosted), so it is off the per-PR path:
+#
+#   event                                          legs
+#   pull_request, push to main                     x86_64-linux
+#   schedule: nightly, 02:17 UTC, on dev           x86_64-linux + aarch64-linux
+#   push of a release tag (release.yml's pattern)  x86_64-linux + aarch64-linux
+#   workflow_dispatch                              x86_64-linux + aarch64-linux
+#
+# The rule is scripts/nix-check-legs.sh (`plan`), the one place it is written; the `plan` job
+# runs it and the aarch64 job runs on its answer. GitHub runs a schedule on the DEFAULT branch,
+# which is dev; the plan refuses a schedule on any other ref rather than check the wrong code.
+# The release hook is the tag push, the same event that starts cargo-dist's release.yml, so the
+# two run side by side: the aarch64 check reports on the release cut, it does not hold the
+# release back. Run both legs on any branch by hand with
+#   gh workflow run nix-check.yml --ref <branch>
+#
+# WHAT THIS TRADES AWAY. Since #688 the ksb x86_64 leg runs Nix with `sandbox = false`
+# (exo-pet/exo-fleet#1081), so the hosted aarch64 leg was the ONLY sandboxed flake check and the
+# ONLY cross-arch determinism check (the #472/#468 class: S15 writer determinism across arches). A
+# pull request now gets neither: a change that breaks x86==ARM agreement, or that only passes
+# because the ksb leg is not hermetic, merges green and is caught by that night's run instead. A
+# regression is caught within a day and is traceable to that day's merges, and the nightly
+# files it (below) rather than leaving a red run nobody opens. A PR that touches the writer, the
+# codecs or the corpus can buy the old guarantee before merging: dispatch the workflow on its
+# branch.
+#
+# REQUIRED CONTEXT. Branch protection requires `nix flake check`, the `gate` job. It asserts, BY
+# NAME, that the run had exactly the planned legs and each passed: a planned leg that did not
+# succeed, an unplanned leg that ran, a missing result, or a plan output that differs from the
+# rule (which the gate applies again to the event and ref) each fail it
+# (scripts/nix-check-legs.sh `gate`; #722/#723). It never reads "the legs that happened to run",
+# so a nightly whose aarch64 job never started is red, not green with one leg.
+#
+# NIGHTLY FAILURES ARE FILED. When the gate does not pass on a schedule or a release-tag run (failed
+# or cancelled), the `report`
+# job files an issue labelled `bug` + `area:ci` (scripts/ci-failure-issue.sh), or comments on the
+# open one with the same title: one issue for the nightly, one per release tag. Pull requests and
+# dispatched runs are not filed: someone is already looking at those.
 
 name: CI
 
@@ -69,26 +110,87 @@ on:  # yamllint disable-line rule:truthy
   push:
     branches:
       - main
+    # The release cut (#725): the same pattern release.yml (cargo-dist) is triggered by, so every
+    # release tag gets both legs.
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
+  # The nightly (#725): both legs on dev, the default branch. Off the hour, where GitHub's
+  # scheduler is least loaded and a schedule is least likely to be delayed or dropped.
+  schedule:
+    - cron: '17 2 * * *'
   workflow_dispatch:
 
 # Added with the stacked-PR trigger widening (#463): this is the expensive lane
-# (~40-60 min per leg and it varies, two arch legs per run), and the base filter above
-# now matches any base, so without this a force-push to a stacked branch would
-# leave two superseded ~40-90 min legs burning runner slots. Keyed per workflow AND
-# per ref so distinct refs stay independent. `!= 'push'` mirrors ci.yml: the
-# push-to-main leg must not be cancelled by a rapid follow-up merge. This file is
-# this repo's own, not devkit-managed, so the group is durable.
+# (~40-90 min per leg and it varies), and the base filter above now matches any base, so
+# without this a force-push to a stacked branch would leave superseded legs burning runner
+# slots. Keyed per workflow AND per ref so distinct refs stay independent.
+#
+# Only pull requests share a group and cancel each other (#725). Every other run gets a group of
+# its own (keyed by its run id), so it is never cancelled and never dropped: a group holds one
+# running and ONE pending run, so a shared group would silently drop a queued nightly,
+# release-tag, dispatched or push-to-main run (and a push to main must not be cancelled by a
+# rapid follow-up merge, as in ci.yml). This file is this repo's own, not devkit-managed, so the
+# group is durable.
 concurrency:
-  group: nix-check-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  group: nix-check-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  check:
-    name: nix flake check (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
+  # Which legs this event runs (#725). The rule and its reasoning are in the script; WHEN EACH LEG
+  # RUNS at the top of this file has the table. GitHub-hosted: one short shell step, and the
+  # x86_64 leg does not wait for it.
+  plan:
+    name: nix flake check (plan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      legs: ${{ steps.plan.outputs.legs }}
+      run-aarch64-linux: ${{ steps.plan.outputs.run-aarch64-linux }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Plan the legs for this event
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          plan=$(scripts/nix-check-legs.sh plan "$EVENT" "$REF")
+          echo "$plan"
+          echo "$plan" >> "$GITHUB_OUTPUT"
+
+  # One job per arch, not a matrix: a matrix entry cannot be switched off per event (a job-level
+  # `if:` cannot see `matrix`, and `include` adds back what `exclude` removed). The steps are
+  # shared in .github/actions/nix-flake-check, so the two jobs differ only in runner and `if:`.
+  # Their names are the per-leg context names the matrix used to report.
+  check-x86_64:
+    name: nix flake check (x86_64-linux)
+    # x86_64 runs on ksb's large pool (8 CPU / 32 GiB, #688), except for a fork PR: that takes the
+    # GitHub-hosted fallback. See RUNNERS at the top of this file. It runs for every event.
+    #
+    # KNOWN LIMIT, REDUCED HERMETICITY: the ksb pods run Nix with `sandbox = false`, so on this
+    # leg a check is NOT isolated from the pod. It sees the pod's network namespace, its
+    # filesystem outside the store and every other build running beside it. The owner accepted
+    # this for now (#688, 2026-10-29). What keeps it honest:
+    #   - checks that start a loopback server do not depend on the sandbox. The registry
+    #     checks bind port 0 (the kernel picks a free port), keep their blobs in memory (a
+    #     filesystem registry stalled for 60 s under the pod's disk load: the root cause of
+    #     the first ksb failure), keep config and log in a private $TMPDIR dir, wait for
+    #     readiness with a bound and kill the server on exit (`loopbackRegistry` in
+    #     flake.nix). `s3-range-read` has the same shape: a versitygw server on a
+    #     kernel-picked port with private $TMPDIR dirs, a bounded readiness wait and exit
+    #     hooks that stop it (#702);
+    #   - the aarch64 leg below is GitHub-hosted WITH the sandbox, so cross-arch determinism is
+    #     still checked by a hermetic build on one side. Since #725 that leg runs nightly, on
+    #     release tags and by hand, not per PR: see WHAT THIS TRADES AWAY at the top;
+    #   - moving back to sandboxed Nix on ksb is exo-pet/exo-fleet#1081. Once it lands, this
+    #     note goes.
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-large' }}
     # A cold build of the vortex/zarrs/hdf5 stack is slow on a GitHub-hosted runner and varies a
     # lot between them: observed 40m (x86) and 51m (aarch64) on one run, then >60m on x86 for the
     # very next one, which the previous 60-minute cap cancelled mid-build. A cancelled leg is not
@@ -98,7 +200,7 @@ jobs:
     # Raised 90 -> 120 because the spread widened past 90 and the cap started cutting real work.
     # HOSTED-ONLY FIGURES: everything below was measured on GitHub-hosted runners, before the x86_64
     # leg moved to ksb (#688). The cap is kept as is for both arches; re-derive it (and the --max-jobs/--cores
-    # below) from ksb timings: #701.
+    # in .github/actions/nix-flake-check) from ksb timings: #701.
     # Measured leg durations, same workflow, all on GitHub-hosted runners:
     #
     #     commit     x86_64            aarch64
@@ -121,224 +223,110 @@ jobs:
     # silicon instead of guessed at. A concurrency cap (`--max-jobs`) must NOT land before this
     # change: at 89 of 90 minutes any slowdown converts an intermittent failure into a reliable one.
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # x86_64 runs on ksb's large pool (8 CPU / 32 GiB, #688), except for a fork PR: that takes
-          # the GitHub-hosted fallback. See RUNNERS at the top of this file.
-          #
-          # KNOWN LIMIT, REDUCED HERMETICITY: the ksb pods run Nix with `sandbox = false`, so on this
-          # leg a check is NOT isolated from the pod. It sees the pod's network namespace, its
-          # filesystem outside the store and every other build running beside it. The owner accepted
-          # this for now (#688, 2026-10-29). What keeps it honest:
-          #   - checks that start a loopback server do not depend on the sandbox. The registry
-          #     checks bind port 0 (the kernel picks a free port), keep their blobs in memory (a
-          #     filesystem registry stalled for 60 s under the pod's disk load: the root cause of
-          #     the first ksb failure), keep config and log in a private $TMPDIR dir, wait for
-          #     readiness with a bound and kill the server on exit (`loopbackRegistry` in
-          #     flake.nix). `s3-range-read` has the same shape: a versitygw server on a
-          #     kernel-picked port with private $TMPDIR dirs, a bounded readiness wait and exit
-          #     hooks that stop it (#702);
-          #   - the aarch64 leg below is GitHub-hosted WITH the sandbox, so cross-arch determinism is
-          #     still checked by a hermetic build on one side;
-          #   - moving back to sandboxed Nix on ksb is exo-pet/exo-fleet#1081. Once it lands, this
-          #     note goes.
-          - arch: x86_64-linux
-            runner: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-large' }}
-          # aarch64 stays GitHub-hosted for EVERY event: ksb has no ARM runners, and the cross-arch
-          # determinism gate needs a real aarch64 machine, not emulation.
-          - arch: aarch64-linux
-            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Nothing here pushes, and on a self-hosted pod a token left in .git/config outlives the step.
           persist-credentials: false
-
-      # GitHub-hosted runners (aarch64, and x86_64 for a fork PR) get Nix from the installer. A ksb
-      # pod ships it: a per-pod single-user store seeded from a pinned image (Nix 2.34.8 in the #688
-      # probe), with `sandbox = false` because the pod itself is the isolation boundary. The installer
-      # cannot run there (no usable sudo: "no new privileges"), so it is skipped rather than left to
-      # stumble into "already installed"; the next step fails loudly if a pod ever ships without Nix.
-      - name: Install Nix
-        if: runner.environment == 'github-hosted'
-        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
-
-      # Every runner prints its Nix config. A GitHub-hosted runner must also have the sandbox ON: the
-      # x86_64 leg on ksb runs without it (KNOWN LIMIT at the matrix above), so the hosted aarch64
-      # leg is the hermetic side of the cross-arch determinism gate, and this asserts that rather
-      # than assuming the installer's default.
-      - name: Check the runner's Nix
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          nix --version
-          nix config show | grep -E '^(sandbox|substituters|trusted-users|cores|max-jobs) '
-          if [ "$RUNNER_ENVIRONMENT" = github-hosted ] && [ "$(nix config show sandbox)" != true ]; then
-            echo "::error::the Nix sandbox is off on a GitHub-hosted runner; this leg must be hermetic"
-            exit 1
-          fi
-
-      # Dependency cache (#507): restore + import `tessera-deps` before the build. Details, measurements
-      # and the can-only-save-time guarantee are in the action itself. The matching save is after the
-      # build; `nix-deps-cache.yml` warms the same key on pushes to dev, which nix-check never sees.
-      - name: Restore the dependency cache
-        id: deps
-        uses: ./.github/actions/nix-deps-cache
-
-      # `--keep-going` is the fix for #483. Without it the FIRST failing derivation cancels every
-      # other check, so a leg goes red with all 17 checks reporting `(cancelled)` and nothing naming
-      # a real failure. That is exactly what happened on #481: an unrelated test-fixture substitution
-      # failed and took down the determinism gates, clippy, the wasm checks — none of which depend on
-      # it. A red leg that names no failing check costs a reader log archaeology to distinguish from a
-      # genuine break, and two reviewers paid that cost before it was understood.
-      #
-      # `--fallback` builds a derivation from source when it cannot be substituted, instead of
-      # failing. Measured for the one that actually bit us (a Go S3-server fixture, since replaced by
-      # #702) on these exact runner images: 102s (x86_64) and 73s (aarch64) — on aarch64 that is
-      # FASTER than pulling its 36 MiB from cache.nixos.org, because the download is the slow part,
-      # not the Go build. Against the 90-minute cap above, noise.
-      #
-      # The flag applies to EVERY derivation, so a pathological outage on something large (a
-      # toolchain, LLVM) could build until that cap rather than failing in seconds. Deliberate: both
-      # outcomes are a red leg, it is bounded by the budget already set above, and in exchange the
-      # common case stops being a spurious failure. Accepted with that tradeoff stated rather than
-      # discovered.
-      #
-      # `--max-jobs 2 --cores 4` is the memory fix, and every number below is measured (#495).
-      #
-      # WHAT DRIVES PEAK MEMORY: the number of CONCURRENT DERIVATIONS. Each is a separate
-      # cargo/rustc process tree holding its own heap, so halving how many run at once halves the
-      # dominant term. `--cores` caps threads INSIDE one derivation, which is the weaker factor.
-      #
-      # An earlier revision of this comment framed these as alternatives — "`--cores 2` keeps four
-      # derivations in flight while `--max-jobs 2` serialises whole derivations and costs closer to
-      # 2x" — and chose `--cores 2` alone on that basis. That framing was the error: the two are
-      # independent knobs and the right answer combines them. `--cores 2` alone was not enough, and
-      # #497 was OOM-KILLED (exit 137) at 15.5 GB with four derivations still in flight.
-      #
-      # `--max-jobs 2 --cores 4` keeps TOTAL cpu at ~8 (2 x 4, as the old 4 x 2) while halving the
-      # concurrent process trees. Measured on scratch branches against both heavy branches:
-      #
-      #   leg           before (--cores 2)          after (--max-jobs 2 --cores 4)
-      #   #497 x86      82m 14651 MB 1338 MB free   80m 11171 MB 4818 MB free   (-24% peak)
-      #   #497 arm      66m 11503 MB 4444 MB free   54m 11431 MB 4516 MB free
-      #   #461 x86      85m 13534 MB 2454 MB free   76m 12980 MB 3008 MB free
-      #   #461 arm      69m 11536 MB 4410 MB free   55m 10690 MB 5256 MB free
-      #
-      # WALL-CLOCK IMPROVED ON ALL FOUR LEGS (-2, -12, -9, -14 min), which was NOT predicted — the
-      # argument had been that it would stay neutral since total cpu is unchanged. Max load1 held at
-      # 8.3-8.6 throughout, confirming cpu really was constant, so the gain is memory-pressure stalls
-      # disappearing. The memory fix paid a wall-clock dividend rather than costing one.
-      #
-      # HONEST CAVEAT, and why #495 stays open. The accept bar was fixed BEFORE the run at
-      # peak < 12288 MB and < 100 min. #461's x86 leg MISSED it: 12980 MB, over by 692 MB. It is
-      # adopted anyway because it dominates the previous setting on every leg measured, but the
-      # ceiling risk on the heaviest branch is REDUCED, NOT ELIMINATED — 3.0 GB of headroom. That leg
-      # is the watch item on #495. Do not read four green legs as "solved".
-      #
-      # A contributing factor worth naming: peak climbed 10.2 -> 12.0 -> 15.6 GB across observed runs,
-      # and the vortex fork pin (#480) is part of that — ~27 crates now compile from a git source with
-      # no binary-cache substituter where they were previously downloaded. Removing the pin later
-      # should give headroom back, at which point these flags can be revisited.
-      #
-      # Related, measured, and NOT addressed by these flags: the `tessera-deps` serial prefix (8.8-14.7
-      # min, provenance in the nix-deps-cache action), which the dependency cache above now skips on a
-      # hit (#507). That is a wall-clock fix, not a memory one: the deps phase peaks at 4.6 GB against
-      # a leg peak of 12.0 GB, so caching it does not lower the peak.
-      #
-      # `set +e` so a failure reaches the summary step below instead of ending the job here; the real
-      # result is re-raised there, so the leg still fails when a check fails.
       - name: nix flake check
-        id: check
-        run: |
-          set +e
-          # Resource sampler, started INSIDE this step on purpose (#483). Three legs on #460/#461
-          # died with the generic "runner has received a shutdown signal" and exit 143, with NO
-          # in-job error — no ENOSPC, no OOM line. That is the shape of the runner AGENT being
-          # killed rather than a build failing.
-          #
-          # The cause is now MEASURED, not inferred. This sampler caught it twice: a leg pegged at
-          # 15.60 GB with ~340 MB available for 3m14s while load climbed 15.5 -> 29.0, then took the
-          # signal; and #497 was killed outright with exit 137 (SIGKILL, the kernel's OOM killer)
-          # after memory jumped 6956 -> 15531 MB inside one 4-minute window. Disk never fell below
-          # 58.9 GB across those runs, so disk was never the constraint — tested on six legs across
-          # four branches and never once supported.
-          #
-          # It must print to THIS step's stdout rather than to a file collected later: GitHub
-          # streams step logs, so samples written before the agent dies are preserved, whereas a
-          # file and an `always()` step both vanish with the runner. The last sample before a
-          # shutdown is exactly the number worth having.
-          ( while true; do
-              printf '[res] %s | mem %s | %s | load %s\n' \
-                "$(date -u +%H:%M:%S)" \
-                "$(free -m 2>/dev/null | awk '/^Mem:/{printf "used=%sM avail=%sM", $3, $7}')" \
-                "$(df -m /nix /home/runner 2>/dev/null | awk 'NR>1{printf "%s avail=%sM ", $6, $4}')" \
-                "$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
-              sleep 30
-            done ) &
-          sampler=$!
-          # shellcheck disable=SC2064
-          trap "kill $sampler 2>/dev/null" EXIT
-
-          nix flake check -L --keep-going --fallback --max-jobs 2 --cores 4
-          rc=$?
-          kill "$sampler" 2>/dev/null
-          echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          echo "nix flake check exited $rc"
-
-      # Save only on a MISS, and only if this leg actually produced the artifact. `always()` so a red
-      # leg with a good tessera-deps still warms the cache for the next run.
-      - name: Save the dependency cache
-        if: always() && steps.deps.outputs.hit != 'true'
-        uses: ./.github/actions/nix-deps-cache
+        uses: ./.github/actions/nix-flake-check
         with:
-          mode: save
-          key: ${{ steps.deps.outputs.key }}
-          out: ${{ steps.deps.outputs.out }}
-          dir: ${{ steps.deps.outputs.dir }}
+          arch: x86_64-linux
 
-      # Per-check verdicts, so a red leg always names what failed (#483), derived from the store; and
-      # the evaluated set of checks asserted by name against .github/nix-flake-checks.txt, so an
-      # empty or short evaluation turns the leg red (#722). The logic, its reasoning (including when a cached output may count as a pass) and its
-      # stubbed self-test live in the script; the `nix-check-summary` flake check runs that self-test.
-      - name: Summarise per-check results
-        if: always()
-        # Through `env:` rather than inline `${{ }}` in the run block: a workflow expression expanded
-        # into shell is the template-injection shape the zizmor gate flags, and `matrix.arch` being
-        # repo-controlled today does not make interpolating it a habit worth keeping.
-        env:
-          SYS: ${{ matrix.arch }}
-          CHECK_RC: ${{ steps.check.outputs.rc }}
-        run: scripts/nix-check-summary.sh "$SYS" "$CHECK_RC"
+  check-aarch64:
+    name: nix flake check (aarch64-linux)
+    needs: [plan]
+    # Only when the plan says so: nightly, release tags and by hand (#725).
+    if: needs.plan.outputs.run-aarch64-linux == 'true'
+    # GitHub-hosted for every event: ksb has no ARM runners, and the cross-arch determinism gate
+    # needs a real aarch64 machine, not emulation. Hosted means sandboxed, which the action asserts:
+    # this is the hermetic side of the gate.
+    runs-on: ubuntu-24.04-arm
+    # The x86_64 job's cap and its reasoning.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: nix flake check
+        uses: ./.github/actions/nix-flake-check
+        with:
+          arch: aarch64-linux
 
   # ── The single REQUIRED status check ──────────────────────────────────────────────────────
-  # Branch protection matches context names EXACTLY. A matrix job is reported per-leg as
-  # "nix flake check (x86_64-linux)" / "(aarch64-linux)", so a required context of
-  # "nix flake check" can never be satisfied by `check` — the gate silently matches nothing and
-  # every PR looks mergeable. This aggregate leg has a name that does NOT vary with the matrix,
-  # so protection stays correct when an arch is added or renamed: point it at THIS job only.
+  # Branch protection matches context names EXACTLY. The legs report as
+  # "nix flake check (x86_64-linux)" / "(aarch64-linux)", and which of them run depends on the
+  # event, so neither can be the required context. This aggregate has a name that does NOT vary
+  # with the legs: point protection at THIS job only.
   #
-  # `if: always()` + an explicit result assertion is required — without it the job is *skipped*
-  # when a leg fails, and a skipped required check is treated as neutral (i.e. passing) by
-  # branch protection. `needs.check.result` is the aggregate over every matrix leg: it is
-  # 'success' only when all of them succeeded.
+  # `if: always()` + an explicit assertion is required: without it the job is *skipped* when a
+  # leg fails, and a skipped required check is treated as neutral (i.e. passing) by branch
+  # protection. The assertion is by name, against the plan (REQUIRED CONTEXT at the top).
   gate:
     name: nix flake check
     # Light (one shell step): ksb's small pool, with the same fork fallback as the legs.
     runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-small' }}
     timeout-minutes: 5
-    needs: [check]
+    needs: [plan, check-x86_64, check-aarch64]
     if: always()
     steps:
-      - name: Assert every matrix leg passed
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      # The gate works the legs out again from the event and ref and holds the plan job's output to
+      # them, so a lost or mangled output cannot shrink the set it checks.
+      - name: Assert exactly the planned legs passed
         env:
-          RESULT: ${{ needs.check.result }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          PLAN: ${{ needs.plan.result }}
+          LEGS: ${{ needs.plan.outputs.legs }}
+          X86_64: ${{ needs.check-x86_64.result }}
+          AARCH64: ${{ needs.check-aarch64.result }}
         run: |
-          echo "aggregate result of 'check' matrix: $RESULT"
-          if [ "$RESULT" != "success" ]; then
-            echo "::error::nix flake check did not pass on every arch"
-            exit 1
+          scripts/nix-check-legs.sh gate "$EVENT" "$REF" "$PLAN" "$LEGS" \
+            "x86_64-linux=$X86_64" "aarch64-linux=$AARCH64"
+
+  # A failed unattended run files an issue (#725): see NIGHTLY FAILURES ARE FILED at the top.
+  # Any gate result but success counts: a nightly cancelled (by hand, or after a day queued while
+  # ksb is down) checked nothing that night either.
+  # GitHub-hosted, and the only job with write access, to issues alone.
+  report:
+    name: file the failure
+    needs: [gate]
+    if: >-
+      always() && needs.gate.result != 'success'
+      && (github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: File or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$EVENT" = schedule ]; then
+            title="nix flake check: the nightly run on $REF_NAME failed"
+          else
+            title="nix flake check: the run on release tag $REF_NAME failed"
           fi
+          body="The \`nix flake check\` run $RUN_URL ($EVENT, \`$REF_NAME\` at $SHA) failed.
+
+          Its \`nix flake check\` job names the leg that failed, and that leg's summary names the
+          checks. On a nightly, the cause is among the day's merges to $REF_NAME. Close this issue
+          once a run passes again."
+          scripts/ci-failure-issue.sh "$title" "$body"

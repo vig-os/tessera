@@ -15,6 +15,8 @@
 >   commit rule.
 > - The "single irreducible external — an ARM CI runner" conclusion is **stale**: `.github/workflows/ci.yml`
 >   has run a GitHub-hosted `ubuntu-24.04-arm` leg since the CI shim landed, and it is green on `dev`.
+>   (Since #725 that leg lives in `.github/workflows/nix-check.yml` and runs nightly on `dev`, on release
+>   tags and on demand, not per PR.)
 >
 > For current status use `FEATURE-MATRIX.md`, `docs/adr/README.md`, `ROADMAP.md`, and the live issue
 > list — not this file.

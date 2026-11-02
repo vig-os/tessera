@@ -10,8 +10,9 @@
 #     evaluated against this list, so an evaluation that comes back empty or short turns the leg red
 #     instead of reporting "0 passed, 0 failed".
 # The count is checked against the names, so a truncated list cannot pass as a shorter one.
-count: 27
+count: 29
 bench-ecosystems
+ci-failure-issue
 dev-shell
 feature-snapshots
 guardrails-gates
@@ -21,6 +22,7 @@ ingest-gate-a-sql
 ingest-gate-a-workspace
 ingest-producer-equality
 mdbook-build
+nix-check-legs
 nix-check-summary
 oci-roundtrip
 reference-reader
