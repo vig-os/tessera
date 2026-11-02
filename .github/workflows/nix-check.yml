@@ -12,9 +12,9 @@
 # Run it yourself with the SAME flags CI uses:
 #   nix flake check -L --keep-going --fallback --max-jobs 2 --cores 4
 #
-# Checks (see flake.nix): workspace-clippy · workspace-test · workspace-fmt ·
-# guardrails-gates · dev-shell. cargo-deny + the full pre-commit gate set run via `prek`
-# locally (they need network / the working tree).
+# Checks: defined in flake.nix and listed by name in .github/nix-flake-checks.txt, which both the
+# flake and this workflow's summary hold the evaluated set to (#722). cargo-deny + the full
+# pre-commit gate set run via `prek` locally (they need network / the working tree).
 #
 # RUNNERS (#688). The x86_64 leg runs on ksb, vig-os's ARC scale sets on the ksb compute VM
 # (runner group `ksb-ci`): `ksb-vig-os-large` (8 CPU / 32 GiB, ephemeral pod, per-pod single-user
@@ -289,8 +289,6 @@ jobs:
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           echo "nix flake check exited $rc"
 
-      # Per-check verdicts, so a red leg always names what failed (#483).
-      #
       # Save only on a MISS, and only if this leg actually produced the artifact. `always()` so a red
       # leg with a good tessera-deps still warms the cache for the next run.
       - name: Save the dependency cache
@@ -302,11 +300,10 @@ jobs:
           out: ${{ steps.deps.outputs.out }}
           dir: ${{ steps.deps.outputs.dir }}
 
-      # Derived from the STORE, not by parsing nix's human-readable output: a check whose output path
-      # is valid was built and therefore passed. `--keep-going` above is what makes that inference
-      # sound, because every check is attempted, so a missing output means that check failed rather
-      # than that it was skipped — unless a substituter already had it, which nix counts as passed
-      # without building it (see the loop below). No output format to drift against.
+      # Per-check verdicts, so a red leg always names what failed (#483), derived from the store; and
+      # the evaluated set of checks asserted by name against .github/nix-flake-checks.txt, so an
+      # empty or short evaluation turns the leg red (#722). The logic, its reasoning (including when a cached output may count as a pass) and its
+      # stubbed self-test live in the script; the `nix-check-summary` flake check runs that self-test.
       - name: Summarise per-check results
         if: always()
         # Through `env:` rather than inline `${{ }}` in the run block: a workflow expression expanded
@@ -315,92 +312,7 @@ jobs:
         env:
           SYS: ${{ matrix.arch }}
           CHECK_RC: ${{ steps.check.outputs.rc }}
-        run: |
-          set +e
-          S="$GITHUB_STEP_SUMMARY"
-
-          # One evaluation for every check's output path, instead of `attrNames` followed by an
-          # `outPath` eval per check: 17 nix evaluations became 1, and the name and the path can no
-          # longer disagree because they come from the same attrset.
-          paths_json=$(nix eval --json ".#checks.${SYS}" \
-            --apply 'builtins.mapAttrs (_: c: c.outPath)' 2>/dev/null)
-
-          if [ -z "$paths_json" ] || [ "$paths_json" = "{}" ]; then
-            # Without this, a failed evaluation reported "0 passed, 0 failed or not built", which
-            # reads like an empty-but-fine result rather than a broken one.
-            {
-              echo "## nix flake check — ${SYS}"
-              echo ""
-              echo ":warning: **Could not evaluate \`.#checks.${SYS}\`** — no per-check summary."
-              echo "The flake may have failed to evaluate; the job log is authoritative."
-            } >> "$S"
-            echo "ERROR: could not evaluate .#checks.${SYS}; no summary produced"
-            exit "${CHECK_RC:-1}"
-          fi
-
-          {
-            echo "## nix flake check — ${SYS}"
-            echo ""
-            echo "| check | result |"
-            echo "|---|---|"
-          } >> "$S"
-
-          pass=0; fail=0; cached=0; failed_names=""
-          subs=$(nix config show substituters 2>/dev/null)
-          while IFS=$'\t' read -r name outp; do
-            [ -n "$name" ] || continue
-            # `--check-validity` is unambiguously LOCAL. Plain `nix path-info` may consult
-            # substituters, which would report a path as present because a cache HAS it rather than
-            # because this leg built it — turning a failed check into a green row.
-            #
-            # A cached output is still a pass, though, and saying so is not that trap. Nix 2.34's
-            # `nix flake check` itself skips every check whose output a substituter already has
-            # (it builds only `queryMissing`'s `willBuild`: src/nix/flake.cc), so such a check is
-            # never built here and never downloaded. On ksb the shared cache holds outputs from earlier
-            # ksb runs of the SAME derivations, and the local test alone showed those checks as
-            # "failed or not built" on every ksb leg (#688). A check that nix did build and that
-            # failed is not in any cache, so it stays red. Each cached row names the cache.
-            if [ -n "$outp" ] && nix-store --check-validity "$outp" >/dev/null 2>&1; then
-              echo "| \`$name\` | :white_check_mark: passed |" >> "$S"
-              pass=$((pass+1))
-              continue
-            fi
-            cache=""
-            for sub in $subs; do
-              if [ -n "$outp" ] && nix path-info --store "$sub" "$outp" >/dev/null 2>&1; then cache=$sub; break; fi
-            done
-            if [ -n "$cache" ]; then
-              echo "| \`$name\` | :white_check_mark: passed earlier (output in \`$cache\`, so nix skipped it) |" >> "$S"
-              pass=$((pass+1)); cached=$((cached+1))
-            else
-              echo "| \`$name\` | :x: failed or not built |" >> "$S"
-              fail=$((fail+1)); failed_names="$failed_names $name"
-            fi
-          done <<< "$(jq -r 'to_entries[] | "\(.key)\t\(.value)"' <<< "$paths_json")"
-
-          {
-            echo ""
-            echo "**$pass passed ($cached from a binary cache), $fail failed or not built** (\`nix flake check\` exited \`${CHECK_RC:-?}\`)."
-            if [ "$fail" -gt 0 ]; then
-              echo ""
-              echo "Not built:$failed_names"
-              echo ""
-              echo "A check listed here either failed or never produced an output. With \`--keep-going\`"
-              echo "every check is attempted, so the usual reading is a real failure — unless the leg hit"
-              echo "its 90-minute cap, in which case the tail of the job log says so."
-            fi
-          } >> "$S"
-          echo "summary: $pass passed ($cached of them from a binary cache), $fail failed or not built; check rc=${CHECK_RC:-?}"
-          # The summary must agree with nix. With `--keep-going`, rc 0 means every check passed, so a
-          # red row on a green run is this summary miscounting (as it did for cached checks, #688),
-          # and it fails the leg rather than publishing a wrong table. The converse is not asserted:
-          # rc != 0 with no red row is legitimate (an evaluation error, the job cap).
-          if [ "${CHECK_RC:-1}" -eq 0 ] && [ "$fail" -gt 0 ]; then
-            echo "::error title=check summary::nix flake check passed, but the summary counted $fail check(s) as failed or not built:$failed_names"
-            exit 1
-          fi
-          # Re-raise the real result: the check step swallowed it so this summary could run.
-          exit "${CHECK_RC:-1}"
+        run: scripts/nix-check-summary.sh "$SYS" "$CHECK_RC"
 
   # ── The single REQUIRED status check ──────────────────────────────────────────────────────
   # Branch protection matches context names EXACTLY. A matrix job is reported per-leg as
