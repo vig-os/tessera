@@ -277,8 +277,8 @@ input size, so #677 stays open on #681.
 
 ## Amended by ADR-0064 (2026-10-30) — streamed tables are partitioned into numbered leaves
 
-[ADR-0064](0064-logical-tables-over-numbered-leaves.md) (Proposed) records the owner's decision on #677
-(2026-10-29, option P-logical of the #681 design note). It changes three things in this ADR:
+[ADR-0064](0064-logical-tables-over-numbered-leaves.md) (Accepted 2026-11-02) records the owner's
+decision on #677 (2026-10-29, option P-logical of the #681 design note). It changes three things in this ADR:
 
 1. **"One logical block stays one canonical block" is retired for tables above `BLOCK_ROWS`.** Rule 2 of the
    #677 amendment above ("no suffixed physical blocks") no longer holds for them. A table of more than
