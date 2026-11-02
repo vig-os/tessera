@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-30T01:11:53Z
-updated: 2026-10-30T01:23:05Z
+updated: 2026-11-02T03:45:09Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/710
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: 677
 children: none
-synced: 2026-10-30T08:02:18.140Z
+synced: 2026-11-02T08:51:37.288Z
 ---
 
 # [Issue 710]: [feat(io): resolve numbered-leaf tables in Reader::table_group and LogicalTableView (ADR-0064 PR B)](https://github.com/vig-os/tessera/issues/710)
@@ -23,7 +23,10 @@ PR B of ADR-0064's implementation plan (§3, §4, §7).
 **Scope (`tessera-io` readers):**
 - `Reader::table_group(name) -> Result<TableGroup>` over PR A's resolver; `Reader::logical_table` /
   `LogicalTableView` built on it, with typed `Error::LogicalTable` errors instead of `Error::Container` strings.
-- `Reader::block_group` unchanged in behaviour (legacy flat only) and `#[deprecated]`, pointing to `table_group`.
+- `Reader::block_group` unchanged in behaviour (legacy flat only) and `#[deprecated]`, pointing to `table_group`. Its
+  callers (ADR-0064 §6) under `clippy -D warnings`: `multiblock.rs:377` and `:524` and `tests/block_names.rs:415`
+  migrate to `table_group`; `accumulate.rs:1049` and `container.rs:1912` stay as legacy-rule tests under a test-local
+  `#[allow(deprecated)]`.
 - `select_blocks_overlapping` / `block_stats` iterate the resolved leaves (`pairs/0000.cidx` sidecars).
 - `WriteSession::seal`, `unpack` and `pack_dir` (`container.rs:927,1012`, next to their `check_leaf_rule` calls) run
   the shared validation.
@@ -39,4 +42,5 @@ returns its typed variant from every reader entry point.
 Design: ADR-0064 "Logical tables over numbered leaves" (`docs/adr/0064-logical-tables-over-numbered-leaves.md`,
 Proposed, PR for #677). Implement only after the ADR is Accepted. Sub-issue of #677; order A → B → C1, C2 → D → E → F → G → H
 (D lands only after B, C1 and C2, so no writer on `dev` writes a form a reader on `dev` can't read).
+
 

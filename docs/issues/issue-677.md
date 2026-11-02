@@ -1,19 +1,19 @@
 ---
 type: issue
-state: closed
+state: open
 created: 2026-10-25T11:53:24Z
-updated: 2026-10-29T12:09:49Z
+updated: 2026-11-02T03:30:07Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/677
-comments: 3
+comments: 4
 labels: bug, priority:high, effort:large, area:io
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: 709, 710, 711, 712, 713, 714, 715, 716, 717
-synced: 2026-10-30T08:02:27.148Z
+synced: 2026-11-02T08:51:40.836Z
 ---
 
 # [Issue 677]: [feat(io): bounded single-table output sink and end-to-end StreamWriter backpressure](https://github.com/vig-os/tessera/issues/677)
@@ -151,4 +151,12 @@ Consumer checks: release example tests (3) and precommit pass. `cargo deny` curr
 _Posted on October 29, 2026 at 12:09 PM_
 
 **Owner decision (2026-10-29), from the #681 design note (PR #692, b6de2d1):** option **P-logical**. Streamed tables above `BLOCK_ROWS` are written as hierarchical leaves `pairs/0000`, `pairs/0001`, … (ADR-0063), and every logical reader presents `pairs` as one table. This retires ADR-0026's "one canonical block of any size" for streamed tables, and #677's literal "single physical block" requirement with it. The memory bound (flat 128–143 MB from 67 M to 1.07 G rows, W=4) is in the note. Next: a new ADR (amends SPEC §5b, ADR-0026, ADR-0062's `RowAlignment` and ADR-0063), which folds in the re-review nits recorded on #681, then the implementation. The Vortex writer gate F stays a separate upstream track (vortex#10046).
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 2, 2026 at 03:30 AM_
+
+**Reopened: the closure was an accident.** GitHub closed this on 2026-10-29 11:43 because commit e2e9c02 (PR #692, the #681 design note) has the prose '…and closes #677 without a Vortex change' in its body, and GitHub read that as a closing keyword. Nothing has implemented #677 yet. The path is ADR-0064 (P-logical, PR #718, in review), then the implementation in sub-issues #709–#717, then the flat RSS proof on ksb (RssAnon and cgroup memory.current). This issue closes only when that has landed.
 

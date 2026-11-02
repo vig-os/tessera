@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-10-31T20:54:28Z
+updated: 2026-11-02T08:50:30Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-01T08:40:52.117Z
+synced: 2026-11-02T08:51:41.199Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -56,6 +56,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/toml-1.x -->chore(deps): update rust crate toml to v1
  - [ ] <!-- unlimit-branch=renovate/trycmd-1.x -->chore(deps): update rust crate trycmd to v1
  - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-3.x -->ci(actions): update actions/create-github-app-token action to v3
+ - [ ] <!-- unlimit-branch=renovate/ubuntu-26.x -->ci(actions): update dependency ubuntu to v26
  - [ ] <!-- unlimit-branch=renovate/major-arrow-rs-monorepo -->fix(deps): update arrow-rs monorepo to v60 (`arrow`, `arrow-array`, `arrow-buffer`, `arrow-ipc`, `arrow-schema`, `parquet`)
  - [ ] <!-- unlimit-branch=renovate/major-datafusion-monorepo -->fix(deps): update rust crate datafusion to v55
  - [ ] <!-- unlimit-branch=renovate/lock-file-maintenance -->build(pip): lock file maintenance
@@ -180,13 +181,19 @@ The following updates have all been created. To force a retry/rebase of any, cli
 </blockquote>
 </details>
 
-<details><summary>github-actions (13)</summary>
+<details><summary>github-actions (14)</summary>
 <blockquote>
 
 <details><summary>.github/actions/nix-deps-cache/action.yml (2)</summary>
 
  - `actions/cache v6.1.0@55cc8345863c7cc4c66a329aec7e433d2d1c52a9`
  - `actions/cache v6.1.0@55cc8345863c7cc4c66a329aec7e433d2d1c52a9`
+
+</details>
+
+<details><summary>.github/actions/nix-flake-check/action.yml (1)</summary>
+
+ - `DeterminateSystems/nix-installer-action v23@3138316df39ed29be04236d7ffc686fa525866aa`
 
 </details>
 
@@ -217,10 +224,14 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 </details>
 
-<details><summary>.github/workflows/nix-check.yml (2)</summary>
+<details><summary>.github/workflows/nix-check.yml (6)</summary>
 
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
- - `DeterminateSystems/nix-installer-action v23@3138316df39ed29be04236d7ffc686fa525866aa`
+ - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
+ - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
+ - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
+ - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
+ - `ubuntu 24.04-arm` → [Updates: `26.04-arm`]
 
 </details>
 
