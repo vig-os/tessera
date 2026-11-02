@@ -169,8 +169,12 @@ impl ProductBuilder {
     /// The block names must obey the **leaf rule** (ADR-0063): no name may be a parent prefix of
     /// another, or the seal is refused with [`crate::Error::BlockNameConflict`]. (Each name is
     /// already valid by its type, [`crate::block::BlockName`].)
+    ///
+    /// Every partitioned table must be valid (ADR-0064 §2.4, [`crate::block::check_partitions`]),
+    /// or the seal is refused with [`crate::Error::LogicalTable`].
     pub fn seal(mut self) -> crate::Result<Manifest> {
         crate::block::check_leaf_rule(self.refs.iter().map(|r| &r.name))?;
+        crate::block::check_partitions(&self.refs)?;
         let mut digests = Vec::with_capacity(self.refs.len());
         for r in &self.refs {
             match &r.digest {
