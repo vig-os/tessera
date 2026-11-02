@@ -11,9 +11,11 @@
 pub mod array;
 pub mod blob;
 pub mod name;
+pub mod partition;
 pub mod table;
 
 pub use name::{check_leaf_rule, BlockName};
+pub use partition::Partition;
 
 use serde::{Deserialize, Serialize};
 
