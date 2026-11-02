@@ -79,6 +79,18 @@ pub enum TableGroup {
     },
 }
 
+impl TableGroup {
+    /// The group's blocks in logical order: the one block, the leaves in index order, or the
+    /// legacy blocks in manifest order.
+    pub fn blocks(&self) -> &[BlockName] {
+        match self {
+            TableGroup::Single(b) => std::slice::from_ref(b),
+            TableGroup::Partitioned { leaves } => leaves,
+            TableGroup::LegacyFlat { blocks } => blocks,
+        }
+    }
+}
+
 /// Why a table name does not resolve to a logical table (ADR-0064 §3), carried by
 /// [`Error::LogicalTable`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -372,33 +384,66 @@ fn validate_node(blocks: &[BlockRef], node: &str) -> Result<Vec<BlockName>> {
             max_index: lp.index,
         }));
     }
-    let schema = |b: &BlockRef| {
-        serde_json::from_value::<TableSpec>(b.spec.clone())
-            .map(|s| {
-                s.columns
-                    .into_iter()
-                    .map(|c| (c.name, c.dtype))
-                    .collect::<Vec<_>>()
-            })
-            .map_err(|e| {
-                fail(LogicalTableError::SchemaMismatch {
-                    leaf: b.name.to_string(),
-                    detail: e.to_string(),
-                })
-            })
-    };
-    let head = schema(leaves[0].0)?;
-    for (b, _) in &leaves[1..] {
-        let cols = schema(b)?;
-        if cols != head {
-            let detail = format!("columns {cols:?}, first leaf {head:?}");
-            return Err(fail(LogicalTableError::SchemaMismatch {
-                leaf: b.name.to_string(),
-                detail,
-            }));
-        }
-    }
+    let refs: Vec<&BlockRef> = leaves.iter().map(|(b, _)| *b).collect();
+    specs_of(node, &refs)?;
     Ok(leaves.into_iter().map(|(b, _)| b.name.clone()).collect())
+}
+
+/// The [`TableSpec`] of every block of a resolved group, in the group's order (ADR-0064 §2.1's
+/// schema rule): each block's spec must parse, and every block must have the first one's column
+/// names and dtypes, in order, or the name is refused with [`LogicalTableError::SchemaMismatch`].
+/// The validation of a partitioned node already applies it; readers apply it to every group, the
+/// legacy flat form included, through this one function. Reads the manifest only.
+pub fn group_specs(blocks: &[BlockRef], name: &str, group: &TableGroup) -> Result<Vec<TableSpec>> {
+    let by_name: std::collections::HashMap<&str, &BlockRef> =
+        blocks.iter().map(|b| (b.name.as_str(), b)).collect();
+    let refs = group
+        .blocks()
+        .iter()
+        .map(|n| {
+            by_name
+                .get(n.as_str())
+                .copied()
+                .ok_or_else(|| Error::LogicalTable {
+                    name: name.to_string(),
+                    reason: LogicalTableError::NotFound,
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    specs_of(name, &refs)
+}
+
+/// Parse each block's [`TableSpec`] and check the shared schema (see [`group_specs`]).
+fn specs_of(name: &str, refs: &[&BlockRef]) -> Result<Vec<TableSpec>> {
+    let mismatch = |b: &BlockRef, detail: String| Error::LogicalTable {
+        name: name.to_string(),
+        reason: LogicalTableError::SchemaMismatch {
+            leaf: b.name.to_string(),
+            detail,
+        },
+    };
+    let columns = |s: &TableSpec| {
+        s.columns
+            .iter()
+            .map(|c| (c.name.clone(), c.dtype.clone()))
+            .collect::<Vec<_>>()
+    };
+    let mut specs: Vec<TableSpec> = Vec::with_capacity(refs.len());
+    for b in refs {
+        let spec: TableSpec =
+            serde_json::from_value(b.spec.clone()).map_err(|e| mismatch(b, e.to_string()))?;
+        if let Some(head) = specs.first().map(columns) {
+            let cols = columns(&spec);
+            if cols != head {
+                return Err(mismatch(
+                    b,
+                    format!("columns {cols:?}, first leaf {head:?}"),
+                ));
+            }
+        }
+        specs.push(spec);
+    }
+    Ok(specs)
 }
 
 /// Whether `name` is exactly one segment below `node` (`node/<segment>`, no further `/`).

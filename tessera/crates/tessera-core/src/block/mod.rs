@@ -15,7 +15,9 @@ pub mod partition;
 pub mod table;
 
 pub use name::{check_leaf_rule, BlockName};
-pub use partition::{check_partitions, table_group, LogicalTableError, Partition, TableGroup};
+pub use partition::{
+    check_partitions, group_specs, table_group, LogicalTableError, Partition, TableGroup,
+};
 
 use serde::{Deserialize, Serialize};
 
