@@ -127,6 +127,15 @@ pub enum Error {
     )]
     BlockNameConflict { parent: String, child: String },
 
+    /// `name` does not resolve to a logical table, or a partitioned node is invalid (ADR-0064 §2,
+    /// §3): refused by every reader resolving the name and by the seal, never skipped or merged.
+    /// Every block stays readable by its full name.
+    #[error("logical table '{name}': {reason}")]
+    LogicalTable {
+        name: String,
+        reason: crate::block::partition::LogicalTableError,
+    },
+
     /// A line of a write-session journal that is **complete** (newline-terminated), so a commit,
     /// but not a valid one: not UTF-8, not JSON, not a block reference, or a block committed a
     /// second time. `WriteSession::recover` refuses the journal rather than drop such a line as a
