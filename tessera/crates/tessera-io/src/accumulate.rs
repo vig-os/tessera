@@ -26,7 +26,8 @@ use tessera_core::{Error, Result};
 
 use crate::stream::{table_job_from_fragments, StagedEncodeJob, StreamWriter};
 use crate::table::{
-    self, block_name, partition_blocks, ColumnData, TableData, BLOCK_ROWS, ROWS_PER_GROUP,
+    self, block_name, block_partition, partition_blocks, ColumnData, TableData, BLOCK_ROWS,
+    ROWS_PER_GROUP,
 };
 
 /// An empty buffer (one empty column per spec column). Spec dtypes are validated in
@@ -372,12 +373,13 @@ impl TableStreamWriter {
 /// [`crate::table::BLOCK_ROWS`], the sink emits exactly ONE block named `prefix` (via
 /// [`crate::table::block_name`]'s `total<=1` branch). That single block's bytes are byte-identical
 /// to today's pre-partition layout — so existing fixtures and the conformance corpus stay
-/// byte-identical (no regen). Only data above the ceiling sees the new `prefix_NNNN` shards.
+/// byte-identical (no regen). Only data above the ceiling is partitioned, into the marked leaves
+/// `prefix/0000`, `prefix/0001`, … of one logical table (ADR-0064).
 ///
 /// **Why finish-time dispatch (not mid-stream).** The small-stays-single invariant *requires*
 /// knowing the total before naming any block: a 1-block product is `prefix`, a 2+-block product is
-/// `prefix_0000..`. Mid-stream dispatch would force a provisional name + post-hoc rewrite, which
-/// the [`StreamWriter`] (commit-in-push-order) doesn't support. Workers still parallel-encode the
+/// `prefix/0000..` with `last` set on the final leaf. Mid-stream dispatch would force a provisional
+/// name + post-hoc rewrite, which the [`StreamWriter`] (commit-in-push-order) doesn't support. Workers still parallel-encode the
 /// blocks (the StreamWriter dispatches them across threads), they just start after the read.
 pub struct TableMultiBlockSink<'a> {
     /// Per-block column schema (every block carries the same columns).
@@ -539,8 +541,10 @@ impl<'a> TableMultiBlockSink<'a> {
     }
 
     /// Drain the trailing partial row-group, partition the fragments into blocks per the format
-    /// SSoT ([`crate::table::block_count`] + [`crate::table::block_name`]), and dispatch one
-    /// [`table_job_from_fragments`] encode job per block to the [`StreamWriter`]. Returns the
+    /// SSoT ([`crate::table::block_count`] + [`crate::table::block_name`] +
+    /// [`crate::table::block_partition`]), and dispatch one [`table_job_from_fragments`] encode job
+    /// per block to the [`StreamWriter`], in index order. Above one block the blocks are the marked
+    /// leaves `<prefix>/0000`, `<prefix>/0001`, … of one logical table (ADR-0064). Returns the
     /// number of blocks dispatched.
     ///
     /// The partition is a **pure function of the data**: every full block carries exactly
@@ -572,12 +576,12 @@ impl<'a> TableMultiBlockSink<'a> {
             let frags_in_block: Vec<PathBuf> = self.frags[frag_idx..frag_idx + take].to_vec();
             let rows_in_block: u64 = self.frag_rows[frag_idx..frag_idx + take].iter().sum();
             frag_idx += take;
-            let nm = block_name(&self.name_prefix, blk, total_blocks);
+            let nm = block_name(&self.name_prefix, blk, total_blocks)?;
             let spec = TableSpec {
                 columns: self.columns.clone(),
                 rows: rows_in_block,
                 row_index: self.row_index.clone(),
-                partition: None,
+                partition: block_partition(blk, total_blocks),
             };
             self.sw
                 .push_staged(table_job_from_fragments(nm, spec, frags_in_block))?;
@@ -591,7 +595,9 @@ mod tests {
     use super::*;
     use crate::write::WriteSession;
     use crate::Reader;
+    use tessera_core::block::partition::{check_partitions, marker, Partition};
     use tessera_core::block::table::Column;
+    use tessera_core::block::TableGroup;
 
     fn col(name: &str, dtype: &str) -> Column {
         Column {
@@ -930,7 +936,7 @@ mod tests {
         let out = dir.path().join("multi.tsra");
         let sealed = sw.finish(&out).unwrap();
 
-        // The sealed product has exactly ONE block, named `events` (NOT `events_0000`).
+        // The sealed product has exactly ONE block, named `events` (NOT `events/0000`).
         assert_eq!(sealed.blocks.len(), 1);
         assert_eq!(sealed.blocks[0].name, "events", "small-stays-single");
 
@@ -1006,12 +1012,10 @@ mod tests {
         assert_eq!(h1, h8, "workers=1 vs 8 disagree on content_hash");
     }
 
-    // The sink still writes the legacy `events_NNNN` form, so this checks it against the legacy
-    // rule; ADR-0064 PR D renames the output and moves this to `table_group`.
     #[test]
-    #[allow(deprecated)]
     fn multi_block_above_ceiling_emits_partitioned_names_in_manifest_order() {
-        // The naming + manifest-order proof at the test block size: 3 blocks → events_0000, events_0001, events_0002.
+        // The naming + manifest-order proof at the test block size (ADR-0064 §1, §2): 3 blocks →
+        // the marked leaves events/0000, events/0001, events/0002.
         let dir = tempfile::tempdir().unwrap();
         let rows = ROWS_PER_GROUP * 5 + 1234;
         let block_rows = (ROWS_PER_GROUP as u64) * 2;
@@ -1044,19 +1048,29 @@ mod tests {
         }
         let out = dir.path().join("multi.tsra");
         let sealed = sw.finish(&out).unwrap();
+        let leaf = |index, last| Some(Partition { index, last });
         assert_eq!(
             sealed
                 .blocks
                 .iter()
-                .map(|b| b.name.clone())
+                .map(|b| (b.name.as_str(), marker(b).unwrap()))
                 .collect::<Vec<_>>(),
-            vec!["events_0000", "events_0001", "events_0002"]
+            [
+                ("events/0000", leaf(0, false)),
+                ("events/0001", leaf(1, false)),
+                ("events/0002", leaf(2, true)),
+            ]
         );
-        // and the reader's block_group helper recovers the same logical group in manifest order.
+        // The shared validation accepts it, and the reader resolves `events` to the same leaves in
+        // manifest order.
+        check_partitions(&sealed.blocks).unwrap();
         let r = Reader::open(&out).unwrap();
+        let leaves = ["events/0000", "events/0001", "events/0002"].map(|n| n.parse().unwrap());
         assert_eq!(
-            r.block_group("events"),
-            vec!["events_0000", "events_0001", "events_0002"]
+            r.table_group("events").unwrap(),
+            TableGroup::Partitioned {
+                leaves: leaves.to_vec()
+            }
         );
     }
 

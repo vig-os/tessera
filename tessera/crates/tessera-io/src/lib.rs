@@ -64,5 +64,7 @@ pub use stream::{
     array_job, table_job, table_job_from_fragments, table_job_streaming, EncodeJob,
     StagedEncodeJob, StagedEncodedBlock, StreamStats, StreamWindow, StreamWriter,
 };
-pub use table::{block_count, block_name, partition_blocks, ColumnData, TableData, BLOCK_ROWS};
+pub use table::{
+    block_count, block_name, block_partition, partition_blocks, ColumnData, TableData, BLOCK_ROWS,
+};
 pub use write::{BlockStaging, StagedBlock, WriteSession};

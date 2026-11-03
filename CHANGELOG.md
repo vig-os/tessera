@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking for writer output, `tessera-io` / `tessera-ingest`:** a table above `BLOCK_ROWS` rows is written as the
+  leaves `<table>/0000`, `<table>/0001`, … (`events/0000` for GE listmode), each carrying the partition marker
+  `{"index": i, "last": b}`, where it was `<table>_0000`, … without one (ADR-0064 PR D, #712). This covers GE
+  whole-file and streaming ingest and `tessera bench --input` (`TableMultiBlockSink`). The payloads, block digests
+  and so `content_hash` are unchanged for the same rows; the names and markers move `manifest_hash`. A table of at
+  most `BLOCK_ROWS` rows stays one bare-named block, byte-identical. Products written before still read unchanged.
+  `table::block_name` now returns `Result<String>` (the leaf name is checked against the block-name grammar), and
+  the new `table::block_partition` gives each block's marker.
 - **Breaking for struct literals (pre-1.0), `tessera-core`:** `TableSpec` has a new public field,
   `partition: Option<Partition>` (ADR-0064, #728). A `TableSpec { .. }` literal outside this workspace no longer
   compiles until it adds `partition: None`; downstream crates such as visionx-rs need that one-line change.

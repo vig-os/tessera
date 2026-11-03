@@ -876,8 +876,9 @@ pub fn stream_to_listmode_product_2p(
 /// table's monotonic-key column (default `ms`).
 ///
 /// Partitions `cols` into [`tessera_io::BLOCK_ROWS`]-sized blocks via the format-SSoT helpers
-/// ([`tessera_io::block_count`] + [`tessera_io::block_name`]) — so the per-block split (and
-/// therefore `content_hash`) matches the streaming path exactly. Small acquisitions
+/// ([`tessera_io::block_count`] + [`tessera_io::block_name`] + [`tessera_io::block_partition`]) — so
+/// the per-block split (and therefore `content_hash`), the leaf names `<block_prefix>/0000`, … and
+/// their partition markers (ADR-0064) match the streaming path exactly. Small acquisitions
 /// (≤ `BLOCK_ROWS`) stay a single block named `block_prefix`, byte-identical to the pre-partition
 /// layout under that prefix (no corpus regen for `block_prefix=events`).
 ///
@@ -936,8 +937,11 @@ pub fn to_listmode_product_with_schema(
 /// explicit so unit tests can drive the multi-block path at a small block size (production goes
 /// through [`to_listmode_product`], which pins `block_rows = BLOCK_ROWS`).
 ///
-/// Partition is via [`tessera_io::partition_blocks`] + [`tessera_io::block_name`] (the format
-/// SSoT): every block carries `block_rows` rows except the trailing one (which may be partial).
+/// Partition is via [`tessera_io::partition_blocks`] + [`tessera_io::block_name`] +
+/// [`tessera_io::block_partition`] (the format SSoT): every block carries `block_rows` rows except the
+/// trailing one (which may be partial). Above one block the blocks are the marked leaves
+/// `<block_prefix>/0000`, `<block_prefix>/0001`, … of one logical table (ADR-0064); one block is the
+/// bare `<block_prefix>`.
 /// `block_rows == BLOCK_ROWS` is the format invariant — overriding it produces test products,
 /// **not** corpus-compatible bytes. `pub(crate)` so no external caller can pass a non-canonical
 /// `block_rows`; production goes through [`to_listmode_product`] (pins `BLOCK_ROWS`).
@@ -1003,9 +1007,9 @@ pub(crate) fn to_listmode_product_partitioned(
             columns: columns.clone(),
             rows: rows_in_block,
             row_index: Some(row_index.to_string()),
-            partition: None,
+            partition: tessera_io::block_partition(blk, total_blocks),
         };
-        let nm = tessera_io::block_name(block_prefix, blk, total_blocks);
+        let nm = tessera_io::block_name(block_prefix, blk, total_blocks)?;
         let (block_ref, payload) = table::table_block(&nm, &spec, &block_data)?;
         b.add_block_ref(block_ref);
         payloads.push(payload);
@@ -1025,6 +1029,8 @@ pub(crate) fn to_listmode_product_partitioned(
 mod tests {
     use super::*;
     use hdf5::H5Type;
+    use tessera_core::block::partition::{check_partitions, marker, table_group, Partition};
+    use tessera_core::block::{BlockKind, TableGroup};
 
     #[test]
     fn geddf_dictionary_parses_and_carries_units_and_scales() {
@@ -1661,6 +1667,41 @@ mod tests {
         assert_eq!(table::decode(&spec, &bytes).unwrap(), cols);
     }
 
+    /// The `content_hash` both paths sealed for these rows before ADR-0064 PR D, when they named the
+    /// blocks `events_0000`, `events_0001`, `events_0002`: read from this test run against the
+    /// unswitched writers at `11280ba`.
+    const PRE_SWITCH_CONTENT_HASH: &str =
+        "blake3:1d5468896b9f824344969775cd28087bfa90a04ab5f00a8f57600b6be75c5123";
+
+    /// ADR-0064 §6's block projection: per block, in manifest order, `name`, `kind`, `digest`,
+    /// `spec.rows`, `spec.row_index` and `spec.partition`.
+    #[allow(clippy::type_complexity)]
+    fn block_projection(
+        m: &Manifest,
+    ) -> Vec<(
+        String,
+        BlockKind,
+        Option<String>,
+        u64,
+        Option<String>,
+        Option<Partition>,
+    )> {
+        m.blocks
+            .iter()
+            .map(|b| {
+                let spec: TableSpec = serde_json::from_value(b.spec.clone()).unwrap();
+                (
+                    b.name.to_string(),
+                    b.kind,
+                    b.digest.clone(),
+                    spec.rows,
+                    spec.row_index,
+                    spec.partition,
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn whole_file_and_streamed_multi_block_match_at_n_blocks() {
         // The N-block extension of `streamed_2p_ingest_is_byte_identical_to_whole_file_read`: when
@@ -1708,31 +1749,48 @@ mod tests {
         )
         .unwrap();
 
-        // Both paths must agree on content_hash AND per-block names/order (the partition SSoT). The
-        // multi-block partition produces NNNN names — confirm we don't accidentally hit the single
-        // `events` branch at this row count.
+        // ADR-0064 §6: the two paths' description, sources and column annotations legitimately
+        // differ, so they are compared on the block projection, which holds the partition (names
+        // and markers) as well as the bytes.
         assert_eq!(
-            streamed.blocks.len(),
-            batch.blocks.len(),
-            "block count mismatch"
+            block_projection(&streamed),
+            block_projection(&batch),
+            "whole-file ↔ streamed multi-block block projection"
         );
-        let stream_names: Vec<&str> = streamed.blocks.iter().map(|b| b.name.as_str()).collect();
-        let batch_names: Vec<&str> = batch.blocks.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(stream_names, batch_names, "block names must match in order");
-        assert!(
-            stream_names.iter().all(|n| n.starts_with("events_")),
-            "multi-block expected; got {stream_names:?}"
+        let leaves: Vec<(&str, Option<Partition>)> = batch
+            .blocks
+            .iter()
+            .map(|b| (b.name.as_str(), marker(b).unwrap()))
+            .collect();
+        let leaf = |index, last| Some(Partition { index, last });
+        assert_eq!(
+            leaves,
+            [
+                ("events/0000", leaf(0, false)),
+                ("events/0001", leaf(1, false)),
+                ("events/0002", leaf(2, true)),
+            ]
         );
+        for m in [&streamed, &batch] {
+            check_partitions(&m.blocks).unwrap();
+            assert!(matches!(
+                table_group(&m.blocks, "events").unwrap(),
+                TableGroup::Partitioned { .. }
+            ));
+        }
+        // Names and markers are in no payload, so the switch from `events_NNNN` moved
+        // `manifest_hash` only: both paths still seal the pre-switch writer's `content_hash`.
         assert_eq!(
             streamed.content_hash, batch.content_hash,
             "whole-file ↔ streamed multi-block content_hash mismatch"
         );
+        assert_eq!(batch.content_hash.as_deref(), Some(PRE_SWITCH_CONTENT_HASH));
     }
 
     #[test]
     fn ingested_multi_block_listmode_is_queryable_cross_block() {
         // The goal through-line: ingest a real multi-block listmode acquisition, then read + query
-        // it ACROSS its `events_NNNN` blocks via the generic `LogicalTableView` — listmode is just
+        // it ACROSS its `events/NNNN` leaves via the generic `LogicalTableView` — listmode is just
         // one multi-block table the cross-block engine spans. End-to-end on the actual ingest path
         // (not the synthetic test seam the LogicalTableView unit tests use).
         let dir = tempfile::tempdir().unwrap();
@@ -1850,7 +1908,7 @@ mod tests {
         // Step 2 lift: the generic engine must be able to drive non-default `block_prefix` (e.g.
         // `coin_3p`) + non-default `row_index` (e.g. `time_ps`). Two contracts:
         //   1. Block name(s) honor the prefix — a small acquisition stays single-block named
-        //      `<prefix>`; a multi-block product produces `<prefix>_NNNN`.
+        //      `<prefix>`; a multi-block product produces the leaves `<prefix>/NNNN`.
         //   2. Same DATA + same `block_prefix` + same `row_index` → byte-identical content_hash
         //      (the prefix is part of the partition SSoT, not part of the encoded bytes).
         let dir = tempfile::tempdir().unwrap();
@@ -1902,7 +1960,7 @@ mod tests {
         assert_ne!(a.manifest_hash, c.manifest_hash);
 
         // Multi-block exercise: the test-seam partitioned API at a small block_rows splits the
-        // same data into `<prefix>_NNNN` per the format SSoT.
+        // same data into the leaves `<prefix>/NNNN` per the format SSoT.
         let rows = tessera_io::table::ROWS_PER_GROUP * 2 + 100;
         let big_h5 = dir.path().join("LIST_2p_big.h5");
         write_synth_2p(&big_h5, rows);
@@ -1925,7 +1983,7 @@ mod tests {
             "expected multi-block partition at rows={rows}"
         );
         assert!(
-            multi.blocks.iter().all(|b| b.name.starts_with("coin_3p_")),
+            multi.blocks.iter().all(|b| b.name.starts_with("coin_3p/")),
             "all multi-block names must carry the requested prefix; got {:?}",
             multi.blocks.iter().map(|b| &b.name).collect::<Vec<_>>()
         );

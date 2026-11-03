@@ -175,8 +175,7 @@ optional `row_index`.
     `content_hash` and different manifests. *(Amended by
     [ADR-0064](../../docs/adr/0064-logical-tables-over-numbered-leaves.md), 2026-10-30: the leaves replace the
     flat `<prefix>_0000` … `<prefix>_NNNN` names, which writers no longer produce and readers still accept,
-    below. ADR-0064 is Accepted (2026-11-02); the writers switch in its PR D, until which they still write the
-    flat names.)*
+    below. ADR-0064 is Accepted (2026-11-02); every multi-block writer writes the leaves since its PR D, #712.)*
   Both whole-file and streaming writers MUST use the same partition function (`ceil(rows / BLOCK_ROWS)`,
   with `max(1)` so an empty table is still one block) and the same naming function — so streamed and
   batch ingest of the same rows produce byte-identical per-block bytes and therefore the same
