@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-02T08:50:30Z
+updated: 2026-11-02T16:14:53Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-02T08:51:41.199Z
+synced: 2026-11-03T09:00:20.539Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -29,8 +29,8 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/zarrs-0.x-lockfile -->chore(deps): update rust crate zarrs to v0.23.14
  - [ ] <!-- unlimit-branch=renovate/rust-wasm-bindgen-monorepo -->fix(deps): update rust crate wasm-bindgen to v0.2.130
  - [ ] <!-- unlimit-branch=renovate/python-(minor-and-patch) -->build(pip): update python (minor and patch) (`numcodecs`, `numpy`, `uproot`, `zarr`)
- - [ ] <!-- unlimit-branch=renovate/arrow-rs-monorepo -->chore(deps): update arrow-rs monorepo to v58.4.1 (`arrow`, `arrow-array`, `arrow-buffer`, `arrow-ipc`, `arrow-schema`, `parquet`)
  - [ ] <!-- unlimit-branch=renovate/age-0.x -->chore(deps): update rust crate age to 0.12
+ - [ ] <!-- unlimit-branch=renovate/arrow-rs-monorepo -->chore(deps): update rust crate arrow to v58.4.1
  - [ ] <!-- unlimit-branch=renovate/criterion-0.x -->chore(deps): update rust crate criterion to 0.8
  - [ ] <!-- unlimit-branch=renovate/datafusion-monorepo -->chore(deps): update rust crate datafusion to v54.1.0
  - [ ] <!-- unlimit-branch=renovate/hdf5-metno-0.x -->chore(deps): update rust crate hdf5-metno to 0.15
@@ -116,11 +116,11 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `dicom-transfer-syntax-registry 0.10` → [Updates: `0.10`]
  - `hdf5-metno 0.12` → [Updates: `0.15`]
  - `hdf5-metno-sys 0.12` → [Updates: `0.12`]
- - `arrow-array =58.3.0` → [Updates: `=58.4.1`, `=60.1.0`]
- - `arrow-buffer =58.3.0` → [Updates: `=58.4.1`, `=60.1.0`]
- - `arrow-schema =58.3.0` → [Updates: `=58.4.1`, `=60.1.0`]
- - `arrow-ipc =58.3.0` → [Updates: `=58.4.1`, `=60.1.0`]
- - `parquet =58.3.0` → [Updates: `=58.4.1`, `=60.1.0`]
+ - `arrow-array =58.4.1` → [Updates: `=60.1.0`]
+ - `arrow-buffer =58.4.1` → [Updates: `=60.1.0`]
+ - `arrow-schema =58.4.1` → [Updates: `=60.1.0`]
+ - `arrow-ipc =58.4.1` → [Updates: `=60.1.0`]
+ - `parquet =58.4.1` → [Updates: `=60.1.0`]
  - `csv =1.4.0`
  - `pyo3 0.29` → [Updates: `0.30`]
  - `pyo3-build-config 0.29` → [Updates: `0.30`]
