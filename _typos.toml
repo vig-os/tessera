@@ -9,7 +9,10 @@
 # Binary conformance test vectors — typos' binary sniffing usually skips these, but any byte run
 # that happens to decode as UTF-8 words gets spell-checked (a widened-payload .tsra tripped on
 # "ba"). They are not text; exclude them structurally instead of per-lucky-file.
-extend-exclude = ["tessera/corpus/files/*.tsra"]
+extend-exclude = [
+  "tessera/corpus/files/*.tsra",
+  "tessera/crates/tessera-io/tests/fixtures/*.tsra",
+]
 
 [default]
 extend-ignore-re = [

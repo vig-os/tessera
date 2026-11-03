@@ -26,11 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tessera-io`: `Reader::logical_table` reports a name it can't resolve, or blocks that disagree on their schema, as
   `Error::LogicalTable` with a typed `LogicalTableError` reason, where it returned `Error::Container` messages; a
   caller matching `Error::Container` for "no blocks for prefix" must match `LogicalTableError::NotFound`. A single
-  non-table block (an array) is now `NotATable`. `Reader::block_group` is deprecated in favour of `table_group`;
-  its behaviour (the legacy flat rule only) is unchanged.
+  non-table block (an array) is now `NotATable`, and a legacy `events_NNNN` block whose spec doesn't parse as a
+  `TableSpec` is `SchemaMismatch` (it was `Error::Serde`). `Reader::block_group` is deprecated in favour of
+  `table_group`; its behaviour (the legacy flat rule only) is unchanged.
+- `tessera-io`: `LogicalTableView::prefix` is deprecated in favour of `LogicalTableView::name`. The view is resolved
+  from a table name, which is no longer always a block-name prefix; both return the same string.
+- `tessera-io`: `unpack` and `pack_dir` refuse a product with an invalid partitioned table (`Error::LogicalTable`,
+  ADR-0064 §2.4) before writing anything, as `ProductBuilder::seal` and so `WriteSession::seal` already do.
 
 ### Removed
 
 ### Fixed
+
+- `tessera-core`: a partition marker whose forged index makes the canonical leaf name longer than 255 bytes is
+  refused as `LogicalTableError::NonCanonicalLeaf`, not a bare `Error::InvalidBlockName` (#733).
+- `tessera-core`: `table_group` refuses a marked legacy-named block under a node (`a/pairs_0001`) with the error the
+  seal gives for its parent node, instead of resolving a legacy flat group around it (#733, ADR-0064 §3 rule 4
+  clarified).
 
 ### Security

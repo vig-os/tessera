@@ -12,7 +12,7 @@ use std::path::Path;
 
 use tessera_core::block::name::join_checked;
 use tessera_core::block::partition::is_legacy_flat_member;
-use tessera_core::block::{check_leaf_rule, BlockName, TableGroup};
+use tessera_core::block::{check_leaf_rule, check_partitions, BlockName, TableGroup};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
 use zip::read::{ArchiveOffset, Config};
@@ -926,11 +926,14 @@ pub fn read_manifest_unverified(path: &Path) -> Result<Manifest> {
 /// (`volume/0`) becomes a subdirectory. A product whose names break the **leaf rule** (one name the
 /// parent of another — a pyramid sealed before ADR-0063) is refused with
 /// [`Error::BlockNameConflict`] before anything is written, since a name can't be both a file and a
-/// directory; it still reads in-zip through [`Reader`].
+/// directory; it still reads in-zip through [`Reader`]. So is a product with an invalid partitioned
+/// table (ADR-0064 §2.4, [`check_partitions`], the seal's check): [`Error::LogicalTable`], before
+/// anything is written, while each of its blocks still reads in-zip by its full name.
 pub fn unpack(path: &Path, outdir: &Path) -> Result<Manifest> {
     let mut r = Reader::open(path)?;
     let manifest = r.manifest().clone();
     check_leaf_rule(manifest.blocks.iter().map(|b| &b.name))?;
+    check_partitions(&manifest.blocks)?;
     let blocks_dir = outdir.join("blocks");
     let aux_dir = outdir.join("aux");
     // Resolve every path before writing anything, so a refused name leaves no partial tree.
@@ -1011,11 +1014,14 @@ fn write_creating_parents(path: &Path, bytes: &[u8]) -> Result<()> {
 /// Each block is read from [`BlockName::path_under`] `dir/blocks` (plain components only, ADR-0063),
 /// and a manifest whose names break the leaf rule is refused with [`Error::BlockNameConflict`]: an
 /// exploded directory cannot hold it. An `aux/` file whose relative path fails the grammar (a space,
-/// a non-ASCII character) is [`Error::Container`]. Every check runs before `out` is written.
+/// a non-ASCII character) is [`Error::Container`]. A manifest with an invalid partitioned table is
+/// refused with [`Error::LogicalTable`] (ADR-0064 §2.4, [`check_partitions`], the seal's check).
+/// Every check runs before `out` is written.
 pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
     let mj = std::fs::read_to_string(dir.join("manifest.json"))?;
     let manifest = Manifest::from_json_verified(&mj)?;
     check_leaf_rule(manifest.blocks.iter().map(|b| &b.name))?;
+    check_partitions(&manifest.blocks)?;
     // Collect and check the aux/ subtree first, so a member name the grammar refuses fails before
     // `out` is written (not after, leaving a sealed archive without its aux members).
     let aux_dir = dir.join("aux");

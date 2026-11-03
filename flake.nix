@@ -55,6 +55,8 @@
             || (pkgs.lib.hasInfix "/docs/dictionaries/" path)
             || (pkgs.lib.hasInfix "/tests/cmd/" path)
             || (pkgs.lib.hasInfix "/tests/feature-snapshots/" path)
+            # Committed binary test products, e.g. tessera-io's legacy `events_NNNN` fixture (#710).
+            || (pkgs.lib.hasInfix "/tests/fixtures/" path)
             # The GENERATED product-schema reference the book includes (#389). Its drift test compares
             # this committed copy against `SchemaRegistry::builtin()`, so the file has to reach the
             # sandbox — the `derived-docs` gate cannot do the job here because it runs without cargo.
