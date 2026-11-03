@@ -37,3 +37,7 @@ there, which is the point of keeping one copy rather than two.
 ### Provenance: the recipe and the chain
 
 {{#include ../../../tessera/crates/tessera-cli/tests/cmd/provenance-walk.trycmd}}
+
+### Logical tables: one name for many blocks
+
+{{#include ../../../tessera/crates/tessera-cli/tests/cmd/logical_tables.trycmd}}

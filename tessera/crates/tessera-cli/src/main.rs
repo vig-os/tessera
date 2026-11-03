@@ -317,11 +317,13 @@ enum Cmd {
     /// Render a `.tsra` as a navigable hierarchy tree.
     ///
     /// Renders the root status (product · schema · sealed · signed), `meta` fields, every block
-    /// with its columns / array spec, and `sources`.
+    /// with its columns / array spec, and `sources`. A partitioned table (leaves `pairs/NNNN`) is one
+    /// node `pairs/` with its columns; `--full` lists its leaves under it.
     Tree {
         /// The `.tsra` to render.
         file: PathBuf,
-        /// Print provenance references in full instead of collapsing a multi-file edge.
+        /// Print provenance references in full instead of collapsing a multi-file edge, and list a
+        /// partitioned table's leaves.
         #[arg(long)]
         full: bool,
         /// Deep-verify: re-hash every block payload (bounded memory) before rendering; the root
@@ -332,12 +334,13 @@ enum Cmd {
     },
     /// List one node's children (top level, `meta`, a block, or `sources`).
     ///
-    /// No PATH = top level (`meta`, blocks, `sources`); `PATH=meta` = metadata fields;
-    /// `PATH=<block>` = a table's columns or an array's spec; `PATH=sources` = edges.
+    /// No PATH = top level (`meta`, blocks, `sources`; a partitioned table's leaves `pairs/NNNN` are
+    /// one line `pairs/`); `PATH=meta` = metadata fields; `PATH=<block>` = a table's columns or an
+    /// array's spec; `PATH=<table>` = a partitioned table's columns and leaves; `PATH=sources` = edges.
     Ls {
         /// The `.tsra` to list.
         file: PathBuf,
-        /// Node to list (a block name, `meta`, or `sources`). Omit for the top level.
+        /// Node to list (a block or table name, `meta`, or `sources`). Omit for the top level.
         path: Option<String>,
         /// For `sources`: list every file in a multi-file edge instead of the first 8.
         #[arg(long)]
@@ -346,11 +349,12 @@ enum Cmd {
     /// Read table data as CSV/TSV/NDJSON over the logical cross-block view.
     ///
     /// Extracts table data over the **logical** (cross-block) view as CSV/TSV/NDJSON — a read of
-    /// `events` spans every `events_NNNN` block, projecting only the requested columns per block.
+    /// `pairs` spans every leaf `pairs/NNNN` of a partitioned table (and `events` every legacy
+    /// `events_NNNN` block), projecting only the requested columns per block.
     Read {
         /// The `.tsra` to read.
         file: PathBuf,
-        /// Table block, or a multi-block prefix like `events`.
+        /// Table name: a block, or a multi-block table like `pairs` (leaves `pairs/NNNN`).
         block: String,
         /// Columns to project (repeatable **or** comma-list: `-c ms -c en` or `-c ms,en`). Omit for
         /// all columns in schema order.
@@ -786,7 +790,7 @@ enum Cmd {
     /// Run SQL (DataFusion) over a `.tsra` table block (needs `--features sql`).
     ///
     /// Registers the block's [`LogicalTableView`] as an Arrow `MemTable` under the block name
-    /// (so `FROM events` transparently spans every `events_NNNN` shard) and hands the query to
+    /// (so `FROM pairs` transparently spans every leaf `pairs/NNNN`) and hands the query to
     /// DataFusion. Result is CSV (default) / TSV.
     ///
     /// Spike phase (#251): the whole block is materialized in RAM before the query runs —
@@ -795,7 +799,7 @@ enum Cmd {
     Sql {
         /// The `.tsra` to query.
         file: PathBuf,
-        /// Table block (or multi-block prefix like `events`) to expose as the SQL table.
+        /// Table name (a block, or a multi-block table like `pairs`) to expose as the SQL table.
         block: String,
         /// The SQL query (`FROM <block>`; SELECT/WHERE/ORDER BY/LIMIT are the phase-1 target).
         query: String,

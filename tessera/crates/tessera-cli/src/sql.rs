@@ -2,8 +2,9 @@
 //!
 //! **The stack.** A table block is Vortex → Arrow (zero-copy in the read direction) → DataFusion
 //! runs SQL over Arrow in-process (pure Rust, embeddable, no external engine). We build the same
-//! [`LogicalTableView`] the `read` verb uses — so `events` spans every `events_NNNN` shard as one
-//! logical table — materialize every column into an Arrow `RecordBatch`, register it as a
+//! [`LogicalTableView`] the `read` verb uses — so `pairs` spans every leaf `pairs/NNNN` of a
+//! partitioned table (ADR-0064), and `events` every legacy `events_NNNN` shard, as one logical
+//! table — materialize every column into an Arrow `RecordBatch`, register it as a
 //! DataFusion `MemTable` under the block name, and hand the SQL to `SessionContext::sql`.
 //!
 //! **What this is (spike phase).** Materializing to `RecordBatch` up front puts the whole block in
@@ -119,9 +120,10 @@ fn numpy_to_arrow(code: &str) -> tessera_core::Result<DataType> {
 
 /// `tessera sql FILE BLOCK "QUERY"` — DataFusion SQL over the cross-block logical view.
 ///
-/// - `block` is the table-block name (or multi-block prefix like `events`). It's registered as a
-///   MemTable under **exactly that name**, so `FROM events` in a query matches `events` /
-///   `events_NNNN` transparently — the same view semantics `tessera read` uses.
+/// - `block` is the table name: a block, or a multi-block table (`pairs` for the leaves
+///   `pairs/NNNN`, `events` for the legacy `events_NNNN`). It's registered as a MemTable under
+///   **exactly that name**, so `FROM pairs` in a query spans every leaf transparently — the same view
+///   semantics `tessera read` uses.
 /// - `format` is `csv` (default) or `tsv`. The result batches are written via `arrow-csv`'s
 ///   writer (float `Display`, no quoting); `tsv` swaps the delimiter without another writer.
 ///
@@ -157,6 +159,8 @@ pub fn run_with(
 
     // Build the logical view + eagerly materialize its columns into an Arrow RecordBatch. This is
     // the spike-phase materialisation described in the module doc (streaming is #251 phase 2/3).
+    // `pairs/`, as `ls` and `tree` print a table, names `pairs`: no block name ends in `/`.
+    let block = block.trim_end_matches('/');
     let mut r = Reader::open(file)?;
     let view = r.logical_table(block)?;
     let columns: Vec<tessera_core::block::table::Column> = view.columns().to_vec();
@@ -526,6 +530,28 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "flag,origin\nfalse,other\n"
+        );
+    }
+
+    /// A partitioned table (ADR-0064) is registered under its logical name: `FROM pairs` sees the
+    /// rows of every leaf `pairs/0000..0002` in index order. The fixture is the committed input of
+    /// the `logical_tables.trycmd` walkthrough (rows `t` = 1..=8, `e` = t / 2).
+    #[test]
+    fn a_partitioned_table_answers_by_its_logical_name() {
+        let tsra = std::path::Path::new("tests/cmd/logical_tables.in/scan.tsra");
+        let query = |q: &str| {
+            let mut out = Vec::<u8>::new();
+            run_with(tsra, "pairs", q, Format::Csv, &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert_eq!(
+            query("SELECT count(*) AS n, sum(t) AS s FROM pairs"),
+            "n,s\n8,36\n"
+        );
+        // Rows 3 and 4 sit on either side of the boundary between leaves 0000 and 0001.
+        assert_eq!(
+            query("SELECT t, e FROM pairs WHERE t BETWEEN 3 AND 4 ORDER BY t"),
+            "t,e\n3,1.5\n4,2.0\n"
         );
     }
 }
