@@ -55,7 +55,8 @@
             || (pkgs.lib.hasInfix "/docs/dictionaries/" path)
             || (pkgs.lib.hasInfix "/tests/cmd/" path)
             || (pkgs.lib.hasInfix "/tests/feature-snapshots/" path)
-            # Committed binary test products, e.g. tessera-io's legacy `events_NNNN` fixture (#710).
+            # Committed binary test products, e.g. tessera-io's legacy `events_NNNN` fixture (#710) and
+            # tessera-py's partitioned `pairs` fixture (#717).
             || (pkgs.lib.hasInfix "/tests/fixtures/" path)
             # The GENERATED product-schema reference the book includes (#389). Its drift test compares
             # this committed copy against `SchemaRegistry::builtin()`, so the file has to reach the
@@ -89,6 +90,7 @@
           "/crates/tessera-py/tests/codec_roundtrip.py" = [ "tessera-py-import" "tessera-wheel-import" ];
           "/crates/tessera-py/tests/write_example.py" = [ "tessera-py-import" "tessera-wheel-import" ];
           "/crates/tessera-py/tests/provenance.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/logical_tables.py" = [ "tessera-py-import" "tessera-wheel-import" ];
           "/crates/tessera-ingest/tests/producer_equality.py" = [ "ingest-producer-equality" ];
           "/crates/tessera-wasm/tests/smoke.cjs" = [ "wasm-bindgen-smoke" ];
           "/corpus/reference_reader/run.py" = [ "reference-reader" ];
@@ -120,6 +122,7 @@
               "/crates/tessera-py/tests/codec_roundtrip.py"
               "/crates/tessera-py/tests/write_example.py"
               "/crates/tessera-py/tests/provenance.py"
+              "/crates/tessera-py/tests/logical_tables.py"
             ];
           in
           {
@@ -243,6 +246,9 @@
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        # The committed partitioned-table fixture the Python checks read (ADR-0064, #717).
+        pairsFixture = ./tessera/crates/tessera-py/tests/fixtures/partitioned_pairs.tsra;
 
         # The Python extension module (#210). crane doesn't install cdylibs by default, so copy the
         # built `lib_native.so` → `_native.so` into $out/lib — the `tessera._native` extension that the
@@ -1234,9 +1240,11 @@
             python3 ${./tessera/crates/tessera-py/tests/codec_roundtrip.py}
             # The WRITE path as documentation (#389): the book `{{#include}}`s anchored regions of this
             # script, so running it here means a snippet that stopped working cannot reach the docs.
-            python3 ${./tessera/crates/tessera-py/tests/write_example.py}
+            python3 ${./tessera/crates/tessera-py/tests/write_example.py} ${pairsFixture}
             # Python provenance surface (#562, #563): pinned edges, producer, generation, read back sealed.
             python3 ${./tessera/crates/tessera-py/tests/provenance.py}
+            # Table reads on logical names over a partitioned table, and the typed NotABlockError (#717).
+            python3 ${./tessera/crates/tessera-py/tests/logical_tables.py} ${pairsFixture}
             touch $out
           '';
 
@@ -1261,9 +1269,11 @@
             # Array-codec round-trip + pinned default content_hash (#533).
             python3 ${./tessera/crates/tessera-py/tests/codec_roundtrip.py}
             # …and the documented write path, so the book's example works through the real wheel too.
-            python3 ${./tessera/crates/tessera-py/tests/write_example.py}
+            python3 ${./tessera/crates/tessera-py/tests/write_example.py} ${pairsFixture}
             # Python provenance surface (#562, #563): pinned edges, producer, generation, read back sealed.
             python3 ${./tessera/crates/tessera-py/tests/provenance.py}
+            # Table reads on logical names over a partitioned table, and the typed NotABlockError (#717).
+            python3 ${./tessera/crates/tessera-py/tests/logical_tables.py} ${pairsFixture}
             touch $out
           '';
 

@@ -94,6 +94,81 @@ def check(name: str, accepted: set[str], doc: str) -> list[str]:
     return errors
 
 
+# --- logical table names (ADR-0064 PR C2, #717) ---------------------------------------------------
+# A table read takes a logical name; a one-block read takes one block and raises NotABlockError on a
+# node. Probed on a legacy flat group (`events_0000` + `events_0001`, 2 + 1 rows): the Python Builder
+# can't write a partitioned table, and this form resolves through the same `table_group`, so a method
+# that reads one block only fails here exactly as it would on `pairs/0000`, … (logical_tables.py reads
+# the partitioned fixture). The docstrings must claim exactly what the probe finds.
+TABLE_READS = {
+    "column": lambda r: len(r.column("events", "c")),
+    "logical_column": lambda r: len(r.logical_column("events", "c")),
+    "table_dict": lambda r: len(r.table_dict("events")["c"]),
+    "table_arrow": lambda r: r.table_arrow("events").num_rows,
+    "table": lambda r: r.table("events").height,
+}
+BLOCK_READS = {
+    "read_block": lambda r: r.read_block("events"),
+    "array": lambda r: r.array("events"),
+    "array_roi": lambda r: r.array_roi("events", [0, 0, 0], [1, 1, 1]),
+}
+
+
+def logical_names() -> list[str]:
+    import pathlib
+    import tempfile
+
+    path = pathlib.Path(tempfile.mkdtemp()) / "flat.tsra"
+    b = tessera.Builder("t", "flat", "", "2026-01-01T00:00:00Z")
+    for name, values in (("events_0000", [1, 2]), ("events_0001", [3])):
+        b.add_table(name, [("c", "i4", np.array(values, "<i4").tobytes())])
+    b.pack(str(path))
+    r = tessera.open(path)
+
+    errors = []
+    reads = set()
+    for name, read in TABLE_READS.items():
+        try:
+            if read(r) == 3:
+                reads.add(name)
+        except tessera.TesseraError:
+            pass
+    claims = {
+        n
+        for n in TABLE_READS
+        if "logical table" in (getattr(tessera.Reader, n).__doc__ or "")
+    }
+    if reads != claims:
+        errors.append(
+            f"logical table names: resolved by {sorted(reads)}, documented on {sorted(claims)} — update both"
+        )
+    for name, read in BLOCK_READS.items():
+        documented = "NotABlockError" in (getattr(tessera.Reader, name).__doc__ or "")
+        try:
+            read(r)
+            raised = False
+        except tessera.NotABlockError:
+            raised = True
+        if raised != documented:
+            errors.append(
+                f"{name}: raises NotABlockError={raised}, documents it={documented}"
+            )
+
+    exported = {
+        n
+        for n in dir(tessera._native)
+        if isinstance(getattr(tessera._native, n), type)
+        and issubclass(getattr(tessera._native, n), BaseException)
+    }
+    if missing := exported - set(tessera.__all__):
+        errors.append(f"native exceptions not in tessera.__all__: {sorted(missing)}")
+    if not issubclass(tessera.NotABlockError, tessera.TesseraError):
+        errors.append(
+            "NotABlockError must subclass TesseraError, so `except TesseraError` still catches it"
+        )
+    return errors
+
+
 def main() -> int:
     table = probe(
         lambda code, data: tessera.Builder(
@@ -154,6 +229,8 @@ def main() -> int:
         errors.append(
             f"add_array is no longer callable without an explicit codec: {_e}"
         )
+
+    errors += logical_names()
 
     for e in errors:
         print(f"DRIFT: {e}", file=sys.stderr)
