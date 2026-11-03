@@ -127,13 +127,22 @@ fn staged_table_ref(
     })
 }
 
-/// Wrap ONE canonical table block of **any size** as a [`StagedEncodeJob`]: the job pulls `groups`
-/// (row-groups of ≤ [`crate::table::ROWS_PER_GROUP`] rows, in order, totalling `spec.rows`) lazily
-/// through [`crate::table::encode_streaming_to`] into a staged file, so neither the input nor the
-/// encoded output is collected in RAM (#677; the Vortex writer's own in-flight segments are a known
-/// limit, #681). The committed block is byte-identical to
-/// [`crate::table::encode`] of the concatenated rows (and to [`table_job`] of them), so its digest
-/// and the product's `content_hash` do not depend on the job kind.
+/// Wrap ONE canonical table block of at most [`crate::table::BLOCK_ROWS`] rows as a
+/// [`StagedEncodeJob`]: the job pulls `groups` (row-groups of ≤ [`crate::table::ROWS_PER_GROUP`]
+/// rows, in order, totalling `spec.rows`) lazily through [`crate::table::encode_streaming_to`] into a
+/// staged file, so neither the input nor the encoded output is collected in RAM. The committed block
+/// is byte-identical to [`crate::table::encode`] of the concatenated rows (and to [`table_job`] of
+/// them), so its digest and the product's `content_hash` do not depend on the job kind.
+///
+/// **Deprecated (ADR-0064 §5.4):** a table above `BLOCK_ROWS` rows is partitioned into the leaves
+/// of one logical table, which [`StreamWriter::push_table`] writes. Above `BLOCK_ROWS` the job fails
+/// with [`Error::StreamedTable`] ([`StreamedTableError::NeedsPartition`]) before it stages anything.
+/// The job runs on a worker, so the error surfaces at [`StreamWriter::finish`], not at this call or
+/// at [`StreamWriter::push_staged`]. The "any size" contract of alpha.4 is withdrawn. At or below
+/// it the block is unchanged, and `push_table` writes the same bytes.
+#[deprecated(
+    note = "use StreamWriter::push_table, which partitions above BLOCK_ROWS (ADR-0064 §5.4)"
+)]
 pub fn table_job_streaming<I>(
     name: impl Into<String>,
     spec: tessera_core::block::table::TableSpec,
@@ -145,6 +154,15 @@ where
 {
     let name = name.into();
     Box::new(move |staging| {
+        if spec.rows > BLOCK_ROWS as u64 {
+            return Err(Error::StreamedTable {
+                name,
+                reason: StreamedTableError::NeedsPartition {
+                    rows: spec.rows,
+                    max: BLOCK_ROWS as u64,
+                },
+            });
+        }
         let mut staged = staging.create()?;
         crate::table::encode_streaming_to(&spec, groups, &mut staged)?;
         Ok(((staged_table_ref(name, &spec)?, staged), Vec::new()))
@@ -1796,6 +1814,7 @@ mod tests {
     /// kind of job wrote a block is invisible in the product. Mixed with in-memory jobs, the commit
     /// order is still push order.
     #[test]
+    #[allow(deprecated)] // pins the deprecated job's remaining (≤ BLOCK_ROWS) contract until it is removed
     fn staged_table_jobs_seal_the_in_memory_product_for_every_worker_count_and_window() {
         let total = 3 * crate::table::ROWS_PER_GROUP as u64 + 99;
         let spec = listmode::spec(total);
@@ -1898,11 +1917,11 @@ mod tests {
         for i in 0..3 {
             // Pushes after the panic closed the window fail; that is fine, the jobs already in the
             // queue are what matters.
-            let _ = sw.push_staged(table_job_streaming(
+            let _ = sw.push_table(
                 format!("events{i}"),
                 listmode::spec(total),
                 listmode::groups(total),
-            ));
+            );
         }
         let err = sw.finish(&dir.path().join("s.tsra")).unwrap_err();
         assert!(err.to_string().contains("worker panicked"), "{err}");
@@ -1931,11 +1950,11 @@ mod tests {
         }))
         .unwrap();
         for i in 0..3 {
-            sw.push_staged(table_job_streaming(
+            sw.push_table(
                 format!("events{i}"),
                 listmode::spec(total),
                 listmode::groups(total),
-            ))
+            )
             .unwrap();
         }
         // Timing-free: release job 0 only once the three later jobs are encoded and charged.
@@ -2080,6 +2099,7 @@ mod tests {
 
     /// At most BLOCK_ROWS rows, `push_table` writes the sealed bytes of `table_job_streaming`.
     #[test]
+    #[allow(deprecated)] // the deprecated job is the reference this test compares against
     fn push_table_of_one_block_is_byte_identical_to_table_job_streaming() {
         let total = 3 * RPG + 99;
         let dir = tempfile::tempdir().unwrap();
@@ -2244,5 +2264,39 @@ mod tests {
                 "{expected}: staged file left behind"
             );
         }
+    }
+
+    /// Above BLOCK_ROWS, the deprecated single-block job fails with a typed error naming
+    /// `push_table` instead of writing one oversized block (ADR-0064 §5.4).
+    #[test]
+    #[allow(deprecated)] // tests the deprecated job's refusal
+    fn table_job_streaming_above_block_rows_names_push_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::new(ws, 1, 1);
+        let rows = BLOCK_ROWS as u64 + 1;
+        sw.push_staged(table_job_streaming(
+            "events",
+            listmode::spec(rows),
+            std::iter::empty(),
+        ))
+        .unwrap();
+        let out = dir.path().join("p.tsra");
+        let err = sw.finish(&out).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::StreamedTable {
+                    reason: StreamedTableError::NeedsPartition { rows: r, .. },
+                    ..
+                } if r == rows
+            ),
+            "{err}"
+        );
+        assert!(err.to_string().contains("push_table"), "{err}");
+        // Refused before anything is staged or sealed.
+        assert!(staged_files(&stage).is_empty(), "staged file left behind");
+        assert!(!out.exists(), "a product was sealed");
     }
 }
