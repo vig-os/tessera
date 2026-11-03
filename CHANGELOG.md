@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `StreamStats::peak_staged_input_blocks` and `peak_staged_input_bytes`. A row count that disagrees with
   `spec.rows`, or a row-group above `ROWS_PER_GROUP` rows, is `Error::StreamedTable` with a typed
   `StreamedTableError` reason (`tessera-core`).
+- `tessera-io`: `StreamWriter::push_table` documents its heap bound, `min(W, n) · p_block + s` for `W` encode workers
+  and `n` leaves, with `p_block` one leaf's measured write peak and `s = 2 · ROWS_PER_GROUP · r_mem + 4 MiB` (7 MiB
+  for 24-byte rows), independent of the row count; and that staged input is page cache, which counts toward a
+  cgroup's memory and is RAM on tmpfs (ADR-0064 PR F, #714). `tests/staged_job_memory.rs` checks the bound on the heap,
+  and that neither the reader filling a block nor a worker reading it back holds the block in RAM.
 
 ### Changed
 
