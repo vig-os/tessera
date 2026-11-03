@@ -476,6 +476,8 @@ fn every_corpus_and_fixture_name_validates() {
     // pyramid) and used across the tests and docs.
     let generated = [
         "events",
+        "events/0000",
+        "events/10000",
         "events_0000",
         "events_9999",
         "events_3p",

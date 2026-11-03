@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tessera_core::block::partition::Partition;
+use tessera_core::block::partition::{marker, Partition};
 use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::block::{BlockRef, LogicalTableError, TableGroup};
 use tessera_core::manifest::Manifest;
@@ -92,13 +92,41 @@ fn the_legacy_fixture_reads_identically() {
     }
 }
 
-/// ADR-0064 §6: a block's name is not in its payload, so the multi-block writer gives the same
-/// `content_hash` for the same rows before and after it switches to `events/NNNN`.
+/// ADR-0064 §6: a block's name and marker are in no payload, so the multi-block writer, now writing
+/// the marked leaves `events/NNNN`, seals the pre-switch writer's `content_hash` and block digests
+/// for the same rows; only the names, the markers and so `manifest_hash` move.
 #[test]
 fn the_writer_reproduces_the_legacy_fixture_content() {
     let dir = tempfile::tempdir().unwrap();
     let (_, sealed) = write_legacy_events(dir.path());
     assert_eq!(sealed.content_hash.as_deref(), Some(LEGACY_CONTENT_HASH));
+
+    let legacy = Reader::open(&Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_FIXTURE))
+        .unwrap()
+        .manifest()
+        .clone();
+    let digests = |m: &Manifest| {
+        m.blocks
+            .iter()
+            .map(|b| b.digest.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(digests(&sealed), digests(&legacy));
+    let leaves: Vec<_> = sealed
+        .blocks
+        .iter()
+        .map(|b| (b.name.as_str(), marker(b).unwrap()))
+        .collect();
+    let leaf = |index, last| Some(Partition { index, last });
+    assert_eq!(
+        leaves,
+        [
+            ("events/0000", leaf(0, false)),
+            ("events/0001", leaf(1, false)),
+            ("events/0002", leaf(2, true)),
+        ]
+    );
+    assert_ne!(sealed.manifest_hash, legacy.manifest_hash);
 }
 
 /// Leaves `pairs/0000` and `pairs/0002`: what an old binary's `commit --remove-block pairs/0001`

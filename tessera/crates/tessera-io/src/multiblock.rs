@@ -823,13 +823,14 @@ mod tests {
                 let (lo, hi) = (b * block_rows, ((b + 1) * block_rows).min(rows));
                 let block_spec = TableSpec {
                     rows: (hi - lo) as u64,
+                    partition: table::block_partition(b as u64, total),
                     ..spec.clone()
                 };
                 let slice: TableData = data
                     .iter()
                     .map(|(n, c)| (n.clone(), c.slice(lo, hi)))
                     .collect();
-                let name = table::block_name("events", b as u64, total);
+                let name = table::block_name("events", b as u64, total).unwrap();
                 sw.push(table_job_indexed(name, block_spec, slice, Some("k".into())))
                     .unwrap();
             }

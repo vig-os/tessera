@@ -47,6 +47,7 @@
 //! choice + intended access pattern were the missing signposts.)
 
 use futures::StreamExt;
+use tessera_core::block::partition::{leaf_name, Partition};
 use tessera_core::block::table::{Column, TableSpec};
 use tessera_core::block::{BlockKind, BlockName, BlockRef};
 use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
@@ -843,7 +844,8 @@ fn validate_nullable(name: &str, spec_nullable: bool, cd: &ColumnData) -> Result
 pub const ROWS_PER_GROUP: usize = 1 << 16; // 65_536
 
 /// **Format-invariant** maximum rows per table block — partitions a >`BLOCK_ROWS` listmode product
-/// across multiple `events_NNNN` blocks (ADR-0026). Picked at 64 × [`ROWS_PER_GROUP`] = `2^22`
+/// across the leaves `events/0000`, `events/0001`, … of one logical table (ADR-0026, ADR-0064).
+/// Picked at 64 × [`ROWS_PER_GROUP`] = `2^22`
 /// (≈ 4.19 M rows ≈ a few hundred MiB encoded for typical PET schemas), big enough that the per-block
 /// Vortex footer overhead stays trivial and small enough that one block fits comfortably in a worker's
 /// RAM. Changing this is a **format-breaking** change (it shifts the per-block partition, which shifts
@@ -882,17 +884,40 @@ pub fn partition_blocks(rows: u64, block_rows: u64) -> u64 {
     rows.div_ceil(br).max(1)
 }
 
-/// Canonical name for the `idx`-th of `total` blocks under `prefix`. `total <= 1` → `prefix` (the
-/// **small-stays-single** invariant — a ≤ [`BLOCK_ROWS`] product writes exactly one `events` block,
-/// byte-identical to today's pre-partition layout). Otherwise `prefix_NNNN` (zero-padded to 4
-/// digits, plenty of headroom for the realistic block-count range — up to 9999 blocks ≈ 41 G rows).
-/// Shared by writer and reader so the manifest order is unambiguous.
-pub fn block_name(prefix: &str, idx: u64, total: u64) -> String {
+/// Canonical name for the `idx`-th of the `total` blocks a table named `prefix` partitions into
+/// (ADR-0064 §1). `total <= 1` → `prefix` (the **small-stays-single** invariant: a ≤ [`BLOCK_ROWS`]
+/// table is exactly one bare-named block, byte-identical to the pre-partition layout). Otherwise the
+/// leaf `<prefix>/{idx:04}` ([`leaf_name`]): the index padded to at least four digits and never more
+/// than needed (`events/0000`, …, `events/9999`, `events/10000`), so there is no ceiling and the
+/// name needs nothing but `idx`. Every multi-block writer pairs it with [`block_partition`]'s marker
+/// in the block's [`TableSpec::partition`] and emits the blocks in index order, which is what makes
+/// them one logical table to [`crate::Reader::table_group`].
+///
+/// Products written before ADR-0064 PR D (#712) name their blocks `prefix_NNNN` without a marker;
+/// readers still resolve that legacy flat form, no writer produces it.
+///
+/// # Errors
+///
+/// [`Error::InvalidBlockName`] when the leaf is not a valid block name: `prefix` is not one, or is
+/// long enough to push the leaf past the 255-byte limit. A single block's `prefix` is returned
+/// unchecked; the seal checks it as it checks every name.
+pub fn block_name(prefix: &str, idx: u64, total: u64) -> Result<String> {
     if total <= 1 {
-        prefix.to_string()
+        Ok(prefix.to_string())
     } else {
-        format!("{prefix}_{idx:04}")
+        Ok(leaf_name(prefix, idx)?.into_string())
     }
+}
+
+/// The partition marker of the `idx`-th of `total` blocks (ADR-0064 §2): `None` for a single
+/// block (`total <= 1`), else `Partition { index: idx, last: idx + 1 == total }`. The writer that
+/// names a block with [`block_name`] puts this in that block's [`TableSpec::partition`]. The marker
+/// is in the manifest only, never in the payload, so it moves `manifest_hash` and not `content_hash`.
+pub fn block_partition(idx: u64, total: u64) -> Option<Partition> {
+    (total > 1).then_some(Partition {
+        index: idx,
+        last: idx + 1 == total,
+    })
 }
 
 /// Encode columns into the deterministic table-block payload bytes for `spec`.
@@ -3516,20 +3541,30 @@ mod tests {
         assert_eq!(block_count(BLOCK_ROWS as u64), 1);
         assert_eq!(block_count((BLOCK_ROWS as u64) + 1), 2);
 
-        // ── naming: small-stays-single (no NNNN suffix), multi-block uses zero-padded 4-digit suffix
+        // ── naming (ADR-0064 §1): small-stays-single (bare name, no marker); multi-block is the
+        // leaf `<prefix>/{idx:04}`, padded per index (never per count), with a marker.
+        let name = |idx, total| block_name("events", idx, total).unwrap();
+        assert_eq!(name(0, 0), "events", "empty product → bare name");
+        assert_eq!(name(0, 1), "events", "single block → bare name");
+        assert_eq!(block_partition(0, 0), None);
         assert_eq!(
-            block_name("events", 0, 0),
-            "events",
-            "empty product → bare name"
+            block_partition(0, 1),
+            None,
+            "a single block carries no marker"
         );
-        assert_eq!(
-            block_name("events", 0, 1),
-            "events",
-            "single block → bare name"
+        assert_eq!(name(0, 2), "events/0000");
+        assert_eq!(name(7, 8), "events/0007");
+        assert_eq!(name(1234, 9999), "events/1234");
+        assert_eq!(name(9999, 10001), "events/9999");
+        assert_eq!(name(10000, 10001), "events/10000", "no ceiling past 9999");
+        let leaf = |index, last| Some(Partition { index, last });
+        assert_eq!(block_partition(0, 2), leaf(0, false));
+        assert_eq!(block_partition(1, 2), leaf(1, true));
+        assert_eq!(block_partition(10000, 10001), leaf(10000, true));
+        assert!(
+            block_name("", 0, 2).is_err(),
+            "an invalid table name is refused"
         );
-        assert_eq!(block_name("events", 0, 2), "events_0000");
-        assert_eq!(block_name("events", 7, 8), "events_0007");
-        assert_eq!(block_name("events", 1234, 9999), "events_1234");
     }
 
     #[test]
