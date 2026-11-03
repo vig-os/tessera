@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An invalid partitioned table shows its typed error instead. `read` and `sql` answer `pairs` as one table, and
   `read` on a node that holds no table says so and points to its blocks (ADR-0064 PR C1, #711). Legacy
   `events_NNNN` blocks are listed one per line, as before.
+- `tessera-io`: `StreamWriter::push_table(name, spec, groups)` writes a streamed table of any size as one logical
+  table, partitioned at `BLOCK_ROWS` into the marked leaves `name/0000`, `name/0001`, …, byte for byte the leaves
+  `TableMultiBlockSink` writes for the same rows (ADR-0064 PR E, #713); at most `BLOCK_ROWS` rows it is the one block
+  `name`. Each block's input is staged on disk in the session's `staging/` directory and handed to a free encode
+  worker once complete, so at most `W + 1` blocks of input are staged for `W` workers, counted by the new
+  `StreamStats::peak_staged_input_blocks` and `peak_staged_input_bytes`. A row count that disagrees with
+  `spec.rows`, or a row-group above `ROWS_PER_GROUP` rows, is `Error::StreamedTable` with a typed
+  `StreamedTableError` reason (`tessera-core`).
 
 ### Changed
 

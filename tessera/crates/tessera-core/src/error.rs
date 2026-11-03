@@ -136,6 +136,14 @@ pub enum Error {
         reason: crate::block::partition::LogicalTableError,
     },
 
+    /// A streaming table writer refused its input (ADR-0064 §5.3): the rows disagree with the
+    /// declared `spec.rows`, or a row-group is too large.
+    #[error("streamed table '{name}': {reason}")]
+    StreamedTable {
+        name: String,
+        reason: crate::block::partition::StreamedTableError,
+    },
+
     /// A line of a write-session journal that is **complete** (newline-terminated), so a commit,
     /// but not a valid one: not UTF-8, not JSON, not a block reference, or a block committed a
     /// second time. `WriteSession::recover` refuses the journal rather than drop such a line as a

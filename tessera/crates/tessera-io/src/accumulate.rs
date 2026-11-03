@@ -16,7 +16,7 @@
 //! columns (not the sealed format), so it's intentionally trivial.
 
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -63,63 +63,79 @@ const FRAG_MAGIC: &[u8; 8] = b"TSRAFRG\x02";
 /// Shared by [`TableStreamWriter`] (single block) and the multi-block sink so both stage in the
 /// **same** format, and so the parallel per-block encode jobs read fragments written by either path.
 pub(crate) fn write_fragment(path: &Path, group: &TableData) -> Result<()> {
+    let mut f = File::create(path)?;
+    write_fragment_to(&mut f, group)?;
+    f.sync_all()?; // durable: a committed row-group survives a crash
+    Ok(())
+}
+
+/// Append one fragment record (the [`write_fragment`] format) to `out`; returns its byte length.
+/// `StreamWriter::push_table` writes a block's row-groups as consecutive records of one file.
+pub(crate) fn write_fragment_to<W: Write>(out: &mut W, group: &TableData) -> Result<u64> {
     let n_rows = u64::try_from(group.first().map(|(_, c)| c.len()).unwrap_or(0))
         .map_err(|e| Error::Codec(format!("fragment: row count overflows u64: {e}")))?;
-    let mut f = File::create(path)?;
-    f.write_all(FRAG_MAGIC)?;
-    f.write_all(&n_rows.to_le_bytes())?;
+    out.write_all(FRAG_MAGIC)?;
+    out.write_all(&n_rows.to_le_bytes())?;
+    let mut written = 16;
     for (_, c) in group {
         let raw = c.to_le_bytes();
         let len = u64::try_from(raw.len())
             .map_err(|e| Error::Codec(format!("fragment: column length overflows u64: {e}")))?;
-        f.write_all(&len.to_le_bytes())?;
-        f.write_all(&raw)?;
+        out.write_all(&len.to_le_bytes())?;
+        out.write_all(&raw)?;
+        written += 8 + len;
     }
-    f.sync_all()?; // durable: a committed row-group survives a crash
-    Ok(())
+    Ok(written)
 }
 
 /// Read one fragment back into a [`TableData`] of `columns` (inverse of [`write_fragment`]). The
 /// fragment format is internal; this is the only reader. `pub(crate)` so [`crate::stream`] can lazily
 /// pull fragments inside a per-block encode job.
 pub(crate) fn read_fragment(path: &Path, columns: &[Column]) -> Result<TableData> {
-    let bytes = fs::read(path)?;
-    let magic = bytes
-        .get(0..8)
-        .ok_or_else(|| Error::Codec("fragment: truncated header".into()))?;
-    if magic != FRAG_MAGIC {
+    read_fragment_from(
+        &mut std::io::BufReader::new(File::open(path)?),
+        columns,
+        path,
+    )
+}
+
+/// Read the next fragment record from `input` (inverse of [`write_fragment_to`]); `origin` names
+/// the file in errors.
+pub(crate) fn read_fragment_from<R: Read>(
+    input: &mut R,
+    columns: &[Column],
+    origin: &Path,
+) -> Result<TableData> {
+    let truncated = |what: &str| Error::Codec(format!("fragment: truncated {what}"));
+    let mut word = [0u8; 8];
+    input
+        .read_exact(&mut word)
+        .map_err(|_| truncated("header"))?;
+    if &word != FRAG_MAGIC {
         return Err(Error::Codec(format!(
             "fragment: bad magic (stale or foreign staging file at {})",
-            path.display()
+            origin.display()
         )));
     }
-    let head_arr: [u8; 8] = bytes
-        .get(8..16)
-        .ok_or_else(|| Error::Codec("fragment: truncated header".into()))?
-        .try_into()
-        .map_err(|e| Error::Codec(format!("fragment: corrupt header: {e}")))?;
-    let n_rows = usize::try_from(u64::from_le_bytes(head_arr))
+    input
+        .read_exact(&mut word)
+        .map_err(|_| truncated("header"))?;
+    let n_rows = usize::try_from(u64::from_le_bytes(word))
         .map_err(|e| Error::Codec(format!("fragment: row count exceeds usize: {e}")))?;
-    let mut off = 16usize;
     let mut out = Vec::with_capacity(columns.len());
     for c in columns {
-        let len_arr: [u8; 8] = bytes
-            .get(off..off + 8)
-            .ok_or_else(|| {
-                Error::Codec(format!(
-                    "fragment: truncated length for column '{}'",
-                    c.name
-                ))
-            })?
-            .try_into()
-            .map_err(|e| Error::Codec(format!("fragment: corrupt column length: {e}")))?;
-        let len = usize::try_from(u64::from_le_bytes(len_arr))
+        let mut len = [0u8; 8];
+        input
+            .read_exact(&mut len)
+            .map_err(|_| truncated(&format!("length for column '{}'", c.name)))?;
+        let len = usize::try_from(u64::from_le_bytes(len))
             .map_err(|e| Error::Codec(format!("fragment: column length exceeds usize: {e}")))?;
-        off += 8;
-        let raw = bytes
-            .get(off..off + len)
-            .ok_or_else(|| Error::Codec(format!("fragment: truncated column '{}'", c.name)))?;
-        let col = ColumnData::from_column_bytes(c, raw, n_rows)?;
+        let mut raw = Vec::new();
+        input.by_ref().take(len as u64).read_to_end(&mut raw)?;
+        if raw.len() != len {
+            return Err(truncated(&format!("column '{}'", c.name)));
+        }
+        let col = ColumnData::from_column_bytes(c, &raw, n_rows)?;
         if col.len() != n_rows {
             return Err(Error::Codec(format!(
                 "fragment: column '{}' decoded {} rows, header says {n_rows}",
@@ -128,7 +144,6 @@ pub(crate) fn read_fragment(path: &Path, columns: &[Column]) -> Result<TableData
             )));
         }
         out.push((c.name.clone(), col));
-        off += len;
     }
     Ok(out)
 }
@@ -147,25 +162,26 @@ impl FragmentReadError {
     }
 }
 
-/// The row-groups staged in `paths`, read lazily one fragment at a time — the input of
-/// [`compact_fragments_to`]. The encoder pulls infallible [`TableData`], so a read error is stashed
-/// in the returned [`FragmentReadError`] and empty row-groups are fed from then on; the caller must
+/// The row-groups `read` from `sources`, lazily one at a time — the input of [`compact_to`]. The
+/// encoder pulls infallible [`TableData`], so a read error is stashed in the returned
+/// [`FragmentReadError`] and empty row-groups are fed from then on; the caller must
 /// [`FragmentReadError::check`] it after the encode.
-fn fragment_groups(
+fn fragment_groups<S>(
     columns: Vec<Column>,
-    paths: Vec<PathBuf>,
+    sources: impl Iterator<Item = S> + Send + 'static,
+    mut read: impl FnMut(S, &[Column]) -> Result<TableData> + Send + 'static,
 ) -> (
     impl Iterator<Item = TableData> + Send + 'static,
     FragmentReadError,
 ) {
     let err: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
     let slot = Arc::clone(&err);
-    let groups = paths.into_iter().map(move |p| {
+    let groups = sources.map(move |source| {
         let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_some() {
             return empty_cols(&columns);
         }
-        match read_fragment(&p, &columns) {
+        match read(source, &columns) {
             Ok(td) => td,
             Err(e) => {
                 *slot = Some(e);
@@ -179,16 +195,32 @@ fn fragment_groups(
 /// Encode the row-groups staged in `paths` as one table block of `spec` into `sink` — every fragment
 /// compaction ([`TableStreamWriter::finish_to`] and [`table_job_from_fragments`]). Returns the bytes
 /// written.
-///
-/// **A fragment read error wins over the encode's error.** After a failed read the encoder is fed
-/// empty row-groups, so the read error is the first cause, and whatever the encode then reports
-/// (its own failure, or a short block that is discarded) is downstream of it or beside the point.
 pub(crate) fn compact_fragments_to<W: Write>(
     spec: &TableSpec,
     paths: Vec<PathBuf>,
     sink: W,
 ) -> Result<u64> {
-    let (groups, read_error) = fragment_groups(spec.columns.clone(), paths);
+    compact_to(
+        spec,
+        paths.into_iter(),
+        |p: PathBuf, columns: &[Column]| read_fragment(&p, columns),
+        sink,
+    )
+}
+
+/// Encode the row-groups `read` one at a time from `sources` as one table block of `spec` into
+/// `sink`; returns the bytes written.
+///
+/// **A fragment read error wins over the encode's error.** After a failed read the encoder is fed
+/// empty row-groups, so the read error is the first cause, and whatever the encode then reports
+/// (its own failure, or a short block that is discarded) is downstream of it or beside the point.
+pub(crate) fn compact_to<S, W: Write>(
+    spec: &TableSpec,
+    sources: impl Iterator<Item = S> + Send + 'static,
+    read: impl FnMut(S, &[Column]) -> Result<TableData> + Send + 'static,
+    sink: W,
+) -> Result<u64> {
+    let (groups, read_error) = fragment_groups(spec.columns.clone(), sources, read);
     let encoded = table::encode_streaming_to(spec, groups, sink);
     read_error.check()?;
     encoded

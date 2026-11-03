@@ -183,6 +183,35 @@ pub enum LogicalTableError {
     },
 }
 
+/// Why a streaming table writer refused its input (ADR-0064 §5.3), carried by
+/// [`Error::StreamedTable`]. Nothing of the table is sealed when it is raised.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum StreamedTableError {
+    /// The input yielded a row past the declared `spec.rows`.
+    #[error("the input runs past the declared {declared} rows")]
+    TooManyRows {
+        /// The declared row count.
+        declared: u64,
+    },
+    /// The input ended before the declared `spec.rows`.
+    #[error("the input ended after {actual} of the declared {declared} rows")]
+    TooFewRows {
+        /// The declared row count.
+        declared: u64,
+        /// The rows the input yielded.
+        actual: u64,
+    },
+    /// One row-group of the input holds more rows than a row-group may.
+    #[error("a row-group of {rows} rows exceeds the {max} rows of one row-group")]
+    OversizedGroup {
+        /// The group's rows.
+        rows: u64,
+        /// The most rows a group may hold.
+        max: u64,
+    },
+}
+
 /// The legacy flat rule (ADR-0064 §4, `Reader::block_group` before ADR-0064): `prefix` itself, or
 /// `prefix_` followed by exactly four ASCII digits.
 pub fn is_legacy_flat_member(name: &str, prefix: &str) -> bool {
