@@ -25,7 +25,11 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tessera_core::block::table::{Column, TableSpec};
-use tessera_io::stream::{table_job_streaming, StagedEncodeJob, StreamWindow, StreamWriter};
+// The deprecated single-block job keeps its heap contract at ≤ BLOCK_ROWS rows, measured here until
+// it is removed; `push_table`'s heap model is #714's.
+#[allow(deprecated)]
+use tessera_io::stream::table_job_streaming;
+use tessera_io::stream::{StagedEncodeJob, StreamWindow, StreamWriter};
 use tessera_io::table::ROWS_PER_GROUP;
 use tessera_io::{ColumnData, TableData, TableStreamWriter, WriteSession};
 
@@ -161,6 +165,7 @@ fn sealed_block(dir: &std::path::Path) -> u64 {
 }
 
 #[test]
+#[allow(deprecated)] // measures the deprecated job at ≤ BLOCK_ROWS rows, see its import
 fn staged_table_jobs_hold_no_more_than_the_encoder_itself() {
     let total = 16 * ROWS_PER_GROUP as u64 + 4321; // 17 row-groups, as test (a)
     let dir = tempfile::tempdir().unwrap();

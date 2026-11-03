@@ -183,7 +183,7 @@ pub enum LogicalTableError {
     },
 }
 
-/// Why a streaming table writer refused its input (ADR-0064 §5.3), carried by
+/// Why a streaming table writer refused its input or its call (ADR-0064 §5.3, §5.4), carried by
 /// [`Error::StreamedTable`]. Nothing of the table is sealed when it is raised.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -208,6 +208,16 @@ pub enum StreamedTableError {
         /// The group's rows.
         rows: u64,
         /// The most rows a group may hold.
+        max: u64,
+    },
+    /// A single-block writer was given more rows than one block holds.
+    #[error(
+        "{rows} rows exceed one block of {max} rows: write the table with StreamWriter::push_table"
+    )]
+    NeedsPartition {
+        /// The declared row count.
+        rows: u64,
+        /// The most rows of one block.
         max: u64,
     },
 }

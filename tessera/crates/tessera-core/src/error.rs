@@ -136,8 +136,9 @@ pub enum Error {
         reason: crate::block::partition::LogicalTableError,
     },
 
-    /// A streaming table writer refused its input (ADR-0064 §5.3): the rows disagree with the
-    /// declared `spec.rows`, or a row-group is too large.
+    /// A streaming table writer refused its input or its call (ADR-0064 §5.3, §5.4): the rows
+    /// disagree with the declared `spec.rows`, a row-group is too large, or a single-block writer
+    /// was given a table that must be partitioned.
     #[error("streamed table '{name}': {reason}")]
     StreamedTable {
         name: String,
