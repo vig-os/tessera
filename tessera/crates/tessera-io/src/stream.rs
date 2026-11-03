@@ -387,6 +387,8 @@ struct WindowState {
     /// [`StreamWriter::push_table`] input staged on disk now: files and their bytes.
     staged_input_blocks: usize,
     staged_input_bytes: u64,
+    /// Set by a [`ReadHold`]: `push_table` jobs wait before reading their input.
+    hold_reads: bool,
     stats: StreamStats,
 }
 
@@ -413,6 +415,7 @@ impl CreditWindow {
                 busy_jobs: 0,
                 staged_input_blocks: 0,
                 staged_input_bytes: 0,
+                hold_reads: false,
                 stats: StreamStats::default(),
             }),
             changed: Condvar::new(),
@@ -512,6 +515,22 @@ impl CreditWindow {
             .max(st.staged_input_blocks);
         st.stats.peak_staged_input_bytes =
             st.stats.peak_staged_input_bytes.max(st.staged_input_bytes);
+    }
+
+    /// Set or clear the [`ReadHold`].
+    fn hold_reads(&self, hold: bool) {
+        self.lock().hold_reads = hold;
+        self.changed.notify_all();
+    }
+
+    /// A `push_table` job may read its input: wait while a [`ReadHold`] is held. `false` once the
+    /// window is closed.
+    fn wait_read_turn(&self) -> bool {
+        let mut st = self.lock();
+        while st.hold_reads && !st.closed {
+            st = self.wait(st);
+        }
+        !st.closed
     }
 
     /// The committer appended job `next_commit` (which held `held`): give its credit back.
@@ -627,8 +646,8 @@ impl StagedInput {
         Ok(())
     }
 
-    /// The leaf's job: encode the records one at a time into a staged block, deleting this file
-    /// once the last record is read.
+    /// The leaf's job: wait out a [`ReadHold`], then encode the records one at a time into a
+    /// staged block, deleting this file once the last record is read.
     fn into_job(mut self, bref: BlockRef, spec: TableSpec) -> Result<StagedEncodeJob> {
         drop(
             self.out
@@ -638,6 +657,9 @@ impl StagedInput {
                 .map_err(|e| e.into_error())?,
         );
         Ok(Box::new(move |staging| {
+            if !self.window.wait_read_turn() {
+                return Err(closed_error());
+            }
             let groups = self.groups;
             let reader = BufReader::new(File::open(&self.path)?);
             let mut source = Some((reader, self));
@@ -661,6 +683,24 @@ impl Drop for StagedInput {
         drop(self.out.take());
         let _ = fs::remove_file(&self.path);
         self.window.stage_input(-1, -(self.bytes as i64));
+    }
+}
+
+/// Holds [`StreamWriter::push_table`]'s jobs before they read their input while it lives; see
+/// [`StreamWriter::hold_table_reads`]. Dropping it releases them.
+#[doc(hidden)]
+pub struct ReadHold(Arc<CreditWindow>);
+
+impl ReadHold {
+    /// A live snapshot of the writer's [`StreamStats`], readable while `push_table` blocks.
+    pub fn stats(&self) -> StreamStats {
+        self.0.stats()
+    }
+}
+
+impl Drop for ReadHold {
+    fn drop(&mut self) {
+        self.0.hold_reads(false);
     }
 }
 
@@ -987,6 +1027,15 @@ impl StreamWriter {
             ..Fill::default()
         };
         Ok(())
+    }
+
+    /// Hold every [`Self::push_table`] job before it reads its staged input, until the returned
+    /// [`ReadHold`] is dropped: a test seam (ADR-0064 §8's barrier test, #714's heap model) that
+    /// pins the `W` dispatched blocks on disk so the staged-input bound can be observed.
+    #[doc(hidden)]
+    pub fn hold_table_reads(&self) -> ReadHold {
+        self.window.hold_reads(true);
+        ReadHold(Arc::clone(&self.window))
     }
 
     fn submit(&mut self, job: Job, free_worker: bool) -> Result<()> {
@@ -2053,6 +2102,88 @@ mod tests {
                 == std::fs::read(dir.path().join("table.tsra")).unwrap(),
             "push_table's single block differs from table_job_streaming's"
         );
+    }
+
+    /// ADR-0064 §8's barrier test. With all `W` workers held before they read, the reader fills the
+    /// `W` dispatched blocks and one more, then stalls: exactly `W + 1` staged input blocks, a
+    /// partial block's bytes counted while it fills, and no further row-group pulled although `W`
+    /// more blocks of input are offered. Released, the product is the batch partition.
+    #[test]
+    fn held_workers_pin_w_plus_one_staged_input_blocks() {
+        let block_rows = 2 * RPG;
+        for workers in [1usize, 2, 3] {
+            let w = workers as u64;
+            let total = (2 * w + 1) * block_rows + 1234;
+            let dir = tempfile::tempdir().unwrap();
+            let stage = dir.path().join("stage");
+            let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            let mut sw = StreamWriter::new(ws, workers, 64);
+            let hold = sw.hold_table_reads();
+            // The generator records each pulled group's staged size, and at the second group of
+            // block `W` (block `W` partly filled) waits for the monitor to look.
+            let staged = Arc::new(Mutex::new(Vec::<u64>::new()));
+            let (at_mid, mid) = channel::<()>();
+            let (ack, acked) = channel::<()>();
+            let mid_pull = 2 * workers + 1;
+            let sizes = Arc::clone(&staged);
+            let input = listmode::groups(total).enumerate().map(move |(i, group)| {
+                if i == mid_pull {
+                    at_mid.send(()).unwrap();
+                    let _ = acked.recv();
+                }
+                let mut record = Vec::new();
+                crate::accumulate::write_fragment_to(&mut record, &group).unwrap();
+                sizes.lock().unwrap().push(record.len() as u64);
+                group
+            });
+            let sizes = Arc::clone(&staged);
+            let monitor = thread::spawn(move || {
+                let written = |n: usize| sizes.lock().unwrap()[..n].iter().sum::<u64>();
+                mid.recv().unwrap();
+                let st = hold.stats();
+                assert_eq!(st.peak_staged_input_blocks, workers + 1, "mid-fill");
+                assert_eq!(
+                    st.peak_staged_input_bytes,
+                    written(mid_pull),
+                    "partial block"
+                );
+                ack.send(()).unwrap();
+                // The reader must stall at the hand-over of block `W` (every worker has a job), not
+                // pull past it: a writer that hands blocks to a queue instead of a free worker
+                // keeps pulling, which fails here rather than hanging.
+                let full = 2 * (workers + 1);
+                while hold.stats().producer_stalls == 0 {
+                    let pulled = sizes.lock().unwrap().len();
+                    assert!(
+                        pulled <= full,
+                        "pulled {pulled} groups past the W + 1-th block"
+                    );
+                    thread::yield_now();
+                }
+                let st = hold.stats();
+                let pulled = sizes.lock().unwrap().len();
+                assert_eq!(pulled, full, "pulled past the W + 1-th block");
+                assert_eq!(
+                    st.jobs_pushed, workers,
+                    "block W was handed over to a busy pool"
+                );
+                assert_eq!(st.peak_staged_input_blocks, workers + 1);
+                assert_eq!(st.peak_staged_input_bytes, written(pulled));
+                drop(hold);
+            });
+            let spec = listmode::spec(total);
+            sw.push_table_with_block_rows("events", spec, input, block_rows)
+                .unwrap();
+            monitor.join().unwrap();
+            let (m, stats) = sw.finish_with_stats(&dir.path().join("p.tsra")).unwrap();
+            assert_eq!(stats.peak_staged_input_blocks, workers + 1, "w{workers}");
+            assert!(
+                staged_files(&stage).is_empty(),
+                "w{workers}: staged file left behind"
+            );
+            let reference = sink_product(dir.path(), total, block_rows);
+            assert_eq!(canonical(&m), canonical(&reference), "w{workers}");
+        }
     }
 
     /// A row count that disagrees with `spec.rows`, or an oversized group, is a typed error; the
