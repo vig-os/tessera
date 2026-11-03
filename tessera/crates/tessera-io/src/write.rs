@@ -437,6 +437,13 @@ impl BlockStaging {
         &self.dir
     }
 
+    /// A fresh path in the staging directory for one block's staged input (the fragment records
+    /// [`crate::StreamWriter::push_table`] writes and its worker deletes once read).
+    pub(crate) fn input_path(&self) -> PathBuf {
+        let n = self.seq.fetch_add(1, Ordering::Relaxed);
+        self.dir.join(format!("input-{n:010}.frag"))
+    }
+
     /// Create an empty staged file to write one encoded block into.
     pub fn create(&self) -> Result<StagedBlock> {
         let n = self.seq.fetch_add(1, Ordering::Relaxed);

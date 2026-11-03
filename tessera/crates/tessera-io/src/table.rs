@@ -1054,7 +1054,7 @@ pub fn decode_rows(spec: &TableSpec, blob: &[u8], rows: &[u64]) -> Result<TableD
 /// the sink. The input side is bounded (one row-group in flight), but the **output** is the whole
 /// encoded table in RAM, so this is for tables that fit in memory. A table of any size streams to a
 /// file (or any other [`std::io::Write`]) through [`encode_streaming_to`] instead, and into a
-/// [`crate::StreamWriter`] as one canonical block through [`crate::table_job_streaming`] (#677).
+/// [`crate::StreamWriter`] through [`crate::StreamWriter::push_table`] (ADR-0064).
 ///
 /// Feeding the row-groups in fixed-grid order yields bytes **byte-identical to [`encode`]** of the
 /// concatenation — there is one logical encoder, so streaming-then-compact == batch (tested by

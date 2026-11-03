@@ -23,9 +23,10 @@
 //!
 //!   A **staged** job ([`StagedEncodeJob`], pushed with [`StreamWriter::push_staged`]) writes its
 //!   data block to a file in the session's staging directory instead of RAM, so only its companions
-//!   count towards `P` — zero for [`table_job_streaming`] and [`table_job_from_fragments`]. That is
-//!   what makes ONE canonical table block of any size bounded (#677): its encoded bytes are on disk,
-//!   not in the window. Disk is not bounded by `B`: the staged files of finished-but-uncommitted
+//!   count towards `P` — zero for [`StreamWriter::push_table`]'s leaves and
+//!   [`table_job_from_fragments`]: a table block's encoded bytes are on disk, not in the window
+//!   (#677). A table above [`BLOCK_ROWS`] rows is written by `push_table` as the leaves of one
+//!   logical table (ADR-0064), each leaf one staged job. Disk is not bounded by `B`: the staged files of finished-but-uncommitted
 //!   jobs hold `≤ J × S` bytes (`S` = the largest staged block, [`StreamStats::max_staged_job_bytes`]),
 //!   plus the files of the encodes in progress.
 //! - **Parallel encode:** `workers` threads encode concurrently (the expensive pcodec/Vortex step).
@@ -68,15 +69,23 @@
 //! (idle workers exit once [`StreamWriter::finish`] or a drop closes the job queue).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::{BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
-use tessera_core::block::BlockRef;
+use tessera_core::block::table::TableSpec;
+use tessera_core::block::{BlockName, BlockRef, StreamedTableError};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
 
+use crate::accumulate::{read_fragment_from, write_fragment_to};
+use crate::table::{
+    block_name, block_partition, partition_blocks, ColumnData, TableData, BLOCK_ROWS,
+    ROWS_PER_GROUP,
+};
 use crate::write::{BlockStaging, StagedBlock, WriteSession};
 use crate::BlockPayload;
 
@@ -348,6 +357,13 @@ pub struct StreamStats {
     pub peak_staged_bytes: u64,
     /// The largest staged data block of a single job (`S` in the disk bound `≤ J × S`).
     pub max_staged_job_bytes: u64,
+    /// The most blocks of [`StreamWriter::push_table`] input staged on disk at one time: a block
+    /// counts from the creation of its staging file, while it is still being filled, until its
+    /// worker deletes the file (ADR-0064 §8). At most `W + 1` for `W` workers.
+    pub peak_staged_input_blocks: usize,
+    /// The most bytes of [`StreamWriter::push_table`] input staged on disk at one time, the block
+    /// being filled included: the staging files' sizes, updated as each row-group is written.
+    pub peak_staged_input_bytes: u64,
 }
 
 /// The window's mutable state, behind [`CreditWindow::state`].
@@ -365,20 +381,28 @@ struct WindowState {
     closed: bool,
     /// Workers currently waiting at gate 2 (tests observe it; it is not part of [`StreamStats`]).
     gated_encodes: usize,
+    /// Jobs admitted whose `run` has not returned (queued or on a worker); a worker is free while
+    /// this is below the worker count.
+    busy_jobs: usize,
+    /// [`StreamWriter::push_table`] input staged on disk now: files and their bytes.
+    staged_input_blocks: usize,
+    staged_input_bytes: u64,
     stats: StreamStats,
 }
 
 /// The shared credit window: the limits, the state, and one condvar every gate waits on.
 struct CreditWindow {
     limits: StreamWindow,
+    workers: usize,
     state: Mutex<WindowState>,
     changed: Condvar,
 }
 
 impl CreditWindow {
-    fn new(limits: StreamWindow) -> Self {
+    fn new(limits: StreamWindow, workers: usize) -> Self {
         CreditWindow {
             limits,
+            workers,
             state: Mutex::new(WindowState {
                 in_flight_jobs: 0,
                 in_flight_bytes: 0,
@@ -386,6 +410,9 @@ impl CreditWindow {
                 next_commit: 0,
                 closed: false,
                 gated_encodes: 0,
+                busy_jobs: 0,
+                staged_input_blocks: 0,
+                staged_input_bytes: 0,
                 stats: StreamStats::default(),
             }),
             changed: Condvar::new(),
@@ -405,8 +432,9 @@ impl CreditWindow {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Gate 1 (producer): wait for a job credit, then take it. `Err` once the window is closed.
-    fn acquire(&self) -> Result<()> {
+    /// Gate 1 (producer): wait for a job credit — and, with `free_worker`, for a worker with no
+    /// job — then take it. `Err` once the window is closed.
+    fn acquire(&self, free_worker: bool) -> Result<()> {
         let mut st = self.lock();
         let mut stalled = false;
         loop {
@@ -416,6 +444,7 @@ impl CreditWindow {
             // With no job in flight no bytes are held, so an empty window always admits.
             if st.in_flight_jobs < self.limits.max_in_flight
                 && st.in_flight_bytes < self.limits.max_in_flight_bytes
+                && (!free_worker || st.busy_jobs < self.workers)
             {
                 break;
             }
@@ -426,6 +455,7 @@ impl CreditWindow {
             st = self.wait(st);
         }
         st.in_flight_jobs += 1;
+        st.busy_jobs += 1;
         st.stats.jobs_pushed += 1;
         st.stats.peak_in_flight_jobs = st.stats.peak_in_flight_jobs.max(st.in_flight_jobs);
         Ok(())
@@ -456,15 +486,32 @@ impl CreditWindow {
         turn
     }
 
-    /// A worker finished encoding a job that holds `held`: hold it until the job's commit.
+    /// A worker finished encoding a job that holds `held`: hold it until the job's commit. The
+    /// worker is free again.
     fn charge(&self, held: Held) {
         let mut st = self.lock();
+        st.busy_jobs -= 1;
         st.in_flight_bytes += held.ram;
         st.staged_bytes += held.staged;
         st.stats.peak_in_flight_bytes = st.stats.peak_in_flight_bytes.max(st.in_flight_bytes);
         st.stats.max_job_bytes = st.stats.max_job_bytes.max(held.ram);
         st.stats.peak_staged_bytes = st.stats.peak_staged_bytes.max(st.staged_bytes);
         st.stats.max_staged_job_bytes = st.stats.max_staged_job_bytes.max(held.staged);
+        drop(st);
+        self.changed.notify_all();
+    }
+
+    /// Staged input changed by `files` files and `bytes` bytes (created/grown, or deleted).
+    fn stage_input(&self, files: isize, bytes: i64) {
+        let mut st = self.lock();
+        st.staged_input_blocks = st.staged_input_blocks.saturating_add_signed(files);
+        st.staged_input_bytes = st.staged_input_bytes.saturating_add_signed(bytes);
+        st.stats.peak_staged_input_blocks = st
+            .stats
+            .peak_staged_input_blocks
+            .max(st.staged_input_blocks);
+        st.stats.peak_staged_input_bytes =
+            st.stats.peak_staged_input_bytes.max(st.staged_input_bytes);
     }
 
     /// The committer appended job `next_commit` (which held `held`): give its credit back.
@@ -512,6 +559,111 @@ impl Drop for CloseOnDrop {
     }
 }
 
+/// The rows of `group` after checking its columns against `spec` (names, order, equal lengths).
+fn group_rows(spec: &TableSpec, group: &TableData) -> Result<usize> {
+    if group.len() != spec.columns.len() {
+        return Err(Error::Codec("push_table: column count mismatch".into()));
+    }
+    let rows = rows_of(group);
+    for ((name, data), col) in group.iter().zip(&spec.columns) {
+        if name != &col.name {
+            return Err(Error::Codec(format!(
+                "push_table: column '{name}' != spec '{}'",
+                col.name
+            )));
+        }
+        if data.len() != rows {
+            return Err(Error::Codec("push_table: ragged group columns".into()));
+        }
+    }
+    Ok(rows)
+}
+
+fn rows_of(group: &TableData) -> usize {
+    group.first().map_or(0, |(_, c)| c.len())
+}
+
+/// The block [`StreamWriter::push_table`] is filling: its index, its staging file and its rows.
+#[derive(Default)]
+struct Fill {
+    block: u64,
+    input: Option<StagedInput>,
+    rows: u64,
+}
+
+/// One block's staged input: consecutive fragment records in a file of the session's staging
+/// directory. It counts in the window's staged input from its creation until it is dropped, which
+/// deletes the file — once its worker has read the last record, or on any error or abort.
+struct StagedInput {
+    path: PathBuf,
+    out: Option<BufWriter<File>>,
+    groups: usize,
+    bytes: u64,
+    window: Arc<CreditWindow>,
+}
+
+impl StagedInput {
+    fn create(staging: &BlockStaging, window: &Arc<CreditWindow>) -> Result<Self> {
+        let path = staging.input_path();
+        let out = BufWriter::new(File::create(&path)?);
+        window.stage_input(1, 0);
+        Ok(StagedInput {
+            path,
+            out: Some(out),
+            groups: 0,
+            bytes: 0,
+            window: Arc::clone(window),
+        })
+    }
+
+    /// Write one row-group, flushed so the file's size on disk is what the window counts.
+    fn append(&mut self, group: &TableData) -> Result<()> {
+        let out = self.out.as_mut().expect("still being filled");
+        let n = write_fragment_to(out, group)?;
+        out.flush()?;
+        self.groups += 1;
+        self.bytes += n;
+        self.window.stage_input(0, n as i64);
+        Ok(())
+    }
+
+    /// The leaf's job: encode the records one at a time into a staged block, deleting this file
+    /// once the last record is read.
+    fn into_job(mut self, bref: BlockRef, spec: TableSpec) -> Result<StagedEncodeJob> {
+        drop(
+            self.out
+                .take()
+                .expect("still being filled")
+                .into_inner()
+                .map_err(|e| e.into_error())?,
+        );
+        Ok(Box::new(move |staging| {
+            let groups = self.groups;
+            let reader = BufReader::new(File::open(&self.path)?);
+            let mut source = Some((reader, self));
+            let mut staged = staging.create()?;
+            let read = move |i: usize, columns: &[tessera_core::block::table::Column]| {
+                let (reader, input) = source.as_mut().expect("one read per record");
+                let group = read_fragment_from(reader, columns, &input.path);
+                if i + 1 == groups {
+                    source = None; // read in full: delete it
+                }
+                group
+            };
+            crate::accumulate::compact_to(&spec, 0..groups, read, &mut staged)?;
+            Ok(((bref, staged), Vec::new()))
+        }))
+    }
+}
+
+impl Drop for StagedInput {
+    fn drop(&mut self) {
+        drop(self.out.take());
+        let _ = fs::remove_file(&self.path);
+        self.window.stage_input(-1, -(self.bytes as i64));
+    }
+}
+
 /// A bounded-memory, parallel-encode streaming writer over a [`WriteSession`].
 ///
 /// Every job holds a credit of the writer's [`StreamWindow`] from [`Self::push`] until it is
@@ -522,6 +674,7 @@ pub struct StreamWriter {
     workers: Vec<JoinHandle<()>>,
     committer: Option<JoinHandle<Result<WriteSession>>>,
     window: Arc<CreditWindow>,
+    staging: BlockStaging,
     seq: usize,
 }
 
@@ -545,7 +698,7 @@ impl StreamWriter {
     /// credit `window`.
     pub fn with_window(session: WriteSession, workers: usize, window: StreamWindow) -> Self {
         let workers = workers.max(1);
-        let window = Arc::new(CreditWindow::new(window));
+        let window = Arc::new(CreditWindow::new(window, workers));
         // The channels only carry jobs; the window is what bounds them (at most `max_in_flight`
         // jobs sit in both together). Unbounded channels allocate nothing up front, so a window of
         // `usize::MAX` jobs (bound by bytes only) is fine.
@@ -605,6 +758,7 @@ impl StreamWriter {
             workers: worker_handles,
             committer: Some(committer),
             window,
+            staging,
             seq: 0,
         }
     }
@@ -631,22 +785,216 @@ impl StreamWriter {
     /// manifest to record them. Errors once the pipeline died (a failed encode or commit, or a
     /// panicking worker); [`Self::finish`] then reports the cause.
     pub fn push(&mut self, job: EncodeJob) -> Result<()> {
-        self.submit(Job::InMemory(job))
+        self.submit(Job::InMemory(job), false)
     }
 
     /// Enqueue a [`StagedEncodeJob`]: like [`Self::push`] (same window, same commit order), but the
     /// job writes its data block to a staged file, which the committer streams into the product and
     /// deletes, so the block's bytes never count against the window's byte budget.
     pub fn push_staged(&mut self, job: StagedEncodeJob) -> Result<()> {
-        self.submit(Job::Staged(job))
+        self.submit(Job::Staged(job), false)
     }
 
-    fn submit(&mut self, job: Job) -> Result<()> {
+    /// Write the table `name` of `spec.rows` rows from `groups` as the leaves of one logical table
+    /// (ADR-0064 §5), each leaf one staged job under this writer's window, and return the number of
+    /// leaves. The table is partitioned at [`BLOCK_ROWS`] ([`crate::table::block_count`]): a table
+    /// of at most `BLOCK_ROWS` rows is the one block `name`, byte-identical to
+    /// [`table_job_streaming`]; a larger one is the leaves `name/0000`, `name/0001`, … named by
+    /// [`block_name`] and marked by [`block_partition`], byte for byte the leaves
+    /// [`crate::TableMultiBlockSink`] writes for the same rows. Names and markers follow from
+    /// `spec.rows` before the first row is read. Call [`Self::finish`] to commit and seal as usual.
+    ///
+    /// **Input.** `groups` is pulled on the calling thread, in order; each group holds at most
+    /// [`ROWS_PER_GROUP`] rows with `spec`'s columns. Groups of exactly `ROWS_PER_GROUP` rows (the
+    /// last may be shorter) are staged as they come; other sizes are re-chunked to that grid
+    /// through a buffer of less than one row-group, so the leaves don't depend on how the input
+    /// was chunked. `spec.partition` must be `None`: each leaf's marker is set here.
+    ///
+    /// **Staging and ordering.** Each block's row-groups are written, as they are pulled, to one
+    /// file in the session's `staging/` directory, in the fragment format of
+    /// [`crate::TableMultiBlockSink`]. A complete block is handed to a free encode worker (the call
+    /// blocks while every worker has a job, or while the window is full), which reads the file back
+    /// one row-group at a time and deletes it once read. The next block's file is created only after
+    /// that hand-over, so at most `W + 1` blocks of input are on disk for `W` workers: the `W` the
+    /// workers hold and the one being filled ([`StreamStats::peak_staged_input_blocks`],
+    /// [`StreamStats::peak_staged_input_bytes`]). That is up to `(W + 1) · BLOCK_ROWS` rows of
+    /// staged input, plus the encoded blocks staged until their commit, on the filesystem of the
+    /// session directory. The staged files are page cache, which counts towards a cgroup's memory,
+    /// and on tmpfs they are RAM: keep the session directory on a disk-backed filesystem. The last
+    /// leaf is handed over once `groups` has ended, and the call returns then. The heap bound is
+    /// documented with its proof, [#714](https://github.com/vig-os/tessera/issues/714).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::StreamedTable`] when the input runs past `spec.rows` (when it does), ends short
+    /// of it (at its end) or yields a group of more than `ROWS_PER_GROUP` rows; the name, column and
+    /// dtype errors of the sinks; and the pipeline's errors (a dead pipeline closes the window). A
+    /// failed call never hands over the last leaf, so a partitioned table stays without its
+    /// terminal leaf and [`Self::finish`] refuses to seal it ([`Error::LogicalTable`]); a single
+    /// block is never handed over at all. Every staging file is deleted on every path: the one being
+    /// filled when the call fails, the others by their workers or when their jobs are dropped.
+    pub fn push_table<I>(
+        &mut self,
+        name: impl Into<String>,
+        spec: TableSpec,
+        groups: I,
+    ) -> Result<u64>
+    where
+        I: IntoIterator<Item = TableData>,
+    {
+        self.push_table_with_block_rows(name, spec, groups, BLOCK_ROWS as u64)
+    }
+
+    /// [`Self::push_table`] partitioned at `block_rows` (a positive multiple of
+    /// [`ROWS_PER_GROUP`]) instead of [`BLOCK_ROWS`]: a test seam, like
+    /// [`crate::TableMultiBlockSink::with_block_rows`], for multi-block products at test sizes.
+    /// Anything but `BLOCK_ROWS` writes a non-canonical partition.
+    #[doc(hidden)]
+    pub fn push_table_with_block_rows<I>(
+        &mut self,
+        name: impl Into<String>,
+        spec: TableSpec,
+        groups: I,
+        block_rows: u64,
+    ) -> Result<u64>
+    where
+        I: IntoIterator<Item = TableData>,
+    {
+        let name = name.into();
+        if block_rows == 0 || !block_rows.is_multiple_of(ROWS_PER_GROUP as u64) {
+            return Err(Error::Codec(format!(
+                "push_table: block_rows ({block_rows}) must be a positive multiple of ROWS_PER_GROUP ({ROWS_PER_GROUP})"
+            )));
+        }
+        if spec.partition.is_some() {
+            return Err(Error::Invalid(format!(
+                "push_table '{name}': spec.partition must be None, each leaf's marker is set by the writer"
+            )));
+        }
+        for c in &spec.columns {
+            ColumnData::validate_dtype(&c.dtype)?;
+        }
+        let blocks = partition_blocks(spec.rows, block_rows);
+        // The last name is the longest: if it is valid, every name is.
+        BlockName::new(block_name(&name, blocks - 1, blocks)?)?;
+        let refuse = |reason| Error::StreamedTable {
+            name: name.clone(),
+            reason,
+        };
+        let mut fill = Fill::default();
+        let mut seen = 0u64;
+        // Rows short of a full row-group, when the input is not on the ROWS_PER_GROUP grid.
+        let mut pending: Option<TableData> = None;
+        for group in groups {
+            let rows = group_rows(&spec, &group)?;
+            if rows > ROWS_PER_GROUP {
+                return Err(refuse(StreamedTableError::OversizedGroup {
+                    rows: rows as u64,
+                    max: ROWS_PER_GROUP as u64,
+                }));
+            }
+            seen += rows as u64;
+            if seen > spec.rows {
+                return Err(refuse(StreamedTableError::TooManyRows {
+                    declared: spec.rows,
+                }));
+            }
+            let mut buf = match pending.take() {
+                None if rows == ROWS_PER_GROUP => {
+                    self.stage_group(&mut fill, &name, &spec, blocks, block_rows, &group)?;
+                    continue;
+                }
+                None => group,
+                Some(mut buf) => {
+                    for ((_, into), (_, from)) in buf.iter_mut().zip(&group) {
+                        into.extend(from)?;
+                    }
+                    buf
+                }
+            };
+            while rows_of(&buf) >= ROWS_PER_GROUP {
+                let (head, tail) = buf
+                    .into_iter()
+                    .map(|(n, c)| {
+                        (
+                            (n.clone(), c.slice(0, ROWS_PER_GROUP)),
+                            (n, c.slice(ROWS_PER_GROUP, c.len())),
+                        )
+                    })
+                    .unzip();
+                self.stage_group(&mut fill, &name, &spec, blocks, block_rows, &head)?;
+                buf = tail;
+            }
+            pending = (rows_of(&buf) > 0).then_some(buf);
+        }
+        if seen != spec.rows {
+            return Err(refuse(StreamedTableError::TooFewRows {
+                declared: spec.rows,
+                actual: seen,
+            }));
+        }
+        if let Some(rest) = pending {
+            self.stage_group(&mut fill, &name, &spec, blocks, block_rows, &rest)?;
+        }
+        // The input has ended: the last leaf (the terminal one) is complete.
+        self.dispatch(&mut fill, &name, &spec, blocks)?;
+        Ok(blocks)
+    }
+
+    /// Append one canonical row-group to the block being filled (creating its staging file), and
+    /// hand the block over once it is full, unless it is the last one.
+    fn stage_group(
+        &mut self,
+        fill: &mut Fill,
+        name: &str,
+        spec: &TableSpec,
+        blocks: u64,
+        block_rows: u64,
+        group: &TableData,
+    ) -> Result<()> {
+        if fill.input.is_none() {
+            fill.input = Some(StagedInput::create(&self.staging, &self.window)?);
+        }
+        fill.input.as_mut().expect("created").append(group)?;
+        fill.rows += rows_of(group) as u64;
+        if fill.rows == block_rows && fill.block + 1 < blocks {
+            self.dispatch(fill, name, spec, blocks)?;
+        }
+        Ok(())
+    }
+
+    /// Hand the filled block to a free worker as one staged leaf job.
+    fn dispatch(
+        &mut self,
+        fill: &mut Fill,
+        name: &str,
+        spec: &TableSpec,
+        blocks: u64,
+    ) -> Result<()> {
+        let leaf = TableSpec {
+            rows: fill.rows,
+            partition: block_partition(fill.block, blocks),
+            ..spec.clone()
+        };
+        let bref = staged_table_ref(block_name(name, fill.block, blocks)?, &leaf)?;
+        let input = match fill.input.take() {
+            Some(input) => input,
+            None => StagedInput::create(&self.staging, &self.window)?, // the empty table
+        };
+        self.submit(Job::Staged(input.into_job(bref, leaf)?), true)?;
+        *fill = Fill {
+            block: fill.block + 1,
+            ..Fill::default()
+        };
+        Ok(())
+    }
+
+    fn submit(&mut self, job: Job, free_worker: bool) -> Result<()> {
         let tx = self
             .input
             .as_ref()
             .ok_or_else(|| Error::Container("stream writer already finished".into()))?;
-        self.window.acquire()?;
+        self.window.acquire(free_worker)?;
         // The window admitted the job; the send never blocks, and fails only if every worker is gone.
         tx.send((self.seq, job)).map_err(|_| closed_error())?;
         self.seq += 1;
@@ -1590,5 +1938,180 @@ mod tests {
         assert!(err.to_string().contains("pipeline closed"), "{err}");
         let err = sw.finish(&dir.path().join("s.tsra")).unwrap_err();
         assert!(err.to_string().contains("worker panicked"), "{err}");
+    }
+
+    // ---- ADR-0064 §5: push_table -------------------------------------------------------------
+
+    const RPG: u64 = ROWS_PER_GROUP as u64;
+
+    /// The listmode table in groups of `size` rows (≤ ROWS_PER_GROUP), off the canonical grid
+    /// unless `size` is ROWS_PER_GROUP.
+    fn groups_of(total: u64, size: u64) -> impl Iterator<Item = TableData> {
+        (0..total)
+            .step_by(size as usize)
+            .map(move |start| listmode::rows(start, (total - start).min(size) as usize))
+    }
+
+    /// A manifest without what ADR-0064 §6 lets differ between two writers of the same rows:
+    /// `producer`, `timestamp` and what follows from them.
+    fn canonical(m: &Manifest) -> serde_json::Value {
+        let mut v = serde_json::to_value(m).unwrap();
+        for key in ["producer", "timestamp", "id", "id_inputs", "manifest_hash"] {
+            v.as_object_mut().unwrap().remove(key);
+        }
+        v
+    }
+
+    /// The batch partition of the listmode table at `block_rows`: `TableMultiBlockSink`'s product.
+    fn sink_product(dir: &Path, total: u64, block_rows: u64) -> Manifest {
+        let ws = WriteSession::create(&dir.join("sink"), "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::new(ws, 2, 4);
+        let columns = listmode::spec(0).columns;
+        let mut sink = crate::TableMultiBlockSink::with_block_rows(
+            columns,
+            "events",
+            &dir.join("frags"),
+            &mut sw,
+            block_rows,
+        )
+        .unwrap()
+        .with_row_index("t");
+        for group in groups_of(total, 9999) {
+            sink.push(group).unwrap();
+        }
+        sink.finish().unwrap();
+        sw.finish(&dir.join("sink.tsra")).unwrap()
+    }
+
+    /// `push_table` of the listmode table at `block_rows` with `workers` workers.
+    fn push_table_product(
+        dir: &Path,
+        tag: &str,
+        workers: usize,
+        block_rows: u64,
+        groups: impl Iterator<Item = TableData>,
+        total: u64,
+    ) -> Manifest {
+        let stage = dir.join(tag);
+        let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::new(ws, workers, 4);
+        sw.push_table_with_block_rows("events", listmode::spec(total), groups, block_rows)
+            .unwrap();
+        let m = sw.finish(&dir.join(format!("{tag}.tsra"))).unwrap();
+        assert!(
+            staged_files(&stage).is_empty(),
+            "{tag}: staged file left behind"
+        );
+        m
+    }
+
+    /// `push_table` seals `TableMultiBlockSink`'s canonical manifest (names, markers, specs,
+    /// digests, order) and `content_hash` for every worker count, nullable `ms` included, whether
+    /// the input is on the row-group grid or not.
+    #[test]
+    fn push_table_seals_the_multi_block_sink_manifest_for_every_worker_count() {
+        let total = 3 * RPG + 99; // four leaves at block_rows = RPG
+        let dir = tempfile::tempdir().unwrap();
+        let reference = sink_product(dir.path(), total, RPG);
+        assert_eq!(reference.blocks.len(), 4);
+        for (workers, size) in [(1, RPG), (2, 9999), (4, RPG)] {
+            let tag = format!("w{workers}");
+            let m = push_table_product(
+                dir.path(),
+                &tag,
+                workers,
+                RPG,
+                groups_of(total, size),
+                total,
+            );
+            assert_eq!(canonical(&m), canonical(&reference), "{tag}");
+            assert_eq!(m.content_hash, reference.content_hash, "{tag}");
+        }
+    }
+
+    /// At most BLOCK_ROWS rows, `push_table` writes the sealed bytes of `table_job_streaming`.
+    #[test]
+    fn push_table_of_one_block_is_byte_identical_to_table_job_streaming() {
+        let total = 3 * RPG + 99;
+        let dir = tempfile::tempdir().unwrap();
+        let ws = WriteSession::create(&dir.path().join("job"), "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::new(ws, 2, 4);
+        sw.push_staged(table_job_streaming(
+            "events",
+            listmode::spec(total),
+            listmode::groups(total),
+        ))
+        .unwrap();
+        sw.finish(&dir.path().join("job.tsra")).unwrap();
+        let ws = WriteSession::create(&dir.path().join("table"), "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::new(ws, 2, 4);
+        let blocks = sw.push_table("events", listmode::spec(total), groups_of(total, 9999));
+        assert_eq!(blocks.unwrap(), 1);
+        sw.finish(&dir.path().join("table.tsra")).unwrap();
+        assert!(
+            std::fs::read(dir.path().join("job.tsra")).unwrap()
+                == std::fs::read(dir.path().join("table.tsra")).unwrap(),
+            "push_table's single block differs from table_job_streaming's"
+        );
+    }
+
+    /// A row count that disagrees with `spec.rows`, or an oversized group, is a typed error; the
+    /// partial table is never sealed and no staging file is left behind.
+    #[test]
+    fn a_wrong_row_count_is_a_typed_error_and_leaves_no_staging_file() {
+        let total = 3 * RPG;
+        let cases: [(u64, StreamedTableError); 3] = [
+            (
+                total + 10,
+                StreamedTableError::TooManyRows { declared: total },
+            ),
+            (
+                total - 5,
+                StreamedTableError::TooFewRows {
+                    declared: total,
+                    actual: total - 5,
+                },
+            ),
+            (
+                RPG + 1,
+                StreamedTableError::OversizedGroup {
+                    rows: RPG + 1,
+                    max: RPG,
+                },
+            ),
+        ];
+        for (fed, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let stage = dir.path().join("stage");
+            let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            let mut sw = StreamWriter::new(ws, 2, 4);
+            let size = if fed == RPG + 1 { RPG + 1 } else { RPG };
+            let err = sw
+                .push_table_with_block_rows(
+                    "events",
+                    listmode::spec(total),
+                    groups_of(fed, size),
+                    RPG,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(&err, Error::StreamedTable { name, reason } if name == "events" && *reason == expected),
+                "{err}"
+            );
+            // The leaves handed over before the error are committed; the terminal one never is.
+            let sealed = sw.finish(&dir.path().join("p.tsra"));
+            if matches!(expected, StreamedTableError::OversizedGroup { .. }) {
+                assert_eq!(sealed.unwrap().blocks.len(), 0);
+            } else {
+                assert!(
+                    matches!(sealed, Err(Error::LogicalTable { .. })),
+                    "{sealed:?}"
+                );
+            }
+            assert!(
+                staged_files(&stage).is_empty(),
+                "{expected}: staged file left behind"
+            );
+        }
     }
 }
