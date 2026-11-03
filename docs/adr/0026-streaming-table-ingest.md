@@ -263,17 +263,27 @@ sets the peak, is the same), `ksb run --cpu 4 --exclusive-cpus --mem 12Gi`, `--w
 | 268,435,456 | 2.15 GB | 0.91 GB | 2.05 GB | 4.76 GB |
 | 1,600,000,000 | 12.8 GB | 5.15 GB | 12.21 GB | — |
 
-**Known limit: the Vortex writer's own buffering (#681).** The output Vec is gone, but RSS still grows
-during the encode (~3.2 bytes/row, about 0.4 × the encoded size at the peak) and drops when the footer is
-written. Root cause, measured with a counting allocator and a patched copy of the pinned Vortex: its
-`ChunkedLayoutStrategy` spawns one write task per chunk and polls them with `buffered(usize::MAX)`, and the
-segment sink writes segments in one global sequence order across all columns, so compressed chunks pile up
-in pending tasks ahead of the sink with nothing applying backpressure. A fixed cap is not a drop-in fix:
-`buffered(64)` bounds the heap, `buffered(2)` and `buffered(8)` deadlock on the cross-column order. So the
-bound this amendment gives is the tessera side (the window and the staged block); the encode's RAM is
-`≈ 0.4 × S` on top until #681 lands a deadlock-free bound inside Vortex. Projected for the consumer's full
-2.4 G-row (19.2 GB) acquisition: ≈ 7.7 GB peak RssAnon, under its 8 GiB budget but not independent of the
-input size, so #677 stays open on #681.
+**Known limit: the Vortex writer's own buffering (#681).** *Superseded for `push_table` by ADR-0064 §8
+(2026-11-03, #714); the original text stays on the record:*
+
+> ~~The output Vec is gone, but RSS still grows
+> during the encode (~3.2 bytes/row, about 0.4 × the encoded size at the peak) and drops when the footer is
+> written. Root cause, measured with a counting allocator and a patched copy of the pinned Vortex: its
+> `ChunkedLayoutStrategy` spawns one write task per chunk and polls them with `buffered(usize::MAX)`, and the
+> segment sink writes segments in one global sequence order across all columns, so compressed chunks pile up
+> in pending tasks ahead of the sink with nothing applying backpressure. A fixed cap is not a drop-in fix:
+> `buffered(64)` bounds the heap, `buffered(2)` and `buffered(8)` deadlock on the cross-column order. So the
+> bound this amendment gives is the tessera side (the window and the staged block); the encode's RAM is
+> `≈ 0.4 × S` on top until #681 lands a deadlock-free bound inside Vortex. Projected for the consumer's full
+> 2.4 G-row (19.2 GB) acquisition: ≈ 7.7 GB peak RssAnon, under its 8 GiB budget but not independent of the
+> input size, so #677 stays open on #681.~~
+
+One canonical block's encode heap still grows with its rows, so no size-independent bound holds for a single
+block: this is what `table::table_block` and the Python `Builder.add_table` write at any size (ADR-0064 §5.6),
+and what `table_job_streaming` writes up to `BLOCK_ROWS` rows. `StreamWriter::push_table` writes a streamed
+table above `BLOCK_ROWS` as leaves of at most `BLOCK_ROWS` rows, with ADR-0064 §8's bound
+`min(W, n) · p_block + s` (item 3 of the amendment below), stated in `push_table`'s rustdoc and checked on the
+heap by `tessera-io/tests/staged_job_memory.rs`.
 
 ## Amended by ADR-0064 (2026-10-30) — streamed tables are partitioned into numbered leaves
 
@@ -306,6 +316,9 @@ decision on #677 (2026-10-29, option P-logical of the #681 design note). It chan
    staged input is page cache, which counts toward the cgroup's `memory.current` and is RAM on tmpfs, so the
    session directory SHOULD be on a disk-backed filesystem; the ksb RSS proof samples `RssAnon`, `memory.current`
    and `memory.stat` and refuses a tmpfs staging directory (ADR-0064 §8.1). Its results will be recorded here.
+   The bound is stated in `push_table`'s rustdoc and checked in-tree on the heap (2026-11-03, #714):
+   `tessera-io/tests/staged_job_memory.rs` holds the workers and asserts the staged input is not held in
+   RAM (`≤ s`), and asserts the ceiling against a `p_block` calibrated in the same binary.
 
 The rest of this ADR (the encoder, the window, the staged commit, the RAII and journal rules, the disk paragraph)
 is unchanged; each leaf is one staged job under the window.

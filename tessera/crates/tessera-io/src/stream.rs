@@ -877,10 +877,32 @@ impl StreamWriter {
     /// workers hold and the one being filled ([`StreamStats::peak_staged_input_blocks`],
     /// [`StreamStats::peak_staged_input_bytes`]). That is up to `(W + 1) · BLOCK_ROWS` rows of
     /// staged input, plus the encoded blocks staged until their commit, on the filesystem of the
-    /// session directory. The staged files are page cache, which counts towards a cgroup's memory,
-    /// and on tmpfs they are RAM: keep the session directory on a disk-backed filesystem. The last
-    /// leaf is handed over once `groups` has ended, and the call returns then. The heap bound is
-    /// documented with its proof, [#714](https://github.com/vig-os/tessera/issues/714).
+    /// session directory. The last leaf is handed over once `groups` has ended, and the call
+    /// returns then.
+    ///
+    /// **Memory.** With `W` encode workers and a table of `n` leaves, the heap is bounded by
+    ///
+    /// ```text
+    /// peak heap  ≤  min(W, n) · p_block + s,    s = 2 · ROWS_PER_GROUP · r_mem + 4 MiB
+    /// ```
+    ///
+    /// independent of the table's row count (ADR-0064 §8). `p_block` is the peak heap of a
+    /// one-leaf write of the same schema in the same binary: measured, not a constant, since
+    /// `available_parallelism` sets the encoder's queue depths, and it still holds the encoder's
+    /// per-column terms, so it grows with the table's width. `r_mem` is the input's in-memory bytes
+    /// per row (the column widths, plus one byte per nullable column). `s` is two row-groups of
+    /// input (the one being staged and the one a worker has just read back) and 4 MiB of buffers
+    /// and bookkeeping: 7 MiB for 24-byte rows. `tests/staged_job_memory.rs` checks the ceiling at
+    /// `W ∈ {1, 2}`, that the reader keeps no more than `s` of input in RAM while every worker is
+    /// held, and that a one-leaf write's peak is within `s` of the same encode into a sink, so a
+    /// worker reads its staged block back a row-group at a time.
+    ///
+    /// The bound is on the heap, not on the process's memory. Staged input is on disk, and its
+    /// pages are page cache: they count toward a cgroup's memory (`memory.current`) and are
+    /// reclaimed only under pressure, once written back; on tmpfs they are RAM that can't be
+    /// reclaimed at all, so the bound gains every byte in the session directory: the staged input
+    /// above, the encoded blocks staged until their commit and the committed fragments (ADR-0026's
+    /// disk paragraph). Keep the session directory on a disk-backed filesystem.
     ///
     /// # Errors
     ///
