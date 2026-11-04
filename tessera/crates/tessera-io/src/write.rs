@@ -219,12 +219,48 @@ struct Header {
     generation: Option<tessera_core::Generation>,
 }
 
+/// A committed block as a [`WriteSession`] holds it until the seal (#759): its name, for the checks
+/// every append makes, and its journal line, the [`BlockRef`] serialized as compact JSON, which is
+/// its manifest entry. The session holds every committed block until the seal, so what one costs is
+/// an O(blocks) term in the writer's memory: as a `BlockRef`, whose spec is a `serde_json::Value`
+/// tree of small allocations (for a table, every leaf repeating the same column specs), that is
+/// several times the entry's bytes; as its line, the entry's bytes in one allocation
+/// (`tests/session_leaf_memory.rs` holds it to that). The seal parses the lines back into the
+/// manifest's `BlockRef`s, which gives back each reference exactly, as [`WriteSession::recover`]
+/// has always relied on: serde_json keeps the key order (`preserve_order`) and every float
+/// (`float_roundtrip`, which `serde_jcs`, the manifest's canonicaliser, enables).
+struct Committed {
+    name: BlockName,
+    line: Box<str>,
+}
+
+impl Committed {
+    /// `block` as the session holds it. The line is parsed back once, as the seal will parse it, so
+    /// a reference whose line can't be (a spec nested deeper than serde_json reads, 128 levels) is
+    /// refused here, before its journal line, rather than by the seal once every block is encoded;
+    /// no reader could open its manifest anyway. The parsed copy is dropped at once.
+    fn of(block: BlockRef) -> Result<Self> {
+        let line = serde_json::to_string(&block)?;
+        serde_json::from_str::<BlockRef>(&line)?;
+        Ok(Committed {
+            name: block.name,
+            line: line.into_boxed_str(),
+        })
+    }
+
+    /// The committed [`BlockRef`], parsed back from its line.
+    fn block_ref(&self) -> Result<BlockRef> {
+        Ok(serde_json::from_str(&self.line)?)
+    }
+}
+
 /// A crash-tolerant streaming writer over a staging directory.
 pub struct WriteSession {
     dir: PathBuf,
     header: Header,
     journal: File,
-    blocks: Vec<BlockRef>,
+    /// The committed blocks, in commit order, until the seal (#759).
+    blocks: Vec<Committed>,
     merkle: MerkleAccumulator,
     /// Numbers the session's staged files, shared by every [`BlockStaging`] handle.
     staged_seq: Arc<AtomicU64>,
@@ -844,19 +880,21 @@ impl WriteSession {
         bytes: u64,
         fragment: RemoveOnDrop,
     ) -> Result<()> {
-        let line = serde_json::to_string(&block_ref)?;
+        let kind = block_ref.kind;
+        let committed = Committed::of(block_ref)?;
         #[cfg(test)]
         seam::record(seam::Event::JournalLine(fragment.path().to_path_buf()));
         // 2. journal line → durable (this is the commit watermark advance)
-        let journaled = writeln!(self.journal, "{line}").and_then(|()| self.sync_journal());
+        let journaled =
+            writeln!(self.journal, "{}", committed.line).and_then(|()| self.sync_journal());
         if let Err(e) = journaled {
-            self.poisoned = Some(format!("block '{}': {e}", block_ref.name));
+            self.poisoned = Some(format!("block '{}': {e}", committed.name));
             return Err(std::io::Error::new(
                 e.kind(),
                 format!(
                     "journal commit of block '{}' failed: {e}; the write session accepts no more \
                      appends — reopen it with WriteSession::recover",
-                    block_ref.name
+                    committed.name
                 ),
             )
             .into());
@@ -867,17 +905,17 @@ impl WriteSession {
         // Write-path observability (SSoT): every durably-committed block — batch, stream, or ingest —
         // flows through here, so one structured event gives devs/users full I/O info on write (name,
         // kind, bytes, content digest, and the new integrity watermark). Zero-cost when no subscriber.
-        let kind = format!("{:?}", block_ref.kind);
+        let kind = format!("{kind:?}");
         tracing::info!(
             target: "tessera::write",
-            name = %block_ref.name,
+            name = %committed.name,
             kind = %kind,
             bytes = bytes,
             digest = %digest,
             watermark = self.merkle.watermark(),
             "committed block"
         );
-        self.blocks.push(block_ref);
+        self.blocks.push(committed);
         Ok(())
     }
 
@@ -994,7 +1032,13 @@ impl WriteSession {
             dir: dir.to_path_buf(),
             header,
             journal,
-            blocks: kept.iter().map(|l| l.block.clone()).collect(),
+            blocks: kept
+                .iter()
+                .map(|l| Committed {
+                    name: l.block.name.clone(),
+                    line: l.text.into(),
+                })
+                .collect(),
             merkle,
             staged_seq: Arc::new(AtomicU64::new(0)),
             poisoned: None,
@@ -1013,7 +1057,11 @@ impl WriteSession {
     /// [`pack_streaming`] (one buffered `io::copy` per block), so the whole engine (encode, commit,
     /// and seal) never has to fit a product in RAM. This is the must-fix that lets the multi-block
     /// listmode path actually be bounded-memory end-to-end — otherwise seal would re-materialise
-    /// every block in a `Vec<BlockPayload>` and defeat the rest of the pipeline.
+    /// every block in a `Vec<BlockPayload>` and defeat the rest of the pipeline. The manifest itself
+    /// is held whole: up to the seal the session holds each block's entry as its compact journal
+    /// line (#759), and the seal parses them into the manifest's `BlockRef`s, so the manifest's
+    /// in-memory form, several times its serialized size, exists only once the last block is
+    /// committed and the encoders are done.
     pub fn seal(self, out: &Path) -> Result<Manifest> {
         self.usable()?;
         let mut b = ProductBuilder::new(
@@ -1042,8 +1090,8 @@ impl WriteSession {
         if let Some(generation) = &self.header.generation {
             b.with_generation(generation.clone());
         }
-        for r in &self.blocks {
-            b.add_block_ref(r.clone());
+        for c in &self.blocks {
+            b.add_block_ref(c.block_ref()?);
         }
         let sealed = b.seal()?;
         // Integrity self-check: the streamed running root must equal the batch content hash.
@@ -1079,6 +1127,8 @@ impl WriteSession {
 struct JournalLine<'a> {
     block: BlockRef,
     digest: String,
+    /// The line's text, without its newline: what the session holds for the block ([`Committed`]).
+    text: &'a str,
     raw: &'a [u8],
 }
 
@@ -1140,6 +1190,7 @@ fn parse_journal<'a>(path: &Path, raw: &'a [u8]) -> Result<Vec<JournalLine<'a>>>
         lines.push(JournalLine {
             block,
             digest,
+            text,
             raw: line,
         });
     }
@@ -1278,6 +1329,73 @@ mod tests {
         let data = ArrayData::I16((0..64).map(|k| k as i16 + n).collect());
         let (r, payload) = array::array_block(name, &spec, &data).unwrap();
         (r, payload.bytes)
+    }
+
+    /// #759: the session holds a committed block as its journal line and the seal parses it back, so
+    /// the sealed reference must be the appended one exactly: key order, integers past `i64`, and
+    /// floats to the bit (subnormal, `-0.0`, shortest-repr edge cases), and the seal must equal the
+    /// batch seal of the same reference.
+    #[test]
+    fn a_committed_block_seals_as_the_reference_appended() {
+        let floats = [
+            0.1,
+            1e-300,
+            5e-324,
+            -0.0,
+            1.0,
+            f64::MAX,
+            f64::from_bits(0x000f_ffff_ffff_ffff), // the largest subnormal
+        ];
+        let (mut r, p) = block("a", 0);
+        let spec = r.spec.as_object_mut().unwrap();
+        // Inserted last, out of sorted order: with serde_json's `preserve_order`, which this
+        // workspace enables, the line must keep insertion order.
+        spec.insert("a_after_the_rest".into(), serde_json::json!(u64::MAX));
+        spec.insert("floats".into(), serde_json::json!(floats));
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws =
+            WriteSession::create(&dir.path().join("stage"), "recon", "p", "d", TS).unwrap();
+        ws.append_block(r.clone(), &p).unwrap();
+        let sealed = ws.seal(&dir.path().join("p.tsra")).unwrap();
+
+        assert_eq!(sealed.blocks, [r.clone()]);
+        let keys = |b: &BlockRef| {
+            b.spec
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&sealed.blocks[0]), keys(&r));
+        let bits: Vec<u64> = sealed.blocks[0].spec["floats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap().to_bits())
+            .collect();
+        assert_eq!(bits, floats.map(f64::to_bits));
+        let mut bb = ProductBuilder::new("recon", "p", "d", TS);
+        bb.add_block_ref(r);
+        assert_eq!(sealed.manifest_hash, bb.seal().unwrap().manifest_hash);
+    }
+
+    /// #759: a block whose line the seal couldn't parse back (a spec nested past serde_json's 128
+    /// levels) is refused at its append, before its journal line, and the session goes on.
+    #[test]
+    fn a_block_the_seal_could_not_parse_back_is_refused_at_its_append() {
+        let (mut deep, p) = block("deep", 0);
+        for _ in 0..200 {
+            deep.spec = serde_json::json!([deep.spec]);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws =
+            WriteSession::create(&dir.path().join("stage"), "recon", "p", "d", TS).unwrap();
+        assert!(ws.append_block(deep, &p).is_err());
+        assert_eq!(ws.watermark(), 0);
+        let (r, p) = block("a", 0);
+        ws.append_block(r, &p).unwrap();
+        assert_eq!(ws.seal(&dir.path().join("p.tsra")).unwrap().blocks.len(), 1);
     }
 
     #[test]
