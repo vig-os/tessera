@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-09-29T14:20:04Z
-updated: 2026-09-29T14:20:04Z
+updated: 2026-11-03T13:13:46Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/523
-comments: 0
+comments: 1
 labels: bug, area:core
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-09-30T07:57:04.946Z
+synced: 2026-11-04T08:36:00.015Z
 ---
 
 # [Issue 523]: [fix(core): ChunkStats sum_sq overflows for 64-bit samples — silently wraps into a sealed .cidx in release builds](https://github.com/vig-os/tessera/issues/523)
@@ -77,4 +77,12 @@ now overflow-safe: `nav::array_stats` uses checked accumulation and falls back t
 labelled `exact: false` rather than wrapping. This issue is the **write** path, which still wraps.
 
 Refs: #347, #522
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 3, 2026 at 01:13 PM_
+
+Input from a SOLID/DRY review of dev 74fc409: the 'chunk stats are exact' predicate lives in two places. `io/array.rs` ~756-759 indexes any integer dtype (including 64-bit), while `cli/nav.rs` ~1809-1812 hard-codes a narrower trusted set (≤32-bit + bool), deliberately guarding this overflow. When #523 lands, make it one predicate (`DType::chunk_stats_exact()` or a `.cidx` spec flag) that both use, or nav will keep refusing valid 64-bit indexes.
 

@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-09-29T15:28:07Z
-updated: 2026-09-29T15:36:38Z
+updated: 2026-11-03T13:13:45Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/526
-comments: 2
+comments: 3
 labels: none
 assignees: none
 milestone: 0.1.0-beta
 projects: none
 parent: none
 children: none
-synced: 2026-09-30T07:57:04.158Z
+synced: 2026-11-04T08:35:59.496Z
 ---
 
 # [Issue 526]: [ADR: hash-algorithm agility — explicit hash_alg tag + optional SHA-256/512 fixity co-hash (keep blake3 as identity)](https://github.com/vig-os/tessera/issues/526)
@@ -51,4 +51,12 @@ Open design points for the spike:
 _Posted on September 29, 2026 at 03:36 PM_
 
 Owner decision: the per-block SHA-256 co-digest ships in ADR-0059's format event, OFF by default (seal flag or BagIt/OCFL export).
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 3, 2026 at 01:13 PM_
+
+Input from a SOLID/DRY review of dev 74fc409: the `blake3:` prefix has 4 producers (`core/hash.rs` ~16/49/77) and 3 ad-hoc strippers with no parser: `core/export.rs` ~36-38 (`trim_start_matches`), `io/write.rs` ~1159 (`strip_prefix(...).unwrap_or`), and `cli/provenance.rs` ~237-240 (the only 64-hex shape check). Algorithm agility should introduce one `hash::Digest { alg, hex }` with `parse`/`Display` and route these sites through it.
 

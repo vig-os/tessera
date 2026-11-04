@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-02T16:14:53Z
+updated: 2026-11-03T13:35:21Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-03T09:00:20.539Z
+synced: 2026-11-04T08:36:00.528Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -288,7 +288,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `numcodecs ==0.16.5` → [Updates: `==0.17.1`]
  - `nibabel ==5.4.2`
  - `pydicom ==3.0.2`
- - `pyarrow ==24.0.0` → [Updates: `==26.0.0`]
+ - `pyarrow ==24.0.0` → [Updates: `==26.0.1`]
  - `uproot ==5.7.4` → [Updates: `==5.7.7`]
 
 </details>

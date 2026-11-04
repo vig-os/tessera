@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-30T02:08:08Z
-updated: 2026-10-30T02:08:08Z
+updated: 2026-11-03T12:58:18Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/720
-comments: 0
+comments: 1
 labels: bug, priority:high
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-30T08:02:13.255Z
+synced: 2026-11-04T08:35:57.331Z
 ---
 
 # [Issue 720]: [bug(core): derived-sidecar blocks are folded into content_hash, contradicting Accepted ADR-0028 §4](https://github.com/vig-os/tessera/issues/720)
@@ -48,4 +48,34 @@ it part of ADR-0059's single format event. That ADR must decide:
 Then implement, with a test that fails today: regenerating or adding a derived block leaves `content_hash` unchanged,
 and changing a canonical block changes it. Until then, either ADR-0028 §4 or the code is wrong. Do not paper over it
 in one place.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 3, 2026 at 12:58 PM_
+
+Scope for the ADR (owner discussion 2026-11-03): make the hash topology a single declared definition in the format, not code scattered per type and not part of the per-product schema.
+
+**Proposed components** (one root each, in one format event with ADR-0059):
+- `content_hash`: canonical blocks.
+- `derived_hash`: derived blocks, each carrying `from` and `recipe`.
+- `schema_hash`: the embedded schema, as JCS.
+- `metadata_hash`: descriptive metadata and provenance, as JCS. A separate root allows selective proofs without disclosing PHI (ADR-0040).
+- `manifest_hash`: a root over the four above plus `id` and the version fields. This is what the signature signs. Today it is a flat digest of the whole canonical JSON.
+
+**State on dev (3ebb40a):**
+- The primitives are DRY: one `hash::digest`, and one `merkle_root` / `inclusion_proof` with `0x00`/`0x01` domains.
+- The composition is not DRY:
+  - `Manifest::recompute_content_hash` hashes block digests in manifest order, with no class or kind tag on the leaf.
+  - `Collection::recompute_content_hash` uses its own `tessera-collection-member-v1` prefix plus a kind byte.
+  - `ChunkIndex::root` hashes in index order.
+  - `compute_manifest_hash` is duplicated in `manifest.rs` and `collection.rs`.
+  - Domain separation is inconsistent across the three.
+
+**Decide in the ADR:**
+1. **One declarative identity spec per format version** (components, leaf domain tags, ordering rule, root composition), evaluated by one generic composer used by product, collection and chunk index. Old specs stay in the reader so old products verify forever (ADR-0052 migration = a new entry).
+2. **The product schema must not define identity.** It may only classify a block kind as derived within format rules (it must carry `from` and `recipe` and be recomputable); everything else is canonical. Otherwise a schema could remove real data from `content_hash`.
+3. **Leaf ordering.** Today it is manifest order, and `merkle_is_order_sensitive` pins it, so the same blocks written in a different order give a different `content_hash`. Decide on a canonical order (e.g. by block name, which must stay consistent with partition leaf order `<table>/NNNN`) or keep writer order deliberately, with the reason.
+4. **What each hash vouches for**, stated in one table in SPEC. In particular, `content_hash` does not vouch for accelerators; readers that use an index must verify `derived_hash` or `manifest_hash`.
 
