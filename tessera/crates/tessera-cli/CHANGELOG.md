@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5](https://github.com/vig-os/tessera/compare/tessera-cli-v0.1.0-alpha.4...tessera-cli-v0.1.0-alpha.5) - 2026-11-04
+
+### Added
+
+- *(cli)* show and read partitioned tables by their logical name
+- *(core)* add the ADR-0064 partition marker to TableSpec ([#728](https://github.com/vig-os/tessera/pull/728))
+- *(core)* add the ADR-0064 partition marker to TableSpec
+
+### Fixed
+
+- *(deps)* move parquet/arrow to 58.4.1 for thrift 0.23 (RUSTSEC-2026-0435)
+- *(core,io,ingest,cli)* [**breaking**] validate block names into one type and join them by plain components only
+
+### Other
+
+- *(io)* fail the S3 tests when the s3-range-read check loses its endpoint
+- *(io)* run the S3 range-read check against versitygw, sandbox-independent
+
 ## [0.1.0-alpha.4](https://github.com/vig-os/tessera/compare/tessera-cli-v0.1.0-alpha.3...tessera-cli-v0.1.0-alpha.4) - 2026-10-29
 
 ### Fixed

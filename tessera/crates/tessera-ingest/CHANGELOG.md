@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5](https://github.com/vig-os/tessera/compare/tessera-ingest-v0.1.0-alpha.4...tessera-ingest-v0.1.0-alpha.5) - 2026-11-04
+
+### Added
+
+- *(io)* [**breaking**] write multi-block tables as marked <table>/NNNN leaves
+- *(core)* add the ADR-0064 partition marker to TableSpec
+
+### Fixed
+
+- *(deps)* move parquet/arrow to 58.4.1 for thrift 0.23 (RUSTSEC-2026-0435)
+- *(core,io,ingest,cli)* [**breaking**] validate block names into one type and join them by plain components only
+
 ## [0.1.0-alpha.2](https://github.com/vig-os/tessera/compare/tessera-ingest-v0.1.0-alpha.1...tessera-ingest-v0.1.0-alpha.2) - 2026-10-19
 
 ### Added
