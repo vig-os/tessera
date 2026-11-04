@@ -105,6 +105,9 @@
           "/bench/ecosystems/run.py" =
             "the benchmark DRIVER, not a test: it produces timings for humans and is run by hand "
             + "(bench/ecosystems/README.md). Numbers from a shared CI runner would not be meaningful";
+          "/bench/ksb/677-rss-proof/run.py" =
+            "the ADR-0064 §8.1 RSS proof, a ksb batch job (its own flake): it needs a 4-CPU exclusive "
+            + "job with its own cgroup and --mem, disk-backed scratch and /dev/shm, and hours of runs";
         } // pkgs.lib.optionalAttrs (!isLinux) {
           "/bench/ecosystems/test_common.py" =
             "Linux-only: common.py uses CDLL('libc.so.6'), mincore(2) and posix_fadvise";

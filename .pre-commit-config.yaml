@@ -64,7 +64,8 @@ repos:
       - id: mixed-line-ending
         exclude: \.trycmd$
       - id: trailing-whitespace
-        exclude: \.trycmd$
+        # A unified diff's blank context line is a single space: stripping it breaks the patch.
+        exclude: \.(trycmd|patch)$
 
   # Python Linting and Formatting (Ruff). From Nix, like typos/shellcheck above:
   # ruff-pre-commit installs a generic-linux wheel whose dynamically linked
