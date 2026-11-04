@@ -1,0 +1,80 @@
+{
+  "nodes": {
+    "crane": {
+      "locked": {
+        "lastModified": 1781825982,
+        "narHash": "sha256-SlXKwIRIhrOSAcTjCB3ftPLzJWZStQIPS7J1FlZPnKk=",
+        "owner": "ipetkov",
+        "repo": "crane",
+        "rev": "469fd08d0bcf6926321fa973c6777fbc87785dd7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ipetkov",
+        "repo": "crane",
+        "rev": "469fd08d0bcf6926321fa973c6777fbc87785dd7",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1790533781,
+        "narHash": "sha256-F+b8u43BVF5DlM0pz7JQSbtbwKy5PrHIT5zQUekXsD0=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "cf5e76507c6e23b59f7e0ffcc7baa2a39ddd8442",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "cf5e76507c6e23b59f7e0ffcc7baa2a39ddd8442",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "crane": "crane",
+        "nixpkgs": "nixpkgs",
+        "tessera": "tessera",
+        "visionx": "visionx"
+      }
+    },
+    "tessera": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793768327,
+        "narHash": "sha256-xDdR+HC41jGMMqNCGIvSo5ToLoY3o8z8gjO3GXf22gY=",
+        "owner": "vig-os",
+        "repo": "tessera",
+        "rev": "26159de0d618b57e2fa7aa9e0b24c4a4e74be3fa",
+        "type": "github"
+      },
+      "original": {
+        "owner": "vig-os",
+        "repo": "tessera",
+        "rev": "26159de0d618b57e2fa7aa9e0b24c4a4e74be3fa",
+        "type": "github"
+      }
+    },
+    "visionx": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792932166,
+        "narHash": "sha256-VqXHBK3I71a4TaPG8cm5dDFFTwRlY0CEo0dD4WyoZFY=",
+        "ref": "refs/heads/main",
+        "rev": "c4aff942e4cfc7876b966e9d8c01c12ad6e7740d",
+        "revCount": 14,
+        "type": "git",
+        "url": "ssh://git@github.com/MorePET/visionx-rs"
+      },
+      "original": {
+        "rev": "c4aff942e4cfc7876b966e9d8c01c12ad6e7740d",
+        "type": "git",
+        "url": "ssh://git@github.com/MorePET/visionx-rs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
