@@ -7,7 +7,10 @@ owner's decision on
 merged in PR #692 at `b6de2d1`) and specifies it so that the implementation can be briefed from this ADR
 alone. Resolves the five re-review nits recorded on #681 (§11). Amends SPEC §5b, ADR-0026, ADR-0062
 (`RowAlignment` only) and ADR-0063 (§9). Code references are at `origin/dev` `4504efb` (re-checked at `41b62c3`,
-which changes no crate), under `tessera/crates/`, unless they say otherwise.
+which changes no crate), under `tessera/crates/`, unless they say otherwise. **Amended by #760 (2026-11-04):** §8's
+bound gains a per-leaf term `c_leaf · n`, §8.1's plateau compares medians of 3 runs at `W = 4`, and parallelism is
+measured in its own job on `/dev/shm`, the only graded timing: shared-disk timings are context, never evidence
+(exo-pet/exo-fleet#980; the amendment at the end).
 
 ## Context
 
@@ -488,6 +491,9 @@ staged input   ≤  W + 1 blocks, including the one being filled
 staged bytes   ≤  (W + 1) · BLOCK_ROWS · r_stage
 ```
 
+*(Amended by #760, below: the first line is `peak heap ≤ min(W, n) · p_block + s + c_leaf · n`, with
+`c_leaf = 2 · (e_leaf + b_leaf)` for the manifest entry each committed leaf keeps until the seal.)*
+
 - **`p_block`** is the peak heap of a one-block write of the same schema in the same binary with the same `P`
   (`available_parallelism`): measured, never a constant, because `P` sets Vortex's queue depths (note §4.4).
   46.1 MB for the consumer shape at 8 CPUs (note §4.7).
@@ -514,6 +520,9 @@ the rise flattened by 64 blocks. So this ADR asserts two things and doesn't mode
 ```text
 peak(n₂)  ≤  (1 + τ) · peak(n₁)      for  16 W ≤ n₁ < n₂,   τ = 5 %
 ```
+
+*(Amended by #760, below: the ceiling gains `c_leaf · n`, and the plateau is
+`peak(n₂) ≤ (1 + τ) · peak(n₁) + c_leaf · (n₂ − n₁)`, with `τ` unchanged.)*
 
 `τ = 5 %` is six times the measured plateau variation (0.8%) and under a third of the smallest regression it must
 catch: the zone-statistics half of `c · rows` alone, reappearing across the whole table, adds 0.029 B/row, which is
@@ -556,16 +565,19 @@ memory: the staged files' pages are page cache, which counts toward the cgroup's
   no `--nonnullable-ms`).
 - **Sweep.** `W ∈ {1, 4}` × rows `∈ {0, 4,194,304 (one block), 67,108,864 (16 blocks), 268,435,456 (64),
   1,073,741,824 (256), 2,400,000,000 (573, the consumer's acquisition)}`. Each run also records the input
-  row-group at its `RssAnon` peak.
+  row-group at its `RssAnon` peak. *(Amended by #760, below: each `W = 4` point at 64 blocks or more runs 3 times.)*
 - **Sampling.** Every 10 ms: `RssAnon` from `/proc/<pid>/status`; `memory.current` and `memory.stat`'s `anon`,
   `file` and `shmem` from the job's cgroup. Before the first row: `statfs` of the session directory is not
-  `TMPFS_MAGIC` (`0x01021994`), else the job fails.
+  `TMPFS_MAGIC` (`0x01021994`), else the job fails. *(Amended by #760, below: this guard is the criteria 1–5
+  job's; criterion 6 runs in its own job on tmpfs, with the converse guard.)*
 - **Pass criteria.** With `R₀` the peak `RssAnon` at 0 rows (binary, runtime) and `R₁` at one block, same binary:
   1. **Ceiling:** `RssAnon(n, W) ≤ R₀ + min(W, n) · (R₁ − R₀) + s + s_rss` at every point, 16 blocks included, with
      `s_rss = 32 MiB + 8 MiB · (W + 1)` for allocator retention (one glibc arena's retained top per thread) and
      thread stacks the heap model doesn't see;
+     *(Amended by #760, below: plus `c_leaf · n`, checked on every run.)*
   2. **Plateau:** `RssAnon(n₂) ≤ 1.05 · RssAnon(n₁)` for 64 ≤ `n₁` < `n₂` at `W = 4` (64 = 16 W), and the same at
      `W = 1` from 16 blocks;
+     *(Amended by #760, below: plus `c_leaf · (n₂ − n₁)`, on the medians of 3 runs at `W = 4`.)*
   3. **Page cache is reclaimable:** the 2.4 G-row run completes under `--mem 4Gi` (its output is ~18 GB, so
      unreclaimable staging would OOM), peak `memory.stat` `shmem` stays under 16 MiB, and `anon` agrees with
      `RssAnon` within `s_rss`;
@@ -576,7 +588,8 @@ memory: the staged files' pages are page cache, which counts toward the cgroup's
      PR E's direct check);
   6. **Parallelism:** at 268 M rows `W = 4` is faster than `W = 1` by at least 1.5× wall time. If it isn't, the disk
      reader is the bottleneck the note's harness had (note §4.7), and the PR stops with a design question rather than
-     merging a serial pipeline.
+     merging a serial pipeline. *(Amended by #760, below: measured in a separate job with staging on `/dev/shm`;
+     the shared-scratch throughput is recorded as context with the disk's `%util`.)*
 - **Recorded** in the ADR-0026 amendment (a table like its 2026-10-26 one) and the FEATURE-MATRIX row, with the job
   names and exit codes.
 
@@ -603,6 +616,9 @@ the reader is serializing. With `ROWS_PER_GROUP` = 65 536 and `r_mem` = 24 B, `s
    `min(W, n) · (p_enc + A) + s`, it exceeds by `A − s` = 24 − 7 = **17 MiB**. At the old
    `block_rows = 4 · ROWS_PER_GROUP` the excess was `6 − 7 = −1 MiB`, so a ceiling check alone at that size could
    never fail, which is why part 1 exists and part 2 uses the larger block.
+
+*(Amended by #760, below: the test doesn't add the `c_leaf · n` term; at its 8 leaves the term is at most
+25.3 KB, 0.34 % of `s`.)*
 
 It does not assert `τ`: at test-size blocks the `c · rows` term is too small against `p_block` to resolve a 5%
 plateau. The plateau is the ksb proof's job, at real `BLOCK_ROWS`.
@@ -679,6 +695,178 @@ naming. F and G need E. H follows G.
 - Disk: up to `(W + 1)` blocks of raw input are staged (`5 × 4,194,304 × 24 B` = 503.3 MB at `W = 4` for the
   consumer shape; the note's harness measured 402.7 MB, counting complete blocks only, note §4.7),
   on top of ADR-0026's staged output and fragments.
+
+## Amendment (#760, 2026-11-04) — a per-leaf term, a median-of-3 plateau, parallelism on tmpfs
+
+The first run of the §8.1 proof (#715: jobs `tessera-715-sweep-1` and `tessera-715-diag-1`, both exit 1, tessera
+`a3df683`) passed criteria 1, 3, 4 and 5 and failed 2 and 6. The diagnosis,
+`docs/spikes/715-rss-proof-diagnosis.md` (branch `test/715-ksb-rss-proof` at `252af87`, "the diagnosis" below),
+found three causes, and the owner ruled on each on #715 (comment of 2026-11-04). This amendment applies the
+rulings to §8 and §8.1. The text it replaces is kept above, marked *(Amended by #760, below)*. Nothing else in
+§8 or §8.1 changes: `τ = 5 %`, `s`, `s_rss`, the ceilings, the 1.5× threshold, the `--mem 4Gi` and 8 GiB budgets
+and criteria 3, 4 and 5 stand as written.
+
+### A.1 — §8: the bound gains `c_leaf · n`
+
+**Why.** A write session keeps every committed leaf's manifest entry until the seal, which must write it
+(`WriteSession::blocks`, `tessera-io/src/write.rs`), so the heap grows with the number of leaves, not only with
+`min(W, n)`. §8 had no term for it. At `W = 1` the diagnosis measured 12.8 KB of live heap and ~25.4 KB of
+`RssAnon` per leaf for the consumer's 12-column schema (§1 there). About 3.1 KB of that is the entry's content,
+which has to reach the manifest. The rest is the entry's form, a `serde_json::Value` tree per leaf, and the
+allocator retention around it. #759 replaces that form with a compact one.
+
+**The bound, normative** (replaces §8's first block; the other lines are unchanged):
+
+```text
+peak heap      ≤  min(W, n) · p_block  +  s  +  c_leaf · n
+s              =  s_stage + s_fixed
+s_stage        =  2 · ROWS_PER_GROUP · r_mem
+s_fixed        =  4 MiB
+c_leaf         =  2 · (e_leaf + b_leaf)
+b_leaf         =  1 KiB
+staged input   ≤  W + 1 blocks, including the one being filled
+staged bytes   ≤  (W + 1) · BLOCK_ROWS · r_stage
+```
+
+- **`e_leaf`** is the length in bytes of the leaf's entry (`name`, `kind`, `digest`, `spec`) in the sealed
+  manifest's canonical JSON (RFC 8785, `tessera_core::canonical`), the largest over the table's leaves. It is
+  computed from the schema or read off the sealed manifest, never measured on the heap. It depends on the schema:
+  the column specs, their descriptions included, are repeated in every leaf. For the consumer's schema it is
+  3,180 B (the 3,053 B spec the diagnosis measured, plus 127 B of name, kind, digest and keys).
+- **`b_leaf`** covers the per-leaf bookkeeping outside the entry's bytes: the `blocks` slot
+  (`size_of::<BlockRef>()`, up to twice that while the `Vec` grows) and the allocator's chunk headers and size
+  rounding on the entry's allocations. The diagnosis measured 387 B of requested bytes on the `append_staged`
+  stack (headers and rounding excluded), so 1 KiB covers it with room to spare. The diagnosis counted the Merkle
+  accumulator's per-leaf state in that row; the accumulator holds only `O(log n)` MMR peaks
+  (`tessera-core/src/hash.rs`), not one value per leaf, so it stays in `s_fixed`.
+- **The factor 2 is the allocator-retention allowance:** `e_leaf + b_leaf` of retained but free memory per leaf,
+  on top of the same amount live. glibc returns memory to the kernel only from the top of a heap, so a
+  long-lived allocation placed among the encoder's large short-lived buffers keeps the freed space around it
+  resident. That retention scales with the long-lived bytes, not with the encoder's buffers, which are freed
+  and reused leaf after leaf. glibc gives no fragmentation bound, so this is a stated allowance, like `s_rss`,
+  not a theorem. It is not fitted: the measured pre-#759 rate (25.4 KB per leaf) would be a fit, and would let
+  the #759 defect through. Criterion 2 checks the allowance. A run that retains more fails it, and that is a
+  finding about the writer, not a reason to raise the factor. Raising the factor or `b_leaf` needs an amendment,
+  like `τ`.
+- **For the consumer:** `c_leaf` = 2 · (3,180 + 1,024) B = 8,408 B. That is 4.8 MB at its 573 leaves, and
+  0.002 B/row (one leaf is `BLOCK_ROWS` = 4,194,304 rows).
+- **It holds once #759 lands** (`WriteSession` no longer keeps a `Value` tree per leaf, and #759's counting-allocator
+  test bounds the held heap per leaf by the serialized entry plus a stated constant; that constant is `b_leaf` = 1 KiB,
+  so the test checks the live part `e_leaf + b_leaf`). Until then a leaf holds several times `e_leaf` (12.8 KB live for
+  a 3.2 KB entry), so the term understates the writer on `dev`.
+- **The seal.** At the seal no encode is in flight. The seal serializes the manifest, a transient of a few times
+  `n · e_leaf`, 1.8 MB of JSON for the consumer's 573 leaves against its `p_block` of 46.1 MB.
+- **`n`, not `n − min(W, n)`.** `p_block` is measured on a one-leaf write, so it already holds one leaf's entry,
+  and the term counts up to `min(W, n)` entries twice. That is at most 4 × 8,408 B = 33.6 KB at `W = 4`, far
+  below what the proof can resolve. The simpler form is kept as the conservative one.
+
+**Size independence, restated.** The ceiling is `min(W, n) · p_block + s + c_leaf · n` at every `n`. The plateau
+(replaces §8's second block) is flat beyond the per-leaf term:
+
+```text
+peak(n₂)  ≤  (1 + τ) · peak(n₁)  +  c_leaf · (n₂ − n₁)      for  16 W ≤ n₁ < n₂,   τ = 5 %
+```
+
+`τ` still catches the regression it was set for. The zone-statistics half of `c · rows` adds 23 MB from 268 M to
+1.07 G rows at `W = 4` (§8). The allowance over that step is `τ · 143 MB + 192 · 8,408 B` = 7.2 + 1.6 = 8.8 MB on the
+heap; on `RssAnon`, which criterion 2 checks (199–237 MB at `W = 4`, the diagnosis §2), it is at most
+`0.05 · 237 MB + 1.6 MB` = 13.5 MB, still under 23 MB. The per-leaf term is 0.002 B/row, about a fifteenth of the
+0.029 B/row regression.
+
+**The in-tree test (§8's PR F text).** `tests/staged_job_memory.rs` doesn't add the term, and it doesn't need to, at its
+sizes. Its schema (the consumer's 12 columns, without descriptions) has `e_leaf` = 558 B (557 B on the terminal leaf,
+whose `"last":true` is a byte shorter), so `c_leaf` = 2 · (558 + 1,024) B = 3,164 B.
+
+- In part 1 (held heap), no leaf is committed while the workers are held, so the term is 0 there.
+- In part 2 (ceiling) it is at most 8 × 3,164 B = 25.3 KB at `n = 8`. That is 0.34 % of `s` = 7 MiB, and 0.14 %
+  of the 17 MiB by which a writer that fills blocks in memory fails.
+
+So the test's bound `min(W, n) · p_block + s` is the amended bound minus at most 25.3 KB. That makes it stricter,
+by a margin it can't resolve. Both parts keep their fail-before margins.
+
+### A.2 — §8.1 criteria 1 and 2: the ceiling over every run, the plateau over medians of 3
+
+**Why.** At `W = 4` the live encode peak varied by up to +14.9 % between identical runs (159.6–186.5 MB at 256 leaves,
+the diagnosis §2), with no consistent sign between 64 and 256 leaves. The measured spikes were +5.8 % and +14.4 %. A
+spike is the `W` encoders' own peaks happening to coincide at an arbitrary row-group, an event of one run, not a
+function of `n`. A single-run plateau comparison at `τ = 5 %` therefore fails on noise three times `τ`, and loosening
+`τ` would let the zone-statistics regression through (§8). A median of three runs discards one coincidence per point. A
+systematic per-leaf term shows in all three runs, and so in the median. At `W = 1` five identical runs of 64 leaves
+peaked within 0.72 % of each other (48.81–49.16 MB of live heap), and two proof runs' `RssAnon` at 64 leaves within
+0.8 % (59.5 and 60.0 MiB), so `W = 1` points run once. The ceiling is different: it is what one run must hold against a
+cgroup limit, so it is checked against every run, not against a median that would hide the worst one. The highest
+`RssAnon` measured, 226.0 MiB, was under the ceiling of 298.4 MiB.
+
+**Sweep** (an addition to §8.1's *Sweep*): each `W = 4` point at 64 blocks or more (268 M, 1.07 G and 2.4 G
+rows) runs **k = 3** times in the same job. Every other point runs once.
+
+**Criteria 1 and 2** (replace §8.1's 1 and 2):
+
+1. **Ceiling:** `RssAnon(n, W) ≤ R₀ + min(W, n) · (R₁ − R₀) + s + s_rss + c_leaf · n` for **every run** (the
+   maximum over all runs, the `k` repeats included), 16 blocks included. `s_rss = 32 MiB + 8 MiB · (W + 1)` and
+   `c_leaf` is A.1's, with `e_leaf` read off the run's sealed manifest.
+2. **Plateau:** `med RssAnon(n₂) ≤ 1.05 · med RssAnon(n₁) + c_leaf · (n₂ − n₁)` for 64 ≤ `n₁` < `n₂` at `W = 4`
+   (64 = 16 W), where `med` is the median of the point's 3 runs. The same inequality must hold at `W = 1` from 16
+   blocks, on its single runs.
+
+**Still sharp.** The pre-#759 writer still fails criterion 2. At `W = 1`, from 64 to 573 leaves, its `RssAnon`
+rose from 59.5 to 71.7 MiB, which is 12.8 MB. The allowance is `0.05 · 62.4 MB + 509 · 8,408 B` = 3.1 + 4.3 =
+7.4 MB.
+
+### A.3 — §8.1 criterion 6: parallelism on `/dev/shm`, in its own job
+
+**Why.** On ksb, both scratch volumes are `emptyDir`s on the node's one kubelet disk, which every pod on the node
+shares. During the proof that disk was 79–98 % busy. At 268 M rows, identical passes of one job differed 2.4×,
+and `--cpu 8` gave 1.14×. On tmpfs, `W = 4` was **2.78×** faster than `W = 1`, CPU-bound on 4 cores (the
+diagnosis §3, job `tessera-715-r2-par-shm`). On shared scratch, criterion 6 measures the neighbours' I/O, not
+the writer. `/dev/shm` is the only volume a ksb job can get that isn't that disk.
+
+**Criterion 6** (replaces §8.1's 6):
+
+**6. Parallelism:** in a **separate ksb job** (`ksb run --cpu 4 --exclusive-cpus`, the same binary and consumer
+reproducer), with the session directory and the output on `/dev/shm`, at 268 M rows `W = 4` is faster than
+`W = 1` by at least 1.5× wall time. `--mem` is sized for what tmpfs holds, since its pages count toward it:
+
+```text
+--mem  ≥  ceiling(W = 4, n = 64)  +  (W + 1) · BLOCK_ROWS · r_stage  +  2 · T  +  (J + min(W, J)) · S,   plus 1 GiB
+```
+
+The terms are criterion 1's ceiling, the staged input, and ADR-0026's disk paragraph: `2 · T` is the committed fragments
+and the output `.tsra`, each the product's size `T`, and `(J + min(W, J)) · S` is the encoded blocks staged before their
+commit plus the files of the encodes in progress, with `S` the largest staged block. `T` is the size of the 268 M-row
+product from the criteria 1–5 job. Each run's session and output are deleted before the next run. For the consumer shape
+that is about 0.3 + 0.5 + 4.0 + 0.3 ≈ 5.1 GB = 4.7 GiB (`T` ≈ 2.0 GB, from ~18 GB at 2.4 G rows), so with 1 GiB of
+headroom, rounded up, `--mem 6Gi`. On tmpfs no disk waits, so a shortfall is the writer's. As before, the PR then stops
+with a design question rather than merging a serial pipeline.
+
+**Criteria 1–5 stay on disk-backed `--scratch`,** as in §8.1's *Where*. §8.1's tmpfs guard (`statfs` of the
+session directory is not `TMPFS_MAGIC`, else the job fails) applies to their job only. The criterion 6 job
+applies the converse guard: its session directory **is** `TMPFS_MAGIC`, else it fails, so neither job can
+silently measure the other's setup. Criterion 6 is kept apart because tmpfs pages are RAM: they would make
+criterion 3's `shmem` and `memory.current` checks fail by design.
+
+**Recorded as context, not a criterion:** the criteria 1–5 job also records, at 268 M rows, the `W = 1` and
+`W = 4` wall times on scratch and the session device's measured `%util` over each run (busy time over wall time,
+from `/sys/block/<dev>/stat`). They go in the same table, so a reader can see the shared-disk throughput next to
+the tmpfs result without either being mistaken for the other.
+
+### A.4 — Timings on shared disks are context, never evidence (owner, 2026-11-04)
+
+**The known limit.** The ksb node's scratch volumes sit on a shared HDD that is overwhelmed. This is a node
+configuration problem, tracked as [exo-pet/exo-fleet#980](https://github.com/exo-pet/exo-fleet/issues/980), not a
+property of the writer.
+
+- **No graded timing on a shared disk.** Every disk-throughput or wall-time number measured on a ksb disk-backed
+  scratch volume, or on the seat's `/mnt/HDD`, is dominated by the environment. It is never pass/fail evidence for
+  any criterion, in this proof or in a review of it. Criterion 6's `/dev/shm` run (A.3) is the only graded timing.
+- **Criteria 1 and 3 stay on disk-backed scratch,** because a slow disk makes them harder, not easier. A slow
+  commit keeps the window full, so the most encodes overlap (criterion 1), and write-back that lags keeps more staged
+  pages dirty and resident (criterion 3). A pass there is conservative. A criterion-3 failure (an
+  OOM under `--mem 4Gi`, or `anon` apart from `RssAnon`) must be checked against the disk's measured `%util` for
+  that run before anyone calls it a writer defect. A saturated disk points to exo-fleet#980 first.
+- **The shared-disk throughput table (A.3) is context only,** until exo-fleet#980 gives ksb jobs an uncontended
+  scratch class. When it does, a timing criterion on disk-backed scratch needs an amendment of this ADR. It is not
+  adopted silently.
 
 ## References
 

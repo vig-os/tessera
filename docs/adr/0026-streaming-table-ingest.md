@@ -283,7 +283,8 @@ block: this is what `table::table_block` and the Python `Builder.add_table` writ
 and what `table_job_streaming` writes up to `BLOCK_ROWS` rows. `StreamWriter::push_table` writes a streamed
 table above `BLOCK_ROWS` as leaves of at most `BLOCK_ROWS` rows, with ADR-0064 §8's bound
 `min(W, n) · p_block + s` (item 3 of the amendment below), stated in `push_table`'s rustdoc and checked on the
-heap by `tessera-io/tests/staged_job_memory.rs`.
+heap by `tessera-io/tests/staged_job_memory.rs`. *(ADR-0064's #760 amendment, 2026-11-04: the bound is
+`min(W, n) · p_block + s + c_leaf · n`, item 3 below.)*
 
 ## Amended by ADR-0064 (2026-10-30) — streamed tables are partitioned into numbered leaves
 
@@ -309,6 +310,11 @@ decision on #677 (2026-10-29, option P-logical of the #681 design note). It chan
    peak heap     ≤  min(W, n) · p_block + s,   s = 2 · ROWS_PER_GROUP · r_mem + 4 MiB
    staged input  ≤  W + 1 blocks, the partial one included
    ```
+
+   *(Amended by ADR-0064's #760 amendment, 2026-11-04: the bound is
+   `min(W, n) · p_block + s + c_leaf · n`, with `c_leaf = 2 · (e_leaf + b_leaf)`, `e_leaf` the leaf's canonical
+   manifest entry and `b_leaf = 1 KiB`, for the entry each committed leaf keeps until the seal. It holds once #759
+   lands. Size independence is the plateau beyond `c_leaf · (n₂ − n₁)`.)*
 
    `p_block` is one block's measured encode peak (46.1 MB for the consumer shape at 8 CPUs, #681 note §4.7);
    it still holds the Vortex writer's width terms `D(width)` and `K(width)`, but no longer a term that grows with

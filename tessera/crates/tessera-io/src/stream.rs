@@ -883,19 +883,30 @@ impl StreamWriter {
     /// **Memory.** With `W` encode workers and a table of `n` leaves, the heap is bounded by
     ///
     /// ```text
-    /// peak heap  ≤  min(W, n) · p_block + s,    s = 2 · ROWS_PER_GROUP · r_mem + 4 MiB
+    /// peak heap  ≤  min(W, n) · p_block + s + c_leaf · n
+    /// s          =  2 · ROWS_PER_GROUP · r_mem + 4 MiB
+    /// c_leaf     =  2 · (e_leaf + b_leaf),    b_leaf = 1 KiB
     /// ```
     ///
-    /// independent of the table's row count (ADR-0064 §8). `p_block` is the peak heap of a
-    /// one-leaf write of the same schema in the same binary: measured, not a constant, since
-    /// `available_parallelism` sets the encoder's queue depths, and it still holds the encoder's
-    /// per-column terms, so it grows with the table's width. `r_mem` is the input's in-memory bytes
-    /// per row (the column widths, plus one byte per nullable column). `s` is two row-groups of
-    /// input (the one being staged and the one a worker has just read back) and 4 MiB of buffers
-    /// and bookkeeping: 7 MiB for 24-byte rows. `tests/staged_job_memory.rs` checks the ceiling at
-    /// `W ∈ {1, 2}`, that the reader keeps no more than `s` of input in RAM while every worker is
-    /// held, and that a one-leaf write's peak is within `s` of the same encode into a sink, so a
-    /// worker reads its staged block back a row-group at a time.
+    /// which, beyond the per-leaf term, doesn't grow with the table's row count (ADR-0064 §8, as
+    /// amended by #760). `p_block` is the peak heap of a one-leaf write of the same schema in the
+    /// same binary: measured, not a constant, since `available_parallelism` sets the encoder's
+    /// queue depths, and it still holds the encoder's per-column terms, so it grows with the
+    /// table's width. `r_mem` is the input's in-memory bytes per row (the column widths, plus one
+    /// byte per nullable column). `s` is two row-groups of input (the one being staged and the one
+    /// a worker has just read back) and 4 MiB of buffers and bookkeeping: 7 MiB for 24-byte rows.
+    /// `c_leaf` is the manifest entry the session keeps for each committed leaf until the seal
+    /// writes it: `e_leaf` is that entry's length in the manifest's canonical JSON (name, kind,
+    /// digest and spec, so it grows with the column specs and their descriptions), `b_leaf` its
+    /// bookkeeping, and the factor 2 an allowance for allocator retention around it. For a
+    /// 12-column schema with a 3,180 B entry that is 8,408 B per leaf, 4.8 MB at 573 leaves. The
+    /// term holds once #759 lands; until then a committed leaf's spec is held as a
+    /// `serde_json::Value` tree, several times `e_leaf` (12.8 KB live for that schema).
+    /// `tests/staged_job_memory.rs` checks the ceiling at `W ∈ {1, 2}` without the per-leaf term
+    /// (at most 25.3 KB at its 8 leaves, which it can't resolve), that the reader keeps no more
+    /// than `s` of input in RAM while every worker is held, and that a one-leaf write's peak is
+    /// within `s` of the same encode into a sink, so a worker reads its staged block back a
+    /// row-group at a time.
     ///
     /// The bound is on the heap, not on the process's memory. Staged input is on disk, and its
     /// pages are page cache: they count toward a cgroup's memory (`memory.current`) and are
