@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-04T22:07:47Z
+updated: 2026-11-05T22:49:55Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-05T08:56:20.024Z
+synced: 2026-11-06T08:56:19.241Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -81,7 +81,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 ## Detected Dependencies
 
-<details><summary>cargo (7)</summary>
+<details><summary>cargo (5)</summary>
 <blockquote>
 
 <details><summary>tessera/Cargo.toml (40)</summary>
@@ -146,11 +146,6 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 </details>
 
-<details><summary>tessera/crates/tessera-core/Cargo.toml</summary>
-
-
-</details>
-
 <details><summary>tessera/crates/tessera-ingest/Cargo.toml (1)</summary>
 
  - `tempfile 3`
@@ -167,11 +162,6 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 </details>
 
-<details><summary>tessera/crates/tessera-py/Cargo.toml</summary>
-
-
-</details>
-
 <details><summary>tessera/crates/tessera-wasm/Cargo.toml (1)</summary>
 
  - `wasm-bindgen =0.2.121` → [Updates: `=0.2.130`]
@@ -181,7 +171,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 </blockquote>
 </details>
 
-<details><summary>github-actions (14)</summary>
+<details><summary>github-actions (7)</summary>
 <blockquote>
 
 <details><summary>.github/actions/nix-deps-cache/action.yml (2)</summary>
@@ -194,26 +184,6 @@ The following updates have all been created. To force a retry/rebase of any, cli
 <details><summary>.github/actions/nix-flake-check/action.yml (1)</summary>
 
  - `DeterminateSystems/nix-installer-action v23@3138316df39ed29be04236d7ffc686fa525866aa`
-
-</details>
-
-<details><summary>.github/actions/setup-devkit-toolchain/action.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/ci.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/codeql.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/devkit-upgrade.yml</summary>
-
 
 </details>
 
@@ -256,21 +226,6 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `actions/create-github-app-token v1.12.0@d72941d797fd3113feb6b93fd0dec494b13a2547` → [Updates: `v3.3.0`]
  - `cargo-bins/cargo-binstall v1.23.0@b874e25ea559687bec77e281e9b271aa1367b624` → [Updates: `v1.26.2`]
  - `cargo-bins/cargo-binstall 1.23.0` → [Updates: `1.26.2`]
-
-</details>
-
-<details><summary>.github/workflows/release.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/scorecard.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/sync-issues.yml</summary>
-
 
 </details>
 
