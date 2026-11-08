@@ -24,7 +24,16 @@
     # runs `uv run validate-commit-range` and resolves it off THIS dev-shell's
     # PATH, so without the input that job fails with "Failed to spawn". Keep the
     # pin in step with DEVKIT_VERSION.
-    vigos.url = "github:vig-os/devkit/1.17.0";
+    #
+    # The upgrade keeps it in step for us: `.vig-os` sets DEVKIT_FLAKE_PIN_ADVANCE=true
+    # (#771), so every `install.sh --force` (including the weekly devkit-upgrade PR)
+    # rewrites this ref and runs `nix flake update vigos` in the same step. Without it
+    # the bot's 1.18.0 PR (#557) bumped DEVKIT_VERSION alone and failed the scaffolded
+    # ci.yml's flake-pin lockstep gate at `Resolve toolchain` (devkit#1752/#1756).
+    # `true` rather than the empty default: the default advances the pin only while it
+    # still equals the pre-upgrade DEVKIT_VERSION, so a pin that ever fell out of step
+    # would be left behind (and red); `true` advances any release pin.
+    vigos.url = "github:vig-os/devkit/1.19.0";
     vigos.inputs.nixpkgs.follows = "nixpkgs";
   };
 
