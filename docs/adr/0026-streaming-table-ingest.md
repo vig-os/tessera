@@ -315,6 +315,10 @@ decision on #677 (2026-10-29, option P-logical of the #681 design note). It chan
    `min(W, n) · p_block + s + c_leaf · n`, with `c_leaf = 2 · (e_leaf + b_leaf)`, `e_leaf` the leaf's canonical
    manifest entry and `b_leaf = 1 KiB`, for the entry each committed leaf keeps until the seal. It holds once #759
    lands. Size independence is the plateau beyond `c_leaf · (n₂ − n₁)`.)*
+   *(ADR-0064's #770 amendment, 2026-11-08: the plateau is a slope test, so the 5% tolerance below is retired.
+   Over every run of the RSS proof from `16 W` leaves on, the OLS slope of peak `RssAnon` against `n` must be at
+   most `c_leaf` plus its one-sided 95 % confidence margin, and that margin must be able to resolve the 0.029 B/row
+   zone-statistics regression.)*
 
    `p_block` is one block's measured encode peak (46.1 MB for the consumer shape at 8 CPUs, #681 note §4.7);
    it still holds the Vortex writer's width terms `D(width)` and `K(width)`, but no longer a term that grows with

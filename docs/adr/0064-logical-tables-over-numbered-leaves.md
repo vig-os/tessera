@@ -10,7 +10,10 @@ alone. Resolves the five re-review nits recorded on #681 (§11). Amends SPEC §5
 which changes no crate), under `tessera/crates/`, unless they say otherwise. **Amended by #760 (2026-11-04):** §8's
 bound gains a per-leaf term `c_leaf · n`, §8.1's plateau compares medians of 3 runs at `W = 4`, and parallelism is
 measured in its own job on `/dev/shm`, the only graded timing: shared-disk timings are context, never evidence
-(exo-pet/exo-fleet#980; the amendment at the end).
+(exo-pet/exo-fleet#980; the amendment at the end). **Amended by #770 (2026-11-08):** §8.1's plateau is a slope
+test, an OLS fit of every run's peak `RssAnon` against `n` from `16 W` leaves on, whose slope must be at most
+`c_leaf` plus its one-sided 95 % confidence margin, with a resolution check; `τ` is retired (the second amendment
+at the end).
 
 ## Context
 
@@ -523,6 +526,8 @@ peak(n₂)  ≤  (1 + τ) · peak(n₁)      for  16 W ≤ n₁ < n₂,   τ = 5
 
 *(Amended by #760, below: the ceiling gains `c_leaf · n`, and the plateau is
 `peak(n₂) ≤ (1 + τ) · peak(n₁) + c_leaf · (n₂ − n₁)`, with `τ` unchanged.)*
+*(Amended by #770, below: the plateau is a slope test, the slope of peak `RssAnon` against `n` over every run at
+`n ≥ 16 W` at most `c_leaf` plus its one-sided 95 % confidence margin; `τ` is retired.)*
 
 `τ = 5 %` is six times the measured plateau variation (0.8%) and under a third of the smallest regression it must
 catch: the zone-statistics half of `c · rows` alone, reappearing across the whole table, adds 0.029 B/row, which is
@@ -530,7 +535,8 @@ catch: the zone-statistics half of `c · rows` alone, reappearing across the who
 would let the zone-stats regression through; one at the measured 0.8% would fail on scheduler noise. `τ` and `s` may
 be tightened by the proof; loosening either needs an amendment of this ADR. The proof also records, for every run,
 the input row-group at which the peak fell, so the 16-to-64 rise gets an explanation or a bound of its own before
-`τ` is tightened.
+`τ` is tightened. *(Amended by #770, below: `τ` is retired. The slope test's level and its resolution target, the
+0.029 B/row zone-statistics half, take its place; loosening either needs an amendment.)*
 
 **The `staged_peak` metric (nit 4).** `StreamStats` gains `peak_staged_input_blocks` and
 `peak_staged_input_bytes`. A block counts **from the moment the reader creates its staging file**, while it is still
@@ -578,6 +584,7 @@ memory: the staged files' pages are page cache, which counts toward the cgroup's
   2. **Plateau:** `RssAnon(n₂) ≤ 1.05 · RssAnon(n₁)` for 64 ≤ `n₁` < `n₂` at `W = 4` (64 = 16 W), and the same at
      `W = 1` from 16 blocks;
      *(Amended by #760, below: plus `c_leaf · (n₂ − n₁)`, on the medians of 3 runs at `W = 4`.)*
+     *(Amended by #770, below: a slope test over every run at `n ≥ 16 W`, at both `W`.)*
   3. **Page cache is reclaimable:** the 2.4 G-row run completes under `--mem 4Gi` (its output is ~18 GB, so
      unreclaimable staging would OOM), peak `memory.stat` `shmem` stays under 16 MiB, and `anon` agrees with
      `RssAnon` within `s_rss`;
@@ -621,7 +628,8 @@ the reader is serializing. With `ROWS_PER_GROUP` = 65 536 and `r_mem` = 24 B, `s
 25.3 KB, 0.34 % of `s`.)*
 
 It does not assert `τ`: at test-size blocks the `c · rows` term is too small against `p_block` to resolve a 5%
-plateau. The plateau is the ksb proof's job, at real `BLOCK_ROWS`.
+plateau. The plateau is the ksb proof's job, at real `BLOCK_ROWS`. *(Amended by #770, below: `τ` is retired and
+the plateau is a slope test; it is still the ksb proof's job.)*
 
 ### §9 — Amendments (exact text, applied in this PR)
 
@@ -704,7 +712,7 @@ The first run of the §8.1 proof (#715: jobs `tessera-715-sweep-1` and `tessera-
 found three causes, and the owner ruled on each on #715 (comment of 2026-11-04). This amendment applies the
 rulings to §8 and §8.1. The text it replaces is kept above, marked *(Amended by #760, below)*. Nothing else in
 §8 or §8.1 changes: `τ = 5 %`, `s`, `s_rss`, the ceilings, the 1.5× threshold, the `--mem 4Gi` and 8 GiB budgets
-and criteria 3, 4 and 5 stand as written.
+and criteria 3, 4 and 5 stand as written. *(Amended by #770, below: `τ` is retired, the rest stands.)*
 
 ### A.1 — §8: the bound gains `c_leaf · n`
 
@@ -747,7 +755,8 @@ staged bytes   ≤  (W + 1) · BLOCK_ROWS · r_stage
   not a theorem. It is not fitted: the measured pre-#759 rate (25.4 KB per leaf) would be a fit, and would let
   the #759 defect through. Criterion 2 checks the allowance. A run that retains more fails it, and that is a
   finding about the writer, not a reason to raise the factor. Raising the factor or `b_leaf` needs an amendment,
-  like `τ`.
+  like `τ`. *(Amended by #770, below: criterion 2 checks the allowance to within the slope test's margin; the live
+  part is checked exactly in-tree, B.3. `τ` is retired; raising the factor or `b_leaf` still needs an amendment.)*
 - **For the consumer:** `c_leaf` = 2 · (3,180 + 1,024) B = 8,408 B. That is 4.8 MB at its 573 leaves, and
   0.002 B/row (one leaf is `BLOCK_ROWS` = 4,194,304 rows).
 - **It holds once #759 lands** (`WriteSession` no longer keeps a `Value` tree per leaf, and #759's counting-allocator
@@ -766,6 +775,10 @@ staged bytes   ≤  (W + 1) · BLOCK_ROWS · r_stage
 ```text
 peak(n₂)  ≤  (1 + τ) · peak(n₁)  +  c_leaf · (n₂ − n₁)      for  16 W ≤ n₁ < n₂,   τ = 5 %
 ```
+
+*(Amended by #770, below: the plateau is the slope of peak `RssAnon` against `n`, at most `c_leaf` plus its
+confidence margin; `τ` is retired. The next paragraph's argument for `τ` is replaced by #770's power analysis,
+B.4.)*
 
 `τ` still catches the regression it was set for. The zone-statistics half of `c · rows` adds 23 MB from 268 M to
 1.07 G rows at `W = 4` (§8). The allowance over that step is `τ · 143 MB + 192 · 8,408 B` = 7.2 + 1.6 = 8.8 MB on the
@@ -790,12 +803,13 @@ by a margin it can't resolve. Both parts keep their fail-before margins.
 the diagnosis §2), with no consistent sign between 64 and 256 leaves. The measured spikes were +5.8 % and +14.4 %. A
 spike is the `W` encoders' own peaks happening to coincide at an arbitrary row-group, an event of one run, not a
 function of `n`. A single-run plateau comparison at `τ = 5 %` therefore fails on noise three times `τ`, and loosening
-`τ` would let the zone-statistics regression through (§8). A median of three runs discards one coincidence per point. A
-systematic per-leaf term shows in all three runs, and so in the median. At `W = 1` five identical runs of 64 leaves
-peaked within 0.72 % of each other (48.81–49.16 MB of live heap), and two proof runs' `RssAnon` at 64 leaves within
-0.8 % (59.5 and 60.0 MiB), so `W = 1` points run once. The ceiling is different: it is what one run must hold against a
-cgroup limit, so it is checked against every run, not against a median that would hide the worst one. The highest
-`RssAnon` measured, 226.0 MiB, was under the ceiling of 298.4 MiB.
+`τ` would let the zone-statistics regression through (§8). A median of three runs discards one coincidence per point.
+*(Amended by #770, below: in G r3 it didn't, B.1; the slope test replaces the medians.)* A systematic per-leaf term
+shows in all three runs, and so in the median. At `W = 1` five identical runs of 64 leaves peaked within 0.72 % of
+each other (48.81–49.16 MB of live heap), and two proof runs' `RssAnon` at 64 leaves within 0.8 % (59.5 and
+60.0 MiB), so `W = 1` points run once. The ceiling is different: it is what one run must hold against a cgroup limit,
+so it is checked against every run, not against a median that would hide the worst one. The highest `RssAnon`
+measured, 226.0 MiB, was under the ceiling of 298.4 MiB.
 
 **Sweep** (an addition to §8.1's *Sweep*): each `W = 4` point at 64 blocks or more (268 M, 1.07 G and 2.4 G
 rows) runs **k = 3** times in the same job. Every other point runs once.
@@ -808,8 +822,11 @@ rows) runs **k = 3** times in the same job. Every other point runs once.
 2. **Plateau:** `med RssAnon(n₂) ≤ 1.05 · med RssAnon(n₁) + c_leaf · (n₂ − n₁)` for 64 ≤ `n₁` < `n₂` at `W = 4`
    (64 = 16 W), where `med` is the median of the point's 3 runs. The same inequality must hold at `W = 1` from 16
    blocks, on its single runs.
+   *(Amended by #770, below: the medians failed on noise in G r3; criterion 2 is the slope of every run's peak
+   against `n`, B.3. The sweep and `k = 3` above stand.)*
 
-**Still sharp.** The pre-#759 writer still fails criterion 2. At `W = 1`, from 64 to 573 leaves, its `RssAnon`
+**Still sharp.** *(Amended by #770, below: B.4 shows the pre-#759 writer failing the slope test on its own data.)*
+The pre-#759 writer still fails criterion 2. At `W = 1`, from 64 to 573 leaves, its `RssAnon`
 rose from 59.5 to 71.7 MiB, which is 12.8 MB. The allowance is `0.05 · 62.4 MB + 509 · 8,408 B` = 3.1 + 4.3 =
 7.4 MB.
 
@@ -867,6 +884,191 @@ property of the writer.
 - **The shared-disk throughput table (A.3) is context only,** until exo-fleet#980 gives ksb jobs an uncontended
   scratch class. When it does, a timing criterion on disk-backed scratch needs an amendment of this ADR. It is not
   adopted silently.
+
+## Amendment (#770, 2026-11-08) — the plateau as a slope test over every run
+
+The third run of the §8.1 proof (#715 G r3: job `tessera-715-r3-sweep-2`, exit 1, PR #767 at `0b66160`, on the
+post-#759 writer) passed criteria 1, 4 and 5, and criterion 6 in its own job (`tessera-715-r3-par-3`, exit 0, 2.68×).
+It failed criterion 2 at `W = 4` (criterion 3's failure was an evaluator defect, fixed in `0b66160`). The owner
+ruled on #715 (comment of 2026-11-08) that criterion 2 becomes a slope test. This amendment applies that ruling to
+§8 and §8.1, as amended by #760. The text it replaces is kept above, marked *(Amended by #770, below)*.
+
+### B.1 — Why the median-of-3 plateau fails on noise
+
+A.2 compared the medians of 3 runs pairwise. In r3, at `W = 4`, the 9 runs from 64 leaves on were (MiB of peak
+`RssAnon`, the job's `records.json`):
+
+| Leaves | Rows | Run 0 | Run 1 | Run 2 | Median | Spread within the point |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 268,435,456 | 180.95 | 189.54 | 190.20 | 189.54 | +5.1 % |
+| 256 | 1,073,741,824 | 189.14 | 205.27 | 202.86 | 202.86 | +8.5 % |
+| 573 | 2,400,000,000 | 191.54 | 195.86 | 206.23 | 195.86 | +7.7 % |
+
+From 64 to 256 leaves the median rose to 202.86 MiB against A.2's allowance of
+`1.05 · 189.54 MiB + 192 · 7,980 B` = 200.5 MiB, so the pairwise check failed. The medians aren't monotone in `n`:
+the 573-leaf median is below the 256-leaf one. And the spread within one point (up to +8.5 %) is larger than `τ`.
+A.2's premise, that a median of 3 discards the one encode-peak coincidence per point, didn't hold: two of the three
+256-leaf runs were high, so the median was too. The peaks fell at row-groups spread over the whole input (380 to
+27,315), as in the diagnosis §2. That is noise from concurrent encode peaks, not growth in `n`. A pairwise test
+compares two medians, one point's against another's, so a point that draws two high runs decides the verdict.
+
+A slope fitted to every run uses all 9 runs at once. Noise that doesn't depend on `n` widens the slope's
+confidence interval. It doesn't bias the slope. A regression that grows with `n` moves the slope itself.
+
+### B.2 — The estimator: ordinary least squares over every run, with its standard error
+
+**The runs.** For each `W`, every run at `n ≥ 16 W` leaves, each repeat its own point (no medians): at `W = 4` the
+`k = 3` runs at each of 64, 256 and 573 leaves (`N = 9`); at `W = 1` the single runs at 16, 64, 256 and 573 leaves
+(`N = 4`). The sweep and `k` are A.2's, unchanged. The runs below `16 W` are out, as in §8: the rise from 16 to
+64 leaves at `W = 4` is in the regime §8 doesn't model, and criterion 1 bounds it.
+
+**The fit.** With `yᵢ` the run's peak `RssAnon` in bytes and `nᵢ` its leaves, ordinary least squares (OLS) of
+`y = a + b · n`:
+
+```text
+b̂     =  Σ (nᵢ − n̄) (yᵢ − ȳ)  /  Sₙₙ,          Sₙₙ = Σ (nᵢ − n̄)²
+σ̂²    =  Σ (yᵢ − â − b̂ nᵢ)²  /  (N − 2)
+SE(b̂) =  σ̂ / √Sₙₙ
+```
+
+`b̂` is in bytes per leaf; divided by `BLOCK_ROWS` = 4,194,304 it is bytes per row.
+
+**Why OLS, not Theil–Sen.** The noise is what decides it, and the measured noise has three properties:
+
+- **It doesn't depend on `n`.** The spikes are the `W` encoders' peaks coinciding at an arbitrary row-group (the
+  diagnosis §2; in r3 the peaks fell anywhere from row-group 380 to 27,315). The spread within a point is similar at
+  every `n` (+5.1 %, +8.5 % and +7.7 % above). Noise of that kind is variance, not bias, for an OLS slope, and
+  `SE(b̂)` measures it from the run's own residuals. Nothing is fitted to a previous run. `SE(b̂)` treats the runs
+  as independent. Repeats of one point run one after another in the same job, so a condition that lasts across them
+  (a neighbour's load) would correlate them, and `SE(b̂)` would understate the noise. That is the same limit A.4
+  states for timings, and it is one more reason the level is nominal.
+- **It is one-sided and skewed.** A coincidence only raises a peak. OLS doesn't need symmetric noise for its slope
+  to be unbiased. The `t` quantile below is exact only for Gaussian noise, so the stated level is nominal (B.3).
+- **There are only three or four distinct `n`, with `k ≤ 3` runs each.** Theil–Sen's robustness to outliers is
+  what it would buy here. But its median of the 27 pairwise slopes between different points is set by the
+  within-point spread, and its confidence interval would come from a bootstrap. A bootstrap over three runs per point
+  has only 10 distinct resamples per point, and it underestimates the variance by a factor of `(k − 1) / k`, so its
+  interval would be narrower than the noise and grainy. OLS's bound is in closed form, deterministic and checkable
+  by hand from the records, which is what an acceptance criterion should be. On r3 the two estimators agree
+  (Theil–Sen 21,832 B/leaf against OLS 19,961 at `W = 4`, 5,750 against 5,787 at `W = 1`, both within 0.15 `SE`).
+  Theil–Sen may be recorded as a cross-check. It isn't graded.
+
+The fit uses every run, so a point whose median happens to be high, like 256 leaves in r3, carries no more weight
+than its runs do.
+
+### B.3 — The pass rule, and its margin
+
+**The level.** One-sided, `α = 5 %`: a writer whose true slope is exactly `c_leaf` fails criterion 2 in at most
+one proof run in 20 (nominally; B.2). The margin is the one-sided 95 % confidence bound of `b̂`:
+
+```text
+margin  =  t₀.₉₅,N−2 · SE(b̂)          t₀.₉₅,₇ = 1.895 (W = 4, N = 9),   t₀.₉₅,₂ = 2.920 (W = 1, N = 4)
+```
+
+The level is chosen before the data, not fitted to r3. 95 % is the conventional one-sided level, and B.4 shows that at
+it the test keeps the power it needs at `k = 3`. A failing run is a finding about the writer, investigated like any
+other. It isn't rerun until it passes, which would make the level meaningless.
+
+**The resolution check.** A margin derived from the run's own noise widens with that noise, so a run noisy enough
+would pass any slope. The test must still catch the regression it exists for: the zone-statistics half of `c · rows`,
+**`δ_z` = 0.029 B/row = 121,635 B/leaf** (§8, note §4.2), the smallest regression §8 says the plateau must catch.
+With probability at least 95 %, a slope of `c_leaf + δ` exceeds the pass bound when
+`δ ≥ (t₀.₉₅ + t₀.₉₅) · SE(b̂)` (the usual normal-theory approximation, with the central `t` for both quantiles). So
+a run whose `2 · t₀.₉₅,N−2 · SE(b̂)` exceeds `δ_z` can't resolve that regression. It is inconclusive, and an
+inconclusive run fails.
+
+**Criterion 2** (replaces A.2's criterion 2):
+
+**2. Plateau:** for each `W ∈ {1, 4}`, over every run at `n ≥ 16 W` leaves (B.2), the OLS slope of peak `RssAnon`
+against `n` satisfies both
+
+- `b̂ ≤ c_leaf + t₀.₉₅,N−2 · SE(b̂)` (**slope**), and
+- `2 · t₀.₉₅,N−2 · SE(b̂) ≤ δ_z = 121,635 B/leaf` (**resolution**),
+
+with `c_leaf` A.1's, its `e_leaf` read off the run's sealed manifest (the maximum over the runs the fit uses).
+
+Equivalently, the slope check fails a run only when the data show, at 95 % confidence, that peak `RssAnon` grows by
+more than `c_leaf` per leaf: `b̂ − t₀.₉₅,N−2 · SE(b̂) > c_leaf`.
+
+**`W = 1` gets the same test,** on its `N = 4` single runs from 16 leaves (`16 W`). Its noise is smaller (r3 residual
+σ̂ = 1.90 MiB against 7.98 MiB at `W = 4`), which is why A.2 runs its points once. Its two degrees of freedom are
+paid for by the larger `t` (2.920 against 1.895), and its resolution check still passes with room to spare (B.4).
+
+**What criterion 2 no longer checks.** A.1 says criterion 2 "checks the allowance" `c_leaf`. As a slope test it
+checks it to within its margin: on r3, a growth up to 33,160 B/leaf at `W = 4` and 21,290 B/leaf at `W = 1`
+passes, four and almost three times `c_leaf`. The per-leaf held heap of the session is checked exactly, in-tree,
+by #759's counting-allocator test (`tessera-io/tests/session_leaf_memory.rs`: the serialized entries plus 128 B per
+leaf). Criterion 2 is what catches a growth in `n` that the in-tree tests can't see, at real `BLOCK_ROWS`: a
+per-row term like zone statistics, or retention around the encoder.
+
+**`τ` is retired.** It appeared only in the plateau (§8's second block, §8.1's criterion 2 and A.1/A.2's restatements
+of both), and nothing else uses it. A pairwise tolerance was a fixed fraction of a noisy single value. The slope test
+puts the margin derived from the run's own noise in its place, with the level (95 %) and `δ_z` that the old
+"tightening `τ`" rule had stood for. Raising `δ_z` or lowering the level loosens criterion 2 and needs an amendment
+of this ADR, as raising `τ` did. §8's row-group record (where each run's peak fell) stays, as the evidence for the
+16-to-64 rise.
+
+**Unchanged:** criterion 1 (the ceiling, checked on every run, A.2), `s`, `s_rss`, `c_leaf`'s definition (A.1),
+the sweep and `k = 3` (A.2), criteria 3–5 and their budgets (`--mem 4Gi`, 8 GiB), and criterion 6 with its
+`/dev/shm` job, its converse tmpfs guard and its `--mem` (A.3), and A.4.
+
+**`c_leaf` in the numbers below.** A.2 reads `e_leaf` off the run's sealed manifest. In r3 it is at most
+2,966 B (2,965 B at 16, 64 leaves; 2,966 B at 256 and 573), so `c_leaf` = 2 · (2,966 + 1,024) B = **7,980 B**.
+A.1's worked figure, 8,408 B, used a 3,180 B entry that wasn't the canonical length A.1 defines. The criterion
+uses the definition. Every verdict below is the same with 8,408 B, which moves each bound up by 428 B/leaf.
+
+### B.4 — Power, with the recorded numbers
+
+**r3 as measured** (`tessera-715-r3-sweep-2`, the post-#759 writer at `0b66160`; bytes per leaf):
+
+| `W` | `N` | `b̂` | `SE(b̂)` | Margin | Bound `c_leaf` + margin | Slope | Resolution `2 t SE ≤ 121,635` |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 4 | 9 | 19,961 | 13,290 | 25,180 | 33,160 | **pass** | 50,359: **pass** |
+| 1 | 4 | 5,787 | 4,558 | 13,310 | 21,290 | **pass** | 26,619: **pass** |
+
+The fit's inputs: at `W = 4` the 9 runs of B.1 (`n̄` = 297.67, `Sₙₙ` = 396,434, σ̂ = 7.98 MiB); at `W = 1` 59.88,
+62.52, 59.98 and 64.18 MiB at 16, 64, 256 and 573 leaves (`n̄` = 227.25, `Sₙₙ` = 191,647, σ̂ = 1.90 MiB). The `W = 4`
+slope, 19,961 B/leaf, is 0.90 `SE` above `c_leaf`: the data don't distinguish it from `c_leaf`, and they show no
+significant growth beyond it at 95 %.
+
+**A regression added to r3.** A growth of `δ` per leaf adds `δ · nᵢ` to every run. That moves `b̂` by exactly `δ`
+and leaves the residuals, and so `SE(b̂)` and the margin, unchanged. So each row below is r3's `b̂ + δ` against the
+bound above:
+
+| Added growth | `δ` (B/leaf) | `W = 4`: `b̂ + δ` vs 33,160 | `W = 1`: `b̂ + δ` vs 21,290 |
+| --- | ---: | --- | --- |
+| Zone statistics, full: 0.058 B/row (+47 MB over 192 leaves, §8) | 243,270 | 263,231: **fails** | 249,057: **fails** |
+| Zone statistics, half: 0.029 B/row (`δ_z`) | 121,635 | 141,596: **fails** | 127,422: **fails** |
+| Reverting #759: r1's `W = 1` slope less r3's, 24,265 − 5,787 (below) | 18,478 | 38,439: **fails** | 24,265: **fails** |
+| Pre-#759 per-leaf live heap (12.8 KB, the diagnosis §1) | 12,800 | 32,761: passes | 18,587: passes |
+
+**The pre-#759 writer on its own data.** r1's sweep (`tessera-715-sweep-1`, tessera `a3df683`, before #759) is the
+`W = 1` design exactly: 59.1, 59.5, 64.1 and 71.7 MiB at 16, 64, 256 and 573 leaves (the job log's 0.1 MiB
+precision). OLS gives `b̂` = 24,265 B/leaf, `SE` = 915, a bound of 7,980 + 2.920 · 915 = 10,652 B/leaf: it
+**fails**, by 2.3 times the bound. (r1 ran `W = 4` once per point, so it isn't the `W = 4` design, and r3's
+fail-before job, `tessera-715-r3-failbefore-2`, has only 64 and 573 leaves from `16 W` on, two runs with no degree
+of freedom; neither is graded here.)
+
+The 12.8 KB row passes, and #770 asked for that cost to fail; this is a deliberate deviation. 12.8 KB is the pre-#759
+session's **live** heap per leaf. Criterion 2 measures `RssAnon`, and in `RssAnon` that writer grew by its measured
+24,265 B/leaf (18,478 B/leaf more than the post-#759 writer), which fails, the factor of about 2 being A.1's allocator
+retention. An `RssAnon` growth of 12.8 KB/leaf above `c_leaf` at `W = 4` is below what `k = 3` can resolve (the next
+paragraph), and resolving it would take about 35–46 runs per point. The live heap per leaf is checked exactly in-tree
+(B.3), and that test fails on the pre-#759 writer.
+
+**The smallest growth that fails at `k = 3`.**
+
+- **Added to r3, deterministically:** at `W = 4`, `δ` > 13,198 B/leaf (0.0031 B/row), a total slope above 33,160
+  B/leaf; at `W = 1`, `δ` > 15,503 B/leaf (0.0037 B/row), a total above 21,290 B/leaf.
+- **Detected with probability ≥ 95 % at r3's measured noise** (the minimum detectable growth above `c_leaf`,
+  `2 · t₀.₉₅,N−2 · SE(b̂)`): at `W = 4`, **50,359 B/leaf = 0.0120 B/row**; at `W = 1`, **26,619 B/leaf =
+  0.0063 B/row**.
+
+`δ_z` = 121,635 B/leaf is 2.4 times the `W = 4` detectable growth and 4.6 times the `W = 1` one. At `W = 4` it lies
+9.2 `SE` above `c_leaf` against a bound 1.9 `SE` above it, so its detection probability is above 0.999. **`k = 3` is
+enough; `k` doesn't change.** Resolving a growth of the order of `c_leaf` itself at `W = 4` (say 12.8 KB/leaf) would
+take about 35–46 runs per point at r3's noise (46 with `t` held at 1.895, nearer 35 as `t` falls toward 1.645).
+That isn't the test's job: `W = 1`, with its lower noise, and the in-tree test resolve per-leaf terms.
 
 ## References
 
