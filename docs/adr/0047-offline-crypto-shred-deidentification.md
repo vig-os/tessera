@@ -131,6 +131,15 @@ recipient private key, and destroying that key erases it from every copy."** Nev
 - **New dep:** `age` (MIT/Apache-2.0) on `tessera-ingest` (encrypt) + `tessera-cli` (decrypt). Host-only,
   like `keygen`/`sign` — never in the wasm verify path (verifying a crypto-shred `.tsra`'s seal +
   signature needs no key; decryption is a separate, host-only operation).
+
+  > **Amended (2026-11-09, #762):** the envelope primitives (`IdentityDocument`, `AUX_IDENTITY_NAME`,
+  > `encrypt_identity`, `decrypt_identity`, `parse_recipient`, `generate_keypair`) moved out of
+  > `tessera-ingest` into the new `tessera-identity` crate, which carries the `age` dependency alone and
+  > links no libhdf5, so a Rust producer can write the envelope without the vendor-decoder crate.
+  > `tessera-ingest` re-exports it as `tessera_ingest::identity`, so no public path changed. Not in
+  > `tessera-core` or `tessera-io`, because `tessera-wasm` and the abi3 wheel depend on those and stay
+  > `age`-free. The envelope format is unchanged; `tessera-identity/tests/pre_move_golden.rs` decrypts an
+  > envelope written before the move and pins its plaintext bytes.
 - **New CLI verbs:** `reidentify`, `shred`; one new `ingest dicom`/`dicom-series` flag pair
   `--crypto-shred` + `--recipient`.
 - **Raw-header leak fixed regardless of crypto-shred:** `extra["dicom_header"]` is now embedded

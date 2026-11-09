@@ -11,15 +11,32 @@
 //! - **shred** — dropping the aux member (`tessera shred`) or destroying every copy of the private key
 //!   renders the identifying material irrecoverable on every distributed copy (ADR-0040 §2.2).
 //!
+//! # A producer without `tessera-ingest` (#762)
+//!
+//! This crate depends on `tessera-core`, `age` and serde, and on nothing that links libhdf5, so a Rust
+//! producer that already writes `.tsra` products with `tessera-io` can attach an envelope without the
+//! vendor-decoder crate. `tessera-ingest` re-exports this crate as `tessera_ingest::identity`, so both
+//! paths name the same items. A producer encrypts with [`encrypt_identity`] and writes the bytes with
+//! `tessera_io::add_aux_members(path, &[AuxMember::new(AUX_IDENTITY_NAME, envelope)])` after the seal.
+//! The `identity-deps` flake check keeps this crate's graph free of libhdf5.
+//!
+//! "Identity" here is the patient identity that de-identification strips. A product's content-addressed
+//! identity (its `id`, `content_hash` and `manifest_hash`) is `tessera_core::identity`, a different thing.
+//!
 //! Host-only: this is the encrypt/decrypt path, never the wasm verify path (verifying a crypto-shred
 //! product's seal + signature needs no key — the sealed product underneath is an ordinary
-//! de-identified `recon`).
+//! de-identified `recon`). It is kept out of `tessera-core` and `tessera-io` for that reason: the wasm
+//! verifier and the abi3 wheel depend on those two and must not carry `age`.
 
 use std::io::{Read, Write};
 
 use serde::{Deserialize, Serialize};
 
 use tessera_core::{Error, Result};
+
+/// The `age` recipient type [`encrypt_identity`] takes, re-exported so a caller names the same `age`
+/// version this crate was built against without a direct `age` dependency of its own.
+pub use age::x25519::Recipient;
 
 /// The aux-member path (relative to `aux/`) that carries the encrypted identity envelope — so the
 /// full path inside the container is `aux/identity/identity.age` (ADR-0042/0047).
@@ -58,7 +75,7 @@ pub fn generate_keypair() -> (String, String) {
 }
 
 /// Parse an `age` recipient **public** key (`age1…`) from its string form.
-pub fn parse_recipient(s: &str) -> Result<age::x25519::Recipient> {
+pub fn parse_recipient(s: &str) -> Result<Recipient> {
     s.trim()
         .parse()
         .map_err(|e| Error::Invalid(format!("invalid age recipient public key: {e}")))
@@ -67,10 +84,10 @@ pub fn parse_recipient(s: &str) -> Result<age::x25519::Recipient> {
 /// Encrypt an [`IdentityDocument`] to one or more `age` recipients → the ASCII-armored envelope bytes
 /// destined for [`AUX_IDENTITY_NAME`]. Errors if `recipients` is empty (crypto-shred with no key would
 /// silently destroy the identity — that is what plain `--deidentify` is for; refuse the ambiguity).
-pub fn encrypt_identity(
-    doc: &IdentityDocument,
-    recipients: &[age::x25519::Recipient],
-) -> Result<Vec<u8>> {
+///
+/// The plaintext is the document's JCS (RFC 8785) canonical JSON, so it is byte-deterministic; the
+/// ciphertext is not, because `age` draws a fresh file key and ephemeral share on every call.
+pub fn encrypt_identity(doc: &IdentityDocument, recipients: &[Recipient]) -> Result<Vec<u8>> {
     if recipients.is_empty() {
         return Err(Error::Invalid(
             "crypto-shred requires at least one --recipient (age public key)".into(),
@@ -135,7 +152,7 @@ mod tests {
     use super::*;
     use age::secrecy::ExposeSecret;
 
-    fn keypair() -> (age::x25519::Recipient, String) {
+    fn keypair() -> (Recipient, String) {
         let id = age::x25519::Identity::generate();
         (id.to_public(), id.to_string().expose_secret().to_string())
     }

@@ -37,7 +37,9 @@ pub mod decoder;
 pub mod dicom;
 pub mod engine;
 pub mod ge_hdf5;
-pub mod identity;
+/// The ADR-0047 crypto-shred identity envelope. Re-exported from the hdf5-free `tessera-identity`
+/// crate (#762), so `tessera_ingest::identity::*` and `tessera_identity::*` are the same items.
+pub use tessera_identity as identity;
 pub mod nifti;
 /// NumPy `.npy` → `array` (and a structured dtype → `table`); `.npz` → a collection.
 /// ADR-0056 §11's P1 array rows. Feature `npy` — an in-tree header parse, no decoder dependency.

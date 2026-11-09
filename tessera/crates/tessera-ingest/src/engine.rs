@@ -1126,7 +1126,7 @@ fn seal_to_tsra(
 /// Parse the crypto-shred recipient list (ADR-0047) — `age` public-key strings from the spec /
 /// `--recipient` — into typed recipients. An empty list means "not crypto-shred" (the common case),
 /// so this returns an empty `Vec` without error; a malformed key is a hard, typed error.
-fn parse_recipients(recipients: &[String]) -> Result<Vec<age::x25519::Recipient>> {
+fn parse_recipients(recipients: &[String]) -> Result<Vec<crate::identity::Recipient>> {
     recipients
         .iter()
         .map(|s| crate::identity::parse_recipient(s))
@@ -1151,7 +1151,7 @@ fn attach_identity_envelope(
     out_dir: &Path,
     m: &Manifest,
     identity: Option<&crate::identity::IdentityDocument>,
-    recipients: &[age::x25519::Recipient],
+    recipients: &[crate::identity::Recipient],
 ) -> Result<()> {
     let Some(doc) = identity else { return Ok(()) };
     let envelope = crate::identity::encrypt_identity(doc, recipients)?;

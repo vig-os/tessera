@@ -1,0 +1,19 @@
+[package]
+name = "tessera-identity"
+description = "Tessera crypto-shred identity envelope (ADR-0047): age-encrypt the stripped identity of a de-identified product"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# The ADR-0047 envelope primitives in their own crate (#762), so a Rust producer can write
+# `aux/identity/identity.age` without `tessera-ingest` and the libhdf5 it links. Not in `tessera-core`:
+# that is tessera-wasm's only dependency and the pure-abi3 wheel's, and `age` must reach neither. Not in
+# `tessera-io` either: the wheel depends on it. Keep this crate's graph to `tessera-core` + `age` + serde;
+# the `identity-deps` flake check fails if hdf5 enters it or `age` reaches tessera-wasm / tessera-py.
+[dependencies]
+tessera-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+age.workspace = true

@@ -6675,10 +6675,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "tessera-ingest"
+name = "tessera-identity"
 version = "0.1.0-alpha.4"
 dependencies = [
  "age",
+ "serde",
+ "serde_json",
+ "tessera-core",
+]
+
+[[package]]
+name = "tessera-ingest"
+version = "0.1.0-alpha.4"
+dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-ipc",
@@ -6695,6 +6704,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tessera-core",
+ "tessera-identity",
  "tessera-io",
  "toml 0.8.23",
  "tracing",

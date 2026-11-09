@@ -1,0 +1,1 @@
+{"curated_identifying":{"patient_pseudonym":"pseud-Ünïcode","study_date":"20260101"},"dicom_header":{"0010,0010":{"value":["SMITH^JOHN"],"vr":"PN"},"0010,0020":{"value":["MRN-000123"],"vr":"LO"}},"v":1}

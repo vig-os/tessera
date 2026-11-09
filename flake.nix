@@ -679,6 +679,40 @@
             '';
           });
 
+          # The crypto-shred envelope crate's dependency contract (#762, ADR-0047 amendment), checked
+          # rather than asserted in a comment: `tessera-identity` links no libhdf5, so a Rust producer
+          # can write an envelope without `tessera-ingest`; and `age` stays out of `tessera-wasm` and the
+          # abi3 wheel (`tessera-py`). Like Gate B it only runs `cargo tree`, so it compiles nothing.
+          # Each graph must also contain a crate it is known to have, so an empty tree cannot pass.
+          identity-deps = craneLib.mkCargoDerivation (commonArgs // {
+            cargoArtifacts = null;
+            doInstallCargoArtifacts = false;
+            pnameSuffix = "-identity-deps";
+            buildPhaseCargoCommand = ''
+              tree() {
+                cargo tree --quiet --locked --offline --all-features --target all -e normal \
+                  --prefix none -p "$1"
+              }
+              # require PKG CRATE: PKG's graph must contain CRATE. forbid PKG REGEX: no crate matches.
+              require() {
+                if ! tree "$1" | grep -qE "^$2 v"; then
+                  echo "identity-deps: $1's graph has no $2 (an empty or broken tree?)" >&2; exit 1
+                fi
+              }
+              forbid() {
+                if tree "$1" | grep -E "^($2) v"; then
+                  echo "identity-deps: $1 must not depend on the crates above (#762)" >&2; exit 1
+                fi
+              }
+              require tessera-identity age
+              forbid tessera-identity 'hdf5[a-z-]*'
+              require tessera-wasm tessera-core
+              forbid tessera-wasm age
+              require tessera-py tessera-io
+              forbid tessera-py age
+            '';
+          });
+
           # **Gate A — the ingest determinism gate** (ADR-0057 §5, ADR-0056 §5). Where Gate B above
           # catches the *risk* on the PR that introduces it, Gate A catches a golden that actually moved.
           #

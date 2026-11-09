@@ -22,9 +22,9 @@ hdf5-metno.workspace = true
 hdf5-metno-sys.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Offline crypto-shred de-identification (ADR-0047 / #269): encrypt the DICOM identity document to
-# recipient `age` public keys. Host-only encrypt path; the decrypt (`reidentify`) lives in tessera-cli.
-age.workspace = true
+# Offline crypto-shred de-identification (ADR-0047 / #269): the envelope primitives live in the
+# hdf5-free tessera-identity (#762) and are re-exported as `tessera_ingest::identity`.
+tessera-identity.workspace = true
 # Transparent `.nii.gz` (#396 B2) — see the workspace manifest for why this costs no new dependency.
 flate2.workspace = true
 # Declarative ingest spec: pure-Rust TOML parser for `tessera-ingest::spec`. The engine canonicalizes
