@@ -195,7 +195,7 @@ fn fragment_groups<S>(
 /// Encode the row-groups staged in `paths` as one table block of `spec` into `sink` — every fragment
 /// compaction ([`TableStreamWriter::finish_to`] and [`table_job_from_fragments`]). Returns the bytes
 /// written.
-pub(crate) fn compact_fragments_to<W: Write>(
+pub(crate) fn compact_fragments_to<W: Write + Send>(
     spec: &TableSpec,
     paths: Vec<PathBuf>,
     sink: W,
@@ -214,7 +214,7 @@ pub(crate) fn compact_fragments_to<W: Write>(
 /// **A fragment read error wins over the encode's error.** After a failed read the encoder is fed
 /// empty row-groups, so the read error is the first cause, and whatever the encode then reports
 /// (its own failure, or a short block that is discarded) is downstream of it or beside the point.
-pub(crate) fn compact_to<S, W: Write>(
+pub(crate) fn compact_to<S, W: Write + Send>(
     spec: &TableSpec,
     sources: impl Iterator<Item = S> + Send + 'static,
     read: impl FnMut(S, &[Column]) -> Result<TableData> + Send + 'static,
@@ -364,7 +364,7 @@ impl TableStreamWriter {
     /// the encode holds one row-group of input and doesn't collect the output (see
     /// [`table::encode_streaming_to`]). Returns the bytes written. The bytes are those of
     /// [`Self::finish`]. On error, what `sink` received is not a valid block.
-    pub fn finish_to<W: Write>(mut self, sink: W) -> Result<u64> {
+    pub fn finish_to<W: Write + Send>(mut self, sink: W) -> Result<u64> {
         let paths = self.flush_trailing()?;
         compact_fragments_to(&self.spec, paths, sink)
     }

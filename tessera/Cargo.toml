@@ -44,14 +44,18 @@ half = "2"                                           # float16 array dtype (alre
 # Table block backend: Vortex (the settled columnar backend) — deterministic single-file writer +
 # reader. vortex-file pulls the default encoding crates (pco/alp/fsst/…); the sub-crates give the
 # exact import paths the probe verified. CurrentThreadRuntime drives the async write/read (no tokio).
-vortex-file = "0.75"
-vortex-array = "0.75"
+vortex-file = "0.93"
+vortex-array = "0.93"
 # compressor builder — exclude non-deterministic ALP, register deterministic Pco for float columns.
-vortex-btrblocks = { version = "0.75", features = ["pco"] }
-vortex-buffer = "0.75"
-vortex-io = "0.75"
-vortex-layout = "0.75"
-vortex-session = "0.75"
+vortex-btrblocks = { version = "0.93", features = ["pco"] }
+vortex-buffer = "0.93"
+# Edition declarations: the writer only emits encodings in an enabled edition (table::TABLE_EDITION).
+vortex-edition = "0.93"
+vortex-io = "0.93"
+vortex-layout = "0.93"
+# `StrictSortedBuffer`, the row-index selection type `ScanBuilder::with_row_indices` takes.
+vortex-scan = "0.93"
+vortex-session = "0.93"
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }     # tessera-cli
 # 8-bit greyscale PNG previews for `tsra slice|project --format png` (#387). Costs no new dependency:
@@ -79,9 +83,11 @@ hdf5-metno-sys = "0.12"
 # determinism gate and treats a decoder bump as a *deliberate corpus event*; a `^` range would let one
 # happen on an unrelated `cargo update`, which is the same discipline as the ALP-exclusion pin.
 #
-# Vortex 0.75 asks for `^58.3` and resolves to these same versions, so `arrow-array` / `-buffer` /
-# `-schema` are ALREADY in the default graph (Gate B snapshots all three) and these pins add no second
-# arrow copy. The floor is 58.4.1 because that is the first parquet on `thrift` 0.23, which fixes
+# These pins are a SECOND arrow copy in the graph. Vortex 0.93 depends on arrow `^59.2` (resolved
+# 59.3.2) for its own Arrow interop; tessera never passes an arrow value to or from Vortex, so the two
+# majors don't meet and the graph links. Moving these pins to 59 would collapse the two copies, but it
+# is a decoder bump and so a corpus event (the version goes into the sealed `ingest_decoder` digest).
+# The floor is 58.4.1 because that is the first parquet on `thrift` 0.23, which fixes
 # RUSTSEC-2026-0435 (unbounded allocation in thrift's binary-protocol `read_bytes`, #736); arrow and
 # parquet release in lockstep, so the arrow pins move with it.
 #
@@ -146,50 +152,61 @@ inherits = "release"
 lto = "thin"
 
 # --- vortex fork pin (#480 tracks removal) -------------------------------------------------------
-# vortex 0.75.0 has two determinism defects that both leak a WRITE-TIME STATISTIC into the
+# vortex 0.93.0 still has one determinism defect that leaks a WRITE-TIME STATISTIC into the
 # serialised bytes, so the sealed `content_hash` stops being a function of the data alone:
 #
-#   #468  the `debug_assertions`-gated `is_sorted` assert on patch indices caches `Stat::IsSorted`
-#         on them, so a debug-built writer emitted 24 bytes more than a release-built one.
-#   #472  `sum_float_all` skips NaN, so a column holding both `+inf` and `-inf` evaluates
-#         `inf + -inf`; the resulting default NaN is `0xfff8…` on x86_64 and `0x7ff8…` on aarch64,
-#         and `Stat::Sum` is persisted — so the bytes depended on the writing host.
+#   #468  the `debug_assertions`-gated `is_strict_sorted` assert on patch indices caches
+#         `Stat::IsSorted`, `Stat::IsStrictSorted` and `Stat::NullCount` on them, so a debug-built
+#         writer can emit different bytes from a release-built one. Upstream issue
+#         vortex-data/vortex#10119 is open; its PR #10121 was closed as stale, unmerged.
 #
-# Pinned to a FULL COMMIT SHA, never a branch name: a branch would let the pinned content move
-# underneath a lockfile that still looks unchanged.
+# The second fix the 0.75 pin carried, #472 (the arch-dependent NaN `Stat::Sum`), shipped upstream
+# in 0.89.0 (vortex-data/vortex#10122, canonicalised at write time in `stats/flatbuffers.rs`), so
+# the fork no longer carries it.
 #
-# Every vortex crate must be patched TOGETHER. Patching `vortex-array` alone leaves its siblings
-# resolving from crates.io, which yields two copies of `vortex-proto`/`vortex-buffer` and ~1000 type
+# Pinned to a FULL COMMIT SHA on `gerchowl/vortex:tessera/0.93.0-patched` (0.93.0 + the #468 fix +
+# a version commit), never a branch name: a branch would let the pinned content move underneath a
+# lockfile that still looks unchanged. The branch is locked against deletion and force-push, so
+# GitHub keeps the SHA.
+#
+# Every vortex crate in the graph must be patched TOGETHER. Patching `vortex-array` alone leaves its
+# siblings resolving from crates.io, which yields two copies of `vortex-buffer` & co and ~1000 type
 # errors. The fork branch also carries one non-upstream commit setting the workspace version to
-# 0.75.0: the tag ships the placeholder 0.1.0, and without that commit cargo reports
-# `patch ... was not used in the crate graph` and SILENTLY keeps using crates.io.
+# 0.93.0: the tag ships the placeholder 0.1.0, and without that commit cargo reports
+# `patch ... was not used in the crate graph` and SILENTLY keeps using crates.io. Every entry below
+# must show up as a `git+` source in `Cargo.lock`.
 #
-# REMOVE THIS BLOCK once a released vortex contains both fixes — see #480 for the checklist.
+# The patch applies to THIS workspace only: a crate that depends on tessera does not inherit it and
+# builds with crates.io vortex, without the #468 fix (#758).
+#
+# REMOVE THIS BLOCK once a released vortex contains the #468 fix — see #480 for the checklist.
 [patch.crates-io]
-vortex-alp = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-array = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-array-macros = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-btrblocks = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-buffer = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-bytebool = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-compressor = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-datetime-parts = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-decimal-byte-parts = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-error = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-fastlanes = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-file = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-flatbuffers = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-fsst = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-io = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-layout = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-mask = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-metrics = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-pco = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-proto = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-runend = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-scan = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-sequence = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-session = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-sparse = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-utils = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
-vortex-zigzag = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-alp = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-array = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-array-macros = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-arrow = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-btrblocks = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-buffer = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-bytebool = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-compressor = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-compute = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-datetime-parts = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-decimal-byte-parts = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-edition = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-error = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-expr = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-fastlanes = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-file = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-fsst = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-io = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-layout = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-mask = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-metrics = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-onpair = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-pco = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-scan = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-sequence = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-session = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-sparse = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-utils = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-zigzag = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
