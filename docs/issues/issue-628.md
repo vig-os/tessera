@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-18T22:23:57Z
-updated: 2026-10-25T09:11:24Z
+updated: 2026-11-08T11:44:04Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/628
-comments: 2
+comments: 3
 labels: feature, question, priority:medium, effort:large, area:core, area:io, area:integrity, adr
 assignees: none
 milestone: none
 projects: none
-parent: none
+parent: 778
 children: none
-synced: 2026-10-26T07:24:31.922Z
+synced: 2026-11-09T09:04:28.245Z
 ---
 
 # [Issue 628]: [perf(format): string-heavy tables are ~3x larger than Parquet — normalize forbids Vortex's zstd compact encoding](https://github.com/vig-os/tessera/issues/628)
@@ -60,4 +60,17 @@ Plan, in order:
 
 Order: the spike is queued in the design wave after #632/#655. It's not started yet.
 
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 8, 2026 at 11:44 AM_
+
+**Consumer data point for the format decision (epic #778, scitadel-hub).** The corpus is almost entirely strings: titles, abstracts, author and affiliation names, and US patent full text (claims and description).
+
+- **Sizes (estimates):** about 8×10⁶ patents at 50–100 GB of raw text, and OpenAlex works up to about 4.8×10⁸ rows (the quarterly snapshot is about 770 GB as zstd Parquet).
+- **What that means:** at the observed ≈3.4× of Parquet (348 vs 103 B/row), the full OpenAlex works set would seal at roughly 2.5 TB instead of about 770 GB. A topic subset of 10⁷ rows would be about 3× its Parquet size too. That makes this the biggest risk for the use case and the reason it sits in W0 of #778.
+- **For the spike:** please include a long-prose column, abstracts at 150–300 tokens and patent descriptions at 5–50k tokens, next to the JSON column. FSST alone does well on short repetitive strings and much worse on long prose, so the result may differ.
+- **Range reads:** the "whole-block reads" note matters here too. The corpus will live in an S3-compatible object store (versitygw, gerchowl/g-fleet#1121), and queries project a few columns out of wide rows.
 

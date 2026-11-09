@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-21T00:01:03Z
-updated: 2026-10-29T06:20:52Z
+updated: 2026-11-08T11:44:05Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/654
-comments: 3
+comments: 4
 labels: feature, priority:high, effort:large, epic, area:io, adr
 assignees: none
 milestone: none
 projects: none
-parent: none
+parent: 778
 children: 666, 667, 668, 669, 670, 671, 672, 673, 674, 675
-synced: 2026-10-29T08:04:16.099Z
+synced: 2026-11-09T09:04:27.336Z
 ---
 
 # [Issue 654]: [feat(query): streaming DataFusion TableProvider over table blocks (projection + filter pushdown, chunk-stat pruning, bounded memory)](https://github.com/vig-os/tessera/issues/654)
@@ -76,4 +76,19 @@ Owner decisions on ADR-0062's open questions (2026-10-26). ADR-0062 merged as Pr
 _Posted on October 29, 2026 at 06:20 AM_
 
 ADR-0062 acceptance is up in #698. It records owner decisions (a), (b) and (c) of 2026-10-26 as normative text: (a) in §5 declared mode, (b) in §7, and (c) as §5's key-only pre-pass and release gate, with the `[5, 6] [3, 5]` counterexample. #667's acceptance criteria now include the (c) release-gate test. Open questions #672–#675 are listed as not blocking acceptance. Review found #697 (the non-key spool default), filed against #668.
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 8, 2026 at 11:44 AM_
+
+**Blocker for epic #778 (scitadel-hub).** The corpus tables are 10⁷–10⁸ rows of string-heavy data, up to about 4.8×10⁸ for full OpenAlex works. Materialising into a `MemTable` (`tessera-cli/src/sql.rs:31`) is not an option at that size.
+
+The consumer needs, in order:
+1. #666: projection + filter pushdown with chunk pruning (year, topic and type filters are highly selective).
+2. #668: multi-product / Collection scans over a quarterly base product plus daily delta products, **over the object store** (an S3-compatible object store, versitygw, gerchowl/g-fleet#1121).
+3. Row ids that survive projection and filtering, so BM25 (#775) and vector (#769) top-k results can be joined back to their rows.
+
+#666, #668 and stable row ids are the W1 gate in #778.
 

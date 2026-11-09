@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-11-08T02:43:13Z
-updated: 2026-11-08T02:43:13Z
+updated: 2026-11-09T04:50:41Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/770
-comments: 0
+comments: 1
 labels: none
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-08T08:33:51.770Z
+synced: 2026-11-09T09:04:24.128Z
 ---
 
 # [Issue 770]: [docs(adr): ADR-0064 §8.1 plateau as a slope test over all runs (second amendment)](https://github.com/vig-os/tessera/issues/770)
@@ -34,4 +34,16 @@ Second amendment to ADR-0064 §8/§8.1 (after #760 / PR #764), per the owner's r
 - τ, s, s_rss, the ceilings and the criterion-6 setup are unchanged unless the ADR argues otherwise explicitly.
 
 Refs: #715, #677
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 9, 2026 at 03:22 AM_
+
+**Owner ruling, 2026-11-09: close the coverage gap with more W=1 runs.**
+
+The fresh review of PR #773 (6c3cc14) confirmed every number. It also found that at k = 3, the test reliably catches per-leaf growth only above about 13.2 KB/leaf at W=4 and 15.5 KB/leaf at W=1, while `c_leaf` is about 8 KB/leaf. So extra RssAnon of roughly 8–13 KB/leaf held outside `WriteSession` (allocator, encoder) would pass: about +2–3 MB at 573 leaves. `session_leaf_memory.rs` pins only the session's own heap.
+
+Decision: the amendment derives how many W=1 repeats per size bring W=1's detection floor down to `c_leaf`'s excess, i.e. growth beyond c_leaf at the stated power. The reviewer's estimate is 3–4 repeats, about 12–16 runs. G r4 runs that many. W=4 stays at k = 3. The detection floors at both W are written into the ADR as stated limits.
 

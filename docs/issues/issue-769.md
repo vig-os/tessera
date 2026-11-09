@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-06T14:42:13Z
-updated: 2026-11-06T14:42:13Z
+updated: 2026-11-09T03:32:38Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/769
-comments: 0
+comments: 2
 labels: feature, area:core, area:io
 assignees: none
 milestone: none
 projects: none
-parent: none
+parent: 778
 children: none
-synced: 2026-11-07T08:18:16.339Z
+synced: 2026-11-09T09:04:24.605Z
 ---
 
 # [Issue 769]: [feat(io): strict-Vortex vector search — exact scan, IVF-flat in Vortex, optional HNSW as an ADR-0054 aux cache](https://github.com/vig-os/tessera/issues/769)
@@ -102,4 +102,28 @@ Depends on: #768 (native `fixed_size_list` carrier for declared vector columns).
 
 Refs: #299 (external vector DB integration), #310 (quantization precedent), ADR-0024, ADR-0026, ADR-0040, ADR-0054,
 ADR-0056 §2, ADR-0059, ADR-0062.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 8, 2026 at 11:44 AM_
+
+**Consumer requirements from epic #778 (scitadel-hub):**
+
+- **Scale:** exact scan must handle 8×10⁶ × 768-d (≈12 GB f16), which fits a single GPU or large RAM. The 10⁸ × 384-d case needs IVF-flat (or HNSW as a cache) with filters applied **before or during** the search: year, topic and type pre-filters are the norm, not the exception.
+- **Hybrid query:** the dominant query is hybrid. `vec_topk(...)` has to compose with the BM25 table function from #775 (reciprocal-rank fusion) and with ordinary predicates in one SQL statement, joined by row id.
+- **Many products:** queries span many products (a quarterly base plus daily deltas, #668), so a merged top-k across per-product indexes is required.
+- **Typical k:** 100–5000. The candidate set is then re-scored outside tessera.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 9, 2026 at 03:32 AM_
+
+**Owner ruling, 2026-11-09 (search dependencies):** derived search caches are **optional, feature-gated, and pure Rust**.
+- tantivy (#775) is allowed, being pure Rust. An HNSW tier (#769) must be pure Rust: no C++ such as usearch.
+- The lean, WASM and determinism builds never pull them.
+- A cache never enters `content_hash`; that depends on #720 (derived blocks out of identity), so these land after #720.
 

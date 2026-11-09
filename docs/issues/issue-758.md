@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-03T18:07:31Z
-updated: 2026-11-03T18:07:31Z
+updated: 2026-11-08T11:44:08Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/758
-comments: 0
+comments: 1
 labels: bug
 assignees: none
 milestone: none
 projects: none
-parent: none
+parent: 778
 children: none
-synced: 2026-11-04T08:35:52.353Z
+synced: 2026-11-09T09:04:26.425Z
 ---
 
 # [Issue 758]: [fix(build): tessera's vortex fork pin is a workspace [patch], so dependents silently build with crates.io vortex 0.75.0 and lose both determinism fixes](https://github.com/vig-os/tessera/issues/758)
@@ -33,3 +33,13 @@ A downstream product can therefore seal a different `content_hash` than tessera'
 Related: #480 (removing the pin once upstream releases both fixes), #677 consumer.
 
 Refs: #715
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 8, 2026 at 11:44 AM_
+
+**Downstream impact (epic #778):** scitadel-hub will be a direct downstream dependent of tessera's io and query crates, sealing corpus products of 10⁷–10⁸ rows. Under the workspace `[patch]` pin it would silently build against crates.io vortex 0.75.0 and lose both determinism fixes. Its quarterly rebuilds and its Hugging Face publications would then seal differently from tessera's own CLI.
+
+This sits in W0 of #778. Fix it before the first external dependent exists, so the gap never ships.
+

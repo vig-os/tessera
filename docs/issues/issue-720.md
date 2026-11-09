@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-30T02:08:08Z
-updated: 2026-11-03T12:58:18Z
+updated: 2026-11-09T03:32:41Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/720
-comments: 1
+comments: 2
 labels: bug, priority:high
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-04T08:35:57.331Z
+synced: 2026-11-09T09:04:26.886Z
 ---
 
 # [Issue 720]: [bug(core): derived-sidecar blocks are folded into content_hash, contradicting Accepted ADR-0028 §4](https://github.com/vig-os/tessera/issues/720)
@@ -78,4 +78,12 @@ Scope for the ADR (owner discussion 2026-11-03): make the hash topology a single
 2. **The product schema must not define identity.** It may only classify a block kind as derived within format rules (it must carry `from` and `recipe` and be recomputable); everything else is canonical. Otherwise a schema could remove real data from `content_hash`.
 3. **Leaf ordering.** Today it is manifest order, and `merkle_is_order_sensitive` pins it, so the same blocks written in a different order give a different `content_hash`. Decide on a canonical order (e.g. by block name, which must stay consistent with partition leaf order `<table>/NNNN`) or keep writer order deliberately, with the reason.
 4. **What each hash vouches for**, stated in one table in SPEC. In particular, `content_hash` does not vouch for accelerators; readers that use an index must verify `derived_hash` or `manifest_hash`.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 9, 2026 at 03:32 AM_
+
+Scheduling note (2026-11-09): the #778 epic's sealed column carriers, #768 (declared vector) and #779 (declared media), should be folded into this ADR-0059 format event, not shipped as separate point changes. Several #778 children (#775, #776, #769 tier 2, #782) depend on this issue's derived-block identity exclusion.
 

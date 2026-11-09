@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-18T23:50:37Z
-updated: 2026-10-19T00:00:07Z
+updated: 2026-11-09T03:36:48Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/635
-comments: 1
+comments: 2
 labels: dependencies, priority:medium, area:core
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-19T07:17:41.519Z
+synced: 2026-11-09T09:04:27.786Z
 ---
 
 # [Issue 635]: [build(deps): plan the vortex 0.75 → upstream jump (fork is 13 releases behind, no bumps flow)](https://github.com/vig-os/tessera/issues/635)
@@ -47,4 +47,18 @@ work, wasm).
 _Posted on October 19, 2026 at 12:00 AM_
 
 Gate audit (2026-10-19): forward determinism is guarded (golden hashes over the encoded Vortex bytes on both arches; Gate A/B; seal-profile-determinism), but backward read, rich committed table fixtures and size are NOT. Order before the jump: 636 (backward-read value goldens) → 637 (size ratchet) → 638 (canary + changelog review checklist) → the planned jump. Also: Gate B's vortex-*.txt snapshots embed the fork rev, and table.rs:1640's hardcoded 2772/2916/2444 lengths will move on any bump.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 9, 2026 at 03:36 AM_
+
+Update, 2026-11-09: upstream is at **0.93.0** (2026-11-06). The pin is `gerchowl/vortex` @ 608d8a1 (0.75.0), so we are now **18 releases behind**.
+
+New reasons this matters for the #778 epic:
+- **Layout plugins.** Upstream 0.91.0 notes "Layout plugins read and write more than one wire ID". Custom and auxiliary layouts (`LayoutSpec { id }`, resolved from the registry at read time) are how a derived index could be held in a `.vortex` sidecar. At our pin, `docs/developer-guide/extending/writing-a-layout.md` is "under construction".
+- **FixedSizeList.** Upstream 0.89.0 adds DuckDB `ARRAY` round-trip for FixedSizeList scalars, which is relevant to #768.
+
+Also recorded: a derived index stored *inside* a sealed block moves `content_hash`. Vortex's footer has no user-metadata slot, and everything is reachable through the layout tree. So in-Vortex layouts are a container choice for ADR-0054 caches, not a replacement for #720.
 

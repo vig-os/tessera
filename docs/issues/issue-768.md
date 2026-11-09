@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-06T14:41:55Z
-updated: 2026-11-06T14:42:24Z
+updated: 2026-11-08T11:44:06Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/768
-comments: 1
+comments: 2
 labels: feature, area:core, area:io, area:ingest
 assignees: none
 milestone: none
 projects: none
-parent: none
+parent: 778
 children: none
-synced: 2026-11-07T08:18:16.650Z
+synced: 2026-11-09T09:04:25.075Z
 ---
 
 # [Issue 768]: [feat(ingest): wide FixedSizeList (N > 8) has no carrier — store declared vector columns natively as a Vortex fixed_size_list](https://github.com/vig-os/tessera/issues/768)
@@ -84,4 +84,21 @@ alongside).
 _Posted on November 6, 2026 at 02:42 PM_
 
 Blocks #769 (strict-Vortex vector search).
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 8, 2026 at 11:44 AM_
+
+**Consumer sizes from epic #778 (scitadel-hub):**
+
+| Column | Rows | Width / dtype |
+|---|---|---|
+| Patent embeddings (PatentSBERTa) | ≈8×10⁶ | 768-d |
+| OpenAlex abstract embeddings (MiniLM-class) | ≈10⁸ | 384-d |
+| Graph node embeddings, node2vec / GraphSAGE (#776) | up to 10⁸ | 64–256-d |
+
+- **dtype:** both **f16** and **i8 + scale** are wanted for the 10⁸ case (about 77 GB vs about 38 GB), with **f32** kept for small exact sets. Please keep f16 native rather than widened (`f16_widen` today), at least for declared vector columns.
+- **Export:** these columns should export to Parquet as `FixedSizeList` (#777), so Hugging Face `datasets` sees a vector column.
 
