@@ -115,12 +115,41 @@ normalise() {
     -e 's#(tessera-(core|io|cli|ingest|py|wasm)) v[0-9][^ ]*#\1 vWORKSPACE#g'
 }
 
+# The versions of crate `$1` in Cargo.lock, one per line, in version order.
+locked_versions() {
+  awk -v name="$1" '
+    $0 == "[[package]]" { pkg = "" }
+    $1 == "name" && $3 == "\"" name "\"" { pkg = name }
+    $1 == "version" && pkg != "" { gsub(/"/, "", $3); print $3; pkg = "" }
+  ' Cargo.lock | sort -uV
+}
+
+snapshot() {
+  cargo tree --quiet --locked --offline --all-features --charset ascii --target all \
+    -e features -i "$1" \
+    | normalise \
+    | sort
+}
+
+# A crate resolved at more than one version (vortex 0.93 brings its own arrow 59 next to the
+# workspace's `=58.4.1` ingest pins, #635) makes a bare `-i <crate>` ambiguous. Every copy can move
+# sealed bytes, so each gets its own `## <crate>@<version>` section; a crate with one version keeps
+# the plain, header-less snapshot.
 cd "${workspace_dir}"
 for c in "${CRATES[@]}"; do
-  cargo tree --quiet --locked --offline --all-features --charset ascii --target all \
-    -e features -i "${c}" \
-    | normalise \
-    | sort > "${out_dir}/${c}.txt"
+  mapfile -t versions < <(locked_versions "${c}")
+  if [ "${#versions[@]}" -eq 0 ]; then
+    echo "${c} is not in Cargo.lock; the seal-path list above is stale" >&2
+    exit 1
+  fi
+  if [ "${#versions[@]}" -eq 1 ]; then
+    snapshot "${c}" > "${out_dir}/${c}.txt"
+  else
+    for v in "${versions[@]}"; do
+      echo "## ${c}@${v}"
+      snapshot "${c}@${v}"
+    done > "${out_dir}/${c}.txt"
+  fi
 done
 
 echo "wrote ${#CRATES[@]} feature snapshots to ${out_dir}"
