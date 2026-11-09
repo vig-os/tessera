@@ -94,6 +94,7 @@
           "/crates/tessera-ingest/tests/producer_equality.py" = [ "ingest-producer-equality" ];
           "/crates/tessera-wasm/tests/smoke.cjs" = [ "wasm-bindgen-smoke" ];
           "/corpus/reference_reader/run.py" = [ "reference-reader" ];
+          "/bench/ksb/677-rss-proof/test_run.py" = [ "rss-proof-evaluator" ];
         } // pkgs.lib.optionalAttrs isLinux {
           "/bench/ecosystems/test_common.py" = [ "bench-ecosystems" ];
         };
@@ -107,7 +108,8 @@
             + "(bench/ecosystems/README.md). Numbers from a shared CI runner would not be meaningful";
           "/bench/ksb/677-rss-proof/run.py" =
             "the ADR-0064 §8.1 RSS proof, a ksb batch job (its own flake): it needs a 4-CPU exclusive "
-            + "job with its own cgroup and --mem, disk-backed scratch and /dev/shm, and hours of runs";
+            + "job with its own cgroup and --mem, disk-backed scratch and /dev/shm, and hours of runs. "
+            + "Its criterion-2 arithmetic is run by rss-proof-evaluator, through test_run.py";
         } // pkgs.lib.optionalAttrs (!isLinux) {
           "/bench/ecosystems/test_common.py" =
             "Linux-only: common.py uses CDLL('libc.so.6'), mincore(2) and posix_fadvise";
@@ -1296,6 +1298,25 @@
             HOME=$TMPDIR bash ${./scripts/last-release-tag.sh} --self-test
             touch $out
           '';
+
+          # The ADR-0064 §8.1 RSS proof's evaluator (#715): criterion 2's slope test (ADR-0064 B.2-B.5)
+          # checked against the recorded ksb numbers ADR-0064 B.4 tabulates, the pre-#759 writer's
+          # failure included. The proof itself is a ksb job (tessera/bench/ksb/677-rss-proof, its own
+          # flake); this runs only its offline arithmetic. Its source is ONLY run.py + test_run.py.
+          rss-proof-evaluator =
+            let
+              src = builtins.path {
+                name = "rss-proof-evaluator-src";
+                path = ./tessera/bench/ksb/677-rss-proof;
+                filter = path: _type: builtins.elem (baseNameOf path) [ "run.py" "test_run.py" ];
+              };
+            in
+            pkgs.runCommand "rss-proof-evaluator"
+              { nativeBuildInputs = [ (pkgs.python312.withPackages (ps: [ ps.pytest ])) ]; } ''
+              cp ${src}/run.py ${src}/test_run.py .
+              python3 -m pytest -q -p no:cacheprovider test_run.py
+              touch $out
+            '';
 
           # The CI summary of a `nix flake check` leg (nix-check.yml) counts per-check verdicts and
           # holds the evaluated set of checks to .github/nix-flake-checks.txt by name (#722). Its

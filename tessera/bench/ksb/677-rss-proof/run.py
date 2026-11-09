@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""ADR-0064 §8.1, as amended by #760: the RSS proof of `StreamWriter::push_table` with the consumer reproducer (#715).
+"""ADR-0064 §8.1, as amended by #760 and #770: the RSS proof of `StreamWriter::push_table` with the consumer reproducer (#715).
 
 Two ksb jobs, each a subcommand that runs the reproducer, writes `records.json` to `--out` and then evaluates it:
 
 - `job` (criteria 1-5): the sweep, with every session and output directory on a volume that `statfs` shows is NOT
-  tmpfs (else the job fails before any row is written). Each W = 4 point of 64 blocks or more runs 3 times (A.2),
-  every other point once. Per run it records the exit code, the 10 ms samples' peaks, the input row-group at the
+  tmpfs (else the job fails before any row is written). Each W = 4 point of 64 blocks or more runs k = 3 times
+  (A.2), each W = 1 point of 16 blocks or more k₁ times (B.5), every other point once. Per run it records the exit code, the 10 ms samples' peaks, the input row-group at the
   `RssAnon` peak, the CPUs it may run on, the cgroup's anon and processes just before and after it (criterion 3
   counts only the anon the run added) and the sealed manifest (kept as `<run>.manifest.json`, summarised in
   `records.json`); at 268 M rows it also prints the wall times and the session device's `%util` as context (A.3,
@@ -14,25 +14,35 @@ Two ksb jobs, each a subcommand that runs the reproducer, writes `records.json` 
   `/dev/shm`. Its guard is the converse one (A.3): they MUST be tmpfs, else the job fails, so neither job can
   silently measure the other's setup. The speed-up only counts with the 4 CPUs of `--cpu 4 --exclusive-cpus`.
 
+Criterion 2 is B.3's slope test: per W, the OLS slope of peak `RssAnon` against leaves over every run at n ≥ 16 W
+(each repeat its own point), with its standard error from the runs' own residuals. It passes only if the slope is at
+most `c_leaf` plus the one-sided 95 % margin `t₀.₉₅,N−2 · SE` (slope), and the detection floor `2 t · SE` is at most
+δ_z = 0.029 B/row (resolution) and, at W = 1, at most `c_leaf` (B.5's re-check). An unresolved run is inconclusive,
+and fails. The W = 4 floor is printed as a stated limit. `test_run.py` pins this arithmetic to ADR-0064's B.4 and B.5 tables.
+
+`job` can run as shards (`--workers`, `--rows`, `--reps`: the repeat indices of each point to run), so the repeats run
+in parallel ksb jobs rather than serially in one of ~24 h. A shard's exit code checks only that its own runs
+completed, guards included; the criteria are checked over all shards by `run.py evaluate DIR...`, which refuses
+shards of different binaries (R₀ and R₁ calibrate one binary) or a repeat recorded twice.
+
 `records.json` is rewritten after every run, so a job that dies keeps the runs it finished. `run.py --out DIR
-evaluate` (`--out` before the subcommand, default `$KSB_JOB_OUT`) re-checks one offline, the guards included. Every
-criterion prints its numbers and bound; the exit code is 1 if any fails. A criterion whose runs are missing or failed
-fails: it is never passed on no data.
+evaluate` (`--out` before the subcommand, default `$KSB_JOB_OUT`), or `run.py evaluate DIR...` over a job's shards,
+re-checks one offline, the guards included. Every criterion prints its numbers and bound; the exit code is 1 if any
+fails. A criterion whose runs are missing or failed fails: it is never passed on no data.
 """
 
 import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
-import statistics
 import subprocess
 import sys
 import time
 import zipfile
-from itertools import combinations
 from pathlib import Path
 
 MIB = 1 << 20
@@ -54,11 +64,13 @@ WORKERS = (1, 4)
 ROWS = (0, 4_194_304, 67_108_864, 268_435_456, 1_073_741_824, 2_400_000_000)
 MID = 268_435_456  # criteria 5 and 6, and the A.3 context
 REPEATS = 3  # A.2: k, for each W = 4 point of 64 blocks or more
+K1 = 6  # B.5: k₁, for each W = 1 point of 16 blocks or more (the floor at r3's noise ≤ c_leaf)
 PLATEAU_FROM = {
     1: 16,
     4: 64,
 }  # criterion 2: n ≥ 16 W blocks at W = 4, from 16 blocks at W = 1
-TAU = 0.05
+ALPHA = 0.05  # B.3: the slope test's one-sided level, per W
+DELTA_Z = 121_635  # B.3: δ_z, the zone-statistics regression (0.029 B/row) in B/leaf, which criterion 2 must resolve
 SPEEDUP = 1.5  # criterion 6
 
 
@@ -73,8 +85,11 @@ def blocks(rows):
 
 
 def repeats(w, rows):
-    """A.2: 3 runs of each W = 4 point at 64 blocks or more, 1 of every other point."""
-    return REPEATS if w == 4 and blocks(rows) >= 64 else 1
+    """A.2 and B.5: k runs of each W = 4 point at 64 blocks or more, k₁ of each W = 1 point at 16 blocks or more
+    (the runs criterion 2 fits, n ≥ 16 W), 1 of every other point."""
+    if blocks(rows) >= PLATEAU_FROM[w]:
+        return {1: K1, 4: REPEATS}[w]
+    return 1
 
 
 def mib(b):
@@ -125,6 +140,130 @@ def summary(manifest):
 def c_leaf(e):
     """A.1: c_leaf = 2 · (e_leaf + b_leaf), the factor 2 being the allocator-retention allowance."""
     return 2 * (e + B_LEAF)
+
+
+def t_quantile(p, df):
+    """The p-quantile (p > 0.5) of Student's t with `df` degrees of freedom, by bisection on its CDF: t's upper tail
+    is I_x(df/2, 1/2) / 2 at x = df / (df + t²), the regularized incomplete beta function."""
+
+    def ibeta(a, b, x):
+        # Lentz's continued fraction for I_x(a, b) (Numerical Recipes §6.4), on the side where it converges fast.
+        if x > (a + 1) / (a + b + 2):
+            return 1 - ibeta(b, a, 1 - x)
+        front = (
+            math.exp(
+                math.lgamma(a + b)
+                - math.lgamma(a)
+                - math.lgamma(b)
+                + a * math.log(x)
+                + b * math.log1p(-x)
+            )
+            / a
+        )
+        tiny, c, d, f = 1e-300, 1.0, 0.0, 1.0
+        for i in range(400):
+            m = i // 2
+            if i == 0:
+                num = 1.0
+            elif i % 2:
+                num = -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1))
+            else:
+                num = m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m))
+            d = 1 + num * d
+            d = 1 / (d if abs(d) > tiny else tiny)
+            c = 1 + num / c
+            c = c if abs(c) > tiny else tiny
+            f *= c * d
+            if abs(1 - c * d) < 1e-15:
+                return front * (f - 1)
+        raise ArithmeticError(f"incomplete beta I_{x}({a}, {b}) did not converge")
+
+    lo, hi = 0.0, 1e3
+    for _ in range(200):
+        t = (lo + hi) / 2
+        if 1 - ibeta(df / 2, 0.5, df / (df + t * t)) / 2 < p:
+            lo = t
+        else:
+            hi = t
+    return (lo + hi) / 2
+
+
+def slope_test(w, points, e):
+    """B.2 and B.3: the OLS slope of peak RssAnon (bytes) against leaves over `points`, the (n, RssAnon) of every run
+    at n ≥ 16 W, and criterion 2's checks on it, as (name, ok, detail) triples. `e` is e_leaf, the largest over the
+    runs. W = 1 also carries B.5's re-check: its detection floor at the measured SE must be at most c_leaf, so a
+    run too noisy to see a growth of c_leaf beyond c_leaf is inconclusive, and fails."""
+    big_n = len(points)
+    if big_n < 3 or len({n for n, _ in points}) < 2:
+        return {}, [
+            (
+                f"2 plateau W={w}",
+                False,
+                f"{big_n} runs at {sorted({n for n, _ in points})} leaves: "
+                "an OLS slope with a standard error needs 3 runs or more at 2 sizes or more",
+            )
+        ]
+    n_bar = sum(n for n, _ in points) / big_n
+    y_bar = sum(y for _, y in points) / big_n
+    snn = sum((n - n_bar) ** 2 for n, _ in points)
+    b = sum((n - n_bar) * (y - y_bar) for n, y in points) / snn
+    a = y_bar - b * n_bar
+    sigma = math.sqrt(sum((y - a - b * n) ** 2 for n, y in points) / (big_n - 2))
+    se = sigma / math.sqrt(snn)
+    t = t_quantile(1 - ALPHA, big_n - 2)
+    c, margin = c_leaf(e), t * se
+    floor = (
+        2 * margin
+    )  # B.3: the growth beyond c_leaf detected with probability ≥ 95 %, the resolution
+    fit = {
+        "N": big_n,
+        "b": b,
+        "se": se,
+        "t": t,
+        "bound": c + margin,
+        "floor": floor,
+        "c_leaf": c,
+        "sigma": sigma,
+        "n_bar": n_bar,
+        "snn": snn,
+    }
+    per_row = f"{b / BLOCK_ROWS:.4f} B/row"
+    sizes = ", ".join(
+        f"{n}: {[round(y / MIB, 2) for m, y in points if m == n]}"
+        for n in sorted({n for n, _ in points})
+    )
+    detail = (
+        f"N {big_n}, b̂ {b:,.0f} B/leaf ({per_row}), SE {se:,.0f}, t₀.₉₅,{big_n - 2} {t:.3f}, "
+        f"σ̂ {sigma / MIB:.2f} MiB, n̄ {n_bar:.2f}, Sₙₙ {snn:,.0f}"
+    )
+    checks = [
+        (
+            f"2 plateau W={w}: slope",
+            b <= fit["bound"],
+            f"b̂ {b:,.0f} ≤ c_leaf {c:,} B (e_leaf {e} B) + t · SE {margin:,.0f} = {fit['bound']:,.0f} B/leaf; "
+            f"{detail}; MiB per leaves {{{sizes}}}",
+        ),
+        (
+            f"2 plateau W={w}: resolution",
+            floor <= DELTA_Z,
+            f"detection floor 2 t · SE {floor:,.0f} ≤ δ_z {DELTA_Z:,} B/leaf (0.029 B/row); else inconclusive",
+        ),
+    ]
+    if w == 1:
+        checks.append(
+            (
+                f"2 plateau W={w}: re-check",
+                floor <= c,
+                f"detection floor 2 t · SE {floor:,.0f} ≤ c_leaf {c:,} B/leaf at N {big_n} (B.5: else "
+                "inconclusive, and k₁ is re-derived from this σ̂ by an amendment)",
+            )
+        )
+    else:
+        print(
+            f"LIMIT 2 plateau W={w}: detection floor {floor:,.0f} B/leaf ({floor / BLOCK_ROWS:.4f} B/row), "
+            "a stated limit, not a check (B.4)"
+        )
+    return fit, checks
 
 
 def statfs_type(path):
@@ -243,6 +382,7 @@ def run_once(a, w, rows, rep, out, want_tmpfs):
         "session_fs": hex(statfs_type(session)),
         "output_fs": hex(statfs_type(a.output_root)),
         "cpus": len(os.sched_getaffinity(0)),
+        "binary": str(Path(a.binary).resolve()),
         "cgroup_before": before,
         "cgroup_after": cgroup_snapshot(),
     }
@@ -353,25 +493,20 @@ def evaluate_proof(v):
                     f"{c_leaf(e)} B (e_leaf {e} B) · n {n} = {mib(bound)}",
                 )
 
-    # 2. Plateau, on the medians of a W = 4 point's 3 runs and on W = 1's single runs.
+    # 2. Plateau, the OLS slope over every run at n ≥ 16 W, each repeat its own point (B.2, B.3).
     for w in WORKERS:
         sizes = [rows for rows in ROWS if blocks(rows) >= PLATEAU_FROM[w]]
-        for n1, n2 in combinations(sizes, 2):
-            name = f"2 plateau W={w} n={blocks(n1)}→{blocks(n2)}"
-            p = [v.need(name, w, rows, repeats(w, rows)) for rows in (n1, n2)]
-            if None in p:
-                continue
-            m1, m2 = (statistics.median(r["rss_anon"] for r in runs) for runs in p)
-            e = max(r["e_leaf"] for runs in p for r in runs)
-            dn = blocks(n2) - blocks(n1)
-            bound = (1 + TAU) * m1 + c_leaf(e) * dn
-            med = "median of 3 " if len(p[0]) > 1 else ""
-            v.verdict(
-                name,
-                m2 <= bound,
-                f"{med}RssAnon {mib(m2)} ≤ 1.05 · {mib(m1)} + c_leaf {c_leaf(e)} B (e_leaf {e} B) · (n₂ − n₁) "
-                f"{dn} = {mib(bound)}; runs {[mib(r['rss_anon']) for r in p[0]]} → {[mib(r['rss_anon']) for r in p[1]]}",
-            )
+        p = [v.need(f"2 plateau W={w}", w, rows, repeats(w, rows)) for rows in sizes]
+        if None in p:
+            continue
+        runs = [r for point in p for r in point]
+        _, checks = slope_test(
+            w,
+            [(r["leaves"], r["rss_anon"]) for r in runs],
+            max(r["e_leaf"] for r in runs),
+        )
+        for check in checks:
+            v.verdict(*check)
 
     big = ROWS[-1]
     # 3. Page cache is reclaimable; 4. the consumer's budget. Every run of the point.
@@ -421,21 +556,23 @@ def evaluate_proof(v):
                 f"RssAnon {mib(r['rss_anon'])} < 8 GiB",
             )
 
-    # 5. Bytes and names: canonical manifests minus the §6 fields, and content_hash, W = 1 against each W = 4 run.
+    # 5. Bytes and names: canonical manifests minus the §6 fields, and content_hash. Every run at 268 M rows, both W
+    # and every repeat, against W = 1's first: equality is transitive, so that covers every W = 1 / W = 4 pair.
     one, four = (
-        v.need("5 bytes and names", 1, MID),
+        v.need("5 bytes and names", 1, MID, repeats(1, MID)),
         v.need("5 bytes and names", 4, MID, repeats(4, MID)),
     )
     if one is not None and four is not None:
-        c1 = one[0]["canonical"]
-        for i, r4 in enumerate(four):
-            c4 = r4["canonical"]
-            differ = sorted(k for k in c1.keys() | c4.keys() if c1.get(k) != c4.get(k))
+        ref = one[0]
+        c1 = ref["canonical"]
+        for r in one[1:] + four:
+            c = r["canonical"]
+            differ = sorted(k for k in c1.keys() | c.keys() if c1.get(k) != c.get(k))
             v.verdict(
-                f"5 bytes and names rows={MID} W=4 run {i + 1}",
-                not differ and one[0]["content_hash"] == r4["content_hash"],
-                f"canonical manifests W=1 vs W=4 differ in {differ or 'nothing'} ({one[0]['blocks']} blocks, "
-                f"keys {sorted(c1)}), content_hash {one[0]['content_hash']} vs {r4['content_hash']}",
+                f"5 bytes and names rows={MID} W={r['workers']} run {r['rep'] + 1} vs W=1 run {ref['rep'] + 1}",
+                not differ and ref["content_hash"] == r["content_hash"],
+                f"canonical manifests differ in {differ or 'nothing'} ({ref['blocks']} blocks, keys {sorted(c1)}), "
+                f"content_hash {ref['content_hash']} vs {r['content_hash']}",
             )
 
     # A.3/A.4 context, never a verdict: the shared scratch disk's wall times and %util at 268 M rows.
@@ -469,13 +606,66 @@ def evaluate_parallel(v):
     return v.close("criterion 6")
 
 
-def evaluate(out):
-    records = json.loads(Path(out, "records.json").read_text())
+def load(dirs):
+    """The runs of one job's records, merged over its shards' dirs. Shards are one job split for wall time: they
+    must be the same job kind, the same binary (R₀ and R₁ calibrate it, §8.1), and no point's repeat twice."""
+    jobs, runs = set(), []
+    for d in dirs:
+        records = json.loads(Path(d, "records.json").read_text())
+        jobs.add(records["job"])
+        runs += records["runs"]
+    if len(jobs) != 1:
+        raise SystemExit(
+            f"FAIL merge: the dirs hold records of jobs {sorted(jobs)}, not one"
+        )
+    binaries = {r.get("binary") for r in runs}
+    if len(dirs) > 1 and (None in binaries or len(binaries) != 1):
+        raise SystemExit(
+            f"FAIL merge: shards ran binaries {sorted(map(str, binaries))}, not one"
+        )
+    keys = [(r["workers"], r["rows"], r["rep"]) for r in runs]
+    dup = sorted({k for k in keys if keys.count(k) > 1})
+    if dup:
+        raise SystemExit(f"FAIL merge: (W, rows, rep) {dup} recorded more than once")
+    return jobs.pop(), runs
+
+
+def job_plan(workers=WORKERS, rows=ROWS, reps=None):
+    """The `job` runs as (W, rows, rep), in run order; with the defaults, the full design of criteria 1-5, and
+    anything less is a shard."""
+    return [
+        (w, r, k)
+        for w in workers
+        for r in rows
+        for k in range(repeats(w, r))
+        if reps is None or k in reps
+    ]
+
+
+def check_shard(out, plan):
+    """A shard's own exit code: each planned run completed, on the right filesystem, with the right leaf count.
+    The criteria need every shard's runs, so `evaluate DIR...` checks them; this is not a criterion."""
+    _, runs = load([out])
+    v = Verdicts(runs, want_tmpfs=False)
+    for w, rows in sorted({(w, rows) for w, rows, _ in plan}):
+        v.need(
+            f"shard W={w} rows={rows}",
+            w,
+            rows,
+            sum(1 for p in plan if p[:2] == (w, rows)),
+        )
+    return v.close(
+        f"shard of {len(plan)} runs (criteria: `evaluate` over every shard's records)"
+    )
+
+
+def evaluate(*dirs):
+    job, runs = load(dirs)
     check, want_tmpfs = {
         "proof": (evaluate_proof, False),
         "parallel": (evaluate_parallel, True),
-    }[records["job"]]
-    return check(Verdicts(records["runs"], want_tmpfs))
+    }[job]
+    return check(Verdicts(runs, want_tmpfs))
 
 
 def main():
@@ -507,21 +697,29 @@ def main():
     job = sub.choices["job"]
     job.add_argument("--workers", type=int, nargs="+", default=WORKERS)
     job.add_argument("--rows", type=int, nargs="+", default=ROWS)
-    sub.add_parser("evaluate", help="check the criteria over --out/records.json")
+    job.add_argument(
+        "--reps",
+        type=int,
+        nargs="+",
+        help="a shard: only these repeat indices of each point (index i runs where i < the point's k); the "
+        "job then checks its own runs only, and `evaluate DIR...` checks the criteria over all shards",
+    )
+    ev = sub.add_parser(
+        "evaluate",
+        help="check the criteria over the records.json of --out, or of each DIR",
+    )
+    ev.add_argument("dirs", nargs="*", help="records dirs of one job's shards, merged")
     a = p.parse_args()
-    if a.out is None:
+    if a.out is None and not getattr(a, "dirs", None):
         p.error("--out or $KSB_JOB_OUT is required")
     if a.cmd == "job":
-        plan = [
-            (w, rows, k)
-            for w in a.workers
-            for rows in a.rows
-            for k in range(repeats(w, rows))
-        ]
+        plan = job_plan(a.workers, a.rows, a.reps)
         sweep(a, "proof", plan, want_tmpfs=False)
+        if plan != job_plan():
+            sys.exit(check_shard(a.out, plan))
     elif a.cmd == "parallel":
         sweep(a, "parallel", [(1, MID, 0), (4, MID, 0)], want_tmpfs=True)
-    sys.exit(evaluate(a.out))
+    sys.exit(evaluate(*(getattr(a, "dirs", None) or [a.out])))
 
 
 if __name__ == "__main__":

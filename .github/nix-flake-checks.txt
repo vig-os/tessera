@@ -10,7 +10,7 @@
 #     evaluated against this list, so an evaluation that comes back empty or short turns the leg red
 #     instead of reporting "0 passed, 0 failed".
 # The count is checked against the names, so a truncated list cannot pass as a shorter one.
-count: 29
+count: 30
 bench-ecosystems
 ci-failure-issue
 dev-shell
@@ -28,6 +28,7 @@ oci-roundtrip
 reference-reader
 registry-roundtrip
 release-tag-resolution
+rss-proof-evaluator
 s3-range-read
 seal-profile-determinism
 sql-tests

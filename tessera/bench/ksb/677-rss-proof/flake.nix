@@ -1,22 +1,32 @@
-# ADR-0064 §8.1's RSS proof (#715), as amended by #760: the consumer reproducer on push_table, swept and evaluated
-# by run.py in two jobs, each exiting 1 on any failed criterion. Results: ADR-0026 and FEATURE-MATRIX. tessera has
-# no ksb project with a scratch prefix, so this borrows dogplet-analysis's, as the #677 jobs (t677b-*) did.
+# ADR-0064 §8.1's RSS proof (#715), as amended by #760 and #770: the consumer reproducer on push_table, swept and
+# evaluated by run.py, criteria 1-5 in one job (run as shards) and criterion 6 in another; the evaluation exits 1 on
+# any failed criterion. Results: ADR-0026 and FEATURE-MATRIX. tessera has no ksb project with a scratch prefix, so this
+# borrows dogplet-analysis's, as the #677 jobs (t677b-*) did.
 #
-# Criteria 1-5, staging on disk-backed --scratch (the guard fails the job if the session dir is tmpfs):
+# Criteria 1-5, staging on disk-backed --scratch (the guard fails the job if the session dir is tmpfs). One job holding
+# every repeat would run ~24 h, so it runs as shards, in parallel: W = 4 whole, and W = 1 one repeat index each
+# (rep 0 carries the 0- and 1-block calibration points). --time is about twice r3's measured wall per shard (W = 4
+# 176 min, a W = 1 repeat 215 min), since identical runs on the shared disk differed up to 2.4x (A.3):
 #
 #   P=/mnt/HDD/larsgerchow/dogplet_analysis_scratch
-#   ksb run --project dogplet-analysis --name tessera-715-r3-sweep-N --cpu 4 --exclusive-cpus --mem 4Gi --time 360 \
-#     --scratch $P/s715-session --scratch $P/s715-out "path:$PWD#default" -- \
-#     --session-root $P/s715-session --output-root $P/s715-out
+#   C="--project dogplet-analysis --cpu 4 --exclusive-cpus --mem 4Gi --scratch $P/s715r4-session --scratch $P/s715r4-out"
+#   R="--session-root $P/s715r4-session --output-root $P/s715r4-out"
+#   ksb run $C --name tessera-715-r4-sweep-w4-2 --time 480 "path:$PWD#default" -- --workers 4 $R
+#   ksb run $C --name tessera-715-r4-sweep-w1-kK --time 420 "path:$PWD#default" -- --workers 1 --reps K $R  # K < k1
+#
+# then, with each shard's records.json fetched (`ksb out <job> --path records.json --dest DIR/records.json`):
+#
+#   python3 run.py evaluate DIR...
 #
 # Criterion 6, session and output on /dev/shm (A.3: the converse guard fails the job unless the session dir IS
 # tmpfs; tmpfs pages count toward --mem, sized by A.3's formula):
 #
-#   ksb run --name tessera-715-r3-par-N --cpu 4 --exclusive-cpus --mem 6Gi --time 30 "path:$PWD#parallel" -- \
+#   ksb run --name tessera-715-r4-par-N --cpu 4 --exclusive-cpus --mem 6Gi --time 30 "path:$PWD#parallel" -- \
 #     --session-root /dev/shm/s715-session --output-root /dev/shm/s715-out
 #
-# Fail-before: copy this dir, `nix flake lock --override-input tessera github:vig-os/tessera/<pre-fix rev>`, and
-# pass `--workers 1` (the pre-#759 writer, a841745, fails criterion 2 at W = 1).
+# Fail-before: test_run.py runs criterion 2 on r1's records of the pre-#759 writer (a3df683), which fail it. To rerun
+# that writer, copy this dir, `nix flake lock --override-input tessera github:vig-os/tessera/<pre-fix rev>`, and pass
+# `--workers 1`.
 {
   description = "ksb job: ADR-0064 §8.1 RSS proof of push_table with the consumer reproducer (#715)";
 
