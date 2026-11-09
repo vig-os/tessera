@@ -112,7 +112,7 @@ out_dir="$(cd -- "${out_dir}" && pwd)"
 normalise() {
   sed -E \
     -e 's# \(/[^)]*\)##g' \
-    -e 's#(tessera-(core|io|cli|ingest|py|wasm)) v[0-9][^ ]*#\1 vWORKSPACE#g'
+    -e 's#(tessera-(core|io|identity|cli|ingest|py|wasm)) v[0-9][^ ]*#\1 vWORKSPACE#g'
 }
 
 cd "${workspace_dir}"

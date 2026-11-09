@@ -31,7 +31,8 @@ fd5 white-paper (the founding vision): `white-paper.md` at the repo root.
   normalise vendor-proprietary at the door; verify PS3.15 + re-attest; bidirectional (+ DICOMweb VNA).
 - **Schema:** versioned, extensible **product-schema registry**; engine is **schema-driven /
   domain-agnostic** (schemas are embedded data, not engine code).
-- **Crates:** `tessera-core` (format/spine, no I/O) · `tessera-io` (write/read engine) · `tessera-ingest` (vendor decoders).
+- **Crates:** `tessera-core` (format/spine, no I/O) · `tessera-io` (write/read engine) ·
+  `tessera-identity` (ADR-0047 crypto-shred envelope, `age`, no hdf5) · `tessera-ingest` (vendor decoders).
 
 ## Proven (run pre-push)
 - **S13** ✓ pcodec+Vortex **bit-exact lossless** (incl float NaN/±inf/−0.0/denormal) — clinical gate.

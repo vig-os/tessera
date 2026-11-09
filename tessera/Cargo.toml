@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-cli", "crates/tessera-ingest", "crates/tessera-py", "crates/tessera-wasm"]
+members = ["crates/tessera-core", "crates/tessera-io", "crates/tessera-identity", "crates/tessera-cli", "crates/tessera-ingest", "crates/tessera-py", "crates/tessera-wasm"]
 
 [workspace.package]
 edition = "2021"
@@ -27,8 +27,9 @@ tracing-subscriber = "0.3"   # test-side event capture + an opt-in human/JSON su
 ed25519-dalek = "2"
 sha2 = "0.10"   # sha256 digests for OCI artifact descriptors (registries are sha256-addressed)
 # Offline crypto-shred de-identification (ADR-0047 / #269): `age` X25519 + ChaCha20-Poly1305 envelope
-# encryption of the DICOM identity document, to recipient public keys (sops model). Host-only — encrypt
-# on ingest (tessera-ingest), decrypt on `reidentify` (tessera-cli); NEVER in the wasm verify path.
+# encryption of the DICOM identity document, to recipient public keys (sops model). Host-only — used by
+# tessera-identity alone (#762), which tessera-ingest and tessera-cli reach it through; NEVER in the
+# wasm verify path or the abi3 wheel.
 # default-features=false drops the CLI/plugin machinery; `armor` gives ASCII-armored envelopes.
 age = { version = "0.11", default-features = false, features = ["armor"] }
 time = { version = "0.3", features = ["parsing", "formatting"] }
@@ -138,6 +139,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 toml = "0.8"
 tessera-core = { path = "crates/tessera-core" }
 tessera-io = { path = "crates/tessera-io" }
+tessera-identity = { path = "crates/tessera-identity" }
 tessera-ingest = { path = "crates/tessera-ingest" }
 
 # The profile that 'dist' will build with

@@ -59,12 +59,14 @@ repos:
       # expected output and the assertion then fails against the real CLI --
       # which is exactly what happened here before this exclude existed.
       # Data files the whitespace fixers must not touch.
+      # Golden test fixtures under tests/fixtures/ are byte-exact, e.g. the JCS plaintext that
+      # tessera-identity's pre_move_golden.rs pins, which has no trailing newline (#762).
       - id: end-of-file-fixer
-        exclude: \.trycmd$
+        exclude: (\.trycmd$|/tests/fixtures/)
       - id: mixed-line-ending
-        exclude: \.trycmd$
+        exclude: (\.trycmd$|/tests/fixtures/)
       - id: trailing-whitespace
-        exclude: \.trycmd$
+        exclude: (\.trycmd$|/tests/fixtures/)
 
   # Python Linting and Formatting (Ruff). From Nix, like typos/shellcheck above:
   # ruff-pre-commit installs a generic-linux wheel whose dynamically linked

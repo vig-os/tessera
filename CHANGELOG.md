@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input is page cache, which counts toward a cgroup's memory and is RAM on tmpfs (ADR-0064 PR F, #714).
   `tests/staged_job_memory.rs` checks the bound on the heap (without the per-leaf term, at most 25.3 KB at its 8
   leaves), and that neither the reader filling a block nor a worker reading it back holds the block in RAM.
+- `tessera-identity`: a new crate holding the ADR-0047 crypto-shred envelope primitives, `IdentityDocument`,
+  `AUX_IDENTITY_NAME`, `encrypt_identity`, `decrypt_identity`, `parse_recipient` and `generate_keypair`, moved out of
+  `tessera-ingest` (#762). It depends on `tessera-core`, `age` and serde and links no libhdf5, so a Rust producer
+  writes an envelope without `tessera-ingest`. `tessera-ingest` re-exports it as `tessera_ingest::identity`, so every
+  existing path still resolves to the same item, and the envelope format is unchanged. It also re-exports
+  `age::x25519::Recipient` as `tessera_identity::Recipient`, so a caller needs no direct `age` dependency.
 
 ### Changed
 
