@@ -807,8 +807,10 @@ by a margin it can't resolve. Both parts keep their fail-before margins.
 
 ### A.2 — §8.1 criteria 1 and 2: the ceiling over every run, the plateau over medians of 3
 
-**Why.** At `W = 4` the live encode peak varied by up to +14.9 % between identical runs (159.6–186.5 MB at 256 leaves,
-the diagnosis §2), with no consistent sign between 64 and 256 leaves. The measured spikes were +5.8 % and +14.4 %. A
+**Why.** At `W = 4` the live encode peak varied by up to +14.4 % between identical runs (163.09–186.53 MB at 256 leaves,
+the diagnosis §2; +14.9 % from 64 to 256 leaves within one job), with no consistent sign between 64 and 256 leaves.
+*(Erratum (#715, 2026-11-09): this read "+14.9 % between identical runs (159.6–186.5 MB at 256 leaves)"; the
+159.6 MB run had 64 leaves.)* The measured spikes were +5.8 % and +14.4 %. A
 spike is the `W` encoders' own peaks happening to coincide at an arbitrary row-group, an event of one run, not a
 function of `n`. A single-run plateau comparison at `τ = 5 %` therefore fails on noise three times `τ`, and loosening
 `τ` would let the zone-statistics regression through (§8). A median of three runs discards one coincidence per point.
