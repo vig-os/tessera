@@ -318,7 +318,8 @@ decision on #677 (2026-10-29, option P-logical of the #681 design note). It chan
    *(ADR-0064's #770 amendment, 2026-11-08: the plateau is a slope test, so the 5% tolerance below is retired.
    Over every run of the RSS proof from `16 W` leaves on, the OLS slope of peak `RssAnon` against `n` must be at
    most `c_leaf` plus its one-sided 95 % confidence margin, and that margin must be able to resolve the 0.029 B/row
-   zone-statistics regression.)*
+   zone-statistics regression at `W = 4` and a growth of `c_leaf` beyond `c_leaf` at `W = 1`, which runs 6 times per
+   size for it.)*
 
    `p_block` is one block's measured encode peak (46.1 MB for the consumer shape at 8 CPUs, #681 note §4.7);
    it still holds the Vortex writer's width terms `D(width)` and `K(width)`, but no longer a term that grows with

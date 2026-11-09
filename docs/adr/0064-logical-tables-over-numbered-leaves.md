@@ -12,7 +12,8 @@ bound gains a per-leaf term `c_leaf · n`, §8.1's plateau compares medians of 3
 measured in its own job on `/dev/shm`, the only graded timing: shared-disk timings are context, never evidence
 (exo-pet/exo-fleet#980; the amendment at the end). **Amended by #770 (2026-11-08):** §8.1's plateau is a slope
 test, an OLS fit of every run's peak `RssAnon` against `n` from `16 W` leaves on, whose slope must be at most
-`c_leaf` plus its one-sided 95 % confidence margin, with a resolution check; `τ` is retired (the second amendment
+`c_leaf` plus its one-sided 95 % confidence margin, with a resolution check; `W = 1` runs `k₁ = 6` times per size
+from 16 leaves, so that its check resolves a growth of `c_leaf` beyond `c_leaf`; `τ` is retired (the second amendment
 at the end).
 
 ## Context
@@ -758,7 +759,9 @@ staged bytes   ≤  (W + 1) · BLOCK_ROWS · r_stage
   like `τ`. *(Amended by #770, below: criterion 2 checks the allowance to within the slope test's margin; the live
   part is checked exactly in-tree, B.3. `τ` is retired; raising the factor or `b_leaf` still needs an amendment.)*
 - **For the consumer:** `c_leaf` = 2 · (3,180 + 1,024) B = 8,408 B. That is 4.8 MB at its 573 leaves, and
-  0.002 B/row (one leaf is `BLOCK_ROWS` = 4,194,304 rows).
+  0.002 B/row (one leaf is `BLOCK_ROWS` = 4,194,304 rows). *(Amended by #770, below: 3,180 B isn't the canonical
+  entry length this bullet list defines; the sealed manifests of G r3 give `e_leaf` ≤ 2,966 B, so `c_leaf` =
+  7,980 B, and every 8,408 B in A.1 and A.2 is 7,980 B by the definition, B.3.)*
 - **It holds once #759 lands** (`WriteSession` no longer keeps a `Value` tree per leaf, and #759's counting-allocator
   test bounds the held heap per leaf by the serialized entry plus a stated constant; that constant is `b_leaf` = 1 KiB,
   so the test checks the live part `e_leaf + b_leaf`). Until then a leaf holds several times `e_leaf` (12.8 KB live for
@@ -781,7 +784,8 @@ confidence margin; `τ` is retired. The next paragraph's argument for `τ` is re
 B.4.)*
 
 `τ` still catches the regression it was set for. The zone-statistics half of `c · rows` adds 23 MB from 268 M to
-1.07 G rows at `W = 4` (§8). The allowance over that step is `τ · 143 MB + 192 · 8,408 B` = 7.2 + 1.6 = 8.8 MB on the
+1.07 G rows at `W = 4` (§8). *(Amended by #770, below: 8,408 B is 7,980 B by A.1's definition, B.3.)* The allowance
+over that step is `τ · 143 MB + 192 · 8,408 B` = 7.2 + 1.6 = 8.8 MB on the
 heap; on `RssAnon`, which criterion 2 checks (199–237 MB at `W = 4`, the diagnosis §2), it is at most
 `0.05 · 237 MB + 1.6 MB` = 13.5 MB, still under 23 MB. The per-leaf term is 0.002 B/row, about a fifteenth of the
 0.029 B/row regression.
@@ -812,7 +816,8 @@ so it is checked against every run, not against a median that would hide the wor
 measured, 226.0 MiB, was under the ceiling of 298.4 MiB.
 
 **Sweep** (an addition to §8.1's *Sweep*): each `W = 4` point at 64 blocks or more (268 M, 1.07 G and 2.4 G
-rows) runs **k = 3** times in the same job. Every other point runs once.
+rows) runs **k = 3** times in the same job. Every other point runs once. *(Amended by #770, below: each `W = 1`
+point at 16 blocks or more runs `k₁ = 6` times, B.5.)*
 
 **Criteria 1 and 2** (replace §8.1's 1 and 2):
 
@@ -823,7 +828,7 @@ rows) runs **k = 3** times in the same job. Every other point runs once.
    (64 = 16 W), where `med` is the median of the point's 3 runs. The same inequality must hold at `W = 1` from 16
    blocks, on its single runs.
    *(Amended by #770, below: the medians failed on noise in G r3; criterion 2 is the slope of every run's peak
-   against `n`, B.3. The sweep and `k = 3` above stand.)*
+   against `n`, B.3. The `W = 4` sweep and `k = 3` above stand; `W = 1` runs `k₁ = 6` times from 16 blocks, B.5.)*
 
 **Still sharp.** *(Amended by #770, below: B.4 shows the pre-#759 writer failing the slope test on its own data.)*
 The pre-#759 writer still fails criterion 2. At `W = 1`, from 64 to 573 leaves, its `RssAnon`
@@ -918,9 +923,10 @@ confidence interval. It doesn't bias the slope. A regression that grows with `n`
 ### B.2 — The estimator: ordinary least squares over every run, with its standard error
 
 **The runs.** For each `W`, every run at `n ≥ 16 W` leaves, each repeat its own point (no medians): at `W = 4` the
-`k = 3` runs at each of 64, 256 and 573 leaves (`N = 9`); at `W = 1` the single runs at 16, 64, 256 and 573 leaves
-(`N = 4`). The sweep and `k` are A.2's, unchanged. The runs below `16 W` are out, as in §8: the rise from 16 to
-64 leaves at `W = 4` is in the regime §8 doesn't model, and criterion 1 bounds it.
+`k = 3` runs at each of 64, 256 and 573 leaves (`N = 9`); at `W = 1` the `k₁ = 6` runs at each of 16, 64, 256 and
+573 leaves (`N = 24`). The `W = 4` sweep and `k` are A.2's, unchanged; `k₁` is derived in B.5 (r3 ran `W = 1` once
+per point, `N = 4`, and B.4's r3 numbers are that design's). The runs below `16 W` are out, as in §8: the rise from
+16 to 64 leaves at `W = 4` is in the regime §8 doesn't model, and criterion 1 bounds it.
 
 **The fit.** With `yᵢ` the run's peak `RssAnon` in bytes and `nᵢ` its leaves, ordinary least squares (OLS) of
 `y = a + b · n`:
@@ -944,7 +950,7 @@ SE(b̂) =  σ̂ / √Sₙₙ
   states for timings, and it is one more reason the level is nominal.
 - **It is one-sided and skewed.** A coincidence only raises a peak. OLS doesn't need symmetric noise for its slope
   to be unbiased. The `t` quantile below is exact only for Gaussian noise, so the stated level is nominal (B.3).
-- **There are only three or four distinct `n`, with `k ≤ 3` runs each.** Theil–Sen's robustness to outliers is
+- **There are only three or four distinct `n`, with a few runs each.** Theil–Sen's robustness to outliers is
   what it would buy here. But its median of the 27 pairwise slopes between different points is set by the
   within-point spread, and its confidence interval would come from a bootstrap. A bootstrap over three runs per point
   has only 10 distinct resamples per point, and it underestimates the variance by a factor of `(k − 1) / k`, so its
@@ -958,24 +964,38 @@ than its runs do.
 
 ### B.3 — The pass rule, and its margin
 
-**The level.** One-sided, `α = 5 %`: a writer whose true slope is exactly `c_leaf` fails criterion 2 in at most
-one proof run in 20 (nominally; B.2). The margin is the one-sided 95 % confidence bound of `b̂`:
+**The level.** One-sided, `α = 5 %` **per `W`**: at each `W`, a writer whose true slope is exactly `c_leaf` fails
+that `W`'s slope check in at most one proof run in 20 (nominally; B.2). The margin is the one-sided 95 % confidence
+bound of `b̂`:
 
 ```text
-margin  =  t₀.₉₅,N−2 · SE(b̂)          t₀.₉₅,₇ = 1.895 (W = 4, N = 9),   t₀.₉₅,₂ = 2.920 (W = 1, N = 4)
+margin  =  t₀.₉₅,N−2 · SE(b̂)          t₀.₉₅,₇ = 1.895 (W = 4, N = 9),   t₀.₉₅,₂₂ = 1.717 (W = 1, N = 24)
 ```
 
-The level is chosen before the data, not fitted to r3. 95 % is the conventional one-sided level, and B.4 shows that at
-it the test keeps the power it needs at `k = 3`. A failing run is a finding about the writer, investigated like any
+(r3, with `N = 4` at `W = 1`, used `t₀.₉₅,₂` = 2.920, B.4.) The level is chosen before the data, not fitted to r3.
+95 % is the conventional one-sided level, and B.4 and B.5 show that at it the test keeps the power it needs.
+
+**Two tests, one proof.** The proof runs the slope check at both `W` and fails if either fails, so a writer at
+exactly `c_leaf` at both `W` fails the proof's slope checks with probability `1 − 0.95²` = 9.75 % if the two are
+independent, and at most 10 % whatever their dependence (the union bound). The level stays 5 % per `W`, without a
+Bonferroni correction to 2.5 %, and the proof's false-fail rate is stated as that family-wise ≤ 10 %. The
+correction would raise `t` from 1.895 to 2.365 at `W = 4` (+25 % on its margin and detection floor) and from 1.717
+to 2.074 at `W = 1`, where B.5's `k₁` would have to grow to keep its floor at `c_leaf`. That trades the regressions
+criterion 2 exists to catch for fewer false alarms, and the two errors don't cost the same: a false fail costs an
+investigation of a run, a false pass ships the regression. 9.75 % is also the worst case: it needs a true slope of
+exactly `c_leaf` at both `W`, and a writer below `c_leaf` fails less often. The resolution checks add to the
+false-fail rate in the way B.5 states. A failing run is a finding about the writer, investigated like any
 other. It isn't rerun until it passes, which would make the level meaningless.
 
 **The resolution check.** A margin derived from the run's own noise widens with that noise, so a run noisy enough
 would pass any slope. The test must still catch the regression it exists for: the zone-statistics half of `c · rows`,
 **`δ_z` = 0.029 B/row = 121,635 B/leaf** (§8, note §4.2), the smallest regression §8 says the plateau must catch.
 With probability at least 95 %, a slope of `c_leaf + δ` exceeds the pass bound when
-`δ ≥ (t₀.₉₅ + t₀.₉₅) · SE(b̂)` (the usual normal-theory approximation, with the central `t` for both quantiles). So
-a run whose `2 · t₀.₉₅,N−2 · SE(b̂)` exceeds `δ_z` can't resolve that regression. It is inconclusive, and an
-inconclusive run fails.
+`δ ≥ (t₀.₉₅ + t₀.₉₅) · SE(b̂)` (the usual normal-theory approximation, with the central `t` for both quantiles).
+That `2 · t₀.₉₅,N−2 · SE(b̂)` is the run's **detection floor**. A run whose floor exceeds the growth its `W` must
+catch can't resolve that growth. It is inconclusive, and an inconclusive run fails; it never passes. At `W = 4` the
+growth to catch is `δ_z`. At `W = 1` it is `δ₁ = c_leaf`, an unaccounted growth as large as the whole allowance
+(B.5); since `c_leaf` < `δ_z`, that check covers `δ_z` too.
 
 **Criterion 2** (replaces A.2's criterion 2):
 
@@ -983,20 +1003,27 @@ inconclusive run fails.
 against `n` satisfies both
 
 - `b̂ ≤ c_leaf + t₀.₉₅,N−2 · SE(b̂)` (**slope**), and
-- `2 · t₀.₉₅,N−2 · SE(b̂) ≤ δ_z = 121,635 B/leaf` (**resolution**),
+- `2 · t₀.₉₅,N−2 · SE(b̂) ≤ δ_z = 121,635 B/leaf` at `W = 4`, and `≤ c_leaf` at `W = 1` (**resolution**),
 
-with `c_leaf` A.1's, its `e_leaf` read off the run's sealed manifest (the maximum over the runs the fit uses).
+with `c_leaf` A.1's, its `e_leaf` read off the run's sealed manifest (the maximum over the runs the fit uses), and
+`N` the runs the fit uses (9 at `W = 4`, `4 k₁` = 24 at `W = 1`).
 
 Equivalently, the slope check fails a run only when the data show, at 95 % confidence, that peak `RssAnon` grows by
 more than `c_leaf` per leaf: `b̂ − t₀.₉₅,N−2 · SE(b̂) > c_leaf`.
 
-**`W = 1` gets the same test,** on its `N = 4` single runs from 16 leaves (`16 W`). Its noise is smaller (r3 residual
-σ̂ = 1.90 MiB against 7.98 MiB at `W = 4`), which is why A.2 runs its points once. Its two degrees of freedom are
-paid for by the larger `t` (2.920 against 1.895), and its resolution check still passes with room to spare (B.4).
+**`W = 1` gets the same test,** on its `N = 24` runs from 16 leaves (`16 W`), with the tighter resolution target.
+Its noise is smaller (r3 residual σ̂ = 1.90 MiB against 7.98 MiB at `W = 4`), which is why it is the `W` that can
+resolve a growth of the order of `c_leaf` at an affordable `k₁`, and why B.5 spends the extra runs there.
+
+**The evaluator.** PR #767's evaluator still implements A.2's medians and `τ`. The proof's evaluator implements this
+criterion 2 (the fit, both checks at both `W`, and the record B.5 asks for) in G r4, under #715, which tracks it;
+until then this criterion has no code on `dev`, and a run is graded against it only by hand from its records, as B.4
+does for r3.
 
 **What criterion 2 no longer checks.** A.1 says criterion 2 "checks the allowance" `c_leaf`. As a slope test it
 checks it to within its margin: on r3, a growth up to 33,160 B/leaf at `W = 4` and 21,290 B/leaf at `W = 1`
-passes, four and almost three times `c_leaf`. The per-leaf held heap of the session is checked exactly, in-tree,
+passes, four and almost three times `c_leaf`. At `k₁ = 6`, `W = 1`'s bound falls to about 11,175 B/leaf at r3's
+noise, 1.4 times `c_leaf` (B.5). The per-leaf held heap of the session is checked exactly, in-tree,
 by #759's counting-allocator test (`tessera-io/tests/session_leaf_memory.rs`: the serialized entries plus 128 B per
 leaf). Criterion 2 is what catches a growth in `n` that the in-tree tests can't see, at real `BLOCK_ROWS`: a
 per-row term like zone statistics, or retention around the encoder.
@@ -1009,8 +1036,8 @@ of this ADR, as raising `τ` did. §8's row-group record (where each run's peak 
 16-to-64 rise.
 
 **Unchanged:** criterion 1 (the ceiling, checked on every run, A.2), `s`, `s_rss`, `c_leaf`'s definition (A.1),
-the sweep and `k = 3` (A.2), criteria 3–5 and their budgets (`--mem 4Gi`, 8 GiB), and criterion 6 with its
-`/dev/shm` job, its converse tmpfs guard and its `--mem` (A.3), and A.4.
+the `W = 4` sweep and `k = 3` (A.2; `W = 1`'s repeats are B.5's), criteria 3–5 and their budgets (`--mem 4Gi`,
+8 GiB), and criterion 6 with its `/dev/shm` job, its converse tmpfs guard and its `--mem` (A.3), and A.4.
 
 **`c_leaf` in the numbers below.** A.2 reads `e_leaf` off the run's sealed manifest. In r3 it is at most
 2,966 B (2,965 B at 16, 64 leaves; 2,966 B at 256 and 573), so `c_leaf` = 2 · (2,966 + 1,024) B = **7,980 B**.
@@ -1021,10 +1048,14 @@ uses the definition. Every verdict below is the same with 8,408 B, which moves e
 
 **r3 as measured** (`tessera-715-r3-sweep-2`, the post-#759 writer at `0b66160`; bytes per leaf):
 
-| `W` | `N` | `b̂` | `SE(b̂)` | Margin | Bound `c_leaf` + margin | Slope | Resolution `2 t SE ≤ 121,635` |
+| `W` | `N` | `b̂` | `SE(b̂)` | Margin | Bound `c_leaf` + margin | Slope | Resolution: floor `2 t SE` vs target |
 | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| 4 | 9 | 19,961 | 13,290 | 25,180 | 33,160 | **pass** | 50,359: **pass** |
-| 1 | 4 | 5,787 | 4,558 | 13,310 | 21,290 | **pass** | 26,619: **pass** |
+| 4 | 9 | 19,961 | 13,290 | 25,180 | 33,160 | **pass** | 50,359 ≤ 121,635 (`δ_z`): **pass** |
+| 1 | 4 | 5,787 | 4,558 | 13,310 | 21,290 | **pass** | 26,619 > 7,980 (`c_leaf`): **inconclusive** |
+
+r3 ran `W = 1` once per point (`k₁ = 1`). Against the `δ_z` target it resolved (26,619 ≤ 121,635); against B.5's
+`c_leaf` target it can't, and under the amended criterion 2 a run of that design fails as inconclusive. That is the
+gap B.5's repeats close; r3 isn't regraded, and the rest of B.4 uses its numbers as the noise they measured.
 
 The fit's inputs: at `W = 4` the 9 runs of B.1 (`n̄` = 297.67, `Sₙₙ` = 396,434, σ̂ = 7.98 MiB); at `W = 1` 59.88,
 62.52, 59.98 and 64.18 MiB at 16, 64, 256 and 573 leaves (`n̄` = 227.25, `Sₙₙ` = 191,647, σ̂ = 1.90 MiB). The `W = 4`
@@ -1049,14 +1080,20 @@ precision). OLS gives `b̂` = 24,265 B/leaf, `SE` = 915, a bound of 7,980 + 2.92
 fail-before job, `tessera-715-r3-failbefore-2`, has only 64 and 573 leaves from `16 W` on, two runs with no degree
 of freedom; neither is graded here.)
 
-The 12.8 KB row passes, and #770 asked for that cost to fail; this is a deliberate deviation. 12.8 KB is the pre-#759
-session's **live** heap per leaf. Criterion 2 measures `RssAnon`, and in `RssAnon` that writer grew by its measured
-24,265 B/leaf (18,478 B/leaf more than the post-#759 writer), which fails, the factor of about 2 being A.1's allocator
-retention. An `RssAnon` growth of 12.8 KB/leaf above `c_leaf` at `W = 4` is below what `k = 3` can resolve (the next
-paragraph), and resolving it would take about 35–46 runs per point. The live heap per leaf is checked exactly in-tree
-(B.3), and that test fails on the pre-#759 writer.
+The 12.8 KB row passes on r3's data, and #770 asked for that cost to fail; at `W = 4` this is a deliberate deviation.
+12.8 KB is the pre-#759 session's **live** heap per leaf. Criterion 2 measures `RssAnon`, and in `RssAnon` that writer
+grew by its measured 24,265 B/leaf, which fails. The factor of about 2 is that 24,265 against the 12,800 live, ×1.90:
+the whole `RssAnon` slope against the whole live heap per leaf, which is A.1's allocator retention. The 18,478 B/leaf
+of the regression row is a different comparison, the difference between two writers' `RssAnon` slopes, and its ×1.44
+against 12,800 compares it with the wrong live figure; set against the difference of their live heaps, 12,800 less
+the post-#759 writer's bound (#759's test: the entry plus 128 B, 3,094 B at `e_leaf` = 2,966 B), at least 9,706 B,
+it is at most ×1.90 again.
+An `RssAnon` growth of 12.8 KB/leaf above `c_leaf` at `W = 4` is below what `k = 3` can resolve (the next
+paragraph), and resolving it there would take about 36–47 runs per point. At `W = 1` with `k₁ = 6` it is above the
+detection floor, which is at most `c_leaf` by criterion 2 (B.5), so the slope test catches it there with probability
+at least 95 %. The live heap per leaf is checked exactly in-tree (B.3), and that test fails on the pre-#759 writer.
 
-**The smallest growth that fails at `k = 3`.**
+**The smallest growth that fails, in r3's design** (`k = 3` at `W = 4`, one run per point at `W = 1`).
 
 - **Added to r3, deterministically:** at `W = 4`, `δ` > 13,198 B/leaf (0.0031 B/row), a total slope above 33,160
   B/leaf; at `W = 1`, `δ` > 15,503 B/leaf (0.0037 B/row), a total above 21,290 B/leaf.
@@ -1065,10 +1102,85 @@ paragraph), and resolving it would take about 35–46 runs per point. The live h
   0.0063 B/row**.
 
 `δ_z` = 121,635 B/leaf is 2.4 times the `W = 4` detectable growth and 4.6 times the `W = 1` one. At `W = 4` it lies
-9.2 `SE` above `c_leaf` against a bound 1.9 `SE` above it, so its detection probability is above 0.999. **`k = 3` is
-enough; `k` doesn't change.** Resolving a growth of the order of `c_leaf` itself at `W = 4` (say 12.8 KB/leaf) would
-take about 35–46 runs per point at r3's noise (46 with `t` held at 1.895, nearer 35 as `t` falls toward 1.645).
-That isn't the test's job: `W = 1`, with its lower noise, and the in-tree test resolve per-leaf terms.
+9.2 `SE` above `c_leaf` against a bound 1.9 `SE` above it, so its detection probability is above 0.999. **At
+`W = 4`, `k = 3` is enough; `k` doesn't change.** Resolving a growth of the order of `c_leaf` itself at `W = 4` (say
+12.8 KB/leaf) would take about 36–47 runs per point at r3's noise (36 with `t` at its value `t₀.₉₅,3k−2`, 47 with
+`t` held at 1.895). That isn't `W = 4`'s job: `W = 1`, with its lower noise and B.5's repeats, and the in-tree test
+resolve per-leaf terms.
+
+### B.5 — `W = 1` repeats: `k₁` from the detection floor
+
+The fresh review of this amendment (#770, ruling of 2026-11-09) found the gap B.4 shows: in r3's design an `RssAnon`
+growth of about 8–13 KB/leaf beyond `c_leaf`, held outside `WriteSession` (the allocator, the encoder), passes at
+both `W` (about +2–3 MB at 573 leaves), and the in-tree test pins only the session's own heap. The owner ruled that
+`W = 1` closes it with repeats, and `W = 4` stays at `k = 3`.
+
+**The target.** `W = 1` must catch, with probability at least 95 %, an `RssAnon` growth of **`δ₁ = c_leaf`** beyond
+`c_leaf` (7,980 B/leaf in r3, 0.0019 B/row; the run's own `c_leaf` is used, as in the slope check). That is a
+second term as large as the whole allowance, a per-leaf slope twice what §8 grants. It is the smallest excess that
+matters at the scale §8 states its bound in: `c_leaf` already holds a factor 2 for allocator retention that isn't
+a theorem (A.1), so a smaller unaccounted term is within the uncertainty the allowance itself carries, while a term
+of `c_leaf` or more doubles the per-leaf cost the ADR promises. It covers the reviewer's whole 8–13 KB/leaf gap and
+the 12.8 KB/leaf row of B.4.
+
+**The arithmetic.** With `k₁` runs at each of the four sizes 16, 64, 256 and 573 leaves, `N = 4 k₁`, the leaves'
+`Sₙₙ` is `k₁` times r3's 191,647, and
+
+```text
+floor(k₁)  =  2 · t₀.₉₅,4k₁−2 · σ₁ / √(k₁ · 191,647)          σ₁ = W = 1's per-run noise
+```
+
+**The noise estimate, and why it is provisional.** r3 ran each `W = 1` point once, so it has no within-point
+spread to measure. σ₁ is estimated from the residuals of the four-point fit, σ̂ = 1,995,436 B (1.90 MiB), with
+`N − 2` = 2 degrees of freedom. That estimate also holds any curvature of the mean in `n`, which would inflate it,
+and with 2 degrees of freedom it is coarse: the 90 % interval for σ₁ is 0.58–4.4 times σ̂. (r1's pre-#759 `W = 1`
+fit gives a residual of 0.38 MiB, at its log's 0.1 MiB precision, and A.2's two proof runs at 64 leaves peaked
+0.5 MiB apart, so r3's σ̂ is more likely high than low.) The numbers below are r3's planning figures, provisional
+until G r4 measures σ₁ with `N − 2 = 22` degrees of freedom.
+
+| `k₁` | `N` | `t₀.₉₅,N−2` | `SE(b̂)` at r3's σ̂ | Floor `2 t SE` | Floor / `c_leaf` | P(r4 inconclusive) if σ₁ = σ̂ |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 (r3) | 4 | 2.920 | 4,558 | 26,619 | 3.34 | 0.91 |
+| 2 | 8 | 1.943 | 3,223 | 12,526 | 1.57 | 0.88 |
+| 3 | 12 | 1.812 | 2,632 | 9,539 | 1.20 | 0.73 |
+| 4 | 16 | 1.761 | 2,279 | 8,028 | 1.006 | 0.46 |
+| 5 | 20 | 1.734 | 2,038 | 7,070 | 0.89 | 0.19 |
+| **6** | **24** | **1.717** | **1,861** | **6,391** | **0.80** | **0.046** |
+| 7 | 28 | 1.706 | 1,723 | 5,877 | 0.74 | 0.006 |
+
+The last column is the chance that G r4's own σ̂ comes out high enough to put its floor above `c_leaf`, if σ₁ is
+r3's estimate: `P(χ²₍N−2₎ > (N − 2) · (c_leaf / floor)²)`, since `(N − 2) σ̂² / σ₁²` is `χ²` with `N − 2` degrees of
+freedom for Gaussian noise (nominal, as B.2 says).
+
+**`k₁ = 6`.** `k₁ = 4`, the upper end of the review's estimate of 3–4, leaves the floor just above the target
+(8,028 > 7,980 B/leaf). `k₁ = 5` is the smallest whose projected floor is under it, but by 11 %, and a run of that
+design would come out inconclusive about one time in five even if r3's σ̂ were exact. `k₁ = 6` is the smallest with
+both the projected floor under the target and the chance of an inconclusive run at most 5 %, the level criterion 2
+already uses for a false fail. It puts the projected floor at 6,391 B/leaf (0.0015 B/row), the slope bound at
+`c_leaf + 1.717 · 1,861` ≈ 11,175 B/leaf, and the 12.8 KB/leaf row of B.4 above the floor. Every `W = 1` point at 16
+leaves or more runs `k₁ = 6` times (24 runs); the points below 16 leaves run once, as in A.2, for criterion 1. The
+cost is the runs: r3's `W = 1` points from 16 leaves took 12,884 s together (8,491 s of them at 573 leaves), so six
+repeats are about 21.5 h of serial wall time. How G r4 schedules them is #715's. With the slope checks (B.3), a
+writer at exactly `c_leaf` at both `W` then fails the proof with probability at most about 15 % if σ₁ is r3's
+estimate (10 % from the slope checks, 4.6 % from `W = 1`'s resolution check, by the union bound), stated as such.
+
+**The re-check rule.** The `k₁` above is chosen from r3's estimate; G r4 is graded on its own. Its resolution
+check at `W = 1` uses its own `SE(b̂)` and `t₀.₉₅,N−2` at the `N` it fit (24 if every run completed): if
+`2 · t₀.₉₅,N−2 · SE(b̂)` exceeds the run's `c_leaf`, the
+proof **fails as inconclusive**. It does not pass, whatever `b̂` is, because a floor above the target means a growth
+the ADR must catch could pass. An inconclusive run is recorded with its measured σ̂, `k₁` is re-derived from that σ̂
+by the arithmetic above in an amendment of this ADR, and the next run is graded on its own data. A run isn't
+repeated until it resolves.
+
+**The stated limits.** These are the detection floors criterion 2 runs at, the smallest growth beyond `c_leaf` it
+catches with probability at least 95 %:
+
+- **`W = 4`, `k = 3`:** 50,359 B/leaf (0.0120 B/row) at r3's noise, required to be at most `δ_z` = 121,635 B/leaf.
+  A growth beyond `c_leaf` below the floor can pass at `W = 4`; that `W` is there for the zone-statistics class.
+- **`W = 1`, `k₁ = 6`:** projected 6,391 B/leaf (0.0015 B/row) at r3's noise, required to be at most `c_leaf`
+  (7,980 B/leaf in r3). A growth beyond `c_leaf` smaller than the run's floor, so less than `c_leaf`, can pass.
+
+Each proof run records both measured floors with its verdict, so the limit a run actually met is on file.
 
 ## References
 
