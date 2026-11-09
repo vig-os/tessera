@@ -4,15 +4,19 @@
 # borrows dogplet-analysis's, as the #677 jobs (t677b-*) did.
 #
 # Criteria 1-5, staging on disk-backed --scratch (the guard fails the job if the session dir is tmpfs). One job holding
-# every repeat would run ~24 h, so it runs as shards, in parallel: W = 4 whole, and W = 1 one repeat index each
-# (rep 0 carries the 0- and 1-block calibration points). --time is about twice r3's measured wall per shard (W = 4
-# 176 min, a W = 1 repeat 215 min), since identical runs on the shared disk differed up to 2.4x (A.3):
+# every repeat would run ~24 h, so it runs as shards, in parallel, one repeat index of one W each (rep 0 carries the
+# 0- and 1-block calibration points). With all nine shards on the shared scratch disk at once, r4 measured 157-198 min
+# for a W = 4 repeat and 247-254 min for a W = 1 one, and identical runs differed up to 2.4x (A.3), so --time is 420
+# for each. (r4 ran W = 4 as one shard, sized from r3's 176 min uncontended: it hit 480 min after 8 of its 9 runs,
+# tessera-715-r4-sweep-w4-2 exit 124, and tessera-715-r4-sweep-w4-k2, `--rows 2400000000 --reps 2`, ran the ninth.)
 #
 #   P=/mnt/HDD/larsgerchow/dogplet_analysis_scratch
 #   C="--project dogplet-analysis --cpu 4 --exclusive-cpus --mem 4Gi --scratch $P/s715r4-session --scratch $P/s715r4-out"
 #   R="--session-root $P/s715r4-session --output-root $P/s715r4-out"
-#   ksb run $C --name tessera-715-r4-sweep-w4-2 --time 480 "path:$PWD#default" -- --workers 4 $R
-#   ksb run $C --name tessera-715-r4-sweep-w1-kK --time 420 "path:$PWD#default" -- --workers 1 --reps K $R  # K < k1
+#   ksb run $C --name tessera-715-rN-sweep-w4-kK --time 420 "path:$PWD#default" -- --workers 4 --reps K $R  # K < 3
+#   ksb run $C --name tessera-715-rN-sweep-w1-kK --time 420 "path:$PWD#default" -- --workers 1 --reps K $R  # K < k1
+#
+# (In zsh, word-split the flag strings: $=C, $=R.)
 #
 # then, with each shard's records.json fetched (`ksb out <job> --path records.json --dest DIR/records.json`):
 #
