@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-06T16:38:04Z
+updated: 2026-11-09T14:37:39Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-07T08:18:23.099Z
+synced: 2026-11-10T09:13:28.134Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -28,7 +28,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/dicom-transfer-syntax-registry-0.x-lockfile -->chore(deps): update rust crate dicom-transfer-syntax-registry to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/zarrs-0.x-lockfile -->chore(deps): update rust crate zarrs to v0.23.14
  - [ ] <!-- unlimit-branch=renovate/rust-wasm-bindgen-monorepo -->fix(deps): update rust crate wasm-bindgen to v0.2.130
- - [ ] <!-- unlimit-branch=renovate/python-(minor-and-patch) -->build(pip): update python (minor and patch) (`numcodecs`, `numpy`, `uproot`, `zarr`)
+ - [ ] <!-- unlimit-branch=renovate/python-(minor-and-patch) -->build(pip): update python (minor and patch) (`nibabel`, `numcodecs`, `numpy`, `uproot`, `zarr`)
  - [ ] <!-- unlimit-branch=renovate/age-0.x -->chore(deps): update rust crate age to 0.12
  - [ ] <!-- unlimit-branch=renovate/arrow-rs-monorepo -->chore(deps): update rust crate arrow to v58.4.1
  - [ ] <!-- unlimit-branch=renovate/criterion-0.x -->chore(deps): update rust crate criterion to 0.8
@@ -241,7 +241,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `h5py ==3.16.0`
  - `zarr ==3.2.1` → [Updates: `==3.4.2`]
  - `numcodecs ==0.16.5` → [Updates: `==0.17.1`]
- - `nibabel ==5.4.2`
+ - `nibabel ==5.4.2` → [Updates: `==5.5.0`]
  - `pydicom ==3.0.2`
  - `pyarrow ==24.0.0` → [Updates: `==26.0.1`]
  - `uproot ==5.7.4` → [Updates: `==5.7.7`]

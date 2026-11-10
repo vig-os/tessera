@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-09T08:35:14Z
-updated: 2026-11-09T08:35:14Z
+updated: 2026-11-09T12:11:52Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/789
-comments: 0
+comments: 1
 labels: none
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-09T09:04:17.462Z
+synced: 2026-11-10T09:13:24.854Z
 ---
 
 # [Issue 789]: [ci(nix-check): x86_64-linux leg hits the 2h job limit with workspace-test starved (tests 100x slower), on three unrelated branches](https://github.com/vig-os/tessera/issues/789)
@@ -55,3 +55,11 @@ confirmed: comparing this run's test timings with 42556966454's, and the node's 
 ## Ask
 
 Find why the x86 leg's tests are starved, and fix the cause rather than raising the 2h limit.
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 9, 2026 at 12:11 PM_
+
+Second occurrence on PR #786 (head fd268c2): the rerun of the x86_64-linux leg (run 42569492335, job 129059193111, runner ksb-vig-os-large-runner-zx55v) ran 10:09:50→12:11:10Z and was cancelled with "The job has exceeded the maximum execution time of 2h0m0s". That's two 2h timeouts in a row on different runners for the same head, so this isn't a one-off.
+

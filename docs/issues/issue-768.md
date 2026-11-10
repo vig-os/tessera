@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-06T14:41:55Z
-updated: 2026-11-08T11:44:06Z
+updated: 2026-11-09T15:33:14Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/768
-comments: 2
+comments: 3
 labels: feature, area:core, area:io, area:ingest
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-09T09:04:25.075Z
+synced: 2026-11-10T09:13:25.794Z
 ---
 
 # [Issue 768]: [feat(ingest): wide FixedSizeList (N > 8) has no carrier — store declared vector columns natively as a Vortex fixed_size_list](https://github.com/vig-os/tessera/issues/768)
@@ -101,4 +101,13 @@ _Posted on November 8, 2026 at 11:44 AM_
 
 - **dtype:** both **f16** and **i8 + scale** are wanted for the 10⁸ case (about 77 GB vs about 38 GB), with **f32** kept for small exact sets. Please keep f16 native rather than widened (`f16_widen` today), at least for declared vector columns.
 - **Export:** these columns should export to Parquet as `FixedSizeList` (#777), so Hugging Face `datasets` sees a vector column.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 9, 2026 at 03:33 PM_
+
+Re-checked against vortex 0.93.0 (PR #788, #635), probe on x86_64: wide `fixed_size_list` columns round-trip **bit-exact**, and debug and release write identical bytes. f32 ×768 (pco, 0.816 of raw), f32 ×384 (pco, 0.817), f32 ×9 (pco, 0.849), f64 ×768 (pco, 0.861), i8 ×768 (primitive, 1.002), u8 ×32 (primitive, 1.044). **Cross-architecture agreement is untested** for these columns: the probe ran on x86_64 only, and no aarch64 digest was compared. That needs a fixture in the cross-arch corpus before this lands.
+
 

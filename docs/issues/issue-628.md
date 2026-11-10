@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-18T22:23:57Z
-updated: 2026-11-08T11:44:04Z
+updated: 2026-11-09T15:33:12Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/628
-comments: 3
+comments: 4
 labels: feature, question, priority:medium, effort:large, area:core, area:io, area:integrity, adr
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-09T09:04:28.245Z
+synced: 2026-11-10T09:13:27.392Z
 ---
 
 # [Issue 628]: [perf(format): string-heavy tables are ~3x larger than Parquet — normalize forbids Vortex's zstd compact encoding](https://github.com/vig-os/tessera/issues/628)
@@ -73,4 +73,13 @@ _Posted on November 8, 2026 at 11:44 AM_
 - **What that means:** at the observed ≈3.4× of Parquet (348 vs 103 B/row), the full OpenAlex works set would seal at roughly 2.5 TB instead of about 770 GB. A topic subset of 10⁷ rows would be about 3× its Parquet size too. That makes this the biggest risk for the use case and the reason it sits in W0 of #778.
 - **For the spike:** please include a long-prose column, abstracts at 150–300 tokens and patent descriptions at 5–50k tokens, next to the JSON column. FSST alone does well on short repetitive strings and much worse on long prose, so the result may differ.
 - **Range reads:** the "whole-block reads" note matters here too. The corpus will live in an S3-compatible object store (versitygw, gerchowl/g-fleet#1121), and queries project a few columns out of wide rows.
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 9, 2026 at 03:33 PM_
+
+Re-checked against vortex 0.93.0 (PR #788, #635): the vortex-side blocker is gone. `vortex.zstd` is in the `core2025.06` edition, so it is admissible under the table edition tessera now enables (`TABLE_EDITION = core2026.08.3`). #788 deliberately keeps the 0.75 codec set (no zstd compiled in, compact preset with ALP/ALPRD, integer Pco, Delta and OnPair excluded), so whether string columns get zstd is now **tessera's choice**: a codec-set decision, and a format event of its own (it moves table bytes), not a vortex limitation.
+
 

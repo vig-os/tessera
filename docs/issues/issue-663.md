@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-25T10:04:07Z
-updated: 2026-10-25T10:04:07Z
+updated: 2026-11-09T15:33:10Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/663
-comments: 0
+comments: 1
 labels: bug, priority:high, area:io, area:integrity
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-26T07:24:23.557Z
+synced: 2026-11-10T09:13:26.405Z
 ---
 
 # [Issue 663]: [fix(io): a panic inside the vortex write task returns Ok with wrong bytes](https://github.com/vig-os/tessera/issues/663)
@@ -41,4 +41,13 @@ Test: force a panic inside the write path (e.g. a chunk stream that panics mid-w
 `encode_streaming` returns `Err`, not `Ok`.
 
 Found in review of #662.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 9, 2026 at 03:33 PM_
+
+Re-checked against vortex 0.93.0 (PR #788, #635): **partly changed**. A panic inside a vortex write task now propagates to the caller as a panic instead of returning `Ok` with wrong bytes, so the silent-corruption half is gone. It is still a panic, not an `Err`, so a caller can't handle it as an error without `catch_unwind`. The remaining work here is mapping it to a typed error at the tessera boundary.
+
 
