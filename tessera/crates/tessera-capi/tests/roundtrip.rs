@@ -316,3 +316,31 @@ fn a_hash_buffer_too_small_is_refused_after_the_seal() {
     assert_eq!(tiny, [0; 4], "nothing is written into a buffer too small");
     assert!(dir.path().join("p.tsra").exists());
 }
+
+/// Hazard H4 (ADR-0056 §5), characterised: the bridge, like the native writer, seals a float's
+/// bits as given, so two NaNs with different payloads seal two different products. A producer
+/// whose NaNs come from arithmetic (x86-64 and AArch64 disagree on the sign of `0.0 / 0.0`) would
+/// seal per-architecture bytes unless something canonicalises them first.
+#[test]
+fn nan_payloads_are_sealed_bit_for_bit() {
+    let hash_with = |nan_bits: u32| {
+        let dir = tempfile::tempdir().unwrap();
+        let session = open(&dir.path().join("stage"), 1);
+        let field = Field::new("x", DataType::Float32, false);
+        let schema =
+            FFI_ArrowSchema::try_from(DataType::Struct(Fields::from(vec![field.clone()]))).unwrap();
+        let (st, table) = begin(session, &schema, 3);
+        expect(st, TsraStatus::Ok);
+        let values = arrow_array::Float32Array::from(vec![1.0, f32::from_bits(nan_bits), 2.0]);
+        let batch = struct_of(vec![(field, Arc::new(values) as ArrayRef)]);
+        expect(push(table, 0, &batch), TsraStatus::Ok);
+        expect(end(table), TsraStatus::Ok);
+        let (st, hash) = seal(session, &dir.path().join("p.tsra"));
+        expect(st, TsraStatus::Ok);
+        hash
+    };
+    let quiet = hash_with(0x7fc0_0000); // the canonical quiet NaN
+    let negative = hash_with(0xffc0_0000); // x86-64's default NaN: the sign bit set
+    assert_eq!(quiet, hash_with(0x7fc0_0000));
+    assert_ne!(quiet, negative, "NaN payload bits reach content_hash");
+}
