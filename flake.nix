@@ -95,6 +95,7 @@
           "/crates/tessera-wasm/tests/smoke.cjs" = [ "wasm-bindgen-smoke" ];
           "/corpus/reference_reader/run.py" = [ "reference-reader" ];
           "/bench/ksb/677-rss-proof/test_run.py" = [ "rss-proof-evaluator" ];
+          "/crates/tessera-capi/cpp/capi-smoke.sh" = [ "capi-smoke" ];
         } // pkgs.lib.optionalAttrs isLinux {
           "/bench/ecosystems/test_common.py" = [ "bench-ecosystems" ];
         };
@@ -1408,42 +1409,13 @@
                 name = "tessera-capi-src";
               };
             in
-            pkgs.runCommand "capi-smoke"
+            # runCommandCC, not runCommand: the programs need a C++ compiler (runCommand is NoCC).
+            pkgs.runCommandCC "capi-smoke"
               {
                 nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config pkgs.rust-cbindgen pkgs.diffutils ];
                 buildInputs = [ nanoarrow tessera-capi ];
               } ''
-              cbindgen --quiet --config ${capiSrc}/cbindgen.toml --output generated.h ${capiSrc}/src/lib.rs
-              if ! diff -u ${capiSrc}/include/tessera.h generated.h; then
-                echo "include/tessera.h is stale: regenerate it (see cbindgen.toml)" >&2
-                exit 1
-              fi
-              for link in shared static; do
-                cmake -S ${capiSrc}/cpp -B build-$link -DTESSERA_LINK=$link -DCMAKE_BUILD_TYPE=Release
-                cmake --build build-$link -j "$NIX_BUILD_CORES"
-              done
-              # The static build must not need the shared library at run time.
-              # ldd into a file first: under pipefail a `grep -q` match can SIGPIPE ldd and turn the
-              # pipeline non-zero, which would pass exactly the case this must catch.
-              ldd build-static/capi_smoke > static.ldd
-              if grep -q libtessera_capi static.ldd; then
-                echo "capi_smoke (static) still links libtessera_capi.so" >&2
-                exit 1
-              fi
-              for link in shared static; do
-                for rows in known unknown; do
-                  run=$link-$rows
-                  mkdir -p dumps-$run
-                  flag=""; [ $rows = unknown ] && flag=--unknown-rows
-                  build-$link/capi_smoke stage-$run $run.tsra dumps-$run 200000 9973 $flag | tee $run.log
-                  ${tessera-cli}/bin/tessera verify $run.tsra
-                  ${tessera-capi}/bin/readback $run.tsra dumps-$run
-                done
-              done
-              # Every variant sealed the same product.
-              test "$(grep -h '^content_hash' *.log | sort -u | wc -l)" -eq 1
-              mkdir threads
-              build-shared/capi_threads threads
+              bash ${capiSrc}/cpp/capi-smoke.sh ${capiSrc} ${tessera-cli}/bin/tessera ${tessera-capi}/bin/readback
               touch $out
             '';
 
