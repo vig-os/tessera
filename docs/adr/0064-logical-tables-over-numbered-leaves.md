@@ -14,7 +14,10 @@ measured in its own job on `/dev/shm`, the only graded timing: shared-disk timin
 test, an OLS fit of every run's peak `RssAnon` against `n` from `16 W` leaves on, whose slope must be at most
 `c_leaf` plus its one-sided 95 % confidence margin, with a resolution check; `W = 1` runs `k₁ = 6` times per size
 from 16 leaves, so that its check resolves a growth of `c_leaf` beyond `c_leaf`; `τ` is retired (the second amendment
-at the end).
+at the end). **Amended by #797 (2026-11-11):** criterion 2's slope is fitted within runs, by fixed effects over the
+tenths of each run's input from `16 W` leaves on, with a standard error cluster-robust by run; the pass rule and the
+resolution checks are unchanged, and the across-run slope is reported as context confounded by the shared disk (the
+third amendment at the end).
 
 ## Context
 
@@ -586,6 +589,7 @@ memory: the staged files' pages are page cache, which counts toward the cgroup's
      `W = 1` from 16 blocks;
      *(Amended by #760, below: plus `c_leaf · (n₂ − n₁)`, on the medians of 3 runs at `W = 4`.)*
      *(Amended by #770, below: a slope test over every run at `n ≥ 16 W`, at both `W`.)*
+     *(Amended by #797, below: the slope is fitted within runs, over the tenths of each run's input, C.2.)*
   3. **Page cache is reclaimable:** the 2.4 G-row run completes under `--mem 4Gi` (its output is ~18 GB, so
      unreclaimable staging would OOM), peak `memory.stat` `shmem` stays under 16 MiB, and `anon` agrees with
      `RssAnon` within `s_rss`;
@@ -922,6 +926,9 @@ confidence interval. It doesn't bias the slope. A regression that grows with `n`
 
 ### B.2 — The estimator: ordinary least squares over every run, with its standard error
 
+*(Amended by #797, below: this across-run fit is reported as context, not graded; criterion 2 is graded on the
+within-run fit of C.2.)*
+
 **The runs.** For each `W`, every run at `n ≥ 16 W` leaves, each repeat its own point (no medians): at `W = 4` the
 `k = 3` runs at each of 64, 256 and 573 leaves (`N = 9`); at `W = 1` the `k₁ = 6` runs at each of 16, 64, 256 and
 573 leaves (`N = 24`). The `W = 4` sweep and `k` are A.2's, unchanged; `k₁` is derived in B.5 (r3 ran `W = 1` once
@@ -978,7 +985,8 @@ margin  =  t₀.₉₅,N−2 · SE(b̂)          t₀.₉₅,₇ = 1.895 (W = 4,
 **Two tests, one proof.** The proof runs the slope check at both `W` and fails if either fails, so a writer at
 exactly `c_leaf` at both `W` fails the proof's slope checks with probability `1 − 0.95²` = 9.75 % if the two are
 independent, and at most 10 % whatever their dependence (the union bound). The level stays 5 % per `W`, without a
-Bonferroni correction to 2.5 %, and the proof's false-fail rate is stated as that family-wise ≤ 10 %. The
+Bonferroni correction to 2.5 %, and the false-fail rate of the proof's two slope checks is stated as that
+family-wise ≤ 10 %; with `W = 1`'s resolution check it is about 15 % overall (B.5). The
 correction would raise `t` from 1.895 to 2.365 at `W = 4` (+25 % on its margin and detection floor) and from 1.717
 to 2.074 at `W = 1`, where B.5's `k₁` would have to grow to keep its floor at `c_leaf`. That trades the regressions
 criterion 2 exists to catch for fewer false alarms, and the two errors don't cost the same: a false fail costs an
@@ -1010,6 +1018,9 @@ with `c_leaf` A.1's, its `e_leaf` read off the run's sealed manifest (the maximu
 
 Equivalently, the slope check fails a run only when the data show, at 95 % confidence, that peak `RssAnon` grows by
 more than `c_leaf` per leaf: `b̂ − t₀.₉₅,N−2 · SE(b̂) > c_leaf`.
+
+*(Amended by #797, below: `b̂` and `SE(b̂)` are the within-run fit's, and `t` is `t₀.₉₅,G−1` with `G` the runs that
+fit uses, C.2 and C.3. The two checks, their targets and "inconclusive fails" are unchanged.)*
 
 **`W = 1` gets the same test,** on its `N = 24` runs from 16 leaves (`16 W`), with the tighter resolution target.
 Its noise is smaller (r3 residual σ̂ = 1.90 MiB against 7.98 MiB at `W = 4`), which is why it is the `W` that can
@@ -1181,6 +1192,146 @@ catches with probability at least 95 %:
   (7,980 B/leaf in r3). A growth beyond `c_leaf` smaller than the run's floor, so less than `c_leaf`, can pass.
 
 Each proof run records both measured floors with its verdict, so the limit a run actually met is on file.
+
+## Amendment (#797, 2026-11-11) — criterion 2 as a within-run slope
+
+The fourth run of the §8.1 proof (#715 G r4: eight shards `tessera-715-r4-sweep-*` and `tessera-715-r4-par-1`, PR #767
+at `fa09a81`, on the post-#759 writer) ran #770's full design, `k = 3` at `W = 4` (`N = 9`) and `k₁ = 6` at `W = 1`
+(`N = 24`). It passed every criterion but criterion 2 at `W = 4`, which failed its across-run slope check. The owner
+ruled on #797 (2026-11-11) that criterion 2 is judged by a within-run slope, because the ksb HDD is degraded
+([exo-pet/exo-fleet#980](https://github.com/exo-pet/exo-fleet/issues/980)). This amendment applies that ruling to
+§8.1 and B.2–B.5. The text it replaces is kept above, marked *(Amended by #797, below)*. It was written, and the
+estimator fixed, before the estimator was computed on r4's records; whatever it gives on them is the verdict, and
+changing the estimator again needs an amendment.
+
+### C.1 — Why: across runs, the peak tracks the disk, not `n`
+
+r4's across-run fit (B.2), from its records:
+
+| `W` | `N` | `b̂` (B/leaf) | `SE(b̂)` | Bound `c_leaf + t · SE` | Slope |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 4 | 9 | 40,437 | 12,208 | 31,109 | **fails** |
+| 1 | 24 | 5,072 | 1,247 | 10,121 | passes |
+
+The `W = 4` slope comes from the runs, not from growth within them:
+
+- **Within every `W = 4` run, `RssAnon` is flat over the tenths of its input.** The two highest 573-leaf runs were
+  high from their first tenth (218.6 and 203.2 MiB over leaves 0–57, against 185–193 MiB for whole 64-leaf runs). The
+  highest peaked at input row-group 448, about 7 leaves into its input, so per-leaf state can't be what lifts it.
+- **Against the leaves committed at each run's peak,** instead of the run's `n`, the `W = 4` slope is
+  −26,778 ± 46,234 B/leaf.
+- **`W = 1` holds the same per-leaf state** and measures 5,072 B/leaf, under `c_leaf`.
+- **The run's level follows the disk.** The scratch volumes are on the node's one shared HDD (A.3), 99–100 % busy
+  over every r4 run from 16 leaves on (each run's recorded `%util`). A stalled commit keeps more encoded payloads
+  in flight (A.4: a slow disk keeps the window full), so a run's peak rises with its disk's contention. The longest
+  runs, the 573-leaf ones, overlapped the most contention, and nine shards ran at once on that disk.
+
+A.4 rules that disk-backed timings are context, never evidence. The same reasoning applies to a level that the disk
+moves from run to run: it is a property of the run's environment, which an across-run fit reads as a property of `n`.
+B.2 had named this limit ("a condition that lasts across them … would correlate them"); r4 shows it biasing the slope,
+not only its error.
+
+A within-run fit compares a run with itself. A per-run intercept absorbs whatever stays fixed over that run (its I/O
+state, its neighbours, where its encode peaks coincided), and the slope is what grows as the same run commits more
+leaves. That is the quantity §8's bound is about: a per-leaf or per-row term grows within a run, and so does the
+zone-statistics regression criterion 2 exists to catch. A disk whose contention changes within a run still adds noise,
+which the run-clustered standard error (C.2) counts.
+
+### C.2 — The estimator: fixed effects over the tenths of each run
+
+**The data.** Every run records `tenths`, the peak `RssAnon` of its 10 ms samples in each tenth of its input
+(`run.py`'s `peaks`): tenth `t ∈ {0, …, 9}` holds the samples taken while the generated row count is below
+`(t + 1) · rows / 10`, and the last tenth runs on through the seal. For run `r` and tenth `t`:
+
+- `y_rt` = that tenth's peak `RssAnon`, in bytes;
+- `x_rt` = the leaves whose input is complete at the tenth's end, `⌊(t + 1) · rows / (10 · BLOCK_ROWS)⌋` for `t < 9`,
+  and the run's `n` for `t = 9`, when the seal has committed every leaf.
+
+The records hold the input position, not a commit count, so `x_rt` counts leaves through the reader. The leaves
+committed lag it by at most the jobs in flight, `J` plus the one full block waiting for a worker (§5.2,
+ADR-0026's credit window), a constant of the writer's configuration. A constant lag is absorbed by the run's
+intercept; a varying one is bounded by those `J + 1` leaves, against the 45 (64 leaves at `W = 1`) to 459 (573 leaves
+at `W = 4`) leaves over which a fitted run's `x` ranges.
+
+**Warm-up.** Only tenths with `x_rt ≥ 16 W` are fitted, the threshold B.2 used for runs, now applied within a run.
+A run with fewer than two such tenths has no within-run variation and adds nothing to the fit; it is left out of `G`
+below. In the `job` design that leaves, at `W = 4`, the 6 runs at 256 and 573 leaves (8 and 9 tenths each; a 64-leaf
+run has only its last); at `W = 1`, the 18 runs at 64, 256 and 573 leaves (a 16-leaf run has only its last). A fitted
+tenth with no sample is missing data, and criterion 2 fails on it.
+
+**The model.**
+
+```text
+y_rt  =  α_r  +  b · x_rt  +  ε_rt
+```
+
+one intercept `α_r` per run and one slope `b` common to the runs. `b̂` is OLS on the deviations from each run's own
+means, `x̃_rt = x_rt − x̄_r` and `ỹ_rt = y_rt − ȳ_r`:
+
+```text
+b̂     =  Σ x̃_rt ỹ_rt  /  Sₓₓ,          Sₓₓ = Σ x̃_rt²,      e_rt = ỹ_rt − b̂ · x̃_rt
+SE(b̂) =  √( G/(G − 1) · (N − 1)/(N − 2) · Σ_r (Σ_t x̃_rt e_rt)² )  /  Sₓₓ
+df    =  G − 1
+```
+
+with `G` the fitted runs and `N` their fitted tenths.
+
+**Why this standard error.** Tenths of one run are not independent: a run's encode peaks, its disk's stalls and its
+allocator's retained top carry from one tenth to the next, so the tenths are autocorrelated and the classical OLS
+error, which counts each tenth as a fresh draw, would be too small. The cluster-robust (sandwich) estimator,
+clustered by run, allows any correlation and any variance within a run; it assumes only what B.2 already assumed,
+that runs are independent of each other. `G/(G − 1) · (N − 1)/(N − 2)` is the usual CR1 small-sample factor, the
+per-run intercepts not counted as regressors since they are nested in the clusters, and `t` with `G − 1` degrees of
+freedom is the usual reference for few clusters (Cameron and Miller, "A Practitioner's Guide to Cluster-Robust
+Inference", *Journal of Human Resources* 50(2), 2015). A per-tenth model of the autocorrelation (AR(1), Newey–West)
+was rejected: it would assume a form the data can't test with 8–10 tenths per run, while clustering assumes none.
+With `G = 6` at `W = 4` CR1 is known to run small, so, as in B.2, the level is nominal; the bound is still closed-form
+and checkable by hand from the records.
+
+**What the per-run intercepts cost.** Variation between runs no longer informs `b̂`. A per-run term that is constant
+over a run (a level that depends on `n` but doesn't grow during the run) is invisible to this fit. Nothing in §8's
+model has that form: every term of the bound is either fixed (`p_block`, `s`, `s_rss`) or grows as the session
+commits leaves (`c_leaf · n`, and the zone-statistics regression). Criterion 1 still bounds every run's peak against
+its own `n`, so a level that rose with `n` across runs would still have to stay under the ceiling.
+
+### C.3 — The pass rule, unchanged; the across-run slope as context
+
+**Criterion 2** (replaces B.3's criterion 2): for each `W ∈ {1, 4}`, over the tenths of every run at `n ≥ 16 W`
+leaves with `x_rt ≥ 16 W` (C.2), the within-run slope `b̂` and its cluster-robust `SE(b̂)` satisfy
+
+- `b̂ ≤ c_leaf + t₀.₉₅,G−1 · SE(b̂)` (**slope**), and
+- `2 · t₀.₉₅,G−1 · SE(b̂) ≤ δ_z = 121,635 B/leaf` at both `W` (**resolution**), and at `W = 1` also
+  `≤ c_leaf` (B.5's **re-check**),
+
+with `c_leaf` A.1's, its `e_leaf` the maximum over the fitted runs' sealed manifests. Unchanged from B.3: the level
+(one-sided 5 % per `W`), `δ_z`, the `W = 1` target `c_leaf`, and **an inconclusive run fails**; it never passes.
+Fewer than two fitted runs at a `W` is no standard error, and fails. B.3's statement of the error rates stands: the
+two slope checks fail a writer at exactly `c_leaf` with probability at most 10 % (family-wise, nominal), about 15 %
+overall with `W = 1`'s re-check (B.5).
+
+**The across-run slope is reported, never graded.** The proof still computes B.2's fit at each `W` and prints it with
+B.3's checks, labelled as confounded by the shared disk (C.1). It is the context a reader compares the within-run
+verdict with, like A.3's shared-disk timings, and it isn't evidence for or against the writer until
+exo-fleet#980 gives ksb jobs an uncontended scratch class; grading it again then needs an amendment.
+
+**Unchanged:** the sweep, `k = 3` at `W = 4` and `k₁ = 6` at `W = 1` (B.5's `k₁` was derived for the across-run fit;
+the re-check on the run's own `SE(b̂)` is what binds, and an inconclusive `W = 1` fit re-derives `k₁` by amendment,
+as B.5 says), every other criterion, `c_leaf`, `δ_z`, the stated limits B.5 asks each run to record (now the
+within-run fit's floors), and A.4.
+
+### C.4 — Still sharp: the pre-#759 writer fails
+
+The pre-#759 writer's `RssAnon` grows within its runs, so the within-run fit sees it. r1 (`tessera-715-sweep-1`, B.4's
+fail-before) predates the per-tenth record, and its 256- and 573-leaf sample files (3.7 and 14.5 MB) are over what
+`ksb out` fetches, so its tenths can't be recovered. The same writer's other sweep can:
+`tessera-715-r3-failbefore-2` (B.4; `W = 1`, 64 and 573 leaves), whose 573-leaf run rose steadily from 59.6 to 68.5 MiB
+over its ten tenths. Its within-run fit (`G = 2`, `N = 18`):
+
+| `b̂` (B/leaf) | `SE(b̂)` | `t₀.₉₅,1` | Bound `c_leaf + t · SE` | Slope | Floor `2 t SE` vs `δ_z`, `c_leaf` |
+| ---: | ---: | ---: | ---: | --- | --- |
+| 17,219 | 199 | 6.314 | 9,237 | **fails** | 2,513: resolved |
+
+It fails at 1.9 times its bound, resolvably, with only two runs. `run.py`'s self-tests pin these numbers.
 
 ## References
 

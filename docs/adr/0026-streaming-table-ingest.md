@@ -320,6 +320,9 @@ decision on #677 (2026-10-29, option P-logical of the #681 design note). It chan
    most `c_leaf` plus its one-sided 95 % confidence margin, and that margin must be able to resolve the 0.029 B/row
    zone-statistics regression at `W = 4` and a growth of `c_leaf` beyond `c_leaf` at `W = 1`, which runs 6 times per
    size for it.)*
+   *(ADR-0064's #797 amendment, 2026-11-11: that slope is fitted within runs, by fixed effects over the tenths of
+   each run's input, with a standard error clustered by run; the across-run slope is reported as context, confounded
+   by ksb's shared disk.)*
 
    `p_block` is one block's measured encode peak (46.1 MB for the consumer shape at 8 CPUs, #681 note §4.7);
    it still holds the Vortex writer's width terms `D(width)` and `K(width)`, but no longer a term that grows with
