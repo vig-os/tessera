@@ -1,0 +1,82 @@
+{
+  "product": "geddf:pairwise-record",
+  "version": "3.0",
+  "description": "geddf-analysis pairwise summary: double/triple counts by class, windows and cuts.",
+  "fields": [
+    {
+      "id": "doubles",
+      "description": "pairs, true, scatter, random, prompt, detscat counts",
+      "dtype": "json",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "triples",
+      "description": "triples, true, scatter, same_decay_bad_types, random counts",
+      "dtype": "json",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "windows",
+      "description": "ng_window_keV, lt_window_ns, max_dt_clk, clock_unit_ps",
+      "dtype": "json",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "cuts",
+      "description": "Energy and time cuts applied",
+      "dtype": "json",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "singles_span_s",
+      "description": "Time span of the singles",
+      "dtype": "float64",
+      "unit": "s",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "n_singles",
+      "description": "Singles read",
+      "dtype": "uint64",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "n_511",
+      "description": "Singles in the 511 keV window",
+      "dtype": "uint64",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "n_ng",
+      "description": "Singles in the non-511 window",
+      "dtype": "uint64",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "window_diag",
+      "description": "Window diagnostics",
+      "dtype": "json",
+      "required": false,
+      "recommended": true,
+      "sensitivity": "public"
+    }
+  ],
+  "blocks": [],
+  "requires_generation": true
+}

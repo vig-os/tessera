@@ -1,0 +1,84 @@
+{
+  "product": "gpet-sim2listmode:listmode-singles",
+  "version": "3.0",
+  "description": "Time-ordered list-mode singles built from g4ring output (intrinsic + tracer sources).",
+  "fields": [
+    {
+      "id": "min_edep_keV",
+      "description": "Minimum single energy kept",
+      "dtype": "float64",
+      "unit": "keV",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "edep_threshold_keV",
+      "description": "g4ring threshold carried forward from the inputs",
+      "dtype": "float64",
+      "unit": "keV",
+      "required": false,
+      "recommended": true,
+      "sensitivity": "public"
+    },
+    {
+      "id": "scanner_axial_axis",
+      "description": "Scanner axial axis in the world frame: x | y | z",
+      "dtype": "string",
+      "required": false,
+      "recommended": true,
+      "sensitivity": "public"
+    },
+    {
+      "id": "acquisition_complete",
+      "description": "Whether the acquisition reached its configured end",
+      "dtype": "bool",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "sources",
+      "description": "Per-source facts (intrinsic, tracers/<name>): event_count, dropped_* counts, has_* flags, detection_acceptance, simulated_events",
+      "dtype": "json",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "statistics",
+      "description": "min/max/mean energy, min/max time (the /statistics group)",
+      "dtype": "json",
+      "required": false,
+      "recommended": true,
+      "sensitivity": "public"
+    }
+  ],
+  "blocks": [
+    {
+      "role": "listmode_singles",
+      "kind": "table",
+      "min_count": 1,
+      "description": "One row per single, non-decreasing absolute_time_ps"
+    },
+    {
+      "role": "source_files",
+      "kind": "table",
+      "min_count": 1,
+      "description": "Input shard per source with its event_id offset and sha256"
+    },
+    {
+      "role": "decay_channels",
+      "kind": "table",
+      "min_count": 0,
+      "description": "Per tracer: decay-channel intensities and lifetimes"
+    },
+    {
+      "role": "hit_type_counts",
+      "kind": "table",
+      "min_count": 0,
+      "description": "Singles per hit_type (the /statistics hit_types/hit_counts)"
+    }
+  ],
+  "requires_generation": true
+}
