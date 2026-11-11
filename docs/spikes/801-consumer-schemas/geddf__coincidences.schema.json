@@ -1,0 +1,91 @@
+{
+  "product": "geddf:coincidences",
+  "version": "3.0",
+  "description": "geddf-analysis coincidences: 2- and 3-photon coincidences and events from simulated singles.",
+  "fields": [
+    {
+      "id": "scanner_axial_axis",
+      "description": "Scanner axial axis in the world frame: x | y | z",
+      "dtype": "string",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "has_hit_pos",
+      "description": "Whether events_2p carries the hit_pos columns",
+      "dtype": "bool",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "has_singles",
+      "description": "Whether the singles block is present",
+      "dtype": "bool",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "clock_unit_ps",
+      "description": "Duration of one dt_clk / td_clk tick",
+      "dtype": "float64",
+      "unit": "ps",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    }
+  ],
+  "blocks": [
+    {
+      "role": "events_2p",
+      "kind": "table",
+      "min_count": 1,
+      "description": "2-photon events"
+    },
+    {
+      "role": "events_3p",
+      "kind": "table",
+      "min_count": 1,
+      "description": "3-photon events"
+    },
+    {
+      "role": "coin_2p",
+      "kind": "table",
+      "min_count": 1,
+      "description": "2-photon coincidences"
+    },
+    {
+      "role": "coin_3p",
+      "kind": "table",
+      "min_count": 1,
+      "description": "3-photon coincidences"
+    },
+    {
+      "role": "time_markers",
+      "kind": "table",
+      "min_count": 1,
+      "description": "One row per populated millisecond"
+    },
+    {
+      "role": "coin_size_dist",
+      "kind": "table",
+      "min_count": 1,
+      "description": "Coincidence-size histogram (size, count)"
+    },
+    {
+      "role": "singles",
+      "kind": "table",
+      "min_count": 0,
+      "description": "The singles the coincidences were built from (opt-in)"
+    },
+    {
+      "role": "lyso_map",
+      "kind": "array",
+      "min_count": 1,
+      "description": "(n_tx, n_ax, 4) float64: calibration, x, z, y per channel"
+    }
+  ],
+  "requires_generation": true
+}

@@ -1,0 +1,552 @@
+{
+  "product": "geddf:coincidences",
+  "status": "proposed (#801)",
+  "tables": {
+    "events_2p": {
+      "sequence_key": [],
+      "order": "producer",
+      "keys": [],
+      "references": [],
+      "columns": [
+        {
+          "name": "tm_ms",
+          "dtype": "u4",
+          "description": "Millisecond time marker of the row",
+          "unit": "ms"
+        },
+        {
+          "name": "dt_clk",
+          "dtype": "i8",
+          "description": "Time difference in clock ticks (clock_unit_ps)",
+          "unit": "1"
+        },
+        {
+          "name": "en_keV.0",
+          "dtype": "f4",
+          "description": "Photon energy [0]",
+          "unit": "keV"
+        },
+        {
+          "name": "en_keV.1",
+          "dtype": "f4",
+          "description": "Photon energy [1]",
+          "unit": "keV"
+        },
+        {
+          "name": "ax.0",
+          "dtype": "u2",
+          "description": "Axial channel [0]",
+          "unit": "1"
+        },
+        {
+          "name": "ax.1",
+          "dtype": "u2",
+          "description": "Axial channel [1]",
+          "unit": "1"
+        },
+        {
+          "name": "tx.0",
+          "dtype": "u2",
+          "description": "Transaxial channel [0]",
+          "unit": "1"
+        },
+        {
+          "name": "tx.1",
+          "dtype": "u2",
+          "description": "Transaxial channel [1]",
+          "unit": "1"
+        },
+        {
+          "name": "vtx_x_mm",
+          "dtype": "f4",
+          "description": "Reconstructed vertex (x)",
+          "unit": "mm"
+        },
+        {
+          "name": "vtx_y_mm",
+          "dtype": "f4",
+          "description": "Reconstructed vertex (y)",
+          "unit": "mm"
+        },
+        {
+          "name": "vtx_z_mm",
+          "dtype": "f4",
+          "description": "Reconstructed vertex (z)",
+          "unit": "mm"
+        },
+        {
+          "name": "event_label",
+          "dtype": "u1",
+          "description": "Truth label (was proc_data/event_labels_2p)",
+          "unit": "1"
+        },
+        {
+          "name": "true_vtx_x_mm",
+          "dtype": "f4",
+          "description": "True vertex; NULL for non-TRUE events (x)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "true_vtx_y_mm",
+          "dtype": "f4",
+          "description": "True vertex; NULL for non-TRUE events (y)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "true_vtx_z_mm",
+          "dtype": "f4",
+          "description": "True vertex; NULL for non-TRUE events (z)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "hit_pos.0.x_mm",
+          "dtype": "f4",
+          "description": "Hit 0 position (x); NULL when missing",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "hit_pos.0.y_mm",
+          "dtype": "f4",
+          "description": "Hit 0 position (y); NULL when missing",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "hit_pos.0.z_mm",
+          "dtype": "f4",
+          "description": "Hit 0 position (z); NULL when missing",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "hit_pos.1.x_mm",
+          "dtype": "f4",
+          "description": "Hit 1 position (x); NULL when missing",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "hit_pos.1.y_mm",
+          "dtype": "f4",
+          "description": "Hit 1 position (y); NULL when missing",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "hit_pos.1.z_mm",
+          "dtype": "f4",
+          "description": "Hit 1 position (z); NULL when missing",
+          "unit": "mm",
+          "nullable": true
+        }
+      ]
+    },
+    "events_3p": {
+      "sequence_key": [],
+      "order": "producer",
+      "keys": [],
+      "references": [],
+      "columns": [
+        {
+          "name": "tm_ms",
+          "dtype": "u4",
+          "description": "Millisecond time marker of the row",
+          "unit": "ms"
+        },
+        {
+          "name": "dt_clk",
+          "dtype": "i8",
+          "description": "Time difference in clock ticks",
+          "unit": "1"
+        },
+        {
+          "name": "en_keV.0",
+          "dtype": "f4",
+          "description": "Photon energy [0]",
+          "unit": "keV"
+        },
+        {
+          "name": "en_keV.1",
+          "dtype": "f4",
+          "description": "Photon energy [1]",
+          "unit": "keV"
+        },
+        {
+          "name": "en_keV.2",
+          "dtype": "f4",
+          "description": "Photon energy [2]",
+          "unit": "keV"
+        },
+        {
+          "name": "ax.0",
+          "dtype": "u2",
+          "description": "Axial channel [0]",
+          "unit": "1"
+        },
+        {
+          "name": "ax.1",
+          "dtype": "u2",
+          "description": "Axial channel [1]",
+          "unit": "1"
+        },
+        {
+          "name": "ax.2",
+          "dtype": "u2",
+          "description": "Axial channel [2]",
+          "unit": "1"
+        },
+        {
+          "name": "tx.0",
+          "dtype": "u2",
+          "description": "Transaxial channel [0]",
+          "unit": "1"
+        },
+        {
+          "name": "tx.1",
+          "dtype": "u2",
+          "description": "Transaxial channel [1]",
+          "unit": "1"
+        },
+        {
+          "name": "tx.2",
+          "dtype": "u2",
+          "description": "Transaxial channel [2]",
+          "unit": "1"
+        },
+        {
+          "name": "vtx_x_mm",
+          "dtype": "f4",
+          "description": "Reconstructed vertex (x)",
+          "unit": "mm"
+        },
+        {
+          "name": "vtx_y_mm",
+          "dtype": "f4",
+          "description": "Reconstructed vertex (y)",
+          "unit": "mm"
+        },
+        {
+          "name": "vtx_z_mm",
+          "dtype": "f4",
+          "description": "Reconstructed vertex (z)",
+          "unit": "mm"
+        },
+        {
+          "name": "lt_ns",
+          "dtype": "f4",
+          "description": "Positronium lifetime estimate",
+          "unit": "ns"
+        },
+        {
+          "name": "lt_corr_ns",
+          "dtype": "f4",
+          "description": "Corrected lifetime estimate",
+          "unit": "ns"
+        },
+        {
+          "name": "event_label",
+          "dtype": "u1",
+          "description": "Truth label (was proc_data/event_labels_3p)",
+          "unit": "1"
+        },
+        {
+          "name": "true_vtx_x_mm",
+          "dtype": "f4",
+          "description": "True vertex; NULL for non-TRUE events (x)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "true_vtx_y_mm",
+          "dtype": "f4",
+          "description": "True vertex; NULL for non-TRUE events (y)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "true_vtx_z_mm",
+          "dtype": "f4",
+          "description": "True vertex; NULL for non-TRUE events (z)",
+          "unit": "mm",
+          "nullable": true
+        }
+      ]
+    },
+    "coin_2p": {
+      "sequence_key": [],
+      "order": "producer",
+      "keys": [],
+      "references": [],
+      "columns": [
+        {
+          "name": "tm_ms",
+          "dtype": "u4",
+          "description": "Millisecond time marker of the row",
+          "unit": "ms"
+        },
+        {
+          "name": "en_keV.0",
+          "dtype": "u2",
+          "description": "Quantised photon energy [0]",
+          "unit": "keV"
+        },
+        {
+          "name": "en_keV.1",
+          "dtype": "u2",
+          "description": "Quantised photon energy [1]",
+          "unit": "keV"
+        },
+        {
+          "name": "ax.0",
+          "dtype": "u2",
+          "description": "Axial channel [0]",
+          "unit": "1"
+        },
+        {
+          "name": "ax.1",
+          "dtype": "u2",
+          "description": "Axial channel [1]",
+          "unit": "1"
+        },
+        {
+          "name": "tx.0",
+          "dtype": "u2",
+          "description": "Transaxial channel [0]",
+          "unit": "1"
+        },
+        {
+          "name": "tx.1",
+          "dtype": "u2",
+          "description": "Transaxial channel [1]",
+          "unit": "1"
+        },
+        {
+          "name": "dt_clk",
+          "dtype": "i8",
+          "description": "Time difference in clock ticks",
+          "unit": "1"
+        },
+        {
+          "name": "coin_label",
+          "dtype": "u1",
+          "description": "Truth label (was proc_data/coin_labels_2p)",
+          "unit": "1"
+        }
+      ]
+    },
+    "coin_3p": {
+      "sequence_key": [],
+      "order": "producer",
+      "keys": [],
+      "references": [],
+      "columns": [
+        {
+          "name": "tm_ms",
+          "dtype": "u4",
+          "description": "Millisecond time marker of the row",
+          "unit": "ms"
+        },
+        {
+          "name": "en_keV.0",
+          "dtype": "u2",
+          "description": "Quantised photon energy [0]",
+          "unit": "keV"
+        },
+        {
+          "name": "en_keV.1",
+          "dtype": "u2",
+          "description": "Quantised photon energy [1]",
+          "unit": "keV"
+        },
+        {
+          "name": "en_keV.2",
+          "dtype": "u2",
+          "description": "Quantised photon energy [2]",
+          "unit": "keV"
+        },
+        {
+          "name": "ax.0",
+          "dtype": "u2",
+          "description": "Axial channel [0]",
+          "unit": "1"
+        },
+        {
+          "name": "ax.1",
+          "dtype": "u2",
+          "description": "Axial channel [1]",
+          "unit": "1"
+        },
+        {
+          "name": "ax.2",
+          "dtype": "u2",
+          "description": "Axial channel [2]",
+          "unit": "1"
+        },
+        {
+          "name": "tx.0",
+          "dtype": "u2",
+          "description": "Transaxial channel [0]",
+          "unit": "1"
+        },
+        {
+          "name": "tx.1",
+          "dtype": "u2",
+          "description": "Transaxial channel [1]",
+          "unit": "1"
+        },
+        {
+          "name": "tx.2",
+          "dtype": "u2",
+          "description": "Transaxial channel [2]",
+          "unit": "1"
+        },
+        {
+          "name": "dt_clk.0",
+          "dtype": "i8",
+          "description": "Time difference in clock ticks [0]",
+          "unit": "1"
+        },
+        {
+          "name": "dt_clk.1",
+          "dtype": "i8",
+          "description": "Time difference in clock ticks [1]",
+          "unit": "1"
+        },
+        {
+          "name": "coin_label",
+          "dtype": "u1",
+          "description": "Truth label (was proc_data/coin_labels_3p)",
+          "unit": "1"
+        }
+      ]
+    },
+    "time_markers": {
+      "sequence_key": [
+        "tm_ms"
+      ],
+      "keys": [
+        [
+          "tm_ms"
+        ]
+      ],
+      "references": [],
+      "columns": [
+        {
+          "name": "tm_ms",
+          "dtype": "u4",
+          "description": "Millisecond time marker of the row",
+          "unit": "ms"
+        },
+        {
+          "name": "idx",
+          "dtype": "u8",
+          "description": "Index of the millisecond's first single",
+          "unit": "1"
+        },
+        {
+          "name": "length_ms",
+          "dtype": "u1",
+          "description": "Marker length",
+          "unit": "ms"
+        },
+        {
+          "name": "n_singles",
+          "dtype": "u4",
+          "description": "Singles in the millisecond",
+          "unit": "1"
+        },
+        {
+          "name": "n_coins2p",
+          "dtype": "u4",
+          "description": "2-photon coincidences in the millisecond",
+          "unit": "1"
+        },
+        {
+          "name": "n_coins3p",
+          "dtype": "u4",
+          "description": "3-photon coincidences in the millisecond",
+          "unit": "1"
+        },
+        {
+          "name": "n_event2p",
+          "dtype": "u4",
+          "description": "2-photon events in the millisecond",
+          "unit": "1"
+        },
+        {
+          "name": "n_event3p",
+          "dtype": "u4",
+          "description": "3-photon events in the millisecond",
+          "unit": "1"
+        }
+      ]
+    },
+    "coin_size_dist": {
+      "sequence_key": [
+        "size"
+      ],
+      "keys": [
+        [
+          "size"
+        ]
+      ],
+      "references": [],
+      "columns": [
+        {
+          "name": "size",
+          "dtype": "i8",
+          "description": "Coincidence size",
+          "unit": "1"
+        },
+        {
+          "name": "count",
+          "dtype": "i8",
+          "description": "Coincidences of that size",
+          "unit": "1"
+        }
+      ]
+    },
+    "singles": {
+      "sequence_key": [],
+      "order": "producer",
+      "keys": [],
+      "references": [],
+      "columns": [
+        {
+          "name": "tm_ms",
+          "dtype": "u4",
+          "description": "Millisecond time marker of the row",
+          "unit": "ms"
+        },
+        {
+          "name": "en_keV",
+          "dtype": "u2",
+          "description": "Quantised energy",
+          "unit": "keV"
+        },
+        {
+          "name": "ax",
+          "dtype": "u2",
+          "description": "Axial channel",
+          "unit": "1"
+        },
+        {
+          "name": "tx",
+          "dtype": "u2",
+          "description": "Transaxial channel",
+          "unit": "1"
+        },
+        {
+          "name": "td_clk",
+          "dtype": "i8",
+          "description": "Time to the next single in clock ticks",
+          "unit": "1"
+        }
+      ]
+    }
+  }
+}

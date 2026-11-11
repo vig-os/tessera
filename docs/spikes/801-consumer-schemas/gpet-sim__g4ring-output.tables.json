@@ -1,0 +1,202 @@
+{
+  "product": "gpet-sim:g4ring-output",
+  "status": "proposed (#801)",
+  "tables": {
+    "events": {
+      "sequence_key": [
+        "event_id"
+      ],
+      "keys": [
+        [
+          "event_id"
+        ]
+      ],
+      "references": [],
+      "columns": [
+        {
+          "name": "event_id",
+          "dtype": "u8",
+          "description": "Geant4 event id + event_id_offset; unique within the run",
+          "unit": "1"
+        },
+        {
+          "name": "n_pethits",
+          "dtype": "u2",
+          "description": "Number of pethits rows of this event",
+          "unit": "1"
+        },
+        {
+          "name": "source_x_mm",
+          "dtype": "f4",
+          "description": "Sampled source position, world frame (x)",
+          "unit": "mm"
+        },
+        {
+          "name": "source_y_mm",
+          "dtype": "f4",
+          "description": "Sampled source position, world frame (y)",
+          "unit": "mm"
+        },
+        {
+          "name": "source_z_mm",
+          "dtype": "f4",
+          "description": "Sampled source position, world frame (z)",
+          "unit": "mm"
+        },
+        {
+          "name": "annih_x_mm",
+          "dtype": "f4",
+          "description": "Positron annihilation vertex, world frame; NULL when the event has none (x)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "annih_y_mm",
+          "dtype": "f4",
+          "description": "Positron annihilation vertex, world frame; NULL when the event has none (y)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "annih_z_mm",
+          "dtype": "f4",
+          "description": "Positron annihilation vertex, world frame; NULL when the event has none (z)",
+          "unit": "mm",
+          "nullable": true
+        }
+      ]
+    },
+    "pethits": {
+      "sequence_key": [
+        "event_id",
+        "hit_ordinal"
+      ],
+      "keys": [
+        [
+          "event_id",
+          "hit_ordinal"
+        ]
+      ],
+      "references": [
+        {
+          "columns": [
+            "event_id"
+          ],
+          "to": {
+            "scope": "block",
+            "block": "events",
+            "columns": [
+              "event_id"
+            ]
+          }
+        },
+        {
+          "columns": [
+            "crystal_id"
+          ],
+          "to": {
+            "scope": "source(crystal_map)",
+            "block": "crystals",
+            "columns": [
+              "crystal_id"
+            ]
+          }
+        }
+      ],
+      "columns": [
+        {
+          "name": "event_id",
+          "dtype": "u8",
+          "description": "Owning event (references events.event_id)",
+          "unit": "1"
+        },
+        {
+          "name": "hit_ordinal",
+          "dtype": "u4",
+          "description": "PROPOSED: position of the hit within its event in g4ring's flush order; not written today",
+          "unit": "1"
+        },
+        {
+          "name": "hit_type",
+          "dtype": "u2",
+          "description": "0 prompt, 1 annihilation photon 1, 2 annihilation photon 2, 4 pre",
+          "unit": "1"
+        },
+        {
+          "name": "crystal_id",
+          "dtype": "u4",
+          "description": "GDML copy number of the crystal (references the crystal map)",
+          "unit": "1"
+        },
+        {
+          "name": "edep_keV",
+          "dtype": "f4",
+          "description": "Aggregated energy deposit in the crystal",
+          "unit": "keV"
+        },
+        {
+          "name": "time_ps",
+          "dtype": "f8",
+          "description": "Time of the earliest deposit since the event start",
+          "unit": "ps"
+        },
+        {
+          "name": "nHits",
+          "dtype": "u2",
+          "description": "Geant4 steps aggregated into this hit",
+          "unit": "1"
+        },
+        {
+          "name": "n_compton",
+          "dtype": "u1",
+          "description": "Compton scatters before the hit (saturates at 255); NULL when not recorded",
+          "unit": "1",
+          "nullable": true
+        },
+        {
+          "name": "n_rayleigh",
+          "dtype": "u1",
+          "description": "Rayleigh scatters before the hit (saturates at 255); NULL when not recorded",
+          "unit": "1",
+          "nullable": true
+        },
+        {
+          "name": "pos_x_mm",
+          "dtype": "f4",
+          "description": "Energy-weighted deposit centroid (x)",
+          "unit": "mm"
+        },
+        {
+          "name": "pos_y_mm",
+          "dtype": "f4",
+          "description": "Energy-weighted deposit centroid (y)",
+          "unit": "mm"
+        },
+        {
+          "name": "pos_z_mm",
+          "dtype": "f4",
+          "description": "Energy-weighted deposit centroid (z)",
+          "unit": "mm"
+        },
+        {
+          "name": "first_x_mm",
+          "dtype": "f4",
+          "description": "Position of the earliest deposit (x)",
+          "unit": "mm"
+        },
+        {
+          "name": "first_y_mm",
+          "dtype": "f4",
+          "description": "Position of the earliest deposit (y)",
+          "unit": "mm"
+        },
+        {
+          "name": "first_z_mm",
+          "dtype": "f4",
+          "description": "Position of the earliest deposit (z)",
+          "unit": "mm"
+        }
+      ]
+    }
+  }
+}
