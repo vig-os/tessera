@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5](https://github.com/vig-os/tessera/compare/tessera-py-v0.1.0-alpha.4...tessera-py-v0.1.0-alpha.5) - 2026-11-11
+
+### Added
+
+- *(py)* read tables by logical name and type the not-a-block error
+- *(core)* add the ADR-0064 partition marker to TableSpec
+
 ## [0.1.0-alpha.3](https://github.com/vig-os/tessera/compare/tessera-py-v0.1.0-alpha.2...tessera-py-v0.1.0-alpha.3) - 2026-10-19
 
 ### Fixed
