@@ -44,8 +44,9 @@
   counts (§4).
 - **Tessera's writer is single-producer, and it needs the row count up front.** `StreamWriter` commits in push order
   from one `&mut self` caller (`tessera/crates/tessera-io/src/stream.rs:34-38`), and `push_table` refuses an unknown
-  `spec.rows` (ADR-0064 §5.3). Geant4 workers neither push in order nor know their row counts. #802 needs keyed lanes,
-  and #806 needs open-ended tables.
+  `spec.rows` (ADR-0064 §5.3). Geant4 workers neither push in order nor know their row counts. #802 needs the owner's
+  dense `seq`, as `seq = event_id / B` for a fixed, recorded `B`: Geant4's own block size follows the thread count
+  (§4.4). #806 needs open-ended tables.
 - **One reader is C++** (gPET-sim2listmode). #800 is writer-only, so the port can't start without a read-side C ABI
   (#805). The Python readers need row-range reads (#807), and a correct nullable read: today's Python returns NULL
   columns with their validity mask appended (#804, found by this spike).
@@ -178,7 +179,7 @@ Columns per `ListModeStructs.h:370-417`. Sentinel flags are per source (`schema/
   `source_files/{paths, event_id_offsets}`, `decay_channels`), `/statistics`, and `/provenance` (git, nix path, the
   full effective `config_json`, inputs with sha256).
 - **Chunking:** 100 k rows, deflate 6, and `H5Pset_obj_track_times(false)`, so identical runs are byte-identical
-  (`ListModeDataManager.cpp:28,825-836`).
+  (`ListModeDataManager.cpp:30,825-836`).
 - **Order:** non-decreasing `absolute_time_ps`, enforced at flush (`ListModeDataManager.cpp:865-916`).
 - **One writer thread.** The event loop is a sequential inhomogeneous Poisson process. Threads are used only to read
   inputs, so "the output is identical for every thread count" (`README_DEV.md:55`,
@@ -321,8 +322,11 @@ ADR-0042, and seal-time identity is ADR-0058 §5. The rows above cite all three.
    `numberOfEventsPerTask` ids, starting at the shared counter `numberOfEventProcessed`, and advances the counter
    (`Geant4/geant4 source/run/src/G4TaskRunManager.cc:629-661`). The block size is `eventModulo`: `sqrt(nEvents)` by
    default, capped at `nEvents / grainSize`, where `grainSize` is the **thread-pool size**
-   (`G4TaskRunManager.cc:292-323`). gPET-sim's Stage 2 overrides it with `SetEventModulo`, aligned to the Stage 1 tasks
-   (`g4ring.cpp:616-628`).
+   (`G4TaskRunManager.cc:293-333`). The cap also applies to a value set with `SetEventModulo`: it is reduced with only
+   a `JustWarning` (`Run10035`, `:311-320`), and `G4FORCE_EVENTS_PER_TASK` overrides both (`:323-327`). gPET-sim's
+   Stage 2 calls `SetEventModulo`, aligned to the Stage 1 tasks (`g4ring.cpp:614-626`), but with a value that is
+   itself capped at `nEvents / nThreads`, or 0 to keep Geant4's default (`g4ring/include/PhaseSpaceTasks.h:32-46`). So
+   the block size follows the thread count once `nThreads > sqrt(nEvents)`, in both stages (§4.4).
 3. **Each worker appends its blocks to its own file**, in event order within a block. Which blocks a worker gets
    depends on who takes the mutex first. A shard holds non-contiguous blocks, and the merge script concatenates the
    shards in thread order, **unsorted** (`merge_mt_h5files.py:140-167`). That is why gPET-sim2listmode and
@@ -377,33 +381,91 @@ ADR-0042, and seal-time identity is ADR-0058 §5. The rows above cite all three.
 `particle_ordinal` (§5). The alternative is a stable sort on `event_id` alone, which is deterministic only if each
 event's rows arrive in their fixed order (§4.1 item 4).
 
+**sim2listmode's sorts are not stable.** It re-sorts the merged events and hits with `std::sort` on `event_id` alone
+(`ListMode-Libraries/DataManagers/src/SimulationDataManager.cpp:344-351`), and the output buffer with `std::sort` on
+`absolute_time_ps` alone (`ListModeDataManager.cpp:907`, `operator<` at `include/ListModeStructs.h:379-381`).
+`std::sort` leaves the order of equal keys unspecified. The input is a merged MT file whose order follows scheduling
+(§4.1 item 3), so the order of one event's hits, and of hits with equal times, can differ between runs of the same
+simulation *(inferred: same rows, so it is visible only on ties)*. Its byte-identity claim (§2.3) holds for an
+identical input file. A tessera port should use `std::stable_sort` with a full key, for example
+`(absolute_time_ps, event_id, hit_ordinal)`.
+
 **Single-producer consumers don't need a key.** gPET-sim2listmode (one writer thread, time-sorted) and geddf-analysis
-(ordered pool) already produce scheduling-independent order. For them the draft tables say `"order": "producer"`.
+(ordered pool) don't depend on their own thread count. sim2listmode's sorts still need a full key (above). For them the draft tables say `"order": "producer"`.
 
 ### 4.4 What #802 has to provide
 
-The consequence for tessera's writer, as input to #802's design and not a decision:
+The owner's steer on #802 (2026-11-11, full text on #800) fixes the writer's shape: each batch carries a dense,
+producer-assigned `seq`. The bridge commits batches in `seq` order through StreamWriter, behind its bounded credit
+window, and an empty block pushes an empty batch or calls `mark_done(seq)`. This section maps the analysis above onto
+that shape. Items 2 and 7 are proposed **amendments** to the steer, which the owner decides.
 
-1. **Keyed lanes, not arrival order.** A producer thread pushes a *segment*: the rows of one Geant4 id block,
-   declared with the block's id range `[lo, hi)`, with rows increasing in the sequence key (`event_id`, or
-   `(run_id, event_id)`) inside it. The writer commits segments in range order, with a reorder buffer like the
-   committer's (`stream.rs:34-38`), keyed by `lo` instead of the push sequence. The **declared range** is the key, not
-   the first row: `events` keeps only the kept events and an event without hits writes no `pethits` rows, so a block
-   can have no rows at all, and an empty segment still has to be pushed. Geant4's blocks are contiguous
-   (`SetUpNEvents`), so the ranges tile `[0, N)` and the writer can tell which segment is due next.
-2. **The partition must be over the logical sequence.** Leaves have to be cut at `BLOCK_ROWS` over the key-ordered
-   rows, never at segment boundaries: the segment size follows `eventModulo`, which follows the thread count.
-   ADR-0064 §5.1 already cuts `push_table`'s input this way.
-3. **Bound the reorder buffer.** While one slow worker holds the due block, the others can finish any number of
-   later blocks. So the bound exists only with backpressure: `push` blocks once a window of segments (for example one
-   per worker, `W × eventModulo` events) is waiting ahead of the due one, or their rows are staged on disk like
-   ADR-0064 §5.2's input. This is a new
-   term in the ADR-0064 §8 bound.
-4. **Keep the thread count out of the seal.** gPET-sim writes `numberOfThreads` into `/metadata/general`. In a
+1. **The key is `seq = event_id / B`.** It replaces round 1's segments keyed by a declared id range `[lo, hi)`, and
+   the mapping is exact: the segment `[lo, hi)` is the batch `seq = lo / B` with `hi = lo + B`, and only the run's
+   last batch is shorter.
+   - `event_id` is Geant4's id within the run (`G4Event::GetEventID`), before g4ring adds its offset (§4.3).
+   - Density is round 1's "an empty segment still has to be pushed". A block can have no kept `events` and no
+     `pethits` rows, and it still pushes an empty batch or `mark_done`.
+   - The in-order commit replaces round 1's reorder buffer keyed by `lo`, and the credit window is round 1's
+     backpressure bound (item 4).
+   - For a product that spans `/run/beamOn` batches (`(run_id, event_id)`, §4.3), #802 chooses between a per-run
+     `seq` base and one session per run.
+2. **Contradiction, and amendment to the steer's item 3: Geant4's block is not a fixed size.** The steer suggests
+   `seq` = the event-block index. Geant4's block size is `T = eventModulo = min(sqrt(N), N / grainSize)`, where
+   `grainSize` is the thread-pool size (`G4TaskRunManager.cc:293-333`). Once the thread count exceeds `sqrt(N)`, `T`
+   depends on it. For `N = 64`, `T` is 8 at 1 and 4 threads and 4 at 16.
+   - `SetEventModulo` does not pin `T` unconditionally. Geant4 still caps it at `N / grainSize` with only a
+     `JustWarning` (`:311-320`), and `G4FORCE_EVENTS_PER_TASK` overrides it (`:323-327`).
+   - g4ring's Stage 2 pins a value that depends on the thread count (§4.1 item 2, `PhaseSpaceTasks.h:32-46`).
+   - So with `seq` = Geant4's block index, the steer's guarantee "same (seq → batch) mapping, same bytes" holds, but
+     the mapping is not the same across thread counts.
+
+   **Amendment.** `seq = event_id / B`, for a block size `B` that the producer fixes per product, independently of
+   the thread count. `B` is recorded in the session metadata.
+   - Recording `B` in the seal is safe because `B` is fixed. It does not bring the thread count into the bytes,
+     unlike `numberOfThreads` (item 5).
+   - The producer computes `seq` from the event id, never from Geant4's task index, and flushes its buffer whenever
+     `seq` changes.
+   - **Alignment.** A worker can push a whole batch only if one Geant4 task covers it. Tasks start at multiples of `T`
+     (`SetUpNEvents` advances the counter by `T`, `:629-661`), so the condition is `T % B == 0`.
+   - The producer pins it with `SetEventModulo(B)`, with `B ≤ N / pool size`. It reads back the effective size,
+     `GetNumberOfEventsPerTask()` (`G4TaskRunManager.hh:100`), and refuses the run if `T % B != 0`. *(Inferred: where
+     to read it back; the size is computed inside `InitializeEventLoop`, `G4TaskRunManager.cc:359`.)*
+   - **If alignment breaks anyway**, two workers push parts of one `seq`. That is the steer's duplicate-`seq` case,
+     so it must be an error, never a merge. Then a misaligned run fails loudly instead of sealing different bytes.
+3. **Amendment to the steer's item 2: the partition.** Whether `B` reaches the bytes depends on how the bridge turns
+   batches into leaves.
+   - If each batch becomes its own leaves, every batch boundary is a leaf boundary. `B` is then part of the product's
+     bytes, and item 2's fixed, recorded `B` is the whole guarantee.
+   - If the bridge cuts leaves at `BLOCK_ROWS` over the `seq`-ordered rows, `B` drops out of the bytes, and only the
+     row order remains. `push_table` already re-chunks its input "so the leaves don't depend on how the input was
+     chunked" (`tessera/crates/tessera-io/src/stream.rs:865-869`, ADR-0064 §5.1). A producer could then change `B`
+     without changing the product.
+   - The second option needs #806, because `push_table` takes `spec.rows` up front. Density and alignment (item 2)
+     are needed either way.
+4. **The window.** Round 1's bound on out-of-order work is the steer's credit window, which blocks a thread that is
+   too far ahead. One condition matters for Geant4: the due `seq` must always be admitted. Otherwise a window smaller
+   than the pool deadlocks, with every slot held by later batches while the worker holding the due block waits.
+   This is a new term in the ADR-0064 §8 bound.
+5. **Keep the thread count out of the seal.** gPET-sim writes `numberOfThreads` into `/metadata/general`. In a
    tessera product it belongs in `aux/provenance.json` (ADR-0042), or the sealed bytes change with the thread count by
    construction. The same goes for the output and log paths (G35).
-5. **#802's test** runs N producer threads under randomised scheduling **and** several thread counts, with the segment
-   size following the thread count as Geant4's does, and asserts byte identity of the sealed `.tsra`. It is the
+6. **Single-producer consumers.** gPET-sim2listmode and geddf-analysis push from one thread in their own order
+   (`"order": "producer"`). For them `seq` is just the push index. sim2listmode's unstable sorts (§4.3) still need a
+   full key before its order is independent of its input file.
+7. **Amendment to the steer's item 5: the test that catches item 2.** The steer's test pushes a fixed (seq → batch)
+   mapping in shuffled order from 1, 4 and 16 threads. Because the mapping is fixed, it cannot see a mapping that
+   follows the thread count. The amended test runs the same `N` events at 1, 4 and 16 threads, with blocks handed
+   out as Geant4's **default** modulo does. That means real Geant4, or a mock of `ComputeNumberOfTasks` and
+   `SetUpNEvents` with `T = min(sqrt(N), N / threads)`. Take `N = 64`, so `T` is 8, 8 and 4. It asserts three things:
+   - **`B` pinned** (`B = 4`, `seq = event_id / B`, `T` a multiple of `B`): an identical `content_hash` at 1, 4 and 16
+     threads.
+   - **`B` not pinned** (`seq` = Geant4's task index): under item 3's first option, the `content_hash` differs
+     between 1 and 16 threads. This arm fails if the test is blind. Under the second option, equality is correct,
+     and the misaligned arm carries the check.
+   - **Misaligned** (`B = 8` with `T = 4` at 16 threads): rejected as a duplicate `seq`, never sealed.
+
+   The steer's own assertions stay: peak in-flight ≤ the window, and a gap at seal is an error. The test is the
    producer-side twin of `content_hash_is_identical_across_workers_and_windows` (`stream.rs:1605`).
 
 ## 5. Draft product schemas (#801)
@@ -486,7 +548,7 @@ pipeline's chain contract (`gPET-pipeline/docs/chain-contract.md`) is where to r
 7. **Companion products.** Are `dose_map`, the activity map and the CSV crystal map products in their own right?
 8. **gPET-reco.** What does it read, and is it in #803's scope?
 9. **Volumes.** What are the row counts and pethits per event of the largest planned campaign? They size the §4.4
-   reorder bound and #806.
+   credit window and #806.
 
 ## 8. Issues filed by this spike
 

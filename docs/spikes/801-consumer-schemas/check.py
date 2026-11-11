@@ -1,7 +1,8 @@
 """Structural check of the #801 drafts against tessera's serde shapes (schema.rs, block/table.rs, dtype.rs).
 
 A Python mirror of the Rust serde shapes, not a Rust round-trip. Exits 1 on the first run with any error.
-Usage (from the repo root): python3 docs/spikes/801-consumer-schemas/check.py docs/spikes/801-consumer-schemas
+Usage: python3 docs/spikes/801-consumer-schemas/check.py [DIR]. DIR defaults to this script's directory. A DIR with no
+*.schema.json is an error, so a wrong path cannot pass vacuously.
 """
 
 import json
@@ -38,7 +39,11 @@ def need(o, k, t, where):
         errs.append(f"{where}: {k} not {t}")
 
 
-for p in sorted(Path(sys.argv[1]).glob("*.schema.json")):
+root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent
+schemas = sorted(root.glob("*.schema.json"))
+if not schemas:
+    errs.append(f"{root}: no *.schema.json")
+for p in schemas:
     s = json.loads(p.read_text())
     w = p.name
     for k in ("product", "version", "description"):
