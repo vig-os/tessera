@@ -1251,9 +1251,15 @@ The records hold the input position, not a commit count, so `x_rt` counts leaves
 committed lag it by at most the jobs in flight, `J` plus the one full block waiting for a worker (§5.2,
 ADR-0026's credit window), a constant of the writer's configuration. A constant lag is absorbed by the run's
 intercept; a varying one is bounded by those `J + 1` leaves, against the 45 (64 leaves at `W = 1`) to 459 (573 leaves
-at `W = 4`) leaves over which a fitted run's `x` ranges.
+at `W = 4`) leaves over which a fitted run's `x` ranges. Within a tenth, which spans up to 57 leaves, the peak can
+fall anywhere; under a real growth it falls near the tenth's end, where `x_rt` is taken, so the slope isn't biased,
+and otherwise where it falls is noise, which the clustered standard error counts.
 
 **Warm-up.** Only tenths with `x_rt ≥ 16 W` are fitted, the threshold B.2 used for runs, now applied within a run.
+The records hold one peak per tenth, not per sample, so the rule is applied at the tenth's end: a fitted tenth may
+begin before `16 W` (at `W = 4` and 573 leaves, tenth 1 covers leaves 57–114; at `W = 1` and 64 leaves, tenth 2
+covers 12.8–19). That differs from #797's "samples only once `x ≥ 16 W`" by at most part of one tenth per run, and it
+is the nearest the records allow.
 A run with fewer than two such tenths has no within-run variation and adds nothing to the fit; it is left out of `G`
 below. In the `job` design that leaves, at `W = 4`, the 6 runs at 256 and 573 leaves (8 and 9 tenths each; a 64-leaf
 run has only its last); at `W = 1`, the 18 runs at 64, 256 and 573 leaves (a 16-leaf run has only its last). A fitted
@@ -1277,16 +1283,18 @@ df    =  G − 1
 with `G` the fitted runs and `N` their fitted tenths.
 
 **Why this standard error.** Tenths of one run are not independent: a run's encode peaks, its disk's stalls and its
-allocator's retained top carry from one tenth to the next, so the tenths are autocorrelated and the classical OLS
-error, which counts each tenth as a fresh draw, would be too small. The cluster-robust (sandwich) estimator,
-clustered by run, allows any correlation and any variance within a run; it assumes only what B.2 already assumed,
-that runs are independent of each other. `G/(G − 1) · (N − 1)/(N − 2)` is the usual CR1 small-sample factor, the
-per-run intercepts not counted as regressors since they are nested in the clusters, and `t` with `G − 1` degrees of
-freedom is the usual reference for few clusters (Cameron and Miller, "A Practitioner's Guide to Cluster-Robust
-Inference", *Journal of Human Resources* 50(2), 2015). A per-tenth model of the autocorrelation (AR(1), Newey–West)
-was rejected: it would assume a form the data can't test with 8–10 tenths per run, while clustering assumes none.
-With `G = 6` at `W = 4` CR1 is known to run small, so, as in B.2, the level is nominal; the bound is still closed-form
-and checkable by hand from the records.
+allocator's retained top carry from one tenth to the next, so the tenths are autocorrelated and the classical OLS error,
+which counts each tenth as a fresh draw, would be too small. The cluster-robust (sandwich) estimator, clustered by run,
+allows any correlation and any variance within a run; it assumes only what B.2 already assumed, that runs are
+independent of each other. `G/(G − 1) · (N − 1)/(N − 2)` is the CR1 small-sample factor in the convention of Stata's
+`xtreg, fe` (the per-run intercepts nested in the clusters are not counted as regressors; the reported constant is); on
+the demeaned data with one regressor the strict factor would be `G/(G − 1)` alone, so the convention is slightly
+conservative, by about 1 % on `SE(b̂)` at r4's `N` (51 tenths at `W = 4`). `t` with `G − 1` degrees of freedom is the
+usual reference for few clusters (Cameron and Miller, "A Practitioner's Guide to Cluster-Robust Inference", *Journal of
+Human Resources* 50(2), 2015). A per-tenth model of the autocorrelation (AR(1), Newey–West) was rejected: it would
+assume a form the data can't test with 8–10 tenths per run, while clustering assumes none. With `G = 6` at `W = 4` CR1
+is known to run small, so, as in B.2, the level is nominal; the bound is still closed-form and checkable by hand from
+the records.
 
 **What the per-run intercepts cost.** Variation between runs no longer informs `b̂`. A per-run term that is constant
 over a run (a level that depends on `n` but doesn't grow during the run) is invisible to this fit. Nothing in §8's
@@ -1303,11 +1311,11 @@ leaves with `x_rt ≥ 16 W` (C.2), the within-run slope `b̂` and its cluster-ro
 - `2 · t₀.₉₅,G−1 · SE(b̂) ≤ δ_z = 121,635 B/leaf` at both `W` (**resolution**), and at `W = 1` also
   `≤ c_leaf` (B.5's **re-check**),
 
-with `c_leaf` A.1's, its `e_leaf` the maximum over the fitted runs' sealed manifests. Unchanged from B.3: the level
-(one-sided 5 % per `W`), `δ_z`, the `W = 1` target `c_leaf`, and **an inconclusive run fails**; it never passes.
-Fewer than two fitted runs at a `W` is no standard error, and fails. B.3's statement of the error rates stands: the
-two slope checks fail a writer at exactly `c_leaf` with probability at most 10 % (family-wise, nominal), about 15 %
-overall with `W = 1`'s re-check (B.5).
+with `c_leaf` A.1's, its `e_leaf` the maximum over the sealed manifests of the runs at `n ≥ 16 W`, as in B.3. Unchanged
+from B.3: the level (one-sided 5 % per `W`), `δ_z`, the `W = 1` target `c_leaf`, and **an inconclusive run fails**; it
+never passes. Fewer than two fitted runs at a `W` is no standard error, and fails. B.3's statement of the error rates
+stands: the two slope checks fail a writer at exactly `c_leaf` with probability at most 10 % (family-wise, nominal),
+about 15 % overall with `W = 1`'s re-check (B.5).
 
 **The across-run slope is reported, never graded.** The proof still computes B.2's fit at each `W` and prints it with
 B.3's checks, labelled as confounded by the shared disk (C.1). It is the context a reader compares the within-run
@@ -1331,7 +1339,9 @@ over its ten tenths. Its within-run fit (`G = 2`, `N = 18`):
 | ---: | ---: | ---: | ---: | --- | --- |
 | 17,219 | 199 | 6.314 | 9,237 | **fails** | 2,513: resolved |
 
-It fails at 1.9 times its bound, resolvably, with only two runs. `run.py`'s self-tests pin these numbers.
+It fails at 1.9 times its bound. With `G = 2` (`df = 1`) a clustered standard error is fragile, so this is a
+fail-before, evidence that the fit sees that writer's growth, not a statement of the test's power, which B.5's floors
+recorded with each run are. `run.py`'s self-tests pin these numbers.
 
 ## References
 
