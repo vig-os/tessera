@@ -104,6 +104,13 @@ pub struct TsraSessionOptions {
     pub timestamp: *const c_char,
     /// Encode worker threads; 0 means 1. The sealed bytes don't depend on it.
     pub workers: u32,
+    /// Events per sequence key (`B`), or 0 if not declared. Batch `seq` covers the events
+    /// `[seq·B, (seq+1)·B)`. Recorded in the sealed manifest (`extra.tessera_capi.seq_block_events`).
+    /// The producer must pin it: Geant4's task run manager derives its event block from the thread
+    /// count unless `SetEventModulo(B)` fixes it, and a thread-count-dependent `B` makes the bytes
+    /// depend on the thread count whenever a batch's rows are reordered within the batch. A table's
+    /// `seq_key_column` lets the bridge check every batch against it.
+    pub seq_block_events: u64,
 }
 
 /// Table options; `struct_size` as for `TsraSessionOptions`.
@@ -126,6 +133,11 @@ pub struct TsraTableOptions {
     /// those pushes, later pushes and the end return `TSRA_STATUS_ORDER` instead of hanging. With 0
     /// there is no such detection.
     pub producers: u32,
+    /// The column holding each row's event id (an integer column, not nullable), or NULL. With the
+    /// session's `seq_block_events` declared, every batch's event ids must lie in
+    /// `[seq·B, (seq+1)·B)`, or the push is refused with `TSRA_STATUS_ORDER`: that is how a block
+    /// size that doesn't match the declared one (an unpinned Geant4 event modulo) is caught.
+    pub seq_key_column: *const c_char,
 }
 
 /// An open write session (opaque).
@@ -136,6 +148,8 @@ pub struct TsraSession {
 /// An open table of a session (opaque).
 pub struct TsraTable {
     declared: Vec<DeclaredColumn>,
+    /// `(column index, B)` when batches are checked against the declared block size.
+    seq_key: Option<(usize, u64)>,
     /// `None` is a key marked done: it holds its place in the order and carries no rows.
     reorder: Reorder<Option<TableData>, SyncSender<Option<TableData>>>,
     feeder: Option<JoinHandle<Fed>>,
@@ -150,6 +164,8 @@ struct SessionInner {
     tables_dir: PathBuf,
     /// The session handle was sealed or freed while a table was open: the table's end cleans up.
     orphaned: bool,
+    /// The declared events per sequence key, if any.
+    seq_block_events: Option<u64>,
 }
 
 enum WriterState {
@@ -306,13 +322,20 @@ pub unsafe extern "C" fn tsra_session_open(
             )
         };
         let stage = Path::new(stage);
-        let session = WriteSession::create(
+        let mut session = WriteSession::create(
             &stage.join("session"),
             product,
             name,
             description,
             timestamp,
         )?;
+        let seq_block_events = (opts.seq_block_events > 0).then_some(opts.seq_block_events);
+        if let Some(b) = seq_block_events {
+            // Sealed with the product, so a reader knows which events each key covered.
+            let mut record = serde_json::Map::new();
+            record.insert("seq_block_events".into(), b.into());
+            session.with_extra("tessera_capi", record.into())?;
+        }
         let writer = StreamWriter::new(session, opts.workers.max(1) as usize, 4);
         let handle = Box::new(TsraSession {
             inner: Arc::new(Mutex::new(SessionInner {
@@ -320,6 +343,7 @@ pub unsafe extern "C" fn tsra_session_open(
                 tables: 0,
                 tables_dir: stage.join("tables"),
                 orphaned: false,
+                seq_block_events,
             })),
         });
         // SAFETY: checked non-NULL above.
@@ -372,7 +396,24 @@ pub unsafe extern "C" fn tsra_table_begin(
             w => w,
         };
 
+        // SAFETY: the caller guarantees `seq_key_column` is NULL or NUL-terminated.
+        let key_column = if opts.seq_key_column.is_null() {
+            None
+        } else {
+            Some(unsafe { arg_str(opts.seq_key_column, "opts.seq_key_column")? })
+        };
         let mut inner = SessionInner::lock(&session.inner);
+        let seq_key = match key_column {
+            None => None,
+            Some(col) => {
+                let b = inner.seq_block_events.ok_or_else(|| {
+                    invalid(format!(
+                        "seq_key_column '{col}' needs the session's seq_block_events declared"
+                    ))
+                })?;
+                Some((arrow::key_column(&declared, col)?, b))
+            }
+        };
         let writer = inner.take_ready(WriterState::InTable(name.clone()))?;
         let stage = inner.tables_dir.join(format!("{:04}", inner.tables));
         inner.tables += 1;
@@ -400,6 +441,7 @@ pub unsafe extern "C" fn tsra_table_begin(
         };
         let table = Box::new(TsraTable {
             declared,
+            seq_key,
             reorder: Reorder::new(tx, u64::from(window), u64::from(opts.producers)),
             feeder: Some(feeder),
             session: Arc::clone(&session.inner),
@@ -537,6 +579,9 @@ pub unsafe extern "C" fn tsra_table_push(
         }
         let batch = StructArray::from(data);
         let rows = arrow::to_table_data(&table.declared, &batch)?;
+        if let Some((col, b)) = table.seq_key {
+            arrow::check_seq_block(&rows[col], seq, b)?;
+        }
         drop(batch); // releases the producer's buffers before the writer's back-pressure can block
         table.reorder.push(seq, Some(rows))
     })

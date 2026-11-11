@@ -203,3 +203,59 @@ fn column_data(d: &DeclaredColumn, array: &ArrayRef) -> CapiResult<ColumnData> {
         validity,
     })
 }
+
+/// The index of the declared column `name`, which must be a non-nullable integer column: the
+/// table's sequence-key column.
+pub fn key_column(declared: &[DeclaredColumn], name: &str) -> CapiResult<usize> {
+    let (i, d) = declared
+        .iter()
+        .enumerate()
+        .find(|(_, d)| d.column.name == name)
+        .ok_or_else(|| schema_err(format!("seq_key_column '{name}' is not a declared column")))?;
+    let integer = matches!(
+        d.column.dtype.as_str(),
+        "i1" | "i2" | "i4" | "i8" | "u1" | "u2" | "u4" | "u8"
+    );
+    if !integer || d.column.nullable {
+        return Err(schema_err(format!(
+            "seq_key_column '{name}' must be a non-nullable integer column, not {}{}",
+            d.column.dtype,
+            if d.column.nullable { " (nullable)" } else { "" }
+        )));
+    }
+    Ok(i)
+}
+
+/// Check that every event id in `column` lies in batch `seq`'s block `[seq·b, (seq+1)·b)`.
+pub fn check_seq_block(column: &(String, ColumnData), seq: u64, b: u64) -> CapiResult<()> {
+    let order = |m: String| CapiError::new(TsraStatus::Order, m);
+    let lo = i128::from(seq) * i128::from(b);
+    let hi = lo + i128::from(b);
+    let values: Box<dyn Iterator<Item = i128> + '_> = match &column.1 {
+        ColumnData::I8(v) => Box::new(v.iter().map(|&x| i128::from(x))),
+        ColumnData::I16(v) => Box::new(v.iter().map(|&x| i128::from(x))),
+        ColumnData::I32(v) => Box::new(v.iter().map(|&x| i128::from(x))),
+        ColumnData::I64(v) => Box::new(v.iter().map(|&x| i128::from(x))),
+        ColumnData::U8(v) => Box::new(v.iter().map(|&x| i128::from(x))),
+        ColumnData::U16(v) => Box::new(v.iter().map(|&x| i128::from(x))),
+        ColumnData::U32(v) => Box::new(v.iter().map(|&x| i128::from(x))),
+        ColumnData::U64(v) => Box::new(v.iter().map(|&x| i128::from(x))),
+        _ => {
+            return Err(order(format!(
+                "seq_key_column '{}' is not an integer column",
+                column.0
+            )))
+        }
+    };
+    for v in values {
+        if v < lo || v >= hi {
+            return Err(order(format!(
+                "batch {seq} holds {} = {v}, outside its block [{lo}, {hi}) of {b} events: the \
+                 producer's blocks don't match the declared seq_block_events (with Geant4, pin \
+                 the block size with SetEventModulo({b}) and push each block as seq = first event / {b})",
+                column.0
+            )));
+        }
+    }
+    Ok(())
+}

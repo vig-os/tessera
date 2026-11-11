@@ -108,6 +108,13 @@ typedef struct {
   const char *timestamp;
   // Encode worker threads; 0 means 1. The sealed bytes don't depend on it.
   uint32_t workers;
+  // Events per sequence key (`B`), or 0 if not declared. Batch `seq` covers the events
+  // `[seq·B, (seq+1)·B)`. Recorded in the sealed manifest (`extra.tessera_capi.seq_block_events`).
+  // The producer must pin it: Geant4's task run manager derives its event block from the thread
+  // count unless `SetEventModulo(B)` fixes it, and a thread-count-dependent `B` makes the bytes
+  // depend on the thread count whenever a batch's rows are reordered within the batch. A table's
+  // `seq_key_column` lets the bridge check every batch against it.
+  uint64_t seq_block_events;
 } TsraSessionOptions;
 
 // Table options; `struct_size` as for `TsraSessionOptions`.
@@ -129,6 +136,11 @@ typedef struct {
   // those pushes, later pushes and the end return `TSRA_STATUS_ORDER` instead of hanging. With 0
   // there is no such detection.
   uint32_t producers;
+  // The column holding each row's event id (an integer column, not nullable), or NULL. With the
+  // session's `seq_block_events` declared, every batch's event ids must lie in
+  // `[seq·B, (seq+1)·B)`, or the push is refused with `TSRA_STATUS_ORDER`: that is how a block
+  // size that doesn't match the declared one (an unpinned Geant4 event modulo) is caught.
+  const char *seq_key_column;
 } TsraTableOptions;
 
 #ifdef __cplusplus

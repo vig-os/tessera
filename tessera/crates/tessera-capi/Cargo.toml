@@ -25,6 +25,8 @@ tessera-io.workspace = true
 # Vortex and the ingest table lane; `ffi` turns on arrow-data/arrow-schema's FFI structs.
 arrow-array = { workspace = true, features = ["ffi"] }
 arrow-schema = { workspace = true, features = ["ffi"] }
+# The `extra.tessera_capi` manifest record (the declared seq_block_events). Already in every build.
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

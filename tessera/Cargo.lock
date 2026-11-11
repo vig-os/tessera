@@ -6632,6 +6632,7 @@ version = "0.1.0-alpha.4"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "serde_json",
  "tempfile",
  "tessera-core",
  "tessera-io",

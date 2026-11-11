@@ -155,6 +155,7 @@ impl Strings {
             description: self.description.as_ptr(),
             timestamp: self.timestamp.as_ptr(),
             workers,
+            seq_block_events: 0,
         }
     }
 }
@@ -185,6 +186,7 @@ pub fn table_opts_producers(rows: u64, reorder_window: u32, producers: u32) -> T
         rows,
         reorder_window,
         producers,
+        seq_key_column: std::ptr::null(),
     }
 }
 
