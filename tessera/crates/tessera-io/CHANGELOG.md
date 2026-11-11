@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.4...tessera-io-v0.1.0-alpha.5) - 2026-11-11
+
+### Added
+
+- *(io)* [**breaking**] deprecate table_job_streaming, refusing tables above BLOCK_ROWS
+- *(io)* hold push_table's workers before they read, and test the W + 1 bound
+- *(io)* add StreamWriter::push_table, a disk-staged streaming partition
+- *(io)* [**breaking**] write multi-block tables as marked <table>/NNNN leaves
+- *(io)* name LogicalTableView's table name `name`, deprecate `prefix`
+- *(io)* run the shared partition check in unpack and pack_dir
+- *(io)* resolve table names through table_group in every reader
+- *(core)* add the ADR-0064 partition marker to TableSpec ([#728](https://github.com/vig-os/tessera/pull/728))
+- *(core)* add the ADR-0064 partition marker to TableSpec
+
+### Fixed
+
+- *(io)* hold each committed block as its journal line, not a BlockRef
+- *(io)* make every directory entry a journal line names durable before it
+- *(io)* make WriteSession::recover crash-safe and idempotent
+- *(core,io,ingest,cli)* [**breaking**] validate block names into one type and join them by plain components only
+
+### Other
+
+- *(adr)* amend ADR-0064 §8/§8.1 with c_leaf · n and a tmpfs parallelism run
+- *(io)* check push_table's per-block heap model and document its bound
+- *(io)* commit a legacy events_NNNN fixture with a pinned content_hash
+- *(io)* prove .cidx pruning over a partitioned table reads no leaf
+- *(io)* fail the S3 tests when the s3-range-read check loses its endpoint
+- *(io)* run the S3 range-read check against versitygw, sandbox-independent
+
 ## [0.1.0-alpha.4](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.3...tessera-io-v0.1.0-alpha.4) - 2026-10-29
 
 ### Fixed
