@@ -146,6 +146,7 @@ inline TsraTableOptions table_options(uint64_t rows) {
   o.struct_size = sizeof(TsraTableOptions);
   o.rows = rows;
   o.reorder_window = 0;
+  o.producers = 0;
   return o;
 }
 

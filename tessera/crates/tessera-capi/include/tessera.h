@@ -118,11 +118,17 @@ typedef struct {
   // block as soon as it fills; an unknown one stages every row on disk and encodes at
   // `tsra_table_end`. The sealed bytes are the same either way.
   uint64_t rows;
-  // How many keys from the next one due are admitted; a push of a key further ahead blocks until
-  // the window moves. 0 means `TSRA_DEFAULT_REORDER_WINDOW`. Blocking is deadlock-free only when
-  // keys are claimed in increasing order and each thread pushes its keys in increasing order
-  // (see `src/order.rs`); with any other assignment, set it to at least the number of batches.
+  // How many keys from the next one due are admitted (at most that many batches wait out of
+  // order); a push of a key further ahead blocks until the window moves. 0 means
+  // `TSRA_DEFAULT_REORDER_WINDOW`. The wait is safe when keys are claimed in increasing order and
+  // each thread pushes its own keys in increasing order (Geant4's event blocks); see `producers`
+  // for what happens otherwise.
   uint32_t reorder_window;
+  // The number of producer threads that push to this table, or 0 if unknown. When every one of
+  // them is blocked on the window, none can push the key due, so the table is marked stalled and
+  // those pushes, later pushes and the end return `TSRA_STATUS_ORDER` instead of hanging. With 0
+  // there is no such detection.
+  uint32_t producers;
 } TsraTableOptions;
 
 #ifdef __cplusplus
@@ -165,9 +171,10 @@ TsraStatus tsra_table_begin(TsraSession *session,
 // `ArrowArray` matching the declared schema, and `schema` its `ArrowSchema` (borrowed).
 //
 // Takes ownership of `*array` whenever `array` is non-NULL, on failure too, and releases it before
-// returning. Safe to call from many threads at once; blocks while `seq` is at or past
-// `next + reorder_window` (`next` being the next key due), which is deadlock-free only under the
-// precondition `TsraTableOptions::reorder_window` states.
+// returning. Safe to call from many threads at once. Blocks while `seq` is at or past
+// `next + reorder_window` (`next` being the next key due), and while the writer's credit window is
+// full: back-pressure. Refuses a key already pushed (`TSRA_STATUS_ORDER`, at once), and fails on a
+// stall (see `TsraTableOptions::producers`).
 //
 // # Safety
 // `table` is a live table; `array` points to an `ArrowArray` the caller owns; `schema` is a valid,
@@ -176,6 +183,14 @@ TsraStatus tsra_table_push(TsraTable *table,
                            uint64_t seq,
                            struct ArrowArray *array,
                            const struct ArrowSchema *schema);
+
+// Mark key `seq` of `table` done without rows: it holds its place in the order, as an empty batch
+// would, so the keys stay dense when an event block produced nothing. Waits and is refused like a
+// push. Safe to call from many threads at once, like `tsra_table_push`.
+//
+// # Safety
+// `table` is a live table.
+TsraStatus tsra_table_mark_done(TsraTable *table, uint64_t seq);
 
 // End `table`: wait until every batch is written, and give the session back. Consumes `table`
 // (it is freed whatever the outcome). A gap in the sequence numbers, a row count short of the

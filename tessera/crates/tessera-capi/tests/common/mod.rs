@@ -176,10 +176,15 @@ pub fn table_opts(rows: u64) -> TsraTableOptions {
 }
 
 pub fn table_opts_window(rows: u64, reorder_window: u32) -> TsraTableOptions {
+    table_opts_producers(rows, reorder_window, 0)
+}
+
+pub fn table_opts_producers(rows: u64, reorder_window: u32, producers: u32) -> TsraTableOptions {
     TsraTableOptions {
         struct_size: std::mem::size_of::<TsraTableOptions>(),
         rows,
         reorder_window,
+        producers,
     }
 }
 

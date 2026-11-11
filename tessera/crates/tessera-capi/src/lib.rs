@@ -9,7 +9,8 @@
 //! ```text
 //! tsra_session_open(stage_dir, &opts, &session)
 //!   tsra_table_begin(session, "events", &arrow_schema, &table_opts, &table)
-//!     tsra_table_push(table, seq, &arrow_array, &arrow_schema)   // any thread; see the window below
+//!     tsra_table_push(table, seq, &arrow_array, &arrow_schema)   // any thread, any order of seq
+//!     tsra_table_mark_done(table, seq)                           // a key with no rows
 //!   tsra_table_end(table)                                        // consumes the table
 //! tsra_session_seal(session, "out.tsra", hash, sizeof hash)      // consumes the session
 //! ```
@@ -35,9 +36,12 @@
 //!
 //! # Determinism
 //!
-//! The sealed bytes depend only on the rows in **sequence-number** order (see [`order`]): batch `seq`
-//! is written after batch `seq - 1`, whichever thread pushed it and whenever. Batch sizes don't matter
-//! either: the writer re-chunks rows to its fixed row-group grid.
+//! The sealed bytes depend only on the `seq → batch` mapping (see [`order`]): batch `seq` is written
+//! after batch `seq - 1`, whichever thread pushed it and whenever. Keys are dense, each pushed exactly
+//! once (a key with no rows as an empty batch or with `tsra_table_mark_done`). Batch sizes don't
+//! matter either: the writer re-chunks rows to its fixed row-group grid. A thread running too far
+//! ahead blocks (back-pressure); a duplicate key, a stall (every declared producer thread blocked) and
+//! a gap at the end are errors, never a hang.
 //!
 //! # Errors
 //!
@@ -111,11 +115,17 @@ pub struct TsraTableOptions {
     /// block as soon as it fills; an unknown one stages every row on disk and encodes at
     /// `tsra_table_end`. The sealed bytes are the same either way.
     pub rows: u64,
-    /// How many keys from the next one due are admitted; a push of a key further ahead blocks until
-    /// the window moves. 0 means `TSRA_DEFAULT_REORDER_WINDOW`. Blocking is deadlock-free only when
-    /// keys are claimed in increasing order and each thread pushes its keys in increasing order
-    /// (see `src/order.rs`); with any other assignment, set it to at least the number of batches.
+    /// How many keys from the next one due are admitted (at most that many batches wait out of
+    /// order); a push of a key further ahead blocks until the window moves. 0 means
+    /// `TSRA_DEFAULT_REORDER_WINDOW`. The wait is safe when keys are claimed in increasing order and
+    /// each thread pushes its own keys in increasing order (Geant4's event blocks); see `producers`
+    /// for what happens otherwise.
     pub reorder_window: u32,
+    /// The number of producer threads that push to this table, or 0 if unknown. When every one of
+    /// them is blocked on the window, none can push the key due, so the table is marked stalled and
+    /// those pushes, later pushes and the end return `TSRA_STATUS_ORDER` instead of hanging. With 0
+    /// there is no such detection.
+    pub producers: u32,
 }
 
 /// An open write session (opaque).
@@ -126,7 +136,8 @@ pub struct TsraSession {
 /// An open table of a session (opaque).
 pub struct TsraTable {
     declared: Vec<DeclaredColumn>,
-    reorder: Reorder<TableData, SyncSender<TableData>>,
+    /// `None` is a key marked done: it holds its place in the order and carries no rows.
+    reorder: Reorder<Option<TableData>, SyncSender<Option<TableData>>>,
     feeder: Option<JoinHandle<Fed>>,
     session: Arc<Mutex<SessionInner>>,
     name: String,
@@ -368,7 +379,7 @@ pub unsafe extern "C" fn tsra_table_begin(
         drop(inner);
 
         // The channel holds two batches: the reorder buffer is where early batches wait.
-        let (tx, rx) = sync_channel::<TableData>(2);
+        let (tx, rx) = sync_channel::<Option<TableData>>(2);
         let feeder = {
             let name = name.clone();
             std::thread::Builder::new()
@@ -389,7 +400,7 @@ pub unsafe extern "C" fn tsra_table_begin(
         };
         let table = Box::new(TsraTable {
             declared,
-            reorder: Reorder::new(tx, u64::from(window)),
+            reorder: Reorder::new(tx, u64::from(window), u64::from(opts.producers)),
             feeder: Some(feeder),
             session: Arc::clone(&session.inner),
             name,
@@ -401,8 +412,14 @@ pub unsafe extern "C" fn tsra_table_begin(
 }
 
 impl TsraTable {
-    /// How many pushes waited for the reorder window (Rust-side observability, not part of the C
-    /// ABI; the tests use it to prove the backpressure path ran).
+    /// The most batches that ever waited out of order (Rust-side observability, not part of the C
+    /// ABI; the tests use it to prove the window bound holds).
+    #[doc(hidden)]
+    pub fn reorder_peak(&self) -> usize {
+        self.reorder.peak_pending()
+    }
+
+    /// How many pushes blocked on the reorder window (Rust-side observability, as above).
     #[doc(hidden)]
     pub fn reorder_waits(&self) -> u64 {
         self.reorder.waits()
@@ -417,7 +434,7 @@ fn feed(
     columns: Vec<Column>,
     rows: Option<u64>,
     stage: PathBuf,
-    rx: std::sync::mpsc::Receiver<TableData>,
+    rx: std::sync::mpsc::Receiver<Option<TableData>>,
 ) -> Fed {
     let outcome = match rows {
         Some(rows) => {
@@ -429,11 +446,11 @@ fn feed(
             };
             // `push_table` takes groups of at most ROWS_PER_GROUP rows; a producer's batch may be
             // larger, so split it. The writer re-chunks to its grid regardless.
-            writer.push_table(name, spec, rx.into_iter().flat_map(split_groups))
+            writer.push_table(name, spec, rx.into_iter().flatten().flat_map(split_groups))
         }
         None => (|| {
             let mut sink = TableMultiBlockSink::new(columns, name, &stage, &mut writer)?;
-            for batch in rx {
+            for batch in rx.into_iter().flatten() {
                 sink.push(batch)?;
             }
             sink.finish()
@@ -466,9 +483,10 @@ fn split_groups(batch: TableData) -> Vec<TableData> {
 /// `ArrowArray` matching the declared schema, and `schema` its `ArrowSchema` (borrowed).
 ///
 /// Takes ownership of `*array` whenever `array` is non-NULL, on failure too, and releases it before
-/// returning. Safe to call from many threads at once; blocks while `seq` is at or past
-/// `next + reorder_window` (`next` being the next key due), which is deadlock-free only under the
-/// precondition `TsraTableOptions::reorder_window` states.
+/// returning. Safe to call from many threads at once. Blocks while `seq` is at or past
+/// `next + reorder_window` (`next` being the next key due), and while the writer's credit window is
+/// full: back-pressure. Refuses a key already pushed (`TSRA_STATUS_ORDER`, at once), and fails on a
+/// stall (see `TsraTableOptions::producers`).
 ///
 /// # Safety
 /// `table` is a live table; `array` points to an `ArrowArray` the caller owns; `schema` is a valid,
@@ -519,8 +537,27 @@ pub unsafe extern "C" fn tsra_table_push(
         }
         let batch = StructArray::from(data);
         let rows = arrow::to_table_data(&table.declared, &batch)?;
-        drop(batch); // releases the producer's buffers before we block in the reorder buffer
-        table.reorder.push(seq, rows)
+        drop(batch); // releases the producer's buffers before the writer's back-pressure can block
+        table.reorder.push(seq, Some(rows))
+    })
+}
+
+/// Mark key `seq` of `table` done without rows: it holds its place in the order, as an empty batch
+/// would, so the keys stay dense when an event block produced nothing. Waits and is refused like a
+/// push. Safe to call from many threads at once, like `tsra_table_push`.
+///
+/// # Safety
+/// `table` is a live table.
+#[no_mangle]
+pub unsafe extern "C" fn tsra_table_mark_done(table: *mut TsraTable, seq: u64) -> TsraStatus {
+    guard(|| {
+        if table.is_null() {
+            return Err(invalid("table is NULL"));
+        }
+        // SAFETY: non-NULL; the caller guarantees a live table (shared with concurrent pushes,
+        // which TsraTable's `&self` + interior locking allows).
+        let table = unsafe { &*table };
+        table.reorder.push(seq, None)
     })
 }
 

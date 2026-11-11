@@ -5,11 +5,13 @@
 // With an explicit sequence key (the batch's own index) the content hash is the same for
 // N in {1, 4, 16} over several shuffled schedules. With the key taken in arrival order, the hash
 // follows the scheduler. A third set claims keys in increasing order (G4TaskRunManager's shape)
-// through a reorder window far smaller than the batch count, so pushes block on the window, and
-// still seals the in-order hash. Exits non-zero if any claim fails.
+// through a reorder window of 2, so threads that run ahead block on it, and still seals the
+// in-order hash. A last run breaks that order on purpose (keys in descending order through a
+// small window): the declared producers all block, and the bridge reports a stall instead of
+// hanging. Exits non-zero if any claim fails.
 //
-// The shuffled runs set the window to the batch count: with an arbitrary assignment a blocking
-// window can deadlock (src/order.rs), so only the claimed runs use a small one.
+// The shuffled runs set the window to the batch count: an arbitrary order may need the whole
+// table buffered (src/order.rs).
 #include "listmode.hpp"
 
 #include <algorithm>
@@ -26,7 +28,7 @@ constexpr uint64_t kBatches = 48;
 constexpr int64_t kBatchRows = 3001;
 constexpr uint64_t kClaimedBatches = 200;
 constexpr int64_t kClaimedBatchRows = 997;
-constexpr uint32_t kClaimedWindow = 2;  // engages only with more than 2 threads
+constexpr uint32_t kClaimedWindow = 2;
 
 enum class Key { Explicit, Arrival };
 enum class Assign { Shuffled, Claimed };
@@ -42,6 +44,7 @@ std::string run(const std::string& stage, int threads, uint32_t seed, Key key, A
   check(tsra_session_open(stage.c_str(), &sopts, &session), "tsra_session_open");
   TsraTableOptions topts = table_options(batches * static_cast<uint64_t>(batch_rows));
   topts.reorder_window = claimed ? kClaimedWindow : static_cast<uint32_t>(batches);
+  topts.producers = static_cast<uint32_t>(threads);
   TsraTable* table = nullptr;
   check(tsra_table_begin(session, "events", &schema, &topts, &table), "tsra_table_begin");
 
@@ -115,6 +118,45 @@ int main(int argc, char** argv) {
       ok = ok && same;
       std::printf("claimed  N=%-2d seed %u   %s %s\n", n, seed, h.c_str(), same ? "==" : "!= REFERENCE");
     }
+  }
+  // Keys in descending order from 4 threads through a window of 2: every producer blocks on a key
+  // past the window, so the bridge reports a stall (TSRA_STATUS_ORDER), never a hang.
+  {
+    ArrowSchema schema;
+    make_schema(&schema);
+    const std::string st = stage();
+    const TsraSessionOptions sopts = session_options(1);
+    TsraSession* session = nullptr;
+    check(tsra_session_open(st.c_str(), &sopts, &session), "tsra_session_open");
+    TsraTableOptions topts = table_options(kBatches * static_cast<uint64_t>(kBatchRows));
+    topts.reorder_window = 2;
+    topts.producers = 4;
+    TsraTable* table = nullptr;
+    check(tsra_table_begin(session, "events", &schema, &topts, &table), "tsra_table_begin");
+    std::atomic<uint64_t> next_desc{0};
+    std::atomic<int> stalled{0};
+    std::vector<std::thread> pool;
+    for (int w = 0; w < 4; ++w) {
+      pool.emplace_back([&] {
+        for (uint64_t k; (k = next_desc.fetch_add(1)) < kBatches;) {
+          const uint64_t b = kBatches - 1 - k;
+          ArrowArray array;
+          make_batch(&schema, b * static_cast<uint64_t>(kBatchRows), kBatchRows, &array);
+          if (tsra_table_push(table, b, &array, &schema) != TSRA_STATUS_OK) {
+            if (std::string(tsra_last_error()).find("stalled") != std::string::npos) stalled.fetch_add(1);
+            return;
+          }
+        }
+      });
+    }
+    for (auto& t : pool) t.join();
+    const bool end_failed = tsra_table_end(table) == TSRA_STATUS_ORDER;
+    char hash[TSRA_HASH_CAPACITY];
+    const bool seal_refused = tsra_session_seal(session, (st + ".tsra").c_str(), hash, sizeof hash) == TSRA_STATUS_STATE;
+    ArrowSchemaRelease(&schema);
+    std::printf("stall    descending keys, window 2, 4 producers: %d of 4 got the stall; end %s; seal %s\n",
+                stalled.load(), end_failed ? "failed" : "SUCCEEDED (unexpected)", seal_refused ? "refused" : "ALLOWED");
+    ok = ok && stalled.load() == 4 && end_failed && seal_refused;
   }
   if (!ok) die("determinism claims failed");
   std::printf("OK: explicit-key hashes are identical for N in {1,4,16}, shuffled and claimed; arrival order is not\n");
