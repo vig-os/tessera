@@ -35,6 +35,10 @@
 - [Conformance & the SPEC](./conformance.md)
 - [Bindings: Python & WASM](./bindings.md)
 
+# Upgrading
+
+- [Migrating a streamed table to `push_table` (alpha.5)](./migrating-to-push-table.md)
+
 ---
 
 - [Command reference](./cli.md)
