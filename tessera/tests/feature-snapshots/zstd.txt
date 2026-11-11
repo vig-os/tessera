@@ -6,6 +6,8 @@ zstd v0.13.3
 |           `-- zarrs feature "zstd"
 |           |               `-- tessera-py feature "default" (command-line)
 |           |           `-- tessera-py vWORKSPACE
+|           |           |   `-- tessera-capi feature "default" (command-line)
+|           |           |-- tessera-capi v0.1.0-alpha.4
 |           |           |-- tessera-cli vWORKSPACE (*)
 |           |           |-- tessera-ingest vWORKSPACE (*)
 |           |       `-- tessera-io feature "default" (command-line)

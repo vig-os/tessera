@@ -15,8 +15,10 @@ blake3 v1.8.7
 |   |   |   |           `-- tessera-py feature "default" (command-line)
 |   |   |   |       `-- tessera-cli feature "static-hdf5" (command-line)
 |   |   |   |       `-- tessera-py vWORKSPACE
+|   |   |   |       |-- tessera-capi v0.1.0-alpha.4 (*)
 |   |   |   |       |-- tessera-cli vWORKSPACE (*)
 |   |   |   |       |-- tessera-ingest vWORKSPACE (*)
+|   |   |   |   `-- tessera-capi feature "default" (command-line)
 |   |   |   |   `-- tessera-cli feature "static-hdf5" (command-line)
 |   |   |   |   `-- tessera-ingest feature "static-hdf5" (command-line)
 |   |   |   |   `-- tessera-io feature "default" (command-line)
@@ -45,6 +47,7 @@ blake3 v1.8.7
 |   |   |   |   |-- tessera-ingest feature "npz" (command-line) (*)
 |   |   |   |   |-- tessera-ingest feature "parquet" (command-line) (*)
 |   |   |   |   |-- tessera-io feature "cloud" (command-line)
+|   |   |   |-- tessera-capi v0.1.0-alpha.4
 |   |   |   |-- tessera-cli vWORKSPACE
 |   |   |   |-- tessera-ingest vWORKSPACE
 |   |   |   |-- tessera-io vWORKSPACE

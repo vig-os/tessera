@@ -60,8 +60,10 @@
 `-- datafusion-physical-plan v54.0.0
 arrow-schema v58.4.1
 |           `-- arrow-array feature "ffi" (*)
+|           `-- tessera-capi feature "default" (command-line)
 |       `-- arrow-data feature "ffi"
 |       `-- datafusion-expr v54.0.0 (*)
+|       `-- tessera-capi v0.1.0-alpha.4
 |       |           `-- tessera-io vWORKSPACE (*)
 |       |           `-- vortex-file v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
 |       |           |-- vortex-btrblocks v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
@@ -109,6 +111,7 @@ arrow-schema v58.4.1
 |       |       |   |   |               |   |-- tessera-ingest feature "npy" (command-line)
 |       |       |   |   |               |   |-- tessera-ingest feature "npz" (command-line) (*)
 |       |       |   |   |               |   |-- tessera-ingest feature "parquet" (command-line) (*)
+|       |       |   |   |               |-- tessera-capi v0.1.0-alpha.4 (*)
 |       |       |   |   |               |-- tessera-cli vWORKSPACE (*)
 |       |       |   |   |               |-- tessera-ingest vWORKSPACE
 |       |       |   |   |           `-- tessera-io feature "default" (command-line)
@@ -150,6 +153,7 @@ arrow-schema v58.4.1
 |       |       |-- vortex-sequence v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)
 |       |       |-- vortex-sparse v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)
 |       |   `-- vortex-array v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)
+|       |   |-- tessera-capi v0.1.0-alpha.4 (*)
 |       |-- arrow-array feature "ffi"
 |   [dev-dependencies]
 |   `-- arrow feature "canonical_extension_types"
@@ -572,6 +576,7 @@ arrow-schema v58.4.1
 |   |   |   |-- datafusion-pruning v54.0.0 (*)
 |   |   |   |-- parquet v58.4.1 (*)
 |   |   |   |-- parquet v58.4.1 (*)
+|   |   |   |-- tessera-capi v0.1.0-alpha.4 (*)
 |   |   |   |-- tessera-cli vWORKSPACE (*)
 |   |   |   |-- tessera-ingest vWORKSPACE (*)
 |   |   |   |-- vortex-alp v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
@@ -681,6 +686,7 @@ arrow-schema v58.4.1
 |   |-- datafusion-common v54.0.0
 |   |-- datafusion-expr v54.0.0 (*)
 |   |-- parquet v58.4.1 (*)
+|   |-- tessera-capi v0.1.0-alpha.4 (*)
 |   |-- tessera-cli vWORKSPACE (*)
 |   |-- tessera-ingest vWORKSPACE (*)
 |   |-- vortex-array v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)

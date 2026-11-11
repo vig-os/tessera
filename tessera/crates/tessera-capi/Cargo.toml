@@ -1,0 +1,30 @@
+[package]
+name = "tessera-capi"
+description = "C ABI over the tessera-io table writer: C/C++ producers push Arrow C Data Interface batches (#800 spike)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# A spike prototype (#800): the ADR on `docs/800-capi-bridge-adr` decides the shipped API. Not for
+# crates.io; it ships as a C library (staticlib + cdylib + header + pkg-config file).
+publish = false
+
+[lib]
+# `tessera_capi` → libtessera_capi.a / libtessera_capi.so for C/C++ consumers. The rlib is what lets
+# this crate's own Rust tests call the `extern "C"` surface exactly as a C caller would.
+name = "tessera_capi"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+tessera-core.workspace = true
+# tessera-io only, never tessera-ingest: tessera-ingest links libhdf5 and dicom unconditionally, and a
+# C++ producer that only writes tables must not inherit them (the same rule tessera-py follows).
+tessera-io.workspace = true
+# The Arrow C Data Interface import (`arrow_array::ffi::from_ffi`). Already in the default graph via
+# Vortex and the ingest table lane; `ffi` turns on arrow-data/arrow-schema's FFI structs.
+arrow-array = { workspace = true, features = ["ffi"] }
+arrow-schema = { workspace = true, features = ["ffi"] }
+
+[dev-dependencies]
+tempfile = "3"

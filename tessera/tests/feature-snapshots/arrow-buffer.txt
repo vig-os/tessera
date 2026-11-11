@@ -80,6 +80,7 @@
     |           |   |   |                   `-- tessera-py feature "default" (command-line)
     |           |   |   |               `-- tessera-py vWORKSPACE
     |           |   |   |               |       `-- tessera-cli feature "static-hdf5" (command-line)
+    |           |   |   |               |   `-- tessera-capi feature "default" (command-line)
     |           |   |   |               |   `-- tessera-ingest feature "static-hdf5" (command-line)
     |           |   |   |               |   |       `-- tessera-ingest feature "default" (command-line) (*)
     |           |   |   |               |   |       `-- tessera-ingest feature "default" (command-line) (*)
@@ -98,6 +99,7 @@
     |           |   |   |               |   |-- tessera-ingest feature "npy" (command-line)
     |           |   |   |               |   |-- tessera-ingest feature "npz" (command-line) (*)
     |           |   |   |               |   |-- tessera-ingest feature "parquet" (command-line) (*)
+    |           |   |   |               |-- tessera-capi v0.1.0-alpha.4
     |           |   |   |               |-- tessera-cli vWORKSPACE (*)
     |           |   |   |               |-- tessera-ingest vWORKSPACE
     |           |   |   |           `-- tessera-io feature "default" (command-line)
@@ -167,6 +169,7 @@
     |       |-- datafusion-physical-optimizer v54.0.0 (*)
     |       |-- datafusion-physical-plan v54.0.0 (*)
     |       |-- datafusion-pruning v54.0.0 (*)
+    |       |-- tessera-capi v0.1.0-alpha.4 (*)
     |   `-- arrow feature "prettyprint"
     |   `-- arrow-arith feature "default"
     |   `-- arrow-array feature "ffi"
@@ -474,6 +477,7 @@
     |   |   |-- datafusion-pruning v54.0.0 (*)
     |   |   |-- parquet v58.4.1 (*)
     |   |   |-- parquet v58.4.1 (*)
+    |   |   |-- tessera-capi v0.1.0-alpha.4 (*)
     |   |   |-- tessera-cli vWORKSPACE (*)
     |   |   |-- tessera-ingest vWORKSPACE (*)
     |   |   |-- vortex-array v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)

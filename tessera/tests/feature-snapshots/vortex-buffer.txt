@@ -79,6 +79,7 @@ vortex-buffer v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea
 |   |   |                   `-- tessera-py feature "default" (command-line)
 |   |   |               `-- tessera-py vWORKSPACE
 |   |   |               |       `-- tessera-cli feature "static-hdf5" (command-line)
+|   |   |               |   `-- tessera-capi feature "default" (command-line)
 |   |   |               |   `-- tessera-cli feature "static-hdf5" (command-line)
 |   |   |               |   `-- tessera-ingest feature "static-hdf5" (command-line)
 |   |   |               |   |       `-- tessera-ingest feature "default" (command-line) (*)
@@ -104,6 +105,7 @@ vortex-buffer v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea
 |   |   |               |   |-- tessera-ingest feature "npy" (command-line)
 |   |   |               |   |-- tessera-ingest feature "npz" (command-line) (*)
 |   |   |               |   |-- tessera-ingest feature "parquet" (command-line) (*)
+|   |   |               |-- tessera-capi v0.1.0-alpha.4
 |   |   |               |-- tessera-cli vWORKSPACE
 |   |   |               |-- tessera-ingest vWORKSPACE
 |   |   |           `-- tessera-io feature "default" (command-line)

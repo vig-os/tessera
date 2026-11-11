@@ -1,0 +1,14 @@
+# pkg-config file for tessera-capi; @prefix@ and @version@ are filled in at install (flake.nix).
+# Shared:  pkg-config --cflags --libs tessera-capi
+# Static:  link ${libdir}/libtessera_capi.a, then `pkg-config --static --libs-only-l tessera-capi`
+#          minus -ltessera_capi (Libs.private is rustc's `--print native-static-libs`).
+prefix=@prefix@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: tessera-capi
+Description: C ABI over the tessera writer (Arrow C Data Interface in, sealed .tsra out)
+Version: @version@
+Cflags: -I${includedir}
+Libs: -L${libdir} -ltessera_capi
+Libs.private: -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
