@@ -41,8 +41,20 @@ targets = [
     "x86_64-unknown-linux-gnu",
 ]
 
+# Pin the aarch64-apple-darwin build host (#790). cargo-dist 0.32.0's built-in default for this target
+# is `macos-14`, an image GitHub retired for arm64 on 2026-11-02
+# (https://github.blog/changelog/2026-10-01-github-actions-macos-14-runner-image-retirement/,
+# actions/runner-images#13518). Since then every job on that label fails to start with "The
+# configuration 'macos-14-arm64-us-default' is not supported". `macos-15` (arm64) is one of the
+# changelog's recommended replacements, and the default cargo-dist 0.34.0 itself moved to
+# (axodotdev/cargo-dist#2555). It is a named version, not `macos-latest`, so an image change stays
+# a reviewed edit here. x86_64-apple-darwin keeps dist 0.32's default, `macos-15-intel`.
+# Regenerate `release.yml` with `dist generate --ci github` after any change here.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+
 # The vendored HDF5 build needs CMake (+ a C compiler & make, already present on GitHub runners) on
-# every build host. Linux gets cmake via apt; macOS runners (`macos-14`) ship cmake preinstalled and
+# every build host. Linux gets cmake via apt; macOS runners (`macos-15`) ship cmake preinstalled and
 # we deliberately do NOT declare a Homebrew dependency, because that makes cargo-dist wrap the build
 # in `brew bundle exec`, which failed silently (exit 1) on the v0.1.0-alpha.1 release run.
 [dist.dependencies.apt]
