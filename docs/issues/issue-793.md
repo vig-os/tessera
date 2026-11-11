@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-09T16:12:57Z
-updated: 2026-11-09T16:12:57Z
+updated: 2026-11-11T02:19:46Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/793
-comments: 0
+comments: 2
 labels: bug
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-10T09:13:24.080Z
+synced: 2026-11-11T08:50:46.231Z
 ---
 
 # [Issue 793]: [test(io): stream workers_and_windows + session_leaf_memory hang under ksb CI load (>3,240 s vs 400 s / >840 s vs 0.9 s), timing out the x86 nix check](https://github.com/vig-os/tessera/issues/793)
@@ -42,4 +42,20 @@ A 0.9 s test running for more than 840 s is a hang, not slowness under load. Eve
 - Fix the cause. Never raise a timeout or skip the test, and add no retry.
 - Any thread budget must come from a real limit (cgroup cpu.max and pids.max, or `$NIX_BUILD_CORES`), not from `available_parallelism()` alone.
 - If a hang is possible at all, the writer must turn spawn failures and lost workers into errors.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 11, 2026 at 01:00 AM_
+
+Owner decision 2026-11-11: it isn't a hang. The tests are fsync-bound on the overloaded volume (diagnosis in the delegate receipt: tmpfs 0.97 s / 0.07 s vs ≥2,000 s with 2 buffered writers on the disk; EAGAIN refuted, a spawn failure panics in 0.04 s). **Fix: the nextest-running checks get TMPDIR on a RAM fs** (#688 precedent). Group commit is filed separately as a product improvement.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 11, 2026 at 02:19 AM_
+
+Owner decision (2026-11-11): the ARC pods get a 1Gi Memory emptyDir at /dev/shm (exo-pet/exo-fleet#1113). The tessera RAM-tmpdir change goes ahead unmodified. It lands only after #1113 is deployed and CI is green on ksb runners. #1081 (sandbox) and #798 (group commit) stay separate follow-ups.
 
