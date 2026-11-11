@@ -19,14 +19,14 @@ say otherwise.
 | Reading `pairs` | the one block | the same name, every leaf in order (`logical_table`, `read`, `sql`, Python `table`) |
 | `TableSpec { .. }` literal | three fields | a fourth, `partition` |
 | Unresolvable `logical_table` name | `Error::Container("no blocks for prefix …")` | `Error::LogicalTable { name, reason }` |
-| Peak `RssAnon`, 2.4 G rows, `W = 4` | grew with the table (4.4 GiB at 268 M rows, [#677]) | 218.6 MiB, measured, and flat in the row count |
+| Peak `RssAnon`, 2.4 G rows, `W = 4` | grew with the table (4.4 GiB at 268 M rows, [#677]) | 218.6 MiB, measured, and flat within each run |
 
 ## 1. Writing: switch to `StreamWriter::push_table`
 
 ### Before
 
 The consumer reproducer (MorePET/visionx-rs [PR #41], `crates/visionx-tsra/examples/stream_memory.rs:247-267`
-at `c4aff94`) encodes the whole table inside one in-memory job:
+at `c4aff94`, abridged: its progress counter is left out) encodes the whole table inside one in-memory job:
 
 ```rust,ignore
 writer.push(Box::new(move || {
@@ -34,7 +34,10 @@ writer.push(Box::new(move || {
         let n = chunk.min(rows - start) as usize;
         pairs(start, n, nonnullable_ms)
     });
-    let spec = spec(Table::Pairs, rows);
+    let mut spec = spec(Table::Pairs, rows);
+    if nonnullable_ms {
+        spec.columns[1].nullable = false; // the --nonnullable-ms diagnostic
+    }
     let bytes = table::encode_streaming(&spec, groups)?; // the whole encoded table in RAM
     let block = BlockRef {
         name: "pairs".into(),
@@ -68,8 +71,12 @@ let groups = (0..rows).step_by(chunk as usize).map(move |start| {
     let n = chunk.min(rows - start) as usize;
     pairs(start, n, nonnullable_ms)
 });
-let spec = spec(Table::Pairs, rows); // spec.rows must be the exact row count, partition: None
-let leaves = writer.push_table("pairs", spec, groups)?; // 573 leaves for 2.4 G rows
+// Not `spec`: that would shadow the spec() helper the small tables below still call.
+let mut pairs_spec = spec(Table::Pairs, rows); // spec.rows must be exact; partition: None
+if nonnullable_ms {
+    pairs_spec.columns[1].nullable = false;
+}
+let leaves = writer.push_table("pairs", pairs_spec, groups)?; // 573 leaves for 2.4 G rows
 // … push the small `markers` / `ms_stats` tables as before (table_job, single blocks) …
 let (manifest, stats) = writer.finish_with_stats(&output)?;
 ```
@@ -86,12 +93,14 @@ let (manifest, stats) = writer.finish_with_stats(&output)?;
   `OversizedGroup` (`tessera-core/src/block/partition.rs:186-223`).
 - **Markers.** `spec.partition` must be `None`, since the writer sets each leaf's marker (section 4).
 - **Nullable columns** are written as declared. The nullable `ms` that hit a dtype assertion at `9424f90`
-  ([#677]) is in `push_table`'s test schema (`stream.rs:1710-1722`), and the RSS proof (section 5) ran the
+  ([#677]) is in `push_table`'s test schema (`stream.rs:1688-1700`), and the RSS proof (section 5) ran the
   exact nullable schema.
 - **Backpressure.** The call blocks while every encode worker has a job or the window is full, and returns
   once the last leaf is handed to a worker. `finish` commits and seals as before.
-- **Failure.** A failed call never hands over the last leaf, so `finish` refuses to seal a partial table
-  (`Error::LogicalTable`). It never seals a truncated one.
+- **Failure.** A failed call never hands over the last leaf, so for a partitioned table `finish` refuses to seal
+  (`Error::LogicalTable`) rather than seal a truncated one. A table of at most `BLOCK_ROWS` rows is never handed
+  over at all, so a caller that ignores the error and still calls `finish` seals a product without that table.
+  Propagate the error.
 
 **Put the session directory on disk.** Each block's input is staged in the session's `staging/` directory
 before it is encoded: at most `W + 1` blocks for `W` workers, `(W + 1) · BLOCK_ROWS · 24 B` = 503.3 MB at
@@ -143,7 +152,8 @@ ingest's `events_0000`, …, `TableMultiBlockSink`) resolve under the same name,
 of format v0 (ADR-0064 §4). No product is rewritten. A product holding both `pairs_NNNN` and `pairs/NNNN` is
 refused as `LogicalTableError::Ambiguous`, never merged.
 
-**Readers need alpha.5 too.** An alpha.1 to alpha.4 reader opens and verifies a new product and reads each leaf
+**Readers need alpha.5 too.** An alpha.1 to alpha.4 reader opens and verifies a new product (ADR-0064 §6: the
+marker is an optional `spec` field an old reader keeps when it checks the seal) and reads each leaf
 by its full name. For the logical `pairs` it fails with "no blocks for prefix", never with wrong rows. Move your
 reading tools to alpha.5 together with the writer.
 
@@ -238,13 +248,18 @@ is on disk, not in the heap (section 1).
 | --- | --- |
 | Highest peak `RssAnon`, `W = 4`, 573 leaves (2.4 G rows) | **218.6 MiB**, against the 305.5 MiB ceiling and your 8 GiB budget |
 | Highest peak `RssAnon`, `W = 1` | 64.3 MiB, against 114.9 MiB |
-| Growth with the table (within-run slope) | `W = 4`: −5,082 B/leaf; `W = 1`: 3,899 B/leaf; both within `c_leaf` plus margin |
+| Growth with the table (within-run slope, graded) | `W = 4`: −5,082 B/leaf; `W = 1`: 3,899 B/leaf; both within `c_leaf` plus margin |
 | Page cache, 2.4 G rows | all 9 runs complete under `--mem 4Gi`; peak `shmem` 0.0 MiB; cgroup `anon` within 1.0 MiB of `RssAnon` |
 | Bytes and names, 268 M rows | the 9 runs at `W = 1` and `W = 4` seal one canonical manifest and one `content_hash` |
 | Parallelism, 268 M rows on `/dev/shm` | `W = 1` 42.9 s, `W = 4` 15.3 s: 2.80× |
 
+The across-run slope (each run's peak against its `n`) is reported as context, not graded: 40,437 B/leaf at `W = 4`,
+outside the slope rule, because across runs the peak tracks the shared disk's load, 99–100 % busy (ADR-0064 C.1);
+5,072 B/leaf at `W = 1`, within it.
+
 For comparison, [#677] measured 4,758,114,304 B (4.4 GiB) peak `RssAnon` at 268 M rows on alpha.3's single-block
-path. On ksb's shared HDD the wall times are context, not a benchmark (ADR-0064 A.4). At 268 M rows, the `W = 4`
+path, with `--nonnullable-ms` (the nullable schema hit a dtype assertion at `9424f90`) under an 8 GiB address-space
+cap. On ksb's shared HDD the wall times are context, not a benchmark (ADR-0064 A.4). At 268 M rows, the `W = 4`
 runs took 848–1,451 s.
 
 ## 6. Depending on v0.1.0-alpha.5
@@ -261,8 +276,9 @@ tessera-core = { git = "https://github.com/vig-os/tessera", tag = "v0.1.0-alpha.
 tessera-io   = { git = "https://github.com/vig-os/tessera", tag = "v0.1.0-alpha.5" }
 ```
 
-Then run `cargo update -p tessera-core -p tessera-io` to move `Cargo.lock` off the old pin (visionx-rs's lock pins
-`9424f90`, alpha.3).
+Then run `cargo update -p tessera-core -p tessera-io` to move `Cargo.lock` off the old pin. visionx-rs
+`main` pins `branch = "dev"` at `4504efb` (between alpha.4 and alpha.5); PR #41 at `c4aff94` pins `9424f90`
+(alpha.3).
 
 **Known limit: vortex resolves from crates.io in your build ([#758]).** Tessera pins vortex to a fork carrying
 two determinism fixes (#468, #472) through a `[patch.crates-io]` block in its own workspace manifest
