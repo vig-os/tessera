@@ -330,9 +330,45 @@ decision on #677 (2026-10-29, option P-logical of the #681 design note). It chan
    staged input is page cache, which counts toward the cgroup's `memory.current` and is RAM on tmpfs, so the
    session directory SHOULD be on a disk-backed filesystem; the ksb RSS proof samples `RssAnon`, `memory.current`
    and `memory.stat` and refuses a tmpfs staging directory (ADR-0064 §8.1). Its results will be recorded here.
+   *(Recorded below, 2026-11-11: all six criteria pass.)*
    The bound is stated in `push_table`'s rustdoc and checked in-tree on the heap (2026-11-03, #714):
    `tessera-io/tests/staged_job_memory.rs` holds the workers and asserts the staged input is not held in
    RAM (`≤ s`), and asserts the ceiling against a `p_block` calibrated in the same binary.
 
 The rest of this ADR (the encoder, the window, the staged commit, the RAII and journal rules, the disk paragraph)
 is unchanged; each leaf is one staged job under the window.
+
+**Measured (ADR-0064 §8.1 RSS proof, #715 G r4, 2026-11-11).** The consumer reproducer (MorePET/visionx-rs
+`c4aff94`, `stream_memory.rs` switched to `push_table`, exact nullable schema) built against tessera `26159de` (the
+post-#759 writer), `ksb run --cpu 4 --exclusive-cpus`, evaluated by `tessera/bench/ksb/677-rss-proof/run.py` (PR #767)
+against §8.1 as amended by #760, #770 and #797. Criteria 1–5 ran with staging on disk-backed `--scratch` under
+`--mem 4Gi`, as shards merged by `run.py evaluate`; criterion 6 ran on `/dev/shm` under `--mem 6Gi`.
+
+| Job | Runs | Exit |
+| --- | --- | ---: |
+| `tessera-715-r4-sweep-w4-2` | `W = 4`, every point, 8 of its 9 repeats | 124 (480 min limit) |
+| `tessera-715-r4-sweep-w4-k2` | `W = 4`, 2.4 G rows, repeat 3 | 0 |
+| `tessera-715-r4-sweep-w1-k0` … `-k5` | `W = 1`, repeat 1 … 6 (repeat 1 with the 0- and 1-block points) | 0 each |
+| `tessera-715-r4-par-1` | criterion 6, `W = 1` and `W = 4` at 268 M rows on `/dev/shm` | 0 |
+
+`run.py evaluate` over the eight criteria 1–5 shards: 83 checks, all pass, exit 0; over `tessera-715-r4-par-1`: exit
+0. (`tessera-715-r4-sweep-w4`, which passed `job` twice, was cancelled and isn't graded.)
+
+| Criterion | Result |
+| --- | --- |
+| 1. Ceiling, every run | Pass. Highest `RssAnon` 218.6 MiB against 305.5 MiB (`W = 4`, 573 leaves); at `W = 1` 64.3 MiB against 114.9 MiB |
+| 2. Plateau, `W = 4` (within-run slope) | Pass. `b̂` −5,082 B/leaf ≤ bound 28,174 (`c_leaf` 7,980 + `t₀.₉₅,5` 2.015 · SE 10,022); `G` 6 runs, `N` 51 tenths; floor 40,389 ≤ `δ_z` 121,635 |
+| 2. Plateau, `W = 1` (within-run slope) | Pass. `b̂` 3,899 B/leaf ≤ bound 9,032 (7,980 + `t₀.₉₅,17` 1.740 · SE 605); `G` 18, `N` 168; floor 2,103 ≤ `c_leaf` and ≤ `δ_z` |
+| 3. Page cache reclaimable, 2.4 G rows | Pass, all 9 runs: complete under `--mem 4Gi`, peak `shmem` 0.0 MiB, `anon` within 1.0 MiB of `RssAnon` |
+| 4. The consumer's budget, 2.4 G rows | Pass. Highest `RssAnon` 218.6 MiB < 8 GiB |
+| 5. Bytes and names, 268 M rows | Pass. All 9 runs (6 at `W = 1`, 3 at `W = 4`) have the canonical manifest and `content_hash` (`blake3:4ad6e224…`) of `W = 1`'s first |
+| 6. Parallelism, `/dev/shm` | Pass. `W = 1` 42.9 s, `W = 4` 15.3 s: 2.80× ≥ 1.5× |
+
+**Context, not graded** (ADR-0064 A.4, C.3). The across-run slope of every run's peak against `n` is 40,437 B/leaf at
+`W = 4`, outside B.3's rule (bound 31,109), and 5,072 B/leaf at `W = 1`, within it (bound 10,121): across runs the
+peak tracks the shared disk's load, which was 99–100 % busy on every run from 16 leaves on (ADR-0064 C.1). On that
+disk, at 268 M rows, the `W = 4` runs took 848–1,451 s and the `W = 1` runs 906–1,275 s.
+
+**Stated limits** (ADR-0064 B.5, now the within-run fit's): the smallest growth beyond `c_leaf` that criterion 2
+catches with probability ≥ 95 % was 40,389 B/leaf (0.0096 B/row) at `W = 4` and 2,103 B/leaf (0.0005 B/row) at
+`W = 1` in this run.
