@@ -44,7 +44,7 @@
 | Ordering | `src/order.rs` | a reorder buffer over the dense key, bounded by a batch-count window |
 | Header | `include/tessera.h` | cbindgen output, with the Arrow C structs behind `ARROW_C_DATA_INTERFACE` |
 | C++ programs | `cpp/` | `capi_smoke`, `capi_threads`, `capi_bench`; CMake + pkg-config + nanoarrow |
-| Rust tests | `tests/` | 18 tests that call the `extern "C"` functions as C does |
+| Rust tests | `tests/` | 19 tests that call the `extern "C"` functions as C does |
 | Nix | `flake.nix` | `packages.capi`, `packages.nanoarrow`, the `capi-smoke` check |
 
 The API in one view (the full contract is in the header):
@@ -69,7 +69,7 @@ are borrowed.
 
 | Check | Result |
 | --- | --- |
-| `cargo test -p tessera-capi --release` | 18 passed, exit 0 (3 unit, 12 roundtrip, 3 threads) |
+| `cargo test -p tessera-capi --release` | 19 passed, exit 0 (3 unit, 13 roundtrip, 3 threads) |
 | `columns_read_back_are_the_columns_pushed` | 150,000 rows in batches of 10,007, off the row-group grid; every value equal, float bits included |
 | `the_bytes_are_those_of_the_native_writer` | the C ABI hash equals native `push_table`'s on the same rows |
 | `an_unknown_row_count_seals_the_same_bytes` | `TSRA_ROWS_UNKNOWN` (staged through `TableMultiBlockSink`) gives the same hash as a declared count |
@@ -82,7 +82,9 @@ The error paths are tested as statuses, never as crashes. Every case passes: a N
 (Timestamp), a nullable `str` column, a non-struct schema (`SCHEMA`), a batch of the wrong shape or type, a NULL
 in a non-nullable column (`SCHEMA`, and the array is still released), a duplicate key (`ORDER`), a gap at the
 end (`ORDER`, and the session is poisoned, so the seal returns `STATE` and writes no file), too few or too many
-rows (`WRITER`), a second table while one is open (`STATE`), and a hash buffer that is too small.
+rows (`WRITER`), a second table while one is open (`STATE`), a hash buffer that is too small, and a seal
+that fails (a NULL path, or a table still open). A failed seal still releases the session: its staging goes at
+once, or, with a table open, when that table ends.
 
 ## §3 — Determinism across producer threads (#802)
 
@@ -134,11 +136,13 @@ because it can't know how many producers exist. (An independent review caught th
 used 48 batches under the default window of 64, so the window never engaged.)
 
 The claimed runs exercise it. Threads claim keys from a shared counter, so 200 batches of 997 rows pass through a
-window of 4. In Rust, `claimed_keys_pass_a_small_window_without_deadlock` asserts that pushes waited, so the
-test isn't vacuous. In C++:
+window of 2. Each thread holds at most one claimed, unpushed key, so a push is at most `N - 1` past the next
+key due, and the window can only engage with more than 2 threads. The runs therefore use N ∈ {4, 16}. In Rust,
+`claimed_keys_pass_a_small_window_without_deadlock` fails if any run hangs for 120 s. It also counts the
+waits: 31 and 34 at N = 4, 716 and 849 at N = 16, so the test isn't vacuous. In C++:
 
 ```text
-claimed  reference (N=1)  blake3:98d880ed… (window 4, 200 batches)
+claimed  reference (N=1)  blake3:98d880ed… (window 2, 200 batches)
 claimed  N=4  seed 1..2   98d880ed… == (×2)
 claimed  N=16 seed 1..2   98d880ed… == (×2)
 ```
@@ -217,6 +221,9 @@ modes with CMake, the way a Geant4 build would: `find_package(nanoarrow CONFIG)`
 bridge depends on `tessera-ingest` before #454 makes `hdf5` optional (§7.1).
 
 ### §6.2 The static archive leaks its dependencies' C symbols
+
+*Measured by hand on the seat (x86-64, release build of `1ea7d54`) with the commands shown. No check repeats
+it yet: that is #815's.*
 
 A Rust `staticlib` bundles every dependency's object files. Their symbols stay global: zstd (`ZSTD_*`, `HUF_*`,
 `FSE_*`, the legacy `ZSTDv05`–`v07`), blake3's C/asm kernels, and the Rust-mangled rest. A Geant4 or HDF5
@@ -302,8 +309,9 @@ decides, and the ADR records which.**
   and types. Importing it is a handful of small allocations for a 5-column schema, which is noise against a
   65,536-row batch, but §5 doesn't isolate it. ADR-0065 §2.1 imports against the declared type instead
   (`from_ffi_and_data_type`), which skips the check. Both work. The difference is an API choice.
-- **`catch_unwind` adds no work on the success path** under Rust's table-based unwinding: it compiles to
-  a landing pad that runs only on a panic. §5's numbers include it on every call, but they don't isolate it.
+- **`catch_unwind` is expected to add no work on the success path**, because Rust's table-based unwinding
+  compiles it to a landing pad that runs only on a panic. That is an expectation, not a measurement: §5's
+  numbers include it on every call but don't isolate it.
 - **A window counted in batches, with no spill, is safe only under §3.1's precondition, and it bounds batch
   count, not bytes.** ADR-0065 §7.2's RAM credit with spill is the right production design. The claimed runs
   model consecutive claiming, but not a lagging thread that holds the window for everyone under real

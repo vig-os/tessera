@@ -26,7 +26,7 @@ constexpr uint64_t kBatches = 48;
 constexpr int64_t kBatchRows = 3001;
 constexpr uint64_t kClaimedBatches = 200;
 constexpr int64_t kClaimedBatchRows = 997;
-constexpr uint32_t kClaimedWindow = 4;
+constexpr uint32_t kClaimedWindow = 2;  // engages only with more than 2 threads
 
 enum class Key { Explicit, Arrival };
 enum class Assign { Shuffled, Claimed };

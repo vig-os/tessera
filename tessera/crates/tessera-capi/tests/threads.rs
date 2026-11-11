@@ -7,8 +7,10 @@
 //! - **shuffled**: each thread takes batch indices from a shuffled list, so keys arrive in any order.
 //!   The window is set to the batch count, so nothing blocks; this isolates the ordering.
 //! - **claimed**: threads claim keys from a shared counter, in increasing order (the shape of
-//!   `G4TaskRunManager`'s block scheduling), with a window far smaller than the batch count, so the
-//!   backpressure path runs on most pushes.
+//!   `G4TaskRunManager`'s block scheduling), through a window of 2. Each thread holds at most one
+//!   claimed, unpushed key, so a push can be at most `N - 1` past the next key due: the window can
+//!   engage only with more than 2 threads, so these runs use N in {4, 16} and assert that pushes
+//!   waited.
 
 mod common;
 
@@ -27,7 +29,7 @@ const ROWS: u64 = BATCHES * BATCH;
 /// The claimed runs: many more batches than the window admits.
 const CLAIMED_BATCHES: u64 = 200;
 const CLAIMED_BATCH: u64 = 997;
-const CLAIMED_WINDOW: u32 = 4;
+const CLAIMED_WINDOW: u32 = 2;
 
 /// xorshift64*: a seeded shuffle and jitter without a dependency.
 struct Rng(u64);
@@ -174,30 +176,40 @@ fn without_the_key_the_hash_follows_the_scheduler() {
     );
 }
 
-/// Keys claimed in increasing order through a window of 4 over 200 batches: the backpressure path
-/// runs, nothing deadlocks, and the hash is still the in-order one for every N.
+/// Keys claimed in increasing order through a window of 2 over 200 batches, from 4 and 16 threads:
+/// pushes wait on the window, nothing deadlocks (a hang fails the test after 120 s), and the hash is
+/// still the in-order one.
 #[test]
 fn claimed_keys_pass_a_small_window_without_deadlock() {
-    let plan = Plan {
-        queue: (0..CLAIMED_BATCHES).collect(),
-        batch: CLAIMED_BATCH,
-        window: CLAIMED_WINDOW,
-    };
-    let rows = CLAIMED_BATCHES * CLAIMED_BATCH;
-    let in_order = {
-        let dir = tempfile::tempdir().unwrap();
-        write_through_capi(dir.path(), rows, CLAIMED_BATCH, rows)
-    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let plan = Plan {
+            queue: (0..CLAIMED_BATCHES).collect(),
+            batch: CLAIMED_BATCH,
+            window: CLAIMED_WINDOW,
+        };
+        let rows = CLAIMED_BATCHES * CLAIMED_BATCH;
+        let in_order = {
+            let dir = tempfile::tempdir().unwrap();
+            write_through_capi(dir.path(), rows, CLAIMED_BATCH, rows)
+        };
+        let runs: Vec<(usize, u64, Run)> = [4, 16]
+            .into_iter()
+            .flat_map(|n| (1..=2).map(move |seed| (n, seed)))
+            .map(|(n, seed)| (n, seed, run(n, seed, Key::Explicit, &plan)))
+            .collect();
+        let _ = tx.send((in_order, runs));
+    });
+    let (in_order, runs) = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("the claimed runs did not finish in 120 s: the window deadlocked");
     let mut waited = 0;
-    for threads in [1, 4, 16] {
-        for seed in 1..=2 {
-            let r = run(threads, seed, Key::Explicit, &plan);
-            assert_eq!(r.hash, in_order, "N = {threads}, seed {seed}");
-            waited += r.waits;
-        }
+    for (n, seed, r) in runs {
+        assert_eq!(r.hash, in_order, "N = {n}, seed {seed}");
+        eprintln!("claimed N = {n}, seed {seed}: {} pushes waited", r.waits);
+        waited += r.waits;
     }
-    // Not vacuous: with 16 threads claiming through a window of 4, pushes do wait.
-    eprintln!("claimed runs: {waited} pushes waited for the window");
+    // Not vacuous: with more threads than the window admits, pushes do wait.
     assert!(
         waited > 0,
         "no push ever waited, so the window path did not run"

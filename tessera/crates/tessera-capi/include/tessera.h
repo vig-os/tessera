@@ -139,7 +139,8 @@ const char *tsra_last_error(void);
 
 // Open a write session staging under `stage_dir` (created if absent). The library owns its
 // contents until the session is sealed, or, after `tsra_session_free` or a failed seal, until the
-// writer's detached threads finish draining (there is no abort yet, #810). On success `*out` is
+// writer's detached threads finish draining (there is no abort yet, #810). A session sealed or
+// freed while a table is open is released when that table is ended, which the caller must still do. On success `*out` is
 // the session; on failure it is left NULL.
 //
 // # Safety

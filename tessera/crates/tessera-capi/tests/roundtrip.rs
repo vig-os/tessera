@@ -344,3 +344,47 @@ fn nan_payloads_are_sealed_bit_for_bit() {
     assert_eq!(quiet, hash_with(0x7fc0_0000));
     assert_ne!(quiet, negative, "NaN payload bits reach content_hash");
 }
+
+/// A seal that fails still releases the session: with a NULL path its unknown-row-count staging
+/// goes at once; with a table open the seal is refused (`STATE`), and ending the table afterwards
+/// stops the table's thread and removes the staging.
+#[test]
+fn a_failed_seal_releases_the_session() {
+    let schema = FFI_ArrowSchema::try_from(DataType::Struct(fields())).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    let stage = dir.path().join("a");
+    let session = open(&stage, 1);
+    let (_, table) = begin(session, &schema, TSRA_ROWS_UNKNOWN);
+    expect(push(table, 0, &batch(0, 10)), TsraStatus::Ok);
+    expect(end(table), TsraStatus::Ok);
+    // SAFETY: a live session; a NULL path is refused, and the session is released.
+    let st = unsafe { tsra_session_seal(session, std::ptr::null(), std::ptr::null_mut(), 0) };
+    expect(st, TsraStatus::InvalidArgument);
+    assert!(
+        !stage.join("tables").exists(),
+        "the table staging outlived the session"
+    );
+
+    let stage = dir.path().join("b");
+    let session = open(&stage, 1);
+    let (_, table) = begin(session, &schema, TSRA_ROWS_UNKNOWN);
+    // More than one row-group, so the sink has spilled a fragment into the staging.
+    expect(push(table, 0, &batch(0, 70_000)), TsraStatus::Ok);
+    while !stage.join("tables").exists() {
+        std::thread::yield_now(); // the table thread spills asynchronously
+    }
+    let (st, _) = seal(session, &dir.path().join("b.tsra"));
+    expect(st, TsraStatus::State);
+    assert!(last_error().unwrap().contains("still open"));
+    assert!(
+        stage.join("tables").exists(),
+        "the open table's staging is still in use"
+    );
+    expect(end(table), TsraStatus::Ok);
+    assert!(
+        !stage.join("tables").exists(),
+        "ending the orphaned table removes the staging"
+    );
+    assert!(!dir.path().join("b.tsra").exists());
+}

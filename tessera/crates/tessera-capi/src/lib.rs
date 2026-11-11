@@ -121,7 +121,6 @@ pub struct TsraTableOptions {
 /// An open write session (opaque).
 pub struct TsraSession {
     inner: Arc<Mutex<SessionInner>>,
-    tables_dir: PathBuf,
 }
 
 /// An open table of a session (opaque).
@@ -136,6 +135,10 @@ pub struct TsraTable {
 struct SessionInner {
     writer: WriterState,
     tables: u64,
+    /// The staging of unknown-row-count tables (`stage_dir/tables`).
+    tables_dir: PathBuf,
+    /// The session handle was sealed or freed while a table was open: the table's end cleans up.
+    orphaned: bool,
 }
 
 enum WriterState {
@@ -187,26 +190,31 @@ impl TsraSession {
     /// `StreamWriter` has no abort: dropping it closes its input and **detaches** its threads, which
     /// drain what they hold into `stage_dir/session` after this returns. A job whose fragments go with
     /// the table staging fails on its detached thread, which is harmless for a product nobody seals.
-    /// With a table still open, the writer is the table's, so its staging stays until the caller ends
-    /// the table, which it still must do to stop the table's thread.
+    /// With a table still open, the writer is the table's: the session is marked orphaned, and the
+    /// caller must still `tsra_table_end` the table, which stops its thread, drops the writer and
+    /// removes the staging then.
     fn abandon(&self) {
         let mut inner = SessionInner::lock(&self.inner);
-        let table_open = matches!(inner.writer, WriterState::InTable(_));
-        drop(inner.take_ready(WriterState::Poisoned("the session was given up".into())));
-        drop(inner);
-        if !table_open {
-            self.remove_tables_dir();
+        if matches!(inner.writer, WriterState::InTable(_)) {
+            inner.orphaned = true;
+            return;
         }
+        drop(inner.take_ready(WriterState::Poisoned("the session was given up".into())));
+        inner.remove_tables_dir();
     }
 
+    fn remove_tables_dir(&self) {
+        SessionInner::lock(&self.inner).remove_tables_dir();
+    }
+}
+
+impl SessionInner {
     /// Remove the staging of the session's unknown-row-count tables. Only once the writer is
     /// finished or dropped: until then an encode job may still be reading a fragment there.
     fn remove_tables_dir(&self) {
         let _ = std::fs::remove_dir_all(&self.tables_dir);
     }
-}
 
-impl SessionInner {
     fn lock(inner: &Mutex<SessionInner>) -> std::sync::MutexGuard<'_, SessionInner> {
         inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -247,7 +255,8 @@ pub extern "C" fn tsra_last_error() -> *const c_char {
 
 /// Open a write session staging under `stage_dir` (created if absent). The library owns its
 /// contents until the session is sealed, or, after `tsra_session_free` or a failed seal, until the
-/// writer's detached threads finish draining (there is no abort yet, #810). On success `*out` is
+/// writer's detached threads finish draining (there is no abort yet, #810). A session sealed or
+/// freed while a table is open is released when that table is ended, which the caller must still do. On success `*out` is
 /// the session; on failure it is left NULL.
 ///
 /// # Safety
@@ -298,8 +307,9 @@ pub unsafe extern "C" fn tsra_session_open(
             inner: Arc::new(Mutex::new(SessionInner {
                 writer: WriterState::Ready(writer),
                 tables: 0,
+                tables_dir: stage.join("tables"),
+                orphaned: false,
             })),
-            tables_dir: stage.join("tables"),
         });
         // SAFETY: checked non-NULL above.
         unsafe { out.write(Box::into_raw(handle)) };
@@ -353,7 +363,7 @@ pub unsafe extern "C" fn tsra_table_begin(
 
         let mut inner = SessionInner::lock(&session.inner);
         let writer = inner.take_ready(WriterState::InTable(name.clone()))?;
-        let stage = session.tables_dir.join(format!("{:04}", inner.tables));
+        let stage = inner.tables_dir.join(format!("{:04}", inner.tables));
         inner.tables += 1;
         drop(inner);
 
@@ -541,17 +551,28 @@ pub unsafe extern "C" fn tsra_table_end(table: *mut TsraTable) -> TsraStatus {
             Err(_) => {
                 let why = format!("the writer thread of table '{}' panicked", table.name);
                 inner.writer = WriterState::Poisoned(why.clone());
+                if inner.orphaned {
+                    inner.remove_tables_dir();
+                }
                 return Err(CapiError::new(TsraStatus::Panic, why));
             }
         };
         let result = closed.and(outcome.map(|_| ()).map_err(CapiError::from));
         inner.writer = match &result {
-            Ok(()) => WriterState::Ready(writer),
+            Ok(()) if !inner.orphaned => WriterState::Ready(writer),
+            Ok(()) => {
+                drop(writer);
+                WriterState::Poisoned("the session was sealed or freed with this table open".into())
+            }
             Err(e) => {
                 drop(writer);
                 WriterState::Poisoned(format!("table '{}': {}", table.name, e.message))
             }
         };
+        if inner.orphaned {
+            // Nobody can seal this session any more: the staging is ours to remove.
+            inner.remove_tables_dir();
+        }
         result
     })
 }
