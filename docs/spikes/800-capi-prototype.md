@@ -18,7 +18,9 @@
    A duplicate, a missing key at the end, and a **stall** are **errors, never hangs**. A stall means every
    declared producer thread is blocked, which only an out-of-order assignment can cause. It's detected exactly,
    with no timer. `StreamWriter` only takes jobs in submission order. The prototype doesn't change that: it
-   sequences batches before rows are cut into leaves (§3.1–§3.2).
+   sequences batches before rows are cut into leaves (§3.1–§3.2). **Under Geant4, `seq` needs a pinned block
+   size:** the default event modulo depends on the thread count. So the block size `B` is declared and
+   sealed, and with an event-id column the bridge refuses a batch outside `[seq·B, (seq+1)·B)` (§3.4).
 3. **The import is zero-copy and the bridge copies once.** `from_ffi` wraps the producer's buffers (a test
    compares the pointers). Converting them to `ColumnData` is the one copy the bridge adds, because the
    writer's input type owns a `Vec` per column. Everything after that is the writer's own path, the same as
@@ -46,15 +48,17 @@
 | Ordering | `src/order.rs` | the dense-key sequencer: window back-pressure, exact stall detection |
 | Header | `include/tessera.h` | cbindgen output, with the Arrow C structs behind `ARROW_C_DATA_INTERFACE` |
 | C++ programs | `cpp/` | `capi_smoke`, `capi_threads`, `capi_bench`; CMake + pkg-config + nanoarrow |
-| Rust tests | `tests/` | 23 tests that call the `extern "C"` functions as C does |
+| Rust tests | `tests/` | 28 tests that call the `extern "C"` functions as C does |
 | Nix | `flake.nix` | `packages.capi`, `packages.nanoarrow`, the `capi-smoke` check |
 
 The API in one view (the full contract is in the header):
 
 ```c
-TsraSessionOptions so = { sizeof so, "listmode", "run-42", "…", "2026-11-11T00:00:00Z", /*workers*/ 4 };
+TsraSessionOptions so = { sizeof so, "listmode", "run-42", "…", "2026-11-11T00:00:00Z", /*workers*/ 4,
+                          /*seq_block_events*/ 100 };
 tsra_session_open("/scratch/stage", &so, &session);
-TsraTableOptions to = { sizeof to, rows /* or TSRA_ROWS_UNKNOWN */, /*reorder_window*/ 0, /*producers*/ 8 };
+TsraTableOptions to = { sizeof to, rows /* or TSRA_ROWS_UNKNOWN */, /*reorder_window*/ 0, /*producers*/ 8,
+                        /*seq_key_column*/ "event_id" };
 tsra_table_begin(session, "events", &schema, &to, &table);
 tsra_table_push(table, seq, &array, &schema);   /* any thread; takes ownership of `array` */
 tsra_table_mark_done(table, seq);               /* a key whose event block produced no rows */
@@ -72,7 +76,7 @@ are borrowed.
 
 | Check | Result |
 | --- | --- |
-| `cargo test -p tessera-capi --release` | 23 passed, exit 0 (4 unit, 13 roundtrip, 6 threads); the threads tests also 20 × clean |
+| `cargo test -p tessera-capi --release` | 28 passed, exit 0 (4 unit, 5 geant4_blocks, 13 roundtrip, 6 threads); the threads tests also 20 × clean |
 | `columns_read_back_are_the_columns_pushed` | 150,000 rows in batches of 10,007, off the row-group grid; every value equal, float bits included |
 | `the_bytes_are_those_of_the_native_writer` | the C ABI hash equals native `push_table`'s on the same rows |
 | `an_unknown_row_count_seals_the_same_bytes` | `TSRA_ROWS_UNKNOWN` (staged through `TableMultiBlockSink`) gives the same hash as a declared count |
@@ -195,6 +199,35 @@ spells that `tsra_table_push(table, seq, …)` on the one table a session has op
 for a one-table product. For a product with two tables (gPET-sim writes `pethits` and `events`), the owner's
 shape needs either two sessions, and so two products, or a table argument. The prototype's handle is that
 argument. The ADR should choose.
+
+### §3.4 `seq` under Geant4: the block size must be pinned and declared
+
+Geant4's task run manager sizes its event blocks as `eventModulo = min(sqrt(N), N / grainSize)`, with
+`grainSize` the thread-pool size (`G4TaskRunManager.cc:292-323`). So once there are more threads than
+`sqrt(N)`, "the event-block index" depends on the thread count. For 200 events, the blocks are 14 events on 1
+and 4 threads and 12 on 16 (`geant4s_default_block_size_depends_on_the_thread_count`). `seq` is
+deterministic only when the producer pins the block size `B` (`SetEventModulo(B)`, as Stage 2's
+`g4ring.cpp:616-628` does), so that batch `seq` covers the events `[seq·B, (seq+1)·B)` for any thread count.
+
+The prototype makes `B` a declared, recorded session parameter. `TsraSessionOptions::seq_block_events` is
+sealed in the manifest as `extra.tessera_capi.seq_block_events`
+(`the_declared_block_size_is_sealed`). With `TsraTableOptions::seq_key_column` naming the event-id column, the
+bridge checks every batch's ids against its block. `tests/geant4_blocks.rs` models the producer: workers
+take blocks dynamically from a shared counter and push block `k` as `seq = k`. Each block's hits are sorted by
+time first, as a listmode flush is, which is what makes the cut visible in the bytes.
+
+| Run | Result |
+| --- | --- |
+| `B = 10` pinned and declared, N ∈ {1, 4, 16} × 3 schedules | one hash (`a_pinned_block_size_seals_one_product_for_every_thread_count`) |
+| Geant4's default `B`, not declared | same hash at N = 1 and 4 (`B` = 14), a **different** hash at N = 16 (`B` = 12): a producer error the bridge can't see |
+| `B` = 14 declared, but the producer cuts 12 at N = 16 | refused: `batch 1 holds event_id = 12, outside its block [14, 28) … pin the block size with SetEventModulo(14)` |
+
+The last row is the bridge catching the error rather than sealing thread-dependent bytes. Without the
+check, the same run seals a product that differs from the 1-thread one: disabling the check fails
+`a_declared_block_size_rejects_a_mismatched_cut` (cargo test exit 101). **For the ADR:** make `B` a declared
+session parameter, state that the producer must pin it, and make the event-id check the bridge's documented
+failure mode. Without an event-id column the bridge can't tell a wrong cut from a right one. The cut is only
+visible in the bytes, and only when something reorders rows within a batch.
 
 ## §4 — Copies
 
@@ -367,7 +400,8 @@ decides, and the ADR records which.**
 
 1. **Blocking window with required `producers`, or spill** (§3.1): blocking is the owner's back-pressure, and
    the stall detection makes it error-not-hang, but only with an accurate thread count. Spill needs no count.
-   Also, **a table handle or session-per-table** (§3.3).
+   Also, **a table handle or session-per-table** (§3.3), and **whether the event-id check is required**
+   whenever `seq_block_events` is declared (§3.4).
 2. **H4's home** (§7.2): in the bridge, in `tessera-io` for every producer, or nowhere.
 3. **#454 first, or a ~40-line clean-lane map in the bridge** (§7.1). The evidence says either is safe for the
    bytes. Only the dependency graph differs.
