@@ -1,0 +1,12 @@
+# extract of tessera-715-sweep-1 w1-r268435456.log: sha256 ba65e3509a24a5beb75cbf125ed5a4d85d869d4dffc9c5e2e19f904afa4c0d84, 88 lines
+# per tenth of input, the first `sample` line at that tenth's peak RssAnon (run.py log_extract)
+sample rows=16777216 RssAnon=55742464 VmHWM=74403840
+sample rows=33554432 RssAnon=55529472 VmHWM=75763712
+sample rows=54525952 RssAnon=50368512 VmHWM=75763712
+sample rows=88080384 RssAnon=55746560 VmHWM=75964416
+sample rows=125829120 RssAnon=60702720 VmHWM=77692928
+sample rows=142606336 RssAnon=55595008 VmHWM=75964416
+sample rows=180355072 RssAnon=51384320 VmHWM=76148736
+sample rows=201326592 RssAnon=59473920 VmHWM=76464128
+sample rows=230686720 RssAnon=58806272 VmHWM=76148736
+sample rows=255852544 RssAnon=62435328 VmHWM=79425536
