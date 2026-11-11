@@ -6,12 +6,22 @@
 //! block index), and [`Reorder`] hands batches to the writer strictly in that order, whatever order
 //! the threads deliver them in.
 //!
-//! **Bounded memory.** A batch that arrives early waits in the buffer, at most `window` batches past
-//! the next one due. A thread pushing a batch further ahead than that blocks until the window moves.
-//! The thread holding the next batch due is never blocked by the window, so the wait can't deadlock
-//! as long as every sequence number is eventually pushed.
+//! **Bounded memory, and the precondition it costs.** The buffer admits the keys
+//! `next .. next + window` (`window` of them, `next` being the next key due); a push of a key at or
+//! past `next + window` blocks until the window moves. That bound holds the buffer to `window`
+//! batches, and it is safe only if **the key `next` is never held by a thread that is itself blocked**.
+//! That holds when keys are *claimed in increasing order and each thread pushes its own keys in
+//! increasing order*, the shape of `G4TaskRunManager`'s block scheduling and of a shared counter: the
+//! thread that claimed `next` claimed nothing below it that is still unpushed, so it is not waiting.
+//! It does **not** hold for an arbitrary assignment. If every producer thread holds a key at least
+//! `window` past `next` while `next` itself is still unclaimed (or held by one of them), every push
+//! waits and nothing ever releases them: a deadlock, which a single thread pushing key `window`
+//! before key 0 reaches too. The window can't tell the two cases apart, because it can't know how many
+//! producers exist. ADR-0065 §7.2 removes the precondition by spilling early batches to disk instead of
+//! blocking; this prototype measures the ordering, not that.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use crate::error::{CapiError, CapiResult, TsraStatus};
@@ -41,6 +51,8 @@ pub struct Reorder<T, D> {
     window: u64,
     state: Mutex<State<T, D>>,
     advanced: Condvar,
+    /// Pushes that had to wait for the window (observability; tests prove the path ran).
+    waits: AtomicU64,
 }
 
 fn order_err(message: impl Into<String>) -> CapiError {
@@ -48,8 +60,7 @@ fn order_err(message: impl Into<String>) -> CapiError {
 }
 
 impl<T, D: Downstream<T>> Reorder<T, D> {
-    /// A buffer releasing to `downstream`, holding at most `window` (≥ 1) items ahead of the next one
-    /// due.
+    /// A buffer releasing to `downstream`, admitting the `window` (≥ 1) keys from the next one due.
     pub fn new(downstream: D, window: u64) -> Self {
         Reorder {
             window: window.max(1),
@@ -59,6 +70,7 @@ impl<T, D: Downstream<T>> Reorder<T, D> {
                 downstream: Some(downstream),
             }),
             advanced: Condvar::new(),
+            waits: AtomicU64::new(0),
         }
     }
 
@@ -69,7 +81,7 @@ impl<T, D: Downstream<T>> Reorder<T, D> {
     }
 
     /// Accept item `seq`; release it, and every item after it that is already waiting, if it is the
-    /// next one due. Blocks while `seq` is more than `window` past the next one due.
+    /// next one due. Blocks while `seq >= next + window` (see the module docs for when that is safe).
     pub fn push(&self, seq: u64, item: T) -> CapiResult<()> {
         let mut st = self.lock();
         loop {
@@ -85,6 +97,7 @@ impl<T, D: Downstream<T>> Reorder<T, D> {
             if seq - st.next < self.window {
                 break;
             }
+            self.waits.fetch_add(1, Ordering::Relaxed);
             st = self.advanced.wait(st).unwrap_or_else(|e| e.into_inner());
         }
         st.pending.insert(seq, item);
@@ -108,6 +121,11 @@ impl<T, D: Downstream<T>> Reorder<T, D> {
             self.advanced.notify_all();
         }
         Ok(())
+    }
+
+    /// How many times a push waited for the window to move.
+    pub fn waits(&self) -> u64 {
+        self.waits.load(Ordering::Relaxed)
     }
 
     /// Close the buffer and hand back the downstream (dropping it is what tells the writer the input
@@ -171,16 +189,15 @@ mod tests {
         let out = Arc::new(Mutex::new(Vec::new()));
         let r = Arc::new(Reorder::new(Collect(Arc::clone(&out)), 2));
         r.push(1, 1).unwrap();
-        // seq 3 is 3 past next (0) with a window of 2, so it must wait for seq 0 and 1 to go.
+        // With next = 0 and a window of 2 the buffer admits keys 0 and 1: key 2 is the first to wait.
         let ahead = {
             let r = Arc::clone(&r);
-            std::thread::spawn(move || r.push(3, 3))
+            std::thread::spawn(move || r.push(2, 2))
         };
         assert!(out.lock().unwrap().is_empty(), "nothing goes before seq 0");
         // Releasing 0 and 1 moves the window to 2..4, which admits the waiting push.
         r.push(0, 0).unwrap();
-        r.push(2, 2).unwrap();
         ahead.join().unwrap().unwrap();
-        assert_eq!(*out.lock().unwrap(), vec![0, 1, 2, 3]);
+        assert_eq!(*out.lock().unwrap(), vec![0, 1, 2]);
     }
 }

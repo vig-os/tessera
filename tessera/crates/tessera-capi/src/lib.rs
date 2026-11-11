@@ -9,7 +9,7 @@
 //! ```text
 //! tsra_session_open(stage_dir, &opts, &session)
 //!   tsra_table_begin(session, "events", &arrow_schema, &table_opts, &table)
-//!     tsra_table_push(table, seq, &arrow_array, &arrow_schema)   // any thread, any order of seq
+//!     tsra_table_push(table, seq, &arrow_array, &arrow_schema)   // any thread; see the window below
 //!   tsra_table_end(table)                                        // consumes the table
 //! tsra_session_seal(session, "out.tsra", hash, sizeof hash)      // consumes the session
 //! ```
@@ -77,7 +77,7 @@ pub const TSRA_ABI_VERSION_MINOR: u32 = 1;
 /// `TsraTableOptions::rows` for a table whose row count isn't known before the first batch.
 pub const TSRA_ROWS_UNKNOWN: u64 = u64::MAX;
 
-/// The default `TsraTableOptions::reorder_window`: batches held ahead of the next one due.
+/// The default `TsraTableOptions::reorder_window`: the keys admitted from the next one due.
 pub const TSRA_DEFAULT_REORDER_WINDOW: u32 = 64;
 
 /// Bytes `tsra_session_seal` needs for the content hash, terminating NUL included.
@@ -111,8 +111,10 @@ pub struct TsraTableOptions {
     /// block as soon as it fills; an unknown one stages every row on disk and encodes at
     /// `tsra_table_end`. The sealed bytes are the same either way.
     pub rows: u64,
-    /// Batches held ahead of the next one due before a push blocks; 0 means
-    /// `TSRA_DEFAULT_REORDER_WINDOW`.
+    /// How many keys from the next one due are admitted; a push of a key further ahead blocks until
+    /// the window moves. 0 means `TSRA_DEFAULT_REORDER_WINDOW`. Blocking is deadlock-free only when
+    /// keys are claimed in increasing order and each thread pushes its keys in increasing order
+    /// (see `src/order.rs`); with any other assignment, set it to at least the number of batches.
     pub reorder_window: u32,
 }
 
@@ -180,6 +182,23 @@ fn check_size(struct_size: usize, base: usize, what: &str) -> CapiResult<()> {
 }
 
 impl TsraSession {
+    /// Give the session up without sealing: drop its writer and remove its table staging.
+    ///
+    /// `StreamWriter` has no abort: dropping it closes its input and **detaches** its threads, which
+    /// drain what they hold into `stage_dir/session` after this returns. A job whose fragments go with
+    /// the table staging fails on its detached thread, which is harmless for a product nobody seals.
+    /// With a table still open, the writer is the table's, so its staging stays until the caller ends
+    /// the table, which it still must do to stop the table's thread.
+    fn abandon(&self) {
+        let mut inner = SessionInner::lock(&self.inner);
+        let table_open = matches!(inner.writer, WriterState::InTable(_));
+        drop(inner.take_ready(WriterState::Poisoned("the session was given up".into())));
+        drop(inner);
+        if !table_open {
+            self.remove_tables_dir();
+        }
+    }
+
     /// Remove the staging of the session's unknown-row-count tables. Only once the writer is
     /// finished or dropped: until then an encode job may still be reading a fragment there.
     fn remove_tables_dir(&self) {
@@ -226,9 +245,10 @@ pub extern "C" fn tsra_last_error() -> *const c_char {
     error::last_error_ptr()
 }
 
-/// Open a write session staging under `stage_dir` (created if absent; the library owns its
-/// contents until the session is sealed or freed). On success `*out` is the session; on failure it
-/// is left NULL.
+/// Open a write session staging under `stage_dir` (created if absent). The library owns its
+/// contents until the session is sealed, or, after `tsra_session_free` or a failed seal, until the
+/// writer's detached threads finish draining (there is no abort yet, #810). On success `*out` is
+/// the session; on failure it is left NULL.
 ///
 /// # Safety
 /// `stage_dir` and the strings in `opts` are NUL-terminated; `opts` and `out` are valid pointers.
@@ -370,6 +390,15 @@ pub unsafe extern "C" fn tsra_table_begin(
     })
 }
 
+impl TsraTable {
+    /// How many pushes waited for the reorder window (Rust-side observability, not part of the C
+    /// ABI; the tests use it to prove the backpressure path ran).
+    #[doc(hidden)]
+    pub fn reorder_waits(&self) -> u64 {
+        self.reorder.waits()
+    }
+}
+
 /// The table thread: run the writer over the batches the reorder buffer releases, in order, then
 /// hand the writer back.
 fn feed(
@@ -427,8 +456,9 @@ fn split_groups(batch: TableData) -> Vec<TableData> {
 /// `ArrowArray` matching the declared schema, and `schema` its `ArrowSchema` (borrowed).
 ///
 /// Takes ownership of `*array` whenever `array` is non-NULL, on failure too, and releases it before
-/// returning. Safe to call from many threads at once; blocks while `seq` is more than the reorder
-/// window past the next batch due.
+/// returning. Safe to call from many threads at once; blocks while `seq` is at or past
+/// `next + reorder_window` (`next` being the next key due), which is deadlock-free only under the
+/// precondition `TsraTableOptions::reorder_window` states.
 ///
 /// # Safety
 /// `table` is a live table; `array` points to an `ArrowArray` the caller owns; `schema` is a valid,
@@ -547,13 +577,31 @@ pub unsafe extern "C" fn tsra_session_seal(
         // SAFETY: the caller hands over a live session it no longer uses; it is freed here.
         let session = unsafe { Box::from_raw(session) };
         // SAFETY: the caller guarantees `out_path` is NUL-terminated.
-        let out_path = unsafe { arg_str(out_path, "out_path")? };
-        let writer = SessionInner::lock(&session.inner)
-            .take_ready(WriterState::Poisoned("the session was sealed".into()))?;
+        let out_path = match unsafe { arg_str(out_path, "out_path") } {
+            Ok(p) => p,
+            Err(e) => {
+                session.abandon();
+                return Err(e);
+            }
+        };
+        // Bound first, so the lock guard is released before `abandon` takes it again.
+        let taken = SessionInner::lock(&session.inner)
+            .take_ready(WriterState::Poisoned("the session was sealed".into()));
+        let writer = match taken {
+            Ok(w) => w,
+            Err(e) => {
+                session.abandon();
+                return Err(e);
+            }
+        };
         let sealed = writer.finish(Path::new(out_path));
         session.remove_tables_dir();
-        let manifest = sealed?;
-        let hash = manifest.content_hash.unwrap_or_default();
+        let hash = sealed?.content_hash.ok_or_else(|| {
+            CapiError::new(
+                TsraStatus::Writer,
+                "the sealed manifest carries no content hash",
+            )
+        })?;
         if !hash_out.is_null() {
             if hash.len() + 1 > hash_cap {
                 return Err(invalid(format!(
@@ -580,15 +628,7 @@ pub unsafe extern "C" fn tsra_session_free(session: *mut TsraSession) {
     let _ = guard(|| {
         if !session.is_null() {
             // SAFETY: the caller hands over a live session it no longer uses.
-            let session = unsafe { Box::from_raw(session) };
-            // `StreamWriter` has no abort: dropping it closes its input and detaches its threads,
-            // which drain what they hold. A job whose fragments go with the directory below fails
-            // on its detached thread, which is harmless for a product nobody seals.
-            drop(
-                SessionInner::lock(&session.inner)
-                    .take_ready(WriterState::Poisoned("the session was freed".into())),
-            );
-            session.remove_tables_dir();
+            unsafe { Box::from_raw(session) }.abandon();
         }
         Ok(())
     });

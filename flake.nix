@@ -1423,7 +1423,10 @@
                 cmake --build build-$link -j "$NIX_BUILD_CORES"
               done
               # The static build must not need the shared library at run time.
-              if ldd build-static/capi_smoke | grep -q libtessera_capi; then
+              # ldd into a file first: under pipefail a `grep -q` match can SIGPIPE ldd and turn the
+              # pipeline non-zero, which would pass exactly the case this must catch.
+              ldd build-static/capi_smoke > static.ldd
+              if grep -q libtessera_capi static.ldd; then
                 echo "capi_smoke (static) still links libtessera_capi.so" >&2
                 exit 1
               fi

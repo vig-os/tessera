@@ -172,10 +172,14 @@ pub fn open(stage: &Path, workers: u32) -> *mut TsraSession {
 }
 
 pub fn table_opts(rows: u64) -> TsraTableOptions {
+    table_opts_window(rows, 0)
+}
+
+pub fn table_opts_window(rows: u64, reorder_window: u32) -> TsraTableOptions {
     TsraTableOptions {
         struct_size: std::mem::size_of::<TsraTableOptions>(),
         rows,
-        reorder_window: 0,
+        reorder_window,
     }
 }
 
@@ -184,18 +188,18 @@ pub fn begin(
     schema: &FFI_ArrowSchema,
     rows: u64,
 ) -> (TsraStatus, *mut TsraTable) {
+    begin_with(session, schema, &table_opts(rows))
+}
+
+pub fn begin_with(
+    session: *mut TsraSession,
+    schema: &FFI_ArrowSchema,
+    opts: &TsraTableOptions,
+) -> (TsraStatus, *mut TsraTable) {
     let name = CString::new("events").unwrap();
     let mut table = std::ptr::null_mut();
     // SAFETY: a live session, a valid schema and options, and an out pointer.
-    let st = unsafe {
-        tsra_table_begin(
-            session,
-            name.as_ptr(),
-            schema,
-            &table_opts(rows),
-            &mut table,
-        )
-    };
+    let st = unsafe { tsra_table_begin(session, name.as_ptr(), schema, opts, &mut table) };
     (st, table)
 }
 

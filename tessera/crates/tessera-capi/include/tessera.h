@@ -53,14 +53,14 @@ struct ArrowArray {
 // `TsraTableOptions::rows` for a table whose row count isn't known before the first batch.
 #define TSRA_ROWS_UNKNOWN UINT64_MAX
 
-// The default `TsraTableOptions::reorder_window`: batches held ahead of the next one due.
+// The default `TsraTableOptions::reorder_window`: the keys admitted from the next one due.
 #define TSRA_DEFAULT_REORDER_WINDOW 64
 
 // Bytes `tsra_session_seal` needs for the content hash, terminating NUL included.
 #define TSRA_HASH_CAPACITY 128
 
-// The status every `tsra_*` call returns. `TSRA_OK` is zero; every other value is a failure whose
-// message [`crate::tsra_last_error`] returns on the same thread.
+// The status every `tsra_*` call returns. `TSRA_STATUS_OK` is zero; every other value is a failure
+// whose message `tsra_last_error()` returns on the same thread.
 //
 // New codes may be added in a minor ABI version, so a caller must treat an unknown non-zero value
 // as a failure.
@@ -110,7 +110,7 @@ typedef struct {
   uint32_t workers;
 } TsraSessionOptions;
 
-// Table options; `struct_size` as for [`TsraSessionOptions`].
+// Table options; `struct_size` as for `TsraSessionOptions`.
 typedef struct {
   // `sizeof(TsraTableOptions)` as the caller compiled it.
   size_t struct_size;
@@ -118,8 +118,10 @@ typedef struct {
   // block as soon as it fills; an unknown one stages every row on disk and encodes at
   // `tsra_table_end`. The sealed bytes are the same either way.
   uint64_t rows;
-  // Batches held ahead of the next one due before a push blocks; 0 means
-  // `TSRA_DEFAULT_REORDER_WINDOW`.
+  // How many keys from the next one due are admitted; a push of a key further ahead blocks until
+  // the window moves. 0 means `TSRA_DEFAULT_REORDER_WINDOW`. Blocking is deadlock-free only when
+  // keys are claimed in increasing order and each thread pushes its keys in increasing order
+  // (see `src/order.rs`); with any other assignment, set it to at least the number of batches.
   uint32_t reorder_window;
 } TsraTableOptions;
 
@@ -135,9 +137,10 @@ uint32_t tsra_abi_version(void);
 // Valid until the next `tsra_*` call on this thread; copy it to keep it.
 const char *tsra_last_error(void);
 
-// Open a write session staging under `stage_dir` (created if absent; the library owns its
-// contents until the session is sealed or freed). On success `*out` is the session; on failure it
-// is left NULL.
+// Open a write session staging under `stage_dir` (created if absent). The library owns its
+// contents until the session is sealed, or, after `tsra_session_free` or a failed seal, until the
+// writer's detached threads finish draining (there is no abort yet, #810). On success `*out` is
+// the session; on failure it is left NULL.
 //
 // # Safety
 // `stage_dir` and the strings in `opts` are NUL-terminated; `opts` and `out` are valid pointers.
@@ -161,8 +164,9 @@ TsraStatus tsra_table_begin(TsraSession *session,
 // `ArrowArray` matching the declared schema, and `schema` its `ArrowSchema` (borrowed).
 //
 // Takes ownership of `*array` whenever `array` is non-NULL, on failure too, and releases it before
-// returning. Safe to call from many threads at once; blocks while `seq` is more than the reorder
-// window past the next batch due.
+// returning. Safe to call from many threads at once; blocks while `seq` is at or past
+// `next + reorder_window` (`next` being the next key due), which is deadlock-free only under the
+// precondition `TsraTableOptions::reorder_window` states.
 //
 // # Safety
 // `table` is a live table; `array` points to an `ArrowArray` the caller owns; `schema` is a valid,
