@@ -408,6 +408,29 @@ def test_r1_extracts_carry_their_provenance():
         assert len(head.split("sha256 ")[1].split(",")[0]) == 64
 
 
+def test_tenth_peaks_take_each_tenths_maximum():
+    """A hand-built log with several samples per tenth, the peak neither first nor last in its tenth: each tenth's
+    value is its maximum, a tenth with no sample is 0, and samples at the end of the input (the seal) fall in the last
+    tenth. A first, last or minimum sample per tenth fails it."""
+    total = 1000
+    samples = {
+        0: [(0, 50), (40, 70), (99, 60)],
+        1: [(100, 90), (150, 120), (199, 80)],
+        3: [(300, 7), (310, 9), (399, 8)],
+        9: [(900, 30), (999, 45), (1000, 55), (1000, 40)],
+    }
+    text = "".join(
+        f"sample rows={r} RssAnon={y} VmHWM=0\n"
+        for t in sorted(samples)
+        for r, y in samples[t]
+    )
+    want = [70, 120, 0, 9, 0, 0, 0, 0, 0, 55]
+    assert run.log_tenths(text, total) == want
+    assert (
+        run.tenth_peaks([(r, y) for t in samples.values() for r, y in t], total) == want
+    )
+
+
 def test_log_extract_keeps_the_logs_tenths():
     """`log_extract` keeps one line per tenth, and `log_tenths` reads the same tenths from it as from the log; lines
     that aren't samples, and samples after the input ends, are handled as `peaks` handles the CSV's."""

@@ -420,8 +420,9 @@ SAMPLE_LINE = re.compile(r"^sample rows=(\d+) RssAnon=(\d+)\b", re.M)
 
 def log_tenths(text, total):
     """`tenth_peaks` from a run log's own `sample rows=… RssAnon=…` lines, the reproducer's ~1 s sampler. r1
-    (`tessera-715-sweep-1`, the pre-#759 writer) recorded no tenths and its 10 ms CSVs are over `ksb out`'s 1 MiB, but
-    its logs fetch, so ADR-0064 C.4's r1 fit is rebuilt from them (`run.py log-tenths`)."""
+    (`tessera-715-sweep-1`, the pre-#759 writer) recorded no tenths, and the 10 ms CSVs of its longer runs (256 and
+    573 leaves at both W, 64 at W = 4) are over `ksb out`'s 1 MiB; the 64-leaf W = 1 one (481 KB) isn't. Every run's
+    log fetches, so ADR-0064 C.4's r1 fit is rebuilt from the logs (`run.py log-tenths`), one sampler for every run."""
     samples = [(int(r), int(y)) for r, y in SAMPLE_LINE.findall(text)]
     if not samples:
         raise SystemExit("FAIL log: no `sample rows= RssAnon=` lines")
