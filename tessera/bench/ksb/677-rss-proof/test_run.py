@@ -1,12 +1,16 @@
-"""Self-test of run.py's criterion 2 (ADR-0064 §8.1 as amended by #770, B.2-B.5) on recorded ksb data.
+"""Self-test of run.py's criterion 2 (ADR-0064 §8.1 as amended by #770, B.2-B.5, and #797, C.1-C.4) on recorded ksb
+data.
 
 The r3 numbers are `tessera-715-r3-sweep-2`'s records.json (PR #767 at 0b66160, the post-#759 writer), exact bytes of
 peak RssAnon. The r1 numbers are `tessera-715-sweep-1`'s job log (tessera a3df683, the pre-#759 writer), at the log's
 0.1 MiB precision: its records.json is over `ksb out`'s 1 MiB. ADR-0064 B.4 tabulates both; these tests pin run.py to
-that table, so the evaluator and the ADR can't drift apart.
+that table, so the evaluator and the ADR can't drift apart. Since #797 that across-run fit is context, and criterion 2
+is the within-run fit (C.2); its fail-before is `tessera-715-r3-failbefore-2`'s per-tenth records of the pre-#759
+writer (C.4), exact bytes.
 """
 
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -32,6 +36,13 @@ R3 = {
     1: [(16, 62_783_488), (64, 65_560_576), (256, 62_894_080), (573, 67_293_184)],
 }
 R1_W1 = [(16, 59.1 * MIB), (64, 59.5 * MIB), (256, 64.1 * MIB), (573, 71.7 * MIB)]
+# tessera-715-r3-failbefore-2, the pre-#759 writer at W = 1: each run's peak RssAnon per tenth of its input (C.4).
+R3_FAILBEFORE = {
+    268_435_456: [60936192, 61616128, 61587456, 62013440, 61657088]
+    + [62242816, 62394368, 62427136, 63373312, 62779392],
+    2_400_000_000: [62492672, 64000000, 65454080, 65544192, 66584576]
+    + [67993600, 68558848, 69795840, 70447104, 71876608],
+}
 
 
 def verdicts(w, points, e=E_LEAF):
@@ -175,6 +186,170 @@ def test_too_few_runs_fail():
     assert [ok for _, ok, _ in checks] == [False]
 
 
+def tenth_runs(series):
+    """Run records holding only what the within-run fit reads: rows, rep and the ten tenths' peaks."""
+    return [
+        {"rows": rows, "rep": rep, "tenths": tenths}
+        for rep, (rows, tenths) in enumerate(series)
+    ]
+
+
+def within(w, series, e=E_LEAF):
+    fit, checks = run.within_run_test(w, tenth_runs(series), e)
+    return fit, {name.split(": ")[-1]: ok for name, ok, _ in checks}
+
+
+def series(w, rows, level, per_leaf=0, jitter=0):
+    """A run's ten tenths: `level`, plus `per_leaf` bytes per leaf through the writer, plus a deterministic ±`jitter`
+    that doesn't depend on the leaves."""
+    return (
+        rows,
+        [
+            level + per_leaf * run.tenth_leaves(rows, t) + jitter * (-1) ** t
+            for t in range(10)
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "rows,want",
+    [
+        (67_108_864, [1, 3, 4, 6, 8, 9, 11, 12, 14, 16]),
+        (2_400_000_000, [57, 114, 171, 228, 286, 343, 400, 457, 514, 573]),
+    ],
+)
+def test_tenth_leaves_are_the_leaves_complete_at_each_tenths_end(rows, want):
+    """C.2's x_rt: ⌊(t + 1) · rows / (10 · BLOCK_ROWS)⌋, and n in the last tenth (the seal commits every leaf)."""
+    assert [run.tenth_leaves(rows, t) for t in range(10)] == want
+
+
+SIZES = {
+    4: (1_073_741_824, 2_400_000_000),
+    1: (268_435_456, 1_073_741_824, 2_400_000_000),
+}
+
+
+def design(w, per_leaf=0, jitter=MIB // 4, level=lambda i: 60 * MIB):
+    """The job design's fitted runs at W (k per size), each at its own level `level(i)`."""
+    k = {4: run.REPEATS, 1: run.K1}[w]
+    return [
+        series(w, rows, level(i), per_leaf, jitter)
+        for i, rows in enumerate(r for r in SIZES[w] for _ in range(k))
+    ]
+
+
+@pytest.mark.parametrize("w", [4, 1])
+def test_flat_runs_at_different_levels_pass_within_and_fail_across(w):
+    """C.1: per-run offsets that rise with n (the disk's load across runs) and no growth within a run. The within-run
+    slope passes; the across-run slope (B.2, now context) on the same runs' peaks reads the offsets as growth."""
+    runs = design(w, level=lambda i: 180 * MIB + i * 3 * MIB)
+    fit, ok = within(w, runs)
+    assert abs(fit["b"]) < run.c_leaf(E_LEAF) / 10 and all(ok.values())
+    peaks = [(run.blocks(rows), max(t)) for rows, t in runs]
+    assert not verdicts(w, peaks)[1]["slope"]
+
+
+@pytest.mark.parametrize("w", [4, 1])
+def test_growth_within_runs_fails(w):
+    """A per-leaf growth of c_leaf beyond c_leaf (B.5's target), the same in every run, fails the within-run slope at
+    both W, whatever the runs' levels."""
+    level = lambda i: (60 + 7 * (i % 3)) * MIB  # noqa: E731
+    flat, _ = within(w, design(w, level=level))
+    fit, ok = within(w, design(w, per_leaf=2 * run.c_leaf(E_LEAF), level=level))
+    # The fit is linear in y, so a growth common to every run moves b̂ by exactly that growth (as B.4 argues).
+    assert fit["b"] == pytest.approx(flat["b"] + 2 * run.c_leaf(E_LEAF))
+    assert fit["se"] == pytest.approx(flat["se"])
+    assert not ok["slope"]
+
+
+def test_g_and_n_are_c2s_counts_and_t_has_g_minus_1_df():
+    """C.2: at W = 4 a 64-leaf run has one tenth at x ≥ 64 and is left out (G = 6: 256 leaves with 8 tenths, 573 with
+    9); at W = 1 a 16-leaf run is left out (G = 18)."""
+    runs4 = [series(4, 268_435_456, 60 * MIB)] * 3 + design(4)
+    fit, _ = within(4, runs4)
+    assert (fit["G"], fit["N"], fit["df"]) == (6, 3 * 8 + 3 * 9, 5)
+    assert fit["t"] == pytest.approx(2.015, abs=5e-4)
+    runs1 = [series(1, 67_108_864, 60 * MIB)] * run.K1 + design(1)
+    fit, _ = within(1, runs1)
+    assert (fit["G"], fit["N"], fit["df"]) == (18, 6 * 8 + 12 * 10, 17)
+
+
+def test_the_standard_error_is_cr1_clustered_by_run():
+    """Two runs of three tenths, worked by hand: the within-run deviations and their residuals, the per-run score
+    Σ x̃ e, and CR1's factor G/(G − 1) · (N − 1)/(N − 2)."""
+    pts = [
+        [(64, 10.0), (128, 30.0), (192, 20.0)],
+        [(64, 0.0), (128, 10.0), (192, 50.0)],
+    ]
+    # x̃ = (−64, 0, 64) in both; ỹ = (−10, 10, 0) and (−20, −10, 30); Sₓₓ = 4 · 64²; b̂ = (640 + 3200) / 16384.
+    b = 3840 / 16384
+    scores = [
+        -64 * (-10 + 64 * b) + 64 * (0 - 64 * b),
+        -64 * (-20 + 64 * b) + 64 * (30 - 64 * b),
+    ]
+    se = (2 / 1 * 5 / 4 * sum(u * u for u in scores)) ** 0.5 / 16384
+    got_b, got_se, big_n, sxx = run.cluster_fit(pts)
+    assert (big_n, sxx) == (6, 16384)
+    assert got_b == pytest.approx(b) and got_se == pytest.approx(se)
+
+
+def test_noise_within_runs_too_large_to_resolve_delta_z_is_inconclusive():
+    """Resolution at W = 4: tenths with 40 MiB of independent noise put the floor above δ_z; the fit is inconclusive
+    and fails, whatever b̂ is."""
+    rng = random.Random(4)
+    runs = [
+        (rows, [300 * MIB + rng.gauss(0, 40 * MIB) for _ in range(10)])
+        for rows, _ in design(4)
+    ]
+    fit, ok = within(4, runs)
+    assert fit["floor"] > run.DELTA_Z and not ok["resolution"]
+
+
+def test_w1_floor_above_c_leaf_fails_the_recheck_but_resolves_delta_z():
+    """Resolution at W = 1 (B.5's re-check, unchanged by C.3): noise that leaves the floor between c_leaf and δ_z
+    resolves the zone-statistics class but not a growth of c_leaf beyond c_leaf, and fails as inconclusive."""
+    rng = random.Random(1)
+    runs = [
+        (rows, [60 * MIB + rng.gauss(0, 8 * MIB) for _ in range(10)])
+        for rows, _ in design(1)
+    ]
+    fit, ok = within(1, runs)
+    assert run.c_leaf(E_LEAF) < fit["floor"] <= run.DELTA_Z
+    assert ok["resolution"] and not ok["re-check"]
+
+
+def test_fewer_than_two_fitted_runs_or_missing_tenths_fail():
+    _, checks = run.within_run_test(4, tenth_runs(design(4)[:1]), E_LEAF)
+    assert [ok for _, ok, _ in checks] == [False]
+    gap = design(4)
+    gap[2] = (gap[2][0], gap[2][1][:5] + [0] + gap[2][1][6:])
+    _, checks = run.within_run_test(4, tenth_runs(gap), E_LEAF)
+    assert [ok for _, ok, _ in checks] == [False] and "no sample" in checks[0][2]
+    short = design(4)
+    short[0] = (short[0][0], short[0][1][:9])
+    _, checks = run.within_run_test(4, tenth_runs(short), E_LEAF)
+    assert [ok for _, ok, _ in checks] == [False] and "9 tenths" in checks[0][2]
+
+
+def test_pre_759_writer_fails_the_within_run_slope():
+    """C.4's fail-before: tessera-715-r3-failbefore-2, the pre-#759 writer at W = 1, 64 and 573 leaves. b̂ 17,219
+    B/leaf against a bound of 9,237, resolved (floor 2,513 ≤ c_leaf)."""
+    fit, ok = within(1, list(R3_FAILBEFORE.items()), e=2966)
+    assert (fit["G"], fit["N"]) == (2, 18)
+    assert (
+        round(fit["b"]),
+        round(fit["se"]),
+        round(fit["bound"]),
+        round(fit["floor"]),
+    ) == (
+        17_219,
+        199,
+        9_237,
+        2_513,
+    )
+    assert not ok["slope"] and ok["resolution"] and ok["re-check"]
+
+
 def records(tmp_path, name, runs, job="proof"):
     d = tmp_path / name
     d.mkdir()
@@ -209,9 +384,10 @@ def test_shards_merge_only_from_one_binary_and_without_duplicates(tmp_path):
         run.load([a, records(tmp_path, "par", [run_ | {"rows": 1}], job="parallel")])
 
 
-def full_records(rss=lambda w, n, rep: None):
+def full_records(grow=lambda w, n, rep: 0):
     """A complete, passing record set of the `job` design (every point, every repeat), shaped like run_once's:
-    W = 1 at r3's level with ±0.25 MiB per repeat, W = 4 cycling r3's nine runs. `rss` may override a run's peak."""
+    W = 1 at r3's level with ±0.25 MiB per repeat, W = 4 at r3's nine runs' levels; each run flat over its tenths
+    with ±64 KiB of jitter. `grow(w, n, rep)` adds that many bytes per leaf through the writer to a run's tenths."""
     w4 = {n: [y for m, y in R3[4] if m == n] for n in (64, 256, 573)}
     runs = []
     for w in run.WORKERS:
@@ -219,14 +395,22 @@ def full_records(rss=lambda w, n, rep: None):
             n = run.blocks(rows)
             for rep in range(run.repeats(w, rows)):
                 if rows == 0:
-                    y = 2 * MIB
+                    tenths = [2 * MIB] + [0] * 9
                 elif n == 1:
-                    y = 56 * MIB
-                elif w == 1:
-                    y = 60 * MIB + (rep % 2 - 0.5) * MIB / 2
+                    tenths = [3 * MIB] * 9 + [56 * MIB]
                 else:
-                    y = w4.get(n, [186 * MIB])[rep % 3]
-                y = rss(w, n, rep) or y
+                    y = (
+                        60 * MIB + (rep % 2 - 0.5) * MIB / 2
+                        if w == 1
+                        else w4.get(n, [186 * MIB])[rep % 3]
+                    )
+                    tenths = [
+                        y
+                        + (64 << 10) * ((t + rep) % 3 - 1)
+                        + grow(w, n, rep) * run.tenth_leaves(rows, t)
+                        for t in range(10)
+                    ]
+                y = max(tenths)
                 runs.append(
                     {
                         "workers": w,
@@ -251,6 +435,7 @@ def full_records(rss=lambda w, n, rep: None):
                         "content_hash": f"blake3:{rows}",
                         "canonical": {"blocks": f"{rows}", "schema": "s"},
                         "rss_anon": y,
+                        "tenths": tenths,
                         "peak_row_group": 1,
                         "memory_current": y + 100 * MIB,
                         "anon": y + 20 * MIB,
@@ -271,6 +456,14 @@ def test_complete_records_pass_every_criterion(capsys):
     code, fails, out = evaluate(full_records(), capsys)
     assert (code, fails) == (0, [])
     assert "VERDICT: PASS, criteria 1-5" in out
+    # C.3: the across-run slope is printed as context at both W, never as a verdict.
+    assert [
+        line.split(" (")[0] for line in out.splitlines() if "across-run" in line
+    ] == [
+        "CONTEXT 2 across-run W=1",
+        "CONTEXT 2 across-run W=4",
+    ]
+    assert "within-run (fixed effects, C.2)" in out
     # Criterion 5 compares every run at 268 M rows, the 6 W = 1 and 3 W = 4 repeats, with W = 1's first.
     assert out.count("PASS 5 bytes and names") == run.K1 - 1 + run.REPEATS
 
@@ -299,11 +492,9 @@ def test_a_differing_repeat_fails_criterion_5(capsys):
 
 
 def test_growth_of_c_leaf_beyond_c_leaf_fails_the_slope_end_to_end(capsys):
-    """B.5's target, a W = 1 slope of 2 c_leaf: 4.6 MB over the sweep, under every run's ceiling, so only criterion 2
-    sees it."""
-    runs = full_records(
-        lambda w, n, rep: n >= 16 and w == 1 and 60 * MIB + 2 * run.c_leaf(E_LEAF) * n
-    )
+    """B.5's target, a W = 1 slope of 2 c_leaf within every run: 4.6 MB over the sweep, under every run's ceiling, so
+    only criterion 2 sees it."""
+    runs = full_records(lambda w, n, rep: 2 * run.c_leaf(E_LEAF) if w == 1 else 0)
     _, fails, _ = evaluate(runs, capsys)
     assert [f.split(":")[0] + ":" + f.split(":")[1] for f in fails] == [
         "FAIL 2 plateau W=1: slope"

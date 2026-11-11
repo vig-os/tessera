@@ -1,6 +1,6 @@
-# ADR-0064 §8.1's RSS proof (#715), as amended by #760 and #770: the consumer reproducer on push_table, swept and
-# evaluated by run.py, criteria 1-5 in one job (run as shards) and criterion 6 in another; the evaluation exits 1 on
-# any failed criterion. Results: ADR-0026 and FEATURE-MATRIX. tessera has no ksb project with a scratch prefix, so this
+# ADR-0064 §8.1's RSS proof (#715), as amended by #760, #770 and #797: the consumer reproducer on push_table, swept
+# and evaluated by run.py, criteria 1-5 in one job (run as shards) and criterion 6 in another; the evaluation exits 1
+# on any failed criterion. Results: ADR-0026 and FEATURE-MATRIX. tessera has no ksb project with a scratch prefix, so this
 # borrows dogplet-analysis's, as the #677 jobs (t677b-*) did.
 #
 # Criteria 1-5, staging on disk-backed --scratch (the guard fails the job if the session dir is tmpfs). One job holding
@@ -28,7 +28,8 @@
 #   ksb run --name tessera-715-r4-par-N --cpu 4 --exclusive-cpus --mem 6Gi --time 30 "path:$PWD#parallel" -- \
 #     --session-root /dev/shm/s715-session --output-root /dev/shm/s715-out
 #
-# Fail-before: test_run.py runs criterion 2 on r1's records of the pre-#759 writer (a3df683), which fail it. To rerun
+# Fail-before: test_run.py runs criterion 2 on tessera-715-r3-failbefore-2's per-tenth records of the pre-#759 writer
+# (ADR-0064 C.4; r1's, a3df683, predate the per-tenth record), which fail it. To rerun
 # that writer, copy this dir, `nix flake lock --override-input tessera github:vig-os/tessera/<pre-fix rev>`, and pass
 # `--workers 1`.
 {

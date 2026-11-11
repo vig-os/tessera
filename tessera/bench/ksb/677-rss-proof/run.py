@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ADR-0064 §8.1, as amended by #760 and #770: the RSS proof of `StreamWriter::push_table` with the consumer reproducer (#715).
+"""ADR-0064 §8.1, as amended by #760, #770 and #797: the RSS proof of `StreamWriter::push_table` with the consumer reproducer (#715).
 
 Two ksb jobs, each a subcommand that runs the reproducer, writes `records.json` to `--out` and then evaluates it:
 
@@ -14,11 +14,14 @@ Two ksb jobs, each a subcommand that runs the reproducer, writes `records.json` 
   `/dev/shm`. Its guard is the converse one (A.3): they MUST be tmpfs, else the job fails, so neither job can
   silently measure the other's setup. The speed-up only counts with the 4 CPUs of `--cpu 4 --exclusive-cpus`.
 
-Criterion 2 is B.3's slope test: per W, the OLS slope of peak `RssAnon` against leaves over every run at n ≥ 16 W
-(each repeat its own point), with its standard error from the runs' own residuals. It passes only if the slope is at
-most `c_leaf` plus the one-sided 95 % margin `t₀.₉₅,N−2 · SE` (slope), and the detection floor `2 t · SE` is at most
-δ_z = 0.029 B/row (resolution) and, at W = 1, at most `c_leaf` (B.5's re-check). An unresolved run is inconclusive,
-and fails. The W = 4 floor is printed as a stated limit. `test_run.py` pins this arithmetic to ADR-0064's B.4 and B.5 tables.
+Criterion 2 is C.2's within-run slope (#797): per W, over the tenths of every run at n ≥ 16 W whose leaves through
+the writer x_rt are at least 16 W, the tenth's peak `RssAnon` is fitted as α_r + b · x_rt, one intercept per run and
+one common slope, with a standard error cluster-robust by run (CR1) and t at G − 1 degrees of freedom, G the runs
+fitted. B.3's pass rule is unchanged: the slope at most `c_leaf` plus the one-sided 95 % margin `t₀.₉₅,G−1 · SE`
+(slope), and the detection floor `2 t · SE` at most δ_z = 0.029 B/row (resolution) and, at W = 1, at most `c_leaf`
+(B.5's re-check). An unresolved fit is inconclusive, and fails. The W = 4 floor is printed as a stated limit. B.2's
+across-run OLS slope of each run's peak against its leaves is printed as CONTEXT, never graded: across runs the peak
+tracks the shared disk's load (C.1). `test_run.py` pins the arithmetic to ADR-0064's B.4, B.5 and C.4.
 
 `job` can run as shards (`--workers`, `--rows`, `--reps`: the repeat indices of each point to run), so the repeats run
 in parallel ksb jobs rather than serially in one of ~24 h. A shard's exit code checks only that its own runs
@@ -188,11 +191,58 @@ def t_quantile(p, df):
     return (lo + hi) / 2
 
 
+def plateau_checks(w, fit, e, detail):
+    """B.3's pass rule on a fitted slope, as (name, ok, detail) triples: the slope check `b̂ ≤ c_leaf + t · SE`, the
+    resolution check `2 t · SE ≤ δ_z`, and at W = 1 B.5's re-check `2 t · SE ≤ c_leaf`. An unresolved fit is
+    inconclusive, and fails. The same rule grades the within-run slope (C.2) and was the across-run one's (B.3)."""
+    b, margin, c = fit["b"], fit["t"] * fit["se"], fit["c_leaf"]
+    floor = fit["floor"]
+    checks = [
+        (
+            f"2 plateau W={w}: slope",
+            b <= fit["bound"],
+            f"b̂ {b:,.0f} ≤ c_leaf {c:,} B (e_leaf {e} B) + t · SE {margin:,.0f} = {fit['bound']:,.0f} B/leaf; "
+            f"{detail}",
+        ),
+        (
+            f"2 plateau W={w}: resolution",
+            floor <= DELTA_Z,
+            f"detection floor 2 t · SE {floor:,.0f} ≤ δ_z {DELTA_Z:,} B/leaf (0.029 B/row); else inconclusive",
+        ),
+    ]
+    if w == 1:
+        checks.append(
+            (
+                f"2 plateau W={w}: re-check",
+                floor <= c,
+                f"detection floor 2 t · SE {floor:,.0f} ≤ c_leaf {c:,} B/leaf (B.5: else inconclusive, and k₁ is "
+                "re-derived from this noise by an amendment)",
+            )
+        )
+    return checks
+
+
+def fitted(b, se, df, e):
+    """The pass rule's numbers for a slope `b̂` with standard error `se` and `df` degrees of freedom (B.3)."""
+    t = t_quantile(1 - ALPHA, df)
+    c = c_leaf(e)
+    return {
+        "b": b,
+        "se": se,
+        "t": t,
+        "df": df,
+        "bound": c + t * se,
+        "floor": 2
+        * t
+        * se,  # B.3: the growth beyond c_leaf detected with probability ≥ 95 %, the resolution
+        "c_leaf": c,
+    }
+
+
 def slope_test(w, points, e):
     """B.2 and B.3: the OLS slope of peak RssAnon (bytes) against leaves over `points`, the (n, RssAnon) of every run
-    at n ≥ 16 W, and criterion 2's checks on it, as (name, ok, detail) triples. `e` is e_leaf, the largest over the
-    runs. W = 1 also carries B.5's re-check: its detection floor at the measured SE must be at most c_leaf, so a
-    run too noisy to see a growth of c_leaf beyond c_leaf is inconclusive, and fails."""
+    at n ≥ 16 W, and B.3's checks on it, as (name, ok, detail) triples. `e` is e_leaf, the largest over the runs.
+    Since #797 (C.1) this across-run slope is context, confounded by the shared disk; `within_run_test` grades."""
     big_n = len(points)
     if big_n < 3 or len({n for n, _ in points}) < 2:
         return {}, [
@@ -209,61 +259,106 @@ def slope_test(w, points, e):
     b = sum((n - n_bar) * (y - y_bar) for n, y in points) / snn
     a = y_bar - b * n_bar
     sigma = math.sqrt(sum((y - a - b * n) ** 2 for n, y in points) / (big_n - 2))
-    se = sigma / math.sqrt(snn)
-    t = t_quantile(1 - ALPHA, big_n - 2)
-    c, margin = c_leaf(e), t * se
-    floor = (
-        2 * margin
-    )  # B.3: the growth beyond c_leaf detected with probability ≥ 95 %, the resolution
-    fit = {
+    fit = fitted(b, sigma / math.sqrt(snn), big_n - 2, e) | {
         "N": big_n,
-        "b": b,
-        "se": se,
-        "t": t,
-        "bound": c + margin,
-        "floor": floor,
-        "c_leaf": c,
         "sigma": sigma,
         "n_bar": n_bar,
         "snn": snn,
     }
-    per_row = f"{b / BLOCK_ROWS:.4f} B/row"
     sizes = ", ".join(
         f"{n}: {[round(y / MIB, 2) for m, y in points if m == n]}"
         for n in sorted({n for n, _ in points})
     )
     detail = (
-        f"N {big_n}, b̂ {b:,.0f} B/leaf ({per_row}), SE {se:,.0f}, t₀.₉₅,{big_n - 2} {t:.3f}, "
-        f"σ̂ {sigma / MIB:.2f} MiB, n̄ {n_bar:.2f}, Sₙₙ {snn:,.0f}"
+        f"N {big_n}, b̂ {b:,.0f} B/leaf ({b / BLOCK_ROWS:.4f} B/row), SE {fit['se']:,.0f}, "
+        f"t₀.₉₅,{big_n - 2} {fit['t']:.3f}, σ̂ {sigma / MIB:.2f} MiB, n̄ {n_bar:.2f}, Sₙₙ {snn:,.0f}; "
+        f"MiB per leaves {{{sizes}}}"
     )
-    checks = [
-        (
-            f"2 plateau W={w}: slope",
-            b <= fit["bound"],
-            f"b̂ {b:,.0f} ≤ c_leaf {c:,} B (e_leaf {e} B) + t · SE {margin:,.0f} = {fit['bound']:,.0f} B/leaf; "
-            f"{detail}; MiB per leaves {{{sizes}}}",
-        ),
-        (
-            f"2 plateau W={w}: resolution",
-            floor <= DELTA_Z,
-            f"detection floor 2 t · SE {floor:,.0f} ≤ δ_z {DELTA_Z:,} B/leaf (0.029 B/row); else inconclusive",
-        ),
-    ]
-    if w == 1:
-        checks.append(
+    return fit, plateau_checks(w, fit, e, detail)
+
+
+def tenth_leaves(rows, t):
+    """C.1: x_rt, the leaves whose input is complete at the end of tenth `t` of a run of `rows` input rows. A run's
+    records hold each tenth's peak RssAnon (`peaks`), and the tenths are cut at input rows `(t + 1) · rows / 10`, so
+    tenth t ends with `(t + 1) · rows // (10 · BLOCK_ROWS)` complete blocks; the last tenth runs to the seal, when
+    every leaf is committed."""
+    return blocks(rows) if t == 9 else (t + 1) * rows // (10 * BLOCK_ROWS)
+
+
+def cluster_fit(clusters):
+    """C.2's fit over `clusters`, one list of (x_rt, y_rt) per run with two or more: the fixed-effects slope b̂ (OLS
+    on the deviations from each run's own means), its CR1 standard error clustered by run, N and Sₓₓ. The CR1 factor
+    is G/(G − 1) · (N − 1)/(N − 2): the per-run intercepts are nested in the clusters and not counted as regressors."""
+    dev = []
+    for kept in clusters:
+        mx = sum(x for x, _ in kept) / len(kept)
+        my = sum(y for _, y in kept) / len(kept)
+        dev.append([(x - mx, y - my) for x, y in kept])
+    sxx = sum(x * x for d in dev for x, _ in d)
+    big_n = sum(len(d) for d in dev)
+    if sxx == 0:
+        return 0.0, math.inf, big_n, 0
+    b = sum(x * y for d in dev for x, y in d) / sxx
+    g = len(dev)
+    scores = [sum(x * (y - b * x) for x, y in d) for d in dev]
+    factor = g / (g - 1) * (big_n - 1) / (big_n - 2)
+    return b, math.sqrt(factor * sum(u * u for u in scores)) / sxx, big_n, sxx
+
+
+def within_run_test(w, runs, e):
+    """C.2 and C.3 (#797): criterion 2's fixed-effects slope. Over every tenth t of every run r with
+    x_rt ≥ 16 W leaves (`tenth_leaves`), y_rt = that tenth's peak RssAnon is fitted as y_rt = α_r + b · x_rt + ε,
+    one intercept per run (its I/O state) and one common slope b, by OLS on the within-run deviations. SE(b̂) is
+    cluster-robust by run (CR1: arbitrary correlation and variance within a run, runs independent), with B.3's
+    pass rule at t₀.₉₅,G−1, G the runs with at least two tenths in the fit (a run with one has no within-run
+    variation and adds nothing). Returns the fit and the (name, ok, detail) checks; missing data fail."""
+    clusters, empty = [], []
+    for r in runs:
+        tenths = r.get("tenths") or []
+        if len(tenths) != 10:
+            return {}, [
+                (
+                    f"2 plateau W={w}",
+                    False,
+                    f"W={w} rows={r['rows']} run {r['rep'] + 1} has {len(tenths)} tenths recorded, not 10",
+                )
+            ]
+        kept = [
+            (tenth_leaves(r["rows"], t), y)
+            for t, y in enumerate(tenths)
+            if tenth_leaves(r["rows"], t) >= PLATEAU_FROM[w]
+        ]
+        empty += [(r["rows"], r["rep"]) for x, y in kept if y <= 0]
+        if len(kept) >= 2:
+            clusters.append(kept)
+    if empty:
+        return {}, [
             (
-                f"2 plateau W={w}: re-check",
-                floor <= c,
-                f"detection floor 2 t · SE {floor:,.0f} ≤ c_leaf {c:,} B/leaf at N {big_n} (B.5: else "
-                "inconclusive, and k₁ is re-derived from this σ̂ by an amendment)",
+                f"2 plateau W={w}",
+                False,
+                f"tenths with no sample in the fit, (rows, rep) {sorted(set(empty))}: never passed on no data",
             )
-        )
-    else:
-        print(
-            f"LIMIT 2 plateau W={w}: detection floor {floor:,.0f} B/leaf ({floor / BLOCK_ROWS:.4f} B/row), "
-            "a stated limit, not a check (B.4)"
-        )
-    return fit, checks
+        ]
+    g = len(clusters)
+    if g < 2:
+        return {}, [
+            (
+                f"2 plateau W={w}",
+                False,
+                f"{g} run(s) with two or more tenths at x ≥ {PLATEAU_FROM[w]} leaves: a cluster-robust standard "
+                "error needs 2 runs or more",
+            )
+        ]
+    b, se, big_n, sxx = cluster_fit(clusters)
+    if sxx == 0:
+        return {}, [(f"2 plateau W={w}", False, "no within-run variation of x_rt")]
+    fit = fitted(b, se, g - 1, e) | {"N": big_n, "G": g, "sxx": sxx}
+    detail = (
+        f"within-run (fixed effects, C.2): G {g} runs, N {big_n} tenths, b̂ {b:,.0f} B/leaf "
+        f"({b / BLOCK_ROWS:.4f} B/row), cluster-robust SE {se:,.0f}, t₀.₉₅,{g - 1} {fit['t']:.3f}, "
+        f"Σx̃² {sxx:,.0f}"
+    )
+    return fit, plateau_checks(w, fit, e, detail)
 
 
 def statfs_type(path):
@@ -500,13 +595,25 @@ def evaluate_proof(v):
         if None in p:
             continue
         runs = [r for point in p for r in point]
-        _, checks = slope_test(
-            w,
-            [(r["leaves"], r["rss_anon"]) for r in runs],
-            max(r["e_leaf"] for r in runs),
-        )
+        e = max(r["e_leaf"] for r in runs)
+        fit, checks = within_run_test(w, runs, e)
         for check in checks:
             v.verdict(*check)
+        if fit and w != 1:
+            print(
+                f"LIMIT 2 plateau W={w}: detection floor {fit['floor']:,.0f} B/leaf "
+                f"({fit['floor'] / BLOCK_ROWS:.4f} B/row), a stated limit, not a check (B.4)"
+            )
+        # C.3: the across-run slope (B.2) is reported, never graded: its peaks track the shared disk's load.
+        _, context = slope_test(w, [(r["leaves"], r["rss_anon"]) for r in runs], e)
+        print(
+            f"CONTEXT 2 across-run W={w} (disk-confounded, not graded): "
+            + "; ".join(
+                f"{name.split(': ')[-1]} {'within' if ok else 'outside'} B.3's rule"
+                for name, ok, _ in context
+            )
+            + f"; {context[0][2]}"
+        )
 
     big = ROWS[-1]
     # 3. Page cache is reclaimable; 4. the consumer's budget. Every run of the point.
