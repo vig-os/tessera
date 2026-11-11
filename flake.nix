@@ -629,20 +629,22 @@
                 exit 1
               fi
 
-              # #468 is FIXED (carried by the vortex fork pin, #480). The test now asserts ONE byte
-              # count per shape with no `cfg!(debug_assertions)` branch, so running it in both profiles
-              # is what proves the two agree: a re-divergence fails in exactly one of these two lines.
+              # #468 is FIXED (carried by the vortex fork pin, #480). The guard asserts the cause: no
+              # written patch-indices array persists a sortedness statistic. A release build never
+              # caches one, so the debug run is the one that bites; both run so the pair is explicit.
+              # (Since vortex 0.93 the defect keeps the byte COUNT and changes the bytes, which is why
+              # the guard no longer compares lengths, #635.)
               echo "[#468] the build-config independence guard under both profiles" >&2
-              cargo test -q -p tessera-io --lib full_span_int_container_bytes_are_build_config_independent
-              cargo test -q --release -p tessera-io --lib full_span_int_container_bytes_are_build_config_independent
+              cargo test -q -p tessera-io --lib patch_indices_persist_no_sortedness_statistic
+              cargo test -q --release -p tessera-io --lib patch_indices_persist_no_sortedness_statistic
 
-              # #472's guard (the arch-dependent half): the persisted float Sum must be the canonical
-              # NaN, not x86_64's default. Run in both profiles for symmetry with the above, though
-              # this one's axis is the architecture — the aarch64 leg of this matrix is what pairs
-              # with it, and aarch64 cannot fail it (it always produced the canonical value).
-              echo "[#472] the canonical-NaN Sum guard under both profiles" >&2
-              cargo test -q -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
-              cargo test -q --release -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
+              # #472's guard (the arch-dependent half): no NaN-valued float statistic may reach the
+              # bytes of a [+inf, -inf] column, of either sign, and no zone map may carry a sum. Run in
+              # both profiles for symmetry with the above, though this one's axis is the architecture;
+              # the aarch64 leg of this matrix is what pairs with it.
+              echo "[#472] the float-statistic NaN guard under both profiles" >&2
+              cargo test -q -p tessera-io --lib float_stats_persist_no_nan_for_inf_and_neg_inf
+              cargo test -q --release -p tessera-io --lib float_stats_persist_no_nan_for_inf_and_neg_inf
             '';
           });
 
@@ -1095,8 +1097,8 @@
             # `sql::tests::*` runs the DataFusion SessionContext path end-to-end (register table,
             # execute query, collect batches). The positional `sql` filter matches every test
             # name in the `sql` module — DataFusion 54 pins arrow-58, so cargo unifies with the
-            # arrow-58 the workspace already has (via Vortex 0.75); a version mismatch would
-            # fail to link, not to test.
+            # arrow-58 the workspace's ingest decoders pin; a version mismatch on that boundary
+            # would fail to compile, not to test.
             cargoExtraArgs = "-p tessera-cli --features sql sql::";
             cargoNextestExtraArgs = nextestFailOnNoTests;
           }));

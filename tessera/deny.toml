@@ -43,8 +43,8 @@ ignore = [
     "RUSTSEC-2026-0374",
     # zstd 0.13.3 / zstd-safe 7.2.4 / zstd-sys 2.0.16: four advisories (ignored 2026-10-26, #683).
     # NO UPGRADE PATH. zarrs 0.23.14 (latest) and zarrs main require zstd 0.13.3. The first parquet on
-    # zstd 0.14 is 60.0, and it needs arrow 60, which the vortex 0.75 fork (arrow 58.3) and datafusion
-    # 55 (arrow 59) can't take. tessera has no direct zstd calls. Its dependencies reach zstd only
+    # zstd 0.14 is 60.0, and it needs arrow 60, which the arrow-58 ingest pins, the vortex 0.93 fork
+    # (arrow 59.2) and datafusion 55 (arrow 59) can't take. tessera has no direct zstd calls. Its dependencies reach zstd only
     # through the bulk codecs of parquet, zarrs and arrow-ipc (`sql` feature), plus zarrs'
     # `decode_all`. clippy.toml bans the affected APIs in our code, and the
     # [[bans.features]] entry below bans `seekable`. Reachability evidence and exit criteria are in

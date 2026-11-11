@@ -4,7 +4,7 @@
 //! exact bytes stored at `blocks/<name>` in a `.tsra`, and back.
 //!
 //! Like [`crate::array`], the payload is one self-contained, **byte-deterministic** blob (verified:
-//! the Vortex 0.75 file writer produces identical bytes for identical input — the writer-determinism
+//! the Vortex file writer produces identical bytes for identical input — the writer-determinism
 //! release gate), digested over the encoded bytes. Column dtypes use the fd5 numpy-style codes
 //! (`i1/i2/i4/i8`, `u1/u2/u4/u8`, `f4/f8`) carried in [`tessera_core::block::table::Column`].
 //!
@@ -53,7 +53,6 @@ use tessera_core::block::{BlockKind, BlockName, BlockRef};
 use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
 use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
-use vortex_array::accessor::ArrayAccessor;
 use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::arrays::{BoolArray, ChunkedArray, PrimitiveArray, StructArray, VarBinViewArray};
 use vortex_array::expr::{root, select};
@@ -62,9 +61,13 @@ use vortex_array::scalar_fn::session::ScalarFnSession;
 use vortex_array::session::ArraySession;
 use vortex_array::ExecutionCtx;
 use vortex_array::{ArrayRef, IntoArray, VortexSessionExecute};
-use vortex_btrblocks::schemes::float::{ALPRDScheme, ALPScheme, PcoScheme};
-use vortex_btrblocks::{BtrBlocksCompressorBuilder, SchemeExt};
+use vortex_btrblocks::schemes::float::{ALPRDScheme, ALPScheme};
+use vortex_btrblocks::schemes::integer::{DeltaScheme, PcoScheme as IntPcoScheme};
+use vortex_btrblocks::schemes::string::OnPairScheme;
+use vortex_btrblocks::{BtrBlocksCompressorBuilder, CompressionSession, SchemeExt};
 use vortex_buffer::{Buffer, ByteBuffer, ByteBufferMut};
+use vortex_edition::declarations::core::CORE_2026_08_3;
+use vortex_edition::{EditionId, EditionSessionExt, EDITION_DECLARATIONS, EDITION_FAMILIES};
 use vortex_file::{
     register_default_encodings, OpenOptionsSessionExt, WriteOptionsSessionExt, WriteStrategyBuilder,
 };
@@ -72,6 +75,7 @@ use vortex_io::runtime::current::{CurrentThreadRuntime, CurrentThreadWorkerPool}
 use vortex_io::runtime::BlockingRuntime;
 use vortex_io::session::{RuntimeSession, RuntimeSessionExt};
 use vortex_layout::session::LayoutSession;
+use vortex_scan::strict_sorted_buffer::StrictSortedBuffer;
 use vortex_session::VortexSession;
 
 use crate::BlockPayload;
@@ -721,9 +725,43 @@ fn new_session(rt: &CurrentThreadRuntime) -> VortexSession {
         .with::<ArraySession>()
         .with::<LayoutSession>()
         .with::<ScalarFnSession>()
+        .with::<CompressionSession>()
         .with::<RuntimeSession>();
     register_default_encodings(&s);
+    enable_table_edition(&s);
     s.with_handle(rt.handle())
+}
+
+/// The Vortex **edition** every table block is written under — the set of serialized encoding IDs
+/// the writer may emit.
+///
+/// The pinned Vortex (0.93) gates the writer by the editions enabled on its session: an encoding whose wire
+/// ID is in no enabled edition is refused at write time. The `vortex` facade crate enables its
+/// current default (`DEFAULT_CORE_EDITION`) for you; tessera builds its session from the
+/// sub-crates, so it must choose one, and it names it here rather than inheriting a default that a
+/// Vortex bump could move.
+///
+/// `core2026.08.3` is the default edition of the pinned Vortex (0.93) and is **frozen** (immutable,
+/// `min_library_version` 0.85.0): Vortex guarantees every reader from 0.85 on can read what it
+/// admits. Moving this constant changes which encodings the compressor may choose, so it is a
+/// format event like any Vortex bump: it can move sealed table bytes and `content_hash`.
+/// Reading is not affected — registration covers every encoding, whatever edition wrote it.
+pub const TABLE_EDITION: EditionId = CORE_2026_08_3;
+
+/// Declare Vortex's first-party edition families and editions on `s`, then enable
+/// [`TABLE_EDITION`] for writing.
+fn enable_table_edition(s: &VortexSession) {
+    for family in EDITION_FAMILIES {
+        s.editions()
+            .declare_family(family)
+            .expect("vortex's first-party edition families are valid");
+    }
+    for declaration in EDITION_DECLARATIONS {
+        s.register_edition(declaration)
+            .expect("vortex's first-party edition declarations are valid");
+    }
+    s.enable_edition(TABLE_EDITION)
+        .expect("TABLE_EDITION is one of vortex's first-party editions");
 }
 
 thread_local! {
@@ -928,16 +966,33 @@ pub fn block_partition(idx: u64, total: u64) -> Option<Partition> {
 /// - **ALP / ALPRD excluded** — their exponent search runs float arithmetic whose result varies with
 ///   the build profile's float codegen (opt-level / FMA), so they'd encode the same column to
 ///   different bytes under different compilers — fatal for content-addressing.
-/// - **Pco registered** via [`with_new_scheme`](BtrBlocksCompressorBuilder::with_new_scheme) (it is
-///   `#[cfg(feature = "pco")]`-gated and *not* in `ALL_SCHEMES`, so it must be added explicitly).
-///   Pco is a deterministic numeric codec — the same family that carries the array path, already
-///   proven byte-reproducible x86==ARM by the cross-arch conformance gate — so continuous float
-///   columns compress instead of falling through to flat/raw (issue #380). Integer schemes, chosen by
-///   exact integer math, are untouched.
-fn deterministic_table_compressor() -> BtrBlocksCompressorBuilder {
-    BtrBlocksCompressorBuilder::default()
-        .exclude_schemes([ALPScheme.id(), ALPRDScheme.id()])
-        .with_new_scheme(&PcoScheme)
+/// - **Pco kept.** In Vortex 0.93 the session's `CompressionSession` registers Pco (we enable
+///   `vortex-btrblocks/pco`), but the *default* preset of
+///   [`from_session`](BtrBlocksCompressorBuilder::from_session) drops it again at build time.
+///   [`with_compact`](BtrBlocksCompressorBuilder::with_compact) is the preset that keeps it; its only
+///   other difference from the default is keeping Zstd, which is not compiled in (tessera enables no
+///   `zstd` feature on any vortex crate). Pco is a deterministic numeric codec — the same family that
+///   carries the array path, already proven byte-reproducible x86==ARM by the cross-arch conformance
+///   gate — so continuous float columns compress instead of falling through to flat/raw (issue
+///   #380). Integer schemes, chosen by exact integer math, are untouched.
+/// - **No scheme the 0.75 writer didn't use.** The session registers three schemes that the
+///   compressor of vortex 0.75 (whose output the format was validated on) never chose from:
+///   integer Pco, integer Delta and OnPair strings (behind `unstable_encodings` in 0.75). They are
+///   excluded so that a Vortex bump does not widen the codec set as a side effect. Admitting one is
+///   a format decision, with its own determinism evidence (#635).
+///
+/// The schemes come from the session, and the encodings they may emit are restricted to
+/// [`TABLE_EDITION`].
+fn deterministic_table_compressor(s: &VortexSession) -> BtrBlocksCompressorBuilder {
+    BtrBlocksCompressorBuilder::from_session(s)
+        .with_compact()
+        .exclude_schemes([
+            ALPScheme.id(),
+            ALPRDScheme.id(),
+            IntPcoScheme.id(),
+            DeltaScheme::default().id(),
+            OnPairScheme::default().id(),
+        ])
 }
 
 /// The table is written as a **chunked** Vortex file: the columns are sliced into fixed
@@ -971,8 +1026,8 @@ pub fn encode(spec: &TableSpec, data: &TableData) -> Result<Vec<u8>> {
         })
         .collect::<Result<_>>()?;
     let chunked = ChunkedArray::from_iter(chunks).into_array();
-    let strategy = WriteStrategyBuilder::default()
-        .with_btrblocks_builder(deterministic_table_compressor())
+    let strategy = WriteStrategyBuilder::from_session(&s)
+        .with_btrblocks_builder(deterministic_table_compressor(&s))
         .build();
     let mut buf = ByteBufferMut::empty();
     rt.block_on(
@@ -1078,8 +1133,8 @@ where
 /// the Vortex writer releases them (see the known limit below). Returns the number of bytes
 /// written.
 ///
-/// The sink is any [`std::io::Write`]: the pinned Vortex (0.75, `vortex-file`'s
-/// `VortexWriteOptions::blocking(..).write<W: std::io::Write + Unpin>`) writes each buffer through
+/// The sink is any `Send` [`std::io::Write`]: the pinned Vortex (0.93, `vortex-file`'s
+/// `VortexWriteOptions::blocking(..).write<W: std::io::Write + Unpin + Send>`) writes each buffer through
 /// `write_all` as soon as it is available and calls `flush` once after the footer, with no buffering
 /// of its own — so wrap a [`std::fs::File`] in a [`std::io::BufWriter`].
 ///
@@ -1097,7 +1152,7 @@ pub fn encode_streaming_to<I, W>(spec: &TableSpec, groups: I, mut sink: W) -> Re
 where
     I: IntoIterator<Item = TableData>,
     I::IntoIter: Send + 'static,
-    W: std::io::Write,
+    W: std::io::Write + Send,
 {
     let (rt, s) = runtime_session();
     // The struct dtype, taken from an empty struct of the declared columns. It must carry each
@@ -1141,8 +1196,8 @@ where
     });
     let array_iter = ArrayIteratorAdapter::new(dtype, chunk_iter);
 
-    let strategy = WriteStrategyBuilder::default()
-        .with_btrblocks_builder(deterministic_table_compressor())
+    let strategy = WriteStrategyBuilder::from_session(&s)
+        .with_btrblocks_builder(deterministic_table_compressor(&s))
         .build();
     let summary = s
         .write_options()
@@ -1167,14 +1222,19 @@ fn extend_field(col: &mut ColumnData, field: ArrayRef, ctx: &mut ExecutionCtx) -
         }
         ColumnData::Utf8(v) => {
             let s: VarBinViewArray = field.execute(ctx).map_err(ze)?;
-            s.with_iterator(|it| {
-                for opt in it {
-                    v.push(
-                        opt.map(|b| String::from_utf8_lossy(b).into_owned())
-                            .unwrap_or_default(),
-                    );
+            let valid = s
+                .validity()
+                .map_err(ze)?
+                .execute_mask(s.len(), ctx)
+                .map_err(ze)?;
+            let views = s.resolved_views();
+            v.extend((0..views.len()).map(|i| {
+                if valid.value(i) {
+                    String::from_utf8_lossy(views.bytes(i)).into_owned()
+                } else {
+                    String::new()
                 }
-            });
+            }));
         }
         // Execute ONCE and take both halves from the same array: the values, and the validity
         // mask derived from Vortex's own nullability. Executing twice would decode the chunk twice
@@ -1475,18 +1535,23 @@ async fn scan_chunks_at(
     rows: Option<&[u64]>,
 ) -> Result<Vec<StructArray>> {
     let mut ctx = s.create_execution_ctx();
-    let scan = s
+    let file = s
         .open_options()
         .open_buffer(ByteBuffer::copy_from(blob))
-        .map_err(ze)?
-        .scan()
         .map_err(ze)?;
+    let scan = file.scan().map_err(ze)?;
     let scan = match projection {
-        Some(names) => scan.with_projection(select(names.to_vec(), root())),
+        Some(names) => scan.with_projection(
+            select(names.to_vec(), root())
+                .bind(file.dtype())
+                .map_err(ze)?,
+        ),
         None => scan,
     };
     let scan = match rows {
-        Some(idx) => scan.with_row_indices(Buffer::copy_from(idx)),
+        Some(idx) => {
+            scan.with_row_indices(StrictSortedBuffer::try_new(Buffer::copy_from(idx)).map_err(ze)?)
+        }
         None => scan,
     };
     let stream = scan.into_array_stream().map_err(ze)?;
@@ -1816,35 +1881,99 @@ mod tests {
             s.write_options()
                 // Deliberately NOT `deterministic_table_compressor()`: the point is that the stock
                 // strategy diverges too.
-                .with_strategy(WriteStrategyBuilder::default().build())
+                .with_strategy(WriteStrategyBuilder::from_session(&s).build())
                 .write(&mut buf, arr.to_array_stream()),
         )
         .expect("vortex write");
         buf.freeze().to_vec()
     }
 
-    /// **#472 — a persisted float `Sum` must not carry the platform's default NaN.**
+    /// Read `bytes` back as written: the stored (still encoded) chunks, not canonicalized ones, so
+    /// every node of the encoding tree and the statistics persisted on it are visible.
+    fn read_stored_chunks(bytes: &[u8]) -> Vec<ArrayRef> {
+        let rt = CurrentThreadRuntime::new();
+        let s = new_session(&rt);
+        let file = s
+            .open_options()
+            .open_buffer(ByteBuffer::copy_from(bytes))
+            .expect("open written vortex file");
+        let stream = file
+            .scan()
+            .expect("scan")
+            .into_array_stream()
+            .expect("array stream");
+        rt.block_on(stream.collect::<Vec<_>>())
+            .into_iter()
+            .map(|chunk| chunk.expect("read chunk"))
+            .collect()
+    }
+
+    /// Every node named `name` anywhere in the encoding trees of `chunks`.
+    fn named_nodes(chunks: &[ArrayRef], name: &str) -> Vec<ArrayRef> {
+        fn walk(array: &ArrayRef, name: &str, found: &mut Vec<ArrayRef>) {
+            for (child_name, child) in array.named_children() {
+                if child_name == name {
+                    found.push(child.clone());
+                }
+                walk(&child, name, found);
+            }
+        }
+        let mut found = Vec::new();
+        for chunk in chunks {
+            walk(chunk, name, &mut found);
+        }
+        found
+    }
+
+    /// The field names of every zone map (`zones` child) in the layout tree of `bytes`.
+    fn zone_map_fields(bytes: &[u8]) -> Vec<String> {
+        fn walk(layout: &vortex_layout::LayoutRef, fields: &mut Vec<String>) {
+            let children = layout.children().expect("layout children");
+            for (child_name, child) in layout.child_names().zip(children) {
+                if &*child_name == "zones" {
+                    let st = child
+                        .dtype()
+                        .as_struct_fields_opt()
+                        .expect("zone map is a struct");
+                    fields.extend(st.names().iter().map(|n| n.to_string()));
+                }
+                walk(&child, fields);
+            }
+        }
+        let rt = CurrentThreadRuntime::new();
+        let s = new_session(&rt);
+        let file = s
+            .open_options()
+            .open_buffer(ByteBuffer::copy_from(bytes))
+            .expect("open written vortex file");
+        let mut fields = Vec::new();
+        walk(file.footer().layout(), &mut fields);
+        fields
+    }
+
+    /// **#472 — a persisted float statistic must not carry the platform's default NaN.**
     ///
-    /// A column holding both `+inf` and `-inf` makes vortex's `Sum` statistic evaluate `inf + -inf`,
-    /// an IEEE 754 *invalid* operation. IEEE leaves the resulting bit pattern unspecified and the
-    /// targets disagree — x86_64 produces `0xfff8_0000_0000_0000` (sign bit set), aarch64
-    /// `0x7ff8_0000_0000_0000` (clear). `Stat::Sum` is persisted, so those bits reached the sealed
-    /// bytes and the same logical table sealed to a different `content_hash` per host.
+    /// A column holding both `+inf` and `-inf` makes a float `Sum` evaluate `inf + -inf`, an IEEE
+    /// 754 *invalid* operation. IEEE leaves the resulting bit pattern unspecified and the targets
+    /// disagree — x86_64 produces `0xfff8_0000_0000_0000` (sign bit set), aarch64
+    /// `0x7ff8_0000_0000_0000` (clear). vortex 0.75 persisted `Stat::Sum` in each column's zone map,
+    /// so those bits reached the sealed bytes and the same logical table sealed to a different
+    /// `content_hash` per host.
     ///
-    /// Fixed upstream by canonicalising a NaN sum; carried here by the vortex fork pin (see the
-    /// `[patch.crates-io]` block in `tessera/Cargo.toml`, removal tracked in #480).
+    /// Fixed upstream in vortex 0.89.0 (vortex-data/vortex#10122 canonicalises a NaN sum when stats
+    /// are serialised), so the fork pin no longer carries it. In 0.93 the zone maps also no longer
+    /// store a sum at all (`vortex.max()` / `vortex.min()` / `vortex.nan_count()` /
+    /// `vortex.null_count()` only), so with the pinned vortex no NaN-valued `Sum` reaches our bytes
+    /// by either route.
     ///
-    /// **Asymmetry worth knowing before trusting this test.** aarch64 was always producing the
-    /// canonical value, so on aarch64 the sealed bytes are identical with and without the fix — no
-    /// test can detect a dropped pin there via this defect. The guard therefore bites on **x86_64**,
-    /// which is where it matters: that is the host whose bytes were wrong. #468's separate guard is
-    /// the profile-dependent half and fires on both arches.
-    ///
-    /// Asserts byte *patterns* rather than a digest, following the same reasoning as the #468 guard:
-    /// a vortex bump legitimately moves bytes, and this test should fire for a determinism regression
-    /// rather than for every dependency update.
+    /// The guard therefore asserts two things. No 64-bit NaN of either sign may be anywhere in the
+    /// sealed bytes. The data holds none and its min/max are ±inf, so a NaN can only be a computed
+    /// statistic; asserting both signs makes the check bite on aarch64 as well as on x86_64, where
+    /// the bytes used to be wrong. And no zone map may carry a sum, so a vortex bump that starts
+    /// persisting `Sum` in zone maps again fails here, with a message saying what to assert then.
+    /// A sum persisted in the per-array statistics would show up as a NaN in the first assertion.
     #[test]
-    fn float_sum_stat_is_canonical_nan_not_the_platform_default() {
+    fn float_stats_persist_no_nan_for_inf_and_neg_inf() {
         let data: TableData = vec![(
             "x".into(),
             ColumnData::F64(vec![f64::INFINITY, f64::NEG_INFINITY]),
@@ -1857,96 +1986,119 @@ mod tests {
         };
         let sealed = encode(&spec, &data).expect("encode");
 
-        let canonical = 0x7ff8_0000_0000_0000u64.to_le_bytes();
-        let x86_default = 0xfff8_0000_0000_0000u64.to_le_bytes();
-        let contains = |needle: &[u8]| sealed.windows(needle.len()).any(|w| w == needle);
+        for (nan, which) in [
+            (0xfff8_0000_0000_0000u64, "x86_64's default NaN"),
+            (0x7ff8_0000_0000_0000u64, "the canonical NaN"),
+        ] {
+            let needle = nan.to_le_bytes();
+            assert!(
+                !sealed.windows(needle.len()).any(|w| w == needle),
+                "#472: the sealed bytes carry {which} ({nan:#018x}), so vortex persists a NaN-valued \
+                 float statistic for [+inf, -inf] again. It must be the canonical NaN on every host; \
+                 re-establish which statistic it is and assert its bits."
+            );
+        }
 
+        let fields = zone_map_fields(&sealed);
         assert!(
-            contains(&canonical),
-            "#472: the sealed bytes must carry the CANONICAL quiet NaN as the float Sum statistic"
+            !fields.is_empty(),
+            "the float column has no zone map, so this guard checks nothing"
         );
         assert!(
-            !contains(&x86_default),
-            "#472 regression: the sealed bytes carry x86_64's default NaN (0xfff8_0000_0000_0000). \
-             The vortex fork pin has most likely been dropped before the fix shipped upstream — see \
-             #480. Note this assertion cannot fire on aarch64, which always produced the canonical \
-             value, so a green aarch64 leg is not evidence against it."
+            fields.iter().all(|f| !f.contains("sum")),
+            "the zone maps persist a sum again ({fields:?}). A NaN sum of `[+inf, -inf]` must then be \
+             asserted to be written as the canonical 0x7ff8_0000_0000_0000 (#472)"
         );
     }
 
-    /// **#468 — the container bytes must NOT depend on the build configuration.**
+    /// **#468 — the bytes must NOT depend on the build configuration.**
     ///
-    /// This was a known upstream limitation, asserted as still-broken. It is now FIXED, and this test
-    /// is the positive guard that it stays fixed.
+    /// vortex validates the indices of every `Patches` it constructs with a
+    /// `#[cfg(debug_assertions)]` `is_strict_sorted` check, and that check *caches* its answer
+    /// (`IsSorted`, `IsStrictSorted`, and in 0.93 also `NullCount`) on the indices array. Cached
+    /// statistics are serialised with the array, so the assert changed the bytes it was only
+    /// supposed to inspect: a debug-built writer and a release-built writer sealed the same column
+    /// to different bytes, and so to a different `content_hash`. `overflow-checks` and the
+    /// optimisation level were measured to have no effect; the axis is `debug_assertions` alone.
     ///
-    /// vortex 0.75.0 wrote different container bytes for an integer column whose encoding produces
-    /// *patches*, depending on whether `debug_assertions` was enabled. `[i64::MIN, 0, i64::MAX]`
-    /// zigzags to `[u64::MAX, 0, u64::MAX - 1]`, which bitpacks with exactly one exception; the bare
-    /// vortex write came out 2796 bytes with `debug_assertions` on and 2772 with it off, a constant
-    /// 24-byte delta.
+    /// Still present in vortex 0.93.0 (vortex-data/vortex#10119 is open; its PR #10121 was closed
+    /// unmerged) and carried by the vortex fork pin, see the `[patch.crates-io]` block in
+    /// `tessera/Cargo.toml` and #480 for its removal.
     ///
-    /// The cause was an **assertion with a side effect**: the `#[cfg(debug_assertions)]`
-    /// `is_sorted(&indices, …)` check in `vortex-array/src/patches.rs` calls `cache_is_sorted`, which
-    /// *sets* `Stat::IsSorted` on the indices array. Cached statistics are serialised into the file,
-    /// so the assert changed the bytes it was only supposed to inspect. `overflow-checks` and the
-    /// optimisation level were measured to have no effect; the axis was `debug_assertions` alone.
+    /// The guard asserts the cause, not a byte count: no patch-indices array read back from the
+    /// written bytes carries a sortedness statistic. Reading also constructs `Patches`, so a
+    /// statistic the assert caches while reading would fire it too; both come from the same assert.
+    /// A release build never caches one there, so this holds in release either way and fails in a
+    /// debug build exactly when the side-effecting assert is back. `NullCount` is not checked: a
+    /// release build persists it on the indices as well, so it doesn't separate the profiles.
+    /// `flake.nix` runs it under both `cargo test` and `cargo test --release`. Measured on 0.93.0
+    /// without the fork: `[i64::MIN, 0, i64::MAX]` wrote 2560 bytes in both profiles but with
+    /// different digests, so the byte-count guard this replaced could no longer see the defect.
     ///
-    /// Fixed upstream by computing sortedness without caching it, carried here via the vortex fork
-    /// pin (see the `[patch.crates-io]` block in `tessera/Cargo.toml` and #480 for its removal).
-    ///
-    /// **The expectations below are deliberately NOT `cfg!(debug_assertions)`-dependent.** That is the
-    /// whole assertion: a single expected length per shape, so a re-divergence fails in exactly one
-    /// profile. `flake.nix` runs this test under both `cargo test` and `cargo test --release` so the
-    /// pair is actually exercised. Both profiles agreed on the former release-build numbers (bare
-    /// 2772, sealed 2916), which is the expected direction — the debug build was the one carrying the
-    /// extra 24 bytes of cached statistic.
-    ///
-    /// Why it matters: `content_hash` is a blake3 root over these bytes, so while this was broken the
-    /// sealed identity of a product was not a function of only its data.
+    /// Each shape must actually produce patches, or the guard checks nothing; that is asserted
+    /// too. The shapes run through a bare vortex write with the stock strategy (so the finding
+    /// cannot be blamed on our compressor configuration) and through our seal path.
     #[test]
-    fn full_span_int_container_bytes_are_build_config_independent() {
-        let pathological = encode_bare_i64_via_vortex(&[i64::MIN, 0, i64::MAX]);
+    fn patch_indices_persist_no_sortedness_statistic() {
+        use vortex_array::expr::stats::Stat;
 
-        // The lengths, not the hashes: a vortex bump legitimately moves bytes, and this test should
-        // fire for a *determinism* regression rather than for every dependency update.
-        assert_eq!(
-            pathological.len(),
-            2772,
-            "#468 regression: the patch-producing shape must write 2772 bytes in EVERY build \
-             configuration (debug_assertions={}). 2796 here means the side-effecting assert is back \
-             — most likely the vortex fork pin was dropped before the fix shipped upstream (#480).",
-            cfg!(debug_assertions)
-        );
+        let mut outliers: Vec<i64> = (0..4096).map(|k| k % 7).collect();
+        outliers[100] = 1 << 40;
+        outliers[3000] = 1 << 41;
+        let shapes: [(&str, Vec<i64>); 2] = [
+            (
+                "full-span [i64::MIN, 0, i64::MAX]",
+                vec![i64::MIN, 0, i64::MAX],
+            ),
+            ("small values with two outliers", outliers),
+        ];
 
-        // Same shape through OUR seal path: the divergence used to reach `content_hash`, which is why
-        // this was a format problem and not a curiosity.
-        let sealed = encode(
-            &TableSpec {
-                columns: vec![col("x", "i8")],
-                rows: 3,
-                row_index: None,
-                partition: None,
-            },
-            &vec![("x".into(), ColumnData::I64(vec![i64::MIN, 0, i64::MAX]))],
-        )
-        .expect("encode");
-        assert_eq!(
-            sealed.len(),
-            2916,
-            "#468 regression reached the sealed table payload, not just a bare vortex write"
-        );
+        for (shape, values) in shapes {
+            let sealed = encode(
+                &TableSpec {
+                    columns: vec![col("x", "i8")],
+                    rows: values.len() as u64,
+                    row_index: None,
+                    partition: None,
+                },
+                &vec![("x".into(), ColumnData::I64(values.clone()))],
+            )
+            .expect("encode");
+            for (path, bytes) in [
+                ("bare vortex write", encode_bare_i64_via_vortex(&values)),
+                ("seal path", sealed),
+            ] {
+                let indices = named_nodes(&read_stored_chunks(&bytes), "patch_indices");
+                assert!(
+                    !indices.is_empty(),
+                    "{shape} via the {path} produced no patches, so this guard checks nothing"
+                );
+                for idx in &indices {
+                    let persisted: Vec<Stat> = idx
+                        .statistics()
+                        .to_owned()
+                        .iter()
+                        .map(|(stat, _)| *stat)
+                        .collect();
+                    assert!(
+                        !persisted
+                            .iter()
+                            .any(|stat| matches!(stat, Stat::IsSorted | Stat::IsStrictSorted)),
+                        "#468 regression ({shape} via the {path}, debug_assertions={}): the written \
+                         patch indices persist {persisted:?}. The side-effecting `is_strict_sorted` \
+                         assert in vortex's `Patches::new` is back, so a debug and a release build \
+                         write different bytes. Most likely the vortex fork pin was dropped before \
+                         the fix shipped upstream (#480).",
+                        cfg!(debug_assertions)
+                    );
+                }
+            }
+        }
 
-        // A control that does NOT produce patches, and was byte-identical in both profiles even while
-        // the bug was live. If this one ever diverges, the defect is broader than #468 described.
+        // Within a single profile the bytes must still be stable — #468 was cross-configuration,
+        // not nondeterminism. A failure here would be a much worse bug.
         assert_eq!(
-            encode_bare_i64_via_vortex(&[i64::MIN, i64::MAX]).len(),
-            2444
-        );
-
-        // Within a single profile the bytes must still be stable — #468 was cross-configuration, not
-        // nondeterminism. A failure here would be a much worse bug.
-        assert_eq!(
-            pathological,
+            encode_bare_i64_via_vortex(&[i64::MIN, 0, i64::MAX]),
             encode_bare_i64_via_vortex(&[i64::MIN, 0, i64::MAX]),
             "within one build the write must be reproducible"
         );

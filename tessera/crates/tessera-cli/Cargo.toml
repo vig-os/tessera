@@ -51,10 +51,11 @@ arrow-array.workspace = true
 arrow-schema.workspace = true
 
 # `sql` feature (#251): `tessera sql <FILE> "<QUERY>"` runs DataFusion in-process over a table
-# block's Arrow projection. DataFusion 54 pins `arrow ^58` — the SAME major the workspace already
-# resolves through Vortex 0.75 (arrow-array 58.4.1), so cargo unifies into one arrow tree. Two
-# arrow majors in one graph would fail to link (`RecordBatch` has the same name but incompatible
-# reprs). Both deps are `optional`, so a default `cargo build -p tessera-cli` does NOT pull them.
+# block's Arrow projection. DataFusion 54 pins `arrow ^58` — the SAME major as the workspace's
+# `=`-pinned ingest decoders (arrow-array 58.4.1), so the arrow values this crate builds and hands to
+# DataFusion are one type. Two arrow majors on one boundary would fail to compile (`RecordBatch` has
+# the same name but incompatible reprs). Vortex 0.93 brings its own arrow 59, which never crosses
+# that boundary. Both deps are `optional`, so a default `cargo build -p tessera-cli` does NOT pull them.
 datafusion = { version = "54", default-features = false, features = ["sql", "recursive_protection"], optional = true }
 # DataFusion needs an async runtime to drive `SessionContext::sql().collect()`; we spin a fresh
 # `current_thread` runtime per invocation (the spike phase — no long-lived executor). `rt` covers

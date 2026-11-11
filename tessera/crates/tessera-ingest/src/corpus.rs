@@ -503,8 +503,8 @@ fn write_scalars(dir: &Path) -> Result<PathBuf> {
         // (and x86-64 vs aarch64 release disagree), so the sealed bytes would be a function of the
         // compiler rather than of the data. ±(2^53 + 1) keeps what this column is *for* — a value no
         // `f64` can represent, so an i64 silently routed through a float is still caught — without
-        // the pathological span. The pathological shape itself is covered, and its divergence pinned,
-        // by `known_limitation_468_full_span_int_container_bytes`.
+        // the pathological span. The pathological shape itself is covered by tessera-io's
+        // `patch_indices_persist_no_sortedness_statistic`.
         Arc::new(Int64Array::from(vec![
             -9_007_199_254_740_993,
             0,

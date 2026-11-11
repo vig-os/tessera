@@ -462,7 +462,12 @@ rather than quietly left stale. It is now
 `full_span_int_container_bytes_are_build_config_independent`, asserting **one** length per shape with no
 `cfg!(debug_assertions)` branch at all — the absence of that branch *is* the assertion — and the flake
 check still runs it under both profiles, so a re-divergence fails in one line. A test written to be
-deleted by its own fix is worth more than one written to be ignored. Cross-*architecture* agreement remains a separate axis, still covered only as a side effect of CI
+deleted by its own fix is worth more than one written to be ignored. **Amended for vortex 0.93 (#635):**
+the defect changed shape. 0.93's `is_strict_sorted` caches `IsSorted`, `IsStrictSorted` and `NullCount`,
+and the debug write is the same *length* as the release write with different bytes (`[i64::MIN, 0,
+i64::MAX]`: 2560 bytes in both profiles, two digests). A length guard could no longer see it, so the
+guard is now `patch_indices_persist_no_sortedness_statistic`, which asserts the cause (no written
+patch-indices array persists a sortedness statistic) and that each shape really produces patches. Cross-*architecture* agreement remains a separate axis, still covered only as a side effect of CI
 running both arches — which is how **#472** was found: a float fixture that moved on aarch64 under the
 *same* profile. Its cause is worth recording next to #468's, because the pair is the argument for this
 whole section. `sum_float_all` **skips** NaN, so a column containing `+inf` and `-inf` summed to a NaN
