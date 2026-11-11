@@ -14,9 +14,11 @@
 2. **#802 is solved by an explicit dense sequence key.** With the key, N ∈ {1, 4, 16} C++ producer threads
    under shuffled schedules seal one hash (9 of 9 runs). The same hash comes out of the Rust test and the C++
    program. With the key taken in arrival order, 9 runs give 9 distinct hashes. A mutation that ignores the key
-   fails the test (§3). **The prototype's blocking window holds memory bounded only under a precondition:**
-   keys claimed in increasing order and pushed in increasing order per thread, which is G4TaskRunManager's
-   shape. An arbitrary assignment can deadlock it, and that is the evidence for ADR-0065 §7.2's spill (§3.1).
+   fails the test (§3). In the owner's shape, a thread that runs too far ahead **blocks** (back-pressure).
+   A duplicate, a missing key at the end, and a **stall** are **errors, never hangs**. A stall means every
+   declared producer thread is blocked, which only an out-of-order assignment can cause. It's detected exactly,
+   with no timer. `StreamWriter` only takes jobs in submission order. The prototype doesn't change that: it
+   sequences batches before rows are cut into leaves (§3.1–§3.2).
 3. **The import is zero-copy and the bridge copies once.** `from_ffi` wraps the producer's buffers (a test
    compares the pointers). Converting them to `ColumnData` is the one copy the bridge adds, because the
    writer's input type owns a `Vec` per column. Everything after that is the writer's own path, the same as
@@ -41,10 +43,10 @@
 | C ABI | `src/lib.rs` | session → table (declared by an `ArrowSchema`) → `push(seq, ArrowArray)` → end → seal |
 | Error model | `src/error.rs` | `catch_unwind` at every entry point, a `TsraStatus`, a thread-local last error |
 | Type map | `src/arrow.rs` | the clean lane only; nullability from the declaration |
-| Ordering | `src/order.rs` | a reorder buffer over the dense key, bounded by a batch-count window |
+| Ordering | `src/order.rs` | the dense-key sequencer: window back-pressure, exact stall detection |
 | Header | `include/tessera.h` | cbindgen output, with the Arrow C structs behind `ARROW_C_DATA_INTERFACE` |
 | C++ programs | `cpp/` | `capi_smoke`, `capi_threads`, `capi_bench`; CMake + pkg-config + nanoarrow |
-| Rust tests | `tests/` | 19 tests that call the `extern "C"` functions as C does |
+| Rust tests | `tests/` | 23 tests that call the `extern "C"` functions as C does |
 | Nix | `flake.nix` | `packages.capi`, `packages.nanoarrow`, the `capi-smoke` check |
 
 The API in one view (the full contract is in the header):
@@ -52,9 +54,10 @@ The API in one view (the full contract is in the header):
 ```c
 TsraSessionOptions so = { sizeof so, "listmode", "run-42", "…", "2026-11-11T00:00:00Z", /*workers*/ 4 };
 tsra_session_open("/scratch/stage", &so, &session);
-TsraTableOptions to = { sizeof to, rows /* or TSRA_ROWS_UNKNOWN */, /*reorder_window*/ 0 };
+TsraTableOptions to = { sizeof to, rows /* or TSRA_ROWS_UNKNOWN */, /*reorder_window*/ 0, /*producers*/ 8 };
 tsra_table_begin(session, "events", &schema, &to, &table);
 tsra_table_push(table, seq, &array, &schema);   /* any thread; takes ownership of `array` */
+tsra_table_mark_done(table, seq);               /* a key whose event block produced no rows */
 tsra_table_end(table);
 tsra_session_seal(session, "run-42.tsra", hash, sizeof hash);
 ```
@@ -69,7 +72,7 @@ are borrowed.
 
 | Check | Result |
 | --- | --- |
-| `cargo test -p tessera-capi --release` | 19 passed, exit 0 (3 unit, 13 roundtrip, 3 threads) |
+| `cargo test -p tessera-capi --release` | 23 passed, exit 0 (4 unit, 13 roundtrip, 6 threads); the threads tests also 20 × clean |
 | `columns_read_back_are_the_columns_pushed` | 150,000 rows in batches of 10,007, off the row-group grid; every value equal, float bits included |
 | `the_bytes_are_those_of_the_native_writer` | the C ABI hash equals native `push_table`'s on the same rows |
 | `an_unknown_row_count_seals_the_same_bytes` | `TSRA_ROWS_UNKNOWN` (staged through `TableMultiBlockSink`) gives the same hash as a declared count |
@@ -123,33 +126,75 @@ test result: FAILED. 0 passed; 2 failed            (cargo test exit 101)
 Even a single thread breaks it, once it processes its work out of order. So "one producer thread" is not a
 substitute for the key.
 
-### §3.1 The window, and the precondition it costs
+### §3.1 Back-pressure, and why every misuse is an error, not a hang
 
-A blocking window bounds the buffer to `window` batches, but it is safe only when **the key `next` is never
-held by a thread that is itself blocked**. That holds when keys are claimed in increasing order (a shared counter,
-or `G4TaskRunManager`'s consecutive event blocks) and each thread pushes its own keys in increasing order: the
-thread that claimed `next` has nothing smaller still unpushed, so it isn't waiting. It does **not** hold for an
-arbitrary assignment. Suppose every producer holds a key at least `window` past `next`, while `next` itself is
-still unclaimed or held by one of them. Then every push waits and nothing ever releases them. A single thread
-that pushes key `window` before key 0 deadlocks the same way. The window can't tell the two cases apart,
-because it can't know how many producers exist. (An independent review caught this. The first revision's tests
-used 48 batches under the default window of 64, so the window never engaged.)
+The owner's shape (2026-11-11) is a thread-safe push that back-pressures a thread running too far ahead,
+determinism from `seq` alone, and errors, never hangs, for a duplicate, missing-at-seal or too-far-ahead key.
+The prototype now implements exactly that:
 
-The claimed runs exercise it. Threads claim keys from a shared counter, so 200 batches of 997 rows pass through a
-window of 2. Each thread holds at most one claimed, unpushed key, so a push is at most `N - 1` past the next
-key due, and the window can only engage with more than 2 threads. The runs therefore use N ∈ {4, 16}. In Rust,
-`claimed_keys_pass_a_small_window_without_deadlock` fails if any run hangs for 120 s. It also counts the
-waits: 31 and 34 at N = 4, 716 and 849 at N = 16, so the test isn't vacuous. In C++:
+| Case | Behaviour | Test |
+| --- | --- | --- |
+| `seq` inside `next .. next + window` | admitted; at most `window` batches wait out of order | `run()` asserts peak ≤ window, every run |
+| `seq` past the window | **blocks** until the window moves (back-pressure) | `claimed_keys_are_back_pressured_by_the_window_without_deadlock` |
+| the writer full | the in-order release blocks on the writer's credit window | the bench (§5) |
+| duplicate | `TSRA_STATUS_ORDER` at once | `duplicates_gaps_and_short_tables_are_refused_and_poison`, mark-done test |
+| missing at the end | `tsra_table_end` → `ORDER`, then the seal → `STATE`, no file | `a_gap_from_many_threads_fails_the_end` (16 threads) |
+| **stall**: every declared producer blocked on the window | `ORDER` to all of them, to later pushes and to the end | `a_stall_is_an_error_not_a_hang` (Rust and C++) |
+| a key with no rows | an empty batch, or `tsra_table_mark_done(seq)` | `an_empty_batch_and_mark_done_keep_the_keys_dense` |
+
+**Why a stall needs detecting at all.** Blocking is safe when keys are claimed in increasing order and each
+thread pushes its own keys in increasing order, which is `G4TaskRunManager`'s shape: the thread that holds
+`next` has nothing smaller left to push, so it is never the one waiting, and its push moves the window. That's
+what the claimed runs show. 200 batches pass through a window of 2 from 1, 4 and 16 threads, every run seals
+the in-order hash `98d880ed…`, and pushes really block (17–36 waits at N = 4, 186–189 at N = 16). Any other
+assignment can deadlock, as the stall test's descending keys do: every producer holds a key past the window
+that none of them will ever release.
+
+The bridge turns that deadlock into an error **without a timer**. `TsraTableOptions::producers` declares the
+number of producer threads, which Geant4 knows. A stall is every one of them blocked on a key still past the
+window. A thread that is outside a push (building its next batch, or stuck in a slow event) isn't counted, so
+a slow event is never mistaken for a stall. A thread that has been woken but hasn't run yet isn't counted
+either: the first version counted it, and got a false stall at N = 16, which the claimed runs caught. The count
+is exact when `producers` is right. Over-declaring disables detection, which the first draft of the stall test
+showed by accident: it spawned its four producers one at a time, so only one was ever running. Under-declaring
+can report a stall that isn't one. With `producers = 0` there is no detection. **For the ADR:**
+make `producers` required, or replace blocking with §7.2's spill. Spill removes the precondition at the cost of
+disk, and back-pressure then comes from the RAM credit alone.
+
+The C++ run of the same cases:
 
 ```text
 claimed  reference (N=1)  blake3:98d880ed… (window 2, 200 batches)
 claimed  N=4  seed 1..2   98d880ed… == (×2)
 claimed  N=16 seed 1..2   98d880ed… == (×2)
+stall    descending keys, window 2, 4 producers: 4 of 4 got the stall; end failed; seal refused
 ```
 
-**For the ADR:** this is the evidence for §7.2's RAM credit with spill. Spilling early batches instead of
-blocking removes the precondition, at the cost of disk. If the bridge ships a blocking window instead, the
-precondition is ABI contract, and it must be stated where producers read it.
+The shuffled runs above use a window of the batch count, because a fully shuffled order can need the whole
+table buffered. Their peaks were 37–46 of 48.
+
+### §3.2 Does `StreamWriter` take jobs out of order? No, and it doesn't need to
+
+On the real code, `StreamWriter::submit` numbers each job itself, in submission order, through `&mut self`
+(`tessera-io/src/stream.rs:1092-1101`, `tx.send((self.seq, job))`). `commit_loop` already reorders encode
+*completions* back into that order (`stream.rs:1149-1183`, a `BTreeMap` keyed by that number). So the writer
+has the in-order commit machinery, but it takes a single submitter. A job is a whole leaf of `BLOCK_ROWS` rows
+too, while a producer's batch is a few thousand to 65,536 rows. Many batches make one leaf, and the leaf's
+bytes depend on their order. **So the ordering has to happen before rows are cut into leaves, where
+`StreamWriter`'s job numbering can't reach.** That's what the bridge's sequencer (`src/order.rs`) does. It turns
+N producer threads into the one ordered row stream that `push_table` reads on one thread. Parallel encode,
+in-order commit and the credit window all stay `StreamWriter`'s, unchanged, so no second scheduler exists. The
+minimal `tessera-io` extension is not out-of-order job submission. It is making the sequencer's buffered bytes
+**a charge on the writer's existing credit window**, so one budget covers both. That is ADR-0065 §7.2's "one
+credit", and #812.
+
+### §3.3 The owner's API shape against the prototype's
+
+The owner's sketch is `push(session, seq, ArrowArray*, ArrowSchema*)`, one session per product. The prototype
+spells that `tsra_table_push(table, seq, …)` on the one table a session has open. The two are the same shape
+for a one-table product. For a product with two tables (gPET-sim writes `pethits` and `events`), the owner's
+shape needs either two sessions, and so two products, or a table argument. The prototype's handle is that
+argument. The ADR should choose.
 
 ## §4 — Copies
 
@@ -312,14 +357,17 @@ decides, and the ADR records which.**
 - **`catch_unwind` is expected to add no work on the success path**, because Rust's table-based unwinding
   compiles it to a landing pad that runs only on a panic. That is an expectation, not a measurement: §5's
   numbers include it on every call but don't isolate it.
-- **A window counted in batches, with no spill, is safe only under §3.1's precondition, and it bounds batch
-  count, not bytes.** ADR-0065 §7.2's RAM credit with spill is the right production design. The claimed runs
-  model consecutive claiming, but not a lagging thread that holds the window for everyone under real
-  `G4TaskRunManager` block sizes. #812 carries that measurement.
+- **The window counts batches, not bytes**, and it is safe to block on only under §3.1's precondition (the
+  stall detection makes a violation an error). ADR-0065 §7.2's RAM credit, charged to `StreamWriter`'s window
+  (§3.2), is the production bound. The claimed runs model consecutive claiming. A slow event holding `next`
+  under real `G4TaskRunManager` block sizes, with every other thread blocked behind it, is unmeasured. #812
+  carries that measurement.
 
 ## §8 — Open questions (for the ADR)
 
-1. **Blocking window or spill** (§3.1): if a blocking window ships at all, its precondition is ABI contract.
+1. **Blocking window with required `producers`, or spill** (§3.1): blocking is the owner's back-pressure, and
+   the stall detection makes it error-not-hang, but only with an accurate thread count. Spill needs no count.
+   Also, **a table handle or session-per-table** (§3.3).
 2. **H4's home** (§7.2): in the bridge, in `tessera-io` for every producer, or nowhere.
 3. **#454 first, or a ~40-line clean-lane map in the bridge** (§7.1). The evidence says either is safe for the
    bytes. Only the dependency graph differs.
