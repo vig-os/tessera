@@ -15,9 +15,9 @@ test, an OLS fit of every run's peak `RssAnon` against `n` from `16 W` leaves on
 `c_leaf` plus its one-sided 95 % confidence margin, with a resolution check; `W = 1` runs `k₁ = 6` times per size
 from 16 leaves, so that its check resolves a growth of `c_leaf` beyond `c_leaf`; `τ` is retired (the second amendment
 at the end). **Amended by #797 (2026-11-11):** criterion 2's slope is fitted within runs, by fixed effects over the
-tenths of each run's input from `16 W` leaves on, with a standard error cluster-robust by run; the pass rule and the
-resolution checks are unchanged, and the across-run slope is reported as context confounded by the shared disk (the
-third amendment at the end).
+tenths of each run's input from `16 W` leaves on, with a standard error cluster-robust by run and `t` at `G − 1`
+degrees of freedom; the checks' form, their targets and "inconclusive fails" are unchanged, the pre-#759 writer still
+fails, and the across-run slope is reported as context confounded by the shared disk (the third amendment at the end).
 
 ## Context
 
@@ -986,7 +986,7 @@ margin  =  t₀.₉₅,N−2 · SE(b̂)          t₀.₉₅,₇ = 1.895 (W = 4,
 exactly `c_leaf` at both `W` fails the proof's slope checks with probability `1 − 0.95²` = 9.75 % if the two are
 independent, and at most 10 % whatever their dependence (the union bound). The level stays 5 % per `W`, without a
 Bonferroni correction to 2.5 %, and the false-fail rate of the proof's two slope checks is stated as that
-family-wise ≤ 10 %; with `W = 1`'s resolution check it is about 15 % overall (B.5). The
+family-wise ≤ 10 %; with `W = 1`'s re-check it is about 15 % overall (B.5). The
 correction would raise `t` from 1.895 to 2.365 at `W = 4` (+25 % on its margin and detection floor) and from 1.717
 to 2.074 at `W = 1`, where B.5's `k₁` would have to grow to keep its floor at `c_leaf`. That trades the regressions
 criterion 2 exists to catch for fewer false alarms, and the two errors don't cost the same: a false fail costs an
@@ -1329,19 +1329,30 @@ within-run fit's floors), and A.4.
 
 ### C.4 — Still sharp: the pre-#759 writer fails
 
-The pre-#759 writer's `RssAnon` grows within its runs, so the within-run fit sees it. r1 (`tessera-715-sweep-1`, B.4's
-fail-before) predates the per-tenth record, and its 256- and 573-leaf sample files (3.7 and 14.5 MB) are over what
-`ksb out` fetches, so its tenths can't be recovered. The same writer's other sweep can:
-`tessera-715-r3-failbefore-2` (B.4; `W = 1`, 64 and 573 leaves), whose 573-leaf run rose steadily from 59.6 to 68.5 MiB
-over its ten tenths. Its within-run fit (`G = 2`, `N = 18`):
+The pre-#759 writer's `RssAnon` grows within its runs, so the within-run fit sees it, on both of its recorded sweeps.
 
-| `b̂` (B/leaf) | `SE(b̂)` | `t₀.₉₅,1` | Bound `c_leaf + t · SE` | Slope | Floor `2 t SE` vs `δ_z`, `c_leaf` |
-| ---: | ---: | ---: | ---: | --- | --- |
-| 17,219 | 199 | 6.314 | 9,237 | **fails** | 2,513: resolved |
+**r1** (`tessera-715-sweep-1`, tessera `a3df683`, B.4's fail-before, `k = 1` at both `W`) predates the per-tenth record,
+and its 10 ms sample files at 256 and 573 leaves (3.7 and 14.5 MB) are over what `ksb out` fetches. Its job logs fetch,
+and each holds the reproducer's own ~1 s sampler lines (`sample rows=… RssAnon=…`; 2,463 of them at `W = 1` and 573
+leaves). The tenths are rebuilt from those lines by the same cut as `peaks` (`run.py log-tenths`). A 1 s sampler can
+miss a short spike that the 10 ms one would catch, so each rebuilt tenth's peak is a lower bound of the 10 ms one; that
+is good enough for a fail-before, which isn't a graded run. The fit's `e_leaf` is r3's 2,966 B, since r1's manifests
+weren't kept; the `W = 1` slope would still fail with entries 2,367 B larger, and the `W = 4` slope with entries 22,569
+B larger. PR #767's `tessera/bench/ksb/677-rss-proof/fixtures/r1-logs` holds the extract of each fitted log (one line
+per tenth, under the source log's sha256), from which the self-tests reproduce the fit.
 
-It fails at 1.9 times its bound. With `G = 2` (`df = 1`) a clustered standard error is fragile, so this is a
-fail-before, evidence that the fit sees that writer's growth, not a statement of the test's power, which B.5's floors
-recorded with each run are. `run.py`'s self-tests pin these numbers.
+**`tessera-715-r3-failbefore-2`** (B.4; `W = 1`, 64 and 573 leaves) recorded its tenths at 10 ms; its 573-leaf run
+rose steadily from 59.6 to 68.5 MiB over its ten tenths.
+
+| Sweep | `W` | `G` | `N` | `b̂` (B/leaf) | `SE(b̂)` | `t₀.₉₅,G−1` | Bound `c_leaf + t · SE` | Slope | Floor `2 t SE` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| r1 (logs) | 1 | 3 | 28 | 19,761 | 2,414 | 2.920 | 15,028 | **fails** | 14,096 > `c_leaf`: inconclusive, **fails** |
+| r1 (logs) | 4 | 2 | 17 | 73,901 | 3,292 | 6.314 | 28,763 | **fails** | 41,566 ≤ `δ_z`: resolved |
+| r3-failbefore-2 | 1 | 2 | 18 | 17,219 | 199 | 6.314 | 9,237 | **fails** | 2,513 ≤ `c_leaf`: resolved |
+
+Every fit fails its slope check, by 1.3 to 2.6 times its bound. With `G` of 2 or 3 a clustered standard error is
+fragile, so each is a fail-before test, evidence that the fit sees that writer's growth, not a statement of the
+test's power, which B.5's floors recorded with each run are. `run.py`'s self-tests pin these numbers.
 
 ## References
 
