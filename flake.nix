@@ -294,6 +294,41 @@
           meta.mainProgram = "tessera";
         });
 
+        # ── The C ABI (spike #800): libtessera_capi.{a,so} + tessera.h + tessera-capi.pc. ──
+        # A C/C++ producer links this and nothing of HDF5 or DICOM: tessera-capi depends on
+        # tessera-io only. The two examples are the spike's helpers: `readback` compares a product
+        # with the C++ side's column dumps, `native_bench` is the Rust baseline of `capi_bench`.
+        tessera-capi = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "tessera-capi";
+          cargoExtraArgs = "-p tessera-capi --lib --examples";
+          doCheck = false;
+          postInstall = ''
+            mkdir -p $out/lib/pkgconfig $out/include $out/bin
+            cp -f target/release/libtessera_capi.a target/release/libtessera_capi.so $out/lib/
+            cp ${./tessera/crates/tessera-capi/include/tessera.h} $out/include/tessera.h
+            substitute ${./tessera/crates/tessera-capi/tessera-capi.pc.in} \
+              $out/lib/pkgconfig/tessera-capi.pc \
+              --subst-var-by prefix $out --subst-var-by version 0.1.0-alpha.4
+            cp -f target/release/examples/readback target/release/examples/native_bench $out/bin/
+          '';
+        });
+
+        # nanoarrow 0.8.0, the C library the tessera-capi C++ programs build Arrow batches with: the
+        # core library only (a plain CMake build). This flake's nixpkgs pin has no nanoarrow, and a
+        # later nixpkgs' package pulls arrow-cpp, gtest and benchmark for its own tests.
+        nanoarrow = pkgs.stdenv.mkDerivation {
+          pname = "nanoarrow";
+          version = "0.8.0";
+          src = pkgs.fetchFromGitHub {
+            owner = "apache";
+            repo = "arrow-nanoarrow";
+            rev = "apache-arrow-nanoarrow-0.8.0";
+            hash = "sha256-1iLbT1eeyZaoB75uYTgg4qns+C7b4DErqMwJ9nQPRls=";
+          };
+          nativeBuildInputs = [ pkgs.cmake ];
+        };
+
         # The reproducible tessera-py Python wheel (#210). tessera-py is a pure pyo3/abi3 extension
         # with NO native deps (tessera-core + tessera-io only — no libhdf5), so the wheel is just the
         # crane-built `_native.so` + the pure-Python `tessera/` wrapper, assembled and `wheel pack`ed.
@@ -431,6 +466,8 @@
           tessera = tessera-cli;
           tessera-cloud = tessera-cli-cloud;
           wheel = tessera-wheel;
+          capi = tessera-capi;
+          inherit nanoarrow;
         };
 
         apps = rec {
@@ -1353,6 +1390,59 @@
             bash ${./scripts/ci-failure-issue.sh} --self-test
             touch $out
           '';
+
+          # The C ABI from a C++ producer's side (spike #800): the committed header is what cbindgen
+          # generates from the source; the C++ programs build with CMake against the INSTALLED
+          # header, pkg-config file and nanoarrow package, once linking the shared library and once
+          # the static archive; the smoke test's product passes `tessera verify` and reads back, in
+          # Rust, value for value as C++ pushed it (known and unknown row count); and the threaded
+          # program shows the content hash identical for N in {1, 4, 16} producer threads under
+          # shuffled schedules, and moving when the sequence key is taken in arrival order (#802).
+          capi-smoke =
+            let
+              capiSrc = pkgs.lib.cleanSourceWith {
+                src = ./tessera/crates/tessera-capi;
+                filter = path: _type:
+                  let rel = pkgs.lib.removePrefix (toString ./tessera/crates/tessera-capi) path; in
+                  builtins.any (p: pkgs.lib.hasPrefix p rel) [ "/src" "/cpp" "/include" "/cbindgen.toml" ];
+                name = "tessera-capi-src";
+              };
+            in
+            pkgs.runCommand "capi-smoke"
+              {
+                nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config pkgs.rust-cbindgen pkgs.diffutils ];
+                buildInputs = [ nanoarrow tessera-capi ];
+              } ''
+              cbindgen --quiet --config ${capiSrc}/cbindgen.toml --output generated.h ${capiSrc}/src/lib.rs
+              if ! diff -u ${capiSrc}/include/tessera.h generated.h; then
+                echo "include/tessera.h is stale: regenerate it (see cbindgen.toml)" >&2
+                exit 1
+              fi
+              for link in shared static; do
+                cmake -S ${capiSrc}/cpp -B build-$link -DTESSERA_LINK=$link -DCMAKE_BUILD_TYPE=Release
+                cmake --build build-$link -j "$NIX_BUILD_CORES"
+              done
+              # The static build must not need the shared library at run time.
+              if ldd build-static/capi_smoke | grep -q libtessera_capi; then
+                echo "capi_smoke (static) still links libtessera_capi.so" >&2
+                exit 1
+              fi
+              for link in shared static; do
+                for rows in known unknown; do
+                  run=$link-$rows
+                  mkdir -p dumps-$run
+                  flag=""; [ $rows = unknown ] && flag=--unknown-rows
+                  build-$link/capi_smoke stage-$run $run.tsra dumps-$run 200000 9973 $flag | tee $run.log
+                  ${tessera-cli}/bin/tessera verify $run.tsra
+                  ${tessera-capi}/bin/readback $run.tsra dumps-$run
+                done
+              done
+              # Every variant sealed the same product.
+              test "$(grep -h '^content_hash' *.log | sort -u | wc -l)" -eq 1
+              mkdir threads
+              build-shared/capi_threads threads
+              touch $out
+            '';
 
           # The dev shell itself must build (toolbelt + toolchain resolve).
           dev-shell = self.devShells.${system}.default;
