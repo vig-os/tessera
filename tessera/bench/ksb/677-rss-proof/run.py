@@ -22,6 +22,8 @@ fitted. B.3's pass rule is unchanged: the slope at most `c_leaf` plus the one-si
 (B.5's re-check). An unresolved fit is inconclusive, and fails. The W = 4 floor is printed as a stated limit. B.2's
 across-run OLS slope of each run's peak against its leaves is printed as CONTEXT, never graded: across runs the peak
 tracks the shared disk's load (C.1). `test_run.py` pins the arithmetic to ADR-0064's B.4, B.5 and C.4.
+`run.py log-tenths LOG...` runs criterion 2 on tenths rebuilt from run logs' own sample lines, for r1, which recorded
+none (C.4); `--extract DIR` writes the small, provenance-stamped extracts `test_run.py` uses.
 
 `job` can run as shards (`--workers`, `--rows`, `--reps`: the repeat indices of each point to run), so the repeats run
 in parallel ksb jobs rather than serially in one of ~24 h. A shard's exit code checks only that its own runs
@@ -75,6 +77,9 @@ PLATEAU_FROM = {
 ALPHA = 0.05  # B.3: the slope test's one-sided level, per W
 DELTA_Z = 121_635  # B.3: δ_z, the zone-statistics regression (0.029 B/row) in B/leaf, which criterion 2 must resolve
 SPEEDUP = 1.5  # criterion 6
+# B.3: r3's largest pairs entry, for runs graded from logs, which hold no manifest. r1's sealed manifests weren't kept;
+# its W = 1 slope fails even if its entries were 2,367 B larger (c_leaf + 4,734 B), its W = 4 slope by 22,569 B.
+E_LEAF_LOGS = 2966
 
 
 def s_rss(w):
@@ -399,6 +404,51 @@ def cgroup_snapshot():
     }
 
 
+def tenth_peaks(samples, total):
+    """Peak RssAnon over each tenth of the input, from (generated rows, RssAnon) samples: tenth t holds the samples
+    while the row count is below (t + 1) · total / 10, and the last runs on through the seal. 0 marks a tenth with no
+    sample, which criterion 2 treats as missing data."""
+    tenths = [0] * 10
+    for rows, rss in samples:
+        t = min(9, rows * 10 // max(total, 1))
+        tenths[t] = max(tenths[t], rss)
+    return tenths
+
+
+SAMPLE_LINE = re.compile(r"^sample rows=(\d+) RssAnon=(\d+)\b", re.M)
+
+
+def log_tenths(text, total):
+    """`tenth_peaks` from a run log's own `sample rows=… RssAnon=…` lines, the reproducer's ~1 s sampler. r1
+    (`tessera-715-sweep-1`, the pre-#759 writer) recorded no tenths and its 10 ms CSVs are over `ksb out`'s 1 MiB, but
+    its logs fetch, so ADR-0064 C.4's r1 fit is rebuilt from them (`run.py log-tenths`)."""
+    samples = [(int(r), int(y)) for r, y in SAMPLE_LINE.findall(text)]
+    if not samples:
+        raise SystemExit("FAIL log: no `sample rows= RssAnon=` lines")
+    return tenth_peaks(samples, total)
+
+
+def log_extract(text, total, source):
+    """The lines of a run log that `log_tenths` needs, for a small committed fixture: per tenth, the first sample line
+    at that tenth's peak, under a provenance header (`source`, the log's sha256 and line count). `log_tenths` gives the
+    same tenths from the extract as from the whole log."""
+    tenths = log_tenths(text, total)
+    kept, seen = [], set()
+    for line in text.splitlines():
+        m = SAMPLE_LINE.match(line)
+        if m:
+            t = min(9, int(m[1]) * 10 // max(total, 1))
+            if int(m[2]) == tenths[t] and t not in seen:
+                seen.add(t)
+                kept.append(line)
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    head = [
+        f"# extract of {source}: sha256 {digest}, {len(text.splitlines())} lines",
+        "# per tenth of input, the first `sample` line at that tenth's peak RssAnon (run.py log_extract)",
+    ]
+    return "\n".join(head + kept) + "\n"
+
+
 def peaks(samples, stdout, total):
     """Peaks of one run's 10 ms samples, and the input row-group being generated at the RssAnon peak.
     The reproducer's own `peak_RssAnon` adds its reading after the seal, which a short run's samples miss."""
@@ -410,17 +460,13 @@ def peaks(samples, stdout, total):
             f"FAIL sampler: {samples} has no samples or the run printed no peak_RssAnon"
         )
     top = max(rows, key=lambda r: r["rss_anon"])
-    # Peak RssAnon over each tenth of the input, so where the peak grows is on the record (§8).
-    tenths = [
-        [r["rss_anon"] for r in rows if min(9, r["rows"] * 10 // max(total, 1)) == i]
-        for i in range(10)
-    ]
     after_seal = int(final.group(1)) > top["rss_anon"]
     return {
         "samples": len(rows),
         "rss_anon": max(top["rss_anon"], int(final.group(1))),
         "peak_row_group": "after seal" if after_seal else top["rows"] // ROWS_PER_GROUP,
-        "tenths": [max(t, default=0) for t in tenths],
+        # Where the peak grows is on the record (§8), and criterion 2 fits it (C.2).
+        "tenths": tenth_peaks([(r["rows"], r["rss_anon"]) for r in rows], total),
         **{
             k: max(r[k] for r in rows)
             for k in ("memory_current", "anon", "file", "shmem")
@@ -766,6 +812,28 @@ def check_shard(out, plan):
     )
 
 
+LOG_NAME = re.compile(r"^w(\d+)-r(\d+)(?:-k(\d+))?\.log$")
+
+
+def evaluate_logs(paths):
+    """Criterion 2's within-run fit per W over run logs (`log_tenths`), the runs at n ≥ 16 W, e_leaf at r3's 2,966 B
+    since a log holds no manifest. Exits 1 if any W's checks fail. Only criterion 2: a log holds nothing else."""
+    runs = {}
+    for path in paths:
+        m = LOG_NAME.match(Path(path).name)
+        if m is None:
+            raise SystemExit(f"FAIL log: {path} isn't named w<W>-r<rows>[-k<rep>].log")
+        w, rows, rep = int(m[1]), int(m[2]), int(m[3] or 0)
+        if blocks(rows) >= PLATEAU_FROM[w]:
+            tenths = log_tenths(Path(path).read_text(), rows)
+            runs.setdefault(w, []).append({"rows": rows, "rep": rep, "tenths": tenths})
+    v = Verdicts([], want_tmpfs=False)
+    for w in sorted(runs):
+        for check in within_run_test(w, runs[w], E_LEAF_LOGS)[1]:
+            v.verdict(*check)
+    return v.close("criterion 2 on the logs")
+
+
 def evaluate(*dirs):
     job, runs = load(dirs)
     check, want_tmpfs = {
@@ -816,7 +884,33 @@ def main():
         help="check the criteria over the records.json of --out, or of each DIR",
     )
     ev.add_argument("dirs", nargs="*", help="records dirs of one job's shards, merged")
+    lt = sub.add_parser(
+        "log-tenths",
+        help="criterion 2's within-run fit (C.2) on run logs' own sample lines, for runs that recorded no tenths "
+        "(r1, ADR-0064 C.4); each LOG is named w<W>-r<rows>.log as `job` writes it",
+    )
+    lt.add_argument("logs", nargs="+")
+    lt.add_argument(
+        "--extract",
+        metavar="DIR",
+        help="also write each log's extract (log_extract) to DIR, under its own name",
+    )
+    lt.add_argument(
+        "--source",
+        default="tessera-715-sweep-1",
+        help="the job the logs came from, for the extracts' provenance",
+    )
     a = p.parse_args()
+    if a.cmd == "log-tenths":
+        if a.extract:
+            for path in a.logs:
+                rows = int(LOG_NAME.match(Path(path).name)[2])
+                Path(a.extract, Path(path).name).write_text(
+                    log_extract(
+                        Path(path).read_text(), rows, f"{a.source} {Path(path).name}"
+                    )
+                )
+        sys.exit(evaluate_logs(a.logs))
     if a.out is None and not getattr(a, "dirs", None):
         p.error("--out or $KSB_JOB_OUT is required")
     if a.cmd == "job":

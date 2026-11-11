@@ -5,10 +5,12 @@ The r3 numbers are `tessera-715-r3-sweep-2`'s records.json (PR #767 at 0b66160, 
 peak RssAnon. The r1 numbers are `tessera-715-sweep-1`'s job log (tessera a3df683, the pre-#759 writer), at the log's
 0.1 MiB precision: its records.json is over `ksb out`'s 1 MiB. ADR-0064 B.4 tabulates both; these tests pin run.py to
 that table, so the evaluator and the ADR can't drift apart. Since #797 that across-run fit is context, and criterion 2
-is the within-run fit (C.2); its fail-before is `tessera-715-r3-failbefore-2`'s per-tenth records of the pre-#759
-writer (C.4), exact bytes.
+is the within-run fit (C.2); its fail-before (C.4) is the pre-#759 writer on r1's tenths, rebuilt from its logs'
+sample lines (the extracts in fixtures/r1-logs, with each source log's sha256), and on
+`tessera-715-r3-failbefore-2`'s per-tenth records, exact bytes.
 """
 
+import hashlib
 import json
 import random
 import sys
@@ -348,6 +350,86 @@ def test_pre_759_writer_fails_the_within_run_slope():
         2_513,
     )
     assert not ok["slope"] and ok["resolution"] and ok["re-check"]
+
+
+R1_LOGS = Path(__file__).parent / "fixtures" / "r1-logs"
+
+
+def r1_runs(w):
+    """r1's fitted runs at W, from the committed extracts of its logs (C.4)."""
+    out = []
+    for path in sorted(R1_LOGS.glob(f"w{w}-r*.log")):
+        rows = int(run.LOG_NAME.match(path.name)[2])
+        out.append(
+            {"rows": rows, "rep": 0, "tenths": run.log_tenths(path.read_text(), rows)}
+        )
+    return out
+
+
+@pytest.mark.parametrize(
+    "w,g,big_n,b,se,bound,floor,fails",
+    [
+        (1, 3, 28, 19_761, 2_414, 15_028, 14_096, {"slope", "re-check"}),
+        (4, 2, 17, 73_901, 3_292, 28_763, 41_566, {"slope"}),
+    ],
+)
+def test_r1_pre_759_writer_fails_the_within_run_slope_from_its_logs(
+    w, g, big_n, b, se, bound, floor, fails
+):
+    """C.4's fail-before on r1 itself (tessera-715-sweep-1, a3df683): the tenths rebuilt from its logs' own ~1 s
+    sample lines (its 10 ms CSVs are over `ksb out`'s 1 MiB) fail the slope at both W; at W = 1 the floor is also
+    above c_leaf (inconclusive), which fails too."""
+    fit, checks = run.within_run_test(w, r1_runs(w), run.E_LEAF_LOGS)
+    got = (
+        fit["G"],
+        fit["N"],
+        round(fit["b"]),
+        round(fit["se"]),
+        round(fit["bound"]),
+        round(fit["floor"]),
+    )
+    assert got == (g, big_n, b, se, bound, floor)
+    assert {name.split(": ")[-1] for name, ok, _ in checks if not ok} == fails
+
+
+def test_r1_extracts_carry_their_provenance():
+    """Each extract names its source log and that log's sha256, so it can be checked against `ksb out`."""
+    names = sorted(p.name for p in R1_LOGS.glob("*.log"))
+    assert names == [
+        "w1-r1073741824.log",
+        "w1-r2400000000.log",
+        "w1-r268435456.log",
+        "w4-r1073741824.log",
+        "w4-r2400000000.log",
+    ]
+    for path in R1_LOGS.glob("*.log"):
+        head = path.read_text().splitlines()[0]
+        assert head.startswith(f"# extract of tessera-715-sweep-1 {path.name}: sha256 ")
+        assert len(head.split("sha256 ")[1].split(",")[0]) == 64
+
+
+def test_log_extract_keeps_the_logs_tenths():
+    """`log_extract` keeps one line per tenth, and `log_tenths` reads the same tenths from it as from the log; lines
+    that aren't samples, and samples after the input ends, are handled as `peaks` handles the CSV's."""
+    rng = random.Random(7)
+    total = 64 * run.BLOCK_ROWS
+    lines = ["reorder=false rows=… peak_RssAnon=1"]
+    for i in range(400):
+        lines.append(
+            f"sample rows={min(total, i * total // 380)} RssAnon={60 * MIB + rng.randrange(MIB)} VmHWM=1"
+        )
+    text = "\n".join(lines) + "\n"
+    extract = run.log_extract(text, total, "job w1-r268435456.log")
+    assert run.log_tenths(extract, total) == run.log_tenths(text, total)
+    assert sum(1 for line in extract.splitlines() if line.startswith("sample")) == 10
+    assert hashlib.sha256(text.encode()).hexdigest() in extract.splitlines()[0]
+    with pytest.raises(SystemExit, match="no `sample"):
+        run.log_tenths("no samples here\n", total)
+
+
+def test_log_tenths_cli_fails_on_r1(capsys):
+    assert run.evaluate_logs(sorted(str(p) for p in R1_LOGS.glob("*.log"))) == 1
+    assert "VERDICT: FAIL 2 plateau W=1: slope" in capsys.readouterr().out
 
 
 def records(tmp_path, name, runs, job="proof"):

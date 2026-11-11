@@ -28,8 +28,9 @@
 #   ksb run --name tessera-715-r4-par-N --cpu 4 --exclusive-cpus --mem 6Gi --time 30 "path:$PWD#parallel" -- \
 #     --session-root /dev/shm/s715-session --output-root /dev/shm/s715-out
 #
-# Fail-before: test_run.py runs criterion 2 on tessera-715-r3-failbefore-2's per-tenth records of the pre-#759 writer
-# (ADR-0064 C.4; r1's, a3df683, predate the per-tenth record), which fail it. To rerun
+# Fail-before (ADR-0064 C.4): test_run.py runs criterion 2 on the pre-#759 writer, which fails it: on r1's (a3df683)
+# tenths rebuilt from its logs' sample lines (`run.py log-tenths`, extracts with provenance in fixtures/r1-logs; its
+# 10 ms CSVs are over `ksb out`'s 1 MiB) and on tessera-715-r3-failbefore-2's per-tenth records. To rerun
 # that writer, copy this dir, `nix flake lock --override-input tessera github:vig-os/tessera/<pre-fix rev>`, and pass
 # `--workers 1`.
 {

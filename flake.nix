@@ -1302,18 +1302,26 @@
           # The ADR-0064 §8.1 RSS proof's evaluator (#715): criterion 2's slope test (ADR-0064 B.2-B.5)
           # checked against the recorded ksb numbers ADR-0064 B.4 tabulates, the pre-#759 writer's
           # failure included. The proof itself is a ksb job (tessera/bench/ksb/677-rss-proof, its own
-          # flake); this runs only its offline arithmetic. Its source is ONLY run.py + test_run.py.
+          # flake); this runs only its offline arithmetic. Its source is ONLY run.py + test_run.py and
+          # the r1 log extracts under fixtures/r1-logs (ADR-0064 C.4's fail-before).
           rss-proof-evaluator =
             let
+              dir = ./tessera/bench/ksb/677-rss-proof;
               src = builtins.path {
                 name = "rss-proof-evaluator-src";
-                path = ./tessera/bench/ksb/677-rss-proof;
-                filter = path: _type: builtins.elem (baseNameOf path) [ "run.py" "test_run.py" ];
+                path = dir;
+                filter =
+                  path: _type:
+                  let
+                    rel = pkgs.lib.removePrefix (toString dir + "/") (toString path);
+                  in
+                  builtins.elem rel [ "run.py" "test_run.py" "fixtures" "fixtures/r1-logs" ]
+                  || pkgs.lib.hasPrefix "fixtures/r1-logs/" rel;
               };
             in
             pkgs.runCommand "rss-proof-evaluator"
               { nativeBuildInputs = [ (pkgs.python312.withPackages (ps: [ ps.pytest ])) ]; } ''
-              cp ${src}/run.py ${src}/test_run.py .
+              cp -r ${src}/run.py ${src}/test_run.py ${src}/fixtures .
               python3 -m pytest -q -p no:cacheprovider test_run.py
               touch $out
             '';
