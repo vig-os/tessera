@@ -13,6 +13,11 @@ This gives **constant-memory streaming above RAM**: a 294 M-row DUPLET acquisiti
 peak RSS** (vs 3.63 GiB single-block), throughput scaling ~3× with the encode pool — and `content_hash`
 is worker-count-independent (the same bytes regardless of parallelism).
 
+A Rust producer streaming one table larger than RAM writes it with `StreamWriter::push_table`, which stages
+each block's input on disk and seals the table as the leaves `<table>/0000`, `<table>/0001`, … of one logical
+table, with a heap bound that doesn't grow with the row count. Upgrading from `table_job_streaming` is covered in
+[Migrating a streamed table to `push_table`](./migrating-to-push-table.md).
+
 `tessera bench` measures this on *your* host, so you can size RAM/threads for your acquisition rate:
 
 {{#include ../../../tessera/crates/tessera-cli/tests/cmd/bench.trycmd}}
