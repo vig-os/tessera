@@ -22,9 +22,10 @@ fn cli_walkthroughs() {
 
 /// The committed input of `logical_tables.trycmd`, a product with a partitioned table (ADR-0064):
 /// `pairs/0000..0002` (3 + 3 + 2 rows, each leaf marked), a one-block table `markers`, and a node
-/// `notes/` that holds a blob and no table. No writer produces partitioned tables yet (#712), so it
-/// is built here through the public builder API and checked byte for byte against the committed
-/// file, which keeps it reproducible; `TRYCMD=overwrite` rewrites it with the snapshots.
+/// `notes/` that holds a blob and no table. The writers partition only a table above `BLOCK_ROWS`
+/// rows (since #712), far too large for a committed fixture, so it is built here through the public
+/// builder API and checked byte for byte against the committed file, which keeps it reproducible;
+/// `TRYCMD=overwrite` rewrites it with the snapshots.
 fn logical_tables_fixture() {
     use tessera_core::block::partition::{leaf_name, Partition};
     use tessera_core::block::table::{Column, TableSpec};
