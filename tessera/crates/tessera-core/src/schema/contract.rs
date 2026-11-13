@@ -3,20 +3,31 @@
 //! A [`ProductSchema`](super::ProductSchema)'s `fields` and `blocks` say which metadata a product
 //! carries and how many blocks play each role. They say nothing about a block's *inside*. The
 //! contract does: per table role an ordered column list ([`TableContract`]), per array role a dtype
-//! and a rank ([`ArrayContract`]).
+//! and a rank ([`ArrayContract`]). [`ProductSchema::check_table`](super::ProductSchema::check_table)
+//! and [`ProductSchema::check_array`](super::ProductSchema::check_array) check one block's spec
+//! against its role and return a typed [`ContractViolation`] naming the role and the column.
 //!
 //! The shape is the #801 drafts' (`tests/fixtures/801-consumer-schemas/*.tables.json`); `arrays` is
-//! ADR-0065's addition. Here the contract is parsed, carried and sealed with the schema; no block is
-//! checked against it yet. Checking a block's columns against its role is the rest of #809, the
-//! sequence-key checks over the rows are #833, `keys` and `references` are #780, and the contract's
-//! own consistency (a column listed twice, a key naming an undeclared column) is #844.
+//! ADR-0065's addition. What is **carried but not checked** here:
+//! - every column attribute but `name`, `dtype` and `nullable`: `unit`, `scale`, `description`,
+//!   `short_name`, `codec`, `referencing` and `sensitivity` (so a block may declare a column
+//!   `public` that the contract marks `identifying`), and an array's `unit`;
+//! - `sequence_key` and `order`: the sequence-key checks run over the rows (#833);
+//! - `keys` and `references`: sealed with the schema, checked nowhere yet (#780).
+//!
+//! Nor is the contract checked against itself (#844): a key naming an undeclared column or
+//! `"producer"` order with a non-empty `sequence_key` parses and is carried. A contract that lists a
+//! column twice also parses, but no block can satisfy it: `check_table` refuses every block of that
+//! role with a [`ContractViolation::ColumnOrder`] for the repeated column.
 //!
 //! The contract is additive: an older binary deserialising a schema that carries it drops it
 //! without a word (ADR-0065 §8, G6). Making that a typed refusal is #830.
 
 use serde::{Deserialize, Serialize};
 
-use crate::block::table::Column;
+use crate::block::array::ArraySpec;
+use crate::block::table::{Column, TableSpec};
+use crate::block::BlockKind;
 
 /// The contract for one **table** role: its columns in storage order, and the row-order and key
 /// declarations that travel with them.
@@ -120,15 +131,199 @@ impl From<ReferenceScope> for String {
 /// The contract for one **array** role (ADR-0065's addition; no #801 draft has one).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArrayContract {
-    /// The array dtype, in [`ArraySpec::dtype`](crate::block::array::ArraySpec::dtype)'s vocabulary
-    /// (e.g. `"int16"`).
+    /// The array dtype, in [`ArraySpec::dtype`]'s vocabulary (e.g. `"int16"`), compared verbatim.
     pub dtype: String,
     /// The number of dimensions.
     pub rank: u32,
     /// The named axes in storage order. Empty means the contract leaves them to the producer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub axes: Vec<String>,
-    /// UCUM unit of the sample values.
+    /// UCUM unit of the sample values. Carried, not checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+}
+
+/// One way a block's spec breaks its role's contract. Every variant names the role, and the column
+/// where there is one. Raised inside [`crate::Error::Contract`].
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ContractViolation {
+    /// The schema declares no contract for this role and block kind ([`BlockKind::Table`] from
+    /// `check_table`, [`BlockKind::Array`] from `check_array`).
+    #[error("no {} role '{role}' is declared", kind_word(*kind))]
+    UnknownRole { kind: BlockKind, role: String },
+    /// The block has a column the role does not declare.
+    #[error("table '{role}' has column '{column}', which the contract does not declare")]
+    UnknownColumn { role: String, column: String },
+    /// The block has the same column twice.
+    #[error("table '{role}' has column '{column}' more than once")]
+    DuplicateColumn { role: String, column: String },
+    /// A column the contract declares non-optional is absent.
+    #[error("table '{role}' is missing the non-optional column '{column}'")]
+    MissingColumn { role: String, column: String },
+    /// A declared column is present but not in the contract's order. `block_position` is the
+    /// column's 0-based index in the block's spec, not in the contract.
+    #[error(
+        "table '{role}' has column '{column}' at block position {block_position}, out of the contract's order"
+    )]
+    ColumnOrder {
+        role: String,
+        column: String,
+        block_position: usize,
+    },
+    /// A column's dtype differs from the declared one.
+    #[error(
+        "table '{role}' column '{column}' has dtype '{found}', the contract declares '{declared}'"
+    )]
+    ColumnDtype {
+        role: String,
+        column: String,
+        declared: String,
+        found: String,
+    },
+    /// A column's nullability differs from the declared one, in either direction.
+    #[error(
+        "table '{role}' column '{column}' has nullable = {found}, the contract declares {declared}"
+    )]
+    ColumnNullability {
+        role: String,
+        column: String,
+        declared: bool,
+        found: bool,
+    },
+    /// An array's dtype differs from the declared one.
+    #[error("array '{role}' has dtype '{found}', the contract declares '{declared}'")]
+    ArrayDtype {
+        role: String,
+        declared: String,
+        found: String,
+    },
+    /// An array's rank differs from the declared one.
+    #[error("array '{role}' has rank {found}, the contract declares {declared}")]
+    ArrayRank {
+        role: String,
+        declared: u32,
+        found: u32,
+    },
+    /// An array's axis names differ from the declared ones.
+    #[error("array '{role}' has axes {found:?}, the contract declares {declared:?}")]
+    ArrayAxes {
+        role: String,
+        declared: Vec<String>,
+        found: Vec<String>,
+    },
+}
+
+impl TableContract {
+    /// Check a table block's columns against this contract (see
+    /// [`ProductSchema::check_table`](super::ProductSchema::check_table)).
+    pub(crate) fn check(&self, role: &str, spec: &TableSpec) -> Result<(), ContractViolation> {
+        let v = |make: fn(String, String) -> ContractViolation, column: &str| {
+            Err(make(role.to_owned(), column.to_owned()))
+        };
+        let declared = |name: &str| self.columns.iter().any(|c| c.name == name);
+        for (i, c) in spec.columns.iter().enumerate() {
+            if !declared(&c.name) {
+                return v(
+                    |role, column| ContractViolation::UnknownColumn { role, column },
+                    &c.name,
+                );
+            }
+            if spec.columns[..i].iter().any(|p| p.name == c.name) {
+                return v(
+                    |role, column| ContractViolation::DuplicateColumn { role, column },
+                    &c.name,
+                );
+            }
+        }
+        // Every spec column is declared and unique. Walk the contract in order: each declared
+        // column is either the next spec column, or optional and absent here.
+        let mut next = 0;
+        for d in &self.columns {
+            match spec.columns.get(next) {
+                Some(s) if s.name == d.name => {
+                    check_column(role, d, s)?;
+                    next += 1;
+                }
+                _ => match spec.columns.iter().position(|s| s.name == d.name) {
+                    Some(block_position) => {
+                        return Err(ContractViolation::ColumnOrder {
+                            role: role.to_owned(),
+                            column: d.name.clone(),
+                            block_position,
+                        })
+                    }
+                    None if d.optional => {}
+                    None => {
+                        return v(
+                            |role, column| ContractViolation::MissingColumn { role, column },
+                            &d.name,
+                        )
+                    }
+                },
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The word a refusal message uses for a block kind.
+fn kind_word(kind: BlockKind) -> &'static str {
+    match kind {
+        BlockKind::Array => "array",
+        BlockKind::Table => "table",
+        BlockKind::ChunkIndex => "chunk-index",
+        BlockKind::Blob => "blob",
+    }
+}
+
+fn check_column(role: &str, declared: &Column, found: &Column) -> Result<(), ContractViolation> {
+    if declared.dtype != found.dtype {
+        return Err(ContractViolation::ColumnDtype {
+            role: role.to_owned(),
+            column: found.name.clone(),
+            declared: declared.dtype.clone(),
+            found: found.dtype.clone(),
+        });
+    }
+    if declared.nullable != found.nullable {
+        return Err(ContractViolation::ColumnNullability {
+            role: role.to_owned(),
+            column: found.name.clone(),
+            declared: declared.nullable,
+            found: found.nullable,
+        });
+    }
+    Ok(())
+}
+
+impl ArrayContract {
+    /// Check an array block's spec against this contract (see
+    /// [`ProductSchema::check_array`](super::ProductSchema::check_array)).
+    pub(crate) fn check(&self, role: &str, spec: &ArraySpec) -> Result<(), ContractViolation> {
+        if self.dtype != spec.dtype {
+            return Err(ContractViolation::ArrayDtype {
+                role: role.to_owned(),
+                declared: self.dtype.clone(),
+                found: spec.dtype.clone(),
+            });
+        }
+        // A rank beyond u32 cannot equal a declared u32 rank; saturate rather than wrap.
+        let found = u32::try_from(spec.shape.len()).unwrap_or(u32::MAX);
+        if self.rank != found {
+            return Err(ContractViolation::ArrayRank {
+                role: role.to_owned(),
+                declared: self.rank,
+                found,
+            });
+        }
+        if !self.axes.is_empty() && self.axes != spec.axes {
+            return Err(ContractViolation::ArrayAxes {
+                role: role.to_owned(),
+                declared: self.axes.clone(),
+                found: spec.axes.clone(),
+            });
+        }
+        Ok(())
+    }
 }

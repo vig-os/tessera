@@ -1,8 +1,13 @@
 //! The column contract keyed by role (ADR-0065 §8, #809).
 
 use serde_json::{json, Value};
-use tessera_core::schema::{ReferenceScope, ReferenceTarget};
-use tessera_core::{ProductSchema, SchemaRegistry};
+use tessera_core::block::array::ArraySpec;
+use tessera_core::block::table::{Column, TableSpec};
+use tessera_core::block::BlockKind;
+use tessera_core::schema::{
+    ArrayContract, ContractViolation, ReferenceScope, ReferenceTarget, TableContract,
+};
+use tessera_core::{Error, ProductSchema, SchemaRegistry};
 
 /// The committed blake3 of every builtin schema's serialised bytes, captured before the column
 /// contract existed.
@@ -100,6 +105,237 @@ fn kept(input: &Value, output: &Value, at: &str) {
             }
         }
         _ => assert_eq!(input, output, "{at} changed"),
+    }
+}
+
+/// A product schema with one table role and one array role, for the refusal tests.
+fn schema() -> ProductSchema {
+    let mut s = ProductSchema::from_value(&json!({
+        "product": "test:contract", "version": "1", "description": "",
+    }))
+    .unwrap();
+    s.tables.insert(
+        "events".into(),
+        TableContract {
+            columns: vec![
+                Column::new("event_id", "u8"),
+                Column::new("n_hits", "u4").optional(),
+                Column::new("energy", "f4").nullable(),
+            ],
+            sequence_key: vec!["event_id".into()],
+            ..Default::default()
+        },
+    );
+    s.arrays.insert(
+        "lyso_map".into(),
+        ArrayContract {
+            dtype: "float32".into(),
+            rank: 2,
+            axes: vec!["y".into(), "x".into()],
+            unit: None,
+        },
+    );
+    s
+}
+
+fn table(columns: &[Column]) -> TableSpec {
+    TableSpec {
+        columns: columns.to_vec(),
+        rows: 0,
+        row_index: None,
+        partition: None,
+    }
+}
+
+fn violation(r: tessera_core::Result<()>) -> ContractViolation {
+    match r {
+        Err(Error::Contract { product, violation }) => {
+            assert_eq!(product, "test:contract");
+            violation
+        }
+        other => panic!("expected a contract violation, got {other:?}"),
+    }
+}
+
+fn id() -> Column {
+    Column::new("event_id", "u8")
+}
+fn hits() -> Column {
+    Column::new("n_hits", "u4")
+}
+fn energy() -> Column {
+    Column::new("energy", "f4").nullable()
+}
+
+#[test]
+fn a_conforming_table_passes_with_or_without_its_optional_column() {
+    let s = schema();
+    s.check_table("events", &table(&[id(), hits(), energy()]))
+        .unwrap();
+    s.check_table("events", &table(&[id(), energy()])).unwrap();
+}
+
+#[test]
+fn an_undeclared_role_is_refused() {
+    let s = schema();
+    let v = violation(s.check_table("pethits", &table(&[id()])));
+    assert!(
+        matches!(v, ContractViolation::UnknownRole { kind: BlockKind::Table, ref role } if role == "pethits")
+    );
+    // A role declared for the other kind is not a table role.
+    let v = violation(s.check_table("lyso_map", &table(&[id()])));
+    assert!(matches!(
+        v,
+        ContractViolation::UnknownRole {
+            kind: BlockKind::Table,
+            ..
+        }
+    ));
+    let v = violation(s.check_array("events", &array("float32", &[4, 4], &["y", "x"])));
+    assert!(matches!(
+        v,
+        ContractViolation::UnknownRole {
+            kind: BlockKind::Array,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn an_undeclared_or_repeated_column_is_refused() {
+    let s = schema();
+    let v = violation(s.check_table(
+        "events",
+        &table(&[id(), Column::new("extra", "u1"), energy()]),
+    ));
+    assert!(matches!(v, ContractViolation::UnknownColumn { ref column, .. } if column == "extra"));
+    let v = violation(s.check_table("events", &table(&[id(), id(), energy()])));
+    assert!(
+        matches!(v, ContractViolation::DuplicateColumn { ref column, .. } if column == "event_id")
+    );
+}
+
+#[test]
+fn columns_out_of_the_declared_order_are_refused() {
+    let s = schema();
+    let v = violation(s.check_table("events", &table(&[energy(), id()])));
+    assert_eq!(
+        v,
+        ContractViolation::ColumnOrder {
+            role: "events".into(),
+            column: "event_id".into(),
+            block_position: 1
+        }
+    );
+    // An optional column is still bound to its place when present.
+    let v = violation(s.check_table("events", &table(&[id(), energy(), hits()])));
+    assert!(matches!(v, ContractViolation::ColumnOrder { ref column, .. } if column == "n_hits"));
+}
+
+#[test]
+fn a_missing_non_optional_column_is_refused() {
+    let s = schema();
+    let v = violation(s.check_table("events", &table(&[id(), hits()])));
+    assert_eq!(
+        v,
+        ContractViolation::MissingColumn {
+            role: "events".into(),
+            column: "energy".into()
+        }
+    );
+}
+
+#[test]
+fn a_column_dtype_mismatch_is_refused() {
+    let s = schema();
+    let v = violation(s.check_table("events", &table(&[Column::new("event_id", "i8"), energy()])));
+    assert_eq!(
+        v,
+        ContractViolation::ColumnDtype {
+            role: "events".into(),
+            column: "event_id".into(),
+            declared: "u8".into(),
+            found: "i8".into(),
+        }
+    );
+}
+
+#[test]
+fn a_nullability_mismatch_is_refused_in_both_directions() {
+    let s = schema();
+    let v = violation(s.check_table("events", &table(&[id(), Column::new("energy", "f4")])));
+    assert!(matches!(
+        v,
+        ContractViolation::ColumnNullability {
+            declared: true,
+            found: false,
+            ..
+        }
+    ));
+    let v = violation(s.check_table("events", &table(&[id().nullable(), energy()])));
+    assert!(matches!(
+        v,
+        ContractViolation::ColumnNullability {
+            declared: false,
+            found: true,
+            ..
+        }
+    ));
+}
+
+fn array(dtype: &str, shape: &[u64], axes: &[&str]) -> ArraySpec {
+    ArraySpec {
+        axes: axes.iter().map(|a| a.to_string()).collect(),
+        ..ArraySpec::new(shape.to_vec(), dtype)
+    }
+}
+
+#[test]
+fn array_dtype_rank_and_axes_mismatches_are_refused() {
+    let s = schema();
+    s.check_array("lyso_map", &array("float32", &[64, 64], &["y", "x"]))
+        .unwrap();
+    let v = violation(s.check_array("lyso_map", &array("float64", &[64, 64], &["y", "x"])));
+    assert!(matches!(v, ContractViolation::ArrayDtype { ref found, .. } if found == "float64"));
+    let v = violation(s.check_array(
+        "lyso_map",
+        &array("float32", &[4, 64, 64], &["z", "y", "x"]),
+    ));
+    assert!(matches!(
+        v,
+        ContractViolation::ArrayRank {
+            declared: 2,
+            found: 3,
+            ..
+        }
+    ));
+    let v = violation(s.check_array("lyso_map", &array("float32", &[64, 64], &["x", "y"])));
+    assert!(matches!(v, ContractViolation::ArrayAxes { .. }));
+}
+
+/// An array contract without axes leaves them to the producer: any axis names pass.
+#[test]
+fn an_array_contract_without_axes_accepts_any_axes() {
+    let mut s = schema();
+    s.arrays.get_mut("lyso_map").unwrap().axes.clear();
+    s.check_array("lyso_map", &array("float32", &[64, 64], &["x", "y"]))
+        .unwrap();
+    s.check_array("lyso_map", &array("float32", &[64, 64], &[]))
+        .unwrap();
+}
+
+/// A contract listing a column twice parses (its own consistency is #844) but no block satisfies
+/// it: the repeated column is refused as out of order, never passed.
+#[test]
+fn a_contract_with_a_repeated_column_refuses_every_block() {
+    let mut s = schema();
+    s.tables.get_mut("events").unwrap().columns = vec![id(), id()];
+    for block in [table(&[id()]), table(&[id(), id()])] {
+        let v = violation(s.check_table("events", &block));
+        assert!(matches!(
+            v,
+            ContractViolation::ColumnOrder { .. } | ContractViolation::DuplicateColumn { .. }
+        ));
     }
 }
 

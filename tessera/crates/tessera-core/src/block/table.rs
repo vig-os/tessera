@@ -72,10 +72,11 @@ pub struct Column {
     /// Whether a block may **omit** this column altogether (ADR-0065 §8, #809). Distinct from
     /// [`nullable`](Self::nullable), which is per-row NULL inside a present column.
     ///
-    /// Meaningful only in a schema's [`TableContract`](crate::schema::TableContract), which lists
-    /// every column a block of its role may carry. A block's own [`TableSpec`] lists the columns it
-    /// has, so the flag means nothing there and nothing reads it. Skipped when `false`, so every
-    /// existing manifest keeps its bytes.
+    /// Meaningful only in a schema's [`TableContract`](crate::schema::TableContract): there it lets
+    /// [`ProductSchema::check_table`](crate::schema::ProductSchema::check_table) pass a block
+    /// without the column. A block's own [`TableSpec`] lists the columns it has, so the flag means
+    /// nothing there and nothing reads it. Skipped when `false`, so every existing manifest keeps
+    /// its bytes.
     #[serde(default, skip_serializing_if = "is_false")]
     pub optional: bool,
 }
@@ -130,6 +131,11 @@ impl Column {
     /// Builder: the column may contain NULLs (#330) — its payload carries a validity mask.
     pub fn nullable(mut self) -> Self {
         self.nullable = true;
+        self
+    }
+    /// Builder: a contract column a block may omit (ADR-0065 §8) — see [`optional`](Column#structfield.optional).
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
         self
     }
     /// Builder: anchor the column's values in a reference frame — the epoch slot (ADR-0056 §6.1).
