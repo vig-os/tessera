@@ -19,6 +19,11 @@ use serde::{Deserialize, Serialize};
 use crate::block::BlockKind;
 use crate::manifest::Manifest;
 
+pub mod contract;
+pub use contract::{
+    ArrayContract, ColumnReference, ReferenceScope, ReferenceTarget, TableContract, TableOrder,
+};
+
 /// Schema-driven **sensitivity tier** for a metadata field (ADR-0040 §1 — the spike that
 /// teaches the engine to *reason* about PHI without yet redacting/encrypting). Four tiers on an
 /// increasing-identifiability ladder, plus one off-ladder tier for *unclassified*:
@@ -240,6 +245,16 @@ pub struct ProductSchema {
     /// the policy lives in the schema, not the engine (a domain opts in per product kind).
     #[serde(default, skip_serializing_if = "is_false")]
     pub requires_generation: bool,
+    /// The **column contract** per table role (ADR-0065 §8, #809): ordered columns, sequence key,
+    /// row order, keys and references; see [`contract`]. Skipped when empty, so every schema sealed
+    /// before it existed keeps its bytes. A binary older than this field drops
+    /// it on parse without an error (#830 makes that a refusal).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tables: BTreeMap<String, TableContract>,
+    /// The contract per array role (dtype, rank, axes, unit; ADR-0065 §8). Skipped when empty, as
+    /// [`Self::tables`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arrays: BTreeMap<String, ArrayContract>,
 }
 
 impl ProductSchema {
@@ -413,6 +428,8 @@ fn schema(product: &str, version: &str, description: &str) -> ProductSchema {
         fields: Vec::new(),
         blocks: Vec::new(),
         requires_generation: false,
+        tables: BTreeMap::new(),
+        arrays: BTreeMap::new(),
     }
 }
 
