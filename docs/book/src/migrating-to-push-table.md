@@ -91,6 +91,11 @@ let (manifest, stats) = writer.finish_with_stats(&output)?;
   the leaves don't depend on your chunking. `spec.rows` must equal the rows the input yields: an input that
   runs past it, or ends short, is `Error::StreamedTable` (`TooManyRows`, `TooFewRows`). A larger group is
   `OversizedGroup` (`tessera-core/src/block/partition.rs:186-223`).
+- **Row count unknown until the end?** Not in alpha.5: from the release after it, use
+  `StreamWriter::open_table(name, spec)` with `spec.rows = 0` instead ([#806]). Call
+  `OpenTable::push(&mut writer, group)` per row-group and `OpenTable::close(&mut writer)` at the end. It writes
+  the same bytes as `push_table` for the same rows and keeps the same bounds. A full leaf is handed to a worker
+  once a row follows it, so only the last leaf waits for the close.
 - **Markers.** `spec.partition` must be `None`, since the writer sets each leaf's marker (section 4).
 - **Nullable columns** are written as declared. The nullable `ms` that hit a dtype assertion at `9424f90`
   ([#677]) is in `push_table`'s test schema (`stream.rs:1688-1700`), and the RSS proof (section 5) ran the
@@ -298,6 +303,7 @@ copies of the shared vortex crates. `cargo tree -i vortex-array` then shows
 [#677]: https://github.com/vig-os/tessera/issues/677
 [#715]: https://github.com/vig-os/tessera/issues/715
 [#758]: https://github.com/vig-os/tessera/issues/758
+[#806]: https://github.com/vig-os/tessera/issues/806
 [PR #41]: https://github.com/MorePET/visionx-rs/pull/41
 [ADR-0064]: https://github.com/vig-os/tessera/blob/dev/docs/adr/0064-logical-tables-over-numbered-leaves.md
 [ADR-0026-measured]: https://github.com/vig-os/tessera/blob/dev/docs/adr/0026-streaming-table-ingest.md
