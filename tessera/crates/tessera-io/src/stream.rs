@@ -26,7 +26,8 @@
 //!   count towards `P` — zero for [`StreamWriter::push_table`]'s leaves and
 //!   [`table_job_from_fragments`]: a table block's encoded bytes are on disk, not in the window
 //!   (#677). A table above [`BLOCK_ROWS`] rows is written by `push_table` as the leaves of one
-//!   logical table (ADR-0064), each leaf one staged job. Disk is not bounded by `B`: the staged files of finished-but-uncommitted
+//!   logical table (ADR-0064), each leaf one staged job; [`StreamWriter::open_table`] writes the
+//!   same leaves for a table whose row count is known only at its close (#806). Disk is not bounded by `B`: the staged files of finished-but-uncommitted
 //!   jobs hold `≤ J × S` bytes (`S` = the largest staged block, [`StreamStats::max_staged_job_bytes`]),
 //!   plus the files of the encodes in progress.
 //! - **Parallel encode:** `workers` threads encode concurrently (the expensive pcodec/Vortex step).
@@ -704,6 +705,284 @@ impl Drop for StagedInput {
     }
 }
 
+/// A partitioned table being streamed into a [`StreamWriter`] whose row count is known only when
+/// it is closed (ADR-0065 §7.3, #806). Open it with [`StreamWriter::open_table`], feed it with
+/// [`Self::push`], end it with [`Self::close`].
+///
+/// The handle doesn't borrow the writer: each call takes the `&mut StreamWriter` it was opened on,
+/// so a producer can keep the table between calls without holding the writer, and push other jobs
+/// to the writer in between. Those jobs commit in push order, interleaved with the table's leaves.
+///
+/// **One leaf of lookahead.** Rows are re-chunked to the [`ROWS_PER_GROUP`] grid and staged leaf
+/// by leaf, exactly as [`StreamWriter::push_table`] stages them. A full leaf `i` is handed to an
+/// encode worker as the non-terminal leaf `name/{i:04}` as soon as a row arrives after it, so only
+/// the last leaf waits for [`Self::close`], which hands it over as the terminal leaf, or as the
+/// bare-named single block `name` if it is the only one. Nothing is renamed: a leaf's name and
+/// marker are fixed when it is handed over. The sealed product is byte-identical to
+/// [`crate::TableMultiBlockSink`]'s for the same rows, whatever the worker count, the window and
+/// the input's chunking.
+///
+/// **Disk and heap.** For one open table the bounds of [`StreamWriter::push_table`] hold
+/// unchanged: at most `W + 1` leaves of input are staged on disk for `W` workers, up to
+/// `(W + 1) · BLOCK_ROWS` rows ([`StreamStats::peak_staged_input_blocks`]), because the held full
+/// leaf is handed over before the next leaf's staging file is created, and the heap bound of
+/// `push_table` with the same `s` (one row-group re-chunk buffer). With `T` tables open on one
+/// writer at once each holds its own leaf, so at most `W + T` leaves and `T` re-chunk buffers.
+/// What differs is time, not size: a full leaf stays staged until the producer pushes another row
+/// or closes, however long that takes. [`Self::push`] blocks while every worker is busy or the
+/// window is full, like `push_table`.
+///
+/// **Failure.** Any error of [`Self::push`] or [`Self::close`] abandons the table: the staging
+/// file of the leaf being filled is deleted at once, the leaves already handed over stay in the
+/// pipeline (committed, unless the pipeline itself has died) but the terminal leaf never is (so [`StreamWriter::finish`] refuses to seal a partitioned
+/// remnant with [`Error::LogicalTable`]; a table that never left leaf 0 leaves nothing, and the
+/// product seals without it), and every later call returns [`Error::Invalid`]. Dropping the handle
+/// without closing it does the same, which is why the handle is `#[must_use]`.
+/// Staging files of leaves already handed over are deleted by their workers, or when their jobs
+/// are dropped. [`Self::push`] on another writer than the one it was opened on is
+/// [`Error::Invalid`] and changes nothing; [`Self::close`] on another writer is the same error,
+/// and abandons the table, since `close` consumes it.
+#[must_use = "a table is written only by OpenTable::close; dropping it abandons the table"]
+pub struct OpenTable {
+    name: String,
+    /// The leaf template: `rows` 0, `partition` `None`.
+    spec: TableSpec,
+    block_rows: u64,
+    /// [`StreamWriter::push_table`]'s declared row count; `None` when it's known only at close.
+    declared: Option<u64>,
+    /// The window of the writer this table was opened on: the identity [`Self::push`] checks.
+    window: Arc<CreditWindow>,
+    fill: Fill,
+    /// Rows short of a full row-group, when the input is not on the ROWS_PER_GROUP grid.
+    pending: Option<TableData>,
+    seen: u64,
+    failed: bool,
+}
+
+impl OpenTable {
+    fn new(
+        writer: &StreamWriter,
+        name: String,
+        spec: TableSpec,
+        block_rows: u64,
+        declared: Option<u64>,
+    ) -> Result<Self> {
+        let call = if declared.is_some() {
+            "push_table"
+        } else {
+            "open_table"
+        };
+        if block_rows == 0 || !block_rows.is_multiple_of(ROWS_PER_GROUP as u64) {
+            return Err(Error::Codec(format!(
+                "{call}: block_rows ({block_rows}) must be a positive multiple of ROWS_PER_GROUP ({ROWS_PER_GROUP})"
+            )));
+        }
+        if spec.partition.is_some() {
+            return Err(Error::Invalid(format!(
+                "{call} '{name}': spec.partition must be None, each leaf's marker is set by the writer"
+            )));
+        }
+        for c in &spec.columns {
+            ColumnData::validate_dtype(&c.dtype)?;
+        }
+        // With a declared count the last name is the longest: if it is valid, every name is.
+        // Without one, check the bare name and the first leaf, since the rows can't tell yet which
+        // the table needs; a later leaf's longer name is checked when it is handed over.
+        let names = match declared {
+            Some(rows) => {
+                let blocks = partition_blocks(rows, block_rows);
+                vec![(blocks - 1, blocks)]
+            }
+            None => vec![(0, 1), (0, 2)],
+        };
+        for (idx, total) in names {
+            BlockName::new(block_name(&name, idx, total)?)?;
+        }
+        Ok(OpenTable {
+            name,
+            spec,
+            block_rows,
+            declared,
+            window: Arc::clone(&writer.window),
+            fill: Fill::default(),
+            pending: None,
+            seen: 0,
+            failed: false,
+        })
+    }
+
+    /// The rows pushed so far.
+    pub fn rows(&self) -> u64 {
+        self.seen
+    }
+
+    /// Append one row-group of at most [`ROWS_PER_GROUP`] rows with the spec's columns, on
+    /// `writer`, the writer the table was opened on. Groups of any size up to that are re-chunked
+    /// to the grid through a buffer of less than one row-group. Blocks while a leaf this push
+    /// completes or makes non-terminal waits for a free worker or for the window.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::StreamedTable`] for a group of more than `ROWS_PER_GROUP` rows; the column and
+    /// dtype errors of [`StreamWriter::push_table`]; I/O errors staging the rows; the pipeline's
+    /// errors; [`Error::Invalid`] for another writer or a table abandoned by an earlier error.
+    /// Every error but the wrong writer abandons the table (see [`OpenTable`]).
+    pub fn push(&mut self, writer: &mut StreamWriter, group: TableData) -> Result<()> {
+        self.check(writer)?;
+        let res = self.push_group(writer, group);
+        self.abandon_on_error(res)
+    }
+
+    /// End the table on `writer`: stage the buffered rows and hand over the last leaf, and return
+    /// the number of leaves. `1` is the single block named `name` (an empty table included);
+    /// more are the leaves `name/0000` … with the terminal marker on the last. Call
+    /// [`StreamWriter::finish`] to commit and seal as usual.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::push`]; a table abandoned by an earlier error is [`Error::Invalid`]. The table
+    /// is abandoned on every error.
+    pub fn close(mut self, writer: &mut StreamWriter) -> Result<u64> {
+        self.check(writer)?;
+        if let Some(declared) = self.declared.filter(|&d| d != self.seen) {
+            return Err(self.refuse(StreamedTableError::TooFewRows {
+                declared,
+                actual: self.seen,
+            }));
+        }
+        if let Some(rest) = self.pending.take() {
+            self.stage_group(writer, &rest)?;
+        }
+        let blocks = self.fill.block + 1;
+        self.dispatch(writer, blocks)?;
+        Ok(blocks)
+    }
+
+    fn check(&self, writer: &StreamWriter) -> Result<()> {
+        if !Arc::ptr_eq(&self.window, &writer.window) {
+            return Err(Error::Invalid(format!(
+                "table '{}' was opened on another StreamWriter",
+                self.name
+            )));
+        }
+        if self.failed {
+            return Err(Error::Invalid(format!(
+                "table '{}' was abandoned by an earlier error",
+                self.name
+            )));
+        }
+        Ok(())
+    }
+
+    /// On an error, drop the leaf being filled (deleting its staging file) and the buffered rows.
+    fn abandon_on_error<T>(&mut self, res: Result<T>) -> Result<T> {
+        if res.is_err() {
+            self.failed = true;
+            self.fill = Fill::default();
+            self.pending = None;
+        }
+        res
+    }
+
+    fn refuse(&self, reason: StreamedTableError) -> Error {
+        Error::StreamedTable {
+            name: self.name.clone(),
+            reason,
+        }
+    }
+
+    fn push_group(&mut self, writer: &mut StreamWriter, group: TableData) -> Result<()> {
+        let rows = group_rows(&self.spec, &group)?;
+        if rows > ROWS_PER_GROUP {
+            return Err(self.refuse(StreamedTableError::OversizedGroup {
+                rows: rows as u64,
+                max: ROWS_PER_GROUP as u64,
+            }));
+        }
+        self.seen += rows as u64;
+        if let Some(declared) = self.declared.filter(|&d| self.seen > d) {
+            return Err(self.refuse(StreamedTableError::TooManyRows { declared }));
+        }
+        let mut buf = match self.pending.take() {
+            None if rows == ROWS_PER_GROUP => return self.stage_group(writer, &group),
+            None => group,
+            Some(mut buf) => {
+                for ((_, into), (_, from)) in buf.iter_mut().zip(&group) {
+                    into.extend(from)?;
+                }
+                buf
+            }
+        };
+        while rows_of(&buf) >= ROWS_PER_GROUP {
+            let (head, tail) = buf
+                .into_iter()
+                .map(|(n, c)| {
+                    (
+                        (n.clone(), c.slice(0, ROWS_PER_GROUP)),
+                        (n, c.slice(ROWS_PER_GROUP, c.len())),
+                    )
+                })
+                .unzip();
+            self.stage_group(writer, &head)?;
+            buf = tail;
+        }
+        if rows_of(&buf) > 0 {
+            self.release_full(writer)?;
+            self.pending = Some(buf);
+        }
+        Ok(())
+    }
+
+    /// The lookahead: a row past a full leaf makes it non-terminal, so hand it over. `total =
+    /// index + 2` names and marks it as the leaf it is in any table of more leaves than that.
+    /// With a declared count a full leaf is handed over on filling, unless it is the last.
+    fn release_full(&mut self, writer: &mut StreamWriter) -> Result<()> {
+        if self.fill.rows == self.block_rows {
+            self.dispatch(writer, self.fill.block + 2)?;
+        }
+        Ok(())
+    }
+
+    /// Append one canonical row-group to the leaf being filled (creating its staging file), and
+    /// hand the leaf over once it is full and known not to be the last.
+    fn stage_group(&mut self, writer: &mut StreamWriter, group: &TableData) -> Result<()> {
+        self.release_full(writer)?;
+        if self.fill.input.is_none() {
+            self.fill.input = Some(StagedInput::create(&writer.staging, &writer.window)?);
+        }
+        self.fill.input.as_mut().expect("created").append(group)?;
+        self.fill.rows += rows_of(group) as u64;
+        if let Some(rows) = self.declared {
+            let blocks = partition_blocks(rows, self.block_rows);
+            if self.fill.rows == self.block_rows && self.fill.block + 1 < blocks {
+                self.dispatch(writer, blocks)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Hand the leaf being filled to a free worker as one staged job, named and marked as the
+    /// leaf `fill.block` of `total`.
+    fn dispatch(&mut self, writer: &mut StreamWriter, total: u64) -> Result<()> {
+        let leaf = TableSpec {
+            rows: self.fill.rows,
+            partition: block_partition(self.fill.block, total),
+            ..self.spec.clone()
+        };
+        let bref = staged_table_ref(block_name(&self.name, self.fill.block, total)?, &leaf)?;
+        let input = match self.fill.input.take() {
+            Some(input) => input,
+            None => StagedInput::create(&writer.staging, &writer.window)?, // the empty table
+        };
+        writer.submit(Job::Staged(input.into_job(bref, leaf)?), true)?;
+        self.fill = Fill {
+            block: self.fill.block + 1,
+            ..Fill::default()
+        };
+        Ok(())
+    }
+}
+
 /// Holds [`StreamWriter::push_table`]'s jobs before they read their input while it lives; see
 /// [`StreamWriter::hold_table_reads`]. Dropping it releases them.
 #[doc(hidden)]
@@ -951,133 +1230,53 @@ impl StreamWriter {
     where
         I: IntoIterator<Item = TableData>,
     {
-        let name = name.into();
-        if block_rows == 0 || !block_rows.is_multiple_of(ROWS_PER_GROUP as u64) {
-            return Err(Error::Codec(format!(
-                "push_table: block_rows ({block_rows}) must be a positive multiple of ROWS_PER_GROUP ({ROWS_PER_GROUP})"
-            )));
-        }
-        if spec.partition.is_some() {
-            return Err(Error::Invalid(format!(
-                "push_table '{name}': spec.partition must be None, each leaf's marker is set by the writer"
-            )));
-        }
-        for c in &spec.columns {
-            ColumnData::validate_dtype(&c.dtype)?;
-        }
-        let blocks = partition_blocks(spec.rows, block_rows);
-        // The last name is the longest: if it is valid, every name is.
-        BlockName::new(block_name(&name, blocks - 1, blocks)?)?;
-        let refuse = |reason| Error::StreamedTable {
-            name: name.clone(),
-            reason,
-        };
-        let mut fill = Fill::default();
-        let mut seen = 0u64;
-        // Rows short of a full row-group, when the input is not on the ROWS_PER_GROUP grid.
-        let mut pending: Option<TableData> = None;
+        let declared = spec.rows;
+        let spec = TableSpec { rows: 0, ..spec };
+        let mut table = OpenTable::new(self, name.into(), spec, block_rows, Some(declared))?;
         for group in groups {
-            let rows = group_rows(&spec, &group)?;
-            if rows > ROWS_PER_GROUP {
-                return Err(refuse(StreamedTableError::OversizedGroup {
-                    rows: rows as u64,
-                    max: ROWS_PER_GROUP as u64,
-                }));
-            }
-            seen += rows as u64;
-            if seen > spec.rows {
-                return Err(refuse(StreamedTableError::TooManyRows {
-                    declared: spec.rows,
-                }));
-            }
-            let mut buf = match pending.take() {
-                None if rows == ROWS_PER_GROUP => {
-                    self.stage_group(&mut fill, &name, &spec, blocks, block_rows, &group)?;
-                    continue;
-                }
-                None => group,
-                Some(mut buf) => {
-                    for ((_, into), (_, from)) in buf.iter_mut().zip(&group) {
-                        into.extend(from)?;
-                    }
-                    buf
-                }
-            };
-            while rows_of(&buf) >= ROWS_PER_GROUP {
-                let (head, tail) = buf
-                    .into_iter()
-                    .map(|(n, c)| {
-                        (
-                            (n.clone(), c.slice(0, ROWS_PER_GROUP)),
-                            (n, c.slice(ROWS_PER_GROUP, c.len())),
-                        )
-                    })
-                    .unzip();
-                self.stage_group(&mut fill, &name, &spec, blocks, block_rows, &head)?;
-                buf = tail;
-            }
-            pending = (rows_of(&buf) > 0).then_some(buf);
+            table.push(self, group)?;
         }
-        if seen != spec.rows {
-            return Err(refuse(StreamedTableError::TooFewRows {
-                declared: spec.rows,
-                actual: seen,
-            }));
-        }
-        if let Some(rest) = pending {
-            self.stage_group(&mut fill, &name, &spec, blocks, block_rows, &rest)?;
-        }
-        // The input has ended: the last leaf (the terminal one) is complete.
-        self.dispatch(&mut fill, &name, &spec, blocks)?;
-        Ok(blocks)
+        table.close(self)
     }
 
-    /// Append one canonical row-group to the block being filled (creating its staging file), and
-    /// hand the block over once it is full, unless it is the last one.
-    fn stage_group(
-        &mut self,
-        fill: &mut Fill,
-        name: &str,
-        spec: &TableSpec,
-        blocks: u64,
+    /// Open the table `name` for streaming without its row count: an [`OpenTable`] that takes
+    /// row-groups with [`OpenTable::push`] and decides at [`OpenTable::close`] how many leaves the
+    /// table has, which one is the terminal leaf, and whether it is the one bare-named block
+    /// `name` or the leaves `name/0000`, `name/0001`, … (ADR-0065 §7.3, #806). The sealed bytes
+    /// are those of [`Self::push_table`] and [`crate::TableMultiBlockSink`] for the same rows.
+    ///
+    /// `spec` is the template of every leaf: its columns, `row_index` and any other field are
+    /// copied into each leaf's spec, while `rows` and `partition` are set per leaf by the writer.
+    /// So `spec.rows` must be `0` and `spec.partition` `None`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] when `spec.rows` isn't `0` or `spec.partition` isn't `None`, and the
+    /// name and dtype errors of [`Self::push_table`], all before anything is staged. As the row
+    /// count is unknown, `name` must be valid both bare and as the first leaf `name/0000`, so a
+    /// name within five bytes of the length limit is refused even for a table that would end as
+    /// one block. A later leaf's longer name (`name/10000` on) is checked when that leaf is handed
+    /// over, and refusing it abandons the table.
+    pub fn open_table(&self, name: impl Into<String>, spec: TableSpec) -> Result<OpenTable> {
+        self.open_table_with_block_rows(name, spec, BLOCK_ROWS as u64)
+    }
+
+    /// [`Self::open_table`] partitioned at `block_rows`: the test seam of
+    /// [`Self::push_table_with_block_rows`].
+    #[doc(hidden)]
+    pub fn open_table_with_block_rows(
+        &self,
+        name: impl Into<String>,
+        spec: TableSpec,
         block_rows: u64,
-        group: &TableData,
-    ) -> Result<()> {
-        if fill.input.is_none() {
-            fill.input = Some(StagedInput::create(&self.staging, &self.window)?);
+    ) -> Result<OpenTable> {
+        let name = name.into();
+        if spec.rows != 0 {
+            return Err(Error::Invalid(format!(
+                "open_table '{name}': spec.rows must be 0, the row count is the rows pushed before close"
+            )));
         }
-        fill.input.as_mut().expect("created").append(group)?;
-        fill.rows += rows_of(group) as u64;
-        if fill.rows == block_rows && fill.block + 1 < blocks {
-            self.dispatch(fill, name, spec, blocks)?;
-        }
-        Ok(())
-    }
-
-    /// Hand the filled block to a free worker as one staged leaf job.
-    fn dispatch(
-        &mut self,
-        fill: &mut Fill,
-        name: &str,
-        spec: &TableSpec,
-        blocks: u64,
-    ) -> Result<()> {
-        let leaf = TableSpec {
-            rows: fill.rows,
-            partition: block_partition(fill.block, blocks),
-            ..spec.clone()
-        };
-        let bref = staged_table_ref(block_name(name, fill.block, blocks)?, &leaf)?;
-        let input = match fill.input.take() {
-            Some(input) => input,
-            None => StagedInput::create(&self.staging, &self.window)?, // the empty table
-        };
-        self.submit(Job::Staged(input.into_job(bref, leaf)?), true)?;
-        *fill = Fill {
-            block: fill.block + 1,
-            ..Fill::default()
-        };
-        Ok(())
+        OpenTable::new(self, name, spec, block_rows, None)
     }
 
     /// Hold every [`Self::push_table`] job before it reads its staged input, until the returned
@@ -2331,5 +2530,234 @@ mod tests {
         // Refused before anything is staged or sealed.
         assert!(staged_files(&stage).is_empty(), "staged file left behind");
         assert!(!out.exists(), "a product was sealed");
+    }
+
+    // ---- ADR-0065 §7.3 / #806: open_table ----------------------------------------------------
+
+    /// `open_table` of the listmode table at `block_rows` with `workers` workers: the leaves and
+    /// the sealed manifest.
+    fn open_table_product(
+        dir: &Path,
+        tag: &str,
+        workers: usize,
+        groups: impl Iterator<Item = TableData>,
+    ) -> (u64, Manifest) {
+        let stage = dir.join(tag);
+        let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::new(ws, workers, 4);
+        let mut table = sw
+            .open_table_with_block_rows("events", listmode::spec(0), RPG)
+            .unwrap();
+        for group in groups {
+            table.push(&mut sw, group).unwrap();
+        }
+        let leaves = table.close(&mut sw).unwrap();
+        let m = sw.finish(&dir.join(format!("{tag}.tsra"))).unwrap();
+        assert!(
+            staged_files(&stage).is_empty(),
+            "{tag}: staged file left behind"
+        );
+        (leaves, m)
+    }
+
+    /// A table whose row count is known only at close seals `TableMultiBlockSink`'s canonical
+    /// manifest and `content_hash` at one leaf (empty, partial, exactly full), two leaves (the
+    /// second full) and many leaves, for every worker count and on and off the row-group grid.
+    #[test]
+    fn open_table_seals_the_multi_block_sink_manifest_at_every_leaf_count() {
+        let dir = tempfile::tempdir().unwrap();
+        for (total, leaves) in [(0, 1), (99, 1), (RPG, 1), (2 * RPG, 2), (5 * RPG + 99, 6)] {
+            let reference = sink_product(&dir.path().join(format!("sink{total}")), total, RPG);
+            assert_eq!(reference.blocks.len() as u64, leaves, "sink at {total}");
+            for (workers, size) in [(1, RPG), (2, 9999), (4, RPG)] {
+                let tag = format!("r{total}w{workers}");
+                let (n, m) = open_table_product(dir.path(), &tag, workers, groups_of(total, size));
+                assert_eq!(n, leaves, "{tag}");
+                assert_eq!(canonical(&m), canonical(&reference), "{tag}");
+                assert_eq!(m.content_hash, reference.content_hash, "{tag}");
+            }
+        }
+    }
+
+    /// One leaf of lookahead: a full leaf is handed over once a row follows it, and before the
+    /// next leaf's staging file is created, so only the last leaf waits for close. With all `W`
+    /// workers held, the producer hands over `W` leaves, fills leaf `W`, and stalls on its
+    /// hand-over at the next row with exactly `W + 1` leaves of input staged (a writer that
+    /// created the next file first would stage `W + 2`; one that dispatched at close, as
+    /// `TableMultiBlockSink` does, would hand over nothing and stage every leaf).
+    #[test]
+    fn open_table_hands_over_each_full_leaf_once_a_row_follows_it() {
+        let leaves = 8u64;
+        let leaf = |i: u64| listmode::rows(i * RPG, RPG as usize);
+        for workers in [1usize, 2] {
+            let w = workers as u64;
+            let dir = tempfile::tempdir().unwrap();
+            let stage = dir.path().join("stage");
+            let ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            let mut sw = StreamWriter::new(ws, workers, 4);
+            let window = Arc::clone(&sw.window);
+            let hold = sw.hold_table_reads();
+            let out = dir.path().join("p.tsra");
+            let producer = thread::spawn(move || {
+                let mut table = sw
+                    .open_table_with_block_rows("events", listmode::spec(0), RPG)
+                    .unwrap();
+                table.push(&mut sw, leaf(0)).unwrap();
+                assert_eq!(
+                    sw.stats().jobs_pushed,
+                    0,
+                    "a full leaf may be the terminal one"
+                );
+                table.push(&mut sw, listmode::rows(RPG, 1)).unwrap();
+                assert_eq!(
+                    sw.stats().jobs_pushed,
+                    1,
+                    "a row after it makes it non-terminal"
+                );
+                table
+                    .push(&mut sw, listmode::rows(RPG + 1, RPG as usize - 1))
+                    .unwrap();
+                for i in 2..leaves {
+                    table.push(&mut sw, leaf(i)).unwrap(); // stalls at leaf W + 1, held
+                }
+                assert_eq!(table.rows(), leaves * RPG);
+                assert_eq!(sw.stats().jobs_pushed as u64, leaves - 1);
+                assert_eq!(table.close(&mut sw).unwrap(), leaves);
+                sw.finish_with_stats(&out).unwrap()
+            });
+            // Until the producer stalls on the held workers (or fails, which the join reports).
+            while window.lock().stats.producer_stalls == 0 && !producer.is_finished() {
+                thread::yield_now();
+            }
+            let st = hold.stats();
+            assert_eq!(st.jobs_pushed as u64, w, "w{workers}: leaves handed over");
+            assert_eq!(st.peak_staged_input_blocks, workers + 1, "w{workers}");
+            drop(hold);
+            let (m, st) = producer.join().unwrap();
+            assert_eq!(m.blocks.len() as u64, leaves);
+            assert_eq!(st.peak_staged_input_blocks, workers + 1, "w{workers}");
+            assert!(staged_files(&stage).is_empty(), "staged file left behind");
+        }
+    }
+
+    /// Every way an open table can end without a close deletes every staging file: a refused
+    /// group or a malformed one (at once, the handle still alive), a dropped handle, a close on
+    /// another writer, and a dead pipeline. Handed-over leaves commit, the terminal one never does.
+    #[test]
+    fn an_abandoned_open_table_leaves_no_staging_file() {
+        // Leaves of two row-groups: leaf 0 handed over, leaf 1 one row-group staged.
+        let open = |dir: &Path, fail_first: bool| {
+            let ws = WriteSession::create(&dir.join("stage"), "recon", "p", "d", TS).unwrap();
+            let mut sw = StreamWriter::new(ws, 1, 4);
+            if fail_first {
+                sw.push(Box::new(|| Err(Error::Codec("boom".into()))))
+                    .unwrap();
+                spin_until(&sw.window, |st| st.closed);
+            }
+            let table = sw
+                .open_table_with_block_rows("events", listmode::spec(0), 2 * RPG)
+                .unwrap();
+            (sw, table)
+        };
+        let fill = |sw: &mut StreamWriter, table: &mut OpenTable, groups: u64| {
+            (0..groups).try_for_each(|i| table.push(sw, listmode::rows(i * RPG, RPG as usize)))
+        };
+        // Within leaf 0, nothing handed over: the refused group's leaf is deleted at once.
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let (mut sw, mut table) = open(dir.path(), false);
+        fill(&mut sw, &mut table, 1).unwrap();
+        assert_eq!(staged_files(&stage).len(), 1);
+        let err = table
+            .push(&mut sw, listmode::rows(RPG, RPG as usize + 1))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::StreamedTable {
+                    reason: StreamedTableError::OversizedGroup { .. },
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(staged_files(&stage).is_empty(), "refused: staged file left");
+        let err = table.push(&mut sw, listmode::rows(0, 1)).unwrap_err();
+        assert!(err.to_string().contains("abandoned"), "{err}");
+        assert!(table.close(&mut sw).is_err());
+        assert_eq!(
+            sw.finish(&dir.path().join("p.tsra")).unwrap().blocks.len(),
+            0
+        );
+
+        // Past leaf 0: the leaf being filled is deleted, and the seal refuses the partition
+        // without its terminal leaf.
+        for case in ["malformed", "dropped", "closed elsewhere"] {
+            let dir = tempfile::tempdir().unwrap();
+            let stage = dir.path().join("stage");
+            let ws = WriteSession::create(&dir.path().join("other"), "recon", "p", "d", TS);
+            let mut other = StreamWriter::new(ws.unwrap(), 1, 4);
+            let (mut sw, mut table) = open(dir.path(), false);
+            fill(&mut sw, &mut table, 3).unwrap();
+            let alive = match case {
+                "malformed" => {
+                    let mut group = listmode::rows(3 * RPG, 1);
+                    group.pop();
+                    assert!(table.push(&mut sw, group).is_err());
+                    Some(table)
+                }
+                "dropped" => {
+                    drop(table);
+                    None
+                }
+                _ => {
+                    assert!(table.close(&mut other).is_err());
+                    None
+                }
+            };
+            let sealed = sw.finish(&dir.path().join("p.tsra"));
+            assert!(
+                matches!(sealed, Err(Error::LogicalTable { .. })),
+                "{sealed:?}"
+            );
+            assert!(staged_files(&stage).is_empty(), "{case}: staged file left");
+            drop(alive);
+            other.finish(&dir.path().join("o.tsra")).unwrap();
+        }
+
+        // A dead pipeline refuses the hand-over of leaf 0; the table is abandoned with it.
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let (mut sw, mut table) = open(dir.path(), true);
+        fill(&mut sw, &mut table, 2).unwrap();
+        let err = table.push(&mut sw, listmode::rows(2 * RPG, 1)).unwrap_err();
+        assert!(err.to_string().contains("pipeline closed"), "{err}");
+        assert!(
+            staged_files(&stage).is_empty(),
+            "dead pipeline: staged file left"
+        );
+        let err = sw.finish(&dir.path().join("p.tsra")).unwrap_err();
+        assert!(err.to_string().contains("boom"), "{err}");
+    }
+
+    /// The handle is checked against the writer it was opened on, and its spec must leave `rows`
+    /// to the writer.
+    #[test]
+    fn open_table_refuses_another_writer_and_a_declared_row_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = WriteSession::create(&dir.path().join("a"), "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::new(ws, 1, 4);
+        let ws = WriteSession::create(&dir.path().join("b"), "recon", "p", "d", TS).unwrap();
+        let mut other = StreamWriter::new(ws, 1, 4);
+        let err = sw.open_table("events", listmode::spec(5)).err().unwrap();
+        assert!(matches!(err, Error::Invalid(_)), "{err}");
+        let mut table = sw.open_table("events", listmode::spec(0)).unwrap();
+        let err = table.push(&mut other, listmode::rows(0, 3)).unwrap_err();
+        assert!(err.to_string().contains("another StreamWriter"), "{err}");
+        table.push(&mut sw, listmode::rows(0, 3)).unwrap();
+        assert_eq!(table.close(&mut sw).unwrap(), 1);
+        let m = sw.finish(&dir.path().join("p.tsra")).unwrap();
+        assert_eq!(m.blocks[0].name.as_str(), "events");
+        other.finish(&dir.path().join("o.tsra")).unwrap();
     }
 }
