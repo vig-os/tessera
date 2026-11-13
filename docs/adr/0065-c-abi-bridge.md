@@ -1,7 +1,9 @@
 # ADR-0065 — C ABI bridge: C++ producers write through tessera's writer (`tessera-capi`)
 
-**Status:** Proposed (2026-11-11), awaiting owner acceptance. Nothing in it is decided until the owner accepts it.
-Toward epic
+**Status:** Accepted (2026-11-13), by the owner, as written; proposed 2026-11-11. The acceptance settles the ADR's
+two owner decision points: NaN payloads (hazard H4) are canonicalised **at the bridge**, which calls
+`tessera-ingest`'s `canonicalise_floats` and seals the `IngestTransform` exactly as ingest does (§1, §9); and the
+stall deadline is **mandatory**, with no "no stall deadline" opt-in (§7.2). Toward epic
 [#799](https://github.com/vig-os/tessera/issues/799); this is the design of
 [#800](https://github.com/vig-os/tessera/issues/800), and it fixes how the bridge expresses
 [#801](https://github.com/vig-os/tessera/issues/801) (a registered schema per product type) and
@@ -11,7 +13,7 @@ Toward epic
 gPET-sim `7fa1ad38`, gPET-sim2listmode `3d6d5660`, geddf-analysis `d6cd7857`, g4h5 `a548054f`. The owner's two consumer
 surveys are still running. Points they would settle are marked **pending surveys**, and are not guessed here.
 **Owner steer (2026-11-11), folded in:** "a C interface that takes Arrow batches from many threads and streams them
-to StreamWriter". The architect's refinement of it is the design proposed here: the Arrow C Data Interface as the
+to StreamWriter". The architect's refinement of it is the design this ADR decides: the Arrow C Data Interface as the
 wire; one session per product; a thread-safe `push(…, seq, ArrowArray*, ArrowSchema*)`; commit in `seq` order behind a
 credit window that back-pressures a thread running too far ahead; and the schema declared at open and checked on
 every batch. One refinement goes beyond the steer's sketch. The surveyed products have several tables
@@ -112,7 +114,8 @@ whole batches with a key, not single rows.
 2. **Tables cross the boundary as the Arrow C Data Interface.** Each push is one `struct ArrowArray` (a struct
    array) with its borrowed `struct ArrowSchema`. The bridge checks the batch's schema against the declaration
    before it imports anything, imports zero-copy with `arrow::ffi`, and converts through `tessera-ingest`'s arrow
-   lane. Where hazard H4 (NaN payloads) is fixed is the owner's call (§1). Vortex never appears in the C API, so the
+   lane. The bridge canonicalises NaN payloads (hazard H4) with `canonicalise_floats` and seals the transform, as
+   ingest does (owner ruling 2026-11-13, §1). Vortex never appears in the C API, so the
    storage engine can change without breaking a C++ caller. **Arrays (volumes) cross as a plain C buffer** plus a
    numpy dtype code and a shape (§2).
 3. **One session per product, with one table lane per table role, each fed by `tsra_push(table, seq, batch,
@@ -123,7 +126,8 @@ whole batches with a key, not single rows.
      table waits for another.
    - A credit window back-pressures (blocks) a thread that runs too far ahead.
    - A duplicate, a gap at the seal, a `seq` past a hard horizon and a lost `seq` (through `tsra_session_abort` or a
-     finite stall deadline) are typed errors, never hangs.
+     finite stall deadline) are typed errors, never hangs. The stall deadline is mandatory: no value disables it
+     (owner ruling 2026-11-13, §7.2).
    - Many products means many independent sessions.
 
    This is how the bridge expresses #802 (§7).
@@ -161,8 +165,8 @@ no binary, and it is not a dependency of the CLI, the wheel or the wasm crate.
 **Why `tessera-ingest` and not a second Arrow map.** The bridge has the same job as the ingest table lane: a foreign
 type system becomes `ColumnData` upstream of the waist (ADR-0057 §1). A second map in the bridge would be a second
 place where a NaN payload or a masked slot could reach `content_hash`. Hazard H4 is real for this consumer: x86-64
-and AArch64 produce NaNs of opposite sign for the same `0.0/0.0`, the same one-bit divergence that #472 traced. If the owner
-takes this ADR's recommendation below, the bridge calls `canonicalise_floats` and records its transform exactly as
+and AArch64 produce NaNs of opposite sign for the same `0.0/0.0`, the same one-bit divergence that #472 traced. As the
+owner ruled on 2026-11-13 (below), the bridge calls `canonicalise_floats` and records its transform exactly as
 ingest does. It does not call `normalise_null_slots` (H5): the encoder already normalises masked slots
 (`tessera-io/src/table.rs:115-121`), so calling it would only add a receipt that a native write of the same rows
 doesn't carry. ADR-0057 §2 pre-authorised a `tessera-arrow` crate for "an obvious third-party audience ('I have a
@@ -177,24 +181,26 @@ alone is about 40 lines and needs no `tessera-ingest`, because a clean-lane valu
 bridge needs from ingest is the canonicalisation, not the map, so a bridge with its own map would still have to
 duplicate H4. That's why #454 stays first, and the 40-line map is the fallback only if #454 slips past #813.
 
-**Where H4 lives is the owner's decision, and this ADR recommends the bridge.** The prototype showed the
-consequence (spike §7.2, `nan_payloads_are_sealed_bit_for_bit`): the native writer seals NaN payloads bit for bit
-(S13), so a C++ producer whose NaNs the bridge canonicalises and a Rust producer that pushes the same rows through
-`StreamWriter` seal **different products whenever a NaN is present**. The options:
+**H4 lives in the bridge (owner ruling, 2026-11-13).** The ADR recommended the bridge, and the owner's acceptance
+made that the decision: the bridge calls `tessera-ingest`'s `canonicalise_floats` and records the `IngestTransform`
+in the seal exactly as ingest does (§9). The prototype showed the consequence (spike §7.2,
+`nan_payloads_are_sealed_bit_for_bit`): the native writer seals NaN payloads bit for bit (S13), so a C++ producer
+whose NaNs the bridge canonicalises and a Rust producer that pushes the same rows through `StreamWriter` seal
+**different products whenever a NaN is present**. The options that were weighed:
 
-- **In the bridge** (recommended). The bridge is a door into the format, like ingest, and ADR-0056 §5 put H4 at the
+- **In the bridge** (decided). The bridge is a door into the format, like ingest, and ADR-0056 §5 put H4 at the
   doors. A simulation's NaNs are arithmetic accidents whose sign depends on the CPU that ran it, so without this the
   same seed seals different bytes on x86-64 and AArch64. The transform is sealed, so the two products differ by a
   recorded receipt, not silently. Bridge-written equals native-written for every NaN-free table, and #813's
   equivalence test is stated that way.
 - **In `tessera-io`'s encoder, for every producer.** Every producer then agrees, but it changes what the waist
   seals, which is a format decision (a corpus event for float columns that hold non-canonical NaNs, and S13's
-  bit-exactness narrows). It belongs in its own ADR, not in this one.
+  bit-exactness narrows). It belongs in its own ADR, not in this one. Rejected for this ADR.
 - **Nowhere.** The producer owns its NaN bits. That's consistent, but it gives up cross-arch reproducibility for
-  any producer that computes a NaN.
+  any producer that computes a NaN. Rejected.
 
-The choice is ABI-neutral: no function or code changes between the three, only whether the bridge calls
-`canonicalise_floats`.
+The choice was ABI-neutral: no function or code differs between the three, only whether the bridge calls
+`canonicalise_floats`. It does.
 
 **Feature snapshots.** `arrow-array`'s `ffi` feature is already on in today's graph, through `vortex-array`
 (`tessera/tests/feature-snapshots/arrow-array.txt:2`), so importing `arrow_array::ffi` turns no new feature on in
@@ -632,8 +638,10 @@ the byte credit, which the session's lanes share.
     whose single event takes longer than 24 hours raises the deadline toward the cap, or uses refuse mode, where
     nothing waits.
 
-  **Owner decision point:** whether an explicit, documented "no stall deadline" opt-in should exist at all, for
-  producers whose single events can exceed 24 hours. This ADR proposes no such opt-in.
+  **The deadline is mandatory (owner ruling, 2026-11-13).** The proposal left open whether an explicit, documented
+  "no stall deadline" opt-in should exist for producers whose single events can exceed 24 hours. The owner ruled
+  that it doesn't: the finite deadline (default 10 minutes, cap 24 hours, `0` = the default, expiry
+  `TSRA_E_STALL`) applies to every session, and refuse mode is the path for a producer that can't live within it.
 
   So every ordering fault has a typed error outcome: a duplicate, a gap at close, a `seq` too far ahead, a key out of
   its block, a lost `seq` and a dead pipeline.
@@ -854,10 +862,10 @@ drafts (`docs/spikes/801-consumer-schemas/*.tables.json`). Where they differ fro
 - `set_generation` maps onto `with_generation` (ADR-0058 §2, `write.rs:682`). gPET-sim's run configuration (the JSON
   it already loads with nlohmann_json) is the natural `config`. A schema that sets `requires_generation` makes it
   mandatory at the seal (§8).
-- **The canonicalisation transform** (NaN canonicalisation, if the owner places H4 in the bridge, §1) is collected
-  by the bridge when it fires, deduplicated as ingest does, and sealed through `finish_with` (§3). `WriteSession` has no
-  `ingest_transform` setter today, though `ProductBuilder::with_ingest_transform` exists (`product.rs:141`). #810 adds
-  it to the session header, like `with_generation`.
+- **The canonicalisation transform** (NaN canonicalisation, which the owner placed in the bridge on 2026-11-13,
+  §1) is collected by the bridge when it fires, deduplicated as ingest does, and sealed through `finish_with` (§3).
+  `WriteSession` has no `ingest_transform` setter today, though `ProductBuilder::with_ingest_transform` exists
+  (`product.rs:141`). #810 adds it to the session header, like `with_generation`.
 - **`set_identity`** encrypts a JSON identity document to `age` recipients after the seal, as
   `aux/identity/identity.age`, through `tessera-identity` (ADR-0047, PR #786). Simulations carry no identity. The
   call exists for producers that write from patient data. Whether a C++ producer does is **pending surveys**: the
@@ -1067,11 +1075,11 @@ collection (ADR-0049), or one product keyed `(run_id, event_id)` (gap analysis �
 
 ## §15 — Implementation plan
 
-Each item is a sub-issue of #799, each a PR of about 400 lines or less, landing in this order once the owner
-accepts the ADR. The prerequisites already have issues: #454 (gating `hdf5`/`dicom` in `tessera-ingest`, so the
-arrow lane is HDF5-free) and PR #786 (`tessera-identity`). The estimates were redone for this revision. The items
-that bundled several deliverables (#810, #812, #814) are split, and the open-ended table writer is the gap
-analysis's #806 (#808, filed earlier with the same scope, is closed as its duplicate).
+Each item is a sub-issue of #799, each a PR of about 400 lines or less, landing in this order now that the owner
+has accepted the ADR (2026-11-13). The prerequisites already have issues: #454 (gating `hdf5`/`dicom` in
+`tessera-ingest`, so the arrow lane is HDF5-free) and PR #786 (`tessera-identity`). The estimates were redone for
+this revision. The items that bundled several deliverables (#810, #812, #814) are split, and the open-ended table
+writer is the gap analysis's #806 (#808, filed earlier with the same scope, is closed as its duplicate).
 
 | # | Issue | What | Size | Depends on |
 | --- | --- | --- | --- | --- |
@@ -1130,8 +1138,9 @@ per event and run sizes, which set the window and the staging disk budget (§7.2
   ahead. That holds memory bounded and can't hang when sequence numbers are claimed in increasing order: claimed
   keys through a window of 4 sealed one hash for N ∈ {1, 4, 16}. Under an arbitrary assignment it deadlocks (spike
   §3.1). The owner's steer adopts the blocking window. §7.2 states the precondition as ABI contract, adds the
-  `max_ahead` refusal, wake-on-failure, abort and a finite stall deadline, so a fault is a typed error and not a
-  hang, and lets a producer without the precondition turn blocking off (`refuse_instead_of_block = 1`).
+  `max_ahead` refusal, wake-on-failure, abort and a finite stall deadline (mandatory, by the owner's 2026-11-13
+  ruling), so a fault is a typed error and not a hang, and lets a producer without the precondition turn blocking
+  off (`refuse_instead_of_block = 1`).
 - **Throughput.** 50 M rows on 8 dedicated ksb cores, 4 encode workers, staging on `/dev/shm`: native `push_table`
   ran at a median of 8.89 M rows/s, and the C ABI at 8.25 M (1 producer thread, −7 %, inside that configuration's own
   17 % spread), 8.52 M (4) and 9.23 M (16). All 12 runs sealed one `content_hash`, and the writer, not the bridge, is
