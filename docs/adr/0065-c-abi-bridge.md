@@ -21,8 +21,9 @@ every batch. One refinement goes beyond the steer's sketch. The surveyed product
 opens one **table lane** per table role, each with its own `seq` stream, and seals them together. `push` therefore
 takes the lane, not the session (§3, §7.3).
 **Reconciled with the merged #801 gap analysis** (`docs/spikes/801-consumer-gap-analysis.md`, on `dev` at `ecc55be`)
-and its draft schemas (`docs/spikes/801-consumer-schemas/`). The schema shape (§8), the sequence key and block size
-(§7.2) and the plan (§15) follow it. Where this ADR differs, it says so and says which wins.
+and its draft schemas (then `docs/spikes/801-consumer-schemas/`, in `tessera-core`'s test fixtures since #809).
+The schema shape (§8), the sequence key and block size (§7.2) and the plan (§15) follow it. Where this ADR
+differs, it says so and says which wins.
 
 ## Context
 
@@ -769,8 +770,8 @@ sealed one hash, and keying by arrival gave 9 distinct ones (§16).
 ## §8 — Schemas (#801)
 
 This section follows the merged #801 gap analysis (`docs/spikes/801-consumer-gap-analysis.md` §3.1, §5) and its
-drafts (`docs/spikes/801-consumer-schemas/*.tables.json`). Where they differ from an earlier revision of this ADR,
-**the drafts win**.
+drafts (`*.tables.json`, in `tessera/crates/tessera-core/tests/fixtures/801-consumer-schemas/` since #809).
+Where they differ from an earlier revision of this ADR, **the drafts win**.
 
 - **The bridge writes only schema'd products, and the schema is declared at session open.**
   `tsra_session_options.schema_json` is a `ProductSchema` as JSON (from the registry, below). Its `product` must
