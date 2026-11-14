@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-11T01:02:41Z
-updated: 2026-11-11T01:10:08Z
+updated: 2026-11-13T12:11:05Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/800
-comments: 1
+comments: 2
 labels: feature
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-11T08:50:42.491Z
+synced: 2026-11-14T08:34:35.505Z
 ---
 
 # [Issue 800]: [feature(capi): C ABI bridge over the tessera-io writer (Arrow C Data Interface), ADR first](https://github.com/vig-os/tessera/issues/800)
@@ -51,4 +51,12 @@ which the ADR states as the proposed design. It stays Proposed until the owner a
      content_hash. It also shows the window bound holds (peak in-flight ≤ window) and that a gap at seal is an error.
 Do not restart. Fold this into your current round; same receipt, same last-line rule.
 
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 13, 2026 at 12:11 PM_
+
+ADR-0065 accepted 2026-11-13; implementation per §15 started. Acceptance recorded in https://github.com/vig-os/tessera/pull/843 (owner rulings: H4 NaN canonicalisation at the bridge; mandatory finite stall deadline, no opt-out).
 

@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-11T01:02:39Z
-updated: 2026-11-11T01:02:39Z
+updated: 2026-11-13T12:11:06Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/799
-comments: 0
+comments: 1
 labels: priority:high, epic
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: 808, 809, 810, 811, 812, 813, 814, 815, 816, 817, 818, 830, 831, 832, 833, 834, 835, 836, 806
-synced: 2026-11-11T08:50:42.946Z
+synced: 2026-11-14T08:34:36.345Z
 ---
 
 # [Issue 799]: [epic: C++ producers write tessera products through our writer (C ABI / Arrow C Data Interface bridge)](https://github.com/vig-os/tessera/issues/799)
@@ -35,4 +35,12 @@ C++ producers write tessera products **through tessera's own writer** (`tessera-
 
 ## Process
 Design before code: ADR (Proposed → Accepted by the owner) before the implementation PRs. Spikes may build throwaway prototypes to answer design questions with evidence.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 13, 2026 at 12:11 PM_
+
+ADR-0065 accepted 2026-11-13; implementation per §15 started. Acceptance recorded in https://github.com/vig-os/tessera/pull/843 (owner rulings: H4 NaN canonicalisation at the bridge; mandatory finite stall deadline, no opt-out).
 

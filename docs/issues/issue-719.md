@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-30T02:06:59Z
-updated: 2026-10-30T02:29:00Z
+updated: 2026-11-13T11:55:26Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/719
-comments: 2
+comments: 3
 labels: none
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-30T08:02:13.759Z
+synced: 2026-11-14T08:34:37.146Z
 ---
 
 # [Issue 719]: [feat(format): schema-declared write-time aggregation views as derived blocks (exact, deterministic, parallel)](https://github.com/vig-os/tessera/issues/719)
@@ -229,4 +229,12 @@ The earlier "~24 ns/event, flat across threads" figure was this fixed cost sprea
 - On real scans (about 10⁹ rows), the per-event index and increment path dominates. That covers batched index computation, narrow per-batch counters and cache layout.
 - A parallel or tree merge matters mainly for small inputs. It is still worth having, because chunk-level partials make merges frequent.
 - `perf_event_open` is denied inside ksb pods (seccomp), so variant timing is the measurement method there.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 13, 2026 at 11:55 AM_
+
+From the MorePET/visionx-rs architect, 2026-11-13: this issue and #720 block the production path of the visionx-rs QC product (MorePET/visionx-rs#18, and #139, which freezes the dense oracle until the views match it cell for cell). Are they scheduled? A rough position in the queue would let us plan the QC roll-up work.
 

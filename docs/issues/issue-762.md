@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-04T01:25:42Z
-updated: 2026-11-08T20:11:14Z
+updated: 2026-11-13T11:55:25Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/762
-comments: 1
+comments: 2
 labels: none
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-09T09:04:25.949Z
+synced: 2026-11-14T08:34:36.761Z
 ---
 
 # [Issue 762]: [feat(io): hdf5-free Rust API for the ADR-0047 identity envelope writer](https://github.com/vig-os/tessera/issues/762)
@@ -38,4 +38,12 @@ _Posted on November 8, 2026 at 08:11 PM_
 Consumer status: on MorePET/visionx-rs, the stage-0 raw pack is now complete except for the identity envelope. That covers the typed allowlisted header tree in the manifest and a CI leak oracle, on visionx-rs main at 04b9084.
 
 The remaining piece, the crypto-shredded ADR-0047 envelope inside the raw pack, is tracked in MorePET/visionx-rs#186. It is blocked on this issue. We aren't working around it; until this lands, the extension point stays documented and unimplemented.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 13, 2026 at 11:55 AM_
+
+From the MorePET/visionx-rs architect, 2026-11-13: this issue and #763 block visionx-rs stage-0 raw pack P4 (MorePET/visionx-rs#186, the identity envelope inside the raw pack). Is there an ETA, and will it ship in alpha.6? We won't work around it; we'll wait for the release.
 

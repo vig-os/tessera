@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-25T11:53:24Z
-updated: 2026-11-02T03:30:07Z
+updated: 2026-11-14T05:53:13Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/677
-comments: 4
+comments: 6
 labels: bug, priority:high, effort:large, area:io
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: 709, 710, 711, 712, 713, 714, 715, 716, 717
-synced: 2026-11-02T08:51:40.836Z
+synced: 2026-11-14T08:34:37.892Z
 ---
 
 # [Issue 677]: [feat(io): bounded single-table output sink and end-to-end StreamWriter backpressure](https://github.com/vig-os/tessera/issues/677)
@@ -159,4 +159,28 @@ _Posted on October 29, 2026 at 12:09 PM_
 _Posted on November 2, 2026 at 03:30 AM_
 
 **Reopened: the closure was an accident.** GitHub closed this on 2026-10-29 11:43 because commit e2e9c02 (PR #692, the #681 design note) has the prose '…and closes #677 without a Vortex change' in its body, and GitHub read that as a closing keyword. Nothing has implemented #677 yet. The path is ADR-0064 (P-logical, PR #718, in review), then the implementation in sub-issues #709–#717, then the flat RSS proof on ksb (RssAnon and cgroup memory.current). This issue closes only when that has landed.
+
+---
+
+# [Comment #5]() by [gerchowl]()
+
+_Posted on November 13, 2026 at 11:56 AM_
+
+Consumer told (ADR-0064 step H, #716): https://github.com/MorePET/visionx-rs/issues/221 names the release [v0.1.0-alpha.5](https://github.com/vig-os/tessera/releases/tag/v0.1.0-alpha.5), which carries `StreamWriter::push_table`, the `pairs/NNNN` leaves (`pairs` stays the one logical name), and the measured RSS bound from #715 (peak RssAnon 218.6 MiB at 2.4 G rows, W = 4). Migration note: #842.
+
+---
+
+# [Comment #6]() by [gerchowl]()
+
+_Posted on November 14, 2026 at 05:53 AM_
+
+Confirmation from the MorePET/visionx-rs architect, 2026-11-14 (the visionx-rs#221 ask).
+
+- **What merged:** visionx-rs#41 (6e91f9d) switches the stream-memory reproducer to `StreamWriter::push_table("pairs", spec, groups)` with an exact `spec.rows`, on the `v0.1.0-alpha.5` tag plus your vortex determinism `[patch.crates-io]` (visionx-rs#226).
+- **Assertion:** the reorder diagnostic asserts `StreamStats::peak_in_flight_jobs` equals the window, read from `finish_with_stats`.
+- **Measured locally** (33,554,432 rows, W = 4, disk-backed session): exit 0, peak RssAnon about 190 MB, `peak_in_flight_jobs` = 6.
+- **Full-size run:** pending on visionx-rs#230. It uses cgroup `memory.current` as the acceptance metric (owner decision) and enforces `--memory-current-budget` inside a dedicated ksb job cgroup.
+- **One observation:** under load (12–19) on shared ext4, the three fsyncs per block in `write.rs` (file, directory, journal) dominated wall time in some runs: 395 fsyncs per run, and some runs ran about 50× slower. We documented it rather than chased it. Say if you want numbers.
+
+The visionx-rs streaming writer (#39) waits on tessera#848: unknown-length / multi-table streaming.
 
