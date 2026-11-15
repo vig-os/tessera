@@ -1,0 +1,209 @@
+# Keeps `main` equal to the latest release (#854): after every successful Release run on a tag, opens
+# the promotion PR `release/promote-<tag>` -> main. A maintainer approves and merges it; that is the
+# last step of the release checklist in docs/RELEASING.md.
+#
+# WHY A PR AND NOT A PUSH: main's ruleset (Main protection) requires a pull request with one approving
+# review and a green `nix flake check`, and forbids force-pushes; only an organization admin can bypass
+# it. No bot fast-forwards or merges main, by design, so this workflow does everything up to that
+# approval and nothing past it.
+#
+# WHY THE HEAD IS USUALLY A MERGE COMMIT: the ruleset also requires the head to be up to date with main
+# (strict status checks). After the first promotion main always has a merge commit the next tag lacks,
+# so a head that is the bare tag commit could only merge after an "Update branch", which pushes a new
+# head, dismisses the approval and restarts `nix flake check`. scripts/promotion-plan.sh decides: the
+# head is the tag commit itself when main is its ancestor, otherwise GitHub's merge API merges the tag
+# into a branch cut at main's tip. Either way the head's tree must be EXACTLY the tag's tree (checked
+# before the merge by the script and after it against what GitHub built), so merging the PR changes
+# nothing that is not in the release. A merge that conflicts or yields another tree fails the run: main
+# then holds a change the release lacks, which a human resolves.
+#
+# TRIGGER = `workflow_run` of Release, NOT `release: published`. cargo-dist's release.yml publishes the
+# GitHub Release with GITHUB_TOKEN, and events caused by GITHUB_TOKEN start no workflows, so a
+# `release: published` trigger never fires here (#438, the same reason release-nix.yml has never run on
+# its own). Only a successful `push` run counts: release.yml also runs, plan-only, on pull requests.
+# `workflow_run` is a privileged trigger, and safe here because nothing from the triggering run is
+# executed: the checkout is this workflow's own ref (the default branch), the tag is read only as git
+# objects, and the run's tag name and sha reach the script through env, never interpolated into shell.
+#
+# TOKEN: the vigos-devkit-upgrade GitHub App (org secrets DEVKIT_UPGRADE_APP_CLIENT_ID +
+# DEVKIT_UPGRADE_APP_PRIVATE_KEY, shared with this repo; devkit-upgrade.yml mints the same App), minted
+# only when there is a PR to open. The token needs `workflows: write` on top of contents + pull requests:
+# GitHub refuses an App a ref or commit that adds or changes `.github/workflows/*` without it, and a
+# release usually changes workflows relative to main. That is why it is not the release-plz App
+# (RP_APP_*, #430): its installation grants no `workflows`, and by owner decision (2026-11-15) it keeps
+# none, since the release PR it opens never touches a workflow. GITHUB_TOKEN cannot create PRs here
+# (Actions PR creation is off), and PRs it opened would start no CI. A failed mint fails the run: there
+# is no fallback token. A PR opened by the App's bot account skips the branch-name check
+# (docs/COMMIT_MESSAGE_STANDARD.md "Exemptions"), which `release/promote-v0.1.0-alpha.N` (dots) would
+# not pass. Its head adds no commit of its own (bare tag) or exactly one, GitHub's bot-authored merge.
+#
+# MANUAL RUN: `gh workflow run promote-main.yml -f tag=v<version>` re-plans for an existing release, for
+# instance after a failed run; `-f dry_run=true` prints the plan and stops before minting any token.
+name: promote-main
+
+on:  # yamllint disable-line rule:truthy
+  # Runs nothing from the triggering run (see TRIGGER above).
+  workflow_run:  # zizmor: ignore[dangerous-triggers]
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Published release tag to promote main to (v<semver>)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Print the plan only: mint no token, push no branch, open no PR'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: promote-main
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: open the promotion PR
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')
+    # GitHub-hosted on purpose (#688): this job mints the release App token, and release-credential
+    # jobs stay off the shared ksb pods.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (this workflow's ref, all history and tags)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The plan needs main's history, the tag and every release tag (the latest-release rule).
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Plan the promotion
+        id: plan
+        env:
+          # A tag push's run reports the tag name as its head branch.
+          TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
+          # The commit the Release run built; empty on a manual run.
+          EXPECT_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          scripts/promotion-plan.sh "$TAG" origin/main ${EXPECT_SHA:+"$EXPECT_SHA"} > "$RUNNER_TEMP/plan"
+          cat "$RUNNER_TEMP/plan"
+          cat "$RUNNER_TEMP/plan" >> "$GITHUB_OUTPUT"
+
+      - name: Nothing to promote
+        if: steps.plan.outputs.action == 'noop'
+        env:
+          REASON: ${{ steps.plan.outputs.reason }}
+        run: |
+          echo "::notice::$REASON"
+
+      - name: Dry run (stop here)
+        if: steps.plan.outputs.action == 'open' && inputs.dry_run
+        env:
+          BRANCH: ${{ steps.plan.outputs.branch }}
+          HEAD_KIND: ${{ steps.plan.outputs.head }}
+        run: |
+          echo "::notice::dry run: would open $BRANCH -> main (head built as '$HEAD_KIND')"
+
+      - name: Mint GitHub App token (pushes the promotion branch, opens the PR)
+        id: app-token
+        if: steps.plan.outputs.action == 'open' && !inputs.dry_run
+        # The same pin and inputs devkit-upgrade.yml mints this App with.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3
+        with:
+          client-id: ${{ secrets.DEVKIT_UPGRADE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DEVKIT_UPGRADE_APP_PRIVATE_KEY }}
+          # Least privilege: exactly what this run exercises. Create the branch (and its merge commit),
+          # open the PR; `workflows` because the promoted commits change .github/workflows/* (see TOKEN
+          # above). The App's `issues: write` is not requested.
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      - name: Open the promotion PR
+        if: steps.plan.outputs.action == 'open' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          TAG_SHA: ${{ steps.plan.outputs.tag_sha }}
+          MAIN_SHA: ${{ steps.plan.outputs.main_sha }}
+          HEAD_KIND: ${{ steps.plan.outputs.head }}
+          TREE: ${{ steps.plan.outputs.tree }}
+          BRANCH: ${{ steps.plan.outputs.branch }}
+          TITLE: ${{ steps.plan.outputs.title }}
+          RELEASE_RUN: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          existing=$(gh pr list -R "$REPO" --head "$BRANCH" --base main --state open --json url --jq '.[0].url // ""')
+          if [ -n "$existing" ]; then
+            echo "::notice::the promotion PR is already open: $existing"
+            exit 0
+          fi
+          # A leftover branch (an earlier run that failed after pushing it) is never reused unseen.
+          # Exit 2 = no such ref; any other failure is an error, not "absent".
+          rc=0
+          git ls-remote --exit-code "$SERVER/$REPO" "refs/heads/$BRANCH" >/dev/null || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::$BRANCH exists but has no open PR. Inspect it, delete it, and re-run: gh workflow run promote-main.yml -f tag=$TAG"
+            exit 1
+          elif [ "$rc" -ne 2 ]; then
+            echo "::error::could not list $BRANCH on the remote (git ls-remote exit $rc)"
+            exit 1
+          fi
+
+          if [ "$HEAD_KIND" = tag ]; then
+            gh api "repos/$REPO/git/refs" -f "ref=refs/heads/$BRANCH" -f "sha=$TAG_SHA" >/dev/null
+            head_sha=$TAG_SHA
+            how="the \`$TAG\` commit itself (main is its ancestor)"
+          else
+            gh api "repos/$REPO/git/refs" -f "ref=refs/heads/$BRANCH" -f "sha=$MAIN_SHA" >/dev/null
+            # GitHub makes (and signs) the merge commit server-side; a conflict is an HTTP error here.
+            if ! gh api "repos/$REPO/merges" -f "base=$BRANCH" -f "head=$TAG_SHA" -f "commit_message=$TITLE" \
+              > "$RUNNER_TEMP/merge.json"; then
+              # This run created $BRANCH (it did not exist above) at main's tip, and a refused merge leaves
+              # it there adding nothing: delete it, so a re-run starts clean. Only while it still points at
+              # main's tip, i.e. is exactly what this run made; anything else is left alone.
+              now=$(gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq '.object.sha' || true)
+              if [ "$now" = "$MAIN_SHA" ]; then
+                gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH"
+                echo "::error::GitHub refused to merge $TAG into main's tip ($MAIN_SHA): a conflict, or a permission the App lacks (see the response above). Deleted the $BRANCH this run created; no PR opened."
+              else
+                echo "::error::GitHub refused to merge $TAG into main's tip ($MAIN_SHA): a conflict, or a permission the App lacks (see the response above). $BRANCH now points at '${now:-unknown}', not what this run made, so it was left alone; no PR opened."
+              fi
+              exit 1
+            fi
+            head_sha=$(jq -r '.sha' "$RUNNER_TEMP/merge.json")
+            got_tree=$(jq -r '.commit.tree.sha' "$RUNNER_TEMP/merge.json")
+            if [ "$got_tree" != "$TREE" ]; then
+              echo "::error::GitHub's merge $head_sha has tree $got_tree, not $TAG's tree $TREE. Left $BRANCH for inspection; no PR opened."
+              exit 1
+            fi
+            if [ "$(jq -r '.commit.verification.verified' "$RUNNER_TEMP/merge.json")" != true ]; then
+              echo "::error::GitHub's merge $head_sha is not signature-verified. Left $BRANCH for inspection; no PR opened."
+              exit 1
+            fi
+            how="a merge of \`$TAG\` (\`$TAG_SHA\`) into main's tip (\`$MAIN_SHA\`), made and signed by GitHub"
+          fi
+
+          {
+            echo "Promotes \`main\` to the published release **$TAG**, so \`main\` keeps matching the latest release (#854)."
+            echo
+            echo "- **Head** \`$head_sha\`: $how."
+            echo "- **Tree** \`$TREE\`: exactly the \`$TAG\` tree, so merging this changes nothing that is not in the release."
+            if [ -n "$RELEASE_RUN" ]; then echo "- **Release run**: $RELEASE_RUN"; fi
+            echo
+            echo "**Maintainer step:** approve this PR and merge it with a merge commit once \`nix flake check\` is green."
+            echo "\`main\`'s ruleset requires a PR with one approving review, so no bot can merge or push \`main\`."
+            echo "Opened by \`.github/workflows/promote-main.yml\`; the release checklist is \`docs/RELEASING.md\`."
+          } > "$RUNNER_TEMP/body.md"
+          gh pr create -R "$REPO" --base main --head "$BRANCH" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"

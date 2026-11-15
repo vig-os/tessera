@@ -13,9 +13,10 @@
 #   - Ordering is SemVer, pre-releases included: v0.1.0-alpha.1 < v0.1.0-alpha.2 < v0.1.0-alpha.10
 #     < v0.1.0. A lexical sort, and `git tag --sort=v:refname` without `versionsort.suffix`, put
 #     v0.1.0 BEFORE its own pre-releases.
-#   - The ceiling exists because the tag namespace predates the software releases: `v0.1.0` and
-#     `v1.0.0-rc1` are FORMAT milestones from 2026-06 (annotated "format frozen" / "format
-#     v1.0-ready"), not software releases. release-plz only ever bumps upward, so no tag above the
+#   - The ceiling exists because the tag namespace predated the software releases: `v0.1.0` and
+#     `v1.0.0-rc1` were FORMAT milestones from 2026-06 (annotated "format frozen" / "format
+#     v1.0-ready"), not software releases. Both were deleted on 2026-11-15 (#854); the ceiling still
+#     guards against any tag above the workspace version. release-plz only ever bumps upward, so no tag above the
 #     workspace version can be the previous release of this workspace. The cap stops working once the
 #     workspace reaches 0.1.0; the namespace clash itself is #608.
 #   - Unreachable tags (a release cut from another line) are not this branch's history.
@@ -28,17 +29,9 @@ die() {
   exit 1
 }
 
-# A `v`-prefixed SemVer core with an optional pre-release; build metadata is not used by our tags.
-TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
-
-# SemVer sort of bare versions on stdin, ascending. GNU `sort -V` follows Debian ordering, where
-# `~` sorts before everything, even the end of the string; mapping the pre-release `-` to `~` makes
-# 0.1.0~alpha.1 < 0.1.0, which is SemVer's rule. Numeric runs compare numerically (alpha.2 < alpha.10).
-# Exact for our `<word>.<number>` pre-releases (alpha.N, beta.N, rc.N); NOT for SemVer's mixed rule
-# that numeric identifiers sort below alphanumeric ones (sort -V puts alpha.beta before alpha.1).
-semver_sort() {
-  sed 's/-/~/' | sort -V | sed 's/~/-/'
-}
+# TAG_RE, semver_sort, semver_le: shared with scripts/promotion-plan.sh.
+# shellcheck source-path=SCRIPTDIR source=lib/semver.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/semver.sh"
 
 # The `version` key of the `[workspace.package]` table in the given Cargo.toml.
 workspace_version() {
@@ -52,11 +45,6 @@ workspace_version() {
   [ -n "$v" ] || die "$manifest has no [workspace.package] version"
   [[ "v$v" =~ $TAG_RE ]] || die "$manifest: workspace version '$v' is not SemVer"
   printf '%s\n' "$v"
-}
-
-# Whether version $1 <= version $2 in SemVer order.
-semver_le() {
-  [ "$(printf '%s\n%s\n' "$1" "$2" | semver_sort | tail -n 1)" = "$2" ]
 }
 
 # The tag of the last release, for the repository in the current directory.

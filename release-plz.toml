@@ -1,7 +1,8 @@
 # Release pipeline — ADR-0052. release-plz drives the workspace version + CHANGELOG from conventional
 # commits. .github/workflows/release-plz.yml runs ONLY `release-plz release-pr`, which opens/updates a
 # HELD release PR (version bump + CHANGELOG); it never tags or publishes. A release is cut by merging
-# that PR and then pushing the unified `v<version>` tag on the merge commit (operator step).
+# that PR and then pushing the unified `v<version>` tag on the merge commit (operator step). The
+# release checklist, through the `main` promotion PR (#854), is docs/RELEASING.md.
 #
 # BASELINE: release-plz compares against the LAST `v*` RELEASE TAG (checked out and passed as
 # `--registry-manifest-path`), not against crates.io (#606). Tessera's crates are deliberately not
