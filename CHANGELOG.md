@@ -55,15 +55,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer be built with a struct literal outside `tessera-core` (use `Manifest::new`). `Manifest::from_json`
   (and `read_manifest_unverified`) refuse duplicate keys too. The wasm `verify_signature` now verifies the
   manifest's seal before the signature (#573).
-- **Breaking for writer output and for `tessera-io` sink types:** vortex moves from 0.75 to 0.93.0, pinned to the
-  fork `gerchowl/vortex@5c55cf7` (0.93.0 plus the #468 fix, which upstream hasn't merged; the #472 fix shipped
-  upstream in 0.89.0). The sealed bytes of **table** blocks change, and so do `content_hash` and `manifest_hash` of
-  products that hold one: vortex 0.93 writes column statistics as a `vortex.zoned` zone map without `sum` or
-  `*_is_truncated`. Column encodings are unchanged. Array, blob and empty products are byte-identical. Products
-  written before still read. The table writer enables the frozen vortex edition `table::TABLE_EDITION`
-  (`core2026.08.3`) and keeps vortex 0.75's codec set (ALP, ALPRD, integer Pco, Delta and OnPair excluded). The
-  sink of `table::encode_streaming_to` and `TableStreamWriter::finish_to` must now be `Send`, because vortex's
-  writer requires it (#635).
+- **Format event (table blocks), breaking for writer output and for `tessera-io` sink types:** vortex moves from
+  0.75 to 0.93.0, pinned to the fork `gerchowl/vortex@5c55cf7` (0.93.0 plus the #468 fix, which upstream hasn't
+  merged; the #472 fix shipped upstream in 0.89.0). Vortex 0.93 writes column statistics as a `vortex.zoned` zone
+  map instead of `vortex.stats`, with no `sum` or `*_is_truncated`. Column encodings are unchanged. So the sealed
+  bytes of **table** blocks change, and re-ingesting or re-building the same input gives a new `content_hash` and
+  `manifest_hash` for every product that holds one. Table blocks are 5–10 % smaller. Array, blob and table-free
+  products are byte-identical. Products written by 0.75 still open, read and verify. The table writer enables the
+  frozen vortex edition `table::TABLE_EDITION` (`core2026.08.3`) and keeps vortex 0.75's codec set (Pco, with ALP,
+  ALPRD, integer Pco, Delta and OnPair excluded). The corpus goldens (`corpus/corpus.json`, `corpus/files`,
+  `corpus/ingest-corpus.json`, the `logical_tables` walkthrough's `scan.tsra`) are regenerated. ADR-0024 records the
+  event. The sink of `table::encode_streaming_to` and `TableStreamWriter::finish_to` must now be `Send`, because
+  vortex's writer requires it (#635).
 
 - **Breaking for writer output, `tessera-io` / `tessera-ingest`:** a table above `BLOCK_ROWS` rows is written as the
   leaves `<table>/0000`, `<table>/0001`, … (`events/0000` for GE listmode), each carrying the partition marker
