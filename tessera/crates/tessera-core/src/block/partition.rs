@@ -227,6 +227,14 @@ pub enum StreamedTableError {
         /// The duplicated sequence number.
         seq: u64,
     },
+    /// A sequenced input was given a `seq` below its first sequence number, which no batch has.
+    #[error("batch {seq} is below the first sequence number, {first_seq}")]
+    BeforeFirst {
+        /// The refused sequence number.
+        seq: u64,
+        /// The input's first sequence number.
+        first_seq: u64,
+    },
     /// A sequenced input was given a `seq` at or past its hard horizon, `next + max_ahead`.
     #[error("batch {seq} is too far ahead of the next one due, {next} (max_ahead {max_ahead})")]
     TooFarAhead {
@@ -272,6 +280,10 @@ pub enum StreamedTableError {
         /// The sequence number that never came.
         next: u64,
     },
+    /// A sequenced input was still open, or was dropped without being closed, when its writer
+    /// was finished: its rows aren't all committed, so nothing is sealed.
+    #[error("the sequenced table was never closed")]
+    NotClosed,
     /// Releasing a sequenced input's batches into its table failed.
     #[error("releasing a batch failed: {cause}")]
     Failed {

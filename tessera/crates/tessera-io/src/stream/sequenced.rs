@@ -105,11 +105,29 @@ pub struct SequencedStats {
 /// What the releasing side of one lane holds, behind the lock that orders its appends.
 struct Release {
     table: OpenTable,
-    /// Admitted batches waiting for an earlier one, by their index from `first_seq` (`None` for
+    /// Admitted batches waiting for an earlier one, by their `seq` (`None` for
     /// [`SequencedTable::mark_done`]).
-    waiting: BTreeMap<usize, Option<TableData>>,
-    /// The index of the next batch due.
-    next: usize,
+    waiting: BTreeMap<u64, Option<TableData>>,
+    /// The next `seq` due; `None` once `u64::MAX` was released.
+    next: Option<u64>,
+    /// The batches released so far.
+    released: u64,
+}
+
+/// A [`SequencedTable`]'s place in its writer's ordering gate. Dropped before a successful
+/// [`SequencedTable::close`] marked the lane closed, it poisons the writer with
+/// [`StreamedTableError::NotClosed`].
+struct LaneHandle {
+    gate: Arc<CreditWindow>,
+    lane: usize,
+}
+
+impl Drop for LaneHandle {
+    fn drop(&mut self) {
+        if self.gate.unclosed_lane(self.lane) {
+            self.gate.poison(self.lane, StreamedTableError::NotClosed);
+        }
+    }
 }
 
 /// A table lane fed by many threads with numbered batches (ADR-0065 §7.2–§7.3, #812), opened
@@ -123,13 +141,21 @@ struct Release {
 ///
 /// **The gate.** A push of the next due `seq` (`next`) is never held. Any other push is admitted
 /// while `seq < next + window` and the batches waiting ahead on all the writer's sequenced
-/// inputs hold less than the byte credit, the writer's
-/// [`crate::StreamWindow::max_in_flight_bytes`], and waits otherwise until `next` advances (or is
+/// inputs hold less than the byte credit, and waits otherwise until `next` advances (or is
 /// refused at once in [`SequencedOptions::refuse_instead_of_block`] mode). So a lane holds at
 /// most `window` batches ahead of a slow thread, and all lanes together less than the credit plus
 /// the last batch admitted, plus each lane's due batch, which the credit never holds. The gate is
 /// a second credit window of the writer, the type that bounds its encodes, with that rule keyed
 /// to each lane's `next`.
+///
+/// **The byte credit** is the writer's [`crate::StreamWindow::max_in_flight_bytes`], the same
+/// budget its encode window holds encoded payloads to: one value bounds two pools of equal size,
+/// the batches waiting at this gate (their in-memory column bytes) and the encoded blocks waiting
+/// for their commit. ADR-0065 §7.2 gives each pool half of a session's `ram_budget_bytes`, so a
+/// caller holding that budget sets `max_in_flight_bytes = ram_budget_bytes / 2`. Both are soft
+/// bounds: each pool can pass its half by what it admits last (a batch here, the encodes in
+/// progress there) and by the batch or job it never holds back (each lane's due batch, the job
+/// the committer waits on). An unequal split can't be expressed.
 ///
 /// **Release.** The push that makes a contiguous run due releases it on its own thread, under
 /// one lock per lane that orders the appends, into an [`OpenTable`] on the lane: the rows are
@@ -145,17 +171,24 @@ struct Release {
 /// this uses refuse mode. A lost `seq` (a thread that died) is ended by [`Self::abort`] or by
 /// the stall deadline.
 ///
-/// **Failure.** Every refusal is terminal and **poisons every sequenced input of the writer**
-/// (they share the byte credit): it wakes every waiting push, and every later call returns the
-/// same [`Error::StreamedTable`], naming the table where it happened. The reasons
-/// ([`StreamedTableError`]): `Duplicate` (a `seq` below `next` or already entered: a push
-/// reserves its `seq` on entry, so two pushes of one `seq` are caught even while one waits),
+/// **Failure.** Every refusal is terminal and **poisons the writer** (ADR-0065 §7.2: every
+/// refusal poisons the session): it wakes every waiting push, every later call on any of the
+/// writer's sequenced inputs and every later push on the writer (an [`OpenTable`]'s, a job's)
+/// returns the same [`Error::StreamedTable`], naming the table where it happened, the writer's
+/// pipeline is closed, and [`StreamWriter::finish`] returns it and seals nothing. The reasons
+/// ([`StreamedTableError`]): `BeforeFirst` (a `seq` below `first_seq`), `Duplicate` (a `seq`
+/// below `next` or already entered: a push reserves its `seq` on entry, so two pushes of one
+/// `seq` are caught even while one waits; once `u64::MAX` was released, every `seq`),
 /// `TooFarAhead`, `WouldBlock`, `Missing` and `CountMismatch` (at close), `Aborted`, `Stalled`,
-/// and `Failed` (releasing a batch into the table failed). A dead pipeline wakes every waiter
-/// with the pipeline's own error. A batch whose columns don't match the spec is refused before
-/// its `seq` is entered, and poisons nothing. A poisoned input abandons its table as an
-/// [`OpenTable`] error does, so [`StreamWriter::finish`] must not be called after one: a table
-/// that never filled its first leaf would be sealed without it.
+/// `Failed` (releasing a batch into the table failed), and `NotClosed` (the input was dropped
+/// before a successful [`Self::close`]; a still-open input fails `finish` with it too). A dead
+/// pipeline wakes every waiter with the pipeline's own error. A batch whose column names, order
+/// or lengths don't match the spec is refused before its `seq` is entered, and poisons nothing.
+///
+/// The poison lives in the writer, not on disk: the session directory still journals the leaves
+/// committed before it, which [`crate::WriteSession::recover`] replays as it replays any
+/// interrupted run (a prefix of whole leaves, not the run; ADR-0065 §5 keeps recovery out of the
+/// bridge for that reason).
 ///
 /// One sequenced input per lane, and nothing else pushed on its lane: other jobs on the lane
 /// would interleave with its leaves by timing.
@@ -163,8 +196,7 @@ struct Release {
 pub struct SequencedTable {
     name: String,
     /// The writer's ordering gate, and this input's lane in it.
-    gate: Arc<CreditWindow>,
-    lane: usize,
+    handle: LaneHandle,
     spec: TableSpec,
     release: Mutex<Release>,
 }
@@ -177,7 +209,8 @@ impl StreamWriter {
     /// # Errors
     ///
     /// [`Error::Invalid`] for options outside the ranges of [`SequencedOptions`], or a lane that
-    /// already had a sequenced input on this writer; the errors of [`Self::open_table`].
+    /// already had a sequenced input on this writer; the errors of [`Self::open_table`]; the
+    /// writer's refusal once a sequenced input poisoned it.
     pub fn open_sequenced_table_on(
         &self,
         lane: Lane,
@@ -192,13 +225,16 @@ impl StreamWriter {
         let id = self.order.add_lane(lane, name.clone(), options)?;
         Ok(SequencedTable {
             name,
-            gate: Arc::clone(&self.order),
-            lane: id,
+            handle: LaneHandle {
+                gate: Arc::clone(&self.order),
+                lane: id,
+            },
             spec,
             release: Mutex::new(Release {
                 table,
                 waiting: BTreeMap::new(),
-                next: 0,
+                next: Some(options.first_seq),
+                released: 0,
             }),
         })
     }
@@ -231,17 +267,18 @@ impl SequencedTable {
         self.enter(writer, seq, 0, None)
     }
 
-    /// Fail the writer's sequenced inputs with [`StreamedTableError::Aborted`], from any thread,
-    /// waking every waiting push: the way out for a producer that lost a `seq`.
+    /// Poison the writer with [`StreamedTableError::Aborted`], from any thread, waking every
+    /// waiting push: the way out for a producer that lost a `seq`.
     pub fn abort(&self, reason: impl Into<String>) {
         let reason = reason.into();
-        self.gate
-            .poison(self.lane, StreamedTableError::Aborted { reason });
+        self.handle
+            .gate
+            .poison(self.handle.lane, StreamedTableError::Aborted { reason });
     }
 
     /// The gate's high-water marks for this input.
     pub fn stats(&self) -> SequencedStats {
-        self.gate.sequenced_stats(self.lane)
+        self.handle.gate.sequenced_stats(self.handle.lane)
     }
 
     /// End the input once every push has returned: check that no `seq` below the largest one
@@ -253,43 +290,41 @@ impl SequencedTable {
     ///
     /// [`StreamedTableError::Missing`] naming the first missing `seq`,
     /// [`StreamedTableError::CountMismatch`], an earlier refusal, and the errors of
-    /// [`OpenTable::close`]. Every error poisons the writer's sequenced inputs.
+    /// [`OpenTable::close`]; [`Error::Invalid`] for another writer. Every error poisons the
+    /// writer, since the input is consumed unclosed (another writer's included:
+    /// [`StreamedTableError::NotClosed`]).
     pub fn close(self, writer: &StreamWriter, expected_count: Option<u64>) -> Result<u64> {
         self.check(writer)?;
         let SequencedTable {
-            gate,
-            lane,
-            release,
-            ..
+            handle, release, ..
         } = self;
+        let (gate, lane) = (&handle.gate, handle.lane);
         gate.refusal().map_or(Ok(()), Err)?;
         let release = release
             .into_inner()
-            .map_err(|_| fail(&gate, lane, released_panic()))?;
-        let next = release.next as u64;
-        let refused = if !release.waiting.is_empty() {
-            Some(StreamedTableError::Missing {
-                seq: gate.first_seq(lane) + next,
-            })
-        } else {
-            expected_count
-                .filter(|&expected| expected != next)
+            .map_err(|_| fail(gate, lane, released_panic()))?;
+        let refused = match release.next {
+            Some(seq) if !release.waiting.is_empty() => Some(StreamedTableError::Missing { seq }),
+            _ => expected_count
+                .filter(|&expected| expected != release.released)
                 .map(|expected| StreamedTableError::CountMismatch {
                     expected,
-                    pushed: next,
-                })
+                    pushed: release.released,
+                }),
         };
         if let Some(reason) = refused {
             return Err(gate.poison(lane, reason));
         }
-        release
+        let leaves = release
             .table
             .close_in(writer)
-            .map_err(|e| fail(&gate, lane, e))
+            .map_err(|e| fail(gate, lane, e))?;
+        gate.close_lane(lane);
+        Ok(leaves)
     }
 
     fn check(&self, writer: &StreamWriter) -> Result<()> {
-        if Arc::ptr_eq(&self.gate, &writer.order) {
+        if Arc::ptr_eq(&self.handle.gate, &writer.order) {
             Ok(())
         } else {
             Err(Error::Invalid(format!(
@@ -300,7 +335,7 @@ impl SequencedTable {
     }
 
     fn fail(&self, e: Error) -> Error {
-        fail(&self.gate, self.lane, e)
+        fail(&self.handle.gate, self.handle.lane, e)
     }
 
     fn enter(
@@ -310,20 +345,24 @@ impl SequencedTable {
         bytes: u64,
         batch: Option<TableData>,
     ) -> Result<()> {
-        let index = self.gate.admit(self.lane, seq, bytes)?;
+        let (gate, lane) = (&self.handle.gate, self.handle.lane);
+        gate.admit(lane, seq, bytes)?;
         let mut release = match self.release.lock() {
             Ok(release) => release,
             Err(_) => return Err(self.fail(released_panic())),
         };
-        release.waiting.insert(index, batch);
+        release.waiting.insert(seq, batch);
         loop {
-            let next = release.next;
+            let Some(next) = release.next else {
+                return Ok(());
+            };
             let Some(batch) = release.waiting.remove(&next) else {
                 return Ok(());
             };
-            release.next += 1;
-            self.gate.release(
-                self.lane,
+            release.next = next.checked_add(1);
+            release.released += 1;
+            gate.release(
+                lane,
                 Held {
                     ram: bytes_of(&batch),
                     staged: 0,
@@ -336,7 +375,7 @@ impl SequencedTable {
     }
 }
 
-/// Poison the gate's inputs with [`StreamedTableError::Failed`] on `lane` and return `e` itself.
+/// Poison the writer with [`StreamedTableError::Failed`] on `lane` and return `e` itself.
 fn fail(gate: &CreditWindow, lane: usize, e: Error) -> Error {
     let cause = e.to_string();
     gate.poison(lane, StreamedTableError::Failed { cause });
@@ -689,6 +728,181 @@ mod tests {
             });
             assert_eq!(t.close(&sw, Some(3)).unwrap(), 1);
         });
+    }
+
+    /// The refusal `finish` returned, and that it wrote no product.
+    fn finish_refuses(sw: StreamWriter, dir: &Path) -> StreamedTableError {
+        let out = dir.join("out.tsra");
+        let err = reason(sw.finish(&out).unwrap_err());
+        assert!(!out.exists(), "nothing sealed");
+        err
+    }
+
+    #[test]
+    fn a_refusal_poisons_the_writer_so_finish_seals_nothing() {
+        // Seq 0 never fills a leaf, so its rows exist only in the table's staging, which the
+        // failed close abandons: a finish that ignored the refusal would seal no events table.
+        let dir = tempfile::tempdir().unwrap();
+        let sw = writer(dir.path(), StreamWindow::new(8, u64::MAX));
+        let t = open(&sw, options(4));
+        t.push(&sw, 0, listmode::rows(0, 3)).unwrap();
+        t.abort("lost seq 1");
+        let aborted = StreamedTableError::Aborted {
+            reason: "lost seq 1".into(),
+        };
+        assert_eq!(reason(t.close(&sw, None).unwrap_err()), aborted);
+        // The writer is poisoned, not just the input: its other lanes refuse too.
+        let job = Job::InMemory(Box::new(|| unreachable!("never admitted")));
+        let other = sw.submit(&Lane::Arrays, job, false).unwrap_err();
+        assert_eq!(reason(other), aborted);
+        assert_eq!(finish_refuses(sw, dir.path()), aborted);
+    }
+
+    #[test]
+    fn a_sequenced_table_not_closed_at_finish_fails_it() {
+        // Dropped without close: the drop poisons the writer.
+        let dir = tempfile::tempdir().unwrap();
+        let sw = writer(dir.path(), StreamWindow::new(8, u64::MAX));
+        let t = open(&sw, options(4));
+        t.push(&sw, 0, listmode::rows(0, 3)).unwrap();
+        drop(t);
+        assert_eq!(
+            reason(
+                sw.open_sequenced_table_on(
+                    Lane::table("hits"),
+                    "hits",
+                    listmode::spec(0),
+                    options(4)
+                )
+                .err()
+                .unwrap()
+            ),
+            StreamedTableError::NotClosed,
+            "poisoned"
+        );
+        assert_eq!(
+            finish_refuses(sw, dir.path()),
+            StreamedTableError::NotClosed
+        );
+        // Still open: `finish` checks every lane it opened.
+        let dir = tempfile::tempdir().unwrap();
+        let sw = writer(dir.path(), StreamWindow::new(8, u64::MAX));
+        let t = open(&sw, options(4));
+        t.push(&sw, 0, listmode::rows(0, 3)).unwrap();
+        assert_eq!(
+            finish_refuses(sw, dir.path()),
+            StreamedTableError::NotClosed
+        );
+        drop(t);
+    }
+
+    #[test]
+    fn a_seq_below_first_seq_is_refused_as_before_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let sw = writer(dir.path(), StreamWindow::new(8, u64::MAX));
+        let t = open(
+            &sw,
+            SequencedOptions {
+                first_seq: 10,
+                ..options(4)
+            },
+        );
+        let before = reason(t.mark_done(&sw, 9).unwrap_err());
+        assert_eq!(
+            before,
+            StreamedTableError::BeforeFirst {
+                seq: 9,
+                first_seq: 10
+            }
+        );
+        assert_eq!(
+            reason(t.mark_done(&sw, 10).unwrap_err()),
+            before,
+            "poisoned"
+        );
+    }
+
+    #[test]
+    fn the_last_sequence_numbers_release_without_overflow() {
+        // `u64::MAX - 1` and `u64::MAX`, out of order: both seal, and `next` runs out.
+        let dir = tempfile::tempdir().unwrap();
+        let sw = writer(dir.path(), StreamWindow::new(8, u64::MAX));
+        let opts = SequencedOptions {
+            first_seq: u64::MAX - 1,
+            ..options(4)
+        };
+        let t = open(&sw, opts);
+        t.push(&sw, u64::MAX, listmode::rows(2, 3)).unwrap();
+        t.push(&sw, u64::MAX - 1, listmode::rows(0, 2)).unwrap();
+        assert_eq!(t.close(&sw, Some(2)).unwrap(), 1);
+        let m = sw.finish(&dir.path().join("out.tsra")).unwrap();
+        // The same rows in order through an open table on the lane.
+        let ws = WriteSession::create(&dir.path().join("ref"), "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::new(ws, 2, 4);
+        let mut table = sw
+            .open_table_on(Lane::table("events"), "events", listmode::spec(0))
+            .unwrap();
+        table.push(&mut sw, listmode::rows(0, 5)).unwrap();
+        table.close(&mut sw).unwrap();
+        let reference = sw.finish(&dir.path().join("ref.tsra")).unwrap();
+        assert_eq!(m.content_hash, reference.content_hash);
+        // Past the last number every seq was pushed: a duplicate, not an overflow.
+        let dir = tempfile::tempdir().unwrap();
+        let sw = writer(dir.path(), StreamWindow::new(8, u64::MAX));
+        let t = open(&sw, opts);
+        t.mark_done(&sw, u64::MAX - 1).unwrap();
+        t.mark_done(&sw, u64::MAX).unwrap();
+        let dup = reason(t.mark_done(&sw, u64::MAX).unwrap_err());
+        assert_eq!(dup, StreamedTableError::Duplicate { seq: u64::MAX });
+    }
+
+    #[test]
+    fn every_advance_of_next_restarts_the_stall_deadline() {
+        // A push of 4 waits (window 1) for 1.35 deadlines in all, while `next` advances every
+        // 0.45 (each sleep has 1.1 s of slack): a deadline counted from the push's entry would
+        // fire between the advances.
+        const STALL: Duration = Duration::from_millis(2000);
+        let opts = SequencedOptions {
+            stall_timeout: STALL,
+            ..options(1)
+        };
+        no_hang(move || {
+            let dir = tempfile::tempdir().unwrap();
+            let sw = writer(dir.path(), StreamWindow::new(8, u64::MAX));
+            let t = open(&sw, opts);
+            thread::scope(|s| {
+                let blocked = s.spawn(|| t.mark_done(&sw, 4));
+                until_blocked(&t, 1);
+                let entered = std::time::Instant::now();
+                for seq in 0..4 {
+                    if seq < 3 {
+                        thread::sleep(STALL * 9 / 20);
+                    }
+                    t.mark_done(&sw, seq).unwrap();
+                }
+                blocked.join().unwrap().unwrap();
+                assert!(entered.elapsed() > STALL, "waited past one deadline");
+            });
+            assert_eq!(t.close(&sw, Some(5)).unwrap(), 1);
+        });
+    }
+
+    #[test]
+    fn a_failed_release_poisons_the_writer_as_failed() {
+        // The table's staging directory is gone: releasing seq 0, a whole row-group, can't stage
+        // its rows.
+        let dir = tempfile::tempdir().unwrap();
+        let sw = writer(dir.path(), StreamWindow::new(8, u64::MAX));
+        let t = open(&sw, options(4));
+        std::fs::remove_dir_all(dir.path().join("stage").join("staging")).unwrap();
+        let io = t.push(&sw, 0, listmode::rows(0, RPG as usize)).unwrap_err();
+        assert!(matches!(io, Error::Io(_)), "the release's own error: {io}");
+        let failed = StreamedTableError::Failed {
+            cause: io.to_string(),
+        };
+        assert_eq!(reason(t.mark_done(&sw, 1).unwrap_err()), failed);
+        assert_eq!(reason(t.close(&sw, Some(2)).unwrap_err()), failed);
+        assert_eq!(finish_refuses(sw, dir.path()), failed);
     }
 
     #[test]

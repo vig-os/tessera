@@ -57,12 +57,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   threads push numbered batches into (`push(&self, writer, seq, batch)`, `mark_done`, `close(expected_count)`), sealed
   byte for byte as the batches in `seq` order whatever order they arrive in (ADR-0065 §7.2–§7.3, #812). Its gate is a
   second credit window of the writer: the due `seq` is never held, others wait while `seq >= next + window` or the
-  shared byte credit (the writer's `max_in_flight_bytes`) is held, or are refused in `refuse_instead_of_block` mode.
-  A duplicate, a `seq` past `max_ahead`, a gap or count mismatch at close, `abort`, the finite stall deadline
-  (default 10 minutes, at most `MAX_STALL_TIMEOUT` = 24 hours) and a dead pipeline each wake every waiting push with
-  an error; `SequencedOptions` and `SequencedStats` configure and observe it. `tessera-core` adds the
-  `StreamedTableError` reasons `Duplicate`, `TooFarAhead`, `WouldBlock`, `Missing`, `CountMismatch`, `Aborted`,
-  `Stalled` and `Failed`.
+  shared byte credit (the writer's `max_in_flight_bytes`, the encode window's budget, so a caller holding a RAM budget
+  sets it to half) is held, or are refused in `refuse_instead_of_block` mode. A `seq` below `first_seq`, a
+  duplicate, a `seq` past `max_ahead`, a gap or count mismatch at close, `abort`, the finite stall deadline (default
+  10 minutes, at most `MAX_STALL_TIMEOUT` = 24 hours) and a dead pipeline each wake every waiting push with an error.
+  Every refusal poisons the writer: its other pushes return it, and `finish` returns it and seals nothing, as it does
+  for a sequenced table still open or dropped unclosed (`NotClosed`). `SequencedOptions` and `SequencedStats`
+  configure and observe it. `tessera-core` adds the `StreamedTableError` reasons `Duplicate`, `BeforeFirst`,
+  `TooFarAhead`, `WouldBlock`, `Missing`, `CountMismatch`, `Aborted`, `Stalled`, `Failed` and `NotClosed`.
 
 ### Changed
 

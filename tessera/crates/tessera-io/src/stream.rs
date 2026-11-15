@@ -82,7 +82,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -437,17 +437,22 @@ struct WindowState {
     stats: StreamStats,
     /// The ordering gate's lanes, by index (#812): empty in a writer's encode window.
     order: Vec<LaneGate>,
-    /// The ordering gate's first refusal, with the table it happened on: every waiter and every
-    /// later admission returns it.
+    /// The writer's first refusal by a sequenced input, with the table it happened on, held by
+    /// both the ordering gate and the encode window (ADR-0065 §7.2: every refusal poisons the
+    /// session): every waiter, every later admission and [`StreamWriter::finish`] return it.
     poison: Option<(String, StreamedTableError)>,
 }
 
-/// One [`SequencedTable`]'s state in the writer's ordering gate. Its `next` is the window's
-/// `next_commit` of the lane, counted from `options.first_seq`.
+/// One [`SequencedTable`]'s state in the writer's ordering gate.
 struct LaneGate {
     lane: Lane,
     name: String,
     options: SequencedOptions,
+    /// The next sequence number due; `None` once `u64::MAX` was released, when no number is left.
+    next: Option<u64>,
+    /// Set by a successful [`SequencedTable::close`]: [`StreamWriter::finish`] refuses while a
+    /// lane isn't.
+    closed: bool,
     /// The sequence numbers entered and not yet released (waiting, admitted or being released).
     reserved: BTreeSet<u64>,
     /// Of those, the batches admitted.
@@ -465,14 +470,13 @@ struct CreditWindow {
     changed: Condvar,
     /// A window closed with this one: the writer's ordering gate, which a dead pipeline closes.
     cascade: Option<Arc<CreditWindow>>,
+    /// The window this one's refusals poison: the ordering gate's encode window (a `Weak`, as
+    /// that window owns the gate through `cascade`).
+    upstream: Weak<CreditWindow>,
 }
 
 impl CreditWindow {
     fn new(limits: StreamWindow, workers: usize) -> Self {
-        Self::cascading(limits, workers, None)
-    }
-
-    fn cascading(limits: StreamWindow, workers: usize, cascade: Option<Arc<Self>>) -> Self {
         CreditWindow {
             limits,
             workers,
@@ -492,8 +496,24 @@ impl CreditWindow {
                 poison: None,
             }),
             changed: Condvar::new(),
-            cascade,
+            cascade: None,
+            upstream: Weak::new(),
         }
+    }
+
+    /// A writer's encode window with `limits`, and its ordering gate (#812) as `cascade`: closing
+    /// the window closes the gate, and the gate's refusals poison the window.
+    fn with_order(limits: StreamWindow, workers: usize) -> Arc<Self> {
+        // The sequenced inputs' byte credit is the encode window's byte budget; their per-lane
+        // windows are counted by the gate itself.
+        let order_limits = StreamWindow::new(usize::MAX, limits.max_in_flight_bytes);
+        Arc::new_cyclic(|window| CreditWindow {
+            cascade: Some(Arc::new(CreditWindow {
+                upstream: window.clone(),
+                ..CreditWindow::new(order_limits, 0)
+            })),
+            ..CreditWindow::new(limits, workers)
+        })
     }
 
     /// The state is plain counters updated under the lock without any panicking code, so a
@@ -518,8 +538,8 @@ impl CreditWindow {
         }
         let mut stalled = false;
         loop {
-            if st.closed {
-                return Err(closed_error());
+            if let Some(e) = Self::refused(&st) {
+                return Err(e);
             }
             // With no job in flight no bytes are held, so an empty window always admits.
             if st.in_flight_jobs < self.limits.max_in_flight
@@ -618,14 +638,17 @@ impl CreditWindow {
         st.in_flight_jobs -= 1;
         st.in_flight_bytes -= held.ram;
         st.staged_bytes -= held.staged;
-        let next = st.next_commit[lane];
         if let Some(gate) = st.order.get_mut(lane) {
-            gate.reserved
-                .remove(&(gate.options.first_seq + next as u64));
+            // The ordering gate: release the lane's due batch (admitted, so `next` is `Some`).
+            if let Some(next) = gate.next {
+                gate.reserved.remove(&next);
+                gate.next = next.checked_add(1);
+            }
             gate.admitted -= 1;
             gate.last_advance = Instant::now();
+        } else {
+            st.next_commit[lane] += 1;
         }
-        st.next_commit[lane] += 1;
         st.stats.jobs_committed += 1;
         drop(st);
         self.changed.notify_all();
@@ -643,16 +666,20 @@ impl CreditWindow {
     /// The ordering gate (#812): add the lane of a [`SequencedTable`], one per [`Lane`].
     fn add_lane(&self, lane: Lane, name: String, options: SequencedOptions) -> Result<usize> {
         let mut st = self.lock();
+        if let Some(e) = Self::refused(&st) {
+            return Err(e);
+        }
         if st.order.iter().any(|gate| gate.lane == lane) {
             return Err(Error::Invalid(format!(
                 "sequenced table '{name}': its lane {lane:?} already has a sequenced input"
             )));
         }
-        st.next_commit.push(0);
         st.order.push(LaneGate {
             lane,
             name,
             options,
+            next: Some(options.first_seq),
+            closed: false,
             reserved: BTreeSet::new(),
             admitted: 0,
             last_advance: Instant::now(),
@@ -662,20 +689,28 @@ impl CreditWindow {
     }
 
     /// The ordering gate: enter batch `seq` of `lane`, holding `bytes`, and wait for its
-    /// admission (see [`SequencedTable`]). Returns its index from the lane's `first_seq`.
-    fn admit(&self, lane: usize, seq: u64, bytes: u64) -> Result<usize> {
+    /// admission (see [`SequencedTable`]).
+    fn admit(&self, lane: usize, seq: u64, bytes: u64) -> Result<()> {
         let entered = Instant::now();
         let mut st = self.lock();
         if let Some(e) = Self::refused(&st) {
             return Err(e);
         }
         let gate = &st.order[lane];
-        let (first, o) = (gate.options.first_seq, gate.options);
-        let next = first + st.next_commit[lane] as u64;
-        let horizon = o.horizon() as u64;
-        if seq < next || gate.reserved.contains(&seq) {
-            return Err(self.poison_locked(st, lane, StreamedTableError::Duplicate { seq }));
+        let o = gate.options;
+        if seq < o.first_seq {
+            let reason = StreamedTableError::BeforeFirst {
+                seq,
+                first_seq: o.first_seq,
+            };
+            return Err(self.poison_locked(st, lane, reason));
         }
+        // `None`: every number up to `u64::MAX` was released, so `seq` was pushed before.
+        let next = match gate.next {
+            Some(next) if seq >= next && !gate.reserved.contains(&seq) => next,
+            _ => return Err(self.poison_locked(st, lane, StreamedTableError::Duplicate { seq })),
+        };
+        let horizon = o.horizon() as u64;
         if seq - next >= horizon {
             let reason = StreamedTableError::TooFarAhead {
                 seq,
@@ -690,8 +725,11 @@ impl CreditWindow {
             if let Some(e) = Self::refused(&st) {
                 return Err(e);
             }
-            // `next` can't pass `seq` while it waits: `seq` is reserved and not yet released.
-            let next = first + st.next_commit[lane] as u64;
+            // `next` can't pass `seq` while it waits: `seq` is reserved and not yet released, so
+            // `next` is a number at most `seq`.
+            let next = st.order[lane]
+                .next
+                .expect("a reserved seq is not yet released");
             if seq == next
                 || (seq - next < o.window as u64
                     && st.in_flight_bytes < self.limits.max_in_flight_bytes)
@@ -726,10 +764,10 @@ impl CreditWindow {
         gate.admitted += 1;
         gate.stats.peak_admitted = gate.stats.peak_admitted.max(gate.admitted);
         gate.stats.peak_admitted_bytes = peak_bytes;
-        Ok((seq - first) as usize)
+        Ok(())
     }
 
-    /// The ordering gate's refusal, once it refused or the pipeline died.
+    /// The window's refusal once it is closed: its poison, or the dead pipeline's error.
     fn refused(st: &WindowState) -> Option<Error> {
         match &st.poison {
             Some((name, reason)) => Some(Error::StreamedTable {
@@ -744,8 +782,15 @@ impl CreditWindow {
         Self::refused(&self.lock())
     }
 
-    /// Poison the ordering gate with `reason` on `lane` (unless it already refused), wake every
-    /// waiter, and return the gate's refusal.
+    /// The poison alone: the first refusal of a sequenced input, if there was one.
+    fn poisoned(&self) -> Option<Error> {
+        let st = self.lock();
+        st.poison.as_ref().and_then(|_| Self::refused(&st))
+    }
+
+    /// Poison the ordering gate with `reason` on `lane` (unless it already refused or the
+    /// pipeline died), wake every waiter, poison the encode window with it too, and return the
+    /// gate's refusal.
     fn poison(&self, lane: usize, reason: StreamedTableError) -> Error {
         self.poison_locked(self.lock(), lane, reason)
     }
@@ -756,18 +801,53 @@ impl CreditWindow {
         lane: usize,
         reason: StreamedTableError,
     ) -> Error {
-        if st.poison.is_none() && !st.closed {
-            st.poison = Some((st.order[lane].name.clone(), reason));
+        let first =
+            (st.poison.is_none() && !st.closed).then(|| (st.order[lane].name.clone(), reason));
+        if first.is_some() {
+            st.poison.clone_from(&first);
         }
         st.closed = true;
         let e = Self::refused(&st).expect("closed");
         drop(st);
         self.changed.notify_all();
+        if let (Some(poison), Some(window)) = (first, self.upstream.upgrade()) {
+            window.poison_with(poison);
+        }
         e
     }
 
-    fn first_seq(&self, lane: usize) -> u64 {
-        self.lock().order[lane].options.first_seq
+    /// Hold `poison` as this (encode) window's refusal, unless the pipeline already died, and
+    /// close it: every waiter and every later push return it.
+    fn poison_with(&self, poison: (String, StreamedTableError)) {
+        {
+            let mut st = self.lock();
+            if st.poison.is_none() && !st.closed {
+                st.poison = Some(poison);
+            }
+        }
+        self.close();
+    }
+
+    /// A successful [`SequencedTable::close`] of `lane`.
+    fn close_lane(&self, lane: usize) {
+        self.lock().order[lane].closed = true;
+    }
+
+    /// Whether `lane` was never closed (see [`Self::close_lane`]).
+    fn unclosed_lane(&self, lane: usize) -> bool {
+        !self.lock().order[lane].closed
+    }
+
+    /// [`StreamedTableError::NotClosed`] for the first sequenced input that was never closed.
+    fn unclosed(&self) -> Option<Error> {
+        self.lock()
+            .order
+            .iter()
+            .find(|gate| !gate.closed)
+            .map(|gate| Error::StreamedTable {
+                name: gate.name.clone(),
+                reason: StreamedTableError::NotClosed,
+            })
     }
 
     fn sequenced_stats(&self, lane: usize) -> SequencedStats {
@@ -1263,15 +1343,13 @@ impl StreamWriter {
     /// credit `window`.
     pub fn with_window(session: WriteSession, workers: usize, window: StreamWindow) -> Self {
         let workers = workers.max(1);
-        // The sequenced inputs' byte credit is the encode window's byte budget; their per-lane
-        // windows are counted by the gate itself.
-        let order_limits = StreamWindow::new(usize::MAX, window.max_in_flight_bytes);
-        let order = Arc::new(CreditWindow::new(order_limits, 0));
-        let window = Arc::new(CreditWindow::cascading(
-            window,
-            workers,
-            Some(Arc::clone(&order)),
-        ));
+        let window = CreditWindow::with_order(window, workers);
+        let order = Arc::clone(
+            window
+                .cascade
+                .as_ref()
+                .expect("a writer's window has its gate"),
+        );
         // The channels only carry jobs; the window is what bounds them (at most `max_in_flight`
         // jobs sit in both together). Unbounded channels allocate nothing up front, so a window of
         // `usize::MAX` jobs (bound by bytes only) is fine.
@@ -1621,13 +1699,22 @@ impl StreamWriter {
         let seq = lanes[id].1;
         // The window admitted the job; the send never blocks, and fails only if every worker is gone.
         tx.send((Slot { lane: id, seq }, lane.clone(), job))
-            .map_err(|_| closed_error())?;
+            .map_err(|_| self.window.refusal().unwrap_or_else(closed_error))?;
         lanes[id].1 += 1;
         Ok(())
     }
 
     /// Drain the pipeline, then compact + seal to `out`. Returns the sealed manifest (identical to a
     /// batch seal of the same blocks by lane, then in push order within a lane).
+    ///
+    /// # Errors
+    ///
+    /// Every thread is joined first, whatever the outcome. Then, in this order: the first refusal
+    /// of a [`SequencedTable`] of this writer (ADR-0065 §7.2: it poisons the writer, so nothing is
+    /// sealed; the [`Error::StreamedTable`] its own call returned); a panicked encode worker or
+    /// committer; the pipeline's encode and commit errors;
+    /// [`StreamedTableError::NotClosed`] for a sequenced table opened on this writer and not
+    /// closed (still open, or dropped, so its rows aren't all committed); the seal's errors.
     pub fn finish(self, out: &Path) -> Result<Manifest> {
         self.finish_with_stats(out).map(|(manifest, _)| manifest)
     }
@@ -1653,10 +1740,20 @@ impl StreamWriter {
             .join()
             .map_err(|_| Error::Container("committer thread panicked".into()))
             .and_then(|r| r);
+        // A refusal poisoned the writer: its pipeline was closed, so the committer's own error is
+        // a consequence, and the refusal is the cause. (Should the pipeline die in the same
+        // instant as a refusal, before its close reaches the gate, the refusal is reported in
+        // place of the pipeline's error: a mislabelled cause, never a seal.)
+        if let Some(e) = self.order.poisoned() {
+            return Err(e);
+        }
         if let Some(e) = first_error {
             return Err(e);
         }
         let session = committed?;
+        if let Some(e) = self.order.unclosed() {
+            return Err(e);
+        }
         let stats = self.window.stats();
         Ok((session.seal(out)?, stats))
     }
