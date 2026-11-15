@@ -79,6 +79,7 @@ fn bench_table(c: &mut Criterion) {
         rows: n as u64,
         row_index: None,
         partition: None,
+        edition: None,
     };
     let data: TableData = vec![
         ("t".into(), ColumnData::U64((0..n as u64).collect())),

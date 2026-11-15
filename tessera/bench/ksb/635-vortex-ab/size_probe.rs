@@ -78,7 +78,7 @@ fn main() {
     let mut out = std::io::stdout().lock();
     writeln!(out, "case\traw_bytes\tsealed_bytes\tratio").expect("write report");
     for (name, dtype, data, raw) in cases {
-        let spec = TableSpec { columns: vec![col("c", dtype)], rows: n as u64, row_index: None, partition: None };
+        let spec = TableSpec { columns: vec![col("c", dtype)], rows: n as u64, row_index: None, partition: None, edition: None };
         let table: TableData = vec![("c".into(), data)];
         let bytes = encode(&spec, &table).expect("encode");
         writeln!(out, "{name}\t{raw}\t{}\t{:.4}", bytes.len(), bytes.len() as f64 / raw as f64)

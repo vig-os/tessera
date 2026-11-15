@@ -27,6 +27,11 @@ const TS: &str = "2024-01-01T00:00:00Z";
 const LEGACY_FIXTURE: &str = "tests/fixtures/legacy_flat_events.tsra";
 const LEGACY_CONTENT_HASH: &str =
     "blake3:c1115417dcf7aba23ee3e9d50c6d193011b9d0201ffad7a528ff03ab572dd39a";
+/// The fixture's seal. `Reader::open` re-verifies it over the stored manifest bytes, so this pins
+/// that the frozen pre-edition fixture itself is unchanged (the byte identity of a pre-edition
+/// spec's re-serialisation is `tessera-core`'s `pre_edition_spec_…` test).
+const LEGACY_MANIFEST_HASH: &str =
+    "blake3:498da59e89047908a03c79a49f155a90cfed3a7cacd9281f3f4472063d49aa31";
 /// What [`write_legacy_events`] seals today. It differs from [`LEGACY_CONTENT_HASH`] only because the
 /// table codec moved (vortex 0.75 → 0.93, #635), never because of the names.
 const WRITER_CONTENT_HASH: &str =
@@ -76,12 +81,24 @@ fn write_legacy_events(dir: &Path) -> (PathBuf, Manifest) {
 }
 
 /// A product written by vortex 0.75 before the 0.93 table-byte event (ADR-0024's 2026-11-09
-/// amendment) still verifies against its sealed digests and reads its rows back.
+/// amendment) still verifies against its sealed digests and reads its rows back. It predates
+/// `TableSpec::edition` (the 2026-11-15 amendment): its specs carry no `edition` key, parse as
+/// "no edition recorded", and `Reader::open` re-verifies `id`, `content_hash` and `manifest_hash`
+/// over its manifest unchanged.
 #[test]
 fn the_legacy_fixture_reads_identically() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_FIXTURE);
     let mut r = Reader::open(&path).unwrap();
     r.verify_payloads("legacy").unwrap();
+    for b in &r.manifest().blocks {
+        assert!(b.spec.get("edition").is_none(), "{}: {}", b.name, b.spec);
+        let spec: TableSpec = serde_json::from_value(b.spec.clone()).unwrap();
+        assert_eq!(spec.edition, None, "{}", b.name);
+    }
+    assert_eq!(
+        r.manifest().manifest_hash.as_deref(),
+        Some(LEGACY_MANIFEST_HASH)
+    );
     assert_eq!(
         r.manifest().content_hash.as_deref(),
         Some(LEGACY_CONTENT_HASH)
@@ -163,6 +180,7 @@ fn gap_leaves() -> Vec<(BlockRef, BlockPayload)> {
                 rows: 3,
                 row_index: None,
                 partition: Some(Partition { index, last }),
+                edition: None,
             };
             let data: TableData = vec![("t".into(), ColumnData::U64(vec![1, 2, 3]))];
             table_block(&format!("pairs/{index:04}"), &spec, &data).unwrap()

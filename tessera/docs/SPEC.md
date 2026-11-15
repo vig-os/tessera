@@ -215,6 +215,18 @@ optional `row_index`.
   build profile. Excluding it makes the payload a pure function of the logical data (floats store
   flat/Pco). Cross-*version* stability is still not guaranteed pre-1.0 — pin the Vortex version
   (recorded in the corpus provenance).
+- **Edition.** `TableSpec.edition` (optional string, e.g. `"core2026.08.3"`) names the Vortex
+  **edition** the payload was written under: the frozen set of encoding wire IDs the writer was allowed to
+  emit *(ADR-0024, 2026-11-15 amendment)*. A writer MUST set it to the edition it encoded under, on every
+  table block and partition leaf, and MUST NOT record an edition it did not write under. It is bound by
+  `manifest_hash` (it is in the manifest) and not by `content_hash` (it is in no payload). **Absent** means
+  the block predates the field (written by the vortex 0.75 writer, which had no edition gate); such a block
+  is valid, reads and verifies, and its manifest bytes are unchanged, because the key is omitted, never
+  written as `null`. A reader MUST NOT need it to decode: Vortex decodes by the wire IDs in the file. Same
+  input under a **different** edition may give different bytes; the **same** edition is necessary for the same
+  bytes but not sufficient, since the edition bounds which encodings the writer may use, not which it picks
+  (that is the writer's codec set, ADR-0024 §Codec set, and the pinned Vortex compressor, both changed only as
+  a format event).
 
 A reader MAY project a subset of columns or random-`take` rows; the format supports O(1) random access.
 

@@ -58,6 +58,7 @@ fn build(path: &Path) {
                 index: index as u64,
                 last: index + 1 == LEAF_ROWS.len(),
             }),
+            edition: None,
         };
         let name = leaf_name("pairs", index as u64).unwrap();
         let (block_ref, payload) =

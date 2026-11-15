@@ -501,6 +501,7 @@ mod tests {
                     index: i as u64,
                     last: i + 1 == n,
                 }),
+                edition: None,
             };
             let name = leaf_name("pairs", i as u64).unwrap().into_string();
             sw.push(table_job_indexed(name, spec, data, Some("t".into())))

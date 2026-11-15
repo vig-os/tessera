@@ -229,6 +229,7 @@ fn main() {
         rows: rows as u64,
         row_index: None,
         partition: None,
+        edition: None,
     };
     let blob = encode(&spec, &data).expect("encode");
     let groups = rows.div_ceil(ROWS_PER_GROUP);

@@ -233,6 +233,7 @@ fn run_listmode_synthetic(
         rows: rows as u64,
         row_index: Some("ms".into()),
         partition: None,
+        edition: None,
     };
     // Bound the producer's in-memory batch slab to one ring-depth equivalent of rows. Conservative
     // (the row-group accumulator stages durable fragments anyway), but it keeps the producer side
@@ -491,6 +492,7 @@ fn warmup_encode_per_core(columns: &[Column], data: &TableData) -> tessera_core:
         rows: u64::try_from(n_rows).unwrap_or(u64::MAX),
         row_index: None,
         partition: None,
+        edition: None,
     };
     let row_bytes: usize = columns
         .iter()

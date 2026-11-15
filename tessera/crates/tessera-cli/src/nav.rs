@@ -2799,6 +2799,7 @@ mod tests {
             rows: 4,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let data: TableData = vec![
             ("ms".into(), ColumnData::U32(vec![10, 20, 30, 40])),
@@ -2924,6 +2925,7 @@ mod tests {
                     rows: 2,
                     row_index: None,
                     partition: Some(Partition { index, last }),
+                    edition: None,
                 };
                 let data = vec![("t".into(), ColumnData::U32(vec![1, 2]))];
                 table_block(&format!("pairs/{index:04}"), &spec, &data).unwrap()
@@ -2986,6 +2988,7 @@ mod tests {
                 rows: 1,
                 row_index: None,
                 partition: None,
+                edition: None,
             };
             let data = vec![("t".into(), ColumnData::U32(vec![i]))];
             let (r, p) = table_block(&format!("events_{i:04}"), &spec, &data).unwrap();

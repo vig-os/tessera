@@ -132,6 +132,7 @@ fn coo_3col(dense: &[i16], n: usize) -> (TableSpec, TableData) {
         rows: vc.len() as u64,
         row_index: None,
         partition: None,
+        edition: None,
     };
     let data: TableData = vec![
         ("z".into(), ColumnData::U16(zc)),
@@ -157,6 +158,7 @@ fn coo_lin(dense: &[i16], _n: usize) -> (TableSpec, TableData) {
         rows: vc.len() as u64,
         row_index: None,
         partition: None,
+        edition: None,
     };
     let data: TableData = vec![
         ("idx".into(), ColumnData::U32(ic)),

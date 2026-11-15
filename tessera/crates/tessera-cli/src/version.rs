@@ -410,6 +410,7 @@ mod tests {
             rows: 3,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let data = vec![("x".into(), ColumnData::U32(vec![1, 2, 3]))];
         let (block_ref, payload) = table_block("events", &spec, &data).unwrap();
@@ -432,6 +433,7 @@ mod tests {
             rows: u64::try_from(vals.len()).unwrap(),
             row_index: None,
             partition: None,
+            edition: None,
         };
         let data = vec![("v".into(), ColumnData::U32(vals.to_vec()))];
         let (br, payload) = table_block(block, &spec, &data).unwrap();

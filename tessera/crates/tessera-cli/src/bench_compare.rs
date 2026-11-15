@@ -213,6 +213,7 @@ fn table_spec(data: &TableData, rows: usize) -> TableSpec {
         rows: rows as u64,
         row_index: None,
         partition: None,
+        edition: None,
     }
 }
 

@@ -42,6 +42,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input is page cache, which counts toward a cgroup's memory and is RAM on tmpfs (ADR-0064 PR F, #714).
   `tests/staged_job_memory.rs` checks the bound on the heap (without the per-leaf term, at most 25.3 KB at its 8
   leaves), and that neither the reader filling a block nor a worker reading it back holds the block in RAM.
+- **Breaking for `TableSpec` struct literals, `tessera-core` / `tessera-io`:** `TableSpec` gains
+  `edition: Option<String>`, the Vortex edition a table block's payload was written under (ADR-0024's 2026-11-15
+  amendment, #635). `tessera-io`'s writer sets it to `table::TABLE_EDITION` (`"core2026.08.3"`) on every table block
+  and partition leaf it seals, and refuses a spec that names another edition with `Error::Codec`. Build specs with
+  `edition: None`. It is in the manifest, not the payload, so it moves `manifest_hash` and leaves `content_hash` and
+  the block digests as they are; the corpus goldens are regenerated with it, in the same format event as the vortex
+  0.93 bump below. A spec without the key (every product sealed before this change) still parses, reads and
+  verifies, and keeps its manifest bytes: `None` is omitted, never written as `null`. An older reader opens and
+  verifies a product that carries the key, because `BlockRef.spec` is kept as raw JSON. `TableSpec` has no `Default`
+  and isn't `#[non_exhaustive]`, so a struct literal outside tessera stops compiling until it names the field.
 
 ### Changed
 

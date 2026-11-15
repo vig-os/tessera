@@ -748,6 +748,34 @@ fn new_session(rt: &CurrentThreadRuntime) -> VortexSession {
 /// Reading is not affected — registration covers every encoding, whatever edition wrote it.
 pub const TABLE_EDITION: EditionId = CORE_2026_08_3;
 
+/// The spec a table block is sealed with: `spec` with [`TableSpec::edition`] set to
+/// [`TABLE_EDITION`], the edition this writer encodes under (ADR-0024, 2026-11-15 amendment).
+///
+/// Every table [`BlockRef`] this crate builds goes through here, so every table block and
+/// partition leaf it seals records its edition. A caller's spec normally leaves `edition` as
+/// `None`. One that already names [`TABLE_EDITION`] is accepted unchanged.
+///
+/// # Errors
+/// [`Error::Codec`] if `spec.edition` names any other edition: this writer can only write its own,
+/// and recording the other name over bytes it didn't produce would make the field a lie.
+pub(crate) fn sealed_spec(spec: &TableSpec) -> Result<TableSpec> {
+    let edition = TABLE_EDITION.to_string();
+    match spec.edition.as_deref() {
+        None => {}
+        Some(e) if e == edition => {}
+        Some(other) => {
+            return Err(Error::Codec(format!(
+                "table spec names vortex edition `{other}`, but this writer writes `{edition}` \
+                 (tessera_io::table::TABLE_EDITION); leave `edition` unset and the writer records it"
+            )))
+        }
+    }
+    Ok(TableSpec {
+        edition: Some(edition),
+        ..spec.clone()
+    })
+}
+
 /// Declare Vortex's first-party edition families and editions on `s`, then enable
 /// [`TABLE_EDITION`] for writing.
 fn enable_table_edition(s: &VortexSession) {
@@ -1680,6 +1708,7 @@ pub fn decode_projected(spec: &TableSpec, blob: &[u8], names: &[&str]) -> Result
 ///     rows: 3,
 ///     row_index: None,
 ///     partition: None,
+///     edition: None,
 /// };
 /// let data: TableData = vec![("t".into(), ColumnData::U64(vec![10, 20, 30]))];
 /// let idx = table_chunk_index(&spec, &data, "t").unwrap();
@@ -1748,13 +1777,14 @@ pub fn table_block(
     data: &TableData,
 ) -> Result<(BlockRef, BlockPayload)> {
     let name = BlockName::new(name)?;
+    let sealed = sealed_spec(spec)?;
     let payload = encode(spec, data)?;
     let digest = tessera_core::hash::digest(&payload);
     let block_ref = BlockRef {
         name: name.clone(),
         kind: BlockKind::Table,
         digest: Some(digest),
-        spec: serde_json::to_value(spec)?,
+        spec: serde_json::to_value(&sealed)?,
     };
     Ok((block_ref, BlockPayload::new(name, payload)))
 }
@@ -1813,6 +1843,7 @@ pub(crate) mod under_null_fixture {
             rows: rows as u64,
             row_index: Some("t".into()),
             partition: None,
+            edition: None,
         }
     }
 
@@ -1983,6 +2014,7 @@ mod tests {
             rows: 2,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let sealed = encode(&spec, &data).expect("encode");
 
@@ -2060,6 +2092,7 @@ mod tests {
                     rows: values.len() as u64,
                     row_index: None,
                     partition: None,
+                    edition: None,
                 },
                 &vec![("x".into(), ColumnData::I64(values.clone()))],
             )
@@ -2163,6 +2196,7 @@ mod tests {
             rows: rows as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         (spec, data)
     }
@@ -2184,6 +2218,7 @@ mod tests {
             rows: rows as u64,
             row_index: Some("t".into()),
             partition: None,
+            edition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2240,6 +2275,7 @@ mod tests {
                 rows: rows as u64,
                 row_index: None,
                 partition: None,
+                edition: None,
             };
             let data: TableData = vec![(
                 "v".into(),
@@ -2278,6 +2314,7 @@ mod tests {
             rows: rows as u64,
             row_index: Some("t".into()),
             partition: None,
+            edition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2306,12 +2343,14 @@ mod tests {
             rows: 3,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let bare_spec = TableSpec {
             columns: vec![col("v", "i2")],
             rows: 3,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let nullable = |values: ColumnData, validity: Vec<bool>| ColumnData::Nullable {
             values: Box::new(values),
@@ -2394,6 +2433,7 @@ mod tests {
             rows: rows as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let validity: Vec<bool> = (0..rows).map(|k| k % 3 != 0).collect();
         let build = |filler: i32| -> TableData {
@@ -2781,6 +2821,7 @@ mod tests {
             rows: 2,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let group: TableData = vec![(
             "k".into(),
@@ -2803,6 +2844,7 @@ mod tests {
             rows: rows as u64,
             row_index: Some("t".into()),
             partition: None,
+            edition: None,
         };
         let full: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2842,6 +2884,7 @@ mod tests {
             rows: rows as u64,
             row_index: Some("t".into()),
             partition: None,
+            edition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2872,6 +2915,7 @@ mod tests {
             rows: rows as u64,
             row_index: Some("t".into()),
             partition: None,
+            edition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())), // monotonic → prunable
@@ -2940,6 +2984,7 @@ mod tests {
             rows: vals.len() as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         table_chunk_index(&spec, &vec![("k".into(), nullable_i8(vals))], "k").unwrap()
     }
@@ -3003,6 +3048,7 @@ mod tests {
             rows: 3,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let data: TableData = vec![("k".into(), nullable_i8(&k)), ("f".into(), f)];
         let idx = table_chunk_index(&spec, &data, "k").unwrap();
@@ -3037,6 +3083,7 @@ mod tests {
             rows: 3,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let data: TableData = vec![
             ("k".into(), nullable_i8(&[Some(1), None, Some(3)])),
@@ -3120,6 +3167,7 @@ mod tests {
             rows: 3,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let idx = table_chunk_index(&spec, &vec![("k".into(), k)], "k").unwrap();
         let agg = idx.aggregate();
@@ -3192,6 +3240,7 @@ mod tests {
             rows: 5,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let data: TableData = vec![
             ("idx".into(), ColumnData::U32((0..5u32).collect())),
@@ -3249,6 +3298,7 @@ mod tests {
             rows: n as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let blob = encode(&spec, &data).unwrap();
         let whole = decode(&spec, &blob).unwrap();
@@ -3289,6 +3339,7 @@ mod tests {
             rows: n as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         // Vortex round-trip (bit-packed bool + FSST/dict-chosen strings).
         let blob = encode(&spec, &data).unwrap();
@@ -3366,6 +3417,7 @@ mod tests {
             rows: 32,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let back = decode(&spec, &encode(&spec, &data).unwrap()).unwrap();
         let ColumnData::F32(ga) = &back[0].1 else {
@@ -3400,6 +3452,7 @@ mod tests {
             rows: N as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let encoded = encode(&spec, &data).unwrap();
         let raw = N * std::mem::size_of::<f64>();
@@ -3456,6 +3509,7 @@ mod tests {
             rows: rows as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let blob = encode(&spec, &data).unwrap();
         let grid = decode(&spec, &blob).unwrap(); // auto → grid (all numeric, over threshold)
@@ -3529,6 +3583,7 @@ mod tests {
                 rows: rows as u64,
                 row_index: None,
                 partition: None,
+                edition: None,
             };
             let blob = encode(&spec, &data).unwrap();
             GRID_DECODES.with(|c| c.set(0));
@@ -3565,6 +3620,7 @@ mod tests {
                 rows: rows as u64,
                 row_index: None,
                 partition: None,
+                edition: None,
             };
             (spec, data)
         };
@@ -3600,6 +3656,7 @@ mod tests {
             rows: big as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let blob_m = encode(&spec_m, &data_m).unwrap();
         assert_eq!(
@@ -3638,6 +3695,7 @@ mod tests {
             rows: rows as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let blob = encode(&spec, &data).unwrap();
         let best = |run: &dyn Fn()| -> f64 {
@@ -3726,6 +3784,7 @@ mod tests {
             rows: 4,
             row_index: None,
             partition: None,
+            edition: None,
         };
         // wrong dtype for column 'e'
         let bad_dtype: TableData = vec![

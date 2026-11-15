@@ -161,6 +161,34 @@ pub struct TableSpec {
     /// `None`, so every single-block spec serializes byte for byte as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition: Option<super::Partition>,
+    /// The Vortex **edition** the block's payload was written under, e.g. `"core2026.08.3"`
+    /// (ADR-0024, 2026-11-15 amendment): the frozen set of encoding wire IDs the writer was allowed
+    /// to emit, as Vortex names it (`<family><year>.<month>.<version>`).
+    ///
+    /// Sealed, so a product states which Vortex codec contract its table bytes were written under.
+    /// It is a **necessary** condition for "same input → same bytes", not a sufficient one: two
+    /// blocks of the same rows under different editions may legitimately differ, but the same
+    /// edition alone does not make them equal, because the edition bounds which encodings the
+    /// writer may use, not which it picks. That choice is the writer's codec set (tessera excludes
+    /// ALP, ALPRD, integer Pco, Delta and OnPair, all inside `core2026.08.3`) and the pinned
+    /// Vortex's compressor, which tessera changes only as a format event (ADR-0024).
+    ///
+    /// **Set by the writer, not the caller.** `tessera-io`'s table sealing paths (`table_block`,
+    /// the staged jobs, `push_table` / `open_table`) record the edition they write under
+    /// (`tessera_io::table::TABLE_EDITION`) on every table block and partition leaf, and refuse a
+    /// spec that names a different one: they can only write their own. Leave it `None` when
+    /// building a spec. A caller that encodes with `table::encode` and builds its own `BlockRef`
+    /// bypasses this and must set the field itself.
+    ///
+    /// **Absent** means the block was sealed before the field existed, by the vortex 0.75 writer
+    /// (before #635), which had no edition gate: which encodings it could emit is known only from
+    /// that writer build. Such a block still reads and verifies; its manifest bytes and hashes are
+    /// unchanged, because `None` is skipped on serialization, as for [`TableSpec::partition`].
+    ///
+    /// Reading never consults it: Vortex decodes by the wire IDs in the file, whatever edition
+    /// admitted them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition: Option<String>,
 }
 
 pub struct TableBlock {
@@ -360,5 +388,29 @@ mod tests {
             ["dtype", "name"],
             "an explicitly-Public column must serialise like a pre-ADR-0056 one"
         );
+    }
+
+    /// A spec sealed before `edition` existed (the vortex 0.75 writer, before #635), verbatim.
+    const PRE_EDITION_SPEC: &str = r#"{"columns":[{"name":"t","dtype":"u8"}],"rows":3}"#;
+
+    /// ADR-0024's 2026-11-15 amendment: a pre-edition spec still parses, reads as "no edition
+    /// recorded", and re-serialises to exactly its old bytes, so the manifest and its hashes stay
+    /// put.
+    #[test]
+    fn pre_edition_spec_parses_without_edition_and_reserialises_byte_identically() {
+        let spec: super::TableSpec = serde_json::from_str(PRE_EDITION_SPEC).unwrap();
+        assert_eq!(spec.edition, None);
+        assert_eq!(serde_json::to_string(&spec).unwrap(), PRE_EDITION_SPEC);
+    }
+
+    /// A recorded edition is serialised under the `edition` key and survives the round trip.
+    #[test]
+    fn edition_round_trips_through_json() {
+        let mut spec: super::TableSpec = serde_json::from_str(PRE_EDITION_SPEC).unwrap();
+        spec.edition = Some("core2026.08.3".into());
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(json["edition"], "core2026.08.3");
+        let back: super::TableSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(back.edition.as_deref(), Some("core2026.08.3"));
     }
 }

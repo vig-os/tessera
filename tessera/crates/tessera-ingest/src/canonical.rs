@@ -131,6 +131,7 @@ impl CanonicalTable {
             // with the metadata-edit path.
             row_index: None,
             partition: None,
+            edition: None,
         })
     }
 

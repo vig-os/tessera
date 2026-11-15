@@ -614,6 +614,7 @@ impl<'a> TableMultiBlockSink<'a> {
                 rows: rows_in_block,
                 row_index: self.row_index.clone(),
                 partition: block_partition(blk, total_blocks),
+                edition: None,
             };
             self.sw
                 .push_staged(table_job_from_fragments(nm, spec, frags_in_block))?;
@@ -658,6 +659,7 @@ mod tests {
             rows: rows as u64,
             row_index: Some("t".into()),
             partition: None,
+            edition: None,
         };
         // Deliberately variable-length strings, so a fixed-width offset assumption cannot survive.
         let origins: Vec<String> = (0..rows)
@@ -746,6 +748,7 @@ mod tests {
             rows: rows as u64,
             row_index: Some("t".into()),
             partition: None,
+            edition: None,
         };
         let full: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -790,6 +793,7 @@ mod tests {
             rows: rows as u64,
             row_index: Some("t".into()),
             partition: None,
+            edition: None,
         };
         let full: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -879,6 +883,7 @@ mod tests {
             rows: rows as u64,
             row_index: Some("t".into()),
             partition: None,
+            edition: None,
         };
         let lost = |tag: &str| {
             let stage = dir.path().join(tag);
@@ -936,6 +941,7 @@ mod tests {
             rows: rows as u64,
             row_index: Some("t".into()),
             partition: None,
+            edition: None,
         };
 
         // Legacy path: TableStreamWriter → encode_streaming → one Vortex block bytes.
@@ -1130,6 +1136,7 @@ mod tests {
             rows: rows as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         let full: TableData = vec![
             (
@@ -1197,6 +1204,7 @@ mod tests {
             rows: rows as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         // NULLs in the first row-group only; i64::MAX under each so a leak would show as the max.
         let k_valid: Vec<bool> = (0..rows)
@@ -1262,6 +1270,7 @@ mod tests {
             rows: rows as u64,
             row_index: None,
             partition: None,
+            edition: None,
         };
         // group 0: every row NULL; group 1: every 4th row NULL. u64::MAX under every NULL.
         let validity: Vec<bool> = (0..rows)
