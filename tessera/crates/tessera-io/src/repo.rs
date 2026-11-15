@@ -143,7 +143,7 @@ impl Repository {
             .manifest_hash
             .clone()
             .ok_or_else(|| Error::Invalid("put_manifest: manifest is not sealed".into()))?;
-        self.write_raw(&mh, m.to_json()?.as_bytes())?;
+        self.write_raw(&mh, m.to_sealed_json()?.as_bytes())?;
         Ok(mh)
     }
 

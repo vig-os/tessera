@@ -47,6 +47,20 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
   with **exactly one key deleted** (`manifest_hash`); no other normalization, key insertion, or
   empty-stripping is applied beyond JCS. All other fields, including `content_hash`, stay present. It
   transitively commits to every block digest and all metadata.
+  - A reader computes it over the object **as parsed from `manifest.json`**, never over a re-serialisation
+    of its own typed model: keys it doesn't model, an explicit `null` (`"study": null`) and an omitted
+    default (no `sources` key) are hashed exactly as received. So a key a newer writer added verifies, and a
+    key spliced into a sealed manifest does not. A product's manifest MUST carry `content_hash` and
+    `manifest_hash`; a reader treats a missing one as an integrity failure, since deleting the seal would
+    otherwise launder any edit.
+  - `manifest.json` MUST be I-JSON (RFC 7493; JCS requires it, RFC 8785 §3.1): no key repeated within any
+    object, at any depth (keys compare after unescaping), no lone surrogate, no `NaN`/`Infinity` and no number outside a double's range. A reader
+    MUST refuse anything else rather than keep the first or last of two values, because parsers differ on
+    which one wins.
+  - **Forward reading (RFC §13).** A key no field of this section declares is a field from a newer format
+    revision: a reader verifies it as part of the seal, SHOULD warn that it is not interpreted, and reads
+    the rest. A writer MUST NOT build a new seal from such a manifest (a new version, a re-seal), since it
+    can't carry what it doesn't understand; copying the product's bytes unchanged is always allowed.
 
 ## 5. Manifest schema
 A JSON object. Fields (✱ = omitted from the JSON when the writer's value is absent/null). Note `[]`
@@ -409,8 +423,8 @@ An opt-in **exploded** form is the same tree unzipped under an object-store pref
 ## 7. Verification (reader procedure)
 On open a reader MUST: (a) read `mimetype`, reject if ≠ `application/vnd.tessera`; (b) parse
 `manifest.json`; (c) reject if `tessera_version` major > supported; (d) recompute and check `id` from
-`id_inputs`, `content_hash` from block digests, and `manifest_hash` over the canonical bytes — any
-mismatch is an integrity failure. On reading a block, the reader MUST verify the bytes against the
+`id_inputs`, `content_hash` from block digests, and `manifest_hash` over the parsed manifest object
+(§4) — any mismatch is an integrity failure; a duplicate key is refused before any hash is computed. On reading a block, the reader MUST verify the bytes against the
 BlockRef `digest`. Full verification of a file also checks the container's canonical layout and member
 set (§6, "One reading"), so a `.tsra` that verifies reads the same under every zip reader, byte for byte.
 
@@ -428,3 +442,8 @@ golden triple. Reproducing the triple needs only the container (§6) + canonical
 **not** block-payload decoding — so a reader can be validated without the array/table codecs. Both are
 regenerated (and the spec version bumped) only on an intended format change:
 `cargo run -p tessera-io --example gen_corpus` / `--example gen_corpus_files`.
+
+`tessera/corpus/seal-cases.json` adds manifest-only vectors for §4's seal rule: each corpus manifest with a
+newer-format key added and resealed (verifies), the same key spliced in under the old seal (fails), the
+encodings a typed model loses (`"study": null`, an omitted `sources`, a nested newer key; all verify) and
+a splice whose seal was deleted or nulled (fails), and text that is not I-JSON (refused). A conformant reader MUST reach every case's `verdict` from its `manifest` text.

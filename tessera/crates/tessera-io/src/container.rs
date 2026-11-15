@@ -758,12 +758,20 @@ fn check_central_directory<A: Read + Seek, S: Read + Seek>(
 /// rule is not re-checked: the manifest is already sealed ([`tessera_core::ProductBuilder::seal`]
 /// enforces it), and a product sealed before ADR-0063 (a `volume` + `volume/1` pyramid) is still a
 /// valid zip that readers open, so re-packaging it (e.g. to add an `aux/` member) keeps working.
+///
+/// The manifest is written as [`Manifest::to_sealed_json`], so a manifest whose JSON doesn't carry
+/// its own seal (edited after sealing, or a parsed view with newer fields) is refused, not packed.
 pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Result<()> {
     if !manifest.is_sealed() {
         return Err(Error::Container(
             "refusing to pack an unsealed manifest".into(),
         ));
     }
+    pack_manifest_json(&manifest.to_sealed_json()?, payloads, path)
+}
+
+/// [`pack`]'s body, over manifest JSON the caller has already sealed or seal-verified.
+fn pack_manifest_json(manifest_json: &str, payloads: &[BlockPayload], path: &Path) -> Result<()> {
     let mut zw = ZipWriter::new(File::create(path)?);
     // STORED + force zip64 so a large study is never silently truncated at 4 GiB / 65 k entries.
     // Pin the entry mtime to the zip epoch (1980-01-01) so the same product packs to byte-identical
@@ -774,7 +782,7 @@ pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Resu
     zw.write_all(MIMETYPE.as_bytes())?;
 
     zw.start_file(MANIFEST_ENTRY, stored).map_err(cz)?;
-    zw.write_all(manifest.to_json()?.as_bytes())?;
+    zw.write_all(manifest_json.as_bytes())?;
 
     for p in payloads {
         zw.start_file(format!("{BLOCKS_PREFIX}{}", p.name), stored)
@@ -882,7 +890,7 @@ fn pack_streaming_to(
     zw.write_all(MIMETYPE.as_bytes())?;
 
     zw.start_file(MANIFEST_ENTRY, stored).map_err(cz)?;
-    zw.write_all(manifest.to_json()?.as_bytes())?;
+    zw.write_all(manifest.to_sealed_json()?.as_bytes())?;
 
     for (name, frag) in sources {
         // Resolve the manifest-recorded digest UP FRONT (only when verifying) so a typo'd name or
@@ -951,6 +959,8 @@ pub struct Reader<R: Read + Seek> {
     /// The same source `archive` reads, for the bytes no zip record points at ([`SharedSource`]).
     source: Arc<Mutex<R>>,
     manifest: Manifest,
+    /// The `manifest.json` member exactly as stored, which the seal was verified over (SPEC §4).
+    manifest_json: String,
 }
 
 impl Reader<File> {
@@ -1046,12 +1056,22 @@ impl<R: Read + Seek> Reader<R> {
             archive,
             source,
             manifest,
+            manifest_json: mj,
         })
     }
 
     /// The verified manifest (read without touching any payload — partial-product access).
+    ///
+    /// A typed *view* of [`manifest_json`](Self::manifest_json): fields from a newer format revision
+    /// are listed by [`Manifest::newer_fields`], not carried.
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// The `manifest.json` member exactly as stored: the bytes the seal was verified over on open.
+    /// Copy these, not [`manifest`](Self::manifest)'s JSON, to re-emit the product unchanged.
+    pub fn manifest_json(&self) -> &str {
+        &self.manifest_json
     }
 
     /// Names of the blocks recorded in the manifest.
@@ -1578,6 +1598,9 @@ fn write_repacked_archive(
 /// The returned manifest is **untrusted**. Its `id`, `manifest_hash` and metadata are claims by a file
 /// that has already failed verification, so use them to name and locate, never to decide. Anything that
 /// reads block payloads or acts on metadata must go through [`Reader::open`] and get the refusal.
+///
+/// It still parses strictly ([`Manifest::from_json`]): a manifest that repeats a key is not one
+/// manifest, so there is no single claim to name, and it fails with the parse error.
 pub fn read_manifest_unverified(path: &Path) -> Result<Manifest> {
     let mut archive = open_tsra_archive(File::open(path)?)?;
     let mut mj = String::new();
@@ -1627,7 +1650,8 @@ pub fn unpack(path: &Path, outdir: &Path) -> Result<Manifest> {
         })
         .collect::<Result<Vec<_>>>()?;
     std::fs::create_dir_all(&blocks_dir)?;
-    std::fs::write(outdir.join("manifest.json"), manifest.to_json()?)?;
+    // The stored bytes, not the view's JSON: the view may not reproduce the seal (SPEC §4).
+    std::fs::write(outdir.join("manifest.json"), r.manifest_json())?;
     for (name, out_path) in block_paths {
         let bytes = r.read_block(&name)?;
         write_creating_parents(&out_path, &bytes)?;
@@ -1716,7 +1740,14 @@ pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
         let bytes = std::fs::read(b.name.path_under(&blocks_dir)?)?;
         payloads.push(BlockPayload::new(b.name.clone(), bytes));
     }
-    pack(&manifest, &payloads, out)?;
+    if !manifest.is_sealed() {
+        return Err(Error::Container(
+            "refusing to pack an unsealed manifest".into(),
+        ));
+    }
+    // The verified bytes as they are, not the view's JSON: they are what the seal covers (SPEC §4),
+    // so a product from another writer, or with newer fields, packs back unchanged.
+    pack_manifest_json(&mj, &payloads, out)?;
     // Re-attach the aux/ subtree, each file under its relative path.
     if !members.is_empty() {
         add_aux_members(out, &members)?;

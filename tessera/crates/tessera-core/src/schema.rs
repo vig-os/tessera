@@ -1169,7 +1169,7 @@ mod tests {
         assert_eq!(missing[0].id, "study");
 
         // supplying it (what `--meta study=…` does) clears the recommendation.
-        let mut b2 = ProductBuilder::from_manifest(&m);
+        let mut b2 = ProductBuilder::from_manifest(&m).unwrap();
         b2.with_field("study", serde_json::json!("DUPLET-07"));
         let m2 = b2.seal().unwrap();
         assert!(r.missing_recommended(&m2).is_empty());

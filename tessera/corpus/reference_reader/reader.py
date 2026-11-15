@@ -81,6 +81,77 @@ def jcs_bytes(obj: Any) -> bytes:
     return jcs.canonicalize(obj)
 
 
+class NotAManifest(ValueError):
+    """manifest.json is not I-JSON (SPEC §4): a repeated key in one object (refused, never last- or
+    first-wins), a NaN/Infinity constant, or a lone surrogate (RFC 8259 / RFC 7493 §2.1)."""
+
+
+def _refuse_constant(name: str) -> Any:
+    raise NotAManifest(f"{name} is not a JSON number")
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if value in (float("inf"), float("-inf")):
+        raise NotAManifest(f"number {text} is out of range for a double")
+    return value
+
+
+def _refuse_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise NotAManifest(f"duplicate key {key!r} in a JSON object")
+        out[key] = value
+    return out
+
+
+def parse_manifest(raw: bytes | str) -> dict[str, Any]:
+    """Parse manifest.json, refusing a duplicate key in any object at any depth, NaN/Infinity, a
+    number out of a double's range, and (checked by encoding the text back to UTF-8) a lone
+    surrogate escape."""
+    m = json.loads(
+        raw,
+        object_pairs_hook=_refuse_duplicates,
+        parse_constant=_refuse_constant,
+        parse_float=_finite_float,
+    )
+    try:
+        json.dumps(m, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as e:
+        raise NotAManifest(f"lone surrogate: {e}") from e
+    return m
+
+
+def manifest_seal(manifest: dict[str, Any]) -> str:
+    """manifest_hash: JCS over the manifest object WITHOUT the manifest_hash key (SPEC §4)."""
+    return digest(
+        jcs_bytes({k: v for k, v in manifest.items() if k != "manifest_hash"})
+    )
+
+
+def manifest_verdict(raw: bytes | str) -> str:
+    """A manifest's own three hashes, without block payloads: "ok", "tampered" or "refused"
+    (not I-JSON, or a major tessera_version this reader doesn't support)."""
+    try:
+        m = parse_manifest(raw)
+    except NotAManifest:
+        return "refused"
+    try:
+        major = int(str(m.get("tessera_version", "")).split(".", 1)[0])
+    except ValueError:
+        return "refused"
+    if major > SUPPORTED_MAJOR:
+        return "refused"
+    ok = (
+        digest(jcs_bytes(m.get("id_inputs", {}))) == m.get("id")
+        and merkle_root([b["digest"] for b in m.get("blocks", [])])
+        == m.get("content_hash")
+        and manifest_seal(m) == m.get("manifest_hash")
+    )
+    return "ok" if ok else "tampered"
+
+
 @dataclass
 class VerifyResult:
     fixture: str
@@ -108,7 +179,7 @@ def verify_tsra(path: str) -> VerifyResult:
 
         # (b) manifest.json
         manifest_raw = zf.read(MANIFEST_NAME)
-        manifest = json.loads(manifest_raw)
+        manifest = parse_manifest(manifest_raw)
 
         # (c) version gate
         ver = manifest.get("tessera_version", "0.0.0")
@@ -143,8 +214,7 @@ def verify_tsra(path: str) -> VerifyResult:
         computed_content_hash = merkle_root(block_digests)
 
         # (f) recompute manifest_hash: JCS over manifest WITHOUT manifest_hash key.
-        manifest_for_seal = {k: v for k, v in manifest.items() if k != "manifest_hash"}
-        computed_manifest_hash = digest(jcs_bytes(manifest_for_seal))
+        computed_manifest_hash = manifest_seal(manifest)
 
         ok = (
             computed_id == manifest.get("id")

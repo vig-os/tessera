@@ -213,7 +213,8 @@ impl Reader {
     /// bounded memory. Raises
     /// `TesseraError` on any failure. The same pass as `tessera verify`.
     fn verify(&mut self) -> PyResult<()> {
-        self.inner.manifest().verify().map_err(err)?;
+        // Over the stored manifest bytes, as on open (SPEC §4): the typed view may not reproduce them.
+        tessera_core::Manifest::from_json_verified(self.inner.manifest_json()).map_err(err)?;
         let label = self.path.display().to_string();
         self.inner.verify_payloads(&label).map_err(err)
     }

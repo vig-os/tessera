@@ -1232,7 +1232,7 @@ fn apply_spec_metadata(
     if meta.is_empty() && parents.is_empty() && !has_generation {
         return Ok(m);
     }
-    let mut b = tessera_core::ProductBuilder::from_manifest(&m);
+    let mut b = tessera_core::ProductBuilder::from_manifest(&m)?;
     // (1) Inherit schema-flagged identity from each parent (fills only fields the child lacks).
     if !parents.is_empty() {
         let registry = tessera_core::SchemaRegistry::builtin();

@@ -21,7 +21,9 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python run.py     # prints a PASS/FAIL table over corpus/files/*.tsra
 ```
 
-Exit code 0 ⇔ all fixtures reproduce their goldens.
+Exit code 0 ⇔ all fixtures reproduce their goldens and every manifest in `corpus/seal-cases.json` reaches its
+`verdict` (SPEC §4's seal over the parsed object, duplicate keys refused). The Rust reader checks the same file
+(`tessera-core/tests/seal_cases.rs`), so the two readers agree by construction.
 
 ## Why it matters
 Until a second codebase reads Tessera correctly from the spec alone, "the spec" is really "whatever
