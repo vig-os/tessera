@@ -6,7 +6,8 @@ traversal in [#685](https://github.com/vig-os/tessera/issues/685). Refines the `
 SPEC §5, which was `string` with no rule. Keeps ADR-0043's hierarchy (pyramid levels, sidecars and
 collection members are nodes of one tree); keeps ADR-0022's layouts (sealed zip, exploded directory, S3
 prefix) mirroring one another. Amended by ADR-0064 (2026-10-30): a node of numbered, marked table leaves is one
-logical table.
+logical table. Amended by #734 (2026-11-15): block names are unique within a product, and readers
+refuse a repeat.
 
 ## Context
 
@@ -163,6 +164,46 @@ one. `WriteSession::recover` now does this instead (rustdoc on `recover` is the 
 
 This is internal to the staging directory, not the sealed format: no grammar, leaf-rule, manifest or
 `content_hash` change, and no corpus golden moves.
+
+## Amendment (#734, 2026-11-15) — block names are unique within a product, and readers enforce it
+
+§2 governed which *pairs* of names may coexist but said nothing about a name listed twice, and
+nothing refused one. A manifest listing `data` twice, the second entry with the digest of bytes the
+archive doesn't hold, and properly re-sealed over that list, verified as `OK (2 blocks)`: the
+reader resolved a name to its first listed digest and compared the listed names as a set, so the
+second digest was checked against nothing. The in-repo reference reader refused the same file, but
+only because it happened to look the second digest up. Added:
+
+- **§2a. Uniqueness.** Within one product, no two block references have the same name. Names are
+  compared by **exact byte equality** (the grammar makes every name ASCII, so byte and string
+  equality agree). Names that differ only in letter case (`Data`, `data`) are distinct here.
+  Case-fold collisions on case-insensitive file systems are [#690](https://github.com/vig-os/tessera/issues/690)'s
+  concern, and this amendment doesn't widen into it.
+- **Writers refuse it.** One shared check, `tessera_core::block::check_unique_names`, returns
+  `Error::DuplicateBlockName { name }`. `ProductBuilder::seal` runs it, and so does every writer that
+  seals through the builder: a write session's seal (and so the `StreamWriter` and its lanes),
+  `tessera commit --add-block`, ingest and the Python `Builder`. A write session also runs it on
+  each append, against the blocks it has committed. `pack` and `pack_streaming` run it on the sealed
+  manifest they're given, before they create the output, so no tessera writer emits what readers
+  refuse. The seal runs uniqueness before the leaf rule and ADR-0064's node checks, so a duplicate
+  partition index under canonical leaf names (two `pairs/0000`) is now refused at seal as
+  `DuplicateBlockName`; `table_group` over such a list still names it `LogicalTableError::DuplicateIndex`.
+- **Readers refuse it too, unlike the leaf rule.** `Manifest::from_json_verified` (the reader's
+  check over the bytes) and `Manifest::verify` (the check over a struct) run it before they
+  recompute any hash, so `Reader::open`, every in-zip
+  read, `verify`, the repository and `pack_dir` refuse such a manifest before any digest is looked
+  up. The deep verify's member check (`check_members`) also runs it, as defence in depth, before it
+  builds its set of listed members (through `Reader` the open has already refused the repeat). A product that lists a name twice was never
+  readable as written (a second digest is unverifiable), so no valid product changes. Every corpus
+  golden and fixture lists each name once, and their `manifest_hash`es don't move.
+- **The reference reader agrees, for this reason.** `corpus/reference_reader` refuses a manifest
+  listing a name twice by name (`duplicate_block_names`) before it reads any payload, not by
+  happening to find a digest mismatch, in `verify_tsra` and in `manifest_verdict`. `run.py` checks
+  both archive cases (a second entry with a foreign digest, and one with the block's own, which
+  neither reader refused before), and `corpus/seal-cases.json` carries the manifest case
+  `recon_int16/block-listed-twice` with the verdict `refused`, which both readers must reach.
+- **SPEC §5 and §7** state the rule normatively. A conformant reader MUST refuse the repeat before
+  any digest lookup.
 
 ## Amended by ADR-0064 (2026-10-30) — a node of numbered, marked leaves is one logical table
 

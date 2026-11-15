@@ -509,7 +509,9 @@ impl Builder {
     }
 
     /// Seal (compute the three hashes) and write the sealed `.tsra` to `path`. Returns the content
-    /// `id`. Consumes the builder — a second call raises `TesseraError`.
+    /// `id`. Consumes the builder — a second call raises `TesseraError`. So does a product whose
+    /// blocks don't have unique names (two `add_array("volume", …)`: block names are unique within
+    /// a product, ADR-0063), before anything is written.
     fn pack(&mut self, path: PathBuf) -> PyResult<String> {
         let builder = self
             .inner

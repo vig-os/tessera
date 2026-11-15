@@ -148,6 +148,18 @@ pub enum Error {
     )]
     BlockNameConflict { parent: String, child: String },
 
+    /// One product lists block `name` more than once (ADR-0063 §2a, SPEC §5). Block names are unique
+    /// within a product, by exact byte equality. A reader resolves a name to one listed digest, so a
+    /// second entry's digest would cover no bytes. Refused by every writer (`ProductBuilder::seal`, a
+    /// write session's append, `pack`, `pack_streaming`) and by every verification
+    /// (`Manifest::verify`, so `Reader::open`, and the deep verify's member check), before any
+    /// digest is looked up. Names that differ only in letter case are distinct here (#690).
+    #[error(
+        "block name '{name}' is listed more than once; block names are unique within a product \
+         (ADR-0063)"
+    )]
+    DuplicateBlockName { name: String },
+
     /// `name` does not resolve to a logical table, or a partitioned node is invalid (ADR-0064 §2,
     /// §3): refused by every reader resolving the name and by the seal, never skipped or merged.
     /// Every block stays readable by its full name.

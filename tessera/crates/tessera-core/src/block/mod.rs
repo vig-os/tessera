@@ -14,7 +14,7 @@ pub mod name;
 pub mod partition;
 pub mod table;
 
-pub use name::{check_leaf_rule, BlockName};
+pub use name::{check_leaf_rule, check_unique_names, BlockName};
 pub use partition::{
     check_partitions, group_specs, table_group, LogicalTableError, Partition, StreamedTableError,
     TableGroup,

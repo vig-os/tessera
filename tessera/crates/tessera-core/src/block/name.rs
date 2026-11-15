@@ -19,6 +19,10 @@
 //! by pushing only `Normal` components onto a base stays under it. [`BlockName::path_under`]
 //! re-checks this at the filesystem boundary instead of relying on the grammar alone.
 //!
+//! **Uniqueness.** Within one product no block name occurs twice, compared byte for byte
+//! (ADR-0063 §2a). [`check_unique_names`] enforces it; every writer and every reader applies it, since
+//! a reader resolves a name to one listed digest and a second entry's digest would cover no bytes.
+//!
 //! **The leaf rule.** Within one product no block name may be a parent prefix of another
 //! (`volume` and `volume/1` cannot both exist), so zip members, exploded directories and
 //! object-store prefixes all mirror the names one-to-one: a name is either a file or a directory,
@@ -160,9 +164,25 @@ impl BlockName {
     }
 }
 
+/// Enforce **uniqueness** over the names of one product (module docs): no name occurs twice, by
+/// exact byte equality (`Data` and `data` are two names; case folding is #690's concern). The first
+/// repeated name is [`crate::Error::DuplicateBlockName`]. Unlike the leaf rule, readers apply it too.
+/// Linear in the total length of the names.
+pub fn check_unique_names<'a>(names: impl IntoIterator<Item = &'a BlockName>) -> crate::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for name in names {
+        if !seen.insert(name.as_str()) {
+            return Err(crate::Error::DuplicateBlockName {
+                name: name.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Enforce the **leaf rule** over the names of one product: no name is a parent prefix of another
-/// (module docs). A conflict is [`crate::Error::BlockNameConflict`] naming both. Duplicates are not
-/// this rule's concern. Linear in the total length of the names.
+/// (module docs). A conflict is [`crate::Error::BlockNameConflict`] naming both. Duplicates are
+/// [`check_unique_names`]' concern. Linear in the total length of the names.
 pub fn check_leaf_rule<'a>(names: impl IntoIterator<Item = &'a BlockName>) -> crate::Result<()> {
     let names: Vec<&BlockName> = names.into_iter().collect();
     let all: BTreeSet<&str> = names.iter().map(|n| n.as_str()).collect();

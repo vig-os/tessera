@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tessera_core::block::name::join_checked;
 use tessera_core::block::partition::is_legacy_flat_member;
-use tessera_core::block::{check_leaf_rule, check_partitions, BlockName, TableGroup};
+use tessera_core::block::{
+    check_leaf_rule, check_partitions, check_unique_names, BlockName, TableGroup,
+};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
 use zip::read::{ArchiveOffset, Config, ZipFile};
@@ -263,7 +265,10 @@ fn check_one_reading<A: Read + Seek, S: Read + Seek>(
 
 /// Part 2 of [`check_one_reading`]: the archive holds only what SPEC §6 permits. Duplicates are
 /// already refused, so `mimetype` and `manifest.json` occur at most once; a listed block that is
-/// missing fails later, when its payload is verified.
+/// missing fails later, when its payload is verified. The manifest must list each block name once
+/// ([`Error::DuplicateBlockName`], #734). The open's [`Manifest::verify`] already refuses a repeat,
+/// so through [`Reader`] this never fires; it is defence in depth, kept next to the one place that
+/// collapses the listed names into a set, where a repeat would otherwise vanish.
 ///
 /// An `aux/` member's name below the prefix obeys the block-name grammar
 /// ([`tessera_core::block::name::check_name`]), the same rule [`write_aux_members`] and [`pack_dir`]
@@ -273,6 +278,7 @@ fn check_one_reading<A: Read + Seek, S: Read + Seek>(
 /// `aux/../manifest.json` lands outside the target directory in an extracting reader, and a name
 /// with a NUL reads as `aux/` in one reader and as the full name in another.
 fn check_members<A: Read + Seek>(archive: &ZipArchive<A>, manifest: &Manifest) -> Result<()> {
+    check_unique_names(manifest.blocks.iter().map(|b| &b.name))?;
     let listed: HashSet<String> = manifest
         .blocks
         .iter()
@@ -752,21 +758,31 @@ fn check_central_directory<A: Read + Seek, S: Read + Seek>(
     want.require(&found, &format!("the end records at byte {cd_end}"))
 }
 
-/// Pack a **sealed** manifest + its block payloads into a `.tsra` at `path` (STORED zip64).
-///
-/// Every payload name is a [`BlockName`], so every entry lands under `blocks/` (ADR-0063). The leaf
-/// rule is not re-checked: the manifest is already sealed ([`tessera_core::ProductBuilder::seal`]
-/// enforces it), and a product sealed before ADR-0063 (a `volume` + `volume/1` pyramid) is still a
-/// valid zip that readers open, so re-packaging it (e.g. to add an `aux/` member) keeps working.
-///
-/// The manifest is written as [`Manifest::to_sealed_json`], so a manifest whose JSON doesn't carry
-/// its own seal (edited after sealing, or a parsed view with newer fields) is refused, not packed.
-pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Result<()> {
+/// What both packers require of the manifest, before they create any file: it is sealed, and it
+/// lists each block name once ([`Error::DuplicateBlockName`], ADR-0063 §2a). Readers refuse a repeated
+/// name, so no writer packs one, however a sealed manifest was made (its fields are public).
+fn check_packable(manifest: &Manifest) -> Result<()> {
     if !manifest.is_sealed() {
         return Err(Error::Container(
             "refusing to pack an unsealed manifest".into(),
         ));
     }
+    check_unique_names(manifest.blocks.iter().map(|b| &b.name))
+}
+
+/// Pack a **sealed** manifest + its block payloads into a `.tsra` at `path` (STORED zip64).
+///
+/// Every payload name is a [`BlockName`], so every entry lands under `blocks/` (ADR-0063). A
+/// manifest listing a name twice is refused with [`Error::DuplicateBlockName`] before `path` is
+/// created. The leaf rule is not re-checked: the manifest is already sealed
+/// ([`tessera_core::ProductBuilder::seal`] enforces it), and a product sealed before ADR-0063 (a
+/// `volume` + `volume/1` pyramid) is still a valid zip that readers open, so re-packaging it (e.g.
+/// to add an `aux/` member) keeps working.
+///
+/// The manifest is written as [`Manifest::to_sealed_json`], so a manifest whose JSON doesn't carry
+/// its own seal (edited after sealing, or a parsed view with newer fields) is refused, not packed.
+pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Result<()> {
+    check_packable(manifest)?;
     pack_manifest_json(&manifest.to_sealed_json()?, payloads, path)
 }
 
@@ -804,7 +820,8 @@ fn pack_manifest_json(manifest_json: &str, payloads: &[BlockPayload], path: &Pat
 /// match the manifest's `blocks` list (the caller passes them straight from the session's committed
 /// refs). The output is **byte-identical** to `pack(manifest, &Vec<BlockPayload>::from(sources), out)`
 /// — proven by `pack_streaming_equals_pack` below — because both writers share [`tsra_entry_options`]
-/// and emit the mimetype/manifest/blocks in the same order.
+/// and emit the mimetype/manifest/blocks in the same order. Like [`pack`], it refuses an unsealed
+/// manifest, or one listing a block name twice ([`Error::DuplicateBlockName`]), before creating `out`.
 pub fn pack_streaming(
     manifest: &Manifest,
     sources: &[(BlockName, &Path)],
@@ -878,11 +895,7 @@ fn pack_streaming_to(
     out: &Path,
     verify: bool,
 ) -> Result<()> {
-    if !manifest.is_sealed() {
-        return Err(Error::Container(
-            "refusing to pack an unsealed manifest".into(),
-        ));
-    }
+    check_packable(manifest)?;
     let mut zw = ZipWriter::new(File::create(out)?);
     let stored = tsra_entry_options();
 
@@ -1740,11 +1753,7 @@ pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
         let bytes = std::fs::read(b.name.path_under(&blocks_dir)?)?;
         payloads.push(BlockPayload::new(b.name.clone(), bytes));
     }
-    if !manifest.is_sealed() {
-        return Err(Error::Container(
-            "refusing to pack an unsealed manifest".into(),
-        ));
-    }
+    check_packable(&manifest)?;
     // The verified bytes as they are, not the view's JSON: they are what the seal covers (SPEC §4),
     // so a product from another writer, or with newer fields, packs back unchanged.
     pack_manifest_json(&mj, &payloads, out)?;
