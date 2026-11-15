@@ -765,7 +765,8 @@ staged bytes   ≤  (W + 1) · BLOCK_ROWS · r_stage
 - **For the consumer:** `c_leaf` = 2 · (3,180 + 1,024) B = 8,408 B. That is 4.8 MB at its 573 leaves, and
   0.002 B/row (one leaf is `BLOCK_ROWS` = 4,194,304 rows). *(Amended by #770, below: 3,180 B isn't the canonical
   entry length this bullet list defines; the sealed manifests of G r3 give `e_leaf` ≤ 2,966 B, so `c_leaf` =
-  7,980 B, and every 8,408 B in A.1 and A.2 is 7,980 B by the definition, B.3.)*
+  7,980 B, and every 8,408 B in A.1 and A.2 is 7,980 B by the definition, B.3. The consumer's term is then 4.6 MB
+  (573 × 7,980 B), not 4.8 MB, and 0.0019 B/row.)*
 - **It holds once #759 lands** (`WriteSession` no longer keeps a `Value` tree per leaf, and #759's counting-allocator
   test bounds the held heap per leaf by the serialized entry plus a stated constant; that constant is `b_leaf` = 1 KiB,
   so the test checks the live part `e_leaf + b_leaf`). Until then a leaf holds several times `e_leaf` (12.8 KB live for

@@ -899,9 +899,10 @@ impl StreamWriter {
     /// writes it: `e_leaf` is that entry's length in the manifest's canonical JSON (name, kind,
     /// digest and spec, so it grows with the column specs and their descriptions), `b_leaf` its
     /// bookkeeping, and the factor 2 an allowance for allocator retention around it. For a
-    /// 12-column schema with a 3,180 B entry that is 8,408 B per leaf, 4.8 MB at 573 leaves. The
-    /// term holds once #759 lands; until then a committed leaf's spec is held as a
-    /// `serde_json::Value` tree, several times `e_leaf` (12.8 KB live for that schema).
+    /// 12-column schema with a 2,966 B entry (the consumer's, read off the sealed manifests,
+    /// ADR-0064 as amended by #770) that is 7,980 B per leaf, 4.6 MB at 573 leaves. The term holds
+    /// since #759 (PR #765); before it, a committed leaf's spec was held as a `serde_json::Value`
+    /// tree, several times `e_leaf` (12.8 KB live for that schema).
     /// `tests/staged_job_memory.rs` checks the ceiling at `W ∈ {1, 2}` without the per-leaf term
     /// (at most 25.3 KB at its 8 leaves, which it can't resolve), that the reader keeps no more
     /// than `s` of input in RAM while every worker is held, and that a one-leaf write's peak is
