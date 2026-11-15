@@ -2005,12 +2005,22 @@ mod tests {
     /// `vortex.null_count()` only), so with the pinned vortex no NaN-valued `Sum` reaches our bytes
     /// by either route.
     ///
-    /// The guard therefore asserts two things. No 64-bit NaN of either sign may be anywhere in the
-    /// sealed bytes. The data holds none and its min/max are ±inf, so a NaN can only be a computed
-    /// statistic; asserting both signs makes the check bite on aarch64 as well as on x86_64, where
-    /// the bytes used to be wrong. And no zone map may carry a sum, so a vortex bump that starts
+    /// The guard therefore asserts two things. First, neither default NaN, the sign-set
+    /// `0xfff8_0000_0000_0000` or the sign-clear `0x7ff8_0000_0000_0000`, may be anywhere in the
+    /// sealed bytes. The data holds no NaN and its min/max are ±inf, so a NaN here can only be a
+    /// computed statistic. An IEEE invalid operation on non-NaN operands (`inf + -inf`) yields the
+    /// target's *default* NaN, with no payload, and these two patterns are the defaults of the
+    /// targets we build (x86_64's sign-set indefinite, aarch64's sign-clear default NaN). Checking
+    /// both signs makes the check bite on aarch64 as well as on x86_64, where the bytes used to be
+    /// wrong. It deliberately does not flag *every* NaN bit pattern (exponent all ones, non-zero
+    /// mantissa): the sealed bytes are not an array of aligned `f64`s, and unaligned 8-byte windows
+    /// of NaN-free payloads match that class constantly. Measured on the regenerated corpus, the
+    /// table payload of `listmode_events` has 139 such windows and none of the two patterns, and
+    /// every table and array payload in `corpus/files` has 18 or more, so such a scan fails on
+    /// NaN-free data. Second, no zone map may carry a sum, so a vortex bump that starts
     /// persisting `Sum` in zone maps again fails here, with a message saying what to assert then.
-    /// A sum persisted in the per-array statistics would show up as a NaN in the first assertion.
+    /// A NaN sum persisted in the per-array statistics would show up as one of the two patterns in
+    /// the first assertion.
     #[test]
     fn float_stats_persist_no_nan_for_inf_and_neg_inf() {
         let data: TableData = vec![(
