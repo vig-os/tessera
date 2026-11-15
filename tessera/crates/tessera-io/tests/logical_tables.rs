@@ -20,11 +20,17 @@ use tessera_io::{
 const TS: &str = "2024-01-01T00:00:00Z";
 
 /// Written by [`write_legacy_events`] before ADR-0064 PR D, so by the writer that names blocks
-/// `events_NNNN`. It is frozen: after PR D the same function writes `events/NNNN` with the same
-/// `content_hash` (ADR-0064 §6), which [`the_writer_reproduces_the_legacy_fixture_content`] checks.
+/// `events_NNNN`, and by vortex 0.75. It is frozen: after PR D the same function writes `events/NNNN`
+/// with the same rows in the same split (ADR-0064 §6), which
+/// [`the_writer_reproduces_the_legacy_fixture_content`] checks, and it keeps a product written by
+/// vortex 0.75 under test, which [`the_legacy_fixture_reads_identically`] opens, verifies and reads.
 const LEGACY_FIXTURE: &str = "tests/fixtures/legacy_flat_events.tsra";
 const LEGACY_CONTENT_HASH: &str =
     "blake3:c1115417dcf7aba23ee3e9d50c6d193011b9d0201ffad7a528ff03ab572dd39a";
+/// What [`write_legacy_events`] seals today. It differs from [`LEGACY_CONTENT_HASH`] only because the
+/// table codec moved (vortex 0.75 → 0.93, #635), never because of the names.
+const WRITER_CONTENT_HASH: &str =
+    "blake3:37435470f4526600ea6dedc1fbbbc0a9fdd8c45f4994e56531cf110d8f85a532";
 /// Three blocks at `ROWS_PER_GROUP` rows each, the last one partial.
 const LEGACY_ROWS: usize = 2 * ROWS_PER_GROUP + 4242;
 
@@ -69,6 +75,8 @@ fn write_legacy_events(dir: &Path) -> (PathBuf, Manifest) {
     (out, sealed)
 }
 
+/// A product written by vortex 0.75 before the 0.93 table-byte event (ADR-0024's 2026-11-09
+/// amendment) still verifies against its sealed digests and reads its rows back.
 #[test]
 fn the_legacy_fixture_reads_identically() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_FIXTURE);
@@ -93,25 +101,40 @@ fn the_legacy_fixture_reads_identically() {
 }
 
 /// ADR-0064 §6: a block's name and marker are in no payload, so the multi-block writer, now writing
-/// the marked leaves `events/NNNN`, seals the pre-switch writer's `content_hash` and block digests
-/// for the same rows; only the names, the markers and so `manifest_hash` move.
+/// the marked leaves `events/NNNN`, writes the legacy fixture's rows in the same split; only the
+/// names, the markers and so `manifest_hash` were to move. The fixture was written by vortex 0.75,
+/// and vortex 0.93 re-encodes every table block (ADR-0024's 2026-11-09 amendment), so the leaves no
+/// longer carry its block digests: their rows and split are compared here, and their bytes are pinned
+/// by [`WRITER_CONTENT_HASH`].
 #[test]
 fn the_writer_reproduces_the_legacy_fixture_content() {
     let dir = tempfile::tempdir().unwrap();
-    let (_, sealed) = write_legacy_events(dir.path());
-    assert_eq!(sealed.content_hash.as_deref(), Some(LEGACY_CONTENT_HASH));
+    let (out, sealed) = write_legacy_events(dir.path());
+    assert_eq!(sealed.content_hash.as_deref(), Some(WRITER_CONTENT_HASH));
 
-    let legacy = Reader::open(&Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_FIXTURE))
-        .unwrap()
-        .manifest()
-        .clone();
-    let digests = |m: &Manifest| {
+    let legacy_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_FIXTURE);
+    let mut legacy_reader = Reader::open(&legacy_path).unwrap();
+    let legacy = legacy_reader.manifest().clone();
+    let split = |m: &Manifest| {
         m.blocks
             .iter()
-            .map(|b| b.digest.clone())
+            .map(|b| {
+                let spec: TableSpec = serde_json::from_value(b.spec.clone()).unwrap();
+                (b.kind, spec.rows, spec.row_index)
+            })
             .collect::<Vec<_>>()
     };
-    assert_eq!(digests(&sealed), digests(&legacy));
+    assert_eq!(split(&sealed), split(&legacy));
+    let mut written = Reader::open(&out).unwrap();
+    let view = written.logical_table("events").unwrap();
+    let legacy_view = legacy_reader.logical_table("events").unwrap();
+    for (name, _) in legacy_rows() {
+        assert_eq!(
+            view.column(&mut written, &name).unwrap(),
+            legacy_view.column(&mut legacy_reader, &name).unwrap(),
+            "column {name}"
+        );
+    }
     let leaves: Vec<_> = sealed
         .blocks
         .iter()

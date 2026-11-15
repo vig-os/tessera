@@ -1667,11 +1667,12 @@ mod tests {
         assert_eq!(table::decode(&spec, &bytes).unwrap(), cols);
     }
 
-    /// The `content_hash` both paths sealed for these rows before ADR-0064 PR D, when they named the
-    /// blocks `events_0000`, `events_0001`, `events_0002`: read from this test run against the
-    /// unswitched writers at `11280ba`.
-    const PRE_SWITCH_CONTENT_HASH: &str =
-        "blake3:1d5468896b9f824344969775cd28087bfa90a04ab5f00a8f57600b6be75c5123";
+    /// The `content_hash` both paths seal for these rows. ADR-0064 PR D's switch from `events_NNNN` to
+    /// `events/NNNN` left it unchanged (`blake3:1d5468…5123`, read against the unswitched writers at
+    /// `11280ba`). The vortex 0.93 table-byte event (ADR-0024's 2026-11-09 amendment, #635) moved it,
+    /// because every table block is re-encoded.
+    const WRITER_CONTENT_HASH: &str =
+        "blake3:9208e00be90730986dbcf3aa89f0d5da21a4d6bfd39eb0582115d027add95c27";
 
     /// ADR-0064 §6's block projection: per block, in manifest order, `name`, `kind`, `digest`,
     /// `spec.rows`, `spec.row_index` and `spec.partition`.
@@ -1779,12 +1780,12 @@ mod tests {
             ));
         }
         // Names and markers are in no payload, so the switch from `events_NNNN` moved
-        // `manifest_hash` only: both paths still seal the pre-switch writer's `content_hash`.
+        // `manifest_hash` only, and both paths seal the same `content_hash`.
         assert_eq!(
             streamed.content_hash, batch.content_hash,
             "whole-file ↔ streamed multi-block content_hash mismatch"
         );
-        assert_eq!(batch.content_hash.as_deref(), Some(PRE_SWITCH_CONTENT_HASH));
+        assert_eq!(batch.content_hash.as_deref(), Some(WRITER_CONTENT_HASH));
     }
 
     #[test]
