@@ -203,10 +203,15 @@ impl Reader {
         ))
     }
 
-    /// Full integrity pass: recompute the three-hash seal, check the container's one-reading rule
-    /// (SPEC §6: every local header agrees with the central directory and the entries tile the archive,
-    /// so every zip reader sees the same members), and stream every block against its digest in bounded
-    /// memory. Raises `TesseraError` on any failure. The same pass as `tessera verify`.
+    /// Full integrity pass: recompute the three-hash seal, check the container's canonical layout
+    /// (SPEC §6 "One reading": the entries tile the archive from byte 0, every local header and
+    /// central-directory record is byte for byte the one tessera's writer emits, the end records are
+    /// exactly the writer's with nothing after them, the directory lists the entries in file order, and
+    /// the members are `mimetype`, `manifest.json`, the listed blocks and safely named `aux/` members,
+    /// distinct up to letter case, none below another, each matching its CRC-32; so every zip reader
+    /// sees the same members with the same bytes), and stream every block against its digest in
+    /// bounded memory. Raises
+    /// `TesseraError` on any failure. The same pass as `tessera verify`.
     fn verify(&mut self) -> PyResult<()> {
         self.inner.manifest().verify().map_err(err)?;
         let label = self.path.display().to_string();

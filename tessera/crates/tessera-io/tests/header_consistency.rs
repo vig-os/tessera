@@ -216,7 +216,8 @@ fn rezip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let opts = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Stored)
         .last_modified_time(zip::DateTime::default())
-        .large_file(true);
+        .large_file(true)
+        .system(zip::System::Unix);
     let mut w = ZipWriter::new(Cursor::new(Vec::new()));
     for (name, bytes) in entries {
         w.start_file(*name, opts).unwrap();
@@ -703,4 +704,579 @@ fn every_tessera_writer_and_corpus_file_satisfies_the_layout_rule() {
             assert!(verdict(&bytes).is_none(), "{} is refused", p.display());
         }
     }
+}
+
+// ── every byte of every record: the canonical encoding ──────────────────────────────────────────
+//
+// The second round of review. Everything above holds each record to the others; nothing held a
+// record to what it says. A field the check ignores is a field some reader interprets, and the
+// reviewer found five: a data-descriptor flag, an unknown extra field that the tiling counts as part
+// of its entry, an encryption flag, a per-entry disk number, and a symlink mode. So each record is
+// held, byte for byte, to the one tessera's writer emits (SPEC §6). The builder below writes that
+// encoding by hand, proven identical to `pack`'s output, and each case changes exactly one thing.
+
+/// One entry for [`hand_zip`]: by default, exactly what tessera's writer emits for it.
+#[derive(Clone)]
+struct Hand {
+    name: Vec<u8>,
+    data: Vec<u8>,
+    /// The CRC both headers carry, when it is not the data's.
+    crc: Option<u32>,
+    flags: u16,
+    /// The local header's CRC and zip64 sizes, when they differ from the data's (a data descriptor
+    /// lets a writer leave them zero).
+    local_crc: Option<u32>,
+    local_size: Option<u64>,
+    /// Bytes appended to the local header's (or the central record's) extra field, after its zip64
+    /// field.
+    local_extra: Vec<u8>,
+    central_extra: Vec<u8>,
+    made_by: u16,
+    date: u16,
+    disk: u16,
+    external: u32,
+}
+
+impl Hand {
+    fn new(name: &[u8], data: &[u8]) -> Self {
+        Hand {
+            name: name.to_vec(),
+            data: data.to_vec(),
+            crc: None,
+            flags: 0,
+            local_crc: None,
+            local_size: None,
+            local_extra: Vec::new(),
+            central_extra: Vec::new(),
+            made_by: 0x032d,
+            date: 0x0021,
+            disk: 0,
+            external: 0o100_644 << 16,
+        }
+    }
+}
+
+/// The local header [`hand_zip`] writes for `e`.
+fn hand_local_header(e: &Hand) -> Vec<u8> {
+    let size = e.local_size.unwrap_or(e.data.len() as u64);
+    let mut extra = Vec::new();
+    extra.extend_from_slice(&ZIP64_EXTRA_ID.to_le_bytes());
+    extra.extend_from_slice(&16u16.to_le_bytes());
+    extra.extend_from_slice(&size.to_le_bytes());
+    extra.extend_from_slice(&size.to_le_bytes());
+    extra.extend_from_slice(&e.local_extra);
+    let mut h = b"PK\x03\x04".to_vec();
+    for v in [45u16, e.flags, 0, 0, e.date] {
+        h.extend_from_slice(&v.to_le_bytes());
+    }
+    let crc = e.crc.unwrap_or_else(|| crc32(&e.data));
+    h.extend_from_slice(&e.local_crc.unwrap_or(crc).to_le_bytes());
+    h.extend_from_slice(&u32::MAX.to_le_bytes());
+    h.extend_from_slice(&u32::MAX.to_le_bytes());
+    h.extend_from_slice(&u16::try_from(e.name.len()).unwrap().to_le_bytes());
+    h.extend_from_slice(&u16::try_from(extra.len()).unwrap().to_le_bytes());
+    h.extend_from_slice(&e.name);
+    h.extend_from_slice(&extra);
+    h
+}
+
+/// A `.tsra`-shaped zip written by hand, entry by entry: the local entries back to back from byte 0,
+/// the central directory, the end record. Small archives only (no offset past 32 bits).
+fn hand_zip(entries: &[Hand]) -> Vec<u8> {
+    let order: Vec<usize> = (0..entries.len()).collect();
+    hand_zip_listed(entries, &order)
+}
+
+/// [`hand_zip`], with the central directory listing the entries in `order` (indices into `entries`,
+/// which sit in the file in their own order).
+fn hand_zip_listed(entries: &[Hand], order: &[usize]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut records = Vec::new();
+    for e in entries {
+        let offset = u32::try_from(out.len()).unwrap();
+        out.extend_from_slice(&hand_local_header(e));
+        out.extend_from_slice(&e.data);
+        let mut cd = Vec::new();
+
+        let size = e.data.len() as u64;
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&ZIP64_EXTRA_ID.to_le_bytes());
+        extra.extend_from_slice(&16u16.to_le_bytes());
+        extra.extend_from_slice(&size.to_le_bytes());
+        extra.extend_from_slice(&size.to_le_bytes());
+        extra.extend_from_slice(&e.central_extra);
+        cd.extend_from_slice(b"PK\x01\x02");
+        for v in [e.made_by, 45, e.flags, 0, 0, e.date] {
+            cd.extend_from_slice(&v.to_le_bytes());
+        }
+        cd.extend_from_slice(&e.crc.unwrap_or_else(|| crc32(&e.data)).to_le_bytes());
+        cd.extend_from_slice(&u32::MAX.to_le_bytes());
+        cd.extend_from_slice(&u32::MAX.to_le_bytes());
+        let name_len = u16::try_from(e.name.len()).unwrap();
+        let extra_len = u16::try_from(extra.len()).unwrap();
+        for v in [name_len, extra_len, 0, e.disk, 0] {
+            cd.extend_from_slice(&v.to_le_bytes());
+        }
+        cd.extend_from_slice(&e.external.to_le_bytes());
+        cd.extend_from_slice(&offset.to_le_bytes());
+        cd.extend_from_slice(&e.name);
+        cd.extend_from_slice(&extra);
+        records.push(cd);
+    }
+    let cd: Vec<u8> = order.iter().flat_map(|&i| records[i].clone()).collect();
+    let (cd_start, n) = (out.len(), u16::try_from(order.len()).unwrap());
+    out.extend_from_slice(&cd);
+    out.extend_from_slice(EOCD_SIG);
+    for v in [0u16, 0, n, n] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&u32::try_from(cd.len()).unwrap().to_le_bytes());
+    out.extend_from_slice(&u32::try_from(cd_start).unwrap().to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+/// One extra field: `id`, its length, `body`.
+fn extra_field(id: u16, body: &[u8]) -> Vec<u8> {
+    let mut f = id.to_le_bytes().to_vec();
+    f.extend_from_slice(&u16::try_from(body.len()).unwrap().to_le_bytes());
+    f.extend_from_slice(body);
+    f
+}
+
+/// A data descriptor (`PK\7\8`, APPNOTE 4.3.9) for `consumed`: what a streaming reader that is
+/// looking for the end of a bit-3 member accepts as that end.
+fn fake_descriptor(consumed: &[u8]) -> Vec<u8> {
+    let mut d = b"PK\x07\x08".to_vec();
+    let len = u32::try_from(consumed.len()).unwrap();
+    for v in [crc32(consumed), len, len] {
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    d
+}
+
+const FORGED: &[u8] = b"{\"forged\":true}";
+
+/// The honest product the cases start from, as [`Hand`] entries in writer order.
+fn honest_entries() -> Vec<Hand> {
+    cd_view(&sealed_blobs(&[("data", b"genuine payload")]))
+        .into_iter()
+        .map(|(n, b)| Hand::new(n.as_bytes(), &b))
+        .collect()
+}
+
+/// `honest_entries` with `aux` inserted before the block, as the reviewer placed it.
+fn with_aux(aux: Hand) -> Vec<Hand> {
+    let mut es = honest_entries();
+    es.insert(2, aux);
+    es
+}
+
+/// The builder writes what `pack` and `add_aux_members` write, to the byte: every case below differs
+/// from a real `.tsra` in exactly the one thing it names.
+#[test]
+fn the_hand_builder_is_the_writer() {
+    let honest = sealed_blobs(&[("data", b"genuine payload")]);
+    assert_eq!(hand_zip(&honest_entries()), honest);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("aux.tsra");
+    std::fs::write(&path, &honest).unwrap();
+    add_aux_members(&path, &[AuxMember::new("note.txt", b"hello".to_vec())]).unwrap();
+    let mut es = honest_entries();
+    es.push(Hand::new(b"aux/note.txt", b"hello"));
+    assert_eq!(hand_zip(&es), std::fs::read(&path).unwrap());
+    assert!(verdict(&hand_zip(&es)).is_none());
+}
+
+/// Each case, refused with the field that differs named in the message. Before the canonical
+/// encoding every one of them verified: `zip`'s own consistency check accepts them all (asserted),
+/// as did the member set, the tiling and the end records. Every case is judged before any failure is
+/// reported, so one run lists each case that is not refused, not only the first.
+fn assert_each_refused(cases: Vec<(&str, Vec<u8>, &str)>) {
+    let mut failures = Vec::new();
+    for (what, bytes, needle) in cases {
+        let mut a = ZipArchive::new(Cursor::new(&bytes))
+            .unwrap_or_else(|e| panic!("{what}: zip no longer opens it: {e}"));
+        assert!(
+            a.validate_header_consistency().is_ok(),
+            "{what}: zip's own check accepts it; the encoding is tessera's rule to enforce"
+        );
+        match verdict(&bytes) {
+            None => failures.push(format!("{what}: verified a non-canonical archive")),
+            Some(Error::Container(msg))
+                if msg.contains("not a canonical .tsra") && msg.contains(needle) => {}
+            Some(other) => failures.push(format!("{what}: refused for the wrong reason: {other}")),
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// The blocker (review n20, n03, n02). General-purpose bit 3 says "the CRC and sizes follow the data,
+/// in a descriptor", and lets the local header carry zeros. A streaming reader then looks for the
+/// member's end, and the first `PK\7\8` that matches what it has read so far ends it. In n20 that is
+/// a forged descriptor inside the next member's local extra field, followed there by a complete
+/// forged `manifest.json`, which the reviewer's `cat f | bsdtar -xf -` extracted; in n03 the same sits
+/// in an `aux/` member's bytes. The flag alone (n02) already makes the reading reader-dependent.
+#[test]
+fn a_data_descriptor_flag_is_refused() {
+    let dd = |mut es: Vec<Hand>| {
+        es[1].flags = 0x0008;
+        es[1].local_crc = Some(0);
+        es[1].local_size = Some(0);
+        es
+    };
+
+    let flag_only = dd(honest_entries());
+
+    let in_local_extra = {
+        let mut es = dd(honest_entries());
+        let forged = {
+            let mut f = hand_local_header(&Hand::new(b"manifest.json", FORGED));
+            f.extend_from_slice(FORGED);
+            f
+        };
+        // The descriptor matches everything after manifest.json's local header up to itself: the
+        // genuine manifest bytes and the block's local header as far as the extra field's body.
+        let body_len = 16 + forged.len();
+        let placeholder = extra_field(0xcafe, &vec![0; body_len]);
+        es[2].local_extra = placeholder;
+        let head = hand_local_header(&es[2]);
+        let mut consumed = es[1].data.clone();
+        consumed.extend_from_slice(&head[..head.len() - body_len]);
+        let mut body = fake_descriptor(&consumed);
+        body.extend_from_slice(&forged);
+        es[2].local_extra = extra_field(0xcafe, &body);
+        es
+    };
+
+    let in_aux = {
+        let forged = {
+            let mut f = hand_local_header(&Hand::new(b"manifest.json", FORGED));
+            f.extend_from_slice(FORGED);
+            f.extend_from_slice(&hand_local_header(&Hand::new(b"blocks/data", b"EVIL")));
+            f.extend_from_slice(b"EVIL");
+            f
+        };
+        let mut aux = fake_descriptor(
+            b"(the reviewer's harness solves this CRC; the flag is what is refused)",
+        );
+        aux.extend_from_slice(&forged);
+        dd(with_aux(Hand::new(b"aux/x", &aux)))
+    };
+
+    assert_each_refused(vec![
+        (
+            "n02: the flag alone",
+            hand_zip(&flag_only),
+            "general-purpose flags",
+        ),
+        (
+            "n20: a forged entry in a block's local extra field",
+            hand_zip(&in_local_extra),
+            "general-purpose flags",
+        ),
+        (
+            "n03: a forged entry in an aux member",
+            hand_zip(&in_aux),
+            "general-purpose flags",
+        ),
+    ]);
+}
+
+/// Every other field a reader interprets, one case each. An extra field other than zip64 is where
+/// n20 hid its forged entry, and also how a Unicode-path field (0x7075) renames a member for the
+/// readers that honour it; the encryption flag makes a reader decrypt; a disk number makes a reader
+/// look on another disk; a symlink mode makes an extracting reader write a link; a FAT host makes a
+/// reader take `\` for a separator; a modification time is pinned for writer-determinism.
+#[test]
+fn every_field_a_reader_interprets_is_the_writers() {
+    // Review n09: the field's CRC does not match the name it replaces, so `zip` ignores it, but a
+    // reader that skips that check renames the member to `manifest.json`. (With a matching CRC, n10,
+    // `zip` honours it, sees `manifest.json` twice and refuses the archive on its own.)
+    let unicode_path = {
+        let mut body = vec![1];
+        body.extend_from_slice(&0xdead_beef_u32.to_le_bytes());
+        body.extend_from_slice(b"manifest.json");
+        extra_field(0x7075, &body)
+    };
+    let hidden_entry = {
+        let mut f = hand_local_header(&Hand::new(b"manifest.json", FORGED));
+        f.extend_from_slice(FORGED);
+        extra_field(0xcafe, &f)
+    };
+    let aux = |f: &dyn Fn(&mut Hand)| {
+        let mut h = Hand::new(b"aux/note", b"carried bytes");
+        f(&mut h);
+        hand_zip(&with_aux(h))
+    };
+    let block = |f: &dyn Fn(&mut Hand)| {
+        let mut es = honest_entries();
+        f(&mut es[2]);
+        hand_zip(&es)
+    };
+
+    assert_each_refused(vec![
+        (
+            "n15: an encrypted aux member",
+            aux(&|h| h.flags = 0x0001),
+            "general-purpose flags",
+        ),
+        (
+            "an aux member flagged UTF-8 with an ASCII name",
+            aux(&|h| h.flags = 0x0800),
+            "general-purpose flags",
+        ),
+        (
+            "n16: a forged entry in a local extra field",
+            aux(&|h| h.local_extra = hidden_entry.clone()),
+            "extra-field length",
+        ),
+        (
+            "n17: a forged entry in a central extra field",
+            aux(&|h| h.central_extra = hidden_entry.clone()),
+            "extra-field length",
+        ),
+        (
+            "n09: a Unicode-path field naming manifest.json",
+            aux(&|h| {
+                h.name = b"aux/zzzzzzzzzzzzz".to_vec();
+                h.local_extra = unicode_path.clone();
+                h.central_extra = unicode_path.clone();
+            }),
+            "extra-field length",
+        ),
+        (
+            "an unknown extra field on a sealed block's central record only",
+            block(&|h| h.central_extra = extra_field(0xcafe, b"unhashed")),
+            "extra-field length",
+        ),
+        (
+            "n08: a block whose central record says it starts on disk 1",
+            block(&|h| h.disk = 1),
+            "disk number start",
+        ),
+        (
+            "n14: an aux member with a symlink mode",
+            aux(&|h| {
+                h.data = b"../../../../etc/passwd".to_vec();
+                h.external = 0o120_777 << 16;
+            }),
+            "external attributes",
+        ),
+        (
+            "an aux member marked as a directory",
+            aux(&|h| h.external = (0o040_755 << 16) | 0x10),
+            "external attributes",
+        ),
+        (
+            "an aux member made on a FAT host",
+            aux(&|h| h.made_by = 0x0014),
+            "version made by",
+        ),
+        (
+            "a block stamped with a modification date other than the epoch",
+            block(&|h| h.date = 0x5a21),
+            "modification date",
+        ),
+    ]);
+}
+
+/// Review n11-n14: an `aux/` name is a safe relative path, by the block-name grammar the writers
+/// already apply (ADR-0063). Each of these is a name some extracting reader writes outside its
+/// target directory, or reads as a different name than another reader does.
+#[test]
+fn an_aux_member_name_must_be_a_safe_relative_path() {
+    let name = |n: &[u8]| hand_zip(&with_aux(Hand::new(n, FORGED)));
+    let mut utf8 = Hand::new("aux/caf\u{e9}".as_bytes(), FORGED);
+    utf8.flags = 0x0800;
+    let mut dir = Hand::new(b"aux/sub/", b"");
+    dir.external = (0o040_755 << 16) | 0x10;
+    assert_each_refused(vec![
+        (
+            "n11: a .. segment",
+            name(b"aux/../manifest.json"),
+            "not a safe relative path",
+        ),
+        (
+            "n12: a backslash",
+            name(b"aux/..\\manifest.json"),
+            "not a safe relative path",
+        ),
+        (
+            "n13: a NUL",
+            name(b"aux/\0manifest.json"),
+            "not a safe relative path",
+        ),
+        (
+            "a control character",
+            name(b"aux/\x1bnote"),
+            "not a safe relative path",
+        ),
+        (
+            "an absolute path below aux/",
+            name(b"aux//etc/passwd"),
+            "not a safe relative path",
+        ),
+        (
+            "an empty segment",
+            name(b"aux/a//b"),
+            "not a safe relative path",
+        ),
+        (
+            "a . segment",
+            name(b"aux/./note"),
+            "not a safe relative path",
+        ),
+        ("the bare prefix", name(b"aux/"), "not a safe relative path"),
+        (
+            "a directory entry",
+            hand_zip(&with_aux(dir)),
+            "not a safe relative path",
+        ),
+        (
+            "a non-ASCII name",
+            hand_zip(&with_aux(utf8)),
+            "not a safe relative path",
+        ),
+        (
+            "bytes that are not UTF-8",
+            name(b"aux/\xffnote"),
+            "not a safe relative path",
+        ),
+        (
+            "a Windows drive",
+            name(b"aux/C:note"),
+            "not a safe relative path",
+        ),
+    ]);
+}
+
+/// Review n05/n06: zip64 end records on an archive that needs none. Every reader reaches the same
+/// directory through them, but they are not what the writer emits, and the rule is the writer's
+/// encoding, not "harmless enough".
+#[test]
+fn zip64_end_records_on_a_small_archive_are_refused() {
+    let honest = sealed_blobs(&[("data", b"genuine payload")]);
+    let eocd = eocd_at(&honest);
+    let (cd_size, cd_start) = (
+        u64::from(u32_at(&honest, eocd + 12)),
+        u64::from(u32_at(&honest, eocd + EOCD_CD_OFFSET)),
+    );
+    let n = u64::from(u16_at(&honest, eocd + 10));
+    for (what, sentinels) in [("n05: sentinels", true), ("n06: true values", false)] {
+        let mut bytes = honest[..eocd].to_vec();
+        let record_at = bytes.len() as u64;
+        bytes.extend_from_slice(ZIP64_EOCD_SIG);
+        bytes.extend_from_slice(&44u64.to_le_bytes());
+        bytes.extend_from_slice(&45u16.to_le_bytes());
+        bytes.extend_from_slice(&45u16.to_le_bytes());
+        bytes.extend_from_slice(&[0; 8]);
+        for v in [n, n, cd_size, cd_start] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        bytes.extend_from_slice(ZIP64_LOCATOR_SIG);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&record_at.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        let mut eocd_rec = honest[eocd..].to_vec();
+        if sentinels {
+            put_u16(&mut eocd_rec, 8, u16::MAX);
+            put_u16(&mut eocd_rec, 10, u16::MAX);
+            put_u32(&mut eocd_rec, 12, u32::MAX);
+            put_u32(&mut eocd_rec, 16, u32::MAX);
+        }
+        bytes.extend_from_slice(&eocd_rec);
+        assert_eq!(
+            cd_view(&bytes),
+            cd_view(&honest),
+            "{what}: zip reads the same archive"
+        );
+        assert_refused_for(&bytes, what, "follow the central directory");
+    }
+}
+
+/// Review round 2b: the archive's members as a set, and the bytes no check read. Each archive here is
+/// canonical record by record, yet readers left different trees on disk: `unzip`, `zipfile` and 7z
+/// (directory order) against `cat f | bsdtar -xf -` (file order) when the directory lists `aux/a`
+/// before `aux/a/b` but the file holds them the other way round; a case-insensitive file system for
+/// `aux/SIG` next to `aux/sig`; and an `aux/` member whose bytes do not match its CRC, which
+/// `zipfile` truncates to nothing while the others write it with a warning.
+#[test]
+fn the_member_set_reads_the_same_in_every_order() {
+    let reordered = {
+        let es = with_aux(Hand::new(b"aux/b", b"second"));
+        let mut es2 = es.clone();
+        es2.insert(2, Hand::new(b"aux/a", b"first"));
+        // File: mimetype, manifest.json, aux/a, aux/b, blocks/data. Directory: aux/b before aux/a.
+        hand_zip_listed(&es2, &[0, 1, 3, 2, 4])
+    };
+    let leaf = {
+        let mut es = with_aux(Hand::new(b"aux/a/b", b"below"));
+        es.insert(2, Hand::new(b"aux/a", b"a file"));
+        hand_zip(&es)
+    };
+    let case = {
+        let mut es = with_aux(Hand::new(b"aux/sig", b"lower"));
+        es.insert(2, Hand::new(b"aux/SIG", b"upper"));
+        hand_zip(&es)
+    };
+    let bad_crc = {
+        let mut h = Hand::new(b"aux/x", b"payload\n");
+        h.crc = Some(0xdead_beef);
+        hand_zip(&with_aux(h))
+    };
+    assert_each_refused(vec![
+        (
+            "a directory that lists members in another order than the file",
+            reordered,
+            "another order",
+        ),
+        ("aux/a next to aux/a/b", leaf, "leaf rule"),
+        ("aux/SIG next to aux/sig", case, "letter case"),
+        (
+            "an aux member with a wrong CRC-32",
+            bad_crc,
+            "CRC-32 records",
+        ),
+    ]);
+}
+
+/// The aux writers refuse to produce what verification refuses: a member below an existing one, a
+/// case variant of one, and the same pair packed from an exploded directory.
+#[test]
+fn the_aux_writers_hold_the_member_set_to_the_same_rule() {
+    let honest = sealed_blobs(&[("data", b"genuine payload")]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.tsra");
+    std::fs::write(&path, &honest).unwrap();
+    add_aux_members(&path, &[AuxMember::new("notes", b"a file".to_vec())]).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    for (what, name, needle) in [
+        ("below an existing member", "notes/later", "leaf rule"),
+        ("a case variant of one", "NOTES", "letter case"),
+    ] {
+        let err = add_aux_members(&path, &[AuxMember::new(name, b"x".to_vec())]).expect_err(what);
+        assert!(
+            matches!(&err, Error::Container(m) if m.contains(needle)),
+            "{what}: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "{what}: nothing written"
+        );
+    }
+    // Replacing a member by name is not a conflict with itself.
+    add_aux_members(&path, &[AuxMember::new("notes", b"replaced".to_vec())]).unwrap();
+    assert!(verdict(&std::fs::read(&path).unwrap()).is_none());
+
+    let exploded = dir.path().join("exploded");
+    unpack(&path, &exploded).unwrap();
+    std::fs::write(exploded.join("aux").join("NOTES"), b"case twin").unwrap();
+    let err = pack_dir(&exploded, &dir.path().join("out.tsra")).expect_err("case twins");
+    assert!(
+        matches!(&err, Error::Container(m) if m.contains("letter case")),
+        "{err}"
+    );
 }

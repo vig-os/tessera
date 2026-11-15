@@ -20,7 +20,7 @@ use tessera_core::{Error, Result};
 use zip::read::{ArchiveOffset, Config, ZipFile};
 use zip::result::ZipError;
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, DateTime, ZipArchive, ZipReadOptions, ZipWriter};
+use zip::{CompressionMethod, DateTime, System, ZipArchive, ZipReadOptions, ZipWriter};
 
 /// Container MIME magic — the first, uncompressed entry (EPUB/ODF trick) so `file(1)` and magic
 /// sniffers identify a `.tsra` without unzipping.
@@ -70,6 +70,9 @@ fn tsra_entry_options() -> SimpleFileOptions {
         .compression_method(CompressionMethod::Stored)
         .last_modified_time(DateTime::default())
         .large_file(true)
+        // Unix on every host: on Windows `zip` would otherwise mark the entry as made on DOS, a
+        // different "version made by" for the same product (SPEC §6's canonical encoding).
+        .system(System::Unix)
 }
 
 /// Open a `.tsra` as a zip archive whose first byte is byte 0 of the source — the one way every
@@ -175,7 +178,7 @@ fn open_member<'a, R: Read + Seek>(
 ///
 /// `zip` interprets only the bytes its records point at, and a [`ZipArchive`] never hands its source
 /// back. The deep verify must also read the bytes that no record points at: the end records and
-/// anything around them (SPEC §6, [`check_end_records`]). So the reader keeps a second handle to the
+/// anything around them (SPEC §6, [`check_central_directory`]). So the reader keeps a second handle to the
 /// same source. The two never interleave: the check runs only while no member is open, and `zip`
 /// seeks to an entry before it reads one.
 struct SharedSource<R>(Arc<Mutex<R>>);
@@ -202,21 +205,38 @@ impl<R: Seek> Seek for SharedSource<R> {
 /// SPEC §6's **canonical layout**, over every byte of the file: whichever way a zip reader finds its
 /// way into a `.tsra` (the central directory, the local headers front to back, or the end record
 /// found by scanning back from the end of the file), it must see exactly the same members with
-/// exactly the same bytes, and those members must be the ones the manifest seals plus `aux/`.
+/// exactly the same bytes and the same meaning, and those members must be the ones the manifest
+/// seals plus `aux/`.
 ///
-/// Four parts, each closing a cloak the others leave open:
+/// Six parts, each closing a cloak the others leave open:
 ///
 /// 1. `zip`'s [`ZipArchive::validate_header_consistency`]: every local header agrees with its
 ///    central-directory record, no name appears twice, no two entries share a byte.
 /// 2. [`check_members`]: every entry is `mimetype`, `manifest.json`, a block the manifest lists, or
-///    an `aux/` member (ADR-0042). Anything else is bytes no digest covers under a name a reader
-///    would take for part of the product.
-/// 3. [`check_entries_tile`]: the entries cover `[0, central directory)` with no gap, so no complete
-///    local entry hides in bytes no record points at (a streaming reader would list it).
-/// 4. [`check_end_records`]: the central directory, the optional zip64 end records and the
-///    end-of-central-directory record follow one another to the end of the file, with no comment and
-///    nothing after. A second archive appended after the end record (or carried in its comment) is
-///    what `unzip` and Python's `zipfile` open instead, while `zip` falls back to the genuine one.
+///    an `aux/` member whose name obeys the block-name grammar (ADR-0042, ADR-0063), and the `aux/`
+///    names are distinct up to case with none below another ([`check_aux_name_set`]). Anything else
+///    is bytes no digest covers under a name a reader would take for part of the product, or a name
+///    an extracting reader would resolve outside its target directory or into another tree.
+/// 3. [`check_entries_tile`]: in central-directory order, the entries cover `[0, central directory)`
+///    with no gap, so no complete local entry hides in bytes no record points at (a streaming reader
+///    would list it) and every reader meets the members in one order.
+/// 4. [`check_local_headers`]: every local header is, byte for byte, the one tessera's writer emits
+///    for that member ([`canonical_local_header`]). The tiling counts a header's extra field as part
+///    of its entry, and a reader may interpret any field the check does not pin: a data-descriptor
+///    flag makes a streaming reader look for the member's end somewhere else, an unknown extra field
+///    can carry a whole forged entry, an encryption flag or a Unicode-path field changes what a
+///    reader decodes or calls the member. Pinning every byte leaves no field to interpret.
+/// 5. [`check_central_directory`]: the same for every central-directory record
+///    ([`canonical_central_record`]: no comment, disk 0, a regular file's attributes), then the end
+///    records exactly as the writer emits them ([`canonical_end_records`]: no archive comment, true
+///    counts and offsets), then the end of the file. A second archive appended after the end record
+///    (or carried in its comment) is what `unzip` and Python's `zipfile` open instead, while `zip`
+///    falls back to the genuine one.
+/// 6. [`check_aux_bytes`]: every `aux/` member's bytes match its CRC-32. The payload pass reads every
+///    sealed member; nothing else would read an `aux/` one.
+///
+/// Parts 1 and 3 follow from 4 and 5 for an archive `zip` opened; they stay because each names the
+/// disagreement it finds (a renamed member, a gap) where a byte comparison names only a field.
 ///
 /// It reads every local header and the whole central directory, so it belongs to the deep verify,
 /// not to [`Reader::from_reader`]: a cloud open still costs the archive's tail only, and every member
@@ -236,25 +256,45 @@ fn check_one_reading<A: Read + Seek, S: Read + Seek>(
         .map_err(|e| refuse(Error::Container(e.to_string())))?;
     check_members(archive, manifest).map_err(refuse)?;
     check_entries_tile(archive).map_err(refuse)?;
-    check_end_records(archive, raw).map_err(refuse)
+    check_local_headers(archive, raw).map_err(refuse)?;
+    check_central_directory(archive, raw).map_err(refuse)?;
+    check_aux_bytes(archive).map_err(refuse)
 }
 
 /// Part 2 of [`check_one_reading`]: the archive holds only what SPEC §6 permits. Duplicates are
 /// already refused, so `mimetype` and `manifest.json` occur at most once; a listed block that is
 /// missing fails later, when its payload is verified.
+///
+/// An `aux/` member's name below the prefix obeys the block-name grammar
+/// ([`tessera_core::block::name::check_name`]), the same rule [`write_aux_members`] and [`pack_dir`]
+/// apply when they write one: relative, `/`-separated, no empty, `.` or `..` segment, only
+/// `[A-Za-z0-9._-]`. So no `..`, no leading `/`, no `\`, no NUL or control character, no non-ASCII
+/// byte, and no directory entry (its trailing `/` is an empty segment). Without it, a name like
+/// `aux/../manifest.json` lands outside the target directory in an extracting reader, and a name
+/// with a NUL reads as `aux/` in one reader and as the full name in another.
 fn check_members<A: Read + Seek>(archive: &ZipArchive<A>, manifest: &Manifest) -> Result<()> {
     let listed: HashSet<String> = manifest
         .blocks
         .iter()
         .map(|b| format!("{BLOCKS_PREFIX}{}", b.name))
         .collect();
+    let mut aux = Vec::new();
     for i in 0..archive.len() {
         let entry = archive.by_index_data(i).map_err(cz)?;
         let name = entry.name().map_err(cz)?;
-        let permitted = name == MIMETYPE_ENTRY
-            || name == MANIFEST_ENTRY
-            || listed.contains(name.as_ref())
-            || name.starts_with(AUX_PREFIX);
+        if let Some(rest) = name.strip_prefix(AUX_PREFIX) {
+            tessera_core::block::name::check_name(rest).map_err(|reason| {
+                Error::Container(format!(
+                    "aux member {name:?} is not a safe relative path (ADR-0063): {reason}; an \
+                     extracting zip reader would write it somewhere other than under `{AUX_PREFIX}`, \
+                     or read a different name"
+                ))
+            })?;
+            aux.push(rest.to_string());
+            continue;
+        }
+        let permitted =
+            name == MIMETYPE_ENTRY || name == MANIFEST_ENTRY || listed.contains(name.as_ref());
         if !permitted {
             return Err(Error::Container(format!(
                 "entry '{name}' is not `mimetype`, `manifest.json`, a block the manifest lists, or \
@@ -263,14 +303,93 @@ fn check_members<A: Read + Seek>(archive: &ZipArchive<A>, manifest: &Manifest) -
             )));
         }
     }
+    check_aux_name_set(aux.iter().map(String::as_str))
+}
+
+/// The `aux/` member names of one archive (below the prefix), as a set: compared with ASCII case
+/// folded, no two are equal and none is a parent prefix of another (the leaf rule, ADR-0063). An
+/// extracting reader writes `aux/a` as a file and needs `aux/a/b` to make it a directory, and on a
+/// case-insensitive file system `aux/SIG` and `aux/sig` are one file; either way the tree on disk
+/// depends on which member a reader writes first. Sealed `blocks/` names are not held to this here:
+/// the leaf rule applies to them when a product is sealed, not when it is read (ADR-0063).
+///
+/// Every aux writer ([`write_aux_members`], [`pack_dir`]) applies it to the set it would write, and
+/// the deep verify applies it to the set it finds, so no writer emits what verification refuses.
+fn check_aux_name_set<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    let mut folded: Vec<(String, &str)> = names
+        .into_iter()
+        .map(|n| (n.to_ascii_lowercase(), n))
+        .collect();
+    folded.sort_unstable();
+    for pair in folded.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(Error::Container(format!(
+                "aux members '{AUX_PREFIX}{}' and '{AUX_PREFIX}{}' have one name up to letter case; \
+                 a case-insensitive file system holds only one of them, so what an extracting \
+                 reader leaves depends on which it writes last",
+                pair[0].1, pair[1].1
+            )));
+        }
+    }
+    let by_folded: std::collections::BTreeMap<&str, &str> =
+        folded.iter().map(|(f, n)| (f.as_str(), *n)).collect();
+    for (f, child) in &folded {
+        for (i, _) in f.match_indices('/') {
+            if let Some(parent) = by_folded.get(&f[..i]) {
+                return Err(Error::Container(format!(
+                    "aux member '{AUX_PREFIX}{child}' sits below aux member \
+                     '{AUX_PREFIX}{parent}', which is a file; an extracting reader can write only \
+                     one of them, so the tree it leaves depends on the order it writes them \
+                     (the leaf rule, ADR-0063)"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
-/// Part 3 of [`check_one_reading`]: sorted by position, the first entry starts at byte 0, each starts
-/// exactly where the previous one's bytes end, and the last ends exactly where the central directory
-/// starts. A complete local entry hidden in a gap disagrees with no record, so every header check
-/// passes, yet a streaming reader walking the local headers reads it as one more member. Every
-/// tessera writer has always produced this layout (no prefix, no data descriptor, no padding).
+/// Part 6 of [`check_one_reading`]: every `aux/` member's bytes match the CRC-32 its records carry.
+/// Sealed members are read in full by the payload pass (and `manifest.json` by the open), so a CRC
+/// mismatch there is already refused; an `aux/` member is not sealed and would otherwise never be
+/// read. A reader that checks the CRC refuses or truncates such a member while another extracts it,
+/// so the file would read differently. Each member is streamed through a fixed buffer, held to its
+/// local header like every member read ([`open_member`]).
+fn check_aux_bytes<A: Read + Seek>(archive: &mut ZipArchive<A>) -> Result<()> {
+    for i in 0..archive.len() {
+        let name = archive
+            .by_index_data(i)
+            .map_err(cz)?
+            .name()
+            .map_err(cz)?
+            .into_owned();
+        if !name.starts_with(AUX_PREFIX) {
+            continue;
+        }
+        let opts = ZipReadOptions::new().enforce_header_consistency(true);
+        let mut f = archive.by_index_with_options(i, opts).map_err(cz)?;
+        std::io::copy(&mut f, &mut std::io::sink()).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::InvalidData {
+                Error::Container(format!(
+                    "aux member '{name}': {e}: its bytes are not the ones its CRC-32 records, so \
+                     a reader that checks the CRC refuses or truncates it while another extracts it"
+                ))
+            } else {
+                Error::Io(e)
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// Part 3 of [`check_one_reading`]: **in central-directory order**, the first entry starts at byte 0,
+/// each starts exactly where the previous one's bytes end, and the last ends exactly where the
+/// central directory starts. A complete local entry hidden in a gap disagrees with no record, so every
+/// header check passes, yet a streaming reader walking the local headers reads it as one more member.
+/// And the central directory lists the members in the order they sit in the file, so a reader
+/// walking the directory and one walking the local headers meet the members in the same order: an
+/// extracting reader that writes them in turn ends with the same tree either way. Every tessera writer
+/// has always produced this layout (no prefix, no data descriptor, no padding, the directory written
+/// in the order the entries were).
 fn check_entries_tile<A: Read + Seek>(archive: &mut ZipArchive<A>) -> Result<()> {
     let mut spans = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
@@ -286,7 +405,14 @@ fn check_entries_tile<A: Read + Seek>(archive: &mut ZipArchive<A>) -> Result<()>
         })?;
         spans.push((f.header_start(), end, name));
     }
-    spans.sort_unstable();
+    if let Some(w) = spans.windows(2).find(|w| w[1].0 < w[0].0) {
+        return Err(Error::Container(format!(
+            "the central directory lists '{}' (at byte {}) after '{}' (at byte {}): it lists the \
+             members in another order than the file holds them, so a reader walking the directory \
+             and one walking the local headers meet them in different orders",
+            w[1].2, w[1].0, w[0].2, w[0].0
+        )));
+    }
     let hidden =
         "bytes no central-directory record covers can hide a member that a reader walking \
                   the local headers would see";
@@ -310,59 +436,275 @@ fn check_entries_tile<A: Read + Seek>(archive: &mut ZipArchive<A>) -> Result<()>
     Ok(())
 }
 
+// ── The canonical encoding (SPEC §6) ────────────────────────────────────────────────────────────
+//
+// Every value below is what `zip` writes under [`tsra_entry_options`] for a member whose name obeys
+// the block-name grammar (ASCII, so no UTF-8 flag) — the encoding every tessera writer has always
+// produced. The reader holds each record to it byte for byte, so a field is either pinned here or
+// derived from the member's name, CRC, size and offset; none is left for a reader to interpret.
+
+/// Signature of a local file header (`PK\3\4`).
+const LOCAL_HEADER_SIG: [u8; 4] = *b"PK\x03\x04";
 /// Signature of a central-directory record (`PK\1\2`).
 const CENTRAL_RECORD_SIG: [u8; 4] = *b"PK\x01\x02";
-/// Signature of the end-of-central-directory record (`PK\5\6`), and its fixed size.
+/// Signature of the end-of-central-directory record (`PK\5\6`), and its size with no comment.
 const EOCD_SIG: [u8; 4] = *b"PK\x05\x06";
 const EOCD_LEN: usize = 22;
-/// Signature of the zip64 end-of-central-directory record (`PK\6\6`), and its size with no
-/// extensible data sector (the "size of record" field then reads 44).
+/// Signature of the zip64 end-of-central-directory record (`PK\6\6`).
 const ZIP64_EOCD_SIG: [u8; 4] = *b"PK\x06\x06";
-const ZIP64_EOCD_LEN: usize = 56;
-/// Signature of the zip64 end-of-central-directory locator (`PK\6\7`), and its fixed size.
+/// Signature of the zip64 end-of-central-directory locator (`PK\6\7`).
 const ZIP64_LOCATOR_SIG: [u8; 4] = *b"PK\x06\x07";
-const ZIP64_LOCATOR_LEN: usize = 20;
+/// "Version needed to extract": 4.5, zip64 (every entry carries a zip64 extra field).
+const VERSION_NEEDED: u16 = 45;
+/// "Version made by": host 3 (Unix, so the external attributes are a Unix mode) and version 4.5.
+const VERSION_MADE_BY: u16 = (3 << 8) | VERSION_NEEDED;
+/// General-purpose flags: none. No encryption (bit 0), no data descriptor (bit 3), no patch data,
+/// no strong encryption (bit 6), no UTF-8 flag (bit 11; every name is ASCII), nothing reserved.
+const FLAGS: u16 = 0;
+/// Compression method 0, STORED.
+const METHOD_STORED: u16 = 0;
+/// DOS time and date of the zip epoch, 1980-01-01 00:00:00 (the pinned modification time).
+const EPOCH_TIME: u16 = 0;
+const EPOCH_DATE: u16 = (1 << 5) | 1;
+/// External attributes: a regular file, mode `0644` (`S_IFREG | 0644` in the high 16 bits). Not a
+/// symlink, not a directory, so an extracting reader writes a plain file.
+const EXTERNAL_ATTRS: u32 = 0o100_644 << 16;
+/// The zip64 extended-information extra field's header id.
+const ZIP64_EXTRA_ID: u16 = 0x0001;
+/// The 32-bit "see the zip64 field" sentinel (`zip`'s zip64 byte threshold).
+const SENTINEL32: u32 = u32::MAX;
+/// The 16-bit entry-count sentinel (`zip`'s zip64 entry threshold).
+const SENTINEL16: u16 = u16::MAX;
 
-fn le16(b: &[u8], at: usize) -> u64 {
-    u64::from(u16::from_le_bytes([b[at], b[at + 1]]))
+/// A record's canonical bytes, and where each of its fields starts (to name the one that differs).
+struct Canonical {
+    bytes: Vec<u8>,
+    /// (start, field name, whether the field is a little-endian integer rather than raw bytes).
+    fields: Vec<(usize, &'static str, bool)>,
 }
 
-fn le32(b: &[u8], at: usize) -> u64 {
-    u64::from(u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]))
-}
-
-fn le64(b: &[u8], at: usize) -> u64 {
-    let mut v = [0u8; 8];
-    v.copy_from_slice(&b[at..at + 8]);
-    u64::from_le_bytes(v)
-}
-
-/// One end-record field must state the true value. `sentinel` is the "see the zip64 record" value a
-/// 32-bit field may carry instead, and only when the zip64 records are present.
-fn end_field(
-    record: &str,
-    field: &str,
-    found: u64,
-    want: u64,
-    sentinel: Option<u64>,
-) -> Result<()> {
-    if found == want || sentinel == Some(found) {
-        return Ok(());
+impl Canonical {
+    fn new() -> Self {
+        Canonical {
+            bytes: Vec::with_capacity(128),
+            fields: Vec::with_capacity(24),
+        }
     }
-    Err(Error::Container(format!(
-        "the {record} says {field} is {found}, but the archive's true value is {want}; a reader \
-         trusting that record would read a different archive"
-    )))
+
+    fn push(&mut self, name: &'static str, bytes: &[u8], int: bool) -> &mut Self {
+        self.fields.push((self.bytes.len(), name, int));
+        self.bytes.extend_from_slice(bytes);
+        self
+    }
+
+    fn field(&mut self, name: &'static str, bytes: &[u8]) -> &mut Self {
+        self.push(name, bytes, false)
+    }
+
+    fn u16(&mut self, name: &'static str, v: u16) -> &mut Self {
+        self.push(name, &v.to_le_bytes(), true)
+    }
+
+    fn u32(&mut self, name: &'static str, v: u32) -> &mut Self {
+        self.push(name, &v.to_le_bytes(), true)
+    }
+
+    fn u64(&mut self, name: &'static str, v: u64) -> &mut Self {
+        self.push(name, &v.to_le_bytes(), true)
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// `found` must be these bytes; otherwise [`Error::Container`] naming `record` and the first field
+    /// that differs, with both values. A `found` shorter than the record (the file ended) differs
+    /// where it stops.
+    fn require(&self, found: &[u8], record: &str) -> Result<()> {
+        if found == self.bytes.as_slice() {
+            return Ok(());
+        }
+        let at = found
+            .iter()
+            .zip(&self.bytes)
+            .position(|(a, b)| a != b)
+            .unwrap_or(found.len().min(self.bytes.len()));
+        let i = self
+            .fields
+            .iter()
+            .rposition(|(start, _, _)| *start <= at)
+            .unwrap_or(0);
+        let (start, field, int) = self.fields[i];
+        let end = self.fields.get(i + 1).map_or(self.bytes.len(), |f| f.0);
+        let width = end - start;
+        let show = |b: &[u8]| -> String {
+            if b.len() < width {
+                format!("cut short by the end of the file after {} bytes", b.len())
+            } else if int {
+                let v = b.iter().rev().fold(0u64, |v, &x| (v << 8) | u64::from(x));
+                format!("{v:#0w$x}", w = 2 + 2 * width)
+            } else {
+                format!("\"{}\"", b.escape_ascii())
+            }
+        };
+        Err(Error::Container(format!(
+            "{record}: its {field} is {} where tessera's writer emits {}; every record of a .tsra is \
+             byte for byte the one the writer emits, so no zip reader finds a meaning in it that \
+             verification did not check",
+            show(&found[start.min(found.len())..end.min(found.len())]),
+            show(&self.bytes[start..end]),
+        )))
+    }
 }
 
-/// Part 4 of [`check_one_reading`]: every byte from the central directory to the end of the file is
-/// accounted for. The central directory is exactly its records, with no entry comment; then come
-/// either the end-of-central-directory record alone, or the zip64 end record, its locator and the
-/// end-of-central-directory record; then the end of the file. Every field of those records states
-/// the archive's true value (a 32-bit field may defer to the zip64 record with its sentinel), and
-/// the archive comment is empty. So the end record a reader finds by scanning back from the end of
-/// the file is the one `zip` uses, and no reader can be steered to other bytes.
-fn check_end_records<A: Read + Seek, S: Read + Seek>(
+/// The local file header tessera's writer emits for a member (APPNOTE 4.3.7): sizes in a zip64
+/// extra field, the 32-bit size fields holding the sentinel, and nothing else in the extra field.
+fn canonical_local_header(name: &[u8], crc: u32, size: u64) -> Result<Canonical> {
+    let name_len = u16::try_from(name.len())
+        .map_err(|_| Error::Container("an entry name is longer than 65,535 bytes".into()))?;
+    let mut c = Canonical::new();
+    c.field("signature", &LOCAL_HEADER_SIG)
+        .u16("version needed to extract", VERSION_NEEDED)
+        .u16("general-purpose flags", FLAGS)
+        .u16("compression method", METHOD_STORED)
+        .u16("modification time", EPOCH_TIME)
+        .u16("modification date", EPOCH_DATE)
+        .u32("CRC-32", crc)
+        .u32("32-bit compressed size", SENTINEL32)
+        .u32("32-bit uncompressed size", SENTINEL32)
+        .u16("name length", name_len)
+        .u16("extra-field length", 20)
+        .field("name", name)
+        .u16("extra-field id", ZIP64_EXTRA_ID)
+        .u16("zip64 field length", 16)
+        .u64("zip64 uncompressed size", size)
+        .u64("zip64 compressed size", size);
+    Ok(c)
+}
+
+/// The central-directory record tessera's writer emits for a member (APPNOTE 4.3.12): the local
+/// header's fields, plus no comment, disk 0, no internal attributes and a regular file's mode. The
+/// zip64 extra field carries the sizes, and the local header's offset too once that offset no longer
+/// fits 32 bits (the 32-bit offset field then holds the sentinel), exactly as `zip` decides it.
+fn canonical_central_record(name: &[u8], crc: u32, size: u64, offset: u64) -> Result<Canonical> {
+    let name_len = u16::try_from(name.len())
+        .map_err(|_| Error::Container("an entry name is longer than 65,535 bytes".into()))?;
+    let offset_in_zip64 = offset >= u64::from(SENTINEL32);
+    let zip64_len: u16 = if offset_in_zip64 { 24 } else { 16 };
+    let mut c = Canonical::new();
+    c.field("signature", &CENTRAL_RECORD_SIG)
+        .u16("version made by", VERSION_MADE_BY)
+        .u16("version needed to extract", VERSION_NEEDED)
+        .u16("general-purpose flags", FLAGS)
+        .u16("compression method", METHOD_STORED)
+        .u16("modification time", EPOCH_TIME)
+        .u16("modification date", EPOCH_DATE)
+        .u32("CRC-32", crc)
+        .u32("32-bit compressed size", SENTINEL32)
+        .u32("32-bit uncompressed size", SENTINEL32)
+        .u16("name length", name_len)
+        .u16("extra-field length", 4 + zip64_len)
+        .u16("comment length", 0)
+        .u16("disk number start", 0)
+        .u16("internal attributes", 0)
+        .u32("external attributes", EXTERNAL_ATTRS)
+        .u32(
+            "32-bit local header offset",
+            u32::try_from(offset).unwrap_or(SENTINEL32),
+        )
+        .field("name", name)
+        .u16("extra-field id", ZIP64_EXTRA_ID)
+        .u16("zip64 field length", zip64_len)
+        .u64("zip64 uncompressed size", size)
+        .u64("zip64 compressed size", size);
+    if offset_in_zip64 {
+        c.u64("zip64 local header offset", offset);
+    }
+    Ok(c)
+}
+
+/// The end records tessera's writer emits after a central directory of `entries` records, `cd_size`
+/// bytes long, starting at byte `cd_start` (APPNOTE 4.3.14-16, decided as `zip` decides it): the
+/// zip64 end record and its locator only when the archive needs them (more than 65,535 entries, or a
+/// directory size or offset past 32 bits), then the end-of-central-directory record with no comment.
+/// Every count, size and offset is the true value, or its sentinel when that value lives in the zip64
+/// record.
+fn canonical_end_records(entries: u64, cd_start: u64, cd_size: u64) -> Canonical {
+    let zip64 = entries > u64::from(SENTINEL16) || cd_size.max(cd_start) > u64::from(SENTINEL32);
+    let mut c = Canonical::new();
+    if zip64 {
+        c.field("zip64 end record signature", &ZIP64_EOCD_SIG)
+            .u64("zip64 end record size", 44)
+            .u16("zip64 end record version made by", VERSION_NEEDED)
+            .u16("zip64 end record version needed", VERSION_NEEDED)
+            .u32("zip64 end record disk number", 0)
+            .u32("zip64 end record directory disk", 0)
+            .u64("zip64 end record entries on this disk", entries)
+            .u64("zip64 end record entry count", entries)
+            .u64("zip64 end record directory size", cd_size)
+            .u64("zip64 end record directory offset", cd_start)
+            .field("zip64 locator signature", &ZIP64_LOCATOR_SIG)
+            .u32("zip64 locator's zip64 record disk", 0)
+            .u64("zip64 locator's zip64 record offset", cd_start + cd_size)
+            .u32("zip64 locator's disk count", 1);
+    }
+    let count = u16::try_from(entries).unwrap_or(SENTINEL16);
+    let size32 = if zip64 {
+        SENTINEL32
+    } else {
+        u32::try_from(cd_size).unwrap_or(SENTINEL32)
+    };
+    c.field("end record signature", &EOCD_SIG)
+        .u16("end record disk number", 0)
+        .u16("end record directory disk", 0)
+        .u16("end record entries on this disk", count)
+        .u16("end record entry count", count)
+        .u32("end record directory size", size32)
+        .u32(
+            "end record directory offset",
+            u32::try_from(cd_start).unwrap_or(SENTINEL32),
+        )
+        .u16("end record comment length", 0);
+    c
+}
+
+/// Up to `n` bytes from `r`'s current position: fewer only where the file ends.
+fn read_up_to<S: Read>(r: &mut S, n: usize) -> Result<Vec<u8>> {
+    let mut b = Vec::with_capacity(n);
+    r.take(n as u64).read_to_end(&mut b)?;
+    Ok(b)
+}
+
+/// Part 4 of [`check_one_reading`]: every local header is the canonical one for its member, read
+/// from where its central-directory record says it is.
+fn check_local_headers<A: Read + Seek, S: Read + Seek>(
+    archive: &ZipArchive<A>,
+    raw: &mut S,
+) -> Result<()> {
+    for i in 0..archive.len() {
+        let entry = archive.by_index_data(i).map_err(cz)?;
+        let want =
+            canonical_local_header(entry.name_raw(), entry.crc32(), entry.compressed_size())?;
+        raw.seek(SeekFrom::Start(entry.header_start()))?;
+        let found = read_up_to(raw, want.len())?;
+        want.require(
+            &found,
+            &format!(
+                "the local header of '{}' at byte {}",
+                String::from_utf8_lossy(entry.name_raw()),
+                entry.header_start()
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+/// Part 5 of [`check_one_reading`]: every byte from the central directory to the end of the file is
+/// accounted for. The central directory is exactly its canonical records back to back, in `zip`'s
+/// order; then come exactly the canonical end records; then the end of the file. So the end record a
+/// reader finds by scanning back from the end of the file is the one `zip` uses, and no reader can be
+/// steered to other bytes.
+fn check_central_directory<A: Read + Seek, S: Read + Seek>(
     archive: &ZipArchive<A>,
     raw: &mut S,
 ) -> Result<()> {
@@ -372,127 +714,42 @@ fn check_end_records<A: Read + Seek, S: Read + Seek>(
     let mut tail = std::io::BufReader::new(&mut *raw);
     let mut pos = cd_start;
     for i in 0..archive.len() {
-        let mut fixed = [0u8; 46];
-        tail.read_exact(&mut fixed)?;
-        if fixed[..4] != CENTRAL_RECORD_SIG {
-            return Err(Error::Container(format!(
-                "central-directory record #{i} at byte {pos} does not start with a record signature, \
-                 so the directory is not its records back to back"
-            )));
-        }
-        let (name_len, extra_len, comment_len) =
-            (le16(&fixed, 28), le16(&fixed, 30), le16(&fixed, 32));
-        let mut name = vec![0u8; name_len as usize];
-        tail.read_exact(&mut name)?;
         let entry = archive.by_index_data(i).map_err(cz)?;
-        if name != entry.name_raw() {
-            return Err(Error::Container(format!(
-                "central-directory record #{i} at byte {pos} is not the record zip read for entry \
-                 '{}'",
+        let want = canonical_central_record(
+            entry.name_raw(),
+            entry.crc32(),
+            entry.compressed_size(),
+            entry.header_start(),
+        )?;
+        let found = read_up_to(&mut tail, want.len())?;
+        want.require(
+            &found,
+            &format!(
+                "central-directory record #{i} ('{}') at byte {pos}",
                 String::from_utf8_lossy(entry.name_raw())
-            )));
-        }
-        if comment_len != 0 {
-            return Err(Error::Container(format!(
-                "entry '{}' carries a {comment_len}-byte comment; a .tsra carries no bytes outside \
-                 its members and their records",
-                String::from_utf8_lossy(&name)
-            )));
-        }
-        let skipped = std::io::copy(&mut (&mut tail).take(extra_len), &mut std::io::sink())?;
-        if skipped != extra_len {
-            return Err(Error::Container(format!(
-                "central-directory record #{i} at byte {pos} runs past the end of the file"
-            )));
-        }
-        pos += 46 + name_len + extra_len;
+            ),
+        )?;
+        pos += want.len() as u64;
     }
-    let (cd_end, cd_size, entries) = (pos, pos - cd_start, archive.len() as u64);
-
+    let (cd_end, cd_size) = (pos, pos - cd_start);
+    let want = canonical_end_records(archive.len() as u64, cd_start, cd_size);
     let rest = file_len.saturating_sub(cd_end);
-    let zip64 = match usize::try_from(rest) {
-        Ok(EOCD_LEN) => false,
-        Ok(n) if n == ZIP64_EOCD_LEN + ZIP64_LOCATOR_LEN + EOCD_LEN => true,
-        _ => {
-            return Err(Error::Container(format!(
-                "{rest} bytes follow the central directory (which ends at byte {cd_end}), but a \
-                 .tsra ends with exactly its end records: {EOCD_LEN} bytes, or {} with the zip64 \
-                 records, with no archive comment and nothing after them. Extra bytes there can be \
-                 a second archive that other zip readers open instead",
-                ZIP64_EOCD_LEN + ZIP64_LOCATOR_LEN + EOCD_LEN
-            )));
-        }
-    };
-    if zip64 {
-        let mut rec = [0u8; ZIP64_EOCD_LEN];
-        tail.read_exact(&mut rec)?;
-        let mut loc = [0u8; ZIP64_LOCATOR_LEN];
-        tail.read_exact(&mut loc)?;
-        if rec[..4] != ZIP64_EOCD_SIG || loc[..4] != ZIP64_LOCATOR_SIG {
-            return Err(Error::Container(format!(
-                "the {} bytes after the central directory are not the zip64 end record and its \
-                 locator",
-                ZIP64_EOCD_LEN + ZIP64_LOCATOR_LEN
-            )));
-        }
-        let z = "zip64 end-of-central-directory record";
-        end_field(z, "its own size", le64(&rec, 4), 44, None)?;
-        end_field(z, "this disk's number", le32(&rec, 16), 0, None)?;
-        end_field(z, "the directory's disk", le32(&rec, 20), 0, None)?;
-        end_field(z, "the entries on this disk", le64(&rec, 24), entries, None)?;
-        end_field(z, "the entry count", le64(&rec, 32), entries, None)?;
-        end_field(z, "the directory size", le64(&rec, 40), cd_size, None)?;
-        end_field(z, "the directory offset", le64(&rec, 48), cd_start, None)?;
-        let l = "zip64 end-of-central-directory locator";
-        end_field(l, "the zip64 record's disk", le32(&loc, 4), 0, None)?;
-        end_field(l, "the zip64 record's offset", le64(&loc, 8), cd_end, None)?;
-        end_field(l, "the disk count", le32(&loc, 16), 1, None)?;
+    if rest != want.len() as u64 {
+        return Err(Error::Container(format!(
+            "{rest} bytes follow the central directory (which ends at byte {cd_end}), but this \
+             archive's end records are exactly {} bytes (the end-of-central-directory record{}), \
+             with no archive comment and nothing after them. Extra bytes there can be a second \
+             archive that other zip readers open instead",
+            want.len(),
+            if want.len() == EOCD_LEN {
+                ""
+            } else {
+                ", after the zip64 end record and its locator"
+            },
+        )));
     }
-    let mut eocd = [0u8; EOCD_LEN];
-    tail.read_exact(&mut eocd)?;
-    if eocd[..4] != EOCD_SIG {
-        return Err(Error::Container(
-            "the last 22 bytes of the file are not the end-of-central-directory record".into(),
-        ));
-    }
-    let e = "end-of-central-directory record";
-    let (count_sentinel, u32_sentinel) = if zip64 {
-        (Some(u64::from(u16::MAX)), Some(u64::from(u32::MAX)))
-    } else {
-        (None, None)
-    };
-    end_field(e, "this disk's number", le16(&eocd, 4), 0, None)?;
-    end_field(e, "the directory's disk", le16(&eocd, 6), 0, None)?;
-    end_field(
-        e,
-        "the entries on this disk",
-        le16(&eocd, 8),
-        entries,
-        count_sentinel,
-    )?;
-    end_field(
-        e,
-        "the entry count",
-        le16(&eocd, 10),
-        entries,
-        count_sentinel,
-    )?;
-    end_field(
-        e,
-        "the directory size",
-        le32(&eocd, 12),
-        cd_size,
-        u32_sentinel,
-    )?;
-    end_field(
-        e,
-        "the directory offset",
-        le32(&eocd, 16),
-        cd_start,
-        u32_sentinel,
-    )?;
-    end_field(e, "the comment length", le16(&eocd, 20), 0, None)?;
-    Ok(())
+    let found = read_up_to(&mut tail, want.len())?;
+    want.require(&found, &format!("the end records at byte {cd_end}"))
 }
 
 /// Pack a **sealed** manifest + its block payloads into a `.tsra` at `path` (STORED zip64).
@@ -956,8 +1213,13 @@ impl<R: Read + Seek> Reader<R> {
     ///
     /// Before any payload is hashed it checks the container itself (SPEC §6, GHSA-m665-v7pm-7grj):
     /// every local header agrees with its central-directory record, no name appears twice, every
-    /// entry is one the manifest lists or an `aux/` member, and every byte of the file belongs to an
-    /// entry, the central directory or its end records, with no comment and nothing after them. A
+    /// entry is one the manifest lists or a safely named `aux/` member (distinct up to letter case,
+    /// none below another, every one matching its CRC-32), the central directory lists the entries in
+    /// file order, every local header and
+    /// central-directory record is byte for byte the one tessera's writer emits (no data descriptor,
+    /// no encryption, no extra field but zip64's, a regular file's mode, disk 0), and every byte of
+    /// the file belongs to an entry, the central directory or its end records, which are exactly the
+    /// writer's, with no comment and nothing after them. A
     /// `.tsra` that passes reads the same whether a reader walks the central directory, walks the
     /// local headers, or finds the end record by scanning back from the end of the file, so the
     /// verdict holds for every zip reader, not only for tessera's. A failure there is
@@ -1138,8 +1400,10 @@ pub fn add_aux_members(path: &Path, members: &[AuxMember]) -> Result<()> {
 /// Each member name must obey the block-name grammar (ADR-0063: `/`-separated `[A-Za-z0-9._-]+`
 /// segments, no `.`/`..`), so no `aux/` entry this writes can escape `aux/` when the archive is
 /// unzipped or [`unpack`]ed. The `blocks/` and `aux/` entries it copies through from `path` are held
-/// to the same grammar, so a hostile input is refused rather than re-emitted. Either failure is
-/// [`Error::Container`], before anything is written.
+/// to the same grammar, so a hostile input is refused rather than re-emitted. And the aux names the
+/// rewritten archive would hold, kept and added together, must be distinct up to ASCII letter case
+/// with none below another (`a` and `a/b`), as verification requires (SPEC §6). Any of these
+/// failures is [`Error::Container`], before anything is written.
 pub fn write_aux_members(
     path: &Path,
     members: &[AuxMember],
@@ -1191,13 +1455,23 @@ pub fn write_aux_members(
 
     // Every entry copied through is held to the grammar, before anything is written. An aux entry
     // this call replaces or removes is not copied, so it is not checked.
+    let mut kept_aux = Vec::new();
     for (name, _) in &existing {
         let dropped = name.starts_with(AUX_PREFIX)
             && (to_add.contains(name) || remove_full.iter().any(|p| name.starts_with(p.as_str())));
         if !dropped {
             check_passthrough_entry(name)?;
+            if let Some(rest) = name.strip_prefix(AUX_PREFIX) {
+                kept_aux.push(rest);
+            }
         }
     }
+    // The aux set the rewrite would hold, held to the rule verification applies to it.
+    check_aux_name_set(
+        kept_aux
+            .into_iter()
+            .chain(members.iter().map(|m| m.name.as_str())),
+    )?;
 
     // Stage the rewrite to a `.part`, atomic-rename on success.
     let mut tmp = path.as_os_str().to_os_string();
@@ -1415,7 +1689,8 @@ fn write_creating_parents(path: &Path, bytes: &[u8]) -> Result<()> {
 /// Each block is read from [`BlockName::path_under`] `dir/blocks` (plain components only, ADR-0063),
 /// and a manifest whose names break the leaf rule is refused with [`Error::BlockNameConflict`]: an
 /// exploded directory cannot hold it. An `aux/` file whose relative path fails the grammar (a space,
-/// a non-ASCII character) is [`Error::Container`]. A manifest with an invalid partitioned table is
+/// a non-ASCII character), or two `aux/` files whose paths differ only in letter case (possible on a
+/// case-sensitive file system), is [`Error::Container`]. A manifest with an invalid partitioned table is
 /// refused with [`Error::LogicalTable`] (ADR-0064 §2.4, [`check_partitions`], the seal's check).
 /// Every check runs before `out` is written.
 pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
@@ -1434,6 +1709,7 @@ pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
     for m in &members {
         check_aux_name(&m.name)?;
     }
+    check_aux_name_set(members.iter().map(|m| m.name.as_str()))?;
     let blocks_dir = dir.join("blocks");
     let mut payloads = Vec::with_capacity(manifest.blocks.len());
     for b in &manifest.blocks {
@@ -1489,21 +1765,33 @@ mod tests {
     use tessera_core::block::array::{ArrayBlock, ArraySpec};
     use tessera_core::ProductBuilder;
 
-    /// The zip64 branch of [`check_end_records`]. No committed `.tsra` has zip64 end records (`zip`
-    /// writes them only past 65,535 entries or 4 GiB), so this builds the smallest archive that gets
-    /// them: 65,536 empty entries. The honest footer passes; a 32-bit field that is neither the true
-    /// value nor its sentinel, and a byte after the end record, are each refused although `zip` still
-    /// opens the archive. (`zip` itself refuses a locator naming more than one disk.)
+    /// [`check_central_directory`] over an archive `zip` writes with [`tsra_entry_options`].
+    fn central_verdict<R: Read + Seek>(archive: &ZipArchive<R>, raw: &mut R) -> String {
+        let local = check_local_headers(archive, raw);
+        match local.and_then(|()| check_central_directory(archive, raw)) {
+            Ok(()) => "ok".into(),
+            Err(Error::Container(why)) => why,
+            Err(e) => panic!("not a container verdict: {e}"),
+        }
+    }
+
+    /// The zip64 end records of [`canonical_end_records`], forced by the entry count. No committed
+    /// `.tsra` has them (`zip` writes them only past 65,535 entries or 4 GiB), so this builds the
+    /// smallest archive that gets them: 65,536 empty entries, written with the `.tsra` options. The
+    /// honest footer passes; a 32-bit field that is not the sentinel the writer emits, a zip64 field
+    /// the writer pins, and a byte after the end record are each refused although `zip` still opens
+    /// the archive. (`zip` itself refuses a locator naming more than one disk.)
     #[test]
-    fn zip64_end_records_must_state_the_true_values() {
-        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    fn zip64_end_records_must_be_the_ones_the_writer_emits() {
         let mut w = ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for i in 0..=usize::from(u16::MAX) {
-            w.start_file(format!("{i:x}"), opts).unwrap();
+            w.start_file(format!("{i:x}"), tsra_entry_options())
+                .unwrap();
         }
         let honest = w.finish().unwrap().into_inner();
         let eocd = honest.len() - EOCD_LEN;
-        let locator = eocd - ZIP64_LOCATOR_LEN;
+        let locator = eocd - 20; // the zip64 locator's fixed size
+        let zip64_record = locator - 56;
         assert_eq!(
             honest[locator..locator + 4],
             ZIP64_LOCATOR_SIG,
@@ -1512,12 +1800,7 @@ mod tests {
 
         let verdict = |bytes: &[u8]| -> Option<String> {
             let archive = ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
-            let mut raw = std::io::Cursor::new(bytes);
-            Some(match check_end_records(&archive, &mut raw) {
-                Ok(()) => "ok".into(),
-                Err(Error::Container(why)) => why,
-                Err(e) => panic!("not a container verdict: {e}"),
-            })
+            Some(central_verdict(&archive, &mut std::io::Cursor::new(bytes)))
         };
         assert_eq!(verdict(&honest).as_deref(), Some("ok"));
 
@@ -1530,14 +1813,19 @@ mod tests {
         appended.push(0);
         for (what, bytes, needle) in [
             (
-                "a 32-bit directory size that is neither true nor the sentinel",
+                "a 32-bit directory size that is not the sentinel",
                 tampered(eocd + 12, &7u32.to_le_bytes()),
-                "the directory size",
+                "end record directory size",
             ),
             (
-                "a 32-bit entry count that is neither true nor the sentinel",
+                "a 32-bit entry count that is not the sentinel",
                 tampered(eocd + 10, &7u16.to_le_bytes()),
-                "the entry count",
+                "end record entry count",
+            ),
+            (
+                "a zip64 record's version made by that the writer does not emit",
+                tampered(zip64_record + 12, &0x033fu16.to_le_bytes()),
+                "zip64 end record version made by",
             ),
             (
                 "a byte after the end record",
@@ -1548,6 +1836,93 @@ mod tests {
             let v = verdict(&bytes).unwrap_or_else(|| panic!("{what}: zip no longer opens it"));
             assert!(v.contains(needle), "{what}: {v}");
         }
+    }
+
+    /// A `Write + Seek + Read` byte store that keeps every write shorter than [`Self::KEPT`] and reads
+    /// everything else back as zeros: enough to let `zip` write an archive past 4 GiB without 4 GiB of
+    /// memory, when the only long writes are runs of zeros. `zip` writes each header and record with
+    /// short writes of its own, and a test that wrote a long non-zero buffer would read zeros back and
+    /// fail its own check, not pass it.
+    #[derive(Clone, Default)]
+    struct Sparse {
+        writes: Vec<(u64, Vec<u8>)>,
+        len: u64,
+        pos: u64,
+    }
+
+    impl Sparse {
+        const KEPT: usize = 4096;
+    }
+
+    impl Write for Sparse {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.len() < Self::KEPT {
+                self.writes.push((self.pos, buf.to_vec()));
+            }
+            self.pos += buf.len() as u64;
+            self.len = self.len.max(self.pos);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for Sparse {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = usize::try_from(self.len.saturating_sub(self.pos))
+                .unwrap_or(usize::MAX)
+                .min(buf.len());
+            let (start, end) = (self.pos, self.pos + n as u64);
+            buf[..n].fill(0);
+            for (at, bytes) in &self.writes {
+                let (w_start, w_end) = (*at, *at + bytes.len() as u64);
+                let (lo, hi) = (start.max(w_start), end.min(w_end));
+                if lo < hi {
+                    buf[(lo - start) as usize..(hi - start) as usize]
+                        .copy_from_slice(&bytes[(lo - w_start) as usize..(hi - w_start) as usize]);
+                }
+            }
+            self.pos = end;
+            Ok(n)
+        }
+    }
+
+    impl Seek for Sparse {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.pos = match pos {
+                SeekFrom::Start(p) => p,
+                SeekFrom::End(d) => self.len.checked_add_signed(d).unwrap(),
+                SeekFrom::Current(d) => self.pos.checked_add_signed(d).unwrap(),
+            };
+            Ok(self.pos)
+        }
+    }
+
+    /// The branches past 4 GiB, on bytes `zip` itself writes: a member whose local header starts past
+    /// 32 bits carries its offset in the central record's zip64 field (the 32-bit field holds the
+    /// sentinel), and a directory that starts past 32 bits brings the zip64 end records although there
+    /// are only three entries. A large `.tsra` (a raw vendor listmode file) is exactly this shape.
+    #[test]
+    fn a_tsra_past_4_gib_is_canonical() {
+        let mut w = ZipWriter::new(Sparse::default());
+        let zeros = vec![0u8; 1 << 20];
+        w.start_file(MIMETYPE_ENTRY, tsra_entry_options()).unwrap();
+        w.write_all(MIMETYPE.as_bytes()).unwrap();
+        w.start_file("blocks/big", tsra_entry_options()).unwrap();
+        for _ in 0..(4u64 << 10) + 1 {
+            w.write_all(&zeros).unwrap();
+        }
+        w.start_file("blocks/after", tsra_entry_options()).unwrap();
+        w.write_all(b"past four gibibytes").unwrap();
+        let mut sink = w.finish().unwrap();
+        sink.seek(SeekFrom::Start(0)).unwrap();
+        let mut raw = sink.clone();
+        let archive = ZipArchive::new(sink).unwrap();
+        assert!(archive.central_directory_start() > u64::from(u32::MAX));
+        let after = archive.index_for_name("blocks/after").unwrap();
+        assert!(archive.by_index_data(after).unwrap().header_start() > u64::from(u32::MAX));
+        assert_eq!(central_verdict(&archive, &mut raw), "ok");
     }
 
     /// Build a recon product, pack it, then open + verify + read the block back out.
