@@ -86,5 +86,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   12-column table the session held 13.5 KB of heap in small allocations for a 2.4 KB entry (12.8 KB live for the
   #715 consumer's 3.1 KB entry); it now holds the entry's bytes in one allocation, plus the leaf's name.
   `tests/session_leaf_memory.rs` checks the bound. Sealed bytes are unchanged; no public API changes (#759).
+- CI: the flake checks that run tessera's tests through cargo (`workspace-test`, `workspace-doctest`, `sql-tests`,
+  `s3-range-read`, `seal-profile-determinism`, `ingest-gate-a*`) put `TMPDIR` on a RAM fs (`/dev/shm`) on Linux. Each
+  `WriteSession` commit fsyncs three times (#695), and on a ksb pod's shared `/nix` volume two tessera-io tests (0.97 s
+  and 0.07 s on tmpfs) were still running after 3,240 s and 840 s, timing out the x86_64 leg. The tests check logic and
+  fsync order, not disk speed; one journal fsync per batch is #798. A check whose `TMPDIR` is not on tmpfs or ramfs, or
+  has less than 256 MiB free, fails before its tests run; the directory is removed whether the check passes or fails; a
+  check that runs cargo tests without the helper fails evaluation; and `ram-tmpdir-guard` tests the helper's assertions
+  and hook order (#793).
 
 ### Security
