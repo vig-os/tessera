@@ -255,6 +255,18 @@
         # The committed partitioned-table fixture the Python checks read (ADR-0064, #717).
         pairsFixture = ./tessera/crates/tessera-py/tests/fixtures/partitioned_pairs.tsra;
 
+        # The release scripts with the library they source (scripts/lib/semver.sh), laid out as in the
+        # repo so each finds `lib/` next to itself. Only these files: an edit elsewhere in scripts/
+        # does not rebuild the release checks.
+        releaseScripts = pkgs.lib.fileset.toSource {
+          root = ./scripts;
+          fileset = pkgs.lib.fileset.unions [
+            ./scripts/last-release-tag.sh
+            ./scripts/promotion-plan.sh
+            ./scripts/lib/semver.sh
+          ];
+        };
+
         # The Python extension module (#210). crane doesn't install cdylibs by default, so copy the
         # built `lib_native.so` → `_native.so` into $out/lib — the `tessera._native` extension that the
         # pure-Python `tessera/__init__.py` wraps. pyo3's abi3 feature builds without a runtime
@@ -1295,7 +1307,17 @@
           # throwaway repos, since the workflow itself only ever sees the real tag set.
           release-tag-resolution = pkgs.runCommand "release-tag-resolution"
             { nativeBuildInputs = [ pkgs.git ]; } ''
-            HOME=$TMPDIR bash ${./scripts/last-release-tag.sh} --self-test
+            HOME=$TMPDIR bash ${releaseScripts}/last-release-tag.sh --self-test
+            touch $out
+          '';
+
+          # The promotion PR that keeps `main` equal to the latest release (#854): which head and
+          # branch promote-main.yml builds from a tag, a no-op when main already has the release, and
+          # a loud failure for a moved tag, an older release, a conflict, or a merge whose tree is not
+          # the tag's — proven on throwaway repos, since the workflow only ever sees the real repo.
+          release-promotion = pkgs.runCommand "release-promotion"
+            { nativeBuildInputs = [ pkgs.git ]; } ''
+            HOME=$TMPDIR bash ${releaseScripts}/promotion-plan.sh --self-test
             touch $out
           '';
 
