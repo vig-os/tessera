@@ -4,9 +4,10 @@ Tessera is pre-1.0 and iterates on the `dev` branch; the first release (`0.1.0-a
 **held** (see `release-plz.toml`). Until it is cut, Tessera is **not** published to crates.io / PyPI /
 npm — consume it directly from git or the Nix flake. All three paths below are verified working.
 
-> **Point at `dev`, not `main`.** The flake packages and the library crates live on `dev`; `main` is
-> release-only and far behind, with none of this yet. Pin a specific commit (or, once the alpha is cut,
-> the `v0.1.0-alpha.1` tag) for reproducible builds — `dev` is a moving target.
+> **`dev` or a release, not "whatever `main` is".** `dev` is the moving development branch. `main` is the
+> latest release: after every release it is promoted to the newest `v<version>` tag
+> ([RELEASING.md](RELEASING.md)), so it moves only when a release is cut. Pin a specific `v<version>` tag
+> (or commit) for reproducible builds.
 
 ## Run the CLI (no install)
 
