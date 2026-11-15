@@ -31,11 +31,16 @@
 //!   jobs hold `≤ J × S` bytes (`S` = the largest staged block, [`StreamStats::max_staged_job_bytes`]),
 //!   plus the files of the encodes in progress.
 //! - **Parallel encode:** `workers` threads encode concurrently (the expensive pcodec/Vortex step).
-//! - **Deterministic output:** the committer commits blocks in **push order** (a reorder buffer holds
-//!   out-of-order completions), so the running Merkle — and therefore the sealed `content_hash` /
-//!   `id` / `manifest_hash` — is **byte-identical to a batch writer** that added the same blocks in
-//!   the same order. Streaming changes *how* the bytes are produced, never *which* bytes; neither
-//!   the worker count nor the window changes them.
+//! - **Deterministic output:** every job is pushed on a [`Lane`] (ADR-0065 §7.3, #832): one per
+//!   table role, plus the arrays lane, which takes every job pushed without one. Each lane has its
+//!   own sequence, and the committer commits each lane's jobs in that lane's **push order**,
+//!   independently of the other lanes (a reorder buffer keyed by `(lane, seq)` holds out-of-order
+//!   completions). The seal orders the blocks by lane, then by push order within the lane (see
+//!   [`WriteSession::seal`]), so the sealed `content_hash` / `id` / `manifest_hash` are
+//!   **byte-identical to a batch writer** that added the same blocks in that order, however the
+//!   lanes' pushes interleaved. Streaming changes *how* the bytes are produced, never *which*
+//!   bytes; neither the worker count, the window nor the interleaving of lanes changes them. A
+//!   writer fed on one lane seals in push order, as it did before lanes.
 //!
 //! An in-memory job ([`EncodeJob`]) still materialises its encoded payload in RAM (`P` above); a
 //! table block too large for that goes through a staged job. Staged blocks are committed with
@@ -55,16 +60,17 @@
 //! 1. **Submit** ([`StreamWriter::push`]): a job is admitted while fewer than `J` jobs are in flight
 //!    *and* the encoded bytes held are below `B`. With nothing in flight the bytes held are `0`, so a
 //!    job is always admitted into an empty window — including one whose payload alone exceeds `B`.
-//! 2. **Encode start** (a worker, after dequeuing job `seq`): it starts encoding only while the
-//!    encoded bytes held are below `B` — **unless `seq` is the job the committer waits on**, which
-//!    always runs. This is what makes `B` bind: once `B` is reached, only the in-progress encodes
-//!    (at most `min(W, J)`) can still add bytes.
+//! 2. **Encode start** (a worker, after dequeuing job `seq` of a lane): it starts encoding only
+//!    while the encoded bytes held are below `B` — **unless `seq` is the job the committer waits on
+//!    in that lane**, which always runs. This is what makes `B` bind: once `B` is reached, only the
+//!    in-progress encodes (at most `min(W, J)`) can still add bytes.
 //!
 //! **Deadlock freedom.** Credits are released only by an in-order commit, so the window must never
-//! stall the job the committer waits on (`next`). It can't: `next` was pushed (every job below the
-//! newest push was), the job queue is FIFO so `next` is dequeued before any later job, and gate 2
-//! exempts it. So `next` always encodes, commits, and frees its credit; a job too large for `B` simply
-//! runs alone once it is `next`. Gate 1 never waits on an empty window. A failed encode, a failed
+//! stall the job the committer waits on in any lane (that lane's `next`). It can't: a lane's `next`
+//! was pushed (every job of the lane below its newest push was), the job queue is FIFO so `next`
+//! is dequeued before any later job of its lane, and gate 2 exempts it whatever the other lanes
+//! hold. So every lane's `next` encodes, commits, and frees its credit; a job too large for `B`
+//! simply runs alone once it is its lane's `next`. Gate 1 never waits on an empty window. A failed encode, a failed
 //! commit or a panicking worker **closes** the window, which wakes every waiter: `push` then returns
 //! an error and the workers waiting at gate 2 exit, so a dead pipeline never hangs the producer
 //! (idle workers exit once [`StreamWriter::finish`] or a drop closes the job queue).
@@ -87,7 +93,7 @@ use crate::table::{
     block_name, block_partition, partition_blocks, ColumnData, TableData, BLOCK_ROWS,
     ROWS_PER_GROUP,
 };
-use crate::write::{BlockStaging, StagedBlock, WriteSession};
+use crate::write::{BlockStaging, Lane, StagedBlock, WriteSession};
 use crate::BlockPayload;
 
 /// A committed block: its manifest reference paired with its payload bytes.
@@ -314,9 +320,20 @@ struct Held {
     staged: u64,
 }
 
-/// What a worker hands the committer: the job's `seq`, the bytes it charged to the window (so the
-/// commit can give exactly that back), and the encode result.
-type Encoded = (usize, Held, Result<JobOutput>);
+/// Where a job sits in commit order: its lane (an index into the writer's lanes, in the order of
+/// their first push) and its sequence number within that lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Slot {
+    lane: usize,
+    seq: usize,
+}
+
+/// A job as the queue carries it: its slot, its lane (for the commit) and the work.
+type Queued = (Slot, Lane, Job);
+
+/// What a worker hands the committer: the job's slot and lane, the bytes it charged to the window
+/// (so the commit can give exactly that back), and the encode result.
+type Encoded = (Slot, Lane, Held, Result<JobOutput>);
 
 /// The credit window bounding everything a [`StreamWriter`] holds between [`StreamWriter::push`]
 /// and the in-order commit of that job (#677). See the [module docs](self) for the bound it gives
@@ -367,7 +384,7 @@ pub struct StreamStats {
     pub max_job_bytes: u64,
     /// Jobs pushed so far.
     pub jobs_pushed: usize,
-    /// Jobs committed to the session so far, in push order.
+    /// Jobs committed to the session so far, each lane's in its push order.
     pub jobs_committed: usize,
     /// How many [`StreamWriter::push`] calls had to wait for a credit (backpressure events).
     pub producer_stalls: u64,
@@ -393,8 +410,9 @@ struct WindowState {
     in_flight_bytes: u64,
     /// Staged-file bytes of jobs that finished encoding and are not yet committed.
     staged_bytes: u64,
-    /// The `seq` the committer commits next — the job the window must never stall.
-    next_commit: usize,
+    /// Per lane (by index), the `seq` the committer commits next in it — the jobs the window must
+    /// never stall.
+    next_commit: Vec<usize>,
     /// Set when the pipeline can no longer make progress (encode/commit error, worker panic,
     /// committer exit); every waiter gives up.
     closed: bool,
@@ -428,7 +446,7 @@ impl CreditWindow {
                 in_flight_jobs: 0,
                 in_flight_bytes: 0,
                 staged_bytes: 0,
-                next_commit: 0,
+                next_commit: Vec::new(),
                 closed: false,
                 gated_encodes: 0,
                 busy_jobs: 0,
@@ -454,10 +472,13 @@ impl CreditWindow {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Gate 1 (producer): wait for a job credit — and, with `free_worker`, for a worker with no
-    /// job — then take it. `Err` once the window is closed.
-    fn acquire(&self, free_worker: bool) -> Result<()> {
+    /// Gate 1 (producer): wait for a job credit for a job on `lane` — and, with `free_worker`, for
+    /// a worker with no job — then take it. `Err` once the window is closed.
+    fn acquire(&self, lane: usize, free_worker: bool) -> Result<()> {
         let mut st = self.lock();
+        if st.next_commit.len() <= lane {
+            st.next_commit.resize(lane + 1, 0); // a lane's first push: nothing of it committed
+        }
         let mut stalled = false;
         loop {
             if st.closed {
@@ -483,17 +504,19 @@ impl CreditWindow {
         Ok(())
     }
 
-    /// Gate 2 (worker): wait until job `seq` may start encoding — always if it is the job the
-    /// committer waits on, otherwise while the held bytes are below the budget. `false` once the
-    /// window is closed (the worker should exit).
-    fn wait_encode_turn(&self, seq: usize) -> bool {
+    /// Gate 2 (worker): wait until the job at `slot` may start encoding — always if it is the job
+    /// the committer waits on in its lane, otherwise while the held bytes are below the budget.
+    /// `false` once the window is closed (the worker should exit).
+    fn wait_encode_turn(&self, slot: Slot) -> bool {
         let mut st = self.lock();
         let mut gated = false;
         let turn = loop {
             if st.closed {
                 break false;
             }
-            if seq == st.next_commit || st.in_flight_bytes < self.limits.max_in_flight_bytes {
+            if st.next_commit[slot.lane] == slot.seq
+                || st.in_flight_bytes < self.limits.max_in_flight_bytes
+            {
                 break true;
             }
             if !gated {
@@ -552,13 +575,13 @@ impl CreditWindow {
         !st.closed
     }
 
-    /// The committer appended job `next_commit` (which held `held`): give its credit back.
-    fn release(&self, held: Held) {
+    /// The committer appended the job `next_commit[lane]` (which held `held`): give its credit back.
+    fn release(&self, lane: usize, held: Held) {
         let mut st = self.lock();
         st.in_flight_jobs -= 1;
         st.in_flight_bytes -= held.ram;
         st.staged_bytes -= held.staged;
-        st.next_commit += 1;
+        st.next_commit[lane] += 1;
         st.stats.jobs_committed += 1;
         drop(st);
         self.changed.notify_all();
@@ -711,7 +734,10 @@ impl Drop for StagedInput {
 ///
 /// The handle doesn't borrow the writer: each call takes the `&mut StreamWriter` it was opened on,
 /// so a producer can keep the table between calls without holding the writer, and push other jobs
-/// to the writer in between. Those jobs commit in push order, interleaved with the table's leaves.
+/// to the writer in between. The table's leaves are pushed on the [`Lane`] it was opened on
+/// ([`StreamWriter::open_table_on`]; the arrays lane for [`StreamWriter::open_table`]): other jobs
+/// on that lane commit in push order, interleaved with the leaves, and jobs on other lanes are
+/// sealed apart from them, in lane order.
 ///
 /// **One leaf of lookahead.** Rows are re-chunked to the [`ROWS_PER_GROUP`] grid and staged leaf
 /// by leaf, exactly as [`StreamWriter::push_table`] stages them. A full leaf `i` is handed to an
@@ -752,6 +778,8 @@ pub struct OpenTable {
     declared: Option<u64>,
     /// The window of the writer this table was opened on: the identity [`Self::push`] checks.
     window: Arc<CreditWindow>,
+    /// The lane the leaves are pushed on.
+    lane: Lane,
     fill: Fill,
     /// Rows short of a full row-group, when the input is not on the ROWS_PER_GROUP grid.
     pending: Option<TableData>,
@@ -762,6 +790,7 @@ pub struct OpenTable {
 impl OpenTable {
     fn new(
         writer: &StreamWriter,
+        lane: Lane,
         name: String,
         spec: TableSpec,
         block_rows: u64,
@@ -804,6 +833,7 @@ impl OpenTable {
             block_rows,
             declared,
             window: Arc::clone(&writer.window),
+            lane,
             fill: Fill::default(),
             pending: None,
             seen: 0,
@@ -974,7 +1004,7 @@ impl OpenTable {
             Some(input) => input,
             None => StagedInput::create(&writer.staging, &writer.window)?, // the empty table
         };
-        writer.submit(Job::Staged(input.into_job(bref, leaf)?), true)?;
+        writer.submit(&self.lane, Job::Staged(input.into_job(bref, leaf)?), true)?;
         self.fill = Fill {
             block: self.fill.block + 1,
             ..Fill::default()
@@ -1007,12 +1037,14 @@ impl Drop for ReadHold {
 /// committed in order, so the jobs and encoded bytes held stay within the bound in the
 /// [module docs](self), whatever the producer's pace or the encode order.
 pub struct StreamWriter {
-    input: Option<Sender<(usize, Job)>>,
+    input: Option<Sender<Queued>>,
     workers: Vec<JoinHandle<()>>,
     committer: Option<JoinHandle<Result<WriteSession>>>,
     window: Arc<CreditWindow>,
     staging: BlockStaging,
-    seq: usize,
+    /// The lanes pushed on, in the order of their first push (a [`Slot`]'s lane indexes it), each
+    /// with the `seq` its next job takes.
+    lanes: Vec<(Lane, usize)>,
 }
 
 impl StreamWriter {
@@ -1039,7 +1071,7 @@ impl StreamWriter {
         // The channels only carry jobs; the window is what bounds them (at most `max_in_flight`
         // jobs sit in both together). Unbounded channels allocate nothing up front, so a window of
         // `usize::MAX` jobs (bound by bytes only) is fine.
-        let (in_tx, in_rx) = channel::<(usize, Job)>();
+        let (in_tx, in_rx) = channel::<Queued>();
         let in_rx = Arc::new(Mutex::new(in_rx));
         let (out_tx, out_rx) = channel::<Encoded>();
         let staging = session.staging();
@@ -1061,16 +1093,16 @@ impl StreamWriter {
                             let guard = rx.lock().expect("input mutex");
                             guard.recv()
                         };
-                        let Ok((seq, job)) = job else {
+                        let Ok((slot, lane, job)) = job else {
                             break; // input closed + drained
                         };
-                        if !window.wait_encode_turn(seq) {
+                        if !window.wait_encode_turn(slot) {
                             break; // pipeline closed
                         }
                         let res = job.run(&staging);
                         let held = res.as_ref().map_or(Held::default(), JobOutput::held);
                         window.charge(held);
-                        if tx.send((seq, held, res)).is_err() {
+                        if tx.send((slot, lane, held, res)).is_err() {
                             break; // committer gone (it closed the window on its way out)
                         }
                     }
@@ -1096,7 +1128,7 @@ impl StreamWriter {
             committer: Some(committer),
             window,
             staging,
-            seq: 0,
+            lanes: Vec::new(),
         }
     }
 
@@ -1118,23 +1150,36 @@ impl StreamWriter {
 
     /// Enqueue a block for encode+commit. Blocks (backpressure) while the [`StreamWindow`] is full:
     /// `max_in_flight` jobs pushed and not yet committed, or `max_in_flight_bytes` of encoded
-    /// payloads held. Blocks are committed in call order, so push in the order you want the
-    /// manifest to record them. Errors once the pipeline died (a failed encode or commit, or a
+    /// payloads held. The job is pushed on [`Lane::Arrays`], and the jobs of a lane are committed
+    /// in call order, so a writer fed only by this call (and the others without a lane) seals its
+    /// blocks in push order. Errors once the pipeline died (a failed encode or commit, or a
     /// panicking worker); [`Self::finish`] then reports the cause.
     pub fn push(&mut self, job: EncodeJob) -> Result<()> {
-        self.submit(Job::InMemory(job), false)
+        self.push_on(Lane::Arrays, job)
     }
 
-    /// Enqueue a [`StagedEncodeJob`]: like [`Self::push`] (same window, same commit order), but the
-    /// job writes its data block to a staged file, which the committer streams into the product and
-    /// deletes, so the block's bytes never count against the window's byte budget.
+    /// [`Self::push`] on `lane`: the block is committed in push order among `lane`'s jobs,
+    /// independently of the other lanes, and sealed in lane order (see [`Lane`]). The window, its
+    /// backpressure and the errors are those of `push`, shared by every lane.
+    pub fn push_on(&mut self, lane: Lane, job: EncodeJob) -> Result<()> {
+        self.submit(&lane, Job::InMemory(job), false)
+    }
+
+    /// Enqueue a [`StagedEncodeJob`]: like [`Self::push`] (same window, same lane, same commit
+    /// order), but the job writes its data block to a staged file, which the committer streams into
+    /// the product and deletes, so the block's bytes never count against the window's byte budget.
     pub fn push_staged(&mut self, job: StagedEncodeJob) -> Result<()> {
-        self.submit(Job::Staged(job), false)
+        self.push_staged_on(Lane::Arrays, job)
+    }
+
+    /// [`Self::push_staged`] on `lane`, ordered as [`Self::push_on`].
+    pub fn push_staged_on(&mut self, lane: Lane, job: StagedEncodeJob) -> Result<()> {
+        self.submit(&lane, Job::Staged(job), false)
     }
 
     /// Write the table `name` of `spec.rows` rows from `groups` as the leaves of one logical table
     /// (ADR-0064 §5), each leaf one staged job under this writer's window, and return the number of
-    /// leaves. The table is partitioned at [`BLOCK_ROWS`] ([`crate::table::block_count`]): a table
+    /// leaves, on [`Lane::Arrays`]. The table is partitioned at [`BLOCK_ROWS`] ([`crate::table::block_count`]): a table
     /// of at most `BLOCK_ROWS` rows is the one block `name`, byte-identical to
     /// [`table_job_streaming`]; a larger one is the leaves `name/0000`, `name/0001`, … named by
     /// [`block_name`] and marked by [`block_partition`], byte for byte the leaves
@@ -1213,7 +1258,23 @@ impl StreamWriter {
     where
         I: IntoIterator<Item = TableData>,
     {
-        self.push_table_with_block_rows(name, spec, groups, BLOCK_ROWS as u64)
+        self.push_table_in(Lane::Arrays, name.into(), spec, groups, BLOCK_ROWS as u64)
+    }
+
+    /// [`Self::push_table`] on `lane` (usually [`Lane::table`] of the table's role): the leaves are
+    /// committed in order among `lane`'s jobs, independently of the other lanes, and sealed in
+    /// lane order (see [`Lane`]). The bounds and errors are those of `push_table`.
+    pub fn push_table_on<I>(
+        &mut self,
+        lane: Lane,
+        name: impl Into<String>,
+        spec: TableSpec,
+        groups: I,
+    ) -> Result<u64>
+    where
+        I: IntoIterator<Item = TableData>,
+    {
+        self.push_table_in(lane, name.into(), spec, groups, BLOCK_ROWS as u64)
     }
 
     /// [`Self::push_table`] partitioned at `block_rows` (a positive multiple of
@@ -1231,16 +1292,31 @@ impl StreamWriter {
     where
         I: IntoIterator<Item = TableData>,
     {
+        self.push_table_in(Lane::Arrays, name.into(), spec, groups, block_rows)
+    }
+
+    fn push_table_in<I>(
+        &mut self,
+        lane: Lane,
+        name: String,
+        spec: TableSpec,
+        groups: I,
+        block_rows: u64,
+    ) -> Result<u64>
+    where
+        I: IntoIterator<Item = TableData>,
+    {
         let declared = spec.rows;
         let spec = TableSpec { rows: 0, ..spec };
-        let mut table = OpenTable::new(self, name.into(), spec, block_rows, Some(declared))?;
+        let mut table = OpenTable::new(self, lane, name, spec, block_rows, Some(declared))?;
         for group in groups {
             table.push(self, group)?;
         }
         table.close(self)
     }
 
-    /// Open the table `name` for streaming without its row count: an [`OpenTable`] that takes
+    /// Open the table `name` for streaming without its row count, on [`Lane::Arrays`] (see
+    /// [`Self::open_table_on`]): an [`OpenTable`] that takes
     /// row-groups with [`OpenTable::push`] and decides at [`OpenTable::close`] how many leaves the
     /// table has, which one is the terminal leaf, and whether it is the one bare-named block
     /// `name` or the leaves `name/0000`, `name/0001`, … (ADR-0065 §7.3, #806). The sealed bytes
@@ -1259,7 +1335,20 @@ impl StreamWriter {
     /// one block. A later leaf's longer name (`name/10000` on) is checked when that leaf is handed
     /// over, and refusing it abandons the table.
     pub fn open_table(&self, name: impl Into<String>, spec: TableSpec) -> Result<OpenTable> {
-        self.open_table_with_block_rows(name, spec, BLOCK_ROWS as u64)
+        self.open_table_in(Lane::Arrays, name.into(), spec, BLOCK_ROWS as u64)
+    }
+
+    /// [`Self::open_table`] on `lane` (usually [`Lane::table`] of the table's role): the leaves are
+    /// committed in order among `lane`'s jobs, independently of the other lanes, so tables open on
+    /// different lanes stream at once without one waiting for another, and are sealed in lane
+    /// order (see [`Lane`]). The errors are those of `open_table`.
+    pub fn open_table_on(
+        &self,
+        lane: Lane,
+        name: impl Into<String>,
+        spec: TableSpec,
+    ) -> Result<OpenTable> {
+        self.open_table_in(lane, name.into(), spec, BLOCK_ROWS as u64)
     }
 
     /// [`Self::open_table`] partitioned at `block_rows`: the test seam of
@@ -1271,13 +1360,22 @@ impl StreamWriter {
         spec: TableSpec,
         block_rows: u64,
     ) -> Result<OpenTable> {
-        let name = name.into();
+        self.open_table_in(Lane::Arrays, name.into(), spec, block_rows)
+    }
+
+    fn open_table_in(
+        &self,
+        lane: Lane,
+        name: String,
+        spec: TableSpec,
+        block_rows: u64,
+    ) -> Result<OpenTable> {
         if spec.rows != 0 {
             return Err(Error::Invalid(format!(
                 "open_table '{name}': spec.rows must be 0, the row count is the rows pushed before close"
             )));
         }
-        OpenTable::new(self, name, spec, block_rows, None)
+        OpenTable::new(self, lane, name, spec, block_rows, None)
     }
 
     /// Hold every [`Self::push_table`] job before it reads its staged input, until the returned
@@ -1289,20 +1387,29 @@ impl StreamWriter {
         ReadHold(Arc::clone(&self.window))
     }
 
-    fn submit(&mut self, job: Job, free_worker: bool) -> Result<()> {
+    fn submit(&mut self, lane: &Lane, job: Job, free_worker: bool) -> Result<()> {
         let tx = self
             .input
             .as_ref()
             .ok_or_else(|| Error::Container("stream writer already finished".into()))?;
-        self.window.acquire(free_worker)?;
+        let id = match self.lanes.iter().position(|(l, _)| l == lane) {
+            Some(id) => id,
+            None => {
+                self.lanes.push((lane.clone(), 0));
+                self.lanes.len() - 1
+            }
+        };
+        self.window.acquire(id, free_worker)?;
+        let seq = self.lanes[id].1;
         // The window admitted the job; the send never blocks, and fails only if every worker is gone.
-        tx.send((self.seq, job)).map_err(|_| closed_error())?;
-        self.seq += 1;
+        tx.send((Slot { lane: id, seq }, lane.clone(), job))
+            .map_err(|_| closed_error())?;
+        self.lanes[id].1 += 1;
         Ok(())
     }
 
     /// Drain the pipeline, then compact + seal to `out`. Returns the sealed manifest (identical to a
-    /// batch seal of the same blocks in push order).
+    /// batch seal of the same blocks by lane, then in push order within a lane).
     pub fn finish(self, out: &Path) -> Result<Manifest> {
         self.finish_with_stats(out).map(|(manifest, _)| manifest)
     }
@@ -1337,52 +1444,68 @@ impl StreamWriter {
     }
 }
 
-/// The single committer: receives encoded blocks, commits them to the session in `seq` order (a
-/// reorder buffer holds completions that arrive early), releases each job's credit once it is
-/// committed, and returns the session for sealing. The window bounds the reorder buffer to
-/// `max_in_flight` entries.
+/// The single committer: receives encoded blocks, commits each lane's to the session on that lane
+/// in its `seq` order, independently of the other lanes (a reorder buffer keyed by `(lane, seq)`
+/// holds completions that arrive early), releases each job's credit once it is committed, and
+/// returns the session for sealing. The window bounds the reorder buffer to `max_in_flight`
+/// entries.
 fn commit_loop(
     mut session: WriteSession,
     out_rx: Receiver<Encoded>,
     window: &CreditWindow,
 ) -> Result<WriteSession> {
-    let mut pending: BTreeMap<usize, (Held, JobOutput)> = BTreeMap::new();
-    let mut next = 0usize;
-    // Commit the data block then its additive companions (ADR-0028 §5 sidecars), in order, then
-    // give the job's credit back. A staged data block streams from its file, which is deleted.
-    let mut commit_ready = |session: &mut WriteSession,
-                            pending: &mut BTreeMap<usize, (Held, JobOutput)>|
+    let mut pending: BTreeMap<Slot, (Lane, Held, JobOutput)> = BTreeMap::new();
+    // Per lane (by index), the `seq` committed next.
+    let mut next: Vec<usize> = Vec::new();
+    // Commit `lane`'s ready jobs: the data block then its additive companions (ADR-0028 §5
+    // sidecars), in order, then give the job's credit back. A staged data block streams from its
+    // file, which is deleted.
+    let commit_ready = |session: &mut WriteSession,
+                        pending: &mut BTreeMap<Slot, (Lane, Held, JobOutput)>,
+                        next: &mut Vec<usize>,
+                        lane: usize|
      -> Result<()> {
-        while let Some((held, out)) = pending.remove(&next) {
+        if next.len() <= lane {
+            next.resize(lane + 1, 0);
+        }
+        while let Some((name, held, out)) = pending.remove(&Slot {
+            lane,
+            seq: next[lane],
+        }) {
             match out.data {
                 DataBlock::InMemory((bref, payload)) => {
-                    session.append_block(bref, &payload.bytes)?;
+                    session.append_block_on(name.clone(), bref, &payload.bytes)?;
                 }
                 DataBlock::Staged((bref, staged)) => {
-                    session.append_staged(bref, staged)?;
+                    session.append_staged_on(name.clone(), bref, staged)?;
                 }
             }
             for (cref, cpayload) in out.companions {
-                session.append_block(cref, &cpayload.bytes)?;
+                session.append_block_on(name.clone(), cref, &cpayload.bytes)?;
             }
-            window.release(held);
-            next += 1;
+            window.release(lane, held);
+            next[lane] += 1;
         }
         Ok(())
     };
-    while let Ok((seq, held, res)) = out_rx.recv() {
-        pending.insert(seq, (held, res?));
-        commit_ready(&mut session, &mut pending)?;
+    while let Ok((slot, lane, held, res)) = out_rx.recv() {
+        pending.insert(slot, (lane, held, res?));
+        commit_ready(&mut session, &mut pending, &mut next, slot.lane)?;
     }
-    // Channel closed: all workers exited → every pushed block has arrived → drain the contiguous rest.
-    commit_ready(&mut session, &mut pending)?;
+    // Channel closed: all workers exited → every pushed block has arrived → drain each lane's
+    // contiguous rest (nothing should be left: each arrival drained its own lane).
+    let lanes: Vec<usize> = pending.keys().map(|s| s.lane).collect();
+    for lane in lanes {
+        commit_ready(&mut session, &mut pending, &mut next, lane)?;
+    }
     // Every pushed job must have committed. Workers exit only after the queue drained or on a
     // panic (which `finish` reports first), so a shortfall here is a pipeline bug: fail loudly
     // rather than seal a truncated product.
     let pushed = window.stats().jobs_pushed;
-    if !pending.is_empty() || next != pushed {
+    let committed: usize = next.iter().sum();
+    if !pending.is_empty() || committed != pushed {
         return Err(Error::Container(format!(
-            "stream pipeline lost jobs: {next} of {pushed} committed, {} stranded",
+            "stream pipeline lost jobs: {committed} of {pushed} committed, {} stranded",
             pending.len()
         )));
     }
@@ -2760,5 +2883,200 @@ mod tests {
         let m = sw.finish(&dir.path().join("p.tsra")).unwrap();
         assert_eq!(m.blocks[0].name.as_str(), "events");
         other.finish(&dir.path().join("o.tsra")).unwrap();
+    }
+
+    /// A seeded merge of per-lane sequences: each lane's items keep their order, the lanes'
+    /// interleaving follows `seed` (xorshift64, so the test needs no RNG dependency).
+    fn interleave<T>(seed: u64, mut lanes: Vec<Vec<T>>) -> Vec<(usize, T)> {
+        let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        lanes.iter_mut().for_each(|l| l.reverse());
+        let mut out = Vec::new();
+        loop {
+            let live: Vec<usize> = (0..lanes.len()).filter(|&l| !lanes[l].is_empty()).collect();
+            if live.is_empty() {
+                return out;
+            }
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let lane = live[(x % live.len() as u64) as usize];
+            out.push((lane, lanes[lane].pop().expect("live")));
+        }
+    }
+
+    /// #832: three lanes (two table lanes and the arrays lane) fed in randomised interleavings,
+    /// worker counts and windows seal one product, byte for byte, and it is the batch
+    /// `ProductBuilder` product of the same blocks in lane order: the table lanes by role name,
+    /// then the arrays lane, each in push order — never in commit order.
+    #[test]
+    fn lanes_seal_the_batch_product_in_lane_order_whatever_the_interleaving() {
+        let dir = tempfile::tempdir().unwrap();
+        // Pushed lane by lane in this order, the arrays lane first, so commit order != lane order.
+        let lanes = [Lane::Arrays, Lane::table("pethits"), Lane::table("events")];
+        let named = |tag: &str, n: usize| -> Vec<_> {
+            (0..n)
+                .map(|i| ablock(&format!("{tag}{i:03}"), (i * 7) as i16))
+                .collect()
+        };
+        let per_lane = vec![named("a", 3), named("p", 6), named("e", 5)];
+        let mut batch = ProductBuilder::new("recon", "p", "d", TS);
+        for lane in [2, 1, 0] {
+            for (r, _, _) in &per_lane[lane] {
+                batch.add_block_ref(r.clone());
+            }
+        }
+        let batch = batch.seal().unwrap();
+        let mut sealed_bytes: Option<Vec<u8>> = None;
+        for (seed, workers, jobs) in [(1, 1, 2), (2, 4, 3), (3, 2, 16), (4, 4, 2), (5, 3, 5)] {
+            let tag = format!("s{seed}w{workers}j{jobs}");
+            let ws = WriteSession::create(&dir.path().join(&tag), "recon", "p", "d", TS).unwrap();
+            let window = StreamWindow::new(jobs, u64::MAX);
+            let mut sw = StreamWriter::with_window(ws, workers, window);
+            for (lane, (r, spec, data)) in interleave(seed, per_lane.clone()) {
+                sw.push_on(lanes[lane].clone(), array_job(r.name.as_str(), spec, data))
+                    .unwrap();
+            }
+            let out = dir.path().join(format!("{tag}.tsra"));
+            let m = sw.finish(&out).unwrap();
+            assert_eq!(m.manifest_hash, batch.manifest_hash, "{tag}");
+            assert_eq!(m.content_hash, batch.content_hash, "{tag}");
+            let bytes = std::fs::read(&out).unwrap();
+            match &sealed_bytes {
+                None => sealed_bytes = Some(bytes),
+                Some(first) => assert!(*first == bytes, "{tag}: sealed bytes differ"),
+            }
+        }
+    }
+
+    /// #832: two partitioned tables streamed at once on their own lanes, row-groups interleaved
+    /// at random, seal the bytes of the same tables written one after the other in lane order
+    /// on one lane (which `open_table_seals_the_multi_block_sink_manifest_at_every_leaf_count`
+    /// holds to `TableMultiBlockSink`).
+    #[test]
+    fn open_tables_on_two_lanes_seal_the_sequential_product() {
+        let dir = tempfile::tempdir().unwrap();
+        let totals = [3 * RPG + 17, 2 * RPG];
+        let sequential = {
+            let ws = WriteSession::create(&dir.path().join("seq"), "recon", "p", "d", TS).unwrap();
+            let mut sw = StreamWriter::new(ws, 2, 4);
+            for (name, total) in
+                ["events", "f", "pethits"]
+                    .into_iter()
+                    .zip([totals[0], 2 * RPG + 5, totals[1]])
+            {
+                let mut t = sw
+                    .open_table_with_block_rows(name, listmode::spec(0), RPG)
+                    .unwrap();
+                for group in groups_of(total, RPG) {
+                    t.push(&mut sw, group).unwrap();
+                }
+                t.close(&mut sw).unwrap();
+            }
+            let out = dir.path().join("seq.tsra");
+            sw.finish(&out).unwrap();
+            std::fs::read(&out).unwrap()
+        };
+        for (seed, workers) in [(7, 1), (8, 2), (9, 4)] {
+            let tag = format!("s{seed}w{workers}");
+            let ws = WriteSession::create(&dir.path().join(&tag), "recon", "p", "d", TS).unwrap();
+            let mut sw = StreamWriter::new(ws, workers, 4);
+            // Opened pethits first: lane order, not open or push order, decides the seal.
+            let mut tables: Vec<OpenTable> = ["pethits", "events"]
+                .into_iter()
+                .map(|name| {
+                    let lane = Lane::table(name);
+                    sw.open_table_in(lane, name.into(), listmode::spec(0), RPG)
+                        .unwrap()
+                })
+                .collect();
+            let groups = vec![
+                groups_of(totals[1], 9999).collect::<Vec<_>>(),
+                groups_of(totals[0], 9999).collect(),
+            ];
+            for (t, group) in interleave(seed, groups) {
+                tables[t].push(&mut sw, group).unwrap();
+            }
+            for t in tables {
+                assert!(t.close(&mut sw).unwrap() > 1, "{tag}: partitioned");
+            }
+            // A table known up front, on a lane of its own, sealed between them in lane order.
+            let total = 2 * RPG + 5;
+            let spec = listmode::spec(total);
+            sw.push_table_in(
+                Lane::table("f"),
+                "f".into(),
+                spec,
+                groups_of(total, RPG),
+                RPG,
+            )
+            .unwrap();
+            let out = dir.path().join(format!("{tag}.tsra"));
+            sw.finish(&out).unwrap();
+            assert!(std::fs::read(&out).unwrap() == sequential, "{tag}");
+        }
+    }
+
+    /// #832: a product written on one lane, whichever it is, is the product of today's
+    /// lane-less calls (the arrays lane) for the same jobs, byte for byte.
+    #[test]
+    fn a_single_lane_product_is_byte_identical_to_the_lane_less_product() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocks = blocks(8);
+        let (reference, reference_bytes) = unthrottled(dir.path(), &blocks);
+        for lane in [Lane::table("events"), Lane::table("arrays")] {
+            let tag = format!("{lane:?}");
+            let ws = WriteSession::create(&dir.path().join(&tag), "recon", "p", "d", TS).unwrap();
+            let mut sw = StreamWriter::new(ws, 3, 2);
+            for (i, (_, spec, data)) in blocks.iter().enumerate() {
+                let job = array_job(format!("b{i:03}"), spec.clone(), data.clone());
+                sw.push_on(lane.clone(), job).unwrap();
+            }
+            let out = dir.path().join(format!("{tag}.tsra"));
+            let m = sw.finish(&out).unwrap();
+            assert_eq!(m.manifest_hash, reference.manifest_hash, "{tag}");
+            assert!(std::fs::read(&out).unwrap() == reference_bytes, "{tag}");
+        }
+    }
+
+    /// #832: the encode gate's no-stall rule is per lane. Lane `a`'s job 0 is held and its job 1
+    /// holds the whole 1-byte budget, uncommitted behind it; lane `b`'s job 0 is the job the
+    /// committer waits on in `b`, so it must encode and commit at once. A rule keyed to one
+    /// lane's next would gate it behind lane `a`'s held job.
+    #[test]
+    fn each_lanes_next_job_encodes_and_commits_past_a_held_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocks = blocks(3);
+        let ws = WriteSession::create(&dir.path().join("stage"), "recon", "p", "d", TS).unwrap();
+        let mut sw = StreamWriter::with_window(ws, 2, StreamWindow::new(3, 1));
+        let window = Arc::clone(&sw.window);
+        let (gate0_tx, gate0_rx) = channel();
+        let (gate1_tx, gate1_rx) = channel();
+        let (done_tx, done_rx) = channel();
+        let [(_, s0, d0), (_, s1, d1), (_, s2, d2)] = <[_; 3]>::try_from(blocks).unwrap();
+        // Nothing has finished encoding yet (both workers hold lane a's jobs), so all three are
+        // admitted without waiting.
+        sw.push_on(Lane::table("a"), held_job(0, s0, d0, gate0_rx))
+            .unwrap();
+        sw.push_on(Lane::table("a"), held_job(1, s1, d1, gate1_rx))
+            .unwrap();
+        sw.push_on(Lane::table("b"), reporting_job(2, s2, d2, done_tx))
+            .unwrap();
+        gate1_tx.send(()).unwrap();
+        // Lane a's job 1 now holds the budget; its worker takes lane b's job 0.
+        let done = std::cell::Cell::new(false);
+        spin_until(&window, |st| {
+            done.set(done.get() || done_rx.try_recv().is_ok());
+            (done.get() && st.stats.jobs_committed == 1) || st.gated_encodes == 1
+        });
+        assert_eq!(
+            window.lock().gated_encodes,
+            0,
+            "lane b's next job was gated"
+        );
+        assert!(done.get());
+        gate0_tx.send(()).unwrap();
+        let m = sw.finish(&dir.path().join("p.tsra")).unwrap();
+        let names: Vec<_> = m.blocks.iter().map(|b| b.name.to_string()).collect();
+        assert_eq!(names, ["b000", "b001", "b002"]);
     }
 }
