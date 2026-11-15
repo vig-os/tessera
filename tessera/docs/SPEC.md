@@ -319,6 +319,23 @@ MUST refuse an archive whose first central-directory entry is not `mimetype`, or
 header is not at byte 0. The second rule also covers a prefix whose offsets were rewritten to include it
 (a self-extractor or a shell/zip polyglot), which is otherwise a well-formed zip.
 
+**One reading.** Every zip entry is described twice, by its local file header and by its central-directory
+record, and zip readers differ in which one they trust: a central-directory reader (this reference
+implementation, Python's `zipfile`, `unzip`) never looks at a local header's name or method, and a streaming
+reader never sees the central directory. A `.tsra` MUST therefore read the same both ways
+(GHSA-m665-v7pm-7grj):
+
+- each local header MUST agree with its central-directory record (name, method, flags, CRC, sizes);
+- no name may appear twice in the central directory;
+- the entries MUST tile the archive: sorted by position, the first starts at byte 0, each starts where the
+  previous one's bytes end, and the last ends where the central directory starts. No gap, no overlap, no
+  data descriptor.
+
+A reader MUST refuse to read a member whose local header disagrees with its record, and MUST refuse a member
+read from an archive that names one member twice. Full verification (§7) MUST also check the tiling. It is
+the only rule that catches a complete local entry hidden in bytes no record points at, which a streaming
+reader lists as one more member. A cheap open need not check it, since it reads every local header.
+
 All entries MUST be **STORED** (payloads are pre-compressed by their codec; STORED keeps every block
 byte range directly addressable via the central directory). For **writer-determinism**, entry
 modification times MUST be pinned to the zip epoch (1980-01-01 00:00:00) — the same product MUST pack
@@ -331,7 +348,8 @@ On open a reader MUST: (a) read `mimetype`, reject if ≠ `application/vnd.tesse
 `manifest.json`; (c) reject if `tessera_version` major > supported; (d) recompute and check `id` from
 `id_inputs`, `content_hash` from block digests, and `manifest_hash` over the canonical bytes — any
 mismatch is an integrity failure. On reading a block, the reader MUST verify the bytes against the
-BlockRef `digest`.
+BlockRef `digest`. Full verification of a file also checks the container's one-reading rule (§6), so a
+`.tsra` that verifies reads the same under every zip reader.
 
 ## 8. Versioning
 Products are immutable. A new version is a new product (new `id`) with a `Source`

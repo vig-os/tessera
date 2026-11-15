@@ -1363,6 +1363,11 @@ pub fn read_npz_member(path: &Path, member: &str) -> Result<NpyContent> {
         ))
     })?;
     check_member_name(path, member)?;
+    // Central-directory view on purpose, unlike the `.tsra` reader's header-consistency check
+    // (GHSA-m665-v7pm-7grj, SPEC §6). A `.tsra` is tessera's own claim, and `verify` must hold for
+    // every zip reader. An `.npz` is a third-party input whose reference reader, numpy's
+    // `np.load` through Python's `zipfile`, also reads the central directory, so this member is the
+    // array numpy would load. Whatever is decoded here is then sealed by digest.
     let mut entry = zip.by_name(member).map_err(|e| {
         he(format!(
             "{} has no member '{member}': {e}\n  members: {}",

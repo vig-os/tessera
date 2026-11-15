@@ -15,9 +15,10 @@ use tessera_core::block::partition::is_legacy_flat_member;
 use tessera_core::block::{check_leaf_rule, check_partitions, BlockName, TableGroup};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
-use zip::read::{ArchiveOffset, Config};
+use zip::read::{ArchiveOffset, Config, ZipFile};
+use zip::result::ZipError;
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
+use zip::{CompressionMethod, DateTime, ZipArchive, ZipReadOptions, ZipWriter};
 
 /// Container MIME magic — the first, uncompressed entry (EPUB/ODF trick) so `file(1)` and magic
 /// sniffers identify a `.tsra` without unzipping.
@@ -124,6 +125,103 @@ fn require_mimetype_at_byte_zero<R: Read + Seek>(archive: &ZipArchive<R>) -> Res
         return Err(Error::Container(format!(
             "entry '{MIMETYPE_ENTRY}' is {:?}, but a .tsra must be STORED throughout",
             first.compression()
+        )));
+    }
+    Ok(())
+}
+
+/// Open the member `entry` for reading, refusing it unless its **local header agrees with its
+/// central-directory record** — the one way every `.tsra` member read in this crate opens an entry
+/// (GHSA-m665-v7pm-7grj, #689; SPEC §6).
+///
+/// `zip` locates and decodes a member from its central-directory record and treats the local header
+/// in front of the bytes as a pointer to skip. A streaming reader does the opposite: it never sees the
+/// central directory and takes name, method, sizes and CRC from the local header. So a member whose two
+/// headers disagree is two different members, and the digest tessera checks covers only one of them.
+/// With the check on, `zip` (≥ 9.0.5) parses the local header and refuses the entry unless both
+/// describe the same name, method, sizes, CRC and flags, and refuses any read at all from an archive
+/// whose central directory names one member twice (`zip` would silently resolve the name to the last
+/// record, and a first-match reader to the first).
+///
+/// The cost is small. `zip` reads that local header anyway to find where the bytes start; the check
+/// also reads the header's name and extra field, the bytes directly in front of the payload. So a
+/// ranged cloud read touches the same region as before, though an unbuffered range reader may issue
+/// up to two more small reads per member.
+///
+/// `missing` builds the error for an entry that is simply absent, so each caller keeps its own wording;
+/// every other failure (an inconsistent or unreadable header) is [`Error::Container`] naming the entry.
+fn open_member<'a, R: Read + Seek>(
+    archive: &'a mut ZipArchive<R>,
+    entry: &str,
+    missing: impl FnOnce() -> String,
+) -> Result<ZipFile<'a, R>> {
+    let opts = ZipReadOptions::new().enforce_header_consistency(true);
+    archive
+        .by_name_with_options(entry, opts)
+        .map_err(|e| match e {
+            ZipError::FileNotFound => Error::Container(missing()),
+            // A truncated file or a failed ranged read is an I/O problem, not a header disagreement.
+            ZipError::Io(e) => Error::Io(e),
+            e => Error::Container(format!(
+                "entry '{entry}': {e} — its local header and its central-directory record must \
+                 describe the same member (SPEC §6)"
+            )),
+        })
+}
+
+/// SPEC §6's **one-reading rule**, over the whole archive: every reader, whether it walks the central
+/// directory or the local headers, must see exactly the same members with exactly the same bytes.
+///
+/// Two parts. `zip`'s [`ZipArchive::validate_header_consistency`] checks every entry's local header
+/// against its central-directory record, refuses a duplicated name, and refuses any two entries (or an
+/// entry and the central directory) sharing a byte. That still leaves one cloak open, and this function
+/// closes it: bytes that **no** central-directory record points at. A complete local entry hidden in such
+/// a gap disagrees with nothing, so every header check passes, yet a streaming reader walking the local
+/// headers front to back reads it as one more member. So the entries must also tile the archive: sorted by
+/// position, the first starts at byte 0, each starts exactly where the previous one's bytes end, and the
+/// last ends exactly where the central directory starts. Every tessera writer has always produced that
+/// layout (no prefix, no data descriptor, no padding), and the committed corpus is pinned to it.
+///
+/// Reads every local header (each one is read again when its payload is verified), so it belongs to
+/// the deep verify, not to [`Reader::from_reader`]: a cloud open still costs the archive's tail only,
+/// and every member read is already held to its own header by [`open_member`].
+fn check_one_reading<R: Read + Seek>(archive: &mut ZipArchive<R>, label: &str) -> Result<()> {
+    let refuse = |why: String| Error::Container(format!("{label}: not a canonical .tsra: {why}"));
+    archive
+        .validate_header_consistency()
+        .map_err(|e| refuse(e.to_string()))?;
+    let mut spans = Vec::with_capacity(archive.len());
+    for i in 0..archive.len() {
+        let f = archive.by_index_raw(i).map_err(cz)?;
+        let name = f.name().map_err(cz)?.into_owned();
+        let data_start = f.data_start().ok_or_else(|| {
+            refuse(format!(
+                "entry '{name}' has no resolved data offset after its local header was read"
+            ))
+        })?;
+        let end = data_start
+            .checked_add(f.compressed_size())
+            .ok_or_else(|| refuse(format!("entry '{name}' ends past the largest file offset")))?;
+        spans.push((f.header_start(), end, name));
+    }
+    spans.sort_unstable();
+    let mut cursor = 0u64;
+    for (start, end, name) in &spans {
+        if *start != cursor {
+            return Err(refuse(format!(
+                "entry '{name}' starts at byte {start}, but the previous entry ends at byte {cursor}; \
+                 bytes no central-directory record covers can hide a member that a reader walking the \
+                 local headers would see"
+            )));
+        }
+        cursor = *end;
+    }
+    let cd_start = archive.central_directory_start();
+    if cursor != cd_start {
+        return Err(refuse(format!(
+            "the last entry ends at byte {cursor}, but the central directory starts at byte {cd_start}; \
+             bytes no central-directory record covers can hide a member that a reader walking the local \
+             headers would see"
         )));
     }
     Ok(())
@@ -371,9 +469,11 @@ impl<R: Read + Seek> Reader<R> {
         // this check (`by_index_raw` → `get_metadata().compression_method`) and the actual decode
         // (`by_index_with_options` → `ZipFileData::make_reader` → `self.compression_method`).
         // `ZipFileData::data_start` (via `find_content`) parses the local header only to locate the
-        // payload, never to choose a codec (re-checked against zip 9.0.4). So a crafted file whose
+        // payload, never to choose a codec (re-checked against zip 9.0.5). So a crafted file whose
         // local header disagrees with its central directory cannot slip past this check and then be
-        // decompressed anyway — there is one source of truth, and it is the one checked here.
+        // decompressed anyway — there is one source of truth, and it is the one checked here. A local
+        // header that claims a codec anyway is refused on every member read by [`open_member`], since
+        // a streaming reader would decode it (GHSA-m665-v7pm-7grj).
         let mut compressed: Option<(String, CompressionMethod)> = None;
         for i in 0..archive.len() {
             let f = archive.by_index_raw(i).map_err(cz)?;
@@ -397,10 +497,10 @@ impl<R: Read + Seek> Reader<R> {
         // definition, and `read_to_string` would happily allocate all of it.
         let mut magic = String::new();
         {
-            let mut mime = archive
-                .by_name(MIMETYPE_ENTRY)
-                .map_err(|_| Error::Container("not a .tsra (no mimetype entry)".into()))?
-                .take(64);
+            let mut mime = open_member(&mut archive, MIMETYPE_ENTRY, || {
+                "not a .tsra (no mimetype entry)".into()
+            })?
+            .take(64);
             mime.read_to_string(&mut magic)?;
         }
         if magic != MIMETYPE {
@@ -408,10 +508,10 @@ impl<R: Read + Seek> Reader<R> {
         }
 
         let mut mj = String::new();
-        archive
-            .by_name(MANIFEST_ENTRY)
-            .map_err(|_| Error::Container("missing manifest.json".into()))?
-            .read_to_string(&mut mj)?;
+        open_member(&mut archive, MANIFEST_ENTRY, || {
+            "missing manifest.json".into()
+        })?
+        .read_to_string(&mut mj)?;
         let manifest = Manifest::from_json_verified(&mj)?;
 
         Ok(Reader { archive, manifest })
@@ -469,10 +569,9 @@ impl<R: Read + Seek> Reader<R> {
     pub fn read_block(&mut self, name: &str) -> Result<Vec<u8>> {
         let entry = format!("{BLOCKS_PREFIX}{name}");
         let buf = {
-            let mut f = self
-                .archive
-                .by_name(&entry)
-                .map_err(|_| Error::Container(format!("no block entry '{entry}'")))?;
+            let mut f = open_member(&mut self.archive, &entry, || {
+                format!("no block entry '{entry}'")
+            })?;
             let mut b = Vec::with_capacity(f.size() as usize);
             f.read_to_end(&mut b)?;
             b
@@ -518,10 +617,9 @@ impl<R: Read + Seek> Reader<R> {
     /// that needs tamper-evidence goes in `manifest.blocks` / `extra` (both sealed).
     pub fn read_aux(&mut self, name: &str) -> Result<Vec<u8>> {
         let entry = format!("{AUX_PREFIX}{name}");
-        let mut f = self
-            .archive
-            .by_name(&entry)
-            .map_err(|_| Error::Container(format!("no aux entry '{entry}'")))?;
+        let mut f = open_member(&mut self.archive, &entry, || {
+            format!("no aux entry '{entry}'")
+        })?;
         let mut b = Vec::with_capacity(f.size() as usize);
         f.read_to_end(&mut b)?;
         Ok(b)
@@ -545,10 +643,9 @@ impl<R: Read + Seek> Reader<R> {
             .find(|b| b.name == name)
             .and_then(|b| b.digest.clone());
         let entry = format!("{BLOCKS_PREFIX}{name}");
-        let mut f = self
-            .archive
-            .by_name(&entry)
-            .map_err(|_| Error::Container(format!("no block entry '{entry}'")))?;
+        let mut f = open_member(&mut self.archive, &entry, || {
+            format!("no block entry '{entry}'")
+        })?;
         let mut hasher = tessera_core::hash::StreamHasher::new();
         let mut buf = [0u8; 64 * 1024];
         let mut total: u64 = 0;
@@ -581,7 +678,20 @@ impl<R: Read + Seek> Reader<R> {
     /// `label` (the file path or URL) and the block, with the underlying cause in `detail` (the zip
     /// CRC error, or an `Integrity` mismatch with expected/actual) — never a locus-free `io:` error
     /// (#268). Shared by `tessera verify` and the `--verify` deep opt-in of the read-side commands.
+    ///
+    /// Before any payload is hashed it checks the container itself (SPEC §6, GHSA-m665-v7pm-7grj):
+    /// every local header agrees with its central-directory record, no name appears twice, and the
+    /// entries tile the archive with no gap or overlap. A `.tsra` that passes reads the same under a
+    /// central-directory reader and under a streaming one, so the verdict holds for every zip reader,
+    /// not only for tessera's. A failure there is [`Error::Container`] naming `label`, since it belongs
+    /// to the archive, not to one block.
     pub fn verify_payloads(&mut self, label: &str) -> Result<()> {
+        check_one_reading(&mut self.archive, label)?;
+        self.stream_all_payloads(label)
+    }
+
+    /// The payload half of [`Self::verify_payloads`], with the container check already done.
+    fn stream_all_payloads(&mut self, label: &str) -> Result<()> {
         let mut sink = std::io::sink();
         for name in self.block_names() {
             self.stream_block(&name, &mut sink)
@@ -681,12 +791,15 @@ fn verify_payloads_parallel_with(
     workers: usize,
     min_bytes: u64,
 ) -> Result<usize> {
-    let names = Reader::open(path)?.block_names(); // L1 seal check + block list
+    let mut reader = Reader::open(path)?; // L1 seal check
+    let names = reader.block_names();
+    // The container check runs once, here, before either branch: the workers only stream payloads.
+    check_one_reading(&mut reader.archive, label)?;
     let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if should_parallelize(file_size, names.len(), workers, min_bytes) {
         verify_payloads_multithread(path, &names, label, workers.min(names.len()))?;
     } else {
-        Reader::open(path)?.verify_payloads(label)?;
+        reader.stream_all_payloads(label)?;
     }
     Ok(names.len())
 }
@@ -759,10 +872,13 @@ pub fn write_aux_members(
     let sealed_manifest = {
         let mut r = Reader::open(path)?;
         // Central-directory-ordered pass so the rewritten archive preserves the sealed entry order.
+        // Each entry is held to its local header, like every member read ([`open_member`]): the
+        // rewrite would otherwise re-emit a cloaked input as a clean-looking archive.
         for i in 0..r.archive.len() {
+            let opts = ZipReadOptions::new().enforce_header_consistency(true);
             let mut zf = r
                 .archive
-                .by_index(i)
+                .by_index_with_options(i, opts)
                 .map_err(|e| Error::Container(format!("read existing entry #{i}: {e}")))?;
             let name = zf.name().map_err(cz)?.into_owned();
             let mut buf = Vec::with_capacity(zf.size() as usize);
@@ -839,10 +955,10 @@ pub fn write_aux_members(
     // match with different bytes would still count as a seal-ignore break (JSON reformatting).
     let mut reopened_zip = open_tsra_archive(File::open(path)?)?;
     let mut got = Vec::new();
-    reopened_zip
-        .by_name(MANIFEST_ENTRY)
-        .map_err(cz)?
-        .read_to_end(&mut got)?;
+    open_member(&mut reopened_zip, MANIFEST_ENTRY, || {
+        "aux write lost manifest.json".into()
+    })?
+    .read_to_end(&mut got)?;
     if got != manifest_json_bytes {
         return Err(Error::Container(
             "aux write mutated the manifest.json bytes (seal-ignore invariant broken)".into(),
@@ -908,10 +1024,12 @@ fn write_repacked_archive(
 pub fn read_manifest_unverified(path: &Path) -> Result<Manifest> {
     let mut archive = open_tsra_archive(File::open(path)?)?;
     let mut mj = String::new();
-    archive
-        .by_name(MANIFEST_ENTRY)
-        .map_err(|_| Error::Container("missing manifest.json".into()))?
-        .read_to_string(&mut mj)?;
+    // Held to its local header like every member read: an untrusted manifest is still read the one
+    // way every zip reader would read it, or not at all.
+    open_member(&mut archive, MANIFEST_ENTRY, || {
+        "missing manifest.json".into()
+    })?
+    .read_to_string(&mut mj)?;
     Manifest::from_json(&mj)
 }
 

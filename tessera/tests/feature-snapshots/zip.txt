@@ -36,7 +36,7 @@
 `-- tessera-cli vWORKSPACE (*)
 `-- tessera-io vWORKSPACE
 `-- zip feature "flate2"
-zip v9.0.4
+zip v9.0.5
 |           [dev-dependencies]
 |           `-- tessera-ingest vWORKSPACE (*)
 |           `-- tessera-io vWORKSPACE (*)

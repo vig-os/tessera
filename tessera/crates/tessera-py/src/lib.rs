@@ -43,6 +43,8 @@ fn err<E: std::fmt::Display>(e: E) -> PyErr {
 #[pyclass(module = "tessera")]
 struct Reader {
     inner: tessera_io::Reader<std::fs::File>,
+    /// The path it was opened from, so a `verify` failure names the file.
+    path: PathBuf,
 }
 
 #[pymethods]
@@ -52,6 +54,7 @@ impl Reader {
     fn new(path: PathBuf) -> PyResult<Self> {
         Ok(Self {
             inner: tessera_io::Reader::open(&path).map_err(err)?,
+            path,
         })
     }
 
@@ -200,14 +203,14 @@ impl Reader {
         ))
     }
 
-    /// Full integrity pass: recompute the three-hash seal and every block digest. Raises
-    /// `TesseraError` on any mismatch. Mirrors `tessera verify`.
+    /// Full integrity pass: recompute the three-hash seal, check the container's one-reading rule
+    /// (SPEC §6: every local header agrees with the central directory and the entries tile the archive,
+    /// so every zip reader sees the same members), and stream every block against its digest in bounded
+    /// memory. Raises `TesseraError` on any failure. The same pass as `tessera verify`.
     fn verify(&mut self) -> PyResult<()> {
         self.inner.manifest().verify().map_err(err)?;
-        for name in self.inner.block_names() {
-            self.inner.read_block(&name).map_err(err)?;
-        }
-        Ok(())
+        let label = self.path.display().to_string();
+        self.inner.verify_payloads(&label).map_err(err)
     }
 
     fn __repr__(&self) -> String {
