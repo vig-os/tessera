@@ -53,6 +53,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   older reader, because `BlockRef.spec` is kept as raw JSON. But the table bytes it marks do: an older reader can't
   decode them (the forward-read limit under **Changed** below). `TableSpec` has no `Default`
   and isn't `#[non_exhaustive]`, so a struct literal outside tessera stops compiling until it names the field.
+- `tessera-io`: `StreamWriter::open_sequenced_table_on` opens a `SequencedTable`, a table lane that any number of
+  threads push numbered batches into (`push(&self, writer, seq, batch)`, `mark_done`, `close(expected_count)`), sealed
+  byte for byte as the batches in `seq` order whatever order they arrive in (ADR-0065 §7.2–§7.3, #812). Its gate is a
+  second credit window of the writer: the due `seq` is never held, others wait while `seq >= next + window` or the
+  shared byte credit (the writer's `max_in_flight_bytes`) is held, or are refused in `refuse_instead_of_block` mode.
+  A duplicate, a `seq` past `max_ahead`, a gap or count mismatch at close, `abort`, the finite stall deadline
+  (default 10 minutes, at most `MAX_STALL_TIMEOUT` = 24 hours) and a dead pipeline each wake every waiting push with
+  an error; `SequencedOptions` and `SequencedStats` configure and observe it. `tessera-core` adds the
+  `StreamedTableError` reasons `Duplicate`, `TooFarAhead`, `WouldBlock`, `Missing`, `CountMismatch`, `Aborted`,
+  `Stalled` and `Failed`.
 
 ### Changed
 
