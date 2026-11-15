@@ -16,21 +16,22 @@ use tessera_core::signing::{self, Signature};
 /// Verify a product's **three-hash seal** from its manifest JSON: recomputes `content_hash` (the MMR over
 /// the block digests) and `manifest_hash` (the JCS seal) and checks `id`. Returns `true` iff the manifest
 /// is internally consistent + sealed. (A full integrity check of the *payloads* additionally re-hashes the
-/// blocks — done host-side; in the browser the bytes arrive via Arrow.)
+/// blocks — done host-side; in the browser the bytes arrive via Arrow.) The seal is checked over the
+/// JSON object as given (SPEC §4, [`Manifest::from_json_verified`]), so fields from a newer format
+/// revision verify and a key spliced into a sealed manifest doesn't; a duplicate key is refused.
 #[wasm_bindgen]
 pub fn verify_manifest(manifest_json: &str) -> bool {
-    Manifest::from_json(manifest_json)
-        .map(|m| m.verify().is_ok())
-        .unwrap_or(false)
+    Manifest::from_json_verified(manifest_json).is_ok()
 }
 
 /// Verify an **ed25519 signature** over a product: checks the [`Signature`] envelope (JSON) against the
 /// manifest's `manifest_hash` and the signer's hex public key. `true` iff the signature is valid and the
-/// product is unaltered since signing. Any malformed input returns `false` (never throws).
+/// product is unaltered since signing: the manifest's own seal is verified first, since the signature
+/// binds only `manifest_hash`. Any malformed input returns `false` (never throws).
 #[wasm_bindgen]
 pub fn verify_signature(manifest_json: &str, signature_json: &str, pubkey_hex: &str) -> bool {
     let (Ok(m), Ok(sig), Ok(vk)) = (
-        Manifest::from_json(manifest_json),
+        Manifest::from_json_verified(manifest_json),
         serde_json::from_str::<Signature>(signature_json),
         signing::verifying_key_from_hex(pubkey_hex),
     ) else {

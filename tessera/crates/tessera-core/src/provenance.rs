@@ -24,6 +24,10 @@ pub struct Source {
 }
 
 impl Source {
+    /// The JSON keys this type models (ADR-0060 §2.2 `newer_fields`); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &["role", "reference", "content_hash"];
+
     pub fn new(role: impl Into<String>, reference: impl Into<String>) -> Self {
         Source {
             role: role.into(),
@@ -60,6 +64,11 @@ pub struct Producer {
 }
 
 impl Producer {
+    /// The JSON keys this type models (ADR-0060 §2.2 `newer_fields`); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] =
+        &["tool", "version", "git_commit", "git_repo", "dirty"];
+
     /// An external producer's minimal identity (tool + version).
     pub fn new(tool: impl Into<String>, version: impl Into<String>) -> Self {
         Producer {
@@ -157,6 +166,10 @@ pub struct IngestTransform {
 }
 
 impl IngestTransform {
+    /// The JSON keys this type models (ADR-0060 §2.2 `newer_fields`); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &["name", "params"];
+
     /// A transform with no parameters (e.g. `f16_widen`).
     pub fn new(name: impl Into<String>) -> Self {
         IngestTransform {
@@ -193,6 +206,10 @@ pub struct Generation {
 }
 
 impl Generation {
+    /// The JSON keys this type models (ADR-0060 §2.2 `newer_fields`); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &["config", "config_ref"];
+
     /// A recipe is "present" iff it carries inline settings or points at a carried config block.
     pub fn is_empty(&self) -> bool {
         self.config.is_empty() && self.config_ref.is_none()

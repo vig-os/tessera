@@ -45,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking, `tessera-core`:** `ProductBuilder::from_manifest` returns `Result` and refuses a parsed manifest with
+  `Manifest::newer_fields()` (keys from a newer format revision, verified but not carried by the struct) with the
+  new `Error::NewerFormatFields`, as do `Manifest::compute_manifest_hash`, `canonical_bytes` and `verify` on such a
+  view. `Manifest::to_sealed_json` is the JSON every writer now emits (`pack`, `pack_streaming*`,
+  `Repository::put_manifest`): it refuses a manifest whose JSON doesn't reproduce its own seal. `unpack`, `pack_dir`
+  and the Python `Reader.verify` use the stored manifest bytes (`Reader::manifest_json`), so such a product
+  round-trips unchanged. `tessera verify` warns about newer fields. `Manifest` gains a private field, so it can no
+  longer be built with a struct literal outside `tessera-core` (use `Manifest::new`). `Manifest::from_json`
+  (and `read_manifest_unverified`) refuse duplicate keys too. The wasm `verify_signature` now verifies the
+  manifest's seal before the signature (#573).
+
 - **Breaking for writer output, `tessera-io` / `tessera-ingest`:** a table above `BLOCK_ROWS` rows is written as the
   leaves `<table>/0000`, `<table>/0001`, … (`events/0000` for GE listmode), each carrying the partition marker
   `{"index": i, "last": b}`, where it was `<table>_0000`, … without one (ADR-0064 PR D, #712). This covers GE
@@ -96,3 +107,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and hook order (#793).
 
 ### Security
+
+- `tessera-core`: `Manifest::from_json_verified` checks `manifest_hash` over the manifest JSON object as parsed (SPEC
+  §4), not over a re-serialisation of the `Manifest` struct. Before, a key spliced into a sealed `manifest.json`
+  (`"forged": true`) was dropped by the struct and `tessera verify` reported OK, while a product a newer writer
+  sealed with an extra field, `"study": null` or no `sources` key was reported as tampering. A manifest read from
+  bytes must now carry `content_hash` and `manifest_hash`: before, deleting the seal (or setting it to `null`) skipped
+  the check, so any edit verified. Both readers (Rust and `corpus/reference_reader`) refuse a manifest that is not
+  I-JSON (a key repeated in one object, `NaN`, a lone surrogate), and reach the same verdict on every case of the new
+  `corpus/seal-cases.json`. Every corpus seal is unchanged (#573, ADR-0060 §2.2 P0a).

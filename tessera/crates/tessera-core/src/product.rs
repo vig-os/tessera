@@ -35,7 +35,14 @@ impl ProductBuilder {
     /// Apply the delta (`with_field` / `add_block` / `add_source`), then [`seal`](Self::seal) — which
     /// recomputes `content_hash` + `manifest_hash` while `id` stays put. Unchanged blocks keep their
     /// digests, so a metadata-only version re-stores only the new manifest object.
-    pub fn from_manifest(parent: &Manifest) -> Self {
+    ///
+    /// # Errors
+    /// [`crate::Error::NewerFormatFields`] if `parent` carries [`Manifest::newer_fields`]: this build
+    /// can't carry them into the new version, and a seal without them would silently drop sealed
+    /// content, while one carrying them blindly could break a rule the newer format attaches to them
+    /// (ADR-0060 §2.2).
+    pub fn from_manifest(parent: &Manifest) -> crate::Result<Self> {
+        parent.refuse_newer_fields()?;
         let mut manifest = Manifest::new(
             &parent.product,
             &parent.name,
@@ -56,10 +63,10 @@ impl ProductBuilder {
             .filter(|s| s.role != "supersedes")
             .cloned()
             .collect();
-        ProductBuilder {
+        Ok(ProductBuilder {
             manifest,
             refs: parent.blocks.clone(),
-        }
+        })
     }
 
     /// Add a storage block (array or table); records its manifest reference.
@@ -241,7 +248,7 @@ mod tests {
         let v1mh = v1.manifest_hash.clone().unwrap();
 
         // Evolve: change one metadata field, stamp the supersedes edge to the immediate parent.
-        let mut e = ProductBuilder::from_manifest(&v1);
+        let mut e = ProductBuilder::from_manifest(&v1).unwrap();
         e.with_field("tracer", serde_json::json!("FLT"));
         e.add_source(Source::new("supersedes", &v1mh).with_content_hash(&v1mh));
         let v2 = e.seal().unwrap();

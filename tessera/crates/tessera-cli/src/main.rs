@@ -1283,6 +1283,17 @@ fn grid_opts(
     })
 }
 
+/// Name the manifest fields this build verified but does not interpret (ADR-0060 §2.2, RFC §13:
+/// an older reader warns and reads what it can).
+fn warn_newer_fields(m: &tessera_core::Manifest) {
+    if !m.newer_fields().is_empty() {
+        eprintln!(
+            "warning: fields from a newer format revision are not interpreted: {}",
+            m.newer_fields().join(", ")
+        );
+    }
+}
+
 /// Is stdout a terminal? The one place that asks, so the default-cap rule and the refuse-binary-to-a-TTY
 /// rule cannot disagree about what "interactive" means.
 fn stdout_is_terminal() -> bool {
@@ -1500,11 +1511,14 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 let mut r = open_local_or_url(&file)?; // magic + manifest seal
                 let n = r.manifest().blocks.len();
                 r.verify_payloads(&label)?;
+                warn_newer_fields(r.manifest());
                 println!("OK  {label} verified ({n} blocks)");
             } else {
                 let workers = resource::resolve_write_config(workers, None)?.worker_count();
                 // Returns the block count (verified with L1 seal + L2 payloads) — no extra reopen.
                 let n = tessera_io::verify_payloads_parallel(&file, &label, workers)?;
+                // The file just verified; this re-reads only its manifest, for the warning.
+                warn_newer_fields(&tessera_io::read_manifest_unverified(&file)?);
                 println!("OK  {label} verified ({n} blocks)");
             }
             Ok(())

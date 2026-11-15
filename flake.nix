@@ -1352,6 +1352,12 @@
               EOF
                 exit 1
               fi
+              # The seal cases (#573) have the same vacuous-pass guard: N/N with N the file's count.
+              cases=$(python3 -c 'import json; print(len(json.load(open("corpus/seal-cases.json"))["cases"]))')
+              if [ "$cases" -lt 1 ] || ! grep -qx "$cases/$cases seal cases agreed" out.txt; then
+                echo "reference-reader: expected '$cases/$cases seal cases agreed'" >&2
+                exit 1
+              fi
               touch $out
             '';
 

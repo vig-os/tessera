@@ -55,6 +55,12 @@ pub struct BlockRef {
     pub spec: serde_json::Value,
 }
 
+impl BlockRef {
+    /// The JSON keys this type models (ADR-0060 §2.2 `newer_fields`); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &["name", "kind", "digest", "spec"];
+}
+
 /// Behaviour every block backend provides to the product builder.
 pub trait Block {
     fn name(&self) -> &str;

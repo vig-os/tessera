@@ -1,6 +1,7 @@
 """
 Run the independent reader over the conformance corpus and compare the triple
-(id, content_hash, manifest_hash) against ../corpus.json goldens.
+(id, content_hash, manifest_hash) against ../corpus.json goldens, then reach the
+verdict of every manifest in ../seal-cases.json (the Rust reader checks the same file).
 """
 
 from __future__ import annotations
@@ -9,13 +10,28 @@ import json
 import os
 import sys
 
-from reader import verify_tsra
+from reader import manifest_verdict, verify_tsra
 
 CORPUS_DIR = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
 )  # .../tessera/corpus
 FILES_DIR = os.path.join(CORPUS_DIR, "files")
 GOLDEN_JSON = os.path.join(CORPUS_DIR, "corpus.json")
+SEAL_CASES_JSON = os.path.join(CORPUS_DIR, "seal-cases.json")
+
+
+def check_seal_cases() -> int:
+    """Each seal case's verdict; returns the number of disagreements."""
+    with open(SEAL_CASES_JSON, encoding="utf-8") as f:
+        cases = json.load(f)["cases"]
+    fails = 0
+    for c in cases:
+        got = manifest_verdict(c["manifest"])
+        if got != c["verdict"]:
+            fails += 1
+            print(f"seal case {c['name']}: expected {c['verdict']}, got {got}")
+    print(f"{len(cases) - fails}/{len(cases)} seal cases agreed")
+    return fails
 
 
 def main() -> int:
@@ -55,6 +71,7 @@ def main() -> int:
 
     print("-" * 78)
     print(f"{len(goldens) - fails}/{len(goldens)} fixtures passed")
+    fails += check_seal_cases()
     return 0 if fails == 0 else 1
 
 

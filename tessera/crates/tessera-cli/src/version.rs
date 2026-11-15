@@ -72,7 +72,7 @@ pub fn commit(
         ))
     })?;
     let parent = repo.get_manifest(&tip)?;
-    let mut b = ProductBuilder::from_manifest(&parent);
+    let mut b = ProductBuilder::from_manifest(&parent)?;
 
     // Track live block names so a duplicate `--add-block` is rejected (start from the parent's blocks).
     let mut names: std::collections::BTreeSet<tessera_core::block::BlockName> =
@@ -374,7 +374,7 @@ pub fn publish(
     let repo = Repository::open(repo)?;
     let src = repo.get_manifest(version)?;
     // from_manifest keeps id/blocks/metadata/derivation edges and drops the parent's supersedes chain.
-    let mut b = ProductBuilder::from_manifest(&src);
+    let mut b = ProductBuilder::from_manifest(&src)?;
     if !anonymous {
         b.add_source(Source::new("snapshot_of", version).with_content_hash(version));
     }
