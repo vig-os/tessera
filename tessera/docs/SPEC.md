@@ -319,10 +319,90 @@ MUST refuse an archive whose first central-directory entry is not `mimetype`, or
 header is not at byte 0. The second rule also covers a prefix whose offsets were rewritten to include it
 (a self-extractor or a shell/zip polyglot), which is otherwise a well-formed zip.
 
+**One reading.** Every zip entry is described twice, by its local file header and by its central-directory
+record, and zip readers differ in which one they trust and in how they find the archive at all: a
+central-directory reader (this reference implementation, Python's `zipfile`, `unzip`) never looks at a local
+header's name or method, a streaming reader never sees the central directory, and a reader that finds the
+end-of-central-directory record by scanning back from the end of the file and adjusts for a prefix opens
+whatever archive ends last. Readers also differ in which fields they act on: a streaming reader looks for a
+member's end where a data-descriptor flag says it is, some readers rename a member after a Unicode-path extra
+field, decrypt after an encryption flag, write a symlink after a Unix mode, or take `\` for a separator after
+a DOS host byte. A `.tsra` MUST therefore read the same every way (GHSA-m665-v7pm-7grj), which holds only if
+every byte of the file belongs to exactly one structure and no field is left for a reader to interpret. The
+**canonical layout** is:
+
+1. **Members.** The local entries (local header, then the member's bytes), back to back from byte 0. Sorted
+   by position, the first starts at byte 0, each starts where the previous one's bytes end, and the last ends
+   where the central directory starts. No gap, no overlap.
+2. **Canonical encoding.** Every local file header and every central-directory record is, byte for byte, the
+   one the reference writer emits for that member: every field below is either the value shown or derived
+   from the member's name, CRC-32, size and local-header offset.
+
+   | Field | Local header | Central-directory record |
+   | --- | --- | --- |
+   | version made by | (none) | `0x032D`: host 3 (Unix), version 4.5 |
+   | version needed to extract | `45` (4.5, zip64) | `45` |
+   | general-purpose flags | `0`: no encryption, no data descriptor, no UTF-8 flag (names are ASCII) | `0` |
+   | compression method | `0` (STORED) | `0` |
+   | modification time, date | `0x0000`, `0x0021` (1980-01-01 00:00:00) | the same |
+   | CRC-32 | the member's | the member's |
+   | 32-bit compressed, uncompressed size | `0xFFFFFFFF`, `0xFFFFFFFF` | `0xFFFFFFFF`, `0xFFFFFFFF` |
+   | extra field | exactly one zip64 field (`0x0001`), 16 data bytes | the same; 24 past 32 bits (below) |
+   | comment, disk number start, internal attributes | (none) | empty, `0`, `0` |
+   | external attributes | (none) | `0x81A40000`: a regular file, mode `0644` |
+   | 32-bit local header offset | (none) | the offset, or `0xFFFFFFFF` when the offset is `0xFFFFFFFF` or more |
+
+   The zip64 field holds the uncompressed size, then the compressed size (equal, since STORED). In the record it
+   also holds the local header's offset (24 bytes in all) when that offset is `0xFFFFFFFF` or more. So there is
+   no data descriptor, no encrypted, directory or symlink entry, no extra field but zip64's and no entry
+   comment, and a local header agrees with its record by construction.
+3. **Central directory.** Exactly one record per entry, back to back, no name twice, listed in the order the
+   entries sit in the file. A reader walking the directory and one walking the local headers then meet the
+   members in one order, so an extracting reader leaves the same tree either way.
+4. **End records.** Directly after the central directory, exactly the records the reference writer emits.
+   The zip64 end-of-central-directory record (`44`-byte record, versions `45`, no extensible data sector) and
+   its locator come first if and only if the archive has more than 65,535 entries or a directory size or
+   offset above `0xFFFFFFFF`. Then the end-of-central-directory record: disk numbers `0`, one disk, the entry
+   count (`0xFFFF` past 65,535), the directory size (`0xFFFFFFFF` when the zip64 records are present) and the
+   directory offset (`0xFFFFFFFF` when it is `0xFFFFFFFF` or more), and the comment length `0`. Every zip64
+   field states the true value, and the locator points at the zip64 record.
+5. **Nothing else.** The archive comment is empty, and the end-of-central-directory record ends at the end
+   of the file. Bytes after it, or a comment, can hold a second archive that a prefix-adjusting reader opens
+   instead of this one.
+
+**Members a `.tsra` may hold.** Exactly `mimetype`, `manifest.json`, one `blocks/<name>` for each block the
+manifest lists, and zero or more `aux/<name>` members (ADR-0042). Any other entry, a `blocks/` member the
+manifest does not list included, MUST be refused: no digest covers its bytes, and every reader would take it
+for part of the product. The `<name>` of an `aux/` member obeys the block-name grammar (ADR-0063): one or
+more `/`-separated segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 255 bytes. So no `..`, no
+leading or doubled `/`, no `\`, no NUL or control character, no non-ASCII byte, and no directory entry (a
+trailing `/`). Across one archive, the `aux/` names compared with ASCII letter case folded are distinct, and
+none is a parent prefix of another (the leaf rule: not `aux/a` next to `aux/a/b`). So an extracting reader
+writes every member under its target directory, as a plain file, under the one name every reader decodes, and
+leaves one tree whatever order it writes them in. (Windows device names such as `CON` and a trailing `.` stay
+grammar-valid; #690 tracks them, with case collisions among `blocks/` names, before a Windows build ships.)
+Every `aux/` member's bytes MUST match its CRC-32: a reader that checks the CRC refuses or truncates a
+mismatched member while another extracts it. `aux/` is the one place for bytes outside the seal (the embedded
+signature, the ingest provenance stamp). Because the layout above holds, every reader sees the same `aux/`
+members with the same bytes as it sees the sealed ones, but verification attests only the sealed members. An
+`aux/` member is carried, not authenticated, and a consumer MUST NOT treat its content as covered by
+`content_hash` (an embedded signature authenticates itself against `manifest_hash`, ADR-0037). It is written
+in the same canonical encoding as every other member, so it is added by the reference writer (`tessera sign`,
+`tessera pack` of an exploded directory, the library's `add_aux_members`), not by a generic zip tool.
+
+A reader MUST refuse to read a member whose local header disagrees with its record, and MUST refuse a member
+read from an archive that names one member twice. Full verification (§7) MUST check the whole canonical
+layout, encoding included, and the member set. Only the whole-file check catches a complete local entry
+hidden in bytes no record points at, a field a reader would interpret, or a second archive after the end
+record. Full verification also reads every `aux/` member to check its CRC-32, since nothing else reads an
+unsealed member. A cheap open need not check any of it, since it reads every local header and the whole
+central directory.
+
 All entries MUST be **STORED** (payloads are pre-compressed by their codec; STORED keeps every block
 byte range directly addressable via the central directory). For **writer-determinism**, entry
 modification times MUST be pinned to the zip epoch (1980-01-01 00:00:00) — the same product MUST pack
-to byte-identical archive bytes. The zip **central directory** is the internal index: a cloud reader
+to byte-identical archive bytes. Both rules are part of the canonical encoding above, so full verification
+enforces them. The zip **central directory** is the internal index: a cloud reader
 ranged-reads it, then ranged-reads only `manifest.json` and the block entries it needs.
 An opt-in **exploded** form is the same tree unzipped under an object-store prefix.
 
@@ -331,7 +411,8 @@ On open a reader MUST: (a) read `mimetype`, reject if ≠ `application/vnd.tesse
 `manifest.json`; (c) reject if `tessera_version` major > supported; (d) recompute and check `id` from
 `id_inputs`, `content_hash` from block digests, and `manifest_hash` over the canonical bytes — any
 mismatch is an integrity failure. On reading a block, the reader MUST verify the bytes against the
-BlockRef `digest`.
+BlockRef `digest`. Full verification of a file also checks the container's canonical layout and member
+set (§6, "One reading"), so a `.tsra` that verifies reads the same under every zip reader, byte for byte.
 
 ## 8. Versioning
 Products are immutable. A new version is a new product (new `id`) with a `Source`

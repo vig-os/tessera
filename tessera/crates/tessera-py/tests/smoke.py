@@ -8,10 +8,12 @@ tables — plus the typed-error path and a numpy write→read roundtrip. Driven 
 flake check (the assembled `tessera/` package — pure-Python `__init__.py` + `_native.so` — on PYTHONPATH).
 """
 
+import io
 import pathlib
 import struct
 import sys
 import tempfile
+import zipfile
 
 import numpy as np
 import polars as pl
@@ -70,6 +72,60 @@ for f in files:
             )
             assert df.height == proj.shape[0]
     verified += 1
+
+
+def hide_member_before_central_directory(tsra: bytes) -> bytes:
+    """`tsra` with a complete local entry (`manifest.json`, forged) hidden in front of the central
+    directory, and every end-record pointer moved past it. No central-directory record mentions it, so
+    `zipfile` reads the archive unchanged; a streaming reader walking the local headers lists it as one
+    more member (GHSA-m665-v7pm-7grj, SPEC §6)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("manifest.json", b'{"forged": true}')
+    tiny = buf.getvalue()
+    tiny_eocd = tiny.rindex(b"PK\x05\x06")
+    hidden = tiny[
+        : struct.unpack_from("<I", tiny, tiny_eocd + 16)[0]
+    ]  # local header + bytes only
+
+    out = bytearray(tsra)
+    eocd = out.rindex(b"PK\x05\x06")
+    zip64 = eocd >= 20 and out[eocd - 20 : eocd - 16] == b"PK\x06\x07"
+    if zip64:
+        record = struct.unpack_from("<Q", out, eocd - 20 + 8)[0]
+        cd_start = struct.unpack_from("<Q", out, record + 48)[0]
+    else:
+        cd_start = struct.unpack_from("<I", out, eocd + 16)[0]
+    k = len(hidden)
+    out[cd_start:cd_start] = hidden
+    eocd += k
+    if struct.unpack_from("<I", out, eocd + 16)[0] != 0xFFFFFFFF:
+        struct.pack_into("<I", out, eocd + 16, cd_start + k)
+    if zip64:
+        struct.pack_into("<Q", out, eocd - 20 + 8, record + k)
+        struct.pack_into("<Q", out, record + k + 48, cd_start + k)
+    return bytes(out)
+
+
+# `verify` is the full `tessera verify` pass, container rule included: a member hidden where only a
+# streaming reader looks is refused, though every block digest checks and `zipfile` sees nothing amiss.
+with tempfile.TemporaryDirectory() as td:
+    honest = files[0]
+    cloaked = pathlib.Path(td) / "cloaked.tsra"
+    cloaked.write_bytes(hide_member_before_central_directory(honest.read_bytes()))
+    with zipfile.ZipFile(honest) as a, zipfile.ZipFile(cloaked) as b:
+        assert a.namelist() == b.namelist(), "the central-directory view is unchanged"
+    r = tessera.open(
+        cloaked
+    )  # a cheap open reads only the tail: it does not walk local headers
+    for refuse in (r.verify, lambda: tessera.verify(cloaked)):
+        try:
+            refuse()
+            raise AssertionError(
+                "verified an archive a streaming zip reader reads differently"
+            )
+        except tessera.TesseraError as e:
+            assert "not a canonical .tsra" in str(e), e
 
 # typed-error path: a missing file raises TesseraError, not a bare exception
 try:
