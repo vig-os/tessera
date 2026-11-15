@@ -81,7 +81,16 @@ The codec moves from `vortex` 0.75 to **0.93.0**, pinned to `gerchowl/vortex@5c5
   #788.
 - **Compatibility.** Products written by 0.75 still open, read and verify. Their sealed bytes are unchanged and
   still hash to their recorded digests. `tests/fixtures/legacy_flat_events.tsra` (written by 0.75) stays frozen
-  as that read-compatibility guard.
+  as that read-compatibility guard. This holds in **one direction only**: new readers read old products.
+  Table blocks written by 0.93 at `TABLE_EDITION` need a tessera reader at or after this change, which links
+  Vortex ≥ 0.85, the edition's minimum library version. A reader built before it (the 0.75 fork: `dev`
+  before #635, `0.1.0-alpha.1`–`alpha.5`) opens and verifies such a product, because verification needs no
+  payload decoding. But it fails the table decode with
+  `codec: Other error: Encoding not found in registry: 1`. Reproduced with the released `0.1.0-alpha.5`
+  binary against the regenerated `corpus/files/listmode_events.tsra`: `verify` exit 0, `read … events`
+  exit 1. The same binary reads `dev`'s copy of that file. A product's `TableSpec.edition` (next amendment) is
+  how a reader knows which edition a block needs; a reader that names the edition when it can't decode it is
+  #871. SPEC §5b states the limit normatively.
 - **Size.** Table blocks get **5–10 % smaller** (corpus `listmode_events` 5060 → 4568 bytes, `multiblock_study`
   3388 → 3136 bytes), because the zone map is smaller. Column payloads are within ±0.2 % on every probe column.
 - **Determinism.** dev and release write identical bytes on x86_64 and on aarch64, and both architectures
@@ -127,7 +136,10 @@ bump above, so the corpus goldens move once.
   pins the byte identity; `tests/fixtures/legacy_flat_events.tsra` (vortex 0.75) is the real pre-edition product
   that still opens, verifies under its pinned `manifest_hash`, and reads.
 - **Reading.** A reader never needs the field to decode: Vortex decodes by the wire IDs in the file,
-  whatever edition admitted them. Readers MUST accept a table block with or without it.
+  whatever edition admitted them. Readers MUST accept a table block with or without it. But the reader's
+  Vortex must know those wire IDs. The field tells a reader which edition the block needs (for
+  `core2026.08.3`, Vortex ≥ 0.85, so a tessera reader at or after #635). An older reader ignores the key,
+  verifies the product and fails the decode (the Compatibility bullet of the vortex 0.93 amendment above).
 - **Schema convention.** Block specs are opaque to the core manifest schema (ADR-0020: `BlockRef.spec`
   is shape-specific) and are not in the product-schema registry (`tests/derived-docs/schema-reference.md`
   lists product schemas, not block specs), so no schema version or registry entry changes. The field

@@ -227,6 +227,16 @@ optional `row_index`.
   bytes but not sufficient, since the edition bounds which encodings the writer may use, not which it picks
   (that is the writer's codec set, ADR-0024 §Codec set, and the pinned Vortex compressor, both changed only as
   a format event).
+- **Forward-read limit.** Reading is backward-compatible only: a newer reader decodes older table blocks, but
+  an older reader can't be assumed to decode newer ones. Decoding a table block written under an edition needs
+  a Vortex at or above that edition's minimum library version (for `core2026.08.3`, Vortex 0.85). In tessera
+  that means a reader at or after the vortex 0.93 change (ADR-0024's 2026-11-09 amendment, #635), the first
+  release after `0.1.0-alpha.5`. The edition field is how a reader knows which edition a block needs. A tessera
+  reader from before that change (vortex 0.75; `0.1.0-alpha.1`–`alpha.5`) still opens and **verifies** such a
+  product, because §7 needs no payload decoding. But it fails the table **decode** with a codec registry error
+  (`Encoding not found in registry`), and the error doesn't name the edition. Array, blob and table-free
+  products aren't affected. A reader that can't decode an edition MUST fail with an error, never return
+  partial or substituted data; naming the edition in that error is #871.
 
 A reader MAY project a subset of columns or random-`take` rows; the format supports O(1) random access.
 

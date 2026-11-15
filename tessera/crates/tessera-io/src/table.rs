@@ -745,7 +745,15 @@ fn new_session(rt: &CurrentThreadRuntime) -> VortexSession {
 /// `min_library_version` 0.85.0): Vortex guarantees every reader from 0.85 on can read what it
 /// admits. Moving this constant changes which encodings the compressor may choose, so it is a
 /// format event like any Vortex bump: it can move sealed table bytes and `content_hash`.
-/// Reading is not affected — registration covers every encoding, whatever edition wrote it.
+/// Reading older blocks is not affected: registration covers every encoding the pinned Vortex knows, whatever
+/// edition wrote it.
+///
+/// # Forward-read limit
+/// The guarantee runs one way. A table block written under this edition needs a reader whose Vortex is at least
+/// 0.85, so a tessera reader at or after the vortex 0.93 change (#635). A tessera reader built before it (vortex
+/// 0.75, `0.1.0-alpha.1`–`alpha.5`) still verifies the product, because verification decodes no payload. But it
+/// fails the table decode with `Encoding not found in registry` (SPEC §5b, ADR-0024). [`TableSpec::edition`] is
+/// how a reader knows which edition a block needs; naming it in the decode error is #871.
 pub const TABLE_EDITION: EditionId = CORE_2026_08_3;
 
 /// The spec a table block is sealed with: `spec` with [`TableSpec::edition`] set to

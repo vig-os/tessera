@@ -49,8 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `edition: None`. It is in the manifest, not the payload, so it moves `manifest_hash` and leaves `content_hash` and
   the block digests as they are; the corpus goldens are regenerated with it, in the same format event as the vortex
   0.93 bump below. A spec without the key (every product sealed before this change) still parses, reads and
-  verifies, and keeps its manifest bytes: `None` is omitted, never written as `null`. An older reader opens and
-  verifies a product that carries the key, because `BlockRef.spec` is kept as raw JSON. `TableSpec` has no `Default`
+  verifies, and keeps its manifest bytes: `None` is omitted, never written as `null`. The key itself doesn't stop an
+  older reader, because `BlockRef.spec` is kept as raw JSON. But the table bytes it marks do: an older reader can't
+  decode them (the forward-read limit under **Changed** below). `TableSpec` has no `Default`
   and isn't `#[non_exhaustive]`, so a struct literal outside tessera stops compiling until it names the field.
 
 ### Changed
@@ -71,12 +72,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   map instead of `vortex.stats`, with no `sum` or `*_is_truncated`. Column encodings are unchanged. So the sealed
   bytes of **table** blocks change, and re-ingesting or re-building the same input gives a new `content_hash` and
   `manifest_hash` for every product that holds one. Table blocks are 5–10 % smaller. Array, blob and table-free
-  products are byte-identical. Products written by 0.75 still open, read and verify. The table writer enables the
-  frozen vortex edition `table::TABLE_EDITION` (`core2026.08.3`) and keeps vortex 0.75's codec set (Pco, with ALP,
-  ALPRD, integer Pco, Delta and OnPair excluded). The corpus goldens (`corpus/corpus.json`, `corpus/files`,
-  `corpus/ingest-corpus.json`, the `logical_tables` walkthrough's `scan.tsra`) are regenerated. ADR-0024 records the
-  event. The sink of `table::encode_streaming_to` and `TableStreamWriter::finish_to` must now be `Send`, because
-  vortex's writer requires it (#635).
+  products are byte-identical. Products written by 0.75 still open, read and verify. **Not forward-compatible:**
+  table blocks written by this version need a tessera reader at or after this change, which links Vortex ≥ 0.85, the
+  minimum for `TABLE_EDITION`. Their `TableSpec.edition` names the edition they need. A tessera reader from
+  before it (`0.1.0-alpha.1`–`alpha.5`) still opens and verifies such a product. But it fails to decode the table:
+  `tessera read FILE <table>` exits 1 with `codec: Other error: Encoding not found in registry: 1`. Upgrade every
+  reader before publishing products sealed by this version (SPEC §5b; a clearer error is #871). The table writer
+  enables the frozen vortex edition `table::TABLE_EDITION` (`core2026.08.3`) and keeps vortex 0.75's codec set
+  (Pco, with ALP, ALPRD, integer Pco, Delta and OnPair excluded). The corpus goldens (`corpus/corpus.json`,
+  `corpus/files`, `corpus/ingest-corpus.json`, the `logical_tables` walkthrough's `scan.tsra`) are regenerated.
+  ADR-0024 records the event. The sink of `table::encode_streaming_to` and `TableStreamWriter::finish_to` must now
+  be `Send`, because vortex's writer requires it (#635).
 
 - **Breaking for writer output, `tessera-io` / `tessera-ingest`:** a table above `BLOCK_ROWS` rows is written as the
   leaves `<table>/0000`, `<table>/0001`, … (`events/0000` for GE listmode), each carrying the partition marker
