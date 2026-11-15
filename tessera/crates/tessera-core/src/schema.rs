@@ -16,12 +16,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::block::array::ArraySpec;
+use crate::block::table::TableSpec;
 use crate::block::BlockKind;
 use crate::manifest::Manifest;
 
 pub mod contract;
 pub use contract::{
-    ArrayContract, ColumnReference, ReferenceScope, ReferenceTarget, TableContract, TableOrder,
+    ArrayContract, ColumnReference, ContractViolation, ReferenceScope, ReferenceTarget,
+    TableContract, TableOrder,
 };
 
 /// Schema-driven **sensitivity tier** for a metadata field (ADR-0040 §1 — the spike that
@@ -246,13 +249,14 @@ pub struct ProductSchema {
     #[serde(default, skip_serializing_if = "is_false")]
     pub requires_generation: bool,
     /// The **column contract** per table role (ADR-0065 §8, #809): ordered columns, sequence key,
-    /// row order, keys and references; see [`contract`]. Skipped when empty, so every schema sealed
-    /// before it existed keeps its bytes. A binary older than this field drops
+    /// row order, keys and references. A caller checks a block against it with
+    /// [`Self::check_table`]; nothing in validate or seal calls that yet. Skipped when empty, so
+    /// every schema sealed before it existed keeps its bytes. A binary older than this field drops
     /// it on parse without an error (#830 makes that a refusal).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tables: BTreeMap<String, TableContract>,
-    /// The contract per array role (dtype, rank, axes, unit; ADR-0065 §8). Skipped when empty, as
-    /// [`Self::tables`].
+    /// The contract per array role (dtype, rank, axes, unit; ADR-0065 §8), checked by a caller with
+    /// [`Self::check_array`]. Skipped when empty, as [`Self::tables`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub arrays: BTreeMap<String, ArrayContract>,
 }
@@ -324,6 +328,61 @@ impl ProductSchema {
             .iter()
             .filter(|f| f.sensitivity == tier)
             .collect()
+    }
+
+    /// Check a table block's spec against the contract declared for table `role`.
+    ///
+    /// Passes when every column of `spec` is declared, appears once, and the columns follow the
+    /// contract's order, where a column marked
+    /// [`optional`](crate::block::table::Column#structfield.optional) may be absent; each present
+    /// column's `dtype` and `nullable` must equal the declared ones. No other column attribute
+    /// (`unit`, `scale`, `sensitivity`, …) and none of `sequence_key`, `keys` or `references` is
+    /// compared, and rows are not looked at: [`contract`] lists what is carried but not checked.
+    ///
+    /// # Errors
+    /// [`crate::Error::Contract`] carrying the first [`ContractViolation`] found, in three passes:
+    /// `UnknownRole` when no table contract is declared for `role`; then, over the block's columns
+    /// in order, `UnknownColumn` or `DuplicateColumn`; then, walking the contract's columns in
+    /// order, the first of `ColumnOrder`, `MissingColumn`, `ColumnDtype` or `ColumnNullability`
+    /// (so a dtype mismatch on an early column is reported before a missing later one).
+    pub fn check_table(&self, role: &str, spec: &TableSpec) -> crate::Result<()> {
+        let contract = self
+            .tables
+            .get(role)
+            .ok_or_else(|| ContractViolation::UnknownRole {
+                kind: BlockKind::Table,
+                role: role.to_owned(),
+            });
+        contract
+            .and_then(|c| c.check(role, spec))
+            .map_err(|violation| self.contract_error(violation))
+    }
+
+    /// Check an array block's spec against the contract declared for array `role`: the dtype must
+    /// equal the declared one verbatim, the rank must match, and so must the axis names when the
+    /// contract declares any. The unit is not compared.
+    ///
+    /// # Errors
+    /// [`crate::Error::Contract`] carrying `UnknownRole` when no array contract is declared for
+    /// `role`, else the first of `ArrayDtype`, `ArrayRank` or `ArrayAxes`.
+    pub fn check_array(&self, role: &str, spec: &ArraySpec) -> crate::Result<()> {
+        let contract = self
+            .arrays
+            .get(role)
+            .ok_or_else(|| ContractViolation::UnknownRole {
+                kind: BlockKind::Array,
+                role: role.to_owned(),
+            });
+        contract
+            .and_then(|c| c.check(role, spec))
+            .map_err(|violation| self.contract_error(violation))
+    }
+
+    fn contract_error(&self, violation: ContractViolation) -> crate::Error {
+        crate::Error::Contract {
+            product: self.product.clone(),
+            violation,
+        }
     }
 
     /// Serialize to the JSON value **embedded in a sealed manifest** (`Manifest.schema`), so the

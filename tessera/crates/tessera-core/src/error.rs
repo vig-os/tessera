@@ -107,6 +107,15 @@ pub enum Error {
     #[error("invalid product: {0}")]
     Invalid(String),
 
+    /// A block's spec breaks the column contract its product schema declares for the block's role
+    /// (ADR-0065 §8): raised by `ProductSchema::check_table` / `check_array`. `violation` names the
+    /// role and the column.
+    #[error("schema '{product}': {violation}")]
+    Contract {
+        product: String,
+        violation: crate::schema::ContractViolation,
+    },
+
     /// A block name that fails the block-name grammar (ADR-0063, [`crate::block::name`]): empty,
     /// `.` or `..`, an absolute path, an empty segment, a `\`, `:` or NUL, a character outside
     /// `[A-Za-z0-9._-]`, or over 255 bytes. Refused wherever a name enters — a builder, a manifest,

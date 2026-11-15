@@ -62,23 +62,29 @@ An abridged, illustrative example:
 }
 ```
 
-| key | meaning |
-| --- | --- |
-| `tables.<role>.columns` | the columns in storage order; each is a block column (`name`, `dtype`, `nullable`, `unit`, `scale`, `description`, …) |
-| `optional` (on a column) | a block may leave the column out altogether; per-row "not recorded" is `nullable` instead |
-| `sequence_key` | the ordered key columns the rows are sorted by |
-| `order` | absent: rows are in `sequence_key` order; `"producer"`: the producer's own order, with an empty `sequence_key` |
-| `keys` | lists of column names, each unique per row |
-| `references` | `columns` pointing at `to { scope, block, columns }`; `scope` is `"block"` or `"source(<role>)"`, anything else fails to parse; optional `note` |
-| `arrays.<role>` | `dtype` (array vocabulary, e.g. `int16`), `rank`, `axes` (empty = the producer's choice), `unit` |
+| key | meaning | checked by `check_table` / `check_array` |
+| --- | --- | --- |
+| `tables.<role>.columns` | the columns in storage order; each is a block column (`name`, `dtype`, `nullable`, `unit`, `scale`, `description`, …) | names, order, `dtype`, `nullable` |
+| `optional` (on a column) | a block may leave the column out altogether; per-row "not recorded" is `nullable` instead | a present optional column must still be in its place |
+| `sequence_key` | the ordered key columns the rows are sorted by | no: the row checks are #833 |
+| `order` | absent: rows are in `sequence_key` order; `"producer"`: the producer's own order, with an empty `sequence_key` | no |
+| `keys` | lists of column names, each unique per row | no |
+| `references` | `columns` pointing at `to { scope, block, columns }`; `scope` is `"block"` or `"source(<role>)"`, anything else fails to parse; optional `note` | no: carried and sealed, checked by #780 |
+| `arrays.<role>` | `dtype` (array vocabulary, e.g. `int16`), `rank`, `axes` (empty = the producer's choice), `unit` | `dtype` verbatim, `rank`, `axes` when declared |
 
-For now the contract is parsed, carried and sealed with the schema, and no block is checked against it.
-Checking a block's columns against its role is the rest of #809; the row checks are #833, `keys` and
-`references` are #780, and the contract's own consistency (a column listed twice, a key naming an undeclared
-column) is #844.
+No other column attribute is compared (`unit`, `scale`, `description`, `short_name`, `codec`, `referencing`,
+`sensitivity`), nor an array's `unit`. Nor is the contract checked against itself (#844): a key naming an
+undeclared column is carried as is, and a contract listing a column twice parses but refuses every block
+of its role. `check_table` and `check_array` are library calls; validate and seal don't run them yet. A refusal is
+`Error::Contract { product, violation }`, and the `ContractViolation` names the role and the column: an
+unknown role, an undeclared, repeated, missing or misplaced column, a dtype or nullability mismatch, or an
+array dtype, rank or axes mismatch.
 
 Both maps are left out of the JSON when empty, so a schema without a contract serialises exactly as before
-and every sealed file keeps its bytes. **Binaries up to 0.1.0-alpha.5 don't know these keys**: they parse
+and every sealed file keeps its bytes. Inside a contract the same rule holds: `columns`, and an array's
+`dtype` and `rank`, are always written, while every other key is left out at its default (an empty
+`sequence_key`, `keys`, `references` or `axes`, absent `order`, `unit` or `note`, `optional: false`). An empty
+list and an absent key therefore mean the same and seal to the same bytes. **Binaries up to 0.1.0-alpha.5 don't know these keys**: they parse
 such a schema, drop the contract without a word, and validate only its `fields` and `blocks`. Their data
 reads are unaffected, since each block's own spec carries its columns. A reader that refuses what it can't
 honour is #830.
