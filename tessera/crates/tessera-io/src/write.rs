@@ -40,6 +40,14 @@
 //! made durable: a removal a crash undoes leaves a file no journal line names, which
 //! [`WriteSession::recover`] deletes.
 //!
+//! **What durability costs.** Every append waits on at least three fsyncs (the fragment, its
+//! directory and the journal), more when it creates directories. On a volume other writers keep
+//! busy, each one queues behind their journal commits: on ksb's shared CI volume a test that issues
+//! 1,536 fsyncs, 0.97 s on tmpfs, was still running after 3,240 s (#793). One journal fsync per
+//! batch of commits is #798. tessera's cargo test checks therefore run with `TMPDIR` on a RAM fs
+//! (`withRamTmpdir` in the repo's `flake.nix`): they check the order of these steps (a test-only
+//! recorder replays them), not how fast a disk is.
+//!
 //! **A failed journal write poisons the session.** Once a commit has begun writing its journal line,
 //! a failure leaves the journal's state unknown (see [`WriteSession::append_block`]), so the session
 //! refuses every later append and the seal; [`WriteSession::recover`] is the way on.

@@ -110,6 +110,15 @@
             "the ADR-0064 §8.1 RSS proof, a ksb batch job (its own flake): it needs a 4-CPU exclusive "
             + "job with its own cgroup and --mem, disk-backed scratch and /dev/shm, and hours of runs. "
             + "Its criterion-2 arithmetic is run by rss-proof-evaluator, through test_run.py";
+          # The #793 ksb job (bench/ksb/793-io-hang/flake.nix): a measurement submitted with `ksb run`.
+          "/bench/ksb/793-io-hang/run.sh" =
+            "the #793 stall reproducer, a ksb job: it needs a disk-backed scratch volume under write "
+            + "load and runs for up to 2 h, which no flake check can give it";
+          "/bench/ksb/793-io-hang/fsync_probe.py" =
+            "the #793 reproducer's fsync-latency probe, run by run.sh on the ksb job's scratch disk";
+          "/bench/ksb/793-io-hang/footprint.py" =
+            "the #793 tmp-footprint sampler, run inside the rebuilt checks of the ksb footprint job; "
+            + "the protected checks themselves are what CI runs";
         } // pkgs.lib.optionalAttrs (!isLinux) {
           "/bench/ecosystems/test_common.py" =
             "Linux-only: common.py uses CDLL('libc.so.6'), mincore(2) and posix_fadvise";
@@ -176,6 +185,46 @@
               python3 -m pytest -q -p no:cacheprovider test_common.py
               touch $out
             '';
+
+          # The RAM-TMPDIR guard's own test (#793): `use_ram_tmpdir` must land on tmpfs or ramfs and
+          # `assert_ram_tmpdir` must REJECT a directory that is not, so the assertion every protected
+          # check runs cannot pass vacuously. The negative case is /proc, which is procfs on every
+          # Linux host (the build dir itself may well be tmpfs somewhere). The free-space floor must
+          # reject a filesystem smaller than it (an impossible floor stands in for a small /dev/shm),
+          # the removal must sit LAST in both `exitHooks` and `failureHooks` straight after a check adds
+          # its own hooks through `ram_tmpdir_add_hooks` (s3-range-read's log dump reads the RAM dir,
+          # and its server must stop first), and it must delete the dir. It
+          # also logs the runner's /dev/shm size and free space.
+          ram-tmpdir-guard = pkgs.runCommand "ram-tmpdir-guard" { } ''
+            fail() { echo "ram-tmpdir-guard: $*" >&2; exit 1; }
+            source ${ramTmpdir}
+            use_ram_tmpdir
+            case $TMPDIR in /dev/shm/tessera-check.*) ;; *) fail "TMPDIR=$TMPDIR not the helper's";; esac
+            if (TMPDIR=/proc; assert_ram_tmpdir); then
+              fail "assert_ram_tmpdir accepted /proc ($(stat -f -c %T /proc)): the guard is vacuous"
+            fi
+            if (ram_tmpdir_min_free_mib=$((1 << 40)); assert_ram_tmpdir_space); then
+              fail "assert_ram_tmpdir_space accepted a 1 EiB floor: the space check is vacuous"
+            fi
+            # A check that adds its hooks and then fails at once (s3-range-read when versitygw does not
+            # start): nothing runs `ram_tmpdir_cleanup_last` after the add, so the add itself must
+            # leave the removal last.
+            dump_check_log() { :; }
+            stop_check_server() { :; }
+            ram_tmpdir_add_hooks exitHooks stop_check_server
+            ram_tmpdir_add_hooks failureHooks dump_check_log stop_check_server
+            [[ "''${exitHooks[*]: -2}" == "stop_check_server remove_ram_tmpdir" ]] \
+              || fail "exitHooks are (''${exitHooks[*]}), the removal must run last"
+            [[ "''${failureHooks[*]: -3}" == "dump_check_log stop_check_server remove_ram_tmpdir" ]] \
+              || fail "failureHooks are (''${failureHooks[*]}), the removal must run last"
+            n=0; for h in "''${failureHooks[@]}"; do [[ $h == remove_ram_tmpdir ]] && n=$((n + 1)); done
+            (( n == 1 )) || fail "remove_ram_tmpdir registered $n times in failureHooks"
+            d=$ram_tmpdir; touch "$d/x"; remove_ram_tmpdir
+            [[ ! -e $d ]] || fail "remove_ram_tmpdir left $d"
+            echo "ram-tmpdir-guard: accepts $(stat -f -c %T /dev/shm), rejects $(stat -f -c %T /proc)," \
+              "enforces the ''${ram_tmpdir_min_free_mib} MiB floor, removes the dir last on success and failure"
+            touch $out
+          '';
         };
         linuxOnlyChecks = pkgs.lib.optionalAttrs isLinux linuxOnlyCheckSet;
 
@@ -195,6 +244,140 @@
           "tessera-cli/sql"
         ];
 
+        # A RAM-backed TMPDIR for every check that runs tessera's tests through cargo (#793). The tests measure
+        # logic and the ORDER of fsyncs, never the disk's speed, so their temp files belong on a
+        # filesystem where an fsync costs nothing: a WriteSession commit fsyncs the fragment, its
+        # directory and the journal (#695), so `content_hash_is_identical_across_workers_and_windows`
+        # issues 1,536 fsyncs and `session_leaf_memory` 999. On a ksb pod $TMPDIR is `build-dir` on
+        # the pod's one /nix volume, written by every concurrent build (as in #688), and there the
+        # two took > 3,240 s and > 840 s against 0.97 s and 0.07 s on tmpfs, timing out the x86_64
+        # leg at its 2 h cap. One fsync per batch is a product change, #798, not this.
+        #
+        # /dev/shm is the RAM fs every build can reach. Under the Nix sandbox it is a tmpfs private
+        # to the build (`sandbox-dev-shm-size`, 50 % of RAM by default); with `sandbox = false` (the
+        # ksb pods) it is the pod's own /dev/shm, shared with the other builds in the pod, so the
+        # helper works in a `mktemp -d` dir and removes it from both stdenv's `exitHooks` and its
+        # `failureHooks`, last, whether the check passes or fails (no sandbox teardown would). A build
+        # Nix kills (a timeout, a cancelled job) runs neither, so its dir stays in /dev/shm until the
+        # pod ends; ARC runner pods live for one job. It
+        # refuses to run if that dir is not on tmpfs or ramfs or has less than
+        # `ram_tmpdir_min_free_mib` free, then exports TMPDIR and its aliases from `preBuild` (crane
+        # runs cargo in both buildPhase and checkPhase, and the shell carries the export across), and
+        # re-asserts it last in `preBuild` and `preCheck`, after the check's own hook code, so a TMPDIR
+        # reassignment in a hook fails the check instead of silently moving the tests back to disk. A
+        # reassignment inside the cargo command itself runs after the last assertion and is not caught.
+        # `passthru.ramTmpdir` marks a protected check: the `checks` wrapper fails evaluation for any
+        # check that runs cargo test, nextest run, cargo run, cargo bench or llvm-cov without it, so a
+        # new or edited check cannot drop the protection unnoticed.
+        #
+        # NOT COVERED: checks that run tessera through Python or the CLI binary rather than cargo
+        # (tessera-py-import, tessera-wheel-import, ingest-producer-equality, oci-roundtrip,
+        # registry-roundtrip) keep the build's TMPDIR, and the guard does not look for them. The stall
+        # #793 measured was in the cargo tests; these checks' fsync counts are not measured yet (#865).
+        #
+        # LINUX ONLY. Darwin has no /dev/shm, and its build sandbox cannot mount a RAM disk, so there
+        # the checks keep $TMPDIR (a developer's local SSD, not a volume shared with other builds) and
+        # the guard does not apply. No CI leg builds the Darwin checks (macos-build.yml builds the
+        # release binaries with cargo, outside Nix).
+        ramTmpdir = pkgs.writeText "ram-tmpdir.sh" ''
+          assert_ram_tmpdir() {
+            local fs
+            fs=$(stat -f -c %T "$TMPDIR")
+            case $fs in
+              tmpfs | ramfs) ;;
+              *)
+                echo "TMPDIR=$TMPDIR is on '$fs', not on a RAM fs (#793)" >&2
+                return 1
+                ;;
+            esac
+          }
+          # Fail before the tests run, not with ENOSPC halfway through them.
+          assert_ram_tmpdir_space() {
+            local avail_mib
+            avail_mib=$(( $(stat -f -c '%a * %S' "$TMPDIR") / 1048576 ))
+            if (( avail_mib < ram_tmpdir_min_free_mib )); then
+              echo "TMPDIR=$TMPDIR has $avail_mib MiB free, below the $ram_tmpdir_min_free_mib MiB a" \
+                "protected check needs (#793); this runner's /dev/shm is too small" >&2
+              return 1
+            fi
+          }
+          remove_ram_tmpdir() {
+            rm -rf "$ram_tmpdir"
+            return 0
+          }
+          # stdenv runs `exitHooks` when the build succeeds and `failureHooks` when it fails, each in
+          # array order. The removal goes LAST in both, so a check's own failure hooks (s3-range-read's
+          # `dump_versitygw_log` reads `$TMPDIR/versitygw.log`) still see their files, and a server a
+          # hook stops is stopped before its directory goes.
+          ram_tmpdir_cleanup_last() {
+            local h f kept
+            for h in exitHooks failureHooks; do
+              local -n hooks=$h
+              kept=()
+              for f in "''${hooks[@]}"; do [[ $f == remove_ram_tmpdir ]] || kept+=("$f"); done
+              hooks=("''${kept[@]}" remove_ram_tmpdir)
+              unset -n hooks
+            done
+          }
+          # The one way a protected check adds an exit or failure hook: `ram_tmpdir_add_hooks
+          # failureHooks dump_log stop_server`. It appends and moves the removal back to the end at
+          # once, so the order holds even if the check fails on its next line. `withRamTmpdir` fails
+          # evaluation for a bare `exitHooks+=`/`failureHooks+=` in a protected check's code. Without a
+          # RAM TMPDIR (Darwin) it only appends.
+          ram_tmpdir_add_hooks() {
+            local -n hooks=$1
+            shift
+            hooks+=("$@")
+            unset -n hooks
+            if [[ -n ''${ram_tmpdir:-} ]]; then ram_tmpdir_cleanup_last; fi
+          }
+          use_ram_tmpdir() {
+            ram_tmpdir=$(mktemp -d /dev/shm/tessera-check.XXXXXX) || return 1
+            ram_tmpdir_cleanup_last
+            export TMPDIR=$ram_tmpdir TMP=$ram_tmpdir TEMP=$ram_tmpdir TEMPDIR=$ram_tmpdir
+            assert_ram_tmpdir || return 1
+            echo "check TMPDIR: $TMPDIR, $(stat -f -c %T "$TMPDIR"), $(df -h --output=size,avail /dev/shm | tail -n1) (#793)"
+            assert_ram_tmpdir_space
+          }
+          # workspace-test's measured peak is 106.5 MiB (bench/ksb/793-io-hang, `#footprint`), the
+          # largest of the protected checks; twice that, rounded up, is the floor.
+          ram_tmpdir_min_free_mib=256
+        '';
+        # The helper is sourced on every platform (a protected check's hook code calls
+        # `ram_tmpdir_add_hooks`); only Linux moves TMPDIR.
+        withRamTmpdir = args:
+          let
+            hookFields = [ "preBuild" "postBuild" "preCheck" "postCheck" "buildPhase" "checkPhase"
+              "buildPhaseCargoCommand" "checkPhaseCargoCommand" "installPhaseCommand"
+              "preInstall" "postInstall" "installPhase" ];
+            code = builtins.concatStringsSep "\n" (map (f: toString (args.${f} or "")) hookFields);
+            bareHookAppend =
+              builtins.match "(.*[^_[:alnum:]])?(exitHooks|failureHooks)[[:space:]]*[+]?=.*" ("\n" + code) != null;
+            onLinux = pkgs.lib.optionalString isLinux;
+          in
+          if bareHookAppend then throw ''
+            a withRamTmpdir check adds to exitHooks/failureHooks directly. Use
+            `ram_tmpdir_add_hooks exitHooks|failureHooks <hook>...`: a bare `+=` lands after the RAM
+            TMPDIR's removal, so a failure before the end of the hook deletes the files the new hook
+            needs (#793).
+          ''
+          else args // {
+            preBuild = ''
+              source ${ramTmpdir}
+            '' + onLinux ''
+              use_ram_tmpdir
+            '' + (args.preBuild or "") + onLinux ''
+
+              assert_ram_tmpdir
+              ram_tmpdir_cleanup_last
+            '';
+            preCheck = (args.preCheck or "") + onLinux ''
+
+              assert_ram_tmpdir
+              ram_tmpdir_cleanup_last
+            '';
+            passthru = (args.passthru or { }) // { ramTmpdir = isLinux; };
+          };
         # One Gate A derivation per feature configuration (see `checks.ingest-gate-a*` for the why).
         # Regenerates the ingest conformance corpus under `features` and requires byte-equality with the
         # committed goldens.
@@ -204,7 +387,7 @@
         # reach the shared arrow tree for the H1 door to be under test at all. The example is unambiguous
         # (only tessera-ingest declares it), so no `-p` is needed.
         ingestGateA = tag: features:
-          craneLib.mkCargoDerivation (commonArgs // {
+          craneLib.mkCargoDerivation (withRamTmpdir (commonArgs // {
             inherit cargoArtifacts;
             # The prebuilt dependency artifacts are needed, but must not be re-installed into `$out` —
             # this derivation's output is a pass/fail marker, not a build cache, and inheriting the
@@ -231,7 +414,7 @@
               fi
               echo "[gate A/${tag}] agrees with the committed corpus" >&2
             '';
-          });
+          }));
 
         commonArgs = {
           inherit src;
@@ -576,18 +759,18 @@
             cargoClippyExtraArgs =
               "--all-targets --features ${workspaceFeatures} -- -D warnings";
           });
-          workspace-test = craneLib.cargoNextest (withCpuBudget (commonArgs // {
+          workspace-test = craneLib.cargoNextest (withRamTmpdir (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             partitions = 1;
             partitionType = "count";
             cargoNextestExtraArgs = nextestFailOnNoTests;
-          }));
+          })));
           # nextest does NOT run doctests, so gate them separately — the "docs-as-tests" layer: every
           # `///` example compiles + runs, so public-API docs can never drift from behaviour.
-          workspace-doctest = craneLib.cargoTest (withCpuBudget (commonArgs // {
+          workspace-doctest = craneLib.cargoTest (withRamTmpdir (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             cargoTestExtraArgs = "--doc";
-          }));
+          })));
           workspace-fmt = craneLib.cargoFmt { inherit src; };
 
           # **The third determinism axis — the build configuration** (ADR-0057 §5, #468).
@@ -615,7 +798,7 @@
           # make convenient (a derivation inherits one `cargoArtifacts`), so it is left as a known cost
           # rather than a speculative nix refactor. If this leg becomes the critical path, the cheaper
           # move is to run it release-only on PRs and keep both profiles for `main`.
-          seal-profile-determinism = craneLib.mkCargoDerivation (commonArgs // {
+          seal-profile-determinism = craneLib.mkCargoDerivation (withRamTmpdir (commonArgs // {
             inherit cargoArtifacts;
             doInstallCargoArtifacts = false;
             pnameSuffix = "-seal-profile-determinism";
@@ -656,7 +839,7 @@
               cargo test -q -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
               cargo test -q --release -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
             '';
-          });
+          }));
 
           # **Gate B — the feature-snapshot determinism gate** (ADR-0057 §5). Regenerates the resolved
           # feature graph of every crate on the seal path and diffs it against the committed baseline
@@ -755,7 +938,7 @@
           # configuration hides the later ones until it is fixed. Cheap, because each is seconds of
           # `cargo test` against an already-built dependency graph, and the configurations are
           # independent enough that one failing rarely predicts another.
-          ingest-gate-a-reduced = craneLib.mkCargoDerivation (commonArgs // {
+          ingest-gate-a-reduced = craneLib.mkCargoDerivation (withRamTmpdir (commonArgs // {
             inherit cargoArtifacts;
             doInstallCargoArtifacts = false;
             pnameSuffix = "-ingest-gate-a-reduced";
@@ -793,7 +976,7 @@
               cargo test -p tessera-ingest --no-default-features --features parquet,npy \
                 --lib --test ingest_corpus
             '';
-          });
+          }));
 
           # **ADR-0056 §5's `ingest_parquet_producers` fixture** — the same logical table written by
           # **pyarrow**, **polars** and **DuckDB** must ingest to ONE `content_hash`.
@@ -974,7 +1157,7 @@
           # requests (`http://127.0.0.1:<port>/<bucket>/<key>`), which versitygw serves by default
           # (virtual-hosted style would need `--virtual-domain`). Range GETs, ETags and the error
           # codes the tests rely on behave the same as before; no assertion changed.
-          s3-range-read = craneLib.cargoNextest (commonArgs // {
+          s3-range-read = craneLib.cargoNextest (withRamTmpdir (commonArgs // {
             inherit cargoArtifacts;
             # Distinct from `workspace-test` so CI logs attribute its lines (#535). Via `pname`, not
             # `pnameSuffix`: crane's cargoNextest hard-sets `pnameSuffix = "-nextest${extraSuffix}"`
@@ -1042,8 +1225,10 @@
                 echo "---- versitygw log ($vgw_log) ----"
                 cat $vgw_log
               }
-              exitHooks+=(stop_versitygw)
-              failureHooks+=(dump_versitygw_log stop_versitygw)
+              # Through the helper, not `+=`: the RAM TMPDIR's removal must stay after the log dump
+              # even when this preCheck fails below (withRamTmpdir rejects a bare `+=`, #793).
+              ram_tmpdir_add_hooks exitHooks stop_versitygw
+              ram_tmpdir_add_hooks failureHooks dump_versitygw_log stop_versitygw
 
               s3() {
                 ${pkgs.curl}/bin/curl -sS --max-time 5 -o $TMPDIR/s3-response -w '%{http_code}' \
@@ -1089,7 +1274,7 @@
             '';
             nativeBuildInputs = commonArgs.nativeBuildInputs
               ++ [ pkgs.versitygw pkgs.curl pkgs.python3 pkgs.cacert ];
-          });
+          }));
 
           # **DataFusion SQL surface** (#251 spike): the `sql` feature adds `tessera sql <FILE>
           # "<QUERY>"` — Vortex → Arrow → DataFusion in-process. The unit tests under `sql::tests`
@@ -1098,7 +1283,7 @@
           # the CLI's sql-feature tests only — same pattern as `s3-range-read` for the cloud
           # feature. Clippy already covers `--all-features` at compile-time, so this test is what
           # proves the query actually EXECUTES (WHERE + ORDER BY + LIMIT round-trip).
-          sql-tests = craneLib.cargoNextest (withCpuBudget (commonArgs // {
+          sql-tests = craneLib.cargoNextest (withRamTmpdir (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             # Distinct from `workspace-test` so CI logs attribute its lines (#535). Via `pname`, not
             # `pnameSuffix`: crane's cargoNextest hard-sets `pnameSuffix = "-nextest${extraSuffix}"`
@@ -1111,7 +1296,7 @@
             # fail to link, not to test.
             cargoExtraArgs = "-p tessera-cli --features sql sql::";
             cargoNextestExtraArgs = nextestFailOnNoTests;
-          }));
+          })));
 
           # The independent conformance reader (corpus/reference_reader): a SECOND implementation of
           # the `.tsra` verification, in pure Python, checked against corpus.json's goldens. It was
@@ -1400,6 +1585,33 @@
           expectedChecks = builtins.filter (c: isLinux || !(linuxOnlyCheckSet ? ${c})) listedChecks;
           unlisted = builtins.filter (c: !(builtins.elem c expectedChecks)) (builtins.attrNames allChecks);
           undefined = builtins.filter (c: !(allChecks ? ${c})) expectedChecks;
+          # Every check that runs cargo test, nextest run, cargo run, cargo bench or llvm-cov must have its TMPDIR on a RAM fs
+          # (`withRamTmpdir`, #793). Read from every shell field a build runs: crane folds
+          # `buildPhaseCargoCommand`/`checkPhaseCargoCommand` into `buildPhase`/`checkPhase`, the
+          # hooks around them can run cargo too, a `runCommand` has only `buildCommand`, and the check
+          # fields only run with `doCheck`. Matched as tokens: `cargo`, then any `-flag`/`+toolchain`
+          # words, then the subcommand (cargo's `t`/`r` aliases and `bench` included), across any
+          # whitespace and `\`-newline continuations.
+          # crane's nextest `buildPhase` runs `cargo nextest --version` only, hence `nextest run`.
+          # A flag that takes a separate value (`cargo --config x test`) is not seen. Strings only: no
+          # derivation is forced.
+          cargoRunsTests =
+            let
+              sp = "[[:space:]]+";
+              flags = "(${sp}[-+][^[:space:]]*)*";
+            in
+            "(cargo${flags}${sp}(test|t|run|r|bench|nextest${sp}run|llvm-cov)|cargoWithProfile${flags}${sp}(test|run|bench))"
+            + "[^-_[:alnum:]]";
+          runsCargo = s:
+            builtins.match ".*${cargoRunsTests}.*"
+              (builtins.replaceStrings [ "\\\n" ] [ " " ] s + "\n") != null;
+          fieldsRun = d: fields: builtins.any (f: runsCargo (d.${f} or "")) fields;
+          runsCode = d:
+            fieldsRun d [ "buildPhase" "preBuild" "postBuild" "installPhase" "preInstall" "postInstall" "buildCommand" ]
+            || ((d.doCheck or false) && fieldsRun d [ "checkPhase" "preCheck" "postCheck" ]);
+          onDiskTmpdir = builtins.filter
+            (c: isLinux && runsCode allChecks.${c} && !(allChecks.${c}.ramTmpdir or false))
+            (builtins.attrNames allChecks);
         in
           if dupes != [ ] then throw ''
             flake checks share derivation names: ${builtins.concatStringsSep ", " dupes}
@@ -1422,6 +1634,12 @@
             listed but not defined: ${builtins.concatStringsSep ", " undefined}
             CI's summary fails a leg whose checks differ from that list. Edit the list (names and
             `count:`) together with the check.
+          ''
+          else if onDiskTmpdir != [ ] then throw ''
+            these checks run tessera's tests with TMPDIR on disk: ${builtins.concatStringsSep ", " onDiskTmpdir}
+            Every fsync of a WriteSession commit then waits on the build volume, and on a write-loaded
+            runner a sub-second test runs for an hour (#793). Wrap the check's arguments in
+            `withRamTmpdir`.
           ''
           else allChecks;
 
