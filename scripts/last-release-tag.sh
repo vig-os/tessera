@@ -13,9 +13,10 @@
 #   - Ordering is SemVer, pre-releases included: v0.1.0-alpha.1 < v0.1.0-alpha.2 < v0.1.0-alpha.10
 #     < v0.1.0. A lexical sort, and `git tag --sort=v:refname` without `versionsort.suffix`, put
 #     v0.1.0 BEFORE its own pre-releases.
-#   - The ceiling exists because the tag namespace predates the software releases: `v0.1.0` and
-#     `v1.0.0-rc1` are FORMAT milestones from 2026-06 (annotated "format frozen" / "format
-#     v1.0-ready"), not software releases. release-plz only ever bumps upward, so no tag above the
+#   - The ceiling exists because the tag namespace predated the software releases: `v0.1.0` and
+#     `v1.0.0-rc1` were FORMAT milestones from 2026-06 (annotated "format frozen" / "format
+#     v1.0-ready"), not software releases. Both were deleted on 2026-11-15 (#854); the ceiling still
+#     guards against any tag above the workspace version. release-plz only ever bumps upward, so no tag above the
 #     workspace version can be the previous release of this workspace. The cap stops working once the
 #     workspace reaches 0.1.0; the namespace clash itself is #608.
 #   - Unreachable tags (a release cut from another line) are not this branch's history.

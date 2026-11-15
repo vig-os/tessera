@@ -60,7 +60,10 @@ force-pushes; only an organization admin can bypass it. So no workflow merges or
   - **Refuses** a merge that conflicts, or whose tree is not exactly the tag's tree. Either means `main`
     holds a change the release lacks, and merging would publish an unreleased tree as the release.
 - The PR is opened with the release-plz GitHub App's token, so its CI runs and its bot author is exempt
-  from the branch-name check. Its only new commit is GitHub's merge commit, which adds no change.
+  from the branch-name check. The head adds either no commit (the bare tag) or GitHub's merge commit,
+  which adds no change. The App needs `workflows: write` as well as contents and pull requests, because a
+  release usually changes `.github/workflows/*` relative to `main`, and GitHub refuses an App such a ref
+  or commit without it.
 
 The flake check `release-promotion` runs the script's self-test, which proves each of these rules on
 throwaway repositories.

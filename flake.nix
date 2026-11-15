@@ -1302,8 +1302,8 @@
           '';
 
           # The release-plz baseline: which tag is "the last release" (#606). SemVer order with
-          # pre-releases, capped at the workspace version (the repo's v0.1.0 / v1.0.0-rc1 are format
-          # milestones), reachable from HEAD, and a loud failure when there is none — proven on
+          # pre-releases, capped at the workspace version (the former v0.1.0 / v1.0.0-rc1 tags were
+          # format milestones), reachable from HEAD, and a loud failure when there is none — proven on
           # throwaway repos, since the workflow itself only ever sees the real tag set.
           release-tag-resolution = pkgs.runCommand "release-tag-resolution"
             { nativeBuildInputs = [ pkgs.git ]; } ''

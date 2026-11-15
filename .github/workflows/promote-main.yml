@@ -26,10 +26,14 @@
 # objects, and the run's tag name and sha reach the script through env, never interpolated into shell.
 #
 # TOKEN: the release-plz GitHub App (secrets.RP_APP_ID + RP_APP_PRIVATE_KEY, #430), minted only when
-# there is a PR to open. GITHUB_TOKEN cannot create PRs here (Actions PR creation is off), and PRs it
+# there is a PR to open. It needs `workflows: write` on top of contents + pull requests: GitHub refuses
+# an App a ref or commit that adds or changes `.github/workflows/*` without it, and a release usually
+# changes workflows relative to main. The App installation must grant that permission; until it does,
+# the mint fails loudly (it never mints a narrower token that would fail half-way through). GITHUB_TOKEN cannot create PRs here (Actions PR creation is off), and PRs it
 # opened would start no CI. A failed mint fails the run: there is no fallback token. A PR opened by the
 # App's bot account skips the branch-name check (docs/COMMIT_MESSAGE_STANDARD.md "Exemptions"), which
-# `release/promote-v0.1.0-alpha.N` (dots) would not pass, and its only new commit is bot-authored.
+# `release/promote-v0.1.0-alpha.N` (dots) would not pass. Its head adds no commit of its own (bare tag)
+# or exactly one, GitHub's bot-authored merge commit.
 #
 # MANUAL RUN: `gh workflow run promote-main.yml -f tag=v<version>` re-plans for an existing release, for
 # instance after a failed run; `-f dry_run=true` prints the plan and stops before minting any token.
@@ -114,9 +118,11 @@ jobs:
         with:
           app-id: ${{ secrets.RP_APP_ID }}
           private-key: ${{ secrets.RP_APP_PRIVATE_KEY }}
-          # Least privilege: create the branch (and its merge commit), open the PR.
+          # Least privilege: create the branch (and its merge commit), open the PR; `workflows` because
+          # the promoted commits change .github/workflows/* (see TOKEN above).
           permission-contents: write
           permission-pull-requests: write
+          permission-workflows: write
 
       - name: Open the promotion PR
         if: steps.plan.outputs.action == 'open' && !inputs.dry_run
@@ -158,8 +164,11 @@ jobs:
           else
             gh api "repos/$REPO/git/refs" -f "ref=refs/heads/$BRANCH" -f "sha=$MAIN_SHA" >/dev/null
             # GitHub makes (and signs) the merge commit server-side; a conflict is an HTTP error here.
-            gh api "repos/$REPO/merges" -f "base=$BRANCH" -f "head=$TAG_SHA" -f "commit_message=$TITLE" \
-              > "$RUNNER_TEMP/merge.json"
+            if ! gh api "repos/$REPO/merges" -f "base=$BRANCH" -f "head=$TAG_SHA" -f "commit_message=$TITLE" \
+              > "$RUNNER_TEMP/merge.json"; then
+              echo "::error::GitHub refused to merge $TAG into $BRANCH (a conflict, or a permission the App lacks; see the response above). Left $BRANCH at main's tip ($MAIN_SHA): delete it before re-running."
+              exit 1
+            fi
             head_sha=$(jq -r '.sha' "$RUNNER_TEMP/merge.json")
             got_tree=$(jq -r '.commit.tree.sha' "$RUNNER_TEMP/merge.json")
             if [ "$got_tree" != "$TREE" ]; then

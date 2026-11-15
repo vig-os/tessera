@@ -1,8 +1,9 @@
 # Consuming Tessera (pre-release)
 
-Tessera is pre-1.0 and iterates on the `dev` branch; the first release (`0.1.0-alpha.1`) is deliberately
-**held** (see `release-plz.toml`). Until it is cut, Tessera is **not** published to crates.io / PyPI /
-npm — consume it directly from git or the Nix flake. All three paths below are verified working.
+Tessera is pre-1.0 and iterates on the `dev` branch. Releases (`v0.1.0-alpha.N`) are published as
+[GitHub Releases](https://github.com/vig-os/tessera/releases), but Tessera is **not** published to
+crates.io / PyPI / npm — consume it directly from git or the Nix flake. All three paths below are verified
+working.
 
 > **`dev` or a release, not "whatever `main` is".** `dev` is the moving development branch. `main` is the
 > latest release: after every release it is promoted to the newest `v<version>` tag
