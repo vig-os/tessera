@@ -13,7 +13,8 @@
 //! [`TAIL_PREFETCH`] bytes ONCE in [`ObjectStoreReader::new`] and serve any read that lies wholly
 //! inside that cached suffix from memory — opening a typical product drops from many GETs to one
 //! HEAD plus one tail-GET (plus payload GETs for whichever blocks the caller actually reads).
-//! Verified by [`ObjectStoreReader::get_count`] in the unit tests below.
+//! Verified by [`ObjectStoreReader::get_count`] in the unit tests below. Outside the tail, a small
+//! read fetches a [`READ_AHEAD`] window, so a local header's several small reads cost one GET.
 //!
 //! **Runtime.** `object_store/aws` is reqwest-backed and async; we hold ONE current-thread Tokio
 //! runtime per reader (no globals, no `lazy_static`) and `block_on` each fetch — the public API
@@ -46,6 +47,15 @@ use crate::container::Reader;
 /// the trailing blocks for tiny products, so most opens reduce to 1 HEAD + 1 tail-GET.
 pub const TAIL_PREFETCH: u64 = 64 * 1024;
 
+/// Read-ahead for a **small** read outside the cached tail: a read shorter than this fetches this
+/// many bytes in one GET and keeps them, so the reads that follow it in the same region are served
+/// from memory. `zip` reads a local file header as several small reads (the fixed 30 bytes, the
+/// name, the extra field; GHSA-m665-v7pm-7grj's header-consistency check reads all three), and
+/// without the window each one is its own range GET. 4 KiB covers a header and a typical
+/// `mimetype` + `manifest.json` start. A read of this size or larger, i.e. a block payload, goes
+/// straight to the network as before, so a large read is never fetched twice.
+pub const READ_AHEAD: u64 = 4 * 1024;
+
 /// Adapts an `object_store::ObjectStore` into a synchronous `Read + Seek` source so the existing
 /// [`Reader::from_reader`] code path serves an S3 / HTTP object as-is. One per-reader Tokio
 /// current-thread runtime drives reqwest under the hood.
@@ -58,6 +68,10 @@ pub struct ObjectStoreReader {
     /// open + manifest-read is normally served from memory after the single tail-GET.
     tail: Vec<u8>,
     tail_start: u64,
+    /// The last [`READ_AHEAD`] window fetched for a small read, `[window_start, window_start +
+    /// window.len())`; empty until the first small read misses the tail.
+    window: Vec<u8>,
+    window_start: u64,
     rt: Runtime,
     /// Shared count of `get_range` requests issued (NOT counting the HEAD or the eager tail-GET).
     /// Behind an `Arc<AtomicU64>` so test observers can clone a handle and watch the live count
@@ -94,6 +108,8 @@ impl ObjectStoreReader {
             pos: 0,
             tail,
             tail_start,
+            window: Vec::new(),
+            window_start: 0,
             rt,
             get_count: Arc::new(AtomicU64::new(0)),
         })
@@ -138,6 +154,36 @@ impl Read for ObjectStoreReader {
             let off = usize::try_from(self.pos - self.tail_start).map_err(IoError::other)?;
             let take = usize::try_from(end - self.pos).map_err(IoError::other)?;
             buf[..take].copy_from_slice(&self.tail[off..off + take]);
+            self.pos = end;
+            return Ok(take);
+        }
+        // Read-ahead window: a small read wholly inside the last window is served from memory; a
+        // small read outside it fetches a fresh [`READ_AHEAD`] window in one GET.
+        let window_end = self.window_start + self.window.len() as u64;
+        if self.pos >= self.window_start && end <= window_end {
+            let off = usize::try_from(self.pos - self.window_start).map_err(IoError::other)?;
+            let take = usize::try_from(end - self.pos).map_err(IoError::other)?;
+            buf[..take].copy_from_slice(&self.window[off..off + take]);
+            self.pos = end;
+            return Ok(take);
+        }
+        if want < READ_AHEAD {
+            let fetch_end = self.pos.saturating_add(READ_AHEAD).min(self.len);
+            let bytes = self
+                .rt
+                .block_on(self.store.get_range(&self.path, self.pos..fetch_end))
+                .map_err(|e| IoError::other(format!("object_store get_range: {e}")))?;
+            self.get_count.fetch_add(1, Ordering::Relaxed);
+            if (bytes.len() as u64) < end - self.pos {
+                return Err(IoError::new(
+                    ErrorKind::UnexpectedEof,
+                    "object_store get_range returned fewer bytes than requested",
+                ));
+            }
+            self.window = bytes.to_vec();
+            self.window_start = self.pos;
+            let take = usize::try_from(end - self.pos).map_err(IoError::other)?;
+            buf[..take].copy_from_slice(&self.window[..take]);
             self.pos = end;
             return Ok(take);
         }
@@ -402,6 +448,47 @@ mod tests {
         let block = r.read_block(&names[3]).unwrap();
         let mut local = Reader::from_reader(Cursor::new(bytes)).unwrap();
         assert_eq!(block, local.read_block(&names[3]).unwrap());
+    }
+
+    /// The [`READ_AHEAD`] window: the three small reads `zip` makes to parse one local header (fixed
+    /// part, name, extra field) cost one GET between them, not three, and return the exact bytes. A
+    /// payload-sized read bypasses the window and costs exactly one GET of exactly its range.
+    #[test]
+    fn small_reads_in_one_region_share_one_get() {
+        use object_store::memory::InMemory;
+
+        let (bytes, _) = multiblock_tsra(8, 4096);
+        assert!((bytes.len() as u64) > TAIL_PREFETCH + 2 * READ_AHEAD);
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let key = ObjPath::from("window.tsra");
+        Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(store.put(&key, PutPayload::from(Bytes::from(bytes.clone()))))
+            .unwrap();
+        let mut r = ObjectStoreReader::new(store, key).unwrap();
+        let gets = r.get_counter();
+
+        let mut header = Vec::new();
+        for n in [30usize, 8, 20] {
+            let mut part = vec![0u8; n];
+            r.read_exact(&mut part).unwrap();
+            header.extend_from_slice(&part);
+        }
+        assert_eq!(header, bytes[..58], "served bytes are the object's bytes");
+        assert_eq!(gets.load(Ordering::Relaxed), 1, "one GET for one header");
+
+        let at = 2 * READ_AHEAD as usize;
+        r.seek(SeekFrom::Start(at as u64)).unwrap();
+        let mut payload = vec![0u8; READ_AHEAD as usize];
+        r.read_exact(&mut payload).unwrap();
+        assert_eq!(payload, bytes[at..at + READ_AHEAD as usize]);
+        assert_eq!(
+            gets.load(Ordering::Relaxed),
+            2,
+            "a payload-sized read is one GET"
+        );
     }
 
     /// Same fixture as `range::tests::multiblock_tsra` (range.rs:72-99) — N high-entropy int32
