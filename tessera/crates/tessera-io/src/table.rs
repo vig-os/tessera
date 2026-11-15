@@ -2019,8 +2019,9 @@ mod tests {
     /// every table and array payload in `corpus/files` has 18 or more, so such a scan fails on
     /// NaN-free data. Second, no zone map may carry a sum, so a vortex bump that starts
     /// persisting `Sum` in zone maps again fails here, with a message saying what to assert then.
-    /// A NaN sum persisted in the per-array statistics would show up as one of the two patterns in
-    /// the first assertion.
+    /// A NaN sum persisted in the per-array statistics shows up as one of the two patterns in the
+    /// first assertion if it is stored as a raw little-endian `f64`. A sum stored in another
+    /// encoding would not show up, and this guard would not catch it.
     #[test]
     fn float_stats_persist_no_nan_for_inf_and_neg_inf() {
         let data: TableData = vec![(
@@ -2038,14 +2039,15 @@ mod tests {
 
         for (nan, which) in [
             (0xfff8_0000_0000_0000u64, "x86_64's default NaN"),
-            (0x7ff8_0000_0000_0000u64, "the canonical NaN"),
+            (0x7ff8_0000_0000_0000u64, "aarch64's default NaN"),
         ] {
             let needle = nan.to_le_bytes();
             assert!(
                 !sealed.windows(needle.len()).any(|w| w == needle),
                 "#472: the sealed bytes carry {which} ({nan:#018x}), so vortex persists a NaN-valued \
-                 float statistic for [+inf, -inf] again. It must be the canonical NaN on every host; \
-                 re-establish which statistic it is and assert its bits."
+                 float statistic for the NaN-free column [+inf, -inf] again. Its bits are the host's \
+                 default NaN, so the sealed bytes depend on the architecture; find which statistic \
+                 computes it and make vortex write it as one fixed bit pattern on every host."
             );
         }
 
@@ -2057,7 +2059,8 @@ mod tests {
         assert!(
             fields.iter().all(|f| !f.contains("sum")),
             "the zone maps persist a sum again ({fields:?}). A NaN sum of `[+inf, -inf]` must then be \
-             asserted to be written as the canonical 0x7ff8_0000_0000_0000 (#472)"
+             asserted to be written as one fixed bit pattern on every host (#472), and the NaN scan \
+             above changed to allow exactly that pattern"
         );
     }
 

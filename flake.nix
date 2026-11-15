@@ -847,7 +847,8 @@
                 if [ "$(grep -c '^test result: ' "$log")" -ne 1 ] \
                   || ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"; then
                   echo "" >&2
-                  echo "The guard $test_path did not run as exactly one passing test (cargo test $*)." >&2
+                  echo "The guard $test_path did not run as exactly one passing test:" >&2
+                  echo "    cargo test -q $* -p tessera-io --lib -- --exact $test_path" >&2
                   echo "A renamed, moved or ignored guard empties the gate; update this check with it." >&2
                   exit 1
                 fi
