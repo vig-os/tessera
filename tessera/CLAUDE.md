@@ -81,12 +81,14 @@ build is ~link time.
 - **Tests:** `cd tessera && cargo nextest run` — **346** tests. Two traps:
   - `tessera-cli` is **bin-only** (use `--bins`, not `--lib`) and its `sql` module is behind
     `--features sql`; bare `cargo test` silently covers neither the SQL nor the cloud paths. The
-    flake has dedicated `sql-tests` / `minio-range-read` checks for exactly this.
+    flake has dedicated `sql-tests` / `s3-range-read` checks for exactly this.
   - **nextest runs one process per test**, which hides cross-call regressions (a dropped runtime
     poisoning a cached session passed 345/345 and was caught only by `tessera-py-import`). Issue
     #356 is the mirror case — it fails only in shared-process `cargo test`. Both isolation modes
     hide a different bug class; the flake is the only thing that runs both.
 - **Commits:** commit inside `nix develop` so the `prek` gates fire. If a hook fails to *install*,
   that is a bug worth fixing at the source — do not reach for `--no-verify` by reflex, because it
-  disables every other gate in `.pre-commit-config.yaml` too. (Commit signing is unavailable on the
-  agent VMs, so `-c commit.gpgsign=false` is expected; that is not the same as skipping gates.)
+  disables every other gate in `.pre-commit-config.yaml` too. **Commits are signed**
+  (owner decision 2026-09-29): the local git config signs with the registered SSH signing key. Never pass
+  `-c commit.gpgsign=false`. Squash merges are disabled, so every branch commit lands on `dev` as-is and
+  must be both signed and conventional.

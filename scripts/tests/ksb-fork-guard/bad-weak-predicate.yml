@@ -1,0 +1,8 @@
+# Fixture for scripts/check-ksb-fork-guard.sh --self-test: weakened predicate, head.repo.fork only (must FAIL)
+on:  # yamllint disable-line rule:truthy
+  pull_request:
+jobs:
+  j:
+    runs-on: ${{ (github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'ksb-vig-os-small' }}
+    steps:
+      - run: "true"

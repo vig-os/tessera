@@ -15,10 +15,12 @@ and an RFC 8785 `jcs` encoder. It does **not** decode array/table payloads — r
 triple needs only the stored bytes, not the pcodec/Vortex codecs.
 
 ## Run it
+
 ```sh
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python run.py     # prints a PASS/FAIL table over corpus/files/*.tsra
 ```
+
 Exit code 0 ⇔ all fixtures reproduce their goldens.
 
 ## Why it matters

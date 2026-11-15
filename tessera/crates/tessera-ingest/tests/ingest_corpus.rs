@@ -1,0 +1,352 @@
+//! The ingest conformance corpus gate (ADR-0056 §5, ADR-0057 §5).
+//!
+//! Two guarantees ride on this file, and they fail differently:
+//!
+//! 1. **Anti-vacuity.** The fixture count for this configuration must match the *declared* count
+//!    before a single hash is compared. ADR-0057 §5 asks for this by name, and the reason is local
+//!    history: the trycmd docs-as-tests ran zero cases in CI for a period and reported the same green
+//!    as a full run. A feature-conditional corpus is exactly that shape.
+//! 2. **Value preservation.** Every enabled fixture reproduces its committed `id` / `content_hash` /
+//!    `manifest_hash`. A `content_hash` that moved means a decoder extracted different values.
+
+#![cfg(feature = "parquet")]
+
+use std::collections::BTreeSet;
+
+use tessera_ingest::corpus;
+
+/// The committed goldens.
+fn committed() -> corpus::IngestCorpus {
+    // `CARGO_MANIFEST_DIR` is `crates/tessera-ingest`; the corpus lives at the workspace root beside
+    // `tessera-io`'s, so both conformance suites are in one place a reviewer can find.
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/ingest-corpus.json");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    serde_json::from_str(&text).expect("parse corpus/ingest-corpus.json")
+}
+
+/// Which declared configuration this test binary was built as.
+///
+/// Derived from `cfg!`, so it describes the binary rather than trusting an env var a CI job might
+/// forget to set. `full` and `all-features` are indistinguishable from `default` *from the ingest
+/// lane's point of view* — which is the point: neither adds a generic decoder, so all three must run
+/// the same fixtures. The count table declares them equal for exactly that reason.
+fn configuration() -> &'static str {
+    // `parquet` implies `arrow`, and this file is `#![cfg(feature = "parquet")]`, so the remaining axes
+    // are the CSV lane and the two array lanes. `npy` and `npz` are separate axes since #386: the `.npy`
+    // parser is in-tree and `.npz` adds the archive reader, so a build can have the first without the
+    // second — and that combination runs a DIFFERENT number of fixtures, which is precisely what this
+    // name feeds.
+    if cfg!(feature = "csv") && cfg!(feature = "npy") && cfg!(feature = "npz") {
+        "default"
+    } else if cfg!(feature = "parquet")
+        && !cfg!(feature = "csv")
+        && cfg!(feature = "npy")
+        && !cfg!(feature = "npz")
+    {
+        "parquet-npy-no-npz"
+    } else if cfg!(feature = "parquet") && !cfg!(feature = "csv") && !cfg!(feature = "npy") {
+        "parquet-no-csv"
+    } else {
+        // Unreachable under the file's own cfg, but kept total: an undeclared configuration must fail
+        // loudly rather than be guessed at, because guessing is the blind spot the guard closes.
+        panic!(
+            "this build enables an undeclared mix of generic-ingest lanes (arrow={}, parquet={}, \
+             csv={}, npy={}, npz={}). Add it to `EXPECTED_COUNTS`, with its count.",
+            cfg!(feature = "arrow"),
+            cfg!(feature = "parquet"),
+            cfg!(feature = "csv"),
+            cfg!(feature = "npy"),
+            cfg!(feature = "npz"),
+        )
+    }
+}
+
+/// **The anti-vacuity guard.** Runs before anything compares a hash.
+#[test]
+fn the_fixture_count_matches_the_declared_count_for_this_configuration() {
+    let config = configuration();
+    let expected = corpus::EXPECTED_COUNTS
+        .iter()
+        .find(|(name, _)| *name == config)
+        .map(|(_, n)| *n)
+        .unwrap_or_else(|| panic!("no declared fixture count for configuration '{config}'"));
+    let actual = corpus::enabled_fixtures().len();
+    assert_eq!(
+        actual, expected,
+        "configuration '{config}' ran {actual} ingest fixtures but declares {expected}. A corpus that \
+         silently runs fewer fixtures reports the same green as one that runs them all — which is the \
+         failure this assertion exists to make impossible."
+    );
+
+    // The committed file must declare the same counts as the code, or the guard could be satisfied by
+    // editing one of the two.
+    let c = committed();
+    for (name, n) in corpus::EXPECTED_COUNTS {
+        assert_eq!(
+            c.expected_counts.get(*name),
+            Some(n),
+            "corpus/ingest-corpus.json disagrees with EXPECTED_COUNTS about '{name}'"
+        );
+    }
+}
+
+/// ADR-0057 §5's second half: at least one fixture per live hazard.
+///
+/// A claim about the corpus **as a whole**, so it is checked in the full configuration only — a reduced
+/// build has its array or CSV fixtures compiled out by design, and asserting completeness there would
+/// either fail spuriously or have to be weakened into asserting nothing. The reduced configurations still
+/// check the two things that matter to them: the declared fixture count, and value preservation over the
+/// fixtures they can run.
+#[test]
+#[cfg(all(feature = "npy", feature = "csv", feature = "parquet"))]
+fn every_live_hazard_has_a_fixture() {
+    let covered: BTreeSet<&str> = corpus::fixtures()
+        .iter()
+        .flat_map(|f| f.hazards.iter().copied())
+        .collect();
+    for h in corpus::LIVE_HAZARDS {
+        assert!(
+            covered.contains(h),
+            "ADR-0056 §5 hazard {h} has no corpus fixture — a gate that covers every hazard but one \
+             is a gate with a named blind spot"
+        );
+    }
+    // And nothing claims to cover a hazard that is not on the live list, which would be a fixture
+    // quietly asserting coverage the ADR does not recognise.
+    for h in &covered {
+        assert!(
+            corpus::LIVE_HAZARDS.contains(h),
+            "a fixture claims hazard '{h}', which is not in LIVE_HAZARDS"
+        );
+    }
+}
+
+/// **Value preservation.** Every enabled fixture reproduces its committed hashes.
+#[test]
+fn ingest_corpus_hashes_match_goldens() {
+    let dir = tempfile::tempdir().unwrap();
+    let built = corpus::build(dir.path()).expect("build the ingest corpus");
+    let c = committed();
+
+    // Compare field-wise per fixture rather than whole-file, so a failure names what moved. ADR-0056
+    // §6a's review ergonomics depend on this: "a moved content_hash is not a formality".
+    for want in &c.fixtures {
+        // A fixture the committed file knows but this build cannot run is skipped — but only because
+        // the count guard above already proved the skip set is the declared one.
+        let Some(got) = built.fixtures.iter().find(|g| g.name == want.name) else {
+            assert!(
+                !corpus::fixtures()
+                    .iter()
+                    .find(|f| f.name == want.name)
+                    .is_some_and(corpus::enabled),
+                "fixture '{}' is enabled in this build but produced no golden",
+                want.name
+            );
+            continue;
+        };
+        assert_eq!(&got.id, &want.id, "fixture '{}': id moved", want.name);
+        assert_eq!(
+            &got.content_hash, &want.content_hash,
+            "fixture '{}': content_hash MOVED. This is not a formality — a decoder extracted \
+             different values than the committed run did. State which ADR-0056 §5 H-rule changed \
+             behaviour and why the new values are correct, then regenerate.",
+            want.name
+        );
+        assert_eq!(
+            &got.manifest_hash, &want.manifest_hash,
+            "fixture '{}': manifest_hash moved. Legitimate ONLY if `ingest_decoder` moved with it \
+             (a recipe change is a seal change); otherwise something in the sealed manifest drifted.",
+            want.name
+        );
+        assert_eq!(
+            &got.ingest_decoder, &want.ingest_decoder,
+            "fixture '{}': the sealed decoder triple moved",
+            want.name
+        );
+        assert_eq!(
+            &got.hazards, &want.hazards,
+            "fixture '{}': hazard coverage changed",
+            want.name
+        );
+    }
+}
+
+/// The properties the corpus exists to pin, asserted against each other rather than against a file —
+/// so they hold even in a build where the goldens were just regenerated.
+#[test]
+#[cfg(feature = "parquet")]
+fn the_dictionary_plain_and_chunked_fixtures_agree_with_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let built = corpus::build(dir.path()).unwrap();
+    let hash = |name: &str| {
+        built
+            .fixtures
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.content_hash.clone())
+            .unwrap_or_else(|| panic!("fixture '{name}' missing"))
+    };
+    // ADR-0056 §2: a dictionary is an ENCODING, so materialising it to values must give the same
+    // payload as the plain column — otherwise the writer's dictionary order reaches the hash.
+    assert_eq!(
+        hash("ingest_parquet_dictionary"),
+        hash("ingest_parquet_plain_strings"),
+        "dictionary encoding reached the payload"
+    );
+    // Chunking is the reader's business, not the product's.
+    assert_eq!(
+        hash("ingest_parquet_tiny_row_groups"),
+        hash("ingest_parquet_plain_strings"),
+        "row-group size reached the payload"
+    );
+    // And the container is not the product.
+    assert_eq!(
+        hash("ingest_arrow_ipc_scalars"),
+        hash("ingest_parquet_plain_strings"),
+        "the container reached the payload"
+    );
+}
+
+/// Every fixture seals a decoder triple. ADR-0056 §6a's sequencing is that no ingest fixture may enter
+/// the corpus without one — "no artifact is ever sealed with an ambiguous or missing decoder identity,
+/// because none is sealed at all until the home exists".
+#[test]
+fn every_fixture_seals_a_decoder_triple() {
+    let dir = tempfile::tempdir().unwrap();
+    let built = corpus::build(dir.path()).unwrap();
+    assert!(
+        !built.fixtures.is_empty(),
+        "this configuration runs fixtures"
+    );
+    // An IN-TREE lane (`.npy`, ADR-0056 #386 amendment) seals a bare name: there is no third-party crate
+    // on its decode path to pin, so a digest would be taken over an empty pre-image and would therefore be
+    // identical for every build — a false claim of sameness. Rather than relax the assertion for everyone,
+    // the two shapes are checked separately and the in-tree set is *enumerated*, so a lane cannot go
+    // digest-less by accident.
+    let mut in_tree = Vec::new();
+    for f in &built.fixtures {
+        let d = &f.ingest_decoder;
+        assert!(
+            d.is_object(),
+            "fixture '{}' sealed no decoder record: {d}",
+            f.name
+        );
+        let name = d["name"]
+            .as_str()
+            .unwrap_or_else(|| panic!("fixture '{}': no decoder name", f.name));
+        if name == "tessera/npy" {
+            assert!(
+                d.get("features").is_none() && d.get("version").is_none(),
+                "fixture '{}': the in-tree lane must seal a bare name, got {d}",
+                f.name
+            );
+            in_tree.push(f.name.clone());
+            continue;
+        }
+        assert!(
+            d["features"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("blake3:")),
+            "fixture '{}': the feature component must be a digest, got {d}",
+            f.name
+        );
+    }
+    // Exactly the four `.npy` fixtures. `ingest_npz_member` must NOT be here: it reads through the zip
+    // archive reader, so it has a decode path and a digest — which is the #477 property one scale down,
+    // asserted on the goldens rather than only on the constants.
+    in_tree.sort();
+    // Exactly the `.npy` fixtures when that lane is compiled in, and none at all when it is not — the
+    // expectation is derived from the build rather than hardcoded, so this holds in the reduced
+    // configurations the ingest gates run. `ingest_npz_member` is never here: it reads through the zip
+    // archive reader, so it has a decode path and a digest, which is the #477 property one scale down.
+    let expected: Vec<&str> = if cfg!(feature = "npy") {
+        vec![
+            "ingest_npy_endianness_be",
+            "ingest_npy_endianness_le",
+            "ingest_npy_fortran",
+            "ingest_npy_structured",
+        ]
+    } else {
+        vec![]
+    };
+    assert_eq!(
+        in_tree, expected,
+        "only the in-tree `.npy` fixtures may seal a bare decoder name"
+    );
+}
+
+/// **ADR-0056 §5's `ingest_npy_endianness` claim, asserted as a relation rather than a pair of hashes.**
+///
+/// "A `>f8` file and its `<f8` twin must seal identically." Two corpus fixtures pin the *values*, but the
+/// property is the equality BETWEEN them — so it is checked directly, which means it holds even in a
+/// build where the goldens were just regenerated (a regeneration would happily record two different
+/// hashes without complaint).
+#[test]
+#[cfg(feature = "npy")]
+fn the_endianness_twins_seal_to_the_same_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let built = corpus::build(dir.path()).unwrap();
+    let hash = |name: &str| {
+        built
+            .fixtures
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.content_hash.clone())
+            .unwrap_or_else(|| panic!("fixture '{name}' missing"))
+    };
+    assert_eq!(
+        hash("ingest_npy_endianness_le"),
+        hash("ingest_npy_endianness_be"),
+        "a big-endian .npy and its little-endian twin carry the same values, so they must seal the same \
+         payload — a naive cast_slice of the big-endian buffer would produce garbage that looks like data"
+    );
+    // …and their `manifest_hash`es DIFFER, because the `ingested_from` edge pins the source bytes, which
+    // genuinely are different. Asserting both directions is what stops a bug that made every hash
+    // constant from looking like a pass.
+    let seal = |name: &str| {
+        built
+            .fixtures
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.manifest_hash.clone())
+            .unwrap()
+    };
+    assert_ne!(
+        seal("ingest_npy_endianness_le"),
+        seal("ingest_npy_endianness_be"),
+        "different source bytes, so the seal must say so"
+    );
+}
+
+/// A NumPy **structured** dtype is a table, so its fixture must seal a `table` product while every other
+/// array fixture seals an `array` one. That is ADR-0056 §1 — the shape of the data decides the primitive —
+/// visible in the committed goldens rather than only in a unit test.
+#[test]
+#[cfg(feature = "npy")]
+fn the_array_lane_seals_the_primitive_the_file_implies() {
+    let dir = tempfile::tempdir().unwrap();
+    let built = corpus::build(dir.path()).unwrap();
+    let product = |name: &str| {
+        built
+            .fixtures
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.product.clone())
+            .unwrap_or_else(|| panic!("fixture '{name}' missing"))
+    };
+    let mut array_fixtures = vec!["ingest_npy_endianness_le", "ingest_npy_fortran"];
+    // Only when the archive lane is compiled in — a `parquet,npy` build has the `.npy` parser and no
+    // `.npz` reader, so demanding this fixture there would fail on a lane that is correctly absent.
+    #[cfg(feature = "npz")]
+    array_fixtures.push("ingest_npz_member");
+    for array_fixture in array_fixtures {
+        assert_eq!(product(array_fixture), "array", "{array_fixture}");
+    }
+    assert_eq!(
+        product("ingest_npy_structured"),
+        "table",
+        "a record dtype is rows of typed fields, so it is a TABLE"
+    );
+}

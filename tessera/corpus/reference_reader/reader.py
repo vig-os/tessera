@@ -20,7 +20,6 @@ Spec notes used here (only):
 
 from __future__ import annotations
 
-import io
 import json
 import zipfile
 from dataclasses import dataclass
@@ -60,7 +59,9 @@ def merkle_root(digest_strings: list[str]) -> str:
     "bags" the peaks right-to-left with node(). A single leaf returns its leaf hash; the empty
     product returns blake3(b"") — identical to the Rust `tessera_core::hash::merkle_root`.
     """
-    peaks: list[tuple[int, bytes]] = []  # (height, hash), left -> right (older -> newer)
+    peaks: list[
+        tuple[int, bytes]
+    ] = []  # (height, hash), left -> right (older -> newer)
     for d in digest_strings:
         node = (0, _leaf_hash(d))
         while peaks and peaks[-1][0] == node[0]:

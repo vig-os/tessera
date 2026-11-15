@@ -8,7 +8,7 @@ license = "Apache-2.0"
 # Software SemVer (crates/CLI/bindings) — independent of the format-spec version `tessera_version`,
 # which stays `v0`/pre-1.0 (ADR-0052 §1). The sealed producer stamps TESSERA_VERSION, not this, so a
 # software bump costs no conformance-corpus regen (#336). Bootstrap baseline for release-plz (#337).
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.5"
 repository = "https://github.com/vig-os/tessera"
 authors = ["vig-os"]
 
@@ -33,7 +33,7 @@ sha2 = "0.10"   # sha256 digests for OCI artifact descriptors (registries are sh
 age = { version = "0.11", default-features = false, features = ["armor"] }
 time = { version = "0.3", features = ["parsing", "formatting"] }
 proptest = "1"
-zip = { version = "2", default-features = false }   # STORED zip64 `.tsra` container (no compression deps)
+zip = { version = "9", default-features = false }   # STORED zip64 `.tsra` container (no compression deps)
 # Array block backend: zarrs (Zarr v3) + pcodec + zstd. default-features=false keeps it minimal
 # (no filesystem/sharding/ndarray/blosc/gzip/crc32c we don't use); the zstd codec is a selectable
 # alternative to pcodec per array block (`ArraySpec.codec = "zstd" | "auto"`) and bundles libzstd
@@ -54,13 +54,18 @@ vortex-layout = "0.75"
 vortex-session = "0.75"
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }     # tessera-cli
+# 8-bit greyscale PNG previews for `tsra slice|project --format png` (#387). Costs no new dependency:
+# `png` is already in `Cargo.lock` via `image` (the DICOM pixel path). default-features=false drops the
+# rayon/deflate-tuning extras we don't need for a small preview.
+png = { version = "0.17", default-features = false }
+
 # DICOM ingest (tessera-ingest, P5/#207). default-features=false drops the `ul` network stack and the
 # C++ codecs (charls/gdcm/openjpeg-sys); pure-Rust pixel decode covers uncompressed/RLE.
-dicom = { version = "0.9", default-features = false, features = ["pixeldata", "inventory-registry"] }
+dicom = { version = "0.10", default-features = false, features = ["pixeldata", "inventory-registry"] }
 # JPEG transfer-syntax adapters — JPEG Baseline (Process 1, 8-bit) + JPEG Lossless (Process 14) decode
 # pure-Rust via jpeg-decoder/jpeg-encoder (NO charls/gdcm/openjpeg). Feature-unifies with `dicom` above so
 # `decode_pixel_data()` dispatches to the registered JpegAdapter. Hermetic — builds in the nix gate.
-dicom-transfer-syntax-registry = { version = "0.9", features = ["jpeg"] }
+dicom-transfer-syntax-registry = { version = "0.10", features = ["jpeg"] }
 # GE/vendor HDF5 listmode ingest (#208). Native libhdf5 found via pkg-config (HDF5_DIR unset — see flake.nix).
 hdf5-metno = "0.12"
 # Raw libhdf5 C API used by the **generic** compound reader (#222) for the identity (file-type == memory-type)
@@ -68,9 +73,65 @@ hdf5-metno = "0.12"
 # any public hdf5-metno surface. Caret (not a hard pin) so cargo unifies it with the exact `hdf5-metno-sys`
 # version `hdf5-metno` already pulls transitively (one shared build of libhdf5's bindings; currently 0.12.0).
 hdf5-metno-sys = "0.12"
+# ── Generic-ingest readers (ADR-0056 / ADR-0057, #386). The TABLE lane. ──
+#
+# `=`-pinned, not caret. ADR-0056 §5 makes the `arrow → primitive` canonicalisation the ingest
+# determinism gate and treats a decoder bump as a *deliberate corpus event*; a `^` range would let one
+# happen on an unrelated `cargo update`, which is the same discipline as the ALP-exclusion pin.
+#
+# Vortex 0.75 asks for `^58.3` and resolves to these same versions, so `arrow-array` / `-buffer` /
+# `-schema` are ALREADY in the default graph (Gate B snapshots all three) and these pins add no second
+# arrow copy. The floor is 58.4.1 because that is the first parquet on `thrift` 0.23, which fixes
+# RUSTSEC-2026-0435 (unbounded allocation in thrift's binary-protocol `read_bytes`, #736); arrow and
+# parquet release in lockstep, so the arrow pins move with it.
+#
+# Deliberately NOT the `arrow` meta-crate that ADR-0056 §12 sketched: it reaches this tree only via
+# datafusion, under tessera-cli's optional `sql` feature. Depending on it would newly pull
+# arrow-cast / -ord / -string / -row / -json into *every* build — including the
+# `arrow-array/chrono-tz` surface ADR-0057 §5's probe identified as hazard H1's door. The sub-crates
+# are the whole decode surface we need and nothing more.
+arrow-array = "=58.4.1"
+arrow-buffer = "=58.4.1"
+arrow-schema = "=58.4.1"
+arrow-ipc = "=58.4.1"          # Arrow IPC / Feather source files (`--from arrow`)
+# parquet = arrow-rs's reader. Defaults minus `simdutf8` (ADR-0056 §5 H7 — SIMD-dispatched decode
+# paths): UTF-8 *validation* is a yes/no answer that cannot change a value, so dropping it costs
+# nothing and removes one dispatch-dependent path from upstream of the seal.
+#
+# The compression codecs are kept in FULL, on purpose. A scientist's Parquet in the wild is
+# snappy / gzip / zstd / brotli / lz4-compressed, and refusing to read one is a wall rather than a
+# safety property: the source's compression never reaches our bytes, because ingest is a logical
+# re-encode through Vortex (ADR-0056 §2). `snap` + `brotli` + `zlib-rs` are the only genuinely new
+# crates; flate2 / lz4_flex / zstd are already in-tree.
+parquet = { version = "=58.4.1", default-features = false, features = [
+    "arrow",
+    "snap",
+    "brotli",
+    "flate2-zlib-rs",
+    "lz4",
+    "zstd",
+] }
+# CSV tokenizer (ADR-0056 §8). RFC-4180 record splitting ONLY — every number is parsed by Rust std's
+# `str::parse`, which is correctly-rounded and locale-independent. That closes hazard H3 (strtod /
+# lexical rounding differences) and H8 (`LC_NUMERIC=de_DE` reading `1,5` as 1.5) *by construction*,
+# which is what lets CSV ship in P1 with an explicit schema instead of waiting for P2.
+#
+# `=`-pinned like the arrow crates, and for the same reason: this version goes into the sealed
+# `ingest_decoder` digest (ADR-0056 §6a), so a caret range would let a routine `cargo update` move
+# `manifest_hash` and red Gate A *un*-deliberately — which is precisely what the `=` pins prevent.
+csv = "=1.4.0"
 # Python bindings (tessera-py). abi3 → one .so works across CPython ≥3.9; extension-module → no
 # libpython link (the build needs only the abi3 minimum, not a runtime interpreter).
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
+# tessera-py's build.rs: the macOS extension-module link args (#647). Same minor as `pyo3` (which pins
+# it `=`), so the lockfile keeps exactly one pyo3-build-config.
+pyo3-build-config = "0.29"
+# Transparent `.nii.gz` NIfTI decompression (#396 B2). `.nii.gz` is the majority of NIfTI on disk (FSL,
+# SPM and dcm2niix all emit it by default). `rust_backend` (miniz_oxide) keeps it pure-Rust — no system
+# zlib, so the hermetic nix build stays clean and the wasm-compatible tree is unaffected. Costs no new
+# dependency: `flate2` is already in `Cargo.lock` via `dicom-transfer-syntax-registry` (ADR-0056 §12).
+# Decompression is a *container* concern, not a decoder: the NIfTI parser itself stays in-tree.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Declarative ingest spec (`tessera-ingest::spec`) — pure-Rust TOML parser. The engine canonicalizes the
 # parsed model (JCS) before hashing, so whitespace / comments / key-order in the source TOML never
 # change the spec hash that flows into each member's `ingested_via_spec` provenance edge.
@@ -83,3 +144,52 @@ tessera-ingest = { path = "crates/tessera-ingest" }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# --- vortex fork pin (#480 tracks removal) -------------------------------------------------------
+# vortex 0.75.0 has two determinism defects that both leak a WRITE-TIME STATISTIC into the
+# serialised bytes, so the sealed `content_hash` stops being a function of the data alone:
+#
+#   #468  the `debug_assertions`-gated `is_sorted` assert on patch indices caches `Stat::IsSorted`
+#         on them, so a debug-built writer emitted 24 bytes more than a release-built one.
+#   #472  `sum_float_all` skips NaN, so a column holding both `+inf` and `-inf` evaluates
+#         `inf + -inf`; the resulting default NaN is `0xfff8…` on x86_64 and `0x7ff8…` on aarch64,
+#         and `Stat::Sum` is persisted — so the bytes depended on the writing host.
+#
+# Pinned to a FULL COMMIT SHA, never a branch name: a branch would let the pinned content move
+# underneath a lockfile that still looks unchanged.
+#
+# Every vortex crate must be patched TOGETHER. Patching `vortex-array` alone leaves its siblings
+# resolving from crates.io, which yields two copies of `vortex-proto`/`vortex-buffer` and ~1000 type
+# errors. The fork branch also carries one non-upstream commit setting the workspace version to
+# 0.75.0: the tag ships the placeholder 0.1.0, and without that commit cargo reports
+# `patch ... was not used in the crate graph` and SILENTLY keeps using crates.io.
+#
+# REMOVE THIS BLOCK once a released vortex contains both fixes — see #480 for the checklist.
+[patch.crates-io]
+vortex-alp = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-array = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-array-macros = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-btrblocks = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-buffer = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-bytebool = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-compressor = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-datetime-parts = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-decimal-byte-parts = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-error = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-fastlanes = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-file = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-flatbuffers = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-fsst = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-io = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-layout = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-mask = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-metrics = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-pco = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-proto = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-runend = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-scan = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-sequence = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-session = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-sparse = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-utils = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }
+vortex-zigzag = { git = "https://github.com/gerchowl/vortex", rev = "608d8a1162cf40dbea70f8dd72781ec243754282" }

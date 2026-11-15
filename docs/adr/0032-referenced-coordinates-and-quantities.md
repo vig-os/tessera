@@ -27,6 +27,7 @@ to a named reference. Designing them three times would spawn three descriptors t
 
 ### 1. The primitive — a **referenced axis/value descriptor** `(transform, unit, frame)`
 Every array **axis** and the array's **value** (the pixels) may carry one optional descriptor:
+
 ```
 referencing = {
   transform: <see §2>,     # stored index/value → physical coordinate/quantity
@@ -34,6 +35,7 @@ referencing = {
   frame:     <named ref>,   # §4 — the meaning of the origin/zero
 }
 ```
+
 It is **optional** → **feature-by-presence** (ADR-0029): no descriptor = index/raw space (a sinogram
 axis, a unitless count). A tool needing physical values checks "is there a `referencing`?", never a type.
 
@@ -95,10 +97,10 @@ SUV is a product.
 ### 6. Time specifics (absorbs #220)
 Time = §1 applied to the temporal axis, with two kinds kept apart:
 - **wall-clock absolute** (acquisition datetime, provenance) → **UTC RFC 3339** strings in metadata (human
-  + audit; subject to leap seconds — fine for stamps, never for intervals).
+  - audit; subject to leap seconds — fine for stamps, never for intervals).
 - **elapsed/relative** (durations, frame offsets, event times) → a **quantity on a monotonic scale**
   (`affine_1d`/`lookup`, unit `s`, an `epoch` frame). **High-rate event timestamps** are **integer ticks
-  + scale** (`tick→s`), not floats — lossless and compact, riding the columnar/COO machinery (ADR-0031).
+  - scale** (`tick→s`), not floats — lossless and compact, riding the columnar/COO machinery (ADR-0031).
 PET **decay-correction reference** is a named instant (an `epoch`) recorded in metadata.
 
 ### 7. Identity, determinism, SSoT

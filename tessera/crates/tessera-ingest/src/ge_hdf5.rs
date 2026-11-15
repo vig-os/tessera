@@ -281,6 +281,49 @@ pub fn read_compound(path: &std::path::Path, dataset: &str) -> Result<TableData>
 /// Default row-slab for streaming reads — rows pulled per HDF5 hyperslab (the bounded-memory unit).
 pub const STREAM_SLAB_ROWS: usize = 1 << 16;
 
+/// Soft ceiling on one streaming slab's transient read buffer (#325): it bounds how many WHOLE
+/// chunks are swallowed per `H5Dread`, but it is **not** a hard cap on the buffer.
+///
+/// [`chunk_aligned_slab`] never returns less than one chunk, so on a dataset whose single chunk
+/// exceeds this value the slab is that chunk and the buffer exceeds the ceiling. Peak transient
+/// footprint of a slab is therefore about `2 x max(MAX_SLAB_BYTES, chunk_bytes)` — the raw `buf`
+/// and the decoded columns from [`slab_to_columns`] are both live across the `sink` call. That is
+/// honest rather than tight: sub-chunk reads cannot lower it, because libhdf5 materialises the
+/// whole chunk regardless (see [`chunk_aligned_slab`]).
+///
+/// The alternative was to leave the slab small and instead enlarge libhdf5's per-dataset chunk
+/// cache (`H5Pset_chunk_cache` on the dataset-access plist), which fixes the same re-inflation.
+/// Alignment was chosen because it needs **no new FFI** — the cache route means another raw
+/// `hdf5-metno-sys` plist call on top of the existing unsafe block — and costs the same memory:
+/// a cache big enough to stop the re-reads has to hold a chunk too.
+const MAX_SLAB_BYTES: usize = 64 << 20;
+
+/// Round a requested slab up to a whole number of dataset **chunks** (#325).
+///
+/// libhdf5 must materialise an ENTIRE chunk to serve any row inside it (for a compressed dataset
+/// that means inflating it), and the default per-dataset chunk cache is **1 MiB** — far smaller
+/// than one chunk of a real acquisition. So a slab covering a *fraction* of a chunk makes libhdf5
+/// re-read and re-inflate that whole chunk once per slab: at the default 65,536-row slab against a
+/// 1,048,576-row chunk that is 16 passes over every chunk, which is exactly the streaming-vs-batch
+/// gap #325 measured (batch issues one bulk read, so each chunk is touched once).
+///
+/// Reading LESS than a whole chunk therefore never saves work — the chunk is paid for either way —
+/// so one chunk is the natural minimum unit, and [`MAX_SLAB_BYTES`] caps how many we take above
+/// that. A **contiguous** (unchunked) dataset has no such quantum and keeps the caller's request.
+fn chunk_aligned_slab(chunk_rows: Option<usize>, slab_rows: usize, row_bytes: usize) -> usize {
+    let slab_rows = slab_rows.max(1);
+    // `0` is not a legal chunk edge, but guard rather than divide by it.
+    let Some(chunk) = chunk_rows.filter(|c| *c > 0) else {
+        return slab_rows;
+    };
+    let cap_rows = (MAX_SLAB_BYTES / row_bytes.max(1)).max(1);
+    // Whole chunks that fit under the cap — but never fewer than one, since a partial chunk costs
+    // the same read and then pays for it again on the next slab.
+    let max_chunks = (cap_rows / chunk).max(1);
+    let wanted_chunks = slab_rows.div_ceil(chunk).max(1);
+    wanted_chunks.min(max_chunks).saturating_mul(chunk)
+}
+
 /// Stream any compound dataset in bounded-memory **row-slabs** (ADR-0026 §3): read `slab_rows`
 /// records at a time via an HDF5 hyperslab, decode each slab to columns with [`slab_to_columns`],
 /// and feed `sink` — never holding more than one slab in RAM. `slab_rows` clamps to ≥ 1. Same
@@ -296,7 +339,13 @@ pub fn stream_compound(
     let ds = file.dataset(dataset).map_err(he)?;
     let c = compound_descriptor(&ds)?;
     let n = ds.shape().first().copied().unwrap_or(0);
-    let slab = slab_rows.max(1);
+    // #325: align the slab to the dataset's chunking, or a compressed vendor table re-inflates every
+    // chunk once per sub-chunk slab (measured 4× slower than the batch path before this).
+    let slab = chunk_aligned_slab(
+        ds.chunk().as_deref().and_then(|c| c.first().copied()),
+        slab_rows,
+        c.size,
+    );
 
     // Acquire libhdf5 type + file-space ids once (under `sync()`); they're reused for every slab.
     let (dt_id, file_space_id) = hdf5::sync::sync(|| -> Result<(hid_t, hid_t)> {
@@ -557,6 +606,30 @@ pub fn stream_events_2p(
     stream_compound(path, dataset, slab_rows, sink)
 }
 
+/// Everything the streaming listmode path must stamp on its [`tessera_io::WriteSession`] **before
+/// the first block commits** (ADR-0058). Bundled into one struct rather than five more positional
+/// arguments because the streaming writer has no post-build re-seal hook: a `.tsra` is written once,
+/// straight to disk, so anything that must ride `manifest_hash` has to be declared up-front.
+///
+/// The metadata tiers are held separately, never pre-merged, so the backend can layer them in
+/// ascending precedence (`inherited` < the product's own default < `metadata`) — a value inherited
+/// from a parent must never clobber a product-own default.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StreamProvenance<'a> {
+    /// Schema-flagged identity inherited from the `derived_from` parents (ADR-0058 §5) — the
+    /// lowest-precedence metadata tier.
+    pub inherited: Option<&'a std::collections::BTreeMap<String, serde_json::Value>>,
+    /// The parents' first-class `study` grouping key, when this product declares none of its own.
+    pub inherited_study: Option<&'a str>,
+    /// The spec's `[product.metadata]` — the highest-precedence tier; an explicit operator value
+    /// wins over both the inherited identity and the product's own default.
+    pub metadata: Option<&'a std::collections::BTreeMap<String, serde_json::Value>>,
+    /// The spec's `[product.generation]` recipe (ADR-0058 §2) — *how* this product was made.
+    pub generation: Option<&'a tessera_core::Generation>,
+    /// The spec's `[product.producer]` identity (ADR-0058 §1) — *who/what* made it.
+    pub producer: Option<&'a tessera_core::Producer>,
+}
+
 /// Bounded-memory, **multi-block** ingest of a GE 2-photon dataset → sealed `listmode` product
 /// (ADR-0026 §3/§4): stream the HDF5 in row-slabs through a [`tessera_io::TableMultiBlockSink`]
 /// (≈ one slab on read + ≈ one row-group of buffered rows + per-block worker encode RAM), staging
@@ -593,9 +666,7 @@ pub fn stream_to_listmode_product_2p_to_file(
     row_index: &str,
     source_label: Option<&str>,
     extra_sources: &[tessera_core::provenance::Source],
-    inherited: &std::collections::BTreeMap<String, serde_json::Value>,
-    inherited_study: Option<&str>,
-    extra_metadata: &std::collections::BTreeMap<String, serde_json::Value>,
+    provenance: &StreamProvenance<'_>,
 ) -> Result<Manifest> {
     stream_to_listmode_product_2p_to_file_inner(
         path,
@@ -611,9 +682,7 @@ pub fn stream_to_listmode_product_2p_to_file(
         row_index,
         source_label,
         extra_sources,
-        inherited,
-        inherited_study,
-        extra_metadata,
+        provenance,
     )
 }
 
@@ -649,9 +718,7 @@ pub fn stream_to_listmode_product_2p_to_file_with_block_rows(
         "ms",
         None,
         &[],
-        &std::collections::BTreeMap::new(),
-        None,
-        &std::collections::BTreeMap::new(),
+        &StreamProvenance::default(),
     )
 }
 
@@ -675,9 +742,7 @@ fn stream_to_listmode_product_2p_to_file_inner(
     row_index: &str,
     source_label: Option<&str>,
     extra_sources: &[tessera_core::provenance::Source],
-    inherited: &std::collections::BTreeMap<String, serde_json::Value>,
-    inherited_study: Option<&str>,
-    extra_metadata: &std::collections::BTreeMap<String, serde_json::Value>,
+    provenance: &StreamProvenance<'_>,
 ) -> Result<Manifest> {
     let mut columns = compound_columns(path, dataset)?;
     // #343: annotate the streamed columns (unit/description/short_name) from the GEDDF dictionary so
@@ -713,10 +778,10 @@ fn stream_to_listmode_product_2p_to_file_inner(
     // apply in ascending priority so `with_field`'s last-write-wins yields spec > product-own > inherited.
     // (1) INHERITED schema-flagged identity from `derived_from` parents (ADR-0058 §5) — lowest, so any
     //     product-own default or explicit spec value below overrides it. `study` is a first-class field.
-    if let Some(s) = inherited_study {
+    if let Some(s) = provenance.inherited_study {
         ws.with_study(s)?;
     }
-    for (k, v) in inherited {
+    for (k, v) in provenance.inherited.into_iter().flatten() {
         ws.with_field(k, v.clone())?;
     }
     // (2) PRODUCT-OWN default coincidence_mode (same as the batch builder) — beats inherited, loses to spec.
@@ -726,8 +791,17 @@ fn stream_to_listmode_product_2p_to_file_inner(
     )?;
     // (3) SPEC `[product.metadata]` — highest; an explicit operator value wins over everything. All
     //     three are declared before any block commits, so they flow into the sealed manifest_hash.
-    for (k, v) in extra_metadata {
+    for (k, v) in provenance.metadata.into_iter().flatten() {
         ws.with_field(k, v.clone())?;
+    }
+    // #416 / ADR-0058 §1/§2: the spec's sealed recipe + producer identity. Declared here, alongside
+    // the metadata tiers and for the same reason — the streamed `.tsra` is sealed once with no
+    // post-build re-seal hook, so a recipe plumbed any later would be silently dropped.
+    if let Some(g) = provenance.generation {
+        ws.with_generation(g.clone())?;
+    }
+    if let Some(pr) = provenance.producer {
+        ws.with_producer(pr.clone())?;
     }
     let mut sw = tessera_io::StreamWriter::with_config(ws, cfg, unit_bytes);
     {
@@ -782,9 +856,7 @@ pub fn stream_to_listmode_product_2p(
         "ms",
         None,
         &[],
-        &std::collections::BTreeMap::new(),
-        None,
-        &std::collections::BTreeMap::new(),
+        &StreamProvenance::default(),
     )?;
     // Re-read block bytes from the temp .tsra so callers get the in-memory pair their API expects.
     // Multi-block products may not fit in RAM — callers needing constant-memory should use
@@ -804,8 +876,9 @@ pub fn stream_to_listmode_product_2p(
 /// table's monotonic-key column (default `ms`).
 ///
 /// Partitions `cols` into [`tessera_io::BLOCK_ROWS`]-sized blocks via the format-SSoT helpers
-/// ([`tessera_io::block_count`] + [`tessera_io::block_name`]) — so the per-block split (and
-/// therefore `content_hash`) matches the streaming path exactly. Small acquisitions
+/// ([`tessera_io::block_count`] + [`tessera_io::block_name`] + [`tessera_io::block_partition`]) — so
+/// the per-block split (and therefore `content_hash`), the leaf names `<block_prefix>/0000`, … and
+/// their partition markers (ADR-0064) match the streaming path exactly. Small acquisitions
 /// (≤ `BLOCK_ROWS`) stay a single block named `block_prefix`, byte-identical to the pre-partition
 /// layout under that prefix (no corpus regen for `block_prefix=events`).
 ///
@@ -864,8 +937,11 @@ pub fn to_listmode_product_with_schema(
 /// explicit so unit tests can drive the multi-block path at a small block size (production goes
 /// through [`to_listmode_product`], which pins `block_rows = BLOCK_ROWS`).
 ///
-/// Partition is via [`tessera_io::partition_blocks`] + [`tessera_io::block_name`] (the format
-/// SSoT): every block carries `block_rows` rows except the trailing one (which may be partial).
+/// Partition is via [`tessera_io::partition_blocks`] + [`tessera_io::block_name`] +
+/// [`tessera_io::block_partition`] (the format SSoT): every block carries `block_rows` rows except the
+/// trailing one (which may be partial). Above one block the blocks are the marked leaves
+/// `<block_prefix>/0000`, `<block_prefix>/0001`, … of one logical table (ADR-0064); one block is the
+/// bare `<block_prefix>`.
 /// `block_rows == BLOCK_ROWS` is the format invariant — overriding it produces test products,
 /// **not** corpus-compatible bytes. `pub(crate)` so no external caller can pass a non-canonical
 /// `block_rows`; production goes through [`to_listmode_product`] (pins `BLOCK_ROWS`).
@@ -931,8 +1007,9 @@ pub(crate) fn to_listmode_product_partitioned(
             columns: columns.clone(),
             rows: rows_in_block,
             row_index: Some(row_index.to_string()),
+            partition: tessera_io::block_partition(blk, total_blocks),
         };
-        let nm = tessera_io::block_name(block_prefix, blk, total_blocks);
+        let nm = tessera_io::block_name(block_prefix, blk, total_blocks)?;
         let (block_ref, payload) = table::table_block(&nm, &spec, &block_data)?;
         b.add_block_ref(block_ref);
         payloads.push(payload);
@@ -952,6 +1029,8 @@ pub(crate) fn to_listmode_product_partitioned(
 mod tests {
     use super::*;
     use hdf5::H5Type;
+    use tessera_core::block::partition::{check_partitions, marker, table_group, Partition};
+    use tessera_core::block::{BlockKind, TableGroup};
 
     #[test]
     fn geddf_dictionary_parses_and_carries_units_and_scales() {
@@ -1144,6 +1223,35 @@ mod tests {
             .unwrap();
     }
 
+    /// A CHUNKED + deflate-compressed 3p dataset — the layout every real vendor acquisition uses,
+    /// and the one that exercises libhdf5's per-chunk read/inflate against the slab size (#325).
+    fn write_synth_3p_chunked(path: &std::path::Path, n: usize, chunk_rows: usize, gzip: u8) {
+        let recs: Vec<Rec3p> = (0..n)
+            .map(|k| Rec3p {
+                ms: k as u32,
+                // Wrapping, not `+ 1`: this writer is used at row counts far past u16::MAX, where a
+                // plain add panics in debug. The values only have to be varied, not meaningful.
+                id: [
+                    k as u16,
+                    (k as u16).wrapping_add(1),
+                    (k as u16).wrapping_add(2),
+                ],
+                en: [511.0, 510.0 + k as f32, 512.0],
+                vtx: [0.1 * k as f32, 0.2, 0.3],
+                lt: 1.5 + k as f32 * 0.01,
+            })
+            .collect();
+        let f = hdf5::File::create(path).unwrap();
+        f.new_dataset::<Rec3p>()
+            .shape(n)
+            .chunk(chunk_rows.min(n))
+            .deflate(gzip)
+            .create("events_3p")
+            .unwrap()
+            .write(&recs)
+            .unwrap();
+    }
+
     fn write_synth_2p(path: &std::path::Path, n: usize) {
         let recs: Vec<Rec2p> = (0..n)
             .map(|k| Rec2p {
@@ -1274,6 +1382,148 @@ mod tests {
         assert_eq!(got_2p, expect_2p, "generic reader diverged on 2p compound");
     }
 
+    /// #325: the slab must round up to whole dataset chunks, because libhdf5 pays for a whole
+    /// chunk however little of it you ask for.
+    #[test]
+    fn chunk_aligned_slab_rounds_up_to_whole_chunks() {
+        const ROW: usize = 38; // the 3p record width
+        let chunk = 1 << 20; // 1,048,576 rows — a realistic vendor chunk (38 MB at this row width)
+
+        // The default slab is 1/16th of a chunk → snap up to exactly one chunk. That 16× re-inflate
+        // is the streaming-vs-batch gap #325 measured.
+        assert_eq!(
+            chunk_aligned_slab(Some(chunk), STREAM_SLAB_ROWS, ROW),
+            chunk
+        );
+        // Two of THESE chunks is 76 MB, over the cap, so one chunk is the honest answer here.
+        assert_eq!(chunk_aligned_slab(Some(chunk), chunk + 1, ROW), chunk);
+
+        // With a chunk small enough that several fit under the cap, a request above one chunk
+        // rounds UP to the next whole multiple, never down.
+        let small = 1 << 16; // 65,536 rows — 2.5 MB at this row width
+        assert_eq!(chunk_aligned_slab(Some(small), small + 1, ROW), 2 * small);
+        assert_eq!(chunk_aligned_slab(Some(small), 2 * small, ROW), 2 * small);
+        assert_eq!(
+            chunk_aligned_slab(Some(small), 3 * small - 1, ROW),
+            3 * small
+        );
+
+        // A contiguous dataset has no chunk quantum — the caller's request is honoured verbatim.
+        assert_eq!(
+            chunk_aligned_slab(None, STREAM_SLAB_ROWS, ROW),
+            STREAM_SLAB_ROWS
+        );
+        assert_eq!(chunk_aligned_slab(None, 999, ROW), 999);
+
+        // The byte cap bounds how many chunks we swallow (ADR-0026 stays bounded-memory)...
+        let big_req = 1_000 * chunk;
+        let aligned = chunk_aligned_slab(Some(chunk), big_req, ROW);
+        assert!(
+            aligned * ROW <= MAX_SLAB_BYTES,
+            "slab {aligned} rows x {ROW} B exceeds the {MAX_SLAB_BYTES} B cap"
+        );
+        assert_eq!(
+            aligned % chunk,
+            0,
+            "capped slab must still be chunk-aligned"
+        );
+
+        // ...except that ONE chunk is always allowed, even when it alone blows the cap: reading
+        // less than a chunk cannot cost less, so capping below a chunk would be pure loss.
+        let huge = MAX_SLAB_BYTES / ROW * 4;
+        assert_eq!(chunk_aligned_slab(Some(huge), 1, ROW), huge);
+
+        // Degenerate inputs must not divide by zero or collapse to a zero-row slab.
+        assert_eq!(chunk_aligned_slab(Some(0), 4096, ROW), 4096);
+        assert!(chunk_aligned_slab(Some(chunk), 0, 0) >= 1);
+    }
+
+    /// #325 correctness gate (no timing — this is the one that runs everywhere): chunk-aligning the
+    /// slab changes only HOW MUCH is read per `H5Dread`, never WHAT is produced. Streaming a chunked,
+    /// compressed dataset must still concatenate to exactly the bulk read, including when the row
+    /// count is not a whole number of chunks (the ragged tail is where an alignment bug would show).
+    #[test]
+    fn chunked_stream_matches_bulk_read_including_a_ragged_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let h5 = dir.path().join("chunked_3p.h5");
+        // 5 chunks + a partial one, so the final slab is deliberately short.
+        write_synth_3p_chunked(&h5, 5 * 4096 + 37, 4096, 1);
+
+        let bulk = read_compound(&h5, "events_3p").unwrap();
+        // Same accumulation shape as `stream_compound_concatenated_matches_whole_file`.
+        let mut acc: Option<TableData> = None;
+        stream_compound(&h5, "events_3p", 1000, |slab| {
+            match acc.as_mut() {
+                None => acc = Some(slab),
+                Some(a) => {
+                    for (i, (_, c)) in slab.into_iter().enumerate() {
+                        a[i].1.extend(&c)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            acc.unwrap(),
+            bulk,
+            "chunk-aligned streaming changed the data"
+        );
+    }
+
+    /// #325 perf ratchet: the streaming slab reader must not re-inflate each chunk once per slab.
+    ///
+    /// Relative + machine-independent, like the table grid ratchet: compare the streaming read of a
+    /// COMPRESSED CHUNKED dataset against one bulk `read_compound` of the same file, best-of-N. Both
+    /// sides decompress the same bytes exactly once if the slab is chunk-aligned, so the ratio is
+    /// ~1×; with a sub-chunk slab libhdf5 re-inflates every chunk once per slab, which is the 8×
+    /// (here) / 4× (measured end-to-end on a 1 M-row chunk) regression this guards.
+    ///
+    /// Gated at >= 8 cores on purpose — it runs on dev machines with headroom and is SKIPPED on the
+    /// small, build-saturated CI runners where any timing assertion is flaky. The non-flaky gate
+    /// that runs everywhere is `chunk_aligned_slab_rounds_up_to_whole_chunks` (+ the correctness
+    /// test above); absolute throughput belongs in a perf job, not a unit gate.
+    #[test]
+    fn chunked_stream_read_does_not_reinflate_each_chunk() {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        if cores < 8 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let h5 = dir.path().join("ratchet_3p.h5");
+        // One 1,048,576-row chunk plus a ragged tail: the default 65,536-row slab is 1/16th of a
+        // chunk, so an unaligned reader inflates each chunk 16x. The gap has to be wide because
+        // BOTH sides also pay the same per-row transpose, which dilutes the ratio — at 8x the
+        // measured spread was only 2.07x against a 2.0 gate, too thin to be a reliable guard.
+        let rows = (1 << 20) + 12_345;
+        write_synth_3p_chunked(&h5, rows, 1 << 20, 6);
+
+        let best = |run: &dyn Fn()| -> f64 {
+            let mut m = f64::MAX;
+            for _ in 0..3 {
+                let t = std::time::Instant::now();
+                run();
+                m = m.min(t.elapsed().as_secs_f64());
+            }
+            m
+        };
+        let _ = read_compound(&h5, "events_3p").unwrap(); // warm the page cache for both sides
+        let bulk = best(&|| {
+            read_compound(&h5, "events_3p").unwrap();
+        });
+        let streamed = best(&|| {
+            stream_compound(&h5, "events_3p", STREAM_SLAB_ROWS, |_| Ok(())).unwrap();
+        });
+        let ratio = streamed / bulk;
+        assert!(
+            ratio < 2.0,
+            "streaming re-read overhead {ratio:.2}x vs one bulk read (regression — is the slab \
+             still chunk-aligned? a sub-chunk slab re-inflates every chunk once per slab)"
+        );
+    }
+
     #[test]
     fn stream_compound_concatenated_matches_whole_file() {
         // The generic streaming path's slab decode == the whole-file decode when row-aligned.
@@ -1355,6 +1605,7 @@ mod tests {
                     .collect(),
                 rows: 100,
                 row_index: Some("ms".into()),
+                partition: None,
             },
             &bytes,
         )
@@ -1411,8 +1662,44 @@ mod tests {
                 .collect(),
             rows: 64,
             row_index: Some("ms".into()),
+            partition: None,
         };
         assert_eq!(table::decode(&spec, &bytes).unwrap(), cols);
+    }
+
+    /// The `content_hash` both paths sealed for these rows before ADR-0064 PR D, when they named the
+    /// blocks `events_0000`, `events_0001`, `events_0002`: read from this test run against the
+    /// unswitched writers at `11280ba`.
+    const PRE_SWITCH_CONTENT_HASH: &str =
+        "blake3:1d5468896b9f824344969775cd28087bfa90a04ab5f00a8f57600b6be75c5123";
+
+    /// ADR-0064 §6's block projection: per block, in manifest order, `name`, `kind`, `digest`,
+    /// `spec.rows`, `spec.row_index` and `spec.partition`.
+    #[allow(clippy::type_complexity)]
+    fn block_projection(
+        m: &Manifest,
+    ) -> Vec<(
+        String,
+        BlockKind,
+        Option<String>,
+        u64,
+        Option<String>,
+        Option<Partition>,
+    )> {
+        m.blocks
+            .iter()
+            .map(|b| {
+                let spec: TableSpec = serde_json::from_value(b.spec.clone()).unwrap();
+                (
+                    b.name.to_string(),
+                    b.kind,
+                    b.digest.clone(),
+                    spec.rows,
+                    spec.row_index,
+                    spec.partition,
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -1462,31 +1749,48 @@ mod tests {
         )
         .unwrap();
 
-        // Both paths must agree on content_hash AND per-block names/order (the partition SSoT). The
-        // multi-block partition produces NNNN names — confirm we don't accidentally hit the single
-        // `events` branch at this row count.
+        // ADR-0064 §6: the two paths' description, sources and column annotations legitimately
+        // differ, so they are compared on the block projection, which holds the partition (names
+        // and markers) as well as the bytes.
         assert_eq!(
-            streamed.blocks.len(),
-            batch.blocks.len(),
-            "block count mismatch"
+            block_projection(&streamed),
+            block_projection(&batch),
+            "whole-file ↔ streamed multi-block block projection"
         );
-        let stream_names: Vec<&str> = streamed.blocks.iter().map(|b| b.name.as_str()).collect();
-        let batch_names: Vec<&str> = batch.blocks.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(stream_names, batch_names, "block names must match in order");
-        assert!(
-            stream_names.iter().all(|n| n.starts_with("events_")),
-            "multi-block expected; got {stream_names:?}"
+        let leaves: Vec<(&str, Option<Partition>)> = batch
+            .blocks
+            .iter()
+            .map(|b| (b.name.as_str(), marker(b).unwrap()))
+            .collect();
+        let leaf = |index, last| Some(Partition { index, last });
+        assert_eq!(
+            leaves,
+            [
+                ("events/0000", leaf(0, false)),
+                ("events/0001", leaf(1, false)),
+                ("events/0002", leaf(2, true)),
+            ]
         );
+        for m in [&streamed, &batch] {
+            check_partitions(&m.blocks).unwrap();
+            assert!(matches!(
+                table_group(&m.blocks, "events").unwrap(),
+                TableGroup::Partitioned { .. }
+            ));
+        }
+        // Names and markers are in no payload, so the switch from `events_NNNN` moved
+        // `manifest_hash` only: both paths still seal the pre-switch writer's `content_hash`.
         assert_eq!(
             streamed.content_hash, batch.content_hash,
             "whole-file ↔ streamed multi-block content_hash mismatch"
         );
+        assert_eq!(batch.content_hash.as_deref(), Some(PRE_SWITCH_CONTENT_HASH));
     }
 
     #[test]
     fn ingested_multi_block_listmode_is_queryable_cross_block() {
         // The goal through-line: ingest a real multi-block listmode acquisition, then read + query
-        // it ACROSS its `events_NNNN` blocks via the generic `LogicalTableView` — listmode is just
+        // it ACROSS its `events/NNNN` leaves via the generic `LogicalTableView` — listmode is just
         // one multi-block table the cross-block engine spans. End-to-end on the actual ingest path
         // (not the synthetic test seam the LogicalTableView unit tests use).
         let dir = tempfile::tempdir().unwrap();
@@ -1604,7 +1908,7 @@ mod tests {
         // Step 2 lift: the generic engine must be able to drive non-default `block_prefix` (e.g.
         // `coin_3p`) + non-default `row_index` (e.g. `time_ps`). Two contracts:
         //   1. Block name(s) honor the prefix — a small acquisition stays single-block named
-        //      `<prefix>`; a multi-block product produces `<prefix>_NNNN`.
+        //      `<prefix>`; a multi-block product produces the leaves `<prefix>/NNNN`.
         //   2. Same DATA + same `block_prefix` + same `row_index` → byte-identical content_hash
         //      (the prefix is part of the partition SSoT, not part of the encoded bytes).
         let dir = tempfile::tempdir().unwrap();
@@ -1656,7 +1960,7 @@ mod tests {
         assert_ne!(a.manifest_hash, c.manifest_hash);
 
         // Multi-block exercise: the test-seam partitioned API at a small block_rows splits the
-        // same data into `<prefix>_NNNN` per the format SSoT.
+        // same data into the leaves `<prefix>/NNNN` per the format SSoT.
         let rows = tessera_io::table::ROWS_PER_GROUP * 2 + 100;
         let big_h5 = dir.path().join("LIST_2p_big.h5");
         write_synth_2p(&big_h5, rows);
@@ -1679,7 +1983,7 @@ mod tests {
             "expected multi-block partition at rows={rows}"
         );
         assert!(
-            multi.blocks.iter().all(|b| b.name.starts_with("coin_3p_")),
+            multi.blocks.iter().all(|b| b.name.starts_with("coin_3p/")),
             "all multi-block names must carry the requested prefix; got {:?}",
             multi.blocks.iter().map(|b| &b.name).collect::<Vec<_>>()
         );

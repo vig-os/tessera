@@ -1,0 +1,184 @@
+{
+  "product": "gpet-sim:g4ring-phase-space",
+  "status": "proposed (#801)",
+  "tables": {
+    "events": {
+      "sequence_key": [
+        "event_id"
+      ],
+      "keys": [
+        [
+          "event_id"
+        ]
+      ],
+      "references": [],
+      "columns": [
+        {
+          "name": "event_id",
+          "dtype": "u8",
+          "description": "Geant4 event id + event_id_offset",
+          "unit": "1"
+        },
+        {
+          "name": "n_particles",
+          "dtype": "u4",
+          "description": "phase_space_particles rows of this event",
+          "unit": "1"
+        },
+        {
+          "name": "source_x_mm",
+          "dtype": "f4",
+          "description": "Sampled source position, world frame (x)",
+          "unit": "mm"
+        },
+        {
+          "name": "source_y_mm",
+          "dtype": "f4",
+          "description": "Sampled source position, world frame (y)",
+          "unit": "mm"
+        },
+        {
+          "name": "source_z_mm",
+          "dtype": "f4",
+          "description": "Sampled source position, world frame (z)",
+          "unit": "mm"
+        },
+        {
+          "name": "annih_x_mm",
+          "dtype": "f4",
+          "description": "Positron annihilation vertex; NULL when none (x)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "annih_y_mm",
+          "dtype": "f4",
+          "description": "Positron annihilation vertex; NULL when none (y)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "annih_z_mm",
+          "dtype": "f4",
+          "description": "Positron annihilation vertex; NULL when none (z)",
+          "unit": "mm",
+          "nullable": true
+        }
+      ]
+    },
+    "phase_space_particles": {
+      "sequence_key": [
+        "event_id",
+        "particle_ordinal"
+      ],
+      "keys": [
+        [
+          "event_id",
+          "particle_ordinal"
+        ]
+      ],
+      "references": [
+        {
+          "columns": [
+            "event_id"
+          ],
+          "to": {
+            "scope": "block",
+            "block": "events",
+            "columns": [
+              "event_id"
+            ]
+          }
+        }
+      ],
+      "columns": [
+        {
+          "name": "event_id",
+          "dtype": "u8",
+          "description": "Owning event (references events.event_id)",
+          "unit": "1"
+        },
+        {
+          "name": "particle_ordinal",
+          "dtype": "u4",
+          "description": "PROPOSED: position of the crossing within its event; not written today",
+          "unit": "1"
+        },
+        {
+          "name": "source_photon_id",
+          "dtype": "i2",
+          "description": "0 prompt, 1 annihilation 1, 2 annihilation 2, -1 other",
+          "unit": "1"
+        },
+        {
+          "name": "pdg_code",
+          "dtype": "i4",
+          "description": "PDG particle code",
+          "unit": "1"
+        },
+        {
+          "name": "pos_x_mm",
+          "dtype": "f4",
+          "description": "Exit position on the CT bounding box (x)",
+          "unit": "mm"
+        },
+        {
+          "name": "pos_y_mm",
+          "dtype": "f4",
+          "description": "Exit position on the CT bounding box (y)",
+          "unit": "mm"
+        },
+        {
+          "name": "pos_z_mm",
+          "dtype": "f4",
+          "description": "Exit position on the CT bounding box (z)",
+          "unit": "mm"
+        },
+        {
+          "name": "dir_x",
+          "dtype": "f4",
+          "description": "Unit direction vector (x)",
+          "unit": "1"
+        },
+        {
+          "name": "dir_y",
+          "dtype": "f4",
+          "description": "Unit direction vector (y)",
+          "unit": "1"
+        },
+        {
+          "name": "dir_z",
+          "dtype": "f4",
+          "description": "Unit direction vector (z)",
+          "unit": "1"
+        },
+        {
+          "name": "kinetic_energy_keV",
+          "dtype": "f4",
+          "description": "Kinetic energy at exit",
+          "unit": "keV"
+        },
+        {
+          "name": "time_ps",
+          "dtype": "f8",
+          "description": "Time at exit since the event start",
+          "unit": "ps"
+        },
+        {
+          "name": "n_compton",
+          "dtype": "u1",
+          "description": "Compton scatters before exit; NULL when not recorded",
+          "unit": "1",
+          "nullable": true
+        },
+        {
+          "name": "n_rayleigh",
+          "dtype": "u1",
+          "description": "Rayleigh scatters before exit; NULL when not recorded",
+          "unit": "1",
+          "nullable": true
+        }
+      ]
+    }
+  }
+}

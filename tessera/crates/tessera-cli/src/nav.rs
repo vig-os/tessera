@@ -5,7 +5,13 @@
 //! block is an array or a (possibly multi-block) table whose columns are the leaves. `tree` renders
 //! the whole hierarchy, `ls` lists one node's children, and `read` extracts table data — the latter
 //! over the **logical** table view (`tessera_io::LogicalTableView`), so a column read spans every
-//! `events_NNNN` block transparently (the cross-block query, on the command line).
+//! block of a multi-block table transparently (the cross-block query, on the command line).
+//!
+//! A table name means the same table in every verb (ADR-0064 §7): the leaves `pairs/0000`,
+//! `pairs/0001`, … of a partitioned table are one node `pairs/` in `ls` and `tree` (the leaves are
+//! listed by `ls FILE pairs` and `tree --full`), and `read pairs` reads them all in index order. The
+//! legacy `events_NNNN` blocks are still listed one per line, as they always were, and still read as
+//! one table `events`. Each leaf stays a block, addressable by its full name.
 //!
 //! Output goes to a caller-supplied `Write` (not `println!`) so the commands are unit-testable and
 //! the binary's `main` owns the actual stdout/stderr — `main.rs` is the CLI entrypoint that may print.
@@ -14,7 +20,9 @@ use std::io::Write;
 use std::path::Path;
 
 use serde_json::Value;
-use tessera_core::block::BlockKind;
+use tessera_core::block::partition::marker;
+use tessera_core::block::table::TableSpec;
+use tessera_core::block::{group_specs, table_group, BlockKind, BlockRef, LogicalTableError};
 use tessera_core::{Result, SchemaRegistry};
 use tessera_io::array::ArrayData;
 use tessera_io::{ColumnData, Reader};
@@ -49,6 +57,211 @@ impl Format {
             _ => ',',
         }
     }
+}
+
+/// Default row cap for text output when the user asks for no particular number — a preview length, not a
+/// limit on what the tool can emit. Shared by `read`, `slice` and `project`.
+pub const DEFAULT_GRID_ROWS: u64 = 20;
+
+/// Resolve the row cap for a data-emitting verb. `None` means "no cap — write everything".
+///
+/// An explicit request (`--limit`, or `read`'s `--rows`/`--head`/`--tail`/`--at`) always wins, anywhere.
+/// The **default** cap applies only when stdout is a **terminal**: a human at a prompt wants a preview,
+/// but `> out.csv` or `| wc -l` is a script, and handing a script 20 of 4097 rows with nothing but a
+/// stderr note is silent data loss rather than a courtesy. Found by the #387 review; `read` had shipped
+/// that way since #391, so the rule is applied there too.
+pub fn row_cap(explicit: Option<u64>, all: bool, interactive: bool) -> Option<u64> {
+    match (all, explicit) {
+        (true, _) => None,
+        (false, Some(n)) => Some(n),
+        (false, None) if interactive => Some(DEFAULT_GRID_ROWS),
+        (false, None) => None,
+    }
+}
+
+/// What `slice`/`project` write.
+///
+/// Deliberately separate from [`Format`] (the table formats) because the valid sets differ: an array
+/// plane has no `ndjson` shape, and a table has no `npy`/`png`. A `ValueEnum` rather than a string parsed
+/// at runtime, so clap rejects a typo at parse time and `--help` lists the values from one place instead
+/// of a hand-maintained doc string that can drift (#387).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum GridFormat {
+    /// Comma-separated rows (default).
+    Csv,
+    /// Tab-separated rows.
+    Tsv,
+    /// One self-describing object: `{shape, dtype, values: [[row], …]}`.
+    Json,
+    /// NumPy `.npy` at the array's own dtype — the **lossless** path for analysis.
+    Npy,
+    /// 8-bit greyscale PNG — a **lossy preview**, windowed to 0–255. Not data.
+    Png,
+}
+
+impl GridFormat {
+    /// Text formats are line-oriented and honour the row cap. The binary ones always write the whole
+    /// plane: a truncated `.npy` or `.png` is a **corrupt artifact**, not a preview.
+    pub fn is_text(self) -> bool {
+        !matches!(self, GridFormat::Npy | GridFormat::Png)
+    }
+    fn sep(self) -> char {
+        if matches!(self, GridFormat::Tsv) {
+            '\t'
+        } else {
+            ','
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            GridFormat::Csv => "csv",
+            GridFormat::Tsv => "tsv",
+            GridFormat::Json => "json",
+            GridFormat::Npy => "npy",
+            GridFormat::Png => "png",
+        }
+    }
+}
+
+/// The dtype of a grid, which is **two** facts: what the array stores, and what these particular values
+/// are. They diverge whenever the values were computed rather than read — `--physical` applies a rescale,
+/// and `project --mode mean` averages — and a document that reported only the stored type would be
+/// describing something other than the numbers beside it (#387 review).
+pub enum GridData {
+    /// Untransformed samples, **native dtype intact** — nothing computed them, so they are the array's own
+    /// values. `npy` writes the real descr (`<i8`, `|b1`, …) and integer text prints exactly, rather than
+    /// through an `f64` that cannot represent `i64`/`u64` magnitudes above 2^53 (#478).
+    Native(ArrayData),
+    /// Values the CLI **computed** — a `--physical` rescale, or a reducing projection (`mean`/`sum`).
+    /// Genuinely `f64`, so that is what is emitted and declared.
+    Computed {
+        values: Vec<f64>,
+        /// The dtype the array *stores*, kept for the metadata even though the values are now floats.
+        source_dtype: String,
+    },
+}
+
+impl GridData {
+    fn len(&self) -> usize {
+        match self {
+            GridData::Native(d) => d.len(),
+            GridData::Computed { values, .. } => values.len(),
+        }
+    }
+    /// The dtype the array stores — for `source_dtype` and the png note.
+    fn stored(&self) -> &str {
+        match self {
+            GridData::Native(d) => d.dtype(),
+            GridData::Computed { source_dtype, .. } => source_dtype,
+        }
+    }
+    /// The dtype of the values actually emitted.
+    fn emitted(&self) -> &str {
+        match self {
+            GridData::Native(d) => d.dtype(),
+            GridData::Computed { .. } => "float64",
+        }
+    }
+    /// Every sample as `f64` — for the png windowing, which is 8-bit anyway.
+    fn as_f64(&self) -> Vec<f64> {
+        match self {
+            GridData::Native(d) => d.as_f64(),
+            GridData::Computed { values, .. } => values.clone(),
+        }
+    }
+    /// One cell as text, **exactly**. An integer array prints its integer, never an `f64` round-trip —
+    /// which is what made `i64` above 2^53 lossy in CSV as well as in `npy`.
+    fn text_cell(&self, i: usize) -> String {
+        match self {
+            GridData::Native(d) => native_cell(d, i).unwrap_or_default(),
+            GridData::Computed { values, .. } => values.get(i).map_or(String::new(), fmt_f64),
+        }
+    }
+    /// One cell as JSON, exactly — integers as integers, floats keeping their float-ness.
+    fn json_cell(&self, i: usize) -> Value {
+        match self {
+            GridData::Native(d) => native_json(d, i),
+            GridData::Computed { values, .. } => {
+                values.get(i).map_or(Value::Null, |v| json_num(*v, true))
+            }
+        }
+    }
+}
+
+/// The numpy `descr` for a grid: the element's code with its byte-order char. Single-byte types take
+/// `|` (byte order is not applicable), which is what `numpy.lib.format` itself writes.
+fn npy_descr(d: &ArrayData) -> String {
+    let code = d.numpy_code();
+    let order = if matches!(code, "i1" | "u1" | "b1") {
+        '|'
+    } else {
+        '<'
+    };
+    format!("{order}{code}")
+}
+
+/// One native sample as text — exact for every width, unlike a detour through `f64`.
+fn native_cell(d: &ArrayData, i: usize) -> Option<String> {
+    Some(match d {
+        ArrayData::I8(v) => v.get(i)?.to_string(),
+        ArrayData::U8(v) => v.get(i)?.to_string(),
+        ArrayData::I16(v) => v.get(i)?.to_string(),
+        ArrayData::I32(v) => v.get(i)?.to_string(),
+        ArrayData::I64(v) => v.get(i)?.to_string(),
+        ArrayData::U16(v) => v.get(i)?.to_string(),
+        ArrayData::U32(v) => v.get(i)?.to_string(),
+        ArrayData::U64(v) => v.get(i)?.to_string(),
+        ArrayData::F16(v) => fmt_f64(&f64::from(*v.get(i)?)),
+        ArrayData::F32(v) => fmt_f64(&f64::from(*v.get(i)?)),
+        ArrayData::F64(v) => fmt_f64(v.get(i)?),
+        ArrayData::Bool(v) => u8::from(*v.get(i)?).to_string(),
+    })
+}
+
+/// One native sample as JSON — integers stay integers at full width (`serde_json` carries `i64`/`u64`
+/// natively), so a `u64` beyond `f64`'s mantissa survives the document too.
+fn native_json(d: &ArrayData, i: usize) -> Value {
+    let num = |o: Option<Value>| o.unwrap_or(Value::Null);
+    match d {
+        ArrayData::I8(v) => num(v.get(i).map(|&x| Value::from(i64::from(x)))),
+        ArrayData::U8(v) => num(v.get(i).map(|&x| Value::from(u64::from(x)))),
+        ArrayData::I16(v) => num(v.get(i).map(|&x| Value::from(i64::from(x)))),
+        ArrayData::I32(v) => num(v.get(i).map(|&x| Value::from(i64::from(x)))),
+        ArrayData::I64(v) => num(v.get(i).map(|&x| Value::from(x))),
+        ArrayData::U16(v) => num(v.get(i).map(|&x| Value::from(u64::from(x)))),
+        ArrayData::U32(v) => num(v.get(i).map(|&x| Value::from(u64::from(x)))),
+        ArrayData::U64(v) => num(v.get(i).map(|&x| Value::from(x))),
+        ArrayData::F16(v) => num(v.get(i).map(|&x| json_num(f64::from(x), true))),
+        ArrayData::F32(v) => num(v.get(i).map(|&x| json_num(f64::from(x), true))),
+        ArrayData::F64(v) => num(v.get(i).map(|&x| json_num(x, true))),
+        ArrayData::Bool(v) => num(v.get(i).map(|&x| Value::from(u64::from(x)))),
+    }
+}
+
+/// How much of a grid to write, and how to window a preview image.
+pub struct GridOpts {
+    pub format: GridFormat,
+    /// `Some(n)` caps **text** output at `n` rows; `None` means the caller gave no `--limit`, so a text
+    /// format falls back to [`DEFAULT_GRID_ROWS`] and a binary one writes everything.
+    pub limit: Option<u64>,
+    /// `--all`: write every row (text formats; binary already does).
+    pub all: bool,
+    /// Is stdout a terminal? Decides whether the **default** cap applies at all — see [`row_cap`].
+    pub interactive: bool,
+    /// `png` only: an explicit intensity window `(lo, hi)`. `None` auto-windows on the plane's own
+    /// finite min/max.
+    pub window: Option<(f64, f64)>,
+}
+
+/// What [`write_grid`] emitted, so `main` can print notes to stderr without `nav` touching it.
+#[derive(Debug)]
+pub struct GridResult {
+    pub shown: u64,
+    pub total: u64,
+    /// True when the row cap hid some rows.
+    pub truncated: bool,
+    /// A one-line advisory — currently the `png` "this is a lossy preview, windowed to …" note.
+    pub note: Option<String>,
 }
 
 /// Shorten a `blake3:<hex>` digest to a glanceable prefix for tree/inspect rendering.
@@ -223,6 +436,118 @@ fn block_children(kind: &BlockKind, spec: &Value) -> Vec<String> {
     }
 }
 
+/// A partitioned table (ADR-0064) as `ls` and `tree` show it: one node standing for its leaves and
+/// their registered children (a leaf's `.cidx`).
+struct TableNode<'a> {
+    /// The table's name (`pairs`); its blocks are the ones under `pairs/`.
+    name: &'a str,
+    /// The leaves' specs in index order, or why the name is refused (the typed error every reader
+    /// gives, shown rather than hidden).
+    specs: Result<Vec<TableSpec>>,
+}
+
+impl<'a> TableNode<'a> {
+    /// Does the block `name` belong to this node (any block under `<table>/`)?
+    fn holds(&self, name: &str) -> bool {
+        is_under(name, self.name)
+    }
+
+    /// Every block under the node, in manifest order: the leaves, and their sidecars.
+    fn blocks<'b>(
+        &self,
+        blocks: &'b [BlockRef],
+    ) -> impl Iterator<Item = &'b BlockRef> + use<'a, 'b> {
+        let name = self.name;
+        blocks
+            .iter()
+            .filter(move |b| is_under(b.name.as_str(), name))
+    }
+
+    /// `table, 3 blocks, 8 rows`, or the reason the name does not resolve.
+    fn headline(&self) -> String {
+        match &self.specs {
+            Ok(specs) => format!(
+                "table, {} blocks, {} rows",
+                specs.len(),
+                thousands(specs.iter().map(|s| s.rows).sum())
+            ),
+            Err(e) => format!("not a valid table: {e}"),
+        }
+    }
+
+    /// The table's columns, rendered like a single table block's (every leaf has the same ones).
+    fn columns(&self) -> Vec<String> {
+        match &self.specs {
+            Ok(specs) => specs
+                .first()
+                .and_then(|s| serde_json::to_value(s).ok())
+                .map(|spec| block_children(&BlockKind::Table, &spec))
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+/// Is the block `name` under the node `node` (`node/…`, at any depth)?
+fn is_under(name: &str, node: &str) -> bool {
+    name.strip_prefix(node).is_some_and(|r| r.starts_with('/'))
+}
+
+/// The partitioned tables of a manifest, in the manifest order of their first leaf: every node
+/// directly above a block that carries a partition marker. A malformed marker counts as one, so the
+/// node shows its error rather than its blocks passing as unrelated. A marker on a block with no
+/// parent (`StrayMarker`) makes no node: that block is listed as itself, and `read` refuses it.
+fn table_nodes(blocks: &[BlockRef]) -> Vec<TableNode<'_>> {
+    let mut nodes: Vec<TableNode> = Vec::new();
+    for b in blocks {
+        let Some((name, _)) = b.name.as_str().rsplit_once('/') else {
+            continue;
+        };
+        if matches!(marker(b), Ok(None)) || nodes.iter().any(|n| n.name == name) {
+            continue;
+        }
+        let specs = table_group(blocks, name).and_then(|g| group_specs(blocks, name, &g));
+        nodes.push(TableNode { name, specs });
+    }
+    nodes
+}
+
+/// One top-level entry of `ls` and `tree`: a block, or a partitioned table standing for its blocks.
+enum Entry<'a> {
+    /// A block outside every partitioned table.
+    Block(&'a BlockRef),
+    /// A partitioned table, at the place of its first block.
+    Table(&'a TableNode<'a>),
+}
+
+/// The blocks of a manifest as `ls` and `tree` list them: in manifest order, with every partitioned
+/// table of `tables` in one entry where its first block is.
+fn entries<'a>(blocks: &'a [BlockRef], tables: &'a [TableNode<'a>]) -> Vec<Entry<'a>> {
+    let mut out: Vec<Entry> = Vec::new();
+    let mut shown: Vec<&str> = Vec::new();
+    for b in blocks {
+        match tables.iter().find(|t| t.holds(b.name.as_str())) {
+            Some(t) if shown.contains(&t.name) => {}
+            Some(t) => {
+                shown.push(t.name);
+                out.push(Entry::Table(t));
+            }
+            None => out.push(Entry::Block(b)),
+        }
+    }
+    out
+}
+
+/// A block's `tree` line: name, headline, digest.
+fn block_line(b: &BlockRef) -> String {
+    format!(
+        "{:<18} {}   {}",
+        b.name,
+        block_headline(&b.kind, &b.spec),
+        short_digest(b.digest.as_deref())
+    )
+}
+
 /// `product` + schema-validity + seal + signature badges for the tree root / inspect header.
 /// Validation is against the **embedded** schema when the file carries one (self-describing), else
 /// the built-in registry (legacy / open-world) — see [`tessera_core::validate_manifest`].
@@ -306,14 +631,25 @@ pub fn tree(file: &Path, full: bool, verify: bool, out: &mut dyn Write) -> Resul
             .collect();
         nodes.push((format!("schema  ({} v{})", s.product, s.version), kids));
     }
-    for b in &m.blocks {
-        let header = format!(
-            "{:<18} {}   {}",
-            b.name,
-            block_headline(&b.kind, &b.spec),
-            short_digest(b.digest.as_deref())
-        );
-        nodes.push((header, block_children(&b.kind, &b.spec)));
+    // A partitioned table is one node, its columns as children; `--full` adds its blocks, and an
+    // invalid one always lists them, since they are all there is to show.
+    let tables = table_nodes(&m.blocks);
+    for entry in entries(&m.blocks, &tables) {
+        let t = match entry {
+            Entry::Block(b) => {
+                nodes.push((block_line(b), block_children(&b.kind, &b.spec)));
+                continue;
+            }
+            Entry::Table(t) => t,
+        };
+        let mut kids = t.columns();
+        if full || t.specs.is_err() {
+            kids.extend(t.blocks(&m.blocks).map(block_line));
+        }
+        nodes.push((
+            format!("{:<18} {}", format!("{}/", t.name), t.headline()),
+            kids,
+        ));
     }
     if !m.sources.is_empty() {
         let kids = m
@@ -405,6 +741,224 @@ fn compact_value(v: &Value, full: bool) -> String {
     } else {
         s
     }
+}
+
+/// The `inspect` render of the sealed ADR-0058 §1 **producer identity**.
+///
+/// [`ProducerRef::display`](tessera_core::ProducerRef::display) folds the build fields into a
+/// `tool/version (commit)` one-liner — right for an inline mention, but it drops `git_repo` and
+/// `dirty` entirely, so two of the three sealed build fields had no operator surface at all (#417).
+/// `inspect` is that surface, so it shows every field the manifest actually carries: `tool/version`
+/// on the header line, one indented line per present build field. A legacy bare-string producer
+/// (pre-ADR-0058 manifests) round-trips verbatim — there is nothing more to show.
+pub(crate) fn producer_lines(p: &tessera_core::ProducerRef) -> Vec<String> {
+    let tessera_core::ProducerRef::Structured(s) = p else {
+        return vec![format!("producer      {}", p.display())];
+    };
+    let mut lines = vec![format!("producer      {}/{}", s.tool, s.version)];
+    for (k, v) in [
+        ("git_repo", s.git_repo.clone()),
+        ("git_commit", s.git_commit.clone()),
+        ("dirty", s.dirty.map(|d| d.to_string())),
+    ] {
+        if let Some(v) = v {
+            lines.push(format!("  {k:<12}{v}"));
+        }
+    }
+    lines
+}
+
+/// One-line summary of what a generation record holds — `N config keys`, and/or the `config_ref`
+/// digest of a carried config block. Shared by `inspect`'s multi-line render and `provenance`'s
+/// per-hop line so the two can never describe the same recipe differently.
+pub(crate) fn generation_summary(g: &tessera_core::Generation, full: bool) -> String {
+    let mut head = Vec::new();
+    if !g.config.is_empty() {
+        let plural = if g.config.len() == 1 { "" } else { "s" };
+        head.push(format!("{} config key{plural}", g.config.len()));
+    }
+    if let Some(r) = &g.config_ref {
+        let digest = if full { r.clone() } else { short_hash(r) };
+        head.push(format!("config_ref {digest}"));
+    }
+    if head.is_empty() {
+        // A sealed-but-empty record is still state the operator should see; printing nothing would
+        // read as "this product has no recipe", which is a different fact.
+        return "(empty)".to_string();
+    }
+    head.join(" · ")
+}
+
+/// The `inspect` render of the sealed ADR-0058 §2 **generation recipe** — the answer to "how was
+/// this made?", which until #417 no CLI verb printed at all.
+///
+/// The header line summarises what the record holds (`N config keys`, and/or the `config_ref`
+/// digest of a carried config block); the body is one line per config key. The bag is deliberately
+/// **non-opinionated** (ADR-0058 §2), so the keys are rendered in the manifest's own order and are
+/// never interpreted, validated, or re-grouped — display only. Default caps the body at
+/// [`GENERATION_KEYS_SHOWN`] keys and elides long values, mirroring how `sources` collapses; `--full`
+/// prints every key and the full digest.
+///
+/// Resolving a `config_ref` to the bytes of the block it points at is a separate, larger job
+/// (ADR-0058 §2 / #417) — this prints the digest, not the payload.
+pub(crate) fn generation_lines(g: &tessera_core::Generation, full: bool) -> Vec<String> {
+    let mut lines = vec![format!("generation    {}", generation_summary(g, full))];
+    let show = if full {
+        g.config.len()
+    } else {
+        g.config.len().min(GENERATION_KEYS_SHOWN)
+    };
+    for (k, v) in g.config.iter().take(show) {
+        lines.push(format!("  - {k:<22} {}", compact_value(v, full)));
+    }
+    if g.config.len() > show {
+        lines.push(format!(
+            "    … (+{} more, --full to list all)",
+            g.config.len() - show
+        ));
+    }
+    lines
+}
+
+/// How many `generation.config` keys `inspect` prints before collapsing — the same cap `ls sources`
+/// uses for a multi-file provenance edge, so the two summaries read alike.
+const GENERATION_KEYS_SHOWN: usize = 8;
+
+/// How large a carried config block `inspect --resolve-config` inlines into its output. Past this it
+/// names the block and prints the `extract` command instead — rendering holds the bytes in memory
+/// while `extract` streams them, and ADR-0058 §2's `config_ref` exists *for* large vendor config (the
+/// DUPLET DAQ `acq.cfg.LYSO4x9_…` family), so the big case is the designed-for one, not the exception.
+const CONFIG_INLINE_MAX: u64 = 64 * 1024;
+
+/// A carried config block, located from the **manifest alone** — no payload fetch. A Blob's spec
+/// records its `size` precisely so a manifest-only reader knows it ([`tessera_core::block::blob::BlobSpec`]),
+/// which is what lets the inline-or-extract decision be made before reading a byte of a multi-GB config.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ConfigBlock {
+    pub(crate) name: String,
+    /// The blob's recorded original filename — the natural `extract --out` target. `None` when the
+    /// `config_ref` points at a non-Blob block, which carries no filename.
+    pub(crate) filename: Option<String>,
+    pub(crate) media_type: Option<String>,
+    /// Recorded byte size. `None` for a non-Blob block, whose spec makes no such promise — treated
+    /// as "unknown, therefore assume large", so an unknown size never inlines.
+    pub(crate) size: Option<u64>,
+}
+
+/// Find the block a `generation.config_ref` digest points at. `config_ref` is a `blake3:` digest of a
+/// block carried in the **same** `.tsra` (ADR-0058 §2), so resolution is a lookup over the manifest's
+/// own block list — never a filesystem or network reach. Returns `None` when nothing matches, which
+/// the caller turns into [`tessera_core::Error::UnresolvedConfigRef`].
+pub(crate) fn locate_config(m: &tessera_core::Manifest, digest: &str) -> Option<ConfigBlock> {
+    let b = m
+        .blocks
+        .iter()
+        .find(|b| b.digest.as_deref() == Some(digest))?;
+    // A Blob spec carries `filename`/`media_type`/`size`; any other block kind does not, and a spec
+    // that fails to parse as one is treated the same way — missing metadata, not an error, because
+    // the digest did resolve and that is the question being asked.
+    let blob: Option<tessera_core::block::blob::BlobSpec> =
+        serde_json::from_value(b.spec.clone()).ok();
+    Some(ConfigBlock {
+        name: b.name.to_string(),
+        filename: blob.as_ref().map(|s| s.filename.clone()),
+        media_type: blob.as_ref().and_then(|s| s.media_type.clone()),
+        size: blob.as_ref().map(|s| s.size),
+    })
+}
+
+/// Locate the block a `generation.config_ref` names, or fail loudly (#452 part 1).
+///
+/// `config_ref` is a `blake3:` digest of a block carried in the **same** `.tsra` (ADR-0058 §2), so
+/// resolution is a lookup over the manifest's own block list — never a filesystem or network reach.
+/// A digest that matches nothing is a broken promise, not a missing option: the reference is sealed,
+/// so either the block was dropped or it points into a different product. Callers reach this only by
+/// asking to resolve, which is why erroring here still leaves plain `inspect` working on the file.
+pub(crate) fn config_block(
+    m: &tessera_core::Manifest,
+    label: &str,
+    digest: &str,
+) -> Result<ConfigBlock> {
+    locate_config(m, digest).ok_or_else(|| tessera_core::Error::UnresolvedConfigRef {
+        file: label.to_string(),
+        digest: digest.to_string(),
+        blocks: m.blocks.len(),
+    })
+}
+
+/// Will this config be inlined, i.e. must the caller read its payload? Unknown size counts as large:
+/// a non-Blob block makes no size promise, and guessing wrong means buffering an arbitrary payload
+/// just to render it.
+pub(crate) fn config_inlines(cb: &ConfigBlock) -> bool {
+    cb.size.is_some_and(|n| n <= CONFIG_INLINE_MAX)
+}
+
+/// The `inspect --resolve-config` render: the config the product was actually generated with, so the
+/// recipe reads end to end instead of stopping at a hash the operator has to chase by hand.
+///
+/// `bytes` is `Some` exactly when [`config_inlines`] said so. Three outcomes, and telling them apart
+/// is the point:
+/// - **inlined** — a small, valid-UTF-8 config is printed verbatim under the `generation` block.
+/// - **not inlined** — too large, or not UTF-8: prints the block plus the exact `tessera extract`
+///   command, which streams in bounded memory and verifies the digest before the bytes land. Refusing
+///   to dump binary at a terminal is the rule `slice --format npy` already follows.
+/// - **unresolved** — handled by [`config_block`] before this is reached.
+pub(crate) fn config_lines(
+    cb: &ConfigBlock,
+    bytes: Option<&[u8]>,
+    label: &str,
+    full: bool,
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "  config      block '{}'{}{}",
+        cb.name,
+        cb.filename
+            .as_deref()
+            .map(|f| format!(" ({f})"))
+            .unwrap_or_default(),
+        cb.size.map(|n| format!(" · {n} B")).unwrap_or_default(),
+    )];
+    if let Some(mt) = &cb.media_type {
+        lines.push(format!("  media_type  {mt}"));
+    }
+    let Some(bytes) = bytes else {
+        lines.push(extract_hint(label, cb, "larger than the inline limit"));
+        return lines;
+    };
+    match std::str::from_utf8(bytes) {
+        Ok(text) => {
+            let total = text.lines().count();
+            let show = if full {
+                total
+            } else {
+                total.min(CONFIG_LINES_SHOWN)
+            };
+            for line in text.lines().take(show) {
+                lines.push(format!("  │ {line}"));
+            }
+            if total > show {
+                lines.push(format!(
+                    "  │ … (+{} more line(s), --full to print all)",
+                    total - show
+                ));
+            }
+        }
+        Err(_) => lines.push(extract_hint(label, cb, "not valid UTF-8")),
+    }
+    lines
+}
+
+/// How many lines of an inlined config `inspect --resolve-config` prints before collapsing, mirroring
+/// [`GENERATION_KEYS_SHOWN`]. `--full` prints all of them.
+const CONFIG_LINES_SHOWN: usize = 20;
+
+/// The copy-pasteable `extract` command for a config that will not be inlined, and why it is not.
+fn extract_hint(label: &str, cb: &ConfigBlock, why: &str) -> String {
+    let out = cb.filename.as_deref().unwrap_or(&cb.name);
+    format!(
+        "  payload     not inlined ({why}) — tessera extract {label} {} --out {out}",
+        cb.name
+    )
 }
 
 /// Middle-elide a string to `max` chars, keeping the head **and** the (informative) tail — for a
@@ -532,8 +1086,14 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
                 )
                 .map_err(tessera_core::Error::from)?;
             }
-            for b in &m.blocks {
-                writeln!(out, "{:<18} {:?}", b.name, b.kind).map_err(tessera_core::Error::from)?;
+            // A partitioned table is one line, where its first leaf is; `ls FILE pairs` lists it.
+            let tables = table_nodes(&m.blocks);
+            for entry in entries(&m.blocks, &tables) {
+                match entry {
+                    Entry::Table(t) => writeln!(out, "{}/  {}", t.name, t.headline()),
+                    Entry::Block(b) => writeln!(out, "{:<18} {:?}", b.name, b.kind),
+                }
+                .map_err(tessera_core::Error::from)?;
             }
             if !m.sources.is_empty() {
                 writeln!(out, "sources/  ({} edges)", m.sources.len())
@@ -586,35 +1146,7 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
             }
             Ok(())
         }
-        Some(p) if p == "extra" || p == "extra/" => {
-            if m.extra.is_empty() {
-                writeln!(out, "(no extra fields)").map_err(tessera_core::Error::from)?;
-            }
-            for (k, v) in &m.extra {
-                let kind = match v {
-                    Value::Object(o) => format!("object, {} keys", o.len()),
-                    Value::Array(a) => format!("array, {} items", a.len()),
-                    Value::String(_) => "string".into(),
-                    other => other.to_string(),
-                };
-                writeln!(out, "{k}  ({kind})").map_err(tessera_core::Error::from)?;
-            }
-            Ok(())
-        }
-        Some(p) if p.starts_with("extra/") => {
-            let key = &p["extra/".len()..];
-            match m.extra.get(key) {
-                Some(v) => writeln!(out, "{}", serde_json::to_string_pretty(v)?)
-                    .map_err(tessera_core::Error::from)?,
-                None => {
-                    return Err(tessera_core::Error::Invalid(format!(
-                        "no extra key '{key}' (keys: {})",
-                        m.extra.keys().cloned().collect::<Vec<_>>().join(", ")
-                    )))
-                }
-            }
-            Ok(())
-        }
+        Some(p) if is_extra_path(p) => write_extra(m, p, out),
         Some(p) if p == "aux" || p == "aux/" => {
             // List the embedded aux members carried inside the container (ADR-0042). No sizes are
             // shown — an aux member is opaque JSON / arbitrary bytes; `ls FILE aux/<name>` reads it.
@@ -650,6 +1182,12 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
             Ok(())
         }
         Some(node) => {
+            let table = node.trim_end_matches('/');
+            if !m.blocks.iter().any(|b| b.name == node) {
+                if let Some(t) = table_nodes(&m.blocks).into_iter().find(|t| t.name == table) {
+                    return ls_table(t, &m.blocks, out);
+                }
+            }
             let b = m.blocks.iter().find(|b| b.name == node).ok_or_else(|| {
                 tessera_core::Error::Invalid(format!(
                     "no node '{node}' in {} (try `tessera ls {}` for the top level)",
@@ -665,6 +1203,27 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
             Ok(())
         }
     }
+}
+
+/// `ls FILE <table>` for a partitioned table: its columns, then every block under it (its leaves in
+/// index order, and their sidecars). An invalid table is refused with its typed error, as `read`
+/// refuses it.
+fn ls_table(t: TableNode, blocks: &[BlockRef], out: &mut dyn Write) -> Result<()> {
+    let header = format!("{}/   {}", t.name, t.headline());
+    let lines: Vec<String> = t
+        .columns()
+        .into_iter()
+        .chain(
+            t.blocks(blocks)
+                .map(|b| format!("{:<18} {}", b.name, block_headline(&b.kind, &b.spec))),
+        )
+        .collect();
+    t.specs?;
+    writeln!(out, "{header}").map_err(tessera_core::Error::from)?;
+    for line in lines {
+        writeln!(out, "  {line}").map_err(tessera_core::Error::from)?;
+    }
+    Ok(())
 }
 
 /// A row selection for [`read`], resolved against the table's row count **at read time** — so
@@ -730,7 +1289,8 @@ impl RowSpec {
 pub struct ReadOpts<'a> {
     /// The `.tsra` to read.
     pub file: &'a Path,
-    /// The table block (or multi-block prefix like `events`) to extract.
+    /// The table to extract: a block, or the name of a multi-block table (`pairs` for the leaves
+    /// `pairs/NNNN`, `events` for the legacy `events_NNNN`).
     pub block: &'a str,
     /// Columns to project (empty = all columns, in schema order).
     pub columns: Vec<String>,
@@ -739,8 +1299,11 @@ pub struct ReadOpts<'a> {
     pub rows: Option<RowSpec>,
     /// Emit every row (overrides `limit`).
     pub all: bool,
-    /// Default row cap when neither `rows` nor `all` is given.
-    pub limit: u64,
+    /// The user's explicit `--limit`, if any. `None` falls back to the shared [`row_cap`] rule, where the
+    /// default applies **only** to an interactive terminal.
+    pub limit: Option<u64>,
+    /// Is stdout a terminal? See [`row_cap`] — piping or redirecting gets every row.
+    pub interactive: bool,
     /// Output format.
     pub format: Format,
 }
@@ -757,10 +1320,25 @@ pub struct ReadResult {
 }
 
 /// `tessera read FILE BLOCK [--column C]… [--rows A:B | --all]` — extract table data over the
-/// **logical** view, so a read of `events` spans every `events_NNNN` block (cross-block query).
+/// **logical** view, so a read of `pairs` spans every leaf `pairs/NNNN` of a partitioned table, and a
+/// read of `events` every legacy `events_NNNN` block (cross-block query).
 /// Columns are projected (only the requested columns' segments are decoded per block).
-pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
+pub fn read(mut opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
+    // `pairs/`, as `ls` and `tree` print a table, names `pairs`: no block name ends in `/`.
+    opts.block = opts.block.trim_end_matches('/');
     let mut r = Reader::open(opts.file)?;
+    // `extra/*` is manifest metadata rather than a block, so it matches neither the non-table-block
+    // guard below nor any table prefix — it used to fall through to `logical_table` and surface
+    // "no blocks for prefix 'extra/…'" (#303). Serve it as JSON through the same renderer `ls` uses, so
+    // both navigation verbs address one namespace. Not row-oriented, hence never truncated.
+    if is_extra_path(opts.block) {
+        write_extra(r.manifest(), opts.block, out)?;
+        return Ok(ReadResult {
+            shown: 1,
+            total: 1,
+            truncated: false,
+        });
+    }
     // `read` is table-only. If the target names a non-table block (array volume, blob, index), fail
     // with a clear pointer instead of the opaque "missing field columns" from the table decoder
     // (#253/#268). Covers Array/Blob/ChunkIndex; a multi-block table prefix like `events` won't
@@ -780,6 +1358,35 @@ pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
                 block_headline(&b.kind, &b.spec),
                 opts.file.display(),
                 opts.block,
+            )));
+        }
+    }
+    // A node that holds no table (a `notes/` of blobs, a `tessera pyramid` `volume/` of array
+    // levels) gets the same pointer, naming what it does hold.
+    if let Err(tessera_core::Error::LogicalTable {
+        reason: LogicalTableError::NotATable { kind },
+        ..
+    }) = r.table_group(opts.block)
+    {
+        if kind == "node" {
+            // What the node holds, as `ls` lists it: a partitioned table under it is one `name/`.
+            let blocks = &r.manifest().blocks;
+            let tables = table_nodes(blocks);
+            let held: Vec<String> = entries(blocks, &tables)
+                .into_iter()
+                .filter_map(|e| match e {
+                    Entry::Table(t) => is_under(t.name, opts.block).then(|| format!("{}/", t.name)),
+                    Entry::Block(b) => {
+                        is_under(b.name.as_str(), opts.block).then(|| b.name.to_string())
+                    }
+                })
+                .collect();
+            return Err(tessera_core::Error::Invalid(format!(
+                "'{}' is a node that holds {}, not a table — `read` is for tables. Address one of \
+                 them by its full name, or `tsra ls {}` for the top level.",
+                opts.block,
+                elide(&held.join(", "), 120),
+                opts.file.display(),
             )));
         }
     }
@@ -804,13 +1411,16 @@ pub fn read(opts: ReadOpts, out: &mut dyn Write) -> Result<ReadResult> {
     };
 
     // Resolve the row window: explicit selection (resolved vs the row count), or all, or the cap.
+    // The default cap is a preview for a human, not a limit on what a script may receive (#387 review):
+    // `read … > out.csv` used to hand over 20 of 4097 rows with only a stderr note. An explicit
+    // `--rows`/`--head`/`--tail`/`--at`/`--limit` still applies everywhere.
+    let cap = row_cap(opts.limit, opts.all, opts.interactive);
     let (lo, hi) = match opts.rows {
         Some(spec) => spec.resolve(total),
-        None if opts.all => (0, total),
-        None => (0, opts.limit.min(total)),
+        None => (0, cap.map_or(total, |n| n.min(total))),
     };
     // Only the default-cap path is a silent truncation worth warning about.
-    let truncated = opts.rows.is_none() && !opts.all && hi < total;
+    let truncated = opts.rows.is_none() && hi < total;
     let nrows = hi.saturating_sub(lo);
 
     // Decode each selected column (projected), slice to the window, stringify to JSON cells.
@@ -889,10 +1499,14 @@ fn open_array(
 }
 
 /// `tessera pyramid FILE BLOCK --out OUT` — build a **multiscale pyramid** of the array `BLOCK`: the
-/// full-resolution level plus successive 2× max-downsampled levels (`BLOCK/1`, `BLOCK/2`, …, each with
-/// its `WorldFrame::at_level` affine), sealed as a new `recon` product `derived_from` the source. The
-/// coarse levels answer overview/zoom without decoding the full volume (#260 phase 2). Returns the
-/// number of levels written (including L0).
+/// full-resolution level `BLOCK/0` plus successive 2× max-downsampled levels (`BLOCK/1`, `BLOCK/2`, …,
+/// each with its `WorldFrame::at_level` affine), sealed as a new `recon` product `derived_from` the
+/// source. The coarse levels answer overview/zoom without decoding the full volume (#260 phase 2).
+/// Returns the number of levels written (including L0).
+///
+/// Every level, the full-resolution one included, is a leaf under `BLOCK/` (ADR-0063's leaf rule):
+/// before ADR-0063 level 0 was the bare `BLOCK`, the parent of the other levels, so such a product
+/// reads in-zip but cannot be unpacked to a directory.
 pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) -> Result<usize> {
     let (spec, blob) = open_array(file, block)?;
     if spec.shape.len() != 3 {
@@ -910,7 +1524,11 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
     let mut data = tessera_io::array::decode(&spec, &blob)?;
     let mut blocks: Vec<(tessera_core::block::BlockRef, tessera_io::BlockPayload)> = Vec::new();
     // Level 0 — the full-resolution volume.
-    blocks.push(tessera_io::array::array_block(block, &cur_spec, &data)?);
+    blocks.push(tessera_io::array::array_block(
+        &format!("{block}/0"),
+        &cur_spec,
+        &data,
+    )?);
 
     let cap = levels.unwrap_or(8);
     let mut level = 0u32;
@@ -946,13 +1564,113 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
     Ok((level + 1) as usize)
 }
 
-/// Min / max / mean / std over an [`ArrayData`], computed in `f64` (one pass). Empty → all zero.
-fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize) {
-    macro_rules! reduce {
+/// Min / max / mean / std over an [`ArrayData`], plus the sample count and whether the reduction
+/// was **exact**.
+///
+/// **Integer dtypes reduce in exact integer arithmetic** (`i128`/`u128` sums, like
+/// [`ChunkStats`](tessera_core::chunk_index::ChunkStats)), not `f64`. That matters: an `f64` running
+/// sum stops accumulating once it passes 2^53, so a large volume silently loses the low bits of
+/// `sum`/`sum_sq` and reports a slightly wrong mean/std. Reducing the same way the chunk-index monoid
+/// does also makes this path agree BIT-FOR-BIT with `ChunkIndex::aggregate()`, which is what lets
+/// `stats` serve either source and claim `exact` for both (#347).
+///
+/// Two cases cannot be exact, and both report `false` rather than pretending:
+///   - **floats**, which have no exact integer form;
+///   - **64-bit integers whose `sum_sq` overflows the accumulator.** `i64::MAX²` is ~8.5e37 and
+///     `i128::MAX` is ~1.7e38, so three such samples overflow; `u64::MAX²` is ~3.4e38 against a
+///     `u128::MAX` of ~3.4e38, so two do. Narrower dtypes cannot overflow (`i32::MAX²` is 2^62, and
+///     you would need >2^65 samples), so they keep the unchecked fast path.
+///
+/// Empty → all zero, and exact.
+fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize, bool) {
+    /// Exact integer reduction for dtypes that provably cannot overflow `i128`.
+    /// The final `f64` conversions mirror `ChunkStats::mean`/`variance` exactly, so both paths
+    /// produce identical bits.
+    macro_rules! reduce_int {
         ($v:expr) => {{
             let n = $v.len();
             if n == 0 {
-                (0.0, 0.0, 0.0, 0.0, 0)
+                (0.0, 0.0, 0.0, 0.0, 0, true)
+            } else {
+                let mut mn = i64::MAX;
+                let mut mx = i64::MIN;
+                let mut sum: i128 = 0;
+                let mut sum_sq: i128 = 0;
+                for &x in $v.iter() {
+                    let x = x as i64;
+                    if x < mn {
+                        mn = x;
+                    }
+                    if x > mx {
+                        mx = x;
+                    }
+                    let x = x as i128;
+                    sum += x;
+                    sum_sq += x * x;
+                }
+                match moments_exact(sum, sum_sq, n) {
+                    Some((mean, std)) => (mn as f64, mx as f64, mean, std, n, true),
+                    // Cannot happen for these dtypes (see the overflow note above), but fail closed
+                    // rather than assume it.
+                    None => (mn as f64, mx as f64, f64::NAN, f64::NAN, n, false),
+                }
+            }
+        }};
+    }
+    /// Checked variant for 64-bit dtypes, where `sum_sq` genuinely can overflow. `None` on overflow,
+    /// so the caller can fall back to `f64` and label the result inexact instead of wrapping (release)
+    /// or panicking (debug) — both of which would be silent corruption of a reported statistic.
+    macro_rules! reduce_checked {
+        ($v:expr, $acc:ty, $lo:expr, $hi:expr) => {{
+            let n = $v.len();
+            if n == 0 {
+                Some((0.0, 0.0, 0.0, 0.0, 0, true))
+            } else {
+                let mut mn = $hi;
+                let mut mx = $lo;
+                let mut sum: $acc = 0;
+                let mut sum_sq: $acc = 0;
+                let mut ok = true;
+                for &x in $v.iter() {
+                    if x < mn {
+                        mn = x;
+                    }
+                    if x > mx {
+                        mx = x;
+                    }
+                    let w = x as $acc;
+                    match (
+                        sum.checked_add(w),
+                        w.checked_mul(w).and_then(|q| sum_sq.checked_add(q)),
+                    ) {
+                        (Some(a), Some(b)) => {
+                            sum = a;
+                            sum_sq = b;
+                        }
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    // `sum`/`sum_sq` fit; the variance numerator still might not, so this can
+                    // legitimately return None and send the caller to the f64 fallback.
+                    moments_exact(sum as i128, sum_sq as i128, n)
+                        .map(|(mean, std)| (mn as f64, mx as f64, mean, std, n, true))
+                } else {
+                    None
+                }
+            }
+        }};
+    }
+    /// The `f64` reduction — for float dtypes, and as the inexact fallback when an integer
+    /// accumulator overflows.
+    macro_rules! reduce_f64 {
+        ($v:expr, $exact:expr) => {{
+            let n = $v.len();
+            if n == 0 {
+                (0.0, 0.0, 0.0, 0.0, 0, true)
             } else {
                 let mut mn = f64::INFINITY;
                 let mut mx = f64::NEG_INFINITY;
@@ -965,38 +1683,274 @@ fn array_stats(d: &ArrayData) -> (f64, f64, f64, f64, usize) {
                     sum += x;
                     sumsq += x * x;
                 }
-                let mean = sum / n as f64;
-                let var = (sumsq / n as f64) - mean * mean;
-                (mn, mx, mean, var.max(0.0).sqrt(), n)
+                let (mean, std) = moments_f64(sum, sumsq, n);
+                (mn, mx, mean, std, n, $exact)
             }
         }};
     }
     match d {
-        ArrayData::I8(v) => reduce!(v),
-        ArrayData::U8(v) => reduce!(v),
-        ArrayData::I16(v) => reduce!(v),
-        ArrayData::I32(v) => reduce!(v),
-        ArrayData::I64(v) => reduce!(v),
-        ArrayData::U16(v) => reduce!(v),
-        ArrayData::U32(v) => reduce!(v),
-        ArrayData::U64(v) => reduce!(v),
-        ArrayData::F32(v) => reduce!(v),
-        ArrayData::F64(v) => reduce!(v),
-        // f16/bool have no `as f64` cast — go through the lossless f64 view.
-        ArrayData::F16(_) | ArrayData::Bool(_) => {
+        ArrayData::I8(v) => reduce_int!(v),
+        ArrayData::U8(v) => reduce_int!(v),
+        ArrayData::I16(v) => reduce_int!(v),
+        ArrayData::I32(v) => reduce_int!(v),
+        ArrayData::U16(v) => reduce_int!(v),
+        ArrayData::U32(v) => reduce_int!(v),
+        ArrayData::Bool(v) => reduce_int!(v),
+        ArrayData::I64(v) => {
+            reduce_checked!(v, i128, i64::MIN, i64::MAX).unwrap_or_else(|| reduce_f64!(v, false))
+        }
+        ArrayData::U64(v) => {
+            reduce_checked!(v, u128, u64::MIN, u64::MAX).unwrap_or_else(|| reduce_f64!(v, false))
+        }
+        ArrayData::F32(v) => reduce_f64!(v, false),
+        ArrayData::F64(v) => reduce_f64!(v, false),
+        // f16 has no `as f64` cast — go through the lossless f64 view.
+        ArrayData::F16(_) => {
             let v = d.as_f64();
-            reduce!(v)
+            reduce_f64!(v, false)
         }
     }
 }
 
+/// Mean and population standard deviation from **exact integer** raw moments.
+///
+/// Delegates to [`ChunkStats`] so the decode path and the chunk-index path are the same arithmetic
+/// by construction and cannot drift. That means the variance is `(n·Σx² − (Σx)²) / n²` with the
+/// numerator in `i128`, NOT the textbook `E[x²] − E[x]²`: converting the moments to `f64` before
+/// subtracting two nearly-equal huge numbers cancels catastrophically — for `[10¹⁵, 10¹⁵+1]` the
+/// true variance is 0.25 and the `f64` form returns 0.0.
+///
+/// Returns `None` when the variance cannot be computed exactly (overflow, #523), so the caller
+/// falls back rather than reporting a wrong number as exact.
+fn moments_exact(sum: i128, sum_sq: i128, n: usize) -> Option<(f64, f64)> {
+    let cs = tessera_core::chunk_index::ChunkStats {
+        count: n as u64,
+        min: None,
+        max: None,
+        sum,
+        sum_sq,
+    };
+    Some((cs.mean()?, cs.std_dev()?))
+}
+
+/// The `f64` moments, for float dtypes only — inherently not correctly rounded, hence never `exact`.
+fn moments_f64(sum: f64, sum_sq: f64, n: usize) -> (f64, f64) {
+    let nf = n as f64;
+    let mean = sum / nf;
+    let var = (sum_sq / nf - mean * mean).max(0.0);
+    (mean, var.sqrt())
+}
+
+/// How `stats` obtained its numbers, and whether they are exact.
+///
+/// The distinction is reported, never assumed: an approximation must never be presented as exact
+/// (#347). Today only the float full-decode path is inexact — it accumulates in `f64` — while both
+/// integer paths reduce through the same `i128` monoid and agree bit-for-bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StatsSource {
+    /// Machine-readable tag for the `--json` `method` field.
+    method: &'static str,
+    /// True when the numbers are exact for the block's dtype.
+    exact: bool,
+}
+
+const SRC_INDEX: StatsSource = StatsSource {
+    method: "chunk-index-aggregate",
+    exact: true,
+};
+const SRC_DECODE_INT: StatsSource = StatsSource {
+    method: "full-decode-exact-integer",
+    exact: true,
+};
+/// A float array: reduced by `f64` accumulation, which is not correctly rounded (each addition
+/// rounds, and the error grows with the sample count). Never `exact`.
+const SRC_DECODE_F64: StatsSource = StatsSource {
+    method: "full-decode-f64-float",
+    exact: false,
+};
+/// An INTEGER array whose exact accumulator overflowed, so the reduction fell back to `f64`. A
+/// distinct tag from the float case: same arithmetic, entirely different cause, and a consumer that
+/// sees this on integer data is looking at a #523-class input worth knowing about.
+const SRC_DECODE_OVERFLOW: StatsSource = StatsSource {
+    method: "full-decode-f64-integer-overflow",
+    exact: false,
+};
+
+/// Read `block`'s chunk-index sidecar and return its exact aggregate — **without touching the data
+/// block** (ADR-0028 §3, #347).
+///
+/// `None` (fall back to a full decode) unless every one of these holds. The index is a *derived*
+/// sidecar bound to its data block only by NAME, so each check exists to stop a mismatched index
+/// being served as `exact`. Being slow is recoverable; confidently reporting the wrong `min`/`max`
+/// is not.
+///
+///  - the sidecar exists and declares `indexes: <block>`;
+///  - the data block's dtype is an **integer narrower than 64 bits**. `ChunkStats` folds `sum_sq`
+///    in `i128`, which a 64-bit sample can overflow — and until #523 lands the write path *wraps
+///    silently*, so a sealed `.cidx` for an `int64`/`uint64` array may already contain a wrong
+///    `sum_sq`. A float block can never have an integer index (the writer emits none), so a `.cidx`
+///    sitting next to one is stale by construction;
+///  - the aggregate covers exactly the array's voxel count — catching a stale or partial index;
+///  - the aggregate itself does not overflow ([`ChunkIndex::checked_aggregate`]).
+///
+/// **Known gap, deliberately not papered over here:** the sidecar records the *name* of the block it
+/// indexes, not its content digest, so an index cannot be proven to describe the current bytes of
+/// that block. `tessera commit --remove-block volume --add-block other.tsra:volume` used to leave a
+/// stale `volume.cidx`; that specific hole is closed in `version.rs` (the sidecar is removed with its
+/// block) and the dtype/shape checks below catch the mismatched-shape cases. Binding the index to
+/// `BlockRef.digest` is a sealed-layout change and is a mandatory item of the single format event
+/// being specified for #522/P1.
+fn stats_from_chunk_index<R: std::io::Read + std::io::Seek>(
+    r: &mut tessera_io::Reader<R>,
+    block: &str,
+    spec: &tessera_core::block::array::ArraySpec,
+) -> Option<tessera_core::chunk_index::ChunkStats> {
+    // Only integer dtypes narrower than 64 bits have a trustworthy integer index (see above).
+    let dtype_ok = matches!(
+        spec.dtype.as_str(),
+        "int8" | "uint8" | "int16" | "uint16" | "int32" | "uint32" | "bool"
+    );
+    if !dtype_ok {
+        return None;
+    }
+    let sidecar = format!("{block}.cidx");
+    let bref = r.manifest().blocks.iter().find(|b| b.name == sidecar)?;
+    // The sidecar's own spec records which block it indexes; refuse an index about something else.
+    if bref.spec.get("indexes").and_then(|v| v.as_str()) != Some(block) {
+        return None;
+    }
+    let bytes = r.read_block(&sidecar).ok()?;
+    let index = tessera_core::chunk_index::ChunkIndex::from_bytes(&bytes).ok()?;
+
+    // Shape binding: the index is built by walking the chunk grid, so its entry count is a pure
+    // function of shape+chunks. A mismatch means the index describes a differently-shaped array.
+    let nchunks: u64 = spec
+        .shape
+        .iter()
+        .zip(spec.chunks.iter())
+        .map(|(&d, &c)| d.div_ceil(c.max(1)).max(1))
+        .product();
+    if index.len() as u64 != nchunks {
+        tracing::warn!(
+            block,
+            entries = index.len(),
+            expected = nchunks,
+            "chunk-index entry count does not match the array's chunk grid — falling back"
+        );
+        return None;
+    }
+
+    // Overflow must not be wrapped into a number we are about to call exact (#523).
+    let agg = index.checked_aggregate()?;
+    let voxels: u64 = spec.shape.iter().product();
+    if agg.count != voxels {
+        tracing::warn!(
+            block,
+            indexed = agg.count,
+            voxels,
+            "chunk-index does not cover the whole array — falling back to a full decode"
+        );
+        return None;
+    }
+    // And the derived stats must be computable exactly, or this is not an exact path.
+    agg.std_dev()?;
+    Some(agg)
+}
+
 /// `tessera stats FILE BLOCK` — a numeric overview of an **array** block: shape · dtype · chunks ·
 /// codec · value range (min/max/mean/std, raw and — when a rescale is present — physical) · unit ·
-/// spatial referencing. Decodes the block once; the "general looking at it" for a volume.
-pub fn stats(file: &Path, block: &str, out: &mut dyn Write) -> Result<()> {
-    let (spec, blob) = open_array(file, block)?;
-    let data = tessera_io::array::decode(&spec, &blob)?;
-    let (mn, mx, mean, std, n) = array_stats(&data);
+/// spatial referencing. The "general looking at it" for a volume.
+///
+/// Prefers the block's `{hash, stats}` **chunk-index sidecar** when one is present: `count/min/max/
+/// mean/std` are exact monoid roll-ups, so they come straight off `ChunkIndex::aggregate()` with **no
+/// block read and no decode** (#347). Falls back to decoding the block when there is no usable index.
+/// Either way the output says which path ran and whether the numbers are exact.
+pub fn stats(file: &Path, block: &str, json: bool, out: &mut dyn Write) -> Result<()> {
+    let mut r = tessera_io::Reader::open(file)?;
+    let bref = r
+        .manifest()
+        .blocks
+        .iter()
+        .find(|b| b.name == block)
+        .ok_or_else(|| tessera_core::Error::Invalid(format!("no block '{block}' in this .tsra")))?;
+    if bref.kind != BlockKind::Array {
+        return Err(tessera_core::Error::Invalid(format!(
+            "block '{block}' is a {:?}, not an array — `stats`/`slice` are for array blocks",
+            bref.kind
+        )));
+    }
+    let spec: tessera_core::block::array::ArraySpec = serde_json::from_value(bref.spec.clone())
+        .map_err(|e| tessera_core::Error::Invalid(format!("bad array spec for '{block}': {e}")))?;
+
+    // Decode-free path first: the sidecar's aggregate is exact for the integer core.
+    let (mn, mx, mean, std, n, src) = match stats_from_chunk_index(&mut r, block, &spec) {
+        Some(agg) => (
+            agg.min.unwrap_or(0) as f64,
+            agg.max.unwrap_or(0) as f64,
+            agg.mean().unwrap_or(0.0),
+            agg.std_dev().unwrap_or(0.0),
+            agg.count as usize,
+            SRC_INDEX,
+        ),
+        None => {
+            let blob = r.read_block(block)?;
+            let data = tessera_io::array::decode(&spec, &blob)?;
+            // Integer dtypes reduce exactly (see `array_stats`); floats do not.
+            let (mn, mx, mean, std, n, exact) = array_stats(&data);
+            // `array_stats` reports its own exactness. Distinguish the two inexact causes: a float
+            // array (inherent) from an integer array whose accumulator overflowed (#523-class).
+            let is_float = matches!(
+                &data,
+                ArrayData::F16(_) | ArrayData::F32(_) | ArrayData::F64(_)
+            );
+            let src = match (exact, is_float) {
+                (true, _) => SRC_DECODE_INT,
+                (false, true) => SRC_DECODE_F64,
+                (false, false) => SRC_DECODE_OVERFLOW,
+            };
+            (mn, mx, mean, std, n, src)
+        }
+    };
+
+    let physical = spec
+        .rescale_slope
+        .zip(spec.rescale_intercept)
+        .map(|(sl, ic)| (sl, ic, sl * mn + ic, sl * mx + ic));
+
+    if json {
+        let doc = serde_json::json!({
+            "block": block,
+            "shape": spec.shape,
+            "axes": spec.axes,
+            "dtype": spec.dtype,
+            "codec": spec.codec,
+            "chunks": spec.chunks,
+            "count": n,
+            // The honesty contract (#347): say where the numbers came from and whether they are
+            // exact, so a consumer never has to guess whether it may trust them.
+            //
+            // `exact: true` means the value is the correctly-rounded result of exact arithmetic over
+            // every sample. An `f64` accumulation is NOT that — its error grows with the sample
+            // count — so every float array reports `exact: false` however small its error looks.
+            //
+            // JSON has no NaN or Infinity: `serde_json` serialises a non-finite `f64` as `null`.
+            // That is reachable here (an all-NaN float block, or ±inf values), so a consumer must
+            // read a null statistic as "not available", never as zero.
+            "exact": src.exact,
+            "method": src.method,
+            "raw": { "min": mn, "max": mx, "mean": mean, "std": std },
+            "physical": physical.map(|(sl, ic, pmn, pmx)| serde_json::json!({
+                "min": pmn, "max": pmx, "slope": sl, "intercept": ic,
+                "unit": spec.unit.clone().unwrap_or_default(),
+            })),
+            "world": spec.world_frame.as_ref().map(|wf| serde_json::json!({
+                "convention": wf.convention, "unit": wf.unit,
+            })),
+        });
+        writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)
+            .map_err(tessera_core::Error::from)?;
+        return Ok(());
+    }
 
     let shape: Vec<String> = spec.shape.iter().map(u64::to_string).collect();
     let axes = if spec.axes.is_empty() {
@@ -1021,16 +1975,19 @@ pub fn stats(file: &Path, block: &str, out: &mut dyn Write) -> Result<()> {
         "raw       min {mn}  max {mx}  mean {mean:.3}  std {std:.3}"
     )
     .map_err(tessera_core::Error::from)?;
+    writeln!(
+        out,
+        "source    {} ({})",
+        src.method,
+        if src.exact { "exact" } else { "approximate" }
+    )
+    .map_err(tessera_core::Error::from)?;
     // Physical units (CT→HU, PET→Bq/mL) when the array carries a rescale.
-    if let (Some(sl), Some(ic)) = (spec.rescale_slope, spec.rescale_intercept) {
+    if let Some((sl, ic, pmn, pmx)) = physical {
         let unit = spec.unit.as_deref().unwrap_or("");
         writeln!(
             out,
-            "physical  min {}  max {}  ({}·raw + {}) {unit}",
-            sl * mn + ic,
-            sl * mx + ic,
-            sl,
-            ic
+            "physical  min {pmn}  max {pmx}  ({sl}·raw + {ic}) {unit}"
         )
         .map_err(tessera_core::Error::from)?;
     }
@@ -1215,9 +2172,9 @@ pub fn slice(
     index: Option<&str>,
     world: Option<&str>,
     physical: bool,
-    format: Format,
+    opts: &GridOpts,
     out: &mut dyn Write,
-) -> Result<()> {
+) -> Result<GridResult> {
     let (spec, blob) = open_array(file, block)?;
     let (start, len) = match (index, world) {
         (Some(ix), _) => parse_index(ix, &spec.shape)?,
@@ -1263,17 +2220,18 @@ pub fn slice(
     } else {
         None
     };
-    let values = region_to_f64(&region, rescale);
-
-    // Grid: the last region axis is the column count; everything before it flattens to rows.
-    let cols = *len.last().unwrap_or(&1) as usize;
-    let cols = cols.max(1);
-    let sep = format.sep();
-    for row in values.chunks(cols) {
-        let line: Vec<String> = row.iter().map(fmt_f64).collect();
-        writeln!(out, "{}", line.join(&sep.to_string())).map_err(tessera_core::Error::from)?;
-    }
-    Ok(())
+    // Grid: the last region axis is the column count; everything before it flattens to rows. Without
+    // `--physical` nothing transformed the samples, so they travel at their NATIVE dtype — which is what
+    // lets `npy` declare `<i8` and an `int64` above 2^53 survive (#478). A rescale genuinely produces
+    // floats.
+    let data = match rescale {
+        Some(r) => GridData::Computed {
+            values: region_to_f64(&region, Some(r)),
+            source_dtype: spec.dtype.clone(),
+        },
+        None => GridData::Native(region),
+    };
+    write_grid(&data, &len, opts, out)
 }
 
 /// Reduce mode for [`project`].
@@ -1300,6 +2258,66 @@ impl ProjMode {
     }
 }
 
+/// The projection geometry: the output shape with `axis` dropped, plus the input→output index mapping.
+///
+/// Factored out so the `f64` reduction and the native `max` reduction cannot disagree about layout — two
+/// copies of this index arithmetic would be a silent-wrong-answer waiting to happen (#478).
+///
+/// The mapping is a **function**, not a materialised table. A stored `Vec<usize>` costs 8 bytes per input
+/// sample — ~1.07 GiB of pure bookkeeping on a 512³ volume (134M samples), on top of the samples
+/// themselves — for arithmetic that is a handful of divisions. This holds O(rank) state instead.
+struct Projection {
+    out_shape: Vec<u64>,
+    /// Row-major strides of the INPUT shape.
+    strides: Vec<usize>,
+    dims: Vec<usize>,
+    axis: usize,
+}
+
+impl Projection {
+    fn new(shape: &[u64], axis: usize) -> Self {
+        let n = shape.len();
+        let mut strides = vec![1usize; n];
+        for i in (0..n.saturating_sub(1)).rev() {
+            strides[i] = strides[i + 1] * shape[i + 1] as usize;
+        }
+        Projection {
+            out_shape: shape
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != axis)
+                .map(|(_, &d)| d)
+                .collect(),
+            strides,
+            dims: shape.iter().map(|&d| d as usize).collect(),
+            axis,
+        }
+    }
+
+    /// The number of output cells the declared output shape has. Deliberately **not** clamped to 1: when
+    /// another axis is zero-length the projection really is empty, and inventing a cell would emit a value
+    /// the declared shape says is not there (#478 review).
+    fn out_len(&self) -> usize {
+        self.out_shape.iter().map(|&d| d as usize).product()
+    }
+
+    /// The output flat index an input flat index contributes to: the input coords with the projected axis
+    /// removed, row-major.
+    fn output_index(&self, flat: usize) -> usize {
+        let mut of = 0usize;
+        let mut os = 1usize;
+        for i in (0..self.dims.len()).rev() {
+            if i == self.axis {
+                continue;
+            }
+            let coord = (flat / self.strides[i]) % self.dims[i].max(1);
+            of += coord * os;
+            os *= self.dims[i];
+        }
+        of
+    }
+}
+
 /// Reduce a row-major N-D array `values` (shape `shape`) along `axis` by `mode`, dropping that axis.
 /// Returns `(out_shape, out_values)`.
 fn project_axis(
@@ -1308,39 +2326,20 @@ fn project_axis(
     axis: usize,
     mode: ProjMode,
 ) -> (Vec<u64>, Vec<f64>) {
-    let n = shape.len();
-    let mut strides = vec![1usize; n];
-    for i in (0..n.saturating_sub(1)).rev() {
-        strides[i] = strides[i + 1] * shape[i + 1] as usize;
-    }
+    let p = Projection::new(shape, axis);
     let ax_len = shape[axis].max(1) as usize;
-    let out_shape: Vec<u64> = shape
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != axis)
-        .map(|(_, &d)| d)
-        .collect();
-    let out_n: usize = out_shape.iter().map(|&d| d as usize).product();
     let init = match mode {
         ProjMode::Max => f64::NEG_INFINITY,
         _ => 0.0,
     };
-    let mut out = vec![init; out_n.max(1)];
+    let mut out = vec![init; p.out_len()];
     for (flat, &v) in values.iter().enumerate() {
-        // Output flat index = input coords with the projected axis removed (row-major).
-        let mut of = 0usize;
-        let mut os = 1usize;
-        for i in (0..n).rev() {
-            if i == axis {
-                continue;
-            }
-            let coord = (flat / strides[i]) % shape[i] as usize;
-            of += coord * os;
-            os *= shape[i] as usize;
-        }
+        let Some(slot) = out.get_mut(p.output_index(flat)) else {
+            continue;
+        };
         match mode {
-            ProjMode::Max => out[of] = out[of].max(v),
-            ProjMode::Mean | ProjMode::Sum => out[of] += v,
+            ProjMode::Max => *slot = slot.max(v),
+            ProjMode::Mean | ProjMode::Sum => *slot += v,
         }
     }
     if matches!(mode, ProjMode::Mean) {
@@ -1348,7 +2347,45 @@ fn project_axis(
             *o /= ax_len as f64;
         }
     }
-    (out_shape, out)
+    (p.out_shape, out)
+}
+
+/// Max-project along `axis` **natively**, so the result keeps the array's dtype exactly.
+///
+/// `max` picks an existing sample rather than computing a new one, so there is no reason to route it
+/// through `f64` — and a good reason not to: two `int64`s differing only beyond the 53-bit mantissa compare
+/// *equal* as `f64`, so the f64 path could pick the wrong sample as well as round it (#478).
+fn project_max_native(data: &ArrayData, shape: &[u64], axis: usize) -> (Vec<u64>, ArrayData) {
+    let p = Projection::new(shape, axis);
+    let out_n = p.out_len();
+    macro_rules! reduce {
+        ($v:expr, $variant:ident, $init:expr, $max:expr) => {{
+            let mut out = vec![$init; out_n];
+            for (flat, &x) in $v.iter().enumerate() {
+                let Some(slot) = out.get_mut(p.output_index(flat)) else {
+                    continue;
+                };
+                *slot = $max(*slot, x);
+            }
+            ArrayData::$variant(out)
+        }};
+    }
+    let reduced = match data {
+        ArrayData::I8(v) => reduce!(v, I8, i8::MIN, i8::max),
+        ArrayData::U8(v) => reduce!(v, U8, u8::MIN, u8::max),
+        ArrayData::I16(v) => reduce!(v, I16, i16::MIN, i16::max),
+        ArrayData::I32(v) => reduce!(v, I32, i32::MIN, i32::max),
+        ArrayData::I64(v) => reduce!(v, I64, i64::MIN, i64::max),
+        ArrayData::U16(v) => reduce!(v, U16, u16::MIN, u16::max),
+        ArrayData::U32(v) => reduce!(v, U32, u32::MIN, u32::max),
+        ArrayData::U64(v) => reduce!(v, U64, u64::MIN, u64::max),
+        // Floats keep the f64 path's identity so an all-empty axis reads the same either way.
+        ArrayData::F16(v) => reduce!(v, F16, half::f16::NEG_INFINITY, half::f16::max),
+        ArrayData::F32(v) => reduce!(v, F32, f32::NEG_INFINITY, f32::max),
+        ArrayData::F64(v) => reduce!(v, F64, f64::NEG_INFINITY, f64::max),
+        ArrayData::Bool(v) => reduce!(v, Bool, false, bool::max),
+    };
+    (p.out_shape, reduced)
 }
 
 /// `tessera project FILE BLOCK --axis <name|idx> --mode max|mean|sum` — collapse an **array** block
@@ -1361,9 +2398,9 @@ pub fn project(
     axis: &str,
     mode: &str,
     physical: bool,
-    format: Format,
+    opts: &GridOpts,
     out: &mut dyn Write,
-) -> Result<()> {
+) -> Result<GridResult> {
     let (spec, blob) = open_array(file, block)?;
     let mode = ProjMode::parse(mode)?;
     // Resolve the axis by name (from `spec.axes`) or by index.
@@ -1393,16 +2430,291 @@ pub fn project(
     } else {
         None
     };
-    let values = region_to_f64(&data, rescale);
-    let (out_shape, out_vals) = project_axis(&values, &spec.shape, ax, mode);
+    // Reducing over a ZERO-LENGTH axis has no answer: `max` of nothing is not a value. The f64 path used
+    // to emit -inf and the native path its type's MIN (`i64::MIN`, `0u8`, `false`) — which looks exactly
+    // like real data. Refuse instead (#478 review); `ArraySpec` does allow a zero extent.
+    if spec.shape[ax] == 0 {
+        return Err(tessera_core::Error::Invalid(format!(
+            "--axis '{axis}' has zero length, so there is nothing to project — \
+             a reduction over an empty axis has no value to report"
+        )));
+    }
+    // `max` PICKS an existing sample, so the result keeps the stored dtype and is reduced natively —
+    // an f64 comparison could not tell two `int64`s apart beyond 2^53. `mean` averages and `sum` can
+    // leave the stored type's range, so both are genuinely floats; `--physical` rescales whatever the mode.
+    let (out_shape, grid) = if rescale.is_none() && matches!(mode, ProjMode::Max) {
+        let (shape, reduced) = project_max_native(&data, &spec.shape, ax);
+        (shape, GridData::Native(reduced))
+    } else {
+        let values = region_to_f64(&data, rescale);
+        let (shape, vals) = project_axis(&values, &spec.shape, ax, mode);
+        (
+            shape,
+            GridData::Computed {
+                values: vals,
+                source_dtype: spec.dtype.clone(),
+            },
+        )
+    };
+    write_grid(&grid, &out_shape, opts, out)
+}
 
-    let cols = out_shape.last().copied().unwrap_or(1).max(1) as usize;
-    let sep = format.sep();
-    for row in out_vals.chunks(cols) {
-        let line: Vec<String> = row.iter().map(fmt_f64).collect();
-        writeln!(out, "{}", line.join(&sep.to_string())).map_err(tessera_core::Error::from)?;
+/// Does this path address the manifest's `extra/` namespace (the fd5 extension fields)?
+///
+/// `extra/*` is **manifest metadata, not a block**, which is why `read` used to fall through to the
+/// logical-table path and surface its internal "no blocks for prefix" error (#303).
+fn is_extra_path(p: &str) -> bool {
+    p == "extra" || p == "extra/" || p.starts_with("extra/")
+}
+
+/// Render the `extra/` namespace: the key listing for `extra` itself, or one key's value as pretty JSON.
+///
+/// Shared by `ls` and `read` so the two navigation verbs address exactly the same namespace (#303) —
+/// `ls` could reach the preserved DICOM header while `read` could not, which is confusing for a first
+/// user exploring a product, and the fix is to make the error impossible rather than better-worded.
+fn write_extra(
+    m: &tessera_core::manifest::Manifest,
+    path: &str,
+    out: &mut dyn Write,
+) -> Result<()> {
+    if path == "extra" || path == "extra/" {
+        if m.extra.is_empty() {
+            writeln!(out, "(no extra fields)").map_err(tessera_core::Error::from)?;
+        }
+        for (k, v) in &m.extra {
+            let kind = match v {
+                Value::Object(o) => format!("object, {} keys", o.len()),
+                Value::Array(a) => format!("array, {} items", a.len()),
+                Value::String(_) => "string".into(),
+                other => other.to_string(),
+            };
+            writeln!(out, "{k}  ({kind})").map_err(tessera_core::Error::from)?;
+        }
+        return Ok(());
+    }
+    let key = &path["extra/".len()..];
+    match m.extra.get(key) {
+        Some(v) => writeln!(out, "{}", serde_json::to_string_pretty(v)?)
+            .map_err(tessera_core::Error::from)?,
+        None => {
+            return Err(tessera_core::Error::Invalid(format!(
+                "no extra key '{key}' (keys: {})",
+                m.extra.keys().cloned().collect::<Vec<_>>().join(", ")
+            )))
+        }
     }
     Ok(())
+}
+
+/// Write a 2-D grid of values (row-major, `cols` = the last axis) in the requested format.
+///
+/// ONE place, so `slice` and `project` cannot drift on rendering, capping or windowing — they used to
+/// carry a copy of the row loop each (#387).
+fn write_grid(
+    data: &GridData,
+    shape: &[u64],
+    opts: &GridOpts,
+    out: &mut dyn Write,
+) -> Result<GridResult> {
+    // An explicit cap on a binary format is a flag that would do nothing, which is its own foot-gun —
+    // say so rather than ignore it.
+    if !opts.format.is_text() && opts.limit.is_some() {
+        return Err(tessera_core::Error::Invalid(format!(
+            "--limit applies to text output; --format {} always writes the full plane",
+            opts.format.name()
+        )));
+    }
+    let cols = shape.last().copied().unwrap_or(1).max(1) as usize;
+    let total = data.len().div_ceil(cols) as u64;
+    // Binary formats never cap (a truncated artifact is corrupt, not a preview); text formats follow the
+    // shared rule, where the *default* only bites an interactive terminal.
+    let cap = if opts.format.is_text() {
+        row_cap(opts.limit, opts.all, opts.interactive).map_or(total, |n| n.min(total))
+    } else {
+        total
+    };
+    // Nothing is sliced: the cap only bounds how far the text writers iterate, and the binary writers
+    // are never capped — so `data` stays whole and a native buffer needs no per-variant truncation.
+    let shown = (cap as usize * cols).min(data.len());
+    let mut res = GridResult {
+        shown: cap,
+        total,
+        truncated: cap < total,
+        note: None,
+    };
+
+    match opts.format {
+        GridFormat::Csv | GridFormat::Tsv => {
+            let sep = opts.format.sep().to_string();
+            for start in (0..shown).step_by(cols) {
+                let line: Vec<String> = (start..(start + cols).min(shown))
+                    .map(|i| data.text_cell(i))
+                    .collect();
+                writeln!(out, "{}", line.join(&sep)).map_err(tessera_core::Error::from)?;
+            }
+        }
+        GridFormat::Json => {
+            // Self-describing AND honest about what it is: `shape` is the FULL region, so a saved
+            // document can never masquerade as the complete plane; `rows_emitted`/`truncated` say what
+            // was actually written; `dtype` describes the VALUES and `source_dtype` the stored array.
+            let rows: Vec<Value> = (0..shown)
+                .step_by(cols)
+                .map(|start| {
+                    Value::Array(
+                        (start..(start + cols).min(shown))
+                            .map(|i| data.json_cell(i))
+                            .collect(),
+                    )
+                })
+                .collect();
+            let doc = serde_json::json!({
+                "shape": [total, cols as u64],
+                "rows_emitted": rows.len() as u64,
+                "truncated": res.truncated,
+                "dtype": data.emitted(),
+                "source_dtype": data.stored(),
+                "values": rows,
+            });
+            writeln!(out, "{}", serde_json::to_string(&doc)?).map_err(tessera_core::Error::from)?;
+        }
+        GridFormat::Npy => write_npy(data, total, cols as u64, out)?,
+        GridFormat::Png => {
+            let (lo, hi) = write_png(&data.as_f64(), cols, data.stored(), opts.window, out)?;
+            res.note = Some(format!(
+                "png is a lossy 8-bit preview (window {lo} … {hi}, source dtype {}) — \
+                 use --format npy for the data",
+                data.stored()
+            ));
+        }
+    }
+    Ok(res)
+}
+
+/// A grid cell as JSON, keyed off the **emitted** dtype rather than the value's shape.
+///
+/// For an integer grid an integral value renders as an integer — the rule [`fmt_f64`] already applies to
+/// CSV/TSV, so the two text formats agree and an `int16` array does not come back as `0.0`. For a float
+/// grid the float-ness is preserved (`3.0` stays `3.0`, `-0.0` keeps its sign), because collapsing a
+/// float column to integers whenever it happens to hold whole numbers would contradict the `dtype` the
+/// same document declares.
+///
+/// NaN and ±inf become JSON `null`: JSON cannot spell them, and `null` is the standard mapping.
+#[allow(clippy::cast_possible_truncation)]
+fn json_num(v: f64, float_grid: bool) -> Value {
+    if !float_grid && v.fract() == 0.0 && v.abs() < 1e15 {
+        return Value::Number((v as i64).into());
+    }
+    serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number)
+}
+
+/// Write a 2-D NumPy `.npy` v1.0 array: the magic + version, a padded header dict, then the values.
+///
+/// The `descr` is the grid's **native** dtype whenever nothing transformed the samples — `'<i8'` for an
+/// `int64` array, `'|b1'` for bool, and so on — so `numpy.load()` hands back the dtype the product stores
+/// and a 64-bit integer beyond `f64`'s 53-bit mantissa survives exactly (#478). A `--physical` rescale or a
+/// reducing projection genuinely produces floats, and those are written `'<f8'` and declared as such.
+///
+/// The header is space-padded so `10 + header_len` is a multiple of 64 — the alignment numpy's own writer
+/// produces, and what its reader expects.
+fn write_npy(data: &GridData, rows: u64, cols: u64, out: &mut dyn Write) -> Result<()> {
+    let (descr, payload) = match data {
+        GridData::Native(d) => (npy_descr(d), d.to_le_bytes()),
+        GridData::Computed { values, .. } => (
+            "<f8".to_string(),
+            values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        ),
+    };
+    let dict =
+        format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': ({rows}, {cols}), }}");
+    let pad = (64 - ((10 + dict.len() + 1) % 64)) % 64;
+    let mut header = dict.into_bytes();
+    header.extend(std::iter::repeat_n(b' ', pad));
+    header.push(b'\n');
+    let len = u16::try_from(header.len())
+        .map_err(|_| tessera_core::Error::Invalid("npy header too long".into()))?;
+    out.write_all(b"\x93NUMPY\x01\x00")
+        .map_err(tessera_core::Error::from)?;
+    out.write_all(&len.to_le_bytes())
+        .map_err(tessera_core::Error::from)?;
+    out.write_all(&header).map_err(tessera_core::Error::from)?;
+    out.write_all(&payload).map_err(tessera_core::Error::from)?;
+    Ok(())
+}
+
+/// Write an 8-bit greyscale PNG preview, windowing `[lo, hi]` onto black..white. Returns the window
+/// actually used.
+///
+/// This is **not data**: 8 bits cannot hold a CT Hounsfield range, let alone a float activity map, so the
+/// mapping is lossy by construction and `npy` is the lossless path. The window used and the source dtype
+/// are written into `tEXt` chunks so a preview that has been copied out of context stays self-describing
+/// and cannot be mistaken for the values later.
+fn write_png(
+    values: &[f64],
+    cols: usize,
+    dtype: &str,
+    window: Option<(f64, f64)>,
+    out: &mut dyn Write,
+) -> Result<(f64, f64)> {
+    let rows = values.len().div_ceil(cols.max(1));
+    if rows == 0 || cols == 0 {
+        return Err(tessera_core::Error::Invalid(
+            "png: nothing to write (empty plane)".into(),
+        ));
+    }
+    // Auto-window on the plane's own finite min/max — the honest default for an unknown modality, and
+    // what makes `--format png` a one-liner. Non-finite samples are excluded from the window.
+    let (lo, hi) = window.unwrap_or_else(|| {
+        let finite = || values.iter().copied().filter(|v| v.is_finite());
+        let lo = finite().fold(f64::INFINITY, f64::min);
+        let hi = finite().fold(f64::NEG_INFINITY, f64::max);
+        if lo.is_finite() && hi.is_finite() {
+            (lo, hi)
+        } else {
+            (0.0, 0.0)
+        }
+    });
+    let span = hi - lo;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let grey: Vec<u8> = values
+        .iter()
+        .map(|&v| {
+            if !v.is_finite() || span <= 0.0 {
+                // A flat plane, or a non-finite sample, has no contrast to show. Black, and said out
+                // loud in the tEXt comment below — because a black pixel is otherwise indistinguishable
+                // from a legitimate sample sitting at the window's low end.
+                0
+            } else {
+                (((v - lo) / span).clamp(0.0, 1.0) * 255.0).round() as u8
+            }
+        })
+        .collect();
+
+    let (w, h) = (
+        u32::try_from(cols).map_err(|_| tessera_core::Error::Invalid("png: too wide".into()))?,
+        u32::try_from(rows).map_err(|_| tessera_core::Error::Invalid("png: too tall".into()))?,
+    );
+    let mut enc = png::Encoder::new(out, w, h);
+    enc.set_color(png::ColorType::Grayscale);
+    enc.set_depth(png::BitDepth::Eight);
+    let text = |e: png::EncodingError| tessera_core::Error::Invalid(format!("png: {e}"));
+    enc.add_text_chunk("Software".into(), "tessera".into())
+        .map_err(text)?;
+    enc.add_text_chunk("tessera:window".into(), format!("{lo},{hi}"))
+        .map_err(text)?;
+    enc.add_text_chunk("tessera:source_dtype".into(), dtype.to_string())
+        .map_err(text)?;
+    enc.add_text_chunk(
+        "Comment".into(),
+        "lossy 8-bit preview of a Tessera array; not the data \
+         (use `tsra slice|project --format npy`). NaN/inf samples render as black, \
+         indistinguishable from the window's low end."
+            .into(),
+    )
+    .map_err(text)?;
+    let mut writer = enc.write_header().map_err(text)?;
+    writer.write_image_data(&grey).map_err(text)?;
+    writer.finish().map_err(text)?;
+    Ok((lo, hi))
 }
 
 /// Compact numeric render for slice CSV: integers without a trailing `.0`, floats to 6 sig-ish.
@@ -1486,6 +2798,7 @@ mod tests {
             ],
             rows: 4,
             row_index: None,
+            partition: None,
         };
         let data: TableData = vec![
             ("ms".into(), ColumnData::U32(vec![10, 20, 30, 40])),
@@ -1591,6 +2904,244 @@ mod tests {
         ls(&p, Some("events"), false, &mut cols).unwrap();
         let s = String::from_utf8(cols).unwrap();
         assert!(s.contains("ms") && s.contains("en"));
+    }
+
+    /// An invalid partitioned table (ADR-0064 §2.3) is never shown as a table: here `pairs/0000` and
+    /// `pairs/0002`, a gap at index 1 (hand-packed, since the seal refuses it). The top-level `ls`
+    /// line and the `tree` node say why, the `tree` node lists the blocks it does hold, and
+    /// `ls FILE pairs` refuses the name with the typed error `read` gives. Each leaf still lists
+    /// by its full name.
+    #[test]
+    fn an_invalid_partitioned_table_shows_its_error_not_a_table() {
+        use tessera_core::block::partition::Partition;
+        use tessera_core::block::table::{Column, TableSpec};
+        use tessera_io::{pack, table::table_block, BlockPayload};
+        let blocks: Vec<_> = [(0, false), (2, true)]
+            .into_iter()
+            .map(|(index, last)| {
+                let spec = TableSpec {
+                    columns: vec![Column::new("t", "u4")],
+                    rows: 2,
+                    row_index: None,
+                    partition: Some(Partition { index, last }),
+                };
+                let data = vec![("t".into(), ColumnData::U32(vec![1, 2]))];
+                table_block(&format!("pairs/{index:04}"), &spec, &data).unwrap()
+            })
+            .collect();
+        let mut m = tessera_core::Manifest::new("listmode", "gap", "d", "2024-01-01T00:00:00Z");
+        m.blocks = blocks.iter().map(|(r, _)| r.clone()).collect();
+        m.content_hash = Some(m.recompute_content_hash().unwrap());
+        m.manifest_hash = Some(m.compute_manifest_hash().unwrap());
+        let payloads: Vec<BlockPayload> = blocks.into_iter().map(|(_, p)| p).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("gap.tsra");
+        pack(&m, &payloads, &p).unwrap();
+        let text = |f: &dyn Fn(&mut Vec<u8>) -> Result<()>| {
+            let mut buf = Vec::new();
+            f(&mut buf).map(|()| String::from_utf8(buf).unwrap())
+        };
+        let why = "not a valid table: logical table 'pairs': no leaf for index 1";
+
+        let top = text(&|o| ls(&p, None, false, o)).unwrap();
+        assert_eq!(top, format!("pairs/  {why}\n"));
+        let tree_out = text(&|o| tree(&p, false, false, o)).unwrap();
+        assert!(
+            tree_out.contains(&format!("pairs/             {why}")),
+            "{tree_out}"
+        );
+        assert!(
+            tree_out.contains("pairs/0000") && tree_out.contains("pairs/0002"),
+            "{tree_out}"
+        );
+        let err = text(&|o| ls(&p, Some("pairs"), false, o)).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                tessera_core::Error::LogicalTable {
+                    reason: LogicalTableError::Gap { missing: 1 },
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(text(&|o| ls(&p, Some("pairs/0002"), false, o))
+            .unwrap()
+            .starts_with("pairs/0002   table"));
+    }
+
+    /// The legacy flat form (ADR-0064 §4) is listed as it always was, one line per `events_NNNN`
+    /// block, in `ls` and `tree`, and still reads as one table `events`; a table name with the
+    /// trailing `/` that `ls` prints for a partitioned table reads that table.
+    #[test]
+    fn legacy_flat_blocks_list_one_per_line_and_a_trailing_slash_names_the_table() {
+        use tessera_core::block::table::{Column, TableSpec};
+        use tessera_core::ProductBuilder;
+        use tessera_io::{pack, table::table_block};
+        let mut b = ProductBuilder::new("listmode", "legacy", "d", "2024-01-01T00:00:00Z");
+        let mut payloads = Vec::new();
+        for i in 0..3u32 {
+            let spec = TableSpec {
+                columns: vec![Column::new("t", "u4")],
+                rows: 1,
+                row_index: None,
+                partition: None,
+            };
+            let data = vec![("t".into(), ColumnData::U32(vec![i]))];
+            let (r, p) = table_block(&format!("events_{i:04}"), &spec, &data).unwrap();
+            b.add_block_ref(r);
+            payloads.push(p);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("legacy.tsra");
+        pack(&b.seal().unwrap(), &payloads, &p).unwrap();
+        let read_csv = |file: &std::path::Path, block: &str| {
+            let mut buf = Vec::new();
+            let opts = ReadOpts {
+                file,
+                block,
+                columns: vec![],
+                rows: None,
+                all: true,
+                limit: None,
+                interactive: false,
+                format: Format::Csv,
+            };
+            read(opts, &mut buf).map(|_| String::from_utf8(buf).unwrap())
+        };
+
+        let mut top = Vec::new();
+        ls(&p, None, false, &mut top).unwrap();
+        assert_eq!(
+            String::from_utf8(top).unwrap(),
+            "schema/  (listmode v1.0, 7 fields)\n\
+             events_0000        Table\nevents_0001        Table\nevents_0002        Table\n"
+        );
+        let mut t = Vec::new();
+        tree(&p, false, false, &mut t).unwrap();
+        let t = String::from_utf8(t).unwrap();
+        for i in 0..3 {
+            let line = format!("── {:<18} table  1 cols × 1 rows", format!("events_000{i}"));
+            assert!(t.contains(&line), "{t}");
+        }
+        assert_eq!(read_csv(&p, "events").unwrap(), "t\n0\n1\n2\n");
+
+        let scan = std::path::Path::new("tests/cmd/logical_tables.in/scan.tsra");
+        assert_eq!(
+            read_csv(scan, "pairs/").unwrap(),
+            read_csv(scan, "pairs").unwrap()
+        );
+    }
+
+    /// #417: the sealed producer's build fields must all be reachable. `ProducerRef::display()`
+    /// folds them into `tool/version (commit)`, which silently loses `git_repo` and `dirty` — so
+    /// `inspect` renders each present field on its own line instead.
+    #[test]
+    fn producer_lines_surface_every_sealed_build_field() {
+        let mut p = tessera_core::Producer::new("ge-listmode-daq", "3.2");
+        p.git_commit = Some("0855f5f".into());
+        p.git_repo = Some("vig-os/ge-daq".into());
+        p.dirty = Some(false);
+        let lines = producer_lines(&tessera_core::ProducerRef::Structured(p));
+        assert_eq!(lines[0], "producer      ge-listmode-daq/3.2");
+        let body = lines[1..].join("\n");
+        for want in [
+            "git_repo",
+            "vig-os/ge-daq",
+            "git_commit",
+            "0855f5f",
+            "dirty",
+            "false",
+        ] {
+            assert!(body.contains(want), "missing {want} in:\n{body}");
+        }
+
+        // A producer with no build fields is just the header line — no empty scaffolding.
+        let bare = producer_lines(&tessera_core::ProducerRef::Structured(
+            tessera_core::Producer::new("sim", "0.1"),
+        ));
+        assert_eq!(bare, vec!["producer      sim/0.1".to_string()]);
+
+        // A pre-ADR-0058 bare string round-trips verbatim.
+        let legacy = producer_lines(&tessera_core::ProducerRef::Legacy("tessera/0.0.0".into()));
+        assert_eq!(legacy, vec!["producer      tessera/0.0.0".to_string()]);
+    }
+
+    /// #417: the sealed generation recipe gets an operator surface — a summary header plus the
+    /// config bag, collapsing like `sources` does until `--full`.
+    #[test]
+    fn generation_lines_summarise_then_collapse_until_full() {
+        // Inline config + a config_ref: the header states both, the digest is shortened by default.
+        let mut g = tessera_core::Generation::default()
+            .with("energy_window_keV", serde_json::json!("425-650"))
+            .with("seed", serde_json::json!(7));
+        g.config_ref = Some("blake3:0123456789abcdef0123456789abcdef".into());
+        let lines = generation_lines(&g, false);
+        assert_eq!(
+            lines[0],
+            "generation    2 config keys · config_ref blake3:0123456789ab…"
+        );
+        assert!(lines[1].contains("energy_window_keV") && lines[1].contains("\"425-650\""));
+        assert!(lines[2].contains("seed") && lines[2].contains('7'));
+        // --full spells the digest out.
+        assert!(generation_lines(&g, true)[0].contains("blake3:0123456789abcdef0123456789abcdef"));
+
+        // A bag larger than the cap collapses with a footer; --full lists every key.
+        let big = (0..12).fold(tessera_core::Generation::default(), |acc, i| {
+            acc.with(format!("k{i:02}"), serde_json::json!(i))
+        });
+        let capped = generation_lines(&big, false);
+        assert_eq!(capped[0], "generation    12 config keys");
+        assert_eq!(
+            capped.len(),
+            1 + GENERATION_KEYS_SHOWN + 1,
+            "header + 8 + footer"
+        );
+        assert!(capped
+            .last()
+            .unwrap()
+            .contains("(+4 more, --full to list all)"));
+        assert_eq!(generation_lines(&big, true).len(), 1 + 12);
+
+        // #462: config_ref AND a bag over the cap AND --full, together — the combination the
+        // per-feature assertions above never exercise as one render. `--full` must spell the digest
+        // out AND list every key, with the header still reporting both halves.
+        let mut both = (0..12).fold(tessera_core::Generation::default(), |acc, i| {
+            acc.with(format!("k{i:02}"), serde_json::json!(i))
+        });
+        both.config_ref = Some("blake3:0123456789abcdef0123456789abcdef".into());
+        let full = generation_lines(&both, true);
+        assert_eq!(
+            full[0],
+            "generation    12 config keys · config_ref blake3:0123456789abcdef0123456789abcdef",
+            "--full must not shorten the digest when a bag is present too"
+        );
+        assert_eq!(full.len(), 1 + 12, "--full lists every key, no footer");
+        assert!(full.last().unwrap().contains("k11"));
+        // ...and the default render of the SAME record collapses the bag but still names the digest.
+        let capped_both = generation_lines(&both, false);
+        assert_eq!(
+            capped_both[0],
+            "generation    12 config keys · config_ref blake3:0123456789ab…"
+        );
+        assert_eq!(capped_both.len(), 1 + GENERATION_KEYS_SHOWN + 1);
+        assert!(capped_both
+            .last()
+            .unwrap()
+            .contains("(+4 more, --full to list all)"));
+
+        // config_ref alone — the large/bit-faithful vendor-config case (ADR-0058 §2).
+        let only_ref = tessera_core::Generation::default().with_config_ref("blake3:deadbeefcafe00");
+        assert_eq!(
+            generation_lines(&only_ref, false),
+            vec!["generation    config_ref blake3:deadbeefcafe…".to_string()]
+        );
+
+        // A sealed-but-empty record is still reported — silence would read as "no recipe".
+        assert_eq!(
+            generation_lines(&tessera_core::Generation::default(), false),
+            vec!["generation    (empty)".to_string()]
+        );
     }
 
     #[test]
@@ -1733,7 +3284,8 @@ mod tests {
             "expected the full-res level + ≥1 downsample, got {n}"
         );
 
-        // L0 is the original 8³; L1 is the 4³ 2×-downsample.
+        // L0 is the original 8³; L1 is the 4³ 2×-downsample. Every level is a leaf under
+        // `volume/` (ADR-0063's leaf rule), level 0 included.
         let r = Reader::open(&out).unwrap();
         let names: Vec<&str> = r
             .manifest()
@@ -1741,10 +3293,10 @@ mod tests {
             .iter()
             .map(|b| b.name.as_str())
             .collect();
-        assert!(
-            names.contains(&"volume") && names.contains(&"volume/1"),
-            "{names:?}"
-        );
+        assert_eq!(&names[..2], ["volume/0", "volume/1"], "{names:?}");
+        assert!(names.iter().all(|n| n.starts_with("volume/")), "{names:?}");
+        let (s0, _) = open_array(&out, "volume/0").unwrap();
+        assert_eq!(s0.shape, vec![8, 8, 8]);
         // derived_from the source is recorded.
         assert!(r
             .manifest()
@@ -1755,6 +3307,21 @@ mod tests {
         let (s1, blob1) = open_array(&out, "volume/1").unwrap();
         assert_eq!(s1.shape, vec![4, 4, 4]);
         let _ = tessera_io::array::decode(&s1, &blob1).unwrap();
+        tessera_io::verify_payloads_parallel(&out, "pyr", 1).unwrap();
+
+        // #685 / ADR-0063: the hierarchical names explode to a directory tree under `blocks/` and
+        // pack back to the very same bytes.
+        let exploded = dir.path().join("exploded");
+        tessera_io::unpack(&out, &exploded).unwrap();
+        assert!(exploded.join("blocks/volume/0").is_file());
+        assert!(exploded.join("blocks/volume/1").is_file());
+        let repacked = dir.path().join("repacked.tsra");
+        tessera_io::pack_dir(&exploded, &repacked).unwrap();
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            std::fs::read(&repacked).unwrap(),
+            "a pyramid unpacks and re-packs byte-identically"
+        );
     }
 
     #[test]
@@ -1823,9 +3390,1084 @@ mod tests {
         // Wrong rank is a clear error, not a panic.
         assert!(parse_index("1,:", &shape).is_err());
 
-        let (mn, mx, mean, std, n) = array_stats(&ArrayData::I16(vec![0, 2, 4, 6]));
+        let (mn, mx, mean, std, n, _) = array_stats(&ArrayData::I16(vec![0, 2, 4, 6]));
         assert_eq!((mn, mx, n), (0.0, 6.0, 4));
         assert!((mean - 3.0).abs() < 1e-9 && (std - 5f64.sqrt()).abs() < 1e-9);
+    }
+
+    /// Integer arrays must reduce in EXACT integer arithmetic, not `f64` (#347).
+    ///
+    /// `array_stats` accumulated `sum`/`sum_sq` as `f64`. Once a running sum passes 2^53 the
+    /// increments stop landing: adding 1 to 2^53 rounds back to 2^53 (ties-to-even), so this input
+    /// loses all 1000 of its trailing ones and reports a mean ~1.0 too low. On a real 127.7M-voxel
+    /// int16 volume the same effect puts `sum_sq` past 2^53 and moves `std` in the 4th decimal.
+    ///
+    /// This also makes the full-decode path agree BIT-FOR-BIT with the chunk-index aggregate, which
+    /// reduces through the same `i128` monoid — the property #347's equivalence test rests on.
+    #[test]
+    fn array_stats_reduces_integers_exactly_past_two_pow_53() {
+        let mut v: Vec<i64> = vec![1i64 << 53];
+        v.extend(std::iter::repeat_n(1i64, 1000));
+        let n = v.len();
+
+        let (mn, mx, mean, _std, got_n, exact) = array_stats(&ArrayData::I64(v.clone()));
+        assert!(exact, "i64 within accumulator range must reduce exactly");
+        assert_eq!((mn, mx, got_n), (1.0, (1u64 << 53) as f64, n));
+
+        // Exact reference, computed in i128 the way ChunkStats does.
+        let sum: i128 = v.iter().map(|&x| x as i128).sum();
+        let want_mean = sum as f64 / n as f64;
+        assert_eq!(
+            sum,
+            (1i128 << 53) + 1000,
+            "the 1000 ones must all be counted"
+        );
+        assert_eq!(
+            mean, want_mean,
+            "integer reduction must be exact: f64 accumulation stalls at 2^53 and drops the ones"
+        );
+
+        // And it must equal the chunk-index monoid exactly — same reduction, same answer.
+        let cs = tessera_core::chunk_index::ChunkStats::from_values(&v);
+        assert_eq!(mean, cs.mean().unwrap());
+        assert_eq!(_std, cs.std_dev().unwrap());
+    }
+
+    /// Seal an integer array twice — with and without its chunk-index sidecar — and return both paths.
+    ///
+    /// Non-divisible chunking on purpose: `array_chunk_index` clips edge chunks, so this exercises
+    /// the case where the chunk grid does not tile the shape evenly and the aggregate must still
+    /// cover every voxel exactly.
+    fn seal_with_and_without_index(
+        dir: &std::path::Path,
+        shape: Vec<u64>,
+        chunks: Vec<u64>,
+        dtype: &str,
+        data: ArrayData,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        let mut spec = ArraySpec::new(shape, dtype);
+        spec.chunks = chunks;
+
+        let indexed = dir.join("indexed.tsra");
+        let ((bref, payload), sidecar) =
+            tessera_io::array::array_block_with_index("volume", &spec, &data).unwrap();
+        let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        let mut payloads = vec![payload];
+        if let Some((sref, spayload)) = sidecar {
+            b.add_block_ref(sref);
+            payloads.push(spayload);
+        }
+        tessera_io::pack(&b.seal().unwrap(), &payloads, &indexed).unwrap();
+
+        let plain = dir.join("plain.tsra");
+        let (bref2, payload2) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+        let mut b2 = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+        b2.add_block_ref(bref2);
+        tessera_io::pack(&b2.seal().unwrap(), &[payload2], &plain).unwrap();
+
+        (indexed, plain)
+    }
+
+    fn stats_json(file: &std::path::Path) -> serde_json::Value {
+        let mut buf = Vec::new();
+        stats(file, "volume", true, &mut buf).unwrap();
+        serde_json::from_slice(&buf).unwrap()
+    }
+
+    /// #347 equivalence: the chunk-index aggregate and the full decode must agree EXACTLY, and both
+    /// must equal an exact-integer reference.
+    ///
+    /// The reference is computed in `i128` in the test, not taken from either path — asserting that
+    /// two implementations agree proves only that they agree. Integer extremes and negative values
+    /// are included because `i64::MIN`/`MAX` are where a careless widening or an `abs()` breaks.
+    #[test]
+    fn index_and_decode_stats_agree_and_match_an_exact_integer_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        // 5x7x3 = 105 voxels with 4^3 chunks: the grid does NOT tile the shape (edge chunks clip).
+        let n = 5usize * 7 * 3;
+        let vals: Vec<i32> = (0..n)
+            .map(|k| match k {
+                0 => i32::MIN,                           // integer extreme, negative
+                1 => i32::MAX,                           // integer extreme, positive
+                _ => (k as i32 * 2_097_143) - 1_000_000, // spread, crosses zero
+            })
+            .collect();
+        let (indexed, plain) = seal_with_and_without_index(
+            dir.path(),
+            vec![5, 7, 3],
+            vec![4, 4, 4],
+            "int32",
+            ArrayData::I32(vals.clone()),
+        );
+
+        let a = stats_json(&indexed);
+        let b = stats_json(&plain);
+
+        // The two paths really are different paths.
+        assert_eq!(a["method"], "chunk-index-aggregate");
+        assert_eq!(b["method"], "full-decode-exact-integer");
+        assert_eq!(a["exact"], true);
+        assert_eq!(b["exact"], true);
+
+        // Exact reference, independent of both implementations — and deliberately NOT the
+        // `E[x²] − E[x]²` form, which is the thing under test. The first version of this test
+        // derived its expectation with that same f64 formula, so it agreed vacuously: an
+        // expectation derived from the same wrong thing as the result proves nothing (the same
+        // shape as the #503 row-window bug).
+        let sum: i128 = vals.iter().map(|&x| x as i128).sum();
+        let sum_sq: i128 = vals.iter().map(|&x| (x as i128) * (x as i128)).sum();
+        let ni = n as i128;
+        let want_mean = sum as f64 / n as f64;
+        // variance = (n·Σx² − (Σx)²) / n², numerator in exact integers.
+        let want_std = ((ni * sum_sq - sum * sum) as f64 / (ni as f64 * ni as f64)).sqrt();
+        let want_min = *vals.iter().min().unwrap() as f64;
+        let want_max = *vals.iter().max().unwrap() as f64;
+
+        for (label, v) in [("index", &a), ("decode", &b)] {
+            assert_eq!(v["count"].as_u64().unwrap() as usize, n, "{label} count");
+            assert_eq!(v["raw"]["min"].as_f64().unwrap(), want_min, "{label} min");
+            assert_eq!(v["raw"]["max"].as_f64().unwrap(), want_max, "{label} max");
+            assert_eq!(
+                v["raw"]["mean"].as_f64().unwrap(),
+                want_mean,
+                "{label} mean"
+            );
+            assert_eq!(v["raw"]["std"].as_f64().unwrap(), want_std, "{label} std");
+        }
+        // ...and bit-for-bit with each other.
+        assert_eq!(
+            a["raw"], b["raw"],
+            "index and decode must agree bit-for-bit"
+        );
+    }
+
+    /// A `u64` array holding values above `i64::MAX` gets NO sidecar (`as_i64` refuses), so `stats`
+    /// must fall back to the decode path — and still be exact, via the `u128` reduction.
+    #[test]
+    fn u64_beyond_i64_max_has_no_index_and_still_reduces_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let vals: Vec<u64> = vec![u64::MAX, 0, 1 << 63, 7];
+        let (indexed, _plain) = seal_with_and_without_index(
+            dir.path(),
+            vec![4],
+            vec![2],
+            "uint64",
+            ArrayData::U64(vals.clone()),
+        );
+        let v = stats_json(&indexed);
+        // No sidecar was emitted (`as_i64` refuses these values), so even the "indexed" file falls
+        // back to a decode. And `sum_sq` here overflows u128 — `u64::MAX²` alone is ~3.4e38 against
+        // a `u128::MAX` of ~3.4e38 — so the reduction cannot be exact and must NOT claim to be.
+        assert_eq!(v["method"], "full-decode-f64-integer-overflow");
+        assert_eq!(
+            v["exact"], false,
+            "an overflowed integer accumulator must fall back and report inexact, not wrap"
+        );
+        // min/max are still exact (they never accumulate), and are what a viewer windows on.
+        assert_eq!(v["raw"]["max"].as_f64().unwrap(), u64::MAX as f64);
+        assert_eq!(v["raw"]["min"].as_f64().unwrap(), 0.0);
+
+        // A u64 array whose sum_sq FITS reduces exactly, through the u128 path.
+        let small: Vec<u64> = vec![1, 2, 3, 4];
+        let (_, _, mean, _, n, exact) = array_stats(&ArrayData::U64(small.clone()));
+        assert!(exact, "u64 within accumulator range must reduce exactly");
+        assert_eq!(n, 4);
+        assert_eq!(mean, 2.5);
+    }
+
+    /// Float arrays have no integer monoid: no sidecar, and the result is labelled NOT exact.
+    /// Never present an approximation as exact (#347).
+    #[test]
+    fn float_arrays_are_labelled_inexact() {
+        let dir = tempfile::tempdir().unwrap();
+        let (indexed, _) = seal_with_and_without_index(
+            dir.path(),
+            vec![4],
+            vec![2],
+            "float32",
+            ArrayData::F32(vec![1.5, 2.5, -3.25, 0.0]),
+        );
+        let v = stats_json(&indexed);
+        assert_eq!(v["method"], "full-decode-f64-float");
+        assert_eq!(
+            v["exact"], false,
+            "an f64 reduction must not claim exactness"
+        );
+    }
+
+    /// A sidecar whose aggregate does not cover the array must be REFUSED, not served as exact.
+    ///
+    /// Being slow is recoverable; confidently reporting the wrong min/max is not. This forges a
+    /// short index (one chunk's worth) against a larger array and asserts `stats` falls back.
+    #[test]
+    fn a_partial_chunk_index_is_refused_and_falls_back() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("short.tsra");
+        let mut spec = ArraySpec::new(vec![8], "int16");
+        spec.chunks = vec![4];
+        let data = ArrayData::I16((0..8).collect());
+
+        let (bref, payload) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+        // An index covering only the FIRST half of the array — stale/partial, exactly what must
+        // not be trusted.
+        let mut short = tessera_core::chunk_index::ChunkIndex::new();
+        short.push(tessera_core::hash::digest(b"chunk-0"), &[0, 1, 2, 3]);
+        let (sref, spayload) =
+            tessera_io::chunk_index::chunk_index_block("volume", &short).unwrap();
+
+        let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        b.add_block_ref(sref);
+        tessera_io::pack(&b.seal().unwrap(), &[payload, spayload], &p).unwrap();
+
+        let v = stats_json(&p);
+        assert_eq!(
+            v["method"], "full-decode-exact-integer",
+            "a partial index must be refused, not served as exact"
+        );
+        // The real values are 0..8, which the short index would have reported as max 3.
+        assert_eq!(v["raw"]["max"].as_f64().unwrap(), 7.0);
+        assert_eq!(v["count"].as_u64().unwrap(), 8);
+    }
+
+    /// A 64-bit integer array's index is REFUSED until #523's write-path overflow is fixed.
+    ///
+    /// `ChunkStats` folds `sum_sq` in `i128`, which a 64-bit sample overflows, and the write path
+    /// currently WRAPS in release — so a sealed `.cidx` for an int64 array may already hold a wrong
+    /// `sum_sq`. Reading it and calling the result exact would launder that corruption. The index is
+    /// there (the writer emitted one); `stats` must decline to use it.
+    #[test]
+    fn a_64_bit_integer_index_is_refused_until_the_write_path_is_fixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (indexed, _) = seal_with_and_without_index(
+            dir.path(),
+            vec![4],
+            vec![2],
+            "int64",
+            ArrayData::I64(vec![1, 2, 3, 4]),
+        );
+        // The sidecar exists...
+        let r = tessera_io::Reader::open(&indexed).unwrap();
+        assert!(
+            r.manifest().blocks.iter().any(|b| b.name == "volume.cidx"),
+            "the writer should have emitted an index for an integer array"
+        );
+        drop(r);
+        // ...and is deliberately not used.
+        let v = stats_json(&indexed);
+        assert_eq!(
+            v["method"], "full-decode-exact-integer",
+            "a 64-bit index must be refused while #523 is open"
+        );
+        assert_eq!(v["raw"]["mean"].as_f64().unwrap(), 2.5);
+    }
+
+    /// An index whose entry count does not match the block's chunk grid is refused.
+    ///
+    /// This is the shape-binding half of "the index is bound to its block only by name": a `.cidx`
+    /// built for a differently-shaped array cannot describe this one, and serving its min/max as
+    /// exact would be a confident wrong answer.
+    #[test]
+    fn an_index_for_a_different_shape_is_refused() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("mismatch.tsra");
+
+        // The data block: 8 voxels, chunks of 2 -> a 4-entry chunk grid.
+        let mut spec = ArraySpec::new(vec![8], "int16");
+        spec.chunks = vec![2];
+        let data = ArrayData::I16((0..8).collect());
+        let (bref, payload) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+
+        // An index built for a 2-chunk array — wrong grid, and its max (1) is wrong for this block.
+        let mut other = tessera_core::chunk_index::ChunkIndex::new();
+        other.push(tessera_core::hash::digest(b"c0"), &[0, 1]);
+        other.push(tessera_core::hash::digest(b"c1"), &[0, 1]);
+        let (sref, spayload) =
+            tessera_io::chunk_index::chunk_index_block("volume", &other).unwrap();
+
+        let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        b.add_block_ref(sref);
+        tessera_io::pack(&b.seal().unwrap(), &[payload, spayload], &p).unwrap();
+
+        let v = stats_json(&p);
+        assert_eq!(v["method"], "full-decode-exact-integer");
+        assert_eq!(
+            v["raw"]["max"].as_f64().unwrap(),
+            7.0,
+            "the real max, not the index's 1"
+        );
+    }
+
+    /// Default text-CSV grid options — the shape almost every test wants.
+    fn csv_grid() -> GridOpts {
+        GridOpts {
+            format: GridFormat::Csv,
+            limit: None,
+            all: true,
+            interactive: false,
+            window: None,
+        }
+    }
+
+    /// Seal a small 2-D int16 array as a `recon` volume and hand back its path.
+    fn sealed_grid(dir: &std::path::Path, shape: Vec<u64>, vals: Vec<i16>) -> std::path::PathBuf {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        use tessera_io::{array::ArrayData, pack};
+        let p = dir.join("g.tsra");
+        let spec = ArraySpec::new(shape, "int16");
+        let (bref, payload) =
+            tessera_io::array::array_block("volume", &spec, &ArrayData::I16(vals)).unwrap();
+        let mut b = ProductBuilder::new("recon", "G", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        let sealed = b.seal().unwrap();
+        pack(&sealed, &[payload], &p).unwrap();
+        p
+    }
+
+    /// **#387** — array reads emitted CSV only, which is a foot-gun on a real volume: a 512×512 plane is
+    /// a 512-wide CSV spew, and an analyst wants numpy or an image. `json` carries the shape and dtype
+    /// with the numbers; `npy` is the lossless path.
+    ///
+    /// The expectations here are derived **independently of our own writer** — the `.npy` bytes against
+    /// the NumPy format spec (magic, `'<f8'` descr, 64-byte header alignment, little-endian payload) and
+    /// the PNG by decoding it with the `png` crate's *reader*. A test that merely echoed whatever we
+    /// emitted would pass for a wrong encoder.
+    #[test]
+    fn slice_writes_json_npy_and_png() {
+        let dir = tempfile::tempdir().unwrap();
+        // 2×3: [[0,1,2],[10,11,12]]
+        let p = sealed_grid(dir.path(), vec![2, 3], vec![0, 1, 2, 10, 11, 12]);
+        let run = |fmt: GridFormat, window: Option<(f64, f64)>| {
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: fmt,
+                limit: None,
+                all: true,
+                interactive: false,
+                window,
+            };
+            let res = slice(&p, "volume", Some(":,:"), None, false, &opts, &mut buf).unwrap();
+            (buf, res)
+        };
+
+        // ── json: self-describing, and the values are the array ──
+        let (buf, _) = run(GridFormat::Json, None);
+        let v: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["shape"], serde_json::json!([2, 3]));
+        assert_eq!(v["dtype"], "int16");
+        assert_eq!(v["values"], serde_json::json!([[0, 1, 2], [10, 11, 12]]));
+
+        // ── npy: checked against the NumPy format spec, not against our own output ──
+        let (buf, _) = run(GridFormat::Npy, None);
+        assert_eq!(&buf[..6], b"\x93NUMPY", "magic");
+        assert_eq!(&buf[6..8], &[1, 0], "version 1.0");
+        let hlen = u16::from_le_bytes([buf[8], buf[9]]) as usize;
+        assert_eq!(
+            (10 + hlen) % 64,
+            0,
+            "numpy requires 64-byte header alignment"
+        );
+        let header = std::str::from_utf8(&buf[10..10 + hlen]).unwrap();
+        // the NATIVE descr (#478): this is an int16 array, so `.npy` says so rather than widening to f8
+        assert!(header.contains("'descr': '<i2'"), "{header}");
+        assert!(header.contains("'fortran_order': False"), "{header}");
+        assert!(header.contains("'shape': (2, 3)"), "{header}");
+        assert!(header.ends_with('\n'), "the header must end with a newline");
+        let body = &buf[10 + hlen..];
+        assert_eq!(body.len(), 6 * 2, "6 int16 values");
+        let got: Vec<i16> = body
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(got, vec![0, 1, 2, 10, 11, 12]);
+
+        // ── png: decoded back with the png crate; window + dtype recorded in tEXt ──
+        let (buf, res) = run(GridFormat::Png, None);
+        let decoder = png::Decoder::new(std::io::Cursor::new(&buf));
+        let mut reader = decoder.read_info().unwrap();
+        let info = reader.info();
+        assert_eq!((info.width, info.height), (3, 2), "cols × rows");
+        assert_eq!(info.bit_depth, png::BitDepth::Eight);
+        assert_eq!(info.color_type, png::ColorType::Grayscale);
+        let texts: Vec<(String, String)> = info
+            .uncompressed_latin1_text
+            .iter()
+            .map(|t| (t.keyword.clone(), t.text.clone()))
+            .collect();
+        let get = |k: &str| {
+            texts
+                .iter()
+                .find(|(kw, _)| kw == k)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| panic!("missing tEXt '{k}' in {texts:?}"))
+        };
+        // the window ACTUALLY used, so a preview copied out of context stays self-describing
+        assert_eq!(get("tessera:window"), "0,12");
+        assert_eq!(get("tessera:source_dtype"), "int16");
+        assert!(get("Comment").contains("not the data"), "{texts:?}");
+        // auto-window maps min→black and max→white
+        let mut pixels = vec![0u8; reader.output_buffer_size()];
+        let frame = reader.next_frame(&mut pixels).unwrap();
+        let px = &pixels[..frame.buffer_size()];
+        assert_eq!(px[0], 0, "the minimum (0) is black");
+        assert_eq!(px[5], 255, "the maximum (12) is white");
+        // and the caller is told it is lossy
+        let note = res.note.expect("png must report that it is a preview");
+        assert!(note.contains("lossy"), "{note}");
+        assert!(
+            note.contains("npy"),
+            "the note must point at the lossless path: {note}"
+        );
+
+        // ── an explicit window overrides, and is what gets recorded ──
+        let (buf, _) = run(GridFormat::Png, Some((0.0, 24.0)));
+        let mut reader = png::Decoder::new(std::io::Cursor::new(&buf))
+            .read_info()
+            .unwrap();
+        let recorded = reader
+            .info()
+            .uncompressed_latin1_text
+            .iter()
+            .find(|t| t.keyword == "tessera:window")
+            .map(|t| t.text.clone())
+            .unwrap();
+        assert_eq!(recorded, "0,24");
+        let mut pixels = vec![0u8; reader.output_buffer_size()];
+        let frame = reader.next_frame(&mut pixels).unwrap();
+        // 12 of a 0..24 window is mid-grey, not white any more
+        assert_eq!(pixels[..frame.buffer_size()][5], 128);
+    }
+
+    /// **#387 review** — the default cap must not silently truncate a **script**. `read … > out.csv` had
+    /// handed over 20 of 4097 rows since #391 with nothing but a stderr note, and the first version of
+    /// this PR copied that rule to `slice`/`project`. The default now applies only to an interactive
+    /// terminal; an explicit request applies anywhere.
+    #[test]
+    fn the_default_row_cap_only_applies_to_an_interactive_terminal() {
+        // the rule itself, in one place both read and the grid writer consult
+        assert_eq!(
+            row_cap(None, false, true),
+            Some(DEFAULT_GRID_ROWS),
+            "a terminal previews"
+        );
+        assert_eq!(
+            row_cap(None, false, false),
+            None,
+            "a pipe or redirect gets everything"
+        );
+        assert_eq!(
+            row_cap(Some(5), false, false),
+            Some(5),
+            "an explicit cap applies when piped"
+        );
+        assert_eq!(row_cap(Some(5), false, true), Some(5), "…and at a terminal");
+        assert_eq!(
+            row_cap(None, true, true),
+            None,
+            "--all lifts it even at a terminal"
+        );
+        assert_eq!(
+            row_cap(Some(5), true, true),
+            None,
+            "--all wins over an explicit cap"
+        );
+
+        // and end-to-end through `slice`: 30 rows, more than the 20-row default
+        let dir = tempfile::tempdir().unwrap();
+        let p = sealed_grid(dir.path(), vec![30, 2], (0..60).collect());
+        let run = |interactive: bool, limit: Option<u64>| {
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: GridFormat::Csv,
+                limit,
+                all: false,
+                interactive,
+                window: None,
+            };
+            let res = slice(&p, "volume", Some(":,:"), None, false, &opts, &mut buf).unwrap();
+            (String::from_utf8(buf).unwrap().lines().count(), res)
+        };
+        let (lines, res) = run(true, None);
+        assert_eq!(lines, 20, "a terminal gets the preview");
+        assert!(res.truncated);
+        let (lines, res) = run(false, None);
+        assert_eq!(lines, 30, "a redirect must NOT lose 10 rows silently");
+        assert!(!res.truncated);
+        let (lines, _) = run(false, Some(3));
+        assert_eq!(lines, 3, "an explicit --limit still applies when piped");
+    }
+
+    /// **#387 review** — the JSON document must describe *itself*, or a saved file can lie: the stored
+    /// dtype is not the dtype of computed values, and a capped write is not the whole plane.
+    #[test]
+    fn json_describes_the_values_it_actually_emitted() {
+        let dir = tempfile::tempdir().unwrap();
+        // 4 rows × 2, values 0..8, with a rescale so `--physical` produces genuine floats
+        let p = {
+            use tessera_core::block::array::ArraySpec;
+            use tessera_core::ProductBuilder;
+            use tessera_io::{array::ArrayData, pack};
+            let path = dir.path().join("r.tsra");
+            let spec = ArraySpec::new(vec![4, 2], "int16").with_rescale(0.5, -1.0);
+            let (bref, payload) =
+                tessera_io::array::array_block("volume", &spec, &ArrayData::I16((0..8).collect()))
+                    .unwrap();
+            let mut b = ProductBuilder::new("recon", "R", "d", "2024-01-01T00:00:00Z");
+            b.add_block_ref(bref);
+            pack(&b.seal().unwrap(), &[payload], &path).unwrap();
+            path
+        };
+        let doc = |physical: bool, limit: Option<u64>| {
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: GridFormat::Json,
+                limit,
+                all: false,
+                interactive: false,
+                window: None,
+            };
+            slice(&p, "volume", Some(":,:"), None, physical, &opts, &mut buf).unwrap();
+            serde_json::from_slice::<Value>(&buf).unwrap()
+        };
+
+        // stored values: the dtype IS the array's, and integers stay integers
+        let v = doc(false, None);
+        assert_eq!(v["dtype"], "int16");
+        assert_eq!(v["source_dtype"], "int16");
+        assert_eq!(v["shape"], serde_json::json!([4, 2]));
+        assert_eq!(v["rows_emitted"], 4);
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["values"][0], serde_json::json!([0, 1]));
+
+        // --physical: the emitted values are floats, so THAT is the dtype; the stored one is kept
+        // separately. 0 → -1.0 and 1 → -0.5 under (slope 0.5, intercept -1).
+        let v = doc(true, None);
+        assert_eq!(v["dtype"], "float64", "a rescaled read emits floats");
+        assert_eq!(
+            v["source_dtype"], "int16",
+            "…and still says what was stored"
+        );
+        assert_eq!(v["values"][0], serde_json::json!([-1.0, -0.5]));
+        // float-ness is preserved rather than collapsed: 2 → 0.0, not 0
+        assert_eq!(v["values"][1][0].as_f64(), Some(0.0));
+        assert!(
+            v["values"][1][0].is_f64(),
+            "3.0 must stay a float in a float grid"
+        );
+
+        // a capped write says so, and `shape` stays the FULL region so it cannot pose as complete
+        let v = doc(false, Some(2));
+        assert_eq!(
+            v["shape"],
+            serde_json::json!([4, 2]),
+            "the full region shape"
+        );
+        assert_eq!(v["rows_emitted"], 2);
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["values"].as_array().unwrap().len(), 2);
+    }
+
+    /// **#387 review** — `project --mode mean` computes averages, so the emitted dtype is `float64` even
+    /// though the array holds int16; `max` picks existing samples, so it keeps the stored dtype.
+    #[test]
+    fn a_reducing_projection_reports_the_dtype_it_computed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = sealed_grid(dir.path(), vec![2, 2, 2], vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        let doc = |mode: &str| {
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: GridFormat::Json,
+                limit: None,
+                all: true,
+                interactive: false,
+                window: None,
+            };
+            project(&p, "volume", "0", mode, false, &opts, &mut buf).unwrap();
+            serde_json::from_slice::<Value>(&buf).unwrap()
+        };
+        assert_eq!(doc("max")["dtype"], "int16", "max picks stored samples");
+        let mean = doc("mean");
+        assert_eq!(mean["dtype"], "float64", "mean computes floats");
+        assert_eq!(mean["source_dtype"], "int16");
+        // (0+4)/2 = 2.0 — and it stays a float, matching the declared dtype
+        assert!(mean["values"][0][0].is_f64(), "{mean}");
+        // `sum` can leave the stored type's range, so it is reported as computed too
+        assert_eq!(doc("sum")["dtype"], "float64");
+    }
+
+    /// Seal a 2-D array of an arbitrary dtype and hand back its path.
+    fn sealed_typed(dir: &std::path::Path, shape: Vec<u64>, data: ArrayData) -> std::path::PathBuf {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        use tessera_io::pack;
+        let p = dir.join(format!("{}.tsra", data.dtype()));
+        let spec = ArraySpec::new(shape, data.dtype());
+        let (bref, payload) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+        let mut b = ProductBuilder::new("recon", "T", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        pack(&b.seal().unwrap(), &[payload], &p).unwrap();
+        p
+    }
+
+    /// Parse an `.npy` buffer independently of our writer: returns `(descr, shape_text, payload)`.
+    /// Checked against the NumPy format spec, so it cannot rubber-stamp a wrong encoder.
+    fn parse_npy(buf: &[u8]) -> (String, String, Vec<u8>) {
+        assert_eq!(&buf[..6], b"\x93NUMPY", "magic");
+        assert_eq!(&buf[6..8], &[1, 0], "version 1.0");
+        let hlen = u16::from_le_bytes([buf[8], buf[9]]) as usize;
+        assert_eq!(
+            (10 + hlen) % 64,
+            0,
+            "numpy requires 64-byte header alignment"
+        );
+        let header = std::str::from_utf8(&buf[10..10 + hlen]).unwrap();
+        assert!(header.ends_with('\n'), "the header must end with a newline");
+        let descr = header
+            .split("'descr': '")
+            .nth(1)
+            .and_then(|r| r.split('\'').next())
+            .expect("descr")
+            .to_string();
+        let shape = header
+            .split("'shape': (")
+            .nth(1)
+            .and_then(|r| r.split(')').next())
+            .expect("shape")
+            .to_string();
+        (descr, shape, buf[10 + hlen..].to_vec())
+    }
+
+    /// **#478** — `.npy` used to be written `'<f8'` whatever the array held, because the whole nav value
+    /// path converted to `f64` on the way in. `f64` has a 53-bit mantissa, so an `int64`/`uint64` magnitude
+    /// above 2^53 could not survive — the file was silently rounded while claiming to be the data.
+    ///
+    /// The samples now travel at their native dtype when nothing transformed them, so `.npy` declares the
+    /// real descr and the bytes are exact. Verified with an independent header parser plus a payload
+    /// compare, not against our own reader.
+    #[test]
+    fn npy_preserves_64_bit_integers_beyond_an_f64_mantissa() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = || GridOpts {
+            format: GridFormat::Npy,
+            limit: None,
+            all: true,
+            interactive: false,
+            window: None,
+        };
+
+        // 2^53 + 1 is the first integer f64 cannot represent; the neighbours bracket it.
+        let edge: i64 = (1i64 << 53) + 1;
+        let vals: Vec<i64> = vec![edge, edge + 2, -edge, i64::MAX];
+        assert_ne!(
+            vals[0] as f64 as i64, vals[0],
+            "2^53+1 must really be unrepresentable as f64, or this test proves nothing"
+        );
+        let p = sealed_typed(dir.path(), vec![2, 2], ArrayData::I64(vals.clone()));
+        let mut buf = Vec::new();
+        slice(&p, "volume", Some(":,:"), None, false, &binary(), &mut buf).unwrap();
+        let (descr, shape, body) = parse_npy(&buf);
+        assert_eq!(descr, "<i8", "an int64 array must declare int64");
+        assert_eq!(shape, "2, 2");
+        let got: Vec<i64> = body
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(got, vals, "every int64 must survive byte-exactly");
+
+        // uint64 at its maximum — the same hazard from the unsigned side.
+        let uvals: Vec<u64> = vec![u64::MAX, (1u64 << 53) + 1, 0, 7];
+        let p = sealed_typed(dir.path(), vec![2, 2], ArrayData::U64(uvals.clone()));
+        let mut buf = Vec::new();
+        slice(&p, "volume", Some(":,:"), None, false, &binary(), &mut buf).unwrap();
+        let (descr, _, body) = parse_npy(&buf);
+        assert_eq!(descr, "<u8");
+        let got: Vec<u64> = body
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(got, uvals, "u64::MAX must survive byte-exactly");
+
+        // …and the TEXT paths are exact too, which they were not while everything went through f64.
+        let mut buf = Vec::new();
+        let text = GridOpts {
+            format: GridFormat::Json,
+            limit: None,
+            all: true,
+            interactive: false,
+            window: None,
+        };
+        slice(&p, "volume", Some(":,:"), None, false, &text, &mut buf).unwrap();
+        let v: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["dtype"], "uint64");
+        assert_eq!(
+            v["values"][0][0].as_u64(),
+            Some(u64::MAX),
+            "JSON must carry u64::MAX exactly, not an f64 approximation"
+        );
+        let mut buf = Vec::new();
+        slice(
+            &p,
+            "volume",
+            Some(":,:"),
+            None,
+            false,
+            &csv_grid(),
+            &mut buf,
+        )
+        .unwrap();
+        let csv = String::from_utf8(buf).unwrap();
+        assert!(
+            csv.starts_with(&format!("{},", u64::MAX)),
+            "CSV must print u64::MAX exactly: {csv}"
+        );
+    }
+
+    /// **#478** — every dtype in the envelope declares its own descr, and the byte-order character follows
+    /// numpy's own convention (`|` for single-byte types, where byte order does not apply).
+    #[test]
+    fn npy_declares_the_native_descr_for_every_dtype() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: Vec<(ArrayData, &str, usize)> = vec![
+            (ArrayData::I8(vec![-1, 2]), "|i1", 1),
+            (ArrayData::U8(vec![1, 2]), "|u1", 1),
+            (ArrayData::Bool(vec![true, false]), "|b1", 1),
+            (ArrayData::I16(vec![-1, 2]), "<i2", 2),
+            (ArrayData::U16(vec![1, 2]), "<u2", 2),
+            (ArrayData::I32(vec![-1, 2]), "<i4", 4),
+            (ArrayData::U32(vec![1, 2]), "<u4", 4),
+            (ArrayData::I64(vec![-1, 2]), "<i8", 8),
+            (ArrayData::U64(vec![1, 2]), "<u8", 8),
+            (
+                ArrayData::F16(vec![half::f16::from_f32(-1.5), half::f16::from_f32(2.5)]),
+                "<f2",
+                2,
+            ),
+            (ArrayData::F32(vec![-1.5, 2.5]), "<f4", 4),
+            (ArrayData::F64(vec![-1.5, 2.5]), "<f8", 8),
+        ];
+        for (data, want_descr, width) in cases {
+            let dtype = data.dtype();
+            let p = sealed_typed(dir.path(), vec![1, 2], data);
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: GridFormat::Npy,
+                limit: None,
+                all: true,
+                interactive: false,
+                window: None,
+            };
+            slice(&p, "volume", Some(":,:"), None, false, &opts, &mut buf).unwrap();
+            let (descr, shape, body) = parse_npy(&buf);
+            assert_eq!(descr, want_descr, "{dtype}");
+            assert_eq!(shape, "1, 2", "{dtype}");
+            assert_eq!(body.len(), 2 * width, "{dtype}: 2 values of {width} bytes");
+        }
+    }
+
+    /// **#478 review** — zero-length dims are legal in an `ArraySpec`, and a reduction over an empty axis
+    /// has no value to report. The f64 path used to emit `-inf` and the native path its type's minimum
+    /// (`i64::MIN`, `0u8`, `false`) — which looks exactly like real data rather than like an error. Both
+    /// paths now refuse.
+    ///
+    /// A zero-length axis *elsewhere* is different: the projection is then genuinely empty, and the grid
+    /// must match the declared output shape rather than invent a cell (the carried-over `out_n.max(1)`).
+    #[test]
+    fn projecting_over_an_empty_axis_is_refused_and_an_empty_result_stays_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = |fmt: GridFormat| GridOpts {
+            format: fmt,
+            limit: None,
+            all: true,
+            interactive: false,
+            window: None,
+        };
+
+        // axis 0 is zero-length: max/mean/sum over nothing must all be errors, not MIN/-inf/0.
+        let p = sealed_typed(dir.path(), vec![0, 2, 2], ArrayData::I64(vec![]));
+        for mode in ["max", "mean", "sum"] {
+            let err = project(
+                &p,
+                "volume",
+                "0",
+                mode,
+                false,
+                &opts(GridFormat::Npy),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("zero length"), "{mode}: {msg}");
+        }
+
+        // A zero extent on ANOTHER axis: projecting axis 0 is legal (it has length 2), and the result is
+        // an empty grid whose shape matches the declaration — no invented cell.
+        let p = sealed_typed(dir.path(), vec![2, 0, 3], ArrayData::I64(vec![]));
+        let mut buf = Vec::new();
+        let res = project(
+            &p,
+            "volume",
+            "0",
+            "max",
+            false,
+            &opts(GridFormat::Json),
+            &mut buf,
+        )
+        .unwrap();
+        assert_eq!(res.total, 0, "an empty projection has no rows");
+        let v: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["values"].as_array().unwrap().len(), 0);
+        assert_eq!(v["rows_emitted"], 0);
+
+        // …and the same through the f64 path, so both agree.
+        let mut buf = Vec::new();
+        let res = project(
+            &p,
+            "volume",
+            "0",
+            "mean",
+            false,
+            &opts(GridFormat::Json),
+            &mut buf,
+        )
+        .unwrap();
+        assert_eq!(res.total, 0);
+        let v: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["values"].as_array().unwrap().len(), 0);
+        assert_eq!(v["dtype"], "float64", "mean still computes floats");
+    }
+
+    /// **#478** — a transform genuinely produces floats, so those still go out as `'<f8'` and say so.
+    /// `max` PICKS an existing sample, so it keeps the native dtype and is reduced natively.
+    #[test]
+    fn a_transformed_grid_still_declares_float64() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = sealed_typed(
+            dir.path(),
+            vec![2, 2, 2],
+            ArrayData::I64(vec![1, 2, 3, 4, (1i64 << 53) + 1, 6, 7, 8]),
+        );
+        let npy = |mode: &str, physical: bool| {
+            let mut buf = Vec::new();
+            let opts = GridOpts {
+                format: GridFormat::Npy,
+                limit: None,
+                all: true,
+                interactive: false,
+                window: None,
+            };
+            project(&p, "volume", "0", mode, physical, &opts, &mut buf).unwrap();
+            parse_npy(&buf)
+        };
+
+        // max: native, and the 2^53+1 sample comes through exactly
+        let (descr, shape, body) = npy("max", false);
+        assert_eq!(descr, "<i8", "max picks stored samples, so it keeps int64");
+        assert_eq!(shape, "2, 2");
+        let got: Vec<i64> = body
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![(1i64 << 53) + 1, 6, 7, 8],
+            "a native max must not round the sample it picked"
+        );
+
+        // mean averages, so it is genuinely f64 and declared as such
+        assert_eq!(npy("mean", false).0, "<f8");
+        // sum can leave the stored range — also computed
+        assert_eq!(npy("sum", false).0, "<f8");
+    }
+
+    /// **#387** — the size guard. Text output caps like `read` does; binary output never does, because a
+    /// truncated `.npy`/`.png` is a corrupt artifact rather than a preview — and an explicit `--limit`
+    /// with a binary format is therefore an **error**, since a flag that silently does nothing is its own
+    /// foot-gun.
+    #[test]
+    fn text_grid_output_caps_and_binary_output_refuses_a_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        // 5 rows × 2 cols
+        let p = sealed_grid(dir.path(), vec![5, 2], (0..10).collect());
+        let run = |opts: &GridOpts| {
+            let mut buf = Vec::new();
+            slice(&p, "volume", Some(":,:"), None, false, opts, &mut buf)
+                .map(|res| (String::from_utf8_lossy(&buf).to_string(), res))
+        };
+        let text = |limit: Option<u64>, all: bool| GridOpts {
+            format: GridFormat::Csv,
+            limit,
+            all,
+            interactive: false,
+            window: None,
+        };
+
+        // an explicit cap wins, and the result reports the truncation for main's stderr note
+        let (out, res) = run(&text(Some(2), false)).unwrap();
+        assert_eq!(out.lines().count(), 2);
+        assert_eq!((res.shown, res.total, res.truncated), (2, 5, true));
+
+        // --all lifts it
+        let (out, res) = run(&text(None, true)).unwrap();
+        assert_eq!(out.lines().count(), 5);
+        assert!(!res.truncated);
+
+        // no flags → the shared default, and NOT truncated here because 5 < 20
+        let (out, res) = run(&text(None, false)).unwrap();
+        assert_eq!(out.lines().count(), 5);
+        assert!(!res.truncated);
+        // (this case relies on DEFAULT_GRID_ROWS exceeding the 5 rows above, which it does at 20)
+
+        // binary formats ignore no flag silently: an explicit --limit is refused, naming the reason
+        for fmt in [GridFormat::Npy, GridFormat::Png] {
+            let err = run(&GridOpts {
+                format: fmt,
+                limit: Some(2),
+                all: false,
+                interactive: false,
+                window: None,
+            })
+            .unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("--limit applies to text output"), "{msg}");
+            assert!(
+                msg.contains(fmt.name()),
+                "the error must name the format: {msg}"
+            );
+        }
+
+        // …but --all with a binary format is consistent (it asks for everything and gets everything)
+        let (_, res) = run(&GridOpts {
+            format: GridFormat::Npy,
+            limit: None,
+            all: true,
+            interactive: false,
+            window: None,
+        })
+        .unwrap();
+        assert_eq!((res.shown, res.total, res.truncated), (5, 5, false));
+    }
+
+    /// **#387** — `project` shares the one grid writer, so it gets every format and the same cap without
+    /// a second copy of the row loop (the two verbs each carried one before).
+    #[test]
+    fn project_shares_the_grid_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        // 2×2×2 where a max-projection over axis 0 gives [[4,5],[6,7]]
+        let p = sealed_grid(dir.path(), vec![2, 2, 2], vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        let mut buf = Vec::new();
+        let opts = GridOpts {
+            format: GridFormat::Json,
+            limit: None,
+            all: true,
+            interactive: false,
+            window: None,
+        };
+        project(&p, "volume", "0", "max", false, &opts, &mut buf).unwrap();
+        let v: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["values"], serde_json::json!([[4, 5], [6, 7]]));
+        assert_eq!(v["dtype"], "int16");
+
+        // and the cap refusal reaches project too, from the same place
+        let err = project(
+            &p,
+            "volume",
+            "0",
+            "max",
+            false,
+            &GridOpts {
+                format: GridFormat::Png,
+                limit: Some(1),
+                all: false,
+                interactive: false,
+                window: None,
+            },
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("--limit applies to text output"));
+    }
+
+    /// **#303** — `ls` and `read` disagreed about what is addressable. The full preserved DICOM header
+    /// lands in `extra/dicom_header` (an object, ~167 keys) and `ls FILE extra/dicom_header` dumps it,
+    /// but `read FILE extra/dicom_header` died with the internal
+    /// `container: logical_table: no blocks for prefix 'extra/dicom_header'`.
+    ///
+    /// The cause is that `extra/*` is **not a block at all** — it is manifest metadata — so it never
+    /// matched the non-table-block guard above and fell through to the logical-table path. A first user
+    /// exploring what is inside a product hits it immediately. `read` now serves it as JSON, so the two
+    /// navigation verbs address the same namespace and the error is impossible rather than better-worded.
+    #[test]
+    fn read_reaches_extra_object_blocks_as_json() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::ProductBuilder;
+        use tessera_io::{array::ArrayData, pack};
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("h.tsra");
+        let spec = ArraySpec::new(vec![2, 2], "int16");
+        let data = ArrayData::I16(vec![1, 2, 3, 4]);
+        let (bref, payload) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
+        let mut b = ProductBuilder::new("recon", "H", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(bref);
+        b.with_extra(
+            "dicom_header",
+            serde_json::json!({"0008,0060": "CT", "0018,0050": "1.25"}),
+        );
+        b.with_extra("note", serde_json::json!("a string value"));
+        let sealed = b.seal().unwrap();
+        pack(&sealed, &[payload], &p).unwrap();
+
+        let read_to_string = |block: &str| {
+            let mut buf = Vec::new();
+            read(
+                ReadOpts {
+                    file: &p,
+                    block,
+                    columns: vec![],
+                    rows: None,
+                    all: false,
+                    limit: None,
+                    interactive: false,
+                    format: Format::Csv,
+                },
+                &mut buf,
+            )
+            .map(|_| String::from_utf8(buf).unwrap())
+        };
+
+        // the object case: valid JSON carrying the tags, NOT a logical_table error.
+        let out = read_to_string("extra/dicom_header")
+            .unwrap_or_else(|e| panic!("read must reach extra/ blocks: {e}"));
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["0008,0060"], "CT");
+        assert_eq!(v["0018,0050"], "1.25");
+
+        // a scalar extra value works too.
+        let out = read_to_string("extra/note").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+            "a string value"
+        );
+
+        // `extra` itself lists the keys rather than erroring.
+        let out = read_to_string("extra").unwrap();
+        assert!(out.contains("dicom_header"), "{out}");
+
+        // an unknown key names the available ones instead of leaking the table decoder's message.
+        let err = format!("{}", read_to_string("extra/nope").unwrap_err());
+        assert!(err.contains("dicom_header"), "{err}");
+        assert!(
+            !err.contains("logical_table"),
+            "must not surface the internal table error: {err}"
+        );
     }
 
     #[test]
@@ -1852,7 +4494,7 @@ mod tests {
             Some("1,:"),
             None,
             false,
-            Format::Csv,
+            &csv_grid(),
             &mut buf,
         )
         .unwrap();
@@ -1860,7 +4502,7 @@ mod tests {
 
         // stats reports the shape + value range.
         let mut s = Vec::new();
-        stats(&p, "volume", &mut s).unwrap();
+        stats(&p, "volume", false, &mut s).unwrap();
         let s = String::from_utf8(s).unwrap();
         assert!(s.contains("shape     [2, 3]"), "{s}");
         assert!(s.contains("min 0  max 12"), "{s}");
@@ -1873,7 +4515,8 @@ mod tests {
                 columns: vec![],
                 rows: None,
                 all: false,
-                limit: 20,
+                limit: None,
+                interactive: false,
                 format: Format::Csv,
             },
             &mut Vec::new(),
@@ -1919,7 +4562,8 @@ mod tests {
                 columns: vec!["ms".into()],
                 rows: None,
                 all: false,
-                limit: 2,
+                limit: Some(2),
+                interactive: false,
                 format: Format::Csv,
             },
             &mut buf,
@@ -1946,7 +4590,8 @@ mod tests {
                 columns: vec![],
                 rows: None,
                 all: true,
-                limit: 2,
+                limit: Some(2),
+                interactive: false,
                 format: Format::Ndjson,
             },
             &mut buf,

@@ -45,6 +45,13 @@ fi
 #   arrow-array arrow-buffer arrow-schema
 #                                     the shared arrow tree the ADR-0056 table lane canonicalises
 #                                     through (and where `sql` flips `chrono-tz` today)
+#   zip                               the `.tsra` CONTAINER writer itself — and, since #386, the
+#                                     `.npz` archive reader. It was missing from this list, which was
+#                                     a real blind spot of exactly the kind the note above warns
+#                                     about: the crate that frames every sealed byte was unwatched.
+#                                     tessera-io writes STORED explicitly, so enabling a decompressor
+#                                     for `.npz` cannot move a sealed byte — but that is now a claim
+#                                     this gate checks rather than one a comment asserts.
 #
 # NB: ADR-0057 §5 spells the pcodec entry `pcodec` — that is the *project* name; the crate on
 # crates.io (and in `Cargo.lock`) is `pco`, so that is what `cargo tree -i` can be given. Same
@@ -61,6 +68,7 @@ CRATES=(
   arrow-array
   arrow-buffer
   arrow-schema
+  zip
 )
 
 # Determinism of the invocation itself:

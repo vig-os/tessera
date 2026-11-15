@@ -31,6 +31,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use tessera_core::block::BlockName;
 use tessera_core::collection::{
     member_filename, sanitize_reference, CollectionBuilder, MemberKind,
 };
@@ -83,6 +84,12 @@ pub fn run(
     cfg: &tessera_io::WriteConfig,
     stream_threshold: u64,
 ) -> Result<tessera_core::Collection> {
+    // Validate BEFORE touching the filesystem. `run_into` validates too (it needs the topo order),
+    // so this is a cheap pure re-check bought for one property: a rejected spec leaves **nothing**
+    // behind, not even an empty `out_dir`. That matters most for the ADR-0056 §7 laundering rule,
+    // whose whole point is to refuse at the door — an operator who is told "this spec cannot run"
+    // should not then find an output directory suggesting it partly did.
+    validate(spec)?;
     // Atomicity (#302): the engine writes each member `.tsra` as it goes, so a failure on member N
     // used to leave members 0..N orphaned in `out_dir` with NO `collection.json` — a half-written
     // collection indistinguishable from a complete one. Fix: run the whole spec into a private
@@ -356,7 +363,7 @@ fn dispatch(
             )?;
             let m = seal_streaming_to_tsra(
                 m,
-                &[("data".to_string(), input.as_path())],
+                &[(BlockName::new("data")?, input.as_path())],
                 out_dir,
                 p,
                 parents,
@@ -503,6 +510,114 @@ fn dispatch(
             let m = seal_to_tsra(m, &payloads, out_dir, p, parents, timestamp.as_str())?;
             Ok((m, ()))
         }
+        // ── The generic-ingest lanes (ADR-0056 §11 P1) ──
+        //
+        // ADR-0057 §6's shape: the enum variant always **parses** (so a TOML spec's `spec_hash` is
+        // portable across builds and an archival spec never becomes unreadable), and only the
+        // *handler* is feature-gated. An unavailable backend is a clean, typed runtime error — never
+        // a parse error that would point at the file instead of at the build. The gating itself lives
+        // in `decode_generic_table`, so all three lanes share one shape.
+        FormatOptions::Parquet { input, .. }
+        | FormatOptions::Arrow { input, .. }
+        | FormatOptions::Csv { input, .. } => {
+            #[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+            {
+                let (table, source_format, decoder) = decode_generic_table(&p.options)?
+                    .ok_or_else(|| {
+                        Error::Invalid(
+                            "ingest-engine: internal — a generic variant did not decode".into(),
+                        )
+                    })?;
+                let m = seal_generic_table(
+                    &table,
+                    p,
+                    input,
+                    source_format,
+                    decoder,
+                    generic_column_meta(&p.options),
+                    label,
+                    extra_sources,
+                    &timestamp,
+                    out_dir,
+                    parents,
+                )?;
+                Ok((m, ()))
+            }
+            // A build with every generic lane off still parses the spec and still computes its
+            // `spec_hash`; only the run fails, and it names which backend is missing.
+            #[cfg(not(any(feature = "parquet", feature = "arrow", feature = "csv")))]
+            {
+                let _ = input;
+                Err(Error::BackendNotCompiled(crate::backends::backend_name(
+                    &p.options,
+                )))
+            }
+        }
+        // ── The generic ARRAY lane (ADR-0056 §11) ──
+        //
+        // The one generic backend whose primitive depends on the FILE rather than the format: a NumPy
+        // structured dtype is rows of typed fields, so it routes to the table primitive (§1). The spec
+        // declares `array`, and this arm honours whichever the header turned out to hold rather than
+        // making an operator predict their own dtype.
+        FormatOptions::Npy { input } | FormatOptions::NpzMember { input, .. } => {
+            #[cfg(feature = "npy")]
+            {
+                let content = match &p.options {
+                    // The enum stays closed and total (ADR-0057 §6); only the handler is gated. A
+                    // build with `npy` but not `npz` can still read a bare `.npy`, and says so about
+                    // the archive rather than failing as though the format were unknown (§7).
+                    #[cfg(feature = "npz")]
+                    FormatOptions::NpzMember { input, member } => {
+                        crate::npy::read_npz_member(input, member)?
+                    }
+                    #[cfg(not(feature = "npz"))]
+                    FormatOptions::NpzMember { .. } => {
+                        return Err(Error::BackendNotCompiled(crate::backends::backend_name(
+                            &p.options,
+                        )))
+                    }
+                    _ => crate::npy::read_npy(input)?,
+                };
+                let source_format = match &p.options {
+                    FormatOptions::NpzMember { .. } => "npz",
+                    _ => "npy",
+                };
+                let opts = crate::canonical::GenericIngest {
+                    name: &p.name,
+                    timestamp: &timestamp,
+                    description: p
+                        .description
+                        .as_deref()
+                        .unwrap_or("generically-ingested array"),
+                    source_format,
+                    source_path: input,
+                    source_label: label,
+                    extra_sources,
+                    // Branches exactly where `source_format` does: `.npz` goes through the zip
+                    // archive reader, `.npy` through nothing but our own parser, and the seal must
+                    // not claim otherwise (#477).
+                    decoder: match &p.options {
+                        FormatOptions::NpzMember { .. } => crate::decoder::Decoder::NPZ,
+                        _ => crate::decoder::Decoder::NPY,
+                    },
+                    generation: p.generation.clone(),
+                    column_meta: generic_column_meta(&p.options),
+                };
+                // One dispatch, shared with `seal_generic_product`, so the declared-vs-actual check
+                // cannot be present in one copy and missing in the other.
+                let (m, payloads) =
+                    seal_npy_content(content, Some(p.schema.as_str()), input, &p.name, &opts)?;
+                let m = seal_to_tsra(m, &payloads, out_dir, p, parents, timestamp.as_str())?;
+                Ok((m, ()))
+            }
+            #[cfg(not(feature = "npy"))]
+            {
+                let _ = input;
+                Err(Error::BackendNotCompiled(crate::backends::backend_name(
+                    &p.options,
+                )))
+            }
+        }
         FormatOptions::HdfCompound {
             input,
             dataset,
@@ -533,6 +648,9 @@ fn dispatch(
                 let inherited_study = parents.iter().find_map(|m| m.study.as_deref());
                 // Build extra_sources with the canonical `ingested_from` flowing through the
                 // streaming session (it adds its own `ingested_from`); pass `extra_sources` as-is.
+                // #416: the spec's `[product.generation]`/`[product.producer]` (ADR-0058 §1/§2) ride
+                // the same pre-seal bag — the batch path's `apply_spec_metadata` has no counterpart
+                // here, so anything not declared before the first block commits is dropped silently.
                 let m = crate::ge_hdf5::stream_to_listmode_product_2p_to_file(
                     input,
                     dataset,
@@ -546,9 +664,13 @@ fn dispatch(
                     row_index,
                     label,
                     extra_sources,
-                    &inherited,
-                    inherited_study,
-                    &p.metadata,
+                    &crate::ge_hdf5::StreamProvenance {
+                        inherited: Some(&inherited),
+                        inherited_study,
+                        metadata: Some(&p.metadata),
+                        generation: p.generation.as_ref(),
+                        producer: p.producer.as_ref(),
+                    },
                 )?;
                 // Rename the pending .tsra to its id-named final path. Same filesystem → rename is
                 // atomic, so a crash here leaves either the old or the new file in place.
@@ -608,6 +730,328 @@ fn dispatch(
                 Ok((m, ()))
             }
         }
+    }
+}
+
+/// Decode a generic table source into a canonicalised table, naming the source format and the decoder
+/// that read it.
+///
+/// The single place the three generic lanes are chosen between. Both the dispatch arms below and the
+/// conformance corpus go through it, which is what keeps the corpus honest: a fixture must exercise the
+/// same decode a real ingest does, not a parallel re-implementation that could drift from it.
+///
+/// Returns `None` for a non-generic (vendor) backend — the caller is expected to have dispatched it
+/// elsewhere, and the `match` is total so a new variant cannot be silently forgotten.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+pub fn decode_generic_table(
+    opts: &FormatOptions,
+) -> Result<
+    Option<(
+        crate::canonical::CanonicalTable,
+        &'static str,
+        crate::decoder::Decoder,
+    )>,
+> {
+    Ok(match opts {
+        FormatOptions::Parquet { input, exclude, .. } => {
+            #[cfg(feature = "parquet")]
+            {
+                Some((
+                    crate::parquet_table::read_table(input, exclude)?,
+                    "parquet",
+                    crate::decoder::Decoder::PARQUET,
+                ))
+            }
+            #[cfg(not(feature = "parquet"))]
+            {
+                let _ = (input, exclude);
+                return Err(Error::BackendNotCompiled("parquet"));
+            }
+        }
+        FormatOptions::Arrow { input, exclude, .. } => {
+            #[cfg(feature = "arrow")]
+            {
+                Some((
+                    crate::arrow_table::read_arrow_table(input, exclude)?,
+                    "arrow",
+                    crate::decoder::Decoder::ARROW_IPC,
+                ))
+            }
+            #[cfg(not(feature = "arrow"))]
+            {
+                let _ = (input, exclude);
+                return Err(Error::BackendNotCompiled("arrow"));
+            }
+        }
+        FormatOptions::Csv {
+            input,
+            columns,
+            delimiter,
+            header,
+            null_tokens,
+            exclude,
+            ..
+        } => {
+            #[cfg(feature = "csv")]
+            {
+                let mut o = crate::csv_table::CsvOptions::from_decls(columns)?;
+                if let Some(d) = delimiter {
+                    o.delimiter = one_byte_delimiter(d)?;
+                }
+                o.header = *header;
+                o.null_tokens = null_tokens.clone();
+                o.exclude = exclude.clone();
+                Some((
+                    crate::csv_table::read_table(input, &o)?,
+                    "csv",
+                    crate::decoder::Decoder::CSV,
+                ))
+            }
+            #[cfg(not(feature = "csv"))]
+            {
+                let _ = (input, columns, delimiter, header, null_tokens, exclude);
+                return Err(Error::BackendNotCompiled("csv"));
+            }
+        }
+        _ => None,
+    })
+}
+
+/// Decode **and seal** one generic-ingest product, choosing the primitive the source implies.
+///
+/// The single path both the engine's dispatch arms and the conformance corpus take, so a fixture
+/// exercises the real ingest rather than a parallel re-implementation that could drift from it. It stops
+/// short of writing the `.tsra` — the caller does that, because the engine writes into a staging
+/// directory and the corpus only needs the manifest.
+///
+/// Returns `None` for a non-generic (vendor) backend, so the `match` stays total and a new variant
+/// cannot be silently forgotten.
+/// Seal decoded `.npy` content, checking the declared schema against the primitive the file turned out
+/// to hold.
+///
+/// **One function because there were two.** `run` and [`seal_generic_product`] both dispatched on
+/// `NpyContent`, and only one of them checked the declaration — so the corpus path and the spec path
+/// could disagree about what is acceptable, which is the shape of bug that survives review by looking
+/// correct in whichever copy the reviewer opened. There is one dispatch now and the check rides inside
+/// it.
+///
+/// `declared` is the spec's `schema`, or `None` where there is no declaration to falsify (the
+/// conformance corpus seals content directly, with no spec).
+#[cfg(feature = "npy")]
+fn seal_npy_content(
+    content: crate::npy::NpyContent,
+    declared: Option<&str>,
+    input: &std::path::Path,
+    name: &str,
+    opts: &crate::canonical::GenericIngest<'_>,
+) -> Result<(Manifest, Vec<tessera_io::BlockPayload>)> {
+    match content {
+        crate::npy::NpyContent::Array(a) => {
+            // `spec::check_no_schema_laundering` lets a `.npy` product declare `table`, because a
+            // NumPy **structured** dtype really is rows of typed fields and an operator cannot know
+            // which they have without opening the file. That relaxation is only honest until the file
+            // IS open: a spec claiming `table` over a plain array would otherwise seal an **array**
+            // whose declared contract said otherwise — the declared-vs-actual disagreement the
+            // laundering rule exists to stop, merely deferred to where it became knowable.
+            //
+            // Only this direction is an error. `array` is the agnostic declaration and stays accepted
+            // whichever primitive the header holds (that is the point of the relaxation); `table` is a
+            // positive claim, and a plain array falsifies it.
+            if declared == Some("table") {
+                return Err(Error::Invalid(format!(
+                    "ingest-spec: product '{name}' declares schema 'table', but {} holds a plain \
+                     (non-structured) NumPy dtype, so the ingest produces an 'array'.\n  \
+                     A structured/record dtype would be a table; this file is not one.\n  \
+                     use:  schema = \"array\"  (or omit it — 'array' is the default for this backend, \
+                     and it also accepts a structured dtype)",
+                    input.display()
+                )));
+            }
+            crate::canonical::to_array_product(&a.spec, &a.data, &a.transforms, opts)
+        }
+        crate::npy::NpyContent::Table(table) => {
+            warn_unclassified_identifying_columns(&table, opts.column_meta, name);
+            crate::canonical::to_table_product(&table, opts)
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "parquet",
+    feature = "arrow",
+    feature = "csv",
+    feature = "npy"
+))]
+pub fn seal_generic_product(
+    options: &FormatOptions,
+    opts: &crate::canonical::GenericIngest<'_>,
+) -> Result<Option<(Manifest, Vec<tessera_io::BlockPayload>)>> {
+    // The ARRAY lane, whose primitive depends on the file: a NumPy structured dtype is a table.
+    #[cfg(feature = "npy")]
+    if let FormatOptions::Npy { input } | FormatOptions::NpzMember { input, .. } = options {
+        let content = match options {
+            #[cfg(feature = "npz")]
+            FormatOptions::NpzMember { member, .. } => crate::npy::read_npz_member(input, member)?,
+            #[cfg(not(feature = "npz"))]
+            FormatOptions::NpzMember { .. } => {
+                return Err(Error::BackendNotCompiled(crate::backends::backend_name(
+                    options,
+                )))
+            }
+            _ => crate::npy::read_npy(input)?,
+        };
+        // No spec here, so no declaration to falsify — the corpus seals content directly.
+        return Ok(Some(seal_npy_content(
+            content, None, input, opts.name, opts,
+        )?));
+    }
+    // The TABLE lane.
+    #[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+    if let Some((table, _, _)) = decode_generic_table(options)? {
+        warn_unclassified_identifying_columns(&table, opts.column_meta, opts.name);
+        return Ok(Some(crate::canonical::to_table_product(&table, opts)?));
+    }
+    Ok(None)
+}
+
+/// The `source_format` and decoder a generic backend records — the two facts `GenericIngest` needs that
+/// only the backend knows.
+#[cfg(any(
+    feature = "parquet",
+    feature = "arrow",
+    feature = "csv",
+    feature = "npy"
+))]
+pub fn generic_source_and_decoder(
+    options: &FormatOptions,
+) -> Option<(&'static str, crate::decoder::Decoder)> {
+    match options {
+        FormatOptions::Parquet { .. } => Some(("parquet", crate::decoder::Decoder::PARQUET)),
+        FormatOptions::Arrow { .. } => Some(("arrow", crate::decoder::Decoder::ARROW_IPC)),
+        FormatOptions::Csv { .. } => Some(("csv", crate::decoder::Decoder::CSV)),
+        FormatOptions::Npy { .. } => Some(("npy", crate::decoder::Decoder::NPY)),
+        FormatOptions::NpzMember { .. } => Some(("npz", crate::decoder::Decoder::NPZ)),
+        _ => None,
+    }
+}
+
+/// Seal a canonicalised generic table as a `table` product and write its `.tsra`.
+///
+/// One helper for all three generic lanes, so the parts that must not drift between them — the
+/// decoder record, the `source_format` field, the operator's recipe, the `--column-meta` application,
+/// the PHI advisory — are written once. The lanes differ only in how they produced the `CanonicalTable`.
+#[cfg(any(feature = "parquet", feature = "arrow", feature = "csv"))]
+#[allow(clippy::too_many_arguments)] // the dispatch context, same as every other backend seam
+fn seal_generic_table(
+    table: &crate::canonical::CanonicalTable,
+    p: &crate::spec::ProductSpec,
+    input: &Path,
+    source_format: &str,
+    decoder: crate::decoder::Decoder,
+    column_meta: &crate::column_meta::ColumnMeta,
+    label: Option<&str>,
+    extra_sources: &[Source],
+    timestamp: &str,
+    out_dir: &Path,
+    parents: &[&Manifest],
+) -> Result<Manifest> {
+    warn_unclassified_identifying_columns(table, column_meta, &p.name);
+    let (m, payloads) = crate::canonical::to_table_product(
+        table,
+        &crate::canonical::GenericIngest {
+            name: &p.name,
+            timestamp,
+            description: p
+                .description
+                .as_deref()
+                .unwrap_or("generically-ingested table"),
+            source_format,
+            source_path: input,
+            source_label: label,
+            extra_sources,
+            decoder,
+            generation: p.generation.clone(),
+            column_meta,
+        },
+    )?;
+    seal_to_tsra(m, &payloads, out_dir, p, parents, timestamp)
+}
+
+/// The `column_meta` of a generic variant — the one field the collapsed dispatch arm still needs
+/// per-variant, and the `match` stays total so a new generic backend must declare it.
+#[cfg(any(
+    feature = "parquet",
+    feature = "arrow",
+    feature = "csv",
+    feature = "npy"
+))]
+fn generic_column_meta(opts: &FormatOptions) -> &crate::column_meta::ColumnMeta {
+    use crate::column_meta::ColumnMeta;
+    /// The empty annotation set a vendor backend maps to. `OnceLock` rather than a `const`, because
+    /// `ColumnMeta` owns a `BTreeMap` and a borrow has to outlive the call.
+    static NONE: std::sync::OnceLock<ColumnMeta> = std::sync::OnceLock::new();
+    match opts {
+        FormatOptions::Parquet { column_meta, .. }
+        | FormatOptions::Arrow { column_meta, .. }
+        | FormatOptions::Csv { column_meta, .. } => column_meta,
+        _ => NONE.get_or_init(ColumnMeta::empty),
+    }
+}
+
+/// ADR-0056 §7's suspect-column advisory: print **once**, to stderr, with the fix.
+///
+/// Never gates the ingest, and deliberately quiet when there is nothing an operator could act on.
+/// §9's loudness rule is why this is one aggregated line per product rather than one per column:
+/// someone running `find … -exec tessera ingest …` across 5000 files must not scroll 30k lines of
+/// advice. It goes through the `tracing` facade, so a non-TTY consumer can filter it out entirely.
+#[cfg(any(
+    feature = "parquet",
+    feature = "arrow",
+    feature = "csv",
+    feature = "npy"
+))]
+fn warn_unclassified_identifying_columns(
+    table: &crate::canonical::CanonicalTable,
+    column_meta: &crate::column_meta::ColumnMeta,
+    product: &str,
+) {
+    let classified = column_meta.classified();
+    let suspect: Vec<&str> = table
+        .columns
+        .iter()
+        .map(|(c, _)| c.name.as_str())
+        .filter(|n| crate::column_meta::looks_identifying(n))
+        .filter(|n| !classified.contains(n))
+        .collect();
+    if suspect.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        target: "tessera::ingest::phi",
+        member = %product,
+        columns = %suspect.join(", "),
+        "column(s) '{}' match an identifying-name pattern (MRN / patient id / name / DOB / \
+         accession / UID) and no --column-meta gave them a tier; stamped: unknown. Classify before \
+         sharing: add a [<column>] sensitivity = \"identifying\" entry to a --column-meta file, or \
+         edit after the fact with `tessera commit --set`.",
+        suspect.join("', '")
+    );
+}
+
+/// Parse a spec's one-character `delimiter` string into a byte.
+///
+/// A whole `char` rather than a byte in the TOML because `"\t"` must be writable; but the `csv`
+/// tokenizer takes a byte, and a multi-byte delimiter is not a thing RFC 4180 has — so a
+/// `delimiter = "::"` is an error rather than a silently truncated `:`.
+#[cfg(feature = "csv")]
+fn one_byte_delimiter(d: &str) -> Result<u8> {
+    let bytes = d.as_bytes();
+    match bytes {
+        [b] => Ok(*b),
+        _ => Err(Error::Invalid(format!(
+            "ingest-spec: delimiter must be exactly one ASCII character, got '{d}' ({} bytes)",
+            bytes.len()
+        ))),
     }
 }
 
@@ -732,7 +1176,7 @@ fn attach_identity_envelope(
 /// byte-identical to the unverified path (the conformance corpus is unaffected).
 fn seal_streaming_to_tsra(
     m: Manifest,
-    sources: &[(String, &Path)],
+    sources: &[(BlockName, &Path)],
     out_dir: &Path,
     p: &crate::spec::ProductSpec,
     parents: &[&Manifest],
@@ -823,6 +1267,77 @@ mod tests {
     use std::path::PathBuf;
 
     const TS: &str = "2024-01-01T00:00:00Z";
+
+    /// A `.npy` spec may declare `schema = "table"` — `spec::check_no_schema_laundering` permits it
+    /// because a NumPy **structured** dtype genuinely is a table and an operator cannot know their own
+    /// dtype without opening the file. But nothing re-checked the claim once the file *was* open, so a
+    /// spec declaring `table` over a plain array sealed an **array** product while its sealed spec said
+    /// `table` — the declared-vs-actual disagreement the laundering rule exists to prevent, deferred
+    /// past the point where it became checkable.
+    ///
+    /// Only that direction is an error: `array` is the agnostic declaration and must keep accepting
+    /// either primitive, which is the whole point of the relaxation.
+    #[cfg(feature = "npy")]
+    #[test]
+    fn a_npy_spec_claiming_table_over_a_plain_array_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let npy = dir.path().join("vol.npy");
+        // A plain `<f8` array — decidedly not a record dtype.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\x93NUMPY\x01\x00");
+        let header = "{'descr': '<f8', 'fortran_order': False, 'shape': (2,), }\n";
+        bytes.extend_from_slice(&(header.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&1.0f64.to_le_bytes());
+        bytes.extend_from_slice(&2.0f64.to_le_bytes());
+        std::fs::write(&npy, &bytes).unwrap();
+
+        let spec_of = |schema: &str| {
+            format!(
+                r#"
+[collection]
+name = "npy-schema-test"
+timestamp = "{TS}"
+
+[[product]]
+name = "vol"
+role = "raw"
+schema = "{schema}"
+format = "npy"
+input = "{}"
+"#,
+                npy.display()
+            )
+        };
+        let cfg = tessera_io::WriteConfig::for_system().workers(1);
+
+        // The false claim is refused, and the message says what the file actually is.
+        let parsed = crate::spec::parse_str(&spec_of("table")).unwrap();
+        let err = run(
+            &parsed,
+            &PathBuf::from("inline-spec"),
+            &dir.path().join("out-table"),
+            &cfg,
+            1,
+        )
+        .expect_err("declaring 'table' over a plain array must be refused")
+        .to_string();
+        assert!(
+            err.contains("declares schema 'table'") && err.contains("plain"),
+            "got: {err}"
+        );
+
+        // The agnostic declaration still works on the same file.
+        let parsed = crate::spec::parse_str(&spec_of("array")).unwrap();
+        run(
+            &parsed,
+            &PathBuf::from("inline-spec"),
+            &dir.path().join("out-array"),
+            &cfg,
+            1,
+        )
+        .expect("'array' is the correct declaration for a plain dtype");
+    }
 
     // Mirrors the GE 2p record; only used to write the synthetic .h5 fixtures the engine then
     // reads through `crate::ge_hdf5::read_compound` (generic, no per-record struct).
@@ -1173,9 +1688,11 @@ metadata = {{ coincidence_mode = "singles", site = "anvil" }}
         }
     }
 
-    /// ADR-0058 through-line (#342/#324): a derived product **inherits** schema-flagged identity
-    /// from its parent on BOTH the batch and streaming paths, an explicit child value wins, and the
-    /// raw records a **generation** recipe + external **producer** identity that ride the seal.
+    /// ADR-0058 through-line (#342/#324/#416): a derived product **inherits** schema-flagged
+    /// identity from its parent on BOTH the batch and streaming paths, an explicit child value wins,
+    /// and a **generation** recipe + external **producer** identity ride the seal on BOTH paths —
+    /// the batch raw records one, and so does the streamed derived (#416: the streaming path used to
+    /// drop them silently).
     #[test]
     fn derived_inherits_identity_and_raw_records_generation() {
         let dir = tempfile::tempdir().unwrap();
@@ -1233,6 +1750,13 @@ streaming = "stream"
 [product.metadata]
 coincidence_mode = "prompt-coincidence"
 patient_id = "OVERRIDE"
+[product.generation.config]
+tof_cal_ref = "cal-2024-01"
+seed = 7
+[product.producer]
+tool = "coincidence-sorter"
+version = "1.4"
+git_commit = "0855f5f"
 "#,
             a = a.display(),
             b = b.display()
@@ -1298,5 +1822,28 @@ patient_id = "OVERRIDE"
             Some(&serde_json::json!("OVERRIDE")),
             "an explicit child value wins over the inherited one"
         );
+
+        // #416: the spec's recipe + producer must ride the STREAMING seal too. The streaming writer
+        // has no post-build re-seal hook, so these are declared on the `WriteSession` before the
+        // first block commits — a regression here is silent provenance loss on exactly the large
+        // acquisitions that select the streaming path.
+        let gs = der_stream
+            .generation
+            .as_ref()
+            .expect("streamed product must carry its spec's generation record");
+        assert_eq!(
+            gs.config.get("tof_cal_ref"),
+            Some(&serde_json::json!("cal-2024-01")),
+            "streaming path seals the spec's [product.generation.config]"
+        );
+        assert_eq!(gs.config.get("seed"), Some(&serde_json::json!(7)));
+        match der_stream.producer.as_ref().expect("streamed producer") {
+            tessera_core::ProducerRef::Structured(p) => {
+                assert_eq!(p.tool, "coincidence-sorter");
+                assert_eq!(p.version, "1.4");
+                assert_eq!(p.git_commit.as_deref(), Some("0855f5f"));
+            }
+            other => panic!("expected a structured producer, got {other:?}"),
+        }
     }
 }

@@ -56,6 +56,40 @@ pub enum Error {
     #[error("container: {0}")]
     Container(String),
 
+    /// A provenance edge resolved to the **right lineage but a different version**: the parent's `id`
+    /// matched the edge's `reference`, but the seal it carries is not the one the edge pinned.
+    ///
+    /// Deliberately NOT [`Error::Integrity`]. ADR-0036 makes `id` a *lineage handle* that addresses
+    /// many `manifest_hash`es, so resolving an edge against a store holding a newer commit of the
+    /// parent produces exactly this — a version mismatch, not tampering or corruption. A caller that
+    /// cannot tell the two apart either cries corruption over a routine version skew or, worse,
+    /// learns to ignore real corruption reported the same way.
+    #[error(
+        "provenance edge '{role}' -> '{reference}' resolved to a different version — \
+         the edge pins {pinned}, the resolved parent seals {resolved}"
+    )]
+    ProvenanceVersionSkew {
+        role: String,
+        reference: String,
+        pinned: String,
+        resolved: String,
+    },
+
+    /// A `generation.config_ref` digest names no block carried in the product being read — the block
+    /// was dropped, or the reference points into a *different* `.tsra` (ADR-0058 §2 pins the config
+    /// **inside** the product it describes). Raised only where a caller explicitly asked for the
+    /// config to be dereferenced: the reference is sealed and the rest of the product is valid, so a
+    /// plain read must keep working and report the digest as-is.
+    #[error(
+        "config_ref {digest} names no block carried in {file} — \
+         the product carries {blocks} block(s), none with that digest"
+    )]
+    UnresolvedConfigRef {
+        file: String,
+        digest: String,
+        blocks: usize,
+    },
+
     /// A storage-block codec (array pcodec/zarr, table Vortex) failed to encode or decode a
     /// payload, or was asked for an unsupported dtype/codec combination.
     #[error("codec: {0}")]
@@ -72,4 +106,82 @@ pub enum Error {
     /// Structurally invalid product (bad dtype, rank mismatch, missing required field, ...).
     #[error("invalid product: {0}")]
     Invalid(String),
+
+    /// A block name that fails the block-name grammar (ADR-0063, [`crate::block::name`]): empty,
+    /// `.` or `..`, an absolute path, an empty segment, a `\`, `:` or NUL, a character outside
+    /// `[A-Za-z0-9._-]`, or over 255 bytes. Refused wherever a name enters — a builder, a manifest,
+    /// a write-session journal — because a name becomes a path under a base directory (#685).
+    #[error("invalid block name '{name}': {reason}")]
+    InvalidBlockName {
+        name: String,
+        reason: crate::block::name::NameError,
+    },
+
+    /// Two block names of one product break the **leaf rule** (ADR-0063): `parent` is a parent
+    /// prefix of `child` (`volume` and `volume/1`), so the product cannot be laid out as files,
+    /// where a name is either a file or a directory. Refused at seal, by a write session, and when
+    /// exploding a product to a directory; reading such a product in-zip still works.
+    #[error(
+        "block names '{parent}' and '{child}' conflict: a block name cannot also be the parent of \
+         another (the leaf rule, ADR-0063)"
+    )]
+    BlockNameConflict { parent: String, child: String },
+
+    /// `name` does not resolve to a logical table, or a partitioned node is invalid (ADR-0064 §2,
+    /// §3): refused by every reader resolving the name and by the seal, never skipped or merged.
+    /// Every block stays readable by its full name.
+    #[error("logical table '{name}': {reason}")]
+    LogicalTable {
+        name: String,
+        reason: crate::block::partition::LogicalTableError,
+    },
+
+    /// A streaming table writer refused its input or its call (ADR-0064 §5.3, §5.4): the rows
+    /// disagree with the declared `spec.rows`, a row-group is too large, or a single-block writer
+    /// was given a table that must be partitioned.
+    #[error("streamed table '{name}': {reason}")]
+    StreamedTable {
+        name: String,
+        reason: crate::block::partition::StreamedTableError,
+    },
+
+    /// A line of a write-session journal that is **complete** (newline-terminated), so a commit,
+    /// but not a valid one: not UTF-8, not JSON, not a block reference, or a block committed a
+    /// second time. `WriteSession::recover` refuses the journal rather than drop such a line as a
+    /// torn tail (only an unterminated last line is torn), and changes nothing on disk. `line` is
+    /// 1-based; `path` is the journal file.
+    #[error("write-session journal {} line {line} is complete but not a valid commit: {detail}", path.display())]
+    CorruptJournal {
+        path: std::path::PathBuf,
+        line: usize,
+        detail: String,
+    },
+
+    /// An append to a write session whose block `name` is `quarantined`, or its parent or child (the
+    /// leaf rule, ADR-0063), where `quarantined` is held in the recovery quarantine directory
+    /// `quarantine`: a journal tail `WriteSession::recover` could not replay, kept for repair by
+    /// hand. The name stays taken until that quarantine is repaired or deleted and the session is
+    /// recovered again, so a repair never finds two blocks of one name.
+    #[error(
+        "block '{name}' collides with block '{quarantined}', held in the write-session quarantine \
+         {}: repair or delete that quarantine, then recover the session",
+        quarantine.display()
+    )]
+    QuarantinedBlockName {
+        name: String,
+        quarantined: String,
+        quarantine: std::path::PathBuf,
+    },
+
+    /// An ingest backend whose **name is known but whose handler is not compiled into this build**
+    /// (ADR-0057 §6/§7).
+    ///
+    /// ADR-0057 §6 keeps `FormatOptions` closed *and total*: every backend name parses on every
+    /// build, because a TOML ingest spec is an archival artifact whose `spec_hash` must not depend on
+    /// which binary read it. A feature gate switches off the **handler**, not the name — so "this
+    /// build cannot run that backend" is a distinct, *typed* condition rather than a parse failure or
+    /// a string to grep for. `tessera` maps it to its own exit code (3), which is what lets a cookbook
+    /// recipe branch on "wrong build" versus "wrong invocation" (exit 2) without parsing stderr.
+    #[error("backend '{0}' is not compiled into this build")]
+    BackendNotCompiled(&'static str),
 }

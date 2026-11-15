@@ -1,0 +1,119 @@
+`tessera ingest array` — your NumPy data (#386, ADR-0056 §11).
+
+The array twin of `ingest table`. The verb names the **primitive**, so this is also how you override a
+source that misrepresents its shape (§1/§4), and `--from` is sniffed from magic bytes — `\x93NUMPY` for a
+single array, `PK` for a `.npz` archive. The extension is never consulted.
+
+Three tracked inputs, all tiny (118–382 bytes). They are binary, which the rest of the corpus avoids —
+but an `.npy` header is *ASCII*
+(`{'descr': '<f8', 'fortran_order': False, 'shape': (2, 3), }`), so the interesting part of each fixture
+is readable in a diff, and committing them is what keeps the array lane's walkthrough docs-as-tests
+rather than prose.
+
+## A single array
+
+Shape and dtype are explicit in the header, so there is nothing to declare and nothing to infer:
+
+```
+$ tessera ingest array vol.npy vol.tsra --name vol-01 --timestamp 2024-03-01T12:00:00Z --meta study=DEMO-2024
+ingested blake3:[..] (array) -> vol.tsra
+
+```
+
+```
+$ tessera verify vol.tsra
+OK  vol.tsra verified (1 blocks)
+
+```
+
+```
+$ tessera inspect vol.tsra
+tessera [..] · product=array
+id            blake3:[..]
+name          vol-01
+timestamp     2024-03-01T12:00:00Z
+producer      tessera/[..]
+content_hash  blake3:[..]
+manifest_hash blake3:[..]
+blocks        1
+  - data                 Array blake3:[..]
+sources       2
+  - ingested_from <- vol.npy  [blake3:[..]]
+  - ingested_via_spec <- cli-inline-spec  [blake3:[..]]
+
+```
+
+Big-endian and Fortran-ordered files are handled without you asking, and the difference between them is
+worth knowing because only one of them is recorded in the seal:
+
+- a `>f8` file is byte-swapped to native, and that is **not** recorded — byte order needs no recovery
+  instructions, and recording it would make a `>f8` file and its `<f8` twin differ in the seal, which is
+  the one thing ADR-0056 §5's endianness fixture forbids;
+- a Fortran-ordered buffer is **rewritten** to C order and *is* recorded (`fortran_to_c_order`), because
+  that is a real reordering and a reader comparing back to the original needs to know.
+
+## A structured dtype is a table, and the tool says so
+
+This is ADR-0056 §1 in its purest form: the shape of the data decides the primitive. A NumPy record dtype
+is rows of typed fields, so `ingest array` seals a **`table`** — and tells you it did, rather than
+reporting the primitive you asked for:
+
+```
+$ tessera ingest array rec.npy rec.tsra --name rec-01 --timestamp 2024-03-01T12:00:00Z --meta study=DEMO-2024
+ingested blake3:[..] (table) -> rec.tsra
+
+```
+
+```
+$ tessera ls rec.tsra data
+data   table  2 cols × 2 rows
+  id         i4
+  energy     f8
+
+```
+
+NumPy stores records **interleaved** — all of record 0's fields, then all of record 1's — so this is a
+de-interleave, the same transpose the GE-HDF5 compound reader performs and for the same reason: a
+single-column projection on an interleaved layout costs a full read.
+
+## A `.npz` is a collection
+
+An `.npz` is a zip of `.npy` files, so §11 makes it **one array product per member** rather than one
+product with N blocks. That is §10's shape rule one level up: the members of an archive are independent
+arrays, not slices of one grid. The output path is therefore a **directory**:
+
+```
+$ tessera ingest array bundle.npz coll --name bundle-01 --timestamp 2024-03-01T12:00:00Z --meta study=DEMO-2024
+ingested 2 products -> coll/ (collection blake3:[..])
+
+```
+
+Each product is named after its archive member, so `np.savez(f, energy=…, counts=…)` gives you products
+called `energy` and `counts` — the keywords you already chose:
+
+```
+$ tessera collection ls coll/collection.json
+raw     array      blake3:74c0ab6afd44b558ac0729b082e1ad0c3273e598acde2bafebfc94316faf46a4 energy                   [blake3:23c8e150c218…]
+raw     array      blake3:c43ffd96542740fd5ed04cc9460be24486ac411df5010a12e2d01ce0a54672bc counts                   [blake3:7f394539dc4f…]
+
+```
+
+A one-member archive is still a collection, deliberately: branching on the member count would make the
+output a file or a directory depending on the data, which is not a shape anyone can script against.
+
+If you saved with positional arguments — `np.savez(f, a, b)` — the members are called `arr_0`, `arr_1`,
+and ingest says so once on stderr. They ingest perfectly well and mean nothing, so the products would be
+findable by nothing; re-saving with keywords, or annotating afterwards with `tessera commit --set`, is
+the fix. It never blocks.
+
+## What is refused, and where it is routed
+
+The array primitive is a dense **numeric** grid, so four NumPy dtypes have no home in it — each refused
+with somewhere to go rather than a bare failure:
+
+| dtype | Why | Route |
+| --- | --- | --- |
+| `object` (`\|O`) | a pickled `.npy` is arbitrary Python code, not data — there is no `allow_pickle` here, by design | `ingest blob` |
+| `<U4`, `S8` (fixed-width strings) | the array primitive is numeric | `ingest table` — a structured dtype gets there automatically |
+| `datetime64`, `timedelta64` | an array block carries no epoch, so the instant would be indistinguishable from an elapsed count (ADR-0046) | `ingest table`, where a column can carry one |
+| `complex` | no complex dtype yet (#419) | store the real and imaginary parts as two arrays, or `ingest blob` |

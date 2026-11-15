@@ -13,6 +13,11 @@ gets **native objects** — a NumPy ``ndarray`` for arrays, and a polars ``DataF
 
 NumPy is a hard dependency (arrays are ndarrays). polars and pyarrow are imported lazily, only when
 ``table()`` / ``table_arrow()`` are called — so the read+numpy path has no heavy deps.
+
+Table reads take a **logical table name** (ADR-0064): ``events`` is one block, or a partitioned table
+whose leaves ``events/0000``, ``events/0001``, … are read and concatenated in leaf order, or a legacy
+``events_NNNN`` group. One leaf still reads by its full name. ``read_block`` / ``array`` take one block;
+a node such as ``events`` raises ``NotABlockError`` (a ``TesseraError``).
 """
 
 from __future__ import annotations
@@ -22,9 +27,17 @@ import json as _json
 import numpy as _np
 
 from . import _native
-from ._native import TesseraError, __version__
+from ._native import NotABlockError, TesseraError, __version__
 
-__all__ = ["Reader", "Builder", "open", "verify", "TesseraError", "__version__"]
+__all__ = [
+    "Reader",
+    "Builder",
+    "open",
+    "verify",
+    "TesseraError",
+    "NotABlockError",
+    "__version__",
+]
 
 
 def _ndarray(buf: bytes, code: str, shape=None) -> "_np.ndarray":
@@ -86,7 +99,9 @@ class Reader:
         return self._r.verify()
 
     def read_block(self, name: str) -> bytes:
-        """The raw, digest-verified encoded bytes of a block (escape hatch)."""
+        """The raw, digest-verified encoded bytes of one block (escape hatch). A name that is not a
+        block, such as a partitioned table ``pairs`` over its leaves ``pairs/0000``, …, raises
+        ``NotABlockError``."""
         return self._r.read_block(name)
 
     def __repr__(self) -> str:
@@ -94,38 +109,44 @@ class Reader:
 
     # --- ergonomic reads ---
     def array(self, name: str) -> "_np.ndarray":
-        """Decode an array block to a NumPy ``ndarray`` (C-order, native dtype)."""
+        """Decode one array block to a NumPy ``ndarray`` (C-order, native dtype). A name that is not
+        a block raises ``NotABlockError``."""
         buf, shape, code = self._r.read_array(name)
         return _ndarray(buf, code, shape)
 
     def array_roi(self, name: str, origin, shape) -> "_np.ndarray":
-        """Decode a 3-D ROI sub-cube — only the intersecting chunks are read + decoded."""
+        """Decode a 3-D ROI sub-cube of one array block — only the intersecting chunks are read +
+        decoded. A name that is not a block raises ``NotABlockError``."""
         buf, sshape, code = self._r.read_array_subset(name, list(origin), list(shape))
         return _ndarray(buf, code, sshape)
 
     def column(self, block: str, name: str) -> "_np.ndarray":
-        """Decode one table column via Vortex projection (reads only that column's segments)."""
+        """Decode one column of the logical table ``block`` via Vortex projection (reads only that
+        column's segments); a partitioned table's column spans every leaf, in leaf order."""
         buf, code = self._r.read_table_column(block, name)
         return _ndarray(buf, code)
 
     def logical_column(self, prefix: str, name: str) -> "_np.ndarray":
-        """Decode one column of the *logical* multi-block table (`events`/`events_NNNN`), spanning
-        every block in manifest order — the cross-block query, as a single ``ndarray``."""
+        """The same read as ``column()``, kept for existing callers: ``column`` resolves logical table
+        names too (a partitioned ``pairs`` over ``pairs/0000``, …, or a legacy ``events_NNNN``
+        group) and returns the column across every block, in logical order."""
         buf, code = self._r.read_logical_table_column(prefix, name)
         return _ndarray(buf, code)
 
     def table_dict(self, name: str) -> dict:
-        """Decode a table block to a ``{column: np.ndarray}`` dict (no polars/pyarrow needed)."""
+        """Decode the logical table ``name`` to a ``{column: np.ndarray}`` dict (no polars/pyarrow
+        needed); a partitioned table is every leaf's rows, in leaf order."""
         return {n: _ndarray(buf, code) for n, buf, code in self._r.read_table(name)}
 
     def table_arrow(self, name: str):
-        """Decode a table block to a pyarrow ``Table``."""
+        """Decode the logical table ``name`` to a pyarrow ``Table`` (see ``table_dict()``)."""
         import pyarrow as pa
 
         return pa.table(self.table_dict(name))
 
     def table(self, name: str):
-        """Decode a table block to a polars ``DataFrame`` (via Arrow)."""
+        """Decode the logical table ``name`` to a polars ``DataFrame`` (via Arrow; see
+        ``table_dict()``)."""
         import polars as pl
 
         return pl.from_arrow(self.table_arrow(name))

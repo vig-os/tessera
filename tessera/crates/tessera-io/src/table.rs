@@ -10,16 +10,31 @@
 //!
 //! # Reading — performance & the intended access pattern
 //!
-//! **These are Vortex-native reads and they parallelise.** [`decode`] /
-//! [`decode_projected`] drive the scan on a per-thread multi-core worker pool
-//! (`READ_RT`) so segment I/O + decode fan out across cores — do **not**
-//! reach for the bare single-threaded runtime and hand-roll a scan loop; that
-//! path is single-core and will read ~4× slower than a mature row store, which is
-//! a misuse artefact, not a property of the format.
+//! **These are Vortex-native reads and they parallelise.** Every public read —
+//! [`decode`], [`decode_with_workers`], [`decode_projected`], [`decode_column`],
+//! [`decode_rows`] — drives the scan on a per-thread multi-core worker pool
+//! (`READ_RT`) so segment I/O + decode fan out across cores. Do **not** reach for
+//! the bare single-threaded runtime and hand-roll a scan loop: that path is
+//! single-core and will read ~4× slower than a mature row store, which is a
+//! misuse artefact, not a property of the format.
+//!
+//! The pool is not the whole story, though — what decides a read is the
+//! **materialise** path. Measured on 4 M rows x 8 f64 columns, a one-column read
+//! that ran its own chunk-by-chunk loop instead of the shared column-parallel
+//! grid (#352/#385) cost 13.1 ms against 2.2 ms for the same column through
+//! [`decode_projected`] — 5.7x, with the runtime making no difference either way
+//! (that measurement is why [`decode_column`] now delegates rather than
+//! duplicating the loop). If you write a new read, reuse the existing scan +
+//! materialise helpers; do not hand-roll a third one.
 //!
 //! Match the read to the format's shape:
-//! - **Project** — ask only for the columns you need ([`decode_projected`] /
-//!   [`decode_column`]); Vortex reads just those columns' layout segments.
+//! - **Project** — ask only for the columns you need ([`decode_projected`], or
+//!   [`decode_column`] for exactly one); Vortex reads just those columns' layout
+//!   segments. Prefer ONE [`decode_projected`] over N [`decode_column`] calls:
+//!   it pays the session + scan setup once, which is most of the cost of a
+//!   narrow read.
+//! - **Take rows** — [`decode_rows`] for a scattered row set (O(1) random take),
+//!   rather than decoding everything and indexing into it.
 //! - **Full-materialise-to-`Vec<struct>` is the slow path on purpose.** The
 //!   fast, intended consumption is the columnar/zero-copy one (project + filter,
 //!   hand the canonical arrays to Arrow/DuckDB) — not decompressing every row into
@@ -32,8 +47,9 @@
 //! choice + intended access pattern were the missing signposts.)
 
 use futures::StreamExt;
+use tessera_core::block::partition::{leaf_name, Partition};
 use tessera_core::block::table::{Column, TableSpec};
-use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::block::{BlockKind, BlockName, BlockRef};
 use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
 use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
@@ -41,7 +57,7 @@ use vortex_array::accessor::ArrayAccessor;
 use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::arrays::{BoolArray, ChunkedArray, PrimitiveArray, StructArray, VarBinViewArray};
 use vortex_array::expr::{root, select};
-use vortex_array::iter::{ArrayIteratorAdapter, ArrayIteratorExt};
+use vortex_array::iter::ArrayIteratorAdapter;
 use vortex_array::scalar_fn::session::ScalarFnSession;
 use vortex_array::session::ArraySession;
 use vortex_array::ExecutionCtx;
@@ -97,10 +113,12 @@ pub enum ColumnData {
     /// `values` is never itself `Nullable` — `validate_nullable` rejects nesting.
     ///
     /// **Values under a NULL are not preserved.** Encoding normalises every masked-out slot to the
-    /// dtype default, so a decoded column carries `0` (or `0.0`) wherever `validity` is false,
-    /// whatever the producer had there. This is deliberate: it makes the encoded bytes — and
-    /// therefore `content_hash` — independent of whatever happened to sit under a null, which the
-    /// format's determinism guarantee requires. Compare only the slots where `validity` is true.
+    /// dtype default, and decoding returns the dtype default there too (#659), so a decoded column
+    /// carries `0` (or `0.0`) wherever `validity` is false, whatever the producer had there. This
+    /// is deliberate: it makes the encoded bytes — and therefore `content_hash` — independent of
+    /// whatever happened to sit under a null, which the format's determinism guarantee requires.
+    /// The table chunk-index digest takes the same canonical form (#632), so a `.cidx` sidecar is
+    /// independent of it as well. Compare only the slots where `validity` is true.
     Nullable {
         values: Box<ColumnData>,
         validity: Vec<bool>,
@@ -202,31 +220,75 @@ impl ColumnData {
     /// fits losslessly: `i1/i2/i4/i8`, `u1/u2/u4` always, and `u8` (u64) only when every value ≤
     /// `i64::MAX` (a monotonic cast → `min`/`max` stay exact). Float columns return `None` (they need
     /// canonical reduction before stats — ADR-0024).
+    ///
+    /// For a nullable column the result holds the **present values only**, so it is *not*
+    /// row-aligned: its length is the number of non-NULL rows, not [`Self::len`]. Never index it by
+    /// a row range — slice the column first ([`Self::slice`]) and convert the slice, which is what
+    /// [`Self::chunk_stats`] does (#627).
     pub fn as_i64(&self) -> Option<Vec<i64>> {
         match self {
-            ColumnData::I8(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::I16(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::I32(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::I64(v) => Some(v.clone()),
-            ColumnData::U8(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::U16(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::U32(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            ColumnData::U64(v) => v
-                .iter()
-                .all(|&x| x <= i64::MAX as u64)
-                .then(|| v.iter().map(|&x| x as i64).collect()),
-            ColumnData::F32(_) | ColumnData::F64(_) | ColumnData::Bool(_) | ColumnData::Utf8(_) => {
-                None
-            }
             // NULLs are SKIPPED, not coerced: a chunk min/max must describe the values that
             // are actually present, or pruning would exclude chunks that do contain matches.
-            ColumnData::Nullable { values, validity } => values.as_i64().map(|all| {
-                all.into_iter()
-                    .zip(validity)
-                    .filter_map(|(x, &ok)| ok.then_some(x))
-                    .collect()
-            }),
+            ColumnData::Nullable { values, validity } => values.ints_where(|i| validity[i]),
+            other => other.ints_where(|_| true),
         }
+    }
+
+    /// The integer values of the rows `keep` selects, widened to `i64` — the body of
+    /// [`Self::as_i64`]. Only the selected rows are inspected, so the value under a NULL can never
+    /// decide the outcome: a `u64` above `i64::MAX` makes the result `None` only when it is a
+    /// present value. `None` for a non-integer column (and for a nested `Nullable`, which
+    /// `validate_nullable` rejects anyway).
+    fn ints_where(&self, keep: impl Fn(usize) -> bool) -> Option<Vec<i64>> {
+        macro_rules! widen {
+            ($v:expr) => {
+                Some(
+                    $v.iter()
+                        .enumerate()
+                        .filter(|&(i, _)| keep(i))
+                        .map(|(_, &x)| x as i64)
+                        .collect(),
+                )
+            };
+        }
+        match self {
+            ColumnData::I8(v) => widen!(v),
+            ColumnData::I16(v) => widen!(v),
+            ColumnData::I32(v) => widen!(v),
+            ColumnData::I64(v) => widen!(v),
+            ColumnData::U8(v) => widen!(v),
+            ColumnData::U16(v) => widen!(v),
+            ColumnData::U32(v) => widen!(v),
+            // a monotonic cast only while every value fits; one that does not refuses the column
+            ColumnData::U64(v) => v
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| keep(i))
+                .map(|(_, &x)| i64::try_from(x).ok())
+                .collect(),
+            ColumnData::F32(_)
+            | ColumnData::F64(_)
+            | ColumnData::Bool(_)
+            | ColumnData::Utf8(_)
+            | ColumnData::Nullable { .. } => None,
+        }
+    }
+
+    /// The chunk statistics (ADR-0028 §3) of this column's rows — the single definition of a
+    /// row-group's stats, shared by the batch [`table_chunk_index`], the streaming live fold
+    /// ([`crate::accumulate::TableStreamWriter::with_live_index`]) and the multi-block fallback, so
+    /// the three cannot disagree. Pass the row-group's [`Self::slice`], not the whole column.
+    ///
+    /// `None` when the column cannot supply integer stats (see [`Self::as_i64`]).
+    ///
+    /// **NULLs are excluded**: `count`, `min`, `max`, `sum` and `sum_sq` describe the present values
+    /// only, and whatever sits under a NULL never reaches them. `count` is therefore the number of
+    /// non-NULL rows, not the row count, and [`ChunkStats`] carries no separate NULL count (that is a
+    /// format change, tracked by #522). A chunk whose rows are all NULL has the empty chunk's stats,
+    /// `ChunkStats::identity()` — no `min`/`max` — so range pruning skips it for every range, which is
+    /// exact: no NULL lies in any value range.
+    pub fn chunk_stats(&self) -> Option<ChunkStats> {
+        self.as_i64().map(|v| ChunkStats::from_values(&v))
     }
 
     /// Flatten the column to little-endian bytes for zero-copy reconstruction in another runtime —
@@ -261,6 +323,50 @@ impl ColumnData {
                 out.extend_from_slice(&pack_validity(validity));
                 out
             }
+        }
+    }
+
+    /// Put the column in **canonical form**, in place: every masked-out slot of a nullable column
+    /// takes the dtype default, which is what [`encode`] writes and [`decode`] returns. A no-op for
+    /// a non-nullable column. This is the form identity is computed over ([`row_group_digest`]), so
+    /// whatever a producer left under a NULL cannot reach a digest (#632); `to_le_bytes` stays raw
+    /// because the staging fragments and the zero-copy export carry the column as given.
+    fn canonicalise(&mut self) {
+        if let ColumnData::Nullable { values, validity } = self {
+            values.zero_masked(validity, 0);
+        }
+    }
+
+    /// Set every slot at index `>= from` that `validity` marks absent to the dtype default (`0`,
+    /// `0.0`, `false`, `""`) — the canonical form of a nullable column's values, shared by the
+    /// chunk-index digest ([`Self::canonicalise`]) and the nullable decode arm (#659).
+    /// Slots beyond `validity` are left alone (`validate_nullable` makes the lengths agree).
+    fn zero_masked(&mut self, validity: &[bool], from: usize) {
+        let mask = validity.get(from..).unwrap_or_default();
+        macro_rules! zero {
+            ($v:expr) => {{
+                let tail = $v.get_mut(from..).unwrap_or_default();
+                for (slot, _) in tail.iter_mut().zip(mask).filter(|(_, &ok)| !ok) {
+                    *slot = Default::default();
+                }
+            }};
+        }
+        match self {
+            ColumnData::I8(v) => zero!(v),
+            ColumnData::I16(v) => zero!(v),
+            ColumnData::I32(v) => zero!(v),
+            ColumnData::I64(v) => zero!(v),
+            ColumnData::U8(v) => zero!(v),
+            ColumnData::U16(v) => zero!(v),
+            ColumnData::U32(v) => zero!(v),
+            ColumnData::U64(v) => zero!(v),
+            ColumnData::F32(v) => zero!(v),
+            ColumnData::F64(v) => zero!(v),
+            ColumnData::Bool(v) => zero!(v),
+            ColumnData::Utf8(v) => zero!(v),
+            // Nesting is rejected by `validate_nullable`; were it to occur, a slot the outer mask
+            // marks absent is absent at every level.
+            ColumnData::Nullable { values, .. } => values.zero_masked(validity, from),
         }
     }
 
@@ -533,11 +639,6 @@ impl ColumnData {
 /// [`TableSpec`]). All columns have the same length (`rows`).
 pub type TableData = Vec<(String, ColumnData)>;
 
-/// An empty column of the dtype named by a numpy code (the decode accumulator).
-fn empty_column(code: &str) -> Result<ColumnData> {
-    empty_column_with_capacity(code, 0)
-}
-
 /// An empty accumulator column, pre-sized for `cap` rows.
 ///
 /// **This is the dominant cost of a full-materialise read.** Profiling (`examples/read_profile`)
@@ -607,7 +708,7 @@ fn ze(e: impl std::fmt::Display) -> Error {
 /// Sessions must never be shared across runtimes. `VortexSession` is `Arc`-backed,
 /// so `clone().with_handle(..)` rebinds the *shared* state instead of producing an
 /// independent session: caching one template and re-binding a handle per call lets a
-/// short-lived runtime (`encode`/`decode_column`) leave every other holder — notably
+/// short-lived runtime (`encode`/`encode_streaming`) leave every other holder — notably
 /// the long-lived pooled [`READ_RT`] session — pointing at a dropped runtime. The next
 /// pooled read then panics `Attempted to use a Handle after its runtime was dropped`.
 /// Regression-tested by `short_lived_runtime_does_not_poison_pooled_session`.
@@ -743,7 +844,8 @@ fn validate_nullable(name: &str, spec_nullable: bool, cd: &ColumnData) -> Result
 pub const ROWS_PER_GROUP: usize = 1 << 16; // 65_536
 
 /// **Format-invariant** maximum rows per table block — partitions a >`BLOCK_ROWS` listmode product
-/// across multiple `events_NNNN` blocks (ADR-0026). Picked at 64 × [`ROWS_PER_GROUP`] = `2^22`
+/// across the leaves `events/0000`, `events/0001`, … of one logical table (ADR-0026, ADR-0064).
+/// Picked at 64 × [`ROWS_PER_GROUP`] = `2^22`
 /// (≈ 4.19 M rows ≈ a few hundred MiB encoded for typical PET schemas), big enough that the per-block
 /// Vortex footer overhead stays trivial and small enough that one block fits comfortably in a worker's
 /// RAM. Changing this is a **format-breaking** change (it shifts the per-block partition, which shifts
@@ -782,17 +884,40 @@ pub fn partition_blocks(rows: u64, block_rows: u64) -> u64 {
     rows.div_ceil(br).max(1)
 }
 
-/// Canonical name for the `idx`-th of `total` blocks under `prefix`. `total <= 1` → `prefix` (the
-/// **small-stays-single** invariant — a ≤ [`BLOCK_ROWS`] product writes exactly one `events` block,
-/// byte-identical to today's pre-partition layout). Otherwise `prefix_NNNN` (zero-padded to 4
-/// digits, plenty of headroom for the realistic block-count range — up to 9999 blocks ≈ 41 G rows).
-/// Shared by writer and reader so the manifest order is unambiguous.
-pub fn block_name(prefix: &str, idx: u64, total: u64) -> String {
+/// Canonical name for the `idx`-th of the `total` blocks a table named `prefix` partitions into
+/// (ADR-0064 §1). `total <= 1` → `prefix` (the **small-stays-single** invariant: a ≤ [`BLOCK_ROWS`]
+/// table is exactly one bare-named block, byte-identical to the pre-partition layout). Otherwise the
+/// leaf `<prefix>/{idx:04}` ([`leaf_name`]): the index padded to at least four digits and never more
+/// than needed (`events/0000`, …, `events/9999`, `events/10000`), so there is no ceiling and the
+/// name needs nothing but `idx`. Every multi-block writer pairs it with [`block_partition`]'s marker
+/// in the block's [`TableSpec::partition`] and emits the blocks in index order, which is what makes
+/// them one logical table to [`crate::Reader::table_group`].
+///
+/// Products written before ADR-0064 PR D (#712) name their blocks `prefix_NNNN` without a marker;
+/// readers still resolve that legacy flat form, no writer produces it.
+///
+/// # Errors
+///
+/// [`Error::InvalidBlockName`] when the leaf is not a valid block name: `prefix` is not one, or is
+/// long enough to push the leaf past the 255-byte limit. A single block's `prefix` is returned
+/// unchecked; the seal checks it as it checks every name.
+pub fn block_name(prefix: &str, idx: u64, total: u64) -> Result<String> {
     if total <= 1 {
-        prefix.to_string()
+        Ok(prefix.to_string())
     } else {
-        format!("{prefix}_{idx:04}")
+        Ok(leaf_name(prefix, idx)?.into_string())
     }
+}
+
+/// The partition marker of the `idx`-th of `total` blocks (ADR-0064 §2): `None` for a single
+/// block (`total <= 1`), else `Partition { index: idx, last: idx + 1 == total }`. The writer that
+/// names a block with [`block_name`] puts this in that block's [`TableSpec::partition`]. The marker
+/// is in the manifest only, never in the payload, so it moves `manifest_hash` and not `content_hash`.
+pub fn block_partition(idx: u64, total: u64) -> Option<Partition> {
+    (total > 1).then_some(Partition {
+        index: idx,
+        last: idx + 1 == total,
+    })
 }
 
 /// Encode columns into the deterministic table-block payload bytes for `spec`.
@@ -925,11 +1050,11 @@ pub fn decode_rows(spec: &TableSpec, blob: &[u8], rows: &[u64]) -> Result<TableD
         .collect())
 }
 
-/// **Bounded-memory / >RAM variant of [`encode`]**: consume row-group [`TableData`] chunks from a
-/// *lazy* iterator (each ≤ [`ROWS_PER_GROUP`] rows) and write the chunked Vortex bytes **without ever
-/// holding the whole table** — the DAQ / streaming-compaction path. The iterator is pulled one chunk
-/// at a time as the writer consumes it (`ArrayIteratorAdapter` → `into_array_stream`), so a producer
-/// that reads one row-group fragment at a time stays at ~one-group RAM.
+/// The lazy streaming encoder collected into a `Vec<u8>`: [`encode_streaming_to`] with a vector as
+/// the sink. The input side is bounded (one row-group in flight), but the **output** is the whole
+/// encoded table in RAM, so this is for tables that fit in memory. A table of any size streams to a
+/// file (or any other [`std::io::Write`]) through [`encode_streaming_to`] instead, and into a
+/// [`crate::StreamWriter`] through [`crate::StreamWriter::push_table`] (ADR-0064).
 ///
 /// Feeding the row-groups in fixed-grid order yields bytes **byte-identical to [`encode`]** of the
 /// concatenation — there is one logical encoder, so streaming-then-compact == batch (tested by
@@ -939,11 +1064,47 @@ where
     I: IntoIterator<Item = TableData>,
     I::IntoIter: Send + 'static,
 {
+    let mut bytes = Vec::new();
+    encode_streaming_to(spec, groups, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// **Bounded-memory / >RAM variant of [`encode`]**: consume row-group [`TableData`] chunks from a
+/// *lazy* iterator (each ≤ [`ROWS_PER_GROUP`] rows) and write the chunked Vortex bytes to `sink`
+/// **without collecting either the table or the encoded output in a buffer** — the DAQ /
+/// streaming-compaction path. The iterator is pulled one chunk at a time as the writer consumes it
+/// (an `ArrayIteratorAdapter` handed to Vortex's blocking writer), so a producer that reads one
+/// row-group fragment at a time stays at ~one-group RAM, and the encoded segments go to `sink` as
+/// the Vortex writer releases them (see the known limit below). Returns the number of bytes
+/// written.
+///
+/// The sink is any [`std::io::Write`]: the pinned Vortex (0.75, `vortex-file`'s
+/// `VortexWriteOptions::blocking(..).write<W: std::io::Write + Unpin>`) writes each buffer through
+/// `write_all` as soon as it is available and calls `flush` once after the footer, with no buffering
+/// of its own — so wrap a [`std::fs::File`] in a [`std::io::BufWriter`].
+///
+/// **Known limit (#681).** The output no longer accumulates in a buffer, but the pinned Vortex
+/// writer itself still holds encoded segments in memory until it can write them: it spawns one
+/// task per chunk with no bound on how many are pending, and writes segments in one global order
+/// across all columns, so compressed chunks pile up ahead of the sink. Measured, the encode's
+/// anonymous memory is about 0.4 × the encoded size at its peak, released when the footer is
+/// written (ADR-0026, amendment "single-table output sink"). Bounding it needs a deadlock-free
+/// change inside Vortex; until then, size the RAM of a single huge table encode from that ratio.
+///
+/// The bytes are those of [`encode_streaming`] (and of [`encode`] of the concatenation) whatever the
+/// sink: the writer emits the same buffers in the same order, and the sink only receives them.
+pub fn encode_streaming_to<I, W>(spec: &TableSpec, groups: I, mut sink: W) -> Result<u64>
+where
+    I: IntoIterator<Item = TableData>,
+    I::IntoIter: Send + 'static,
+    W: std::io::Write,
+{
     let (rt, s) = runtime_session();
-    // The struct dtype, taken from an empty struct of the declared columns.
+    // The struct dtype, taken from an empty struct of the declared columns. It must carry each
+    // column's nullability, or every chunk of a nullable column mismatches it (#658).
     let mut empty: TableData = Vec::with_capacity(spec.columns.len());
     for c in &spec.columns {
-        empty.push((c.name.clone(), empty_column(&c.dtype)?));
+        empty.push((c.name.clone(), ColumnData::empty_for(c)?));
     }
     let efields: Vec<(&str, ArrayRef)> = empty
         .iter()
@@ -955,27 +1116,41 @@ where
         .dtype()
         .clone();
 
-    // Lazily turn each row-group into a Vortex StructArray chunk (one in flight at a time).
-    let chunk_iter = groups.into_iter().map(|td| {
+    // Lazily turn each row-group into a Vortex StructArray chunk (one in flight at a time). A chunk
+    // whose dtype is not the declared one is refused here, as an error the caller sees: inside vortex
+    // the mismatch panics in the write task (a `debug_assert` in debug builds, a hard assert in the
+    // layout writer in release), and that panic does not reach the caller, which got `Ok` with wrong
+    // bytes (#658).
+    let declared = dtype.clone();
+    let chunk_iter = groups.into_iter().map(move |td| {
         let fields: Vec<(&str, ArrayRef)> = td
             .iter()
             .map(|(n, c)| (n.as_str(), c.to_vortex()))
             .collect();
-        StructArray::from_fields(&fields).map(|s| s.into_array())
+        let chunk = StructArray::from_fields(&fields)?.into_array();
+        if chunk.dtype() != &declared {
+            // An io error only because that is the one `VortexError` source reachable without a
+            // direct vortex-error dependency; the message carries the actual cause.
+            return Err(std::io::Error::other(format!(
+                "encode_streaming: row-group dtype {} != declared {declared}",
+                chunk.dtype()
+            ))
+            .into());
+        }
+        Ok(chunk)
     });
     let array_iter = ArrayIteratorAdapter::new(dtype, chunk_iter);
 
     let strategy = WriteStrategyBuilder::default()
         .with_btrblocks_builder(deterministic_table_compressor())
         .build();
-    let mut buf = ByteBufferMut::empty();
-    rt.block_on(
-        s.write_options()
-            .with_strategy(strategy)
-            .write(&mut buf, array_iter.into_array_stream()),
-    )
-    .map_err(ze)?;
-    Ok(buf.freeze().to_vec())
+    let summary = s
+        .write_options()
+        .with_strategy(strategy)
+        .blocking(&rt)
+        .write(&mut sink, array_iter)
+        .map_err(ze)?;
+    Ok(summary.size())
 }
 
 /// Append a decoded (canonicalized) Vortex column's values onto the matching output (bit-exact).
@@ -983,6 +1158,7 @@ where
 /// Numeric columns canonicalize to `PrimitiveArray`; `Bool` → `BoolArray`,
 /// `Utf8` → `VarBinViewArray` (the compressor's chosen scheme is transparent
 /// here — canonicalization undoes FSST/dict/bit-packing).
+/// Perf: a nullable column costs one extra pass over the decoded chunk, resetting its NULL slots (#659).
 fn extend_field(col: &mut ColumnData, field: ArrayRef, ctx: &mut ExecutionCtx) -> Result<()> {
     match col {
         ColumnData::Bool(v) => {
@@ -1010,8 +1186,12 @@ fn extend_field(col: &mut ColumnData, field: ArrayRef, ctx: &mut ExecutionCtx) -
                 .map_err(ze)?
                 .execute_mask(prim.len(), ctx)
                 .map_err(ze)?;
+            let from = validity.len();
             validity.extend(mask.iter());
             extend_column(values, &prim);
+            // The codec may decompress any fill value under a NULL; the documented decode is the
+            // dtype default there (see `ColumnData::Nullable`, #659).
+            values.zero_masked(validity, from);
         }
         _ => {
             let prim: PrimitiveArray = field.execute(ctx).map_err(ze)?;
@@ -1369,33 +1549,20 @@ fn decode_inner(spec: &TableSpec, blob: &[u8], workers: Option<usize>) -> Result
 /// column's layout segments, so it doesn't materialise the whole table (the columnar-take win;
 /// cf. Parquet/ROOT column projection in the #143 ecosystem bench). Bit-exact with [`decode`]'s
 /// matching column.
+///
+/// A thin wrapper over [`decode_projected`] (#351). It used to run its own scan loop on the bare
+/// single-threaded runtime, materialising chunk by chunk with `extend_field`; that bypassed the
+/// column-parallel grid path (#352/#385) and measured **~5.7x slower** than asking
+/// `decode_projected` for the same one column (13.1 ms vs 2.2 ms, 4 M rows x 8 f64 columns).
+/// Delegating makes the one-column read take the same fast path as every other read, and deletes
+/// the duplicated scan loop rather than keeping two that must stay bit-identical.
 pub fn decode_column(spec: &TableSpec, blob: &[u8], name: &str) -> Result<ColumnData> {
-    let col = spec
-        .columns
-        .iter()
-        .find(|c| c.name == name)
+    // `decode_projected` validates the name and returns exactly the columns asked for, in order.
+    let mut projected = decode_projected(spec, blob, &[name])?;
+    let (_, col) = projected
+        .pop()
         .ok_or_else(|| Error::Codec(format!("table has no column '{name}'")))?;
-    let (rt, s) = runtime_session();
-    let mut out = empty_column_for(col, spec.rows as usize)?;
-    let mut ctx = s.create_execution_ctx();
-    rt.block_on(async {
-        let stream = s
-            .open_options()
-            .open_buffer(ByteBuffer::copy_from(blob))
-            .map_err(ze)?
-            .scan()
-            .map_err(ze)?
-            .with_projection(select([name], root())) // only this field is scanned
-            .into_array_stream()
-            .map_err(ze)?;
-        futures::pin_mut!(stream);
-        while let Some(chunk) = stream.next().await {
-            let st: StructArray = chunk.map_err(ze)?.execute(&mut ctx).map_err(ze)?;
-            extend_field(&mut out, st.unmasked_field(0).clone(), &mut ctx)?;
-        }
-        Ok::<(), Error>(())
-    })?;
-    Ok(out)
+    Ok(col)
 }
 
 /// Decode a **projected subset** of columns in a **single session** — Vortex
@@ -1428,10 +1595,14 @@ pub fn decode_projected(spec: &TableSpec, blob: &[u8], names: &[&str]) -> Result
 
 /// Build the `{hash, stats}` chunk-index (ADR-0028 §3) for a table block, splitting on the **same**
 /// fixed [`ROWS_PER_GROUP`] row-groups [`encode`] uses. Each entry carries the row-group's content digest
-/// (BLAKE3 over the group's little-endian column bytes — recomputable from the decoded group, independent
-/// of the Vortex byte layout) and the chunk statistics of `stat_column` (which must be an integer column,
+/// ([`row_group_digest`]: BLAKE3 over the group's canonical little-endian column bytes, with every value
+/// under a NULL taken as the dtype default — recomputable from the decoded group, independent of the
+/// Vortex byte layout) and the chunk statistics of `stat_column` (which must be an integer column,
 /// see [`ColumnData::as_i64`]). Other columns still feed each group's digest; only the stats come from
-/// `stat_column`. `index.root()` is the block's sub-block Merkle root (ADR-0028 §1), and `index.prune()`
+/// `stat_column`. A **nullable** `stat_column` is supported: NULLs are excluded from every statistic
+/// (so `count` counts the present values) and an all-NULL group carries the empty chunk's stats —
+/// see [`ColumnData::chunk_stats`], the definition this shares with the streaming live fold.
+/// `index.root()` is the block's sub-block Merkle root (ADR-0028 §1), and `index.prune()`
 /// skips row-groups a ranged read can't hit. Per #221-B, the *index* leaf may later be finer than
 /// `ROWS_PER_GROUP`; this first wiring uses the encoder's row-groups 1:1.
 ///
@@ -1443,6 +1614,7 @@ pub fn decode_projected(spec: &TableSpec, blob: &[u8], names: &[&str]) -> Result
 ///     columns: vec![Column { name: "t".into(), dtype: "u8".into(), codec: None, ..Default::default() }],
 ///     rows: 3,
 ///     row_index: None,
+///     partition: None,
 /// };
 /// let data: TableData = vec![("t".into(), ColumnData::U64(vec![10, 20, 30]))];
 /// let idx = table_chunk_index(&spec, &data, "t").unwrap();
@@ -1458,34 +1630,49 @@ pub fn table_chunk_index(
     stat_column: &str,
 ) -> Result<ChunkIndex> {
     validate(spec, data)?;
-    let stat_vals = data
+    let stat_col = &data
         .iter()
         .find(|(name, _)| name == stat_column)
         .ok_or_else(|| Error::Codec(format!("table has no column '{stat_column}'")))?
-        .1
-        .as_i64()
-        .ok_or_else(|| {
-            Error::Codec(format!(
-                "column '{stat_column}' is not an integer column for stats"
-            ))
-        })?;
+        .1;
     let rows = data.first().map(|(_, c)| c.len()).unwrap_or(0);
     let n_groups = rows.div_ceil(ROWS_PER_GROUP).max(1);
     let mut idx = ChunkIndex::new();
     for g in 0..n_groups {
         let start = g * ROWS_PER_GROUP;
         let end = ((g + 1) * ROWS_PER_GROUP).min(rows);
-        // group content digest = every column's LE bytes for [start, end), in column order.
-        let mut bytes = Vec::new();
-        for (_, col) in data.iter() {
-            bytes.extend_from_slice(&col.slice(start, end).to_le_bytes());
-        }
-        idx.push_entry(
-            digest(&bytes),
-            ChunkStats::from_values(&stat_vals[start..end]),
-        );
+        let mut group: Vec<ColumnData> = data.iter().map(|(_, c)| c.slice(start, end)).collect();
+        // Slice the ROWS, then take stats: a nullable column's `as_i64` drops its NULLs, so the
+        // whole-column values are not row-aligned and cannot be sliced by row range (#627).
+        let stats = stat_col.slice(start, end).chunk_stats().ok_or_else(|| {
+            Error::Codec(format!(
+                "column '{stat_column}' is not an integer column for stats"
+            ))
+        })?;
+        idx.push_entry(row_group_digest(&mut group), stats);
     }
     Ok(idx)
+}
+
+/// The content digest of one row-group: BLAKE3 over every column's little-endian bytes
+/// ([`ColumnData::to_le_bytes`]) in [canonical form](ColumnData::canonicalise), in column order. The
+/// single definition shared by the batch [`table_chunk_index`] and the streaming live fold
+/// ([`crate::accumulate::TableStreamWriter::with_live_index`]), so the two cannot disagree.
+///
+/// Values under a NULL are not identity (see [`ColumnData::Nullable`]): they enter the digest as the
+/// dtype default, so two producers of the same logical table get the same digest whatever they left
+/// in a masked-out slot, and the digest is recomputable from the decoded row-group (#632). The
+/// columns are canonicalised **in place**: both callers pass the row-group slice they already own,
+/// so the canonical form costs no further copy.
+pub(crate) fn row_group_digest<'a>(
+    columns: impl IntoIterator<Item = &'a mut ColumnData>,
+) -> String {
+    let mut bytes = Vec::new();
+    for c in columns {
+        c.canonicalise();
+        bytes.extend_from_slice(&c.to_le_bytes());
+    }
+    digest(&bytes)
 }
 
 /// Encode a table block and produce both the digested [`BlockRef`] (digest over the real Vortex
@@ -1495,10 +1682,11 @@ pub fn table_block(
     spec: &TableSpec,
     data: &TableData,
 ) -> Result<(BlockRef, BlockPayload)> {
+    let name = BlockName::new(name)?;
     let payload = encode(spec, data)?;
     let digest = tessera_core::hash::digest(&payload);
     let block_ref = BlockRef {
-        name: name.to_string(),
+        name: name.clone(),
         kind: BlockKind::Table,
         digest: Some(digest),
         spec: serde_json::to_value(spec)?,
@@ -1531,10 +1719,238 @@ pub fn table_block_with_index(
     Ok((block, sidecar))
 }
 
+/// Fixture for the values-under-a-NULL tests (decode #659, streaming encode #658, chunk-index digest
+/// #632): one logical table written by two producers that agree on every present value and every
+/// validity flag, and differ ONLY in what sits under each NULL.
+#[cfg(test)]
+pub(crate) mod under_null_fixture {
+    use super::{ColumnData, TableData, TableSpec};
+    use tessera_core::block::table::Column;
+
+    fn col(name: &str, dtype: &str) -> Column {
+        Column {
+            name: name.into(),
+            dtype: dtype.into(),
+            codec: None,
+            ..Default::default()
+        }
+    }
+
+    /// The spec: a non-nullable `t` row index, a nullable integer stat column `k`, and a nullable
+    /// float `v` that also holds a present `NaN` (a value, not a NULL).
+    pub(crate) fn spec(rows: usize) -> TableSpec {
+        TableSpec {
+            columns: vec![
+                col("t", "u8"),
+                col("k", "i8").nullable(),
+                col("v", "f4").nullable(),
+            ],
+            rows: rows as u64,
+            row_index: Some("t".into()),
+            partition: None,
+        }
+    }
+
+    /// `(canonical, dirty)`: `canonical` carries the dtype default under every NULL; `dirty` carries
+    /// `i64::MAX`/`i64::MIN` under the integer NULLs and `NaN`/`-0.0`/`inf` under the float NULLs
+    /// (`-0.0` is the sharp one: it compares equal to `0.0` but its bytes do not).
+    pub(crate) fn tables(rows: usize) -> (TableData, TableData) {
+        let k_valid: Vec<bool> = (0..rows).map(|r| r % 5 != 0).collect();
+        let v_valid: Vec<bool> = (0..rows).map(|r| r % 7 != 0).collect();
+        let build = |dirty: bool| -> TableData {
+            vec![
+                ("t".into(), ColumnData::U64((0..rows as u64).collect())),
+                (
+                    "k".into(),
+                    ColumnData::Nullable {
+                        values: Box::new(ColumnData::I64(
+                            (0..rows)
+                                .map(|r| match (k_valid[r], dirty) {
+                                    (true, _) => r as i64 * 3 - 7,
+                                    (false, false) => 0,
+                                    (false, true) if r % 2 == 0 => i64::MAX,
+                                    (false, true) => i64::MIN,
+                                })
+                                .collect(),
+                        )),
+                        validity: k_valid.clone(),
+                    },
+                ),
+                (
+                    "v".into(),
+                    ColumnData::Nullable {
+                        values: Box::new(ColumnData::F32(
+                            (0..rows)
+                                .map(|r| match (v_valid[r], dirty) {
+                                    (true, _) if r % 11 == 0 => f32::NAN,
+                                    (true, _) => (r % 17) as f32,
+                                    (false, false) => 0.0,
+                                    (false, true) => [f32::NAN, -0.0, f32::INFINITY][r % 3],
+                                })
+                                .collect(),
+                        )),
+                        validity: v_valid.clone(),
+                    },
+                ),
+            ]
+        };
+        (build(false), build(true))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tessera_core::block::table::Column;
+    use tessera_core::chunk_index::Monoid;
+
+    /// Encode one `i64` column through **vortex only**, with the stock strategy — no tessera types,
+    /// no `deterministic_table_compressor`. Used by the #468 reproducer so the finding cannot be
+    /// mistaken for something our compressor configuration causes.
+    fn encode_bare_i64_via_vortex(values: &[i64]) -> Vec<u8> {
+        let rt = CurrentThreadRuntime::new();
+        let s = new_session(&rt);
+        let arr: ArrayRef = Buffer::copy_from(values).into_array();
+        let mut buf = ByteBufferMut::empty();
+        rt.block_on(
+            s.write_options()
+                // Deliberately NOT `deterministic_table_compressor()`: the point is that the stock
+                // strategy diverges too.
+                .with_strategy(WriteStrategyBuilder::default().build())
+                .write(&mut buf, arr.to_array_stream()),
+        )
+        .expect("vortex write");
+        buf.freeze().to_vec()
+    }
+
+    /// **#472 — a persisted float `Sum` must not carry the platform's default NaN.**
+    ///
+    /// A column holding both `+inf` and `-inf` makes vortex's `Sum` statistic evaluate `inf + -inf`,
+    /// an IEEE 754 *invalid* operation. IEEE leaves the resulting bit pattern unspecified and the
+    /// targets disagree — x86_64 produces `0xfff8_0000_0000_0000` (sign bit set), aarch64
+    /// `0x7ff8_0000_0000_0000` (clear). `Stat::Sum` is persisted, so those bits reached the sealed
+    /// bytes and the same logical table sealed to a different `content_hash` per host.
+    ///
+    /// Fixed upstream by canonicalising a NaN sum; carried here by the vortex fork pin (see the
+    /// `[patch.crates-io]` block in `tessera/Cargo.toml`, removal tracked in #480).
+    ///
+    /// **Asymmetry worth knowing before trusting this test.** aarch64 was always producing the
+    /// canonical value, so on aarch64 the sealed bytes are identical with and without the fix — no
+    /// test can detect a dropped pin there via this defect. The guard therefore bites on **x86_64**,
+    /// which is where it matters: that is the host whose bytes were wrong. #468's separate guard is
+    /// the profile-dependent half and fires on both arches.
+    ///
+    /// Asserts byte *patterns* rather than a digest, following the same reasoning as the #468 guard:
+    /// a vortex bump legitimately moves bytes, and this test should fire for a determinism regression
+    /// rather than for every dependency update.
+    #[test]
+    fn float_sum_stat_is_canonical_nan_not_the_platform_default() {
+        let data: TableData = vec![(
+            "x".into(),
+            ColumnData::F64(vec![f64::INFINITY, f64::NEG_INFINITY]),
+        )];
+        let spec = TableSpec {
+            columns: vec![col("x", "f8")],
+            rows: 2,
+            row_index: None,
+            partition: None,
+        };
+        let sealed = encode(&spec, &data).expect("encode");
+
+        let canonical = 0x7ff8_0000_0000_0000u64.to_le_bytes();
+        let x86_default = 0xfff8_0000_0000_0000u64.to_le_bytes();
+        let contains = |needle: &[u8]| sealed.windows(needle.len()).any(|w| w == needle);
+
+        assert!(
+            contains(&canonical),
+            "#472: the sealed bytes must carry the CANONICAL quiet NaN as the float Sum statistic"
+        );
+        assert!(
+            !contains(&x86_default),
+            "#472 regression: the sealed bytes carry x86_64's default NaN (0xfff8_0000_0000_0000). \
+             The vortex fork pin has most likely been dropped before the fix shipped upstream — see \
+             #480. Note this assertion cannot fire on aarch64, which always produced the canonical \
+             value, so a green aarch64 leg is not evidence against it."
+        );
+    }
+
+    /// **#468 — the container bytes must NOT depend on the build configuration.**
+    ///
+    /// This was a known upstream limitation, asserted as still-broken. It is now FIXED, and this test
+    /// is the positive guard that it stays fixed.
+    ///
+    /// vortex 0.75.0 wrote different container bytes for an integer column whose encoding produces
+    /// *patches*, depending on whether `debug_assertions` was enabled. `[i64::MIN, 0, i64::MAX]`
+    /// zigzags to `[u64::MAX, 0, u64::MAX - 1]`, which bitpacks with exactly one exception; the bare
+    /// vortex write came out 2796 bytes with `debug_assertions` on and 2772 with it off, a constant
+    /// 24-byte delta.
+    ///
+    /// The cause was an **assertion with a side effect**: the `#[cfg(debug_assertions)]`
+    /// `is_sorted(&indices, …)` check in `vortex-array/src/patches.rs` calls `cache_is_sorted`, which
+    /// *sets* `Stat::IsSorted` on the indices array. Cached statistics are serialised into the file,
+    /// so the assert changed the bytes it was only supposed to inspect. `overflow-checks` and the
+    /// optimisation level were measured to have no effect; the axis was `debug_assertions` alone.
+    ///
+    /// Fixed upstream by computing sortedness without caching it, carried here via the vortex fork
+    /// pin (see the `[patch.crates-io]` block in `tessera/Cargo.toml` and #480 for its removal).
+    ///
+    /// **The expectations below are deliberately NOT `cfg!(debug_assertions)`-dependent.** That is the
+    /// whole assertion: a single expected length per shape, so a re-divergence fails in exactly one
+    /// profile. `flake.nix` runs this test under both `cargo test` and `cargo test --release` so the
+    /// pair is actually exercised. Both profiles agreed on the former release-build numbers (bare
+    /// 2772, sealed 2916), which is the expected direction — the debug build was the one carrying the
+    /// extra 24 bytes of cached statistic.
+    ///
+    /// Why it matters: `content_hash` is a blake3 root over these bytes, so while this was broken the
+    /// sealed identity of a product was not a function of only its data.
+    #[test]
+    fn full_span_int_container_bytes_are_build_config_independent() {
+        let pathological = encode_bare_i64_via_vortex(&[i64::MIN, 0, i64::MAX]);
+
+        // The lengths, not the hashes: a vortex bump legitimately moves bytes, and this test should
+        // fire for a *determinism* regression rather than for every dependency update.
+        assert_eq!(
+            pathological.len(),
+            2772,
+            "#468 regression: the patch-producing shape must write 2772 bytes in EVERY build \
+             configuration (debug_assertions={}). 2796 here means the side-effecting assert is back \
+             — most likely the vortex fork pin was dropped before the fix shipped upstream (#480).",
+            cfg!(debug_assertions)
+        );
+
+        // Same shape through OUR seal path: the divergence used to reach `content_hash`, which is why
+        // this was a format problem and not a curiosity.
+        let sealed = encode(
+            &TableSpec {
+                columns: vec![col("x", "i8")],
+                rows: 3,
+                row_index: None,
+                partition: None,
+            },
+            &vec![("x".into(), ColumnData::I64(vec![i64::MIN, 0, i64::MAX]))],
+        )
+        .expect("encode");
+        assert_eq!(
+            sealed.len(),
+            2916,
+            "#468 regression reached the sealed table payload, not just a bare vortex write"
+        );
+
+        // A control that does NOT produce patches, and was byte-identical in both profiles even while
+        // the bug was live. If this one ever diverges, the defect is broader than #468 described.
+        assert_eq!(
+            encode_bare_i64_via_vortex(&[i64::MIN, i64::MAX]).len(),
+            2444
+        );
+
+        // Within a single profile the bytes must still be stable — #468 was cross-configuration, not
+        // nondeterminism. A failure here would be a much worse bug.
+        assert_eq!(
+            pathological,
+            encode_bare_i64_via_vortex(&[i64::MIN, 0, i64::MAX]),
+            "within one build the write must be reproducible"
+        );
+    }
 
     fn col(name: &str, dtype: &str) -> Column {
         Column {
@@ -1594,6 +2010,7 @@ mod tests {
             columns,
             rows: rows as u64,
             row_index: None,
+            partition: None,
         };
         (spec, data)
     }
@@ -1614,6 +2031,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "i2").nullable()],
             rows: rows as u64,
             row_index: Some("t".into()),
+            partition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -1669,6 +2087,7 @@ mod tests {
                 columns: vec![col("v", "f8").nullable()],
                 rows: rows as u64,
                 row_index: None,
+                partition: None,
             };
             let data: TableData = vec![(
                 "v".into(),
@@ -1706,6 +2125,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "f4")],
             rows: rows as u64,
             row_index: Some("t".into()),
+            partition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -1733,11 +2153,13 @@ mod tests {
             columns: vec![col("v", dtype).nullable()],
             rows: 3,
             row_index: None,
+            partition: None,
         };
         let bare_spec = TableSpec {
             columns: vec![col("v", "i2")],
             rows: 3,
             row_index: None,
+            partition: None,
         };
         let nullable = |values: ColumnData, validity: Vec<bool>| ColumnData::Nullable {
             values: Box::new(values),
@@ -1819,6 +2241,7 @@ mod tests {
             columns: vec![col("v", "i4").nullable()],
             rows: rows as u64,
             row_index: None,
+            partition: None,
         };
         let validity: Vec<bool> = (0..rows).map(|k| k % 3 != 0).collect();
         let build = |filler: i32| -> TableData {
@@ -1841,6 +2264,91 @@ mod tests {
         assert_eq!(a, c, "bytes changed with the filler under nulls");
         // ...and the decode is the canonical form regardless of which one was written.
         assert_eq!(decode(&spec, &c).unwrap(), build(0));
+    }
+
+    /// #659: decode returns the dtype default under every NULL, as the `Nullable` docs promise —
+    /// not whatever fill value the codec chose to store there. The fixture's `k` column makes the
+    /// compressor fill each NULL with a neighbouring value, so a verbatim copy of the decompressed
+    /// buffer shows up here, on every read entry point.
+    #[test]
+    fn decode_yields_the_dtype_default_under_every_null() {
+        use super::under_null_fixture as fx;
+        let rows = ROWS_PER_GROUP * 2 + 777;
+        let spec = fx::spec(rows);
+        let (canonical, _) = fx::tables(rows);
+        let blob = encode(&spec, &canonical).unwrap();
+        // LE bytes, not `==`: the fixture holds a present NaN, and NaN != NaN.
+        let le = |c: &ColumnData| c.to_le_bytes();
+        let full = decode(&spec, &blob).unwrap();
+        for (i, (name, want)) in canonical.iter().enumerate() {
+            assert_eq!(le(&full[i].1), le(want), "decode: {name}");
+            let one = decode_column(&spec, &blob, name).unwrap();
+            assert_eq!(le(&one), le(want), "decode_column: {name}");
+            let projected = decode_projected(&spec, &blob, &[name.as_str()]).unwrap();
+            assert_eq!(le(&projected[0].1), le(want), "decode_projected: {name}");
+        }
+        // Scattered rows across row-groups, including NULL rows of both nullable columns.
+        let picks: Vec<u64> = vec![0, 5, 7, 35, ROWS_PER_GROUP as u64, (rows - 1) as u64];
+        let got = decode_rows(&spec, &blob, &picks).unwrap();
+        for ((name, want), (_, got)) in canonical.iter().zip(&got) {
+            let want: Vec<ColumnData> = picks
+                .iter()
+                .map(|&r| want.slice(r as usize, r as usize + 1))
+                .collect();
+            let mut joined = want[0].clone();
+            for w in &want[1..] {
+                joined.extend(w).unwrap();
+            }
+            assert_eq!(le(got), le(&joined), "decode_rows: {name}");
+        }
+    }
+
+    /// #632: the chunk index honours the same invariant as `encode` — two tables that differ ONLY
+    /// beneath their NULLs give an equal chunk-index root, equal per-group digests, and an equal
+    /// sidecar block, over a multi-row-group table with a nullable integer stat column and a
+    /// nullable float holding a present `NaN`. The index must also be recomputable from the
+    /// DECODED table, which carries the dtype default under every NULL.
+    #[test]
+    fn chunk_index_is_independent_of_values_under_nulls() {
+        use super::under_null_fixture as fx;
+        let rows = ROWS_PER_GROUP * 2 + 777; // three row-groups, the last one partial
+        let spec = fx::spec(rows);
+        let (canonical, dirty) = fx::tables(rows);
+        // LE bytes, not `!=`: the fixture holds a present NaN, so the tables are `!=` regardless.
+        let le =
+            |t: &TableData| -> Vec<Vec<u8>> { t.iter().map(|(_, c)| c.to_le_bytes()).collect() };
+        assert_ne!(
+            le(&canonical),
+            le(&dirty),
+            "precondition: the producers differ under a NULL"
+        );
+
+        let blob = encode(&spec, &canonical).unwrap();
+        assert_eq!(blob, encode(&spec, &dirty).unwrap(), "encode bytes");
+
+        let want = table_chunk_index(&spec, &canonical, "k").unwrap();
+        let got = table_chunk_index(&spec, &dirty, "k").unwrap();
+        assert_eq!(want.len(), 3, "precondition: a multi-row-group index");
+        let digests = |idx: &ChunkIndex| -> Vec<String> {
+            idx.entries.iter().map(|e| e.digest.clone()).collect()
+        };
+        assert_eq!(digests(&got), digests(&want), "per-group digests");
+        assert_eq!(got.root(), want.root(), "chunk-index root");
+        assert_eq!(got.aggregate(), want.aggregate(), "stats");
+        let decoded = decode(&spec, &blob).unwrap();
+        assert_eq!(
+            table_chunk_index(&spec, &decoded, "k").unwrap().root(),
+            want.root(),
+            "the index is recomputable from the decoded table"
+        );
+
+        let fused = |data: &TableData| {
+            let ((block, _), sidecar) =
+                table_block_with_index("events", &spec, data, Some("k")).unwrap();
+            let (sidecar, payload) = sidecar.expect("an integer stat column yields a sidecar");
+            (block, sidecar, payload.bytes)
+        };
+        assert_eq!(fused(&dirty), fused(&canonical), "fused block + sidecar");
     }
 
     /// Row-index pushdown must be BIT-EXACT with decoding the block and slicing the same rows.
@@ -2048,6 +2556,91 @@ mod tests {
         assert!(ColumnData::from_le_bytes("f4", &[0u8; 3]).is_err()); // not a multiple of width
     }
 
+    /// Streaming a table with NULLABLE columns must produce the batch bytes, not a dtype panic:
+    /// `encode_streaming` derives its struct dtype from the spec, so it must honour
+    /// `Column::nullable`, or every chunk mismatches the declared dtype.
+    #[test]
+    fn encode_streaming_matches_batch_encode_over_nullable_columns() {
+        use super::under_null_fixture as fx;
+        let rows = ROWS_PER_GROUP * 2 + 777;
+        let spec = fx::spec(rows);
+        let (canonical, dirty) = fx::tables(rows);
+        let groups = |full: &TableData| -> Vec<TableData> {
+            (0..rows.div_ceil(ROWS_PER_GROUP))
+                .map(|g| {
+                    let (st, en) = (g * ROWS_PER_GROUP, ((g + 1) * ROWS_PER_GROUP).min(rows));
+                    full.iter()
+                        .map(|(name, c)| (name.clone(), c.slice(st, en)))
+                        .collect()
+                })
+                .collect()
+        };
+        let batch = encode(&spec, &canonical).unwrap();
+        let streamed = encode_streaming(&spec, groups(&canonical)).unwrap();
+        assert_eq!(streamed, batch, "streaming != batch over nullable columns");
+        // LE bytes, not `==`: the fixture holds a present NaN, and NaN != NaN.
+        let le =
+            |t: &TableData| -> Vec<Vec<u8>> { t.iter().map(|(_, c)| c.to_le_bytes()).collect() };
+        assert_eq!(
+            le(&decode(&spec, &streamed).unwrap()),
+            le(&canonical),
+            "streamed bytes decode"
+        );
+        assert_eq!(
+            encode_streaming(&spec, groups(&dirty)).unwrap(),
+            batch,
+            "streamed bytes depend on the values under a NULL"
+        );
+    }
+
+    /// #677: the sink variant writes `encode_streaming`'s bytes — the batch bytes — into any
+    /// `io::Write` (here a buffered file), over nullable columns, and returns the length written.
+    #[test]
+    fn encode_streaming_to_a_file_writes_the_batch_bytes() {
+        use super::under_null_fixture as fx;
+        let rows = ROWS_PER_GROUP * 2 + 777;
+        let spec = fx::spec(rows);
+        let (canonical, _) = fx::tables(rows);
+        let groups = (0..rows.div_ceil(ROWS_PER_GROUP)).map(move |g| {
+            let (st, en) = (g * ROWS_PER_GROUP, ((g + 1) * ROWS_PER_GROUP).min(rows));
+            canonical
+                .iter()
+                .map(|(name, c)| (name.clone(), c.slice(st, en)))
+                .collect::<TableData>()
+        });
+        let batch = encode(&spec, &fx::tables(rows).0).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.vortex");
+        let sink = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        let written = encode_streaming_to(&spec, groups, sink).unwrap();
+        assert_eq!(written, batch.len() as u64);
+        assert!(
+            std::fs::read(&path).unwrap() == batch,
+            "file sink != batch encode"
+        );
+    }
+
+    /// A row-group whose dtype disagrees with the spec (here: a validity mask on a column the spec
+    /// declares non-nullable) is a typed error, not a debug-only panic or silently-written bytes.
+    #[test]
+    fn encode_streaming_refuses_a_row_group_that_mismatches_the_spec() {
+        let spec = TableSpec {
+            columns: vec![col("k", "i8")],
+            rows: 2,
+            row_index: None,
+            partition: None,
+        };
+        let group: TableData = vec![(
+            "k".into(),
+            ColumnData::Nullable {
+                values: Box::new(ColumnData::I64(vec![1, 0])),
+                validity: vec![true, false],
+            },
+        )];
+        let e = encode_streaming(&spec, vec![group]).unwrap_err();
+        assert!(format!("{e}").contains("!= declared"), "got: {e}");
+    }
+
     #[test]
     fn encode_streaming_matches_batch_encode() {
         // The SSoT proof: feeding row-groups through the lazy streaming encoder produces bytes
@@ -2057,6 +2650,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "f4")],
             rows: rows as u64,
             row_index: Some("t".into()),
+            partition: None,
         };
         let full: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2095,6 +2689,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "f4")],
             rows: rows as u64,
             row_index: Some("t".into()),
+            partition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2124,6 +2719,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "f4")],
             rows: rows as u64,
             row_index: Some("t".into()),
+            partition: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())), // monotonic → prunable
@@ -2152,6 +2748,238 @@ mod tests {
         );
         // a float column can't supply integer stats
         assert!(table_chunk_index(&spec, &data, "e").is_err());
+    }
+
+    /// The value written under every NULL in the #627 tests: the dtype maximum, so a NULL that
+    /// leaked into the stats would show up as `max == 127` (no test puts a real 127 in the column).
+    const UNDER_NULL: i8 = i8::MAX;
+
+    /// A nullable `i1` column from `Option`s, with [`UNDER_NULL`] under every NULL.
+    fn nullable_i8(vals: &[Option<i8>]) -> ColumnData {
+        ColumnData::Nullable {
+            values: Box::new(ColumnData::I8(
+                vals.iter().map(|v| v.unwrap_or(UNDER_NULL)).collect(),
+            )),
+            validity: vals.iter().map(Option::is_some).collect(),
+        }
+    }
+
+    /// The per-row-group stats a chunk index over `vals` must carry, folded straight from the
+    /// `Option`s — independent of `ColumnData::as_i64`/`chunk_stats`, the code under test.
+    fn expected_group_stats(vals: &[Option<i8>]) -> Vec<ChunkStats> {
+        let groups: Vec<&[Option<i8>]> = if vals.is_empty() {
+            vec![&[]]
+        } else {
+            vals.chunks(ROWS_PER_GROUP).collect()
+        };
+        groups
+            .into_iter()
+            .map(|g| {
+                let present: Vec<i64> = g.iter().flatten().map(|&v| v as i64).collect();
+                ChunkStats::from_values(&present)
+            })
+            .collect()
+    }
+
+    /// `table_chunk_index` over a one-column table: the nullable `i1` column `k`, stats on `k`.
+    fn nullable_stat_index(vals: &[Option<i8>]) -> ChunkIndex {
+        let spec = TableSpec {
+            columns: vec![col("k", "i1").nullable()],
+            rows: vals.len() as u64,
+            row_index: None,
+            partition: None,
+        };
+        table_chunk_index(&spec, &vec![("k".into(), nullable_i8(vals))], "k").unwrap()
+    }
+
+    /// #627, the issue's minimal repro: 3 rows, 1 NULL, a nullable `i8` stat column. This panicked
+    /// with `range end index 3 out of range for slice of length 2` — the stats path sliced the
+    /// NULL-free values by the full row range.
+    #[test]
+    fn chunk_index_on_a_nullable_column_with_a_null_does_not_panic() {
+        let vals = [Some(-4), None, Some(9)];
+        let idx = nullable_stat_index(&vals);
+        assert_eq!(idx.len(), 1);
+        assert_eq!(idx.stat_pyramid()[0], expected_group_stats(&vals));
+        let agg = idx.aggregate();
+        assert_eq!((agg.count, agg.min, agg.max), (2, Some(-4), Some(9)));
+    }
+
+    /// #627: a NULL at the start, in the middle and at the end of a chunk is each excluded from
+    /// `count`/`min`/`max`/`sum`, and the value under it never reaches the stats.
+    #[test]
+    fn chunk_index_excludes_nulls_at_start_middle_and_end() {
+        let cases: [&[Option<i8>]; 4] = [
+            &[None, Some(1), Some(2), Some(3)],
+            &[Some(1), Some(2), None, Some(3)],
+            &[Some(1), Some(2), Some(3), None],
+            &[None, Some(1), None, Some(2), None],
+        ];
+        for vals in cases {
+            let idx = nullable_stat_index(vals);
+            assert_eq!(
+                idx.stat_pyramid()[0],
+                expected_group_stats(vals),
+                "{vals:?}"
+            );
+            assert_eq!(
+                idx.aggregate().max,
+                vals.iter().flatten().max().map(|&v| v as i64)
+            );
+            // the value under a NULL must not make the chunk look like it holds UNDER_NULL
+            assert!(
+                idx.prune(UNDER_NULL as i64, UNDER_NULL as i64).is_empty(),
+                "{vals:?}"
+            );
+        }
+    }
+
+    /// #627: a nullable float column carrying both a NaN (a real value) and a NULL feeds the group
+    /// digest alongside a nullable stat column with NULLs. The index builds, the stats come from the
+    /// stat column's present values only, and the digest is exactly "every column's canonical LE
+    /// bytes for the group, in column order" — a nullable column's being `values ‖ packed validity`
+    /// with the dtype default under every NULL (#632), so `UNDER_NULL` never reaches it.
+    #[test]
+    fn chunk_index_with_a_nullable_float_holding_nan_and_null() {
+        let k = [Some(5), None, Some(-2)];
+        let f = ColumnData::Nullable {
+            values: Box::new(ColumnData::F64(vec![f64::NAN, 0.0, 1.5])),
+            validity: vec![true, false, true],
+        };
+        let spec = TableSpec {
+            columns: vec![col("k", "i1").nullable(), col("f", "f8").nullable()],
+            rows: 3,
+            row_index: None,
+            partition: None,
+        };
+        let data: TableData = vec![("k".into(), nullable_i8(&k)), ("f".into(), f)];
+        let idx = table_chunk_index(&spec, &data, "k").unwrap();
+
+        // Spelled out byte by byte rather than through the helper under test: `k` is [5, NULL, -2]
+        // with 0 (not UNDER_NULL) under the NULL, then its mask 0b101; `f` is NaN, 0.0, 1.5, then
+        // the same mask.
+        let mut bytes = vec![5u8, 0, (-2i8) as u8, 0b101];
+        for x in [f64::NAN, 0.0, 1.5] {
+            bytes.extend_from_slice(&x.to_le_bytes());
+        }
+        bytes.push(0b101);
+        let mut want = ChunkIndex::new();
+        want.push_entry(digest(&bytes), expected_group_stats(&k)[0].clone());
+        assert_eq!(idx.root(), want.root());
+        assert_eq!(idx.stat_pyramid(), want.stat_pyramid());
+
+        // A nullable float is not an integer stat column: a typed error, not a panic.
+        let err = table_chunk_index(&spec, &data, "f")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not an integer column"), "{err}");
+    }
+
+    /// #627: a nullable string column is not representable yet (#457), so building a chunk index
+    /// over a table holding one is rejected by the same `validate_nullable` door as `encode` — a
+    /// typed error naming the column, never a panic in the stats path.
+    #[test]
+    fn chunk_index_over_a_nullable_string_column_is_a_typed_error() {
+        let spec = TableSpec {
+            columns: vec![col("k", "i1").nullable(), col("s", "str").nullable()],
+            rows: 3,
+            row_index: None,
+            partition: None,
+        };
+        let data: TableData = vec![
+            ("k".into(), nullable_i8(&[Some(1), None, Some(3)])),
+            (
+                "s".into(),
+                ColumnData::Nullable {
+                    values: Box::new(ColumnData::Utf8(vec![
+                        "a".into(),
+                        String::new(),
+                        "c".into(),
+                    ])),
+                    validity: vec![true, false, true],
+                },
+            ),
+        ];
+        let err = table_chunk_index(&spec, &data, "k")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("column 's'") && err.contains("not supported yet"),
+            "{err}"
+        );
+    }
+
+    /// #627: an all-NULL chunk has no present values, so its stats are the EMPTY chunk's —
+    /// `ChunkStats::identity()` (count 0, no min/max) — and pruning skips it for every range.
+    #[test]
+    fn chunk_index_all_null_chunk_has_the_empty_chunk_stats() {
+        // one all-NULL chunk on its own
+        let idx = nullable_stat_index(&[None, None, None]);
+        assert_eq!(idx.stat_pyramid()[0], vec![ChunkStats::identity()]);
+        assert!(idx.prune(i64::MIN, i64::MAX).is_empty());
+
+        // an all-NULL first chunk next to a populated second one
+        let rows = ROWS_PER_GROUP + 10;
+        let vals: Vec<Option<i8>> = (0..rows)
+            .map(|k| (k >= ROWS_PER_GROUP).then_some((k % 50) as i8))
+            .collect();
+        let idx = nullable_stat_index(&vals);
+        let leaves = &idx.stat_pyramid()[0];
+        assert_eq!(leaves, &expected_group_stats(&vals));
+        assert_eq!(leaves[0], ChunkStats::identity());
+        assert_eq!(idx.prune(i64::MIN, i64::MAX), vec![1]);
+        assert_eq!(idx.aggregate().count, 10);
+    }
+
+    /// #627: a multi-chunk table where only the middle chunk has NULLs — each chunk's stats cover
+    /// exactly its own rows' present values (the NULL-free chunks are unaffected by the NULLs in
+    /// another), and the root is deterministic.
+    #[test]
+    fn chunk_index_multi_chunk_with_nulls_in_only_some_chunks() {
+        let rows = 2 * ROWS_PER_GROUP + 777; // 3 groups, the last a remainder
+        let vals: Vec<Option<i8>> = (0..rows)
+            .map(|k| {
+                let in_middle = (ROWS_PER_GROUP..2 * ROWS_PER_GROUP).contains(&k);
+                (!(in_middle && k % 3 == 0)).then_some((k % 100) as i8)
+            })
+            .collect();
+        let idx = nullable_stat_index(&vals);
+        assert_eq!(idx.len(), 3);
+        assert_eq!(idx.stat_pyramid()[0], expected_group_stats(&vals));
+        let present = vals.iter().flatten().count() as u64;
+        assert_eq!(idx.aggregate().count, present);
+        assert!(present < rows as u64);
+        assert!(idx.prune(UNDER_NULL as i64, UNDER_NULL as i64).is_empty());
+        assert_eq!(nullable_stat_index(&vals).root(), idx.root());
+    }
+
+    /// #627: the value under a NULL must not decide whether stats exist at all. A `u64` above
+    /// `i64::MAX` refuses a column only when it is PRESENT; under a NULL it is invisible, exactly as
+    /// any other value there is.
+    #[test]
+    fn chunk_index_ignores_an_out_of_range_u64_under_a_null() {
+        let k = ColumnData::Nullable {
+            values: Box::new(ColumnData::U64(vec![1, u64::MAX, 3])),
+            validity: vec![true, false, true],
+        };
+        assert_eq!(k.as_i64(), Some(vec![1, 3]));
+        let spec = TableSpec {
+            columns: vec![col("k", "u8").nullable()],
+            rows: 3,
+            row_index: None,
+            partition: None,
+        };
+        let idx = table_chunk_index(&spec, &vec![("k".into(), k)], "k").unwrap();
+        let agg = idx.aggregate();
+        assert_eq!((agg.count, agg.min, agg.max), (2, Some(1), Some(3)));
+
+        // ...while a PRESENT out-of-range u64 still refuses the column, nullable or not.
+        let present = ColumnData::Nullable {
+            values: Box::new(ColumnData::U64(vec![1, u64::MAX, 3])),
+            validity: vec![true, true, false],
+        };
+        assert_eq!(present.as_i64(), None);
+        assert_eq!(ColumnData::U64(vec![1, u64::MAX]).as_i64(), None);
     }
 
     #[test]
@@ -2185,12 +3013,20 @@ mod tests {
 
     /// A short-lived runtime must not poison the long-lived pooled read session.
     ///
-    /// `encode`/`encode_streaming`/`decode_column` each build their own
-    /// `CurrentThreadRuntime` and drop it on return, while `decode`/`decode_projected`
-    /// use the per-thread pooled [`READ_RT`]. When every session was cloned from one
-    /// cached template, `clone().with_handle(..)` rebound `Arc`-shared state, so the
-    /// short-lived runtime's death left the pooled session dangling and this third
-    /// call panicked with `Attempted to use a Handle after its runtime was dropped`.
+    /// `encode`/`encode_streaming` each build their own `CurrentThreadRuntime` and drop
+    /// it on return, while every read (`decode`/`decode_projected`/`decode_column`/
+    /// `decode_rows`) uses the per-thread pooled [`READ_RT`]. When every session was
+    /// cloned from one cached template, `clone().with_handle(..)` rebound `Arc`-shared
+    /// state, so the short-lived runtime's death left the pooled session dangling and
+    /// this third call panicked with `Attempted to use a Handle after its runtime was
+    /// dropped`.
+    ///
+    /// **The middle call must be a short-lived-runtime one.** It used to be
+    /// `decode_column`, which now delegates to the pooled `decode_projected` (#351) —
+    /// leaving the sequence pooled→pooled→pooled, i.e. vacuous. `encode` is the
+    /// remaining short-lived-runtime caller, so it is what reproduces the ordering.
+    /// Verified by A/B: restoring the cached-template `new_session` makes this test
+    /// panic with the original message, and pass again once reverted.
     ///
     /// The ordering is the whole test: it only reproduces when a pooled read, a
     /// short-lived-runtime read, and another pooled read share **one process** — which
@@ -2203,6 +3039,7 @@ mod tests {
             columns: vec![Column::new("idx", "u4"), Column::new("en", "f4")],
             rows: 5,
             row_index: None,
+            partition: None,
         };
         let data: TableData = vec![
             ("idx".into(), ColumnData::U32((0..5u32).collect())),
@@ -2211,13 +3048,76 @@ mod tests {
         let blob = encode(&spec, &data).unwrap();
 
         assert_eq!(decode(&spec, &blob).unwrap(), data, "pooled decode");
-        // Builds and drops its own runtime — the poisoning step.
-        decode_column(&spec, &blob, "idx").unwrap();
+        // The poisoning step: builds its own runtime and drops it on return. Must NOT be a
+        // read — every read is pooled now, which would make this test assert nothing.
+        let _ = encode(&spec, &data).unwrap();
         assert_eq!(
             decode(&spec, &blob).unwrap(),
             data,
             "pooled session poisoned by a dropped short-lived runtime"
         );
+    }
+
+    /// #462: `decode_column` delegates to `decode_projected` (#351), so its equivalence with a full
+    /// `decode` has to hold for the dtypes and the shapes the delegation could plausibly diverge on
+    /// — not just the fixed-width numerics the older test used. Covers `b1`/`str` (whose
+    /// materialise paths differ from the primitives) and a table spanning MULTIPLE row-groups,
+    /// where a per-chunk bug would only show from the second group onward.
+    #[test]
+    fn decode_column_matches_full_decode_across_dtypes_and_chunks() {
+        use tessera_core::block::table::{Column, TableSpec};
+        // Deliberately not a multiple of ROWS_PER_GROUP: the last group is short.
+        let n = ROWS_PER_GROUP + 1_234;
+        let data: TableData = vec![
+            ("idx".into(), ColumnData::U32((0..n as u32).collect())),
+            (
+                "val".into(),
+                ColumnData::F64((0..n).map(|k| k as f64 * 0.25).collect()),
+            ),
+            (
+                "flag".into(),
+                ColumnData::Bool((0..n).map(|k| k % 7 == 0).collect()),
+            ),
+            (
+                "origin".into(),
+                ColumnData::Utf8(
+                    (0..n)
+                        .map(|k| ["annih511", "prompt_nuclear", "other"][k % 3].to_string())
+                        .collect(),
+                ),
+            ),
+        ];
+        let spec = TableSpec {
+            columns: vec![
+                Column::new("idx", "u4"),
+                Column::new("val", "f8"),
+                Column::new("flag", "b1"),
+                Column::new("origin", "str"),
+            ],
+            rows: n as u64,
+            row_index: None,
+            partition: None,
+        };
+        let blob = encode(&spec, &data).unwrap();
+        let whole = decode(&spec, &blob).unwrap();
+        assert!(
+            n > ROWS_PER_GROUP,
+            "fixture must span more than one row-group"
+        );
+        for (name, expected) in &whole {
+            assert_eq!(
+                &decode_column(&spec, &blob, name).unwrap(),
+                expected,
+                "decode_column('{name}') diverged from the full decode"
+            );
+        }
+        // And the multi-column projection agrees with both, in the order asked for.
+        let projected = decode_projected(&spec, &blob, &["origin", "idx"]).unwrap();
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].0, "origin");
+        assert_eq!(projected[1].0, "idx");
+        assert_eq!(projected[0].1, whole[3].1);
+        assert_eq!(projected[1].1, whole[0].1);
     }
 
     #[test]
@@ -2236,6 +3136,7 @@ mod tests {
             columns: vec![Column::new("flag", "b1"), Column::new("origin", "str")],
             rows: n as u64,
             row_index: None,
+            partition: None,
         };
         // Vortex round-trip (bit-packed bool + FSST/dict-chosen strings).
         let blob = encode(&spec, &data).unwrap();
@@ -2312,6 +3213,7 @@ mod tests {
             columns: vec![col("a", "f4"), col("b", "f8")],
             rows: 32,
             row_index: None,
+            partition: None,
         };
         let back = decode(&spec, &encode(&spec, &data).unwrap()).unwrap();
         let ColumnData::F32(ga) = &back[0].1 else {
@@ -2345,6 +3247,7 @@ mod tests {
             columns: vec![col("energy_ev", "f8")],
             rows: N as u64,
             row_index: None,
+            partition: None,
         };
         let encoded = encode(&spec, &data).unwrap();
         let raw = N * std::mem::size_of::<f64>();
@@ -2400,6 +3303,7 @@ mod tests {
             columns: vec![col("a", "f8"), col("b", "i8"), col("c", "u4")],
             rows: rows as u64,
             row_index: None,
+            partition: None,
         };
         let blob = encode(&spec, &data).unwrap();
         let grid = decode(&spec, &blob).unwrap(); // auto → grid (all numeric, over threshold)
@@ -2472,6 +3376,7 @@ mod tests {
                 columns: data.iter().map(|(n, c)| col(n, c.numpy_code())).collect(),
                 rows: rows as u64,
                 row_index: None,
+                partition: None,
             };
             let blob = encode(&spec, &data).unwrap();
             GRID_DECODES.with(|c| c.set(0));
@@ -2507,6 +3412,7 @@ mod tests {
                 columns: data.iter().map(|(n, c)| col(n, c.numpy_code())).collect(),
                 rows: rows as u64,
                 row_index: None,
+                partition: None,
             };
             (spec, data)
         };
@@ -2541,6 +3447,7 @@ mod tests {
             columns: data_m.iter().map(|(n, c)| col(n, c.numpy_code())).collect(),
             rows: big as u64,
             row_index: None,
+            partition: None,
         };
         let blob_m = encode(&spec_m, &data_m).unwrap();
         assert_eq!(
@@ -2578,6 +3485,7 @@ mod tests {
             columns: data.iter().map(|(n, c)| col(n, c.numpy_code())).collect(),
             rows: rows as u64,
             row_index: None,
+            partition: None,
         };
         let blob = encode(&spec, &data).unwrap();
         let best = |run: &dyn Fn()| -> f64 {
@@ -2633,20 +3541,30 @@ mod tests {
         assert_eq!(block_count(BLOCK_ROWS as u64), 1);
         assert_eq!(block_count((BLOCK_ROWS as u64) + 1), 2);
 
-        // ── naming: small-stays-single (no NNNN suffix), multi-block uses zero-padded 4-digit suffix
+        // ── naming (ADR-0064 §1): small-stays-single (bare name, no marker); multi-block is the
+        // leaf `<prefix>/{idx:04}`, padded per index (never per count), with a marker.
+        let name = |idx, total| block_name("events", idx, total).unwrap();
+        assert_eq!(name(0, 0), "events", "empty product → bare name");
+        assert_eq!(name(0, 1), "events", "single block → bare name");
+        assert_eq!(block_partition(0, 0), None);
         assert_eq!(
-            block_name("events", 0, 0),
-            "events",
-            "empty product → bare name"
+            block_partition(0, 1),
+            None,
+            "a single block carries no marker"
         );
-        assert_eq!(
-            block_name("events", 0, 1),
-            "events",
-            "single block → bare name"
+        assert_eq!(name(0, 2), "events/0000");
+        assert_eq!(name(7, 8), "events/0007");
+        assert_eq!(name(1234, 9999), "events/1234");
+        assert_eq!(name(9999, 10001), "events/9999");
+        assert_eq!(name(10000, 10001), "events/10000", "no ceiling past 9999");
+        let leaf = |index, last| Some(Partition { index, last });
+        assert_eq!(block_partition(0, 2), leaf(0, false));
+        assert_eq!(block_partition(1, 2), leaf(1, true));
+        assert_eq!(block_partition(10000, 10001), leaf(10000, true));
+        assert!(
+            block_name("", 0, 2).is_err(),
+            "an invalid table name is refused"
         );
-        assert_eq!(block_name("events", 0, 2), "events_0000");
-        assert_eq!(block_name("events", 7, 8), "events_0007");
-        assert_eq!(block_name("events", 1234, 9999), "events_1234");
     }
 
     #[test]
@@ -2655,6 +3573,7 @@ mod tests {
             columns: vec![col("t", "u8"), col("e", "f4")],
             rows: 4,
             row_index: None,
+            partition: None,
         };
         // wrong dtype for column 'e'
         let bad_dtype: TableData = vec![

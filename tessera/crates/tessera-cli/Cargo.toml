@@ -20,6 +20,11 @@ serde_json.workspace = true
 serde.workspace = true
 toml.workspace = true
 clap.workspace = true
+# PNG previews for slice/project --format png (#387).
+png.workspace = true
+# `half::f16` — naming the float16 element type in the native max-projection (#478). Already in-tree
+# via zarrs; bare `f16` would resolve to Rust's UNSTABLE primitive of the same name.
+half.workspace = true
 # Surface library WARNs (e.g. the schema recommended-field nudge from the ingest engine) on stderr.
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -33,10 +38,21 @@ ssh-key = { version = "0.6", default-features = false, features = ["ed25519", "s
 # `tessera bench write` stages encode fragments under a fresh tempdir per run (the bench runs the
 # real `TableStreamWriter`/`StreamWriter`, which need durable staging dirs).
 tempfile = "3"
+# `tessera bench compare` (#388) writes the HDF5 side of the head-to-head with the REAL library
+# rather than a hand-rolled file. Both of these are already in the build graph (hdf5-metno via
+# tessera-ingest, ndarray via hdf5-metno), so declaring them here adds no compilation.
+hdf5-metno.workspace = true
+ndarray = "0.17"
+# Parquet is the third format in the head-to-head (#388 stage 2). Written with the REAL parquet
+# crate, not hand-rolled. Already in the build graph via tessera-ingest's table lane (#460), so
+# declaring them here adds no compilation.
+parquet.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
 
 # `sql` feature (#251): `tessera sql <FILE> "<QUERY>"` runs DataFusion in-process over a table
 # block's Arrow projection. DataFusion 54 pins `arrow ^58` — the SAME major the workspace already
-# resolves through Vortex 0.75 (arrow-array 58.3.0), so cargo unifies into one arrow tree. Two
+# resolves through Vortex 0.75 (arrow-array 58.4.1), so cargo unifies into one arrow tree. Two
 # arrow majors in one graph would fail to link (`RecordBatch` has the same name but incompatible
 # reprs). Both deps are `optional`, so a default `cargo build -p tessera-cli` does NOT pull them.
 datafusion = { version = "54", default-features = false, features = ["sql", "recursive_protection"], optional = true }
@@ -59,6 +75,19 @@ cloud = ["tessera-io/cloud"]
 # `tessera sql` still parses (uniform UX) but returns a typed "rebuild with --features sql" error,
 # same shape as the `cloud`-gated `push`/`pull` fallback.
 sql = ["dep:datafusion", "dep:tokio", "dep:arrow"]
+# ── Generic-ingest backends (ADR-0057 §5, #386) ──
+#
+# Each forwards to `tessera-ingest/<same name>` and NEVER to `tessera-core` — core gains no features
+# from this axis (it is tessera-wasm's only dependency and the pure-abi3 wheel's). Default-ON, so a
+# downloaded or `cargo install`ed `tessera` reads Parquet / Arrow / CSV out of the box; the gates are
+# for embedders and CI (ADR-0057 §4's one-binary decision).
+#
+# Note the name collision that is NOT one: this crate also has an optional `arrow` *dependency* for
+# the `sql` surface. `tessera-cli/arrow` below is a feature that forwards to the ingest lane; they
+# resolve to the same single arrow 58 tree, which is why two arrow majors can never co-exist here.
+arrow = ["tessera-ingest/arrow"]
+parquet = ["tessera-ingest/parquet"]
+csv = ["tessera-ingest/csv"]
 # `static-hdf5`: forward the vendored-libhdf5 build down to `tessera-ingest` (see its Cargo.toml). The
 # release channels build the CLI with this ON so the shipped `tessera`/`tsra` binaries and a source
 # `cargo install --features static-hdf5` carry their own HDF5 — no system libhdf5 / pkg-config needed.
@@ -66,6 +95,11 @@ static-hdf5 = ["tessera-ingest/static-hdf5"]
 
 [dev-dependencies]
 tempfile = "3"
+# Repack a sealed `.tsra` with an edited `manifest.json` so its recorded seal no longer covers its
+# contents — the only way to build a fixture that is a well-formed container yet fails verification, which
+# is what distinguishes a CORRUPT parent from a merely missing one (#452). A same-length byte patch cannot
+# do it: the zip CRC would fail first and surface as a container error instead of an integrity one.
+zip.workspace = true
 hdf5-metno.workspace = true
 # Synthesise minimal `.dcm` fixtures inline for ingest e2e tests (e.g. the dicom-series --deidentify
 # end-to-end test) — same workspace pin tessera-ingest uses for the real DICOM read path.
@@ -73,7 +107,7 @@ dicom.workspace = true
 # docs-as-tests: CLI walkthroughs in tests/cmd/*.trycmd run against the real `tessera` bin (resolved via
 # CARGO_BIN_EXE_tessera — no cargo invocation at test time, so it works in the hermetic flake check).
 trycmd = "0.15"
-# Live-MinIO test seeding for the `cloud` integration test (tests/cloud.rs). Dev-only — the CLI
+# Live-S3 test seeding for the `cloud` integration test (tests/cloud.rs). Dev-only — the CLI
 # binary itself depends on object_store/tokio only transitively through the `cloud` feature of
 # tessera-io. cargo's `cargo build -p tessera-cli` is unaffected (dev-deps don't enter the runtime
 # graph). The test file is `#![cfg(feature = "cloud")]` so without the feature its contents are

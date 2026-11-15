@@ -130,6 +130,22 @@ impl ProductBuilder {
         self
     }
 
+    /// Record the **transforms applied at the door** (ADR-0056 §6.2) — the receipt for the
+    /// normalise-vs-preserve ladder's middle lane.
+    ///
+    /// Only generic ingest has any business calling this: a vendor backend that preserves its
+    /// source's values bit-faithfully records nothing, and an empty list serialises to nothing, which
+    /// is what keeps every pre-ADR-0056 product's bytes unchanged. Call before `seal` so the receipt
+    /// is covered by the seal — a transform list outside the seal would be a warning with extra
+    /// steps, which is the thing ADR-0056 §2 rejected.
+    pub fn with_ingest_transform(
+        &mut self,
+        transforms: Vec<crate::provenance::IngestTransform>,
+    ) -> &mut Self {
+        self.manifest.ingest_transform = transforms;
+        self
+    }
+
     /// Inherit **schema-flagged identity** fields from a resolved `derived_from` parent (ADR-0058
     /// §5) — the DAG-walk caller (the ingest engine) supplies the parent manifest + this product's
     /// schema; only fields the schema marks `inherit` flow, and an explicit child value always wins.
@@ -149,12 +165,21 @@ impl ProductBuilder {
     /// Every block MUST carry a digest — a missing digest is a hard error, never silently
     /// dropped (otherwise a block would be invisible to the content hash yet present in the
     /// manifest, so two different products could hash identically).
+    ///
+    /// The block names must obey the **leaf rule** (ADR-0063): no name may be a parent prefix of
+    /// another, or the seal is refused with [`crate::Error::BlockNameConflict`]. (Each name is
+    /// already valid by its type, [`crate::block::BlockName`].)
+    ///
+    /// Every partitioned table must be valid (ADR-0064 §2.4, [`crate::block::check_partitions`]),
+    /// or the seal is refused with [`crate::Error::LogicalTable`].
     pub fn seal(mut self) -> crate::Result<Manifest> {
+        crate::block::check_leaf_rule(self.refs.iter().map(|r| &r.name))?;
+        crate::block::check_partitions(&self.refs)?;
         let mut digests = Vec::with_capacity(self.refs.len());
         for r in &self.refs {
             match &r.digest {
                 Some(d) => digests.push(d.clone()),
-                None => return Err(crate::Error::MissingDigest(r.name.clone())),
+                None => return Err(crate::Error::MissingDigest(r.name.to_string())),
             }
         }
         self.manifest.blocks = self.refs;
@@ -198,7 +223,7 @@ mod tests {
 
     fn block(name: &str, digest: &str) -> BlockRef {
         BlockRef {
-            name: name.into(),
+            name: name.parse().unwrap(),
             kind: BlockKind::Array,
             digest: Some(digest.into()),
             spec: serde_json::json!({ "dtype": "int16", "shape": [2] }),

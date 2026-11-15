@@ -47,7 +47,7 @@ cold tier, all joined by `derived_from` provenance edges.
   pcodec. Cluster / cloud reads scan the manifest first, prune by `metadata.study`
   (or any other indexed field), and **only fetch the chunks they need**. The
   `tessera_io::cloud::cohort_prune_before_fetch_skips_non_matching_product`
-  capstone test (`crates/tessera-io/src/cloud.rs`, gated on the live MinIO check)
+  capstone test (`crates/tessera-io/src/cloud.rs`, gated on the live `s3-range-read` check)
   proves a non-matching product's events block is *never fetched* over the wire.
 
 * **Cold tier** (`blob` member): the vendor file (`.7z` / `.l64` / DICOMDIR
@@ -164,13 +164,13 @@ cargo build -p tessera-cli --release --features cloud
 ```
 
 The cohort prune-before-fetch path lives in `tessera_io::cloud::ObjectStoreReader`
-(file `crates/tessera-io/src/cloud.rs`); the live-MinIO test
+(file `crates/tessera-io/src/cloud.rs`); the live-S3 test
 `cohort_prune_before_fetch_skips_non_matching_product` proves the wire-saving
 guarantee.
 
 **Tier policy (the WHY of recon-hot / blob-cold):**
 
-* Push the `recon` members to a hot bucket (e.g. NVMe-backed MinIO). Operators
+* Push the `recon` members to a hot bucket (e.g. an NVMe-backed S3 store). Operators
   scanning the cohort fetch only the manifest + the per-chunk byte ranges their
   query touches — pcodec + Zarr v3 means `study=… AND modality=PT AND t in [t0,t1]`
   reads kilobytes, not gigabytes.
@@ -194,7 +194,7 @@ guarantee.
 | `derived_from` edges with parent `manifest_hash`          | done — engine threads them, `verify_chain` walks them                                   |
 | `[product.metadata] study=` cohort tagging                | done — every backend (engine `apply_spec_metadata`)                                     |
 | Determinism across re-runs                                | done — engine test + this spike's `migrate_petct_study.rs`                              |
-| Wire-level cohort prune over MinIO                        | done — `tessera-io::cloud::cohort_prune_before_fetch_*`                                 |
+| Wire-level cohort prune over S3                           | done — `tessera-io::cloud::cohort_prune_before_fetch_*`                                 |
 | `roi` ingest backend (raster + parametric)                | **TODO** — interim: seal a label-volume NIfTI through `format = "nifti"` (yields `recon`) |
 | DICOM RadiopharmaceuticalInformationSequence parsing      | **TODO** — operator supplies `tracer` + `decay_correction_reference` via `[product.metadata]` |
 | DICOM-series de-identification                            | **TODO** — `DicomSeries { deidentify = true }` currently rejects with a clear error     |

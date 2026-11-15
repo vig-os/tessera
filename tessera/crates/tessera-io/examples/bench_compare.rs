@@ -155,6 +155,7 @@ fn listmode(rows: usize) -> (TableSpec, TableData) {
         ],
         rows: rows as u64,
         row_index: Some("t".into()),
+        partition: None,
     };
     let data: TableData = vec![
         ("t".into(), ColumnData::U64((0..rows as u64).collect())),
