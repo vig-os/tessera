@@ -69,6 +69,15 @@ pub struct Column {
     /// Serialised only when it is not the default, so existing manifests are unchanged.
     #[serde(default, skip_serializing_if = "is_public")]
     pub sensitivity: crate::schema::Sensitivity,
+    /// Whether a block may **omit** this column altogether (ADR-0065 §8, #809). Distinct from
+    /// [`nullable`](Self::nullable), which is per-row NULL inside a present column.
+    ///
+    /// Meaningful only in a schema's [`TableContract`](crate::schema::TableContract), which lists
+    /// every column a block of its role may carry. A block's own [`TableSpec`] lists the columns it
+    /// has, so the flag means nothing there and nothing reads it. Skipped when `false`, so every
+    /// existing manifest keeps its bytes.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
 }
 
 /// `skip_serializing_if` predicate — omit the default tier so adding [`Column::sensitivity`] leaves

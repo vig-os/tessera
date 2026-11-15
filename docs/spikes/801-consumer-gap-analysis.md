@@ -470,7 +470,9 @@ that shape. Items 2 and 7 are proposed **amendments** to the steer, which the ow
 
 ## 5. Draft product schemas (#801)
 
-The drafts live in [`801-consumer-schemas/`](801-consumer-schemas/). They are **not** in the live registry: they wait
+The drafts live in [`tessera/crates/tessera-core/tests/fixtures/801-consumer-schemas/`](../../tessera/crates/tessera-core/tests/fixtures/801-consumer-schemas/)
+(#809 moved them there from [`801-consumer-schemas/`](801-consumer-schemas/), which keeps the scripts: tessera-core's
+column-contract test parses them). They are **not** in the live registry: they wait
 for the surveys. Each product has two files, both in shapes tessera already serialises:
 
 - `<product>.schema.json` is a `tessera_core::schema::ProductSchema` exactly as serde writes it (`schema.rs:225-243`).

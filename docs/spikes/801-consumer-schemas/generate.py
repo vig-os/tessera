@@ -6,7 +6,8 @@ Two files per product, both in shapes tessera already serialises:
                             `tessera_core::block::table::Column` objects (the existing serde shape),
                             plus the proposed `sequence_key` (#802), `keys` / `references` (#780).
 
-Usage (from the repo root): python3 docs/spikes/801-consumer-schemas/generate.py docs/spikes/801-consumer-schemas
+Usage (from the repo root):
+  python3 docs/spikes/801-consumer-schemas/generate.py tessera/crates/tessera-core/tests/fixtures/801-consumer-schemas
 """
 
 import json

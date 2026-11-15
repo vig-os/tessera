@@ -937,6 +937,8 @@ mod tests {
             ],
             blocks: Vec::new(),
             requires_generation: false,
+            tables: Default::default(),
+            arrays: Default::default(),
         };
 
         inherit_identity(&mut child, &parent, &schema);
