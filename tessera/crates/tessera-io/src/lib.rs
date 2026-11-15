@@ -71,4 +71,4 @@ pub use stream::{
 pub use table::{
     block_count, block_name, block_partition, partition_blocks, ColumnData, TableData, BLOCK_ROWS,
 };
-pub use write::{BlockStaging, StagedBlock, WriteSession};
+pub use write::{BlockStaging, Lane, StagedBlock, WriteSession};
