@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-13T22:22:36Z
-updated: 2026-11-13T22:22:36Z
+updated: 2026-11-15T02:18:18Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/848
-comments: 0
+comments: 1
 labels: none
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-14T08:34:34.651Z
+synced: 2026-11-15T08:48:31.520Z
 ---
 
 # [Issue 848]: [feat(io): single-pass multi-table streaming: unknown-length push_table, concurrent table handles, header after stream (downstream: visionx-rs#39)](https://github.com/vig-os/tessera/issues/848)
@@ -42,3 +42,11 @@ Any design that lets one pass write several bounded streamed tables. We'd sugges
 We read this from the alpha.5 source and from ADR-0064, and would be glad to review an ADR.
 
 Downstream issues: MorePET/visionx-rs#39, #40 and #56. Context: tessera#716 (thread from 2026-11-13) and MorePET/visionx-rs#221.
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 15, 2026 at 02:18 AM_
+
+#847 (closing #806) delivers the first ask: a table of unknown length (`open_table`, one leaf of lookahead, byte-identical to `TableMultiBlockSink`/`push_table`). It also lets several tables be open at once (`W + T` staged leaves). Check whether that covers your second ask. 'Header after the stream' (the third) is not in it; it comes with ADR-0065 plan item #831 (`StreamWriter::finish_with`, header patch at the seal).
+

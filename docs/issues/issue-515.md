@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-11T10:26:55Z
+updated: 2026-11-15T03:36:38Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-12T09:15:34.431Z
+synced: 2026-11-15T08:48:33.289Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -67,7 +67,7 @@ The following updates are currently rate-limited. To force their creation now, c
 The following updates have all been created. To force a retry/rebase of any, click on a checkbox below.
 
  - [ ] <!-- rebase-branch=renovate/crate-zip-vulnerability -->[chore(deps): update rust crate zip to v9.0.5 [security]](../pull/689)
- - [ ] <!-- rebase-branch=renovate/dtolnay-rust-toolchain-digest -->[chore(deps): update dtolnay/rust-toolchain digest to b725eda](../pull/558)
+ - [ ] <!-- rebase-branch=renovate/dtolnay-rust-toolchain-digest -->[chore(deps): update dtolnay/rust-toolchain digest to 3900882](../pull/558)
  - [ ] <!-- rebase-branch=renovate/flate2-1.x-lockfile -->[chore(deps): update rust crate flate2 to v1.1.11](../pull/560)
  - [ ] <!-- rebase-branch=renovate/rust-futures-monorepo -->[chore(deps): update rust crate futures to v0.3.34](../pull/561)
  - [ ] <!-- rebase-branch=renovate/hdf5-metno-sys-0.x-lockfile -->[chore(deps): update rust crate hdf5-metno-sys to v0.12.5](../pull/640)

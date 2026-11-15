@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-11T04:18:23Z
-updated: 2026-11-11T04:18:23Z
+updated: 2026-11-15T02:09:03Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/830
-comments: 0
+comments: 1
 labels: feature, area:core
 assignees: none
 milestone: none
 projects: none
 parent: 799
 children: none
-synced: 2026-11-11T08:50:27.936Z
+synced: 2026-11-15T08:48:32.105Z
 ---
 
 # [Issue 830]: [feature(core): strict ProductSchema (deny_unknown_fields, schema_format) and role-matched block requirements (ADR-0065 §8, G2, G6)](https://github.com/vig-os/tessera/issues/830)
@@ -30,4 +30,12 @@ Part of epic #799. Design: ADR-0065 (docs/adr/0065-c-abi-bridge.md, PR #819). **
 - Every builtin schema and the conformance corpus are byte-identical.
 
 Size: ≤ ~300 lines. Depends on: #809.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 15, 2026 at 02:09 AM_
+
+Design note from the #846 review (#809 part A): the column contract reuses `Column`, so a typo inside a contract (e.g. `"optinal": true`) is silently dropped today. Strict parsing here has to make `Column` (and so manifest `TableSpec`s) strict too, or give contracts their own strict column type. Decide which in this issue. Note: #846 uses no `flatten` or `untagged`, so `deny_unknown_fields` remains possible.
 
