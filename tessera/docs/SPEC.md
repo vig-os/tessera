@@ -320,21 +320,42 @@ header is not at byte 0. The second rule also covers a prefix whose offsets were
 (a self-extractor or a shell/zip polyglot), which is otherwise a well-formed zip.
 
 **One reading.** Every zip entry is described twice, by its local file header and by its central-directory
-record, and zip readers differ in which one they trust: a central-directory reader (this reference
-implementation, Python's `zipfile`, `unzip`) never looks at a local header's name or method, and a streaming
-reader never sees the central directory. A `.tsra` MUST therefore read the same both ways
-(GHSA-m665-v7pm-7grj):
+record, and zip readers differ in which one they trust and in how they find the archive at all: a
+central-directory reader (this reference implementation, Python's `zipfile`, `unzip`) never looks at a local
+header's name or method, a streaming reader never sees the central directory, and a reader that finds the
+end-of-central-directory record by scanning back from the end of the file and adjusts for a prefix opens
+whatever archive ends last. A `.tsra` MUST therefore read the same every way (GHSA-m665-v7pm-7grj), which
+holds only if every byte of the file belongs to exactly one structure. The **canonical layout** is:
 
-- each local header MUST agree with its central-directory record (name, method, flags, CRC, sizes);
-- no name may appear twice in the central directory;
-- the entries MUST tile the archive: sorted by position, the first starts at byte 0, each starts where the
-  previous one's bytes end, and the last ends where the central directory starts. No gap, no overlap, no
-  data descriptor.
+1. **Members.** The local entries (local header, then the member's bytes), back to back from byte 0. Sorted
+   by position, the first starts at byte 0, each starts where the previous one's bytes end, and the last ends
+   where the central directory starts. No gap, no overlap, no data descriptor. Each local header MUST agree
+   with its central-directory record (name, method, flags, CRC, sizes).
+2. **Central directory.** Exactly one record per entry, back to back, no name twice, and no entry comment.
+3. **End records.** Directly after the central directory, either the end-of-central-directory record alone,
+   or the zip64 end-of-central-directory record (no extensible data sector), its locator and then the
+   end-of-central-directory record. Every field states the archive's true value: disk numbers 0, one disk,
+   the true entry count, directory size and directory offset, and the locator pointing at the zip64 record.
+   A 32-bit field MAY carry its `0xFFFF`/`0xFFFFFFFF` sentinel instead, and only when the zip64 records are
+   present.
+4. **Nothing else.** The archive comment is empty, and the end-of-central-directory record ends at the end
+   of the file. Bytes after it, or a comment, can hold a second archive that a prefix-adjusting reader opens
+   instead of this one.
+
+**Members a `.tsra` may hold.** Exactly `mimetype`, `manifest.json`, one `blocks/<name>` for each block the
+manifest lists, and zero or more `aux/<name>` members (ADR-0042). Any other entry, a `blocks/` member the
+manifest does not list included, MUST be refused: no digest covers its bytes, and every reader would take it
+for part of the product. `aux/` is the one place for bytes outside the seal (the embedded signature, the
+ingest provenance stamp). Because the layout above holds, every reader sees the same `aux/` members with the
+same bytes as it sees the sealed ones, but verification attests only the sealed members. An `aux/` member
+is carried, not authenticated, and a consumer MUST NOT treat its content as covered by `content_hash` (an
+embedded signature authenticates itself against `manifest_hash`, ADR-0037).
 
 A reader MUST refuse to read a member whose local header disagrees with its record, and MUST refuse a member
-read from an archive that names one member twice. Full verification (§7) MUST also check the tiling. It is
-the only rule that catches a complete local entry hidden in bytes no record points at, which a streaming
-reader lists as one more member. A cheap open need not check it, since it reads every local header.
+read from an archive that names one member twice. Full verification (§7) MUST check the whole canonical
+layout and the member set. Only the whole-file check catches a complete local entry hidden in bytes no
+record points at, or a second archive after the end record. A cheap open need not check it, since it reads
+every local header and the whole central directory.
 
 All entries MUST be **STORED** (payloads are pre-compressed by their codec; STORED keeps every block
 byte range directly addressable via the central directory). For **writer-determinism**, entry
@@ -348,8 +369,8 @@ On open a reader MUST: (a) read `mimetype`, reject if ≠ `application/vnd.tesse
 `manifest.json`; (c) reject if `tessera_version` major > supported; (d) recompute and check `id` from
 `id_inputs`, `content_hash` from block digests, and `manifest_hash` over the canonical bytes — any
 mismatch is an integrity failure. On reading a block, the reader MUST verify the bytes against the
-BlockRef `digest`. Full verification of a file also checks the container's one-reading rule (§6), so a
-`.tsra` that verifies reads the same under every zip reader.
+BlockRef `digest`. Full verification of a file also checks the container's canonical layout and member
+set (§6, "One reading"), so a `.tsra` that verifies reads the same under every zip reader, byte for byte.
 
 ## 8. Versioning
 Products are immutable. A new version is a new product (new `id`) with a `Source`

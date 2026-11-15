@@ -77,6 +77,10 @@ pub struct ObjectStoreReader {
     /// Behind an `Arc<AtomicU64>` so test observers can clone a handle and watch the live count
     /// after the reader has been moved into a [`Reader`].
     get_count: Arc<AtomicU64>,
+    /// Shared count of the bytes those `get_range` requests returned: what actually crossed the
+    /// network after open, including each [`READ_AHEAD`] window in full, not only the part a caller
+    /// asked for. A tally taken above this reader sees only the requested bytes.
+    fetched_bytes: Arc<AtomicU64>,
 }
 
 impl ObjectStoreReader {
@@ -112,6 +116,7 @@ impl ObjectStoreReader {
             window_start: 0,
             rt,
             get_count: Arc::new(AtomicU64::new(0)),
+            fetched_bytes: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -136,6 +141,13 @@ impl ObjectStoreReader {
     /// [`Reader::from_reader`] to keep observing it.
     pub fn get_counter(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.get_count)
+    }
+
+    /// Shared handle to the live count of bytes fetched by `get_range` GETs (excludes the HEAD and
+    /// the eager tail-GET, like [`Self::get_counter`]). Counts every byte each GET returned, so a
+    /// [`READ_AHEAD`] window counts in full.
+    pub fn fetched_bytes_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.fetched_bytes)
     }
 }
 
@@ -174,6 +186,8 @@ impl Read for ObjectStoreReader {
                 .block_on(self.store.get_range(&self.path, self.pos..fetch_end))
                 .map_err(|e| IoError::other(format!("object_store get_range: {e}")))?;
             self.get_count.fetch_add(1, Ordering::Relaxed);
+            self.fetched_bytes
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
             if (bytes.len() as u64) < end - self.pos {
                 return Err(IoError::new(
                     ErrorKind::UnexpectedEof,
@@ -192,6 +206,8 @@ impl Read for ObjectStoreReader {
             .block_on(self.store.get_range(&self.path, self.pos..end))
             .map_err(|e| IoError::other(format!("object_store get_range: {e}")))?;
         self.get_count.fetch_add(1, Ordering::Relaxed);
+        self.fetched_bytes
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         let n = bytes.len();
         buf[..n].copy_from_slice(&bytes);
         self.pos = self
@@ -450,6 +466,43 @@ mod tests {
         assert_eq!(block, local.read_block(&names[3]).unwrap());
     }
 
+    /// The deep verify's whole-file check (SPEC §6) runs over a cloud source too: it reads the end
+    /// records through the same [`ObjectStoreReader`] that `zip` reads members through. An honest
+    /// archive verifies; the same bytes with a second archive appended after the end record do not,
+    /// though `zip` still opens them at byte 0.
+    #[test]
+    fn deep_verify_reads_every_byte_over_object_storage() {
+        use object_store::memory::InMemory;
+
+        let (honest, _) = multiblock_tsra(8, 4096);
+        let mut appended = honest.clone();
+        appended.extend_from_slice(&honest);
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        for (key, bytes) in [("honest.tsra", &honest), ("appended.tsra", &appended)] {
+            rt.block_on(store.put(
+                &ObjPath::from(key),
+                PutPayload::from(Bytes::from(bytes.clone())),
+            ))
+            .unwrap();
+        }
+        let verify = |key: &str| {
+            let src = ObjectStoreReader::new(Arc::clone(&store), ObjPath::from(key)).unwrap();
+            Reader::from_reader(src)
+                .expect("zip opens both at byte 0")
+                .verify_payloads(key)
+        };
+        verify("honest.tsra").unwrap();
+        match verify("appended.tsra") {
+            Err(tessera_core::Error::Container(why)) => assert!(
+                why.contains("not a canonical .tsra")
+                    && why.contains("follow the central directory"),
+                "{why}"
+            ),
+            other => panic!("an appended archive must be refused over object storage: {other:?}"),
+        }
+    }
+
     /// The [`READ_AHEAD`] window: the three small reads `zip` makes to parse one local header (fixed
     /// part, name, extra field) cost one GET between them, not three, and return the exact bytes. A
     /// payload-sized read bypasses the window and costs exactly one GET of exactly its range.
@@ -469,6 +522,7 @@ mod tests {
             .unwrap();
         let mut r = ObjectStoreReader::new(store, key).unwrap();
         let gets = r.get_counter();
+        let fetched = r.fetched_bytes_counter();
 
         let mut header = Vec::new();
         for n in [30usize, 8, 20] {
@@ -478,6 +532,11 @@ mod tests {
         }
         assert_eq!(header, bytes[..58], "served bytes are the object's bytes");
         assert_eq!(gets.load(Ordering::Relaxed), 1, "one GET for one header");
+        assert_eq!(
+            fetched.load(Ordering::Relaxed),
+            READ_AHEAD,
+            "that GET fetched the whole window, not the 58 bytes asked for"
+        );
 
         let at = 2 * READ_AHEAD as usize;
         r.seek(SeekFrom::Start(at as u64)).unwrap();
@@ -488,6 +547,11 @@ mod tests {
             gets.load(Ordering::Relaxed),
             2,
             "a payload-sized read is one GET"
+        );
+        assert_eq!(
+            fetched.load(Ordering::Relaxed),
+            2 * READ_AHEAD,
+            "of exactly its range"
         );
     }
 
@@ -619,14 +683,23 @@ mod tests {
     /// answers the range query from the sidecar — no events-block bytes touched.
     fn listmode_product_with_ms_range(name: &str, ms_lo: u32, ms_hi: u32) -> Vec<u8> {
         assert!(ms_lo < ms_hi);
-        let rows = 4096usize;
+        let rows = 65_536usize;
         let span = ms_hi - ms_lo;
-        // 4096 u64 ms values + 4096 f32 e values = ~48 KiB raw → well above the tiny manifest /
-        // sidecar overhead, so the prune-fetch byte assertion is meaningful.
+        // `e` carries pseudo-random mantissas, which no codec squeezes much, so the events block
+        // stays far larger than the 64 KiB tail prefetch: most of it sits in front of the cached
+        // suffix, where the prune-fetch byte assertions can see whether it was fetched.
         let ms: Vec<u64> = (0..rows)
             .map(|k| u64::from(ms_lo) + (u64::from(span) * k as u64) / rows as u64)
             .collect();
-        let e: Vec<f32> = (0..rows).map(|k| 511.0 + (k % 13) as f32).collect();
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let e: Vec<f32> = (0..rows)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                511.0 + (state >> 40) as f32 / (1u64 << 24) as f32
+            })
+            .collect();
         let data: TableData = vec![
             ("ms".into(), ColumnData::U64(ms)),
             ("e".into(), ColumnData::F32(e)),
@@ -689,6 +762,21 @@ mod tests {
             let mut local = Reader::from_reader(Cursor::new(b_bytes.clone())).unwrap();
             local.read_block("events").unwrap().len()
         };
+        // Over the wire, only the part of B's events payload in front of the suffix the reader
+        // prefetches on open can be fetched (or not); the open already holds the rest. That part
+        // must dwarf the few READ_AHEAD windows the front of the file costs, or the wire-level
+        // assertion below could not tell a pruned block from a fetched one.
+        let b_events_outside_tail = {
+            let mut z = zip::ZipArchive::new(Cursor::new(b_bytes.clone())).unwrap();
+            let start = z.by_name("blocks/events").unwrap().data_start().unwrap();
+            (b_bytes.len() as u64 - TAIL_PREFETCH).saturating_sub(start)
+        };
+        assert!(
+            b_events_outside_tail > 4 * READ_AHEAD,
+            "only {b_events_outside_tail} bytes of B's events block lie outside the {TAIL_PREFETCH}-byte \
+             tail prefetch of its {}-byte archive; too few to prove the block was not fetched",
+            b_bytes.len()
+        );
         // Seed both into the same S3 bucket under distinct keys.
         let a_key = ObjPath::from("cohort/a.tsra");
         let b_key = ObjPath::from("cohort/b.tsra");
@@ -724,8 +812,9 @@ mod tests {
         };
 
         // ── Product B: does NOT match → prune returns empty → we do NOT fetch events.
-        let b_data_bytes_read: u64 = {
+        let (b_data_bytes_read, b_fetched_bytes): (u64, u64) = {
             let inner = ObjectStoreReader::new(Arc::clone(&store), b_key.clone()).unwrap();
+            let fetched = inner.fetched_bytes_counter();
             let counter = CountingReader::new(inner);
             let tally = counter.counter();
             let mut r = Reader::from_reader(counter).unwrap();
@@ -740,7 +829,10 @@ mod tests {
             // The honest claim: we did NOT read B's events payload. Sidecar + manifest + central
             // directory reads are fine — and most should be served from the tail prefetch — but
             // the events bytes themselves (`b_events_bytes`) are off-limits.
-            tally.load(Ordering::Relaxed)
+            (
+                tally.load(Ordering::Relaxed),
+                fetched.load(Ordering::Relaxed),
+            )
         };
 
         // Cohort prune-before-fetch assertion: for the non-matching product, the bytes the wire
@@ -750,6 +842,15 @@ mod tests {
             b_data_bytes_read < b_events_bytes as u64,
             "non-matching product B fetched {b_data_bytes_read} bytes — MUST be < its events \
              block size {b_events_bytes} (we should never have pulled the events payload)"
+        );
+        // `b_data_bytes_read` is tallied ABOVE the object-store reader, so it counts the bytes zip
+        // asked for, not what the reader fetched: each small read that misses the cache pulls a
+        // whole READ_AHEAD window. The same bound must hold for the bytes that crossed the wire.
+        assert!(
+            b_fetched_bytes < b_events_outside_tail,
+            "non-matching product B's range GETs fetched {b_fetched_bytes} bytes (READ_AHEAD \
+             windows included) — MUST be < the {b_events_outside_tail} bytes of its events block \
+             outside the tail prefetch"
         );
         // And the matching product A *did* pay the cost of its events block — sanity check that
         // the prune isn't trivially "skip everything".

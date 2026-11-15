@@ -445,6 +445,204 @@ fn a_member_hidden_before_the_central_directory_is_refused() {
     assert_refused(&bytes, "hidden member");
 }
 
+// ── every byte of the file: what follows the central directory ──────────────────────────────────
+
+/// The offset of the (last) end-of-central-directory record.
+fn eocd_at(bytes: &[u8]) -> usize {
+    bytes
+        .windows(4)
+        .rposition(|w| w == EOCD_SIG)
+        .expect("end of central directory")
+}
+
+/// `bytes` must be refused as a container problem whose message contains `needle`.
+fn assert_refused_for(bytes: &[u8], why: &str, needle: &str) {
+    match verdict(bytes) {
+        None => panic!("verified a non-canonical archive ({why})"),
+        Some(Error::Container(msg)) => assert!(
+            msg.contains("not a canonical .tsra") && msg.contains(needle),
+            "refused for the wrong reason ({why}): {msg}"
+        ),
+        Some(other) => panic!("refused, but not as a container problem ({why}): {other}"),
+    }
+}
+
+/// What a reader that adjusts for a prefix reads as `manifest.json`. `unzip` and Python's `zipfile`
+/// take the last end record in the file and shift every offset by however far the directory it names
+/// sits from where the record says it starts (`zipfile`'s `concat = eocd - size_cd - offset_cd`).
+/// Opening at that offset is exactly that reading.
+fn prefix_adjusting_manifest(bytes: &[u8]) -> Vec<u8> {
+    let eocd = eocd_at(bytes);
+    let (size_cd, offset_cd) = (
+        u32_at(bytes, eocd + 12),
+        u32_at(bytes, eocd + EOCD_CD_OFFSET),
+    );
+    let concat = eocd as u64 - u64::from(size_cd) - u64::from(offset_cd);
+    assert_ne!(
+        concat, 0,
+        "the last end record describes an archive that does not start at 0"
+    );
+    let config = zip::read::Config {
+        archive_offset: zip::read::ArchiveOffset::Known(concat),
+    };
+    let mut a = ZipArchive::with_config(config, Cursor::new(bytes)).unwrap();
+    let mut b = Vec::new();
+    a.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut b)
+        .unwrap();
+    b
+}
+
+/// What tessera reads: the archive opened at byte 0 (SPEC §6), through its central directory.
+fn cd_view_at_zero(bytes: &[u8]) -> View {
+    let config = zip::read::Config {
+        archive_offset: zip::read::ArchiveOffset::Known(0),
+    };
+    let mut a = ZipArchive::with_config(config, Cursor::new(bytes)).unwrap();
+    (0..a.len())
+        .map(|i| {
+            let mut f = a.by_index(i).unwrap();
+            let mut b = Vec::new();
+            f.read_to_end(&mut b).unwrap();
+            (f.name().unwrap().into_owned(), b)
+        })
+        .collect()
+}
+
+/// The reviewer's blocker on the first round: a second, ordinary zip appended after the genuine end
+/// record. `tessera` opens at byte 0, so `zip` rejects the appended end record and falls back to the
+/// genuine one, and the file verified. A reader that adjusts for a prefix (`unzip -p`, `zipfile.read`)
+/// takes the appended archive as the whole file and reads the forged manifest, with no CRC error.
+#[test]
+fn a_second_archive_appended_after_the_end_record_is_refused() {
+    let honest = sealed_blobs(&[("data", b"genuine payload")]);
+    let forged = rezip(&[
+        ("mimetype", b"application/vnd.tessera"),
+        ("manifest.json", b"{\"forged\":true}"),
+        ("blocks/data", b"EVIL"),
+    ]);
+    let mut bytes = honest.clone();
+    bytes.extend_from_slice(&forged);
+
+    assert_eq!(
+        cd_view_at_zero(&bytes),
+        cd_view(&honest),
+        "tessera's own reading is the genuine archive"
+    );
+    assert_eq!(
+        prefix_adjusting_manifest(&bytes),
+        b"{\"forged\":true}",
+        "the crafted archive is a real cloak: a prefix-adjusting reader reads the forged manifest"
+    );
+    assert_refused_for(&bytes, "appended archive", "follow the central directory");
+}
+
+/// The same second archive carried as the genuine end record's comment, so every byte after the end
+/// record is "accounted for" by the comment length. A `.tsra` carries no comment.
+#[test]
+fn an_archive_comment_is_refused() {
+    let honest = sealed_blobs(&[("data", b"genuine payload")]);
+    let comment = b"HIDDEN-UNHASHED-PAYLOAD ".repeat(40);
+    let mut bytes = honest.clone();
+    let eocd = eocd_at(&bytes);
+    put_u16(&mut bytes, eocd + 20, u16::try_from(comment.len()).unwrap());
+    bytes.extend_from_slice(&comment);
+
+    let a = ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    assert_eq!(
+        a.comment(),
+        &comment[..],
+        "zip reads it as the archive comment"
+    );
+    assert_eq!(cd_view(&bytes), cd_view(&honest));
+    assert_refused_for(&bytes, "archive comment", "follow the central directory");
+}
+
+/// Bytes between the last central-directory record and the end record, which no record describes.
+/// The reviewer hid a complete local entry there; plain junk is the same rule.
+#[test]
+fn bytes_between_the_central_directory_and_the_end_record_are_refused() {
+    let honest = sealed_blobs(&[("data", b"genuine payload")]);
+    let eocd = eocd_at(&honest);
+    assert_ne!(
+        &honest[eocd - 20..eocd - 16],
+        ZIP64_LOCATOR_SIG,
+        "this small archive has no zip64 end records"
+    );
+    let hidden_entry = {
+        let z = rezip(&[("manifest.json", b"{\"forged\":true}")]);
+        let cd = ZipArchive::new(Cursor::new(&z))
+            .unwrap()
+            .central_directory_start() as usize;
+        z[..cd].to_vec()
+    };
+    for (what, inserted) in [
+        ("a hidden local entry", hidden_entry),
+        ("junk", b"HIDDEN-UNHASHED-PAYLOAD ".repeat(40)),
+    ] {
+        let mut bytes = honest[..eocd].to_vec();
+        bytes.extend_from_slice(&inserted);
+        bytes.extend_from_slice(&honest[eocd..]);
+        assert_eq!(
+            cd_view(&bytes),
+            cd_view(&honest),
+            "{what}: zip still opens it"
+        );
+        assert_refused_for(&bytes, what, "follow the central directory");
+    }
+}
+
+/// Anything after the end record, even with no comment claiming it.
+#[test]
+fn bytes_after_the_end_record_are_refused() {
+    let honest = sealed_blobs(&[("data", b"genuine payload")]);
+    let mut bytes = honest.clone();
+    bytes.extend_from_slice(b"trailing bytes no record describes");
+    assert_eq!(cd_view(&bytes), cd_view(&honest), "zip still opens it");
+    assert_refused_for(&bytes, "trailing bytes", "follow the central directory");
+}
+
+/// A `blocks/` member the manifest does not list carries bytes no digest covers under a name every
+/// reader takes for part of the product, so it is refused. An `aux/` member is the one exception, by
+/// design (ADR-0042): carried, deliberately outside the seal, and read identically by every reader.
+/// Both archives here are well formed, rebuilt from scratch as a zip appender would leave them.
+#[test]
+fn a_member_the_manifest_does_not_list_is_refused_outside_aux() {
+    let honest = sealed_blobs(&[("data", b"genuine payload")]);
+    let with = |extra: &str| {
+        let mut entries = cd_view(&honest);
+        entries.push((extra.to_string(), b"unsealed bytes".to_vec()));
+        let refs: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice()))
+            .collect();
+        rezip(&refs)
+    };
+
+    let unlisted_block = with("blocks/evil");
+    assert_eq!(
+        cd_view(&unlisted_block),
+        stream_view(&unlisted_block),
+        "an honest zip: both readers agree, and both list the unsealed block"
+    );
+    assert_refused_for(
+        &unlisted_block,
+        "unlisted block",
+        "a block the manifest lists",
+    );
+    for stray in ["evil", "manifest.json.bak", "Blocks/data"] {
+        assert_refused_for(&with(stray), stray, "a block the manifest lists");
+    }
+
+    let aux = with("aux/note.txt");
+    assert_eq!(cd_view(&aux), stream_view(&aux));
+    assert!(
+        verdict(&aux).is_none(),
+        "an aux/ member is carried outside the seal by design (ADR-0042)"
+    );
+}
+
 // ── the honest side: nothing tessera writes trips the rule ──────────────────────────────────────
 
 /// Every committed corpus vector, and every writer path over every fixture, still verifies: the rule
