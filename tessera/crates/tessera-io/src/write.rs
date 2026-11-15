@@ -9,8 +9,16 @@
 //! durably, so a crash during recovery loses nothing and recovering twice changes nothing.
 //! At completion [`WriteSession::seal`] builds the manifest through the same [`ProductBuilder`] a
 //! batch writer uses, so a streamed product is byte-identical to a batch-sealed one (same `id` /
-//! `content_hash` / `manifest_hash`). The running [`MerkleAccumulator`] gives an integrity root at
-//! every watermark and is cross-checked against the sealed `content_hash`.
+//! `content_hash` / `manifest_hash`). Each [`Lane`]'s running [`MerkleAccumulator`] gives an
+//! integrity root over that lane's blocks at every watermark, and is cross-checked at the seal against
+//! the lane's blocks in the sealed manifest.
+//!
+//! **Lanes (ADR-0065 §7.3, #832).** Every block is committed on a [`Lane`]: one per table role,
+//! plus the arrays lane, which also takes every block appended without one. The seal orders the
+//! manifest's blocks by lane (the table lanes by role name, then the arrays lane), and by commit
+//! order within a lane, so the sealed bytes don't depend on how the commits of different lanes
+//! interleaved. A session that uses a single lane seals its blocks in commit order, as it always
+//! has.
 //!
 //! **Blocks larger than RAM (#677).** [`WriteSession::append_block`] takes the encoded bytes as a
 //! slice. For a block too large for that, an encoder writes it into a [`StagedBlock`], a file in the
@@ -227,6 +235,43 @@ struct Header {
     generation: Option<tessera_core::Generation>,
 }
 
+/// The lane a block is committed on (ADR-0065 §7.3): the sealed manifest orders blocks by lane,
+/// then by commit order within the lane, never by how the commits of different lanes interleaved.
+///
+/// The order is the derived one: every [`Lane::Table`] lane, by role name (byte order), then
+/// [`Lane::Arrays`]. A product written on one lane only is sealed in commit order, so it is
+/// byte-identical to one written before lanes existed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Lane {
+    /// The lane of the table role named here: every leaf of that table is committed on it.
+    Table(String),
+    /// The arrays lane, sealed after every table lane. Every block appended or pushed without a
+    /// lane ([`WriteSession::append_block`], [`crate::StreamWriter::push`], …) is committed on it,
+    /// so those calls keep their commit-order product.
+    Arrays,
+}
+
+impl Lane {
+    /// The lane of the table role `role`.
+    pub fn table(role: impl Into<String>) -> Self {
+        Lane::Table(role.into())
+    }
+}
+
+/// The journal line of a block committed on a lane other than [`Lane::Arrays`]: the lane and the
+/// block reference. A block on the arrays lane is journaled as its bare [`BlockRef`], the line
+/// every journal had before lanes, so such journals recover unchanged. The wrapper has no `name`
+/// at its top level, so a build that predates lanes refuses the line ([`Error::CorruptJournal`])
+/// rather than recovering the block on the wrong lane.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaneLine<L, B> {
+    lane: L,
+    block: B,
+}
+
 /// A committed block as a [`WriteSession`] holds it until the seal (#759): its name, for the checks
 /// every append makes, and its journal line, the [`BlockRef`] serialized as compact JSON, which is
 /// its manifest entry. The session holds every committed block until the seal, so what one costs is
@@ -240,6 +285,8 @@ struct Header {
 struct Committed {
     name: BlockName,
     line: Box<str>,
+    /// Its lane: an index into [`WriteSession::lanes`].
+    lane: usize,
 }
 
 impl Committed {
@@ -247,12 +294,13 @@ impl Committed {
     /// a reference whose line can't be (a spec nested deeper than serde_json reads, 128 levels) is
     /// refused here, before its journal line, rather than by the seal once every block is encoded;
     /// no reader could open its manifest anyway. The parsed copy is dropped at once.
-    fn of(block: BlockRef) -> Result<Self> {
+    fn of(block: BlockRef, lane: usize) -> Result<Self> {
         let line = serde_json::to_string(&block)?;
         serde_json::from_str::<BlockRef>(&line)?;
         Ok(Committed {
             name: block.name,
             line: line.into_boxed_str(),
+            lane,
         })
     }
 
@@ -269,7 +317,9 @@ pub struct WriteSession {
     journal: File,
     /// The committed blocks, in commit order, until the seal (#759).
     blocks: Vec<Committed>,
-    merkle: MerkleAccumulator,
+    /// The lanes committed on, in the order of their first commit, each with the running Merkle
+    /// accumulator over its own blocks in commit order.
+    lanes: Vec<(Lane, MerkleAccumulator)>,
     /// Numbers the session's staged files, shared by every [`BlockStaging`] handle.
     staged_seq: Arc<AtomicU64>,
     /// Why the session refuses to go on, once a commit failed after its journal write began.
@@ -633,7 +683,7 @@ impl WriteSession {
             header,
             journal,
             blocks: Vec::new(),
-            merkle: MerkleAccumulator::new(),
+            lanes: Vec::new(),
             staged_seq: Arc::new(AtomicU64::new(0)),
             poisoned: None,
             quarantined,
@@ -721,6 +771,17 @@ impl WriteSession {
     /// disk — the process dies first, or the power fails before the directory is written — possibly
     /// that block too, as for a crash during the append).
     pub fn append_block(&mut self, block_ref: BlockRef, payload: &[u8]) -> Result<()> {
+        self.append_block_on(Lane::Arrays, block_ref, payload)
+    }
+
+    /// [`Self::append_block`] on `lane`: the block is sealed among that lane's blocks, in commit
+    /// order (see [`Lane`]); the failure modes are those of `append_block`.
+    pub fn append_block_on(
+        &mut self,
+        lane: Lane,
+        block_ref: BlockRef,
+        payload: &[u8],
+    ) -> Result<()> {
         self.admit(&block_ref)?;
         let digest = block_ref
             .digest
@@ -733,7 +794,7 @@ impl WriteSession {
             sync_file(&w, path)?;
             Ok(())
         })?;
-        self.commit(block_ref, digest, payload.len() as u64, fragment)
+        self.commit(lane, block_ref, digest, payload.len() as u64, fragment)
     }
 
     /// Durably append one encoded block whose bytes come from `payload`, in bounded memory: the
@@ -769,8 +830,15 @@ impl WriteSession {
     ///
     /// **Failure before the journal write leaves no trace**: no staged file, no fragment, no journal
     /// line, no Merkle leaf, and the session goes on.
-    pub fn append_staged(
+    pub fn append_staged(&mut self, block_ref: BlockRef, staged: StagedBlock) -> Result<BlockRef> {
+        self.append_staged_on(Lane::Arrays, block_ref, staged)
+    }
+
+    /// [`Self::append_staged`] on `lane`: the block is sealed among that lane's blocks, in commit
+    /// order (see [`Lane`]); the failure modes are those of `append_staged`.
+    pub fn append_staged_on(
         &mut self,
+        lane: Lane,
         mut block_ref: BlockRef,
         staged: StagedBlock,
     ) -> Result<BlockRef> {
@@ -804,7 +872,7 @@ impl WriteSession {
                 actual: on_disk,
             });
         }
-        self.commit(block_ref.clone(), digest, len, fragment)?;
+        self.commit(lane, block_ref.clone(), digest, len, fragment)?;
         Ok(block_ref)
     }
 
@@ -878,23 +946,42 @@ impl WriteSession {
     }
 
     /// The commit every append shares, once the block's `fragment` is durable in `blocks/`: the
-    /// journal line (the atomic commit point), the running Merkle root, and the write trace. On
+    /// journal line (the atomic commit point, recording `lane`), the lane's running Merkle root, and
+    /// the write trace. On
     /// success the fragment is kept; on failure it is deleted, and a failure from the journal write
     /// on poisons the session (see [`Self::append_block`] for why).
     fn commit(
         &mut self,
+        lane: Lane,
         block_ref: BlockRef,
         digest: String,
         bytes: u64,
         fragment: RemoveOnDrop,
     ) -> Result<()> {
         let kind = block_ref.kind;
-        let committed = Committed::of(block_ref)?;
+        // A lane line nests the block one level deeper, so it is parsed back too: `recover` must be
+        // able to read every line the journal holds (see `Committed::of`).
+        let lane_line = match lane {
+            Lane::Arrays => None,
+            ref lane => {
+                let line = serde_json::to_string(&LaneLine {
+                    lane,
+                    block: &block_ref,
+                })?;
+                serde_json::from_str::<LaneLine<Lane, BlockRef>>(&line)?;
+                Some(line)
+            }
+        };
+        let lane_id = match self.lanes.iter().position(|(l, _)| *l == lane) {
+            Some(id) => id,
+            None => self.lanes.len(), // registered below, once the commit succeeded
+        };
+        let committed = Committed::of(block_ref, lane_id)?;
         #[cfg(test)]
         seam::record(seam::Event::JournalLine(fragment.path().to_path_buf()));
         // 2. journal line → durable (this is the commit watermark advance)
-        let journaled =
-            writeln!(self.journal, "{}", committed.line).and_then(|()| self.sync_journal());
+        let line = lane_line.as_deref().unwrap_or(&committed.line);
+        let journaled = writeln!(self.journal, "{line}").and_then(|()| self.sync_journal());
         if let Err(e) = journaled {
             self.poisoned = Some(format!("block '{}': {e}", committed.name));
             return Err(std::io::Error::new(
@@ -908,8 +995,11 @@ impl WriteSession {
             .into());
         }
         fragment.disarm();
-        // 3. running integrity root
-        self.merkle.push(&digest);
+        // 3. the lane's running integrity root
+        if lane_id == self.lanes.len() {
+            self.lanes.push((lane, MerkleAccumulator::new()));
+        }
+        self.lanes[lane_id].1.push(&digest);
         // Write-path observability (SSoT): every durably-committed block — batch, stream, or ingest —
         // flows through here, so one structured event gives devs/users full I/O info on write (name,
         // kind, bytes, content digest, and the new integrity watermark). Zero-cost when no subscriber.
@@ -920,7 +1010,7 @@ impl WriteSession {
             kind = %kind,
             bytes = bytes,
             digest = %digest,
-            watermark = self.merkle.watermark(),
+            watermark = self.blocks.len() + 1,
             "committed block"
         );
         self.blocks.push(committed);
@@ -936,15 +1026,47 @@ impl WriteSession {
         sync_file(&self.journal, &self.dir.join(JOURNAL))
     }
 
-    /// The number of committed blocks (the crash-recovery watermark).
+    /// The number of committed blocks, on every lane (the crash-recovery watermark).
     pub fn watermark(&self) -> usize {
-        self.merkle.watermark()
+        self.blocks.len()
     }
 
-    /// The running content Merkle root over all committed blocks (the `content_hash` a seal here
-    /// would produce).
+    /// The content Merkle root over all committed blocks in seal order: the `content_hash` a seal
+    /// here would produce. O(1) while at most one lane is in use; with more, the lanes' blocks are
+    /// reordered and their digests folded again, O(blocks).
     pub fn running_root(&self) -> String {
-        self.merkle.root()
+        match self.lanes.as_slice() {
+            [] => MerkleAccumulator::new().root(),
+            [(_, acc)] => acc.root(),
+            _ => {
+                let mut acc = MerkleAccumulator::new();
+                for i in self.seal_order() {
+                    let block = self.blocks[i]
+                        .block_ref()
+                        .expect("a committed line parses: Committed::of checked it");
+                    acc.push(
+                        block
+                            .digest
+                            .as_deref()
+                            .expect("a committed block has a digest"),
+                    );
+                }
+                acc.root()
+            }
+        }
+    }
+
+    /// The indices of the committed blocks in seal order: by lane (see [`Lane`]), then by commit
+    /// order within the lane.
+    fn seal_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.blocks.len()).collect();
+        // A stable sort, so a lane's blocks keep their commit order.
+        order.sort_by(|&a, &b| {
+            self.lanes[self.blocks[a].lane]
+                .0
+                .cmp(&self.lanes[self.blocks[b].lane].0)
+        });
+        order
     }
 
     /// Reopen a staging directory after a crash, replaying the journal to the last intact commit, and
@@ -959,6 +1081,10 @@ impl WriteSession {
     /// [`Error::BlockNameConflict`] (ADR-0063, #685; neither name is ever followed to a path), a
     /// line without a digest with [`Error::MissingDigest`], and a line that is not UTF-8, not JSON,
     /// not a block reference, or a block committed a second time with [`Error::CorruptJournal`].
+    /// A line of a block on the arrays lane is its bare block reference, as every journal held
+    /// before lanes (#832), so those journals recover unchanged; any other block's line is
+    /// `{"lane": …, "block": …}` and nothing else, and its lane is kept. A build that predates
+    /// lanes refuses such a journal with [`Error::CorruptJournal`] rather than reorder its blocks.
     /// The journals of the recovery quarantine are read, and held to the same format, before
     /// anything changes too (#695).
     /// That strictness has a cost: if a crash leaves stale bytes that happen to end in a newline at
@@ -1032,22 +1158,29 @@ impl WriteSession {
         let journal = OpenOptions::new().append(true).open(&journal_path)?;
         reset_staging(dir)?;
         remove_orphan_fragments(dir, kept.iter().map(|l| &l.block.name))?;
-        let mut merkle = MerkleAccumulator::new();
+        let mut lanes: Vec<(Lane, MerkleAccumulator)> = Vec::new();
+        let mut blocks = Vec::with_capacity(kept.len());
         for line in kept {
-            merkle.push(&line.digest);
+            let lane = match lanes.iter().position(|(l, _)| *l == line.lane) {
+                Some(id) => id,
+                None => {
+                    lanes.push((line.lane.clone(), MerkleAccumulator::new()));
+                    lanes.len() - 1
+                }
+            };
+            lanes[lane].1.push(&line.digest);
+            blocks.push(Committed {
+                name: line.block.name.clone(),
+                line: line.entry.clone().into(),
+                lane,
+            });
         }
         Ok(WriteSession {
             dir: dir.to_path_buf(),
             header,
             journal,
-            blocks: kept
-                .iter()
-                .map(|l| Committed {
-                    name: l.block.name.clone(),
-                    line: l.text.into(),
-                })
-                .collect(),
-            merkle,
+            blocks,
+            lanes,
             staged_seq: Arc::new(AtomicU64::new(0)),
             poisoned: None,
             quarantined,
@@ -1056,8 +1189,10 @@ impl WriteSession {
         })
     }
 
-    /// Compact + seal: build the manifest through [`ProductBuilder`] (identical to a batch writer),
-    /// verify the running root matches the sealed `content_hash`, and pack the fragments into a
+    /// Compact + seal: build the manifest through [`ProductBuilder`] (identical to a batch writer
+    /// adding the same blocks in seal order: by [`Lane`], then by commit order within a lane),
+    /// verify that each lane's running root equals the root over that lane's blocks in the sealed
+    /// manifest, and pack the fragments into a
     /// sealed `.tsra` at `out`. Returns the sealed manifest. A poisoned session (see
     /// [`Self::append_block`]) refuses to seal: [`Self::recover`] it first.
     ///
@@ -1098,32 +1233,63 @@ impl WriteSession {
         if let Some(generation) = &self.header.generation {
             b.with_generation(generation.clone());
         }
-        for c in &self.blocks {
-            b.add_block_ref(c.block_ref()?);
+        let order = self.seal_order();
+        for &i in &order {
+            b.add_block_ref(self.blocks[i].block_ref()?);
         }
         let sealed = b.seal()?;
-        // Integrity self-check: the streamed running root must equal the batch content hash.
-        if sealed.content_hash.as_deref() != Some(self.merkle.root().as_str()) {
+        // Integrity self-check, per lane: each lane's running root, folded in commit order, must
+        // equal the root over that lane's digests in the sealed manifest; and the digests in seal
+        // order must fold to the sealed `content_hash`.
+        if sealed.blocks.len() != order.len() {
+            return Err(Error::Container(format!(
+                "seal: the manifest holds {} blocks, the session committed {}",
+                sealed.blocks.len(),
+                order.len()
+            )));
+        }
+        let mut sealed_lanes: Vec<MerkleAccumulator> = self
+            .lanes
+            .iter()
+            .map(|_| MerkleAccumulator::new())
+            .collect();
+        let mut all = MerkleAccumulator::new();
+        for (&i, block) in order.iter().zip(&sealed.blocks) {
+            let digest = block
+                .digest
+                .as_deref()
+                .ok_or_else(|| Error::MissingDigest(block.name.to_string()))?;
+            sealed_lanes[self.blocks[i].lane].push(digest);
+            all.push(digest);
+        }
+        if sealed.content_hash.as_deref() != Some(all.root().as_str()) {
             return Err(Error::Integrity {
                 what: "streaming_content_hash",
                 expected: sealed.content_hash.clone().unwrap_or_default(),
-                actual: self.merkle.root(),
+                actual: all.root(),
             });
+        }
+        for ((_, running), sealed_lane) in self.lanes.iter().zip(&sealed_lanes) {
+            if running.root() != sealed_lane.root() {
+                return Err(Error::Integrity {
+                    what: "streaming_lane_root",
+                    expected: sealed_lane.root(),
+                    actual: running.root(),
+                });
+            }
         }
         // Stream each fragment from disk → zip entry via pack_streaming (no whole-product Vec). The
         // resulting archive is byte-identical to pack(&sealed, &<vec of read fragments>, out) over
         // the same inputs (proven by pack_streaming_equals_pack), so this swap is determinism-safe.
         let blocks_dir = self.dir.join(BLOCKS);
-        let frag_paths: Vec<PathBuf> = self
-            .blocks
+        let frag_paths: Vec<PathBuf> = order
             .iter()
-            .map(|r| r.name.path_under(&blocks_dir))
+            .map(|&i| self.blocks[i].name.path_under(&blocks_dir))
             .collect::<Result<_>>()?;
-        let sources: Vec<(BlockName, &Path)> = self
-            .blocks
+        let sources: Vec<(BlockName, &Path)> = order
             .iter()
             .zip(frag_paths.iter())
-            .map(|(r, p)| (r.name.clone(), p.as_path()))
+            .map(|(&i, p)| (self.blocks[i].name.clone(), p.as_path()))
             .collect();
         pack_streaming(&sealed, &sources, out)?;
         Ok(sealed)
@@ -1134,9 +1300,11 @@ impl WriteSession {
 /// bytes, newline included.
 struct JournalLine<'a> {
     block: BlockRef,
+    lane: Lane,
     digest: String,
-    /// The line's text, without its newline: what the session holds for the block ([`Committed`]).
-    text: &'a str,
+    /// The block's manifest entry: what the session holds for it ([`Committed`]). The line's text
+    /// (without its newline) for a block on the arrays lane; the bare block reference otherwise.
+    entry: std::borrow::Cow<'a, str>,
     raw: &'a [u8],
 }
 
@@ -1159,12 +1327,27 @@ fn parse_journal<'a>(path: &Path, raw: &'a [u8]) -> Result<Vec<JournalLine<'a>>>
         let text = std::str::from_utf8(text).map_err(|e| corrupt(format!("not UTF-8: {e}")))?;
         let value: Value =
             serde_json::from_str(text).map_err(|e| corrupt(format!("not JSON: {e}")))?;
+        // A line with a `lane` is a [`LaneLine`]; any other is a bare block on the arrays lane.
+        let on_lane = value.get("lane").is_some();
+        let bare = if on_lane {
+            value.get("block")
+        } else {
+            Some(&value)
+        };
         // Name first, so a bad one is refused by its own typed error.
-        if let Some(name) = value.get("name").and_then(Value::as_str) {
+        if let Some(name) = bare.and_then(|b| b.get("name")).and_then(Value::as_str) {
             BlockName::new(name)?;
         }
-        let block: BlockRef = serde_json::from_value(value)
-            .map_err(|e| corrupt(format!("not a block reference: {e}")))?;
+        let not_block = |e: serde_json::Error| corrupt(format!("not a block reference: {e}"));
+        let (block, lane, entry): (BlockRef, _, std::borrow::Cow<'a, str>) = if on_lane {
+            let LaneLine { lane, block } =
+                serde_json::from_value::<LaneLine<Lane, BlockRef>>(value).map_err(not_block)?;
+            let entry = serde_json::to_string(&block)?.into();
+            (block, lane, entry)
+        } else {
+            let block = serde_json::from_value(value).map_err(not_block)?;
+            (block, Lane::Arrays, text.into())
+        };
         let digest = block
             .digest
             .clone()
@@ -1197,8 +1380,9 @@ fn parse_journal<'a>(path: &Path, raw: &'a [u8]) -> Result<Vec<JournalLine<'a>>>
         names.insert(name);
         lines.push(JournalLine {
             block,
+            lane,
             digest,
-            text,
+            entry,
             raw: line,
         });
     }
@@ -1576,6 +1760,136 @@ mod tests {
             sealed.metadata.get("modality"),
             Some(&serde_json::json!({"_vocabulary": "DICOM", "_code": "CT"}))
         );
+    }
+
+    /// #832: blocks committed on lanes, interleaved, in the order `(lane, name)`.
+    fn lane_commits() -> Vec<(Lane, &'static str)> {
+        let (a, e, p) = (Lane::Arrays, Lane::table("events"), Lane::table("pethits"));
+        vec![
+            (a.clone(), "vol0"),
+            (p.clone(), "pethits/0000"),
+            (e.clone(), "events/0000"),
+            (p.clone(), "pethits/0001"),
+            (a.clone(), "vol1"),
+            (e.clone(), "events/0001"),
+            (p, "pethits/0002"),
+            (e, "events/0002"),
+        ]
+    }
+
+    fn append_on(ws: &mut WriteSession, commits: &[(Lane, &str)]) {
+        for (lane, name) in commits {
+            let (r, p) = block(name, name.len() as i16);
+            ws.append_block_on(lane.clone(), r, &p).unwrap();
+        }
+    }
+
+    /// #832: the seal orders blocks by lane, then commit order, whatever the interleaving; the
+    /// running root is that order's `content_hash`.
+    #[test]
+    fn a_session_seals_its_lanes_in_lane_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws =
+            WriteSession::create(&dir.path().join("stage"), "recon", "p", "d", TS).unwrap();
+        append_on(&mut ws, &lane_commits());
+        let root = ws.running_root();
+        let m = ws.seal(&dir.path().join("s.tsra")).unwrap();
+        let names: Vec<_> = m.blocks.iter().map(|b| b.name.to_string()).collect();
+        let expected = [
+            "events/0000",
+            "events/0001",
+            "events/0002",
+            "pethits/0000",
+            "pethits/0001",
+            "pethits/0002",
+            "vol0",
+            "vol1",
+        ];
+        assert_eq!(names, expected);
+        assert_eq!(m.content_hash.as_deref(), Some(root.as_str()));
+    }
+
+    /// #832: `recover` replays a multi-lane journal, keeping every block's lane, and seals the
+    /// product the uninterrupted session seals, byte for byte, also after appending more on the
+    /// recovered lanes. The journal records the lane of every table-lane block, and keeps the
+    /// lane-less line of an arrays-lane block.
+    #[test]
+    fn recover_replays_a_multi_lane_journal_and_seals_the_same_product() {
+        let dir = tempfile::tempdir().unwrap();
+        let commits = lane_commits();
+        let (head, tail) = commits.split_at(5);
+        let mut ws = WriteSession::create(&dir.path().join("ref"), "recon", "p", "d", TS).unwrap();
+        append_on(&mut ws, &commits);
+        let reference = dir.path().join("ref.tsra");
+        ws.seal(&reference).unwrap();
+
+        let stage = dir.path().join("stage");
+        let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        append_on(&mut ws, head);
+        let root = ws.running_root();
+        drop(ws); // the crash: no seal
+        let journal = std::fs::read_to_string(stage.join(JOURNAL)).unwrap();
+        let lines: Vec<Value> = journal
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            lines[0]["name"], "vol0",
+            "an arrays-lane line is a bare block"
+        );
+        assert_eq!(lines[1]["lane"], serde_json::json!({"table": "pethits"}));
+        assert_eq!(lines[1]["block"]["name"], "pethits/0000");
+
+        let mut ws = WriteSession::recover(&stage).unwrap();
+        assert_eq!((ws.watermark(), ws.running_root()), (head.len(), root));
+        append_on(&mut ws, tail);
+        let out = dir.path().join("recovered.tsra");
+        ws.seal(&out).unwrap();
+        assert!(std::fs::read(&out).unwrap() == std::fs::read(&reference).unwrap());
+    }
+
+    /// #832: a table-lane line nests the block one level deeper than its bare line, so a spec at
+    /// serde_json's depth limit is refused at its append on a table lane, before its journal line,
+    /// rather than journaled into a stage dir `recover` could not read.
+    #[test]
+    fn a_lane_line_recover_could_not_read_is_refused_at_its_append() {
+        let (base, p) = block("deep", 0);
+        // The deepest spec whose bare line parses back.
+        let mut deep = base;
+        loop {
+            let mut deeper = deep.clone();
+            deeper.spec = serde_json::json!([deeper.spec]);
+            let line = serde_json::to_string(&deeper).unwrap();
+            if serde_json::from_str::<BlockRef>(&line).is_err() {
+                break;
+            }
+            deep = deeper;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        assert!(ws
+            .append_block_on(Lane::table("t"), deep.clone(), &p)
+            .is_err());
+        assert_eq!(ws.watermark(), 0);
+        ws.append_block(deep, &p).unwrap(); // the bare line is within the limit
+        drop(ws);
+        assert_eq!(WriteSession::recover(&stage).unwrap().watermark(), 1);
+    }
+
+    /// #832: a lane line with anything but its lane and block is a corrupt journal.
+    #[test]
+    fn a_lane_line_with_an_unknown_field_is_a_corrupt_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+        append_on(&mut ws, &lane_commits()[1..2]);
+        drop(ws);
+        let line = std::fs::read_to_string(stage.join(JOURNAL)).unwrap();
+        let bad = line.replacen("{\"lane\"", "{\"x\":1,\"lane\"", 1);
+        std::fs::write(stage.join(JOURNAL), bad).unwrap();
+        let err = WriteSession::recover(&stage).err().unwrap();
+        assert!(matches!(err, Error::CorruptJournal { .. }), "{err}");
     }
 
     #[test]
