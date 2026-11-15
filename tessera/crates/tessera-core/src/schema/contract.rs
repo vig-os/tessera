@@ -31,6 +31,11 @@ use crate::block::BlockKind;
 
 /// The contract for one **table** role: its columns in storage order, and the row-order and key
 /// declarations that travel with them.
+///
+/// **Serialisation rule** (sealed bytes, so fixed): `columns` is always written; every other field
+/// is left out when it holds its default (an empty list, [`TableOrder::SequenceKey`]), as is every
+/// defaulted field of [`ArrayContract`], [`ColumnReference`] and [`Column`]. Absent and empty
+/// therefore mean the same and serialise the same.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TableContract {
     /// The columns, in the order a block of this role stores them. A column marked
@@ -39,16 +44,16 @@ pub struct TableContract {
     pub columns: Vec<Column>,
     /// The ordered key columns the rows are sorted by (#802, ADR-0065 §7.2). Meant to be empty
     /// when [`order`](Self::order) is [`TableOrder::Producer`]; nothing enforces that yet (#844).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sequence_key: Vec<String>,
     /// How the rows are ordered. Absent in JSON means [`TableOrder::SequenceKey`].
     #[serde(default, skip_serializing_if = "TableOrder::is_sequence_key")]
     pub order: TableOrder,
     /// Candidate keys: each entry is a list of column names whose values are unique per row.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<Vec<String>>,
     /// Foreign-key-like references from this table's columns to another block (#780).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<ColumnReference>,
 }
 

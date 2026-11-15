@@ -357,3 +357,55 @@ fn reference_scopes_parse_strictly() {
         assert!(target(bad).is_err(), "{bad} parsed");
     }
 }
+
+/// The serialisation rule, pinned byte for byte before any contract is sealed (moving it later
+/// moves sealed bytes): `columns`, an array's `dtype` and `rank` are always written; every other
+/// contract field is left out at its default, so an empty `sequence_key`, `keys` or `references`
+/// serialises exactly as an absent one. A full contract writes every field.
+#[test]
+fn contract_fields_serialise_skip_if_default_byte_for_byte() {
+    let bare = TableContract {
+        columns: vec![Column::new("event_id", "u8")],
+        ..Default::default()
+    };
+    assert_eq!(
+        serde_json::to_string(&bare).unwrap(),
+        r#"{"columns":[{"name":"event_id","dtype":"u8"}]}"#
+    );
+    let parsed: TableContract =
+        serde_json::from_str(r#"{"columns":[{"name":"event_id","dtype":"u8"}],"sequence_key":[],"keys":[],"references":[]}"#)
+            .unwrap();
+    assert_eq!(parsed, bare, "empty and absent parse the same");
+
+    let full: TableContract = serde_json::from_value(json!({
+        "columns": [{ "name": "event_id", "dtype": "u8", "optional": true }],
+        "sequence_key": ["event_id"],
+        "order": "producer",
+        "keys": [["event_id"]],
+        "references": [{
+            "columns": ["event_id"],
+            "to": { "scope": "source(sim)", "block": "events", "columns": ["event_id"] },
+            "note": "n",
+        }],
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_string(&full).unwrap(),
+        concat!(
+            r#"{"columns":[{"name":"event_id","dtype":"u8","optional":true}],"sequence_key":["event_id"],"#,
+            r#""order":"producer","keys":[["event_id"]],"references":[{"columns":["event_id"],"#,
+            r#""to":{"scope":"source(sim)","block":"events","columns":["event_id"]},"note":"n"}]}"#,
+        )
+    );
+
+    let array = ArrayContract {
+        dtype: "int16".into(),
+        rank: 3,
+        axes: vec![],
+        unit: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&array).unwrap(),
+        r#"{"dtype":"int16","rank":3}"#
+    );
+}

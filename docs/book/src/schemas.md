@@ -81,7 +81,10 @@ unknown role, an undeclared, repeated, missing or misplaced column, a dtype or n
 array dtype, rank or axes mismatch.
 
 Both maps are left out of the JSON when empty, so a schema without a contract serialises exactly as before
-and every sealed file keeps its bytes. **Binaries up to 0.1.0-alpha.5 don't know these keys**: they parse
+and every sealed file keeps its bytes. Inside a contract the same rule holds: `columns`, and an array's
+`dtype` and `rank`, are always written, while every other key is left out at its default (an empty
+`sequence_key`, `keys`, `references` or `axes`, absent `order`, `unit` or `note`, `optional: false`). An empty
+list and an absent key therefore mean the same and seal to the same bytes. **Binaries up to 0.1.0-alpha.5 don't know these keys**: they parse
 such a schema, drop the contract without a word, and validate only its `fields` and `blocks`. Their data
 reads are unaffected, since each block's own spec carries its columns. A reader that refuses what it can't
 honour is #830.
