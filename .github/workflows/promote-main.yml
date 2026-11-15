@@ -25,15 +25,17 @@
 # executed: the checkout is this workflow's own ref (the default branch), the tag is read only as git
 # objects, and the run's tag name and sha reach the script through env, never interpolated into shell.
 #
-# TOKEN: the release-plz GitHub App (secrets.RP_APP_ID + RP_APP_PRIVATE_KEY, #430), minted only when
-# there is a PR to open. It needs `workflows: write` on top of contents + pull requests: GitHub refuses
-# an App a ref or commit that adds or changes `.github/workflows/*` without it, and a release usually
-# changes workflows relative to main. The App installation must grant that permission; until it does,
-# the mint fails loudly (it never mints a narrower token that would fail half-way through). GITHUB_TOKEN cannot create PRs here (Actions PR creation is off), and PRs it
-# opened would start no CI. A failed mint fails the run: there is no fallback token. A PR opened by the
-# App's bot account skips the branch-name check (docs/COMMIT_MESSAGE_STANDARD.md "Exemptions"), which
-# `release/promote-v0.1.0-alpha.N` (dots) would not pass. Its head adds no commit of its own (bare tag)
-# or exactly one, GitHub's bot-authored merge commit.
+# TOKEN: the vigos-devkit-upgrade GitHub App (org secrets DEVKIT_UPGRADE_APP_CLIENT_ID +
+# DEVKIT_UPGRADE_APP_PRIVATE_KEY, shared with this repo; devkit-upgrade.yml mints the same App), minted
+# only when there is a PR to open. The token needs `workflows: write` on top of contents + pull requests:
+# GitHub refuses an App a ref or commit that adds or changes `.github/workflows/*` without it, and a
+# release usually changes workflows relative to main. That is why it is not the release-plz App
+# (RP_APP_*, #430): its installation grants no `workflows`, and by owner decision (2026-11-15) it keeps
+# none, since the release PR it opens never touches a workflow. GITHUB_TOKEN cannot create PRs here
+# (Actions PR creation is off), and PRs it opened would start no CI. A failed mint fails the run: there
+# is no fallback token. A PR opened by the App's bot account skips the branch-name check
+# (docs/COMMIT_MESSAGE_STANDARD.md "Exemptions"), which `release/promote-v0.1.0-alpha.N` (dots) would
+# not pass. Its head adds no commit of its own (bare tag) or exactly one, GitHub's bot-authored merge.
 #
 # MANUAL RUN: `gh workflow run promote-main.yml -f tag=v<version>` re-plans for an existing release, for
 # instance after a failed run; `-f dry_run=true` prints the plan and stops before minting any token.
@@ -114,12 +116,14 @@ jobs:
       - name: Mint GitHub App token (pushes the promotion branch, opens the PR)
         id: app-token
         if: steps.plan.outputs.action == 'open' && !inputs.dry_run
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
+        # The same pin and inputs devkit-upgrade.yml mints this App with.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3
         with:
-          app-id: ${{ secrets.RP_APP_ID }}
-          private-key: ${{ secrets.RP_APP_PRIVATE_KEY }}
-          # Least privilege: create the branch (and its merge commit), open the PR; `workflows` because
-          # the promoted commits change .github/workflows/* (see TOKEN above).
+          client-id: ${{ secrets.DEVKIT_UPGRADE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DEVKIT_UPGRADE_APP_PRIVATE_KEY }}
+          # Least privilege: exactly what this run exercises. Create the branch (and its merge commit),
+          # open the PR; `workflows` because the promoted commits change .github/workflows/* (see TOKEN
+          # above). The App's `issues: write` is not requested.
           permission-contents: write
           permission-pull-requests: write
           permission-workflows: write
@@ -166,7 +170,16 @@ jobs:
             # GitHub makes (and signs) the merge commit server-side; a conflict is an HTTP error here.
             if ! gh api "repos/$REPO/merges" -f "base=$BRANCH" -f "head=$TAG_SHA" -f "commit_message=$TITLE" \
               > "$RUNNER_TEMP/merge.json"; then
-              echo "::error::GitHub refused to merge $TAG into $BRANCH (a conflict, or a permission the App lacks; see the response above). Left $BRANCH at main's tip ($MAIN_SHA): delete it before re-running."
+              # This run created $BRANCH (it did not exist above) at main's tip, and a refused merge leaves
+              # it there adding nothing: delete it, so a re-run starts clean. Only while it still points at
+              # main's tip, i.e. is exactly what this run made; anything else is left alone.
+              now=$(gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq '.object.sha' || true)
+              if [ "$now" = "$MAIN_SHA" ]; then
+                gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH"
+                echo "::error::GitHub refused to merge $TAG into main's tip ($MAIN_SHA): a conflict, or a permission the App lacks (see the response above). Deleted the $BRANCH this run created; no PR opened."
+              else
+                echo "::error::GitHub refused to merge $TAG into main's tip ($MAIN_SHA): a conflict, or a permission the App lacks (see the response above). $BRANCH now points at '${now:-unknown}', not what this run made, so it was left alone; no PR opened."
+              fi
               exit 1
             fi
             head_sha=$(jq -r '.sha' "$RUNNER_TEMP/merge.json")

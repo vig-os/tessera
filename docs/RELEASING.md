@@ -59,11 +59,16 @@ force-pushes; only an organization admin can bypass it. So no workflow merges or
     approval and restarts `nix flake check`.
   - **Refuses** a merge that conflicts, or whose tree is not exactly the tag's tree. Either means `main`
     holds a change the release lacks, and merging would publish an unreleased tree as the release.
-- The PR is opened with the release-plz GitHub App's token, so its CI runs and its bot author is exempt
-  from the branch-name check. The head adds either no commit (the bare tag) or GitHub's merge commit,
-  which adds no change. The App needs `workflows: write` as well as contents and pull requests, because a
-  release usually changes `.github/workflows/*` relative to `main`, and GitHub refuses an App such a ref
-  or commit without it.
+- The PR is opened with a token of the `vigos-devkit-upgrade` GitHub App (org secrets
+  `DEVKIT_UPGRADE_APP_CLIENT_ID` / `DEVKIT_UPGRADE_APP_PRIVATE_KEY`, the App `devkit-upgrade.yml` also
+  uses), so its CI runs and its bot author is exempt from the branch-name check. The token carries
+  contents, pull requests and `workflows: write`: a release usually changes `.github/workflows/*`
+  relative to `main`, and GitHub refuses an App such a ref or commit without `workflows`. The release-plz
+  App is not used because it has no `workflows` permission and keeps none (owner decision, 2026-11-15):
+  the release PR it opens never touches a workflow.
+- The head adds either no commit (the bare tag) or GitHub's merge commit, which adds no change. If GitHub
+  refuses the merge, the run deletes the branch it had just created at `main`'s tip, so a re-run starts
+  clean.
 
 The flake check `release-promotion` runs the script's self-test, which proves each of these rules on
 throwaway repositories.
@@ -77,8 +82,9 @@ gh workflow run promote-main.yml -f tag=v<version>                 # open the PR
 gh workflow run promote-main.yml -f tag=v<version> -f dry_run=true # print the plan only
 ```
 
-- *`release/promote-v<version>` exists but has no open PR*: an earlier run pushed the branch and then
-  failed. Inspect the branch, delete it, and re-run.
+- *`release/promote-v<version>` exists but has no open PR*: an earlier run made the branch and then
+  failed after GitHub's merge (a tree or signature mismatch, kept for inspection), or someone else made
+  it. Inspect the branch, delete it, and re-run.
 - *main holds changes that `v<version>` does not* (or *conflicts*): something reached `main` outside a
   promotion. Bring that change to `dev`, release it, and promote that release.
 - *not the latest release*: a newer tag exists; promote that one instead.
