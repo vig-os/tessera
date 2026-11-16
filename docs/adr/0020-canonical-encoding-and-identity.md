@@ -72,3 +72,38 @@ schema, and error taxonomy are **unaffected and remain Accepted**.
 construction is **superseded** — `content_hash` is the recursive MMR root, and the golden corpus, SPEC §3,
 and the pure-Python reference reader were regenerated to it (conformance 3/3 + reference reader 6/6).
 (ADR-0028 remains **Proposed** for its further parts — chunk-index, pyramid, sidecars, fused pass.)
+
+## Amendment (2026-11-16) — JCS input is I-JSON; integers beyond ±(2^53−1) are refused (#886)
+D4 pinned the canonical *output* but not its *input*. RFC 8785 accepts only I-JSON (RFC 8785 §3.1,
+RFC 7493) and serialises every number as an IEEE-754 double (RFC 8785 §3.2.2.3), so an integer beyond
+±(2^53−1) is rounded before it is hashed: a manifest sealed with `9007199254740993` verified when served
+with `9007199254740992`. The seal did not pin the value. Python's `jcs` agrees with `serde_jcs`, so
+readers never disagreed; the hash was simply not exact.
+
+**Decision (owner, 2026-11-16).** Tessera enforces JCS's own input rule in every sealed JSON document:
+the manifest (embedded schema, metadata, `generation`, `ingest_transform` params), `id_inputs`, a
+collection and a signature envelope. One check, `tessera_core::canonical::check_i_json`, refuses a number
+whose value as parsed is an integer beyond ±(2^53−1), with `Error::InexactInteger` naming its path. It
+runs in `canonical::parse_strict` (every reader) and in `canonical::to_bytes` (every writer, before any
+byte is hashed, so a `u64`/`i64` from Rust code is refused too); a streamed `WriteSession` applies it
+when a block or a metadata, `extra` or recipe value is declared, not hours later at the seal. The rest
+of I-JSON's MUSTs were already enforced there (UTF-8 without lone surrogates, unique names). Large values travel as decimal strings;
+user input (Python `set_field`/`with_generation`, a TOML spec's `[product.metadata]`, CLI
+`commit --set`) is refused with that advice and never converted. SPEC §1 states the rule.
+
+**Why on the value, not the token.** The rule could be read off the number's text, but the parser yields
+a double, and rounding to the nearest double is monotone with 2^53−1 and 2^53 both representable: an
+integer token is beyond the bound exactly when its double is. The value check is therefore the token rule
+for every integer spelling (`9007199254740993.0`, `9.007199254740993e15`, `1e300`) and one implementation
+serves readers and writers alike. It refuses one class the token rule would let through: a token with a
+fraction that rounds to a double beyond the bound (from `9007199254740991.5`, which ties-to-even rounds to
+2^53), whose fraction the double has already lost and which collides the same way. Both readers must
+round each token correctly (`serde_json`'s `float_roundtrip`, Python's `float`) to agree at the bound. Fractions below the bound lose precision too
+(`0.1000000000000000055511151231257827` and `0.1` share bytes); I-JSON makes that a SHOULD, not a MUST,
+and it is not refused.
+
+**Consequences.** Products sealed before this rule (≤ 0.1.0-alpha.5) that hold such a number are refused
+(fail closed; their seal never pinned the value). No tracked corpus product holds one, and no typed ingest
+source writes one: DICOM header values (`SV`/`UV` included) are already strings, GE HDF5 attributes are not
+read into JSON and a vendor `.ini` is carried as an opaque blob, so no golden hash moved. The reference
+reader refuses the same numbers, and `corpus/seal-cases.json` holds both readers to the same verdicts.

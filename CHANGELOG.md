@@ -175,6 +175,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `tessera-core`, `tessera-io`, `tessera-ingest`, `tessera-py`, `tessera-cli`: a sealed JSON number is an integer within
+  ±(2^53−1) or it is refused (I-JSON, RFC 7493 §2.2; SPEC §1; ADR-0020 amendment; #886). JCS writes every number as a
+  double, so a manifest sealed with `9007199254740993` verified when served with `9007199254740992`: the seal did not
+  pin the value. The new `Error::InexactInteger` names the value's path (`metadata.daq_start_ns = 1730000000000000000
+  exceeds ±(2^53−1) …; write it as a string`). `canonical::parse_strict` refuses it in every manifest, collection,
+  embedded schema and signature envelope a reader parses (the envelope is now parsed through it too, so a duplicate
+  key there is refused as well), and `canonical::to_bytes` refuses it before anything is hashed, so no writer seals
+  one, a `u64` from Rust code included (new `canonical::check_i_json`, `canonical::MAX_EXACT_INTEGER`); a streamed
+  `WriteSession` refuses it when it is declared (`append_block*`, `with_field`, `with_extra`, `with_generation`), not
+  at the seal. The envelope is parsed by the new `Signature::from_json`, which `tessera-wasm` uses too. Python
+  `Builder.set_field` and `with_generation`, a TOML spec's `[product.metadata]` (`spec::validate`, before anything is
+  written) and CLI `commit --set` refuse it with that advice and never convert it; `with_generation` now names the
+  rule for any int beyond the bound instead of `does not fit in 64 bits`. Products sealed earlier that hold such a
+  number are refused (fail closed); `tessera provenance` reports such a parent as CORRUPT, never as missing, naming it
+  by the `id` it claims (new `tessera_io::read_claimed_id`). No corpus seal moved, and no ingest backend writes such a
+  number (DICOM values are strings). The reference reader refuses the same numbers, and `corpus/seal-cases.json` adds the cases.
 - `tessera-core`: `Manifest::from_json_verified` checks `manifest_hash` over the manifest JSON object as parsed (SPEC
   §4), not over a re-serialisation of the `Manifest` struct. Before, a key spliced into a sealed `manifest.json`
   (`"forged": true`) was dropped by the struct and `tessera verify` reported OK, while a product a newer writer
