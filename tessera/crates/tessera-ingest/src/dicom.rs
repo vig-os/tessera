@@ -1598,6 +1598,41 @@ mod tests {
         assert_eq!(sealed_a.manifest_hash, sealed_b.manifest_hash);
     }
 
+    /// A 64-bit DICOM value (`UV`, `SV`, here an epoch-ns-sized one) reaches the sealed header as a
+    /// decimal **string**, by its type: every primitive VR is written as its text form, so no value
+    /// can produce a JSON number a seal can't pin (SPEC §1, #886), and nothing is lost.
+    #[test]
+    fn a_64_bit_dicom_value_is_sealed_as_a_string_by_type() {
+        let big: u64 = 1_730_000_000_000_000_000;
+        let file_obj = dcm_with_curated_and(
+            8,
+            8,
+            1,
+            vec![
+                DataElement::new(Tag(0x0019, 0x1001), VR::UV, PrimitiveValue::from(big)),
+                DataElement::new(Tag(0x0019, 0x1002), VR::SV, PrimitiveValue::from(-7_i64)),
+            ],
+        );
+        let img = read_object(&file_obj).unwrap();
+        let (sealed, _) = to_recon_product(
+            &img,
+            "u64-ct",
+            "2024-01-01T00:00:00Z",
+            "1.2.3.u64",
+            None,
+            &[],
+        )
+        .unwrap();
+        let hdr = &sealed.extra["dicom_header"];
+        assert_eq!(
+            hdr["0019,1001"]["value"],
+            serde_json::json!([big.to_string()])
+        );
+        // Small values too: the rule is the VR's, never the value's magnitude.
+        assert_eq!(hdr["0019,1002"]["value"], serde_json::json!(["-7"]));
+        assert_eq!(hdr["0019,1001"]["vr"], "UV");
+    }
+
     /// **The load-bearing PHI test.** A DICOM full-header dump destined for `extra/` must not
     /// leak PHI when the ingest went through the de-identifying path — the `deidentify` call has
     /// to run BEFORE the header is serialized. When the ingest is NOT de-identifying, the header

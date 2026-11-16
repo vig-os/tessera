@@ -319,9 +319,18 @@ pub fn parse_str(toml_text: &str) -> Result<IngestSpec> {
 }
 
 /// Validate the spec: unique product names; every `derived_from` reference resolves; the product
-/// DAG is acyclic (Kahn's topological sort). Returns the topo order (parents-first) on success —
-/// callers that don't need the order can ignore the `Vec`.
+/// DAG is acyclic (Kahn's topological sort); and the spec is valid JCS input. Returns the topo order
+/// (parents-first) on success — callers that don't need the order can ignore the `Vec`.
+///
+/// # Errors
+/// [`Error::InexactInteger`] for an integer beyond ±(2^53−1) anywhere in the spec, such as
+/// `[product.metadata] daq_start_ns = 1730000000000000000`: the spec is hashed ([`spec_hash`]) and
+/// its metadata and recipe are sealed into each member, and a sealed JSON number is a double
+/// (SPEC §1, #886). The error names the value (`product[0].metadata.daq_start_ns`); write it as a
+/// TOML string. [`Error::Invalid`] for the structural faults above.
 pub fn validate(spec: &IngestSpec) -> Result<Vec<usize>> {
+    // 0. Refused at the door, before the engine touches the filesystem, never converted.
+    canonical_bytes(spec)?;
     let n = spec.products.len();
     // 1. unique names — duplicates would silently shadow each other in any name→index map.
     let mut by_name: BTreeMap<&str, usize> = BTreeMap::new();
@@ -641,6 +650,34 @@ format = "hdf-compound"
 input = "fixtures/coin_2p.h5"
 dataset = "events_2p"
 "#
+    }
+
+    /// A TOML integer beyond ±(2^53−1) in `[product.metadata]` (or the recipe) is refused by
+    /// `validate`, naming the value and the fix, before anything is written (SPEC §1, #886).
+    #[test]
+    fn an_integer_a_seal_cannot_pin_is_refused_with_the_fix() {
+        let text = include_str!("../../../docs/examples/migrate-petct-study.toml");
+        let with = |line: &str| {
+            let t = text.replacen(
+                "\n[product.metadata]\n",
+                &format!("\n[product.metadata]\n{line}\n"),
+                1,
+            );
+            validate(&parse_str(&t).unwrap())
+        };
+        let err = with("daq_start_ns = 1730000000000000000").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "product[0].metadata.daq_start_ns = 1730000000000000000 exceeds ±(2^53−1) (I-JSON, \
+             RFC 7493 §2.2): a sealed JSON number is an IEEE-754 double (RFC 8785 §3.2.2.3), \
+             which can't hold this integer exactly; write it as a string"
+        );
+        assert!(matches!(
+            with("x = 1e300"),
+            Err(Error::InexactInteger { .. })
+        ));
+        with("daq_start_ns = \"1730000000000000000\"").unwrap();
+        with("max = 9007199254740991").unwrap();
     }
 
     #[test]
