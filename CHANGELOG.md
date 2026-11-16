@@ -229,3 +229,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collection, with the same `content_hash`. Such a key's value must now be its default's own spelling (`null`, a
   boolean, a number, a string, `[]` or `{}`), and anything else is refused like the forms above. The explicit default
   itself (`"study": null`, `"kind": "product"`, `"sequence_key": []`) is still accepted, as SPEC §4 states (#873).
+- Reference reader (`corpus/reference_reader`): it checks every declared manifest field's JSON type and shape at every
+  depth from one declarative table that mirrors the Rust types (strings, booleans, block-kind names, the block-name
+  grammar, string-valued `id_inputs`, objects for the opaque maps, required fields), refuses a block without a
+  digest, parses a `tessera_version` major as the Rust reader does, and refuses nesting deeper than 127 levels, an
+  integer out of a double's range, and a manifest that is not UTF-8 (UTF-16, a byte-order mark).
+  Before, `metadata: []`, `study: 5`, `blocks[0].kind: "hologram"` or `producer.dirty: 1` verified there while the
+  Rust reader refused them, `id_inputs: []` was `tampered`, and `blocks[0].name: {}` or a missing `digest` raised
+  instead of giving a verdict. Every input now gets a verdict, an archive `zipfile` can't read included.
+  `corpus/seal-cases.json` gains 19 cases for both readers, and `run.py` five crafted archives (#873).

@@ -54,9 +54,11 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
     `manifest_hash`; a reader treats a missing one as an integrity failure, since deleting the seal would
     otherwise launder any edit.
   - `manifest.json` MUST be I-JSON (RFC 7493; JCS requires it, RFC 8785 §3.1): no key repeated within any
-    object, at any depth (keys compare after unescaping), no lone surrogate, no `NaN`/`Infinity` and no number outside a double's range. A reader
-    MUST refuse anything else rather than keep the first or last of two values, because parsers differ on
-    which one wins.
+    object, at any depth (keys compare after unescaping), no lone surrogate, no `NaN`/`Infinity` and no number
+    outside a double's range, and nested at most 127 objects and arrays deep (the manifest object itself is
+    level 1; RFC 8259 §9 lets a parser limit nesting, and this limit is fixed so every reader refuses the same
+    text). The same holds for a collection. A reader MUST refuse anything else rather than keep the first or
+    last of two values, because parsers differ on which one wins.
   - **Forward reading (RFC §13).** A key no field of this section declares is a field from a newer format
     revision: a reader verifies it as part of the seal, SHOULD warn that it is not interpreted, and reads
     the rest. A writer MUST NOT build a new seal from such a manifest (a new version, a re-seal), since it
@@ -87,7 +89,12 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
 
 ## 5. Manifest schema
 A JSON object; so is every record below (BlockRef, Source, Producer, Generation, IngestTransform): objects
-only, the array form is refused, and `kind` is a string, never an object (§4). Fields (✱ = omitted from the
+only, the array form is refused, and `kind` is a string, never an object (§4). A reader MUST refuse a manifest
+whose declared field, at any depth, holds a value of another JSON type than the table gives (`metadata: []`,
+`study: 5`, a `kind` outside its names, a non-string `id_inputs` value; `schema` and a block's `spec` are opaque
+here and hold any JSON, see §4 for the schema) or lacks a field the table doesn't mark
+✱ or give a default (`blocks`, `sources`, `metadata`, `extra`, `ingest_transform` default to empty).
+Fields (✱ = omitted from the
 JSON when the writer's value is absent/null). Note `[]` and `{}` are **present** values, not omissions: e.g.
 `sources: []` stays in the manifest and hashes differently from its absence — only the null/absent sentinel is
 dropped.
@@ -124,7 +131,8 @@ member is checked. A writer MUST also keep the **leaf rule**: no name in one pro
 prefix of another (`volume` and `volume/1` can't both exist), so the zip members, an exploded directory
 and an object-store prefix mirror the names one-to-one. A reader accepts a product sealed before the leaf
 rule in-zip, but MUST NOT explode it to a directory.
-`digest` MUST be present in a sealed product. `spec` is shape-specific and opaque to the spine (an array
+`digest` MUST be present in a sealed product: a reader refuses a manifest with a block that lacks one.
+`spec` is shape-specific and opaque to the spine (an array
 spec carries `shape`/`dtype`/`chunks`/`axes`/`codec`/…; a table spec carries `columns`/`rows`/…; a
 `chunk_index` sidecar spec carries `class`/`recipe`/`indexes`/`entries`/`root` — see §5d; a `blob`
 spec carries `filename`/`media_type`/`size` — see §5e).
@@ -519,5 +527,6 @@ regenerated (and the spec version bumped) only on an intended format change:
 newer-format key added and resealed (verifies), the same key spliced in under the old seal (fails), the
 encodings a typed model loses (`"study": null`, an omitted `sources`, a nested newer key; all verify) and a
 splice whose seal was deleted or nulled (fails), text that is not I-JSON (refused), and a block, the producer
-or the whole manifest spelled as a JSON array, or a block `kind` as an object (refused, §4). A conformant
+or the whole manifest spelled as a JSON array, or a block `kind` as an object (refused, §4), a declared field of
+another JSON type or shape, a block without a digest, and nesting past 127 levels (refused, §4/§5). A conformant
 reader MUST reach every case's `verdict` from its `manifest` text.

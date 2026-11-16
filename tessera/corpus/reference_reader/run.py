@@ -36,29 +36,85 @@ def check_seal_cases() -> int:
     return fails
 
 
-def _listed_twice(src: str, dst: str, second_digest: str | None) -> None:
-    """Copy fixture `src` to `dst` with its first block listed a second time (carrying
-    `second_digest`, or its own digest when None) and the manifest re-sealed over that list:
-    the #734 verify bypass, built the way a hostile producer would."""
+def _resealed(src: str, dst: str, edit, encode) -> None:
+    """Copy fixture `src` to `dst` with `edit` applied to its manifest and the manifest re-sealed
+    (`content_hash` too, when every block still has a digest): built the way a hostile producer
+    would, so only the reader's own refusal can stop it."""
     with zipfile.ZipFile(src) as zf:
         members = [(i.filename, zf.read(i.filename)) for i in zf.infolist()]
     manifest = json.loads(dict(members)["manifest.json"])
-    second = dict(manifest["blocks"][0])
-    if second_digest is not None:
-        second["digest"] = second_digest
-    manifest["blocks"].append(second)
-    manifest["content_hash"] = merkle_root([b["digest"] for b in manifest["blocks"]])
+    edit(manifest)
+    digests = [b.get("digest") for b in manifest["blocks"]]
+    if all(isinstance(d, str) for d in digests):
+        manifest["content_hash"] = merkle_root(digests)
     manifest["manifest_hash"] = manifest_seal(manifest)
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_STORED) as out:
         for name, data in members:
             out.writestr(
-                name, json.dumps(manifest) if name == "manifest.json" else data
+                name, encode(json.dumps(manifest)) if name == "manifest.json" else data
             )
 
 
+def _listed_twice(second_digest: str | None):
+    """The #734 verify bypass: the first block listed a second time, carrying `second_digest` (or
+    its own digest when None)."""
+
+    def edit(manifest: dict) -> None:
+        second = dict(manifest["blocks"][0])
+        if second_digest is not None:
+            second["digest"] = second_digest
+        manifest["blocks"].append(second)
+
+    return edit
+
+
+def _first_block(key: str, value: object):
+    """The first block's `key` set to `value`, or deleted when `value` is `_DELETE`."""
+
+    def edit(manifest: dict) -> None:
+        if value is _DELETE:
+            del manifest["blocks"][0][key]
+        else:
+            manifest["blocks"][0][key] = value
+
+    return edit
+
+
+_DELETE = object()
+
+
+def _unchanged(manifest: dict) -> None:
+    """No edit: the case changes the archive's bytes, not the manifest."""
+
+
+def utf8(text: str) -> bytes:
+    """The manifest's encoding in a well-formed archive (SPEC §4)."""
+    return text.encode("utf-8")
+
+
+def same(path: str) -> None:
+    """No change to the written archive."""
+
+
+def _first_member_marked_encrypted(path: str) -> None:
+    """Set the 'encrypted' flag (bit 0) on the archive's first member, in its local header and
+    its central-directory entry: a zip reader can no longer read it."""
+    with open(path, "r+b") as f:
+        data = bytearray(f.read())
+        for signature, flag_at in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+            i = data.index(signature) + flag_at
+            data[i] |= 1
+        f.seek(0)
+        f.write(data)
+
+
 def check_refusals(goldens: list[dict]) -> int:
-    """The reader refuses a manifest listing a block twice, for that reason (SPEC §5), whether the
-    second entry's digest is foreign or the block's own. Returns the number of misses."""
+    """`verify_tsra` refuses each crafted archive for its reason, and returns a result rather than
+    raising: a block listed twice (SPEC §5), whether the second entry's digest is foreign or the
+    block's own; a block name that is not a string; a block without a digest; a manifest.json in
+    UTF-16 or with a byte-order mark (SPEC §4: UTF-8 I-JSON); an archive zipfile can't read (a
+    member marked encrypted). Returns the number
+    of misses."""
     src = None
     for g in goldens:
         path = os.path.join(FILES_DIR, f"{g['name']}.tsra")
@@ -67,22 +123,67 @@ def check_refusals(goldens: list[dict]) -> int:
                 src = path
                 break
     assert src is not None, "no corpus fixture with a block to list twice"
+    # (case, manifest edit, note the refusal must carry, manifest encoding, archive post-edit)
     refusals = [
-        ("foreign digest", digest(b"NOT THE BYTES")),
-        ("own digest", None),
+        (
+            "block listed twice (foreign digest)",
+            _listed_twice(digest(b"NOT THE BYTES")),
+            "listed more than once",
+            utf8,
+            same,
+        ),
+        (
+            "block listed twice (own digest)",
+            _listed_twice(None),
+            "listed more than once",
+            utf8,
+            same,
+        ),
+        (
+            "block name an object",
+            _first_block("name", {}),
+            "blocks[0].name is not a string",
+            utf8,
+            same,
+        ),
+        (
+            "block without a digest",
+            _first_block("digest", _DELETE),
+            "without a digest",
+            utf8,
+            same,
+        ),
+        (
+            "manifest in UTF-16",
+            _unchanged,
+            "not JSON",
+            lambda text: text.encode("utf-16"),
+            same,
+        ),
+        (
+            "manifest with a byte-order mark",
+            _unchanged,
+            "not JSON",
+            lambda text: b"\xef\xbb\xbf" + utf8(text),
+            same,
+        ),
+        (
+            "first member marked encrypted",
+            _unchanged,
+            "encrypted",
+            utf8,
+            _first_member_marked_encrypted,
+        ),
     ]
     misses = 0
     with tempfile.TemporaryDirectory() as tmp:
-        for case, second in refusals:
-            dst = os.path.join(tmp, "dup.tsra")
-            _listed_twice(src, dst, second)
+        for case, edit, reason, encode, post in refusals:
+            dst = os.path.join(tmp, "crafted.tsra")
+            _resealed(src, dst, edit, encode)
+            post(dst)
             res = verify_tsra(dst)
-            refused = not res.ok and any(
-                "listed more than once" in n for n in res.notes
-            )
-            print(
-                f"refusal: block listed twice ({case}): {'refused' if refused else 'MISSED'}"
-            )
+            refused = not res.ok and any(reason in n for n in res.notes)
+            print(f"refusal: {case}: {'refused' if refused else 'MISSED'}")
             misses += 0 if refused else 1
     print(f"{len(refusals) - misses}/{len(refusals)} refusal cases refused")
     return misses
