@@ -1441,6 +1441,9 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                     b.kind,
                     b.digest.as_deref().unwrap_or("-")
                 );
+                if let Some(line) = nav::table_codec_line(b) {
+                    println!("{line}");
+                }
             }
             if !m.sources.is_empty() {
                 println!("sources       {}", m.sources.len());

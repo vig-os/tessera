@@ -973,6 +973,7 @@ mod tests {
                 row_index: None,
                 partition: None,
                 edition: None,
+                codec_profile: None,
             },
         );
         let mut b = ProductBuilder::new("roi", "roi-b", "sphere ROI", "2024-01-01T00:00:00Z");
@@ -1046,6 +1047,7 @@ mod tests {
                 row_index: None,
                 partition: None,
                 edition: None,
+                codec_profile: None,
             },
         );
         // volume alone → rejected (frame_timing table required)
@@ -1100,6 +1102,7 @@ mod tests {
                 row_index: None,
                 partition: None,
                 edition: None,
+                codec_profile: None,
             },
         );
         let mut b = ProductBuilder::new("dynamic_pet", "DP", "d", "2024-01-01T00:00:00Z");
@@ -1436,6 +1439,7 @@ mod tests {
                 row_index: None,
                 partition: None,
                 edition: None,
+                codec_profile: None,
             },
         );
         let mut b = ProductBuilder::new("table", "t-01", "a parquet someone handed us", TS);

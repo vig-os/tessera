@@ -42,6 +42,7 @@ fn logical_tables_fixture() {
             row_index: None,
             partition,
             edition: None,
+            codec_profile: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U32(t)),

@@ -743,6 +743,28 @@ fn compact_value(v: &Value, full: bool) -> String {
     }
 }
 
+/// `inspect`'s line under a table block: the Vortex edition and the codec profile its sealed spec
+/// records (ADR-0024's 2026-11-15 and 2026-11-16 amendments), the pair that says from the product
+/// alone whether two blocks of the same rows must have the same bytes. `-` marks a key the spec
+/// doesn't carry: a block sealed before the field existed (no edition before #635, no profile
+/// before #869), which reads normally. A value is shown as recorded, whether or not this build
+/// knows it, since readers never refuse on either. `None` for a block that is not a table.
+pub(crate) fn table_codec_line(b: &BlockRef) -> Option<String> {
+    if b.kind != BlockKind::Table {
+        return None;
+    }
+    let key = |k: &str| match b.spec.get(k) {
+        None => "-".to_owned(),
+        Some(Value::String(v)) => v.clone(),
+        Some(other) => other.to_string(),
+    };
+    Some(format!(
+        "      edition {}  codec_profile {}",
+        key("edition"),
+        key("codec_profile")
+    ))
+}
+
 /// The `inspect` render of the sealed ADR-0058 §1 **producer identity**.
 ///
 /// [`ProducerRef::display`](tessera_core::ProducerRef::display) folds the build fields into a
@@ -2780,6 +2802,28 @@ mod tests {
     use tessera_core::ProductBuilder;
     use tessera_io::{pack, table::TableData, ColumnData};
 
+    /// `inspect`'s codec line: a table block shows what its spec records, `-` for an absent key and
+    /// a non-string value verbatim (never hidden, never refused); a non-table block gets no line.
+    #[test]
+    fn table_codec_line_shows_what_the_spec_records() {
+        let block = |kind, spec| BlockRef {
+            name: tessera_core::block::BlockName::new("b").unwrap(),
+            kind,
+            digest: None,
+            spec,
+        };
+        let table = block(
+            BlockKind::Table,
+            serde_json::json!({"edition": "core2026.08.3", "codec_profile": 7}),
+        );
+        assert_eq!(
+            table_codec_line(&table).as_deref(),
+            Some("      edition core2026.08.3  codec_profile 7")
+        );
+        let array = block(BlockKind::Array, serde_json::json!({"edition": "x"}));
+        assert_eq!(table_codec_line(&array), None);
+    }
+
     fn sample(path: &Path) {
         let spec = TableSpec {
             columns: vec![
@@ -2800,6 +2844,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let data: TableData = vec![
             ("ms".into(), ColumnData::U32(vec![10, 20, 30, 40])),
@@ -2926,6 +2971,7 @@ mod tests {
                     row_index: None,
                     partition: Some(Partition { index, last }),
                     edition: None,
+                    codec_profile: None,
                 };
                 let data = vec![("t".into(), ColumnData::U32(vec![1, 2]))];
                 table_block(&format!("pairs/{index:04}"), &spec, &data).unwrap()
@@ -2989,6 +3035,7 @@ mod tests {
                 row_index: None,
                 partition: None,
                 edition: None,
+                codec_profile: None,
             };
             let data = vec![("t".into(), ColumnData::U32(vec![i]))];
             let (r, p) = table_block(&format!("events_{i:04}"), &spec, &data).unwrap();

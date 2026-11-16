@@ -608,6 +608,7 @@ mod tests {
             row_index: None,
             partition,
             edition: None,
+            codec_profile: None,
         };
         serde_json::to_value(s).unwrap()
     }

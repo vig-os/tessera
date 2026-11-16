@@ -65,6 +65,7 @@ fn bench_streaming_write(c: &mut Criterion) {
         row_index: Some("ms".into()),
         partition: None,
         edition: None,
+        codec_profile: None,
     };
 
     let mut g = c.benchmark_group("streaming_write");

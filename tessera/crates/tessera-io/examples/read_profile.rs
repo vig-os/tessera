@@ -230,6 +230,7 @@ fn main() {
         row_index: None,
         partition: None,
         edition: None,
+        codec_profile: None,
     };
     let blob = encode(&spec, &data).expect("encode");
     let groups = rows.div_ceil(ROWS_PER_GROUP);

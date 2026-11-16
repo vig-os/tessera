@@ -453,6 +453,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let data = vec![("x".into(), ColumnData::U32(vec![1, 2, 3]))];
         let (block_ref, payload) = table_block("events", &spec, &data).unwrap();

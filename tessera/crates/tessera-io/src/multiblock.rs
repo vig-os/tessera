@@ -502,6 +502,7 @@ mod tests {
                     last: i + 1 == n,
                 }),
                 edition: None,
+                codec_profile: None,
             };
             let name = leaf_name("pairs", i as u64).unwrap().into_string();
             sw.push(table_job_indexed(name, spec, data, Some("t".into())))

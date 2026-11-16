@@ -127,7 +127,8 @@ pub type StagedEncodeJob = Box<
 >;
 
 /// The table block's manifest reference without a digest (a staged commit fills it in). Its spec
-/// records the writer's edition ([`crate::table::TABLE_EDITION`]), as every sealed table block's does.
+/// records the writer's edition ([`crate::table::TABLE_EDITION`]) and codec profile
+/// ([`crate::table::TABLE_CODEC_PROFILE`]), as every sealed table block's does.
 fn staged_table_ref(
     name: String,
     spec: &tessera_core::block::table::TableSpec,
@@ -1072,8 +1073,8 @@ impl OpenTable {
                 "{call} '{name}': spec.partition must be None, each leaf's marker is set by the writer"
             )));
         }
-        // Each leaf's spec records the writer's edition when it is handed over; a spec naming another
-        // edition is refused here, before any row is staged.
+        // Each leaf's spec records the writer's edition and codec profile when it is handed over; a
+        // spec naming another edition or profile is refused here, before any row is staged.
         crate::table::sealed_spec(&spec)?;
         for c in &spec.columns {
             ColumnData::validate_dtype(&c.dtype)?;
@@ -1528,7 +1529,8 @@ impl StreamWriter {
     /// [`Error::StreamedTable`] when the input runs past `spec.rows` (when it does), ends short
     /// of it (at its end) or yields a group of more than `ROWS_PER_GROUP` rows; [`Error::Codec`]
     /// before anything is staged when `spec.edition` names an edition other than
-    /// [`crate::table::TABLE_EDITION`]; the name, column and dtype errors of the sinks; and the
+    /// [`crate::table::TABLE_EDITION`] or `spec.codec_profile` a profile other than
+    /// [`crate::table::TABLE_CODEC_PROFILE`]; the name, column and dtype errors of the sinks; and the
     /// pipeline's errors (a dead pipeline closes the window). A
     /// failed call never hands over the last leaf, so a partitioned table stays without its
     /// terminal leaf and [`Self::finish`] refuses to seal it ([`Error::LogicalTable`]); a single
@@ -1614,7 +1616,7 @@ impl StreamWriter {
     /// # Errors
     ///
     /// [`Error::Invalid`] when `spec.rows` isn't `0` or `spec.partition` isn't `None`, and the
-    /// edition, name and dtype errors of [`Self::push_table`], all before anything is staged. As the row
+    /// edition, codec-profile, name and dtype errors of [`Self::push_table`], all before anything is staged. As the row
     /// count is unknown, `name` must be valid both bare and as the first leaf `name/0000`, so a
     /// name within five bytes of the length limit is refused even for a table that would end as
     /// one block. A later leaf's longer name (`name/10000` on) is checked when that leaf is handed
@@ -2335,6 +2337,7 @@ mod tests {
                 row_index: Some("t".into()),
                 partition: None,
                 edition: None,
+                codec_profile: None,
             }
         }
 

@@ -101,6 +101,7 @@ fn spec() -> TableSpec {
         row_index: None,
         partition: None,
         edition: None,
+        codec_profile: None,
     }
 }
 

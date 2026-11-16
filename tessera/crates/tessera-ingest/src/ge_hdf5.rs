@@ -1009,6 +1009,7 @@ pub(crate) fn to_listmode_product_partitioned(
             row_index: Some(row_index.to_string()),
             partition: tessera_io::block_partition(blk, total_blocks),
             edition: None,
+            codec_profile: None,
         };
         let nm = tessera_io::block_name(block_prefix, blk, total_blocks)?;
         let (block_ref, payload) = table::table_block(&nm, &spec, &block_data)?;
@@ -1608,6 +1609,7 @@ mod tests {
                 row_index: Some("ms".into()),
                 partition: None,
                 edition: None,
+                codec_profile: None,
             },
             &bytes,
         )
@@ -1666,6 +1668,7 @@ mod tests {
             row_index: Some("ms".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         assert_eq!(table::decode(&spec, &bytes).unwrap(), cols);
     }
