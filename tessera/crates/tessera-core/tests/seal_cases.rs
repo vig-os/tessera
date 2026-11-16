@@ -26,6 +26,8 @@ fn rust_verdict(manifest: &str) -> (&'static str, Vec<String>) {
         // Not I-JSON: a duplicate key, NaN, a lone surrogate (all refused by the parser).
         Err(Error::Serde(_)) => ("refused", Vec::new()),
         Err(Error::UnsupportedVersion(_)) => ("refused", Vec::new()),
+        // A block name listed twice (SPEC §5, #734), refused before any hash.
+        Err(Error::DuplicateBlockName { .. }) => ("refused", Vec::new()),
         Err(e) => panic!("unexpected error class: {e}"),
     }
 }
@@ -33,7 +35,7 @@ fn rust_verdict(manifest: &str) -> (&'static str, Vec<String>) {
 #[test]
 fn rust_reader_reaches_every_seal_case_verdict() {
     let cases = cases();
-    assert_eq!(cases.len(), 40, "seal-cases.json lost or gained cases");
+    assert_eq!(cases.len(), 41, "seal-cases.json lost or gained cases");
     let mut disagreements = Vec::new();
     for c in &cases {
         let name = c["name"].as_str().unwrap();

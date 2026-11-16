@@ -159,6 +159,20 @@ with tempfile.TemporaryDirectory() as td:
     assert rr.table("events")["idx"].to_list() == idx.tolist()
     assert rr.table_arrow("events").column("en").to_pylist() == en.tolist()
 
+# #734: block names are unique within a product, so packing two blocks of one name is refused
+# with the typed reason, and nothing is written.
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "dup.tsra"
+    b = tessera.Builder("recon", "dup", "duplicate block name", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    try:
+        b.pack(str(out))
+        raise AssertionError("packed a product listing block 'volume' twice")
+    except tessera.TesseraError as e:
+        assert "listed more than once" in str(e), f"refused for the wrong reason: {e}"
+    assert not out.exists(), "a refused pack must write nothing"
+
 # str + b1 columns through the ergonomic reads (#421): str crashed _ndarray
 # ("<str" is not a dtype) and b1 silently decoded as int8 instead of bool_.
 els = ["He", "Li", "", "Beryllium"]  # empty string is the edge worth pinning

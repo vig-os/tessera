@@ -21,9 +21,12 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python run.py     # prints a PASS/FAIL table over corpus/files/*.tsra
 ```
 
-Exit code 0 ⇔ all fixtures reproduce their goldens and every manifest in `corpus/seal-cases.json` reaches its
-`verdict` (SPEC §4's seal over the parsed object, duplicate keys refused). The Rust reader checks the same file
-(`tessera-core/tests/seal_cases.rs`), so the two readers agree by construction.
+Exit code 0 ⇔ all fixtures reproduce their goldens, every manifest in `corpus/seal-cases.json` reaches its
+`verdict` (SPEC §4's seal over the parsed object, duplicate keys refused, a block name listed twice refused), and
+the reader refuses each crafted refusal archive for its stated reason. The Rust reader checks the same seal-case
+file (`tessera-core/tests/seal_cases.rs`), so the two readers agree by construction. The refusal archives today
+list a block name twice (SPEC §5, #734), with a foreign digest and with the block's own, built from a corpus
+fixture and re-sealed; the Rust reader refuses the same two (`tessera-io/tests/unique_block_names.rs`).
 
 ## Why it matters
 Until a second codebase reads Tessera correctly from the spec alone, "the spec" is really "whatever

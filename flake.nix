@@ -1385,6 +1385,11 @@
                 echo "reference-reader: expected '$cases/$cases seal cases agreed'" >&2
                 exit 1
               fi
+              # The crafted refusal archives (#734): a literal count, so losing a case fails too.
+              if ! grep -qx "2/2 refusal cases refused" out.txt; then
+                echo "reference-reader: expected '2/2 refusal cases refused'" >&2
+                exit 1
+              fi
               touch $out
             '';
 

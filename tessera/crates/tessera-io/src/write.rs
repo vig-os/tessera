@@ -886,7 +886,8 @@ impl WriteSession {
     }
 
     /// Refuse an append the session can't take: any, once poisoned; one whose name is already
-    /// committed (its fragment would be overwritten, and deleted again if the append failed); one
+    /// committed ([`Error::DuplicateBlockName`], the seal's uniqueness check: its fragment would be
+    /// overwritten, and deleted again if the append failed); one
     /// whose name and a committed name break the leaf rule (ADR-0063: one the parent of the
     /// other, [`Error::BlockNameConflict`]), since the seal would refuse the pair and the fragments
     /// can't be both a file and a directory; and one whose name is, or is the parent or child of, a
@@ -894,11 +895,7 @@ impl WriteSession {
     fn admit(&self, block_ref: &BlockRef) -> Result<()> {
         self.usable()?;
         let name = &block_ref.name;
-        if self.blocks.iter().any(|b| b.name == *name) {
-            return Err(Error::Invalid(format!(
-                "block '{name}' is already committed to this write session"
-            )));
-        }
+        tessera_core::block::check_unique_names(self.blocks.iter().map(|b| &b.name).chain([name]))?;
         leaf_rule_against(self.blocks.iter().map(|b| &b.name), name)?;
         let collision = self
             .quarantined
@@ -2327,7 +2324,8 @@ mod tests {
         assert_eq!(session_files(&stage).2, 0);
     }
 
-    /// A block name is committed once: a second append of it is refused before it touches
+    /// A block name is committed once (#734, [`Error::DuplicateBlockName`]): a second append of it
+    /// is refused before it touches
     /// `blocks/`, so it can neither overwrite the committed fragment nor, failing, delete it.
     #[test]
     fn a_committed_block_name_is_refused_and_its_fragment_kept() {
@@ -2338,11 +2336,12 @@ mod tests {
         let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
         ws.append_block(ra, &pa).unwrap();
         let before = session_files(&stage);
+        let dup = |e: &Error| matches!(e, Error::DuplicateBlockName { name } if name == "a");
         let err = ws.append_block(other.clone(), &po).unwrap_err();
-        assert!(err.to_string().contains("already committed"), "{err}");
+        assert!(dup(&err), "{err}");
         let s = staged(&ws, &po);
         let err = ws.append_staged(other, s).unwrap_err();
-        assert!(err.to_string().contains("already committed"), "{err}");
+        assert!(dup(&err), "{err}");
         assert!(
             session_files(&stage) == before,
             "a refused append changed the session"

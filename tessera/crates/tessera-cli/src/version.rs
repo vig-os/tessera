@@ -74,10 +74,6 @@ pub fn commit(
     let parent = repo.get_manifest(&tip)?;
     let mut b = ProductBuilder::from_manifest(&parent)?;
 
-    // Track live block names so a duplicate `--add-block` is rejected (start from the parent's blocks).
-    let mut names: std::collections::BTreeSet<tessera_core::block::BlockName> =
-        parent.blocks.iter().map(|bl| bl.name.clone()).collect();
-
     // Removes first — manifest edit only; the data object is left for other versions / gc.
     for name in removes {
         if !b.remove_block(name) {
@@ -85,28 +81,21 @@ pub fn commit(
                 "--remove-block: no block '{name}' in this version"
             )));
         }
-        names.remove(name.as_str());
         // A `{hash, stats}` chunk-index sidecar describes ONE data block and is bound to it only by
         // name. Leaving `<name>.cidx` behind when `<name>` goes means the next
         // `--add-block …:<name>` silently inherits it, and `tessera stats` would then serve the OLD
         // block's statistics for the NEW block and label them exact. The sidecar is `class: derived`
         // — regenerable from the data — so removing it with its block loses nothing (#347 review).
         let sidecar = tessera_io::chunk_index::cidx_name(name);
-        if b.remove_block(&sidecar) {
-            names.remove(sidecar.as_str());
-        }
+        b.remove_block(&sidecar);
     }
 
-    // Adds — copy an already-encoded block from another .tsra (file i/o, no re-encode).
+    // Adds — copy an already-encoded block from another .tsra (file i/o, no re-encode). A name the
+    // version already holds (or that two adds share) is refused by the seal below, with
+    // `Error::DuplicateBlockName`, before anything is stored: rename it, or --remove-block it first.
     let mut payloads = Vec::new();
     for spec in adds {
         let (new_ref, payload) = load_block(spec)?;
-        if !names.insert(new_ref.name.clone()) {
-            return Err(Error::Invalid(format!(
-                "--add-block: a block named '{}' already exists (rename, or --remove-block it first)",
-                new_ref.name
-            )));
-        }
         b.add_block_ref(new_ref);
         payloads.push(payload);
     }
@@ -793,5 +782,42 @@ mod tests {
             "events dropped"
         );
         assert!(m2.blocks.iter().any(|b| b.name == "roi"), "roi remains");
+    }
+
+    /// #734: `--add-block` of a name the version already holds is refused by the seal's uniqueness
+    /// check, with the typed error, and leaves the repository as it was: no object, same tip.
+    #[test]
+    fn commit_add_block_refuses_a_name_already_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let p1 = dir.path().join("p1.tsra");
+        let p2 = dir.path().join("p2.tsra");
+        write_tsra(&p1); // carries block "events"
+        write_block_tsra(&p2, "events", &[9, 8]); // a different block, also named "events"
+        init(&repo, &mut Vec::new()).unwrap();
+        let mut ibuf = Vec::new();
+        import(&repo, &p1, &mut ibuf).unwrap();
+        let lineage = String::from_utf8(ibuf)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("imported lineage "))
+            .unwrap()
+            .to_string();
+        let r = Repository::open(&repo).unwrap();
+        let tip = r.read_ref(&lineage).unwrap();
+        let before = count_objects(&repo);
+
+        let add = format!("{}:events", p2.to_str().unwrap());
+        let e = commit(&repo, &lineage, &[], &[add], &[], &mut Vec::new()).unwrap_err();
+        assert!(
+            matches!(&e, Error::DuplicateBlockName { name } if name == "events"),
+            "{e}"
+        );
+        assert_eq!(
+            count_objects(&repo),
+            before,
+            "a refused commit stores nothing"
+        );
+        assert_eq!(r.read_ref(&lineage).unwrap(), tip, "the tip is unchanged");
     }
 }

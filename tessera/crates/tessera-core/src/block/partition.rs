@@ -864,6 +864,13 @@ mod tests {
                 Err(Error::LogicalTable { name, reason }) if name == "pairs" => {
                     assert_eq!(reason, want, "seal")
                 }
+                // A duplicate index under canonical leaf names is a repeated block name, which the
+                // seal refuses first, before any node is resolved (ADR-0063 §2a, #734).
+                Err(Error::DuplicateBlockName { name })
+                    if want == E::DuplicateIndex { index: 0 } =>
+                {
+                    assert_eq!(name, "pairs/0000", "seal")
+                }
                 other => panic!("seal of {want:?} must be refused, got {other:?}"),
             }
         }

@@ -15,6 +15,8 @@ Spec notes used here (only):
   - All hashing inputs derived from JSON are RFC 8785 (JCS) canonical bytes.
   - id            = digest(JCS(id_inputs))
   - content_hash  = merkle_root([block.digest for block in manifest.blocks])
+  - Block names are unique within a product (SPEC §5, exact string equality):
+    a manifest listing one name twice is refused before any digest lookup.
   - manifest_hash = digest(JCS(manifest without "manifest_hash" key))
 """
 
@@ -81,6 +83,18 @@ def jcs_bytes(obj: Any) -> bytes:
     return jcs.canonicalize(obj)
 
 
+def duplicate_block_names(blocks: list[dict[str, Any]]) -> list[str]:
+    """Every block name the list holds more than once, in first-repeat order (SPEC §5)."""
+    seen: set[str] = set()
+    repeated: list[str] = []
+    for block in blocks:
+        name = block["name"]
+        if name in seen and name not in repeated:
+            repeated.append(name)
+        seen.add(name)
+    return repeated
+
+
 class NotAManifest(ValueError):
     """manifest.json is not I-JSON (SPEC §4): a repeated key in one object (refused, never last- or
     first-wins), a NaN/Infinity constant, or a lone surrogate (RFC 8259 / RFC 7493 §2.1)."""
@@ -132,7 +146,8 @@ def manifest_seal(manifest: dict[str, Any]) -> str:
 
 def manifest_verdict(raw: bytes | str) -> str:
     """A manifest's own three hashes, without block payloads: "ok", "tampered" or "refused"
-    (not I-JSON, or a major tessera_version this reader doesn't support)."""
+    (not I-JSON, a major tessera_version this reader doesn't support, or a block name listed
+    twice)."""
     try:
         m = parse_manifest(raw)
     except NotAManifest:
@@ -142,6 +157,9 @@ def manifest_verdict(raw: bytes | str) -> str:
     except ValueError:
         return "refused"
     if major > SUPPORTED_MAJOR:
+        return "refused"
+    # SPEC §5: a block name listed twice is refused before any digest is looked at.
+    if duplicate_block_names(m.get("blocks", [])):
         return "refused"
     ok = (
         digest(jcs_bytes(m.get("id_inputs", {}))) == m.get("id")
@@ -197,12 +215,19 @@ def verify_tsra(path: str) -> VerifyResult:
         # (e) recompute content_hash from block digests in manifest order;
         #     also verify each stored block's bytes against its digest.
         blocks = manifest.get("blocks", [])
+        duplicates = duplicate_block_names(blocks)
+        if duplicates:
+            # SPEC §5/§7: block names are unique within a product (exact string equality), and a
+            # repeat is refused before any digest is looked up: a name resolves to one listed
+            # digest, so a second entry's digest would cover no bytes. No payload is read.
+            notes.append(
+                f"block names listed more than once (SPEC §5 requires unique names): {duplicates}"
+            )
         block_digest_ok: list[tuple[str, bool]] = []
-        block_digests: list[str] = []
-        for block in blocks:
+        block_digests: list[str] = [block["digest"] for block in blocks]
+        for block in [] if duplicates else blocks:
             name = block["name"]
             recorded = block["digest"]
-            block_digests.append(recorded)
             payload = zf.read(BLOCK_PREFIX + name)
             actual = digest(payload)
             block_digest_ok.append((name, actual == recorded))
@@ -217,7 +242,8 @@ def verify_tsra(path: str) -> VerifyResult:
         computed_manifest_hash = manifest_seal(manifest)
 
         ok = (
-            computed_id == manifest.get("id")
+            not duplicates
+            and computed_id == manifest.get("id")
             and computed_content_hash == manifest.get("content_hash")
             and computed_manifest_hash == manifest.get("manifest_hash")
             and all(b[1] for b in block_digest_ok)

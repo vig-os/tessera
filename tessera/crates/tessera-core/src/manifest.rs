@@ -358,11 +358,14 @@ impl Manifest {
     /// would launder any edit). Check a manifest still being built with [`verify`](Self::verify).
     ///
     /// # Errors
-    /// Everything [`from_json`](Self::from_json) refuses, then [`crate::Error::Integrity`] naming the
-    /// first hash that is missing (`actual` is the recomputed value, `expected` reads `(absent)`) or
-    /// doesn't match, or [`crate::Error::MissingDigest`] for an undigested block.
+    /// Everything [`from_json`](Self::from_json) refuses, then [`crate::Error::DuplicateBlockName`]
+    /// for a block list naming a block twice (ADR-0063 §2a, SPEC §5; before any hash), then
+    /// [`crate::Error::Integrity`] naming the first hash that is missing (`actual` is the recomputed
+    /// value, `expected` reads `(absent)`) or doesn't match, or [`crate::Error::MissingDigest`] for an
+    /// undigested block.
     pub fn from_json_verified(s: &str) -> crate::Result<Self> {
         let (m, object) = Self::parse(s)?; // parse() checks the version
+        crate::block::check_unique_names(m.blocks.iter().map(|b| &b.name))?;
         check("id", &m.id, &m.recompute_id()?)?;
         let recorded = |h: &Option<String>| h.clone().unwrap_or_else(|| "(absent)".into());
         check(
@@ -388,6 +391,10 @@ impl Manifest {
     /// a view of a valid product with [`newer_fields`](Self::newer_fields) fails here with
     /// [`crate::Error::NewerFormatFields`], and one parsed from an encoding the struct normalises
     /// (`"study": null`) fails with `Integrity`.
+    ///
+    /// First, the block list must name each block once ([`crate::Error::DuplicateBlockName`],
+    /// ADR-0063 §2a, SPEC §5): a reader resolves a name to one listed digest, so a second entry's
+    /// digest would cover no bytes, however well the list is sealed.
     pub fn verify(&self) -> crate::Result<()> {
         self.verify_id_and_content()?;
         if let Some(mh) = &self.manifest_hash {
@@ -398,6 +405,7 @@ impl Manifest {
 
     fn verify_id_and_content(&self) -> crate::Result<()> {
         self.check_version()?;
+        crate::block::check_unique_names(self.blocks.iter().map(|b| &b.name))?;
         check("id", &self.id, &self.recompute_id()?)?;
         if let Some(ch) = &self.content_hash {
             check("content_hash", ch, &self.recompute_content_hash()?)?;
