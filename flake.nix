@@ -824,20 +824,47 @@
                 exit 1
               fi
 
-              # #468 is FIXED (carried by the vortex fork pin, #480). The test now asserts ONE byte
-              # count per shape with no `cfg!(debug_assertions)` branch, so running it in both profiles
-              # is what proves the two agree: a re-divergence fails in exactly one of these two lines.
-              echo "[#468] the build-config independence guard under both profiles" >&2
-              cargo test -q -p tessera-io --lib full_span_int_container_bytes_are_build_config_independent
-              cargo test -q --release -p tessera-io --lib full_span_int_container_bytes_are_build_config_independent
+              # #468 is FIXED (carried by the vortex fork pin, #480). The guard asserts the cause: no
+              # written patch-indices array persists a sortedness statistic. A release build never
+              # caches one, so the debug run is the one that bites; both run so the pair is explicit.
+              # (Since vortex 0.93 the defect keeps the byte COUNT and changes the bytes, which is why
+              # the guard no longer compares lengths, #635.)
+              #
+              # A name filter that matches nothing passes: `cargo test … <name>` after a rename runs
+              # 0 tests and exits 0, so the gate would be green and check nothing. Each guard is
+              # therefore run by its full path with `--exact`, and the run must report exactly one
+              # test-result line, `1 passed; 0 failed; 0 ignored`. A rename, a move to another module
+              # or an `#[ignore]` fails the gate instead of emptying it.
+              run_one_guard() {
+                local test_path="$1"
+                shift
+                local log="$TMPDIR/guard.log"
+                if ! cargo test -q "$@" -p tessera-io --lib -- --exact "$test_path" > "$log" 2>&1; then
+                  cat "$log" >&2
+                  exit 1
+                fi
+                cat "$log" >&2
+                if [ "$(grep -c '^test result: ' "$log")" -ne 1 ] \
+                  || ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"; then
+                  echo "" >&2
+                  echo "The guard $test_path did not run as exactly one passing test:" >&2
+                  echo "    cargo test -q $* -p tessera-io --lib -- --exact $test_path" >&2
+                  echo "A renamed, moved or ignored guard empties the gate; update this check with it." >&2
+                  exit 1
+                fi
+              }
 
-              # #472's guard (the arch-dependent half): the persisted float Sum must be the canonical
-              # NaN, not x86_64's default. Run in both profiles for symmetry with the above, though
-              # this one's axis is the architecture — the aarch64 leg of this matrix is what pairs
-              # with it, and aarch64 cannot fail it (it always produced the canonical value).
-              echo "[#472] the canonical-NaN Sum guard under both profiles" >&2
-              cargo test -q -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
-              cargo test -q --release -p tessera-io --lib float_sum_stat_is_canonical_nan_not_the_platform_default
+              echo "[#468] the build-config independence guard under both profiles" >&2
+              run_one_guard table::tests::patch_indices_persist_no_sortedness_statistic
+              run_one_guard table::tests::patch_indices_persist_no_sortedness_statistic --release
+
+              # #472's guard (the arch-dependent half): no NaN-valued float statistic may reach the
+              # bytes of a [+inf, -inf] column (either default NaN, sign set or clear), and no zone map
+              # may carry a sum. Run in both profiles for symmetry with the above, though this one's
+              # axis is the architecture; the aarch64 leg of this matrix is what pairs with it.
+              echo "[#472] the float-statistic NaN guard under both profiles" >&2
+              run_one_guard table::tests::float_stats_persist_no_nan_for_inf_and_neg_inf
+              run_one_guard table::tests::float_stats_persist_no_nan_for_inf_and_neg_inf --release
             '';
           }));
 
@@ -1292,8 +1319,8 @@
             # `sql::tests::*` runs the DataFusion SessionContext path end-to-end (register table,
             # execute query, collect batches). The positional `sql` filter matches every test
             # name in the `sql` module — DataFusion 54 pins arrow-58, so cargo unifies with the
-            # arrow-58 the workspace already has (via Vortex 0.75); a version mismatch would
-            # fail to link, not to test.
+            # arrow-58 the workspace's ingest decoders pin; a version mismatch on that boundary
+            # would fail to compile, not to test.
             cargoExtraArgs = "-p tessera-cli --features sql sql::";
             cargoNextestExtraArgs = nextestFailOnNoTests;
           })));

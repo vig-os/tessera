@@ -537,6 +537,7 @@ mod tests {
             rows: 2,
             row_index: None,
             partition,
+            edition: None,
         };
         serde_json::to_value(s).unwrap()
     }

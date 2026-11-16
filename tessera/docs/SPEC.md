@@ -215,6 +215,28 @@ optional `row_index`.
   build profile. Excluding it makes the payload a pure function of the logical data (floats store
   flat/Pco). Cross-*version* stability is still not guaranteed pre-1.0 — pin the Vortex version
   (recorded in the corpus provenance).
+- **Edition.** `TableSpec.edition` (optional string, e.g. `"core2026.08.3"`) names the Vortex
+  **edition** the payload was written under: the frozen set of encoding wire IDs the writer was allowed to
+  emit *(ADR-0024, 2026-11-15 amendment)*. A writer MUST set it to the edition it encoded under, on every
+  table block and partition leaf, and MUST NOT record an edition it did not write under. It is bound by
+  `manifest_hash` (it is in the manifest) and not by `content_hash` (it is in no payload). **Absent** means
+  the block predates the field (written by the vortex 0.75 writer, which had no edition gate); such a block
+  is valid, reads and verifies, and its manifest bytes are unchanged, because the key is omitted, never
+  written as `null`. A reader MUST NOT need it to decode: Vortex decodes by the wire IDs in the file. Same
+  input under a **different** edition may give different bytes; the **same** edition is necessary for the same
+  bytes but not sufficient, since the edition bounds which encodings the writer may use, not which it picks
+  (that is the writer's codec set, ADR-0024 §Codec set, and the pinned Vortex compressor, both changed only as
+  a format event).
+- **Forward-read limit.** Reading is backward-compatible only: a newer reader decodes older table blocks, but
+  an older reader can't be assumed to decode newer ones. Decoding a table block written under an edition needs
+  a Vortex at or above that edition's minimum library version (for `core2026.08.3`, Vortex 0.85). In tessera
+  that means a reader at or after the vortex 0.93 change (ADR-0024's 2026-11-09 amendment, #635), the first
+  release after `0.1.0-alpha.5`. The edition field is how a reader knows which edition a block needs. A tessera
+  reader from before that change (vortex 0.75; `0.1.0-alpha.1`–`alpha.5`) still opens and **verifies** such a
+  product, because §7 needs no payload decoding. But it fails the table **decode** with a codec registry error
+  (`Encoding not found in registry`), and the error doesn't name the edition. Array, blob and table-free
+  products aren't affected. A reader that can't decode an edition MUST fail with an error, never return
+  partial or substituted data; naming the edition in that error is #871.
 
 A reader MAY project a subset of columns or random-`take` rows; the format supports O(1) random access.
 

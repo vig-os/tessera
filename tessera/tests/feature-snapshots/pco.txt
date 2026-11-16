@@ -3,53 +3,58 @@
         |   `-- tessera-io vWORKSPACE (*)
         |-- zarrs feature "pcodec"
     `-- zarrs v0.23.13
-    |           `-- tessera-io vWORKSPACE (*)
+    |           `-- vortex-layout feature "default" (*)
+    |           |-- vortex-file feature "wasm-bindgen" (*)
     |       `-- tessera-io vWORKSPACE (*)
-    |       `-- vortex-file v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
-    |       `-- vortex-layout feature "default"
+    |       `-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
+    |       `-- vortex-layout feature "wasm-bindgen"
+    |       |   `-- tessera-io vWORKSPACE (*)
+    |       |-- vortex-layout feature "default"
     |   `-- vortex-btrblocks feature "pco"
-    |   `-- vortex-file v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
-    |   `-- vortex-layout v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)
-    |   |                   `-- tessera-py feature "default" (command-line)
-    |   |               `-- tessera-py vWORKSPACE
-    |   |               |       `-- tessera-cli feature "static-hdf5" (command-line)
-    |   |               |   `-- tessera-cli feature "static-hdf5" (command-line)
-    |   |               |   `-- tessera-ingest feature "static-hdf5" (command-line)
-    |   |               |   |       `-- tessera-ingest feature "default" (command-line) (*)
-    |   |               |   |       `-- tessera-ingest feature "default" (command-line) (*)
-    |   |               |   |       |-- tessera-cli feature "parquet" (command-line)
-    |   |               |   |   `-- tessera-ingest feature "default" (command-line) (*)
-    |   |               |   |   `-- tessera-ingest feature "npz" (command-line)
-    |   |               |   |   `-- tessera-ingest feature "parquet" (command-line)
-    |   |               |   |   |   `-- tessera-cli vWORKSPACE (*)
-    |   |               |   |   |-- tessera-cli feature "arrow" (command-line)
-    |   |               |   |   |-- tessera-cli feature "csv" (command-line)
-    |   |               |   |   |-- tessera-ingest feature "default" (command-line)
-    |   |               |   |   |-- tessera-ingest feature "default" (command-line) (*)
-    |   |               |   |-- tessera-cli feature "arrow" (command-line)
-    |   |               |   |-- tessera-cli feature "cloud" (command-line)
-    |   |               |   |-- tessera-cli feature "csv" (command-line)
-    |   |               |   |-- tessera-cli feature "default" (command-line)
-    |   |               |   |-- tessera-cli feature "parquet" (command-line)
-    |   |               |   |-- tessera-cli feature "sql" (command-line)
-    |   |               |   |-- tessera-ingest feature "arrow" (command-line)
-    |   |               |   |-- tessera-ingest feature "csv" (command-line)
-    |   |               |   |-- tessera-ingest feature "default" (command-line) (*)
-    |   |               |   |-- tessera-ingest feature "npy" (command-line)
-    |   |               |   |-- tessera-ingest feature "npz" (command-line) (*)
-    |   |               |   |-- tessera-ingest feature "parquet" (command-line) (*)
-    |   |               |-- tessera-cli vWORKSPACE
-    |   |               |-- tessera-ingest vWORKSPACE
-    |   |           `-- tessera-io feature "default" (command-line)
-    |   |           |   `-- tessera-cli feature "cloud" (command-line)
-    |   |           |-- tessera-io feature "cloud" (command-line)
-    |   |       `-- tessera-io vWORKSPACE
+    |   `-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
+    |   `-- vortex-layout v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
+    |   |       `-- vortex-file feature "default" (*)
     |   |   `-- tessera-io vWORKSPACE (*)
-    |   |   `-- vortex-file feature "default"
+    |   |   `-- vortex-file feature "wasm-bindgen"
+    |   |   |               `-- tessera-py feature "default" (command-line)
+    |   |   |           `-- tessera-py vWORKSPACE
+    |   |   |           |       `-- tessera-cli feature "static-hdf5" (command-line)
+    |   |   |           |   `-- tessera-cli feature "static-hdf5" (command-line)
+    |   |   |           |   `-- tessera-ingest feature "static-hdf5" (command-line)
+    |   |   |           |   |       `-- tessera-ingest feature "default" (command-line) (*)
+    |   |   |           |   |       `-- tessera-ingest feature "default" (command-line) (*)
+    |   |   |           |   |       |-- tessera-cli feature "parquet" (command-line)
+    |   |   |           |   |   `-- tessera-ingest feature "default" (command-line) (*)
+    |   |   |           |   |   `-- tessera-ingest feature "npz" (command-line)
+    |   |   |           |   |   `-- tessera-ingest feature "parquet" (command-line)
+    |   |   |           |   |   |   `-- tessera-cli vWORKSPACE (*)
+    |   |   |           |   |   |-- tessera-cli feature "arrow" (command-line)
+    |   |   |           |   |   |-- tessera-cli feature "csv" (command-line)
+    |   |   |           |   |   |-- tessera-ingest feature "default" (command-line)
+    |   |   |           |   |   |-- tessera-ingest feature "default" (command-line) (*)
+    |   |   |           |   |-- tessera-cli feature "arrow" (command-line)
+    |   |   |           |   |-- tessera-cli feature "cloud" (command-line)
+    |   |   |           |   |-- tessera-cli feature "csv" (command-line)
+    |   |   |           |   |-- tessera-cli feature "default" (command-line)
+    |   |   |           |   |-- tessera-cli feature "parquet" (command-line)
+    |   |   |           |   |-- tessera-cli feature "sql" (command-line)
+    |   |   |           |   |-- tessera-ingest feature "arrow" (command-line)
+    |   |   |           |   |-- tessera-ingest feature "csv" (command-line)
+    |   |   |           |   |-- tessera-ingest feature "default" (command-line) (*)
+    |   |   |           |   |-- tessera-ingest feature "npy" (command-line)
+    |   |   |           |   |-- tessera-ingest feature "npz" (command-line) (*)
+    |   |   |           |   |-- tessera-ingest feature "parquet" (command-line) (*)
+    |   |   |           |-- tessera-cli vWORKSPACE
+    |   |   |           |-- tessera-ingest vWORKSPACE
+    |   |   |       `-- tessera-io feature "default" (command-line)
+    |   |   |       |   `-- tessera-cli feature "cloud" (command-line)
+    |   |   |       |-- tessera-io feature "cloud" (command-line)
+    |   |   |   `-- tessera-io vWORKSPACE
+    |   |   |-- vortex-file feature "default"
     |   |-- vortex-btrblocks feature "default"
-    |   |-- vortex-btrblocks v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11) (*)
-    |   |-- vortex-file v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)
-    |-- vortex-btrblocks v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)
-    |-- vortex-pco v0.75.0 (https://github.com/gerchowl/vortex?rev=608d8a1162cf40dbea70f8dd72781ec243754282#608d8a11)
+    |   |-- vortex-btrblocks v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
+    |   |-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
+    |-- vortex-btrblocks v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
+    |-- vortex-pco v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
 `-- pco feature "default"
 pco v1.0.2

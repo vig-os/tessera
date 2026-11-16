@@ -144,6 +144,7 @@ fn table(columns: &[Column]) -> TableSpec {
         rows: 0,
         row_index: None,
         partition: None,
+        edition: None,
     }
 }
 

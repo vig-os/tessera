@@ -42,6 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input is page cache, which counts toward a cgroup's memory and is RAM on tmpfs (ADR-0064 PR F, #714).
   `tests/staged_job_memory.rs` checks the bound on the heap (without the per-leaf term, at most 25.3 KB at its 8
   leaves), and that neither the reader filling a block nor a worker reading it back holds the block in RAM.
+- **Breaking for `TableSpec` struct literals, `tessera-core` / `tessera-io`:** `TableSpec` gains
+  `edition: Option<String>`, the Vortex edition a table block's payload was written under (ADR-0024's 2026-11-15
+  amendment, #635). `tessera-io`'s writer sets it to `table::TABLE_EDITION` (`"core2026.08.3"`) on every table block
+  and partition leaf it seals, and refuses a spec that names another edition with `Error::Codec`. Build specs with
+  `edition: None`. It is in the manifest, not the payload, so it moves `manifest_hash` and leaves `content_hash` and
+  the block digests as they are; the corpus goldens are regenerated with it, in the same format event as the vortex
+  0.93 bump below. A spec without the key (every product sealed before this change) still parses, reads and
+  verifies, and keeps its manifest bytes: `None` is omitted, never written as `null`. The key itself doesn't stop an
+  older reader, because `BlockRef.spec` is kept as raw JSON. But the table bytes it marks do: an older reader can't
+  decode them (the forward-read limit under **Changed** below). `TableSpec` has no `Default`
+  and isn't `#[non_exhaustive]`, so a struct literal outside tessera stops compiling until it names the field.
 
 ### Changed
 
@@ -55,6 +66,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer be built with a struct literal outside `tessera-core` (use `Manifest::new`). `Manifest::from_json`
   (and `read_manifest_unverified`) refuse duplicate keys too. The wasm `verify_signature` now verifies the
   manifest's seal before the signature (#573).
+- **Format event (table blocks), breaking for writer output, for `tessera-io` sink types and for old readers
+  (releases up to `0.1.0-alpha.5` can't decode tables written by this version):** vortex moves from 0.75 to
+  0.93.0, pinned to the fork `gerchowl/vortex@5c55cf7` (0.93.0 plus the #468 fix, which upstream hasn't merged;
+  the #472 fix shipped upstream in 0.89.0). Vortex 0.93 writes column statistics as a `vortex.zoned` zone
+  map instead of `vortex.stats`, with no `sum` or `*_is_truncated`. Column encodings are unchanged. So the sealed
+  bytes of **table** blocks change, and re-ingesting or re-building the same input gives a new `content_hash` and
+  `manifest_hash` for every product that holds one. Table blocks are 5–10 % smaller. Array, blob and table-free
+  products are byte-identical. Products written by 0.75 still open, read and verify. **Not forward-compatible:**
+  table blocks written by this version need a tessera reader at or after this change, which links Vortex ≥ 0.85, the
+  minimum for `TABLE_EDITION`. Their `TableSpec.edition` names the edition they need. A tessera reader from
+  before it (`0.1.0-alpha.1`–`alpha.5`) still opens and verifies such a product. But it fails to decode the table:
+  `tessera read FILE <table>` exits 1 with `codec: Other error: Encoding not found in registry: 1`. Upgrade every
+  reader before publishing products sealed by this version (SPEC §5b; a clearer error is #871). The table writer
+  enables the frozen vortex edition `table::TABLE_EDITION` (`core2026.08.3`) and keeps vortex 0.75's codec set
+  (Pco, with ALP, ALPRD, integer Pco, Delta and OnPair excluded). The corpus goldens (`corpus/corpus.json`,
+  `corpus/files`, `corpus/ingest-corpus.json`, the `logical_tables` walkthrough's `scan.tsra`) are regenerated.
+  ADR-0024 records the event. The sink of `table::encode_streaming_to` and `TableStreamWriter::finish_to` must now
+  be `Send`, because vortex's writer requires it (#635).
 
 - **Breaking for writer output, `tessera-io` / `tessera-ingest`:** a table above `BLOCK_ROWS` rows is written as the
   leaves `<table>/0000`, `<table>/0001`, … (`events/0000` for GE listmode), each carrying the partition marker

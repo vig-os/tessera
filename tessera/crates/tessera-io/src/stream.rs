@@ -121,7 +121,8 @@ pub type StagedEncodeJob = Box<
     dyn FnOnce(&BlockStaging) -> Result<(StagedEncodedBlock, Vec<EncodedBlock>)> + Send + 'static,
 >;
 
-/// The table block's manifest reference without a digest (a staged commit fills it in).
+/// The table block's manifest reference without a digest (a staged commit fills it in). Its spec
+/// records the writer's edition ([`crate::table::TABLE_EDITION`]), as every sealed table block's does.
 fn staged_table_ref(
     name: String,
     spec: &tessera_core::block::table::TableSpec,
@@ -130,7 +131,7 @@ fn staged_table_ref(
         name: tessera_core::block::BlockName::new(name)?,
         kind: tessera_core::block::BlockKind::Table,
         digest: None,
-        spec: serde_json::to_value(spec)?,
+        spec: serde_json::to_value(crate::table::sealed_spec(spec)?)?,
     })
 }
 
@@ -170,9 +171,10 @@ where
                 },
             });
         }
+        let bref = staged_table_ref(name, &spec)?;
         let mut staged = staging.create()?;
         crate::table::encode_streaming_to(&spec, groups, &mut staged)?;
-        Ok(((staged_table_ref(name, &spec)?, staged), Vec::new()))
+        Ok(((bref, staged), Vec::new()))
     })
 }
 
@@ -252,9 +254,10 @@ pub fn table_job_from_fragments(
 ) -> StagedEncodeJob {
     let name = name.into();
     Box::new(move |staging| {
+        let bref = staged_table_ref(name, &spec)?;
         let mut staged = staging.create()?;
         crate::accumulate::compact_fragments_to(&spec, frag_paths, &mut staged)?;
-        Ok(((staged_table_ref(name, &spec)?, staged), Vec::new()))
+        Ok(((bref, staged), Vec::new()))
     })
 }
 
@@ -811,6 +814,9 @@ impl OpenTable {
                 "{call} '{name}': spec.partition must be None, each leaf's marker is set by the writer"
             )));
         }
+        // Each leaf's spec records the writer's edition when it is handed over; a spec naming another
+        // edition is refused here, before any row is staged.
+        crate::table::sealed_spec(&spec)?;
         for c in &spec.columns {
             ColumnData::validate_dtype(&c.dtype)?;
         }
@@ -1243,8 +1249,10 @@ impl StreamWriter {
     /// # Errors
     ///
     /// [`Error::StreamedTable`] when the input runs past `spec.rows` (when it does), ends short
-    /// of it (at its end) or yields a group of more than `ROWS_PER_GROUP` rows; the name, column and
-    /// dtype errors of the sinks; and the pipeline's errors (a dead pipeline closes the window). A
+    /// of it (at its end) or yields a group of more than `ROWS_PER_GROUP` rows; [`Error::Codec`]
+    /// before anything is staged when `spec.edition` names an edition other than
+    /// [`crate::table::TABLE_EDITION`]; the name, column and dtype errors of the sinks; and the
+    /// pipeline's errors (a dead pipeline closes the window). A
     /// failed call never hands over the last leaf, so a partitioned table stays without its
     /// terminal leaf and [`Self::finish`] refuses to seal it ([`Error::LogicalTable`]); a single
     /// block is never handed over at all. Every staging file is deleted on every path: the one being
@@ -1329,7 +1337,7 @@ impl StreamWriter {
     /// # Errors
     ///
     /// [`Error::Invalid`] when `spec.rows` isn't `0` or `spec.partition` isn't `None`, and the
-    /// name and dtype errors of [`Self::push_table`], all before anything is staged. As the row
+    /// edition, name and dtype errors of [`Self::push_table`], all before anything is staged. As the row
     /// count is unknown, `name` must be valid both bare and as the first leaf `name/0000`, so a
     /// name within five bytes of the length limit is refused even for a table that would end as
     /// one block. A later leaf's longer name (`name/10000` on) is checked when that leaf is handed
@@ -2019,6 +2027,7 @@ mod tests {
                 rows,
                 row_index: Some("t".into()),
                 partition: None,
+                edition: None,
             }
         }
 

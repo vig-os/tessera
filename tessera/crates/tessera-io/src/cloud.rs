@@ -723,6 +723,7 @@ mod tests {
             rows: rows as u64,
             row_index: Some("ms".into()),
             partition: None,
+            edition: None,
         };
         // Fused emit: data block + chunk-index sidecar over `ms`. Stats come from the sidecar at
         // read time when (sidecar_present AND requested column == row_index), which holds here.

@@ -5,9 +5,9 @@ id            [..]
 name          lm-3p
 timestamp     2024-01-01T00:00:00Z
 producer      tessera/0.0.0
-content_hash  blake3:207025b1bb4d2b647d1647a860c456513478cf46b2fee4da9eb2ba910e95c33e
-manifest_hash blake3:b6570c78cd9ddde3839aadbefbc0068244d86e90c15e93a9fcf96bcc961c4ac9
+content_hash  blake3:b8c5176eed20a216f9fcd1dd768fb786b073c99bd99f1b498f99442c691620e2
+manifest_hash blake3:b843524cab909c93c31e675f7db31a1c36f5326d2a45cb1ebc220c59d4b69241
 blocks        1
-  - events               Table blake3:b89d887ee84d1445f80e35b43f323cbaeb68c1d2b8b318acdbaac8415ebfb505
+  - events               Table blake3:8e510d9e0778c6a4cc109ea09ab10a5982a0856453befdad55c3f73aa84a6781
 
 ```

@@ -391,6 +391,7 @@ impl Builder {
             rows,
             row_index,
             partition: None,
+            edition: None,
         };
         let (block_ref, payload) =
             tessera_io::table::table_block(name, &spec, &data).map_err(err)?;

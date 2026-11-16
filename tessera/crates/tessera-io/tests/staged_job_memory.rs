@@ -103,6 +103,7 @@ fn spec(rows: u64) -> TableSpec {
         rows,
         row_index: Some("t".into()),
         partition: None,
+        edition: None,
     }
 }
 
@@ -275,6 +276,7 @@ fn consumer_spec(rows: u64) -> TableSpec {
         rows,
         row_index: Some("pkt".into()),
         partition: None,
+        edition: None,
     }
 }
 

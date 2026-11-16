@@ -272,6 +272,16 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "getrandom 0.4's RNG traits (reached via thrift 0.23 -> uuid -> getrandom): generates \
          randomness, never reads a byte of the file",
     ),
+    (
+        "rand",
+        "twox-hash's `random` feature (randomly seeded hasher states), which vortex 0.93 enables by \
+         depending on twox-hash with default features and which feature unification turns on for the \
+         twox-hash on the lz4_flex and parquet paths (#635). Both hash with seed 0 (lz4_flex's frame \
+         checksums, parquet's bloom filter), never with a random state, so it generates randomness and \
+         never reads a byte of the file",
+    ),
+    ("rand_chacha", "rand's default generator, reached only via rand above"),
+    ("ppv-lite86", "rand_chacha's SIMD backend, reached only via rand above"),
     ("siphasher", "phf lookup hashing, not value decoding"),
     ("tiny-keccak", "const-random seeding"),
     ("futures-channel", "async plumbing"),
