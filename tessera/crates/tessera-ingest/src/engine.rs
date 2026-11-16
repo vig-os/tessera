@@ -295,7 +295,7 @@ fn run_into(
     let collection = cb.seal()?;
 
     let coll_path = out_dir.join("collection.json");
-    std::fs::write(&coll_path, collection.to_json()?).map_err(|e| {
+    std::fs::write(&coll_path, collection.to_sealed_json()?).map_err(|e| {
         Error::Invalid(format!("ingest-engine: write {}: {e}", coll_path.display()))
     })?;
     Ok(collection)

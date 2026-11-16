@@ -87,6 +87,12 @@ pub struct ColumnReference {
     pub note: Option<String>,
 }
 
+impl ColumnReference {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &["columns", "to", "note"];
+}
+
 /// The target of a [`ColumnReference`]: columns of a block, in this product or in a source product.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReferenceTarget {
@@ -96,6 +102,12 @@ pub struct ReferenceTarget {
     pub block: String,
     /// The referenced columns, positionally matching [`ColumnReference::columns`].
     pub columns: Vec<String>,
+}
+
+impl ReferenceTarget {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &["scope", "block", "columns"];
 }
 
 /// Where a reference's target block lives. JSON: `"block"` or `"source(<role>)"`; any other string
@@ -220,6 +232,11 @@ pub enum ContractViolation {
 }
 
 impl TableContract {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] =
+        &["columns", "sequence_key", "order", "keys", "references"];
+
     /// Check a table block's columns against this contract (see
     /// [`ProductSchema::check_table`](super::ProductSchema::check_table)).
     pub(crate) fn check(&self, role: &str, spec: &TableSpec) -> Result<(), ContractViolation> {
@@ -303,6 +320,10 @@ fn check_column(role: &str, declared: &Column, found: &Column) -> Result<(), Con
 }
 
 impl ArrayContract {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &["dtype", "rank", "axes", "unit"];
+
     /// Check an array block's spec against this contract (see
     /// [`ProductSchema::check_array`](super::ProductSchema::check_array)).
     pub(crate) fn check(&self, role: &str, spec: &ArraySpec) -> Result<(), ContractViolation> {

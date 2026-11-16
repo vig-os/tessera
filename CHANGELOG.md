@@ -82,6 +82,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `tessera-core`: newer-field paths (`Manifest::newer_fields`, `Collection::newer_fields`, `ProductSchema::view_of`,
+  `Error::NewerFormatFields`) quote a key that isn't a plain identifier, `["producer.agents"]`, so no two paths read
+  the same (SPEC §4); code that parses these strings sees the new form. Plain paths are unchanged (#873, see
+  Security).
+
 - **Breaking, `tessera-core`:** `ProductBuilder::from_manifest` returns `Result` and refuses a parsed manifest with
   `Manifest::newer_fields()` (keys from a newer format revision, verified but not carried by the struct) with the
   new `Error::NewerFormatFields`, as do `Manifest::compute_manifest_hash`, `canonical_bytes` and `verify` on such a
@@ -92,6 +97,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer be built with a struct literal outside `tessera-core` (use `Manifest::new`). `Manifest::from_json`
   (and `read_manifest_unverified`) refuse duplicate keys too. The wasm `verify_signature` now verifies the
   manifest's seal before the signature (#573).
+- **Breaking, `tessera-core`:** `Collection::compute_manifest_hash`, `canonical_bytes` and `verify` refuse a parsed
+  collection with `Collection::newer_fields()` (`Error::NewerFormatFields`) rather than seal a view that drops them.
+  `Collection` gains a private field, so it can no longer be built with a struct literal outside `tessera-core` (use
+  `Collection::new` or `CollectionBuilder`). `Collection::from_json` refuses duplicate keys. The new
+  `Collection::to_sealed_json` is what `tessera collection new` and the ingest engine write: it refuses a view whose
+  JSON doesn't reproduce its seal. `Collection::from_json_with_seal` returns the seal over the object as received.
+  The message of `Error::NewerFormatFields` now also covers validation (#873).
 - **Format event (table blocks), breaking for writer output, for `tessera-io` sink types and for old readers
   (releases up to `0.1.0-alpha.5` can't decode tables written by this version):** vortex moves from 0.75 to
   0.93.0, pinned to the fork `gerchowl/vortex@5c55cf7` (0.93.0 plus the #468 fix, which upstream hasn't merged;
@@ -186,3 +198,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference reader refuses the repeat by name too, and `corpus/seal-cases.json` gains the case
   `recon_int16/block-listed-twice` (`refused`) for both readers. No valid product changes, and no corpus
   `manifest_hash` moves.
+- `tessera-core`: `Collection::from_json_verified` (and so `tessera collection verify`) checks a collection's
+  `manifest_hash` over the `collection.json` object as parsed, the rule #573 set for manifests. Before, a key spliced
+  into a sealed collection (`"forged": true`, at the top level, in `level` or in a member) verified OK, a collection
+  a newer writer sealed with an extra field was reported as tampering, and a deleted seal skipped the check. A
+  collection read from bytes must now carry `content_hash` and `manifest_hash`, and a key repeated in any object is
+  refused. Fields from a newer format revision are named by the new `Collection::newer_fields()` and warned about by
+  `tessera collection inspect`/`verify`, whose seal badge is now computed over the parsed object too (#873, ADR-0060
+  §2.2 P0b).
+- `tessera-core`: `ProductSchema::from_value`, and so `validate_manifest`, refuse an embedded schema carrying a key
+  this build doesn't model (at the top level, in `fields[]`, `blocks[]`, `tables.<role>` with its columns and
+  references, or `arrays.<role>`) with `Error::NewerFormatFields`, naming its path. Before, the key was dropped and the
+  product was reported schema-valid against a rule that was never evaluated. Known keys holding their defaults
+  (`inherit: false`, `requires_generation: false`) still validate. The new `ProductSchema::view_of` returns the typed
+  view plus those paths for display: `tessera schema` shows the roster, warns and then fails validation; `ls FILE
+  schema` names the rules; the `tree`/`inspect` badge reads `schema=<p>?(newer rules, not validated)`; `schema
+  --json` prints the embedded object as stored instead of its re-serialised view (#873).
+- `tessera-core`: the manifest, a collection and an embedded product schema are read in their declared spelling only
+  (SPEC §4, §5): records as JSON objects, enumerated names as strings. serde also built a record from a JSON array,
+  positionally, so a record spelled `["t","u8",…]` verified and validated as `{"name":"t","dtype":"u8",…}`, a second
+  spelling of one sealed value, and the keys inside it (a column's `min`, a reference's `to.strict`, a
+  `referencing.transform.x`) were never named as newer fields, so a rule a newer writer added could be dropped unseen.
+  It also read a name from a one-key object (`"kind": {"array": null}`). `Manifest::from_json`/`from_json_verified`
+  and `Collection::from_json`/`from_json_verified` now refuse either spelling anywhere (the whole object, `producer`,
+  `generation`, `blocks[i]` and its `kind`, `sources[i]`, `ingest_transform[i]`, `level`, `members[i]` and its
+  `role`/`kind`) with `Error::Serde` naming its path; `ProductSchema::from_value`/`view_of` (so `validate_manifest`)
+  refuse it in any schema record, an internally tagged `referencing.transform` included, with `Error::Invalid`. The
+  reference reader, which reads manifests only, refuses the same in a manifest, and `corpus/seal-cases.json` gains four
+  `refused` cases for both readers. No product a tessera writer sealed changes, and no corpus `manifest_hash` moves
+  (#873).
+- `tessera-core`: the spelling check also covers a key the typed view drops as a default (`skip_serializing_if`).
+  Before, it compared only the keys the view wrote back, so a default unit variant spelled as an object (a collection
+  member's `"kind": {"product": null}`, a schema table's `"order": {"sequence_key": null}`, a contract column's
+  `"sensitivity": {"public": null}`) verified or validated under a seal of its own: a second sealed spelling of one
+  collection, with the same `content_hash`. Such a key's value must now be its default's own spelling (`null`, a
+  boolean, a number, a string, `[]` or `{}`), and anything else is refused like the forms above. The explicit default
+  itself (`"study": null`, `"kind": "product"`, `"sequence_key": []`) is still accepted, as SPEC §4 states (#873).
+- `tessera-core`: a newer field is decided by where the key sits (its record doesn't declare it), never by a path
+  string. The spelling check exempted a key whose dotted path was in the newer-field list, but a key's name can
+  spell another key's path: a top-level key named `"members[0].kind"` exempted the first member's real `kind`, so
+  `"kind": {"product": null}` verified (and `tessera collection verify` passed it with a warning). The walk and the
+  check now share structured paths, and such a collection, or an embedded schema with a crafted
+  `"tables.events.order"`, is refused. Newer-field paths are rendered unambiguously wherever they are reported
+  (`Manifest::newer_fields`, `Collection::newer_fields`, `ProductSchema::view_of`, `Error::NewerFormatFields`,
+  the CLI warnings): a key that is not a non-empty run of ASCII letters, digits and `_` starting with a letter or `_` is quoted, `["producer.agents"]`,
+  so it never reads as the nested `producer.agents` (SPEC §4). Every path a well-formed product declares reads
+  as before. `corpus/seal-cases.json` gains the case `recon_int16/key-spelling-a-nested-path-resealed` (#873).
+- Reference reader (`corpus/reference_reader`): it checks every declared manifest field's JSON type and shape at every
+  depth from one declarative table that mirrors the Rust types (strings, booleans, block-kind names, the block-name
+  grammar, string-valued `id_inputs`, objects for the opaque maps, required fields), refuses a block without a
+  digest, parses a `tessera_version` major as the Rust reader does, and refuses nesting deeper than 127 levels, an
+  integer out of a double's range, and a manifest that is not UTF-8 (UTF-16, a byte-order mark).
+  Before, `metadata: []`, `study: 5`, `blocks[0].kind: "hologram"` or `producer.dirty: 1` verified there while the
+  Rust reader refused them, `id_inputs: []` was `tampered`, and `blocks[0].name: {}` or a missing `digest` raised
+  instead of giving a verdict. Every input now gets a verdict, an archive `zipfile` can't read included.
+  `corpus/seal-cases.json` gains 19 cases for both readers, and `run.py` five crafted archives (#873).

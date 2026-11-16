@@ -16,6 +16,7 @@ pub mod collection;
 pub mod dtype;
 pub mod error;
 pub mod export;
+pub(crate) mod field_path;
 pub mod hash;
 pub mod identity;
 pub mod manifest;

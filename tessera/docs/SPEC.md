@@ -54,18 +54,56 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
     `manifest_hash`; a reader treats a missing one as an integrity failure, since deleting the seal would
     otherwise launder any edit.
   - `manifest.json` MUST be I-JSON (RFC 7493; JCS requires it, RFC 8785 §3.1): no key repeated within any
-    object, at any depth (keys compare after unescaping), no lone surrogate, no `NaN`/`Infinity` and no number outside a double's range. A reader
-    MUST refuse anything else rather than keep the first or last of two values, because parsers differ on
-    which one wins.
+    object, at any depth (keys compare after unescaping), no lone surrogate, no `NaN`/`Infinity` and no number
+    outside a double's range, and nested at most 127 objects and arrays deep (the manifest object itself is
+    level 1; RFC 8259 §9 lets a parser limit nesting, and this limit is fixed so every reader refuses the same
+    text). The same holds for a collection. A reader MUST refuse anything else rather than keep the first or
+    last of two values, because parsers differ on which one wins.
   - **Forward reading (RFC §13).** A key no field of this section declares is a field from a newer format
     revision: a reader verifies it as part of the seal, SHOULD warn that it is not interpreted, and reads
     the rest. A writer MUST NOT build a new seal from such a manifest (a new version, a re-seal), since it
     can't carry what it doesn't understand; copying the product's bytes unchanged is always allowed.
+    Only keys count: a declared key holding `null` or its default is never a newer field. Opaque objects
+    (`id_inputs`, `metadata`, `extra`, `generation.config`, `blocks[].spec`, `ingest_transform[].params`)
+    hold data, not format, and their keys are never newer fields.
+    Whether a key is a newer field is decided by where it sits: it is one iff the record that holds it doesn't
+    declare it. A reader MUST NOT decide it by matching a textual path, since a key's name can spell another
+    key's path (a top-level key named `members[0].kind`). When a reader names a newer field by its path, the
+    path is written so no two paths read the same: a key of ASCII letters, digits and `_`, not starting with a
+    digit, is written bare (after a `.` unless first), any other key as its JSON string literal in brackets, and
+    an array index as `[n]`: `producer.agents`, `blocks[0].stats`, `["producer.agents"]`, `tables["a.b"].order`.
+  - The same rules cover a **collection** (`collection.json`, ADR-0033): its `manifest_hash` is computed over
+    the collection object as parsed with only `manifest_hash` removed, both hashes are required, it MUST be
+    I-JSON, and a key the reader doesn't model (top level, `level`, `members[]`) verifies, is warned about
+    and blocks a re-seal.
+  - An **embedded schema** (`schema`, §5) is different: it is a rule set, not data. A reader that finds a
+    key it doesn't model anywhere in it (top level, `fields[]`, `blocks[]`, `tables.<role>` and its
+    `columns[]`/`references[]`, `arrays.<role>`; a field's `default` is opaque) MUST NOT report the product
+    valid against it. It still verifies the seal and reads the product; it refuses only to validate.
+  - **Objects only, one spelling per value.** Every record this spec defines as an object (the manifest and
+    each record of §5, a collection with its `level` and `members[]`, the embedded schema with each of its
+    records) is a JSON object, and every enumerated name (`kind`, `role`, `order`, `sensitivity`, …) is a
+    string. A reader MUST refuse the array form of a record (`["t","u8"]` for `{"name":"t","dtype":"u8"}`),
+    which a positional deserialiser would read as the same record, and a name spelled as an object
+    (`{"array": null}` for `"array"`): each is a second spelling of one value, and the array form hides its
+    keys from the forward-reading rule above, so an unknown rule inside it would be dropped unseen. The rule
+    holds for a key a writer omits when it holds its default (✱ in §5; a member `kind` of `product`, a table
+    `order` of `sequence_key`) too: written explicitly, its value is that default in its own spelling (`null`,
+    `"product"`, `[]`, `false`), never an object or array standing for it (`{"product": null}`). Such a
+    manifest or collection is refused before any seal is checked; such an embedded schema is refused like
+    one that doesn't parse.
 
 ## 5. Manifest schema
-A JSON object. Fields (✱ = omitted from the JSON when the writer's value is absent/null). Note `[]`
-and `{}` are **present** values, not omissions: e.g. `sources: []` stays in the manifest and hashes
-differently from its absence — only the null/absent sentinel is dropped.
+A JSON object; so is every record below (BlockRef, Source, Producer, Generation, IngestTransform): objects
+only, the array form is refused, and `kind` is a string, never an object (§4). A reader MUST refuse a manifest
+whose declared field, at any depth, holds a value of another JSON type than the table gives (`metadata: []`,
+`study: 5`, a `kind` outside its names, a non-string `id_inputs` value; `schema` and a block's `spec` are opaque
+here and hold any JSON, see §4 for the schema) or lacks a field the table doesn't mark
+✱ or give a default (`blocks`, `sources`, `metadata`, `extra`, `ingest_transform` default to empty).
+Fields (✱ = omitted from the
+JSON when the writer's value is absent/null). Note `[]` and `{}` are **present** values, not omissions: e.g.
+`sources: []` stays in the manifest and hashes differently from its absence — only the null/absent sentinel is
+dropped.
 | key | type | notes |
 |---|---|---|
 | `tessera_version` | string | spec version, `MAJOR.MINOR.PATCH`. Reader MUST refuse `MAJOR` > supported. |
@@ -75,12 +113,15 @@ differently from its absence — only the null/absent sentinel is dropped.
 | `name` | string | |
 | `description` | string | |
 | `timestamp` | string | RFC 3339, normalized to UTC (`…Z`) |
-| `schema` ✱ | object | embedded JSON Schema (opaque) |
+| `producer` ✱ | Producer \| string | who/what wrote it (ADR-0058 §1); older products: a `"tool/version"` string |
+| `generation` ✱ | Generation | how the product was made (ADR-0058 §2); required by schemas with `requires_generation` |
+| `schema` ✱ | object | the embedded product schema the product validates against (§4 for unknown keys) |
 | `blocks` | array<BlockRef> | order is significant (fixes the Merkle order) |
 | `sources` | array<Source> | provenance DAG edges |
 | `study` ✱ | string | exam-grouping id |
 | `metadata` ✱ | object | product-schema field values (keyed by field id) |
 | `extra` ✱ | object | non-standard extension namespace |
+| `ingest_transform` ✱ | array<IngestTransform> | recorded ingest normalisations, in order (ADR-0056 §6.2) |
 | `content_hash` ✱ | string | §4; present once sealed |
 | `manifest_hash` ✱ | string | §4; present once sealed |
 
@@ -96,11 +137,16 @@ member is checked. A writer MUST also keep the **leaf rule**: no name in one pro
 prefix of another (`volume` and `volume/1` can't both exist), so the zip members, an exploded directory
 and an object-store prefix mirror the names one-to-one. A reader accepts a product sealed before the leaf
 rule in-zip, but MUST NOT explode it to a directory.
-`digest` MUST be present in a sealed product. `spec` is shape-specific and opaque to the spine (an array
+`digest` MUST be present in a sealed product: a reader refuses a manifest with a block that lacks one.
+`spec` is shape-specific and opaque to the spine (an array
 spec carries `shape`/`dtype`/`chunks`/`axes`/`codec`/…; a table spec carries `columns`/`rows`/…; a
 `chunk_index` sidecar spec carries `class`/`recipe`/`indexes`/`entries`/`root` — see §5d; a `blob`
 spec carries `filename`/`media_type`/`size` — see §5e).
 **Source** = `{ role: string, reference: string, content_hash✱: string }`.
+**Producer** = `{ tool: string, version: string, git_commit✱: string, git_repo✱: string, dirty✱: bool }`.
+**Generation** = `{ config✱: object, config_ref✱: string }` (`config` is opaque; `config_ref` is a `blake3:`
+digest of a config block carried in the product). **IngestTransform** = `{ name: string, params✱: object }`
+(`params` is opaque).
 
 ## 5a. Array block payload (Zarr v3 + pluggable codec)
 A block with `kind == "array"` stores its samples as a **single serialized Zarr v3 store** (ADR-0023).
@@ -485,5 +531,8 @@ regenerated (and the spec version bumped) only on an intended format change:
 
 `tessera/corpus/seal-cases.json` adds manifest-only vectors for §4's seal rule: each corpus manifest with a
 newer-format key added and resealed (verifies), the same key spliced in under the old seal (fails), the
-encodings a typed model loses (`"study": null`, an omitted `sources`, a nested newer key; all verify) and
-a splice whose seal was deleted or nulled (fails), and text that is not I-JSON (refused). A conformant reader MUST reach every case's `verdict` from its `manifest` text.
+encodings a typed model loses (`"study": null`, an omitted `sources`, a nested newer key; all verify) and a
+splice whose seal was deleted or nulled (fails), text that is not I-JSON (refused), and a block, the producer
+or the whole manifest spelled as a JSON array, or a block `kind` as an object (refused, §4), a declared field of
+another JSON type or shape, a block without a digest, and nesting past 127 levels (refused, §4/§5). A conformant
+reader MUST reach every case's `verdict` from its `manifest` text.

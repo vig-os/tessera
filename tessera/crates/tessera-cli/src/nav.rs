@@ -289,9 +289,20 @@ pub(crate) fn short_hash(h: &str) -> String {
     short_digest(Some(h))
 }
 
-/// Parse the embedded schema JSON (`Manifest.schema`) into a typed schema, or `None` if absent/bad.
+/// Parse the embedded schema JSON (`Manifest.schema`) into a typed schema **for display**, or `None`
+/// if it doesn't parse. A schema with rules from a newer format revision still displays what this
+/// build understands ([`tessera_core::ProductSchema::view_of`]); [`schema_newer_rules`] names the rest.
 fn embedded_schema(v: &Value) -> Option<tessera_core::ProductSchema> {
-    tessera_core::ProductSchema::from_value(v).ok()
+    tessera_core::ProductSchema::view_of(v).ok().map(|(s, _)| s)
+}
+
+/// The paths of the embedded schema's rules this build doesn't model (empty when there are none).
+pub(crate) fn schema_newer_rules(m: &tessera_core::Manifest) -> Vec<String> {
+    m.schema
+        .as_ref()
+        .and_then(|v| tessera_core::ProductSchema::view_of(v).ok())
+        .map(|(_, newer)| newer)
+        .unwrap_or_default()
 }
 
 /// Group-of-three thousands separators for human row counts (`4194304` → `4,194,304`).
@@ -559,6 +570,11 @@ fn status_line(file: &Path, m: &tessera_core::Manifest, verified: bool) -> Strin
     let schema = if known {
         match tessera_core::validate_manifest(m) {
             Ok(()) => format!("schema={}✓", m.product),
+            // Not a failed validation: a rule from a newer format revision that this build can't
+            // evaluate (#873), so it reports neither pass nor fail.
+            Err(tessera_core::Error::NewerFormatFields { .. }) => {
+                format!("schema={}?(newer rules, not validated)", m.product)
+            }
             Err(_) => format!("schema={}✗", m.product),
         }
     } else {
@@ -1147,6 +1163,15 @@ pub fn ls(file: &Path, path: Option<&str>, full: bool, out: &mut dyn Write) -> R
                 Some(s) => {
                     writeln!(out, "{} v{} — {}", s.product, s.version, s.description)
                         .map_err(tessera_core::Error::from)?;
+                    let newer = schema_newer_rules(m);
+                    if !newer.is_empty() {
+                        writeln!(
+                            out,
+                            "  (rules from a newer format revision, not interpreted: {})",
+                            newer.join(", ")
+                        )
+                        .map_err(tessera_core::Error::from)?;
+                    }
                     for f in &s.fields {
                         let tier = if f.required {
                             "required"
@@ -2858,6 +2883,35 @@ mod tests {
         b.with_field("modality", serde_json::json!("PT"));
         let sealed = b.seal().unwrap();
         pack(&sealed, &[payload], path).unwrap();
+    }
+
+    /// An embedded schema with a rule from a newer format revision (#873) still displays what this
+    /// build understands, names the rule it doesn't, and the badge says "not validated" rather than
+    /// passing or failing it.
+    #[test]
+    fn a_newer_schema_rule_is_displayed_and_not_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.tsra");
+        let mut b = ProductBuilder::new("custom", "p", "d", "2024-01-01T00:00:00Z");
+        b.with_schema(serde_json::json!({
+            "product": "custom", "version": "2.0", "description": "d",
+            "fields": [{ "id": "site", "description": "s", "dtype": "string", "pattern": "^A" }]
+        }));
+        pack(&b.seal().unwrap(), &[], &path).unwrap();
+
+        let mut buf = Vec::new();
+        ls(&path, Some("schema"), false, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("custom v2.0") && s.contains("site"), "{s}");
+        assert!(s.contains("not interpreted: fields[0].pattern"), "{s}");
+
+        let mut buf = Vec::new();
+        tree(&path, false, false, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("schema=custom?(newer rules, not validated)"),
+            "{s}"
+        );
     }
 
     #[test]

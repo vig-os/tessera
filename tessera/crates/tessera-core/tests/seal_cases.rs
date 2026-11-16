@@ -6,7 +6,12 @@
 //! (must verify), and each with a field spliced in under the old seal (must fail), plus the encodings
 //! a struct round-trip loses (`"study": null`, an omitted `sources`, a nested newer field), a splice
 //! whose seal was deleted or nulled (tampered: a missing seal is not a pass), and text that is not
-//! I-JSON (duplicate keys, NaN, a lone surrogate: refused).
+//! I-JSON (duplicate keys, NaN, a lone surrogate, nesting past 127 levels: refused), records spelled
+//! as JSON arrays (a block, the producer, the whole manifest: refused, SPEC §5 objects only, #873),
+//! and a declared field of another JSON type or shape at any depth (`metadata: []`, `study: 5`, a
+//! block `kind` outside its names, a block `name` outside its grammar, a block without a digest:
+//! refused), so the reference reader's type table and the Rust types agree case by case. A top-level
+//! key spelling a nested newer field's path verifies and is reported quoted, apart from it (#873).
 
 use serde_json::Value;
 use tessera_core::{Error, Manifest};
@@ -28,6 +33,8 @@ fn rust_verdict(manifest: &str) -> (&'static str, Vec<String>) {
         Err(Error::UnsupportedVersion(_)) => ("refused", Vec::new()),
         // A block name listed twice (SPEC §5, #734), refused before any hash.
         Err(Error::DuplicateBlockName { .. }) => ("refused", Vec::new()),
+        // A block without a digest (SPEC §5: a sealed product's blocks carry one).
+        Err(Error::MissingDigest(_)) => ("refused", Vec::new()),
         Err(e) => panic!("unexpected error class: {e}"),
     }
 }
@@ -35,7 +42,7 @@ fn rust_verdict(manifest: &str) -> (&'static str, Vec<String>) {
 #[test]
 fn rust_reader_reaches_every_seal_case_verdict() {
     let cases = cases();
-    assert_eq!(cases.len(), 41, "seal-cases.json lost or gained cases");
+    assert_eq!(cases.len(), 65, "seal-cases.json lost or gained cases");
     let mut disagreements = Vec::new();
     for c in &cases {
         let name = c["name"].as_str().unwrap();
