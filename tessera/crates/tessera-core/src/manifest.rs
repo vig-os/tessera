@@ -346,9 +346,10 @@ impl Manifest {
     /// view, recording the view's [`newer_fields`](Self::newer_fields).
     fn parse(s: &str) -> crate::Result<(Self, Value)> {
         let object = crate::canonical::parse_strict(s)?;
-        let mut m: Manifest = crate::canonical::from_declared_form(&object)?;
+        let newer = newer_fields_of(&object);
+        let mut m: Manifest = crate::canonical::from_declared_form(&object, &newer)?;
         m.check_version()?;
-        m.newer_fields = newer_fields_of(&object);
+        m.newer_fields = newer;
         Ok((m, object))
     }
 

@@ -465,10 +465,11 @@ impl ProductSchema {
     /// [`crate::Error::Invalid`] if `v` is not a `ProductSchema`, as in [`from_value`](Self::from_value)
     /// (a known key of the wrong type, or a record in array form).
     pub fn view_of(v: &serde_json::Value) -> crate::Result<(Self, Vec<String>)> {
-        let schema = crate::canonical::from_declared_form(v).map_err(|e| {
+        let newer = newer_fields_of(v);
+        let schema = crate::canonical::from_declared_form(v, &newer).map_err(|e| {
             crate::Error::Invalid(format!("embedded schema is not a ProductSchema: {e}"))
         })?;
-        Ok((schema, newer_fields_of(v)))
+        Ok((schema, newer))
     }
 }
 

@@ -222,3 +222,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference reader, which reads manifests only, refuses the same in a manifest, and `corpus/seal-cases.json` gains four
   `refused` cases for both readers. No product a tessera writer sealed changes, and no corpus `manifest_hash` moves
   (#873).
+- `tessera-core`: the spelling check also covers a key the typed view drops as a default (`skip_serializing_if`).
+  Before, it compared only the keys the view wrote back, so a default unit variant spelled as an object (a collection
+  member's `"kind": {"product": null}`, a schema table's `"order": {"sequence_key": null}`, a contract column's
+  `"sensitivity": {"public": null}`) verified or validated under a seal of its own: a second sealed spelling of one
+  collection, with the same `content_hash`. Such a key's value must now be its default's own spelling (`null`, a
+  boolean, a number, a string, `[]` or `{}`), and anything else is refused like the forms above. The explicit default
+  itself (`"study": null`, `"kind": "product"`, `"sequence_key": []`) is still accepted, as SPEC §4 states (#873).

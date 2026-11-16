@@ -78,7 +78,10 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
     string. A reader MUST refuse the array form of a record (`["t","u8"]` for `{"name":"t","dtype":"u8"}`),
     which a positional deserialiser would read as the same record, and a name spelled as an object
     (`{"array": null}` for `"array"`): each is a second spelling of one value, and the array form hides its
-    keys from the forward-reading rule above, so an unknown rule inside it would be dropped unseen. Such a
+    keys from the forward-reading rule above, so an unknown rule inside it would be dropped unseen. The rule
+    holds for a key a writer omits when it holds its default (✱ in §5; a member `kind` of `product`, a table
+    `order` of `sequence_key`) too: written explicitly, its value is that default in its own spelling (`null`,
+    `"product"`, `[]`, `false`), never an object or array standing for it (`{"product": null}`). Such a
     manifest or collection is refused before any seal is checked; such an embedded schema is refused like
     one that doesn't parse.
 

@@ -67,80 +67,106 @@ pub fn parse_strict(s: &str) -> crate::Result<Value> {
 
 /// Deserialize a parsed value into the typed view `T`, **refusing any spelling but the declared
 /// one**: a struct only as a JSON object, a unit-variant name only as a string (SPEC §4 "objects
-/// only").
+/// only, one spelling per value"). `newer` is the declared-field walk's report for `v` (the dotted
+/// paths of the keys no type declares, ADR-0060 §2.2).
 ///
 /// serde accepts two spellings the sealed formats don't define. It reads a struct from a JSON array
 /// positionally (`["t","u8"]` for `{"name":"t","dtype":"u8"}`), and a unit enum variant from a
 /// one-key object (`{"table": null}` for `"table"`). Either is a second spelling of one sealed
-/// value, and an array's "keys" are invisible to the declared-field walk that names a newer
-/// writer's fields (ADR-0060 §2.2), so an unknown rule inside an array-form parent would be dropped
-/// instead of refused. So after `T` is built, its own serialization is walked alongside `v`:
-/// wherever either side holds an object or an array, the other must hold the same kind. That covers
-/// every type `T` is made of, internally tagged and untagged enums included, without a per-type
-/// list. Opaque values (`serde_json::Value` fields) serialize as received, so they never differ.
+/// value, and an array's "keys" are invisible to the declared-field walk, so an unknown rule inside
+/// an array-form parent would be dropped instead of refused. So after `T` is built, its own
+/// serialization is walked alongside `v`, **key by key of `v`**:
 ///
-/// The walk relies on `T` emitting every value the input held. A struct-typed field that is
-/// skipped on serialization (a `skip_serializing_if` on a struct, not on an `Option`, `Vec`, map,
-/// `bool` or unit enum) would not be checked; no type in the manifest, collection or product
-/// schema has one.
+/// - a key `T` wrote back: wherever either side holds an object or an array, the other must hold
+///   the same kind (this covers every type `T` is made of, internally tagged and untagged enums
+///   included, without a per-type list);
+/// - a key `T` did not write back and the walk named in `newer`: a newer writer's field, left to
+///   the caller (verified, warned about, never re-sealed);
+/// - any other key `T` did not write back is a declared key whose value `T` reduced to a default
+///   its serializer skips (`skip_serializing_if`: `None`, an empty list or map, `false`, a default
+///   unit variant such as a member `kind` of `product`). A non-empty object or array there is
+///   refused (`{"product": null}` for `"product"`). What is left (`null`, a boolean, a number, a
+///   string, `[]`, `{}`) is the default's own spelling, because serde coerces nothing between
+///   those: only `null` reads as `None`, `false` as `false`, `[]` as an empty list, `{}` as an
+///   empty map and the variant's name as the unit variant. The explicit default itself
+///   (`"study": null`, `"kind": "product"`, `"derived_from": []`) is accepted: SPEC §4 seals the
+///   object as received, so it is a present key, hashed as received, and not a newer field.
+///
+/// Opaque values (`serde_json::Value` fields) serialize as received, so they never differ.
 ///
 /// Manifest, collection and embedded product schema all deserialize through this.
 ///
 /// # Errors
 /// A [`serde_json::Error`]: `T`'s own deserialization error (a known field of the wrong type), or
 /// one naming the first value in an undeclared spelling by its dotted path (`blocks[0]`,
-/// `tables.events`, `members[0].role`).
-pub(crate) fn from_declared_form<T>(v: &Value) -> Result<T, serde_json::Error>
+/// `tables.events`, `members[0].role`, `members[0].kind`).
+pub(crate) fn from_declared_form<T>(v: &Value, newer: &[String]) -> Result<T, serde_json::Error>
 where
     T: serde::de::DeserializeOwned + Serialize,
 {
     let typed = T::deserialize(v)?;
-    if let Some((path, got, declared)) =
-        form_mismatch(v, &serde_json::to_value(&typed)?, String::new())
-    {
+    let written = serde_json::to_value(&typed)?;
+    if let Some((path, got, declared)) = form_mismatch(v, Some(&written), newer, String::new()) {
         let at = if path.is_empty() {
             "the top-level value".to_owned()
         } else {
             format!("`{path}`")
         };
         return Err(de::Error::custom(format!(
-            "{at} is {} where the format defines {} (one spelling per value: a record is an \
-             object, never an array; a name is a string, never an object)",
+            "{at} is {} where the format defines {declared} (one spelling per value: a record is \
+             an object, never an array; a name is a string, never an object)",
             json_type(got),
-            json_type(declared)
         )));
     }
     Ok(typed)
 }
 
-/// The first place, by dotted path, where `received` and `typed` (the serialization of the view
-/// built from `received`) disagree on being an object or an array, with both values. Keys `typed`
-/// omits (defaults) are not compared.
+/// The first place, by dotted path, where `received` is not in the spelling `typed` (the
+/// serialization of the view built from `received`) declares, with the received value and what the
+/// format defines there. `typed` is `None` for a key the serializer skipped: see
+/// [`from_declared_form`] for the rule, and `newer` for the keys exempt from it.
 fn form_mismatch<'a>(
     received: &'a Value,
-    typed: &'a Value,
+    typed: Option<&Value>,
+    newer: &[String],
     path: String,
-) -> Option<(String, &'a Value, &'a Value)> {
+) -> Option<(String, &'a Value, &'static str)> {
+    let Some(typed) = typed else {
+        return match received {
+            Value::Object(o) if !o.is_empty() => Some((path, received, SKIPPED_DEFAULT)),
+            Value::Array(a) if !a.is_empty() => Some((path, received, SKIPPED_DEFAULT)),
+            _ => None,
+        };
+    };
     match (received, typed) {
-        (Value::Object(r), Value::Object(t)) => t.iter().find_map(|(k, tv)| {
+        (Value::Object(r), Value::Object(t)) => r.iter().find_map(|(k, rv)| {
             let at = if path.is_empty() {
                 k.clone()
             } else {
                 format!("{path}.{k}")
             };
-            r.get(k).and_then(|rv| form_mismatch(rv, tv, at))
+            // `at` is spelled exactly as the newer-field walk spells its paths. A map key holding
+            // `.` or `[` could spell another key's path, but that key is then a newer field
+            // itself, which the caller refuses to validate or re-seal anyway.
+            match t.get(k) {
+                None if newer.contains(&at) => None,
+                tv => form_mismatch(rv, tv, newer, at),
+            }
         }),
-        (Value::Array(r), Value::Array(t)) => r
-            .iter()
-            .zip(t)
-            .enumerate()
-            .find_map(|(i, (rv, tv))| form_mismatch(rv, tv, format!("{path}[{i}]"))),
+        (Value::Array(r), Value::Array(t)) => {
+            r.iter().zip(t).enumerate().find_map(|(i, (rv, tv))| {
+                form_mismatch(rv, Some(tv), newer, format!("{path}[{i}]"))
+            })
+        }
         (Value::Object(_) | Value::Array(_), _) | (_, Value::Object(_) | Value::Array(_)) => {
-            Some((path, received, typed))
+            Some((path, received, json_type(typed)))
         }
         _ => None,
     }
 }
+
+/// What the format defines for a key whose value the serializer skips as a default.
+const SKIPPED_DEFAULT: &str = "a default, spelled as null, a boolean, a number, a string, [] or {}";
 
 fn json_type(v: &Value) -> &'static str {
     match v {

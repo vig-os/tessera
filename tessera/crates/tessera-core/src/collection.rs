@@ -401,9 +401,10 @@ impl Collection {
     /// Parse the text strictly into the object and its typed view, recording the newer fields.
     fn parse(s: &str) -> crate::Result<(Self, Value)> {
         let object = crate::canonical::parse_strict(s)?;
-        let mut c: Collection = crate::canonical::from_declared_form(&object)?;
+        let newer = newer_fields_of(&object);
+        let mut c: Collection = crate::canonical::from_declared_form(&object, &newer)?;
         c.check_version()?;
-        c.newer_fields = newer_fields_of(&object);
+        c.newer_fields = newer;
         Ok((c, object))
     }
 
@@ -426,8 +427,9 @@ impl Collection {
     /// [`crate::Error::Serde`] for malformed JSON, a **duplicate key** in any object
     /// ([`crate::canonical::parse_strict`]), a known field of the wrong type (an unknown member
     /// `kind` included), the collection, its `level` or a `members[i]` in array form instead of an
-    /// object, or a member's `role`/`kind` spelled as an object instead of a string (SPEC §4, one
-    /// spelling per value; the message names its path);
+    /// object, or a member's `role`/`kind` spelled as an object instead of a string, the default
+    /// `kind` (`product`, which a writer omits) included (SPEC §4, one spelling per value; the
+    /// message names its path);
     /// [`crate::Error::UnsupportedVersion`] for a newer major version.
     pub fn from_json(s: &str) -> crate::Result<Self> {
         Ok(Self::parse(s)?.0)

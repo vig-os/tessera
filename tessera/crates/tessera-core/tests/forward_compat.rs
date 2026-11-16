@@ -449,3 +449,157 @@ fn unit_variant_object_form_is_refused() {
         assert_form_refused(ProductSchema::from_value(&s), path, "an object", "a string");
     }
 }
+
+/// A key the serializer skips when it holds its default (`skip_serializing_if`) is still compared
+/// with what the view holds: before, the spelling check walked only the keys the view wrote back,
+/// so a default unit variant spelled as an object (`{"product": null}` for the member `kind`
+/// `"product"`) verified, under a seal of its own, as a second sealed spelling of one collection.
+#[test]
+fn a_skipped_default_spelled_as_an_object_is_refused() {
+    use tessera_core::ProductSchema;
+    let mut c = sealed_collection();
+    set(
+        &mut c,
+        &["members", "0", "kind"],
+        json!({ "product": null }),
+    );
+    reseal(&mut c);
+    assert_form_refused(verify(&c), "members[0].kind", "an object", "a default");
+
+    let mut s = base_schema();
+    for (at, value, path) in [
+        (
+            &["tables", "events", "order"][..],
+            json!({ "sequence_key": null }),
+            "tables.events.order",
+        ),
+        (
+            &["tables", "events", "columns", "0", "sensitivity"],
+            json!({ "public": null }),
+            "tables.events.columns[0].sensitivity",
+        ),
+    ] {
+        let mut s = s.clone();
+        set(&mut s, at, value);
+        assert_form_refused(
+            ProductSchema::from_value(&s),
+            path,
+            "an object",
+            "a default",
+        );
+    }
+    set(
+        &mut s,
+        &["tables", "events", "order"],
+        json!("sequence_key"),
+    );
+    ProductSchema::from_value(&s).expect("the default unit variant as its string");
+}
+
+/// One case per kind of `skip_serializing_if` the manifest, collection and schema types use. The
+/// explicit canonical default is a present key (SPEC §4: hashed as received, never a newer field),
+/// so it is accepted under a seal of its own; any other spelling of that default is refused.
+#[test]
+fn every_kind_of_skipped_default_accepts_only_its_own_spelling() {
+    use tessera_core::ProductSchema;
+    // (kind of skip, path, the explicit default, another spelling)
+    let collection: [(&str, &[&str], Value, Value); 3] = [
+        (
+            "unit variant",
+            &["members", "0", "kind"],
+            json!("product"),
+            json!({ "product": null }),
+        ),
+        ("Option::None", &["study"], Value::Null, json!({})),
+        (
+            "empty Vec",
+            &["members", "0", "derived_from"],
+            json!([]),
+            json!({}),
+        ),
+    ];
+    let sealed = sealed_collection();
+    for (kind, at, explicit, other) in collection {
+        let mut c = sealed.clone();
+        set(&mut c, at, explicit);
+        reseal(&mut c);
+        let got = verify(&c).unwrap_or_else(|e| panic!("{kind}: explicit default refused: {e}"));
+        assert!(
+            got.newer_fields().is_empty(),
+            "{kind}: {:?}",
+            got.newer_fields()
+        );
+        assert_ne!(
+            c["manifest_hash"], sealed["manifest_hash"],
+            "{kind}: a seal of its own"
+        );
+        assert_eq!(
+            c["content_hash"], sealed["content_hash"],
+            "{kind}: the same members"
+        );
+        set(&mut c, at, other);
+        reseal(&mut c);
+        assert!(verify(&c).is_err(), "{kind}: another spelling verified");
+    }
+
+    let manifest: [(&str, &str, Value, Value); 2] = [
+        ("empty map", "metadata", json!({}), json!([])),
+        ("empty Vec", "ingest_transform", json!([]), json!({})),
+    ];
+    let p = ProductBuilder::new("recon", "p", "d", TS).seal().unwrap();
+    let sealed: Value = serde_json::from_str(&p.to_json().unwrap()).unwrap();
+    for (kind, key, explicit, other) in manifest {
+        let mut m = sealed.clone();
+        m[key] = explicit;
+        reseal(&mut m);
+        let got = Manifest::from_json_verified(&m.to_string())
+            .unwrap_or_else(|e| panic!("{kind}: explicit default refused: {e}"));
+        assert!(got.newer_fields().is_empty(), "{kind}");
+        m[key] = other;
+        reseal(&mut m);
+        assert!(
+            Manifest::from_json_verified(&m.to_string()).is_err(),
+            "{kind}: other spelling"
+        );
+    }
+
+    let schema: [(&str, &[&str], Value, Value); 4] = [
+        (
+            "unit variant",
+            &["tables", "events", "order"],
+            json!("sequence_key"),
+            json!({ "sequence_key": null }),
+        ),
+        (
+            "Option::None",
+            &["fields", "0", "unit"],
+            Value::Null,
+            json!({}),
+        ),
+        (
+            "empty Vec",
+            &["tables", "events", "keys"],
+            json!([]),
+            json!({}),
+        ),
+        ("false", &["fields", "0", "inherit"], json!(false), json!(0)),
+    ];
+    for (kind, at, explicit, other) in schema {
+        let mut s = base_schema();
+        set(&mut s, at, explicit);
+        ProductSchema::from_value(&s).unwrap_or_else(|e| panic!("{kind}: explicit default: {e}"));
+        set(&mut s, at, other);
+        assert!(
+            ProductSchema::from_value(&s).is_err(),
+            "{kind}: another spelling validated"
+        );
+    }
+    let mut s = base_schema();
+    s["arrays"] = json!({});
+    ProductSchema::from_value(&s).expect("empty map: the explicit default");
+    s["arrays"] = json!([]);
+    assert!(
+        ProductSchema::from_value(&s).is_err(),
+        "empty map: another spelling validated"
+    );
+}
