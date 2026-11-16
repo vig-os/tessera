@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-26T13:46:38Z
-updated: 2026-10-30T01:38:41Z
+updated: 2026-11-09T15:33:09Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/681
-comments: 3
+comments: 4
 labels: bug, priority:backlog, area:io
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-30T08:02:26.213Z
+synced: 2026-11-16T09:00:44.301Z
 ---
 
 # [Issue 681]: [fix(io): Vortex 0.75 writer holds encoded segments until the footer (unbounded per-chunk fan-out)](https://github.com/vig-os/tessera/issues/681)
@@ -95,4 +95,13 @@ This issue stays open as the upstream track. With P-logical in place it no longe
 _Posted on October 30, 2026 at 01:38 AM_
 
 **Owner decision (2026-10-30): no upstream contribution for now.** P-logical (ADR-0064) bounds memory without any Vortex change, so there's no case for one. This stays a backlog record of the Vortex writer behaviour, together with its measurements and the option-F design. Reopen the question only if a use case needs a single physical Vortex file larger than `BLOCK_ROWS`.
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 9, 2026 at 03:33 PM_
+
+Re-checked against vortex 0.93.0 (PR #788, #635): **still present**. The chunked layout writer still collects every chunk's write future with no bound, `stream.buffered(usize::MAX).try_collect()` (`vortex-layout/src/layouts/chunked/writer.rs:87`), and the dict layout writer does the same (`vortex-layout/src/layouts/dict/writer.rs:247`). So encoded segments are still held until the footer. Peak memory under 0.93 was **not** measured in #788. The fix here is unchanged by the bump.
+
 

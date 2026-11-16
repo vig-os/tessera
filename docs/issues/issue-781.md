@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-08T12:02:29Z
-updated: 2026-11-09T03:32:36Z
+updated: 2026-11-16T00:56:37Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/781
-comments: 1
+comments: 2
 labels: feature, effort:large, area:core, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-09T09:04:20.979Z
+synced: 2026-11-16T09:00:17.020Z
 ---
 
 # [Issue 781]: [feat(io): keyed delta products over a base — upserts, tombstones and redirects, a newest-row-wins logical read, and compaction into a new sealed base](https://github.com/vig-os/tessera/issues/781)
@@ -72,4 +72,28 @@ There is no keyed delta semantics over a base: no product role for "these rows r
 _Posted on November 9, 2026 at 03:32 AM_
 
 **Owner ruling, 2026-11-09: one ADR decides both #781 and ADR-0036.** The #781 ADR must define delta products (upsert, tombstone, redirect, compaction, the `current` collection) in terms of ADR-0036's content-addressed objects and commits, or amend ADR-0036 explicitly. Tessera keeps one versioning story; a third, parallel one is ruled out. Review ADR-0036 (Proposed) first.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 16, 2026 at 12:56 AM_
+
+**Input for the #781 / ADR-0036 ADR: the leaf split rule and leaf naming after compaction** (agent, from the kit storage review nerdmachines/kit#97, 2026-11-16).
+
+kit wants the same mechanism as this issue for small, frequently edited keyed collections (tasks, edges, document blocks), so it reviewed how tessera's Merkle tree and ADR-0064's leaves behave under it. Two points for the ADR to decide. Neither asks to change streamed tables.
+
+**1. Splitting by row count defeats ADR-0036's block sharing after a compaction.**
+- Compaction writes a new base, partitioned by SPEC §5b at `BLOCK_ROWS`. An insert or delete at some key shifts the row-to-leaf assignment of every later row, so every later leaf gets a new digest and the new base shares nothing with the old one past that point. Updates in place do not shift anything.
+- At `BLOCK_ROWS` = 4 Mi this hardly matters: a 10⁸-row base is about 24 leaves and a daily delta touches most of them anyway.
+- It becomes the dominant cost when leaves are small (a small-row codec profile, see #869) or edits are clustered, which is kit's case. Then "the version should cost kilobytes" (ADR-0036's own motivation) is lost at every compaction.
+- Option for keyed, sorted tables: a **declared key-defined split rule**, cutting after a row whose key hash matches a declared pattern, with a minimum and maximum row count. Boundaries then move only where rows changed. It is still a pure function of the rows and declared constants, so "same input, same bytes" holds, and a fully compacted table is canonical for its row set. Readers already accept leaves of unequal row counts (ADR-0064 §2.6).
+
+**2. Positional leaf names and markers churn when a middle leaf splits or merges.**
+- With a key-defined rule, a local edit can split or merge one leaf. Every later leaf keeps its payload digest but changes its name (`<table>/{index:04}`) and its sealed `Partition.index` (ADR-0064 §1, §2).
+- The blocks stay shared, because the repository addresses them by digest. What churns is everything that names a leaf: the manifest entries, each `<table>/<leaf>.cidx` sidecar name, and #780's key → (product, leaf, row range) aux index.
+- Question for the ADR: keep positional naming for such tables and accept the churn (with aux indexes referring to leaves by digest, not by name), or give a keyed partition its own marker, for example the leaf's key bounds, as an amendment to ADR-0064's marker and child-class scheme.
+
+**Not affected:** `content_hash` stays the mountain range over the ordered block digests (ADR-0028); the tree stays integrity-only. A history-only-extended proof for a lineage would be the same construction one level up, over the sequence of `manifest_hash` values.
+
 

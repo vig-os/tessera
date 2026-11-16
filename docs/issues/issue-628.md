@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-18T22:23:57Z
-updated: 2026-11-09T15:33:12Z
+updated: 2026-11-16T00:35:15Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/628
-comments: 4
+comments: 5
 labels: feature, question, priority:medium, effort:large, area:core, area:io, area:integrity, adr
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-10T09:13:27.392Z
+synced: 2026-11-16T09:00:47.358Z
 ---
 
 # [Issue 628]: [perf(format): string-heavy tables are ~3x larger than Parquet — normalize forbids Vortex's zstd compact encoding](https://github.com/vig-os/tessera/issues/628)
@@ -81,5 +81,26 @@ _Posted on November 8, 2026 at 11:44 AM_
 _Posted on November 9, 2026 at 03:33 PM_
 
 Re-checked against vortex 0.93.0 (PR #788, #635): the vortex-side blocker is gone. `vortex.zstd` is in the `core2025.06` edition, so it is admissible under the table edition tessera now enables (`TABLE_EDITION = core2026.08.3`). #788 deliberately keeps the 0.75 codec set (no zstd compiled in, compact preset with ALP/ALPRD, integer Pco, Delta and OnPair excluded), so whether string columns get zstd is now **tessera's choice**: a codec-set decision, and a format event of its own (it moves table bytes), not a vortex limitation.
+
+
+---
+
+# [Comment #5]() by [gerchowl]()
+
+_Posted on November 16, 2026 at 12:35 AM_
+
+**Split check (agent, from the kit storage review nerdmachines/kit#97, 2026-11-16).** The first triage comment asked for the whole-block-read part of this issue to be split out. A new issue was about to be filed for it, but the tracker already covers it, so none was opened. Nothing links those issues back here yet:
+
+| Part of the whole-block-read concern | Tracked in |
+|---|---|
+| `Reader::read_block` reads and re-hashes the whole block for every column; 4.6–5× the bytes of vendor HDF5 on column and time-range tasks | #823 |
+| Projection, filter pushdown, chunk pruning and byte-range reads inside a table block, local first | #654, #666 (ADR-0062 PR1) |
+| The same over object storage | #668 (ADR-0062 PR3) |
+| Remote open, verify and projection over HTTP/S3 | #777 |
+| Why a verified read still fetches whole blocks: digests exist only per block | #670, #672 |
+
+The data point from this issue that those do not carry: a projected or filtered query over object storage fetched about 812 KiB per GET at about 2k rows, against 0–98 KiB for Parquet with row groups and page indexes. It is copied to #823.
+
+If the architect agrees with this mapping, this issue can be narrowed to the encoding decision alone (`vortex.zstd` or another string codec in the normalised set), which after #788 is tessera's own codec-set choice.
 
 

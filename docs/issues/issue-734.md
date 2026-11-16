@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-11-02T12:27:20Z
-updated: 2026-11-02T12:27:46Z
+updated: 2026-11-16T02:35:24Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/734
-comments: 0
+comments: 1
 labels: bug
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-03T08:59:45.756Z
+synced: 2026-11-16T09:00:34.977Z
 ---
 
 # [Issue 734]: [core(name): duplicate block names are not refused at seal; ADR-0063 does not state uniqueness](https://github.com/vig-os/tessera/issues/734)
@@ -43,4 +43,16 @@ typed error, plus a negative test per door. Readers keep accepting what they acc
 Whether `DuplicateIndex` then stays as a defensive variant for hand-sealed products is part of the amendment.
 
 Refs: #733
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 15, 2026 at 04:02 PM_
+
+**Escalated: this is a verify bypass, not only a seal-time gap.** It was reproduced at 38b6d61 (PR #862 round-3 adversarial review). The manifest lists block `data` twice. The second entry carries digest blake3("NOT THE BYTES"), and the manifest is properly re-sealed. `tessera verify` prints `OK … verified (2 blocks)`, while the in-repo reference reader (`corpus/reference_reader`) reports `ok=False [('data', True), ('data', False)]`.
+
+**Cause:** `stream_block` resolves a digest with `.find`, which takes the first match. `check_members` collapses the listed names into a set. As a result, the second sealed digest is never checked against any bytes.
+
+**Fix direction:** refuse duplicate block names in the manifest, both at seal time and in `check_members`/verify. State the uniqueness rule in ADR-0063 and the SPEC. Add a test that fails today. The repro generator is in the architect's scratchpad (r3c/scripts, case v01); it will be turned into a Rust fixture.
 

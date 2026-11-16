@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-11T01:35:23Z
-updated: 2026-11-11T03:04:41Z
+updated: 2026-11-16T00:35:16Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/823
-comments: 1
+comments: 2
 labels: feature, priority:medium, area:io
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-11T08:50:31.380Z
+synced: 2026-11-16T08:59:56.021Z
 ---
 
 # [Issue 823]: [perf(io): reader reads 4.6–5× more bytes than vendor HDF5 on column/time-range tasks — whole-block read + re-hash per column()](https://github.com/vig-os/tessera/issues/823)
@@ -74,4 +74,17 @@ Changed
 _Posted on November 11, 2026 at 03:04 AM_
 
 Correction to the original text: `Reader::open` is not a cause. It verifies only the manifest's three hashes and touches no payload (`container.rs:333-417`; open takes ≈ 4 ms, measured). The doc comment at `container.rs:332` ("full seal verification") is misleading. All of the extra bytes come from `read_block` reading and re-hashing the whole all-column block on every `column()` call. The body is updated accordingly.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 16, 2026 at 12:35 AM_
+
+**Cross-reference (agent, from the kit storage review nerdmachines/kit#97, 2026-11-16).** #628 reported the same whole-block read from the object-storage side, and its triage asked for that part to be split out. It maps onto this issue, so no new one was opened.
+
+The data point from #628, for the object-storage case: on an event table with a JSON text column, a projected or filtered query fetched about 812 KiB per GET at about 2k rows, against 0–98 KiB for Parquet with row groups and page indexes (measured at `e771a9c`).
+
+Related: #666 and #668 (the streaming provider's byte-range reads, local then object store), #777 (remote range reads), #670 and #672 (verifying a projected read without fetching the whole block).
+
 

@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-29T02:48:42Z
-updated: 2026-10-29T02:48:42Z
+updated: 2026-11-15T14:30:37Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/690
-comments: 0
+comments: 1
 labels: area:io
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-29T08:04:01.216Z
+synced: 2026-11-16T09:00:43.781Z
 ---
 
 # [Issue 690]: [fix(core,io): refuse Windows device names and case-fold collisions in block-name paths](https://github.com/vig-os/tessera/issues/690)
@@ -37,4 +37,28 @@ exploded products are routinely moved to case-insensitive filesystems.
    leaf rule.
 
 Acceptance: a test per hazard; ADR-0063's "Limitations" section updated.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 15, 2026 at 02:30 PM_
+
+Update from PR #862 (round 2 of the GHSA-m665-v7pm-7grj fix). Full verification now refuses an archive whose
+`aux/` names collide up to ASCII letter case or break the leaf rule (`aux/a` next to `aux/a/b`), and the aux
+writers (`add_aux_members` / `write_aux_members`, `pack_dir`) refuse to write such a set. That covers the
+unsealed half. Three hazards stay open here, all still grammar-valid:
+
+1. **Case-fold collisions among sealed `blocks/` names** (`Volume` next to `volume`). The verifier leaves these
+   alone: the grammar admits them and old products may hold them, so refusing them is a format decision for this
+   issue (seal-time rule, reader rule, or both), not something to add silently to `verify`.
+2. **Windows device names**, as in item 1 above, for `aux/` names as well as block names (`aux/CON` verifies
+   today).
+3. **A trailing `.` or space on a segment.** Windows drops it, so `aux/y.` and `aux/y` (or `blocks/v.` and
+   `blocks/v`) are one file there. The grammar permits a trailing `.`.
+
+An adversarial pass on Linux found all four readers (unzip, Python `zipfile`, `bsdtar` streaming, 7z) extract
+identical trees for `aux/CON`, `aux/y` + `aux/y.` and dotfiles. So these diverge only on Windows or on
+case-insensitive file systems, consistent with this issue's scope.
+
 

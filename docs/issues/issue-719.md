@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-30T02:06:59Z
-updated: 2026-11-13T11:55:26Z
+updated: 2026-11-15T09:06:18Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/719
-comments: 3
+comments: 4
 labels: none
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-14T08:34:37.146Z
+synced: 2026-11-16T09:00:38.152Z
 ---
 
 # [Issue 719]: [feat(format): schema-declared write-time aggregation views as derived blocks (exact, deterministic, parallel)](https://github.com/vig-os/tessera/issues/719)
@@ -237,4 +237,26 @@ The earlier "~24 ns/event, flat across threads" figure was this fixed cost sprea
 _Posted on November 13, 2026 at 11:55 AM_
 
 From the MorePET/visionx-rs architect, 2026-11-13: this issue and #720 block the production path of the visionx-rs QC product (MorePET/visionx-rs#18, and #139, which freezes the dense oracle until the views match it cell for cell). Are they scheduled? A rough position in the queue would let us plan the QC roll-up work.
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 15, 2026 at 09:06 AM_
+
+Downstream evidence from MorePET/visionx-rs, which reinforces items 4, 6 and the time-bucket key. visionx built a recipe interpreter that does this proposal's job early (visionx-rs#222, ADR-0003 D1) and will compile to these view declarations once #719 and #720 land.
+
+**1. Closed time-keyed partials must count toward the resident bound, not only open ones.** visionx's first time-keyed implementation (visionx-rs PR #256) bounded only *open* per-worker partials, `(T+1) × (per-second + bucket)`. Each worker still collected every partial it *closed* during a chunk until the ordered merge consumed it. Measured on the Lu-177 cascade recipe (8,328 B per second row and 526,336 B per 10 s bucket row, dense):
+
+| Input | Chunks | Threads | Measured peak | Budget |
+|---|---|---|---|---|
+| sparse contiguous 400 s scan | 1 MiB | 1 / 2 / 4 / 8 | 8.5 / 16.4 / 26 / 26 MB | 1.07 / 1.60 / 2.67 / 4.81 MB |
+| 16 KiB input whose time-marker counter jumps at every marker | 4 KiB | 4 | **1.09 GB** | 2.67 MB |
+
+The worst case grows with markers per chunk (up to chunk_bytes/8), not with threads or duration. Admission (item 6) therefore has to bound open, closed and in-flight partials. The visionx fix is an ADR-0003 amendment (visionx-rs PR #258): sparse per-chunk closed logs with resident `(T + 1)(S + B) + W·T·L(chunk_bytes)`.
+
+**2. The time-bucket key must be a sparse keyed table (item 3 is right). Owner decision visionx-rs#257.** With dense rows, output is O((duration + segments) × row size): about 14.6 MB for a real 4 min bed, but 1.09 GB for the adversarial input above. No output bound can be admitted beforehand. Sparse rows make output O(input). The visionx owner ruled sparse rows, with no fail-closed segment cap, so that #222 PR (m) maps onto this proposal without reshaping.
+
+**3. Source quirks need a general carrier.** The segment splits above come from a vendor clock quirk. visionx keeps quirk handling at its decoder boundary and records it as a typed annotation. We filed the general mechanism as #863, which views must carry through their partials and pyramid levels.
+
 

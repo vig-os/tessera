@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-15T03:36:38Z
+updated: 2026-11-16T00:13:10Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-15T08:48:33.289Z
+synced: 2026-11-16T09:00:49.501Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -24,6 +24,7 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 
 The following updates are currently rate-limited. To force their creation now, click on a checkbox below.
 
+ - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-digest -->chore(deps): update actions/create-github-app-token digest to 64ab729
  - [ ] <!-- unlimit-branch=renovate/dicom-0.x-lockfile -->chore(deps): update rust crate dicom to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/dicom-transfer-syntax-registry-0.x-lockfile -->chore(deps): update rust crate dicom-transfer-syntax-registry to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/zarrs-0.x-lockfile -->chore(deps): update rust crate zarrs to v0.23.14
@@ -41,13 +42,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unlimit-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.54.1
  - [ ] <!-- unlimit-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
- - [ ] <!-- unlimit-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.93
- - [ ] <!-- unlimit-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.93
- - [ ] <!-- unlimit-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.93
- - [ ] <!-- unlimit-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.93
- - [ ] <!-- unlimit-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.93
- - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.93
- - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.93
+ - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.6.0
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.27.0
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
@@ -66,7 +61,6 @@ The following updates are currently rate-limited. To force their creation now, c
 
 The following updates have all been created. To force a retry/rebase of any, click on a checkbox below.
 
- - [ ] <!-- rebase-branch=renovate/crate-zip-vulnerability -->[chore(deps): update rust crate zip to v9.0.5 [security]](../pull/689)
  - [ ] <!-- rebase-branch=renovate/dtolnay-rust-toolchain-digest -->[chore(deps): update dtolnay/rust-toolchain digest to 3900882](../pull/558)
  - [ ] <!-- rebase-branch=renovate/flate2-1.x-lockfile -->[chore(deps): update rust crate flate2 to v1.1.11](../pull/560)
  - [ ] <!-- rebase-branch=renovate/rust-futures-monorepo -->[chore(deps): update rust crate futures to v0.3.34](../pull/561)
@@ -84,7 +78,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 <details><summary>cargo (5)</summary>
 <blockquote>
 
-<details><summary>tessera/Cargo.toml (40)</summary>
+<details><summary>tessera/Cargo.toml (42)</summary>
 
  - `serde 1` → [Updates: `1`]
  - `serde_json 1` → [Updates: `1`]
@@ -98,17 +92,19 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `age 0.11` → [Updates: `0.12`]
  - `time 0.3` → [Updates: `0.3`]
  - `proptest 1` → [Updates: `1`]
- - `zip 9` → [Updates: `9`]
+ - `zip 9.0.5` → [Updates: `9.0.5`]
  - `zarrs 0.23` → [Updates: `0.23`]
  - `bytes 1`
  - `half 2`
- - `vortex-file 0.75` → [Updates: `0.93`]
- - `vortex-array 0.75` → [Updates: `0.93`]
- - `vortex-btrblocks 0.75` → [Updates: `0.93`]
- - `vortex-buffer 0.75` → [Updates: `0.93`]
- - `vortex-io 0.75` → [Updates: `0.93`]
- - `vortex-layout 0.75` → [Updates: `0.93`]
- - `vortex-session 0.75` → [Updates: `0.93`]
+ - `vortex-file 0.93`
+ - `vortex-array 0.93`
+ - `vortex-btrblocks 0.93`
+ - `vortex-buffer 0.93`
+ - `vortex-edition 0.93`
+ - `vortex-io 0.93`
+ - `vortex-layout 0.93`
+ - `vortex-scan 0.93`
+ - `vortex-session 0.93`
  - `futures 0.3` → [Updates: `0.3`]
  - `clap 4`
  - `png 0.17` → [Updates: `0.18`]
@@ -171,7 +167,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 </blockquote>
 </details>
 
-<details><summary>github-actions (7)</summary>
+<details><summary>github-actions (8)</summary>
 <blockquote>
 
 <details><summary>.github/actions/nix-deps-cache/action.yml (2)</summary>
@@ -212,6 +208,13 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 </details>
 
+<details><summary>.github/workflows/promote-main.yml (2)</summary>
+
+ - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
+ - `actions/create-github-app-token v3@bcd2ba49218906704ab6c1aa796996da409d3eb1` → [Updates: `v3`]
+
+</details>
+
 <details><summary>.github/workflows/release-nix.yml (2)</summary>
 
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
@@ -237,7 +240,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 <details><summary>tessera/bench/ecosystems/pyproject.toml (8)</summary>
 
- - `numpy ==2.5.0` → [Updates: `==2.5.4`]
+ - `numpy ==2.5.0` → [Updates: `==2.5.5`]
  - `h5py ==3.16.0`
  - `zarr ==3.2.1` → [Updates: `==3.4.2`]
  - `numcodecs ==0.16.5` → [Updates: `==0.17.1`]

@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-16T21:45:17Z
-updated: 2026-10-17T08:08:34Z
+updated: 2026-11-15T21:30:11Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/573
-comments: 1
+comments: 3
 labels: bug, area:core, area:integrity
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-18T06:56:51.974Z
+synced: 2026-11-16T09:00:47.985Z
 ---
 
 # [Issue 573]: [bug(core): a reader drops unknown manifest fields, so a correctly sealed newer product fails verify as tampering](https://github.com/vig-os/tessera/issues/573)
@@ -76,4 +76,28 @@ Two more cases from a fresh reviewer's probe on dev fa581f5 (PR #586 audit), lik
 - A manifest that **omits `sources`**, and one with **`"study": null`**, are both valid per SPEC §4 (docs/SPEC.md:46-53). The Python reference reader verifies them; the Rust reader reports `Integrity` (manifest_hash mismatch), because serde defaults/normalises the field before re-hashing.
 - On the unknown-field cases the two readers disagree the other way: Rust B (field added + resealed) → Err, C (field added, old seal) → Ok (field silently dropped). Reference reader: B ok=True, C ok=False.
 The fix should hash the canonical form of the **received** JSON object, and its tests should include all four cases plus a cross-reader conformance check.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 15, 2026 at 04:02 PM_
+
+**Mirror case, found in the PR #862 round-3 review at 38b6d61.** A `manifest.json` with an extra top-level key (`"forged": true`) passes `tessera verify`: the output is OK, and `unzip -p … manifest.json` shows the key. The in-repo reference reader reports `ok=False`.
+
+**Cause:** this is the same root cause as this issue. `Manifest` has no `deny_unknown_fields`, and the seal is computed over the re-serialised struct rather than over the bytes in the file. So the unknown keys a newer writer adds are dropped, which is #573 as reported. Unknown keys that a tamperer adds are dropped the same way, which is the new case: the seal covers bytes other than what other readers see.
+
+**Fix direction:** decide the rule once.
+- Either the seal covers the raw manifest (JCS over the parsed JSON `Value`, keeping unknown fields), so both newer writers and tampering are handled correctly.
+- Or `manifest.json` must be exactly its canonical serialisation.
+
+Both cases need a test that fails today. This is integrity-critical, so it should go before alpha.6.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 15, 2026 at 08:33 PM_
+
+Owner decisions 2026-11-15: alpha.6 is cut after #573 and #734 land, as one security release; one GitHub security advisory covers ≤ alpha.5 (the zip reader differential plus the manifest-seal bypasses), drafted for owner review; #869: record the codec-profile id beside the edition.
 
