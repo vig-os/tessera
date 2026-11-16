@@ -532,6 +532,15 @@ impl Builder {
     }
 }
 
+/// Why a number can't go into a sealed JSON document (SPEC §1, #886), and what to do instead: the
+/// same rule and advice as [`tessera_core::Error::InexactInteger`], for a value not yet in JSON.
+fn inexact(kind: &str, repr: &str) -> String {
+    format!(
+        "{kind} {repr} exceeds ±(2^53−1) (I-JSON, RFC 7493 §2.2): a sealed JSON number is an \
+         IEEE-754 double, which can't hold this integer exactly; write it as a string"
+    )
+}
+
 /// `"an"` before a vowel, for error messages that name a Python type (`an int`, `a set`).
 fn article(word: &str) -> &'static str {
     if word.starts_with(['a', 'e', 'i', 'o', 'u']) {
@@ -739,22 +748,24 @@ impl JsonWalk {
         } else if value.is_instance_of::<PyBool>() {
             Value::Bool(value.extract()?)
         } else if value.is_instance_of::<PyInt>() {
-            if let Ok(i) = value.extract::<i64>() {
-                Value::from(i)
-            } else if let Ok(u) = value.extract::<u64>() {
-                Value::from(u)
-            } else {
-                return Err(bad(format!(
-                    "int {} does not fit in 64 bits",
-                    value.repr()?
-                )));
+            // An int beyond 64 bits is beyond ±(2^53−1) too: one refusal, with the same fix.
+            let n = (value.extract::<i64>().map(Value::from))
+                .or_else(|_| value.extract::<u64>().map(Value::from));
+            match n {
+                Ok(n) if tessera_core::canonical::check_i_json(&n).is_ok() => n,
+                _ => return Err(bad(inexact("int", &value.repr()?.to_string()))),
             }
         } else if value.is_instance_of::<PyFloat>() {
             let f: f64 = value.extract()?;
             let n = serde_json::Number::from_f64(f);
-            Value::Number(
-                n.ok_or_else(|| bad(format!("float {f} is not finite, and JSON has no NaN/inf")))?,
-            )
+            let n =
+                Value::Number(n.ok_or_else(|| {
+                    bad(format!("float {f} is not finite, and JSON has no NaN/inf"))
+                })?);
+            if tessera_core::canonical::check_i_json(&n).is_err() {
+                return Err(bad(inexact("float", &value.repr()?.to_string())));
+            }
+            n
         } else if value.is_instance_of::<PyString>() {
             Value::String(json_str(value, &path, "str")?)
         } else if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {

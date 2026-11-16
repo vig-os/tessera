@@ -173,6 +173,36 @@ with tempfile.TemporaryDirectory() as td:
         assert "listed more than once" in str(e), f"refused for the wrong reason: {e}"
     assert not out.exists(), "a refused pack must write nothing"
 
+# #886: a sealed JSON number is a double (I-JSON, RFC 7493 §2.2), so an integer beyond ±(2^53−1)
+# can't be sealed exactly. Metadata refuses it with the fix to apply (write it as a string), naming
+# the value; nothing is written and nothing is converted. (`with_generation` refuses such an int
+# when it is passed: tests/provenance.py.)
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "big.tsra"
+    b = tessera.Builder("recon", "big", "integer beyond 2^53", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "CT"}')
+    b.set_field("daq_start_ns", "1730000000000000000")
+    try:
+        b.pack(str(out))
+        raise AssertionError("sealed an integer beyond 2^53")
+    except tessera.TesseraError as e:
+        want = "metadata.daq_start_ns = 1730000000000000000 exceeds ±(2^53−1) (I-JSON, RFC 7493 §2.2)"
+        assert want in str(e) and "write it as a string" in str(e), str(e)
+    assert not out.exists(), "a refused pack must write nothing"
+# Written as a string, the same value seals and reads back exactly.
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "big-str.tsra"
+    b = tessera.Builder("recon", "big", "integer as a string", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "CT"}')
+    b.set_field("daq_start_ns", '"1730000000000000000"')
+    b.pack(str(out))
+    assert (
+        tessera.open(out).manifest()["metadata"]["daq_start_ns"]
+        == "1730000000000000000"
+    )
+
 # str + b1 columns through the ergonomic reads (#421): str crashed _ndarray
 # ("<str" is not a dtype) and b1 silently decoded as int8 instead of bool_.
 els = ["He", "Li", "", "Beryllium"]  # empty string is the edge worth pinning
