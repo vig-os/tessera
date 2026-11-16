@@ -32,7 +32,7 @@ pub fn verify_manifest(manifest_json: &str) -> bool {
 pub fn verify_signature(manifest_json: &str, signature_json: &str, pubkey_hex: &str) -> bool {
     let (Ok(m), Ok(sig), Ok(vk)) = (
         Manifest::from_json_verified(manifest_json),
-        serde_json::from_str::<Signature>(signature_json),
+        Signature::from_json(signature_json),
         signing::verifying_key_from_hex(pubkey_hex),
     ) else {
         return false;

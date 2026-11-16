@@ -23,6 +23,23 @@ pub enum Error {
     #[error("canonicalization: {0}")]
     Canonicalization(String),
 
+    /// A JSON number in a sealed document (manifest with its embedded schema and metadata,
+    /// collection, `id_inputs`, signature envelope) is an integer beyond ±(2^53−1), the range in
+    /// which an IEEE-754 double holds every integer exactly ([`crate::canonical::MAX_EXACT_INTEGER`]).
+    ///
+    /// RFC 8785 (JCS) serialises every number as a double and requires its input to be I-JSON
+    /// (RFC 7493 §2.2), so two such integers can canonicalise to the same bytes (`9007199254740993`
+    /// and `9007199254740992` do): the seal would not pin the value. Writers refuse it before any
+    /// hash is computed and readers refuse it on parse (SPEC §1, §4; #886). Carry the value as a
+    /// decimal string instead. `path` names the value from the document's root (rendered as
+    /// [`crate::canonical::check_i_json`] documents); `value` is the number as parsed.
+    #[error(
+        "{path} = {value} exceeds ±(2^53−1) (I-JSON, RFC 7493 §2.2): a sealed JSON number is an \
+         IEEE-754 double (RFC 8785 §3.2.2.3), which can't hold this integer exactly; write it as a \
+         string"
+    )]
+    InexactInteger { path: String, value: String },
+
     /// A recomputed hash did not match the one recorded in the manifest — tampering, corruption,
     /// or a producer bug. `what` names the field (`id` / `content_hash` / `manifest_hash`).
     #[error("integrity: {what} mismatch — expected {expected}, got {actual}")]

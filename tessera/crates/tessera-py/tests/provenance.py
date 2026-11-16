@@ -108,7 +108,7 @@ assert got == {"tool": "anatomist", "version": "0.1.0"}, got
 config = {
     "step": "trees",
     "energy_window_keV": [425, 650],
-    "seed": 2**63 - 1,
+    "seed": 2**53 - 1,  # the largest int a sealed JSON number holds exactly (SPEC §1)
     "window": (0.5, 1.5),  # a tuple seals as a JSON array
     "dry_run": False,
     "note": None,

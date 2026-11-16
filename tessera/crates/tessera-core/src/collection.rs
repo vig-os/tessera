@@ -434,6 +434,8 @@ impl Collection {
     /// object, or a member's `role`/`kind` spelled as an object instead of a string, the default
     /// `kind` (`product`, which a writer omits) included (SPEC §4, one spelling per value; the
     /// message names its path);
+    /// [`crate::Error::InexactInteger`] for a number that is an integer beyond ±(2^53−1) anywhere in
+    /// it (SPEC §1, I-JSON: no seal pins it; the message names its path);
     /// [`crate::Error::UnsupportedVersion`] for a newer major version.
     pub fn from_json(s: &str) -> crate::Result<Self> {
         Ok(Self::parse(s)?.0)

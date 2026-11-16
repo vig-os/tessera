@@ -11,9 +11,92 @@ use serde_json::{Map, Value};
 
 use crate::field_path::FieldPath;
 
+/// The largest integer magnitude a sealed JSON number may hold: 2^53 − 1, the bound below which an
+/// IEEE-754 double represents every integer exactly (I-JSON, RFC 7493 §2.2).
+pub const MAX_EXACT_INTEGER: u64 = (1 << 53) - 1;
+
 /// Serialize `value` to canonical RFC 8785 JCS bytes.
+///
+/// Every sealed document is canonicalised here, so this is where a writer refuses input that is
+/// not I-JSON: the value is checked by [`check_i_json`] before any byte is produced or hashed, so a
+/// `u64`/`i64` from Rust code beyond [`MAX_EXACT_INTEGER`] fails instead of sealing approximately.
+///
+/// # Errors
+/// [`crate::Error::InexactInteger`] for an integer beyond ±[`MAX_EXACT_INTEGER`];
+/// [`crate::Error::Canonicalization`] if `value` has no JSON form.
 pub fn to_bytes<T: Serialize>(value: &T) -> crate::Result<Vec<u8>> {
-    serde_jcs::to_vec(value).map_err(|e| crate::Error::Canonicalization(e.to_string()))
+    let canon = |e: serde_json::Error| crate::Error::Canonicalization(e.to_string());
+    check_i_json(&serde_json::to_value(value).map_err(canon)?)?;
+    // Serialised from `value` itself, not from the checked `Value`: the bytes are exactly what they
+    // were before the check existed (an `f32` field keeps its own shortest form).
+    serde_jcs::to_vec(value).map_err(canon)
+}
+
+/// Refuse a JSON number that RFC 8785 cannot canonicalise exactly: an integer whose magnitude
+/// exceeds [`MAX_EXACT_INTEGER`] (I-JSON, RFC 7493 §2.2, the input rule of RFC 8785 §3.1).
+///
+/// JCS writes every number as an IEEE-754 double (RFC 8785 §3.2.2.3), so `9007199254740993` and
+/// `9007199254740992` canonicalise to the same bytes and one seal would verify both. A number is
+/// refused when its value, as parsed, is such an integer. For a token that spells an integer
+/// (`9007199254740993`, `9007199254740993.0`, `9.007199254740993e15`, `1e300`, `-9007199254740993`)
+/// that is exactly "the token's integer is beyond ±(2^53−1)": rounding to the nearest double is
+/// monotone and 2^53−1 and 2^53 are both doubles, so an integer token lands beyond the bound if and
+/// only if it is beyond it. A token with a fractional part (`1.5`, `-0.0`) is accepted, unless it
+/// rounds to a double beyond the bound (`9007199254740992.5` reads as `9007199254740992`): every
+/// double there is an integer, so the fraction is already lost and the token collides the same
+/// way; it is refused too. `-0` is the integer 0.
+///
+/// The error names the first offending number by its path from `value`'s root (`metadata.t_ns`,
+/// `blocks[0].spec.fill_value`, the rendering [`crate::Error::NewerFormatFields`] uses).
+///
+/// # Errors
+/// [`crate::Error::InexactInteger`] naming the path and the number.
+pub fn check_i_json(value: &Value) -> crate::Result<()> {
+    match inexact_integer(value, &FieldPath::root()) {
+        None => Ok(()),
+        Some((path, n)) => Err(crate::Error::InexactInteger {
+            path: if path.is_root() {
+                "the top-level value".to_owned()
+            } else {
+                path.to_string()
+            },
+            value: n.to_string(),
+        }),
+    }
+}
+
+/// The first number in `value`, in key order, that [`check_i_json`] refuses, with its path.
+fn inexact_integer<'a>(
+    value: &'a Value,
+    path: &FieldPath,
+) -> Option<(FieldPath, &'a serde_json::Number)> {
+    match value {
+        Value::Number(n) if beyond_exact(n) => Some((path.clone(), n)),
+        Value::Array(a) => a
+            .iter()
+            .enumerate()
+            .find_map(|(i, v)| inexact_integer(v, &path.index(i))),
+        Value::Object(o) => o.iter().find_map(|(k, v)| inexact_integer(v, &path.key(k))),
+        _ => None,
+    }
+}
+
+/// Whether `n` is an integer beyond ±[`MAX_EXACT_INTEGER`]. A double above 2^53 − 1 in magnitude
+/// has no fractional bits, so for the `f64` form "beyond" alone means "an integer beyond".
+fn beyond_exact(n: &serde_json::Number) -> bool {
+    if let Some(u) = n.as_u64() {
+        u > MAX_EXACT_INTEGER
+    } else if let Some(i) = n.as_i64() {
+        i.unsigned_abs() > MAX_EXACT_INTEGER
+    } else {
+        // Exact: 2^53 − 1 is a double. `as_f64` is `Some` for every number without
+        // `arbitrary_precision`, which this workspace doesn't enable. The token-to-double step must
+        // round correctly, as Python's `float` does, or the readers disagree near the bound: that is
+        // serde_json's `float_roundtrip`, which `serde_jcs` enables for the whole build
+        // (`numbers_a_double_holds_exactly_are_accepted` pins it with `…991.4999…`).
+        n.as_f64()
+            .is_some_and(|f| f.abs() > MAX_EXACT_INTEGER as f64)
+    }
 }
 
 /// Canonical bytes of `value`, hashed with blake3 → `"blake3:<hex>"`.
@@ -58,12 +141,22 @@ pub fn bytes_without(object: &Value, key: &str) -> crate::Result<Vec<u8>> {
 /// so two readers would see different values under one seal. Hashed input is therefore refused
 /// rather than guessed at. Keys compare after unescaping (`"a"` and `"\u0061"` are the same key).
 ///
+/// The rest of I-JSON's MUSTs (RFC 7493 §2) are enforced here too, so every sealed document a
+/// reader accepts is valid JCS input:
+/// - §2.1 UTF-8 only, no unpaired surrogate: the text is a `&str`, and `serde_json` refuses an
+///   escaped lone surrogate (`"\ud800"`) in a string or key;
+/// - §2.2 numbers: [`check_i_json`] refuses an integer beyond ±(2^53−1); `NaN`/`Infinity` aren't
+///   JSON and a number beyond a double's range (`1e400`) is a parse error;
+/// - §2.3 unique names: the duplicate-key refusal above.
+///
 /// # Errors
-/// [`crate::Error::Serde`] for malformed JSON or a duplicate key (the message names the key).
+/// [`crate::Error::Serde`] for malformed JSON, a lone surrogate or a duplicate key (the message
+/// names the key); [`crate::Error::InexactInteger`] for an integer beyond ±(2^53−1).
 pub fn parse_strict(s: &str) -> crate::Result<Value> {
     let mut de = serde_json::Deserializer::from_str(s);
     let StrictValue(v) = StrictValue::deserialize(&mut de)?;
     de.end()?;
+    check_i_json(&v)?;
     Ok(v)
 }
 
@@ -261,5 +354,103 @@ mod tests {
             String::from_utf8(super::to_bytes(&a).unwrap()).unwrap(),
             r#"{"a":2,"b":1,"nested":{"x":2,"y":1}}"#
         );
+    }
+
+    fn refused_at(text: &str) -> (String, String) {
+        match super::parse_strict(text) {
+            Err(crate::Error::InexactInteger { path, value }) => (path, value),
+            other => panic!("{text}: expected InexactInteger, got {other:?}"),
+        }
+    }
+
+    /// The defect (#886): both integers canonicalise to the same bytes, so a seal over one
+    /// verified the other. Each is now refused instead, in every spelling of an integer.
+    #[test]
+    fn integers_beyond_2_pow_53_collide_under_jcs_and_are_refused() {
+        let a = super::to_bytes(&json!(9_007_199_254_740_992_u64 - 1)).unwrap();
+        assert_eq!(
+            a, b"9007199254740991",
+            "the largest exact integer is sealed"
+        );
+        for token in [
+            "9007199254740992",
+            "9007199254740993",
+            "-9007199254740993",
+            "9007199254740993.0",
+            "9.007199254740993e15",
+            "90071992547409930e-1",
+            "1e300",
+            "-1E+300",
+            "18446744073709551616",
+            "9007199254740992.5",
+            "9007199254740991.5",
+        ] {
+            let (path, _) = refused_at(&format!(r#"{{"metadata":{{"t":[0,{token}]}}}}"#));
+            assert_eq!(path, "metadata.t[1]", "{token}");
+        }
+        assert_eq!(refused_at("9007199254740993").0, "the top-level value");
+    }
+
+    #[test]
+    fn numbers_a_double_holds_exactly_are_accepted() {
+        for token in [
+            "9007199254740991",
+            "-9007199254740991",
+            "9007199254740991.0",
+            "9.007199254740991e15",
+            "-0",
+            "-0.0",
+            "1.5",
+            "1e-300",
+            "0.1",
+            "4503599627370495.5",
+            // Correctly rounded down to 2^53 − 1; an approximate parser rounds it up to 2^53.
+            "9007199254740991.4999999999999999999999",
+        ] {
+            let v = super::parse_strict(token).unwrap_or_else(|e| panic!("{token}: {e}"));
+            super::to_bytes(&v).unwrap_or_else(|e| panic!("{token}: {e}"));
+        }
+    }
+
+    /// A writer refuses before any byte is hashed, whatever Rust type holds the integer.
+    #[test]
+    fn writers_refuse_an_inexact_integer_from_rust_values() {
+        #[derive(serde::Serialize)]
+        struct Doc {
+            id_inputs: std::collections::BTreeMap<String, i64>,
+        }
+        let doc = Doc {
+            id_inputs: [("daq_start_ns".to_owned(), 1_730_000_000_000_000_000)].into(),
+        };
+        let e = super::hash(&doc).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "id_inputs.daq_start_ns = 1730000000000000000 exceeds ±(2^53−1) (I-JSON, RFC 7493 \
+             §2.2): a sealed JSON number is an IEEE-754 double (RFC 8785 §3.2.2.3), which can't \
+             hold this integer exactly; write it as a string"
+        );
+        for v in [json!(u64::MAX), json!(i64::MIN), json!(1e300_f64)] {
+            let object = json!({ "manifest_hash": "x", "extra": { "v": v } });
+            assert!(
+                matches!(
+                    super::hash_without(&object, "manifest_hash"),
+                    Err(crate::Error::InexactInteger { ref path, .. }) if path == "extra.v"
+                ),
+                "{v}"
+            );
+        }
+    }
+
+    /// The other I-JSON MUSTs (RFC 7493 §2.1): an escaped lone surrogate is refused in a value and
+    /// in a key. (Duplicate names, §2.3: `tests/seal_cases.rs::duplicate_keys_are_refused_by_name`.)
+    #[test]
+    fn lone_surrogates_are_refused() {
+        for text in [r#"{"a":"\ud800"}"#, r#"{"a":"\udc00x"}"#, r#"{"\ud83d":1}"#] {
+            assert!(
+                matches!(super::parse_strict(text), Err(crate::Error::Serde(_))),
+                "{text}"
+            );
+        }
+        assert!(super::parse_strict(r#"{"a":"😀"}"#).is_ok());
     }
 }
