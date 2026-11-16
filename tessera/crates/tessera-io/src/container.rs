@@ -1615,15 +1615,44 @@ fn write_repacked_archive(
 /// It still parses strictly ([`Manifest::from_json`]): a manifest that repeats a key is not one
 /// manifest, so there is no single claim to name, and it fails with the parse error.
 pub fn read_manifest_unverified(path: &Path) -> Result<Manifest> {
+    Manifest::from_json(&manifest_text(path)?)
+}
+
+/// The lineage `id` a `.tsra`'s manifest **claims**, read without verifying anything else — for
+/// naming a product that failed [`Reader::open`] (a provenance walk pointing at a corrupt parent).
+///
+/// Like [`read_manifest_unverified`] the claim is **untrusted**, but it needs only the top-level
+/// `id` string, so it is also read from a manifest the format refuses for its numbers: one an older
+/// writer sealed with an integer beyond ±(2^53−1) (SPEC §1, #886). That manifest has passed the
+/// duplicate-key check ([`tessera_core::canonical::parse_strict`] refuses its numbers only after),
+/// so it still holds exactly one `id`. Text that repeats a key or isn't JSON has no single claim and
+/// fails with the parse error.
+///
+/// # Errors
+/// The container and parse errors of [`read_manifest_unverified`], or [`Error::Container`] when the
+/// manifest holds no string `id`.
+pub fn read_claimed_id(path: &Path) -> Result<String> {
+    let mj = manifest_text(path)?;
+    let v = match tessera_core::canonical::parse_strict(&mj) {
+        Err(Error::InexactInteger { .. }) => serde_json::from_str(&mj)?,
+        other => other?,
+    };
+    v.get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Container("manifest.json claims no string `id`".into()))
+}
+
+/// The text of a `.tsra`'s `manifest.json`, unverified. Held to its local header like every member
+/// read: an untrusted manifest is still read the one way every zip reader would read it, or not at all.
+fn manifest_text(path: &Path) -> Result<String> {
     let mut archive = open_tsra_archive(File::open(path)?)?;
     let mut mj = String::new();
-    // Held to its local header like every member read: an untrusted manifest is still read the one
-    // way every zip reader would read it, or not at all.
     open_member(&mut archive, MANIFEST_ENTRY, || {
         "missing manifest.json".into()
     })?
     .read_to_string(&mut mj)?;
-    Manifest::from_json(&mj)
+    Ok(mj)
 }
 
 /// Explode a `.tsra` into a directory: `manifest.json` + `blocks/<name>` + `aux/<name>` (the opt-in

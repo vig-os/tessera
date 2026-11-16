@@ -2862,6 +2862,49 @@ mod tests {
         );
     }
 
+    /// A parent an older writer sealed with an integer no seal pins (`9007199254740993`, SPEC §1, #886)
+    /// is refused, and a refused product found by the search is CORRUPT, never absent at exit 0.
+    #[test]
+    fn a_parent_refused_for_an_inexact_integer_is_corrupt_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let parent_path = d.join("parent.tsra");
+        sample_tsra(&parent_path);
+        let parent = Reader::open(&parent_path).unwrap().manifest().clone();
+        let mut cb = ProductBuilder::new("recon", "child", "d", "2024-01-01T00:00:00Z");
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![4, 4, 4], "int16"));
+        cb.add_block(&vol).unwrap();
+        cb.add_source(
+            tessera_core::provenance::Source::new("derived_from", &parent.id)
+                .with_content_hash(parent.manifest_hash.clone().unwrap()),
+        );
+        let payload = BlockPayload::new(
+            "volume".parse().unwrap(),
+            serde_json::to_vec(&vol.spec).unwrap(),
+        );
+        pack(&cb.seal().unwrap(), &[payload], &d.join("child.tsra")).unwrap();
+
+        edit_manifest(&parent_path, |m| {
+            m["metadata"]["daq_start_ns"] = serde_json::json!(9_007_199_254_740_993_u64);
+        });
+        assert!(matches!(
+            Reader::open(&parent_path),
+            Err(tessera_core::Error::InexactInteger { .. })
+        ));
+        let opts = provenance::Opts {
+            collection: None,
+            search: vec![],
+            depth: None,
+            json: false,
+            full: false,
+        };
+        let mut out = Vec::new();
+        let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(v.corrupt_parents, 1, "{text}");
+        assert!(!v.complete, "{text}");
+    }
+
     /// A pinned parent that is **corrupt** must not be reported as merely *missing* (#452 review).
     ///
     /// The two invite opposite responses. "I could not find it" sends an operator looking for another
@@ -3013,6 +3056,15 @@ mod tests {
     /// Rewrite a sealed `.tsra`'s `manifest.json` so its recorded `manifest_hash` no longer matches its
     /// contents, leaving the container itself well-formed. Repacks the zip STORED, as the format requires.
     fn tamper_manifest_metadata(path: &std::path::Path) {
+        // Change sealed content while leaving `manifest_hash` as recorded.
+        edit_manifest(path, |m| {
+            m["description"] = serde_json::json!("edited after sealing");
+        });
+    }
+
+    /// Rewrite a `.tsra`'s `manifest.json` with `edit`, keeping the recorded hashes and the container
+    /// well-formed (repacked STORED).
+    fn edit_manifest(path: &std::path::Path, edit: impl Fn(&mut serde_json::Value)) {
         let bytes = std::fs::read(path).unwrap();
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let mut entries = Vec::new();
@@ -3023,8 +3075,7 @@ mod tests {
             std::io::Read::read_to_end(&mut f, &mut buf).unwrap();
             if name == "manifest.json" {
                 let mut m: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-                // Change sealed content while leaving `manifest_hash` as recorded.
-                m["description"] = serde_json::json!("edited after sealing");
+                edit(&mut m);
                 buf = serde_json::to_vec_pretty(&m).unwrap();
             }
             entries.push((name, buf));

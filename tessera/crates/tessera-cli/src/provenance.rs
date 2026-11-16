@@ -52,7 +52,7 @@ pub struct FileResolver {
 struct Corrupt {
     path: PathBuf,
     detail: String,
-    /// The lineage `id` the file *claims*, read without verifying (`read_manifest_unverified`). Untrusted
+    /// The lineage `id` the file *claims*, read without verifying (`read_claimed_id`). Untrusted
     /// by construction — used only to point the operator at the file from the edge that needed it, never
     /// to satisfy that edge. `None` when even the claim is unreadable.
     claims_id: Option<String>,
@@ -94,18 +94,22 @@ impl FileResolver {
     /// file that **is** a product (right magic, manifest present) whose manifest fails verification is
     /// corruption, and swallowing it reported a tampered parent as merely *absent*, at exit 0 (#452
     /// review). The split is exact, from `Reader::from_reader`: bad magic / no mimetype / missing
-    /// `manifest.json` raise `Container`, while a manifest that does not verify raises `Integrity` and a
-    /// malformed one raises `Serde`.
+    /// `manifest.json` raise `Container`, while a manifest that does not verify raises `Integrity`, a
+    /// malformed one raises `Serde`, and one holding an integer no seal pins (an older writer's
+    /// `9007199254740993`, SPEC §1, #886) raises `InexactInteger`: refused, so corrupt, never absent.
     fn add_path(&mut self, path: &Path) {
         match Reader::open(path) {
             Ok(r) => self.add(r.manifest().clone(), path.to_path_buf()),
-            Err(e @ (Error::Integrity { .. } | Error::BlockIntegrity { .. } | Error::Serde(_))) => {
+            Err(
+                e @ (Error::Integrity { .. }
+                | Error::BlockIntegrity { .. }
+                | Error::Serde(_)
+                | Error::InexactInteger { .. }),
+            ) => {
                 // Read the identity it claims so the edge that needed this parent can name the file.
                 // Untrusted: a claim by something that already failed verification, good for pointing
                 // and nothing else.
-                let claims_id = tessera_io::read_manifest_unverified(path)
-                    .ok()
-                    .map(|m| m.id);
+                let claims_id = tessera_io::read_claimed_id(path).ok();
                 self.corrupt.push(Corrupt {
                     path: path.to_path_buf(),
                     detail: e.to_string(),
