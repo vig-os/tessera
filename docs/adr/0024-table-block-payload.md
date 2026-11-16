@@ -1,7 +1,7 @@
 # ADR-0024 — Table block payload: a single deterministic Vortex file
 
-Status: **Accepted** (2026-06-26; amended 2026-11-09, vortex 0.93 format event, and 2026-11-15, the sealed
-`TableSpec.edition`, #635) · Relates to:
+Status: **Accepted** (2026-06-26; amended 2026-11-09, vortex 0.93 format event, 2026-11-15, the sealed
+`TableSpec.edition`, #635, and 2026-11-16, the sealed `TableSpec.codec_profile`, #869) · Relates to:
 ADR-0020 (identity/hashing), ADR-0022 (`.tsra` container), ADR-0023 (array payload). Implements the table half of ROADMAP
 **P3 / S5** (`#203`).
 
@@ -146,3 +146,47 @@ bump above, so the corpus goldens move once.
   follows the repo's additive-field convention for sealed specs, `#[serde(default,
   skip_serializing_if = ...)]`, as `Column::nullable`, `Column::referencing` and `TableSpec::partition`
   did. `tessera/docs/SPEC.md` §5b states it normatively.
+
+## Amendment — the codec profile is a sealed `TableSpec` field (2026-11-16, #869)
+
+Owner decision of 2026-11-15 on #869: "Record it". The 2026-11-16 comment on #869 adds that a table profile is a
+named, fixed set of constants, never a choice the writer makes at run time from the workload.
+
+- **Field.** `TableSpec.codec_profile: Option<String>`, an id of the form `tessera-table-v<N>`. The first is
+  `tessera-table-v1`: the codec set of §Codec set above (the compact preset, so Pco is kept; ALP, ALPRD, integer
+  Pco, Delta and OnPair excluded; under `TABLE_EDITION = core2026.08.3`), together with the compressor of the
+  pinned Vortex (`gerchowl/vortex@5c55cf7`, 0.93.0) that chooses among those schemes.
+- **Who sets it.** The writer, through the path that records the edition: `table::sealed_spec` records
+  `tessera_io::table::TABLE_CODEC_PROFILE` on every table block, partition leaf and sequenced-table leaf, and refuses
+  a spec that names another profile (`Error::Codec`, before anything is staged on the streamed paths). A caller
+  leaves it `None`. A caller that encodes with the public `table::encode` and builds its own `BlockRef` must set it
+  itself, as for the edition.
+- **What it promises.** With the edition: **same input + same edition + same profile → same bytes.** Two table
+  blocks of the same rows that record the same edition and the same profile must have the same payload bytes, so a
+  re-encode can be checked against a product from the product alone, without knowing the writer build. The edition
+  alone was a necessary condition (previous amendment); edition and profile together name every input to the
+  payload bytes besides the rows, except the layout constants (`ROWS_PER_GROUP`, `BLOCK_ROWS`), which are frozen
+  for the format and change only as a format event of their own. Which constants a later profile may vary is not
+  decided here (#869).
+- **What it does not promise.** Decodability. A reader decodes by the wire IDs in the file, which the edition
+  bounds (the forward-read limit above). Readers MUST NOT refuse a table block because its profile is unknown (a
+  newer writer's) or absent. Absent means the block was sealed before this amendment: every product of
+  `0.1.0-alpha.1`–`alpha.5` and of `dev` before #869. Such a block reads and verifies and keeps its manifest bytes,
+  because `None` is omitted when serialized.
+- **When it moves.** `N` is bumped on any change to the codec set (an exclusion, an added or removed scheme, the
+  preset, the enabled edition) and on a Vortex bump that changes the compressor's choices. Each is a format event of
+  this ADR, recorded in a dated amendment, with the corpus goldens regenerated. A future profile for small, often
+  changed rows (#869's second comment) would be another id with its own fixed constants.
+- **Drift guard.** `tessera-io`'s `codec_set_matches_the_pinned_codec_profile` pins `TABLE_EDITION` and the built
+  table compressor as it prints itself (its schemes in the order it tries them, each with the mode the edition
+  refined it to, and its root exclusions) as a literal next to the profile id. A change to the exclusions, the
+  preset, the edition, or a Vortex bump that adds, drops, reorders or reconfigures a scheme fails the test with the
+  instruction to bump the profile and amend this ADR. A change of heuristics inside an unchanged scheme does not show
+  in that print; the corpus goldens catch it, because the table bytes move, and the same rule then applies. The
+  print uses Rust type names, so a Vortex rename alone fails the test too; that is re-pinned without a bump once the
+  regenerated goldens show the table bytes did not move.
+- **What it binds.** It sits in `blocks[].spec`, so `manifest_hash` covers it and `content_hash` and the block
+  digests don't change. Regenerating the goldens moved `manifest_hash` of every table-bearing product and nothing
+  else (listed in the PR for #869). No schema version moves, for the reason in the previous amendment's Schema
+  convention bullet. `tessera inspect` shows the edition and the profile under each table block, `-` for an absent
+  key. `tessera/docs/SPEC.md` §5b states the field normatively.

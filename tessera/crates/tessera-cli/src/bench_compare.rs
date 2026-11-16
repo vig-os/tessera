@@ -214,6 +214,7 @@ fn table_spec(data: &TableData, rows: usize) -> TableSpec {
         row_index: None,
         partition: None,
         edition: None,
+        codec_profile: None,
     }
 }
 

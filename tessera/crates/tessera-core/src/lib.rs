@@ -180,6 +180,7 @@ mod tests {
             row_index: Some("ms".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let events = TableBlock::new("events_3p", spec);
         let mut b = ProductBuilder::new(

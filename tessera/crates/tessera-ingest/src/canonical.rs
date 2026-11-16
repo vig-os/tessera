@@ -132,6 +132,7 @@ impl CanonicalTable {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         })
     }
 

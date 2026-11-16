@@ -27,6 +27,7 @@ fn sample_product() -> Manifest {
         row_index: Some("ms".into()),
         partition: None,
         edition: None,
+        codec_profile: None,
     };
     let events = TableBlock::new("events_3p", spec);
     let mut b = ProductBuilder::new("recon", "DP06", "DP06 CT+events", "2023-12-08T00:00:00Z");
@@ -132,6 +133,7 @@ fn tamper_one_block_changes_content_hash() {
             row_index: Some("ms".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         },
     );
     b.add_block(&events).unwrap();
@@ -155,6 +157,7 @@ fn block_reorder_changes_content_hash() {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         },
     );
     let mut a = ProductBuilder::new("p", "n", "d", "2023-12-08T00:00:00Z");
@@ -276,7 +279,7 @@ proptest! {
             .map(|(i, _)| ArrayBlock::new(format!("a{i}"), ArraySpec::new(vec![2, 2, 2], "int16"))).collect();
         let tables: Vec<_> = kinds.iter().enumerate().filter(|(_, k)| !**k)
             .map(|(i, _)| TableBlock::new(format!("t{i}"),
-                TableSpec { columns: vec![Column { name: "c".into(), dtype: "f4".into(), codec: None, ..Default::default() }], rows: i as u64, row_index: None, partition: None, edition: None })).collect();
+                TableSpec { columns: vec![Column { name: "c".into(), dtype: "f4".into(), codec: None, ..Default::default() }], rows: i as u64, row_index: None, partition: None, edition: None, codec_profile: None })).collect();
         for a in &arrays { b.add_block(a).unwrap(); }
         for t in &tables { b.add_block(t).unwrap(); }
         let m = b.seal().unwrap();

@@ -53,6 +53,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   older reader, because `BlockRef.spec` is kept as raw JSON. But the table bytes it marks do: an older reader can't
   decode them (the forward-read limit under **Changed** below). `TableSpec` has no `Default`
   and isn't `#[non_exhaustive]`, so a struct literal outside tessera stops compiling until it names the field.
+- **Breaking for `TableSpec` struct literals, `tessera-core` / `tessera-io` / `tessera-cli`:** `TableSpec` gains
+  `codec_profile: Option<String>`, the tessera codec profile a table block was written with (ADR-0024's 2026-11-16
+  amendment, #869): the codec set (which of the edition's schemes the compressor may choose from) and the pinned
+  Vortex compressor, named `tessera-table-v<N>`. `tessera-io`'s writer records `table::TABLE_CODEC_PROFILE`
+  (`"tessera-table-v1"`) beside the edition on every table block, partition leaf and sequenced-table leaf, and refuses
+  a spec that names another profile with `Error::Codec`. Build specs with `codec_profile: None`. With the edition it
+  makes "same input + same edition + same profile → same bytes" checkable from the product alone; it says nothing
+  about decodability, and readers never refuse a block whose profile is unknown or absent (every product before
+  this change). It is in the manifest, not the payload, so it moves `manifest_hash` of every table-bearing product
+  and leaves `content_hash` and the block digests as they are; the goldens (`corpus/corpus.json`, `corpus/files`,
+  `corpus/ingest-corpus.json`, the `logical_tables` walkthrough's `scan.tsra`, tessera-py's `partitioned_pairs.tsra`)
+  are regenerated. `tessera inspect` prints `edition <id>  codec_profile <id>` under each table block, `-` for an
+  absent key. A test pins the table compressor's configuration against the profile, so a codec-set change that
+  doesn't bump the profile fails CI.
 - `tessera-io`: `StreamWriter::open_sequenced_table_on` opens a `SequencedTable`, a table lane that any number of
   threads push numbered batches into (`push(&self, writer, seq, batch)`, `mark_done`, `close(expected_count)`), sealed
   byte for byte as the batches in `seq` order whatever order they arrive in (ADR-0065 §7.2–§7.3, #812). Its gate is a

@@ -232,6 +232,18 @@ optional `row_index`.
   bytes but not sufficient, since the edition bounds which encodings the writer may use, not which it picks
   (that is the writer's codec set, ADR-0024 §Codec set, and the pinned Vortex compressor, both changed only as
   a format event).
+- **Codec profile.** `TableSpec.codec_profile` (optional string, `tessera-table-v<N>`, today
+  `"tessera-table-v1"`) names the writer's **codec set**: which of the edition's schemes the compressor may choose
+  from, together with the pinned Vortex compressor that chooses among them *(ADR-0024, 2026-11-16 amendment)*. A
+  writer MUST set it to the profile it encoded with, on every table block and partition leaf, beside `edition`, and
+  MUST NOT record a profile it did not encode with. Like `edition` it is bound by `manifest_hash` and not by
+  `content_hash`. **Same input + same edition + same profile → same bytes**: two table blocks of the same rows that
+  record the same edition and the same profile MUST have the same payload bytes. The profile says nothing about
+  decodability, which the edition governs. A reader MUST NOT refuse a table block because its profile is
+  **unknown** or **absent**; it decodes such a block as any other. Absent means the block predates the field
+  (every product before #869, `0.1.0-alpha.5` included); the key is then omitted, never written as `null`, and the
+  block's manifest bytes are unchanged. A profile id is bumped on any change to the codec set or on a Vortex change
+  to the compressor's choices, each a format event.
 - **Forward-read limit.** Reading is backward-compatible only: a newer reader decodes older table blocks, but
   an older reader can't be assumed to decode newer ones. Decoding a table block written under an edition needs
   a Vortex at or above that edition's minimum library version (for `core2026.08.3`, Vortex 0.85). In tessera

@@ -82,9 +82,9 @@ fn write_legacy_events(dir: &Path) -> (PathBuf, Manifest) {
 
 /// A product written by vortex 0.75 before the 0.93 table-byte event (ADR-0024's 2026-11-09
 /// amendment) still verifies against its sealed digests and reads its rows back. It predates
-/// `TableSpec::edition` (the 2026-11-15 amendment): its specs carry no `edition` key, parse as
-/// "no edition recorded", and `Reader::open` re-verifies `id`, `content_hash` and `manifest_hash`
-/// over its manifest unchanged.
+/// `TableSpec::edition` (the 2026-11-15 amendment) and `TableSpec::codec_profile` (2026-11-16):
+/// its specs carry neither key, parse as "none recorded", and `Reader::open` re-verifies `id`,
+/// `content_hash` and `manifest_hash` over its manifest unchanged.
 #[test]
 fn the_legacy_fixture_reads_identically() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_FIXTURE);
@@ -92,8 +92,15 @@ fn the_legacy_fixture_reads_identically() {
     r.verify_payloads("legacy").unwrap();
     for b in &r.manifest().blocks {
         assert!(b.spec.get("edition").is_none(), "{}: {}", b.name, b.spec);
+        assert!(
+            b.spec.get("codec_profile").is_none(),
+            "{}: {}",
+            b.name,
+            b.spec
+        );
         let spec: TableSpec = serde_json::from_value(b.spec.clone()).unwrap();
         assert_eq!(spec.edition, None, "{}", b.name);
+        assert_eq!(spec.codec_profile, None, "{}", b.name);
     }
     assert_eq!(
         r.manifest().manifest_hash.as_deref(),
@@ -181,6 +188,7 @@ fn gap_leaves() -> Vec<(BlockRef, BlockPayload)> {
                 row_index: None,
                 partition: Some(Partition { index, last }),
                 edition: None,
+                codec_profile: None,
             };
             let data: TableData = vec![("t".into(), ColumnData::U64(vec![1, 2, 3]))];
             table_block(&format!("pairs/{index:04}"), &spec, &data).unwrap()

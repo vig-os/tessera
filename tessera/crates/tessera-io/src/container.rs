@@ -2177,6 +2177,7 @@ mod tests {
             row_index: Some("ms".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         // The valid payload is exactly what the block digest is computed over (the spec, in the
         // spike — a real Vortex backend stores encoded column chunks with the same property).
@@ -2239,6 +2240,7 @@ mod tests {
             row_index: Some("ms".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let good = serde_json::to_vec(&spec).unwrap();
         let events = TableBlock::new("events_3p", spec);

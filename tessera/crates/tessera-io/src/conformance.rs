@@ -163,6 +163,7 @@ pub fn fixtures() -> Vec<Fixture> {
             row_index: Some("t".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..N as u64).collect())),
@@ -217,6 +218,7 @@ pub fn fixtures() -> Vec<Fixture> {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let roi_data: TableData = vec![
             ("label".into(), ColumnData::U32((0..8u32).collect())),

@@ -6,8 +6,30 @@ name          lm-3p
 timestamp     2024-01-01T00:00:00Z
 producer      tessera/0.0.0
 content_hash  blake3:b8c5176eed20a216f9fcd1dd768fb786b073c99bd99f1b498f99442c691620e2
-manifest_hash blake3:b843524cab909c93c31e675f7db31a1c36f5326d2a45cb1ebc220c59d4b69241
+manifest_hash blake3:c9a56e24e28b2b7b8192d992b40f8f99dc328b5c73ffdaea32d374be16c9ebd7
 blocks        1
   - events               Table blake3:8e510d9e0778c6a4cc109ea09ab10a5982a0856453befdad55c3f73aa84a6781
+      edition core2026.08.3  codec_profile tessera-table-v1
+
+```
+
+A product sealed before #635 (vortex 0.75) records neither key, shown as `-`; it reads normally.
+
+```
+$ tessera inspect ../tessera-io/tests/fixtures/legacy_flat_events.tsra
+tessera [..] · product=listmode
+id            blake3:02f94990a581c874316b15c39771b1afffe5908c43e02cce3a4a885286de0b7e
+name          legacy
+timestamp     2024-01-01T00:00:00Z
+producer      tessera/0.0.0
+content_hash  blake3:c1115417dcf7aba23ee3e9d50c6d193011b9d0201ffad7a528ff03ab572dd39a
+manifest_hash blake3:498da59e89047908a03c79a49f155a90cfed3a7cacd9281f3f4472063d49aa31
+blocks        3
+  - events_0000          Table blake3:c91ad96d46c18a12732f88b3681903f104627dc55012a8fe0512bbf2bb9cca1b
+      edition -  codec_profile -
+  - events_0001          Table blake3:a5aea5e700f46dc535c1d3636a456fe2068f50ae9220eeda67e6f21c8f8895f0
+      edition -  codec_profile -
+  - events_0002          Table blake3:d588a4cbf3a60e11c306cdc8c281609fb8f8559efb293e317a5421660b4f3109
+      edition -  codec_profile -
 
 ```

@@ -873,6 +873,7 @@ pub fn to_coo(data: &ArrayData, fill: i64) -> Option<(TableSpec, TableData)> {
         row_index: Some("idx".into()),
         partition: None,
         edition: None,
+        codec_profile: None,
     };
     let tdata: TableData = vec![
         ("idx".into(), ColumnData::U64(idx)),

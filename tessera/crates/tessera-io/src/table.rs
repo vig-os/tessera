@@ -756,32 +756,85 @@ fn new_session(rt: &CurrentThreadRuntime) -> VortexSession {
 /// how a reader knows which edition a block needs; naming it in the decode error is #871.
 pub const TABLE_EDITION: EditionId = CORE_2026_08_3;
 
+/// The tessera **codec profile** every table block is written with, sealed beside
+/// [`TABLE_EDITION`] as [`TableSpec::codec_profile`] (ADR-0024, 2026-11-16 amendment, #869).
+///
+/// It names the codec set of [`deterministic_table_compressor`] (which of the edition's schemes
+/// the compressor may choose from: today Pco kept, ALP, ALPRD, integer Pco, Delta and OnPair
+/// excluded) together with the pinned Vortex compressor that chooses among them. With the
+/// edition it makes "same input + same edition + same profile → same bytes" checkable from the
+/// product alone.
+///
+/// Bump `N` in `tessera-table-v<N>` on any change to the codec set (an exclusion, a scheme, the
+/// preset) and on a Vortex bump that changes the compressor's choices; each is a format event,
+/// recorded in ADR-0024. The test `codec_set_matches_the_pinned_codec_profile` fails when the
+/// compressor's configuration or [`TABLE_EDITION`] changes and this constant and its pin don't,
+/// and says to bump it.
+///
+/// The profile promises determinism of bytes, not decodability: readers decode by edition and
+/// never refuse a block for an unknown or absent profile.
+pub const TABLE_CODEC_PROFILE: &str = "tessera-table-v1";
+
 /// The spec a table block is sealed with: `spec` with [`TableSpec::edition`] set to
-/// [`TABLE_EDITION`], the edition this writer encodes under (ADR-0024, 2026-11-15 amendment).
+/// [`TABLE_EDITION`], the edition this writer encodes under (ADR-0024, 2026-11-15 amendment), and
+/// [`TableSpec::codec_profile`] set to [`TABLE_CODEC_PROFILE`], the codec set it encodes with
+/// (ADR-0024, 2026-11-16 amendment).
 ///
 /// Every table [`BlockRef`] this crate builds goes through here, so every table block and
-/// partition leaf it seals records its edition. A caller's spec normally leaves `edition` as
-/// `None`. One that already names [`TABLE_EDITION`] is accepted unchanged.
+/// partition leaf it seals records both. A caller's spec normally leaves both `None`. One that
+/// already names this writer's own value is accepted unchanged.
 ///
 /// # Errors
-/// [`Error::Codec`] if `spec.edition` names any other edition: this writer can only write its own,
-/// and recording the other name over bytes it didn't produce would make the field a lie.
+/// [`Error::Codec`] if `spec.edition` or `spec.codec_profile` names any other value: this writer
+/// can only write its own, and recording another name over bytes it didn't produce would make the
+/// field a lie.
 pub(crate) fn sealed_spec(spec: &TableSpec) -> Result<TableSpec> {
     let edition = TABLE_EDITION.to_string();
-    match spec.edition.as_deref() {
-        None => {}
-        Some(e) if e == edition => {}
-        Some(other) => {
-            return Err(Error::Codec(format!(
-                "table spec names vortex edition `{other}`, but this writer writes `{edition}` \
-                 (tessera_io::table::TABLE_EDITION); leave `edition` unset and the writer records it"
-            )))
-        }
-    }
     Ok(TableSpec {
-        edition: Some(edition),
+        edition: Some(WriterOwned::EDITION.record(spec.edition.as_deref(), &edition)?),
+        codec_profile: Some(
+            WriterOwned::CODEC_PROFILE
+                .record(spec.codec_profile.as_deref(), TABLE_CODEC_PROFILE)?,
+        ),
         ..spec.clone()
     })
+}
+
+/// A [`TableSpec`] field only the writer sets, named for the error a foreign value gets.
+struct WriterOwned {
+    /// What the value is, in prose.
+    what: &'static str,
+    /// The `TableSpec` field.
+    field: &'static str,
+    /// The `tessera_io::table` constant holding the writer's own value.
+    constant: &'static str,
+}
+
+impl WriterOwned {
+    const EDITION: Self = Self {
+        what: "vortex edition",
+        field: "edition",
+        constant: "TABLE_EDITION",
+    };
+    const CODEC_PROFILE: Self = Self {
+        what: "codec profile",
+        field: "codec_profile",
+        constant: "TABLE_CODEC_PROFILE",
+    };
+
+    /// The value the writer records: `own`, if the caller left the field unset or already names
+    /// `own`; otherwise [`Error::Codec`] naming the field and the constant.
+    fn record(&self, given: Option<&str>, own: &str) -> Result<String> {
+        match given {
+            None => Ok(own.to_owned()),
+            Some(g) if g == own => Ok(own.to_owned()),
+            Some(other) => Err(Error::Codec(format!(
+                "table spec names {} `{other}`, but this writer writes `{own}` \
+                 (tessera_io::table::{}); leave `{}` unset and the writer records it",
+                self.what, self.constant, self.field
+            ))),
+        }
+    }
 }
 
 /// Declare Vortex's first-party edition families and editions on `s`, then enable
@@ -1018,7 +1071,8 @@ pub fn block_partition(idx: u64, total: u64) -> Option<Partition> {
 ///   a format decision, with its own determinism evidence (#635).
 ///
 /// The schemes come from the session, and the encodings they may emit are restricted to
-/// [`TABLE_EDITION`].
+/// [`TABLE_EDITION`]. This configuration is what [`TABLE_CODEC_PROFILE`] names: changing it
+/// means bumping the profile (ADR-0024, 2026-11-16 amendment).
 fn deterministic_table_compressor(s: &VortexSession) -> BtrBlocksCompressorBuilder {
     BtrBlocksCompressorBuilder::from_session(s)
         .with_compact()
@@ -1717,6 +1771,7 @@ pub fn decode_projected(spec: &TableSpec, blob: &[u8], names: &[&str]) -> Result
 ///     row_index: None,
 ///     partition: None,
 ///     edition: None,
+///     codec_profile: None,
 /// };
 /// let data: TableData = vec![("t".into(), ColumnData::U64(vec![10, 20, 30]))];
 /// let idx = table_chunk_index(&spec, &data, "t").unwrap();
@@ -1852,6 +1907,7 @@ pub(crate) mod under_null_fixture {
             row_index: Some("t".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         }
     }
 
@@ -1907,6 +1963,91 @@ mod tests {
     use super::*;
     use tessera_core::block::table::Column;
     use tessera_core::chunk_index::Monoid;
+
+    /// The profile id [`codec_set_matches_the_pinned_codec_profile`] pins, beside the codec set it
+    /// names.
+    const PINNED_PROFILE: &str = "tessera-table-v1";
+
+    /// The codec set `tessera-table-v1` names: the edition the compressor is restricted to, then
+    /// the built table compressor as it prints itself, i.e. the schemes it may choose from in the
+    /// order it tries them (with the modes the edition refined them to, e.g. `FoRScheme { mode: V1
+    /// }`) and its root exclusions. Written out by hand, never derived: this literal is the record
+    /// of what the profile means. Some schemes print alike, and their positions tell them apart:
+    /// `NullDominatedSparseScheme` (the float one, then the string one) and `PcoScheme` (the float
+    /// one; integer Pco is excluded, and admitting it would add a second `PcoScheme` line).
+    const PINNED_CODEC_SET: &str = r#"edition core2026.08.3
+CascadingCompressor {
+    schemes: [
+        FoRScheme {
+            mode: V1,
+            bitpacking: BitPackingScheme {
+                mode: V1,
+            },
+        },
+        ZigZagScheme,
+        BitPackingScheme {
+            mode: V1,
+        },
+        SparseScheme,
+        IntDictScheme,
+        RunEndScheme,
+        SequenceScheme,
+        IntRLEScheme,
+        FloatDictScheme,
+        NullDominatedSparseScheme,
+        FloatRLEScheme,
+        PcoScheme,
+        StringDictScheme,
+        FSSTScheme,
+        NullDominatedSparseScheme,
+        BinaryDictScheme,
+        VarBinScheme,
+        DecimalScheme {
+            mode: V1,
+        },
+        TemporalScheme,
+    ],
+    root_exclusions: [
+        DescendantExclusion {
+            excluded: SchemeId {
+                name: "vortex.int.dict",
+            },
+            children: One(
+                1,
+            ),
+        },
+    ],
+}"#;
+
+    /// ADR-0024's 2026-11-16 amendment (#869): the codec set and the profile id move together. A
+    /// change to [`deterministic_table_compressor`]'s exclusions or preset, to [`TABLE_EDITION`],
+    /// or a Vortex bump that adds, drops, reorders or reconfigures a scheme changes the printed
+    /// codec set and fails here until the profile is bumped and re-pinned. A heuristic change
+    /// inside an unchanged scheme does not print; the corpus goldens (`conformance`,
+    /// `ingest_corpus`) catch it, because the table bytes move. The print uses Rust type names, so
+    /// a Vortex rename alone also fails here: that one is re-pinned without a bump, once the
+    /// regenerated goldens show the table bytes did not move.
+    #[test]
+    fn codec_set_matches_the_pinned_codec_profile() {
+        let (_rt, s) = runtime_session();
+        let live = format!(
+            "edition {TABLE_EDITION}\n{:#?}",
+            *deterministic_table_compressor(&s).build()
+        );
+        assert_eq!(
+            live, PINNED_CODEC_SET,
+            "the table codec set changed but the codec profile did not: bump TABLE_CODEC_PROFILE \
+             (now `{TABLE_CODEC_PROFILE}`) to the next `tessera-table-v<N>`, pin the new set and id \
+             in PINNED_CODEC_SET and PINNED_PROFILE, amend ADR-0024 (a format event) and \
+             regenerate the table goldens. Only if a Vortex type was renamed and the regenerated \
+             goldens' table bytes did not move, re-pin without a bump"
+        );
+        assert_eq!(
+            TABLE_CODEC_PROFILE, PINNED_PROFILE,
+            "TABLE_CODEC_PROFILE moved without PINNED_PROFILE: pin the codec set the new profile \
+             names, and amend ADR-0024"
+        );
+    }
 
     /// Encode one `i64` column through **vortex only**, with the stock strategy — no tessera types,
     /// no `deterministic_table_compressor`. Used by the #468 reproducer so the finding cannot be
@@ -2034,6 +2175,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let sealed = encode(&spec, &data).expect("encode");
 
@@ -2114,6 +2256,7 @@ mod tests {
                     row_index: None,
                     partition: None,
                     edition: None,
+                    codec_profile: None,
                 },
                 &vec![("x".into(), ColumnData::I64(values.clone()))],
             )
@@ -2218,6 +2361,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         (spec, data)
     }
@@ -2240,6 +2384,7 @@ mod tests {
             row_index: Some("t".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2297,6 +2442,7 @@ mod tests {
                 row_index: None,
                 partition: None,
                 edition: None,
+                codec_profile: None,
             };
             let data: TableData = vec![(
                 "v".into(),
@@ -2336,6 +2482,7 @@ mod tests {
             row_index: Some("t".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2365,6 +2512,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let bare_spec = TableSpec {
             columns: vec![col("v", "i2")],
@@ -2372,6 +2520,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let nullable = |values: ColumnData, validity: Vec<bool>| ColumnData::Nullable {
             values: Box::new(values),
@@ -2455,6 +2604,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let validity: Vec<bool> = (0..rows).map(|k| k % 3 != 0).collect();
         let build = |filler: i32| -> TableData {
@@ -2843,6 +2993,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let group: TableData = vec![(
             "k".into(),
@@ -2866,6 +3017,7 @@ mod tests {
             row_index: Some("t".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let full: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2906,6 +3058,7 @@ mod tests {
             row_index: Some("t".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())),
@@ -2937,6 +3090,7 @@ mod tests {
             row_index: Some("t".into()),
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let data: TableData = vec![
             ("t".into(), ColumnData::U64((0..rows as u64).collect())), // monotonic → prunable
@@ -3006,6 +3160,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         table_chunk_index(&spec, &vec![("k".into(), nullable_i8(vals))], "k").unwrap()
     }
@@ -3070,6 +3225,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let data: TableData = vec![("k".into(), nullable_i8(&k)), ("f".into(), f)];
         let idx = table_chunk_index(&spec, &data, "k").unwrap();
@@ -3105,6 +3261,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let data: TableData = vec![
             ("k".into(), nullable_i8(&[Some(1), None, Some(3)])),
@@ -3189,6 +3346,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let idx = table_chunk_index(&spec, &vec![("k".into(), k)], "k").unwrap();
         let agg = idx.aggregate();
@@ -3262,6 +3420,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let data: TableData = vec![
             ("idx".into(), ColumnData::U32((0..5u32).collect())),
@@ -3320,6 +3479,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let blob = encode(&spec, &data).unwrap();
         let whole = decode(&spec, &blob).unwrap();
@@ -3361,6 +3521,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         // Vortex round-trip (bit-packed bool + FSST/dict-chosen strings).
         let blob = encode(&spec, &data).unwrap();
@@ -3439,6 +3600,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let back = decode(&spec, &encode(&spec, &data).unwrap()).unwrap();
         let ColumnData::F32(ga) = &back[0].1 else {
@@ -3474,6 +3636,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let encoded = encode(&spec, &data).unwrap();
         let raw = N * std::mem::size_of::<f64>();
@@ -3531,6 +3694,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let blob = encode(&spec, &data).unwrap();
         let grid = decode(&spec, &blob).unwrap(); // auto → grid (all numeric, over threshold)
@@ -3605,6 +3769,7 @@ mod tests {
                 row_index: None,
                 partition: None,
                 edition: None,
+                codec_profile: None,
             };
             let blob = encode(&spec, &data).unwrap();
             GRID_DECODES.with(|c| c.set(0));
@@ -3642,6 +3807,7 @@ mod tests {
                 row_index: None,
                 partition: None,
                 edition: None,
+                codec_profile: None,
             };
             (spec, data)
         };
@@ -3678,6 +3844,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let blob_m = encode(&spec_m, &data_m).unwrap();
         assert_eq!(
@@ -3717,6 +3884,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         let blob = encode(&spec, &data).unwrap();
         let best = |run: &dyn Fn()| -> f64 {
@@ -3806,6 +3974,7 @@ mod tests {
             row_index: None,
             partition: None,
             edition: None,
+            codec_profile: None,
         };
         // wrong dtype for column 'e'
         let bad_dtype: TableData = vec![

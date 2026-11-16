@@ -587,11 +587,14 @@ mod tests {
                 let (m, stats) = sequenced_product(dir.path(), &tag, threads);
                 assert_eq!(canonical(&m), canonical(&reference), "{tag}");
                 assert_eq!(m.content_hash, reference.content_hash, "{tag}");
-                // Every leaf the sequenced input released carries the writer's edition (#788).
+                // Every leaf the sequenced input released carries the writer's edition (#788) and
+                // codec profile (#869).
                 let edition = crate::table::TABLE_EDITION.to_string();
+                let profile = crate::table::TABLE_CODEC_PROFILE;
                 assert!(m.blocks.len() > 2, "{tag}: the leaves");
                 for b in &m.blocks {
                     assert_eq!(b.spec["edition"], edition.as_str(), "{tag}: {}", b.name);
+                    assert_eq!(b.spec["codec_profile"], profile, "{tag}: {}", b.name);
                 }
                 assert!(stats.peak_admitted <= 4, "{tag}: {stats:?}");
             }

@@ -104,6 +104,7 @@ fn spec(rows: u64) -> TableSpec {
         row_index: Some("t".into()),
         partition: None,
         edition: None,
+        codec_profile: None,
     }
 }
 
@@ -277,6 +278,7 @@ fn consumer_spec(rows: u64) -> TableSpec {
         row_index: Some("pkt".into()),
         partition: None,
         edition: None,
+        codec_profile: None,
     }
 }
 

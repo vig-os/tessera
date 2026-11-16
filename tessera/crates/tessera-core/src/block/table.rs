@@ -171,7 +171,8 @@ pub struct TableSpec {
     /// edition alone does not make them equal, because the edition bounds which encodings the
     /// writer may use, not which it picks. That choice is the writer's codec set (tessera excludes
     /// ALP, ALPRD, integer Pco, Delta and OnPair, all inside `core2026.08.3`) and the pinned
-    /// Vortex's compressor, which tessera changes only as a format event (ADR-0024).
+    /// Vortex's compressor, which tessera changes only as a format event (ADR-0024) and names in
+    /// [`TableSpec::codec_profile`].
     ///
     /// **Set by the writer, not the caller.** `tessera-io`'s table sealing paths (`table_block`,
     /// the staged jobs, `push_table` / `open_table`) record the edition they write under
@@ -189,6 +190,28 @@ pub struct TableSpec {
     /// admitted them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edition: Option<String>,
+    /// The tessera **codec profile** the block's payload was written with, e.g. `"tessera-table-v1"`
+    /// (ADR-0024, 2026-11-16 amendment, #869): the writer's codec set (which of the edition's
+    /// schemes the compressor may choose from) together with the pinned Vortex compressor that
+    /// chooses among them. Named `tessera-table-v<N>`; `N` moves on any change to the codec set or
+    /// on a Vortex bump that changes the compressor's choices, each a format event.
+    ///
+    /// Sealed, beside [`TableSpec::edition`], so that "same input + same edition + same profile →
+    /// same bytes" can be checked from the product alone: two blocks of the same rows that record
+    /// the same edition and the same profile must have the same payload bytes. It promises
+    /// determinism of bytes, **not** decodability: a reader decodes by the wire IDs in the file,
+    /// which the edition bounds.
+    ///
+    /// **Set by the writer, not the caller**, through the same path as `edition`
+    /// (`tessera_io::table::TABLE_CODEC_PROFILE`, on every table block and partition leaf). The
+    /// writer refuses a spec that names another profile. Leave it `None` when building a spec.
+    ///
+    /// **Readers never refuse on it.** An unknown profile (from a newer writer) and an absent one
+    /// (a block sealed before #869, including every `0.1.0-alpha.1`–`alpha.5` product) both decode
+    /// and verify normally. Absent is omitted on serialization, so such a block keeps its manifest
+    /// bytes and hashes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec_profile: Option<String>,
 }
 
 pub struct TableBlock {
@@ -412,5 +435,33 @@ mod tests {
         assert_eq!(json["edition"], "core2026.08.3");
         let back: super::TableSpec = serde_json::from_value(json).unwrap();
         assert_eq!(back.edition.as_deref(), Some("core2026.08.3"));
+    }
+
+    /// A spec sealed with an edition but before `codec_profile` existed (#635 to #869), verbatim.
+    const PRE_PROFILE_SPEC: &str =
+        r#"{"columns":[{"name":"t","dtype":"u8"}],"rows":3,"edition":"core2026.08.3"}"#;
+
+    /// ADR-0024's 2026-11-16 amendment: a spec without a profile parses as "no profile recorded"
+    /// and re-serialises to exactly its old bytes, so its manifest and hashes stay put.
+    #[test]
+    fn pre_profile_spec_parses_without_profile_and_reserialises_byte_identically() {
+        let spec: super::TableSpec = serde_json::from_str(PRE_PROFILE_SPEC).unwrap();
+        assert_eq!(spec.codec_profile, None);
+        assert_eq!(serde_json::to_string(&spec).unwrap(), PRE_PROFILE_SPEC);
+    }
+
+    /// A recorded profile is serialised under `codec_profile`, after `edition`, and a profile this
+    /// build has never heard of parses as data, not as an error (readers never refuse on it).
+    #[test]
+    fn codec_profile_round_trips_and_an_unknown_one_parses() {
+        let mut spec: super::TableSpec = serde_json::from_str(PRE_PROFILE_SPEC).unwrap();
+        spec.codec_profile = Some("tessera-table-v99".into());
+        let text = serde_json::to_string(&spec).unwrap();
+        assert!(
+            text.ends_with(r#","edition":"core2026.08.3","codec_profile":"tessera-table-v99"}"#),
+            "{text}"
+        );
+        let back: super::TableSpec = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.codec_profile.as_deref(), Some("tessera-table-v99"));
     }
 }
