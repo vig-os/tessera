@@ -587,6 +587,12 @@ mod tests {
                 let (m, stats) = sequenced_product(dir.path(), &tag, threads);
                 assert_eq!(canonical(&m), canonical(&reference), "{tag}");
                 assert_eq!(m.content_hash, reference.content_hash, "{tag}");
+                // Every leaf the sequenced input released carries the writer's edition (#788).
+                let edition = crate::table::TABLE_EDITION.to_string();
+                assert!(m.blocks.len() > 2, "{tag}: the leaves");
+                for b in &m.blocks {
+                    assert_eq!(b.spec["edition"], edition.as_str(), "{tag}: {}", b.name);
+                }
                 assert!(stats.peak_admitted <= 4, "{tag}: {stats:?}");
             }
         });
