@@ -75,13 +75,16 @@
 //! an error and the workers waiting at gate 2 exit, so a dead pipeline never hangs the producer
 //! (idle workers exit once [`StreamWriter::finish`] or a drop closes the job queue).
 
-use std::collections::BTreeMap;
+mod sequenced;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use tessera_core::block::table::TableSpec;
 use tessera_core::block::{BlockName, BlockRef, StreamedTableError};
@@ -95,6 +98,8 @@ use crate::table::{
 };
 use crate::write::{BlockStaging, Lane, StagedBlock, WriteSession};
 use crate::BlockPayload;
+
+pub use sequenced::{SequencedOptions, SequencedStats, SequencedTable, MAX_STALL_TIMEOUT};
 
 /// A committed block: its manifest reference paired with its payload bytes.
 type EncodedBlock = (BlockRef, BlockPayload);
@@ -430,6 +435,31 @@ struct WindowState {
     /// Set by a [`ReadHold`]: `push_table` jobs wait before reading their input.
     hold_reads: bool,
     stats: StreamStats,
+    /// The ordering gate's lanes, by index (#812): empty in a writer's encode window.
+    order: Vec<LaneGate>,
+    /// The writer's first refusal by a sequenced input, with the table it happened on, held by
+    /// both the ordering gate and the encode window (ADR-0065 §7.2: every refusal poisons the
+    /// session): every waiter, every later admission and [`StreamWriter::finish`] return it.
+    poison: Option<(String, StreamedTableError)>,
+}
+
+/// One [`SequencedTable`]'s state in the writer's ordering gate.
+struct LaneGate {
+    lane: Lane,
+    name: String,
+    options: SequencedOptions,
+    /// The next sequence number due; `None` once `u64::MAX` was released, when no number is left.
+    next: Option<u64>,
+    /// Set by a successful [`SequencedTable::close`]: [`StreamWriter::finish`] refuses while a
+    /// lane isn't.
+    closed: bool,
+    /// The sequence numbers entered and not yet released (waiting, admitted or being released).
+    reserved: BTreeSet<u64>,
+    /// Of those, the batches admitted.
+    admitted: usize,
+    /// When `next` last advanced (or the lane opened): the stall deadline runs from here.
+    last_advance: Instant,
+    stats: SequencedStats,
 }
 
 /// The shared credit window: the limits, the state, and one condvar every gate waits on.
@@ -438,6 +468,11 @@ struct CreditWindow {
     workers: usize,
     state: Mutex<WindowState>,
     changed: Condvar,
+    /// A window closed with this one: the writer's ordering gate, which a dead pipeline closes.
+    cascade: Option<Arc<CreditWindow>>,
+    /// The window this one's refusals poison: the ordering gate's encode window (a `Weak`, as
+    /// that window owns the gate through `cascade`).
+    upstream: Weak<CreditWindow>,
 }
 
 impl CreditWindow {
@@ -457,9 +492,28 @@ impl CreditWindow {
                 staged_input_bytes: 0,
                 hold_reads: false,
                 stats: StreamStats::default(),
+                order: Vec::new(),
+                poison: None,
             }),
             changed: Condvar::new(),
+            cascade: None,
+            upstream: Weak::new(),
         }
+    }
+
+    /// A writer's encode window with `limits`, and its ordering gate (#812) as `cascade`: closing
+    /// the window closes the gate, and the gate's refusals poison the window.
+    fn with_order(limits: StreamWindow, workers: usize) -> Arc<Self> {
+        // The sequenced inputs' byte credit is the encode window's byte budget; their per-lane
+        // windows are counted by the gate itself.
+        let order_limits = StreamWindow::new(usize::MAX, limits.max_in_flight_bytes);
+        Arc::new_cyclic(|window| CreditWindow {
+            cascade: Some(Arc::new(CreditWindow {
+                upstream: window.clone(),
+                ..CreditWindow::new(order_limits, 0)
+            })),
+            ..CreditWindow::new(limits, workers)
+        })
     }
 
     /// The state is plain counters updated under the lock without any panicking code, so a
@@ -484,8 +538,8 @@ impl CreditWindow {
         }
         let mut stalled = false;
         loop {
-            if st.closed {
-                return Err(closed_error());
+            if let Some(e) = Self::refused(&st) {
+                return Err(e);
             }
             // With no job in flight no bytes are held, so an empty window always admits.
             if st.in_flight_jobs < self.limits.max_in_flight
@@ -584,7 +638,17 @@ impl CreditWindow {
         st.in_flight_jobs -= 1;
         st.in_flight_bytes -= held.ram;
         st.staged_bytes -= held.staged;
-        st.next_commit[lane] += 1;
+        if let Some(gate) = st.order.get_mut(lane) {
+            // The ordering gate: release the lane's due batch (admitted, so `next` is `Some`).
+            if let Some(next) = gate.next {
+                gate.reserved.remove(&next);
+                gate.next = next.checked_add(1);
+            }
+            gate.admitted -= 1;
+            gate.last_advance = Instant::now();
+        } else {
+            st.next_commit[lane] += 1;
+        }
         st.stats.jobs_committed += 1;
         drop(st);
         self.changed.notify_all();
@@ -594,6 +658,200 @@ impl CreditWindow {
     fn close(&self) {
         self.lock().closed = true;
         self.changed.notify_all();
+        if let Some(gate) = &self.cascade {
+            gate.close();
+        }
+    }
+
+    /// The ordering gate (#812): add the lane of a [`SequencedTable`], one per [`Lane`].
+    fn add_lane(&self, lane: Lane, name: String, options: SequencedOptions) -> Result<usize> {
+        let mut st = self.lock();
+        if let Some(e) = Self::refused(&st) {
+            return Err(e);
+        }
+        if st.order.iter().any(|gate| gate.lane == lane) {
+            return Err(Error::Invalid(format!(
+                "sequenced table '{name}': its lane {lane:?} already has a sequenced input"
+            )));
+        }
+        st.order.push(LaneGate {
+            lane,
+            name,
+            options,
+            next: Some(options.first_seq),
+            closed: false,
+            reserved: BTreeSet::new(),
+            admitted: 0,
+            last_advance: Instant::now(),
+            stats: SequencedStats::default(),
+        });
+        Ok(st.order.len() - 1)
+    }
+
+    /// The ordering gate: enter batch `seq` of `lane`, holding `bytes`, and wait for its
+    /// admission (see [`SequencedTable`]).
+    fn admit(&self, lane: usize, seq: u64, bytes: u64) -> Result<()> {
+        let entered = Instant::now();
+        let mut st = self.lock();
+        if let Some(e) = Self::refused(&st) {
+            return Err(e);
+        }
+        let gate = &st.order[lane];
+        let o = gate.options;
+        if seq < o.first_seq {
+            let reason = StreamedTableError::BeforeFirst {
+                seq,
+                first_seq: o.first_seq,
+            };
+            return Err(self.poison_locked(st, lane, reason));
+        }
+        // `None`: every number up to `u64::MAX` was released, so `seq` was pushed before.
+        let next = match gate.next {
+            Some(next) if seq >= next && !gate.reserved.contains(&seq) => next,
+            _ => return Err(self.poison_locked(st, lane, StreamedTableError::Duplicate { seq })),
+        };
+        let horizon = o.horizon() as u64;
+        if seq - next >= horizon {
+            let reason = StreamedTableError::TooFarAhead {
+                seq,
+                next,
+                max_ahead: horizon,
+            };
+            return Err(self.poison_locked(st, lane, reason));
+        }
+        st.order[lane].reserved.insert(seq);
+        let mut blocked = false;
+        loop {
+            if let Some(e) = Self::refused(&st) {
+                return Err(e);
+            }
+            // `next` can't pass `seq` while it waits: `seq` is reserved and not yet released, so
+            // `next` is a number at most `seq`.
+            let next = st.order[lane]
+                .next
+                .expect("a reserved seq is not yet released");
+            if seq == next
+                || (seq - next < o.window as u64
+                    && st.in_flight_bytes < self.limits.max_in_flight_bytes)
+            {
+                break;
+            }
+            if o.refuse_instead_of_block {
+                let reason = StreamedTableError::WouldBlock { seq, next };
+                return Err(self.poison_locked(st, lane, reason));
+            }
+            if !blocked {
+                blocked = true;
+                st.order[lane].stats.blocked_pushes += 1;
+                st.stats.producer_stalls += 1;
+            }
+            let deadline = st.order[lane].last_advance.max(entered) + o.stall_timeout;
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(self.poison_locked(st, lane, StreamedTableError::Stalled { next }));
+            }
+            st = self
+                .changed
+                .wait_timeout(st, deadline - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        st.in_flight_jobs += 1;
+        st.in_flight_bytes += bytes;
+        st.stats.peak_in_flight_bytes = st.stats.peak_in_flight_bytes.max(st.in_flight_bytes);
+        let peak_bytes = st.stats.peak_in_flight_bytes;
+        let gate = &mut st.order[lane];
+        gate.admitted += 1;
+        gate.stats.peak_admitted = gate.stats.peak_admitted.max(gate.admitted);
+        gate.stats.peak_admitted_bytes = peak_bytes;
+        Ok(())
+    }
+
+    /// The window's refusal once it is closed: its poison, or the dead pipeline's error.
+    fn refused(st: &WindowState) -> Option<Error> {
+        match &st.poison {
+            Some((name, reason)) => Some(Error::StreamedTable {
+                name: name.clone(),
+                reason: reason.clone(),
+            }),
+            None => st.closed.then(closed_error),
+        }
+    }
+
+    fn refusal(&self) -> Option<Error> {
+        Self::refused(&self.lock())
+    }
+
+    /// The poison alone: the first refusal of a sequenced input, if there was one.
+    fn poisoned(&self) -> Option<Error> {
+        let st = self.lock();
+        st.poison.as_ref().and_then(|_| Self::refused(&st))
+    }
+
+    /// Poison the ordering gate with `reason` on `lane` (unless it already refused or the
+    /// pipeline died), wake every waiter, poison the encode window with it too, and return the
+    /// gate's refusal.
+    fn poison(&self, lane: usize, reason: StreamedTableError) -> Error {
+        self.poison_locked(self.lock(), lane, reason)
+    }
+
+    fn poison_locked(
+        &self,
+        mut st: MutexGuard<'_, WindowState>,
+        lane: usize,
+        reason: StreamedTableError,
+    ) -> Error {
+        let first =
+            (st.poison.is_none() && !st.closed).then(|| (st.order[lane].name.clone(), reason));
+        if first.is_some() {
+            st.poison.clone_from(&first);
+        }
+        st.closed = true;
+        let e = Self::refused(&st).expect("closed");
+        drop(st);
+        self.changed.notify_all();
+        if let (Some(poison), Some(window)) = (first, self.upstream.upgrade()) {
+            window.poison_with(poison);
+        }
+        e
+    }
+
+    /// Hold `poison` as this (encode) window's refusal, unless the pipeline already died, and
+    /// close it: every waiter and every later push return it.
+    fn poison_with(&self, poison: (String, StreamedTableError)) {
+        {
+            let mut st = self.lock();
+            if st.poison.is_none() && !st.closed {
+                st.poison = Some(poison);
+            }
+        }
+        self.close();
+    }
+
+    /// A successful [`SequencedTable::close`] of `lane`.
+    fn close_lane(&self, lane: usize) {
+        self.lock().order[lane].closed = true;
+    }
+
+    /// Whether `lane` was never closed (see [`Self::close_lane`]).
+    fn unclosed_lane(&self, lane: usize) -> bool {
+        !self.lock().order[lane].closed
+    }
+
+    /// [`StreamedTableError::NotClosed`] for the first sequenced input that was never closed.
+    fn unclosed(&self) -> Option<Error> {
+        self.lock()
+            .order
+            .iter()
+            .find(|gate| !gate.closed)
+            .map(|gate| Error::StreamedTable {
+                name: gate.name.clone(),
+                reason: StreamedTableError::NotClosed,
+            })
+    }
+
+    fn sequenced_stats(&self, lane: usize) -> SequencedStats {
+        self.lock().order[lane].stats
     }
 
     fn stats(&self) -> StreamStats {
@@ -864,6 +1122,11 @@ impl OpenTable {
     /// errors; [`Error::Invalid`] for another writer or a table abandoned by an earlier error.
     /// Every error but the wrong writer abandons the table (see [`OpenTable`]).
     pub fn push(&mut self, writer: &mut StreamWriter, group: TableData) -> Result<()> {
+        self.push_in(writer, group)
+    }
+
+    /// [`Self::push`] through a shared writer: a [`SequencedTable`]'s release.
+    fn push_in(&mut self, writer: &StreamWriter, group: TableData) -> Result<()> {
         self.check(writer)?;
         let res = self.push_group(writer, group);
         self.abandon_on_error(res)
@@ -878,7 +1141,12 @@ impl OpenTable {
     ///
     /// As [`Self::push`]; a table abandoned by an earlier error is [`Error::Invalid`]. The table
     /// is abandoned on every error.
-    pub fn close(mut self, writer: &mut StreamWriter) -> Result<u64> {
+    pub fn close(self, writer: &mut StreamWriter) -> Result<u64> {
+        self.close_in(writer)
+    }
+
+    /// [`Self::close`] through a shared writer.
+    fn close_in(mut self, writer: &StreamWriter) -> Result<u64> {
         self.check(writer)?;
         if let Some(declared) = self.declared.filter(|&d| d != self.seen) {
             return Err(self.refuse(StreamedTableError::TooFewRows {
@@ -927,7 +1195,7 @@ impl OpenTable {
         }
     }
 
-    fn push_group(&mut self, writer: &mut StreamWriter, group: TableData) -> Result<()> {
+    fn push_group(&mut self, writer: &StreamWriter, group: TableData) -> Result<()> {
         let rows = group_rows(&self.spec, &group)?;
         if rows > ROWS_PER_GROUP {
             return Err(self.refuse(StreamedTableError::OversizedGroup {
@@ -972,7 +1240,7 @@ impl OpenTable {
     /// The lookahead: a row past a full leaf makes it non-terminal, so hand it over. `total =
     /// index + 2` names and marks it as the leaf it is in any table of more leaves than that.
     /// With a declared count a full leaf is handed over on filling, unless it is the last.
-    fn release_full(&mut self, writer: &mut StreamWriter) -> Result<()> {
+    fn release_full(&mut self, writer: &StreamWriter) -> Result<()> {
         if self.fill.rows == self.block_rows {
             self.dispatch(writer, self.fill.block + 2)?;
         }
@@ -981,7 +1249,7 @@ impl OpenTable {
 
     /// Append one canonical row-group to the leaf being filled (creating its staging file), and
     /// hand the leaf over once it is full and known not to be the last.
-    fn stage_group(&mut self, writer: &mut StreamWriter, group: &TableData) -> Result<()> {
+    fn stage_group(&mut self, writer: &StreamWriter, group: &TableData) -> Result<()> {
         self.release_full(writer)?;
         if self.fill.input.is_none() {
             self.fill.input = Some(StagedInput::create(&writer.staging, &writer.window)?);
@@ -999,7 +1267,7 @@ impl OpenTable {
 
     /// Hand the leaf being filled to a free worker as one staged job, named and marked as the
     /// leaf `fill.block` of `total`.
-    fn dispatch(&mut self, writer: &mut StreamWriter, total: u64) -> Result<()> {
+    fn dispatch(&mut self, writer: &StreamWriter, total: u64) -> Result<()> {
         let leaf = TableSpec {
             rows: self.fill.rows,
             partition: block_partition(self.fill.block, total),
@@ -1047,10 +1315,12 @@ pub struct StreamWriter {
     workers: Vec<JoinHandle<()>>,
     committer: Option<JoinHandle<Result<WriteSession>>>,
     window: Arc<CreditWindow>,
+    /// The ordering gate of the writer's [`SequencedTable`]s, closed with `window` (#812).
+    order: Arc<CreditWindow>,
     staging: BlockStaging,
     /// The lanes pushed on, in the order of their first push (a [`Slot`]'s lane indexes it), each
     /// with the `seq` its next job takes.
-    lanes: Vec<(Lane, usize)>,
+    lanes: Mutex<Vec<(Lane, usize)>>,
 }
 
 impl StreamWriter {
@@ -1073,7 +1343,13 @@ impl StreamWriter {
     /// credit `window`.
     pub fn with_window(session: WriteSession, workers: usize, window: StreamWindow) -> Self {
         let workers = workers.max(1);
-        let window = Arc::new(CreditWindow::new(window, workers));
+        let window = CreditWindow::with_order(window, workers);
+        let order = Arc::clone(
+            window
+                .cascade
+                .as_ref()
+                .expect("a writer's window has its gate"),
+        );
         // The channels only carry jobs; the window is what bounds them (at most `max_in_flight`
         // jobs sit in both together). Unbounded channels allocate nothing up front, so a window of
         // `usize::MAX` jobs (bound by bytes only) is fine.
@@ -1133,8 +1409,9 @@ impl StreamWriter {
             workers: worker_handles,
             committer: Some(committer),
             window,
+            order,
             staging,
-            lanes: Vec::new(),
+            lanes: Mutex::new(Vec::new()),
         }
     }
 
@@ -1395,29 +1672,49 @@ impl StreamWriter {
         ReadHold(Arc::clone(&self.window))
     }
 
-    fn submit(&mut self, lane: &Lane, job: Job, free_worker: bool) -> Result<()> {
+    /// Submit `job` on `lane`. `&self`, so the [`SequencedTable`]s of several lanes hand their
+    /// leaves over from their own threads; a lane's jobs are submitted from one thread at a time
+    /// (its `&mut` caller, or its sequenced input's release lock).
+    fn submit(&self, lane: &Lane, job: Job, free_worker: bool) -> Result<()> {
         let tx = self
             .input
             .as_ref()
             .ok_or_else(|| Error::Container("stream writer already finished".into()))?;
-        let id = match self.lanes.iter().position(|(l, _)| l == lane) {
-            Some(id) => id,
-            None => {
-                self.lanes.push((lane.clone(), 0));
-                self.lanes.len() - 1
+        let lanes = || self.lanes.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = {
+            let mut lanes = lanes();
+            match lanes.iter().position(|(l, _)| l == lane) {
+                Some(id) => id,
+                None => {
+                    lanes.push((lane.clone(), 0));
+                    lanes.len() - 1
+                }
             }
         };
+        // Wait for the credit without the lock, so one lane's wait never holds another's submit.
         self.window.acquire(id, free_worker)?;
-        let seq = self.lanes[id].1;
+        // Take the seq and send under the lock: a lane's seqs reach the FIFO queue in order, so
+        // its `next` is always queued (the window's deadlock freedom rests on it).
+        let mut lanes = lanes();
+        let seq = lanes[id].1;
         // The window admitted the job; the send never blocks, and fails only if every worker is gone.
         tx.send((Slot { lane: id, seq }, lane.clone(), job))
-            .map_err(|_| closed_error())?;
-        self.lanes[id].1 += 1;
+            .map_err(|_| self.window.refusal().unwrap_or_else(closed_error))?;
+        lanes[id].1 += 1;
         Ok(())
     }
 
     /// Drain the pipeline, then compact + seal to `out`. Returns the sealed manifest (identical to a
     /// batch seal of the same blocks by lane, then in push order within a lane).
+    ///
+    /// # Errors
+    ///
+    /// Every thread is joined first, whatever the outcome. Then, in this order: the first refusal
+    /// of a [`SequencedTable`] of this writer (ADR-0065 §7.2: it poisons the writer, so nothing is
+    /// sealed; the [`Error::StreamedTable`] its own call returned); a panicked encode worker or
+    /// committer; the pipeline's encode and commit errors;
+    /// [`StreamedTableError::NotClosed`] for a sequenced table opened on this writer and not
+    /// closed (still open, or dropped, so its rows aren't all committed); the seal's errors.
     pub fn finish(self, out: &Path) -> Result<Manifest> {
         self.finish_with_stats(out).map(|(manifest, _)| manifest)
     }
@@ -1443,10 +1740,20 @@ impl StreamWriter {
             .join()
             .map_err(|_| Error::Container("committer thread panicked".into()))
             .and_then(|r| r);
+        // A refusal poisoned the writer: its pipeline was closed, so the committer's own error is
+        // a consequence, and the refusal is the cause. (Should the pipeline die in the same
+        // instant as a refusal, before its close reaches the gate, the refusal is reported in
+        // place of the pipeline's error: a mislabelled cause, never a seal.)
+        if let Some(e) = self.order.poisoned() {
+            return Err(e);
+        }
         if let Some(e) = first_error {
             return Err(e);
         }
         let session = committed?;
+        if let Some(e) = self.order.unclosed() {
+            return Err(e);
+        }
         let stats = self.window.stats();
         Ok((session.seal(out)?, stats))
     }
@@ -1528,7 +1835,7 @@ mod tests {
     use tessera_core::block::array::ArraySpec;
     use tessera_core::ProductBuilder;
 
-    const TS: &str = "2024-01-01T00:00:00Z";
+    pub(super) const TS: &str = "2024-01-01T00:00:00Z";
 
     fn ablock(name: &str, n: i16) -> (BlockRef, ArraySpec, ArrayData) {
         let mut spec = ArraySpec::new(vec![8, 8, 8], "int16");
@@ -2004,7 +2311,7 @@ mod tests {
     /// A listmode-shaped table for the staged (#677 gap 1) tests: a sequential row index, a NULLABLE
     /// timestamp whose first 1024 rows are NULL (the consumer's decoder shape), and an
     /// incompressible 64-bit column so the encoded block is ~8 bytes a row, far above the budgets.
-    mod listmode {
+    pub(super) mod listmode {
         use crate::table::{ColumnData, TableData, ROWS_PER_GROUP};
         use tessera_core::block::table::{Column, TableSpec};
 
@@ -2016,7 +2323,7 @@ mod tests {
             }
         }
 
-        pub(super) fn spec(rows: u64) -> TableSpec {
+        pub(in crate::stream) fn spec(rows: u64) -> TableSpec {
             TableSpec {
                 columns: vec![
                     col("t", "u8"),
@@ -2040,7 +2347,7 @@ mod tests {
         }
 
         /// Rows `start..start + n`.
-        pub(super) fn rows(start: u64, n: usize) -> TableData {
+        pub(in crate::stream) fn rows(start: u64, n: usize) -> TableData {
             let rows = start..start + n as u64;
             vec![
                 ("t".into(), ColumnData::U64(rows.clone().collect())),
@@ -2375,7 +2682,7 @@ mod tests {
 
     // ---- ADR-0064 §5: push_table -------------------------------------------------------------
 
-    const RPG: u64 = ROWS_PER_GROUP as u64;
+    pub(super) const RPG: u64 = ROWS_PER_GROUP as u64;
 
     /// The listmode table in groups of `size` rows (≤ ROWS_PER_GROUP), off the canonical grid
     /// unless `size` is ROWS_PER_GROUP.
@@ -2387,7 +2694,7 @@ mod tests {
 
     /// A manifest without what ADR-0064 §6 lets differ between two writers of the same rows:
     /// `producer`, `timestamp` and what follows from them.
-    fn canonical(m: &Manifest) -> serde_json::Value {
+    pub(super) fn canonical(m: &Manifest) -> serde_json::Value {
         let mut v = serde_json::to_value(m).unwrap();
         for key in ["producer", "timestamp", "id", "id_inputs", "manifest_hash"] {
             v.as_object_mut().unwrap().remove(key);

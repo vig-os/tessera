@@ -220,6 +220,76 @@ pub enum StreamedTableError {
         /// The most rows of one block.
         max: u64,
     },
+    /// A sequenced input (ADR-0065 §7.2) was given a `seq` below the next one due, or one
+    /// already entered.
+    #[error("batch {seq} was already pushed")]
+    Duplicate {
+        /// The duplicated sequence number.
+        seq: u64,
+    },
+    /// A sequenced input was given a `seq` below its first sequence number, which no batch has.
+    #[error("batch {seq} is below the first sequence number, {first_seq}")]
+    BeforeFirst {
+        /// The refused sequence number.
+        seq: u64,
+        /// The input's first sequence number.
+        first_seq: u64,
+    },
+    /// A sequenced input was given a `seq` at or past its hard horizon, `next + max_ahead`.
+    #[error("batch {seq} is too far ahead of the next one due, {next} (max_ahead {max_ahead})")]
+    TooFarAhead {
+        /// The refused sequence number.
+        seq: u64,
+        /// The next sequence number due.
+        next: u64,
+        /// The horizon.
+        max_ahead: u64,
+    },
+    /// A sequenced input in refuse mode was given a push that would have waited at its gate.
+    #[error("batch {seq} would wait for batch {next} (refuse_instead_of_block)")]
+    WouldBlock {
+        /// The refused sequence number.
+        seq: u64,
+        /// The next sequence number due.
+        next: u64,
+    },
+    /// A sequenced input was closed with a `seq` missing below the largest one pushed.
+    #[error("batch {seq} was never pushed")]
+    Missing {
+        /// The first missing sequence number.
+        seq: u64,
+    },
+    /// A sequenced input was closed with another number of batches than expected.
+    #[error("{pushed} batches were pushed, {expected} expected")]
+    CountMismatch {
+        /// The count given at close.
+        expected: u64,
+        /// The batches pushed.
+        pushed: u64,
+    },
+    /// A sequenced input was aborted by its producer.
+    #[error("aborted: {reason}")]
+    Aborted {
+        /// The producer's reason.
+        reason: String,
+    },
+    /// A sequenced input's next due `seq` didn't advance within the stall deadline while a push
+    /// waited for it.
+    #[error("stalled: batch {next} was not pushed within the stall deadline")]
+    Stalled {
+        /// The sequence number that never came.
+        next: u64,
+    },
+    /// A sequenced input was still open, or was dropped without being closed, when its writer
+    /// was finished: its rows aren't all committed, so nothing is sealed.
+    #[error("the sequenced table was never closed")]
+    NotClosed,
+    /// Releasing a sequenced input's batches into its table failed.
+    #[error("releasing a batch failed: {cause}")]
+    Failed {
+        /// The error that failed it.
+        cause: String,
+    },
 }
 
 /// The legacy flat rule (ADR-0064 §4, `Reader::block_group` before ADR-0064): `prefix` itself, or

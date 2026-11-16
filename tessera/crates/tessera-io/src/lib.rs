@@ -65,8 +65,9 @@ pub use sign::{has_embedded_signature, sign_tsra, sign_tsra_sidecar, verify_tsra
 #[allow(deprecated)]
 pub use stream::table_job_streaming;
 pub use stream::{
-    array_job, table_job, table_job_from_fragments, EncodeJob, OpenTable, StagedEncodeJob,
-    StagedEncodedBlock, StreamStats, StreamWindow, StreamWriter,
+    array_job, table_job, table_job_from_fragments, EncodeJob, OpenTable, SequencedOptions,
+    SequencedStats, SequencedTable, StagedEncodeJob, StagedEncodedBlock, StreamStats, StreamWindow,
+    StreamWriter, MAX_STALL_TIMEOUT,
 };
 pub use table::{
     block_count, block_name, block_partition, partition_blocks, ColumnData, TableData, BLOCK_ROWS,
