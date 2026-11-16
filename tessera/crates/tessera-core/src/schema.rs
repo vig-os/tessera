@@ -125,6 +125,21 @@ fn is_false(b: &bool) -> bool {
 }
 
 impl FieldSpec {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &[
+        "id",
+        "description",
+        "dtype",
+        "unit",
+        "vocabulary",
+        "default",
+        "required",
+        "recommended",
+        "sensitivity",
+        "inherit",
+    ];
+
     /// A required, undimensioned metadata field (absent ⇒ ingest **blocks**). Defaults to
     /// [`Sensitivity::Public`]; chain [`Self::with_sensitivity`] to classify PHI.
     pub fn required(id: &str, description: &str, dtype: &str) -> Self {
@@ -202,6 +217,10 @@ pub struct Coded {
 }
 
 impl Coded {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &["_vocabulary", "_code", "label"];
+
     pub fn new(vocabulary: &str, code: &str) -> Self {
         Coded {
             vocabulary: vocabulary.into(),
@@ -225,6 +244,11 @@ pub struct BlockRequirement {
 }
 
 impl BlockRequirement {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] =
+        &["role", "kind", "min_count", "description"];
+
     fn matches(&self, b: &crate::block::BlockRef) -> bool {
         self.kind.is_none_or(|k| k == b.kind)
     }
@@ -262,6 +286,19 @@ pub struct ProductSchema {
 }
 
 impl ProductSchema {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &[
+        "product",
+        "version",
+        "description",
+        "fields",
+        "blocks",
+        "requires_generation",
+        "tables",
+        "arrays",
+    ];
+
     /// Validate a manifest against this schema: every required block role must have enough
     /// matching blocks, and every required field must be present in `metadata` (or carry a
     /// default). Returns a typed [`crate::Error::Invalid`] naming the first violation.
@@ -392,23 +429,140 @@ impl ProductSchema {
             .map_err(|e| crate::Error::Invalid(format!("schema does not serialize: {e}")))
     }
 
-    /// Parse an embedded schema JSON (from `Manifest.schema`) back into a typed `ProductSchema`.
+    /// Parse an embedded schema JSON (from `Manifest.schema`) back into a typed `ProductSchema`,
+    /// **refusing a rule this build doesn't model** (ADR-0060 §2.2, #873).
+    ///
+    /// The schema is walked against the declared field names of every type it is made of: the top
+    /// level, each `fields[i]` and `blocks[i]`, each `tables.<role>` with its `columns[i]` (and their
+    /// `referencing`, `transform` included), `references[i]` and `references[i].to`, and each
+    /// `arrays.<role>`. A key none of them declares is a rule from a newer format revision. The typed
+    /// schema would drop it, so validating against it, inheriting through it or re-emitting it would
+    /// silently ignore a rule the file declares: it is refused instead. Only keys count, never values:
+    /// a known key holding its default (`inherit: false`, `requires_generation: false`, `unit: null`)
+    /// is fine. `fields[i].default` is an opaque value and is never walked.
+    ///
+    /// # Errors
+    /// - [`crate::Error::Invalid`] if `v` is not a `ProductSchema` (a known key of the wrong type).
+    /// - [`crate::Error::NewerFormatFields`] naming every unknown key by its dotted path within the
+    ///   schema (`fields[0].pattern`, `tables.events.row_count_min`).
     pub fn from_value(v: &serde_json::Value) -> crate::Result<Self> {
-        serde_json::from_value(v.clone()).map_err(|e| {
-            crate::Error::Invalid(format!("embedded schema is not a ProductSchema: {e}"))
-        })
+        let (schema, newer) = Self::view_of(v)?;
+        crate::manifest::refuse_newer(&newer)?;
+        Ok(schema)
     }
+
+    /// The typed **view** of an embedded schema plus the dotted paths of every key it doesn't model
+    /// (the walk [`from_value`](Self::from_value) refuses on), for callers that only **display** the
+    /// schema: they show what this build understands and warn about the rest. Anything that acts on
+    /// the rules (validate, inherit, re-emit) uses [`from_value`](Self::from_value) instead; the view
+    /// silently lacks the newer rules.
+    ///
+    /// # Errors
+    /// [`crate::Error::Invalid`] if `v` is not a `ProductSchema` (a known key of the wrong type).
+    pub fn view_of(v: &serde_json::Value) -> crate::Result<(Self, Vec<String>)> {
+        let schema = serde_json::from_value(v.clone()).map_err(|e| {
+            crate::Error::Invalid(format!("embedded schema is not a ProductSchema: {e}"))
+        })?;
+        Ok((schema, newer_fields_of(v)))
+    }
+}
+
+/// `object[key]`, or `null` when `object` has no such key (or is not an object).
+fn field<'a>(object: &'a serde_json::Value, key: &str) -> &'a serde_json::Value {
+    object.get(key).unwrap_or(&serde_json::Value::Null)
+}
+
+/// The dotted paths of every key in a product-schema object that this build's types don't declare
+/// (see [`ProductSchema::from_value`]).
+fn newer_fields_of(v: &serde_json::Value) -> Vec<String> {
+    use crate::block::table::Column;
+    use crate::manifest::{unknown_keys, unknown_keys_each};
+    use crate::referencing::{Referenced, Transform};
+    let mut out = Vec::new();
+    unknown_keys(v, ProductSchema::FIELDS, "", &mut out);
+    unknown_keys_each(field(v, "fields"), FieldSpec::FIELDS, "fields", &mut out);
+    unknown_keys_each(
+        field(v, "blocks"),
+        BlockRequirement::FIELDS,
+        "blocks",
+        &mut out,
+    );
+    if let Some(tables) = field(v, "tables").as_object() {
+        for (role, t) in tables {
+            let at = format!("tables.{role}");
+            unknown_keys(t, TableContract::FIELDS, &format!("{at}."), &mut out);
+            let columns = format!("{at}.columns");
+            unknown_keys_each(field(t, "columns"), Column::FIELDS, &columns, &mut out);
+            for (i, c) in field(t, "columns")
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let r = field(c, "referencing");
+                let at = format!("{columns}[{i}].referencing.");
+                unknown_keys(r, Referenced::FIELDS, &at, &mut out);
+                let tr = field(r, "transform");
+                let kind = field(tr, "kind").as_str().unwrap_or_default();
+                unknown_keys(
+                    tr,
+                    Transform::fields(kind),
+                    &format!("{at}transform."),
+                    &mut out,
+                );
+            }
+            let refs = format!("{at}.references");
+            unknown_keys_each(
+                field(t, "references"),
+                ColumnReference::FIELDS,
+                &refs,
+                &mut out,
+            );
+            for (i, r) in field(t, "references")
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let to = format!("{refs}[{i}].to.");
+                unknown_keys(field(r, "to"), ReferenceTarget::FIELDS, &to, &mut out);
+            }
+        }
+    }
+    if let Some(arrays) = field(v, "arrays").as_object() {
+        for (role, a) in arrays {
+            unknown_keys(
+                a,
+                ArrayContract::FIELDS,
+                &format!("arrays.{role}."),
+                &mut out,
+            );
+        }
+    }
+    out
 }
 
 /// Validate a manifest against its **embedded** schema (self-describing) when present, else the
 /// built-in registry (legacy / open-world files). The embedded copy is authoritative — a sealed
 /// `.tsra` carries its own contract, so a reader validates what the file *declares*, not whatever
 /// schema version happens to be compiled into this binary.
+///
+/// # Errors
+/// [`crate::Error::Invalid`] naming the first violation, or an embedded schema that doesn't parse;
+/// [`crate::Error::NewerFormatFields`] when the embedded schema carries a rule this build doesn't
+/// model, named by its path in the manifest (`schema.fields[0].pattern`): a gate that can't
+/// evaluate a rule never reports "valid" ([`ProductSchema::from_value`]).
 pub fn validate_manifest(m: &Manifest) -> crate::Result<()> {
-    match &m.schema {
-        Some(v) => ProductSchema::from_value(v)?.validate(m),
-        None => SchemaRegistry::builtin().validate(m),
-    }
+    let Some(v) = &m.schema else {
+        return SchemaRegistry::builtin().validate(m);
+    };
+    let schema = ProductSchema::from_value(v).map_err(|e| match e {
+        crate::Error::NewerFormatFields { fields } => crate::Error::NewerFormatFields {
+            fields: fields.into_iter().map(|f| format!("schema.{f}")).collect(),
+        },
+        other => other,
+    })?;
+    schema.validate(m)
 }
 
 /// The registry of built-in product schemas. Domain-agnostic: lookups for unknown products
@@ -919,6 +1073,146 @@ mod tests {
     /// A fixed acquisition timestamp — identity is content-derived, so every test that seals needs
     /// one that never comes from the clock.
     const TS: &str = "2024-01-01T00:00:00Z";
+
+    /// Every declared-field list of the schema walk equals the keys a fully populated instance
+    /// writes. The struct literals name every field (no `..`), so adding a field to any of these
+    /// types fails to compile here until the walk learns it (ADR-0060 §2.2, #873).
+    #[test]
+    fn schema_declared_fields_match_fully_populated_instances() {
+        use crate::block::table::Column;
+        use crate::referencing::{Referenced, Transform};
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let sorted = |f: &[&str]| {
+            let mut k: Vec<String> = f.iter().map(|s| s.to_string()).collect();
+            k.sort();
+            k
+        };
+        let s = |x: &str| Some(x.to_string());
+        let column = Column {
+            name: "t".into(),
+            dtype: "u8".into(),
+            codec: s("pco"),
+            short_name: s("t"),
+            description: s("time"),
+            unit: s("ps"),
+            scale: Some(2.0),
+            nullable: true,
+            referencing: Some(Referenced {
+                transform: Transform::Identity,
+                unit: s("s"),
+                vocabulary: s("UCUM"),
+                frame: s("epoch"),
+            }),
+            sensitivity: Sensitivity::Coded,
+            optional: true,
+        };
+        let reference = ColumnReference {
+            columns: vec!["t".into()],
+            to: ReferenceTarget {
+                scope: ReferenceScope::Block,
+                block: "b".into(),
+                columns: vec!["t".into()],
+            },
+            note: s("n"),
+        };
+        let table = TableContract {
+            columns: vec![column],
+            sequence_key: vec!["t".into()],
+            order: TableOrder::Producer,
+            keys: vec![vec!["t".into()]],
+            references: vec![reference],
+        };
+        let array = ArrayContract {
+            dtype: "float32".into(),
+            rank: 2,
+            axes: vec!["y".into(), "x".into()],
+            unit: s("1"),
+        };
+        let schema = ProductSchema {
+            product: "p".into(),
+            version: "1".into(),
+            description: "d".into(),
+            fields: vec![FieldSpec {
+                id: "f".into(),
+                description: "d".into(),
+                dtype: "string".into(),
+                unit: s("mm"),
+                vocabulary: s("DICOM"),
+                default: Some(serde_json::json!("x")),
+                required: true,
+                recommended: true,
+                sensitivity: Sensitivity::Identifying,
+                inherit: true,
+            }],
+            blocks: vec![BlockRequirement {
+                role: "r".into(),
+                kind: Some(BlockKind::Table),
+                min_count: 1,
+                description: "d".into(),
+            }],
+            requires_generation: true,
+            tables: BTreeMap::from([("events".to_string(), table)]),
+            arrays: BTreeMap::from([("map".to_string(), array)]),
+        };
+        let v = schema.to_value().unwrap();
+        let t = &v["tables"]["events"];
+        let c = &t["columns"][0];
+        assert_eq!(keys(&v), sorted(ProductSchema::FIELDS));
+        assert_eq!(keys(&v["fields"][0]), sorted(FieldSpec::FIELDS));
+        assert_eq!(keys(&v["blocks"][0]), sorted(BlockRequirement::FIELDS));
+        assert_eq!(keys(t), sorted(TableContract::FIELDS));
+        assert_eq!(keys(c), sorted(Column::FIELDS));
+        assert_eq!(keys(&c["referencing"]), sorted(Referenced::FIELDS));
+        assert_eq!(keys(&t["references"][0]), sorted(ColumnReference::FIELDS));
+        assert_eq!(
+            keys(&t["references"][0]["to"]),
+            sorted(ReferenceTarget::FIELDS)
+        );
+        assert_eq!(keys(&v["arrays"]["map"]), sorted(ArrayContract::FIELDS));
+        let coded = serde_json::to_value(Coded {
+            vocabulary: "v".into(),
+            code: "c".into(),
+            label: s("l"),
+        })
+        .unwrap();
+        assert_eq!(keys(&coded), sorted(Coded::FIELDS));
+        // Each transform variant (an exhaustive match, so a new variant must be listed).
+        for tr in [
+            Transform::Identity,
+            Transform::Affine1d {
+                slope: 1.0,
+                intercept: 0.0,
+            },
+            Transform::Log {
+                ln_lo: 0.0,
+                ln_step: 1.0,
+            },
+            Transform::AffineNd {
+                dims: 1,
+                matrix: vec![1.0, 0.0],
+            },
+            Transform::Lookup { values: vec![1.0] },
+        ] {
+            match tr {
+                Transform::Identity
+                | Transform::Affine1d { .. }
+                | Transform::Log { .. }
+                | Transform::AffineNd { .. }
+                | Transform::Lookup { .. } => {}
+            }
+            let tv = serde_json::to_value(&tr).unwrap();
+            assert_eq!(
+                keys(&tv),
+                sorted(Transform::fields(tv["kind"].as_str().unwrap()))
+            );
+        }
+        assert!(newer_fields_of(&v).is_empty());
+        assert_eq!(ProductSchema::from_value(&v).unwrap(), schema);
+    }
 
     #[test]
     fn registry_has_all_builtins() {

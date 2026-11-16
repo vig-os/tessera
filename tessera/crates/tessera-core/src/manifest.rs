@@ -117,15 +117,42 @@ pub fn seal_of(object: &Value) -> crate::Result<String> {
     crate::canonical::hash_without(object, SEAL_KEY)
 }
 
-/// The one key the seal leaves out (SPEC §4).
-const SEAL_KEY: &str = "manifest_hash";
+/// The one key the seal leaves out (SPEC §4). A [`crate::Collection`] is sealed under the same key.
+pub(crate) const SEAL_KEY: &str = "manifest_hash";
 
-/// Every key of `obj` outside `declared`, as `prefix + key`.
-fn unknown_keys(obj: &Value, declared: &[&str], prefix: &str, out: &mut Vec<String>) {
+/// Every key of `obj` outside `declared`, as `prefix + key`: the declared-field walk of ADR-0060
+/// §2.2, shared by the manifest, the collection and the embedded product schema. Only keys count,
+/// never values. A non-object `obj` (absent, `null`) contributes nothing.
+pub(crate) fn unknown_keys(obj: &Value, declared: &[&str], prefix: &str, out: &mut Vec<String>) {
     if let Value::Object(map) = obj {
         let unknown = map.keys().filter(|k| !declared.contains(&k.as_str()));
         out.extend(unknown.map(|k| format!("{prefix}{k}")));
     }
+}
+
+/// [`unknown_keys`] for each entry of the array `list`, as `{prefix}[i].key`.
+pub(crate) fn unknown_keys_each(
+    list: &Value,
+    declared: &[&str],
+    prefix: &str,
+    out: &mut Vec<String>,
+) {
+    if let Value::Array(items) = list {
+        for (i, item) in items.iter().enumerate() {
+            unknown_keys(item, declared, &format!("{prefix}[{i}]."), out);
+        }
+    }
+}
+
+/// `Err(NewerFormatFields)` when `fields` is non-empty: the one refusal every view of a parsed
+/// object raises before it would build a seal from, validate against or re-emit what it dropped.
+pub(crate) fn refuse_newer(fields: &[String]) -> crate::Result<()> {
+    if fields.is_empty() {
+        return Ok(());
+    }
+    Err(crate::Error::NewerFormatFields {
+        fields: fields.to_vec(),
+    })
 }
 
 /// The dotted paths of every key in a manifest object that this build's types don't declare
@@ -150,11 +177,7 @@ fn newer_fields_of(object: &Value) -> Vec<String> {
         ("ingest_transform", IngestTransform::FIELDS),
     ];
     for (key, declared) in lists {
-        if let Value::Array(items) = get(key) {
-            for (i, item) in items.iter().enumerate() {
-                unknown_keys(item, declared, &format!("{key}[{i}]."), &mut out);
-            }
-        }
+        unknown_keys_each(get(key), declared, key, &mut out);
     }
     out
 }
@@ -236,12 +259,7 @@ impl Manifest {
 
     /// [`crate::Error::NewerFormatFields`] if [`newer_fields`](Self::newer_fields) is non-empty.
     pub fn refuse_newer_fields(&self) -> crate::Result<()> {
-        if self.newer_fields.is_empty() {
-            return Ok(());
-        }
-        Err(crate::Error::NewerFormatFields {
-            fields: self.newer_fields.clone(),
-        })
+        refuse_newer(&self.newer_fields)
     }
 
     /// True once the product has been sealed (carries a manifest hash).

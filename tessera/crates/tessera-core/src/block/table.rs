@@ -94,6 +94,22 @@ fn is_false(b: &bool) -> bool {
 }
 
 impl Column {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &[
+        "name",
+        "dtype",
+        "codec",
+        "short_name",
+        "description",
+        "unit",
+        "scale",
+        "nullable",
+        "referencing",
+        "sensitivity",
+        "optional",
+    ];
+
     /// A bare column: storage `name` + `dtype`, no codec/annotation. Chain the `with_*` builders
     /// to attach the fd5 annotation triad (`short_name`/`description`/`unit`) and a `scale`.
     pub fn new(name: impl Into<String>, dtype: impl Into<String>) -> Self {

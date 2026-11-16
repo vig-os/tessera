@@ -43,14 +43,16 @@ pub enum Error {
         detail: String,
     },
 
-    /// A manifest carries fields from a **newer format revision** that this build does not model
-    /// ([`crate::Manifest::newer_fields`], ADR-0060 §2.2), and the operation would build a new seal
-    /// from it or re-emit it. The fields are sealed and verified, but this build can't carry them, so
-    /// it refuses instead of silently dropping sealed content. Read and verify still work; use a build
-    /// that understands the fields to derive a new version.
+    /// A manifest, a collection or an embedded product schema carries fields from a **newer format
+    /// revision** that this build does not model ([`crate::Manifest::newer_fields`],
+    /// [`crate::Collection::newer_fields`], [`crate::ProductSchema::from_value`]; ADR-0060 §2.2), and
+    /// the operation would build a new seal from it, re-emit it, or validate against it. The fields
+    /// are sealed and verified, but this build can't carry or evaluate them, so it refuses instead of
+    /// silently dropping sealed content or reporting "valid" against a rule it never checked. Read and
+    /// verify still work; use a build that understands the fields to validate or derive a new version.
     #[error(
         "fields from a newer format revision are not interpreted by this build: {}; refusing to \
-         re-seal or re-emit the manifest without them",
+         re-seal, re-emit or validate against it without them",
         fields.join(", ")
     )]
     NewerFormatFields { fields: Vec<String> },

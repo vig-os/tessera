@@ -18,6 +18,12 @@
 //!   member's `manifest_hash` (which itself commits to that member's payload), so tampering with
 //!   any member or with the catalog changes the collection seal.
 //!
+//! **What the seal covers** is the product manifest's rule (SPEC §4, #873): the collection JSON
+//! *object* as parsed, with only `manifest_hash` removed ([`crate::manifest::seal_of`]), never a
+//! re-serialisation of this struct. So a key a newer writer added and sealed verifies and is named by
+//! [`Collection::newer_fields`], a key spliced in under an old seal fails, and a repeated key is
+//! refused ([`crate::canonical::parse_strict`]).
+//!
 //! [`Role`] tags a member as `Raw` (acquisition data, irreplaceable) or `Derived` (regenerable
 //! output). Storage layers map this to WORM retention mode — `Role::Raw` → Compliance (immutable),
 //! `Role::Derived` → Governance (regenerable). The mapping helper lives next to the WORM module in
@@ -26,8 +32,12 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::manifest::{SUPPORTED_MAJOR, TESSERA_VERSION};
+use crate::manifest::{
+    refuse_newer, seal_of, unknown_keys, unknown_keys_each, SEAL_KEY, SUPPORTED_MAJOR,
+    TESSERA_VERSION,
+};
 
 /// Raw acquisition data vs derived/regenerable product. Drives storage's WORM retention mapping
 /// (raw → Compliance, derived → Governance) — see `tessera_io::collection::retention_mode`.
@@ -120,6 +130,11 @@ pub struct CollectionMember {
 }
 
 impl CollectionMember {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] =
+        &["reference", "manifest_hash", "role", "kind", "derived_from"];
+
     pub fn new(reference: impl Into<String>, manifest_hash: impl Into<String>, role: Role) -> Self {
         CollectionMember {
             reference: reference.into(),
@@ -187,6 +202,31 @@ pub struct Collection {
     /// The seal: blake3 over canonical-JSON of this collection with `manifest_hash` omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_hash: Option<String>,
+    /// Keys of the parsed collection this build does not model (see [`Self::newer_fields`]).
+    /// Never serialised: it describes the received object, not the collection.
+    #[serde(skip)]
+    newer_fields: Vec<String>,
+}
+
+/// The dotted paths of every key in a collection object that this build's types don't declare: the
+/// top level, `level` and each `members[i]`. `id_inputs` is an opaque map and is not walked.
+fn newer_fields_of(object: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    unknown_keys(object, Collection::FIELDS, "", &mut out);
+    let get = |k: &str| object.get(k).unwrap_or(&Value::Null);
+    unknown_keys(
+        get("level"),
+        crate::schema::Coded::FIELDS,
+        "level.",
+        &mut out,
+    );
+    unknown_keys_each(
+        get("members"),
+        CollectionMember::FIELDS,
+        "members",
+        &mut out,
+    );
+    out
 }
 
 /// The generic, permissive default collection schema (accepts product *and* sub-collection members).
@@ -233,7 +273,38 @@ impl Collection {
             members: Vec::new(),
             content_hash: None,
             manifest_hash: None,
+            newer_fields: Vec::new(),
         }
+    }
+
+    /// The JSON keys this type models; kept equal to a fully populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &[
+        "tessera_version",
+        "id",
+        "id_inputs",
+        "name",
+        "description",
+        "timestamp",
+        "collection_schema",
+        "study",
+        "level",
+        "members",
+        "content_hash",
+        "manifest_hash",
+    ];
+
+    /// Fields of the parsed collection that this build does not model: keys a **newer format
+    /// revision** added, as dotted paths (`annotations`, `level.uri`, `members[1].weight`). Empty for
+    /// a collection this build wrote and for one not parsed by [`from_json`](Self::from_json) /
+    /// [`from_json_verified`](Self::from_json_verified).
+    ///
+    /// They are covered by the seal (verification hashes the parsed object) but not interpreted, and
+    /// this struct doesn't carry them, so every operation that would build a new seal from this view
+    /// or emit it as sealed ([`to_sealed_json`](Self::to_sealed_json)) refuses with
+    /// [`crate::Error::NewerFormatFields`] instead of dropping them (ADR-0060 §2.2). Only the display
+    /// form [`to_json`](Self::to_json) leaves them out.
+    pub fn newer_fields(&self) -> &[String] {
+        &self.newer_fields
     }
 
     /// True once the collection has been sealed (carries a manifest hash).
@@ -241,17 +312,50 @@ impl Collection {
         self.manifest_hash.is_some()
     }
 
-    /// Pretty JSON, for humans / display. NOT the hashed form — see [`canonical_bytes`].
+    /// Pretty JSON, for humans / display. NOT the hashed form — see [`canonical_bytes`]. A writer
+    /// emitting a sealed `collection.json` uses [`to_sealed_json`](Self::to_sealed_json).
     pub fn to_json(&self) -> crate::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
+    /// This collection's JSON, for a writer to emit as a **sealed** `collection.json`: refused unless
+    /// the bytes carry their own seal ([`seal_of`] over them equals `manifest_hash`). Mirrors
+    /// [`crate::Manifest::to_sealed_json`].
+    ///
+    /// # Errors
+    /// - [`crate::Error::NewerFormatFields`] for a parsed collection with
+    ///   [`newer_fields`](Self::newer_fields): its JSON would drop sealed content.
+    /// - [`crate::Error::Invalid`] if it is unsealed, or its JSON doesn't reproduce its seal (edited
+    ///   after sealing, or parsed from an encoding this struct normalises, such as an omitted
+    ///   `collection_schema`): copy the original bytes instead.
+    pub fn to_sealed_json(&self) -> crate::Result<String> {
+        refuse_newer(&self.newer_fields)?;
+        let Some(mh) = &self.manifest_hash else {
+            return Err(crate::Error::Invalid(
+                "refusing to emit an unsealed collection as sealed".into(),
+            ));
+        };
+        let json = self.to_json()?;
+        let resealed = seal_of(&serde_json::from_str(&json)?)?;
+        if &resealed != mh {
+            return Err(crate::Error::Invalid(format!(
+                "refusing to emit a collection whose JSON does not reproduce its seal {mh} (it \
+                 seals {resealed}); copy the original bytes instead"
+            )));
+        }
+        Ok(json)
+    }
+
     /// Canonical (RFC 8785 JCS) bytes of this collection with `manifest_hash` excluded — the
-    /// exact bytes [`manifest_hash`](Self::manifest_hash) is computed over.
+    /// exact bytes [`manifest_hash`](Self::manifest_hash) is computed over when this struct is
+    /// written out.
+    ///
+    /// # Errors
+    /// [`crate::Error::NewerFormatFields`] for a parsed collection with
+    /// [`newer_fields`](Self::newer_fields): bytes of this view would leave them out.
     pub fn canonical_bytes(&self) -> crate::Result<Vec<u8>> {
-        let mut bare = self.clone();
-        bare.manifest_hash = None;
-        crate::canonical::to_bytes(&bare)
+        refuse_newer(&self.newer_fields)?;
+        crate::canonical::bytes_without(&serde_json::to_value(self)?, SEAL_KEY)
     }
 
     /// Recompute the logical `id` from `id_inputs`.
@@ -284,30 +388,91 @@ impl Collection {
         crate::hash::merkle_root(&leaves)
     }
 
-    /// Recompute the seal (`manifest_hash`) over the canonical bytes.
+    /// The seal (`manifest_hash`) this struct gets when written out: [`seal_of`] over its JSON
+    /// object, the function a reader applies to the object it parses.
+    ///
+    /// # Errors
+    /// As [`canonical_bytes`](Self::canonical_bytes): a re-seal of a view with
+    /// [`newer_fields`](Self::newer_fields) is refused, since it would drop sealed content.
     pub fn compute_manifest_hash(&self) -> crate::Result<String> {
         Ok(crate::hash::digest(&self.canonical_bytes()?))
     }
 
+    /// Parse the text strictly into the object and its typed view, recording the newer fields.
+    fn parse(s: &str) -> crate::Result<(Self, Value)> {
+        let object = crate::canonical::parse_strict(s)?;
+        let mut c = Collection::deserialize(&object)?;
+        c.check_version()?;
+        c.newer_fields = newer_fields_of(&object);
+        Ok((c, object))
+    }
+
+    /// [`from_json`](Self::from_json), plus the seal recomputed over the JSON object **as received**
+    /// ([`seal_of`]): what a display compares with [`manifest_hash`](Self::manifest_hash) to show
+    /// whether the seal holds, without the full [`from_json_verified`](Self::from_json_verified).
+    ///
+    /// # Errors
+    /// As [`from_json`](Self::from_json).
+    pub fn from_json_with_seal(s: &str) -> crate::Result<(Self, String)> {
+        let (c, object) = Self::parse(s)?;
+        let seal = seal_of(&object)?;
+        Ok((c, seal))
+    }
+
     /// Parse a collection JSON, refusing one whose major spec version this reader can't handle.
     /// Does not verify hashes — use [`from_json_verified`](Self::from_json_verified) for that.
+    ///
+    /// # Errors
+    /// [`crate::Error::Serde`] for malformed JSON, a **duplicate key** in any object
+    /// ([`crate::canonical::parse_strict`]) or a known field of the wrong type (an unknown member
+    /// `kind` included); [`crate::Error::UnsupportedVersion`] for a newer major version.
     pub fn from_json(s: &str) -> crate::Result<Self> {
-        let c: Collection = serde_json::from_str(s)?;
-        c.check_version()?;
-        Ok(c)
+        Ok(Self::parse(s)?.0)
     }
 
-    /// Parse + version-check + full integrity [`verify`](Self::verify).
+    /// Parse, version-check and verify a collection **as received** (SPEC §4), then validate its
+    /// members against its level schema.
+    ///
+    /// `id` is recomputed from `id_inputs`, `content_hash` from the members, and `manifest_hash`
+    /// over the parsed JSON object with only `manifest_hash` removed: a key a newer writer added and
+    /// sealed verifies (and is listed by [`newer_fields`](Self::newer_fields)), a key spliced in under
+    /// an old seal fails, and an omitted defaulted key (`collection_schema`) verifies as sealed.
+    ///
+    /// The collection must be **sealed**: bytes without `content_hash` or `manifest_hash` have no
+    /// seal to verify, so deleting the seal can't launder an edit. Check a collection still being
+    /// built with [`verify`](Self::verify).
+    ///
+    /// # Errors
+    /// Everything [`from_json`](Self::from_json) refuses; then [`crate::Error::Integrity`] naming the
+    /// first hash that is missing (`expected` reads `(absent)`) or doesn't match; then
+    /// [`crate::Error::Invalid`] if a member's kind breaks the level schema's `member_rule`.
     pub fn from_json_verified(s: &str) -> crate::Result<Self> {
-        let c = Self::from_json(s)?;
-        c.verify()?;
+        let (c, object) = Self::parse(s)?;
+        check("id", &c.id, &c.recompute_id()?)?;
+        let recorded = |h: &Option<String>| h.clone().unwrap_or_else(|| "(absent)".into());
+        check(
+            "content_hash",
+            &recorded(&c.content_hash),
+            &c.recompute_content_hash(),
+        )?;
+        check(
+            "manifest_hash",
+            &recorded(&c.manifest_hash),
+            &seal_of(&object)?,
+        )?;
+        c.validate_schema()?;
         Ok(c)
     }
 
-    /// Verify the three hashes against their recomputed values (and the spec version). Any
-    /// mismatch is a typed [`crate::Error::Integrity`] naming the field. An unsealed collection
-    /// verifies its `id` only; a sealed one verifies all three. Mirrors
-    /// [`crate::manifest::Manifest::verify`].
+    /// Verify this **struct's** three hashes against their recomputed values (and the spec version):
+    /// the writer's check on a collection it built. Any mismatch is a typed
+    /// [`crate::Error::Integrity`] naming the field. An unsealed collection verifies its `id` only; a
+    /// sealed one verifies all three. Mirrors [`crate::manifest::Manifest::verify`].
+    ///
+    /// The seal is recomputed over this struct's JSON. For a collection read from bytes, verify the
+    /// bytes with [`from_json_verified`](Self::from_json_verified) instead: a view with
+    /// [`newer_fields`](Self::newer_fields) fails here with [`crate::Error::NewerFormatFields`], and
+    /// one parsed from an encoding the struct normalises fails with `Integrity`.
     pub fn verify(&self) -> crate::Result<()> {
         self.check_version()?;
         check("id", &self.id, &self.recompute_id()?)?;
@@ -781,6 +946,77 @@ mod tests {
         assert_eq!(parsed.content_hash, c.content_hash);
         assert_eq!(parsed.members.len(), 2);
         assert_eq!(parsed.members[1].derived_from, vec![raw.id]);
+    }
+
+    /// The declared-field lists stay equal to the keys a fully populated instance writes, so a new
+    /// field can't be added without the newer-field walk learning it (ADR-0060 §2.2, #873).
+    #[test]
+    fn declared_fields_match_a_fully_populated_collection() {
+        let keys = |v: &Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let sorted = |f: &[&str]| {
+            let mut k: Vec<String> = f.iter().map(|s| s.to_string()).collect();
+            k.sort();
+            k
+        };
+        // Struct literals name every field (no `..`), so a new field fails to compile here until
+        // the walk learns it.
+        let c = Collection {
+            tessera_version: TESSERA_VERSION.into(),
+            id: "i".into(),
+            id_inputs: BTreeMap::from([("name".to_string(), "c".to_string())]),
+            name: "c".into(),
+            description: "d".into(),
+            timestamp: TS.into(),
+            collection_schema: "dataset".into(),
+            study: Some("s".into()),
+            level: Some(crate::schema::Coded {
+                vocabulary: "v".into(),
+                code: "cohort".into(),
+                label: Some("Cohort".into()),
+            }),
+            members: vec![CollectionMember {
+                reference: "r".into(),
+                manifest_hash: "blake3:h".into(),
+                role: Role::Derived,
+                kind: MemberKind::Collection,
+                derived_from: vec!["p".into()],
+            }],
+            content_hash: Some("blake3:c".into()),
+            manifest_hash: Some("blake3:m".into()),
+            newer_fields: Vec::new(),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(keys(&v), sorted(Collection::FIELDS));
+        assert_eq!(keys(&v["level"]), sorted(crate::schema::Coded::FIELDS));
+        assert_eq!(keys(&v["members"][0]), sorted(CollectionMember::FIELDS));
+        assert!(newer_fields_of(&v).is_empty());
+    }
+
+    /// `to_sealed_json` emits only bytes that carry their own seal (#873).
+    #[test]
+    fn to_sealed_json_refuses_a_view_that_does_not_reproduce_its_seal() {
+        let sealed = CollectionBuilder::new("c", "d", TS).seal().unwrap();
+        let json = sealed.to_sealed_json().unwrap();
+        Collection::from_json_verified(&json).unwrap();
+        let mut v: Value = serde_json::from_str(&json).unwrap();
+        v["annotations"] = serde_json::json!(1);
+        v["manifest_hash"] = serde_json::json!(seal_of(&v).unwrap());
+        let newer = Collection::from_json_verified(&v.to_string()).unwrap();
+        assert!(matches!(
+            newer.to_sealed_json(),
+            Err(crate::Error::NewerFormatFields { .. })
+        ));
+        let mut edited = sealed.clone();
+        edited.description = "changed".into();
+        assert!(matches!(
+            edited.to_sealed_json(),
+            Err(crate::Error::Invalid(_))
+        ));
+        assert!(Collection::new("c", "d", TS).to_sealed_json().is_err());
     }
 
     // ---- ADR-0049 recursion mechanism (Part 1) ----

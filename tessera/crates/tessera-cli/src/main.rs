@@ -235,10 +235,15 @@ enum Cmd {
     ///   rather than emitted as null.
     ///
     /// * Its stability is the FORMAT's, tracked by the `tessera_version` field the dump itself
-    ///   carries — this is the spec version, not the CLI's. Fields are added compatibly (readers
-    ///   default them, which is how `producer`/`generation` arrived); a rename or a removal is a
-    ///   major-version break, and a reader refuses a manifest whose major exceeds the one it
-    ///   understands. So pin behaviour to `tessera_version`, not to the tessera binary's version.
+    ///   carries — this is the spec version, not the CLI's. Fields are only ever added within a
+    ///   major version (that is how `producer`/`generation` arrived). An older reader reads a newer
+    ///   product as follows (SPEC §4): fields it doesn't know still verify as part of the seal, it
+    ///   warns `fields from a newer format revision are not interpreted: …`, and it refuses to
+    ///   re-seal such a product (`commit`, `publish`) or to validate it against an embedded schema
+    ///   rule it doesn't know, rather than drop or ignore them. Fields absent from an older product
+    ///   take their defaults. A rename or a removal is a major-version break, and a reader refuses
+    ///   a manifest whose major exceeds the one it understands. So pin behaviour to
+    ///   `tessera_version`, not to the tessera binary's version.
     Inspect {
         /// The `.tsra` to summarise (or an `s3://` / `http(s)://` URL with the `cloud` feature).
         file: PathBuf,
@@ -1286,10 +1291,16 @@ fn grid_opts(
 /// Name the manifest fields this build verified but does not interpret (ADR-0060 §2.2, RFC §13:
 /// an older reader warns and reads what it can).
 fn warn_newer_fields(m: &tessera_core::Manifest) {
-    if !m.newer_fields().is_empty() {
+    warn_not_interpreted("fields", m.newer_fields());
+}
+
+/// The one stderr warning for keys from a newer format revision (#573, #873): `what` names them
+/// (`fields`, `collection 'x': fields`, `embedded schema rules`). Silent when `newer` is empty.
+pub(crate) fn warn_not_interpreted(what: &str, newer: &[String]) {
+    if !newer.is_empty() {
         eprintln!(
-            "warning: fields from a newer format revision are not interpreted: {}",
-            m.newer_fields().join(", ")
+            "warning: {what} from a newer format revision are not interpreted: {}",
+            newer.join(", ")
         );
     }
 }
@@ -1785,14 +1796,17 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             // Prefer the schema **embedded in the file** (self-describing) over the binary's
             // registry — a sealed `.tsra` carries its own contract (obligatory since the
             // self-describing batch). `--json` dumps that embedded contract verbatim.
+            // A rule from a newer format revision is shown, warned about, and blocks the final
+            // validation below (#873); the typed view only displays what this build understands.
             let embedded = m
                 .schema
                 .as_ref()
-                .map(tessera_core::ProductSchema::from_value)
+                .map(|v| tessera_core::ProductSchema::view_of(v).map(|(s, _)| s))
                 .transpose()?;
+            warn_not_interpreted("embedded schema rules", &nav::schema_newer_rules(m));
             if json {
-                let schema = match &embedded {
-                    Some(s) => s.to_value()?,
+                let schema = match &m.schema {
+                    Some(v) => v.clone(),
                     None => SchemaRegistry::builtin()
                         .get(&m.product)
                         .ok_or_else(|| {

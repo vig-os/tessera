@@ -631,7 +631,8 @@ fn shared_identity(child: &Manifest, parent: &Manifest) -> Vec<String> {
     let Some(schema) = parent
         .schema
         .as_ref()
-        .and_then(|v| tessera_core::ProductSchema::from_value(v).ok())
+        // Display only: what this build understands of the schema (#873's `view_of`).
+        .and_then(|v| tessera_core::ProductSchema::view_of(v).ok().map(|(s, _)| s))
     else {
         return Vec::new();
     };

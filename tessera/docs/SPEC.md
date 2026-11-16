@@ -61,6 +61,17 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
     revision: a reader verifies it as part of the seal, SHOULD warn that it is not interpreted, and reads
     the rest. A writer MUST NOT build a new seal from such a manifest (a new version, a re-seal), since it
     can't carry what it doesn't understand; copying the product's bytes unchanged is always allowed.
+    Only keys count: a declared key holding `null` or its default is never a newer field. Opaque objects
+    (`id_inputs`, `metadata`, `extra`, `generation.config`, `blocks[].spec`, `ingest_transform[].params`)
+    hold data, not format, and their keys are never newer fields.
+  - The same rules cover a **collection** (`collection.json`, ADR-0033): its `manifest_hash` is computed over
+    the collection object as parsed with only `manifest_hash` removed, both hashes are required, it MUST be
+    I-JSON, and a key the reader doesn't model (top level, `level`, `members[]`) verifies, is warned about
+    and blocks a re-seal.
+  - An **embedded schema** (`schema`, §5) is different: it is a rule set, not data. A reader that finds a
+    key it doesn't model anywhere in it (top level, `fields[]`, `blocks[]`, `tables.<role>` and its
+    `columns[]`/`references[]`, `arrays.<role>`; a field's `default` is opaque) MUST NOT report the product
+    valid against it. It still verifies the seal and reads the product; it refuses only to validate.
 
 ## 5. Manifest schema
 A JSON object. Fields (✱ = omitted from the JSON when the writer's value is absent/null). Note `[]`
@@ -75,12 +86,15 @@ differently from its absence — only the null/absent sentinel is dropped.
 | `name` | string | |
 | `description` | string | |
 | `timestamp` | string | RFC 3339, normalized to UTC (`…Z`) |
-| `schema` ✱ | object | embedded JSON Schema (opaque) |
+| `producer` ✱ | Producer \| string | who/what wrote it (ADR-0058 §1); older products: a `"tool/version"` string |
+| `generation` ✱ | Generation | how the product was made (ADR-0058 §2); required by schemas with `requires_generation` |
+| `schema` ✱ | object | the embedded product schema the product validates against (§4 for unknown keys) |
 | `blocks` | array<BlockRef> | order is significant (fixes the Merkle order) |
 | `sources` | array<Source> | provenance DAG edges |
 | `study` ✱ | string | exam-grouping id |
 | `metadata` ✱ | object | product-schema field values (keyed by field id) |
 | `extra` ✱ | object | non-standard extension namespace |
+| `ingest_transform` ✱ | array<IngestTransform> | recorded ingest normalisations, in order (ADR-0056 §6.2) |
 | `content_hash` ✱ | string | §4; present once sealed |
 | `manifest_hash` ✱ | string | §4; present once sealed |
 
@@ -101,6 +115,10 @@ spec carries `shape`/`dtype`/`chunks`/`axes`/`codec`/…; a table spec carries `
 `chunk_index` sidecar spec carries `class`/`recipe`/`indexes`/`entries`/`root` — see §5d; a `blob`
 spec carries `filename`/`media_type`/`size` — see §5e).
 **Source** = `{ role: string, reference: string, content_hash✱: string }`.
+**Producer** = `{ tool: string, version: string, git_commit✱: string, git_repo✱: string, dirty✱: bool }`.
+**Generation** = `{ config✱: object, config_ref✱: string }` (`config` is opaque; `config_ref` is a `blake3:`
+digest of a config block carried in the product). **IngestTransform** = `{ name: string, params✱: object }`
+(`params` is opaque).
 
 ## 5a. Array block payload (Zarr v3 + pluggable codec)
 A block with `kind == "array"` stores its samples as a **single serialized Zarr v3 store** (ADR-0023).
