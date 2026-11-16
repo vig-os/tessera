@@ -209,3 +209,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   view plus those paths for display: `tessera schema` shows the roster, warns and then fails validation; `ls FILE
   schema` names the rules; the `tree`/`inspect` badge reads `schema=<p>?(newer rules, not validated)`; `schema
   --json` prints the embedded object as stored instead of its re-serialised view (#873).
+- `tessera-core`: the manifest, a collection and an embedded product schema are read in their declared spelling only
+  (SPEC §4, §5): records as JSON objects, enumerated names as strings. serde also built a record from a JSON array,
+  positionally, so a record spelled `["t","u8",…]` verified and validated as `{"name":"t","dtype":"u8",…}`, a second
+  spelling of one sealed value, and the keys inside it (a column's `min`, a reference's `to.strict`, a
+  `referencing.transform.x`) were never named as newer fields, so a rule a newer writer added could be dropped unseen.
+  It also read a name from a one-key object (`"kind": {"array": null}`). `Manifest::from_json`/`from_json_verified`
+  and `Collection::from_json`/`from_json_verified` now refuse either spelling anywhere (the whole object, `producer`,
+  `generation`, `blocks[i]` and its `kind`, `sources[i]`, `ingest_transform[i]`, `level`, `members[i]` and its
+  `role`/`kind`) with `Error::Serde` naming its path; `ProductSchema::from_value`/`view_of` (so `validate_manifest`)
+  refuse it in any schema record, an internally tagged `referencing.transform` included, with `Error::Invalid`. The
+  reference reader, which reads manifests only, refuses the same in a manifest, and `corpus/seal-cases.json` gains four
+  `refused` cases for both readers. No product a tessera writer sealed changes, and no corpus `manifest_hash` moves
+  (#873).

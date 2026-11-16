@@ -442,7 +442,11 @@ impl ProductSchema {
     /// is fine. `fields[i].default` is an opaque value and is never walked.
     ///
     /// # Errors
-    /// - [`crate::Error::Invalid`] if `v` is not a `ProductSchema` (a known key of the wrong type).
+    /// - [`crate::Error::Invalid`] if `v` is not a `ProductSchema`: a known key of the wrong type, or
+    ///   the schema or any record in it in array form instead of an object, or a name (`kind`,
+    ///   `order`, `sensitivity`) spelled as an object instead of a string (SPEC §4, one spelling per
+    ///   value: a positional array would hide its keys from the walk above; the message names its
+    ///   path).
     /// - [`crate::Error::NewerFormatFields`] naming every unknown key by its dotted path within the
     ///   schema (`fields[0].pattern`, `tables.events.row_count_min`).
     pub fn from_value(v: &serde_json::Value) -> crate::Result<Self> {
@@ -458,9 +462,10 @@ impl ProductSchema {
     /// silently lacks the newer rules.
     ///
     /// # Errors
-    /// [`crate::Error::Invalid`] if `v` is not a `ProductSchema` (a known key of the wrong type).
+    /// [`crate::Error::Invalid`] if `v` is not a `ProductSchema`, as in [`from_value`](Self::from_value)
+    /// (a known key of the wrong type, or a record in array form).
     pub fn view_of(v: &serde_json::Value) -> crate::Result<(Self, Vec<String>)> {
-        let schema = serde_json::from_value(v.clone()).map_err(|e| {
+        let schema = crate::canonical::from_declared_form(v).map_err(|e| {
             crate::Error::Invalid(format!("embedded schema is not a ProductSchema: {e}"))
         })?;
         Ok((schema, newer_fields_of(v)))

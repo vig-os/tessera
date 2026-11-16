@@ -346,7 +346,7 @@ impl Manifest {
     /// view, recording the view's [`newer_fields`](Self::newer_fields).
     fn parse(s: &str) -> crate::Result<(Self, Value)> {
         let object = crate::canonical::parse_strict(s)?;
-        let mut m = Manifest::deserialize(&object)?;
+        let mut m: Manifest = crate::canonical::from_declared_form(&object)?;
         m.check_version()?;
         m.newer_fields = newer_fields_of(&object);
         Ok((m, object))
@@ -357,7 +357,10 @@ impl Manifest {
     ///
     /// # Errors
     /// [`crate::Error::Serde`] for malformed JSON, a **duplicate key** in any object
-    /// ([`crate::canonical::parse_strict`]) or a known field of the wrong type;
+    /// ([`crate::canonical::parse_strict`]), a known field of the wrong type, or the manifest or a
+    /// record in it (`producer`, `generation`, `blocks[i]`, `sources[i]`, `ingest_transform[i]`) in
+    /// array form instead of an object, or a block `kind` spelled as an object instead of a string
+    /// (SPEC §4, one spelling per value; the message names its path);
     /// [`crate::Error::UnsupportedVersion`] for a newer major version.
     pub fn from_json(s: &str) -> crate::Result<Self> {
         Ok(Self::parse(s)?.0)

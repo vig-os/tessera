@@ -65,6 +65,83 @@ pub fn parse_strict(s: &str) -> crate::Result<Value> {
     Ok(v)
 }
 
+/// Deserialize a parsed value into the typed view `T`, **refusing any spelling but the declared
+/// one**: a struct only as a JSON object, a unit-variant name only as a string (SPEC §4 "objects
+/// only").
+///
+/// serde accepts two spellings the sealed formats don't define. It reads a struct from a JSON array
+/// positionally (`["t","u8"]` for `{"name":"t","dtype":"u8"}`), and a unit enum variant from a
+/// one-key object (`{"table": null}` for `"table"`). Either is a second spelling of one sealed
+/// value, and an array's "keys" are invisible to the declared-field walk that names a newer
+/// writer's fields (ADR-0060 §2.2), so an unknown rule inside an array-form parent would be dropped
+/// instead of refused. So after `T` is built, its own serialization is walked alongside `v`:
+/// wherever either side holds an object or an array, the other must hold the same kind. That covers
+/// every type `T` is made of, internally tagged and untagged enums included, without a per-type
+/// list. Opaque values (`serde_json::Value` fields) serialize as received, so they never differ.
+///
+/// The walk relies on `T` emitting every value the input held. A struct-typed field that is
+/// skipped on serialization (a `skip_serializing_if` on a struct, not on an `Option`, `Vec`, map,
+/// `bool` or unit enum) would not be checked; no type in the manifest, collection or product
+/// schema has one.
+///
+/// Manifest, collection and embedded product schema all deserialize through this.
+///
+/// # Errors
+/// A [`serde_json::Error`]: `T`'s own deserialization error (a known field of the wrong type), or
+/// one naming the first value in an undeclared spelling by its dotted path (`blocks[0]`,
+/// `tables.events`, `members[0].role`).
+pub(crate) fn from_declared_form<T>(v: &Value) -> Result<T, serde_json::Error>
+where
+    T: serde::de::DeserializeOwned + Serialize,
+{
+    let typed = T::deserialize(v)?;
+    if let Some((path, got, declared)) =
+        form_mismatch(v, &serde_json::to_value(&typed)?, String::new())
+    {
+        let at = if path.is_empty() {
+            "the top-level value".to_owned()
+        } else {
+            format!("`{path}`")
+        };
+        return Err(de::Error::custom(format!(
+            "{at} is {} where the format defines {} (one spelling per value: a record is an \
+             object, never an array; a name is a string, never an object)",
+            json_type(got),
+            json_type(declared)
+        )));
+    }
+    Ok(typed)
+}
+
+/// The first place, by dotted path, where `received` and `typed` (the serialization of the view
+/// built from `received`) disagree on being an object or an array, with both values. Keys `typed`
+/// omits (defaults) are not compared.
+fn form_mismatch<'a>(
+    received: &'a Value,
+    typed: &'a Value,
+    path: String,
+) -> Option<(String, &'a Value, &'a Value)> {
+    match (received, typed) {
+        (Value::Object(r), Value::Object(t)) => t.iter().find_map(|(k, tv)| {
+            let at = if path.is_empty() {
+                k.clone()
+            } else {
+                format!("{path}.{k}")
+            };
+            r.get(k).and_then(|rv| form_mismatch(rv, tv, at))
+        }),
+        (Value::Array(r), Value::Array(t)) => r
+            .iter()
+            .zip(t)
+            .enumerate()
+            .find_map(|(i, (rv, tv))| form_mismatch(rv, tv, format!("{path}[{i}]"))),
+        (Value::Object(_) | Value::Array(_), _) | (_, Value::Object(_) | Value::Array(_)) => {
+            Some((path, received, typed))
+        }
+        _ => None,
+    }
+}
+
 fn json_type(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",

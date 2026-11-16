@@ -6,7 +6,8 @@
 //! (must verify), and each with a field spliced in under the old seal (must fail), plus the encodings
 //! a struct round-trip loses (`"study": null`, an omitted `sources`, a nested newer field), a splice
 //! whose seal was deleted or nulled (tampered: a missing seal is not a pass), and text that is not
-//! I-JSON (duplicate keys, NaN, a lone surrogate: refused).
+//! I-JSON (duplicate keys, NaN, a lone surrogate: refused), and records spelled as JSON arrays (a
+//! block, the producer, the whole manifest: refused, SPEC §5 objects only, #873).
 
 use serde_json::Value;
 use tessera_core::{Error, Manifest};
@@ -35,7 +36,7 @@ fn rust_verdict(manifest: &str) -> (&'static str, Vec<String>) {
 #[test]
 fn rust_reader_reaches_every_seal_case_verdict() {
     let cases = cases();
-    assert_eq!(cases.len(), 41, "seal-cases.json lost or gained cases");
+    assert_eq!(cases.len(), 45, "seal-cases.json lost or gained cases");
     let mut disagreements = Vec::new();
     for c in &cases {
         let name = c["name"].as_str().unwrap();

@@ -50,7 +50,10 @@ fn set(v: &mut Value, path: &[&str], value: Value) {
             Err(_) => &mut at[*seg],
         };
     }
-    at[*last] = value;
+    match last.parse::<usize>() {
+        Ok(i) => at[i] = value,
+        Err(_) => at[*last] = value,
+    }
 }
 
 fn integrity(r: tessera_core::Result<Collection>) -> &'static str {
@@ -198,5 +201,251 @@ fn unknown_schema_rule_is_not_validated() {
             Err(Error::NewerFormatFields { fields }) => assert_eq!(fields, [named]),
             other => panic!("{path:?}: an unknown schema rule must be refused, got {other:?}"),
         }
+    }
+}
+
+/// `Err(Serde)` or `Err(Invalid)` naming `path` as `got` (`"an array"`) where the format defines
+/// `declared` (`"an object"`).
+fn assert_form_refused<T: std::fmt::Debug>(
+    r: tessera_core::Result<T>,
+    path: &str,
+    got: &str,
+    declared: &str,
+) {
+    let msg = match r {
+        Err(Error::Serde(e)) => e.to_string(),
+        Err(Error::Invalid(m)) => m,
+        other => panic!("{path}: the undeclared spelling must be refused, got {other:?}"),
+    };
+    let at = if path.is_empty() {
+        "the top-level value".to_owned()
+    } else {
+        format!("`{path}`")
+    };
+    let want = format!("{at} is {got} where the format defines {declared}");
+    assert!(msg.contains(&want), "{path}: {msg}");
+}
+
+fn assert_array_form_refused<T: std::fmt::Debug>(r: tessera_core::Result<T>, path: &str) {
+    assert_form_refused(r, path, "an array", "an object");
+}
+
+/// The sealed formats define every struct as a JSON object (SPEC §4/§5). serde would also read a
+/// struct from an array positionally, so an array-form parent hid its unknown keys from the
+/// newer-field walk and gave one value a second spelling: every such array is refused.
+#[test]
+fn embedded_schema_array_form_is_refused() {
+    use tessera_core::ProductSchema;
+    let identity_with = |extra: (&str, Value)| {
+        let mut t = json!({ "kind": "identity" });
+        t[extra.0] = extra.1;
+        t
+    };
+    // (where, how the array hides a newer rule, the array's path).
+    let cases: Vec<(&[&str], Value, &str)> = vec![
+        // A table contract as an array: its column carries `min`, a rule this build doesn't model.
+        (
+            &["tables", "events"],
+            json!([[{ "name": "t", "dtype": "u8", "min": 0 }]]),
+            "tables.events",
+        ),
+        // A reference as an array hiding `to.strict`.
+        (
+            &["tables", "events", "references"],
+            json!([[["t"], { "scope": "block", "block": "b", "columns": ["t"], "strict": true }]]),
+            "tables.events.references[0]",
+        ),
+        // A column as an array hiding `referencing.weird`.
+        (
+            &["tables", "events", "columns", "0"],
+            json!(["t", "u8", null, null, null, null, null, false,
+                   { "transform": { "kind": "identity" }, "weird": 1 }]),
+            "tables.events.columns[0]",
+        ),
+        // A column as an array hiding `referencing.transform.x`.
+        (
+            &["tables", "events", "columns", "0"],
+            json!(["t", "u8", null, null, null, null, null, false,
+                   { "transform": identity_with(("x", json!(1))) }]),
+            "tables.events.columns[0]",
+        ),
+        // The internally tagged transform itself in array form (tag first).
+        (
+            &["tables", "events", "columns", "0", "referencing"],
+            json!({ "transform": ["affine_1d", 1.0, 0.0] }),
+            "tables.events.columns[0].referencing.transform",
+        ),
+        // A field spec, a block requirement and an array contract.
+        (
+            &["fields", "0"],
+            json!(["site", "acquisition site", "string"]),
+            "fields[0]",
+        ),
+        (
+            &["blocks", "0"],
+            json!(["volume", null, 0, "the volume"]),
+            "blocks[0]",
+        ),
+        (
+            &["arrays", "lyso_map"],
+            json!(["float32", 2]),
+            "arrays.lyso_map",
+        ),
+    ];
+    for (at, value, path) in cases {
+        let mut s = base_schema();
+        set(&mut s, at, value);
+        assert_array_form_refused(ProductSchema::from_value(&s), path);
+        assert_array_form_refused(ProductSchema::view_of(&s), path);
+        // validate_manifest reports it as an embedded schema that doesn't parse.
+        assert_array_form_refused(validate_manifest(&with_schema(s)), path);
+    }
+
+    // The whole schema as an array, hiding `fields[0].pattern`.
+    let whole = json!(["custom", "1", "d",
+        [{ "id": "site", "description": "s", "dtype": "string", "pattern": "^A" }]]);
+    assert_array_form_refused(ProductSchema::from_value(&whole), "");
+    assert_array_form_refused(validate_manifest(&with_schema(whole)), "");
+
+    // The object form of the same rules still parses (and names the newer rule).
+    let mut object = base_schema();
+    object["tables"]["events"]["columns"][0]["referencing"] =
+        json!({ "transform": { "kind": "affine_1d", "slope": 1.0, "intercept": 0.0 } });
+    validate_manifest(&with_schema(object)).expect("the object form validates");
+}
+
+#[test]
+fn collection_array_form_is_refused() {
+    let sealed = sealed_collection();
+    // `level` and `members[0]` written positionally: the same collection, spelled a second way.
+    let level = sealed["level"].clone();
+    let m = &sealed["members"][0];
+    let cases = [
+        (
+            &["level"][..],
+            json!([level["_vocabulary"], level["_code"]]),
+            "level",
+        ),
+        (
+            &["members", "0"],
+            json!([m["reference"], m["manifest_hash"], m["role"]]),
+            "members[0]",
+        ),
+    ];
+    for (at, value, path) in cases {
+        let mut arr = sealed.clone();
+        set(&mut arr, at, value);
+        reseal(&mut arr);
+        assert_array_form_refused(verify(&arr), path);
+        assert_array_form_refused(Collection::from_json(&arr.to_string()), path);
+    }
+}
+
+#[test]
+fn manifest_array_form_is_refused() {
+    let p = ProductBuilder::new("recon", "p", "d", TS).seal().unwrap();
+    let sealed: Value = serde_json::from_str(&p.to_sealed_json().unwrap()).unwrap();
+    Manifest::from_json_verified(&sealed.to_string()).expect("the writer's own manifest verifies");
+    let producer = sealed["producer"].clone();
+    let cases = [
+        (
+            "producer",
+            json!([producer["tool"], producer["version"]]),
+            "producer",
+        ),
+        ("generation", json!([{ "seed": 1 }]), "generation"),
+        ("sources", json!([["raw", "blake3:00"]]), "sources[0]"),
+        (
+            "ingest_transform",
+            json!([["dictionary_materialised", {}]]),
+            "ingest_transform[0]",
+        ),
+    ];
+    for (key, value, path) in cases {
+        let mut arr = sealed.clone();
+        arr[key] = value;
+        reseal(&mut arr);
+        assert_array_form_refused(Manifest::from_json_verified(&arr.to_string()), path);
+    }
+    // The whole manifest as an array of its values in field order.
+    let order = [
+        "tessera_version",
+        "id",
+        "id_inputs",
+        "product",
+        "name",
+        "description",
+        "timestamp",
+        "producer",
+        "generation",
+        "schema",
+        "blocks",
+        "sources",
+        "study",
+        "metadata",
+        "extra",
+        "ingest_transform",
+        "content_hash",
+        "manifest_hash",
+    ];
+    // Absent keys take the value their field defaults to, so the array is otherwise well-typed.
+    let default = |k: &str| match k {
+        "id_inputs" | "metadata" | "extra" => json!({}),
+        "blocks" | "sources" | "ingest_transform" => json!([]),
+        _ => Value::Null,
+    };
+    let whole = Value::Array(
+        order
+            .iter()
+            .map(|k| sealed.get(*k).cloned().unwrap_or_else(|| default(k)))
+            .collect(),
+    );
+    assert_array_form_refused(Manifest::from_json(&whole.to_string()), "");
+}
+
+/// serde also reads a unit enum variant from a one-key object (`{"raw": null}` for `"raw"`): a second
+/// spelling of one sealed value, refused like the array form.
+#[test]
+fn unit_variant_object_form_is_refused() {
+    use tessera_core::ProductSchema;
+    let sealed = sealed_collection();
+    for (at, value, path) in [
+        (
+            &["members", "0", "role"][..],
+            json!({ "raw": null }),
+            "members[0].role",
+        ),
+        (
+            &["members", "1", "kind"],
+            json!({ "collection": null }),
+            "members[1].kind",
+        ),
+    ] {
+        let mut c = sealed.clone();
+        set(&mut c, at, value);
+        reseal(&mut c);
+        assert_form_refused(verify(&c), path, "an object", "a string");
+    }
+
+    for (at, value, path) in [
+        (
+            &["blocks", "0", "kind"][..],
+            json!({ "array": null }),
+            "blocks[0].kind",
+        ),
+        (
+            &["tables", "events", "order"],
+            json!({ "producer": null }),
+            "tables.events.order",
+        ),
+        (
+            &["fields", "0", "sensitivity"],
+            json!({ "identifying": null }),
+            "fields[0].sensitivity",
+        ),
+    ] {
+        let mut s = base_schema();
+        set(&mut s, at, value);
+        assert_form_refused(ProductSchema::from_value(&s), path, "an object", "a string");
     }
 }

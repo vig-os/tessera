@@ -134,7 +134,37 @@ def parse_manifest(raw: bytes | str) -> dict[str, Any]:
         json.dumps(m, ensure_ascii=False).encode("utf-8")
     except UnicodeEncodeError as e:
         raise NotAManifest(f"lone surrogate: {e}") from e
+    _refuse_non_objects(m)
     return m
+
+
+# SPEC §4/§5, one spelling per value: the manifest and its records are JSON objects only, and a
+# block's kind is a string. A positional deserialiser would also read a record from an array (and a
+# serde-style one a name from `{"array": null}`): a second spelling of one manifest, whose array
+# form hides its keys. So any other form is refused (the Rust reader refuses the same).
+_OBJECT_SLOTS = ("generation",)
+_OBJECT_LISTS = ("blocks", "sources", "ingest_transform")
+
+
+def _refuse_non_objects(m: Any) -> None:
+    if not isinstance(m, dict):
+        raise NotAManifest("the manifest is not a JSON object")
+    producer = m.get("producer")
+    if producer is not None and not isinstance(producer, (dict, str)):
+        raise NotAManifest("producer is neither an object nor a legacy string")
+    for key in _OBJECT_SLOTS:
+        if m.get(key) is not None and not isinstance(m[key], dict):
+            raise NotAManifest(f"{key} is not a JSON object")
+    for key in _OBJECT_LISTS:
+        items = m.get(key, [])
+        if not isinstance(items, list):
+            raise NotAManifest(f"{key} is not a JSON array")
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise NotAManifest(f"{key}[{i}] is not a JSON object")
+    for i, block in enumerate(m.get("blocks", [])):
+        if not isinstance(block.get("kind"), str):
+            raise NotAManifest(f"blocks[{i}].kind is not a string")
 
 
 def manifest_seal(manifest: dict[str, Any]) -> str:

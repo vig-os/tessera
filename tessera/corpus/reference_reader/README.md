@@ -22,10 +22,11 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
 Exit code 0 ⇔ all fixtures reproduce their goldens, every manifest in `corpus/seal-cases.json` reaches its
-`verdict` (SPEC §4's seal over the parsed object, duplicate keys refused, a block name listed twice refused), and
-the reader refuses each crafted refusal archive for its stated reason. The Rust reader checks the same seal-case
-file (`tessera-core/tests/seal_cases.rs`), so the two readers agree by construction. The refusal archives today
-list a block name twice (SPEC §5, #734), with a foreign digest and with the block's own, built from a corpus
+`verdict` (SPEC §4's seal over the parsed object, duplicate keys refused, a block name listed twice refused, a
+manifest or record spelled as a JSON array instead of an object refused), and the reader refuses each crafted
+refusal archive for its stated reason. The Rust reader checks the same seal-case file
+(`tessera-core/tests/seal_cases.rs`), so the two readers agree by construction. The refusal archives today list
+a block name twice (SPEC §5, #734), with a foreign digest and with the block's own, built from a corpus
 fixture and re-sealed; the Rust reader refuses the same two (`tessera-io/tests/unique_block_names.rs`).
 
 ## Why it matters

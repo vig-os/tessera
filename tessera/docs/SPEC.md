@@ -72,11 +72,22 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
     key it doesn't model anywhere in it (top level, `fields[]`, `blocks[]`, `tables.<role>` and its
     `columns[]`/`references[]`, `arrays.<role>`; a field's `default` is opaque) MUST NOT report the product
     valid against it. It still verifies the seal and reads the product; it refuses only to validate.
+  - **Objects only, one spelling per value.** Every record this spec defines as an object (the manifest and
+    each record of §5, a collection with its `level` and `members[]`, the embedded schema with each of its
+    records) is a JSON object, and every enumerated name (`kind`, `role`, `order`, `sensitivity`, …) is a
+    string. A reader MUST refuse the array form of a record (`["t","u8"]` for `{"name":"t","dtype":"u8"}`),
+    which a positional deserialiser would read as the same record, and a name spelled as an object
+    (`{"array": null}` for `"array"`): each is a second spelling of one value, and the array form hides its
+    keys from the forward-reading rule above, so an unknown rule inside it would be dropped unseen. Such a
+    manifest or collection is refused before any seal is checked; such an embedded schema is refused like
+    one that doesn't parse.
 
 ## 5. Manifest schema
-A JSON object. Fields (✱ = omitted from the JSON when the writer's value is absent/null). Note `[]`
-and `{}` are **present** values, not omissions: e.g. `sources: []` stays in the manifest and hashes
-differently from its absence — only the null/absent sentinel is dropped.
+A JSON object; so is every record below (BlockRef, Source, Producer, Generation, IngestTransform): objects
+only, the array form is refused, and `kind` is a string, never an object (§4). Fields (✱ = omitted from the
+JSON when the writer's value is absent/null). Note `[]` and `{}` are **present** values, not omissions: e.g.
+`sources: []` stays in the manifest and hashes differently from its absence — only the null/absent sentinel is
+dropped.
 | key | type | notes |
 |---|---|---|
 | `tessera_version` | string | spec version, `MAJOR.MINOR.PATCH`. Reader MUST refuse `MAJOR` > supported. |
@@ -503,5 +514,7 @@ regenerated (and the spec version bumped) only on an intended format change:
 
 `tessera/corpus/seal-cases.json` adds manifest-only vectors for §4's seal rule: each corpus manifest with a
 newer-format key added and resealed (verifies), the same key spliced in under the old seal (fails), the
-encodings a typed model loses (`"study": null`, an omitted `sources`, a nested newer key; all verify) and
-a splice whose seal was deleted or nulled (fails), and text that is not I-JSON (refused). A conformant reader MUST reach every case's `verdict` from its `manifest` text.
+encodings a typed model loses (`"study": null`, an omitted `sources`, a nested newer key; all verify) and a
+splice whose seal was deleted or nulled (fails), text that is not I-JSON (refused), and a block, the producer
+or the whole manifest spelled as a JSON array, or a block `kind` as an object (refused, §4). A conformant
+reader MUST reach every case's `verdict` from its `manifest` text.
