@@ -178,14 +178,17 @@ only because it happened to look the second digest up. Added:
   compared by **exact byte equality** (the grammar makes every name ASCII, so byte and string
   equality agree). Names that differ only in letter case (`Data`, `data`) are distinct here.
   Case-fold collisions on case-insensitive file systems are [#690](https://github.com/vig-os/tessera/issues/690)'s
-  concern, and this amendment doesn't widen into it.
+  concern, and this amendment doesn't widen into it. Uniqueness is about names, not digests: two
+  distinct names may share one digest (identical bytes), since each name maps to its own
+  `blocks/<name>` member and each member is checked against its own entry's digest.
 - **Writers refuse it.** One shared check, `tessera_core::block::check_unique_names`, returns
   `Error::DuplicateBlockName { name }`. `ProductBuilder::seal` runs it, and so does every writer that
   seals through the builder: a write session's seal (and so the `StreamWriter` and its lanes),
   `tessera commit --add-block`, ingest and the Python `Builder`. A write session also runs it on
   each append, against the blocks it has committed. `pack` and `pack_streaming` run it on the sealed
-  manifest they're given, before they create the output, so no tessera writer emits what readers
-  refuse. The seal runs uniqueness before the leaf rule and ADR-0064's node checks, so a duplicate
+  manifest they're given, before they create the output, and the repository's `commit` and
+  `put_manifest` run it before they store any object or move a ref, so no tessera writer emits
+  what readers refuse. The seal runs uniqueness before the leaf rule and ADR-0064's node checks, so a duplicate
   partition index under canonical leaf names (two `pairs/0000`) is now refused at seal as
   `DuplicateBlockName`; `table_group` over such a list still names it `LogicalTableError::DuplicateIndex`.
 - **Readers refuse it too, unlike the leaf rule.** `Manifest::from_json_verified` (the reader's

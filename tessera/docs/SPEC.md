@@ -91,7 +91,8 @@ refuse a name outside it. Block names are **unique** within a product: no two Bl
 array have the same `name`, compared as exact strings (byte for byte; `Data` and `data` are two names).
 A writer MUST NOT seal such a list, and a reader MUST refuse a manifest that lists a name twice, before it
 looks up any digest: a reader resolves a name to one listed digest, so a second entry's digest would cover
-no bytes. A writer MUST also keep the **leaf rule**: no name in one product is a parent
+no bytes. Two distinct names may share one digest: each name maps to its own `blocks/<name>` member, and each
+member is checked. A writer MUST also keep the **leaf rule**: no name in one product is a parent
 prefix of another (`volume` and `volume/1` can't both exist), so the zip members, an exploded directory
 and an object-store prefix mirror the names one-to-one. A reader accepts a product sealed before the leaf
 rule in-zip, but MUST NOT explode it to a directory.

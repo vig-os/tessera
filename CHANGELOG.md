@@ -153,8 +153,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Reader::open`, every read, `verify`, the repository and `pack_dir`, refuse the repeat before any digest lookup (the
   deep verify's member check also runs it, as defence in depth). Every writer refuses to make one:
   `ProductBuilder::seal` (and so a write session's seal, the `StreamWriter`, `tessera commit --add-block`, ingest and
-  the Python `Builder`), a write session's append, and `pack` / `pack_streaming`. The append and `commit --add-block`
-  refused a repeat before with `Error::Invalid`; they now return `Error::DuplicateBlockName` like every other door.
-  Names compare by exact bytes: `Data` and `data` stay distinct (case folding is #690). The reference reader refuses
-  the repeat by name too, and `corpus/seal-cases.json` gains the case `recon_int16/block-listed-twice` (`refused`) for
-  both readers. No valid product changes, and no corpus `manifest_hash` moves.
+  the Python `Builder`), a write session's append, `pack` / `pack_streaming`, and the repository's `commit` and
+  `put_manifest`, which stored the payloads and moved the lineage tip to a manifest `get_manifest` refuses. The append
+  and `commit --add-block` refused a repeat before with `Error::Invalid`; they now return `Error::DuplicateBlockName`
+  like every other door. Names compare by exact bytes: `Data` and `data` stay distinct (case folding is #690). The
+  reference reader refuses the repeat by name too, and `corpus/seal-cases.json` gains the case
+  `recon_int16/block-listed-twice` (`refused`) for both readers. No valid product changes, and no corpus
+  `manifest_hash` moves.
