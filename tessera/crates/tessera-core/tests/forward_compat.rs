@@ -603,3 +603,82 @@ fn every_kind_of_skipped_default_accepts_only_its_own_spelling() {
         "empty map: another spelling validated"
     );
 }
+
+/// A newer field is decided by structure, never by a string spelling of its path (#873): a key is
+/// exempt from the spelling check only where its parent type doesn't declare it. Before, the exemption
+/// matched dotted path strings, which are not injective: a top-level key literally named
+/// `members[0].kind` (a newer field) spelled the same path as the member's declared `kind`, so that
+/// `kind` in the object form `{"product": null}` escaped the check and verified under a seal of its
+/// own.
+#[test]
+fn a_key_spelling_a_declared_path_cannot_exempt_it() {
+    let mut c = sealed_collection();
+    c["members[0].kind"] = json!(1);
+    reseal(&mut c);
+    let got = verify(&c).expect("a crafted key alone is a sealed newer field");
+    assert_eq!(got.newer_fields(), [r#"["members[0].kind"]"#]);
+
+    set(
+        &mut c,
+        &["members", "0", "kind"],
+        json!({ "product": null }),
+    );
+    reseal(&mut c);
+    assert_form_refused(verify(&c), "members[0].kind", "an object", "a default");
+
+    use tessera_core::ProductSchema;
+    let mut s = base_schema();
+    s["tables.events.order"] = json!(1);
+    let (_, newer) = ProductSchema::view_of(&s).expect("a crafted key alone is a newer rule");
+    assert_eq!(newer, [r#"["tables.events.order"]"#]);
+    set(
+        &mut s,
+        &["tables", "events", "order"],
+        json!({ "sequence_key": null }),
+    );
+    assert_form_refused(
+        ProductSchema::view_of(&s),
+        "tables.events.order",
+        "an object",
+        "a default",
+    );
+}
+
+/// Newer-field paths are reported unambiguously: a key holding `.`, `[` or `"` is quoted, so a
+/// crafted top-level key never reads as the nested declared or newer field it spells (#873).
+#[test]
+fn newer_field_paths_are_reported_unambiguously() {
+    let p = ProductBuilder::new("recon", "p", "d", TS).seal().unwrap();
+    let mut m: Value = serde_json::from_str(&p.to_json().unwrap()).unwrap();
+    m["producer"]["agents"] = json!(["x"]);
+    m["producer.agents"] = json!(1);
+    m["producer.tool"] = json!(1);
+    reseal(&mut m);
+    let got = Manifest::from_json_verified(&m.to_string()).expect("sealed newer fields verify");
+    let mut newer = got.newer_fields().to_vec();
+    newer.sort();
+    assert_eq!(
+        newer,
+        [
+            r#"["producer.agents"]"#,
+            r#"["producer.tool"]"#,
+            "producer.agents"
+        ]
+    );
+
+    // The schema's own paths are prefixed by its key in the manifest structurally, so a crafted key
+    // stays quoted under `schema` too.
+    let mut s = base_schema();
+    s["tables.events.order"] = json!(1);
+    s["tables"]["events"]["row_count_min"] = json!(1);
+    match validate_manifest(&with_schema(s)) {
+        Err(Error::NewerFormatFields { fields }) => assert_eq!(
+            fields,
+            [
+                r#"schema["tables.events.order"]"#,
+                "schema.tables.events.row_count_min"
+            ]
+        ),
+        other => panic!("a newer rule must not validate, got {other:?}"),
+    }
+}

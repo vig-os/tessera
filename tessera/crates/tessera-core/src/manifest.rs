@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::block::BlockRef;
+use crate::field_path::FieldPath;
 use crate::provenance::{Generation, IngestTransform, Producer, ProducerRef, Source};
 
 /// Format/spec version this build writes.
@@ -120,26 +121,33 @@ pub fn seal_of(object: &Value) -> crate::Result<String> {
 /// The one key the seal leaves out (SPEC §4). A [`crate::Collection`] is sealed under the same key.
 pub(crate) const SEAL_KEY: &str = "manifest_hash";
 
-/// Every key of `obj` outside `declared`, as `prefix + key`: the declared-field walk of ADR-0060
-/// §2.2, shared by the manifest, the collection and the embedded product schema. Only keys count,
-/// never values. A non-object `obj` (absent, `null`) contributes nothing.
-pub(crate) fn unknown_keys(obj: &Value, declared: &[&str], prefix: &str, out: &mut Vec<String>) {
+/// Every key of the object `obj` at `at` that its type doesn't declare (`declared`, the type's
+/// `FIELDS`), as `at` + key: the declared-field walk of ADR-0060 §2.2, shared by the manifest, the
+/// collection and the embedded product schema. A key is a newer field iff its parent type does not
+/// declare it, and that is decided here, per parent, on the structured path. Only keys count, never
+/// values. A non-object `obj` (absent, `null`) contributes nothing.
+pub(crate) fn unknown_keys(
+    obj: &Value,
+    declared: &[&str],
+    at: &FieldPath,
+    out: &mut Vec<FieldPath>,
+) {
     if let Value::Object(map) = obj {
         let unknown = map.keys().filter(|k| !declared.contains(&k.as_str()));
-        out.extend(unknown.map(|k| format!("{prefix}{k}")));
+        out.extend(unknown.map(|k| at.key(k)));
     }
 }
 
-/// [`unknown_keys`] for each entry of the array `list`, as `{prefix}[i].key`.
+/// [`unknown_keys`] for each entry of the array `list` at `at`, as `at[i]` + key.
 pub(crate) fn unknown_keys_each(
     list: &Value,
     declared: &[&str],
-    prefix: &str,
-    out: &mut Vec<String>,
+    at: &FieldPath,
+    out: &mut Vec<FieldPath>,
 ) {
     if let Value::Array(items) = list {
         for (i, item) in items.iter().enumerate() {
-            unknown_keys(item, declared, &format!("{prefix}[{i}]."), out);
+            unknown_keys(item, declared, &at.index(i), out);
         }
     }
 }
@@ -155,20 +163,26 @@ pub(crate) fn refuse_newer(fields: &[String]) -> crate::Result<()> {
     })
 }
 
-/// The dotted paths of every key in a manifest object that this build's types don't declare
+/// The paths of every key in a manifest object that this build's types don't declare
 /// (ADR-0060 §2.2): top level, `producer`, `generation`, and each entry of `blocks`, `sources` and
 /// `ingest_transform`. Opaque maps (`id_inputs`, `metadata`, `extra`, `schema`, `generation.config`,
 /// `blocks[].spec`, `ingest_transform[].params`) are data, not format, and are never walked. Only
 /// keys count, never values: a known key holding `null` is not a newer field.
-fn newer_fields_of(object: &Value) -> Vec<String> {
+fn newer_fields_of(object: &Value) -> Vec<FieldPath> {
     let mut out = Vec::new();
-    unknown_keys(object, Manifest::FIELDS, "", &mut out);
+    let root = FieldPath::root();
+    unknown_keys(object, Manifest::FIELDS, &root, &mut out);
     let get = |k: &str| object.get(k).unwrap_or(&Value::Null);
-    unknown_keys(get("producer"), Producer::FIELDS, "producer.", &mut out);
+    unknown_keys(
+        get("producer"),
+        Producer::FIELDS,
+        &root.key("producer"),
+        &mut out,
+    );
     unknown_keys(
         get("generation"),
         Generation::FIELDS,
-        "generation.",
+        &root.key("generation"),
         &mut out,
     );
     let lists = [
@@ -177,7 +191,7 @@ fn newer_fields_of(object: &Value) -> Vec<String> {
         ("ingest_transform", IngestTransform::FIELDS),
     ];
     for (key, declared) in lists {
-        unknown_keys_each(get(key), declared, key, &mut out);
+        unknown_keys_each(get(key), declared, &root.key(key), &mut out);
     }
     out
 }
@@ -245,8 +259,11 @@ impl Manifest {
     ];
 
     /// Fields of the parsed manifest that this build does not model: keys a **newer format
-    /// revision** added (RFC §13, additive-only evolution), as dotted paths (`actors`,
-    /// `producer.agents`, `blocks[0].stats`). Empty for a manifest this build wrote, and for every
+    /// revision** added (RFC §13, additive-only evolution), as paths (`actors`, `producer.agents`,
+    /// `blocks[0].stats`). A key that is not a non-empty run of ASCII letters, digits and `_`
+    /// starting with a letter or `_` is quoted, so a path never reads as another: a top-level key
+    /// named `producer.agents` is `["producer.agents"]` (the grammar is in SPEC §4, "Forward
+    /// reading"). Empty for a manifest this build wrote, and for every
     /// manifest not parsed by [`from_json`](Self::from_json) / [`from_json_verified`](Self::from_json_verified).
     ///
     /// These fields are covered by the seal ([`from_json_verified`](Self::from_json_verified) hashes
@@ -349,7 +366,7 @@ impl Manifest {
         let newer = newer_fields_of(&object);
         let mut m: Manifest = crate::canonical::from_declared_form(&object, &newer)?;
         m.check_version()?;
-        m.newer_fields = newer;
+        m.newer_fields = crate::field_path::render(&newer);
         Ok((m, object))
     }
 

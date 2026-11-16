@@ -10,7 +10,8 @@
 //! as JSON arrays (a block, the producer, the whole manifest: refused, SPEC §5 objects only, #873),
 //! and a declared field of another JSON type or shape at any depth (`metadata: []`, `study: 5`, a
 //! block `kind` outside its names, a block `name` outside its grammar, a block without a digest:
-//! refused), so the reference reader's type table and the Rust types agree case by case.
+//! refused), so the reference reader's type table and the Rust types agree case by case. A top-level
+//! key spelling a nested newer field's path verifies and is reported quoted, apart from it (#873).
 
 use serde_json::Value;
 use tessera_core::{Error, Manifest};
@@ -41,7 +42,7 @@ fn rust_verdict(manifest: &str) -> (&'static str, Vec<String>) {
 #[test]
 fn rust_reader_reaches_every_seal_case_verdict() {
     let cases = cases();
-    assert_eq!(cases.len(), 64, "seal-cases.json lost or gained cases");
+    assert_eq!(cases.len(), 65, "seal-cases.json lost or gained cases");
     let mut disagreements = Vec::new();
     for c in &cases {
         let name = c["name"].as_str().unwrap();

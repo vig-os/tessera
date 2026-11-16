@@ -34,6 +34,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::field_path::FieldPath;
 use crate::manifest::{
     refuse_newer, seal_of, unknown_keys, unknown_keys_each, SEAL_KEY, SUPPORTED_MAJOR,
     TESSERA_VERSION,
@@ -208,22 +209,23 @@ pub struct Collection {
     newer_fields: Vec<String>,
 }
 
-/// The dotted paths of every key in a collection object that this build's types don't declare: the
-/// top level, `level` and each `members[i]`. `id_inputs` is an opaque map and is not walked.
-fn newer_fields_of(object: &Value) -> Vec<String> {
+/// The paths of every key in a collection object that this build's types don't declare: the top
+/// level, `level` and each `members[i]`. `id_inputs` is an opaque map and is not walked.
+fn newer_fields_of(object: &Value) -> Vec<FieldPath> {
     let mut out = Vec::new();
-    unknown_keys(object, Collection::FIELDS, "", &mut out);
+    let root = FieldPath::root();
+    unknown_keys(object, Collection::FIELDS, &root, &mut out);
     let get = |k: &str| object.get(k).unwrap_or(&Value::Null);
     unknown_keys(
         get("level"),
         crate::schema::Coded::FIELDS,
-        "level.",
+        &root.key("level"),
         &mut out,
     );
     unknown_keys_each(
         get("members"),
         CollectionMember::FIELDS,
-        "members",
+        &root.key("members"),
         &mut out,
     );
     out
@@ -294,7 +296,9 @@ impl Collection {
     ];
 
     /// Fields of the parsed collection that this build does not model: keys a **newer format
-    /// revision** added, as dotted paths (`annotations`, `level.uri`, `members[1].weight`). Empty for
+    /// revision** added, as paths (`annotations`, `level.uri`, `members[1].weight`), rendered as
+    /// [`crate::Manifest::newer_fields`] renders them: a top-level key named `members[1].weight` is
+    /// `["members[1].weight"]`, never the member's field. Empty for
     /// a collection this build wrote and for one not parsed by [`from_json`](Self::from_json) /
     /// [`from_json_verified`](Self::from_json_verified).
     ///
@@ -404,7 +408,7 @@ impl Collection {
         let newer = newer_fields_of(&object);
         let mut c: Collection = crate::canonical::from_declared_form(&object, &newer)?;
         c.check_version()?;
-        c.newer_fields = newer;
+        c.newer_fields = crate::field_path::render(&newer);
         Ok((c, object))
     }
 

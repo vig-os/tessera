@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::block::array::ArraySpec;
 use crate::block::table::TableSpec;
 use crate::block::BlockKind;
+use crate::field_path::FieldPath;
 use crate::manifest::Manifest;
 
 pub mod contract;
@@ -447,24 +448,41 @@ impl ProductSchema {
     ///   `order`, `sensitivity`) spelled as an object instead of a string (SPEC §4, one spelling per
     ///   value: a positional array would hide its keys from the walk above; the message names its
     ///   path).
-    /// - [`crate::Error::NewerFormatFields`] naming every unknown key by its dotted path within the
-    ///   schema (`fields[0].pattern`, `tables.events.row_count_min`).
+    /// - [`crate::Error::NewerFormatFields`] naming every unknown key by its path within the schema
+    ///   (`fields[0].pattern`, `tables.events.row_count_min`; rendered as
+    ///   [`crate::Manifest::newer_fields`] renders them).
     pub fn from_value(v: &serde_json::Value) -> crate::Result<Self> {
-        let (schema, newer) = Self::view_of(v)?;
-        crate::manifest::refuse_newer(&newer)?;
+        Self::checked(v, &FieldPath::root())
+    }
+
+    /// [`from_value`](Self::from_value) for a schema found at `at`, which prefixes the paths of
+    /// its unknown keys structurally (`schema` + `fields[0].pattern`).
+    fn checked(v: &serde_json::Value, at: &FieldPath) -> crate::Result<Self> {
+        let (schema, newer) = Self::parse_view(v)?;
+        let newer: Vec<FieldPath> = newer.iter().map(|p| at.join(p)).collect();
+        crate::manifest::refuse_newer(&crate::field_path::render(&newer))?;
         Ok(schema)
     }
 
-    /// The typed **view** of an embedded schema plus the dotted paths of every key it doesn't model
+    /// The typed **view** of an embedded schema plus the paths of every key it doesn't model
     /// (the walk [`from_value`](Self::from_value) refuses on), for callers that only **display** the
     /// schema: they show what this build understands and warn about the rest. Anything that acts on
     /// the rules (validate, inherit, re-emit) uses [`from_value`](Self::from_value) instead; the view
     /// silently lacks the newer rules.
     ///
+    /// The paths are rendered as [`crate::Manifest::newer_fields`] renders them: a top-level key
+    /// named `tables.events.order` is `["tables.events.order"]`, never the declared `order`.
+    ///
     /// # Errors
     /// [`crate::Error::Invalid`] if `v` is not a `ProductSchema`, as in [`from_value`](Self::from_value)
     /// (a known key of the wrong type, or a record in array form).
     pub fn view_of(v: &serde_json::Value) -> crate::Result<(Self, Vec<String>)> {
+        let (schema, newer) = Self::parse_view(v)?;
+        Ok((schema, crate::field_path::render(&newer)))
+    }
+
+    /// [`view_of`](Self::view_of) with the newer-field paths still structured.
+    fn parse_view(v: &serde_json::Value) -> crate::Result<(Self, Vec<FieldPath>)> {
         let newer = newer_fields_of(v);
         let schema = crate::canonical::from_declared_form(v, &newer).map_err(|e| {
             crate::Error::Invalid(format!("embedded schema is not a ProductSchema: {e}"))
@@ -478,26 +496,32 @@ fn field<'a>(object: &'a serde_json::Value, key: &str) -> &'a serde_json::Value 
     object.get(key).unwrap_or(&serde_json::Value::Null)
 }
 
-/// The dotted paths of every key in a product-schema object that this build's types don't declare
+/// The paths of every key in a product-schema object that this build's types don't declare
 /// (see [`ProductSchema::from_value`]).
-fn newer_fields_of(v: &serde_json::Value) -> Vec<String> {
+fn newer_fields_of(v: &serde_json::Value) -> Vec<FieldPath> {
     use crate::block::table::Column;
     use crate::manifest::{unknown_keys, unknown_keys_each};
     use crate::referencing::{Referenced, Transform};
     let mut out = Vec::new();
-    unknown_keys(v, ProductSchema::FIELDS, "", &mut out);
-    unknown_keys_each(field(v, "fields"), FieldSpec::FIELDS, "fields", &mut out);
+    let root = FieldPath::root();
+    unknown_keys(v, ProductSchema::FIELDS, &root, &mut out);
+    unknown_keys_each(
+        field(v, "fields"),
+        FieldSpec::FIELDS,
+        &root.key("fields"),
+        &mut out,
+    );
     unknown_keys_each(
         field(v, "blocks"),
         BlockRequirement::FIELDS,
-        "blocks",
+        &root.key("blocks"),
         &mut out,
     );
     if let Some(tables) = field(v, "tables").as_object() {
         for (role, t) in tables {
-            let at = format!("tables.{role}");
-            unknown_keys(t, TableContract::FIELDS, &format!("{at}."), &mut out);
-            let columns = format!("{at}.columns");
+            let at = root.key("tables").key(role);
+            unknown_keys(t, TableContract::FIELDS, &at, &mut out);
+            let columns = at.key("columns");
             unknown_keys_each(field(t, "columns"), Column::FIELDS, &columns, &mut out);
             for (i, c) in field(t, "columns")
                 .as_array()
@@ -506,18 +530,13 @@ fn newer_fields_of(v: &serde_json::Value) -> Vec<String> {
                 .enumerate()
             {
                 let r = field(c, "referencing");
-                let at = format!("{columns}[{i}].referencing.");
+                let at = columns.index(i).key("referencing");
                 unknown_keys(r, Referenced::FIELDS, &at, &mut out);
                 let tr = field(r, "transform");
                 let kind = field(tr, "kind").as_str().unwrap_or_default();
-                unknown_keys(
-                    tr,
-                    Transform::fields(kind),
-                    &format!("{at}transform."),
-                    &mut out,
-                );
+                unknown_keys(tr, Transform::fields(kind), &at.key("transform"), &mut out);
             }
-            let refs = format!("{at}.references");
+            let refs = at.key("references");
             unknown_keys_each(
                 field(t, "references"),
                 ColumnReference::FIELDS,
@@ -530,19 +549,15 @@ fn newer_fields_of(v: &serde_json::Value) -> Vec<String> {
                 .flatten()
                 .enumerate()
             {
-                let to = format!("{refs}[{i}].to.");
+                let to = refs.index(i).key("to");
                 unknown_keys(field(r, "to"), ReferenceTarget::FIELDS, &to, &mut out);
             }
         }
     }
     if let Some(arrays) = field(v, "arrays").as_object() {
         for (role, a) in arrays {
-            unknown_keys(
-                a,
-                ArrayContract::FIELDS,
-                &format!("arrays.{role}."),
-                &mut out,
-            );
+            let at = root.key("arrays").key(role);
+            unknown_keys(a, ArrayContract::FIELDS, &at, &mut out);
         }
     }
     out
@@ -562,12 +577,7 @@ pub fn validate_manifest(m: &Manifest) -> crate::Result<()> {
     let Some(v) = &m.schema else {
         return SchemaRegistry::builtin().validate(m);
     };
-    let schema = ProductSchema::from_value(v).map_err(|e| match e {
-        crate::Error::NewerFormatFields { fields } => crate::Error::NewerFormatFields {
-            fields: fields.into_iter().map(|f| format!("schema.{f}")).collect(),
-        },
-        other => other,
-    })?;
+    let schema = ProductSchema::checked(v, &FieldPath::root().key("schema"))?;
     schema.validate(m)
 }
 

@@ -66,6 +66,12 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
     Only keys count: a declared key holding `null` or its default is never a newer field. Opaque objects
     (`id_inputs`, `metadata`, `extra`, `generation.config`, `blocks[].spec`, `ingest_transform[].params`)
     hold data, not format, and their keys are never newer fields.
+    Whether a key is a newer field is decided by where it sits: it is one iff the record that holds it doesn't
+    declare it. A reader MUST NOT decide it by matching a textual path, since a key's name can spell another
+    key's path (a top-level key named `members[0].kind`). When a reader names a newer field by its path, the
+    path is written so no two paths read the same: a key of ASCII letters, digits and `_`, not starting with a
+    digit, is written bare (after a `.` unless first), any other key as its JSON string literal in brackets, and
+    an array index as `[n]`: `producer.agents`, `blocks[0].stats`, `["producer.agents"]`, `tables["a.b"].order`.
   - The same rules cover a **collection** (`collection.json`, ADR-0033): its `manifest_hash` is computed over
     the collection object as parsed with only `manifest_hash` removed, both hashes are required, it MUST be
     I-JSON, and a key the reader doesn't model (top level, `level`, `members[]`) verifies, is warned about

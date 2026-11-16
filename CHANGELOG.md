@@ -82,6 +82,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `tessera-core`: newer-field paths (`Manifest::newer_fields`, `Collection::newer_fields`, `ProductSchema::view_of`,
+  `Error::NewerFormatFields`) quote a key that isn't a plain identifier, `["producer.agents"]`, so no two paths read
+  the same (SPEC §4); code that parses these strings sees the new form. Plain paths are unchanged (#873, see
+  Security).
+
 - **Breaking, `tessera-core`:** `ProductBuilder::from_manifest` returns `Result` and refuses a parsed manifest with
   `Manifest::newer_fields()` (keys from a newer format revision, verified but not carried by the struct) with the
   new `Error::NewerFormatFields`, as do `Manifest::compute_manifest_hash`, `canonical_bytes` and `verify` on such a
@@ -229,6 +234,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collection, with the same `content_hash`. Such a key's value must now be its default's own spelling (`null`, a
   boolean, a number, a string, `[]` or `{}`), and anything else is refused like the forms above. The explicit default
   itself (`"study": null`, `"kind": "product"`, `"sequence_key": []`) is still accepted, as SPEC §4 states (#873).
+- `tessera-core`: a newer field is decided by where the key sits (its record doesn't declare it), never by a path
+  string. The spelling check exempted a key whose dotted path was in the newer-field list, but a key's name can
+  spell another key's path: a top-level key named `"members[0].kind"` exempted the first member's real `kind`, so
+  `"kind": {"product": null}` verified (and `tessera collection verify` passed it with a warning). The walk and the
+  check now share structured paths, and such a collection, or an embedded schema with a crafted
+  `"tables.events.order"`, is refused. Newer-field paths are rendered unambiguously wherever they are reported
+  (`Manifest::newer_fields`, `Collection::newer_fields`, `ProductSchema::view_of`, `Error::NewerFormatFields`,
+  the CLI warnings): a key that is not a non-empty run of ASCII letters, digits and `_` starting with a letter or `_` is quoted, `["producer.agents"]`,
+  so it never reads as the nested `producer.agents` (SPEC §4). Every path a well-formed product declares reads
+  as before. `corpus/seal-cases.json` gains the case `recon_int16/key-spelling-a-nested-path-resealed` (#873).
 - Reference reader (`corpus/reference_reader`): it checks every declared manifest field's JSON type and shape at every
   depth from one declarative table that mirrors the Rust types (strings, booleans, block-kind names, the block-name
   grammar, string-valued `id_inputs`, objects for the opaque maps, required fields), refuses a block without a

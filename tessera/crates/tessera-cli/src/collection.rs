@@ -408,6 +408,28 @@ mod tests {
         ));
     }
 
+    /// A crafted top-level key spelling a member field's path (`"members[0].kind"`) is a newer field
+    /// of its own, never an exemption for the member's `kind`: that `kind` spelled as an object is
+    /// refused under a fresh seal, where `verify` once passed it with a warning (#873).
+    #[test]
+    fn a_crafted_key_cannot_exempt_a_member_field() {
+        let dir = tempfile::tempdir().unwrap();
+        build_collection(dir.path());
+        let cf = dir.path().join("collection.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cf).unwrap()).unwrap();
+        v["members[0].kind"] = serde_json::json!(1);
+        v["members"][0]["kind"] = serde_json::json!({ "product": null });
+        v["manifest_hash"] =
+            serde_json::json!(tessera_core::canonical::hash_without(&v, "manifest_hash").unwrap());
+        std::fs::write(&cf, v.to_string()).unwrap();
+        let err = verify(&cf, &mut Vec::new()).expect_err("a second spelling must not verify");
+        assert!(
+            err.to_string().contains("`members[0].kind` is an object"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn inspect_ls_verify_a_collection_on_disk() {
         let dir = tempfile::tempdir().unwrap();
