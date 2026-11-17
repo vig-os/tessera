@@ -1,0 +1,31 @@
+## 64-bit values
+A  JSON.parse                   epoch_ns=1730000000123456800 (number), i64_min=-9223372036854776000 (number), p53_plus_1=9007199254740992 (number), u64_max=18446744073709552000 (number)
+A/A′ strings + BigInt()         epoch_ns=exact, i64_min=exact, p53_plus_1=exact, u64_max=exact
+B  cbor-x decode                epoch_ns=exact, i64_min=exact, p53_plus_1=exact, u64_max=exact | types: small:number i64_min:bigint u64_max:bigint epoch_ns:bigint p53_plus_1:bigint
+B  cbor-x int64AsNumber         epoch_ns=1730000000123456800 (number), i64_min=-9223372036854776000 (number), p53_plus_1=9007199254740992 (number), u64_max=18446744073709552000 (number)
+
+## Corpus: does JavaScript reproduce the stored bytes and the seal?
+A′ canonicalize(JSON.parse(b)) == b : 13/13
+B  cbor-x encode(decode(b)) == b    : 13/13  (profile B, numeric reduction)
+B0 cbor-x encode(decode(b)) == b    : 10/13  (profile B0, no numeric reduction)
+    B0 cause: the float 1.0 (stored f9 3c00) decodes to the JS number 1 and re-encodes as 01, the integer 1
+blake3 seals over stored bytes match Rust : 13/13
+cbor-x writer: 1.5 → fb3ff8000000000000 (profile f93e00); 100000.5 → fb40f86a0800000000 (profile fa47c35040)
+
+## Out-of-profile CBOR: does cbor-x decode refuse it on its own?
+  bignum_tag2                  accepted → 1n
+  float_1_5_as_f32             accepted → 1.5
+  float_nan                    accepted → null
+  int5_non_shortest            accepted → 5
+  int64_non_shortest           accepted → 64
+  map_duplicate_key            accepted → {"a":2}
+  map_unsorted                 accepted → {"b":1,"a":2}
+  text_indefinite              refused: Indefinite length not supported for byte or text strings
+  text_lone_surrogate_cesu8    accepted → "���"
+  trailing_byte                refused: Data read, but end of buffer not reached
+  undefined                    accepted → undefined
+
+## Lone surrogate and a float-spelled integer
+A  JSON.parse lone surrogate    accepted → "\ud800" well-formed: false
+A  JSON.parse shape             [64,64,64] (64.0 and 64 are one JS number)
+B0 cbor-x decode shape          [64,64,64] (the float/int distinction is lost)

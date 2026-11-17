@@ -38,6 +38,7 @@ intoto = "intoto"            # in-toto attestation format (`*.intoto.jsonl`)
 Hashi = "Hashi"              # "HashiCorp", split at the CamelCase boundary
 arange = "arange"            # `np.arange` (numpy API name)
 Fo = "Fo"                    # "FoR" — Frame-of-Reference encoding
+COSE = "COSE"                # CBOR Object Signing and Encryption (RFC 9052): COSE_Sign1, the `coset` crate
 # FAIR acronym written with bold markers: `**A**ccessible` tokenizes to
 # "ccessible". Allowlisted deliberately — the ADR/docs prose stays as written,
 # the entry is NOT a typo we failed to fix.

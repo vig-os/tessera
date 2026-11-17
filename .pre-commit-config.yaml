@@ -238,8 +238,9 @@ repos:
         entry: guardrails-no-debug-leftovers
         language: system
         pass_filenames: true
-        # Report-printing benchmark/corpus harnesses: `print()` IS their output.
-        exclude: ^tessera/(bench|corpus)/.*/run\.py$
+        # Report-printing benchmark/corpus harnesses and the #897 spike's reader probes: their printed
+        # report IS their output.
+        exclude: ^(tessera/(bench|corpus)/.*/run\.py|docs/spikes/897-seal-encoding/(py|js)/[^/]+\.(py|mjs))$
       - id: no-commented-code
         name: no commented-out code
         entry: guardrails-no-commented-code

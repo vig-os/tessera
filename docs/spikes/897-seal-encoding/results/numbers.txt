@@ -1,0 +1,12 @@
+serde_jcs 9007199254740993 → 9007199254740992
+serde_jcs 1730000000123456789 → 1730000000123456800
+serde_jcs 18446744073709551615 → 18446744073709552000
+serde_jcs -9223372036854775808 → -9223372036854776000
+serde_jcs 1e+21 → 1e+21
+serde_jcs 1e-7 → 1e-7
+serde_json parses 9007199254740993 as u64: true
+A seal rule: digest(JCS({seed: 2^53+1})) == digest(JCS({seed: 2^53})): true
+A′ seal rule: digest(b'{"seed":9007199254740993}') == digest(b'{"seed":9007199254740992}'): false
+is 9007199254740992 its own JCS form: true
+is 1730000000123456800 its own JCS form: true
+is 1730000000123456789 its own JCS form: false
