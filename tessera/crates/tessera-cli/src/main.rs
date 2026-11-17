@@ -3890,6 +3890,56 @@ streaming = "batch"
         obj.with_exact_meta(meta).write_to_file(path).unwrap();
     }
 
+    /// `ingest dicom` over a slice whose curated KVP or RescaleSlope is `1E16` (beyond what a sealed
+    /// JSON number holds) fails naming the tag and its text, and leaves no output file (#886 review).
+    #[test]
+    fn ingest_dicom_refuses_a_curated_number_a_seal_cannot_hold_and_writes_nothing() {
+        use dicom::core::{DataElement, PrimitiveValue, Tag, VR};
+        let dir = tempfile::tempdir().unwrap();
+        for (tag, keyword) in [
+            (Tag(0x0018, 0x0060), "KVP"),
+            (Tag(0x0028, 0x1053), "RescaleSlope"),
+        ] {
+            let dcm = dir.path().join(format!("{keyword}.dcm"));
+            write_phi_dcm(&dcm, "DOE^JOHN", "PID-1");
+            let mut obj = dicom::object::open_file(&dcm).unwrap();
+            obj.put(DataElement::new(tag, VR::DS, PrimitiveValue::from("1E16")));
+            obj.write_to_file(&dcm).unwrap();
+            let out = dir.path().join(format!("{keyword}.tsra"));
+            let err = run(Cmd::Ingest {
+                spec: None,
+                out: None,
+                workers: None,
+                ram_budget: None,
+                auto: false,
+                stream_threshold: None,
+                src: Some(Box::new(IngestSrc::Dicom {
+                    input: dcm,
+                    out: out.clone(),
+                    name: "ct".into(),
+                    timestamp: "2024-01-01T00:00:00Z".into(),
+                    deidentify: true,
+                    recipient: vec![],
+                    source_label: Some("STUDY-1/CT".into()),
+                    meta: vec![],
+                })),
+            })
+            .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "invalid product: dicom: {tag} {keyword} = \"1E16\" is outside the range a \
+                     sealed JSON number can hold (±(2^53−1), I-JSON RFC 7493 §2.2)"
+                )
+            );
+            assert!(
+                !out.exists(),
+                "a refused ingest leaves no {}",
+                out.display()
+            );
+        }
+    }
+
     /// Naive substring search over bytes (test-only; the `twoway` crate isn't a dep).
     fn twoway_contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
