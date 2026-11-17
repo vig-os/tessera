@@ -32,7 +32,9 @@ pub enum Error {
     /// and `9007199254740992` do): the seal would not pin the value. Writers refuse it before any
     /// hash is computed and readers refuse it on parse (SPEC §1, §4; #886). Carry the value as a
     /// decimal string instead. `path` names the value from the document's root (rendered as
-    /// [`crate::canonical::check_i_json`] documents); `value` is the number as parsed.
+    /// [`crate::canonical::check_i_json`] documents), or as the person typed it for a value read by
+    /// [`crate::canonical::parse_user_value`] (`--set daq_start_ns`); `value` is the number as parsed,
+    /// or the person's own text for a typed number.
     #[error(
         "{path} = {value} exceeds ±(2^53−1) (I-JSON, RFC 7493 §2.2): a sealed JSON number is an \
          IEEE-754 double (RFC 8785 §3.2.2.3), which can't hold this integer exactly; write it as a \

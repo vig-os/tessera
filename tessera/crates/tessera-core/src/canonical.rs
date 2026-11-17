@@ -81,6 +81,73 @@ fn inexact_integer<'a>(
     }
 }
 
+/// Whether the double `f` lies outside the range a sealed JSON number may hold: its magnitude
+/// exceeds [`MAX_EXACT_INTEGER`] (or it is infinite). This is the rule [`check_i_json`] applies to
+/// a parsed number; a reader of a typed source (a DICOM `DS`/`FD` value headed for a sealed field)
+/// uses it to refuse such a value at its own door, where it can name the source.
+///
+/// A double above 2^53 − 1 in magnitude has no fractional bits, so "beyond" alone means "an integer
+/// beyond", which two documents could not tell apart once JCS writes it (RFC 8785 §3.2.2.3).
+#[must_use]
+pub fn beyond_exact_f64(f: f64) -> bool {
+    // Exact: 2^53 − 1 is a double. NaN compares false and is no JSON number at all.
+    f.abs() > MAX_EXACT_INTEGER as f64
+}
+
+/// Read one value a person typed for a sealed field (`tessera commit --set KEY=VALUE`,
+/// `tessera ingest … --meta KEY=VALUE`) into JSON, refusing a number a seal cannot hold.
+///
+/// Whether the text is JSON is decided by the RFC 8259 grammar, never by whether `serde_json` can
+/// hold every number in it (numbers in the grammar are unbounded):
+/// - JSON text (`42`, `-1.5`, `1e300`, `true`, `null`, `"quoted"`, `[1,2]`, `{"a":1}`, surrounding
+///   JSON whitespace allowed) is that value. A number in it beyond ±[`MAX_EXACT_INTEGER`] is
+///   refused, and so is a number past a double's range (`1e400`, a 401-digit integer,
+///   `[1e400]`), never kept as a string: the person wrote JSON, and a string would silently seal
+///   something else. JSON text that is not I-JSON in another way (an escaped lone surrogate,
+///   `"\ud800"`) is refused too.
+/// - Any other text (`hello`, `DUPLET-07`, `01`, `[draft]`) is a bare string, as before.
+///
+/// To keep a number-shaped value as text, write it as a JSON string:
+/// `--set k='"1730000000000000000"'`.
+///
+/// `label` names the value in the error the way the person wrote it (`--set daq_start_ns`); a
+/// number inside a composite is named by its path under it (`--set x.a[1]`). A bare number is
+/// quoted as typed.
+///
+/// # Errors
+/// [`crate::Error::InexactInteger`] for a number beyond ±[`MAX_EXACT_INTEGER`] or a bare number
+/// past a double's range; [`crate::Error::Invalid`] for other JSON text that isn't I-JSON (a composite
+/// holding a number past a double's range, a lone surrogate), with `serde_json`'s reason.
+pub fn parse_user_value(label: &str, text: &str) -> crate::Result<Value> {
+    // `IgnoredAny` makes serde_json check the grammar alone: it skips a number token without
+    // computing its value, so `1e400` passes here and fails only the `Value` parse below.
+    if serde_json::from_str::<de::IgnoredAny>(text).is_err() {
+        return Ok(Value::String(text.to_owned()));
+    }
+    let token = text.trim_matches([' ', '\t', '\n', '\r']);
+    let refuse = |path: String, value: String| crate::Error::InexactInteger { path, value };
+    let bare_number = token.starts_with(|c: char| c == '-' || c.is_ascii_digit());
+    let value = match serde_json::from_str::<Value>(text) {
+        Ok(value) => value,
+        // A bare number token can fail only by its magnitude.
+        Err(_) if bare_number => return Err(refuse(label.to_owned(), token.to_owned())),
+        Err(e) => {
+            return Err(crate::Error::Invalid(format!(
+                "{label} = {token} is JSON a seal cannot hold (I-JSON, RFC 7493): {e}"
+            )))
+        }
+    };
+    match inexact_integer(&value, &FieldPath::root()) {
+        None => Ok(value),
+        Some((path, _)) if path.is_root() => Err(refuse(label.to_owned(), token.to_owned())),
+        Some((path, n)) => {
+            let rest = path.to_string();
+            let sep = if rest.starts_with('[') { "" } else { "." };
+            Err(refuse(format!("{label}{sep}{rest}"), n.to_string()))
+        }
+    }
+}
+
 /// Whether `n` is an integer beyond ±[`MAX_EXACT_INTEGER`]. A double above 2^53 − 1 in magnitude
 /// has no fractional bits, so for the `f64` form "beyond" alone means "an integer beyond".
 fn beyond_exact(n: &serde_json::Number) -> bool {
@@ -94,8 +161,7 @@ fn beyond_exact(n: &serde_json::Number) -> bool {
         // round correctly, as Python's `float` does, or the readers disagree near the bound: that is
         // serde_json's `float_roundtrip`, which `serde_jcs` enables for the whole build
         // (`numbers_a_double_holds_exactly_are_accepted` pins it with `…991.4999…`).
-        n.as_f64()
-            .is_some_and(|f| f.abs() > MAX_EXACT_INTEGER as f64)
+        n.as_f64().is_some_and(beyond_exact_f64)
     }
 }
 
@@ -438,6 +504,82 @@ mod tests {
                 ),
                 "{v}"
             );
+        }
+    }
+
+    /// Typed JSON is JSON: a number beyond the bound or past a double's range is refused, naming
+    /// the person's label and their own text, never kept as a string (#886 review).
+    #[test]
+    fn a_typed_number_a_seal_cannot_hold_is_refused_not_stringified() {
+        let refused = |text: &str| match super::parse_user_value("--set x", text) {
+            Err(crate::Error::InexactInteger { path, value }) => (path, value),
+            other => panic!("{text}: expected InexactInteger, got {other:?}"),
+        };
+        let big = "9".repeat(401);
+        for text in [
+            big.as_str(),
+            "1e400",
+            "-1e400",
+            "9007199254740992",
+            "-9007199254740993",
+            "9007199254740993.0",
+            "9.007199254740993e15",
+            "1E300",
+        ] {
+            assert_eq!(refused(text), ("--set x".into(), text.into()), "{text}");
+        }
+        // Surrounding JSON whitespace doesn't make it text; the error quotes the token.
+        assert_eq!(refused(" 1e400\n").1, "1e400");
+        // Inside a composite the error names the path under the label.
+        assert_eq!(
+            refused(r#"{"a":[1,9007199254740993]}"#),
+            ("--set x.a[1]".into(), "9007199254740993".into())
+        );
+        assert_eq!(refused("[1e300]").0, "--set x[0]");
+        // JSON past a double's range inside a composite is refused too, never kept as a string.
+        for text in ["[1e400]", r#"{"a":[-1e400]}"#, r#""\ud800""#] {
+            match super::parse_user_value("--set x", text) {
+                Err(crate::Error::Invalid(m)) => {
+                    assert!(m.starts_with(&format!("--set x = {text} is JSON")), "{m}")
+                }
+                other => panic!("{text}: expected Invalid, got {other:?}"),
+            }
+        }
+    }
+
+    /// Everything else keeps its meaning: numbers in range, other JSON, and plain text as a string.
+    #[test]
+    fn a_typed_value_in_range_or_not_a_number_is_kept() {
+        let v = |text: &str| super::parse_user_value("--set x", text).unwrap();
+        assert_eq!(v("9007199254740991"), json!(9_007_199_254_740_991_u64));
+        assert_eq!(v("-9007199254740991"), json!(-9_007_199_254_740_991_i64));
+        assert_eq!(v("1.5"), json!(1.5));
+        assert_eq!(
+            v("-0"),
+            json!(-0.0),
+            "serde_json reads `-0` as the double -0.0"
+        );
+        assert_eq!(v("true"), json!(true));
+        assert_eq!(v(r#""1730000000000000000""#), json!("1730000000000000000"));
+        assert_eq!(v("[1,2]"), json!([1, 2]));
+        // Not JSON by the RFC 8259 grammar: a bare string, as before.
+        for text in [
+            "[draft]",
+            "hello",
+            "DUPLET-07",
+            "01",
+            "1.",
+            ".5",
+            "+1",
+            "1e",
+            "0x10",
+            "NaN",
+            "Infinity",
+            "1_000",
+            "",
+            "-",
+        ] {
+            assert_eq!(v(text), json!(text), "{text:?}");
         }
     }
 

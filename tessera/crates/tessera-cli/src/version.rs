@@ -11,7 +11,6 @@
 use std::io::Write;
 use std::path::Path;
 
-use serde_json::Value;
 use tessera_core::provenance::Source;
 use tessera_core::{Error, Manifest, ProductBuilder, Result};
 use tessera_io::{pack, BlockPayload, Reader, Repository};
@@ -105,9 +104,10 @@ pub fn commit(
         let (k, v) = kv
             .split_once('=')
             .ok_or_else(|| Error::Invalid(format!("--set expects key=value, got '{kv}'")))?;
-        let value =
-            serde_json::from_str::<Value>(v).unwrap_or_else(|_| Value::String(v.to_string()));
-        b.with_field(k, value);
+        b.with_field(
+            k,
+            tessera_core::canonical::parse_user_value(&format!("--set {k}"), v)?,
+        );
     }
 
     b.add_source(Source::new("supersedes", &tip).with_content_hash(&tip));
@@ -504,7 +504,8 @@ mod tests {
     }
 
     /// `--set k=<integer beyond ±(2^53−1)>` is refused with the fix (SPEC §1, #886): the value is
-    /// neither sealed approximately nor silently turned into a string, and no version is stored.
+    /// neither sealed approximately nor silently turned into a string, and no version is stored. The
+    /// error names the key as typed and quotes the typed text (`…993.0`, not the double it parses to).
     #[test]
     fn commit_set_refuses_an_integer_a_seal_cannot_pin() {
         let dir = tempfile::tempdir().unwrap();
@@ -525,13 +526,14 @@ mod tests {
         let err = set("daq_start_ns=1730000000000000000").unwrap_err();
         assert_eq!(
             err.to_string(),
-            "metadata.daq_start_ns = 1730000000000000000 exceeds ±(2^53−1) (I-JSON, RFC 7493 \
+            "--set daq_start_ns = 1730000000000000000 exceeds ±(2^53−1) (I-JSON, RFC 7493 \
              §2.2): a sealed JSON number is an IEEE-754 double (RFC 8785 §3.2.2.3), which can't \
              hold this integer exactly; write it as a string"
         );
         assert!(matches!(
             set("daq_start_ns=9007199254740993.0"),
-            Err(Error::InexactInteger { .. })
+            Err(Error::InexactInteger { path, value })
+                if path == "--set daq_start_ns" && value == "9007199254740993.0"
         ));
         assert_eq!(
             count_objects(&repo),
