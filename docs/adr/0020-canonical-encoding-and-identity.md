@@ -89,7 +89,17 @@ byte is hashed, so a `u64`/`i64` from Rust code is refused too); a streamed `Wri
 when a block or a metadata, `extra` or recipe value is declared, not hours later at the seal. The rest
 of I-JSON's MUSTs were already enforced there (UTF-8 without lone surrogates, unique names). Large values travel as decimal strings;
 user input (Python `set_field`/`with_generation`, a TOML spec's `[product.metadata]`, CLI
-`commit --set`) is refused with that advice and never converted. SPEC §1 states the rule.
+`commit --set` and `ingest … --meta`) is refused with that advice and never converted. SPEC §1 states the rule.
+
+**User-typed numbers and DICOM (owner, 2026-11-17).** A value a person types on the command line is read by
+`canonical::parse_user_value`: text that is JSON by the RFC 8259 grammar is JSON, and a number in it beyond the
+bound, or past a double's range (`1e400`, a 401-digit integer, `[1e400]`), is refused naming the flag and the typed
+text. It is never kept as a string, which the CLI used to fall back to whenever `serde_json` could not hold the
+number. Other text is still a string. DICOM curated `DS`/`FD` fields (`KVP`, `SliceThickness`, `PixelSpacing`,
+`RescaleSlope`/`RescaleIntercept`, a series' `ImagePositionPatient`/`ImageOrientationPatient`) stay JSON numbers; one
+beyond the bound is refused when the file is read, naming the tag and its source text (`(0018,0060) KVP = "1E16" is
+outside the range a sealed JSON number can hold (±(2^53−1), I-JSON RFC 7493 §2.2)`), with no advice to write a string
+because the person ingesting a file cannot. 64-bit integer tags (`SV`/`UV`) are written as strings by their type.
 
 **Why on the value, not the token.** The rule could be read off the number's text, but the parser yields
 a double, and rounding to the nearest double is monotone with 2^53−1 and 2^53 both representable: an
@@ -103,7 +113,8 @@ round each token correctly (`serde_json`'s `float_roundtrip`, Python's `float`) 
 and it is not refused.
 
 **Consequences.** Products sealed before this rule (≤ 0.1.0-alpha.5) that hold such a number are refused
-(fail closed; their seal never pinned the value). No tracked corpus product holds one, and no typed ingest
-source writes one: DICOM header values (`SV`/`UV` included) are already strings, GE HDF5 attributes are not
-read into JSON and a vendor `.ini` is carried as an opaque blob, so no golden hash moved. The reference
+(fail closed; their seal never pinned the value). No tracked corpus product holds one, so no golden hash moved.
+Of the typed ingest sources, only DICOM's curated fields write JSON numbers (refused at the door above); the
+DICOM header dump is text (`SV`/`UV` included), GE HDF5 attributes are not read into JSON and a vendor `.ini`
+is carried as an opaque blob. The reference
 reader refuses the same numbers, and `corpus/seal-cases.json` holds both readers to the same verdicts.

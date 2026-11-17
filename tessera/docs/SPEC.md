@@ -25,7 +25,8 @@ not). Every double beyond 2^53−1 is an integer, so a large float written in sc
 (`6.022e23`) is refused as well. A larger integer (an epoch-nanosecond timestamp, a 64-bit serial or tick counter) is
 carried as a decimal **string**; a writer refuses it with that advice rather than convert it silently, and
 a typed source field that is 64-bit (a DICOM `SV`/`UV` value) is written as a string by its type, never
-by its value. Array and table payloads are hashed as raw bytes and are unaffected. Products sealed before
+by its value. A source field that is a number (a DICOM `DS`/`FD` value such as `KVP`) stays a number and is
+refused beyond the bound, naming the source field; a value a person types as a JSON number stays a number too. Array and table payloads are hashed as raw bytes and are unaffected. Products sealed before
 this rule (≤ 0.1.0-alpha.5) that hold such a number are refused: their seal never pinned the value (#886).
 
 ## 2. Canonical encoding (hashing)

@@ -186,11 +186,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WriteSession` refuses it when it is declared (`append_block*`, `with_field`, `with_extra`, `with_generation`), not
   at the seal. The envelope is parsed by the new `Signature::from_json`, which `tessera-wasm` uses too. Python
   `Builder.set_field` and `with_generation`, a TOML spec's `[product.metadata]` (`spec::validate`, before anything is
-  written) and CLI `commit --set` refuse it with that advice and never convert it; `with_generation` now names the
-  rule for any int beyond the bound instead of `does not fit in 64 bits`. Products sealed earlier that hold such a
+  written) and CLI `commit --set` / `ingest … --meta` refuse it with that advice and never convert it; `with_generation`
+  now names the rule for any int beyond the bound instead of `does not fit in 64 bits`. The CLI reads a typed value
+  through the new `canonical::parse_user_value`: text that is JSON by the RFC 8259 grammar stays JSON, so
+  `--set x=1e400`, a 401-digit integer or `[1e400]` is refused (`--set x = 1e400 exceeds ±(2^53−1) …`, naming the flag
+  and the typed text) instead of being sealed as the string it used to fall back to; other text is still a string. A DICOM
+  curated number (`KVP`, `SliceThickness`, `PixelSpacing`, `RescaleSlope`/`RescaleIntercept`, the series'
+  `ImagePositionPatient`/`ImageOrientationPatient`) stays a JSON number, and one beyond the bound is refused when the
+  file is read, naming the tag and its text (`dicom: (0018,0060) KVP = "1E16" is outside the range a sealed JSON
+  number can hold …`), before any output exists (new `canonical::beyond_exact_f64`). Products sealed earlier that hold such a
   number are refused (fail closed); `tessera provenance` reports such a parent as CORRUPT, never as missing, naming it
-  by the `id` it claims (new `tessera_io::read_claimed_id`). No corpus seal moved, and no ingest backend writes such a
-  number (DICOM values are strings). The reference reader refuses the same numbers, and `corpus/seal-cases.json` adds the cases.
+  by the `id` it claims (new `tessera_io::read_claimed_id`). No corpus seal moved; the DICOM header dump is text, and a
+  64-bit DICOM value (`SV`/`UV`) is written as a string by its type. The reference reader refuses the same numbers, and `corpus/seal-cases.json` adds the cases.
 - `tessera-core`: `Manifest::from_json_verified` checks `manifest_hash` over the manifest JSON object as parsed (SPEC
   §4), not over a re-serialisation of the `Manifest` struct. Before, a key spliced into a sealed `manifest.json`
   (`"forged": true`) was dropped by the struct and `tessera verify` reported OK, while a product a newer writer
