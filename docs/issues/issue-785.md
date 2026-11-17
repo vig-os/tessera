@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-09T05:30:11Z
-updated: 2026-11-09T05:30:11Z
+updated: 2026-11-16T14:54:14Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/785
-comments: 0
+comments: 1
 labels: none
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-09T09:04:18.720Z
+synced: 2026-11-17T10:09:56.725Z
 ---
 
 # [Issue 785]: [docs(ingest): RUSTDOCFLAGS=-D warnings cargo doc -p tessera-ingest fails on an unresolved [`parse_header`] link](https://github.com/vig-os/tessera/issues/785)
@@ -40,3 +40,11 @@ working on #762; it is not caused by that change.
 ## Ask
 
 Fix the link, and consider a rustdoc `-D warnings` gate for the workspace so this class of breakage is caught.
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 16, 2026 at 02:54 PM_
+
+Widening this: per the #883 round-3 agent, `cargo doc -D warnings` fails on 8 broken intra-doc links across crates, not only tessera-ingest's `parse_header` (e.g. `tessera-core/src/block/mod.rs:4`, `collection.rs:8`, `provenance.rs:323`), none in lines #883 touched. Root fix: repair the links and gate `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps` in the flake checks so they can't regress.
+

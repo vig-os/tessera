@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-16T07:18:42Z
-updated: 2026-11-16T07:38:44Z
+updated: 2026-11-16T13:02:16Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/886
-comments: 1
+comments: 2
 labels: bug
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-16T08:59:33.129Z
+synced: 2026-11-17T10:09:20.799Z
 ---
 
 # [Issue 886]: [seal: integers beyond 2^53 collide under JCS canonicalisation (sealed values not exact)](https://github.com/vig-os/tessera/issues/886)
@@ -55,4 +55,19 @@ The real exposure is free-form metadata from ingest: epoch-nanosecond timestamps
 4. The reference reader refuses the same tokens, so readers agree. SPEC §4 states the rule.
 
 Needs the owner's confirmation before dispatch.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 16, 2026 at 01:02 PM_
+
+**Owner decision 2026-11-16: enforce I-JSON, ship in alpha.6.**
+
+- Rule: tessera enforces the input precondition of RFC 8785 (JCS), namely I-JSON (RFC 7493). Any integer token whose absolute value is above 2^53−1 is refused at parse, in writers and readers alike, in every sealed JSON document: manifest (including the embedded schema and metadata), collection, `id_inputs` and signature envelope. Large values travel as decimal strings. Vortex and Zarr payloads are unaffected, because they are hashed as raw bytes.
+- Old products (≤ alpha.5) that contain such a value are refused (fail closed; alpha, breaking is acceptable).
+- User-supplied metadata (Python write, TOML ingest spec, CLI `commit --set`) with such a value gets a clear error telling the user to write it as a string. There is no silent conversion.
+- Typed sources (64-bit HDF5 attributes, DICOM VRs) become strings by source type, never by value.
+- Readers agree: the reference reader refuses the same tokens. SPEC §1 states the I-JSON rule.
+- Dispatch after #883 merges, because both touch `canonical.rs`.
 
