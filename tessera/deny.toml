@@ -57,6 +57,27 @@ ignore = [
     "RUSTSEC-2026-0403",
     # 0410: wasm32 allocator shim. Unreachable: zstd-sys isn't in the tessera-wasm wasm32 graph.
     "RUSTSEC-2026-0410",
+    # chrono 0.4.45 — UNMAINTAINED (not a vulnerability; ignored 2026-11-17, #898). All versions are
+    # affected and there's no safe upgrade (chronotope/chrono#1768). tessera has no direct chrono
+    # dependency and no `chrono::` calls in crates/, so there's no code of ours to move to `jiff`. Every
+    # path is transitive (`cargo tree -i chrono -e normal,build,dev --workspace --all-features`):
+    #   - arrow-array 58.4.1 / parquet 58.4.1: the arrow-58 ingest pins (tessera-cli; tessera-ingest dev).
+    #   - arrow-array/-cast/-ord/-select 59.3.2 → vortex-arrow/-file/-layout 0.93 → tessera-io, so every
+    #     binary, tessera-py included.
+    #   - dicom-core 0.10 → dicom-* → tessera-ingest.
+    #   - object_store 0.14: tessera-io `cloud` feature and a tessera-cli dev-dependency.
+    #   - datafusion 54, arrow-* 58.3, object_store 0.13.2, chrono-tz: tessera-cli `sql` feature only.
+    # Remove when that cargo tree comes back empty (arrow-rs, dicom-rs, object_store and datafusion all
+    # off chrono) or the advisory is withdrawn: vig-os/tessera#899.
+    "RUSTSEC-2026-0543",
+    # humantime 2.3.0 — UNMAINTAINED (not a vulnerability; ignored 2026-11-17, #898). It wraps chrono, so
+    # it inherits RUSTSEC-2026-0543: all versions affected, no safe upgrade. No tessera crate uses it
+    # directly. Every path (`cargo tree -i humantime -e normal,build,dev --workspace --all-features`):
+    #   - object_store 0.14: tessera-io `cloud` feature and a tessera-cli dev-dependency.
+    #   - object_store 0.13.2 → datafusion 54: tessera-cli `sql` feature only.
+    #   - trycmd 0.15 (directly and via humantime-serde): tessera-cli dev-dependency, tests only.
+    # Remove when that cargo tree comes back empty or the advisory is withdrawn: vig-os/tessera#899.
+    "RUSTSEC-2026-0542",
 ]
 
 [licenses]
