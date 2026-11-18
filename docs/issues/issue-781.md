@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-08T12:02:29Z
-updated: 2026-11-16T00:56:37Z
+updated: 2026-11-18T00:05:23Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/781
-comments: 2
+comments: 3
 labels: feature, effort:large, area:core, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-16T09:00:17.020Z
+synced: 2026-11-18T09:43:24.170Z
 ---
 
 # [Issue 781]: [feat(io): keyed delta products over a base — upserts, tombstones and redirects, a newest-row-wins logical read, and compaction into a new sealed base](https://github.com/vig-os/tessera/issues/781)
@@ -95,5 +95,51 @@ kit wants the same mechanism as this issue for small, frequently edited keyed co
 - Question for the ADR: keep positional naming for such tables and accept the churn (with aux indexes referring to leaves by digest, not by name), or give a keyed partition its own marker, for example the leaf's key bounds, as an amendment to ADR-0064's marker and child-class scheme.
 
 **Not affected:** `content_hash` stays the mountain range over the ordered block digests (ADR-0028); the tree stays integrity-only. A history-only-extended proof for a lineage would be the same construction one level up, over the sequence of `manifest_hash` values.
+
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 18, 2026 at 12:05 AM_
+
+**Measurements for the #781 / ADR-0036 ADR: split rule, compaction and the keyed read** (agent, from the kit benchmark nerdmachines/kit#98 for nerdmachines/kit#97, 2026-11-16). This puts numbers on point 1 of the comment above.
+
+**Setup.** A standalone harness, not tessera: sorted Vortex leaf files as base, delta files with an `op` column, a newest-row-wins read and a compaction that writes a new base. Vortex 0.93.0 from crates.io with default codecs, so neither the fork pin nor the canonical codec profile. 10⁶ synthetic rows of about 350 bytes (`u64` key, three small integers, a 40-byte and a 300-byte string). Leaves of 4,096 to 65,536 rows, far below `BLOCK_ROWS`. Every read was checked against an in-memory oracle with no mismatch. Byte counts are the evidence; timings are from a shared host with a warm page cache.
+
+**1. Split rule after compaction.** Each delta changes one contiguous 1 % key window a quarter of the way into the key range. "Downstream" is the share of leaves after the last window that the new base still shares with the old one.
+
+| Change per delta | Row-count split, downstream shared | Key-defined split, downstream shared |
+|---|---:|---:|
+| Inserts only | 0 % | 87.5–100 % |
+| Deletes only | 0 % | 99–100 % |
+| 60/30/10 updates/inserts/deletes | 0 % | 99–100 % |
+| Equal inserts and deletes (net zero) | 100 % | 87.5–100 % |
+
+- With one insert-only delta at 4,096-row leaves, the new base has 212 MiB of unshared leaves under the row-count rule and 7 MiB under the key-defined rule, for about 3.5 MiB of new rows.
+- The key-defined rule tested: cut after a row where `blake3(key) mod target == 0`, with a minimum and a maximum row count. The bounds are why its share is not always 100 %: a forced cut depends on the previous one, and boundaries resynchronise at the next hash match.
+- Updates in place do not shift anything under either rule, as stated above.
+
+**2. Where sharing does not help, whatever the rule.** A uniformly scattered 1 % change, or a 90/10-skewed one, touches every leaf of 4,096 rows or more, and compaction rewrites the whole base (about 80 to 100 times the bytes changed, for one delta). Sharing after compaction pays only for clustered change. For scattered change the lever is how rarely compaction runs.
+
+**3. Cost of the delta chain on the logical read.** A merge-on-read scan grows linearly with the number of deltas, since each is read whole: 3.7 MiB with none, 26 MiB through 8, 1.7 GiB through 600, at 2.9 MiB per delta of 10,000 rows. A delta costs about as many bytes as its rows; there is no write amplification before compaction.
+
+**4. "Same inputs, same bytes" for `compact`.** In all 144 compaction cases the number of leaves shared by file hash equals the number shared by row content, so within one build the acceptance item holds on this path. The crates.io build writes different bytes from debug and release builds for every table shape tested (in one case a different file size). The harness did not test the fork pin, which #788 reports as validated across both.
+
+**5. The keyed read on the base (acceptance item 2, and #780).** With the leaf open and its key column in memory, a row is found by binary search and fetched with `scan().with_row_indices(...)`.
+
+| Read | Time per row | Bytes read per row |
+|---|---:|---:|
+| Full row, one at a time, default writer settings | 1.3–1.7 ms | 1.2–4.3 MiB |
+| Full row, one at a time, 1,024-row blocks and 16 KiB segments | 0.5–0.8 ms | 0.5–1.3 MiB |
+| Two small integer columns, one at a time | 170–290 µs | 13–944 KiB |
+| Two small integer columns, 256 rows in one take | 8.7 µs | 14 KiB |
+| SQLite, full row, same disk | 7 µs | 8 KiB |
+
+- A take reads one whole segment per projected column. With the default 8,192-row blocks and 1 MiB minimum, the 300-byte string column has 2 MiB segments, and a narrow column in a 1M-row leaf is read whole (375 KiB for one 3-bit value).
+- A single take costs about 110 µs even when it reads 249 bytes. This fixed cost has not been profiled yet.
+- So "reads the base and only the delta chunks whose key statistics cover K" is met in chunk terms, but for small-row tables the chunk is the cost. The batched, narrow shape is the one `SPIKE-RESULTS.md` measured (500 rows in one take, numeric columns); the single-key full-row shape with wide strings was not measured there, and neither was a row store.
+
+**Not measured:** the fork pin and the canonical codec profile; 10⁷ rows and above; real data (the strings are random and do not compress); cold reads; object storage; redirects; the #780 index itself.
 
 

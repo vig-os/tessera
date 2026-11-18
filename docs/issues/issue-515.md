@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-17T02:34:52Z
+updated: 2026-11-18T00:42:27Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-17T10:10:21.587Z
+synced: 2026-11-18T09:43:25.526Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -25,16 +25,17 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 The following updates are currently rate-limited. To force their creation now, click on a checkbox below.
 
  - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-digest -->chore(deps): update actions/create-github-app-token digest to 64ab729
+ - [ ] <!-- unlimit-branch=renovate/bytes-1.x-lockfile -->chore(deps): update rust crate bytes to v1.12.2
  - [ ] <!-- unlimit-branch=renovate/clap-4.x-lockfile -->chore(deps): update rust crate clap to v4.6.8
  - [ ] <!-- unlimit-branch=renovate/dicom-0.x-lockfile -->chore(deps): update rust crate dicom to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/dicom-transfer-syntax-registry-0.x-lockfile -->chore(deps): update rust crate dicom-transfer-syntax-registry to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/zarrs-0.x-lockfile -->chore(deps): update rust crate zarrs to v0.23.14
  - [ ] <!-- unlimit-branch=renovate/rust-wasm-bindgen-monorepo -->fix(deps): update rust crate wasm-bindgen to v0.2.130
  - [ ] <!-- unlimit-branch=renovate/python-(minor-and-patch) -->build(pip): update python (minor and patch) (`nibabel`, `numcodecs`, `numpy`, `uproot`, `zarr`)
+ - [ ] <!-- unlimit-branch=renovate/arrow-rs-monorepo -->chore(deps): update arrow-rs monorepo to v58.4.2 (`arrow`, `arrow-array`, `arrow-buffer`, `arrow-ipc`, `arrow-schema`, `parquet`)
  - [ ] <!-- unlimit-branch=renovate/age-0.x -->chore(deps): update rust crate age to 0.12
- - [ ] <!-- unlimit-branch=renovate/arrow-rs-monorepo -->chore(deps): update rust crate arrow to v58.4.1
  - [ ] <!-- unlimit-branch=renovate/criterion-0.x -->chore(deps): update rust crate criterion to 0.8
- - [ ] <!-- unlimit-branch=renovate/datafusion-monorepo -->chore(deps): update rust crate datafusion to v54.1.0
+ - [ ] <!-- unlimit-branch=renovate/datafusion-monorepo -->chore(deps): update rust crate datafusion to v54.2.0
  - [ ] <!-- unlimit-branch=renovate/hdf5-metno-0.x -->chore(deps): update rust crate hdf5-metno to 0.15
  - [ ] <!-- unlimit-branch=renovate/png-0.x -->chore(deps): update rust crate png to 0.18
  - [ ] <!-- unlimit-branch=renovate/proptest-1.x-lockfile -->chore(deps): update rust crate proptest to v1.12.0
@@ -43,7 +44,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unlimit-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.54.1
  - [ ] <!-- unlimit-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
- - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.6.1
+ - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.7.0
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.27.0
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
@@ -81,21 +82,21 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 <details><summary>tessera/Cargo.toml (42)</summary>
 
- - `serde 1` → [Updates: `1`]
- - `serde_json 1` → [Updates: `1`]
+ - `serde 1` → [Updates: `lock file @ 1.0.229`]
+ - `serde_json 1` → [Updates: `lock file @ 1.0.154`]
  - `serde_jcs 0.2`
  - `blake3 1`
- - `thiserror 2` → [Updates: `2`]
+ - `thiserror 2` → [Updates: `lock file @ 2.0.21`]
  - `tracing 0.1`
  - `tracing-subscriber 0.3`
  - `ed25519-dalek 2` → [Updates: `3`]
  - `sha2 0.10` → [Updates: `0.11`]
  - `age 0.11` → [Updates: `0.12`]
- - `time 0.3` → [Updates: `0.3`]
- - `proptest 1` → [Updates: `1`]
- - `zip 9.0.5` → [Updates: `9.0.5`]
- - `zarrs 0.23` → [Updates: `0.23`]
- - `bytes 1`
+ - `time 0.3` → [Updates: `lock file @ 0.3.55`]
+ - `proptest 1` → [Updates: `lock file @ 1.12.0`]
+ - `zip 9.0.5` → [Updates: `lock file @ 9.7.0`]
+ - `zarrs 0.23` → [Updates: `lock file @ 0.23.14`]
+ - `bytes 1` → [Updates: `lock file @ 1.12.2`]
  - `half 2`
  - `vortex-file 0.93`
  - `vortex-array 0.93`
@@ -106,22 +107,22 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `vortex-layout 0.93`
  - `vortex-scan 0.93`
  - `vortex-session 0.93`
- - `futures 0.3` → [Updates: `0.3`]
- - `clap 4` → [Updates: `4`]
+ - `futures 0.3` → [Updates: `lock file @ 0.3.34`]
+ - `clap 4` → [Updates: `lock file @ 4.6.8`]
  - `png 0.17` → [Updates: `0.18`]
- - `dicom 0.10` → [Updates: `0.10`]
- - `dicom-transfer-syntax-registry 0.10` → [Updates: `0.10`]
+ - `dicom 0.10` → [Updates: `lock file @ 0.10.1`]
+ - `dicom-transfer-syntax-registry 0.10` → [Updates: `lock file @ 0.10.1`]
  - `hdf5-metno 0.12` → [Updates: `0.15`]
- - `hdf5-metno-sys 0.12` → [Updates: `0.12`]
- - `arrow-array =58.4.1` → [Updates: `=60.1.0`]
- - `arrow-buffer =58.4.1` → [Updates: `=60.1.0`]
- - `arrow-schema =58.4.1` → [Updates: `=60.1.0`]
- - `arrow-ipc =58.4.1` → [Updates: `=60.1.0`]
- - `parquet =58.4.1` → [Updates: `=60.1.0`]
+ - `hdf5-metno-sys 0.12` → [Updates: `lock file @ 0.12.5`]
+ - `arrow-array =58.4.1` → [Updates: `=58.4.2`, `=60.1.0`]
+ - `arrow-buffer =58.4.1` → [Updates: `=58.4.2`, `=60.1.0`]
+ - `arrow-schema =58.4.1` → [Updates: `=58.4.2`, `=60.1.0`]
+ - `arrow-ipc =58.4.1` → [Updates: `=58.4.2`, `=60.1.0`]
+ - `parquet =58.4.1` → [Updates: `=58.4.2`, `=60.1.0`]
  - `csv =1.4.0`
  - `pyo3 0.29` → [Updates: `0.30`]
  - `pyo3-build-config 0.29` → [Updates: `0.30`]
- - `flate2 1` → [Updates: `1`]
+ - `flate2 1` → [Updates: `lock file @ 1.1.11`]
  - `toml 0.8` → [Updates: `0.9`, `1.0`]
 
 </details>
@@ -132,14 +133,14 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `ssh-key 0.6`
  - `tempfile 3`
  - `ndarray 0.17`
- - `datafusion 54` → [Updates: `54`, `55`]
- - `tokio 1` → [Updates: `1`]
- - `arrow 58` → [Updates: `58`, `60`]
+ - `datafusion 54` → [Updates: `lock file @ 54.2.0`, `55`]
+ - `tokio 1` → [Updates: `lock file @ 1.54.1`]
+ - `arrow 58` → [Updates: `lock file @ 58.4.2`, `60`]
  - `tempfile 3`
  - `trycmd 0.15` → [Updates: `1.0`]
- - `object_store 0.14` → [Updates: `0.14`]
- - `tokio 1` → [Updates: `1`]
- - `libc 0.2` → [Updates: `0.2`]
+ - `object_store 0.14` → [Updates: `lock file @ 0.14.2`]
+ - `tokio 1` → [Updates: `lock file @ 1.54.1`]
+ - `libc 0.2` → [Updates: `lock file @ 0.2.191`]
 
 </details>
 
@@ -151,8 +152,8 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 <details><summary>tessera/crates/tessera-io/Cargo.toml (5)</summary>
 
- - `object_store 0.14` → [Updates: `0.14`]
- - `tokio 1` → [Updates: `1`]
+ - `object_store 0.14` → [Updates: `lock file @ 0.14.2`]
+ - `tokio 1` → [Updates: `lock file @ 1.54.1`]
  - `reqwest 0.12` → [Updates: `0.13`]
  - `tempfile 3`
  - `criterion 0.5` → [Updates: `0.8`]
