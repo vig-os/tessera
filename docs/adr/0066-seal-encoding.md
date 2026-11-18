@@ -1,8 +1,14 @@
 # ADR-0066 — Seal the stored canonical bytes, not a re-serialisation
 
-**Status:** Proposed (2026-11-17). The owner decides between the options below; this ADR records them and a
-recommendation. Issue: #897. Evidence: [spike #897](../spikes/897-seal-encoding.md) (prototypes and every
-number: [`docs/spikes/897-seal-encoding/`](../spikes/897-seal-encoding/README.md)). Holds #895 until decided.
+**Status:** Accepted (2026-11-18); proposed 2026-11-17. Issue: #897. Evidence:
+[spike #897](../spikes/897-seal-encoding.md) (prototypes and every number:
+[`docs/spikes/897-seal-encoding/`](../spikes/897-seal-encoding/README.md)).
+
+**Decision:** option **A′**, chosen by the owner on 2026-11-18 (#897, PR #900). JSON stays; `manifest_hash` moves
+out of the manifest; the seal hashes the stored bytes; writers emit JCS form; readers refuse non-canonical bytes
+and keep I-JSON; 64-bit values are schema-typed strings (#895, no longer held). A and B are kept below as rejected
+alternatives with their reasons. The amendments to other ADRs (§ "Amends and supersedes") land with the
+implementation, not with this ADR.
 
 ## Context
 
@@ -43,7 +49,7 @@ Selection criteria (issue #897): an IETF/ISO spec, a standard deterministic enco
 Rust/Python/JS, exact integers. Only JSON+JCS (no exact integers beyond 2^53) and deterministic CBOR pass the rest;
 TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the issue and the spike.
 
-## Decision (proposed): A′
+## Decision: A′
 
 1. **Stored form.** `manifest.json` MUST be byte-identical to its own RFC 8785 JCS serialisation: no whitespace,
    keys in JCS order, JCS string escapes and number forms, UTF-8. It carries no `manifest_hash` key. Writers emit
@@ -83,7 +89,7 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
     so embedded `aux/signatures/*` and every external reference stay valid. One reading path in readers; the alpha
     path lives only in `migrate`.
 
-### Why not A, why not B
+### Rejected alternatives
 
 - **A** keeps one seal over many byte strings, and the S7 reader split exists today. Each new spelling class costs
   another rule in Rust and in the Python reference reader.
@@ -94,9 +100,9 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
   signature, `Source` edge and pin breaks. None of the four decoders tested (`cbor2`, `cbor-x`, `minicbor`,
   `cbor4ii`) refuses non-deterministic input, and none of the writers reduces floats, so B needs a strict decoder
   and a reducing writer of our own in Rust, Python and JavaScript. It also needs a decoder to read at all.
-  #895's typed strings give A′ exact 64-bit values in all three readers. **B is the better choice if native
-  64-bit integers in schema-less places are a hard requirement**; then ship it with numeric reduction and the
-  seal over the stored bytes.
+  #895's typed strings give A′ exact 64-bit values in all three readers. B would have been the better choice only
+  if native 64-bit integers in schema-less places were a hard requirement; the owner weighed that against seal
+  continuity, no new dependency and `jq` legibility, and chose A′.
 
 ## Consequences
 
@@ -128,16 +134,67 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
   §2's mechanism "seal over the parsed object" is replaced by "seal over the stored bytes".
 - **SPEC §2, §4, §7, §9**: canonical stored form, seal definition, verification order, conformance vectors.
 
-## Implementation plan (ordered; issues are filed only after acceptance)
+## Implementation plan
 
-1. SPEC §2/§4/§6/§7/§9 and the ADR amendments above.
-2. tessera-core: `canonical::check_canonical`; `Manifest`/`Collection` stored-bytes constructor and writer returning
-   `(bytes, seal)`; `manifest_hash` leaves the typed record; seal cases as `(bytes, seal)` pairs, including the
-   respelling and S7 cases.
-3. tessera-io: container (seal member, member set), exploded form, repository objects, `WriteSession`, sign/verify;
-   OCI unchanged.
-4. Call sites in tessera-cli, tessera-ingest, tessera-py and tessera-wasm.
-5. Corpus: re-pack the 13 `.tsra` (goldens unchanged), rewrite `seal-cases.json`, refresh snapshots.
-6. Python reference reader: seal = `blake3(file)`, canonical check with `jcs`, explicit lone-surrogate refusal.
-7. `tessera migrate`.
-8. #895 (schema-typed 64-bit strings), unheld.
+Ordered; the architect files each item as a sub-issue of #897. Every item lands green on its own: the format
+changes once, in item 4, and items 2–3 prepare it without moving a seal.
+
+### 1. #895 — product schemas declare 64-bit string encodings and value ranges
+
+- **Depends on:** nothing; may run in parallel with items 2–3.
+- **Scope:** as written in #895. A `FieldSpec` whose `dtype` can exceed ±(2^53−1) (`u64`, `i64`) must declare a
+  string encoding; optional inclusive `minimum`/`maximum`; built-in schemas declare their rules; the hard-coded
+  ingest checks (DICOM SV/UV, curated ranges) read them from the schema. The bound itself stays a format
+  invariant (rule 7).
+- **Acceptance:** a schema with a bare `u64` metadata field is refused; an out-of-range value is refused naming the
+  field and its source; in-range values and every existing seal are unchanged; the Python `Builder` and the
+  reference reader follow the same rule; an ADR-0020/ADR-0060 amendment records it.
+
+### 2. Writers emit the JCS form of every sealed JSON document
+
+- **Depends on:** nothing.
+- **Scope:** every door that writes `manifest.json` or `collection.json` (`pack`, `pack_dir`/exploded form,
+  `WriteSession`, the repository's `objects/`, `tessera commit`/`publish`/`seal`, the ingest engine's
+  `collection.json`, the CLI collection writer, the Python binding) writes exactly `JCS(object)`, still with the
+  in-band `manifest_hash` key. Readers are unchanged; they already accept any JSON. Docs and snapshots that print
+  `manifest.json` show the single-line form, with `jq .` as the readable view.
+- **Acceptance:** a test per door asserts that the bytes written equal `JCS(parse(bytes))`; the 13 tracked `.tsra`
+  are re-packed with `corpus.json` unchanged (no `id`, `content_hash` or `manifest_hash` moves); the reference
+  reader's `run.py` passes unchanged.
+
+### 3. tessera-core: the stored-bytes API and the canonical-bytes check
+
+- **Depends on:** nothing (additive); item 4 switches the readers over to it.
+- **Scope:** `canonical::check_canonical(bytes)`, which strict-parses (duplicate keys, lone surrogates, I-JSON,
+  depth) and refuses bytes that differ from their own JCS form, naming the first differing byte. Add
+  `Manifest::from_stored(bytes, seal)`, `Collection::from_stored(bytes, seal)` and a `to_stored()` on each,
+  returning `(bytes, seal)`, where the stored bytes carry no `manifest_hash`. Typed errors for "non-canonical
+  bytes" and "seal mismatch".
+- **Acceptance:** unit tests over the spike's cases: T4–T7 and S8 refused as non-canonical, S5b refused by I-JSON
+  (a test shows the byte comparison alone would pass it), and S7 (`64.0`) refused. For all 13 tracked manifests,
+  `blake3(to_stored().0)` equals the recorded seal.
+
+### 4. The A′ format cutover (closes #901)
+
+- **Depends on:** items 2 and 3.
+- **Scope, one PR because the format changes once:**
+  - SPEC §2/§4/§6/§7/§9 and the dated amendments to ADR-0020 D4, ADR-0022, ADR-0037, ADR-0054 and ADR-0060.
+  - The container gains the `manifest.seal` member (entry 2) and the stricter member set; the same for the
+    exploded form; collections get `collection.seal`.
+  - Every reader verifies through `from_stored`, and the in-band `manifest_hash` key is refused.
+  - Repository objects hold the stored bytes; `WriteSession`, sign and verify read the seal member (the
+    envelope is unchanged).
+  - Call sites in tessera-cli, tessera-ingest, tessera-py and tessera-wasm.
+  - The Python reference reader: seal = `blake3(file)`, canonical check with `jcs`, I-JSON kept, explicit
+    lone-surrogate refusal.
+  - `seal-cases.json` rewritten as `(bytes, seal)` vectors, including T4–T7, S5b, S7 and S8; the corpus
+    re-packed.
+  - `tessera migrate` converts an alpha product: verify under the alpha rules, write the A′ form, keep
+    `aux/signatures/*`. It is the only path that still reads the alpha layout.
+- **Acceptance:**
+  - All 13 tracked products verify after `migrate`, with every golden unchanged.
+  - An alpha-layout product is refused with advice naming `tessera migrate`.
+  - Rust, the reference reader and `tessera-wasm` reach the same verdict on every seal case.
+  - #901's case (a sealed `64.0` in an integer field) is refused by all three.
+  - A signature made before the cutover still verifies after `migrate`.
+  - A test per writer door shows the written `manifest.seal` equals `blake3(manifest.json)`.
