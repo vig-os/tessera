@@ -257,6 +257,7 @@ bridge work (#454 → #811) starts before step 9 is released.
    - *Scope:* the per-product-type profile table from the #828 sweep, how the profile is named in the manifest,
      the speed/size trade-off the default takes, and the determinism requirement across arches (ADR-0026, #468,
      #472). Owner review before 7.
+   - *Note:* [`docs/spikes/915-tessera-table-v2.md`](../spikes/915-tessera-table-v2.md) (#915).
 7. **#828: `tessera-table-v2` becomes the default table codec profile.**
    - *Crates:* `tessera-io` (`table`), `tessera-core` (the codec field in the table block spec), `tessera-ingest`,
      `tessera-cli`, `tessera-py`, the reference reader, benches.
