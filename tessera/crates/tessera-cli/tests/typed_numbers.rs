@@ -472,6 +472,34 @@ fn ingest_spec_refuses_an_underflowing_toml_float_and_keeps_zero_and_denormals()
         "product[0].metadata.x = \"5e-400\" is too small for a double",
     );
     assert!(!out.join("collection.json").exists());
+    // The span-aware parse used to fail on a dotted key or an implicit table and the check then passed
+    // the document (#886 round 4): each of these sealed `0.0` with rc=0.
+    for (i, (line, path)) in [
+        ("x = 5e-400\ndeep.z = 1", "x"),
+        ("x = 5e-400\n[product.metadata.deep.deeper]\nz = 1", "x"),
+        (
+            "[product.metadata.deep.deeper]\ny = 1e-400",
+            "deep.deeper.y",
+        ),
+        ("deep.a.b = 1e-400", "deep.a.b"),
+        ("deep = { a = [ { b = 1e-400 } ] }", "deep.a[0].b"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (args, out) = run(line, &format!("dotted{i}"));
+        refused(
+            &args.each_ref().map(String::as_str),
+            &format!("{path} = \""),
+        );
+        assert!(!out.join("collection.json").exists(), "{line}");
+    }
+    // In-range dotted and implicit tables still ingest.
+    let (args, _) = run(
+        "deep.a.b = 1.5\n[product.metadata.other.deeper]\nz = 1",
+        "dotted-ok",
+    );
+    ok(&args.each_ref().map(String::as_str));
     for (i, line) in ["x = 1e-320", "x = 0e5", "x = 0.0", "x = [0.0, 1e-320]"]
         .into_iter()
         .enumerate()
@@ -567,6 +595,35 @@ fn ingest_table_refuses_an_unsealable_column_meta_scale() {
             !out.exists(),
             "scale = {scale}: a refused ingest leaves no output"
         );
+    }
+    // The dotted-key form of the same file (`a.scale = …`) is inspected too.
+    {
+        let meta = d.join("cm-dotted.toml");
+        std::fs::write(&meta, "a.scale = 5e-400\n").unwrap();
+        let out = d.join("out-dotted-tiny.tsra");
+        let args = [
+            "ingest",
+            "table",
+            csv.to_str().unwrap(),
+            out.to_str().unwrap(),
+            "--from",
+            "csv",
+            "--column",
+            "a:i4",
+            "--column",
+            "b:i4",
+            "--name",
+            "t",
+            "--timestamp",
+            "2024-01-01T00:00:00Z",
+            "--column-meta",
+            meta.to_str().unwrap(),
+        ];
+        refused(
+            &args,
+            "--column-meta: a.scale = \"5e-400\" is too small for a double",
+        );
+        assert!(!out.exists(), "a refused ingest leaves no output");
     }
     let (args, _) = run("0.5", "ok");
     ok(&args.each_ref().map(String::as_str));
