@@ -1,9 +1,13 @@
 # Design note — the `tessera-table-v2` codec profile (#915, ADR-0066 step 6)
 
-> **Status:** Proposed, for the owner's acceptance. It gates #828 (ADR-0066 step 7) and sets that step's
-> acceptance numbers (§5). No product code, SPEC, corpus or golden changes here. The ADR-0024 amendment
-> and the SPEC §5b text that make it normative land with #828, as ADR-0066's own amendments land with
-> their implementation.
+> **Status:** Accepted (owner, 2026-11-19; decisions in §7). It gates #828 (ADR-0066 step 7) and sets that
+> step's acceptance criteria (§5, §8). No product code, SPEC, corpus or golden changes here.
+>
+> **ADRs:** this note proposes no new ADR. It proposes one ADR amendment, to ADR-0024 (dated, naming
+> `tessera-table-v2`), plus SPEC §5b text: the rule table of §2.1, the two invariants and the refusal points of
+> §2.3. Both land in #828 with the code that makes them true, as ADR-0066's own amendments land with their
+> implementation, and #828's review checks them against this note. ADR-0060 needs no amendment (§2.3).
+> ADR-0066 step 6 links this note.
 >
 > **Evidence:** the per-column sweep in #828 (body and comments), the #822 fixtures and references, the
 > #826 writer measurements, ADR-0024 (with its 2026-11-09, -15 and -16 amendments), ADR-0026, ADR-0060
@@ -23,8 +27,9 @@
 | 5 | Acceptance | GE ≤ 3.25 B/ev, Siemens ≤ 7.10 B/ev; lossless on both #822 fixtures; whole-writer encode ≥ v1 per core; full-scan decode ≥ 500 MiB/s per core; take, projection and pruning floors (§5). |
 | 6 | Rejected | Per-product-type level tables, logical transforms, sampled BtrBlocks with integer Pco, native 8-bit Pco under the current edition, a standalone codec frame outside Vortex, uniform zstd, a dense default (§6). |
 
-Owner questions are in §7. **O0** (the dtype rule against #828's per-product-type tables, which the owner
-adopted by name on 2026-11-19) and **O1** (the 8-bit codec) must be answered before #828 starts.
+The owner decided O0–O4 on 2026-11-19, each as recommended (§7): the dtype rule (O0), `vortex.zstd` for 8-bit
+columns (O1), row-group-granular take with A4's floors (O2), no per-column codec record (O3), and a green
+both-legs aarch64 run before #828 merges (O4).
 
 ## 1. Where v1 loses, and what v2 changes
 
@@ -81,7 +86,7 @@ a fixed set of constants, not a run-time choice (ADR-0024, 2026-11-16 amendment)
   so the forced path and the stock scheme agree on parameters.
 - Decoding `vortex.zstd` needs `vortex-file`'s `zstd` feature (`vortex:vortex-file/src/lib.rs:177-178`), which
   brings `vortex-zstd` and `zstd` 0.14 beside zarrs' 0.13. That is a new direct feature and new crates: it trips
-  `checks.*.feature-snapshots` and needs a `cargo-deny` pass. Only under O1(b).
+  `checks.*.feature-snapshots` and needs a `cargo-deny` pass. Required: O1 is decided (b).
 - `Pco` measured in the sweep is pcodec 1.1.0 (Python); `Cargo.lock` pins `pco` 1.0.2. A1's margins assume the two
   compress alike; M1 confirms it.
 
@@ -230,12 +235,12 @@ inside a row-group.
   few row-groups.
 - **The remedy, not in v2:** a page-granular take/filter kernel for `vortex.pco` upstream (the pages are
   independently decodable, `array.rs:641-730`) would bring take down to one 8,192-value page per hit and would
-  not change the stored bytes. It is a reader-side improvement, filed with #828's follow-ups, not a profile.
+  not change the stored bytes. It is a reader-side follow-up to #828 (O2), not a profile.
 - **DuckDB/Arrow interop:** unchanged; both encodings are core-edition members that any Vortex ≥ 0.85 reader
   with the default encodings decodes.
 
 So v2 keeps projection, layout pruning and interop, and trades strict O(1) take and in-chunk compute on
-compressed data for size. The floors in §5 (A4) state what is acceptable; O2 asks the owner to accept it.
+compressed data for size. The floors in §5 (A4) state what is acceptable; the owner accepted it (O2).
 
 ## 4. What #828 implements (scope, for the reviewer of step 7)
 
@@ -255,15 +260,16 @@ compressed data for size. The floors in §5 (A4) state what is acceptable; O2 as
 - Corpus: `table_v2_dtypes`, the `listmode` fixture without `codec: "zstd"`, and the regenerated goldens, each
   moved hash explained.
 
-## 5. Acceptance numbers for #828
+## 5. Acceptance criteria for #828
 
-Measured on the `.tsra` written by the real writer (ingest of the #822 fixtures), not by a standalone codec.
+These are #828's acceptance criteria: #828 merges only when every row holds, and its PR reports each with its
+evidence. The open measurements of §8 are part of the same acceptance. Measured on the `.tsra` written by the real writer (ingest of the #822 fixtures), not by a standalone codec.
 Heavy runs go through `ksb run --exclusive-cpus`; every number reports the command, the host and its exit code.
 
 | # | Criterion | Number | How |
 |---|---|---|---|
 | A1 | **Size, GE** (54,161,949 events) | **≤ 3.25 B/ev** (v1 3.907; sweep 3.182 plus ≈ 2 % for zone maps, footer and 65,536-row chunks) | Σ table block bytes / events |
-| A1 | **Size, Siemens** (55,004,119 events) | **≤ 7.10 B/ev** under O1(b) (v1 7.509; §2.4, two upper bounds stacked: zstd's worst row-group cost +2.9 % and the zone-map bound 0.85 %); ≤ 6.95 if O1 resolves to widened or native 8-bit Pco | same |
+| A1 | **Size, Siemens** (55,004,119 events) | **≤ 7.10 B/ev** under O1(b) (v1 7.509; §2.4, two upper bounds stacked: zstd's worst row-group cost +2.9 % and the zone-map bound 0.85 %); O1(a), native 8-bit Pco, would target ≈ 6.95 in a later profile | same |
 | A2 | **Lossless** on both fixtures | 0 mismatches: each decoded column `array_equal` to its source `.npy`, blake3 of the decoded column equal to that of the source; `tessera verify` exit 0 | ksb job |
 | A3 | **Encode, per core** | v2 whole-writer M ev/s ≥ **1.00 ×** v1 on the same host, pinned core, median of 3, both fixtures; absolute numbers reported beside #826's 6.68 / 6.14 | paired run, same binary except the profile |
 | A4 | **Random take** | 500 uniform random rows of one full 2^22-row GE block, all columns, **≤ 100 ms** (estimate ≈ 55 ms, §3); also the FEATURE-MATRIX `take ×500 ≤ 30 ms` floor on a 100k-row table | new `tessera-io` bench |
@@ -271,7 +277,7 @@ Heavy runs go through `ksb run --exclusive-cpus`; every number reports the comma
 | A4 | **Filter pruning** | a `t_ms` window filter over a GE block decodes only row-groups whose zones overlap the window | test counting decoded row-groups |
 | A5 | **Decode, per core** | full-scan decode of the GE fixture **≥ 500 MiB/s** of logical column bytes on one core (≈ 37 M ev/s at 14 B/ev); v1's number reported beside it | new bench |
 | A6 | **Corpus size table** | every corpus table block, v1 vs v2 bytes. A block that grows is listed with its cause; the owner signs off on growth before merge | in the #828 PR body |
-| A7 | **Determinism gate** | §2.5 items 1–5, including a green aarch64 run on the PR head | CI links |
+| A7 | **Determinism gate** | §2.5 items 1–5, including a green both-legs `workflow_dispatch` run on the PR head (O4) | CI links |
 | A8 | **Guards** | #468 and #472 guards run on v2-encoded blocks; the drift guard fails on a `pco` or libzstd bump; the v1 frozen payload decodes bit-exactly | unit tests |
 
 Reasons for the floors that are not regressions against v1:
@@ -295,7 +301,7 @@ shuffle + zstd-19) is for #796's dense profile; A1 does not require it.
   gains 0.9 %, and only with the `hi_tx − lo_tx` transform (rejected in B). On Siemens its codec choice is v2's
   (Pco on ≥ 16-bit, zstd on 8-bit), with per-column levels on top. Cost: the table needs a home (the product
   schema or the writer) and a drift guard per product type, and an unlisted product type needs a fallback rule
-  anyway, which is v2's rule. O0 puts this to the owner.
+  anyway, which is v2's rule. The owner chose the dtype rule (O0).
 - **B. Lossless logical transforms** (store `hi_tx − lo_tx`, delta-code time, narrow or widen the stored dtype).
   Measured gain: 5.6 % on one GE column, 1.85 % of the file (3.143 → 3.085 B/ev). Delta coding time gains
   nothing, because Pco already takes both time columns to ≈ 0 B/ev (#828 finding 5). A transform makes the
@@ -324,34 +330,44 @@ shuffle + zstd-19) is for #796's dense profile; A1 does not require it.
 - **H. Joint, geometry-aware crystal-pair modelling** (what GLEPL presumably does). Siemens is at its order-0
   entropy, so this is the only way past v2. It is a new Vortex encoding or block kind, out of scope here.
 
-## 7. Open questions for the owner
+## 7. Owner decisions (2026-11-19)
 
-- **O0 — what "the per-column codec profile" means for v2.** The owner adopted "the per-column codec profile as
-  the new default `tessera-table-v2`" (#828, 2026-11-19; ADR-0066 rule 13). #828 proposed per-product-type tables
-  with per-column levels and transforms. This note keeps the per-column codec but chooses it by dtype.
-  - **(a) Recommended:** the dtype rule of §2.1. It gets GE to within 0.9 % of #828's fast table, uses the same
+The owner chose the recommended option on every question. The options and their rationale are kept as the record.
+
+- **O0 — what "the per-column codec profile" means for v2. Decided: (a), the dtype rule of §2.1.** The owner
+  adopted "the per-column codec profile as the new default `tessera-table-v2`" (#828, 2026-11-19; ADR-0066 rule
+  13). #828 proposed per-product-type tables with per-column levels and transforms. This note keeps the
+  per-column codec but chooses it by dtype.
+  - **(a) Chosen:** the dtype rule of §2.1. It gets GE to within 0.9 % of #828's fast table, uses the same
     codecs on Siemens, has no transforms (§6 B), and covers every product type with one drift-guarded rule.
   - (b) #828's per-product-type tables without transforms, the dtype rule as fallback. Per-column levels, a table
     per product type in the writer or schema, a drift guard per table; gain ≤ 1 % on the fixtures.
   - (c) #828's tables with transforms. Rejected by §2.3's first invariant unless the owner drops "readers never
     refuse an unknown profile".
-- **O1 — the codec for 8-bit integer columns (`i1`, `u1`; 9 of Siemens' 11 columns).**
-  - **(b) Recommended: `vortex.zstd`**, one frame per row-group, no dictionary. It is a core-edition encoding, so
-    the edition promise holds and no fork grows. A reader built on `vortex-file` without its `zstd` feature gets
-    an "encoding not found" error on Siemens blocks (not a panic); tessera's readers enable it. Cost: new crates (feature snapshots, `cargo-deny`), and Siemens
-    lands at ≤ 7.10 B/ev rather than ≈ 6.95 (A1), about 1 % above HDF5 shuffle+zstd. M6 fixes the level.
+- **O1 — the codec for 8-bit integer columns (`i1`, `u1`; 9 of Siemens' 11 columns). Decided: (b),
+  `vortex.zstd`, one frame per row-group, no dictionary; M6 fixes the level.**
+  - **(b) Chosen: `vortex.zstd`.** It is a core-edition encoding, so the edition promise holds and no fork grows.
+    A reader built on `vortex-file` without its `zstd` feature gets an "encoding not found" error on Siemens
+    blocks (not a panic); tessera's readers enable it. Cost: new crates (feature snapshots, `cargo-deny`), and
+    Siemens lands at ≤ 7.10 B/ev rather than ≈ 6.95 (A1), about 1 % above HDF5 shuffle+zstd.
   - (a) Native 8-bit Pco: wait for a released Vortex that decodes it (upstream PR from us), then adopt it as a
     later profile. Not admissible before that (§6 D′). Size ≈ 6.95 B/ev if it matches widened Pco (M6).
   - (c) Widen to `u16` in storage: rejected by §2.3's first invariant (the stored dtype changes).
-- **O2 — accept row-group-granular take.** Recommended: accept it with A4's floors, and file the upstream
-  page-granular Pco take/filter kernel (§3) as a reader-side follow-up that moves no bytes. The dominant
-  list-mode access is a scan or a time-window filter, not a uniform random take.
-- **O3 — per-column codec record.** Recommended: none (§2.2): derived from (profile, dtype), visible in the
-  footer. Alternative: a writer-owned `Column.codec` value per column, sealed, at the cost of a redundant field.
-- **O4 — aarch64 before merge.** Recommended: require a green `workflow_dispatch` run with both legs on the #828
-  head, since a nightly catch after merge would mean a second regeneration inside the same alpha.
+- **O2 — row-group-granular take. Decided: accept, with A4's floors.** The dominant list-mode access is a scan
+  or a time-window filter, not a uniform random take. The page-granular Pco take/filter kernel (§3) is a
+  reader-side follow-up that moves no bytes; it is not part of #828.
+- **O3 — per-column codec record. Decided: none (§2.2).** The codec is derived from (profile, dtype) and is
+  visible in the footer. The rejected alternative was a writer-owned `Column.codec` value per column, sealed, at
+  the cost of a redundant field that could disagree with the payload.
+- **O4 — aarch64 before merge. Decided: require** a green `workflow_dispatch` run of `nix-check.yml` with both
+  legs on the #828 head before it merges, since a nightly catch after merge would mean a second regeneration
+  inside the same alpha.
 
-## 8. Open measurements (for #828; none ran for this note)
+## 8. Open measurements — part of #828's acceptance (none ran for this note)
+
+#828 runs each measurement and reports it in its PR beside the §5 row it feeds. A result that breaks a §5 floor
+blocks the merge until the owner re-decides; M6's result fixes the Zstd level of §2.1 before the goldens are
+regenerated.
 
 - **M1** Per-column encoded bytes and stats/layout bytes of one v1 block and one v2 block of each fixture
   (#828's 2026-11-11 ask), with the scheme v1's BtrBlocks chose per column (#828 question 1), and `pco` 1.0.2
