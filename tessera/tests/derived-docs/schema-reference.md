@@ -11,9 +11,9 @@
 | [`dynamic_pet`](#dynamic-pet) | 1.0 | no | A dynamic (4-D) PET acquisition: one time-series volume + a frame-timing table. |
 | [`listmode`](#listmode) | 1.0 | no | Raw per-event list-mode acquisition data. |
 | [`multicontrast_mri`](#multicontrast-mri) | 1.0 | no | A multi-contrast MRI study: N separately-acquired contrast volumes (model B). |
-| [`recon`](#recon) | 1.0 | no | A reconstructed image volume (CT/PET/μ-map). |
+| [`recon`](#recon) | 1.1 | no | A reconstructed image volume (CT/PET/μ-map). |
 | [`roi`](#roi) | 1.0 | no | Regions of interest over an image product (representation chosen by the ROI's nature). |
-| [`sim`](#sim) | 1.0 | no | Monte-Carlo simulation output. |
+| [`sim`](#sim) | 1.1 | no | Monte-Carlo simulation output. |
 | [`sinogram`](#sinogram) | 1.0 | no | Projection-space (sinogram) data. |
 | [`spectrum`](#spectrum) | 1.0 | no | An energy / positronium-lifetime / TOF histogram. |
 | [`table`](#table) | 1.0 | no | A generically-ingested flat table — structural preservation, semantics still to be attached. |
@@ -23,10 +23,10 @@
 
 A generically-ingested dense N-D array — structural preservation, semantics still to be attached.
 
-| field | tier | dtype | unit | sensitivity | description |
-| --- | --- | --- | --- | --- | --- |
-| `study` | recommended | string | — | Public | Study / cohort / experiment this array belongs to (FAIR grouping) |
-| `source_format` | recommended | string | — | Public | Source format normalised at ingest ("npy" \| "npz" \| "nifti" \| …) |
+| field | tier | dtype | range | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- | --- |
+| `study` | recommended | string | — | — | Public | Study / cohort / experiment this array belongs to (FAIR grouping) |
+| `source_format` | recommended | string | — | — | Public | Source format normalised at ingest ("npy" \| "npz" \| "nifti" \| …) |
 
 | block role | kind | min | description |
 | --- | --- | --- | --- |
@@ -36,9 +36,9 @@ A generically-ingested dense N-D array — structural preservation, semantics st
 
 Opaque preserved file — bytes stored bit-faithfully, not engine-parsed (the "junk" tier).
 
-| field | tier | dtype | unit | sensitivity | description |
-| --- | --- | --- | --- | --- | --- |
-| `study` | recommended | string | — | Public | Study / exam this preserved file belongs to (FAIR grouping) |
+| field | tier | dtype | range | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- | --- |
+| `study` | recommended | string | — | — | Public | Study / exam this preserved file belongs to (FAIR grouping) |
 
 | block role | kind | min | description |
 | --- | --- | --- | --- |
@@ -68,10 +68,10 @@ _No schema metadata fields._
 
 Raw device data from an existing system (GE/Siemens/…).
 
-| field | tier | dtype | unit | sensitivity | description |
-| --- | --- | --- | --- | --- | --- |
-| `vendor` | optional | string | — | Public | Device vendor |
-| `model` | optional | string | — | Public | Device model |
+| field | tier | dtype | range | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- | --- |
+| `vendor` | optional | string | — | — | Public | Device vendor |
+| `model` | optional | string | — | — | Public | Device model |
 
 | block role | kind | min | description |
 | --- | --- | --- | --- |
@@ -81,9 +81,9 @@ Raw device data from an existing system (GE/Siemens/…).
 
 A diffusion MRI acquisition: per-direction volumes + b-values/vectors.
 
-| field | tier | dtype | unit | sensitivity | description |
-| --- | --- | --- | --- | --- | --- |
-| `modality` | **required** | coded | — | Coded | Imaging modality |
+| field | tier | dtype | range | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- | --- |
+| `modality` | **required** | coded | — | — | Coded | Imaging modality |
 
 | block role | kind | min | description |
 | --- | --- | --- | --- |
@@ -94,10 +94,10 @@ A diffusion MRI acquisition: per-direction volumes + b-values/vectors.
 
 A dynamic (4-D) PET acquisition: one time-series volume + a frame-timing table.
 
-| field | tier | dtype | unit | sensitivity | description |
-| --- | --- | --- | --- | --- | --- |
-| `modality` | **required** | coded | — | Coded | Imaging modality |
-| `decay_correction_reference` | optional | string | — | Public | Named instant PET activity is decay-corrected to (e.g. injection / scan-start / acquisition-start) |
+| field | tier | dtype | range | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- | --- |
+| `modality` | **required** | coded | — | — | Coded | Imaging modality |
+| `decay_correction_reference` | optional | string | — | — | Public | Named instant PET activity is decay-corrected to (e.g. injection / scan-start / acquisition-start) |
 
 | block role | kind | min | description |
 | --- | --- | --- | --- |
@@ -108,15 +108,15 @@ A dynamic (4-D) PET acquisition: one time-series volume + a frame-timing table.
 
 Raw per-event list-mode acquisition data.
 
-| field | tier | dtype | unit | sensitivity | description |
-| --- | --- | --- | --- | --- | --- |
-| `coincidence_mode` | **required** | string | — | Public | Acquisition mode (singles / prompt-coincidence / extended-coincidence) |
-| `patient_id` | optional | string | — | Identifying | Pseudonymised patient handle for this acquisition (direct PHI — supply a site pseudonym, never the raw MRN) |
-| `exam` | optional | string | — | Identifying | Exam / study number linking the acquisition to its study |
-| `study_date` | optional | string | — | Sensitive | Acquisition date (YYYYMMDD or RFC-3339) — scan context, access-controlled |
-| `acquisition_start` | optional | string | — | Sensitive | Acquisition start instant |
-| `acquisition_stop` | optional | string | — | Sensitive | Acquisition stop instant |
-| `acquisition_duration` | optional | float64 | s | Public | Acquisition duration |
+| field | tier | dtype | range | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- | --- |
+| `coincidence_mode` | **required** | string | — | — | Public | Acquisition mode (singles / prompt-coincidence / extended-coincidence) |
+| `patient_id` | optional | string | — | — | Identifying | Pseudonymised patient handle for this acquisition (direct PHI — supply a site pseudonym, never the raw MRN) |
+| `exam` | optional | string | — | — | Identifying | Exam / study number linking the acquisition to its study |
+| `study_date` | optional | string | — | — | Sensitive | Acquisition date (YYYYMMDD or RFC-3339) — scan context, access-controlled |
+| `acquisition_start` | optional | string | — | — | Sensitive | Acquisition start instant |
+| `acquisition_stop` | optional | string | — | — | Sensitive | Acquisition stop instant |
+| `acquisition_duration` | optional | float64 | — | s | Public | Acquisition duration |
 
 | block role | kind | min | description |
 | --- | --- | --- | --- |
@@ -126,9 +126,9 @@ Raw per-event list-mode acquisition data.
 
 A multi-contrast MRI study: N separately-acquired contrast volumes (model B).
 
-| field | tier | dtype | unit | sensitivity | description |
-| --- | --- | --- | --- | --- | --- |
-| `modality` | **required** | coded | — | Coded | Imaging modality |
+| field | tier | dtype | range | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- | --- |
+| `modality` | **required** | coded | — | — | Coded | Imaging modality |
 
 | block role | kind | min | description |
 | --- | --- | --- | --- |
@@ -138,21 +138,21 @@ A multi-contrast MRI study: N separately-acquired contrast volumes (model B).
 
 A reconstructed image volume (CT/PET/μ-map).
 
-| field | tier | dtype | unit | sensitivity | description |
-| --- | --- | --- | --- | --- | --- |
-| `modality` | **required** | coded | — | Coded | Imaging modality |
-| `rescale_slope` | optional | float64 | — | Public | Native→physical slope |
-| `rescale_intercept` | optional | float64 | — | Public | Native→physical intercept |
-| `patient_pseudonym` | optional | string | — | Identifying | Pseudonymised patient handle (DICOM PS3.15 Patient Name / Patient ID family — direct PHI; supply a site-issued pseudonym, never the raw MRN) |
-| `acquisition_uid` | optional | string | — | Identifying | Acquisition UID (DICOM PS3.15 UID family — Study/Series/SOPInstance UID; linking PHI under the confidentiality profile) |
-| `study_instance_uid` | recommended | string | — | Identifying | DICOM StudyInstanceUID (0020,000D) — PS3.15 UID family, links back to the patient/study |
-| `series_instance_uid` | recommended | string | — | Identifying | DICOM SeriesInstanceUID (0020,000E) — PS3.15 UID family, links back to the series |
-| `study_date` | recommended | string | — | Sensitive | DICOM StudyDate (0008,0020), YYYYMMDD — scan context, access-controlled |
-| `manufacturer` | recommended | string | — | Public | DICOM Manufacturer (0008,0070) — device vendor |
-| `model_name` | recommended | string | — | Public | DICOM ManufacturerModelName (0008,1090) — device model |
-| `kvp` | recommended | float64 | kV | Public | DICOM KVP (0018,0060), CT peak kilovoltage |
-| `slice_thickness` | recommended | float64 | mm | Public | DICOM SliceThickness (0018,0050), nominal slice thickness |
-| `pixel_spacing` | recommended | json | mm | Public | DICOM PixelSpacing (0028,0030), [row_spacing, col_spacing] in mm |
+| field | tier | dtype | range | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- | --- |
+| `modality` | **required** | coded | — | — | Coded | Imaging modality |
+| `rescale_slope` | optional | float64 | — | — | Public | Native→physical slope |
+| `rescale_intercept` | optional | float64 | — | — | Public | Native→physical intercept |
+| `patient_pseudonym` | optional | string | — | — | Identifying | Pseudonymised patient handle (DICOM PS3.15 Patient Name / Patient ID family — direct PHI; supply a site-issued pseudonym, never the raw MRN) |
+| `acquisition_uid` | optional | string | — | — | Identifying | Acquisition UID (DICOM PS3.15 UID family — Study/Series/SOPInstance UID; linking PHI under the confidentiality profile) |
+| `study_instance_uid` | recommended | string | — | — | Identifying | DICOM StudyInstanceUID (0020,000D) — PS3.15 UID family, links back to the patient/study |
+| `series_instance_uid` | recommended | string | — | — | Identifying | DICOM SeriesInstanceUID (0020,000E) — PS3.15 UID family, links back to the series |
+| `study_date` | recommended | string | — | — | Sensitive | DICOM StudyDate (0008,0020), YYYYMMDD — scan context, access-controlled |
+| `manufacturer` | recommended | string | — | — | Public | DICOM Manufacturer (0008,0070) — device vendor |
+| `model_name` | recommended | string | — | — | Public | DICOM ManufacturerModelName (0008,1090) — device model |
+| `kvp` | recommended | float64 | 0 – 1000 | kV | Public | DICOM KVP (0018,0060), CT peak kilovoltage |
+| `slice_thickness` | recommended | float64 | 0 – 1000 | mm | Public | DICOM SliceThickness (0018,0050), nominal slice thickness |
+| `pixel_spacing` | recommended | json | — | mm | Public | DICOM PixelSpacing (0028,0030), [row_spacing, col_spacing] in mm |
 
 | block role | kind | min | description |
 | --- | --- | --- | --- |
@@ -172,10 +172,10 @@ _No schema metadata fields._
 
 Monte-Carlo simulation output.
 
-| field | tier | dtype | unit | sensitivity | description |
-| --- | --- | --- | --- | --- | --- |
-| `simulator` | optional | string | — | Public | Simulation toolkit (e.g. GATE/Geant4) |
-| `seed` | optional | int64 | — | Public | RNG seed for reproducibility |
+| field | tier | dtype | range | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- | --- |
+| `simulator` | optional | string | — | — | Public | Simulation toolkit (e.g. GATE/Geant4) |
+| `seed` | optional | int64 (decimal string) | — | — | Public | RNG seed for reproducibility |
 
 | block role | kind | min | description |
 | --- | --- | --- | --- |
@@ -195,9 +195,9 @@ _No schema metadata fields._
 
 An energy / positronium-lifetime / TOF histogram.
 
-| field | tier | dtype | unit | sensitivity | description |
-| --- | --- | --- | --- | --- | --- |
-| `domain` | optional | string | — | Public | Histogram domain (energy / lifetime / time-of-flight) |
+| field | tier | dtype | range | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- | --- |
+| `domain` | optional | string | — | — | Public | Histogram domain (energy / lifetime / time-of-flight) |
 
 | block role | kind | min | description |
 | --- | --- | --- | --- |
@@ -207,10 +207,10 @@ An energy / positronium-lifetime / TOF histogram.
 
 A generically-ingested flat table — structural preservation, semantics still to be attached.
 
-| field | tier | dtype | unit | sensitivity | description |
-| --- | --- | --- | --- | --- | --- |
-| `study` | recommended | string | — | Public | Study / cohort / experiment this table belongs to (FAIR grouping) |
-| `source_format` | recommended | string | — | Public | Source format normalised at ingest ("parquet" \| "arrow" \| "csv" \| …) |
+| field | tier | dtype | range | unit | sensitivity | description |
+| --- | --- | --- | --- | --- | --- | --- |
+| `study` | recommended | string | — | — | Public | Study / cohort / experiment this table belongs to (FAIR grouping) |
+| `source_format` | recommended | string | — | — | Public | Source format normalised at ingest ("parquet" \| "arrow" \| "csv" \| …) |
 
 | block role | kind | min | description |
 | --- | --- | --- | --- |

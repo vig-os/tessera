@@ -140,11 +140,38 @@ fn collection_duplicate_keys_are_refused() {
     }
 }
 
-/// A product whose embedded schema declares one optional field and one optional block role.
+/// A product embedding `schema`, as a writer whose build models every rule in it would have sealed
+/// it. This build refuses to seal a schema it cannot read
+/// (`sealing_refuses_a_schema_this_build_cannot_read`), so the schema is attached to a sealed
+/// product instead: `validate_manifest` reads the schema, never the seal.
 fn with_schema(schema: Value) -> Manifest {
-    let mut b = ProductBuilder::new("custom", "p", "d", TS);
-    b.with_schema(schema);
-    b.seal().unwrap()
+    let mut m = ProductBuilder::new("custom", "p", "d", TS).seal().unwrap();
+    m.schema = Some(schema);
+    m
+}
+
+/// Sealing checks the embedded schema's rules (#895), so a schema this build can't read is refused
+/// at seal as at validate (ADR-0060 §2.2): a rule from a newer revision, a record in array form.
+/// Sealing against either would ignore a rule the schema declares.
+#[test]
+fn sealing_refuses_a_schema_this_build_cannot_read() {
+    let seal = |schema: Value| {
+        let mut b = ProductBuilder::new("custom", "p", "d", TS);
+        b.with_schema(schema);
+        b.seal()
+    };
+    seal(base_schema()).expect("a schema this build models seals");
+    let mut newer = base_schema();
+    newer["fields"][0]["pattern"] = json!("^[A-Z]+$");
+    match seal(newer) {
+        Err(Error::NewerFormatFields { fields }) => {
+            assert_eq!(fields, ["schema.fields[0].pattern"]);
+        }
+        other => panic!("a newer rule must not seal, got {other:?}"),
+    }
+    let mut array_form = base_schema();
+    array_form["fields"] = json!([["site", "acquisition site", "string"]]);
+    assert!(matches!(seal(array_form), Err(Error::Invalid(_))));
 }
 
 fn base_schema() -> Value {

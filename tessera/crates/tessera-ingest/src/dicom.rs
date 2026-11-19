@@ -20,6 +20,7 @@ use dicom::pixeldata::{ConvertOptions, ModalityLutOption, PixelDecoder};
 use tessera_core::block::array::{ArraySpec, WorldFrame};
 use tessera_core::canonical::json_number;
 use tessera_core::manifest::Manifest;
+use tessera_core::schema::{Encoding, ProductSchema, SchemaRegistry};
 use tessera_core::{Error, ProductBuilder, Result};
 use tessera_io::array::{self, ArrayData};
 use tessera_io::BlockPayload;
@@ -50,6 +51,40 @@ const PIXEL_SPACING: Tag = Tag(0x0028, 0x0030);
 /// row + first column, the in-plane axes of the affine (#271, ADR-0030).
 const IMAGE_POSITION_PATIENT: Tag = Tag(0x0020, 0x0032);
 const IMAGE_ORIENTATION_PATIENT: Tag = Tag(0x0020, 0x0037);
+
+/// A curated numeric DICOM tag and the `recon` field it fills (#895). Only the mapping lives here:
+/// how the value is spelled (a JSON number, or a decimal string when the field declares
+/// `"encoding": "string"`) and what range it must fall in are the field's, read from the product
+/// schema, so changing the schema changes what the door seals.
+struct CuratedNumber {
+    tag: Tag,
+    keyword: &'static str,
+    field: &'static str,
+    /// Values sealed: 1 → the first value as a scalar; 2 → the first two as an array, or the field
+    /// is left out when the tag carries fewer.
+    values: usize,
+}
+
+const CURATED_NUMBERS: [CuratedNumber; 3] = [
+    CuratedNumber {
+        tag: KVP,
+        keyword: "KVP",
+        field: "kvp",
+        values: 1,
+    },
+    CuratedNumber {
+        tag: SLICE_THICKNESS,
+        keyword: "SliceThickness",
+        field: "slice_thickness",
+        values: 1,
+    },
+    CuratedNumber {
+        tag: PIXEL_SPACING,
+        keyword: "PixelSpacing",
+        field: "pixel_spacing",
+        values: 2,
+    },
+];
 
 /// The pixel-data tag — excluded from the `extra["dicom_header"]` dump (the pixels are the
 /// `volume` block; the header is metadata about them, not a redundant copy).
@@ -133,6 +168,12 @@ pub struct DicomCuratedTags {
     pub slice_thickness: Option<f64>,
     /// DICOM `PixelSpacing` (0028,0030), `[row_mm, col_mm]` — Public.
     pub pixel_spacing: Option<[f64; 2]>,
+    /// The curated numeric tags (`kvp`, `slice_thickness`, `pixel_spacing`) as the product schema's
+    /// fields spell them, keyed by field id: a JSON number, or the decimal string of a field that
+    /// declares `"encoding": "string"` (#895). Built by [`read_object_with`], already checked against
+    /// the fields' ranges by tag; this, not the `f64`s above, is what [`to_recon_product`] seals. The
+    /// `f64`s stay for the series geometry.
+    pub numbers: BTreeMap<String, serde_json::Value>,
 }
 
 fn de(e: impl std::fmt::Display) -> Error {
@@ -153,8 +194,35 @@ pub fn read_image_deidentified(path: &std::path::Path) -> Result<DicomImage> {
     read_object(&obj)
 }
 
-/// Decode an already-parsed DICOM object (testable without touching the filesystem).
+/// The built-in `recon` schema, which every DICOM read is checked against unless the caller passes
+/// its own ([`read_object_with`]).
+fn recon_schema() -> Result<ProductSchema> {
+    SchemaRegistry::builtin()
+        .get("recon")
+        .cloned()
+        .ok_or_else(|| Error::Invalid("dicom: the built-in registry has no 'recon' schema".into()))
+}
+
+/// Decode an already-parsed DICOM object (testable without touching the filesystem), against the
+/// built-in `recon` schema ([`read_object_with`]).
 pub fn read_object(obj: &FileDicomObject<InMemDicomObject>) -> Result<DicomImage> {
+    read_object_with(obj, &recon_schema()?)
+}
+
+/// [`read_object`] against `schema`: the curated numeric tags are spelled and range-checked as its
+/// fields declare (#895), and every refusal names the DICOM tag and the element's text. Pass the same
+/// schema to [`to_recon_product_with`], which embeds it.
+///
+/// # Errors
+/// [`Error::FieldValue`] for a curated value outside its field's range or not of its encoding
+/// (`dicom: (0018,0060) KVP = "5000": field 'kvp' of schema 'recon': 5000 is above its maximum
+/// 1000`); [`Error::Invalid`], naming the tag and its text, for a number no seal can hold, a curated
+/// numeric tag whose text is not numbers, or a string-encoded field's value that is not an integer;
+/// [`Error::Invalid`] for a pixel grid that doesn't decode.
+pub fn read_object_with(
+    obj: &FileDicomObject<InMemDicomObject>,
+    schema: &ProductSchema,
+) -> Result<DicomImage> {
     // #301: not every DICOM object is an image. Raw sinogram/projection objects (e.g. GE
     // `GEMS_PET_RAW`), structured reports, and exam reports carry no pixel grid. Detect that up
     // front and point the operator at the blob (cold/archival) tier, instead of failing deep in the
@@ -206,31 +274,36 @@ pub fn read_object(obj: &FileDicomObject<InMemDicomObject>) -> Result<DicomImage
             rows * cols
         )));
     }
-    let curated = extract_curated_tags(obj);
-    // Every number below is sealed as a JSON number (the array spec's rescale, the `recon` fields):
-    // refuse one a seal cannot hold here, by tag, before any product exists. In a series every slice
-    // is checked, not only the representative one whose tags are sealed: a slice can't be told apart
-    // until the stack is sorted, and refusing a corrupt member fails safe.
-    sealable_number(obj, RESCALE_SLOPE, "RescaleSlope", &[rescale_slope])?;
-    sealable_number(
-        obj,
-        RESCALE_INTERCEPT,
-        "RescaleIntercept",
-        &[rescale_intercept],
-    )?;
-    sealable_number(obj, KVP, "KVP", curated.kvp.as_slice())?;
-    sealable_number(
-        obj,
-        SLICE_THICKNESS,
-        "SliceThickness",
-        curated.slice_thickness.as_slice(),
-    )?;
-    sealable_number(
-        obj,
-        PIXEL_SPACING,
-        "PixelSpacing",
-        curated.pixel_spacing.as_ref().map_or(&[], |v| &v[..]),
-    )?;
+    // Every number below is sealed (the array spec's rescale, the `recon` fields): refuse one a seal
+    // cannot hold, or one its schema field refuses, here, by tag, before any product exists. In a
+    // series every slice is checked, not only the representative one whose tags are sealed: a slice
+    // can't be told apart until the stack is sorted, and refusing a corrupt member fails safe.
+    for (tag, keyword, field, value) in [
+        (
+            RESCALE_SLOPE,
+            "RescaleSlope",
+            "rescale_slope",
+            rescale_slope,
+        ),
+        (
+            RESCALE_INTERCEPT,
+            "RescaleIntercept",
+            "rescale_intercept",
+            rescale_intercept,
+        ),
+    ] {
+        sealable_number(obj, tag, keyword, &[value])?;
+        // An absent tag's default (slope 1, intercept 0) is the seal's to check, as `metadata.<id>`.
+        if !element_text(obj, tag).is_empty() {
+            schema.check_value(
+                field,
+                &json_number(field, value)?,
+                &tag_origin(obj, tag, keyword),
+            )?;
+        }
+    }
+    let mut curated = extract_curated_tags(obj);
+    curated.numbers = curated_numbers(obj, schema)?;
     let header_json = header_to_json(obj);
     Ok(DicomImage {
         shape: vec![rows, cols],
@@ -269,13 +342,110 @@ fn sealable_number(
     keyword: &str,
     values: &[f64],
 ) -> Result<()> {
-    let text = obj
-        .element(tag)
+    let text = element_text(obj, tag);
+    crate::sealable::refuse_unsealable("dicom", &format!("{tag} {keyword}"), &text, values)
+}
+
+/// The element's text as the source spells it (trimmed), or `""` when absent.
+fn element_text(obj: &FileDicomObject<InMemDicomObject>, tag: Tag) -> String {
+    obj.element(tag)
         .ok()
         .and_then(|e| e.to_str().ok())
         .map(|s| s.trim().to_owned())
-        .unwrap_or_default();
-    crate::sealable::refuse_unsealable("dicom", &format!("{tag} {keyword}"), &text, values)
+        .unwrap_or_default()
+}
+
+/// How a refusal names a DICOM value: `dicom: (0018,0060) KVP = "5000"`.
+fn tag_origin(obj: &FileDicomObject<InMemDicomObject>, tag: Tag, keyword: &str) -> String {
+    format!("dicom: {tag} {keyword} = \"{}\"", element_text(obj, tag))
+}
+
+/// The [`CURATED_NUMBERS`] `obj` carries, spelled as `schema`'s fields declare and checked against
+/// their ranges, keyed by field id (#895). A tag the object lacks or carries empty (a DICOM type 2
+/// attribute), or one with fewer values than its mapping seals, is left out (the `recon` fields are
+/// `recommended`). A tag whose text is not numbers is refused by tag; it used to be left out
+/// silently. A field the schema doesn't declare is sealed as a JSON number, as before the rule
+/// existed.
+///
+/// A field with `"encoding": "string"` gets each value's integer in canonical decimal digits, read
+/// from the element's text (exact for a 64-bit `UV`/`SV`, which a double would round); a value that
+/// is not an integer is refused by tag. Every other field gets JSON numbers, after the format's own
+/// check ([`sealable_number`]: finite, within ±(2^53−1), not an underflow).
+fn curated_numbers(
+    obj: &FileDicomObject<InMemDicomObject>,
+    schema: &ProductSchema,
+) -> Result<BTreeMap<String, serde_json::Value>> {
+    let mut out = BTreeMap::new();
+    for c in &CURATED_NUMBERS {
+        // Absent, or present but empty (a DICOM type 2 attribute with no value): not sealed.
+        let Ok(element) = obj.element(c.tag) else {
+            continue;
+        };
+        if element_text(obj, c.tag).is_empty() {
+            continue;
+        }
+        let origin = tag_origin(obj, c.tag, c.keyword);
+        let string_encoded =
+            schema.field(c.field).and_then(|f| f.encoding) == Some(Encoding::String);
+        let values: Vec<serde_json::Value> = if string_encoded {
+            element_text(obj, c.tag)
+                .split('\\')
+                .map(|t| decimal_integer(t.trim()).map(serde_json::Value::String))
+                .collect::<Option<_>>()
+                .ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "{origin}: field '{}' of schema '{}' declares \"encoding\": \"string\" (an \
+                         integer in decimal digits), and this value is not an integer",
+                        c.field, schema.product
+                    ))
+                })?
+        } else {
+            let floats = multi_f64(element)
+                .ok_or_else(|| Error::Invalid(format!("{origin}: a value is not a number")))?;
+            sealable_number(obj, c.tag, c.keyword, &floats)?;
+            floats
+                .iter()
+                .map(|&v| json_number(c.field, v))
+                .collect::<Result<_>>()?
+        };
+        let value = match (c.values, values.as_slice()) {
+            (1, [first, ..]) => first.clone(),
+            (n, all) if n > 1 && all.len() >= n => serde_json::Value::Array(all[..n].to_vec()),
+            _ => continue,
+        };
+        schema.check_value(c.field, &value, &origin)?;
+        out.insert(c.field.to_owned(), value);
+    }
+    Ok(out)
+}
+
+/// The canonical decimal digits of the integer `text` spells (`"+0120"` → `"120"`), or `None` when
+/// it is not an integer. DICOM's integer strings (`IS`) allow a sign and leading zeros; the sealed
+/// spelling allows neither (#895).
+fn decimal_integer(text: &str) -> Option<String> {
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<i128>().ok().map(|n| n.to_string())
+}
+
+/// Every value of a numeric element as a double: `to_multi_float64`, else the text split on `\`.
+/// `None` when some value is not a number.
+fn multi_f64(element: &DataElement<InMemDicomObject>) -> Option<Vec<f64>> {
+    element
+        .to_multi_float64()
+        .ok()
+        .map(|v| v.to_vec())
+        .or_else(|| {
+            element
+                .to_str()
+                .ok()?
+                .trim()
+                .split('\\')
+                .map(|s| s.trim().parse::<f64>().ok())
+                .collect()
+        })
 }
 
 /// Extract the schema-mapped [`DicomCuratedTags`] from an already-parsed DICOM object. Any tag
@@ -316,6 +486,7 @@ fn extract_curated_tags(obj: &FileDicomObject<InMemDicomObject>) -> DicomCurated
         kvp: f64_of(obj, KVP),
         slice_thickness: f64_of(obj, SLICE_THICKNESS),
         pixel_spacing,
+        numbers: BTreeMap::new(),
     }
 }
 
@@ -780,6 +951,29 @@ pub fn to_recon_product(
     source_digest: Option<&str>,
     extra_sources: &[tessera_core::provenance::Source],
 ) -> Result<(Manifest, Vec<BlockPayload>)> {
+    to_recon_product_with(
+        img,
+        &recon_schema()?,
+        name,
+        timestamp,
+        source,
+        source_digest,
+        extra_sources,
+    )
+}
+
+/// [`to_recon_product`] embedding `schema`, the schema `img` was read against
+/// ([`read_object_with`]). The seal checks every metadata value against it again (#895), so an image
+/// read against a different schema is refused rather than sealed under the wrong rules.
+pub fn to_recon_product_with(
+    img: &DicomImage,
+    schema: &ProductSchema,
+    name: &str,
+    timestamp: &str,
+    source: &str,
+    source_digest: Option<&str>,
+    extra_sources: &[tessera_core::provenance::Source],
+) -> Result<(Manifest, Vec<BlockPayload>)> {
     let mut spec = ArraySpec::new(img.shape.clone(), "int16")
         .with_rescale(img.rescale_slope, img.rescale_intercept);
     if let Some(u) = unit_for(&img.modality) {
@@ -792,6 +986,7 @@ pub fn to_recon_product(
     let (block_ref, payload) = array::array_block("volume", &spec, &data)?;
 
     let mut b = ProductBuilder::new("recon", name, "DICOM recon volume", timestamp);
+    b.with_schema(schema.to_value()?);
     b.add_block_ref(block_ref);
     b.with_field(
         "modality",
@@ -860,20 +1055,9 @@ pub fn to_recon_product(
     if let Some(v) = &c.model_name {
         b.with_field("model_name", serde_json::json!(v));
     }
-    if let Some(v) = c.kvp {
-        b.with_field("kvp", json_number("kvp", v)?);
-    }
-    if let Some(v) = c.slice_thickness {
-        b.with_field("slice_thickness", json_number("slice_thickness", v)?);
-    }
-    if let Some([row, col]) = c.pixel_spacing {
-        b.with_field(
-            "pixel_spacing",
-            serde_json::Value::Array(vec![
-                json_number("pixel_spacing", row)?,
-                json_number("pixel_spacing", col)?,
-            ]),
-        );
+    // The curated numbers as the schema spells them (#895), already range-checked by tag.
+    for (field, value) in &c.numbers {
+        b.with_field(field, value.clone());
     }
 
     // Full DICOM header → `extra["dicom_header"]` (PHI-scrubbed on the de-id path, since the
@@ -1756,14 +1940,168 @@ mod tests {
             with(KVP, text).unwrap_or_else(|e| panic!("{text}: {e}"));
         }
 
-        // In range: unchanged, still a JSON number.
-        let img = with(KVP, "9007199254740991").unwrap();
-        assert_eq!(img.curated.kvp, Some(9_007_199_254_740_991.0));
+        // Within the format bound: unchanged, still a JSON number, where no schema range applies.
+        let img = with(RESCALE_INTERCEPT, "-9007199254740991").unwrap();
         let (sealed, _) =
-            to_recon_product(&img, "kvp-ct", "2024-01-01T00:00:00Z", "1.2.3", None, &[]).unwrap();
+            to_recon_product(&img, "ri-ct", "2024-01-01T00:00:00Z", "1.2.3", None, &[]).unwrap();
         assert_eq!(
-            sealed.metadata.get("kvp"),
-            Some(&serde_json::json!(9_007_199_254_740_991.0))
+            sealed.metadata.get("rescale_intercept"),
+            Some(&serde_json::json!(-9_007_199_254_740_991.0))
+        );
+        // The format bound and a field's range are two layers: KVP within the bound is still refused
+        // by the range the `recon` schema declares for it (#895), by tag.
+        assert_eq!(
+            refused(KVP, "9007199254740991"),
+            "dicom: (0018,0060) KVP = \"9007199254740991\": field 'kvp' of schema 'recon': \
+             9007199254740991 is above its maximum 1000"
+        );
+    }
+
+    /// The `recon` schema's ranges reach the DICOM door (#895): a curated value outside its field's
+    /// range is refused when the file is read, before any product exists, naming the field, the tag
+    /// and the element's text; values inside it are sealed exactly as before.
+    #[test]
+    fn a_curated_dicom_number_outside_its_schema_range_is_refused_naming_the_tag() {
+        let with = |tag: Tag, text: &str| {
+            read_object(&dcm_with_curated_and(
+                8,
+                8,
+                1,
+                vec![DataElement::new(tag, VR::DS, PrimitiveValue::from(text))],
+            ))
+        };
+        let refused = |tag: Tag, text: &str| with(tag, text).unwrap_err().to_string();
+        assert_eq!(
+            refused(KVP, "5000"),
+            "dicom: (0018,0060) KVP = \"5000\": field 'kvp' of schema 'recon': 5000 is above its \
+             maximum 1000"
+        );
+        assert_eq!(
+            refused(SLICE_THICKNESS, "-2.5"),
+            "dicom: (0018,0050) SliceThickness = \"-2.5\": field 'slice_thickness' of schema \
+             'recon': -2.5 is below its minimum 0"
+        );
+        // An empty curated tag (DICOM type 2, no value) is left out as an absent one; text that is
+        // not numbers is refused by tag rather than dropped without a word.
+        let img = with(KVP, "").unwrap();
+        assert!(!img.curated.numbers.contains_key("kvp"));
+        assert_eq!(
+            refused(PIXEL_SPACING, "0.5\\0.5\\x"),
+            "invalid product: dicom: (0028,0030) PixelSpacing = \"0.5\\0.5\\x\": a value is not a \
+             number"
+        );
+        // The bounds are inclusive, and in-range values seal unchanged.
+        for (tag, text, field, sealed) in [
+            (KVP, "0", "kvp", serde_json::json!(0.0)),
+            (KVP, "1000", "kvp", serde_json::json!(1000.0)),
+            (
+                SLICE_THICKNESS,
+                "1000",
+                "slice_thickness",
+                serde_json::json!(1000.0),
+            ),
+        ] {
+            let img = with(tag, text).unwrap();
+            let (m, _) =
+                to_recon_product(&img, "r", "2024-01-01T00:00:00Z", "1.2.3", None, &[]).unwrap();
+            assert_eq!(m.metadata[field], sealed, "{text}");
+        }
+    }
+
+    /// The DICOM door's number handling comes from the schema, not from code (#895): the same
+    /// 64-bit `UV` KVP element is refused under the built-in `recon` schema (a `float64` field
+    /// ranged 0–1000) and sealed as an exact decimal string under a schema that declares `kvp` a
+    /// string-encoded `uint64`; narrowing the range refuses a value the built-in schema accepts.
+    #[test]
+    fn the_dicom_number_rules_follow_the_schema() {
+        let builtin = recon_schema().unwrap();
+        let with_kvp = |kvp: tessera_core::schema::FieldSpec| {
+            let mut s = builtin.clone();
+            let at = s.fields.iter().position(|f| f.id == "kvp").unwrap();
+            s.fields[at] = kvp;
+            s
+        };
+        let big: u64 = 1_730_000_000_000_000_000;
+        let uv = dcm_with_curated_and(
+            8,
+            8,
+            1,
+            vec![DataElement::new(KVP, VR::UV, PrimitiveValue::from(big))],
+        );
+        // Built-in: a JSON number field, so the 64-bit value is refused by tag, as a number no seal
+        // can hold (the format bound is checked before the field's range).
+        let err = read_object_with(&uv, &builtin).unwrap_err().to_string();
+        assert!(
+            err.starts_with(
+                "invalid product: dicom: (0018,0060) KVP = \"1730000000000000000\" is outside the \
+                 range a sealed JSON number can hold"
+            ),
+            "{err}"
+        );
+        // A string-encoded uint64: the exact digits, not a rounded double.
+        let as_string = with_kvp(
+            tessera_core::schema::FieldSpec::recommended("kvp", "KVP", "uint64").string_encoded(),
+        );
+        let img = read_object_with(&uv, &as_string).unwrap();
+        let (m, _) = to_recon_product_with(
+            &img,
+            &as_string,
+            "uv-ct",
+            "2024-01-01T00:00:00Z",
+            "1.2.3.uv",
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(m.metadata["kvp"], serde_json::json!(big.to_string()));
+        assert_eq!(
+            m.schema.as_ref().unwrap()["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["id"] == "kvp")
+                .unwrap()["encoding"],
+            "string"
+        );
+        // The same schema turns a DS `120` into `"120"`; a non-integer is refused by tag.
+        let ds = |text: &str| {
+            dcm_with_curated_and(
+                8,
+                8,
+                1,
+                vec![DataElement::new(KVP, VR::DS, PrimitiveValue::from(text))],
+            )
+        };
+        let img = read_object_with(&ds("+0120"), &as_string).unwrap();
+        assert_eq!(img.curated.numbers["kvp"], serde_json::json!("120"));
+        let err = read_object_with(&ds("120.5"), &as_string)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("KVP = \"120.5\": field 'kvp' of schema 'recon' declares"),
+            "{err}"
+        );
+        // A narrower range refuses what the built-in one keeps.
+        let narrow = with_kvp(
+            tessera_core::schema::FieldSpec::recommended("kvp", "KVP", "float64").range(0.0, 100.0),
+        );
+        read_object_with(&ds("120"), &builtin).unwrap();
+        assert_eq!(
+            read_object_with(&ds("120"), &narrow)
+                .unwrap_err()
+                .to_string(),
+            "dicom: (0018,0060) KVP = \"120\": field 'kvp' of schema 'recon': 120 is above its \
+             maximum 100"
+        );
+        // An image read against one schema is not sealed under another: the seal re-checks.
+        let img = read_object_with(&uv, &as_string).unwrap();
+        let err = match to_recon_product(&img, "x", "2024-01-01T00:00:00Z", "1.2.3", None, &[]) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("an image read against another schema must not seal under recon's"),
+        };
+        assert!(
+            err.starts_with("metadata.kvp: field 'kvp' of schema 'recon'"),
+            "{err}"
         );
     }
 

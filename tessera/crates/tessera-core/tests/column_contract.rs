@@ -14,7 +14,9 @@ use tessera_core::{Error, ProductSchema, SchemaRegistry};
 const BUILTIN_DIGESTS: &str = include_str!("fixtures/builtin-schema-digests.txt");
 
 /// Every builtin schema serialises to the bytes it had before `tables`/`arrays` existed, so every
-/// schema already embedded in a sealed `.tsra` keeps its bytes and its seal.
+/// schema already embedded in a sealed `.tsra` keeps its bytes and its seal. Two digests moved on
+/// purpose since (#895): `recon` 1.1 declares ranges on `kvp` and `slice_thickness`, and `sim` 1.1
+/// declares `seed` a decimal string. A move anywhere else is a change no schema asked for.
 #[test]
 fn builtin_schemas_serialise_byte_identically() {
     let r = SchemaRegistry::builtin();
@@ -409,5 +411,51 @@ fn contract_fields_serialise_skip_if_default_byte_for_byte() {
     assert_eq!(
         serde_json::to_string(&array).unwrap(),
         r#"{"dtype":"int16","rank":3}"#
+    );
+}
+
+/// The #801 drafts predate the number rules (#895): they declare 64-bit counts and seeds as bare
+/// `int64`/`uint64` metadata fields. They still parse (the test above), but sealing or validating
+/// against them is refused until each declares `"encoding": "string"`. This names every field a
+/// consumer has to change, and fails if a draft is fixed or a new bare field appears.
+#[test]
+fn the_801_drafts_name_their_bare_64_bit_fields() {
+    let mut bare = Vec::new();
+    let mut paths: Vec<_> = std::fs::read_dir(DRAFTS)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".schema.json"))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let schema = ProductSchema::from_value(&v).unwrap();
+        for f in &schema.fields {
+            if f.check_definition().is_err() {
+                bare.push(format!("{}.{} {}", schema.product, f.id, f.dtype));
+            }
+        }
+        if let Err(e) = schema.check_definition() {
+            assert!(matches!(e, Error::SchemaField { .. }), "{e}");
+        }
+    }
+    assert_eq!(
+        bare,
+        [
+            "geddf:pairwise-record.n_singles uint64",
+            "geddf:pairwise-record.n_511 uint64",
+            "geddf:pairwise-record.n_ng uint64",
+            "gpet-sim:crystal-map.n_crystals int64",
+            "gpet-sim:g4ring-output.number_of_events uint64",
+            "gpet-sim:g4ring-output.events_run uint64",
+            "gpet-sim:g4ring-output.seed int64",
+            "gpet-sim:g4ring-output.run_id int64",
+            "gpet-sim:g4ring-output.event_id_offset uint64",
+            "gpet-sim:g4ring-phase-space.number_of_events uint64",
+            "gpet-sim:g4ring-phase-space.events_run uint64",
+            "gpet-sim:g4ring-phase-space.seed int64",
+            "gpet-sim:g4ring-phase-space.run_id int64",
+            "gpet-sim:g4ring-phase-space.event_id_offset uint64",
+        ]
     );
 }

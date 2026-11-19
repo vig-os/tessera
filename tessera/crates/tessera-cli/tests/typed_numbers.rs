@@ -160,24 +160,7 @@ fn repo_with_product(d: &Path) -> (std::path::PathBuf, String) {
 
 /// Commit `x=<text>` and read back what the seal holds under `metadata.x`.
 fn stored_x(d: &Path, repo: &Path, lineage: &str, text: &str) -> serde_json::Value {
-    let set = format!("x={text}");
-    let committed = ok(&["commit", repo.to_str().unwrap(), lineage, "--set", &set]);
-    let version = committed
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("version"))
-        .unwrap()
-        .trim()
-        .to_owned();
-    let out = d.join(format!("published-{}.tsra", version.replace(':', "_")));
-    ok(&[
-        "publish",
-        repo.to_str().unwrap(),
-        &version,
-        out.to_str().unwrap(),
-    ]);
-    let manifest: serde_json::Value =
-        serde_json::from_str(&ok(&["inspect", out.to_str().unwrap(), "--json"])).unwrap();
-    manifest["metadata"]["x"].clone()
+    stored_x_of(d, repo, lineage, "x", text)
 }
 
 /// A text Rust reads as a number but JSON does not spell as one (`+5`, `Infinity`, `+1e400`) used to be
@@ -746,4 +729,60 @@ fn ingest_nifti_refuses_every_unsealable_header_value_naming_the_field() {
         "--out",
         out.to_str().unwrap(),
     ]);
+}
+
+/// `commit --set` holds a value to the range its field declares in the schema the version carries
+/// (#895): a corpus `recon` product embeds `recon` 1.1, whose `kvp` is ranged 0–1000 kV, so
+/// `--set kvp=5000` is refused naming the flag and nothing is stored, while `--set kvp=120` commits.
+#[test]
+fn commit_set_refuses_a_value_outside_its_schema_range_naming_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let corpus = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../corpus/files/recon_int16.tsra"
+    );
+    let repo = d.join("repo");
+    ok(&["init", repo.to_str().unwrap()]);
+    let imported = ok(&["import", repo.to_str().unwrap(), corpus]);
+    let lineage = imported
+        .lines()
+        .find_map(|l| l.strip_prefix("imported lineage "))
+        .unwrap()
+        .to_owned();
+    let before = files(&repo);
+    refused(
+        &[
+            "commit",
+            repo.to_str().unwrap(),
+            &lineage,
+            "--set",
+            "kvp=5000",
+        ],
+        "--set kvp: field 'kvp' of schema 'recon': 5000 is above its maximum 1000",
+    );
+    assert_eq!(files(&repo), before, "a refused --set stores nothing");
+    assert_eq!(stored_x_of(d, &repo, &lineage, "kvp", "120"), 120);
+}
+
+/// Commit `key=<text>` and read back what the seal holds under `metadata.<key>`.
+fn stored_x_of(d: &Path, repo: &Path, lineage: &str, key: &str, text: &str) -> serde_json::Value {
+    let set = format!("{key}={text}");
+    let committed = ok(&["commit", repo.to_str().unwrap(), lineage, "--set", &set]);
+    let version = committed
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("version"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let out = d.join(format!("published-{}.tsra", version.replace(':', "_")));
+    ok(&[
+        "publish",
+        repo.to_str().unwrap(),
+        &version,
+        out.to_str().unwrap(),
+    ]);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&ok(&["inspect", out.to_str().unwrap(), "--json"])).unwrap();
+    manifest["metadata"][key].clone()
 }

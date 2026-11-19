@@ -366,10 +366,23 @@ fn non_finite_float(v: &toml::Value, path: &str) -> Option<(String, String)> {
 /// `[product.metadata] daq_start_ns = 1730000000000000000`: the spec is hashed ([`spec_hash`]) and
 /// its metadata and recipe are sealed into each member, and a sealed JSON number is a double
 /// (SPEC §1, #886). The error names the value (`product[0].metadata.daq_start_ns`); write it as a
-/// TOML string. [`Error::Invalid`] for the structural faults above.
+/// TOML string. [`Error::FieldValue`] for a `[product.metadata]` value outside the range, or not of
+/// the encoding, that its field declares in the member's built-in schema (#895), named
+/// `product[i].metadata.<key>`. [`Error::Invalid`] for the structural faults above.
 pub fn validate(spec: &IngestSpec) -> Result<Vec<usize>> {
     // 0. Refused at the door, before the engine touches the filesystem, never converted.
     canonical_bytes(spec)?;
+    // 0b. Each member's `[product.metadata]` against the encoding and range its field declares in
+    // the member's built-in schema (#895), named by its key in the spec.
+    let registry = tessera_core::SchemaRegistry::builtin();
+    for (i, p) in spec.products.iter().enumerate() {
+        let Some(schema) = registry.get(&p.schema) else {
+            continue;
+        };
+        for (k, v) in &p.metadata {
+            schema.check_value(k, v, &format!("product[{i}].metadata.{k}"))?;
+        }
+    }
     let n = spec.products.len();
     // 1. unique names — duplicates would silently shadow each other in any name→index map.
     let mut by_name: BTreeMap<&str, usize> = BTreeMap::new();
@@ -718,6 +731,30 @@ dataset = "events_2p"
         ));
         with("daq_start_ns = \"1730000000000000000\"").unwrap();
         with("max = 9007199254740991").unwrap();
+    }
+
+    /// A `[product.metadata]` value outside the range its field declares in the member's built-in
+    /// schema is refused by `validate`, named by its key in the spec, before anything is read or
+    /// written (#895). The example's second member (`product[1]`) is a `recon`, whose `kvp` is ranged
+    /// 0–1000; the first is a `blob`, which declares no `kvp`, so the same key is open-world there.
+    #[test]
+    fn a_metadata_value_outside_its_schema_range_is_refused_by_spec_key() {
+        let text = include_str!("../../../docs/examples/migrate-petct-study.toml");
+        let at_member = |member: usize, line: &str| {
+            let mut parts: Vec<&str> = text.split("\n[product.metadata]\n").collect();
+            assert!(parts.len() > member + 1, "the example has that member");
+            let tail = format!("{line}\n{}", parts[member + 1]);
+            parts[member + 1] = &tail;
+            validate(&parse_str(&parts.join("\n[product.metadata]\n")).unwrap())
+        };
+        let err = at_member(1, "kvp = 5000").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "product[1].metadata.kvp: field 'kvp' of schema 'recon': 5000 is above its maximum 1000"
+        );
+        assert!(matches!(err, Error::FieldValue { .. }));
+        at_member(1, "kvp = 120").unwrap();
+        at_member(0, "kvp = 5000").unwrap();
     }
 
     /// TOML has `inf`, `-inf` and `nan`; JSON does not, and deserializing one into the spec's JSON

@@ -2163,15 +2163,26 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
 /// [`tessera_core::canonical::parse_user_value`] — JSON, else a bare string; a JSON number a seal
 /// cannot hold is refused, never kept as a string — the same convention as `commit --set`. Shared by
 /// every `tessera ingest` subcommand so metadata is supplied one generic way, not per-backend flags.
+///
+/// Each value is then checked against the encoding and range its field declares in the built-in
+/// `schema` the subcommand writes (#895), and refused naming the flag (`--meta kvp`), before
+/// anything is read or written.
 fn parse_meta(
     items: &[String],
+    schema: &str,
 ) -> tessera_core::Result<std::collections::BTreeMap<String, serde_json::Value>> {
+    let registry = SchemaRegistry::builtin();
+    let schema = registry.get(schema);
     let mut out = std::collections::BTreeMap::new();
     for kv in items {
         let (k, v) = kv.split_once('=').ok_or_else(|| {
             tessera_core::Error::Invalid(format!("--meta expects key=value, got '{kv}'"))
         })?;
-        let value = tessera_core::canonical::parse_user_value(&format!("--meta {k}"), v)?;
+        let flag = format!("--meta {k}");
+        let value = tessera_core::canonical::parse_user_value(&flag, v)?;
+        if let Some(schema) = schema {
+            schema.check_value(k, &value, &flag)?;
+        }
         out.insert(k.to_string(), value);
     }
     Ok(out)
@@ -2421,7 +2432,7 @@ fn ingest_src_to_spec(
                     description: None,
                     derived_from: Vec::new(),
                     source_label,
-                    metadata: parse_meta(&meta)?,
+                    metadata: parse_meta(&meta, "recon")?,
                     generation: None,
                     producer: None,
                     options: FormatOptions::Dicom {
@@ -2460,7 +2471,7 @@ fn ingest_src_to_spec(
                     description: None,
                     derived_from: Vec::new(),
                     source_label,
-                    metadata: parse_meta(&meta)?,
+                    metadata: parse_meta(&meta, "recon")?,
                     generation: None,
                     producer: None,
                     options: FormatOptions::DicomSeries {
@@ -2504,7 +2515,7 @@ fn ingest_src_to_spec(
                     description: None,
                     derived_from: Vec::new(),
                     source_label,
-                    metadata: parse_meta(&meta)?,
+                    metadata: parse_meta(&meta, "listmode")?,
                     generation: None,
                     producer: None,
                     options: FormatOptions::HdfCompound {
@@ -2601,7 +2612,7 @@ fn ingest_src_to_spec(
                         description: None,
                         derived_from: Vec::new(),
                         source_label,
-                        metadata: parse_meta(&meta)?,
+                        metadata: parse_meta(&meta, "table")?,
                         generation: None,
                         producer: None,
                         options,
@@ -2624,7 +2635,7 @@ fn ingest_src_to_spec(
                 Some(f) => f,
                 None => ingest_spec::sniff_array_or_explain(&input)?,
             };
-            let metadata = parse_meta(&meta)?;
+            let metadata = parse_meta(&meta, "array")?;
             let products = match from.as_str() {
                 "npy" => vec![ProductSpec {
                     name: name.clone(),
@@ -2728,7 +2739,7 @@ fn ingest_src_to_spec(
                     description: None,
                     derived_from: Vec::new(),
                     source_label,
-                    metadata: parse_meta(&meta)?,
+                    metadata: parse_meta(&meta, "blob")?,
                     generation: None,
                     producer: None,
                     options: FormatOptions::Blob { input, media_type },
@@ -3954,6 +3965,75 @@ streaming = "batch"
                 out.display()
             );
         }
+    }
+
+    /// `ingest dicom` holds the source's numbers and the operator's `--meta` to the ranges the `recon`
+    /// schema declares (#895): a curated KVP of 5000 kV is refused naming the tag and its text, a
+    /// `--meta kvp=5000` naming the flag, both before any output exists; an in-range `--meta` seals.
+    #[test]
+    fn ingest_dicom_refuses_a_value_outside_its_schema_range_naming_its_source() {
+        use dicom::core::{DataElement, PrimitiveValue, Tag, VR};
+        let dir = tempfile::tempdir().unwrap();
+        let ingest = |dcm: &std::path::Path, out: &std::path::Path, meta: Vec<String>| {
+            run(Cmd::Ingest {
+                spec: None,
+                out: None,
+                workers: None,
+                ram_budget: None,
+                auto: false,
+                stream_threshold: None,
+                src: Some(Box::new(IngestSrc::Dicom {
+                    input: dcm.to_path_buf(),
+                    out: out.to_path_buf(),
+                    name: "ct".into(),
+                    timestamp: "2024-01-01T00:00:00Z".into(),
+                    deidentify: true,
+                    recipient: vec![],
+                    source_label: Some("STUDY-1/CT".into()),
+                    meta,
+                })),
+            })
+        };
+        let plain = dir.path().join("plain.dcm");
+        write_phi_dcm(&plain, "DOE^JOHN", "PID-1");
+        let high = dir.path().join("high.dcm");
+        write_phi_dcm(&high, "DOE^JOHN", "PID-1");
+        let mut obj = dicom::object::open_file(&high).unwrap();
+        obj.put(DataElement::new(
+            Tag(0x0018, 0x0060),
+            VR::DS,
+            PrimitiveValue::from("5000"),
+        ));
+        obj.write_to_file(&high).unwrap();
+
+        let out = dir.path().join("high.tsra");
+        assert_eq!(
+            ingest(&high, &out, vec![]).unwrap_err().to_string(),
+            "dicom: (0018,0060) KVP = \"5000\": field 'kvp' of schema 'recon': 5000 is above its \
+             maximum 1000"
+        );
+        assert!(
+            !out.exists(),
+            "a refused ingest leaves no {}",
+            out.display()
+        );
+
+        let out = dir.path().join("meta.tsra");
+        assert_eq!(
+            ingest(&plain, &out, vec!["kvp=5000".into()])
+                .unwrap_err()
+                .to_string(),
+            "--meta kvp: field 'kvp' of schema 'recon': 5000 is above its maximum 1000"
+        );
+        assert!(
+            !out.exists(),
+            "a refused ingest leaves no {}",
+            out.display()
+        );
+
+        ingest(&plain, &out, vec!["kvp=120".into()]).unwrap();
+        let m = tessera_io::Reader::open(&out).unwrap().manifest().clone();
+        assert_eq!(m.metadata["kvp"], serde_json::json!(120));
     }
 
     /// Naive substring search over bytes (test-only; the `twoway` crate isn't a dep).

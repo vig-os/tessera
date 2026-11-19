@@ -402,6 +402,12 @@ impl Builder {
     }
 
     /// Set a schema metadata field; `value_json` is parsed as JSON.
+    ///
+    /// The value must meet the number rules its field declares in the product's schema (#895),
+    /// checked at `pack`: a field of dtype `int64`/`uint64` takes the integer as a decimal string
+    /// (`set_field("seed", '"42"')`, never `'42'`), and a field with a `minimum`/`maximum` takes a
+    /// number within it (`recon`'s `kvp` is 0–1000). Otherwise `pack` raises `TesseraError` naming
+    /// `metadata.<key>`, the field and the rule, and writes nothing.
     fn set_field(&mut self, key: &str, value_json: &str) -> PyResult<()> {
         let value: serde_json::Value = serde_json::from_str(value_json).map_err(err)?;
         self.builder()?.with_field(key, value);

@@ -19,7 +19,7 @@
 //! sandbox, which has **no cargo on PATH**, so a cargo-backed marker command can never succeed there.
 //! A test runs where cargo obviously exists.
 
-use tessera_core::schema::{FieldSpec, ProductSchema, SchemaRegistry};
+use tessera_core::schema::{Encoding, FieldSpec, ProductSchema, SchemaRegistry};
 
 /// The severity marker used in the field tables — the same three tiers `tessera schema` prints, so the
 /// book and the CLI agree.
@@ -33,6 +33,24 @@ fn tier(f: &FieldSpec) -> &'static str {
     }
 }
 
+/// The dtype, with its string encoding when it declares one (#895): `int64` as `"7"`.
+fn dtype(f: &FieldSpec) -> String {
+    match f.encoding {
+        Some(Encoding::String) => format!("{} (decimal string)", cell(&f.dtype)),
+        None => cell(&f.dtype),
+    }
+}
+
+/// The inclusive range a field declares (#895), `—` when it declares none.
+fn range(f: &FieldSpec) -> String {
+    match (f.minimum, f.maximum) {
+        (None, None) => "—".to_string(),
+        (Some(lo), Some(hi)) => format!("{lo} – {hi}"),
+        (Some(lo), None) => format!("≥ {lo}"),
+        (None, Some(hi)) => format!("≤ {hi}"),
+    }
+}
+
 /// Escape the pipe character, which would otherwise split a markdown table cell.
 fn cell(s: &str) -> String {
     s.replace('|', "\\|")
@@ -43,15 +61,16 @@ fn field_rows(schema: &ProductSchema) -> String {
         return "_No schema metadata fields._\n".to_string();
     }
     let mut out = String::from(
-        "| field | tier | dtype | unit | sensitivity | description |\n\
-         | --- | --- | --- | --- | --- | --- |\n",
+        "| field | tier | dtype | range | unit | sensitivity | description |\n\
+         | --- | --- | --- | --- | --- | --- | --- |\n",
     );
     for f in &schema.fields {
         out.push_str(&format!(
-            "| `{}` | {} | {} | {} | {:?} | {} |\n",
+            "| `{}` | {} | {} | {} | {} | {:?} | {} |\n",
             cell(&f.id),
             tier(f),
-            cell(&f.dtype),
+            dtype(f),
+            range(f),
             f.unit.as_deref().map_or("—".to_string(), cell),
             f.sensitivity,
             cell(&f.description),
