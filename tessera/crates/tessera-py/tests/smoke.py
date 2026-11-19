@@ -187,7 +187,10 @@ with tempfile.TemporaryDirectory() as td:
         b.pack(str(out))
         raise AssertionError("sealed an integer beyond 2^53")
     except tessera.TesseraError as e:
-        want = "metadata.daq_start_ns = 1730000000000000000 exceeds ±(2^53−1) (I-JSON, RFC 7493 §2.2)"
+        want = (
+            "metadata.daq_start_ns = 1730000000000000000 is outside the range a sealed JSON number "
+            "can hold (±(2^53−1), I-JSON RFC 7493 §2.2)"
+        )
         assert want in str(e) and "write it as a string" in str(e), str(e)
     assert not out.exists(), "a refused pack must write nothing"
 # Written as a string, the same value seals and reads back exactly.
