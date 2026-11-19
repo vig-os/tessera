@@ -1,0 +1,30 @@
+## 64-bit values
+A  json.loads (plain)         epoch_ns=exact, i64_min=exact, p53_plus_1=exact, u64_max=exact
+A  json.loads (I-JSON hook)   refused: 1730000000123456789 exceeds ±(2^53−1)
+A/A′ strings + int()           epoch_ns=exact, i64_min=exact, p53_plus_1=exact, u64_max=exact
+B  cbor2.loads                 epoch_ns=exact, i64_min=exact, p53_plus_1=exact, u64_max=exact | types: ['int']
+
+## Corpus: does Python reproduce the stored bytes and the seal?
+A′ jcs.canonicalize(json.loads(b)) == b : 13/13
+B  cbor2.dumps(loads(b), canonical=True) == b : 13/13  (profile B)
+B0 cbor2.dumps(loads(b), canonical=True) == b : 13/13  (profile B0)
+blake3 seals over stored bytes match Rust : 13/13
+
+## Out-of-profile CBOR: does cbor2.loads refuse it on its own?
+  bignum_tag2                  accepted → 1  (canonical re-encode equal: False)
+  float_1_5_as_f32             accepted → 1.5  (canonical re-encode equal: False)
+  float_nan                    accepted → nan  (canonical re-encode equal: True)
+  int5_non_shortest            accepted → 5  (canonical re-encode equal: False)
+  int64_non_shortest           accepted → 64  (canonical re-encode equal: False)
+  map_duplicate_key            accepted → {'a': 2}  (canonical re-encode equal: False)
+  map_unsorted                 accepted → {'b': 1, 'a': 2}  (canonical re-encode equal: False)
+  text_indefinite              accepted → 'a'  (canonical re-encode equal: False)
+  text_lone_surrogate_cesu8    refused: CBORDecodeError: error decoding text string
+  trailing_byte                accepted → 1  (canonical re-encode equal: False)
+  undefined                    accepted → undefined  (canonical re-encode equal: True)
+
+## Lone surrogate and a float-spelled integer
+A  json.loads lone surrogate  accepted → '\ud800'
+A′ jcs.canonicalize lone surrogate refused: UnicodeEncodeError
+A  json.loads shape            [64.0, 64, 64] ['float', 'int', 'int']
+B0 cbor2.loads shape           [64.0, 64, 64] ['float', 'int', 'int']
