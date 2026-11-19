@@ -297,7 +297,7 @@ impl Manifest {
     /// As [`compute_manifest_hash`](Self::compute_manifest_hash).
     pub fn canonical_bytes(&self) -> crate::Result<Vec<u8>> {
         self.refuse_newer_fields()?;
-        crate::canonical::bytes_without(&serde_json::to_value(self)?, SEAL_KEY)
+        crate::canonical::bytes_without(&crate::canonical::to_json_value(self)?, SEAL_KEY)
     }
 
     /// This manifest's JSON, for a writer to emit **as a sealed product**: refused unless the bytes
@@ -379,6 +379,8 @@ impl Manifest {
     /// record in it (`producer`, `generation`, `blocks[i]`, `sources[i]`, `ingest_transform[i]`) in
     /// array form instead of an object, or a block `kind` spelled as an object instead of a string
     /// (SPEC §4, one spelling per value; the message names its path);
+    /// [`crate::Error::InexactInteger`] for a number that is an integer beyond ±(2^53−1) anywhere in
+    /// it (SPEC §1, I-JSON: no seal pins it; the message names its path);
     /// [`crate::Error::UnsupportedVersion`] for a newer major version.
     pub fn from_json(s: &str) -> crate::Result<Self> {
         Ok(Self::parse(s)?.0)

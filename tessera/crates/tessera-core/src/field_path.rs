@@ -48,6 +48,13 @@ impl FieldPath {
         self.0.is_empty()
     }
 
+    /// Whether some segment of this path is the object key `key` (`metadata` in `blocks[0].metadata.x`).
+    pub(crate) fn has_key(&self, key: &str) -> bool {
+        self.0
+            .iter()
+            .any(|s| matches!(s, Segment::Key(k) if k == key))
+    }
+
     /// This path extended by the object key `key`.
     pub(crate) fn key(&self, key: &str) -> Self {
         self.with(Segment::Key(key.to_owned()))

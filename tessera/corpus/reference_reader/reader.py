@@ -14,6 +14,7 @@ Spec notes used here (only):
   - merkle_root(digests) = the Merkle Mountain Range (MMR) root, domain-separated
     leaf(d)=blake3(0x00++utf8(d)) / node(l,r)=blake3(0x01++l++r); empty = blake3(b"").
   - All hashing inputs derived from JSON are RFC 8785 (JCS) canonical bytes.
+  - JSON input is I-JSON (SPEC §1): a number whose value is an integer beyond ±(2^53−1) is refused.
   - id            = digest(JCS(id_inputs))
   - content_hash  = merkle_root([block.digest for block in manifest.blocks])
   - Block names are unique within a product (SPEC §5, exact string equality):
@@ -100,29 +101,43 @@ def duplicate_block_names(blocks: list[dict[str, Any]]) -> list[str]:
 
 class NotAManifest(ValueError):
     """manifest.json is not I-JSON (SPEC §4): a repeated key in one object (refused, never last- or
-    first-wins), a NaN/Infinity constant, or a lone surrogate (RFC 8259 / RFC 7493 §2.1)."""
+    first-wins), a NaN/Infinity constant, a lone surrogate (RFC 8259 / RFC 7493 §2.1), or a number
+    whose value is an integer beyond ±(2^53−1) (RFC 7493 §2.2, SPEC §1)."""
 
 
 def _refuse_constant(name: str) -> Any:
     raise NotAManifest(f"{name} is not a JSON number")
 
 
+# SPEC §1 (I-JSON, RFC 7493 §2.2): the largest integer magnitude a double holds exactly. JCS writes
+# every number as a double (RFC 8785 §3.2.2.3), so an integer beyond it would share its canonical
+# bytes, and so its seal, with a neighbour (9007199254740993 and 9007199254740992 do).
+MAX_EXACT_INTEGER = 2**53 - 1
+
+
+def _inexact(text: str) -> NotAManifest:
+    return NotAManifest(
+        f"number {text[:24]} is an integer beyond ±(2^53−1) (I-JSON, RFC 7493 §2.2)"
+    )
+
+
 def _finite_float(text: str) -> float:
+    """A number token with a fraction or an exponent, as the double JCS writes. Refused: out of a
+    double's range, or a double beyond ±(2^53−1), which is always an integer (`9007199254740993.0`,
+    `1e300`; `9007199254740992.5` too, whose fraction the double has already lost)."""
     value = float(text)
     if value in (float("inf"), float("-inf")):
         raise NotAManifest(f"number {text} is out of range for a double")
+    if abs(value) > MAX_EXACT_INTEGER:
+        raise _inexact(text)
     return value
 
 
 def _finite_int(text: str) -> int:
-    """An integer literal a double can hold the magnitude of (a JSON number is a double, SPEC §4)."""
+    """An integer token a double holds exactly: |value| ≤ 2^53−1 (SPEC §1)."""
     value = int(text)
-    try:
-        float(value)
-    except OverflowError:
-        raise NotAManifest(
-            f"number {text[:20]}… is out of range for a double"
-        ) from None
+    if abs(value) > MAX_EXACT_INTEGER:
+        raise _inexact(text)
     return value
 
 
@@ -152,7 +167,8 @@ def _nesting(v: Any) -> int:
 
 def parse_manifest(raw: bytes | str) -> dict[str, Any]:
     """Parse manifest.json, refusing text that is not UTF-8 JSON (a byte-order mark included), a
-    duplicate key in any object at any depth, NaN/Infinity, a number out of a double's range,
+    duplicate key in any object at any depth, NaN/Infinity, a number out of a double's range or
+    whose value is an integer beyond ±(2^53−1),
     (checked by encoding the text back to UTF-8) a lone surrogate escape, nesting deeper than MAX_NESTING, and a manifest outside its
     declared shape (`MANIFEST`)."""
     try:

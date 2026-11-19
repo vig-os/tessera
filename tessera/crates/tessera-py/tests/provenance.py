@@ -108,7 +108,7 @@ assert got == {"tool": "anatomist", "version": "0.1.0"}, got
 config = {
     "step": "trees",
     "energy_window_keV": [425, 650],
-    "seed": 2**63 - 1,
+    "seed": 2**53 - 1,  # the largest int a sealed JSON number holds exactly (SPEC §1)
     "window": (0.5, 1.5),  # a tuple seals as a JSON array
     "dry_run": False,
     "note": None,
@@ -148,13 +148,28 @@ for bad, needles in (
     ({"t": {1, 2}}, ('config["t"]', "set is not a JSON value")),
     ({"a": [1, object()]}, ('config["a"][1]', "object is not a JSON value")),
     ({"nan": float("nan")}, ('config["nan"]', "not finite")),
-    ({"big": 2**64}, ('config["big"]', "does not fit in 64 bits")),
+    # A sealed JSON number is a double (SPEC §1, #886): an int beyond ±(2^53−1) is refused with the
+    # fix, whether or not it fits in 64 bits, and so is a float that is such an integer.
+    (
+        {"big": 2**64},
+        ('config["big"]', "int 18446744073709551616 exceeds ±(2^53−1)", "as a string"),
+    ),
+    (
+        {"big": 2**53},
+        ('config["big"]', "int 9007199254740992 exceeds ±(2^53−1)", "as a string"),
+    ),
+    ({"big": -(2**53)}, ('config["big"]', "int -9007199254740992 exceeds")),
+    ({"big": 1e300}, ('config["big"]', "float 1e+300 exceeds ±(2^53−1)")),
     ({"raw": b"x"}, ('config["raw"]', "bytes is not a JSON value")),
     # A lone surrogate is a valid Python str but has no UTF-8 (so no JSON) form.
     ({"s": "\ud800"}, ('config["s"]', "lone surrogate")),
     ({"\ud800": 1}, ("config: key", "lone surrogate")),
 ):
     raises(TypeError, lambda: builder("bad").with_generation(config=bad), *needles)
+# The integers a double holds exactly are accepted up to the bound, either sign.
+builder("bound").with_generation(
+    config={"max": 2**53 - 1, "min": -(2**53 - 1), "f": 2.0**52}
+)
 
 # Hostile shapes raise instead of crashing the interpreter: a SIGSEGV is uncatchable and takes a
 # long-running pipeline down with it.

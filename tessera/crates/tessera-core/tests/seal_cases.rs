@@ -6,8 +6,9 @@
 //! (must verify), and each with a field spliced in under the old seal (must fail), plus the encodings
 //! a struct round-trip loses (`"study": null`, an omitted `sources`, a nested newer field), a splice
 //! whose seal was deleted or nulled (tampered: a missing seal is not a pass), and text that is not
-//! I-JSON (duplicate keys, NaN, a lone surrogate, nesting past 127 levels: refused), records spelled
-//! as JSON arrays (a block, the producer, the whole manifest: refused, SPEC §5 objects only, #873),
+//! I-JSON (duplicate keys, NaN, a lone surrogate, nesting past 127 levels, an integer beyond
+//! ±(2^53−1) in any spelling, #886: refused, beside the numbers a double holds exactly), records
+//! spelled as JSON arrays (a block, the producer, the whole manifest: refused, SPEC §5 objects only, #873),
 //! and a declared field of another JSON type or shape at any depth (`metadata: []`, `study: 5`, a
 //! block `kind` outside its names, a block `name` outside its grammar, a block without a digest:
 //! refused), so the reference reader's type table and the Rust types agree case by case. A top-level
@@ -30,6 +31,8 @@ fn rust_verdict(manifest: &str) -> (&'static str, Vec<String>) {
         Err(Error::Integrity { .. }) => ("tampered", Vec::new()),
         // Not I-JSON: a duplicate key, NaN, a lone surrogate (all refused by the parser).
         Err(Error::Serde(_)) => ("refused", Vec::new()),
+        // Not I-JSON: an integer beyond ±(2^53−1), which JCS can't seal exactly (SPEC §1, #886).
+        Err(Error::InexactInteger { .. }) => ("refused", Vec::new()),
         Err(Error::UnsupportedVersion(_)) => ("refused", Vec::new()),
         // A block name listed twice (SPEC §5, #734), refused before any hash.
         Err(Error::DuplicateBlockName { .. }) => ("refused", Vec::new()),
@@ -42,7 +45,7 @@ fn rust_verdict(manifest: &str) -> (&'static str, Vec<String>) {
 #[test]
 fn rust_reader_reaches_every_seal_case_verdict() {
     let cases = cases();
-    assert_eq!(cases.len(), 65, "seal-cases.json lost or gained cases");
+    assert_eq!(cases.len(), 76, "seal-cases.json lost or gained cases");
     let mut disagreements = Vec::new();
     for c in &cases {
         let name = c["name"].as_str().unwrap();
@@ -168,6 +171,46 @@ fn duplicate_keys_are_refused_by_name() {
         let err = Manifest::from_json_verified(&case(name)).unwrap_err();
         assert!(
             matches!(&err, Error::Serde(e) if e.to_string().contains("duplicate key")),
+            "{name}: {err}"
+        );
+    }
+}
+
+/// The integer cases are refused for the integer, not by some other check that would hide a
+/// regression in it: each names the value's path. Without the rule, the first two verify `ok`, the
+/// second under the seal of a different value (#886).
+#[test]
+fn integers_beyond_2_pow_53_are_refused_by_path() {
+    for (name, want) in [
+        ("integer-2^53-plus-1-resealed", "metadata.daq_start_ns"),
+        (
+            "integer-2^53-plus-1-served-as-2^53",
+            "metadata.daq_start_ns",
+        ),
+        ("integer-below-minus-2^53-resealed", "metadata.daq_start_ns"),
+        (
+            "integer-with-zero-fraction-above-2^53-resealed",
+            "metadata.daq_start_ns",
+        ),
+        (
+            "integer-with-exponent-above-2^53-resealed",
+            "metadata.daq_start_ns",
+        ),
+        ("integer-1e300-resealed", "metadata.daq_start_ns"),
+        ("integer-epoch-ns-resealed", "metadata.daq_start_ns"),
+        ("fraction-lost-above-2^53-resealed", "metadata.daq_start_ns"),
+        (
+            "fraction-rounding-to-2^53-resealed",
+            "metadata.daq_start_ns",
+        ),
+        (
+            "integer-above-2^53-in-generation-config-resealed",
+            "generation.config.seed",
+        ),
+    ] {
+        let err = Manifest::from_json_verified(&case(&format!("recon_int16/{name}"))).unwrap_err();
+        assert!(
+            matches!(&err, Error::InexactInteger { path, .. } if path == want),
             "{name}: {err}"
         );
     }

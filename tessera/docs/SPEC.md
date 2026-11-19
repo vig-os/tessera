@@ -9,6 +9,26 @@ A Tessera **product** is one immutable, content-hashed, self-describing FAIR dat
 **manifest** + zero or more shape-dispatched storage **blocks** (N-D arrays, columnar tables). The
 canonical serialized form is a single sealed **`.tsra`** container.
 
+**Every sealed JSON document is I-JSON** (RFC 7493), the input RFC 8785 (JCS, §2) requires (RFC 8785
+§3.1): the manifest with its embedded schema, metadata, `generation` and `ingest_transform` params, the
+`id_inputs` object, a collection, and a signature envelope. A writer MUST NOT seal, and a reader MUST
+refuse, a document with a repeated key in any object, a lone surrogate, `NaN`/`Infinity`, or a **number
+whose value is an integer beyond ±(2^53−1)** (9007199254740991, RFC 7493 §2.2). JCS serialises every
+number as an IEEE-754 double (RFC 8785 §3.2.2.3), so two such integers can share their canonical bytes
+(`9007199254740993` and `9007199254740992` both canonicalise to `9007199254740992`) and one seal would
+verify either. The rule is on the value: `9007199254740993`, `9007199254740993.0`,
+`9.007199254740993e15`, `-9007199254740993` and `1e300` are refused, and so is a token whose fraction the
+double has already lost (`9007199254740992.5` reads as `9007199254740992`); `9007199254740991`, `-0` and
+`1.5` are not. A reader parses each token to the nearest double, correctly rounded, so readers agree at the
+bound (`9007199254740991.5` rounds to 2^53 and is refused; `9007199254740991.4999999999999999999999` is
+not). Every double beyond 2^53−1 is an integer, so a large float written in scientific notation
+(`6.022e23`) is refused as well. A larger integer (an epoch-nanosecond timestamp, a 64-bit serial or tick counter) is
+carried as a decimal **string**; a writer refuses it with that advice rather than convert it silently, and
+a typed source field that is 64-bit (a DICOM `SV`/`UV` value) is written as a string by its type, never
+by its value. A source field that is a number (a DICOM `DS`/`FD` value such as `KVP`) stays a number and is
+refused beyond the bound, naming the source field (a DICOM tag, a NIfTI header field such as `scl_slope`); a value a person types as a JSON number stays a number too. `NaN` and ±infinity have no JSON spelling and are refused the same way wherever a writer reads one (a TOML `inf`, a NIfTI `scl_slope`, a DICOM `DS` of `NaN`, a typed `--set x=inf`): serialising one into JSON would write `null`, so every f64→JSON conversion on a write path goes through `canonical::json_number` / `canonical::to_json_value`, which refuse it. Text typed after `--set`/`--meta` that Rust reads as a number but JSON does not spell as one (`+5`, `.5`, `01`, `inf`, `Infinity`, `NaN`, `+1e400`) is refused, never stored as a string; the JSON-quoted form (`'"+5"'`) stores the text. A non-zero number that underflows to `0.0` (`5e-400`) is refused too, in `--set`/`--meta`, a JSON value, a TOML float, a `--column-meta` `scale` and a DICOM `DS`; zero in any spelling and an exact denormal (`1e-320`) stay. A NIfTI door validates every header value that feeds the manifest (the sform, the qform quaternion, offset and spacing, `pixdim[4]`, `toffset`, `scl_*`), and an affine entry computed from them, naming the header field. The generic seal-time error advises "write it as a string" only for a free-form `metadata` field; for a typed field (a `scale`, an affine, a transform) it is neutral. Array and table payloads are hashed as raw bytes and are unaffected. Products sealed before
+this rule (≤ 0.1.0-alpha.5) that hold such a number are refused: their seal never pinned the value (#886).
+
 ## 2. Canonical encoding (hashing)
 All hashing is over **RFC 8785 JSON Canonicalization Scheme (JCS)** bytes: object keys sorted by
 UTF-16 code unit, no insignificant whitespace, ECMAScript-canonical number forms, UTF-8 output. A
@@ -54,10 +74,10 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
     `manifest_hash`; a reader treats a missing one as an integrity failure, since deleting the seal would
     otherwise launder any edit.
   - `manifest.json` MUST be I-JSON (RFC 7493; JCS requires it, RFC 8785 §3.1): no key repeated within any
-    object, at any depth (keys compare after unescaping), no lone surrogate, no `NaN`/`Infinity` and no number
-    outside a double's range, and nested at most 127 objects and arrays deep (the manifest object itself is
-    level 1; RFC 8259 §9 lets a parser limit nesting, and this limit is fixed so every reader refuses the same
-    text). The same holds for a collection. A reader MUST refuse anything else rather than keep the first or
+    object, at any depth (keys compare after unescaping), no lone surrogate, no `NaN`/`Infinity`, no number
+    outside a double's range and no integer beyond ±(2^53−1) (§1), and nested at most 127 objects and arrays
+    deep (the manifest object itself is level 1; RFC 8259 §9 lets a parser limit nesting, and this limit is
+    fixed so every reader refuses the same text). The same holds for a collection. A reader MUST refuse anything else rather than keep the first or
     last of two values, because parsers differ on which one wins.
   - **Forward reading (RFC §13).** A key no field of this section declares is a field from a newer format
     revision: a reader verifies it as part of the seal, SHOULD warn that it is not interpreted, and reads

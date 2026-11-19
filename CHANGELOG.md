@@ -175,6 +175,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `tessera-core`, `tessera-io`, `tessera-ingest`, `tessera-py`, `tessera-cli`: a sealed JSON number is an integer within
+  ±(2^53−1) or it is refused (I-JSON, RFC 7493 §2.2; SPEC §1; ADR-0020 amendment; #886). JCS writes every number as a
+  double, so a manifest sealed with `9007199254740993` verified when served with `9007199254740992`: the seal did not
+  pin the value. The new `Error::InexactInteger` names the value's path (`metadata.daq_start_ns = 1730000000000000000
+  exceeds ±(2^53−1) …; write it as a string`). `canonical::parse_strict` refuses it in every manifest, collection,
+  embedded schema and signature envelope a reader parses (the envelope is now parsed through it too, so a duplicate
+  key there is refused as well), and `canonical::to_bytes` refuses it before anything is hashed, so no writer seals
+  one, a `u64` from Rust code included (new `canonical::check_i_json`, `canonical::MAX_EXACT_INTEGER`); a streamed
+  `WriteSession` refuses it when it is declared (`append_block*`, `with_field`, `with_extra`, `with_generation`), not
+  at the seal. The envelope is parsed by the new `Signature::from_json`, which `tessera-wasm` uses too. Python
+  `Builder.set_field` and `with_generation`, a TOML spec's `[product.metadata]` (`spec::validate`, before anything is
+  written) and CLI `commit --set` / `ingest … --meta` refuse it with that advice and never convert it; `with_generation`
+  now names the rule for any int beyond the bound instead of `does not fit in 64 bits`. The CLI reads a typed value
+  through the new `canonical::parse_user_value`: text that is JSON by the RFC 8259 grammar stays JSON, so
+  `--set x=1e400`, a 401-digit integer or `[1e400]` is refused (`--set x = 1e400 exceeds ±(2^53−1) …`, naming the flag
+  and the typed text) instead of being sealed as the string it used to fall back to; other text is still a string. A DICOM
+  curated number (`KVP`, `SliceThickness`, `PixelSpacing`, `RescaleSlope`/`RescaleIntercept`, the series'
+  `ImagePositionPatient`/`ImageOrientationPatient`) stays a JSON number, and one beyond the bound is refused when the
+  file is read, naming the tag and its text (`dicom: (0018,0060) KVP = "1E16" is outside the range a sealed JSON
+  number can hold …`), before any output exists (new `canonical::beyond_exact_f64`). Products sealed earlier that hold such a
+  number are refused (fail closed); `tessera provenance` reports such a parent as CORRUPT, never as missing, naming it
+  by the `id` it claims (new `tessera_io::read_claimed_id`). No corpus seal moved; the DICOM header dump is text, and a
+  64-bit DICOM value (`SV`/`UV`) is written as a string by its type. The reference reader refuses the same numbers, and `corpus/seal-cases.json` adds the cases.
+- `tessera-core`, `tessera-io`, `tessera-ingest`, `tessera-cli`: `NaN`, `inf` and `-inf` are refused wherever a writer
+  reads one, and a typed number must be spelled as JSON spells it (#886). `serde_json` writes a non-finite double as
+  `null`, so a TOML `[product.metadata] x = inf`, a NIfTI `scl_slope` of `inf` or `NaN` and a typed value sealed
+  `null` and verified with rc=0. Every f64→JSON conversion on a write path now goes through the new
+  `canonical::json_number` (one value) or `canonical::to_json_value` (a typed document: block specs, manifests,
+  collections, `generation`), which refuse NaN and ±infinity with the new `Error::NonFiniteNumber` (and a value beyond
+  ±(2^53−1) with `InexactInteger`); a TOML `inf`/`nan` is refused by `spec::parse_str`, naming its path
+  (`product[0].metadata.x = inf …`). NIfTI refuses `scl_slope`/`scl_inter` that are non-finite or beyond the bound at the
+  door, naming the header field and its value (`nifti: scl_slope = "inf" is not a finite number …`; before, `1e16`
+  was refused only by the generic message advising a string), and a DICOM `DS` of `NaN`, `inf` or `-inf` is refused by
+  tag as `1E16` already was; both use one formatter. A `--set`/`--meta` text that Rust's `str::parse::<f64>()` reads
+  as a number but JSON does not spell as one (`+5`, `.5`, `01`, `inf`, `Infinity`, `NaN`, `+1e400`,
+  `+9007199254740993`) is refused, naming the flag and key and why, instead of being stored as a string; the
+  JSON-quoted form (`--set k='"+5"'`) stores the text. `hello`, `0x10` and `1_000` are still strings, and `5` and
+  `9007199254740991` still numbers. `01`, `.5` and `+1`, which were strings, are now refused: quote them to keep the text.
+- `tessera-core`, `tessera-io`, `tessera-ingest`, `tessera-cli`: every NIfTI header value that feeds the manifest is now
+  validated at the door, and the generic seal-time error stops giving advice a typed field cannot follow (#886). Round 2
+  checked only `scl_*`; the sform `srow_x/y/z`, the qform `quatern_b/c/d`, `qoffset_x/y/z` and `pixdim[0..=3]`, the time
+  step `pixdim[4]` and `toffset` still reached the seal-time check, which names a JSON path and said "write it as a string".
+  One table-driven validation now refuses NaN, ±infinity and a value beyond ±(2^53−1) naming the header field and its value
+  (`nifti: pixdim[1] = "10000000000000000" …`), and an affine entry computed from in-range fields that falls out of range
+  is refused naming the fields it came from. A NaN `pixdim` was clamped to 1.0 and sealed with rc=0; it is refused (a
+  zero or negative spacing is still clamped, as the reference `nifti_quatern_to_mat44` does). `Error::InexactInteger`
+  gains `as_string`: only a free-form `metadata` field is told to write a string, a typed field (`column_meta.scale`, an
+  affine, a transform) gets a neutral "outside the range a sealed JSON number can hold", and the non-finite error names its
+  JSON path (`blocks[0].spec.scale`) instead of "a sealed document". A non-zero number that underflows to `0.0` (`5e-400`)
+  sealed as `0.0` with rc=0 and is now refused in `--meta`, JSON values, TOML floats, a `--column-meta` `scale` and a
+  DICOM `DS`; `0`, `0e5` and `1e-320` stay. `--meta k=1e400` is worded like `+1e400` ("past a double's range"), not "can't hold
+  this integer exactly". `--column-meta` `scale` of `nan`, `inf` or `1e16` is refused naming the flag and the column.
 - `tessera-core`: `Manifest::from_json_verified` checks `manifest_hash` over the manifest JSON object as parsed (SPEC
   §4), not over a re-serialisation of the `Manifest` struct. Before, a key spliced into a sealed `manifest.json`
   (`"forged": true`) was dropped by the struct and `tessera verify` reported OK, while a product a newer writer

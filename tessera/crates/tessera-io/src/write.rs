@@ -700,15 +700,24 @@ impl WriteSession {
     }
 
     /// Set a schema metadata field (persisted to the header).
+    ///
+    /// # Errors
+    /// [`Error::InexactInteger`] for an integer beyond ±(2^53−1) in `value`, refused here rather
+    /// than at the seal (SPEC §1): see [`admit_value`].
     pub fn with_field(&mut self, id: impl Into<String>, value: Value) -> Result<&mut Self> {
-        self.header.metadata.insert(id.into(), value);
+        let id = id.into();
+        admit_value("metadata", &id, &value)?;
+        self.header.metadata.insert(id, value);
         self.persist_header()?;
         Ok(self)
     }
 
-    /// Add an extension (`extra/`) field (persisted to the header).
+    /// Add an extension (`extra/`) field (persisted to the header). Refuses what
+    /// [`Self::with_field`] refuses.
     pub fn with_extra(&mut self, key: impl Into<String>, value: Value) -> Result<&mut Self> {
-        self.header.extra.insert(key.into(), value);
+        let key = key.into();
+        admit_value("extra", &key, &value)?;
+        self.header.extra.insert(key, value);
         self.persist_header()?;
         Ok(self)
     }
@@ -736,8 +745,14 @@ impl WriteSession {
     /// Attach the generation record (ADR-0058 §2) — *how* this product was made, as a generic bag —
     /// mirroring [`ProductBuilder::with_generation`]. Declared before any block commits, so the
     /// recipe rides the sealed `manifest_hash` and is tamper-evident. Persisted to the header so it
-    /// survives crash recovery.
+    /// survives crash recovery. Refuses what [`Self::with_field`] refuses, in the recipe.
     pub fn with_generation(&mut self, generation: tessera_core::Generation) -> Result<&mut Self> {
+        let mut doc = serde_json::Map::new();
+        doc.insert(
+            "generation".into(),
+            tessera_core::canonical::to_json_value(&generation)?,
+        );
+        tessera_core::canonical::check_i_json(&Value::Object(doc))?;
         self.header.generation = Some(generation);
         self.persist_header()?;
         Ok(self)
@@ -894,6 +909,9 @@ impl WriteSession {
     /// name held in the recovery quarantine ([`Error::QuarantinedBlockName`], see [`Self::recover`]).
     fn admit(&self, block_ref: &BlockRef) -> Result<()> {
         self.usable()?;
+        // A spec the seal would refuse (SPEC §1) is refused before its bytes are journaled; the
+        // path is from the block reference (`spec.fill_value`).
+        tessera_core::canonical::check_i_json(&tessera_core::canonical::to_json_value(block_ref)?)?;
         let name = &block_ref.name;
         tessera_core::block::check_unique_names(self.blocks.iter().map(|b| &b.name).chain([name]))?;
         leaf_rule_against(self.blocks.iter().map(|b| &b.name), name)?;
@@ -1503,6 +1521,17 @@ fn leaf_rule_against<'n>(
     Ok(())
 }
 
+/// Refuse `value` under `section.key` if the seal would (an integer beyond ±(2^53−1), SPEC §1),
+/// naming it by the path the sealed manifest gives it (`metadata.daq_start_ns`), so a streamed
+/// product fails when the value is declared, not hours later at its seal.
+fn admit_value(section: &str, key: &str, value: &Value) -> Result<()> {
+    let mut inner = serde_json::Map::new();
+    inner.insert(key.to_owned(), value.clone());
+    let mut doc = serde_json::Map::new();
+    doc.insert(section.to_owned(), Value::Object(inner));
+    tessera_core::canonical::check_i_json(&Value::Object(doc))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1521,7 +1550,8 @@ mod tests {
     }
 
     /// #759: the session holds a committed block as its journal line and the seal parses it back, so
-    /// the sealed reference must be the appended one exactly: key order, integers past `i64`, and
+    /// the sealed reference must be the appended one exactly: key order, the largest exact integer
+    /// (an integer past it is refused at its append, SPEC §1: see the next test), and
     /// floats to the bit (subnormal, `-0.0`, shortest-repr edge cases), and the seal must equal the
     /// batch seal of the same reference.
     #[test]
@@ -1532,14 +1562,20 @@ mod tests {
             5e-324,
             -0.0,
             1.0,
-            f64::MAX,
+            // The largest doubles a seal holds (SPEC §1): every double past 2^53 − 1 is an
+            // integer beyond it and refused, `f64::MAX` included.
+            9_007_199_254_740_991.0,
+            4_503_599_627_370_495.5,
             f64::from_bits(0x000f_ffff_ffff_ffff), // the largest subnormal
         ];
         let (mut r, p) = block("a", 0);
         let spec = r.spec.as_object_mut().unwrap();
         // Inserted last, out of sorted order: with serde_json's `preserve_order`, which this
         // workspace enables, the line must keep insertion order.
-        spec.insert("a_after_the_rest".into(), serde_json::json!(u64::MAX));
+        spec.insert(
+            "a_after_the_rest".into(),
+            serde_json::json!(tessera_core::canonical::MAX_EXACT_INTEGER),
+        );
         spec.insert("floats".into(), serde_json::json!(floats));
         let dir = tempfile::tempdir().unwrap();
         let mut ws =
@@ -1571,6 +1607,40 @@ mod tests {
 
     /// #759: a block whose line the seal couldn't parse back (a spec nested past serde_json's 128
     /// levels) is refused at its append, before its journal line, and the session goes on.
+    /// A value the seal would refuse (an integer beyond ±(2^53−1), SPEC §1, #886) is refused when it
+    /// is declared, in a block spec, metadata, `extra` or the recipe, and the session goes on.
+    #[test]
+    fn an_integer_the_seal_cannot_pin_is_refused_when_declared() {
+        let big = || serde_json::json!(u64::MAX);
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws =
+            WriteSession::create(&dir.path().join("stage"), "recon", "p", "d", TS).unwrap();
+        let path = |r: Result<()>| match r {
+            Err(Error::InexactInteger { path, .. }) => path,
+            other => panic!("{other:?}"),
+        };
+        let (mut r, p) = block("a", 0);
+        r.spec["fill_value"] = big();
+        assert_eq!(path(ws.append_block(r, &p)), "spec.fill_value");
+        assert_eq!(
+            path(ws.with_field("t_ns", big()).map(drop)),
+            "metadata.t_ns"
+        );
+        assert_eq!(path(ws.with_extra("t_ns", big()).map(drop)), "extra.t_ns");
+        let g = tessera_core::Generation::default().with("seed", big());
+        assert_eq!(
+            path(ws.with_generation(g).map(drop)),
+            "generation.config.seed"
+        );
+        assert_eq!(ws.watermark(), 0);
+        let (r, p) = block("a", 0);
+        ws.append_block(r, &p).unwrap();
+        let sealed = ws.seal(&dir.path().join("p.tsra")).unwrap();
+        assert!(
+            sealed.metadata.is_empty() && sealed.extra.is_empty() && sealed.generation.is_none()
+        );
+    }
+
     #[test]
     fn a_block_the_seal_could_not_parse_back_is_refused_at_its_append() {
         let (mut deep, p) = block("deep", 0);

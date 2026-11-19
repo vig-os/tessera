@@ -1847,7 +1847,7 @@ pub fn table_block(
         name: name.clone(),
         kind: BlockKind::Table,
         digest: Some(digest),
-        spec: serde_json::to_value(&sealed)?,
+        spec: tessera_core::canonical::to_json_value(&sealed)?,
     };
     Ok((block_ref, BlockPayload::new(name, payload)))
 }

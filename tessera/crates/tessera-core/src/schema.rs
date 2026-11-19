@@ -426,8 +426,10 @@ impl ProductSchema {
     /// Serialize to the JSON value **embedded in a sealed manifest** (`Manifest.schema`), so the
     /// `.tsra` carries its own contract (FAIR-Reusable) and the seal commits to it.
     pub fn to_value(&self) -> crate::Result<serde_json::Value> {
-        serde_json::to_value(self)
-            .map_err(|e| crate::Error::Invalid(format!("schema does not serialize: {e}")))
+        crate::canonical::to_json_value(self).map_err(|e| match e {
+            crate::Error::NonFiniteNumber { .. } => e,
+            e => crate::Error::Invalid(format!("schema does not serialize: {e}")),
+        })
     }
 
     /// Parse an embedded schema JSON (from `Manifest.schema`) back into a typed `ProductSchema`,

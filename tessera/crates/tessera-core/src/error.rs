@@ -23,6 +23,45 @@ pub enum Error {
     #[error("canonicalization: {0}")]
     Canonicalization(String),
 
+    /// A JSON number in a sealed document (manifest with its embedded schema and metadata,
+    /// collection, `id_inputs`, signature envelope) is an integer beyond ±(2^53−1), the range in
+    /// which an IEEE-754 double holds every integer exactly ([`crate::canonical::MAX_EXACT_INTEGER`]).
+    ///
+    /// RFC 8785 (JCS) serialises every number as a double and requires its input to be I-JSON
+    /// (RFC 7493 §2.2), so two such integers can canonicalise to the same bytes (`9007199254740993`
+    /// and `9007199254740992` do): the seal would not pin the value. Writers refuse it before any
+    /// hash is computed and readers refuse it on parse (SPEC §1, §4; #886). A free-form field can carry the
+    /// value as a decimal string instead; a typed field cannot. `path` names the value from the
+    /// document's root (rendered as
+    /// [`crate::canonical::check_i_json`] documents), or as the person typed it for a value read by
+    /// [`crate::canonical::parse_user_value`] (`--set daq_start_ns`); `value` is the number as parsed,
+    /// or the person's own text for a typed number.
+    #[error(
+        "{path} = {value} is outside the range a sealed JSON number can hold (±(2^53−1), I-JSON \
+         RFC 7493 §2.2): a sealed JSON number is an IEEE-754 double (RFC 8785 §3.2.2.3), which \
+         can't hold this integer exactly{advice}",
+        advice = string_advice(.as_string)
+    )]
+    InexactInteger {
+        path: String,
+        value: String,
+        /// The value sits in a free-form field that accepts a string (`metadata`, or a number a
+        /// person typed for one), so "write it as a string" is advice they can follow. A typed
+        /// field (a `scale`, an affine, a transform) has no string form: its message is neutral.
+        as_string: bool,
+    },
+
+    /// A number headed for a sealed document is NaN or ±infinity. JSON (RFC 8259 §6) has no spelling
+    /// for either, and `serde_json` would write them as `null`, so a seal would silently pin a
+    /// different value than the one given (#886). Writers refuse it before any value is built; the
+    /// writer's door that read the number names its source in its own words (a DICOM tag, a NIfTI
+    /// header field, a TOML key, a `--set` flag). `what` names the value and `value` is its text.
+    #[error(
+        "{what} = {value} is not a finite number: JSON has no spelling for NaN or infinity \
+         (RFC 8259 §6), so a seal cannot hold it"
+    )]
+    NonFiniteNumber { what: String, value: String },
+
     /// A recomputed hash did not match the one recorded in the manifest — tampering, corruption,
     /// or a producer bug. `what` names the field (`id` / `content_hash` / `manifest_hash`).
     #[error("integrity: {what} mismatch — expected {expected}, got {actual}")]
@@ -219,4 +258,13 @@ pub enum Error {
     /// recipe branch on "wrong build" versus "wrong invocation" (exit 2) without parsing stderr.
     #[error("backend '{0}' is not compiled into this build")]
     BackendNotCompiled(&'static str),
+}
+
+/// The advice an [`Error::InexactInteger`] adds only for a free-form field.
+fn string_advice(as_string: &bool) -> &'static str {
+    if *as_string {
+        "; write it as a string"
+    } else {
+        ""
+    }
 }

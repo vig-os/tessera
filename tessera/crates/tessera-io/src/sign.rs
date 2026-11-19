@@ -95,8 +95,15 @@ pub fn read_signature(tsra: &Path) -> Result<Signature> {
     }
     // 2. Detached (legacy). A file that was signed with `--sidecar` (or an older Tessera) still
     //    verifies unchanged — the mechanism ladder from ADR-0037 §0 bug #2 stays intact.
-    let bytes = std::fs::read(sidecar_path(tsra))?;
-    serde_json::from_slice(&bytes).map_err(|e| Error::Container(e.to_string()))
+    parse_signature(&std::fs::read(sidecar_path(tsra))?)
+}
+
+/// Parse a stored signature envelope (ADR-0037) with [`Signature::from_json`], which refuses text
+/// that is not I-JSON (SPEC §1).
+fn parse_signature(bytes: &[u8]) -> Result<Signature> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| Error::Container(format!("signature envelope is not UTF-8: {e}")))?;
+    Signature::from_json(text)
 }
 
 /// Read the embedded signature (`aux/signatures/<first>.sig.json`) from a `.tsra` if present; `Ok(None)`
@@ -115,9 +122,7 @@ pub fn read_embedded_signature(tsra: &Path) -> Result<Option<Signature>> {
         None => return Ok(None),
     };
     let bytes = r.read_aux(&sig_name)?;
-    let env: Signature =
-        serde_json::from_slice(&bytes).map_err(|e| Error::Container(e.to_string()))?;
-    Ok(Some(env))
+    Ok(Some(parse_signature(&bytes)?))
 }
 
 /// True when the `.tsra` carries an embedded aux signature under `aux/signatures/`. Cheap surface
@@ -234,6 +239,33 @@ mod tests {
         let tampered = sealed_tsra(dir.path(), "tampered.tsra", 1);
         std::fs::copy(sidecar_path(&tsra), sidecar_path(&tampered)).unwrap();
         assert!(!verify_tsra(&tampered, &key.verifying_key()).unwrap());
+    }
+
+    /// The envelope is parsed like every sealed document (SPEC §1, #886): text that isn't I-JSON
+    /// is refused, not read past.
+    #[test]
+    fn a_signature_envelope_that_is_not_i_json_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[44; 32]);
+        let tsra = sealed_tsra(dir.path(), "envelope.tsra", 0);
+        sign_tsra_sidecar(&tsra, &key, &SignOpts::default()).unwrap();
+        let good = std::fs::read_to_string(sidecar_path(&tsra)).unwrap();
+        let splice = |extra: &str| good.replacen('{', &format!("{{{extra},"), 1);
+        std::fs::write(
+            sidecar_path(&tsra),
+            splice(r#""signed_ns":9007199254740993"#),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_signature(&tsra),
+            Err(Error::InexactInteger { ref path, .. }) if path == "signed_ns"
+        ));
+        std::fs::write(sidecar_path(&tsra), splice(r#""alg":"ed25519""#)).unwrap();
+        assert!(
+            matches!(read_signature(&tsra), Err(Error::Serde(ref e)) if e.to_string().contains("duplicate key"))
+        );
+        std::fs::write(sidecar_path(&tsra), &good).unwrap();
+        assert!(verify_tsra(&tsra, &key.verifying_key()).unwrap());
     }
 
     #[test]

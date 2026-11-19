@@ -33,9 +33,10 @@ corpus fixture and re-sealed; the Rust reader refuses the same two (`tessera-io/
 input; neither raises (`verify_tsra` reports an archive `zipfile` can't read, such as an encrypted member, as
 not ok). In SPEC §7's order, so a manifest with two faults gets the verdict of the first:
 
-1. **Refused, not I-JSON (SPEC §4):** text that is not JSON or not UTF-8 (UTF-16, a byte-order mark), a key repeated
-   in any object, `NaN` / `Infinity`, a number outside a double's range, a lone surrogate, nesting deeper than 127
-   objects/arrays.
+1. **Refused, not I-JSON (SPEC §1, §4):** text that is not JSON or not UTF-8 (UTF-16, a byte-order mark), a key
+   repeated in any object, `NaN` / `Infinity`, a number outside a double's range, a number whose value is an integer
+   beyond ±(2^53−1) (`9007199254740993`, `9007199254740993.0`, `1e300`: `parse_int` / `parse_float` see each token,
+   the double JCS writes decides), a lone surrogate, nesting deeper than 127 objects/arrays.
 2. **Refused, outside the declared shape (SPEC §5):** `reader.MANIFEST` is one declarative table, one row per field
    of the Rust `Manifest`, `BlockRef`, `Source`, `Producer`, `Generation` and `IngestTransform`, checked at every
    depth: each record is an object (never the array form), each declared field has its JSON type (string, boolean,

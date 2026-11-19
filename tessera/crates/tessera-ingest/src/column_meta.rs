@@ -100,7 +100,29 @@ impl ColumnMeta {
 
     /// Parse from a TOML string — the filesystem-free seam the tests drive.
     pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text).map_err(|e| he(format!("parse: {e}")))
+        let meta: Self = toml::from_str(text).map_err(|e| he(format!("parse: {e}")))?;
+        // `scale` is sealed as a JSON number; the parsed double has lost an underflowing token, so
+        // that one is read from the source text.
+        crate::sealable::refuse_underflowing_toml_floats("--column-meta", text)?;
+        meta.refuse_unsealable_scales()?;
+        Ok(meta)
+    }
+
+    /// Refuse a `scale` a seal cannot hold (NaN, ±infinity, beyond ±(2^53−1)), naming the flag and the
+    /// column. Run by [`Self::parse`] and again by [`Self::apply`], so a spec that carries the
+    /// annotations inline cannot bypass it.
+    fn refuse_unsealable_scales(&self) -> Result<()> {
+        for (name, ann) in &self.0 {
+            if let Some(scale) = ann.scale {
+                crate::sealable::refuse_unsealable(
+                    "--column-meta",
+                    &format!("column '{name}' scale"),
+                    &scale.to_string(),
+                    &[scale],
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -112,6 +134,7 @@ impl ColumnMeta {
     /// Errors if an entry names a column that is not present, listing what *is* — see the module docs
     /// for why that is not a warning.
     pub fn apply(&self, columns: &mut [Column]) -> Result<()> {
+        self.refuse_unsealable_scales()?;
         for (name, ann) in &self.0 {
             let Some(col) = columns.iter_mut().find(|c| &c.name == name) else {
                 let available: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();

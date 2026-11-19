@@ -49,4 +49,5 @@ pub mod npy;
 pub mod parquet_table;
 pub mod provenance;
 pub mod raw;
+pub(crate) mod sealable;
 pub mod spec;

@@ -699,7 +699,7 @@ pub fn array_block(
         name: name.clone(),
         kind: BlockKind::Array,
         digest: Some(digest),
-        spec: serde_json::to_value(&stored_spec)?,
+        spec: tessera_core::canonical::to_json_value(&stored_spec)?,
     };
     Ok((block_ref, BlockPayload::new(name, payload)))
 }
