@@ -1,0 +1,6 @@
+manifest_hash          occurrences  594 · lines  509 · files  58 · in: reference_reader tessera-cli tessera-core tessera-ingest tessera-io tessera-py tessera-wasm
+canonical::            occurrences   50 · lines   50 · files  18 · in: tessera-cli tessera-core tessera-ingest
+manifest\.json         occurrences   92 · lines   91 · files  14 · in: reference_reader tessera-cli tessera-io tessera-py
+test snapshots (.trycmd, .stdout, .json, .toml under tests/) holding a blake3: value: 17 files
+ADRs mentioning manifest_hash or JCS: 41; SPEC lines: 23
+tracked .tsra: 13; distinct manifest.json contents: 12

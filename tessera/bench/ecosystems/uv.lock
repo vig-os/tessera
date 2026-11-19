@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 
 [[package]]
@@ -435,14 +435,14 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "h5py", specifier = ">=3.11" },
-    { name = "nibabel", specifier = ">=5.2" },
-    { name = "numcodecs", specifier = ">=0.13" },
-    { name = "numpy", specifier = ">=2" },
-    { name = "pyarrow", specifier = ">=17" },
-    { name = "pydicom", specifier = ">=3" },
-    { name = "uproot", specifier = ">=5" },
-    { name = "zarr", specifier = ">=3" },
+    { name = "h5py", specifier = "==3.16.0" },
+    { name = "nibabel", specifier = "==5.4.2" },
+    { name = "numcodecs", specifier = "==0.16.5" },
+    { name = "numpy", specifier = "==2.5.0" },
+    { name = "pyarrow", specifier = "==24.0.0" },
+    { name = "pydicom", specifier = "==3.0.2" },
+    { name = "uproot", specifier = "==5.7.4" },
+    { name = "zarr", specifier = "==3.2.1" },
 ]
 
 [[package]]

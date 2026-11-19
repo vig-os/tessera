@@ -43,7 +43,7 @@ The spike campaign converged on a clear, evidence-backed architecture. Headlines
 
 6. **Three manifests, three layers** (don't conflate): **Tessera manifest** = *what it is*
    (id/schema/units/provenance/Merkle root, Layer 1); **OCI manifest** = *how it ships*
-   (blobs+digests; registry distribution via `zot`/`registry:2` on MinIO, or an OCI-layout of
+   (blobs+digests; registry distribution via `zot`/`registry:2` on S3, or an OCI-layout of
    objects ≈ the exploded prefix); **`ro-crate-metadata.json`** = *what it means* (Schema.org
    JSON-LD discovery, Layer 2, derived export).
 
@@ -196,7 +196,7 @@ table blocks. Its central directory is the internal index → **cloud range-read
 file** (Zarr `ZipStore` proves the pattern), so the single file is *both* inseparable (fd5's
 promise) *and* partial-readable. An **exploded S3 prefix** (≈ an OCI image-layout of
 content-addressed objects) is an opt-in working form for concurrent-writer ingest and CoW
-versioning. **Distribution** via OCI artifacts (`zot`/`registry:2` backed by MinIO, or a bare
+versioning. **Distribution** via OCI artifacts (`zot`/`registry:2` backed by S3, or a bare
 OCI-layout in a bucket). **Discovery** via a derived `ro-crate-metadata.json`. `tar` is
 cold-archive only (no random index). All forms share one **Merkle root** = identity.
 
@@ -253,7 +253,7 @@ compromised scanner is the root-of-trust boundary (mitigate: device attestation,
 security, audit).
 
 ### Distribution / RDM (corrected — DataLad is not the backbone)
-Cloud-native stack: **OCI artifact** (`zot`/`registry:2` on **MinIO**) for addressing +
+Cloud-native stack: **OCI artifact** (`zot`/`registry:2` on **S3**) for addressing +
 distribution; **cosign (private Sigstore)** for sign + tamper-evident anchor; **S3 Object Lock**
 for WORM; **InvenioRDM** (Zenodo's engine) for DOI · versioning · FAIR landing pages · access
 control, fed by the derived **RO-Crate/DataCite** exports. **DataLad (git + git-annex)** is an
@@ -288,14 +288,14 @@ win (you stop being hostage to any vendor's format *or codec*).
 - **Lossless** — preserve *all* metadata (private DICOM tags, vendor headers) so egress is faithful.
 - **Native dtype** — int16 + rescale, not float32.
 - **Bidirectional** — ingest (in) · **egress** (Tessera → DICOM via DICOMweb, on demand, for
-  FDA-cleared viewers) · **serve** (DICOMweb STOW/QIDO/WADO face on the Tessera/MinIO archive =
+  FDA-cleared viewers) · **serve** (DICOMweb STOW/QIDO/WADO face on the Tessera/S3 archive =
   the object-backed **VNA** bridge).
 - **Adaptor interface** — each vendor decoder is a plugin (`dicom-rs`; HDF5+GE-filter reader;
   Siemens-footer parser; …). DICOM is plugin #1; the GE/Siemens raw readers are what let a
   pipeline **skip DICOM entirely** *and* escape the proprietary trap.
 
 ### Transition role
-Clients keep speaking DICOM (DIMSE/DICOMweb); storage becomes Tessera/MinIO underneath; migrate
+Clients keep speaking DICOM (DIMSE/DICOMweb); storage becomes Tessera/S3 underneath; migrate
 study-by-study. **Research/novel-acquisition can go Tessera-native now** (skip DICOM); clinical
 scanners follow, with DICOM persisting only at **egress**. (Generalises spike **S9**.)
 
@@ -316,6 +316,7 @@ footer-at-end; a crash before close loses the whole file) and by the throughput 
 | raw capture | memory/disk-bound (NVMe GB/s) | the DAQ never stalls |
 
 ### Streaming model (Rust: `rayon` encode pool + `crossbeam` fan-out, `Send`/`Sync` = race-free)
+
 ```
 acq → bounded RAM ring (backpressure)
     → rayon worker:  pcodec-encode(chunk)  +  blake3(chunk)     ← FUSED, in RAM, hash ~free
@@ -325,6 +326,7 @@ acq → bounded RAM ring (backpressure)
     → seal:          root = merkle(chunk_hashes)   ← microseconds, NO second data pass
                      + manifest + sign(root) at source
 ```
+
 - **No mandatory raw-first pass.** If `parallel-encode-rate ≥ DAQ-rate`, encode live in RAM
   (avoids the double-RAM/double-I/O of raw→disk→read-back). Durable commits of *encoded*
   fragments stay mandatory for irreplaceable data; commit cadence = max-loss window (s–min).
@@ -350,6 +352,7 @@ acq → bounded RAM ring (backpressure)
   leaves a **hash-verified, integrity-sealed partial product** up to `C`.
 
 ### Lifecycle — where the column forms / where it seals
+
 ```
 ACQUIRE  → durable Vortex/Zarr FRAGMENTS (committed, registry watermark, raw-spill on burst)
 COMPACT  → merge fragments → ONE FULL VORTEX COLUMN   ← full column forms here (bg or post-acq)
@@ -373,6 +376,7 @@ field { id: u16 (stable),  name: "lt",  desc: "per-event positronium lifetime",
         dtype: "f4",  units: "ns",  codec: "pcodec" }
 axis  { name: "z", desc: "slice (cranio-caudal)", unit: "mm", type: "space" }   # OME-NGFF
 ```
+
 - **Short stable `id` = the storage key** — compact (a small int per column/chunk, *not* a
   repeated string) **and** the schema-evolution anchor: readers bind by `id`, so **renaming a
   field never breaks them**; drop-then-re-add-same-name allocates a **new id** (Iceberg lesson —
@@ -429,7 +433,7 @@ the organic spike narrative omitted them — they are normative, not optional.
   binary attachments (MIME-typed) — the destination for §11's "preserve everything" promise.
 - **`sources[]`** typed-role DAG (fd5 I3): `{name, id, content_hash (required for Tessera
   parents), product, role (emission_data|mu_map|reference|calibration|…), description, hint_uri}`
-  + reader **`resolve(id)→URI`** fallback chain (link → manifest → hook → `SourceNotFound`).
+  - reader **`resolve(id)→URI`** fallback chain (link → manifest → hook → `SourceNotFound`).
 - **`provenance`**: `original_files: [{path, hash, size, mime}]` (Layer-0 source hashing — what
   §10/§11 verify-at-door records) + `ingest: {tool, tool_version, timestamp, description}`.
 - **`study`**: `{license (SPDX), license_url, creators: [{name, affiliation, orcid, role}]}` —

@@ -1,0 +1,257 @@
+{
+  "expected_counts": {
+    "all-features": 14,
+    "default": 14,
+    "full": 14,
+    "parquet-no-csv": 7,
+    "parquet-npy-no-npz": 11
+  },
+  "fixtures": [
+    {
+      "name": "ingest_parquet_scalars",
+      "product": "table",
+      "requires": [
+        "parquet"
+      ],
+      "hazards": [
+        "H1",
+        "H9",
+        "H11"
+      ],
+      "id": "blake3:330301c04c9a5aa6b15cd2182eeb345d2fa6fbdb98bec83d6920886c5b4bebd8",
+      "content_hash": "blake3:c1289b3cc5334157bb8ee8d14d6f11b949e515e48c7c4ed0d18824625280083a",
+      "manifest_hash": "blake3:b1b1de14e8a97c56dbf924ef0b94349ba33e68b39158d5751bcb238ddd88497b",
+      "ingest_decoder": {
+        "name": "arrow-rs/parquet",
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
+      }
+    },
+    {
+      "name": "ingest_parquet_nulls",
+      "product": "table",
+      "requires": [
+        "parquet"
+      ],
+      "hazards": [
+        "H10"
+      ],
+      "id": "blake3:ba441f393dcdcb0c1bdcb05f33da5bcc6391573085e405e805b7890659993793",
+      "content_hash": "blake3:05ebe03c05627e11bec9f9c34af199c6ba736e2afdda7ed53cbe1c21cb9e6bc1",
+      "manifest_hash": "blake3:fc74340ba6b3856e15c60852df65d22fe6c9d4ae2e40410035dee57caf275397",
+      "ingest_decoder": {
+        "name": "arrow-rs/parquet",
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
+      }
+    },
+    {
+      "name": "ingest_parquet_floats",
+      "product": "table",
+      "requires": [
+        "parquet"
+      ],
+      "hazards": [
+        "H4"
+      ],
+      "id": "blake3:c39298c514aefd0fd55bc60baf9a214ff4aebbcd7f7ef2108128d51323462619",
+      "content_hash": "blake3:af95d10a752822bda74df4a17ecda30d03a10db167c09e92b3340262791885df",
+      "manifest_hash": "blake3:bdb407ba27c8ab369639aceeeb5c9982551625986663540be5bac2ac6210b984",
+      "ingest_decoder": {
+        "name": "arrow-rs/parquet",
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
+      }
+    },
+    {
+      "name": "ingest_parquet_dictionary",
+      "product": "table",
+      "requires": [
+        "parquet"
+      ],
+      "hazards": [
+        "H9"
+      ],
+      "id": "blake3:4ff4ec8479944f7950add265f86237a240235bdd9865b06cd5d97b019b5b301a",
+      "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+      "manifest_hash": "blake3:59b0155fb5403669afe191cf4e2b99c67a163df6924d3611665a1d6f33b4e824",
+      "ingest_decoder": {
+        "name": "arrow-rs/parquet",
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
+      }
+    },
+    {
+      "name": "ingest_parquet_plain_strings",
+      "product": "table",
+      "requires": [
+        "parquet"
+      ],
+      "hazards": [
+        "H9"
+      ],
+      "id": "blake3:573329727757b9457e69e544f045718fd9282c186f0123499d73bc029499d66b",
+      "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+      "manifest_hash": "blake3:eb858d4cd5eefdaf01290a2f138f124827f7e9b7e6de88ee4e17640c5a0e15b0",
+      "ingest_decoder": {
+        "name": "arrow-rs/parquet",
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
+      }
+    },
+    {
+      "name": "ingest_parquet_tiny_row_groups",
+      "product": "table",
+      "requires": [
+        "parquet"
+      ],
+      "hazards": [
+        "H9"
+      ],
+      "id": "blake3:b013dc4f302e78ad8ab37b64f4c9e703e055de21a03f7f566b3859d61dadd878",
+      "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+      "manifest_hash": "blake3:a264fe2c70d6fadca4ec8845b1d27a5f0168199d9e99d59fd2b82166d6f87c2f",
+      "ingest_decoder": {
+        "name": "arrow-rs/parquet",
+        "version": "=58.4.1",
+        "features": "blake3:ec99ecbea97137d204e282231719feaca958150599781d2e2a44eb60d40acdd7"
+      }
+    },
+    {
+      "name": "ingest_arrow_ipc_scalars",
+      "product": "table",
+      "requires": [
+        "arrow"
+      ],
+      "hazards": [
+        "H9"
+      ],
+      "id": "blake3:27bf5606aea01b68d666efbb052da69bd22e0b5af659be9a275ec6d13785064d",
+      "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+      "manifest_hash": "blake3:0a667d4e0b793015416825a8417bbabc179bbff6903901df96f3c7435ace9961",
+      "ingest_decoder": {
+        "name": "arrow-rs/arrow-ipc",
+        "version": "=58.4.1",
+        "features": "blake3:d1adf7f16db31fff51504384aff1cddb8a563e40fbb6b301c57fb5e30e27ee1e"
+      }
+    },
+    {
+      "name": "ingest_csv_declared",
+      "product": "table",
+      "requires": [
+        "csv"
+      ],
+      "hazards": [
+        "H3",
+        "H8"
+      ],
+      "id": "blake3:9b1bea9155255a3b5ad46ad56ba3feba34ceb7c010ef08657e4840c9e8cacc3d",
+      "content_hash": "blake3:27025c88c9871c3e87a2ed354fc521074fb795e94d2fd4c918dd724978da4966",
+      "manifest_hash": "blake3:3e849d63414e568c6485e72c3c6bb69b0f99cf14f176fc18379b720162848746",
+      "ingest_decoder": {
+        "name": "rust-csv",
+        "version": "=1.4.0",
+        "features": "blake3:adadbe5d5e5a240b48a088db3fc31d296ffecfd5b7a09b10b639a446674fac8f"
+      }
+    },
+    {
+      "name": "ingest_csv_nulls",
+      "product": "table",
+      "requires": [
+        "csv"
+      ],
+      "hazards": [
+        "H10"
+      ],
+      "id": "blake3:9cef6f0858b412bdf80d2722dabe48084e32e6e9336289705f4571e315bd860e",
+      "content_hash": "blake3:c9df3abd89444f2e88563c94b60bc187529a6c7f647e42c7231fe3ffc164db83",
+      "manifest_hash": "blake3:295dee6f96608b6dda64f0d04540582f77597a2104b2b1fa53b626f157933e21",
+      "ingest_decoder": {
+        "name": "rust-csv",
+        "version": "=1.4.0",
+        "features": "blake3:adadbe5d5e5a240b48a088db3fc31d296ffecfd5b7a09b10b639a446674fac8f"
+      }
+    },
+    {
+      "name": "ingest_npy_endianness_le",
+      "product": "array",
+      "requires": [
+        "npy"
+      ],
+      "hazards": [
+        "H6"
+      ],
+      "id": "blake3:1614b7a8399e0c6327d2a35a49b8a59f77df5389ceb4705b6a9e2aa775abdd97",
+      "content_hash": "blake3:4c0a43d0a74ad15d5a75c8a6118f8dd6e07891dd079aed03c307c0f637200ded",
+      "manifest_hash": "blake3:87466a9b2fe72134489d976189aa5758a017ea3991f7de6cae39fe946e4be14a",
+      "ingest_decoder": {
+        "name": "tessera/npy"
+      }
+    },
+    {
+      "name": "ingest_npy_endianness_be",
+      "product": "array",
+      "requires": [
+        "npy"
+      ],
+      "hazards": [
+        "H6"
+      ],
+      "id": "blake3:896c78936fb7b801f1bc372306726d538c4170a914b90d147530b7337fa6e0e3",
+      "content_hash": "blake3:4c0a43d0a74ad15d5a75c8a6118f8dd6e07891dd079aed03c307c0f637200ded",
+      "manifest_hash": "blake3:10982f926fdddaf0e4f86a25e040ea22d48d7fa7b32cb8cb017212f589d31fe2",
+      "ingest_decoder": {
+        "name": "tessera/npy"
+      }
+    },
+    {
+      "name": "ingest_npy_fortran",
+      "product": "array",
+      "requires": [
+        "npy"
+      ],
+      "hazards": [
+        "H11"
+      ],
+      "id": "blake3:c7aeeed5a72278097e8526d9dcdd1de46101258c80785fa2b5ebcbd2f63c872d",
+      "content_hash": "blake3:4197bce3d3ffe9bcea14664069e0fed8623d3bf19e0e6b485af77fb91e1fbe01",
+      "manifest_hash": "blake3:a411ef2daa4421915d338f9165443ca3c332036cbe2cf547e469bc465851bee5",
+      "ingest_decoder": {
+        "name": "tessera/npy"
+      }
+    },
+    {
+      "name": "ingest_npy_structured",
+      "product": "table",
+      "requires": [
+        "npy"
+      ],
+      "hazards": [
+        "H11"
+      ],
+      "id": "blake3:9e86cc719308581ef9a3066db1d9ca30ee0edecac62b1ffe7ed8c8295b64b4c0",
+      "content_hash": "blake3:886bf3e3255c0d78cf19f4f1ca21e29d0884bf60f865a9b0287a73192dbd67da",
+      "manifest_hash": "blake3:6f440d48533662f80863c1456cf1bc9aec4b49db9782814f26e2d6f5c1a948b0",
+      "ingest_decoder": {
+        "name": "tessera/npy"
+      }
+    },
+    {
+      "name": "ingest_npz_member",
+      "product": "array",
+      "requires": [
+        "npz"
+      ],
+      "hazards": [
+        "H9"
+      ],
+      "id": "blake3:130378530be6153a668972e4f48e666d7aa09345300ff44cf840594b585d35e2",
+      "content_hash": "blake3:27d36426f6dc2970ec2691ba0f25a39e644192d35aedc07c920d7adcea952bff",
+      "manifest_hash": "blake3:6f71b1270261786e493ea2edfa7011bf6aceccd9c42d13d1ba124e51c0ed8f0c",
+      "ingest_decoder": {
+        "name": "tessera/npz",
+        "features": "blake3:e55fdafde0763209895410a5904fc3d9606e45024e3c4dfdde60891c30d45825"
+      }
+    }
+  ]
+}

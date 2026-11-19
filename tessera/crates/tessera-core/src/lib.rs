@@ -16,6 +16,7 @@ pub mod collection;
 pub mod dtype;
 pub mod error;
 pub mod export;
+pub(crate) mod field_path;
 pub mod hash;
 pub mod identity;
 pub mod manifest;
@@ -29,7 +30,9 @@ pub use collection::{Collection, CollectionBuilder, CollectionMember, Role};
 pub use error::{Error, Result};
 pub use manifest::Manifest;
 pub use product::ProductBuilder;
-pub use provenance::{inherit_identity, Generation, Producer, ProducerRef, Source};
+pub use provenance::{
+    inherit_identity, Generation, IngestTransform, Producer, ProducerRef, Source,
+};
 pub use schema::{validate_manifest, ProductSchema, SchemaRegistry};
 
 #[cfg(test)]
@@ -176,6 +179,9 @@ mod tests {
             ],
             rows: 2_696_935,
             row_index: Some("ms".into()),
+            partition: None,
+            edition: None,
+            codec_profile: None,
         };
         let events = TableBlock::new("events_3p", spec);
         let mut b = ProductBuilder::new(

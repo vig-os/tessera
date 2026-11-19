@@ -1,0 +1,95 @@
+{
+  "product": "gpet-sim:g4ring-output",
+  "version": "3.0",
+  "description": "gPET-sim g4ring normal-mode (Stage 2) output: kept events and their per-crystal pethits.",
+  "fields": [
+    {
+      "id": "simulation_mode",
+      "description": "g4ring mode: normal | phase_space_writer | phase_space_reader",
+      "dtype": "string",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "number_of_events",
+      "description": "Events requested for the run (numberOfEvents; one value per run, never summed)",
+      "dtype": "uint64",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "events_run",
+      "description": "Events actually simulated over all workers (the sum of the shards' events_run)",
+      "dtype": "uint64",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "save_all_events",
+      "description": "Whether events with no pethits are kept (saveAllEvents)",
+      "dtype": "bool",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "edep_threshold_keV",
+      "description": "Per-crystal deposit threshold applied before a pethit is written",
+      "dtype": "float64",
+      "unit": "keV",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "scanner_axial_axis",
+      "description": "Scanner axial axis in the world frame: x | y | z",
+      "dtype": "string",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "seed",
+      "description": "Master RNG seed; with seedOncePerCommunication = 0 it fixes every event's seed pair",
+      "dtype": "int64",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "run_id",
+      "description": "Operator batch index (runId); with event_id it keys rows across batches",
+      "dtype": "int64",
+      "required": false,
+      "recommended": true,
+      "sensitivity": "public"
+    },
+    {
+      "id": "event_id_offset",
+      "description": "eventIdOffset added to every Geant4 event id written (resume / batching)",
+      "dtype": "uint64",
+      "required": false,
+      "recommended": true,
+      "sensitivity": "public"
+    }
+  ],
+  "blocks": [
+    {
+      "role": "events",
+      "kind": "table",
+      "min_count": 1,
+      "description": "One row per kept event (all events when save_all_events)"
+    },
+    {
+      "role": "pethits",
+      "kind": "table",
+      "min_count": 0,
+      "description": "One row per (event, crystal, source photon) above edep_threshold_keV"
+    }
+  ],
+  "requires_generation": true
+}

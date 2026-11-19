@@ -20,17 +20,24 @@ use tessera_core::collection::{
 use tessera_core::{Error, Result};
 use tessera_io::Reader;
 
-/// The collection seal badge (mirrors `nav::seal_status` for products, #268): `sealed✓` when
-/// `manifest_hash` is present AND re-verifies over the canonical bytes, `sealed✗` on a mismatch,
-/// `unsealed` when the collection carries no seal.
-fn seal_status(c: &Collection) -> &'static str {
+/// The collection seal badge (#268): `sealed✓` when `manifest_hash` is present AND re-verifies over
+/// the JSON object as parsed (SPEC §4, #873 — never over the typed view, which drops a newer
+/// writer's fields), `sealed✗` on a mismatch, `unsealed` when the collection carries no seal.
+/// `received` is that seal, from [`Collection::from_json_with_seal`].
+fn seal_status(c: &Collection, received: &str) -> &'static str {
     match &c.manifest_hash {
         None => "unsealed",
-        Some(mh) => match c.compute_manifest_hash() {
-            Ok(got) if &got == mh => "sealed✓",
-            _ => "sealed✗",
-        },
+        Some(mh) if mh == received => "sealed✓",
+        Some(_) => "sealed✗",
     }
+}
+
+/// Warn on stderr that `c` carries fields from a newer format revision (verified, not interpreted).
+fn warn_newer_fields(c: &Collection) {
+    crate::warn_not_interpreted(
+        &format!("collection '{}': fields", c.name),
+        c.newer_fields(),
+    );
 }
 
 fn role_str(r: &Role) -> &'static str {
@@ -59,7 +66,8 @@ fn w(out: &mut dyn Write, args: std::fmt::Arguments<'_>) -> Result<()> {
 /// `tessera collection inspect FILE` — the catalog header: identity, seal badge, and each member's
 /// role + reference + pinned `manifest_hash` (short). Payload-cheap — reads only the descriptor.
 pub fn inspect(file: &Path, out: &mut dyn Write) -> Result<()> {
-    let c = load(file)?;
+    let (c, received) = Collection::from_json_with_seal(&std::fs::read_to_string(file)?)?;
+    warn_newer_fields(&c);
     w(out, format_args!("collection {}\n", c.name))?;
     w(out, format_args!("id            {}\n", c.id))?;
     w(out, format_args!("schema        {}\n", c.collection_schema))?;
@@ -81,7 +89,10 @@ pub fn inspect(file: &Path, out: &mut dyn Write) -> Result<()> {
             c.manifest_hash.as_deref().unwrap_or("-")
         ),
     )?;
-    w(out, format_args!("seal          {}\n", seal_status(&c)))?;
+    w(
+        out,
+        format_args!("seal          {}\n", seal_status(&c, &received)),
+    )?;
     w(out, format_args!("members       {}\n", c.members.len()))?;
     for m in &c.members {
         let kind = if m.kind == MemberKind::Collection {
@@ -187,6 +198,7 @@ fn verify_collection(
     })?;
     // Seal check (id + content_hash over pinned member hashes + manifest_hash).
     let c = Collection::from_json_verified(&bytes)?;
+    warn_newer_fields(&c);
     // Confirm this collection is the exact version its parent pinned (swapped-but-valid = failure).
     if let Some(exp) = expected_mh {
         let got = c.manifest_hash.as_deref().unwrap_or_default();
@@ -297,7 +309,7 @@ pub fn new(
     // Write the self-contained collection dir: collection.json + each member under the shared
     // `member_filename` (sanitized `<stem>.tsra`), the same name `verify`/`ls` resolve (#323).
     std::fs::create_dir_all(out)?;
-    std::fs::write(out.join("collection.json"), sealed.to_json()?)?;
+    std::fs::write(out.join("collection.json"), sealed.to_sealed_json()?)?;
     for (h, src) in &handles {
         let dst = out.join(member_filename(h.reference(), MemberKind::Product));
         if src.canonicalize().ok() == dst.canonicalize().ok() {
@@ -358,6 +370,64 @@ mod tests {
         let c = cb.seal().unwrap();
         std::fs::write(dir.join("collection.json"), c.to_json().unwrap()).unwrap();
         (c, ids)
+    }
+
+    /// A collection a newer writer sealed with a field this build doesn't model: `inspect` shows the
+    /// seal as holding (it is computed over the object as parsed, #873) and `verify` passes; the same
+    /// field spliced in under the old seal shows `sealed✗` and fails `verify`.
+    #[test]
+    fn a_newer_collection_field_verifies_and_a_spliced_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        build_collection(dir.path());
+        let cf = dir.path().join("collection.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cf).unwrap()).unwrap();
+        v["annotations"] = serde_json::json!({ "curator": "site-a" });
+        let spliced = v.to_string();
+        v["manifest_hash"] =
+            serde_json::json!(tessera_core::canonical::hash_without(&v, "manifest_hash").unwrap());
+        let inspect_seal = |text: &str| {
+            std::fs::write(&cf, text).unwrap();
+            let mut buf = Vec::new();
+            inspect(&cf, &mut buf).unwrap();
+            let s = String::from_utf8(buf).unwrap();
+            s.lines()
+                .find(|l| l.starts_with("seal"))
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(inspect_seal(&v.to_string()), "seal          sealed✓");
+        verify(&cf, &mut Vec::new()).expect("a sealed newer field verifies");
+        assert_eq!(inspect_seal(&spliced), "seal          sealed✗");
+        assert!(matches!(
+            verify(&cf, &mut Vec::new()),
+            Err(Error::Integrity {
+                what: "manifest_hash",
+                ..
+            })
+        ));
+    }
+
+    /// A crafted top-level key spelling a member field's path (`"members[0].kind"`) is a newer field
+    /// of its own, never an exemption for the member's `kind`: that `kind` spelled as an object is
+    /// refused under a fresh seal, where `verify` once passed it with a warning (#873).
+    #[test]
+    fn a_crafted_key_cannot_exempt_a_member_field() {
+        let dir = tempfile::tempdir().unwrap();
+        build_collection(dir.path());
+        let cf = dir.path().join("collection.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cf).unwrap()).unwrap();
+        v["members[0].kind"] = serde_json::json!(1);
+        v["members"][0]["kind"] = serde_json::json!({ "product": null });
+        v["manifest_hash"] =
+            serde_json::json!(tessera_core::canonical::hash_without(&v, "manifest_hash").unwrap());
+        std::fs::write(&cf, v.to_string()).unwrap();
+        let err = verify(&cf, &mut Vec::new()).expect_err("a second spelling must not verify");
+        assert!(
+            err.to_string().contains("`members[0].kind` is an object"),
+            "{err}"
+        );
     }
 
     #[test]

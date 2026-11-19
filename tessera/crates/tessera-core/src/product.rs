@@ -35,7 +35,14 @@ impl ProductBuilder {
     /// Apply the delta (`with_field` / `add_block` / `add_source`), then [`seal`](Self::seal) — which
     /// recomputes `content_hash` + `manifest_hash` while `id` stays put. Unchanged blocks keep their
     /// digests, so a metadata-only version re-stores only the new manifest object.
-    pub fn from_manifest(parent: &Manifest) -> Self {
+    ///
+    /// # Errors
+    /// [`crate::Error::NewerFormatFields`] if `parent` carries [`Manifest::newer_fields`]: this build
+    /// can't carry them into the new version, and a seal without them would silently drop sealed
+    /// content, while one carrying them blindly could break a rule the newer format attaches to them
+    /// (ADR-0060 §2.2).
+    pub fn from_manifest(parent: &Manifest) -> crate::Result<Self> {
+        parent.refuse_newer_fields()?;
         let mut manifest = Manifest::new(
             &parent.product,
             &parent.name,
@@ -56,10 +63,10 @@ impl ProductBuilder {
             .filter(|s| s.role != "supersedes")
             .cloned()
             .collect();
-        ProductBuilder {
+        Ok(ProductBuilder {
             manifest,
             refs: parent.blocks.clone(),
-        }
+        })
     }
 
     /// Add a storage block (array or table); records its manifest reference.
@@ -130,6 +137,22 @@ impl ProductBuilder {
         self
     }
 
+    /// Record the **transforms applied at the door** (ADR-0056 §6.2) — the receipt for the
+    /// normalise-vs-preserve ladder's middle lane.
+    ///
+    /// Only generic ingest has any business calling this: a vendor backend that preserves its
+    /// source's values bit-faithfully records nothing, and an empty list serialises to nothing, which
+    /// is what keeps every pre-ADR-0056 product's bytes unchanged. Call before `seal` so the receipt
+    /// is covered by the seal — a transform list outside the seal would be a warning with extra
+    /// steps, which is the thing ADR-0056 §2 rejected.
+    pub fn with_ingest_transform(
+        &mut self,
+        transforms: Vec<crate::provenance::IngestTransform>,
+    ) -> &mut Self {
+        self.manifest.ingest_transform = transforms;
+        self
+    }
+
     /// Inherit **schema-flagged identity** fields from a resolved `derived_from` parent (ADR-0058
     /// §5) — the DAG-walk caller (the ingest engine) supplies the parent manifest + this product's
     /// schema; only fields the schema marks `inherit` flow, and an explicit child value always wins.
@@ -149,12 +172,24 @@ impl ProductBuilder {
     /// Every block MUST carry a digest — a missing digest is a hard error, never silently
     /// dropped (otherwise a block would be invisible to the content hash yet present in the
     /// manifest, so two different products could hash identically).
+    ///
+    /// The block names must be **unique** (ADR-0063 §2a, exact byte equality), or the seal is
+    /// refused with [`crate::Error::DuplicateBlockName`], and must obey the **leaf rule** (ADR-0063):
+    /// no name may be a parent prefix of another, or the seal is refused with
+    /// [`crate::Error::BlockNameConflict`]. (Each name is already valid by its type,
+    /// [`crate::block::BlockName`].)
+    ///
+    /// Every partitioned table must be valid (ADR-0064 §2.4, [`crate::block::check_partitions`]),
+    /// or the seal is refused with [`crate::Error::LogicalTable`].
     pub fn seal(mut self) -> crate::Result<Manifest> {
+        crate::block::check_unique_names(self.refs.iter().map(|r| &r.name))?;
+        crate::block::check_leaf_rule(self.refs.iter().map(|r| &r.name))?;
+        crate::block::check_partitions(&self.refs)?;
         let mut digests = Vec::with_capacity(self.refs.len());
         for r in &self.refs {
             match &r.digest {
                 Some(d) => digests.push(d.clone()),
-                None => return Err(crate::Error::MissingDigest(r.name.clone())),
+                None => return Err(crate::Error::MissingDigest(r.name.to_string())),
             }
         }
         self.manifest.blocks = self.refs;
@@ -198,11 +233,32 @@ mod tests {
 
     fn block(name: &str, digest: &str) -> BlockRef {
         BlockRef {
-            name: name.into(),
+            name: name.parse().unwrap(),
             kind: BlockKind::Array,
             digest: Some(digest.into()),
             spec: serde_json::json!({ "dtype": "int16", "shape": [2] }),
         }
+    }
+
+    /// #734: a name listed twice is refused at seal with the typed error, whether or not the two
+    /// entries agree. Names compare byte for byte: `Data` and `data` seal as two blocks (#690
+    /// covers case folding).
+    #[test]
+    fn seal_refuses_a_block_name_listed_twice() {
+        for second in ["blake3:aa", "blake3:bb"] {
+            let mut b = ProductBuilder::new("recon", "p", "d", "2024-01-01T00:00:00Z");
+            b.add_block_ref(block("v", "blake3:aa"));
+            b.add_block_ref(block("w", "blake3:cc"));
+            b.add_block_ref(block("v", second));
+            match b.seal() {
+                Err(crate::Error::DuplicateBlockName { name }) => assert_eq!(name, "v"),
+                other => panic!("sealed a repeated name ({second}): {other:?}"),
+            }
+        }
+        let mut b = ProductBuilder::new("recon", "p", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(block("Data", "blake3:aa"));
+        b.add_block_ref(block("data", "blake3:bb"));
+        assert_eq!(b.seal().unwrap().blocks.len(), 2);
     }
 
     #[test]
@@ -216,7 +272,7 @@ mod tests {
         let v1mh = v1.manifest_hash.clone().unwrap();
 
         // Evolve: change one metadata field, stamp the supersedes edge to the immediate parent.
-        let mut e = ProductBuilder::from_manifest(&v1);
+        let mut e = ProductBuilder::from_manifest(&v1).unwrap();
         e.with_field("tracer", serde_json::json!("FLT"));
         e.add_source(Source::new("supersedes", &v1mh).with_content_hash(&v1mh));
         let v2 = e.seal().unwrap();

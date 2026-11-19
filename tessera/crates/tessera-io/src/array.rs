@@ -69,7 +69,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tessera_core::block::array::{ArraySpec, WorldFrame};
 use tessera_core::block::table::{Column, TableSpec};
-use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::block::{BlockKind, BlockName, BlockRef};
 use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
 use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
@@ -689,16 +689,17 @@ pub fn array_block(
     spec: &ArraySpec,
     data: &ArrayData,
 ) -> Result<(BlockRef, BlockPayload)> {
+    let name = BlockName::new(name)?;
     let (resolved, payload) = encode_resolved(spec, data)?;
     let digest = tessera_core::hash::digest(&payload);
     // Record the concrete codec in the manifest's BlockRef.spec — readers never see "auto".
     let mut stored_spec = spec.clone();
     stored_spec.codec = resolved.to_string();
     let block_ref = BlockRef {
-        name: name.to_string(),
+        name: name.clone(),
         kind: BlockKind::Array,
         digest: Some(digest),
-        spec: serde_json::to_value(&stored_spec)?,
+        spec: tessera_core::canonical::to_json_value(&stored_spec)?,
     };
     Ok((block_ref, BlockPayload::new(name, payload)))
 }
@@ -870,6 +871,9 @@ pub fn to_coo(data: &ArrayData, fill: i64) -> Option<(TableSpec, TableData)> {
         columns: vec![col("idx", "u8"), col("v", "i8")],
         rows: v.len() as u64,
         row_index: Some("idx".into()),
+        partition: None,
+        edition: None,
+        codec_profile: None,
     };
     let tdata: TableData = vec![
         ("idx".into(), ColumnData::U64(idx)),
@@ -1146,39 +1150,13 @@ mod tests {
         assert_eq!(ArrayData::U64(vec![0; 3]).byte_len(), 24);
     }
 
-    /// A `MakeWriter` over a shared buffer — captures tracing fmt output for assertions.
-    #[derive(Clone)]
-    struct CapWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-    impl std::io::Write for CapWriter {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapWriter {
-        type Writer = CapWriter;
-        fn make_writer(&'a self) -> CapWriter {
-            self.clone()
-        }
-    }
-
     #[test]
     fn encode_emits_a_structured_compression_trace() {
-        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(CapWriter(buf.clone()))
-            .with_max_level(tracing::Level::DEBUG)
-            .with_ansi(false)
-            .finish();
         let spec = pcodec_spec(vec![8, 8, 8], "int16");
         let data = ArrayData::I16((0..512).map(|k| (k % 97) as i16).collect());
-        tracing::subscriber::with_default(sub, || {
+        let log = crate::test_trace::capture(tracing::Level::DEBUG, || {
             encode(&spec, &data).unwrap();
         });
-        let log = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         // the encode event fired with the codec + raw/encoded sizes (full I/O info on write).
         assert!(
             log.contains("encoded array block"),

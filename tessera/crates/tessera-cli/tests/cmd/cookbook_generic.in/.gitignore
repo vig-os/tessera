@@ -1,0 +1,5 @@
+# trycmd 0.15 runs a case IN PLACE in `<case>.in/` when there is no `.out/`, so everything the
+# transcript produces lands here next to the inputs. Only the INPUTS are tracked — the `.tsra`
+# products are regenerated on every run, and committing them would mean reviewing a binary that
+# the test rewrites anyway.
+*.tsra

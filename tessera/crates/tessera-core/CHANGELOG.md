@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6](https://github.com/vig-os/tessera/compare/tessera-core-v0.1.0-alpha.5...tessera-core-v0.1.0-alpha.6) - 2026-11-19
+
+### Added
+
+- *(io)* [**breaking**] record the codec profile in every sealed table spec
+- *(io)* sequenced table input on StreamWriter, seq-ordered from any thread
+- *(io)* [**breaking**] record the vortex edition in every sealed table spec
+- *(core)* one serialisation rule for the column contract
+- *(core)* check a block against its role's column contract
+- *(core)* column contract keyed by role in ProductSchema
+
+### Fixed
+
+- *(ingest)* validate every NIfTI header value that feeds a seal, and stop advising a string a typed field cannot take
+- *(core)* refuse NaN, infinity and loosely spelt numbers at every entry point
+- *(cli)* refuse a typed number a seal cannot hold, never stringify it
+- *(core)* seal only integers a double holds exactly (I-JSON)
+- *(core)* decide newer fields by structure, never by a path string
+- *(corpus)* the reference reader checks every declared manifest field
+- *(core)* refuse a skipped default in another spelling
+- *(core)* read manifests, collections and schemas in their declared spelling only
+- *(core)* verify collections and embedded schemas over the parsed object
+- *(io)* a sequenced table's refusal poisons its writer, so finish seals nothing
+- *(core,io)* refuse a block name listed twice in one product
+- *(core)* verify a manifest's seal over the object it parsed
+
+## [0.1.0-alpha.5](https://github.com/vig-os/tessera/compare/tessera-core-v0.1.0-alpha.4...tessera-core-v0.1.0-alpha.5) - 2026-11-11
+
+### Added
+
+- *(io)* [**breaking**] deprecate table_job_streaming, refusing tables above BLOCK_ROWS
+- *(io)* add StreamWriter::push_table, a disk-staged streaming partition
+- *(core)* share one schema check for a resolved table group
+- *(core)* resolve logical table names and check partitions at seal
+- *(core)* add the ADR-0064 partition marker to TableSpec
+
+### Fixed
+
+- *(core)* refuse a marked nested legacy block at read as at seal
+- *(core)* refuse a forged over-long leaf index as NonCanonicalLeaf
+- *(io)* make WriteSession::recover crash-safe and idempotent
+- *(core,io,ingest,cli)* [**breaking**] validate block names into one type and join them by plain components only
+
+### Other
+
+- note the legacy-path spec error change in the CHANGELOG
+- *(core)* say why group_specs' NotFound branch is unreachable
+
+## [0.1.0-alpha.2](https://github.com/vig-os/tessera/compare/tessera-core-v0.1.0-alpha.1...tessera-core-v0.1.0-alpha.2) - 2026-10-19
+
+### Added
+
+- *(cli,core)* tessera provenance walk and inspect --resolve-config ([#490](https://github.com/vig-os/tessera/pull/490))
+- *(ingest)* generic table ingest — tessera ingest table <PARQUET|IPC|CSV> ([#460](https://github.com/vig-os/tessera/pull/460))
+
+### Fixed
+
+- *(core,cli)* compute array statistics in exact integer arithmetic
+
+### Other
+
+- ingest cookbook, generated product-schema reference, tested Python write example, cli.md stubs ([#484](https://github.com/vig-os/tessera/pull/484))
+
 ## [0.1.0-alpha.1](https://github.com/vig-os/tessera/releases/tag/tessera-core-v0.1.0-alpha.1) - 2026-09-23
 
 ### Added

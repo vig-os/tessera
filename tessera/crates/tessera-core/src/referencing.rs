@@ -45,6 +45,20 @@ pub enum Transform {
 }
 
 impl Transform {
+    /// The JSON keys a transform of the given `kind` tag models (ADR-0060 §2.2 newer-field walk),
+    /// `kind` included; empty for a kind this build doesn't know (which serde refuses anyway). Kept
+    /// equal to each variant's serialised keys by a test.
+    pub(crate) fn fields(kind: &str) -> &'static [&'static str] {
+        match kind {
+            "identity" => &["kind"],
+            "affine_1d" => &["kind", "slope", "intercept"],
+            "log" => &["kind", "ln_lo", "ln_step"],
+            "affine_nd" => &["kind", "dims", "matrix"],
+            "lookup" => &["kind", "values"],
+            _ => &[],
+        }
+    }
+
     /// Bridge the array rescale pair into the taxonomy: both `None` → [`Self::Identity`]; otherwise a
     /// 1-D affine with the fd5 defaults (slope 1, intercept 0). Lossless and total.
     pub fn from_rescale(slope: Option<f64>, intercept: Option<f64>) -> Self {
@@ -165,6 +179,11 @@ pub struct Referenced {
 }
 
 impl Referenced {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] =
+        &["transform", "unit", "vocabulary", "frame"];
+
     /// The identity descriptor: stored value *is* the quantity, in `unit` (no frame).
     pub fn identity(unit: Option<String>) -> Self {
         Referenced {

@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6](https://github.com/vig-os/tessera/compare/tessera-ingest-v0.1.0-alpha.5...tessera-ingest-v0.1.0-alpha.6) - 2026-11-19
+
+### Added
+
+- *(io)* [**breaking**] record the codec profile in every sealed table spec
+- *(io)* [**breaking**] record the vortex edition in every sealed table spec
+
+### Fixed
+
+- *(ingest)* inspect every TOML table shape for an underflowing float, and fail closed
+- *(ingest)* validate every NIfTI header value that feeds a seal, and stop advising a string a typed field cannot take
+- *(core)* refuse NaN, infinity and loosely spelt numbers at every entry point
+- *(ingest)* refuse a curated DICOM number a seal cannot hold, naming the tag
+- *(ingest)* refuse an inexact integer in an ingest spec before any write
+- *(core)* verify collections and embedded schemas over the parsed object
+- *(ingest)* exclude twox-hash's rand from the decode-path audit
+- *(core)* verify a manifest's seal over the object it parsed
+- *(io,py,deps)* read a .tsra the one way every zip reader does (GHSA-m665-v7pm-7grj)
+
+### Other
+
+- *(corpus)* regenerate the table goldens for the vortex 0.93 format event
+- *(deps)* [**breaking**] move vortex from the 0.75 fork to 0.93.0 on a rebased fork pin
+
+## [0.1.0-alpha.5](https://github.com/vig-os/tessera/compare/tessera-ingest-v0.1.0-alpha.4...tessera-ingest-v0.1.0-alpha.5) - 2026-11-11
+
+### Added
+
+- *(io)* [**breaking**] write multi-block tables as marked <table>/NNNN leaves
+- *(core)* add the ADR-0064 partition marker to TableSpec
+
+### Fixed
+
+- *(deps)* move parquet/arrow to 58.4.1 for thrift 0.23 (RUSTSEC-2026-0435)
+- *(core,io,ingest,cli)* [**breaking**] validate block names into one type and join them by plain components only
+
+## [0.1.0-alpha.2](https://github.com/vig-os/tessera/compare/tessera-ingest-v0.1.0-alpha.1...tessera-ingest-v0.1.0-alpha.2) - 2026-10-19
+
+### Added
+
+- *(ingest)* generic array ingest — NumPy .npy and .npz (ADR-0056 P1)
+- *(ingest)* generic table ingest — tessera ingest table <PARQUET|IPC|CSV> ([#460](https://github.com/vig-os/tessera/pull/460))
+
+### Fixed
+
+- *(deps)* upgrade rustls and zip past RUSTSEC-2026-0346..0349/0367..0369
+- *(ingest)* the arrow lane builds on its own, and the gate proves it
+- *(ingest)* a decode-path package is (name, version), not a name
+- *(ingest)* the decoder digest is per lane, carries each crate's source, and covers the whole decode path
+- *(ingest)* NIfTI spatial units to mm, big-endian NIfTI-1, FSL qform cross-check ([#470](https://github.com/vig-os/tessera/pull/470))
+- *(ingest)* close the five NIfTI decoder bugs and verify the .nii.gz gzip trailer ([#447](https://github.com/vig-os/tessera/pull/447))
+- *(ingest)* seal the ADR-0058 recipe on the streaming path and surface it in inspect ([#453](https://github.com/vig-os/tessera/pull/453))
+
+### Other
+
+- *(ingest)* align the hdf-compound streaming slab to the dataset chunking ([#464](https://github.com/vig-os/tessera/pull/464))
+
 ## [0.1.0-alpha.1](https://github.com/vig-os/tessera/releases/tag/tessera-ingest-v0.1.0-alpha.1) - 2026-09-23
 
 ### Added

@@ -427,7 +427,7 @@ This is rung 2 of ADR-0040's ladder; it depends on rung 1 landing first.
   surrender of writer-determinism — the additive-sidecar precedent ADR-0040 §4 + ADR-0037 §0.2
   already established makes rung 2 a *reuse*, not an invention.
 - **The format stays provider-blind.** A `.tsra` carries an opaque URL + a wrapped-DEK; the same
-  archive verifies, signs, ships over OCI, and round-trips MinIO unchanged. The Tessera client speaks
+  archive verifies, signs, ships over OCI, and round-trips S3 unchanged. The Tessera client speaks
   a four-method trait. Providers are infra (ADR-0039's discipline), not format.
 - **Unwrap-DEK over decrypt-as-a-service is the smaller compliance surface and the lower latency
   default** (§2). The narrow case where regulators demand provider-as-sole-PHI-handler is preserved

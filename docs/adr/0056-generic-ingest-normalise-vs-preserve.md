@@ -211,7 +211,7 @@ step.** Naming it is half the fix.
 | **H3** | Float parsing (`strtod`/`lexical`) and decimal→float casts (FMA-sensitive) | high × fatal | CSV deferred (§8); decimal→float **banned** (§2) |
 | **H4** | `NaN` payload bits and `-0.0` — arrow-rs preserves the source bit pattern; producers differ | medium × fatal | canonicalise every NaN to the quiet default at the boundary |
 | **H5** | Values **under** a null — arrow hands over whatever the writer left there | medium × fatal | zero at the `arrow → ColumnData` boundary, not only at encode (see below) |
-| **H6** | NPY/raw endianness (`>f8` vs `<f8`) — a naive `cast_slice` is silently wrong on one arch | low × fatal | decode and normalise to native LE; test both twins |
+| **H6** | NPY/raw endianness (`>f8` vs `<f8`) — a naive `cast_slice` is silently wrong on one arch | low × fatal | decode and normalise to native LE; test both twins. **NIfTI-1 too (#449): half the `.nii` files in nibabel's own test data are big-endian.** Byte order is never recorded, so the twins seal identically |
 | **H7** | SIMD-dispatched decode paths | medium × float-only | covered by H3/H4 canonicalisation |
 | **H8** | Locale (`LC_NUMERIC=de_DE` reading `1,5` as 1.5) | low × medium | `LC_ALL=C` for the decode |
 | **H9** | arrow-rs / parquet minor bumps changing decoded values | medium × fatal | `=` version pins + the §6a corpus gate; the decoder triple is recorded in the sealed recipe bag (§6a) |
@@ -337,6 +337,121 @@ incomplete on the single dimension most likely to move the values (H1–H9), wit
 parked in an unauthenticated, silently-editable sidecar. That is a worse trade than the second pass
 saw. R1 also restores signature coverage — the bag is inside the manifest, so the decoder record is
 tamper-evident on disk and tape, not only over digest-pinned OCI.
+
+### Amendment (#477) — the digest is **per lane**, carries each crate's **source**, and its pre-image is **versioned**
+
+The triple's third component committed to the wrong slice of reality in three ways, all found after §6a
+landed. Fixing them moved every `manifest_hash` in the ingest corpus once, deliberately.
+
+**1. It was one global crate list for every lane.** Adding `zip` for the `.npz` lane moved the
+`manifest_hash` of every parquet and csv product, because a parquet seal committed to the presence of a zip
+library that had no part in reading it. Measured before the fix: all **9** ingest-corpus fixtures across
+**3** lanes carried the **same** digest, so it could not distinguish the Parquet decoder from the CSV one.
+Now one digest per lane, keyed off the capability features that already declare each lane's crates.
+
+**2. It read only `version` from the lockfile and ignored `source`.** A decode-path crate pinned to a git
+fork at the same version was indistinguishable from the registry release — the one question the digest
+exists to answer, wrong in exactly the case where someone deliberately changed a decoder's behaviour. This
+repo pins `vortex` to a fork, so the manoeuvre is established practice rather than hypothetical; it did not
+bite only because vortex is the *encoder* and correctly absent from the decode path. Now each pin records
+`crate=version` for a registry release and `crate=version@git+<url>#<rev>` otherwise, so a fork-free build's
+per-crate shape is unchanged and only a fork reads differently.
+
+**3. It omitted most of the decode path.** The hand-maintained list named 10 crates. The parquet lane's real
+closure holds 114, of which **41** can change a decoded value — and absent from the digest were `thrift` and
+`integer-encoding` (Parquet's footer, schema and page headers are Thrift), `flatbuffers` (Arrow IPC's wire
+format), and **every page codec**: `snap`, `zstd`, `brotli`, `flate2`, `lz4_flex`. Swapping a snappy
+implementation moved nothing. `chrono-tz` was absent too — the crate this very ADR names as hazard H1's
+mechanism. The digest now covers 41 crates for parquet, 24 for arrow-ipc and 3 for csv.
+
+**Membership cannot be derived, and that was measured rather than assumed.** Four successive derivations
+over this workspace: the full lockfile closure gives 114 crates for parquet (including `syn`, `cc`,
+`windows-*`); `cargo metadata` restricted to normal dependencies with proc-macro crates dropped gives 92
+(`syn` survives as a normal dependency *of* a proc-macro crate); never descending into a proc-macro subtree
+gives 85; additionally cutting the `iana-time-zone` subtree gives 77 — still containing `hashbrown`, `bytes`
+and `slab`. `hashbrown` is a genuine runtime dependency of the Parquet reader that provably cannot change a
+decoded value, and nothing in the dependency graph says so. The question is semantic.
+
+So the **candidate set** is derived and the **membership** is declared, with a gate requiring every
+candidate to be one or the other. That inversion is the substance of the fix: an unclassified crate now
+fails the build, where a forgotten one used to narrow the sealed claim in silence. Over-claiming costs
+visible churn; under-claiming was invisible, which is how three crates' worth accumulated.
+
+**The pre-image is now versioned (`v1` → `v2`).** This digest has been redefined three times — the crate's
+own feature set came out, `CARGO_PKG_VERSION` came out, and now this — and each earlier redefinition was
+silent, so a reader comparing digests across one would read "the decoder changed" when only the derivation
+had. The pre-image therefore begins `v2;`, and any future change bumps it. Three bytes, and the boundary
+becomes a declared fact instead of an inference.
+
+**No format-version bump.** No sealed field is added, removed or renamed; `features` remains an opaque
+digest whose pre-image *composition* is explicitly not part of the format contract (it is printed by
+`tessera info`, never declared in a schema). The only artefacts affected are the 9 ingest fixtures, and the
+migration is **self-verifying**: because `content_hash` is the Merkle root over *block digests* while the
+triple lives in the manifest's generation bag, regenerating must move 9 `manifest_hash`es and **zero**
+`content_hash`es. It did exactly that — 0/9 `id`, 0/9 `content_hash`, 9/9 `manifest_hash` — so if a
+`content_hash` had moved, the corpus gate would have said so and the change would have been wrong.
+
+**A package's identity is `(name, version)`, not its name.** A lockfile legitimately resolves several
+versions of one crate, and they are different code. A name-keyed scan of the lockfile sealed
+`base64=0.21.7` for the parquet lane, which depends on `base64 0.22.1` — so a real `base64` bump in the
+Parquet reader would not have moved the digest, which is the same false sameness this amendment exists to
+remove, reproduced inside its own first fix. Following only the first same-name package also dropped every
+crate reachable solely through a second version. A crate present at two versions on one path now contributes
+**two** pins.
+
+**A source is hashed unless it is the default registry.** `crate=version` for a crates.io release (so
+adopting `source` moved nothing on existing fork-free builds), and `crate=version@<source>` for a git fork
+*or a private registry* — an internal fork published at the same version would otherwise read as the public
+release. A **path** dependency cannot be identified this way at all, because `Cargo.lock` records no path for
+one; rather than pretend otherwise, the gate refuses an in-digest path dependency, so the first one forces a
+deliberate decision.
+
+**Exclusions are enumerated, never pattern-matched.** A `*-macro`/`*-derive` name rule read tidily and was
+wrong in kind: it silently excluded crates nobody had examined, which is the failure this gate exists to end.
+`seq-macro` is the cautionary case — it generates Parquet's bit-unpacking code, so a name rule would have
+waved through something that does bear on decoding.
+
+**Known limit — system-linked codecs.** `zstd-sys`, and `flate2`'s backend, link a library whose identity the
+digest pins only by the **crate** version, not by the library actually linked. A vendored build and a
+system-library build of the same `-sys` crate version therefore seal the same digest while potentially
+decompressing differently. This is the same class of gap as the feature-unification residual below, it is not
+closed here, and ADR-0057 Gate A is what would catch a resulting value difference.
+
+**What this does not close.** A feature flipped *inside* the shared arrow tree by an unrelated crate (the
+`sql` → `arrow-array/chrono-tz` case) is still outside the digest: it records each crate's version and
+source, not its resolved features. The residual below stands, and ADR-0057 Gate A — which regenerates the
+corpus under four feature configurations including `--all-features` — remains what guards it.
+
+### Amendment (#386) — an **in-tree** decoder records a name and deliberately nothing else
+
+The `.npy` lane is the first whose decoder is *our own code*: §12 declined `ndarray-npy` because "NPY is
+a header parse plus a memcpy", so there is no third-party crate on that path to pin. That makes two of
+the triple's three components inapplicable, and the honest record omits both rather than inventing them.
+
+**The record is `{"name": "tessera/npy"}`.**
+
+- **No version.** The only version available would be *ours*, and the #477 pre-image deliberately
+  excludes our version because "our software version moves on every release, which would re-introduce
+  the corpus churn ADR-0052 §1 removed". Putting it in the triple instead would recreate that churn one
+  field over: every release would move the `manifest_hash` of every `.npy` product with nothing having
+  changed about how the bytes were read. Pinning *which* in-tree parser ran is still worth having, but
+  it needs an identity that does not move per release — a digest over the parser's own sources — which
+  is #508 rather than something the version string can solve.
+- **No feature digest.** A digest over an empty pre-image is *identical for every build*, which is a
+  false claim of sameness between builds that may differ. Absence is the same choice §6a already makes
+  for a crates.io build with no workspace lockfile.
+
+**`.npz` is a separate lane, not a flag on `.npy`.** It is the same in-tree member parser reached through
+a zip archive, so `zip` is third-party code on that path — and on no other. While the two shared one
+Cargo feature, every plain `.npy` seal committed to a zip library that had never touched its bytes, which
+is #477's defect exactly (a parquet seal committing to `zip`) one scale down. Two lanes, two records:
+`tessera/npy` names nobody, `tessera/npz` pins the archive reader.
+
+This generalises: **a lane's record names the third-party code that read the bytes, and when that set is
+empty the record says so by being short.** The gate that enforces per-lane distinctness therefore
+tolerates exactly one digest-less lane and fails on a second, because two of them would be
+indistinguishable in the seal — which is the property #477's amendment exists to protect.
+
 
 ### Findings that survive from the earlier passes
 
@@ -671,25 +786,44 @@ stays the single source of truth (ADR-0035).
 | Parquet / Arrow / Feather | table | **P1** — self-describing dtypes, no guessing |
 | NumPy `.npy` | array | **P1** — shape + dtype explicit. Fortran-order transposed to C at the door (recorded); **structured/record dtype routes to `table`**; object/pickled dtype rejects to blob (never unpickle at ingest); big-endian normalised to native |
 | NumPy `.npz` | collection | **P1** — one array product per member; warn on auto-generated `arr_N` names |
-| NIfTI `.nii[.gz]` | array | **already built** — see the gaps below |
+| NIfTI `.nii[.gz]` | array | **already built**; the gaps below are **closed** (#396) |
 | CSV / TSV | table | **P2**, inference-free (§8) |
 | TIFF / OME-TIFF | array | **cut from P1** → #394 |
 | anything else | blob | the honest fallback, signposted by `analyze` |
 
 **NIfTI is largely already answered** — `tessera/crates/tessera-ingest/src/nifti.rs` reads the sform,
 reorders it to `[z,y,x]`, converts RAS+→LPS and carries `scl_slope`/`scl_inter`, which is ADR-0030
-§1/§6 compliant. Four real gaps remain, and they are correctness bugs rather than design questions:
+§1/§6 compliant. Four real gaps remained, and they were correctness bugs rather than design questions.
+**All four are now fixed** (#396, plus a fifth found on the way — a header-driven panic on a malformed
+`vox_offset`); each carries a regression test that failed before the fix. They are recorded here as
+resolved rather than deleted, because the reasoning is what says *why* each was a bug:
 
-1. **`.nii.gz` is unsupported** — and it is the majority of NIfTI on disk. Currently fails with a
-   confusing `sizeof_hdr != 348`.
-2. **qform is ignored.** Files with `sform_code == 0` and `qform_code > 0` (older SPM/FSL outputs)
-   carry geometry in the quaternion; ignoring it silently drops the frame from an array that *has*
-   one. Precedence must be sform, else qform, else no `world_frame`.
-3. **`world_frame.space` is hard-coded `"scanner"`** — the `sform_code`/`qform_code` value
-   (scanner=1, aligned=2, talairach=3, mni=4) must map onto it, and which code was used recorded.
-4. **4-D/5-D volumes are silently truncated to 3-D**, dropping fMRI time and DWI directions — the
-   second-most-common neuroimaging shape. Either declare `[t,z,y,x]` with the time axis carried via
-   ADR-0032 `axis_referencing`, or hard-error. Silently losing volumes is not an option.
+1. ~~**`.nii.gz` is unsupported**~~ — **FIXED (#396).** It is the majority of NIfTI on disk, and it used
+   to fail with a confusing `sizeof_hdr != 348`. The gzip magic is now sniffed and decompressed
+   transparently, capped at the size the *header itself* declares (so the path is not a decompression
+   bomb) under an 8 GiB in-memory ceiling.
+2. ~~**qform is ignored.**~~ — **FIXED (#396).** Files with `sform_code == 0` and `qform_code > 0`
+   (older SPM/FSL outputs) carry geometry in the quaternion; ignoring it silently dropped the frame from
+   an array that *has* one. Precedence is now sform, else qform, else no `world_frame`; a *degenerate*
+   sform falls through to the qform rather than sealing a singular affine.
+3. ~~**`world_frame.space` is hard-coded `"scanner"`**~~ — **FIXED (#396).** The `sform_code`/`qform_code`
+   value (scanner=1, aligned=2, talairach=3, mni=4, other-template=5) now maps onto it, every result
+   staying inside the ADR-0032 pinned frame vocabulary, and an unknown code is a typed error rather than
+   a mislabelled frame. Which transform was used is reported on the decode (`NiftiImage.geometry_source`)
+   and traced — deliberately *not* sealed as a manifest field, since a new field would move the
+   `content_hash` of every NIfTI product including those whose geometry did not change.
+   The `unit` half of the same problem is **also FIXED** (#446): the `xyzt_units` spatial code
+   (1 m / 2 mm / 3 µm) now scales the affine to millimetres at the door, rather than `"mm"` being
+   hard-coded over micron data — a silent 1000× geometry error on preclinical/µCT volumes. Normalising
+   rather than carrying the source unit is what ADR-0030 §1 and ADR-0032's `CANONICAL_UNITS` require.
+4. ~~**4-D/5-D volumes are silently truncated to 3-D**~~ — **FIXED (#396)**, by the better of the two
+   options: the array is declared `[t,z,y,x]` (5-D `[u,t,z,y,x]` — NIfTI's own axis letters reversed) and
+   **every** volume is read, with the `t` axis carrying ADR-0032 `time_regular` when the header names both
+   a step (`pixdim[4]`) and a time unit (`xyzt_units`). A DWI direction stack names neither, so that axis
+   stays a bare index (feature-by-presence) rather than being given a guessed cadence — no new axis
+   convention was invented here. The declared rank keeps a higher axis only while it has more than one
+   element, so a `ndim = 4, dim[4] = 1` file stays the 3-D volume it is and its `content_hash` does not
+   move.
 
 ## §12 — Dependency and feature layout: gate the readers, but not because of bloat
 
@@ -871,3 +1005,281 @@ dependencies is out of scope here but is the larger prize, and is named for a fu
   the ADR-number collision with the shipped ADR-0052 versioning-and-release was resolved by
   renumbering to the next free slot). ADR-0056 §6a's recipe-bag home is now realisable against a
   trunk-visible `Producer`/`Generation`.
+
+---
+
+## §12a — Amended 2026-09-28 by [#386](https://github.com/vig-os/tessera/issues/386): what P1 actually decided
+
+The table half of P1 is built (Parquet · Arrow IPC · CSV). Building it settled six things this ADR left
+open, ambiguous, or decided differently, and found one limitation nobody had named. Each is recorded
+here rather than in a commit message, because each is a decision a future reader will otherwise
+re-litigate.
+
+**Status note.** This ADR stays **Proposed**. P1's array half (`.npy`/`.npz`), P2 (`analyze`,
+`verify --require-classified`) and P3 (the §11 NIfTI correctness gaps) are unbuilt, and marking the
+record Accepted while most of its landing plan is outstanding would misstate what has been discharged.
+
+### (a) CSV ships in P1 with an explicit schema. §8 is revised, not overridden
+
+§8 deferred CSV and gave the right reason: *"sample-based inference is anti-deterministic by
+construction — the inferred schema depends on which rows landed in the sample, so the same file can seal
+to two different products."* That argument is against **inference**, not against CSV, and #386 removes
+the inference rather than the format:
+
+- `--column NAME:DTYPE` (repeatable) or nothing. No mixed mode, no fallback, no sampling.
+- Declarations are **positional and cross-checked against the header row** — a mismatch is a hard error,
+  because the failure it prevents is silent: declare two columns in the wrong order and every value
+  parses fine, lands in the wrong column, and seals.
+- §8's verbatim refusal (with the `duckdb COPY` conversion path) is what you get with no declarations.
+
+**Hazards H3 and H8 are closed by construction, and that is the whole licence for this change.** Both
+were written with C's `strtod` in mind. Rust's `str::parse::<f64>()` is **correctly rounded** (the
+Eisel-Lemire/Clinger path in `core::num::dec2flt` returns the nearest representable double for every
+input, with no FMA-sensitive fast path to diverge on) and **locale-independent** (the grammar is fixed by
+the language, so `LC_NUMERIC=de_DE` cannot make `1,5` parse as 1.5 — it fails to parse, which is the
+honest outcome). The CSV lane therefore uses the `csv` crate for RFC-4180 record splitting only and
+parses every value with std. A test sets a comma-decimal locale and proves a German `LC_ALL` changes not
+one bit; a corpus fixture pins the subnormal and halfway-rounding spellings so a parser swap moves a
+golden rather than passing quietly.
+
+The seal records `csv_explicit_schema`, not `csv_inferred_schema`. **Optional inference stays deferred,
+and is now closer to "never" than to P2**: its output is reproducible only if the sample is the whole
+file, at which point it is not inference.
+
+### (b) `--as` is dropped. The verb is the override
+
+§4's synopsis shows both `--from` and `--as` on `ingest table` / `ingest array`. Once the verb *names the
+primitive*, `--as` is redundant surface: `tessera ingest table x.npy` (a structured/record NPY) and
+`tessera ingest array x.parquet` (a Parquet of flattened volumes) already **are** §1.2's override for a
+source that misrepresents its shape. Shipping both would mean documenting their interaction and fielding
+`ingest table --as array` forever. One flag fewer, no capability lost.
+
+### (c) The §7 laundering rule lands in P1, contradicting the phase table
+
+The landing plan files the laundering rule under **P2**. §7 itself says why that is wrong:
+*"Retrofitting this after the first such artifact ships would leave those seals permanently ambiguous."*
+Since P1 is what ships the first such artifact, the rule lands with it.
+
+It is enforced in `spec::validate`, so it fires **before a byte is read** (a test points it at a
+nonexistent file and expects the schema rejection, not an I/O error) — and `engine::run`'s validation was
+hoisted above its first filesystem touch, so a rejected spec no longer leaves even an empty output
+directory. `--classification-ack` is **not** built: §7 pins its mechanism to ADR-0037 keys but explicitly
+leaves its ergonomics undesigned, so the error names the constraint rather than offering a flag that does
+not exist.
+
+**One exemption, stated so it is not mistaken for an oversight: `raw` is not subject to the rule yet.**
+§4 says `raw` "was always a headerless `array`", but it still produces a `recon` product, and the shipped
+`docs/examples/migrate-petct-study.toml` declares `format = "raw"` with `schema = "recon"`. Enforcing the
+rule on it would break a documented workflow and move existing goldens — that belongs to §4's vendor-verb
+collapse ([#456](https://github.com/vig-os/tessera/issues/456)), which is a separate mechanical change.
+
+### (d) Two boundary rules the §2 table did not state, both load-bearing
+
+The landing plan asks for *"the §2 boundary normalising nullable-wrapping, column order and dtype width,
+added to the §5 hazard table"*. They are hazards **H10** and **H11**:
+
+| # | Hazard | Likelihood × radius | Rule |
+| --- | --- | --- | --- |
+| **H10** | **Nullability declared vs. present.** pyarrow, polars and DuckDB disagree about whether a column with no nulls is *declared* nullable, and about how a validity buffer is padded | high × fatal | wrap in `ColumnData::Nullable` **iff the column actually contains a null** — never on the strength of the schema's declaration |
+| **H11** | **Column order and dtype width.** Sorting columns, or widening an `Int8` to the machine word, would be a re-encode editorialising | low × fatal | preserve source order and source width exactly (`Int8` → `i1`) |
+
+H10 is the one that matters, and it is what makes the three-producer fixture passable at all: honouring a
+nullability *declaration* would seal one logical table three different ways. What is given up is the
+producer's "could have been null but wasn't" — schema nuance, not a value, and §2 says ingest imports the
+logical values.
+
+### (e) A nullable `str` / `b1` column is currently unrepresentable, and is rejected at the door
+
+Not a format decision — an encoder limitation nobody had written down. `tessera-io`'s
+`validate_nullable` carries a validity mask for the **fixed-width numeric dtypes only**, so a nullable
+string or boolean column cannot be encoded. Left alone, an ingest of a Parquet with a nullable string
+column would fail deep inside the codec with a message naming neither the column nor anything to do about
+it.
+
+It is therefore rejected at the canonicalisation boundary, which knows the column's name and can offer
+`--exclude`, filling the nulls in the source, or `ingest blob`. Extending the mask to `str`/`b1` is an
+encoder change, tracked as [#457](https://github.com/vig-os/tessera/issues/457); until then this is a
+documented rejection rather than a surprise.
+
+### (f) The arrow **sub-crates**, not the `arrow` meta-crate
+
+§12's sketch is `ingest-parquet = ["dep:parquet", "dep:arrow"]`. Measured against the actual lockfile, the
+`arrow` meta-crate reaches this tree **only via datafusion**, under `tessera-cli`'s optional `sql` feature
+— while `arrow-array` / `-buffer` / `-schema` are already in the *default* graph via Vortex. Taking the
+meta-crate would newly pull `arrow-cast` / `-ord` / `-string` / `-row` / `-json` into every build,
+including the `arrow-array/chrono-tz` surface ADR-0057 §5 identified as **H1's door**.
+
+So the dependency is `arrow-array` + `arrow-buffer` + `arrow-schema` + `arrow-ipc` + `parquet`, all
+`=`-pinned at 58.3.0. `simdutf8` is dropped from parquet's defaults (**H7**): UTF-8 *validation* is a
+yes/no answer that cannot change a value, so turning it off costs nothing and removes a dispatch-dependent
+path from upstream of the seal. The compression codecs are kept in full — a scientist's Parquet is
+snappy/gzip/zstd/brotli/lz4-compressed in the wild, and refusing to read one is a wall, not a safety
+property, since ingest re-encodes and the source codec never reaches our bytes. Net cost: **ten** new
+crates, single arrow tree.
+
+### (g) The feature digest's pre-image, and the residual §6a could not close
+
+§6a specifies "a digest over the resolved decode-relevant features" without saying how it is derived. A
+build script cannot see the unified feature graph of its own dependencies, and shelling out to
+`cargo tree` from one is not something to ship. The derivation is:
+
+> `blake3(` `pins=<each decode-path crate=version, from the workspace lockfile>` `)`
+
+computed at **runtime** over a string `build.rs` emits, because hashing in the build script would need a
+`[build-dependencies]` entry and adding one is itself a Gate B event.
+
+**Two things were in an earlier derivation and had to come out.** Both are worth recording, because both
+looked like straightforward readings of §6a and both were wrong in the same way — they made
+`manifest_hash` move for a reason that was not a difference in how the file was interpreted, and
+`manifest_hash` is the format's *version identity*.
+
+- **This crate's resolved `CARGO_FEATURE_*` set.** The obvious reading of "resolved decode-relevant
+  features", and the wrong one: whether the *CSV* lane was compiled in has nothing to do with how a
+  *Parquet* file was read. A lane that is off did not touch the bytes. Including it meant two builds of
+  one version sealed different `manifest_hash`es for an identical input — i.e. the version identity of a
+  product became a function of how the reader's binary happened to be compiled. It also missed the thing
+  §6a actually cares about (a feature flip *inside* arrow), so it was contributing precisely the wrong
+  information.
+- **This crate's own `CARGO_PKG_VERSION`.** Added to close the gap §6a leaves open — *"`tessera-ingest`'s
+  own canonicalisation code is attributed by nothing"*. But the workspace version moves on every release,
+  so sealing it would make **every release a conformance-corpus regeneration**, re-introducing exactly the
+  churn ADR-0052 §1 / #336 removed by stamping the *format* version rather than the software version. The
+  gap stays open rather than closed at that price.
+
+**How it was found, because the mechanism is the point.** Not by review — by the `parquet-no-csv`
+configuration in ADR-0057 §5's declared-count table. Declaring a count for a configuration forces someone
+to *run* that configuration, and running it showed `content_hash` matching while `manifest_hash` moved.
+That is the anti-vacuity guard doing a job nobody designed it for, and it is the argument for declaring
+counts for configurations that are reachable rather than only for the one CI happens to build. Gate A now
+runs that configuration too, via the corpus test (which compares field-wise over the fixtures a reduced
+build can run, so a subset is checkable where a byte-comparison is not).
+
+**The residual, stated without varnish:** this pre-image does **not** capture a feature flipped inside the
+shared arrow tree by an unrelated crate — the `sql` → `chrono-tz` case itself. Two things discharge that,
+and neither is the digest:
+
+1. **We never call arrow's timezone machinery.** H1's rule is "strip tz, take raw ticks". An Arrow
+   `Timestamp(_, Some(tz))` already stores UTC-normalised ticks with the zone as a display annotation, so
+   the type map reads the raw `i64` buffer and no tzdb is consulted on any build. The source zone is
+   sealed in a `tz_to_utc{from}` transform record rather than dropped.
+2. **Gate A compares goldens across four feature configurations, `sql` among them**, and
+   `ingest_parquet_scalars` carries a `timestamp(us, "America/New_York")` column precisely so that door is
+   watched. "By construction" is a claim; Gate A is the test of it.
+
+The pre-image is not sealed (the digest is, per §6a) but `tessera info --json` prints it verbatim, so the
+sealed digest is **checkable** rather than merely observable — a reader holding a `.tsra` and a matching
+`tessera info` can confirm the correspondence instead of taking it on faith.
+
+### (h) Three defects adversarial review found, and what they say about the §2 equivalences
+
+A fresh-context review of the type map found a real one, worth recording because the *class* is the
+interesting part.
+
+Three lanes — dictionary, run-end and fixed-size-list — reduce to one mechanism: a logical→physical index
+map plus a values array. They were implemented that way, sharing a `gather` helper, which is what §2's
+equivalence claims rest on ("a `Dictionary<Int32, Utf8>` and a plain `Utf8` must produce byte-identical
+columns"). But each lane derived its index map from **its own** level of nullity — a null dictionary *key*,
+a null list *slot* — and only the run-end lane also consulted the values array's validity. So a dictionary
+whose *values* contained a null decoded that row to a **present zero**: non-nullable, no transform record,
+a corrupt product that verifies.
+
+It also inverted the §2 justification it was supposed to serve. The plain nullable-`str` column is
+*rejected* (§12a(e)), so a dictionary-encoded column with a null value silently sealed wrong data where the
+plain equivalent refused — the producer's choice to dictionary-encode changing not just the bytes but
+whether the data was accepted at all.
+
+The fix folds the values array's own validity into the index map **inside** `gather`, so all three lanes are
+equivalent *by construction* rather than by three authors remembering the same rule, and the redundant
+check came out of the run-end lane. The lesson generalises past this bug: **a shared helper makes lanes
+equivalent only for the decisions actually taken inside it.** Two of the three lanes had been reading as
+"obviously the same" for a decision each was in fact taking separately.
+
+**The same class, one level up: a null STRUCT row.** A second review found the flatten arm walking each
+child directly, without applying the *struct's own* validity. Arrow permits perfectly valid child data
+underneath a null parent row — `pyarrow.StructArray.from_arrays(…, mask=…)` writes exactly that, and it
+survives an Arrow IPC round-trip — so a row the source says is **absent** sealed as present child values,
+unmasked and unrecorded. §3 calls a struct flatten a *renaming*, and a renaming must not change which rows
+exist. Fixed by intersecting the parent's validity into each leaf after the recursion, so a nested
+struct's absence reaches the leaf through however many levels.
+
+Two independent reviews finding the same class of bug at two different levels is the useful signal here,
+and it sharpens the lesson: **nested nullability composes, and every level that can be absent must be
+asked.** The type map now has exactly one place that composition happens per level, and tests at each.
+
+**The documented rejection that did not exist.** §6a says of the decoder triple: *"Nobody types this
+string. It is derived, or it is not written."* This ADR's own module documentation claimed the engine
+rejected a hand-written `ingest_decoder`, and nothing did. On a generic lane it was merely overwritten; on
+a **vendor** backend — which writes no decoder record at all — a spec-supplied one sealed **unchanged**,
+indistinguishable from a derived triple to every later reader. That is a sealed, signed, unfalsifiable
+claim about how a file was interpreted: precisely what §6a rejected a profile id for, reached by a shorter
+road. Now rejected in `spec::validate` for **every** backend, with the vendor case as the one with teeth.
+
+Two further findings touched sealed bytes and are worth naming because neither is about ingest logic at
+all. `Column.scale` for a decimal column was computed with `10f64.powi(-s)` — `powi` is documented as
+permitted to differ across platforms and optimisation levels, and that value rides inside `manifest_hash`,
+so it is hazard **H3**'s family (platform-sensitive arithmetic) arriving through *our* code rather than a
+decoder's; it is now a table of exact literals. And the feature digest's pre-image degenerated to the bare
+string `pins=` on a build with no workspace lockfile, so **every** such build would seal an identical
+digest — a false claim of sameness between builds that may have resolved entirely different decoders. It
+is now omitted rather than defaulted, the same choice `version` already makes.
+
+The same review also found that the `ingest_parquet_nulls` fixture could not test the hazard it claimed.
+H5 is *producer garbage under a null*, and neither format can express it — Parquet encodes absence in its
+definition levels and stores no value, and a CSV null is an empty field. So H5 came off `LIVE_HAZARDS`
+with the reason stated, the fixture was relabelled **H10** (nullability-by-presence, which a Parquet
+round-trip genuinely does pin) and given a declared-nullable-but-null-free column so the claim is real, and
+H5's coverage is the two unit tests that construct a values buffer plus a separate mask — the only shape in
+which the hazard can occur, and only reachable at the in-memory arrow boundary. A hazard label on a fixture
+that cannot fail for that reason is worse than an omission: `every_live_hazard_has_a_fixture` would then
+certify a blind spot.
+
+### (i) The array lane, and the one place the primitive depends on the file
+
+`.npy` and `.npz` complete P1's §11 rows. Three notes:
+
+- **Byte order is the clean lane, Fortran order is the recorded one**, and the distinction is forced by
+  §5's own fixture. H6 asks that "a `>f8` file and its `<f8` twin must seal identically" — so the
+  byte-swap cannot be recorded, because a transform record would make the twins differ in the seal.
+  A Fortran reorder *is* recorded, because it rewrites the buffer and a reader comparing back to the
+  source needs to know. The buffer is rewritten rather than the shape reversed: reversing the shape would
+  make the **axes** wrong instead of the bytes, which reads back transposed with no record of why.
+- **A structured dtype is the one case where the primitive depends on the FILE, not the format.** §1 says
+  the shape of the data decides, and a NumPy record dtype is rows of typed fields — so `ingest array`
+  seals a `table`. The spec declares `array` and `validate` accepts `table` for this backend alone,
+  because an operator cannot know their own dtype without opening the file, and the CLI reports the
+  primitive it *sealed* rather than the one that was asked for.
+- **A `.npz` is a collection, keyed on the source kind rather than the member count.** §11 makes it one
+  array product per member (§10's shape rule one level up: archive members are independent arrays, not
+  slices of one grid). The expansion names each member explicitly in the spec, so the spec stays an
+  honest archival record. And a one-member archive is still a collection — branching on the count would
+  make the output a file or a directory depending on the data.
+
+The whole array lane costs **zero new dependencies**: §12's "NPY is a header parse plus a memcpy" holds,
+and the `.npz` reader is the `zip` crate already present for the `.tsra` container. Choosing its features
+turned up something worth recording: **`zip` was missing from ADR-0057 Gate B's snapshot list**, which is
+exactly the blind spot §5's own note warns about — the crate that frames every sealed byte was unwatched.
+Adding it immediately paid for itself, by showing that zip's umbrella `deflate` feature drags in the
+zopfli **compressor** for a capability nothing uses (we only read). `deflate-flate2` + `flate2` gets the
+decompressor alone.
+
+> **Amended (2026-10-17, #588):** zip ≥ 9 drops the separate `flate2` feature, and its `flate2` dependency
+> no longer names an inflate backend. The decompressor-only choice is now `deflate-flate2-zlib-rs`, whose
+> `zlib-rs` backend was already in-tree via parquet. Still no compressor, and no new crate.
+
+### What the corpus pins, and one thing it deliberately does not
+
+`corpus/ingest-corpus.json` carries nine fixtures with a **declared per-configuration count** checked
+before any hash comparison (ADR-0057 §5's anti-vacuity guard — this repo has shipped a zero-case green
+before) and a test asserting every live hazard has a fixture. Source files are generated, never committed,
+as §5 requires.
+
+The fixtures go through the ingest **seam** rather than through `engine::run`, and that is a determinism
+requirement rather than a shortcut: `engine::run` seals an `ingested_via_spec` edge whose digest is over
+the parsed spec, and a spec names its `input` **path** — which for a generated fixture is a temp directory
+that differs every run. Sealing it would make `manifest_hash` unreproducible and §6a's value-preservation
+check unenforceable. The spec-engine path is covered by its own tests instead.
+
+§5's `ingest_parquet_producers` fixture is built for real, as a hermetic flake check: **pyarrow, polars and
+DuckDB** write the same logical table, and all three ingest to one `content_hash` while their
+`manifest_hash`es differ (the `ingested_from` edge pins the source bytes, which genuinely differ). Both
+directions are asserted, so a bug that made every hash constant would fail rather than look perfect.

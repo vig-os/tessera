@@ -10,7 +10,7 @@
 //! ignores it. The block's `spec` records the index `root` (the sub-block Merkle root, ADR-0028 §1) and
 //! its entry count for self-description.
 
-use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::block::{BlockKind, BlockName, BlockRef};
 use tessera_core::chunk_index::ChunkIndex;
 use tessera_core::hash::digest;
 use tessera_core::Result;
@@ -28,7 +28,7 @@ pub fn cidx_name(data_name: &str) -> String {
 /// pack. Add the returned `BlockRef` to the product alongside the data block; the index's bytes roll
 /// into the content hash like any block.
 pub fn chunk_index_block(data_name: &str, index: &ChunkIndex) -> Result<(BlockRef, BlockPayload)> {
-    let name = cidx_name(data_name);
+    let name = BlockName::new(cidx_name(data_name))?;
     let payload = index.to_bytes()?;
     let dg = digest(&payload);
     let block_ref = BlockRef {
@@ -40,6 +40,11 @@ pub fn chunk_index_block(data_name: &str, index: &ChunkIndex) -> Result<(BlockRe
             // indexes (via table_chunk_index / array_chunk_index), so it is `class: "derived"` with a
             // versioned `recipe`. A consumer may drop + rebuild it; it is not canonical source data.
             "class": "derived",
+            // Still @1 after #632, which took values under a NULL out of the table row-group digest.
+            // @1 was always a pure function of the indexed block's logical content (ADR-0028 §4), and
+            // the block never stores those bytes, so a root that moved with them was a defect, not a
+            // different recipe. Every canonical producer (all ingest, ADR-0056 H5) is byte-unchanged.
+            // The @2 bump is reserved for ADR-0059's schema event (§11 step 1: M1-M3 + new stats).
             "recipe": "chunk_index@1",
             "indexes": data_name,        // the data block this is the chunk-index of
             "entries": index.len(),       // number of sub-block entries

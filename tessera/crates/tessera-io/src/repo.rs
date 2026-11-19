@@ -18,12 +18,13 @@
 //! This module is the store + `commit`/`log` primitives; higher-level verbs (`diff`/`publish`/`seal`)
 //! and the `evolve` delta builder layer on top.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tessera_core::block::{check_unique_names, BlockName, BlockRef};
 use tessera_core::{Error, Manifest, Result};
 
 use crate::BlockPayload;
@@ -138,12 +139,16 @@ impl Repository {
 
     /// Store a sealed manifest as an object **addressed by its `manifest_hash`** (the seal, not a
     /// byte-digest — so the address attests the whole product). Returns the `manifest_hash`.
+    ///
+    /// A manifest listing a block name twice is refused with [`Error::DuplicateBlockName`] before
+    /// anything is written (ADR-0063 §2a): [`get_manifest`](Self::get_manifest) would refuse it.
     pub fn put_manifest(&self, m: &Manifest) -> Result<String> {
         let mh = m
             .manifest_hash
             .clone()
             .ok_or_else(|| Error::Invalid("put_manifest: manifest is not sealed".into()))?;
-        self.write_raw(&mh, m.to_json()?.as_bytes())?;
+        check_unique_names(m.blocks.iter().map(|b| &b.name))?;
+        self.write_raw(&mh, m.to_sealed_json()?.as_bytes())?;
         Ok(mh)
     }
 
@@ -238,6 +243,10 @@ impl Repository {
     ///
     /// A metadata-only version supplies no new payloads: every block is already stored from the
     /// parent, so only the manifest object is written.
+    ///
+    /// A manifest listing a block name twice is refused with [`Error::DuplicateBlockName`] before
+    /// any object is stored or the ref moves (ADR-0063 §2a), so each payload resolves to exactly
+    /// one block reference.
     pub fn commit(
         &self,
         lineage: &str,
@@ -248,19 +257,19 @@ impl Repository {
             .manifest_hash
             .clone()
             .ok_or_else(|| Error::Invalid("commit: manifest is not sealed".into()))?;
+        check_unique_names(manifest.blocks.iter().map(|b| &b.name))?;
+        // Names are unique (just checked), so this map holds every block, one entry per name.
+        let by_name: BTreeMap<&BlockName, &BlockRef> =
+            manifest.blocks.iter().map(|b| (&b.name, b)).collect();
 
         // 1. Store supplied payloads, content-addressed (skip any already present = the dedup win).
         for p in payloads {
-            let br = manifest
-                .blocks
-                .iter()
-                .find(|b| b.name == p.name)
-                .ok_or_else(|| {
-                    Error::Invalid(format!(
-                        "commit: payload '{}' has no matching block in the manifest",
-                        p.name
-                    ))
-                })?;
+            let br = by_name.get(&p.name).copied().ok_or_else(|| {
+                Error::Invalid(format!(
+                    "commit: payload '{}' has no matching block in the manifest",
+                    p.name
+                ))
+            })?;
             let digest = br.digest.as_deref().ok_or_else(|| {
                 Error::Invalid(format!("commit: block '{}' has no digest", br.name))
             })?;
@@ -442,6 +451,9 @@ mod tests {
             }],
             rows: 3,
             row_index: None,
+            partition: None,
+            edition: None,
+            codec_profile: None,
         };
         let data = vec![("x".into(), ColumnData::U32(vec![1, 2, 3]))];
         let (block_ref, payload) = table_block("events", &spec, &data).unwrap();
@@ -507,6 +519,45 @@ mod tests {
         assert_eq!(log[0].manifest_hash, mh1);
         assert_eq!(log[1].manifest_hash, mh2);
         assert_eq!(log[1].parent.as_deref(), Some(mh1.as_str()));
+    }
+
+    /// #734: a hand-built manifest listing a block name twice (properly re-sealed over that list) is
+    /// refused by `commit` and `put_manifest` with the typed error, before anything is stored: the
+    /// lineage tip never moves to an object `get_manifest` would refuse.
+    #[test]
+    fn commit_and_put_manifest_refuse_a_block_name_listed_twice() {
+        let dup = |e: &Error| matches!(e, Error::DuplicateBlockName { name } if name == "events");
+        // The second `events` carries the block's own digest (before the fix the commit stored it
+        // and moved the tip), or a foreign one.
+        for foreign in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = Repository::init(dir.path()).unwrap();
+            let (mut m, p) = sealed_with(1);
+            let mut second = m.blocks[0].clone();
+            if foreign {
+                second.digest = Some(tessera_core::hash::digest(b"NOT THE BYTES"));
+            }
+            m.blocks.push(second);
+            m.content_hash = Some(m.recompute_content_hash().unwrap());
+            m.manifest_hash = Some(m.compute_manifest_hash().unwrap());
+
+            let e = repo.commit("study", &m, &p).unwrap_err();
+            assert!(dup(&e), "foreign={foreign}: {e}");
+            assert_eq!(
+                repo.read_ref("study").unwrap(),
+                None,
+                "the tip must not move"
+            );
+            assert_eq!(
+                count_objects(dir.path()),
+                0,
+                "a refused commit stores nothing"
+            );
+
+            let e = repo.put_manifest(&m).unwrap_err();
+            assert!(dup(&e), "foreign={foreign}: {e}");
+            assert_eq!(count_objects(dir.path()), 0);
+        }
     }
 
     #[test]

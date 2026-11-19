@@ -9,20 +9,64 @@ seal, and verification logic.
 
 ## Python (`pyo3`, abi3)
 
-`import tessera` gives a `Reader` (open / manifest / blocks / `read_array` → NumPy / `read_array_subset`
-for an ROI / `read_table` / `read_table_column` / `verify`) and a `Builder` (`add_array` / `add_table` /
-`set_field` / `add_source` / `pack`), with a typed `TesseraError`.
+`import tessera` gives `tessera.open()` → a `Reader` (manifest / blocks / `array` → NumPy / `array_roi`
+for an ROI / `table` → polars / `table_arrow` / `table_dict` / `column` / `verify`) and a `Builder`
+(`add_array` / `add_table` / `set_field` / `add_source`, whose `content_hash=` pins the parent's seal /
+`with_producer` / `with_generation` / `pack`), with a typed `TesseraError`.
+
+Tables are read by their **logical name** (ADR-0064). `table`, `table_arrow`, `table_dict` and `column` take a
+name that is one block, a partitioned table (`pairs` over the leaves `pairs/0000`, `pairs/0001`, …, joined in
+leaf order) or a legacy `events_NNNN` group, the same name `tessera read` takes; one leaf still reads by its full
+name. `logical_column` is the same read as `column`, kept for existing callers. A partitioned table is
+materialised whole by `table*`; `column` reads only that column's segments of each leaf. `read_block`, `array`
+and `array_roi` take one block, and a name that is not one (a node such as `pairs`, or a name nothing answers
+to) raises `NotABlockError`, a subclass of `TesseraError`. A name that is not a table, or a partitioned table
+that is invalid (a gap, a foreign child, leaves out of order, ...), raises `TesseraError` naming the reason.
 
 ```python
-import tessera
-r = tessera.Reader("study.tsra")
-r.verify()                      # raises TesseraError on tamper
-vol = r.read_array("volume")    # -> numpy.ndarray, native dtype
-roi = r.read_array_subset("volume", [(0, 32), (0, 32), (0, 32)])   # ROI, only the chunks it needs
+{{#include ../../../tessera/crates/tessera-py/tests/write_example.py:logical}}
 ```
 
-*Referenced check:* the `tessera-py-import` flake check does a full NumPy **write → read → verify**
-round-trip over the corpus (numpy + polars + pyarrow).
+Reading:
+
+```python
+{{#include ../../../tessera/crates/tessera-py/tests/write_example.py:read}}
+```
+
+Writing — the half that used to be advertised but never shown:
+
+```python
+{{#include ../../../tessera/crates/tessera-py/tests/write_example.py:array}}
+```
+
+Provenance — who generated the product (`with_producer`), how (`with_generation`), and which sealed parent
+it derives from (`add_source(..., content_hash=)`). See [Provenance, signing & trust](./provenance-signing.md)
+for what each record means and how `tessera provenance` walks the chain:
+
+```python
+{{#include ../../../tessera/crates/tessera-py/tests/write_example.py:provenance}}
+```
+
+`with_generation` takes a `config` dict whose keys are `str` at every level and whose values are JSON
+(`str`, 64-bit `int`, finite `float`, `bool`, `None`, `list`/`tuple`, `dict`). Anything else raises
+`TypeError` naming the key, rather than being coerced, and that includes a `str` with a lone surrogate. As with
+`json.dumps`, a container that contains itself raises `ValueError`. A config may nest at most 125 levels (dicts
+and lists alike, counting `config` itself), the most the manifest reader parses back; deeper raises
+`TesseraError` instead of sealing a product that can't be opened. Read back through `manifest()`, every level of
+the config is key-sorted, the canonical order the seal hashes. Its `config_ref=` digest must name a config block
+carried in the same file, which the Python `Builder` cannot add yet
+([#575](https://github.com/vig-os/tessera/issues/575)), so from Python use `config`. A product's schema
+can require a recipe (`requires_generation`, ADR-0058 §3), but no built-in schema does today, and the Python
+`Builder` cannot embed a custom one.
+
+The [ingest cookbook](./ingest-cookbook.md#2-writing-from-python) has the table and string-column cases,
+and the dtype asymmetries worth knowing.
+
+*Every snippet above is `{{#include}}`d from `tessera/crates/tessera-py/tests/write_example.py`, which the
+`tessera-py-import` and `tessera-wheel-import` flake checks execute on every build — so a call that stopped
+working could not reach this page.* (The previous version of this section documented
+`tessera.Reader("study.tsra")` and `read_array`/`read_array_subset`/`read_table`/`read_table_column`, none
+of which exist — exactly the drift that including from a tested file prevents.)
 
 ## WASM (`wasm-bindgen`)
 
