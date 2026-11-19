@@ -74,7 +74,7 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
    With the check, one seal has one byte string and one meaning.
 5. **Collections** follow the same rules (`collection.json`, `collection.seal`).
 6. **Logical `id`** keeps `blake3(JCS(id_inputs))`. JCS is compositional, so those bytes appear verbatim inside the
-   stored manifest (13/13), and hashing the slice gives the same `id`.
+   stored manifest (13/13 products, 12 distinct manifests), and hashing the slice gives the same `id`.
 7. **Numbers.** I-JSON stays at every writer door. 64-bit values are decimal strings whose type the schema
    declares (#895, the JSON-LD `xsd:long` pattern); an untyped integer beyond ±(2^53−1) in an opaque object is
    refused with the advice to write a string. Readers keep the I-JSON check too: rule 4's byte comparison alone
@@ -89,11 +89,22 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
 10. **No migration verb** (owner, 2026-11-19). There are no real products to keep, so there is no `tessera migrate`
     and no second reading path. A reader refuses a product written before this ADR (a pretty `manifest.json`
     with an in-band `manifest_hash`, no `manifest.seal`) with an error that names the format it found (the
-    `tessera_version` the manifest declares and the layout evidence) and the format the reader requires. Because
-    `TESSERA_VERSION` is deliberately fixed at `"0.0.0"` (the fixed-version policy is ADR-0052 §1; ADR-0042 fixes
-    the stamp format; the value is stamped into the producer and therefore sealed), the layout evidence, not a
-    version bump, tells the two formats apart. The corpus is re-packed in the cutover; anyone with an alpha product
-    re-ingests it.
+    `tessera_version` the manifest declares and the layout evidence) and the format the reader requires. The corpus
+    is re-packed in the cutover; anyone with an alpha product re-ingests it.
+
+    **The format-version string does not change at this break** (decided here). Today `TESSERA_VERSION` is
+    `"0.0.0"` (described by ADR-0052's Update of 2026-07-03: the sealed `producer` stamps the format version, and
+    both versions are `0.0.0`). ADR-0066 leaves it at `"0.0.0"` for three reasons. (a) The value is sealed inside
+    `producer`: a bump would move every `manifest_hash` and lose step 4's proof that the mechanism change kept all
+    seals, which is the evidence that A′ changed nothing but where the seal lives. (b) ADR-0052 §1 keeps the format
+    deliberately unfrozen before 1.0 (SPEC self-designates pre-1.0), so a break needs no version signal to be
+    legitimate; the version is a freeze marker, to be set when the format is frozen. (c) A reader cannot use the
+    string to tell the layouts apart anyway: the alpha and the A′ products both declare `"0.0.0"`. The layout
+    (`manifest.seal` present, no in-band `manifest_hash`, bytes equal to their JCS form) is what the reader checks,
+    so the refusal names the declared `tessera_version` and the missing or extra members.
+
+    If the owner wants a visible version at this break, that is a separate decision that moves every seal and
+    belongs in step 8's regeneration.
 11. **The break ships alone, before the bridge work** (owner, 2026-11-19). It is its own alpha and lands before the
     C ABI bridge (#454 → #811, ADR-0065), so the bridge is built once against the final format. Two further format
     changes ride the same alpha because each moves hashes anyway: #720 (rule 12) and #828 (rule 13).
@@ -127,19 +138,20 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
   and the repository's `objects/<manifest_hash>` holds exactly the bytes that hash to its name (ADR-0036's content
   addressing becomes literal).
 - No new dependency. Stock JCS libraries reproduce the stored bytes exactly (Python `jcs` and JS `canonicalize` on
-  13/13 manifests and 200,000/200,000 doubles).
+  13/13 products (12 distinct manifests) and 200,000/200,000 doubles).
 - A third-party writer that emits "sorted, compact JSON" without a JCS library is refused (Python's `json.dumps`
   writes `1.0`, `1e-07`, `-0.0`). That is a loud failure at the writer, never a second seal.
 - The stored manifest is one line (27,103 B for the 13 products, 12 distinct manifests, vs 40,804 B pretty).
 - Every reader (Rust, the Python reference reader, `tessera-wasm`) must run the canonical check and I-JSON; a
   reader that only hashes would accept a sealed respelling, one without I-JSON a rounded integer. The seal cases
   must carry both.
-- **Seals move, in two steps.** The A′ mechanism keeps every existing seal (13/13, proven in the cutover step before
-  anything else changes). #720 then moves `content_hash` of every product that carries a derived-sidecar block, and
-  #828 moves the block digests, hence `content_hash` and `manifest_hash`, of every table product whose codec choice
-  changes. Both land in the same alpha, so no release carries an intermediate format, and the corpus is
-  regenerated once, after both. Signatures made before the alpha stop verifying against the new seals; with no
-  real products that is accepted.
+- **Seals move, in steps.** The A′ mechanism keeps every existing seal (13/13 products, 12 distinct manifests,
+  proven in the cutover step on its own head). #895 can move the seals of products that embed a built-in schema,
+  #720 moves `content_hash` of every product that carries a derived-sidecar block, and #828 moves the block digests,
+  hence `content_hash` and `manifest_hash`, of every table product whose codec choice changes. Each such step
+  regenerates the goldens it moves in its own PR. All land in the same alpha, so no release carries an intermediate
+  format. Signatures made before the alpha stop verifying against the new seals; with no real products that is
+  accepted.
 - **No upgrade path.** Alpha products are refused, not converted (rule 10). The refusal names both formats so the
   cause is clear.
 - The bridge (#454 → #811) waits for this alpha (rule 11).
@@ -163,8 +175,13 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
 
 ## Implementation plan
 
-Ordered; the architect files one issue per step as a sub-issue of #897. Steps 1–3 prepare the break without moving
-a seal; step 4 is the A′ cutover; steps 5–8 ride the same alpha; step 9 cuts it. Per rule 11 nothing from the
+Ordered; the architect files one issue per step as a sub-issue of #897. Steps 1–3 prepare the break (step 1
+can move the seals of products that embed a built-in schema; steps 2 and 3 move none); step 4 is the A′ cutover;
+steps 5–7 ride the same alpha; step 8 is the final cross-check; step 9 cuts it.
+
+**Goldens between steps (rule).** Every step's PR keeps CI green on its own. A step that moves a seal regenerates
+the goldens it moves in that same PR and explains each one (which hash, which product, why). Step 8 is then the final
+cross-check of the whole corpus against the three causes, not the only regeneration. Per rule 11 nothing from the
 bridge work (#454 → #811) starts before step 9 is released.
 
 1. **#895: product schemas declare 64-bit string encodings and value ranges.**
@@ -176,9 +193,9 @@ bridge work (#454 → #811) starts before step 9 is released.
      format invariant (rule 7).
    - *Acceptance:* a schema with a bare `u64` metadata field is refused; an out-of-range value is refused naming the
      field and its source; in-range values are unchanged. The built-in schemas are embedded in the manifests, so a
-     schema that gains a declaration moves the seal of the products that embed it. Those moves are recorded for
-     step 8, and step 4 takes its seal-preservation proof on a head before step 1 merges (or against the goldens
-     as step 1 moved them). The `Builder` and the reference reader follow the same rule.
+     schema that gains a declaration moves the seal of the products that embed it. This PR regenerates those
+     goldens and explains each. Step 4 then proves seal preservation against the goldens as they stand on its
+     base. The `Builder` and the reference reader follow the same rule.
 2. **Writers emit the JCS form of every sealed JSON document.**
    - *Crates:* `tessera-io` (`pack`, `pack_dir`, exploded form, `WriteSession`, repository `objects/`),
      `tessera-cli` (`commit`/`publish`/`seal`, collection writer), `tessera-ingest` (`collection.json`),
@@ -217,8 +234,9 @@ bridge work (#454 → #811) starts before step 9 is released.
      - `seal-cases.json` rewritten as `(bytes, seal)` vectors, including T4–T7, S5b, S7 and S8; the 13 tracked
        products re-packed.
    - *Acceptance:*
-     - All 13 re-packed products verify with every `corpus.json` golden unchanged (the seal-preservation proof; it
-       must hold on this step's own head, before 5–7 move any hash).
+     - All 13 re-packed products (12 distinct manifests) verify with every `corpus.json` golden unchanged from its
+       base (the seal-preservation proof; it must hold on this step's own head, whatever step 1 had already
+       regenerated, and before 5 and 7 move any hash).
      - An alpha-layout product is refused with an error naming both formats.
      - Rust, the reference reader and `tessera-wasm` reach the same verdict on every seal case.
      - #901's case (a sealed `64.0` in an integer field) is refused by all three.
@@ -232,6 +250,7 @@ bridge work (#454 → #811) starts before step 9 is released.
      block (rule 12).
    - *Acceptance:* a test that fails today: adding or regenerating a derived block leaves `content_hash` unchanged
      and changes `manifest_hash`; changing a primary block changes both.
+     The goldens this moves are regenerated in this PR, each explained.
 6. **#828, design note: `tessera-table-v2`.**
    - *Crates:* none (a document under `docs/`, plus the ADR or ADR amendment it needs).
    - *Depends on:* nothing; should finish before 7 starts and may run in parallel with 1–5.
@@ -245,13 +264,15 @@ bridge work (#454 → #811) starts before step 9 is released.
    - *Scope:* implement the note of step 6.
    - *Acceptance:* per the note; round trips are lossless on the #822 fixtures; the cross-arch determinism gate
      passes; size and speed meet the note's numbers.
+     The goldens this moves are regenerated in this PR, each explained.
 8. **Corpus and conformance regeneration, once.**
    - *Crates:* `corpus/`, `tessera-cli` snapshots, the reference reader, `tessera-wasm`.
    - *Depends on:* 1, 5 and 7.
-   - *Scope:* regenerate every golden that 1, 5 or 7 moved (`content_hash`, `manifest_hash`, block digests). Step 1
-     (#895) can move a golden too: the built-in schemas are embedded in the manifests, so a schema that gains a
-     string encoding or a range changes the sealed bytes. Every change is explained by one of the three, and `id`
-     moves only where #895 touched a field that is part of `id_inputs` (the table states it per product).
+   - *Scope:* each of steps 1, 5 and 7 already regenerated the goldens it moved, in its own PR (the rule above).
+     This step re-runs the whole corpus once more as the final cross-check: any remaining difference is a defect, and
+     every moved hash (`content_hash`, `manifest_hash`, block digests) is traced to step 1, 5 or 7. Step 1 (#895)
+     is a cause too: the built-in schemas are embedded in the manifests. `id` moves only where #895 touched a field
+     that is part of `id_inputs`.
    - *Acceptance:* a per-product table of which hash moved and why; Rust, the reference reader and `tessera-wasm`
      agree on the new corpus.
 9. **Cut the alpha.**
