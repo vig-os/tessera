@@ -61,6 +61,8 @@ pub fn check_i_json(value: &Value) -> crate::Result<()> {
                 path.to_string()
             },
             value: n.to_string(),
+            // Only a free-form `metadata` field accepts a string; a typed field has none.
+            as_string: path.has_key("metadata"),
         }),
     }
 }
@@ -141,6 +143,7 @@ pub fn json_number(what: &str, f: f64) -> crate::Result<Value> {
         Some(Unsealable::Beyond) => Err(crate::Error::InexactInteger {
             path: what.to_owned(),
             value: f.to_string(),
+            as_string: false,
         }),
     }
 }
@@ -160,10 +163,18 @@ pub fn json_number(what: &str, f: f64) -> crate::Result<Value> {
 pub fn to_json_value<T: Serialize>(value: &T) -> crate::Result<Value> {
     let v = serde_json::to_value(value)?;
     // `to_value` succeeded, so the document has a JSON form: the probe can fail only on a float.
-    if value.serialize(finite::Probe).is_err() {
+    if value.serialize(finite::Probe::find()).is_err() {
+        // Rare: walk it again, this time naming where.
+        let found = value
+            .serialize(finite::Probe::locate())
+            .expect_err("the same value fails the same way");
         return Err(crate::Error::NonFiniteNumber {
-            what: "a sealed document".to_owned(),
-            value: "NaN or ±infinity".to_owned(),
+            what: if found.path.is_empty() {
+                "the top-level value".to_owned()
+            } else {
+                found.path
+            },
+            value: found.value,
         });
     }
     Ok(v)
@@ -180,24 +191,88 @@ mod finite {
         SerializeTuple, SerializeTupleStruct, SerializeTupleVariant, Serializer,
     };
 
-    /// The probe found a NaN or an infinity. It is also what a serializer `custom` error becomes,
-    /// which cannot arise for a value `to_value` already serialised.
+    /// The probe found a NaN or an infinity: where (a JSON path from the document root, empty at the
+    /// root) and its text. A serializer `custom` error also lands here, which cannot arise for a value
+    /// `to_value` already serialised.
     #[derive(Debug, PartialEq, Eq)]
-    pub(super) struct NonFinite;
+    pub(super) struct NonFinite {
+        pub(super) path: String,
+        pub(super) value: String,
+    }
 
     impl std::fmt::Display for NonFinite {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("a non-finite number")
+            write!(f, "{} = {} is not finite", self.path, self.value)
         }
     }
     impl std::error::Error for NonFinite {}
     impl serde::ser::Error for NonFinite {
-        fn custom<T: std::fmt::Display>(_: T) -> Self {
-            NonFinite
+        fn custom<T: std::fmt::Display>(m: T) -> Self {
+            NonFinite {
+                path: String::new(),
+                value: m.to_string(),
+            }
         }
     }
 
-    pub(super) struct Probe;
+    /// Walks a value, counting the elements of a sequence and holding the last map key. A tracking
+    /// probe names every child the way the document spells it (`blocks[0].spec.scale`); an untracking
+    /// one allocates nothing, so the common case, a finite document, costs one pass and no strings.
+    pub(super) struct Probe {
+        /// `None` when not tracking.
+        path: Option<String>,
+        next_index: usize,
+        key: String,
+    }
+
+    impl Probe {
+        /// The cheap probe: finds a non-finite number, names nothing.
+        pub(super) fn find() -> Self {
+            Probe {
+                path: None,
+                next_index: 0,
+                key: String::new(),
+            }
+        }
+        /// The naming probe, run again once [`Probe::find`] has failed.
+        pub(super) fn locate() -> Self {
+            Probe {
+                path: Some(String::new()),
+                ..Probe::find()
+            }
+        }
+        fn child(&self, path: impl FnOnce(&str) -> String) -> Self {
+            Probe {
+                path: self.path.as_deref().map(path),
+                next_index: 0,
+                key: String::new(),
+            }
+        }
+        fn field(&self, name: &str) -> Self {
+            self.child(|p| {
+                if p.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{p}.{name}")
+                }
+            })
+        }
+        fn element(&mut self) -> Self {
+            let i = self.next_index;
+            self.next_index += 1;
+            self.child(|p| format!("{p}[{i}]"))
+        }
+        fn float(self, v: f64, text: impl FnOnce() -> String) -> Result<(), NonFinite> {
+            if v.is_finite() {
+                Ok(())
+            } else {
+                Err(NonFinite {
+                    path: self.path.unwrap_or_default(),
+                    value: text(),
+                })
+            }
+        }
+    }
 
     macro_rules! ignore {
         ($($f:ident($t:ty)),* $(,)?) => {$(
@@ -231,24 +306,16 @@ mod finite {
             serialize_bytes(&[u8]),
         );
         fn serialize_f32(self, v: f32) -> Result<(), NonFinite> {
-            if v.is_finite() {
-                Ok(())
-            } else {
-                Err(NonFinite)
-            }
+            self.float(f64::from(v), || v.to_string())
         }
         fn serialize_f64(self, v: f64) -> Result<(), NonFinite> {
-            if v.is_finite() {
-                Ok(())
-            } else {
-                Err(NonFinite)
-            }
+            self.float(v, || v.to_string())
         }
         fn serialize_none(self) -> Result<(), NonFinite> {
             Ok(())
         }
         fn serialize_some<T: ?Sized + Serialize>(self, v: &T) -> Result<(), NonFinite> {
-            v.serialize(Probe)
+            v.serialize(self)
         }
         fn serialize_unit(self) -> Result<(), NonFinite> {
             Ok(())
@@ -269,100 +336,88 @@ mod finite {
             _: &'static str,
             v: &T,
         ) -> Result<(), NonFinite> {
-            v.serialize(Probe)
+            v.serialize(self)
         }
         fn serialize_newtype_variant<T: ?Sized + Serialize>(
             self,
             _: &'static str,
             _: u32,
-            _: &'static str,
+            variant: &'static str,
             v: &T,
         ) -> Result<(), NonFinite> {
-            v.serialize(Probe)
+            // Externally tagged, as `serde_json` writes it: `{"Variant": v}`.
+            v.serialize(self.field(variant))
         }
         fn serialize_seq(self, _: Option<usize>) -> Result<Probe, NonFinite> {
-            Ok(Probe)
+            Ok(self)
         }
         fn serialize_tuple(self, _: usize) -> Result<Probe, NonFinite> {
-            Ok(Probe)
+            Ok(self)
         }
         fn serialize_tuple_struct(self, _: &'static str, _: usize) -> Result<Probe, NonFinite> {
-            Ok(Probe)
+            Ok(self)
         }
         fn serialize_tuple_variant(
             self,
             _: &'static str,
             _: u32,
-            _: &'static str,
+            variant: &'static str,
             _: usize,
         ) -> Result<Probe, NonFinite> {
-            Ok(Probe)
+            Ok(self.field(variant))
         }
         fn serialize_map(self, _: Option<usize>) -> Result<Probe, NonFinite> {
-            Ok(Probe)
+            Ok(self)
         }
         fn serialize_struct(self, _: &'static str, _: usize) -> Result<Probe, NonFinite> {
-            Ok(Probe)
+            Ok(self)
         }
         fn serialize_struct_variant(
             self,
             _: &'static str,
             _: u32,
-            _: &'static str,
+            variant: &'static str,
             _: usize,
         ) -> Result<Probe, NonFinite> {
-            Ok(Probe)
+            Ok(self.field(variant))
         }
     }
 
-    impl SerializeSeq for Probe {
-        type Ok = ();
-        type Error = NonFinite;
-        fn serialize_element<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), NonFinite> {
-            v.serialize(Probe)
-        }
-        fn end(self) -> Result<(), NonFinite> {
-            Ok(())
-        }
+    macro_rules! element_of_a_sequence {
+        ($($tr:ident::$f:ident),* $(,)?) => {$(
+            impl $tr for Probe {
+                type Ok = ();
+                type Error = NonFinite;
+                fn $f<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), NonFinite> {
+                    v.serialize(self.element())
+                }
+                fn end(self) -> Result<(), NonFinite> {
+                    Ok(())
+                }
+            }
+        )*};
     }
-    impl SerializeTuple for Probe {
-        type Ok = ();
-        type Error = NonFinite;
-        fn serialize_element<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), NonFinite> {
-            v.serialize(Probe)
-        }
-        fn end(self) -> Result<(), NonFinite> {
-            Ok(())
-        }
-    }
-    impl SerializeTupleStruct for Probe {
-        type Ok = ();
-        type Error = NonFinite;
-        fn serialize_field<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), NonFinite> {
-            v.serialize(Probe)
-        }
-        fn end(self) -> Result<(), NonFinite> {
-            Ok(())
-        }
-    }
-    impl SerializeTupleVariant for Probe {
-        type Ok = ();
-        type Error = NonFinite;
-        fn serialize_field<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), NonFinite> {
-            v.serialize(Probe)
-        }
-        fn end(self) -> Result<(), NonFinite> {
-            Ok(())
-        }
-    }
+    element_of_a_sequence!(
+        SerializeSeq::serialize_element,
+        SerializeTuple::serialize_element,
+        SerializeTupleStruct::serialize_field,
+        SerializeTupleVariant::serialize_field,
+    );
+
     impl SerializeMap for Probe {
         type Ok = ();
         type Error = NonFinite;
         fn serialize_key<T: ?Sized + Serialize>(&mut self, k: &T) -> Result<(), NonFinite> {
-            k.serialize(Probe)
+            // `to_value` already accepted this key, so it is a string or a number.
+            self.key = match serde_json::to_value(k) {
+                Ok(serde_json::Value::String(s)) => s,
+                Ok(other) => other.to_string(),
+                Err(_) => String::new(),
+            };
+            Ok(())
         }
         fn serialize_value<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), NonFinite> {
-            v.serialize(Probe)
+            v.serialize(self.field(&self.key))
         }
         fn end(self) -> Result<(), NonFinite> {
             Ok(())
@@ -373,10 +428,10 @@ mod finite {
         type Error = NonFinite;
         fn serialize_field<T: ?Sized + Serialize>(
             &mut self,
-            _: &'static str,
+            name: &'static str,
             v: &T,
         ) -> Result<(), NonFinite> {
-            v.serialize(Probe)
+            v.serialize(self.field(name))
         }
         fn end(self) -> Result<(), NonFinite> {
             Ok(())
@@ -387,10 +442,10 @@ mod finite {
         type Error = NonFinite;
         fn serialize_field<T: ?Sized + Serialize>(
             &mut self,
-            _: &'static str,
+            name: &'static str,
             v: &T,
         ) -> Result<(), NonFinite> {
-            v.serialize(Probe)
+            v.serialize(self.field(name))
         }
         fn end(self) -> Result<(), NonFinite> {
             Ok(())
@@ -435,17 +490,28 @@ pub fn parse_user_value(label: &str, text: &str) -> crate::Result<Value> {
         // the person meant as a number, spelled in a way JSON does not allow: refuse it, never
         // store it as a string they didn't ask for. Anything else is a bare string.
         return match text.parse::<f64>() {
-            Ok(f) => Err(refuse_number_spelling(label, text, f)),
+            Ok(f) => Err(refuse_number_text(label, text, TextNumber::of(text, f))),
             Err(_) => Ok(Value::String(text.to_owned())),
         };
     }
     let token = text.trim_matches([' ', '\t', '\n', '\r']);
-    let refuse = |path: String, value: String| crate::Error::InexactInteger { path, value };
+    // A number token that is not zero but reads as ±0.0 would seal a different number (`5e-400`).
+    // `serde_json` has already lost the token by the time it is a `Value`, so look at the text.
+    if let Some(tiny) = underflowing_number_token(text) {
+        return Err(refuse_number_text(label, tiny, TextNumber::Underflow));
+    }
+    let refuse = |path: String, value: String| crate::Error::InexactInteger {
+        path,
+        value,
+        as_string: true,
+    };
     let bare_number = token.starts_with(|c: char| c == '-' || c.is_ascii_digit());
     let value = match serde_json::from_str::<Value>(text) {
         Ok(value) => value,
-        // A bare number token can fail only by its magnitude.
-        Err(_) if bare_number => return Err(refuse(label.to_owned(), token.to_owned())),
+        // A bare number token can fail only by its magnitude: it reads as an infinity.
+        Err(_) if bare_number => {
+            return Err(refuse_number_text(label, token, TextNumber::Overflow));
+        }
         Err(e) => {
             return Err(crate::Error::Invalid(format!(
                 "{label} = {token} is JSON a seal cannot hold (I-JSON, RFC 7493): {e}"
@@ -463,25 +529,100 @@ pub fn parse_user_value(label: &str, text: &str) -> crate::Result<Value> {
     }
 }
 
-/// The refusal of a typed text that Rust reads as a number but JSON does not spell as one.
-fn refuse_number_spelling(label: &str, text: &str, f: f64) -> crate::Error {
+/// Why a typed number text cannot be sealed, for [`refuse_number_text`]: the one message family every
+/// refusal of a person's number text (`--set`, `--meta`) is written from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextNumber {
+    /// `NaN`, `inf`, `Infinity`: JSON has no spelling for them.
+    NonFinite,
+    /// A number past a double's range: it reads as infinity.
+    Overflow,
+    /// A non-zero number below a double's range: it reads as zero.
+    Underflow,
+    /// A number Rust reads but JSON does not spell (`+5`, `.5`, `5.`, `01`).
+    Spelling,
+}
+
+impl TextNumber {
+    /// Classify `text`, which is not JSON but which Rust read as the number `f`.
+    fn of(text: &str, f: f64) -> Self {
+        let lower = text.trim_start_matches(['+', '-']).to_ascii_lowercase();
+        if matches!(lower.as_str(), "inf" | "infinity" | "nan") {
+            TextNumber::NonFinite
+        } else if f.is_infinite() {
+            TextNumber::Overflow
+        } else if f == 0.0 && underflows(text) {
+            TextNumber::Underflow
+        } else {
+            TextNumber::Spelling
+        }
+    }
+}
+
+/// The refusal of a typed number text a seal cannot hold, naming the flag and key (`label`), the
+/// text and why, and the way to store the text itself.
+fn refuse_number_text(label: &str, text: &str, why: TextNumber) -> crate::Error {
     // `--set k` → `--set k='"text"'`: the way to store the text itself.
     let quoted = format!("{label}='\"{text}\"'");
-    let lower = text.trim_start_matches(['+', '-']).to_ascii_lowercase();
-    let why = if matches!(lower.as_str(), "inf" | "infinity" | "nan") {
-        "is not a finite number: JSON has no spelling for NaN or infinity, so a seal cannot hold it"
-            .to_owned()
-    } else if f.is_infinite() {
-        "is past a double's range (it reads as infinity), which a seal cannot hold".to_owned()
-    } else {
-        "is a number, but not in JSON's number spelling (write `5`, not `+5`; no leading `+` or \
-         zero, and no `.5` or `5.`)"
-            .to_owned()
+    let why = match why {
+        TextNumber::NonFinite => {
+            "is not a finite number: JSON has no spelling for NaN or infinity, so a seal cannot hold it"
+        }
+        TextNumber::Overflow => {
+            "is past a double's range (it reads as infinity), which a seal cannot hold"
+        }
+        TextNumber::Underflow => {
+            "is too small for a double (it reads as 0, a different number), which a seal cannot hold"
+        }
+        TextNumber::Spelling => {
+            "is a number, but not in JSON's number spelling (write `5`, not `+5`; no leading `+` or \
+             zero, and no `.5` or `5.`)"
+        }
     };
     crate::Error::Invalid(format!(
         "{label} = {text} {why}. Write it as a JSON number, or to store the text as it is, quote \
          it as a JSON string: {quoted}"
     ))
+}
+
+/// Whether a number token is not zero yet reads as ±0.0: it underflows a double (`5e-400`), so a
+/// seal would pin a different number than the one given. A token that is zero (`0`, `0.0`, `-0`,
+/// `0e5`) and one that is a denormal (`1e-320`, exact) are not underflow.
+///
+/// Digits may be separated by `_`, as TOML spells them.
+#[must_use]
+pub fn underflows(token: &str) -> bool {
+    let clean: String = token.chars().filter(|&c| c != '_').collect();
+    let mantissa = clean.split(['e', 'E']).next().unwrap_or("");
+    mantissa.bytes().any(|b| (b'1'..=b'9').contains(&b))
+        && clean.parse::<f64>().is_ok_and(|f| f == 0.0)
+}
+
+/// The first number token in JSON `text` that [`underflows`], skipping strings. `text` is valid
+/// JSON, so a run of `0-9 + - . e E` outside a string is one number token.
+fn underflowing_number_token(text: &str) -> Option<&str> {
+    let b = text.as_bytes();
+    let (mut i, mut in_string) = (0, false);
+    while i < b.len() {
+        match b[i] {
+            b'\\' if in_string => i += 1,
+            b'"' => in_string = !in_string,
+            c if !in_string && (c == b'-' || c.is_ascii_digit()) => {
+                let end = b[i..]
+                    .iter()
+                    .position(|c| !matches!(c, b'0'..=b'9' | b'+' | b'-' | b'.' | b'e' | b'E'))
+                    .map_or(b.len(), |n| i + n);
+                if underflows(&text[i..end]) {
+                    return Some(&text[i..end]);
+                }
+                i = end;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Whether `n` is an integer beyond ±[`MAX_EXACT_INTEGER`]. A double above 2^53 − 1 in magnitude
@@ -760,7 +901,7 @@ mod tests {
 
     fn refused_at(text: &str) -> (String, String) {
         match super::parse_strict(text) {
-            Err(crate::Error::InexactInteger { path, value }) => (path, value),
+            Err(crate::Error::InexactInteger { path, value, .. }) => (path, value),
             other => panic!("{text}: expected InexactInteger, got {other:?}"),
         }
     }
@@ -827,9 +968,19 @@ mod tests {
         let e = super::hash(&doc).unwrap_err();
         assert_eq!(
             e.to_string(),
-            "id_inputs.daq_start_ns = 1730000000000000000 exceeds ±(2^53−1) (I-JSON, RFC 7493 \
-             §2.2): a sealed JSON number is an IEEE-754 double (RFC 8785 §3.2.2.3), which can't \
-             hold this integer exactly; write it as a string"
+            "id_inputs.daq_start_ns = 1730000000000000000 is outside the range a sealed JSON \
+             number can hold (±(2^53−1), I-JSON RFC 7493 §2.2): a sealed JSON number is an \
+             IEEE-754 double (RFC 8785 §3.2.2.3), which can't hold this integer exactly"
+        );
+        // A typed field has no string form, so no "as a string" advice. A free-form `metadata`
+        // field does.
+        assert!(!e.to_string().contains("as a string"), "{e}");
+        let free = super::hash(&json!({ "metadata": { "t": 9_007_199_254_740_993_u64 } }));
+        assert!(
+            free.unwrap_err()
+                .to_string()
+                .ends_with("; write it as a string"),
+            "a free-form metadata field keeps the advice"
         );
         for v in [json!(u64::MAX), json!(i64::MIN), json!(1e300_f64)] {
             let object = json!({ "manifest_hash": "x", "extra": { "v": v } });
@@ -848,14 +999,10 @@ mod tests {
     #[test]
     fn a_typed_number_a_seal_cannot_hold_is_refused_not_stringified() {
         let refused = |text: &str| match super::parse_user_value("--set x", text) {
-            Err(crate::Error::InexactInteger { path, value }) => (path, value),
+            Err(crate::Error::InexactInteger { path, value, .. }) => (path, value),
             other => panic!("{text}: expected InexactInteger, got {other:?}"),
         };
-        let big = "9".repeat(401);
         for text in [
-            big.as_str(),
-            "1e400",
-            "-1e400",
             "9007199254740992",
             "-9007199254740993",
             "9007199254740993.0",
@@ -865,13 +1012,29 @@ mod tests {
             assert_eq!(refused(text), ("--set x".into(), text.into()), "{text}");
         }
         // Surrounding JSON whitespace doesn't make it text; the error quotes the token.
-        assert_eq!(refused(" 1e400\n").1, "1e400");
+        assert_eq!(refused(" 9007199254740993\n").1, "9007199254740993");
         // Inside a composite the error names the path under the label.
         assert_eq!(
             refused(r#"{"a":[1,9007199254740993]}"#),
             ("--set x.a[1]".into(), "9007199254740993".into())
         );
         assert_eq!(refused("[1e300]").0, "--set x[0]");
+        // A bare number past a double's range is refused in the same words as `+1e400`, from one
+        // helper, and says what it is: a number that reads as infinity, not an inexact integer.
+        let big = "9".repeat(401);
+        for text in [big.as_str(), "1e400", "-1e400", "1E+999"] {
+            match super::parse_user_value("--set x", text) {
+                Err(crate::Error::Invalid(m)) => assert_eq!(
+                    m,
+                    format!(
+                        "--set x = {text} is past a double's range (it reads as infinity), which \
+                         a seal cannot hold. Write it as a JSON number, or to store the text as it \
+                         is, quote it as a JSON string: --set x='\"{text}\"'"
+                    )
+                ),
+                other => panic!("{text}: expected Invalid, got {other:?}"),
+            }
+        }
         // JSON past a double's range inside a composite is refused too, never kept as a string.
         for text in ["[1e400]", r#"{"a":[-1e400]}"#, r#""\ud800""#] {
             match super::parse_user_value("--set x", text) {
@@ -881,6 +1044,45 @@ mod tests {
                 other => panic!("{text}: expected Invalid, got {other:?}"),
             }
         }
+    }
+
+    /// A non-zero number that reads as ±0.0 would seal a different number: refused in every JSON
+    /// position. Zero in any spelling, and a denormal (exact), stay.
+    #[test]
+    fn a_number_that_underflows_to_zero_is_refused_and_zero_and_denormals_are_kept() {
+        for text in [
+            "5e-400",
+            "-5e-400",
+            "1e-1000",
+            r#"{"a":5e-400}"#,
+            "[1,[2e-999]]",
+        ] {
+            match super::parse_user_value("--meta k", text) {
+                Err(crate::Error::Invalid(m)) => {
+                    assert!(
+                        m.contains("is too small for a double (it reads as 0"),
+                        "{text}: {m}"
+                    );
+                    assert!(m.contains("--meta k"), "{m}");
+                }
+                other => panic!("{text}: expected a refusal, got {other:?}"),
+            }
+        }
+        for text in [
+            "0",
+            "0.0",
+            "-0",
+            "0e5",
+            "0.000e-9999",
+            "1e-320",
+            "5e-324",
+            "[0e5,1e-320]",
+        ] {
+            super::parse_user_value("--meta k", text)
+                .unwrap_or_else(|e| panic!("{text} must be accepted: {e}"));
+        }
+        assert!(super::underflows("5e-400") && super::underflows("4_9e-4_00"));
+        assert!(!super::underflows("0e5") && !super::underflows("1e-320"));
     }
 
     /// Everything else keeps its meaning: numbers in range, other JSON, and plain text as a string.
@@ -1066,5 +1268,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The probe names where the non-finite number is, in the document's own spelling, through
+    /// `f32` and `f64`, sequences, maps, options and every enum shape (#886). Each case fails if
+    /// `serialize_f32` (or the f64 twin, or a compound's element walk) were to accept the float.
+    #[test]
+    fn the_probe_names_the_path_of_a_non_finite_f32_f64_map_and_enum_field() {
+        use std::collections::BTreeMap;
+
+        #[derive(serde::Serialize)]
+        enum Shape {
+            Unit,
+            Newtype(f32),
+            Tuple(u8, f64),
+            Struct { scale: f32 },
+        }
+        #[derive(serde::Serialize)]
+        struct Doc {
+            shapes: Vec<Shape>,
+            by_name: BTreeMap<String, Option<f32>>,
+            column_meta: BTreeMap<String, f64>,
+        }
+        let doc = |f: &dyn Fn(&mut Doc)| {
+            let mut d = Doc {
+                shapes: vec![
+                    Shape::Unit,
+                    Shape::Newtype(1.0),
+                    Shape::Tuple(1, 2.0),
+                    Shape::Struct { scale: 3.0 },
+                ],
+                by_name: [("a".to_owned(), Some(1.0))].into(),
+                column_meta: [("energy".to_owned(), 0.5)].into(),
+            };
+            f(&mut d);
+            d
+        };
+        let named = |d: &Doc| match super::to_json_value(d) {
+            Err(crate::Error::NonFiniteNumber { what, value }) => (what, value),
+            other => panic!("expected NonFiniteNumber, got {other:?}"),
+        };
+        assert!(super::to_json_value(&doc(&|_| {})).is_ok());
+        for (bad, text) in [
+            (f32::NAN, "NaN"),
+            (f32::INFINITY, "inf"),
+            (f32::NEG_INFINITY, "-inf"),
+        ] {
+            let b64 = f64::from(bad);
+            assert_eq!(
+                named(&doc(&|d| d.shapes[1] = Shape::Newtype(bad))),
+                ("shapes[1].Newtype".into(), text.into())
+            );
+            assert_eq!(
+                named(&doc(&|d| d.shapes[2] = Shape::Tuple(1, b64))),
+                ("shapes[2].Tuple[1]".into(), text.into())
+            );
+            assert_eq!(
+                named(&doc(&|d| d.shapes[3] = Shape::Struct { scale: bad })),
+                ("shapes[3].Struct.scale".into(), text.into())
+            );
+            assert_eq!(
+                named(&doc(&|d| {
+                    d.by_name.insert("a".into(), Some(bad));
+                })),
+                ("by_name.a".into(), text.into())
+            );
+            assert_eq!(
+                named(&doc(&|d| {
+                    d.column_meta.insert("energy".into(), b64);
+                })),
+                ("column_meta.energy".into(), text.into())
+            );
+        }
+        // A bare top-level float is named as the value itself.
+        assert_eq!(
+            super::to_json_value(&f32::NAN).unwrap_err().to_string(),
+            "the top-level value = NaN is not a finite number: JSON has no spelling for NaN or \
+             infinity (RFC 8259 §6), so a seal cannot hold it"
+        );
+    }
+
+    /// A finite `f32` beyond the bound passes the probe (it is finite) and is refused where every
+    /// typed number is, at the seal, with the neutral message: a typed field has no string form.
+    #[test]
+    fn a_finite_f32_beyond_the_bound_is_refused_at_the_seal_without_string_advice() {
+        #[derive(serde::Serialize)]
+        struct Spec {
+            scale: f32,
+        }
+        let spec = Spec { scale: 1.0e16 };
+        assert!(super::to_json_value(&spec).is_ok());
+        let e = super::hash(&spec).unwrap_err();
+        assert!(
+            matches!(&e, crate::Error::InexactInteger { path, as_string: false, .. } if path == "scale"),
+            "{e}"
+        );
+        assert!(!e.to_string().contains("as a string"), "{e}");
     }
 }

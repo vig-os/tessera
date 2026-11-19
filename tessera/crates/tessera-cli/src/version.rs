@@ -526,13 +526,14 @@ mod tests {
         let err = set("daq_start_ns=1730000000000000000").unwrap_err();
         assert_eq!(
             err.to_string(),
-            "--set daq_start_ns = 1730000000000000000 exceeds ±(2^53−1) (I-JSON, RFC 7493 \
-             §2.2): a sealed JSON number is an IEEE-754 double (RFC 8785 §3.2.2.3), which can't \
-             hold this integer exactly; write it as a string"
+            "--set daq_start_ns = 1730000000000000000 is outside the range a sealed JSON number \
+             can hold (±(2^53−1), I-JSON RFC 7493 §2.2): a sealed JSON number is an IEEE-754 \
+             double (RFC 8785 §3.2.2.3), which can't hold this integer exactly; write it as a \
+             string"
         );
         assert!(matches!(
             set("daq_start_ns=9007199254740993.0"),
-            Err(Error::InexactInteger { path, value })
+            Err(Error::InexactInteger { path, value, .. })
                 if path == "--set daq_start_ns" && value == "9007199254740993.0"
         ));
         assert_eq!(

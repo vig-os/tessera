@@ -330,6 +330,9 @@ pub fn parse_str(toml_text: &str) -> Result<IngestSpec> {
             value: text,
         });
     }
+    // A float that is not zero yet reads as 0.0 would seal a different number; only the source text
+    // still has the token.
+    crate::sealable::refuse_underflowing_toml_floats("ingest-spec", toml_text)?;
     toml::from_str(toml_text).map_err(parse_err)
 }
 
@@ -704,9 +707,10 @@ dataset = "events_2p"
         let err = with("daq_start_ns = 1730000000000000000").unwrap_err();
         assert_eq!(
             err.to_string(),
-            "product[0].metadata.daq_start_ns = 1730000000000000000 exceeds ±(2^53−1) (I-JSON, \
-             RFC 7493 §2.2): a sealed JSON number is an IEEE-754 double (RFC 8785 §3.2.2.3), \
-             which can't hold this integer exactly; write it as a string"
+            "product[0].metadata.daq_start_ns = 1730000000000000000 is outside the range a sealed \
+             JSON number can hold (±(2^53−1), I-JSON RFC 7493 §2.2): a sealed JSON number is an \
+             IEEE-754 double (RFC 8785 §3.2.2.3), which can't hold this integer exactly; write it \
+             as a string"
         );
         assert!(matches!(
             with("x = 1e300"),

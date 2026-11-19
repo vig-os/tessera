@@ -269,12 +269,6 @@ fn sealable_number(
     keyword: &str,
     values: &[f64],
 ) -> Result<()> {
-    if values
-        .iter()
-        .all(|&v| tessera_core::canonical::unsealable_f64(v).is_none())
-    {
-        return Ok(());
-    }
     let text = obj
         .element(tag)
         .ok()
@@ -1748,6 +1742,18 @@ mod tests {
                 ),
                 "{text}"
             );
+        }
+
+        // A value that is not zero yet reads as 0.0 would seal a different number (#886 round 3).
+        assert_eq!(
+            refused(KVP, "5E-400"),
+            "invalid product: dicom: (0018,0060) KVP = \"5E-400\" is too small for a double (it \
+             reads as 0, a different number), which a sealed JSON number cannot be"
+        );
+        assert!(refused(PIXEL_SPACING, "0.5\\1E-999").contains("\"1E-999\" is too small"));
+        // Zero in any spelling and an exact denormal stay.
+        for text in ["0", "0E5", "1E-320"] {
+            with(KVP, text).unwrap_or_else(|e| panic!("{text}: {e}"));
         }
 
         // In range: unchanged, still a JSON number.

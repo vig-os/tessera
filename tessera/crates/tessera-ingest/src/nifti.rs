@@ -415,6 +415,87 @@ fn parse_shape(r: &Raw, ndim: usize) -> Result<(Vec<u64>, Vec<String>, usize)> {
     Ok((shape, axis_names(rank), count))
 }
 
+/// The header fields that feed the sealed manifest, by transform: `(NIfTI name, byte offset)`, each an
+/// `f32`. The door validates every one of them before anything is written (SPEC §1, #886), through
+/// [`refuse_unsealable_fields`], so a value a seal cannot hold is refused in NIfTI's own words
+/// (`pixdim[1] = 1e16`) instead of reaching the generic check at seal time, which can only name a
+/// JSON path.
+///
+/// `scl_slope`/`scl_inter` (`rescale` on the array spec).
+const RESCALE_FIELDS: [(&str, usize); 2] = [("scl_slope", 112), ("scl_inter", 116)];
+/// The sform's twelve entries (`world_frame.affine` when `sform_code > 0`).
+const SFORM_FIELDS: [(&str, usize); 12] = [
+    ("srow_x[0]", 280),
+    ("srow_x[1]", 284),
+    ("srow_x[2]", 288),
+    ("srow_x[3]", 292),
+    ("srow_y[0]", 296),
+    ("srow_y[1]", 300),
+    ("srow_y[2]", 304),
+    ("srow_y[3]", 308),
+    ("srow_z[0]", 312),
+    ("srow_z[1]", 316),
+    ("srow_z[2]", 320),
+    ("srow_z[3]", 324),
+];
+/// What the qform is rebuilt from (`world_frame.affine` when only `qform_code > 0`): the quaternion,
+/// the offset, and `pixdim[0..=3]` (`qfac` and the voxel spacing).
+const QFORM_FIELDS: [(&str, usize); 10] = [
+    ("pixdim[0]", 76),
+    ("pixdim[1]", 80),
+    ("pixdim[2]", 84),
+    ("pixdim[3]", 88),
+    ("quatern_b", 256),
+    ("quatern_c", 260),
+    ("quatern_d", 264),
+    ("qoffset_x", 268),
+    ("qoffset_y", 272),
+    ("qoffset_z", 276),
+];
+/// The time axis' step and start (`axis_referencing`), used only for a 4-D+ series with a time unit.
+const TIME_FIELDS: [(&str, usize); 2] = [("pixdim[4]", 92), ("toffset", 136)];
+
+/// Refuse the first of `fields` whose value a seal cannot hold (NaN, ±infinity, beyond ±(2^53−1)),
+/// naming the header field and its value as the file spells it. The one validation every vendor
+/// number in the header goes through, so no field is checked ad hoc and none is missed.
+///
+/// # Errors
+/// [`Error::Invalid`] naming the field and its value.
+fn refuse_unsealable_fields(r: &Raw, fields: &[(&str, usize)]) -> Result<()> {
+    for &(name, offset) in fields {
+        refuse_unsealable("nifti", name, &r.f32(offset).to_string(), &[r.f64(offset)])?;
+    }
+    Ok(())
+}
+
+/// Refuse an affine entry a seal cannot hold, naming the header fields it came from. The raw fields
+/// are each in range ([`refuse_unsealable_fields`]), but an entry is computed from them (a qform
+/// product of rotation and spacing, a unit conversion from metres), and the computed value can still
+/// fall out of range.
+fn refuse_unsealable_affine(wf: &WorldFrame, source: GeometrySource) -> Result<()> {
+    for (n, &v) in wf.affine.iter().enumerate() {
+        let (row, col) = (n / 4, n % 4);
+        let axis = ['x', 'y', 'z'][row];
+        let from = match source {
+            // The affine's columns are the sform's reversed (`[k, j, i, offset]`).
+            GeometrySource::Sform => format!("srow_{axis}[{}]", [2, 1, 0, 3][col]),
+            GeometrySource::Qform if col == 3 => format!("qoffset_{axis}"),
+            GeometrySource::Qform => format!(
+                "quatern_b/c/d and pixdim[{}]{}",
+                3 - col,
+                if col == 0 { " and pixdim[0]" } else { "" }
+            ),
+        };
+        refuse_unsealable(
+            "nifti",
+            &format!("world_frame.affine[{n}] (computed from {from})"),
+            &v.to_string(),
+            &[v],
+        )?;
+    }
+    Ok(())
+}
+
 /// The sform's three RAS rows — `srow_x/y/z` at 280/296/312, each `f32[4] = [Mi, Mj, Mk, offset]`.
 fn sform_rows(r: &Raw) -> [[f64; 4]; 3] {
     let row = |o: usize| [r.f64(o), r.f64(o + 4), r.f64(o + 8), r.f64(o + 12)];
@@ -427,7 +508,8 @@ fn sform_rows(r: &Raw) -> [[f64; 4]; 3] {
 /// * `a = sqrt(1 − (b² + c² + d²))`, or — when that radicand is negligible — the renormalised unit
 ///   `(b,c,d)` with `a = 0` (a 180° rotation);
 /// * the rotation's `i`/`j`/`k` columns are scaled by `pixdim[1..=3]`, a non-positive spacing clamped to
-///   1 as the reference does;
+///   1 as the reference does. NaN or ±infinity never gets here: the door refuses it first
+///   ([`QFORM_FIELDS`]), because clamping it would seal a spacing the file never had;
 /// * **`pixdim[0] < 0` (`qfac`) negates the `k` column** — the left-handed case, and the sign convention
 ///   that is easy to get subtly wrong;
 /// * the translation is `qoffset_x/y/z`.
@@ -578,6 +660,7 @@ fn parse_geometry(r: &Raw) -> Result<(Option<WorldFrame>, Option<GeometrySource>
         }
     }
     if sform_code > 0 {
+        refuse_unsealable_fields(r, &SFORM_FIELDS)?;
         let wf = world_frame_from_ras(sform_rows(r), sform_code, unit)?;
         // Non-finite is corruption: refuse rather than fall through to a different transform, since
         // "the sform is unreadable" is not the same claim as "there is no sform".
@@ -587,6 +670,7 @@ fn parse_geometry(r: &Raw) -> Result<(Option<WorldFrame>, Option<GeometrySource>
             ));
         }
         if affine_is_usable(&wf) {
+            refuse_unsealable_affine(&wf, GeometrySource::Sform)?;
             return Ok((Some(wf), Some(GeometrySource::Sform)));
         }
         tracing::warn!(
@@ -597,6 +681,7 @@ fn parse_geometry(r: &Raw) -> Result<(Option<WorldFrame>, Option<GeometrySource>
         );
     }
     if qform_code > 0 {
+        refuse_unsealable_fields(r, &QFORM_FIELDS)?;
         let wf = world_frame_from_ras(qform_rows(r), qform_code, unit)?;
         if !affine_is_finite(&wf) {
             return Err(he(
@@ -608,6 +693,7 @@ fn parse_geometry(r: &Raw) -> Result<(Option<WorldFrame>, Option<GeometrySource>
                 "qform_code {qform_code} reconstructs a singular affine (no invertible geometry)"
             )));
         }
+        refuse_unsealable_affine(&wf, GeometrySource::Qform)?;
         return Ok((Some(wf), Some(GeometrySource::Qform)));
     }
     if sform_code > 0 {
@@ -626,23 +712,37 @@ fn parse_geometry(r: &Raw) -> Result<(Option<WorldFrame>, Option<GeometrySource>
 /// DWI direction stack lands there: its `dim[4]` counts gradient directions, not seconds, and such files
 /// leave `pixdim[4]` / the time unit unset. ADR-0032's `time_regular` is reused verbatim — this decoder
 /// invents no axis convention of its own.
-fn parse_time_axis(r: &Raw, rank: usize) -> Option<Vec<Option<Referenced>>> {
-    let t_axis = rank.checked_sub(4)?; // rank 4 → axis 0, rank 5 → axis 1, …
-                                       // xyzt_units bits 3..5 are the time unit: 8 = NIFTI_UNITS_SEC, 16 = MSEC, 24 = USEC.
+///
+/// `pixdim[4]` and `toffset` are sealed, so they are validated here ([`TIME_FIELDS`]) once the header
+/// names a time unit on a 4-D+ series: NaN, ±infinity or a value beyond ±(2^53−1) is refused naming
+/// the field. A finite step that is zero or negative is not a cadence and leaves the axis a storage
+/// index (nothing is sealed from it).
+///
+/// # Errors
+/// [`Error::Invalid`] naming the header field and its value.
+fn parse_time_axis(r: &Raw, rank: usize) -> Result<Option<Vec<Option<Referenced>>>> {
+    let Some(t_axis) = rank.checked_sub(4) else {
+        return Ok(None); // rank 4 → axis 0, rank 5 → axis 1, …
+    };
+    // xyzt_units bits 3..5 are the time unit: 8 = NIFTI_UNITS_SEC, 16 = MSEC, 24 = USEC.
     let scale = match r.u8(123) & 0x38 {
         8 => 1.0,
         16 => 1.0e-3,
         24 => 1.0e-6,
-        _ => return None,
+        _ => return Ok(None),
     };
-    let step = r.f64(76 + 4 * 4) * scale; // pixdim[4]
-    if step <= 0.0 || !step.is_finite() {
-        return None;
+    // The step is sealed when it is a cadence; a non-finite or out-of-range one is refused even when
+    // it is not, because NaN is corruption and not "no cadence".
+    refuse_unsealable_fields(r, &TIME_FIELDS[..1])?;
+    let step = r.f64(TIME_FIELDS[0].1) * scale;
+    if step <= 0.0 {
+        return Ok(None);
     }
-    let start = r.f64(136) * scale; // toffset
+    refuse_unsealable_fields(r, &TIME_FIELDS[1..])?;
+    let start = r.f64(TIME_FIELDS[1].1) * scale;
     let mut per_axis = vec![None; rank];
     per_axis[t_axis] = Some(Referenced::time_regular(start, step));
-    Some(per_axis)
+    Ok(Some(per_axis))
 }
 
 /// Parse + validate the 348-byte NIfTI-1 header (little-endian, single-file `n+1`).
@@ -696,13 +796,10 @@ fn parse_header(b: &[u8]) -> Result<Header> {
     // Both are sealed as JSON numbers (the array spec's rescale): refuse one a seal cannot hold here,
     // by header field and value, before any output exists (SPEC §1, #886). `scl_inter` is read only
     // when `scl_slope` is non-zero, so only then is it sealed and checked.
-    refuse_unsealable("nifti", "scl_slope", &r.f32(112).to_string(), &[scl_slope])?;
-    if scl_slope != 0.0 {
-        refuse_unsealable("nifti", "scl_inter", &r.f32(116).to_string(), &[rescale.1])?;
-    }
+    refuse_unsealable_fields(&r, &RESCALE_FIELDS[..if scl_slope == 0.0 { 1 } else { 2 }])?;
 
     let (world_frame, geometry_source) = parse_geometry(&r)?;
-    let axis_referencing = parse_time_axis(&r, shape.len());
+    let axis_referencing = parse_time_axis(&r, shape.len())?;
     Ok(Header {
         shape,
         axes,
@@ -2073,5 +2170,171 @@ mod tests {
         let p = dir.path().join("ok.nii");
         std::fs::write(&p, b).unwrap();
         assert_eq!(read_nifti(&p).unwrap().rescale_slope, 2.5);
+    }
+
+    /// Every header value that feeds the manifest is validated at the door, in NIfTI's own words
+    /// (#886 round 3): the sform entries, the qform quaternion, offset and spacing, the time axis and
+    /// `toffset`. Before the fix only `scl_*` was, and the rest reached the generic seal-time check
+    /// (naming a JSON path and advising "write it as a string"), or, for a NaN spacing, were clamped
+    /// to 1.0 and sealed (`d > 0.0 { d } else { 1.0 }`).
+    #[test]
+    fn every_header_value_that_feeds_the_manifest_is_validated_naming_the_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let voxels: Vec<i16> = (0..16).collect();
+        let refused = |synth: Synth| -> String {
+            let p = dir.path().join("bad.nii");
+            synth.write(&p, &voxels);
+            read_nifti(&p).map(|_| ()).unwrap_err().to_string()
+        };
+        let series = || Synth::new(&[2, 2, 2, 2]);
+        let qform_only = || Synth::new(&[2, 2, 2]).no_sform().qform(1, [0.0; 3], 1.0);
+        let big = 1.0e16_f32;
+        let big_text = "10000000000000000";
+        let beyond = "is outside the range a sealed JSON number can hold";
+        let non_finite = "is not a finite number";
+
+        let mut cases: Vec<(&str, String, &str, &str)> = Vec::new();
+        for (r, axis) in ["x", "y", "z"].into_iter().enumerate() {
+            for c in 0..4 {
+                let mut s = Synth::new(&[2, 2, 2]);
+                s.srows[r][c] = big;
+                cases.push((
+                    "sform",
+                    refused(s),
+                    Box::leak(format!("srow_{axis}[{c}]").into_boxed_str()),
+                    beyond,
+                ));
+            }
+        }
+        for (bad, text, why) in [(big, big_text, beyond), (f32::NAN, "NaN", non_finite)] {
+            cases.push((
+                "pixdim1",
+                refused(qform_only().spacing(bad, 2.0, 3.0)),
+                "pixdim[1]",
+                why,
+            ));
+            cases.push((
+                "pixdim2",
+                refused(qform_only().spacing(1.0, bad, 3.0)),
+                "pixdim[2]",
+                why,
+            ));
+            cases.push((
+                "pixdim3",
+                refused(qform_only().spacing(1.0, 2.0, bad)),
+                "pixdim[3]",
+                why,
+            ));
+            cases.push((
+                "qfac",
+                refused(qform_only().qform(1, [0.0; 3], bad)),
+                "pixdim[0]",
+                why,
+            ));
+            cases.push((
+                "quatern_b",
+                refused(qform_only().qform(1, [bad, 0.0, 0.0], 1.0)),
+                "quatern_b",
+                why,
+            ));
+            cases.push((
+                "qoffset_z",
+                refused(qform_only().qoffset([1.0, 2.0, bad])),
+                "qoffset_z",
+                why,
+            ));
+            // 8 = seconds: the time axis is in use.
+            cases.push((
+                "pixdim4",
+                refused(series().time_axis(bad, 0.0, 10)),
+                "pixdim[4]",
+                why,
+            ));
+            cases.push((
+                "toffset",
+                refused(series().time_axis(2.5, bad, 10)),
+                "toffset",
+                why,
+            ));
+            let _ = text;
+        }
+        for (label, msg, field, why) in &cases {
+            assert!(
+                msg.starts_with(&format!("invalid product: nifti: {field} = \""))
+                    && msg.contains(why),
+                "{label}: {msg}"
+            );
+            assert!(!msg.contains("as a string"), "{label}: {msg}");
+        }
+        // The value is the one the file spells.
+        assert_eq!(
+            refused(qform_only().spacing(big, 2.0, 3.0)),
+            format!(
+                "invalid product: nifti: pixdim[1] = \"{big_text}\" {beyond} (±(2^53−1), I-JSON RFC \
+                 7493 §2.2)"
+            )
+        );
+        assert!(refused(qform_only().spacing(f32::NAN, 2.0, 3.0))
+            .starts_with("invalid product: nifti: pixdim[1] = \"NaN\" is not a finite number"));
+
+        // An entry computed from in-range fields that falls out of range is refused, naming them:
+        // 1e13 m is 1e16 mm.
+        let mut metres = Synth::new(&[2, 2, 2]).space_units(1);
+        metres.srows[0][0] = 1.0e13;
+        let msg = refused(metres);
+        assert!(
+            msg.starts_with(
+                "invalid product: nifti: world_frame.affine[2] (computed from srow_x[0]) = \""
+            ) && msg.contains(beyond),
+            "{msg}"
+        );
+        let msg = refused(qform_only().space_units(1).spacing(1.0, 1.0, 1.0e13));
+        assert!(
+            msg.contains(
+                "world_frame.affine[8] (computed from quatern_b/c/d and pixdim[3] and pixdim[0])"
+            ),
+            "{msg}"
+        );
+    }
+
+    /// The door refuses what it cannot seal and nothing else: an in-range header (the whole fixture
+    /// family, both transforms, a real time axis) decodes exactly as before, a spacing that is zero or
+    /// negative is still clamped to 1 as the reference `nifti_quatern_to_mat44` does (only a
+    /// non-finite one is refused), and a time step that is not a cadence still leaves the axis bare.
+    #[test]
+    fn an_in_range_header_is_unchanged_and_a_non_positive_spacing_is_still_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let voxels: Vec<i16> = (0..16).collect();
+        let read = |s: Synth| {
+            let p = dir.path().join("ok.nii");
+            s.write(&p, &voxels);
+            read_nifti(&p).unwrap()
+        };
+        let series = read(Synth::new(&[2, 2, 2, 2]).time_axis(2.5, 1.0, 10));
+        assert!(series.axis_referencing.is_some());
+        assert_eq!(series.geometry_source, Some(GeometrySource::Sform));
+        let q = read(Synth::new(&[2, 2, 2]).no_sform().qform(1, [0.0; 3], 1.0));
+        assert_eq!(q.geometry_source, Some(GeometrySource::Qform));
+        // pixdim[1] = 0 and -2 are clamped to 1 (the reference), so the first column is ±1·rotation.
+        for bad in [0.0_f32, -2.0] {
+            let img = read(
+                Synth::new(&[2, 2, 2])
+                    .no_sform()
+                    .qform(1, [0.0; 3], 1.0)
+                    .spacing(bad, 2.0, 3.0),
+            );
+            let wf = img.world_frame.unwrap();
+            assert_eq!(wf.affine[2].abs(), 1.0, "pixdim[1] = {bad} clamps to 1");
+        }
+        // A finite zero step is no cadence: the axis stays a storage index, as it always did.
+        assert!(read(Synth::new(&[2, 2, 2, 2]).time_axis(0.0, 1.0, 10))
+            .axis_referencing
+            .is_none());
+        // A header that names no time unit does not seal `pixdim[4]`/`toffset`, so they are not checked.
+        assert!(
+            read(Synth::new(&[2, 2, 2, 2]).time_axis(f32::NAN, f32::NAN, 2))
+                .axis_referencing
+                .is_none()
+        );
     }
 }
