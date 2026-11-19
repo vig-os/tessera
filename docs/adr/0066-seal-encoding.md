@@ -24,8 +24,9 @@ so far lived in the gap between the two:
 
 Each was closed by its own rule (verify the parsed object, declared-form check, duplicate-key refusal, I-JSON
 integers in PR #894). The gap stays: any byte string whose re-serialisation is the sealed one verifies. The spike's
-attack replay shows the class is still open in alpha.6. Over the 13 tracked products, 59 of 59 respellings (key
-order, whitespace, `\u` escapes, `64` → `64.0`, pretty layout) keep the seal and verify. On 7 products a sealed
+attack replay shows the class is still open in alpha.6. Over the 13 tracked products (12 distinct manifests: the
+two `study.tsra` fixtures are byte-identical), 59 of 59 respellings (key order, whitespace, `\u` escapes,
+`64` → `64.0`, pretty layout) keep the seal and verify. On 7 products a sealed
 `64.0` in an array shape splits the readers (the spike's case S7): Rust refuses the block, JavaScript reads
 `64`, Python a float.
 
@@ -55,7 +56,8 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
    keys in JCS order, JCS string escapes and number forms, UTF-8. It carries no `manifest_hash` key. Writers emit
    JCS bytes (no pretty printing; `jq .` gives the readable view).
 2. **Seal.** `manifest_hash = "blake3:" + hex(blake3(manifest.json bytes))`. Because the stored bytes are the JCS
-   bytes A already hashes, **every existing seal keeps its value** (13/13 tracked products, 8/8 goldens).
+   bytes A already hashes, **every existing seal keeps its value** (13/13 tracked products, 12 distinct manifests;
+   8/8 goldens).
 3. **Where the seal is stored.** In a `manifest.seal` member holding the 71 ASCII bytes `blake3:<64 hex>`,
    entry 2 of the `.tsra` (after `mimetype`, before `manifest.json`, so one ranged read gets both), and as a
    `manifest.seal` file beside `manifest.json` in the exploded form. It is self-attesting, as the in-band field is
@@ -88,9 +90,10 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
     and no second reading path. A reader refuses a product written before this ADR (a pretty `manifest.json`
     with an in-band `manifest_hash`, no `manifest.seal`) with an error that names the format it found (the
     `tessera_version` the manifest declares and the layout evidence) and the format the reader requires. Because
-    `TESSERA_VERSION` is deliberately fixed at `"0.0.0"` (ADR-0042; it is stamped into the producer and therefore
-    sealed), the layout evidence, not a version bump, tells the two formats apart. The corpus is re-packed in the
-    cutover; anyone with an alpha product re-ingests it.
+    `TESSERA_VERSION` is deliberately fixed at `"0.0.0"` (the fixed-version policy is ADR-0052 §1; ADR-0042 fixes
+    the stamp format; the value is stamped into the producer and therefore sealed), the layout evidence, not a
+    version bump, tells the two formats apart. The corpus is re-packed in the cutover; anyone with an alpha product
+    re-ingests it.
 11. **The break ships alone, before the bridge work** (owner, 2026-11-19). It is its own alpha and lands before the
     C ABI bridge (#454 → #811, ADR-0065), so the bridge is built once against the final format. Two further format
     changes ride the same alpha because each moves hashes anyway: #720 (rule 12) and #828 (rule 13).
@@ -127,7 +130,7 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
   13/13 manifests and 200,000/200,000 doubles).
 - A third-party writer that emits "sorted, compact JSON" without a JCS library is refused (Python's `json.dumps`
   writes `1.0`, `1e-07`, `-0.0`). That is a loud failure at the writer, never a second seal.
-- The stored manifest is one line (27,103 B for the 13 products vs 40,804 B pretty).
+- The stored manifest is one line (27,103 B for the 13 products, 12 distinct manifests, vs 40,804 B pretty).
 - Every reader (Rust, the Python reference reader, `tessera-wasm`) must run the canonical check and I-JSON; a
   reader that only hashes would accept a sealed respelling, one without I-JSON a rounded integer. The seal cases
   must carry both.
@@ -172,8 +175,10 @@ bridge work (#454 → #811) starts before step 9 is released.
      encoding; optional inclusive `minimum`/`maximum`; built-in schemas declare their rules. The bound stays a
      format invariant (rule 7).
    - *Acceptance:* a schema with a bare `u64` metadata field is refused; an out-of-range value is refused naming the
-     field and its source; in-range values and every existing seal are unchanged; the `Builder` and the reference
-     reader follow the same rule.
+     field and its source; in-range values are unchanged. The built-in schemas are embedded in the manifests, so a
+     schema that gains a declaration moves the seal of the products that embed it. Those moves are recorded for
+     step 8, and step 4 takes its seal-preservation proof on a head before step 1 merges (or against the goldens
+     as step 1 moved them). The `Builder` and the reference reader follow the same rule.
 2. **Writers emit the JCS form of every sealed JSON document.**
    - *Crates:* `tessera-io` (`pack`, `pack_dir`, exploded form, `WriteSession`, repository `objects/`),
      `tessera-cli` (`commit`/`publish`/`seal`, collection writer), `tessera-ingest` (`collection.json`),
@@ -242,13 +247,15 @@ bridge work (#454 → #811) starts before step 9 is released.
      passes; size and speed meet the note's numbers.
 8. **Corpus and conformance regeneration, once.**
    - *Crates:* `corpus/`, `tessera-cli` snapshots, the reference reader, `tessera-wasm`.
-   - *Depends on:* 5 and 7.
-   - *Scope:* regenerate every golden that 5 and 7 moved (`content_hash`, `manifest_hash`, block digests); every
-     change is explained by one of them, and `id` does not move.
+   - *Depends on:* 1, 5 and 7.
+   - *Scope:* regenerate every golden that 1, 5 or 7 moved (`content_hash`, `manifest_hash`, block digests). Step 1
+     (#895) can move a golden too: the built-in schemas are embedded in the manifests, so a schema that gains a
+     string encoding or a range changes the sealed bytes. Every change is explained by one of the three, and `id`
+     moves only where #895 touched a field that is part of `id_inputs` (the table states it per product).
    - *Acceptance:* a per-product table of which hash moved and why; Rust, the reference reader and `tessera-wasm`
      agree on the new corpus.
 9. **Cut the alpha.**
    - *Crates:* none (release).
-   - *Depends on:* 1 and 8.
+   - *Depends on:* 8 (which depends on 1).
    - *Scope:* release notes name the format break, the refusal of alpha products, the moved hashes and that signatures
      made before it do not verify. The bridge work (#454 → #811) starts afterwards.

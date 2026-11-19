@@ -60,7 +60,7 @@ The alternatives every comparable format uses (issue comment of 2026-11-17): OCI
 
 ## 2. Prototypes (`corpus`)
 
-`cargo run --release -- corpus` over the 13 tracked products (`results/corpus.md`):
+`cargo run --release -- corpus` over the 13 tracked products (12 distinct manifests, see above) (`results/corpus.md`):
 
 - **A′ keeps every seal.** `digest(JCS(manifest − manifest_hash))` is, by definition, the seal A computes, so
   storing exactly those bytes makes `blake3(manifest.json)` equal the recorded `manifest_hash`: **13/13**, and
