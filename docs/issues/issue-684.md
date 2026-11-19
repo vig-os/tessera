@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-26T19:41:07Z
-updated: 2026-10-30T04:47:49Z
+updated: 2026-11-18T14:56:58Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/684
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-30T08:02:25.282Z
+synced: 2026-11-19T09:52:31.923Z
 ---
 
 # [Issue 684]: [chore(deps): remove the zstd advisory ignores (RUSTSEC-2026-0391/0398/0403/0410)](https://github.com/vig-os/tessera/issues/684)
@@ -117,7 +117,7 @@ Follow-up from the #687 review: `tessera/clippy.toml` sets `allow-invalid = true
 
 _Posted on October 30, 2026 at 04:47 AM_
 
-Downstream impact: MorePET/visionx-rs is now blocked on this. visionx-rs#138 (stage-0 raw pack via `tessera-io` `blob_ref_streaming` + `pack_streaming_verified`) adds `tessera-io` at dev 4504efb, which brings `zarrs` 0.23.14 → `zstd` 0.13.3 / `zstd-safe` 7.3.0 unconditionally. visionx's `cargo deny check advisories` then fails on RUSTSEC-2026-0391/0398/0403; `cargo update` can't move them (zarrs pins zstd 0.13). The same will gate visionx#39 (stage-1 import).
+Downstream impact: [private-repo] is now blocked on this. visionx-rs#138 (stage-0 raw pack via `tessera-io` `blob_ref_streaming` + `pack_streaming_verified`) adds `tessera-io` at dev 4504efb, which brings `zarrs` 0.23.14 → `zstd` 0.13.3 / `zstd-safe` 7.3.0 unconditionally. visionx's `cargo deny check advisories` then fails on RUSTSEC-2026-0391/0398/0403; `cargo update` can't move them (zarrs pins zstd 0.13). The same will gate visionx#39 (stage-1 import).
 
 Two upstream asks, either of which unblocks us without a downstream ignore:
 1. Bump to a `zarrs` release on zstd ≥ 0.14.3 / zstd-safe ≥ 8.2.0 when one exists, or

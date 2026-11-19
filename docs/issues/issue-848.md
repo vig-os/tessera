@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-13T22:22:36Z
-updated: 2026-11-15T02:18:18Z
+updated: 2026-11-18T14:52:24Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/848
@@ -13,12 +13,12 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-15T08:48:31.520Z
+synced: 2026-11-19T09:52:15.598Z
 ---
 
 # [Issue 848]: [feat(io): single-pass multi-table streaming: unknown-length push_table, concurrent table handles, header after stream (downstream: visionx-rs#39)](https://github.com/vig-os/tessera/issues/848)
 
-Filed by the MorePET/visionx-rs architect on 2026-11-13, at the owner's direction. The owner decided visionx-rs#39 (the streaming scan writer) **waits for this** rather than working around it with a two-pass writer.
+Filed by the [private-repo] architect on 2026-11-13, at the owner's direction. The owner decided visionx-rs#39 (the streaming scan writer) **waits for this** rather than working around it with a two-pass writer.
 
 ## The producer
 The Siemens list-mode decoder runs one parallel pass over a file of up to about 19 GB. That pass emits three tables at once, interleaved in packet order:
@@ -41,7 +41,7 @@ Any design that lets one pass write several bounded streamed tables. We'd sugges
 
 We read this from the alpha.5 source and from ADR-0064, and would be glad to review an ADR.
 
-Downstream issues: MorePET/visionx-rs#39, #40 and #56. Context: tessera#716 (thread from 2026-11-13) and MorePET/visionx-rs#221.
+Downstream issues: [private-repo]#39, #40 and #56. Context: tessera#716 (thread from 2026-11-13) and [private-repo]#221.
 ---
 
 # [Comment #1]() by [gerchowl]()

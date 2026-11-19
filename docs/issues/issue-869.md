@@ -2,7 +2,7 @@
 type: issue
 state: closed
 created: 2026-11-15T12:54:19Z
-updated: 2026-11-16T06:56:52Z
+updated: 2026-11-18T14:58:04Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/869
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-16T08:59:39.744Z
+synced: 2026-11-19T09:52:13.010Z
 ---
 
 # [Issue 869]: [Record the table codec profile beside the sealed Vortex edition?](https://github.com/vig-os/tessera/issues/869)
@@ -52,7 +52,7 @@ Owner decisions 2026-11-15: alpha.6 is cut after #573 and #734 land, as one secu
 
 _Posted on November 16, 2026 at 12:23 AM_
 
-**Owner decision (2026-11-16), from the kit storage discussion (nerdmachines/kit#97):** a tunable table profile means **declared constants**, not adaptive choices.
+**Owner decision (2026-11-16), from the kit storage discussion ([private-repo]#97):** a tunable table profile means **declared constants**, not adaptive choices.
 
 - A profile is a named, fixed set of constants. The same input with the same edition and the same profile gives the same bytes, for every profile.
 - Byte reproducibility stays the requirement for large data files, where encoding is done once. A second profile for collections of small, frequently changed rows may use other constants (smaller leaves, for example), and is still reproducible within itself.
@@ -65,6 +65,6 @@ _Posted on November 16, 2026 at 12:23 AM_
 - the profile names and the values of a small-row profile;
 - that `ROWS_PER_GROUP` is frozen for format compatibility today, so letting it vary per profile is a format event (corpus regeneration and cross-architecture byte evidence), to be sequenced with the Vortex jump in #635.
 
-The small-row profile is only worth defining if key lookup and small updates meet their budgets on Vortex leaves plus delta leaves. That measurement is the central experiment in nerdmachines/kit#97.
+The small-row profile is only worth defining if key lookup and small updates meet their budgets on Vortex leaves plus delta leaves. That measurement is the central experiment in [private-repo]#97.
 
 

@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-16T21:39:09Z
-updated: 2026-10-18T12:29:46Z
+updated: 2026-11-18T14:55:32Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/570
@@ -13,14 +13,14 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-19T07:18:02.524Z
+synced: 2026-11-19T09:52:38.721Z
 ---
 
 # [Issue 570]: [feat: whole-file crypto-shred (erasure by key destruction) — ADR-0055 share is a grant, not erasure; define an at-rest erasure mode](https://github.com/vig-os/tessera/issues/570)
 
 ## Context
 
-Dogfooding from MorePET/anatomist#86 (ADR-0007, PR MorePET/anatomist#103) and #91, at tessera `dev` `fa581f5`, with synthetic data only.
+Dogfooding from [private-repo]#86 (ADR-0007, PR [private-repo]#103) and #91, at tessera `dev` `fa581f5`, with synthetic data only.
 
 anatomist needs **erasure by key destruction for whole products**: each dog's ingest and every product derived from it are encrypted to one per-dog key, and destroying that key must make every copy unreadable. Tessera's documents don't define that verb today:
 

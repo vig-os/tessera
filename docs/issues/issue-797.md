@@ -2,7 +2,7 @@
 type: issue
 state: closed
 created: 2026-11-11T01:00:28Z
-updated: 2026-11-11T05:55:47Z
+updated: 2026-11-18T14:52:57Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/797
@@ -13,13 +13,13 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-11T08:50:44.086Z
+synced: 2026-11-19T09:52:19.297Z
 ---
 
 # [Issue 797]: [docs(adr): ADR-0064 §8.1 criterion 2 as a within-run (fixed-effects) slope — owner ruling 2026-11-11](https://github.com/vig-os/tessera/issues/797)
 
 ## Owner ruling (2026-11-11)
-ADR-0064 §8.1 criterion 2 is judged by a **within-run** slope, because the ksb HDD is degraded (exo-fleet#980).
+ADR-0064 §8.1 criterion 2 is judged by a **within-run** slope, because the [batch-host] HDD is degraded (exo-fleet#980).
 
 ## Why
 G r4 (PR #767 @ fa09a81) ran the full sample: W=4 k=3 (N=9) and W=1 k=6 (N=24).

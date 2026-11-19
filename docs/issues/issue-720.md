@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-30T02:08:08Z
-updated: 2026-11-09T03:32:41Z
+updated: 2026-11-19T05:25:57Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/720
-comments: 2
+comments: 4
 labels: bug, priority:high
 assignees: none
 milestone: none
 projects: none
-parent: none
+parent: 897
 children: none
-synced: 2026-11-09T09:04:26.886Z
+synced: 2026-11-19T09:52:28.287Z
 ---
 
 # [Issue 720]: [bug(core): derived-sidecar blocks are folded into content_hash, contradicting Accepted ADR-0028 §4](https://github.com/vig-os/tessera/issues/720)
@@ -86,4 +86,20 @@ Scope for the ADR (owner discussion 2026-11-03): make the hash topology a single
 _Posted on November 9, 2026 at 03:32 AM_
 
 Scheduling note (2026-11-09): the #778 epic's sealed column carriers, #768 (declared vector) and #779 (declared media), should be folded into this ADR-0059 format event, not shipped as separate point changes. Several #778 children (#775, #776, #769 tier 2, #782) depend on this issue's derived-block identity exclusion.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 19, 2026 at 12:16 AM_
+
+Owner 2026-11-19: fix this per ADR-0028 §4 (content_hash covers primary blocks only), in the ADR-0066 format-break release.
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 19, 2026 at 05:25 AM_
+
+This issue is step 5 of the ADR-0066 implementation plan (epic #897; full order in the plan comment there). Its scope and acceptance criteria are in docs/adr/0066-seal-encoding.md, under Implementation plan.
 

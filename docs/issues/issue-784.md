@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-09T03:44:13Z
-updated: 2026-11-09T03:44:13Z
+updated: 2026-11-18T14:53:14Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/784
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-09T09:04:19.290Z
+synced: 2026-11-19T09:52:20.666Z
 ---
 
 # [Issue 784]: [chore(deps): Renovate is rate-limited by 11 unlanded PRs; group the vortex crates and gate them on the fork pin](https://github.com/vig-os/tessera/issues/784)
@@ -27,7 +27,7 @@ Renovate saw vortex 0.93 (Dependency Dashboard #515) but never opened a PR, and 
 **Acceptance**
 - Land or close every open Renovate PR. Each one rebased, CI green, fresh-reviewed per the normal path; #689 [security] first. Superseded ones are closed with the reason.
 - `.github/renovate-default.json` (ours): a `packageRules` group for `/^vortex/` (all crates in one PR). While the fork pin exists, either disable vortex updates with a link to #480/#635, or set `dependencyDashboardApproval: true` so they appear only for a deliberate upgrade. Record the choice.
-- Decide whether to keep or raise `prConcurrentLimit`, given the CI capacity (ksb ARC, #772), and record why.
+- Decide whether to keep or raise `prConcurrentLimit`, given the CI capacity ([batch-host] ARC, #772), and record why.
 - Process: the architect lands Renovate PRs on the weekly schedule. Nothing sits for more than a week without a disposition.
 
 Refs: #635, #480, #515

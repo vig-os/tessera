@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-03T18:07:31Z
-updated: 2026-11-08T11:44:08Z
+updated: 2026-11-18T14:53:59Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/758
@@ -13,12 +13,12 @@ milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-09T09:04:26.425Z
+synced: 2026-11-19T09:52:26.400Z
 ---
 
 # [Issue 758]: [fix(build): tessera's vortex fork pin is a workspace [patch], so dependents silently build with crates.io vortex 0.75.0 and lose both determinism fixes](https://github.com/vig-os/tessera/issues/758)
 
-Found by the ADR-0064 PR G proof (#715). The consumer reproducer (MorePET/visionx-rs, `visionx-tsra`) resolves vortex **0.75.0 from crates.io**.
+Found by the ADR-0064 PR G proof (#715). The consumer reproducer ([private-repo], `visionx-tsra`) resolves vortex **0.75.0 from crates.io**.
 
 Tessera pins vortex to the gerchowl/vortex fork (PR #481) through a workspace-level `[patch]`. Cargo applies `[patch]` only in the root workspace; dependents don't inherit it. So every downstream crate that depends on tessera, by git or registry, builds without the two determinism fixes the fork carries:
 - **#468:** container bytes differ under `debug_assertions`.

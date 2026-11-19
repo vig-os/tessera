@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-06-25T11:39:44Z
-updated: 2026-11-10T10:46:08Z
+updated: 2026-11-18T14:57:36Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/203
@@ -13,7 +13,7 @@ milestone: backlog / research
 projects: none
 parent: none
 children: none
-synced: 2026-11-11T08:50:47.958Z
+synced: 2026-11-19T09:52:45.836Z
 ---
 
 # [Issue 203]: [[P3][epic] tessera-io streaming write engine](https://github.com/vig-os/tessera/issues/203)
@@ -84,7 +84,7 @@ _Posted on November 10, 2026 at 10:46 AM_
 ## Design comment — tessera owns the DAQ write path (+ a live tap, deferring aggregation)
 
 Context for #203. A DAQ consumer is landing: a cyclotron control PC streaming **NI cDAQ**
-samples + OCR'd device readouts into tessera, with nerdmachines/kit DAQ daemon as the
+samples + OCR'd device readouts into tessera, with [private-repo] DAQ daemon as the
 reader. Two record kinds:
 
 - **Per-run products** — one `.tsra` per acquisition; receipt before, seal after.

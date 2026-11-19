@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-08T12:02:29Z
-updated: 2026-11-18T00:05:23Z
+updated: 2026-11-18T14:58:17Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/781
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-18T09:43:24.170Z
+synced: 2026-11-19T09:52:21.146Z
 ---
 
 # [Issue 781]: [feat(io): keyed delta products over a base — upserts, tombstones and redirects, a newest-row-wins logical read, and compaction into a new sealed base](https://github.com/vig-os/tessera/issues/781)
@@ -25,7 +25,7 @@ The scitadel-hub corpus (epic #778) mirrors upstream sources that change continu
 - **OpenAlex** publishes a full quarterly snapshot. In between, the hub pulls changes daily: new works from topic subscriptions, and refreshed records in batches of 100 IDs. Works also get **merged** (W1 → W2) and **deleted**.
 - **USPTO** publishes weekly patent grants (mostly additions, with corrections).
 
-The layout is **one base generation per quarter, plus small daily delta products, plus a tiny `current` collection** that pins one base and its deltas. Readers need one logical table where **the newest row per key wins** and tombstones remove or redirect keys. Storage is add-only (the `/srv/anvil` data rule; versitygw, g-fleet#1121): nothing is rewritten in place, and a new base is a new sealed product.
+The layout is **one base generation per quarter, plus small daily delta products, plus a tiny `current` collection** that pins one base and its deltas. Readers need one logical table where **the newest row per key wins** and tombstones remove or redirect keys. Storage is add-only (the `/srv/[gpu-server]` data rule; versitygw, [fleet-config-repo]#1121): nothing is rewritten in place, and a new base is a new sealed product.
 
 ## What already exists (verified at `dev` `26159de`)
 
@@ -79,7 +79,7 @@ _Posted on November 9, 2026 at 03:32 AM_
 
 _Posted on November 16, 2026 at 12:56 AM_
 
-**Input for the #781 / ADR-0036 ADR: the leaf split rule and leaf naming after compaction** (agent, from the kit storage review nerdmachines/kit#97, 2026-11-16).
+**Input for the #781 / ADR-0036 ADR: the leaf split rule and leaf naming after compaction** (agent, from the kit storage review [private-repo]#97, 2026-11-16).
 
 kit wants the same mechanism as this issue for small, frequently edited keyed collections (tasks, edges, document blocks), so it reviewed how tessera's Merkle tree and ADR-0064's leaves behave under it. Two points for the ADR to decide. Neither asks to change streamed tables.
 
@@ -103,7 +103,7 @@ kit wants the same mechanism as this issue for small, frequently edited keyed co
 
 _Posted on November 18, 2026 at 12:05 AM_
 
-**Measurements for the #781 / ADR-0036 ADR: split rule, compaction and the keyed read** (agent, from the kit benchmark nerdmachines/kit#98 for nerdmachines/kit#97, 2026-11-16). This puts numbers on point 1 of the comment above.
+**Measurements for the #781 / ADR-0036 ADR: split rule, compaction and the keyed read** (agent, from the kit benchmark [private-repo]#98 for [private-repo]#97, 2026-11-16). This puts numbers on point 1 of the comment above.
 
 **Setup.** A standalone harness, not tessera: sorted Vortex leaf files as base, delta files with an `op` column, a newest-row-wins read and a compaction that writes a new base. Vortex 0.93.0 from crates.io with default codecs, so neither the fork pin nor the canonical codec profile. 10⁶ synthetic rows of about 350 bytes (`u64` key, three small integers, a 40-byte and a 300-byte string). Leaves of 4,096 to 65,536 rows, far below `BLOCK_ROWS`. Every read was checked against an in-memory oracle with no mismatch. Byte counts are the evidence; timings are from a shared host with a warm page cache.
 

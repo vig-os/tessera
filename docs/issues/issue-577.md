@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-16T22:45:09Z
-updated: 2026-10-16T22:45:09Z
+updated: 2026-11-18T14:55:20Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/577
@@ -13,14 +13,14 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:43.448Z
+synced: 2026-11-19T09:52:36.979Z
 ---
 
 # [Issue 577]: [feat(cli): verify-sig --keyring — a pinned key list with validity windows, for rotation without a trust store](https://github.com/vig-os/tessera/issues/577)
 
 ## Context
 
-Dogfooding from MorePET/anatomist#86 (ADR-0007, PR MorePET/anatomist#103) at tessera `dev` `fa581f5`. Related to #576.
+Dogfooding from [private-repo]#86 (ADR-0007, PR [private-repo]#103) at tessera `dev` `fa581f5`. Related to #576.
 
 An automated verifier should pin exactly which keys it trusts, and not inherit a store from `$HOME` or the cwd (#576). Today the only pinned form is `verify-sig --pubkey <one key file> [--require-signer <id>]`. Key rotation breaks that: once the operator rotates its signing key, products signed with the old key fail against the new pinned key, and products signed with the new key fail against the old one. Each consumer then has to write its own selection logic: read `aux/signatures/<key_id>.sig.json`, take `key_id` and `signed_at`, pick the matching key from its own list, and call `--pubkey`.
 
@@ -48,5 +48,5 @@ That gives rotation without trust-store state, and composes with #576's fix.
 
 ## Linked
 
-#576, ADR-0037, MorePET/anatomist#86.
+#576, ADR-0037, [private-repo]#86.
 

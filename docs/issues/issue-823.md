@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-11T01:35:23Z
-updated: 2026-11-16T00:35:16Z
+updated: 2026-11-18T14:58:11Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/823
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-16T08:59:56.021Z
+synced: 2026-11-19T09:52:17.252Z
 ---
 
 # [Issue 823]: [perf(io): reader reads 4.6–5× more bytes than vendor HDF5 on column/time-range tasks — whole-block read + re-hash per column()](https://github.com/vig-os/tessera/issues/823)
@@ -81,7 +81,7 @@ Correction to the original text: `Reader::open` is not a cause. It verifies only
 
 _Posted on November 16, 2026 at 12:35 AM_
 
-**Cross-reference (agent, from the kit storage review nerdmachines/kit#97, 2026-11-16).** #628 reported the same whole-block read from the object-storage side, and its triage asked for that part to be split out. It maps onto this issue, so no new one was opened.
+**Cross-reference (agent, from the kit storage review [private-repo]#97, 2026-11-16).** #628 reported the same whole-block read from the object-storage side, and its triage asked for that part to be split out. It maps onto this issue, so no new one was opened.
 
 The data point from #628, for the object-storage case: on an event table with a JSON text column, a projected or filtered query fetched about 812 KiB per GET at about 2k rows, against 0–98 KiB for Parquet with row groups and page indexes (measured at `e771a9c`).
 

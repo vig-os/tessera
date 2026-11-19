@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-16T20:45:21Z
-updated: 2026-10-16T20:45:21Z
+updated: 2026-11-18T14:55:41Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/567
@@ -13,14 +13,14 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:48.222Z
+synced: 2026-11-19T09:52:40.002Z
 ---
 
 # [Issue 567]: [feat(py): expose with_schema on Builder — a domain product schema (requires_generation, tiers, inherit) can't be embedded from Python](https://github.com/vig-os/tessera/issues/567)
 
 ## Context
 
-Dogfooding from MorePET/anatomist#86 (ADR-0007 draft) at tessera `dev` `fa581f5`, synthetic data only.
+Dogfooding from [private-repo]#86 (ADR-0007 draft) at tessera `dev` `fa581f5`, synthetic data only.
 
 ADR-0058 §3 says the "needs a recipe" rule is schema data and that "a domain schema is authoritative and may tighten this to `true`". The Rust write API supports it: `ProductBuilder::with_schema(value)` embeds a caller-supplied `ProductSchema`, and `validate_manifest` prefers the embedded schema over the built-in registry (`tessera-core/src/schema.rs:333`). `tessera schema <file>` then enforces `requires_generation`, required fields, sensitivity tiers and `inherit` from the file's own contract.
 
@@ -52,5 +52,5 @@ Unpacking, editing `manifest.json` and running `tessera pack` is not a workaroun
 
 ## Linked
 
-#562 (with_producer / with_generation, the recipe half), #482 (no built-in schema sets `requires_generation`), MorePET/anatomist#86.
+#562 (with_producer / with_generation, the recipe half), #482 (no built-in schema sets `requires_generation`), [private-repo]#86.
 

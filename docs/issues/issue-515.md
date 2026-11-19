@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-18T00:42:27Z
+updated: 2026-11-19T05:25:20Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-18T09:43:25.526Z
+synced: 2026-11-19T09:52:42.512Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -24,7 +24,8 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 
 The following updates are currently rate-limited. To force their creation now, click on a checkbox below.
 
- - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-digest -->chore(deps): update actions/create-github-app-token digest to 64ab729
+ - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-digest -->chore(deps): update actions/create-github-app-token digest to f418cff
+ - [ ] <!-- unlimit-branch=renovate/tessera-core-digest -->fix(deps): update tessera-core digest to 7b5cedd
  - [ ] <!-- unlimit-branch=renovate/bytes-1.x-lockfile -->chore(deps): update rust crate bytes to v1.12.2
  - [ ] <!-- unlimit-branch=renovate/clap-4.x-lockfile -->chore(deps): update rust crate clap to v4.6.8
  - [ ] <!-- unlimit-branch=renovate/dicom-0.x-lockfile -->chore(deps): update rust crate dicom to v0.10.1
@@ -44,7 +45,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unlimit-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.54.1
  - [ ] <!-- unlimit-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
- - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.7.0
+ - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.7.2
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.27.0
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
@@ -77,8 +78,21 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 ## Detected Dependencies
 
-<details><summary>cargo (5)</summary>
+<details><summary>cargo (6)</summary>
 <blockquote>
+
+<details><summary>docs/spikes/897-seal-encoding/Cargo.toml (8)</summary>
+
+ - `tessera-core ea2e47aeafe4a509ef3206e0e6f6d90882031945` → [Updates: ``]
+ - `serde_json 1`
+ - `serde_jcs 0.2.0`
+ - `blake3 1`
+ - `zip 9` → [Updates: `lock file @ 9.7.2`]
+ - `minicbor 2.3.1`
+ - `cbor4ii 1.2.5`
+ - `serde 1`
+
+</details>
 
 <details><summary>tessera/Cargo.toml (42)</summary>
 
@@ -94,7 +108,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `age 0.11` → [Updates: `0.12`]
  - `time 0.3` → [Updates: `lock file @ 0.3.55`]
  - `proptest 1` → [Updates: `lock file @ 1.12.0`]
- - `zip 9.0.5` → [Updates: `lock file @ 9.7.0`]
+ - `zip 9.0.5` → [Updates: `lock file @ 9.7.2`]
  - `zarrs 0.23` → [Updates: `lock file @ 0.23.14`]
  - `bytes 1` → [Updates: `lock file @ 1.12.2`]
  - `half 2`
@@ -228,7 +242,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
  - `dtolnay/rust-toolchain stable@89b12181fb390509a0842a86cc55eeb8eb928c1d` → [Updates: `stable`]
- - `actions/create-github-app-token v1.12.0@d72941d797fd3113feb6b93fd0dec494b13a2547` → [Updates: `v3.3.0`]
+ - `actions/create-github-app-token v1.12.0@d72941d797fd3113feb6b93fd0dec494b13a2547` → [Updates: `v3.4.0`]
  - `cargo-bins/cargo-binstall v1.23.0@b874e25ea559687bec77e281e9b271aa1367b624` → [Updates: `v1.27.0`]
  - `cargo-bins/cargo-binstall 1.23.0` → [Updates: `1.27.0`]
 

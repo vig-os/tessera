@@ -2,7 +2,7 @@
 type: issue
 state: closed
 created: 2026-11-02T06:08:49Z
-updated: 2026-11-02T08:49:57Z
+updated: 2026-11-18T14:54:05Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/725
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-02T08:51:35.034Z
+synced: 2026-11-19T09:52:26.844Z
 ---
 
 # [Issue 725]: [ci(nix): run the aarch64 flake check nightly on dev and on releases, not per PR](https://github.com/vig-os/tessera/issues/725)
@@ -23,7 +23,7 @@ It is the slowest leg: 46–82 min hosted. It keeps running **nightly on dev (sc
 `workflow_dispatch`**. It will run per release once the first real releases start.
 
 ## What is being traded away (state it in nix-check.yml's header)
-Since #688 the ksb x86_64 leg runs Nix with `sandbox = false` (exo-pet/exo-fleet#1081). The hosted aarch64 leg was the
+Since #688 the [batch-host] x86_64 leg runs Nix with `sandbox = false` ([private-repo]#1081). The hosted aarch64 leg was the
 **only sandboxed** flake check, and the **only cross-arch determinism check** (#472/#468 class: S15
 writer-determinism across arches). With this change, both are checked nightly instead of per PR. A regression is
 caught within a day and is traceable to that day's merges.

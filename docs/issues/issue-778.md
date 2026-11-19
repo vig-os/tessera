@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-08T11:43:13Z
-updated: 2026-11-09T03:32:40Z
+updated: 2026-11-18T14:57:26Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/778
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: 758, 628, 654, 768, 769, 775, 776, 777, 779, 780, 781, 782
-synced: 2026-11-09T09:04:22.341Z
+synced: 2026-11-19T09:52:22.121Z
 ---
 
 # [Issue 778]: [use case: scitadel-hub — literature & patent corpus on tessera (strings, vectors, BM25, graph, streaming queries, Parquet export)](https://github.com/vig-os/tessera/issues/778)
@@ -22,7 +22,7 @@ synced: 2026-11-09T09:04:22.341Z
 
 ## What scitadel-hub is
 
-[scitadel](https://github.com/vig-os/scitadel) is a Rust literature-review tool (CLI, MCP, TUI) that searches PubMed, OpenAlex, arXiv, Crossref, Europe PMC, patent offices and others through their live APIs. **scitadel-hub** is a planned server-side split: a shared, prefetched corpus for a lab or institute, so that search, scoring and reading run locally (CPU plus the anvil GPU) instead of through thousands of rate-limited API calls.
+[scitadel](https://github.com/vig-os/scitadel) is a Rust literature-review tool (CLI, MCP, TUI) that searches PubMed, OpenAlex, arXiv, Crossref, Europe PMC, patent offices and others through their live APIs. **scitadel-hub** is a planned server-side split: a shared, prefetched corpus for a lab or institute, so that search, scoring and reading run locally (CPU plus the [gpu-server] GPU) instead of through thousands of rate-limited API calls.
 
 Two triggers:
 
@@ -44,7 +44,7 @@ Two triggers:
 ### Product model
 
 - **Sealed, versioned products.** Each quarterly OpenAlex snapshot (or subset), each USPTO bulk release and each **daily delta** becomes a **new sealed product**. Daily deltas come from (a) topic/author/venue subscriptions filtered by publication date and (b) a rolling refresh of known works in 100-id batches. "Current" is a Collection or catalog pointer (ADR-0049 / ADR-0054 Decision 3), so nothing is rewritten.
-- **Add-only storage.** Products live on anvil's research-data storage (`/srv/anvil/projects/<project>/`, add-only by fleet rule) and in an **S3-compatible object store (versitygw, gerchowl/g-fleet#1121)**, read through `object_store` range reads (the `cloud` feature, #225; #628 notes that whole-block GETs are the latency problem).
+- **Add-only storage.** Products live on [gpu-server]'s research-data storage (`/srv/[gpu-server]/projects/<project>/`, add-only by fleet rule) and in an **S3-compatible object store (versitygw, [fleet-config-repo]#1121)**, read through `object_store` range reads (the `cloud` feature, #225; #628 notes that whole-block GETs are the latency problem).
 - **Everything is derived and rebuildable from upstream,** so tessera's pre-1.0 format is acceptable for this consumer. A format change means a rebuild, not data loss.
 - **Provenance carries the useful facts:** which OpenAlex release, which USPTO week, which embedding model and version, which analyzer config.
 
@@ -82,7 +82,7 @@ W3  #776 graph edge tables + CSR aux cache   (node embeddings via #768/#769)
 
 - [ ] A 10⁸-row abstracts table (titles + abstracts + metadata) seals at a size within an agreed factor of the equivalent Parquet (the target is set by #628's ADR).
 - [ ] `SELECT … WHERE year >= 2020 AND topic IN (…)` over a Collection of quarterly + daily-delta products, local and over S3, runs in bounded RSS.
-- [ ] One SQL statement does filter + `bm25(...)` + `vec_topk(...)` + RRF over 10⁸ rows and returns top-100 with the columns in seconds, in bounded RSS (exact target to be set when measured on ksb).
+- [ ] One SQL statement does filter + `bm25(...)` + `vec_topk(...)` + RRF over 10⁸ rows and returns top-100 with the columns in seconds, in bounded RSS (exact target to be set when measured on [batch-host]).
 - [ ] A 768-d f16 embedding column for 8×10⁶ patents is stored natively (#768) and searchable (#769).
 - [ ] A k-hop citation neighbourhood and PageRank run from the CSR cache (#776).
 - [ ] A sealed corpus product published to an HF dataset repo can be verified and column-projected remotely (range reads, no full download), vectors included (#777).
@@ -91,7 +91,7 @@ W3  #776 graph edge tables + CSR aux cache   (node embeddings via #768/#769)
 
 - Sub-issues: #758, #628, #654, #768, #769, #775, #776, #777, #779, #780, #781, #782.
 - Context: #299 (external indexes as rebuildable projections; this epic keeps the indexes in-format), #365 / ADR-0054, ADR-0062, ADR-0064, #580 (geometric graphs, different scope).
-- Fleet: gerchowl/g-fleet#1121 (research-data S3 buckets, versitygw).
+- Fleet: [fleet-config-repo]#1121 (research-data S3 buckets, versitygw).
 - Consumer: vig-os/scitadel (the scitadel-hub ADR is to be filed there).
 
 
@@ -125,7 +125,7 @@ current  → collection{ base 2026-Q4, deltas[…] }
 ```
 
 - **Every block is sorted by `(work_id, ord)`,** so one paper's rows are contiguous and "give me paper W" prunes by chunk statistics (ADR-0059) in every block.
-- **PDFs are never stored in tessera.** Originals are referenced by content-addressed blake3 + URL + fetch date. They are either held in a separate cold artefact store (versitygw, gerchowl/g-fleet#1121) or discarded once processed, when they can be fetched again. #782 makes such unheld inputs first-class leaves, so they don't show up as provenance gaps.
+- **PDFs are never stored in tessera.** Originals are referenced by content-addressed blake3 + URL + fetch date. They are either held in a separate cold artefact store (versitygw, [fleet-config-repo]#1121) or discarded once processed, when they can be fetched again. #782 makes such unheld inputs first-class leaves, so they don't show up as provenance gaps.
 - **Full provenance of every step:** acquire → parse (JATS | HTML | Grobid TEI | PDF extractor) → table/figure extraction → chunking → embedding → index. Typed steps go in a pipeline slot, and per-row `prov_id` handles shards that mix sources (#782).
 - **Re-extraction and re-embedding are new derived products** (ADR-0033 roles). Bases and deltas are never rewritten in place.
 - **Client-side `detach`:** a per-paper `.tsra` projection of one work's rows from every block (found through the #780 index), with a `derived_from` edge to the shard seal, so a user's local copy stays verifiable against the hub.

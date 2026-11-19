@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-08-11T08:06:28Z
-updated: 2026-10-16T21:39:18Z
+updated: 2026-11-18T14:56:21Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/378
@@ -13,7 +13,7 @@ milestone: 0.1.0-beta
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:51.599Z
+synced: 2026-11-19T09:52:43.932Z
 ---
 
 # [Issue 378]: [Implement ADR-0055 — whole-file encryption (tessera share --to / open)](https://github.com/vig-os/tessera/issues/378)
@@ -52,7 +52,7 @@ ADR-0040/0041 (the per-field ladder).
 
 _Posted on October 16, 2026 at 05:15 PM_
 
-Dogfooding anatomist spike (MorePET/anatomist#91), tessera `dev` `fa581f5`, synthetic data only ("fictus" pseudonyms, no real patients).
+Dogfooding anatomist spike ([private-repo]#91), tessera `dev` `fa581f5`, synthetic data only ("fictus" pseudonyms, no real patients).
 
 **Anatomist's shape of ADR-0055:** per-dog data key — a dog's ingest product (CT) and every derived product (trees, frames, reports) are encrypted to **one** X25519 recipient that stands for that dog; destroying that recipient private key crypto-shreds the whole lineage for that dog, on every copy. Not the "share with a named human collaborator" picture the ADR foregrounds, but the same primitives.
 
@@ -74,11 +74,11 @@ What held up end-to-end:
 4. **Chain-verify without the key.** `derived_from` and parent `manifest_hash` live **inside** the ciphertext, so once you age-encrypt the whole file an auditor can confirm "this ciphertext hasn't been tampered since signing" via the outer sig, but can't confirm "this derived product descends from <parent id>" without decrypting. Cross-linked with #407 — anatomist needs the signed-aux appendix (or a projection of the lineage summary into the outer envelope) for the "no-decrypt lineage audit" use case.
 
 **Key-management questions for anatomist's ADR (not asks on tessera, logging for cross-link):**
-- Where keys live on the ksb host (per-dog X25519 identity file mounted into the pod from a host-only secret store; signing key stays on the operator host, not the pod).
-- Offline ksb job (`--no-egress`): the per-dog key is a pre-mounted file; online KMS/broker (#241) is the follow-on, not M2.
+- Where keys live on the [batch-host] host (per-dog X25519 identity file mounted into the pod from a host-only secret store; signing key stays on the operator host, not the pod).
+- Offline [batch-host] job (`--no-egress`): the per-dog key is a pre-mounted file; online KMS/broker (#241) is the follow-on, not M2.
 - Per-dog vs per-study: per-dog is the current pick (one recipient covers every product of that dog's lifetime).
 - Derived inheriting the parent's key: trivially, the step encrypts to the same per-dog recipient — but age has no "add-recipient" primitive (§5 L9), so a rotation needs a plaintext round-trip of every product of that dog.
-- Who signs with which key: ed25519 operator key; the ksb pod does not sign (no secrets in the pod).
+- Who signs with which key: ed25519 operator key; the [batch-host] pod does not sign (no secrets in the pod).
 - Shredding and `supersedes`: destroying the per-dog key breaks every reference to that dog's products; audit trails that only recorded manifest_hashes stay valid, but any audit trail that quoted plaintext content is now orphaned.
 
 Repro inputs available on request; synthetic throughout, no patient data.
@@ -90,5 +90,5 @@ Repro inputs available on request; synthetic throughout, no patient data.
 
 _Posted on October 16, 2026 at 09:39 PM_
 
-From MorePET/anatomist#86 (ADR-0007): ADR-0055 §5 says `share --to` is a grant, not erasure. anatomist's per-dog crypto-shredding therefore can't rest on #378 alone. The erasure semantics are requested separately in #570 (at-rest mode, one recipient or an explicit obligation to destroy every recipient's key, inspect showing the recipient count). anatomist's per-dog encryption is now gated on #378 plus #570.
+From [private-repo]#86 (ADR-0007): ADR-0055 §5 says `share --to` is a grant, not erasure. anatomist's per-dog crypto-shredding therefore can't rest on #378 alone. The erasure semantics are requested separately in #570 (at-rest mode, one recipient or an explicit obligation to destroy every recipient's key, inspect showing the recipient count). anatomist's per-dog encryption is now gated on #378 plus #570.
 

@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-15T09:06:00Z
-updated: 2026-11-15T09:06:15Z
+updated: 2026-11-18T14:52:11Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/863
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-16T08:59:41.950Z
+synced: 2026-11-19T09:52:13.988Z
 ---
 
 # [Issue 863]: [feat(format): schema-declared typed quality annotations (source quirks as closed kinds + counts, carried through views)](https://github.com/vig-os/tessera/issues/863)
@@ -22,7 +22,7 @@ synced: 2026-11-16T08:59:41.950Z
 
 A producer that converts vendor data into a product often meets **source quirks**: the input is valid, but it has a property a consumer should know about. Today each producer invents its own place to record these, or hides them. We'd like **one general, schema-declared facility** for typed quality annotations, so tessera stays system-agnostic while every producer reports quirks the same way.
 
-## The real example (downstream: MorePET/visionx-rs)
+## The real example (downstream: [private-repo])
 
 visionx-rs converts Siemens Biograph Vision list-mode (`.ptd` / `.l64`) into `.tsra`. The list-mode carries time markers whose counter normally ticks steadily. Sometimes it **jumps**, for example at a clock reset or a gap. visionx handles this at its decoder boundary: it splits the stream into **segments** at each jump, and every time-keyed QC row is keyed `(segment, second)`.
 
@@ -51,5 +51,5 @@ visionx-rs converts Siemens Biograph Vision list-mode (`.ptd` / `.l64`) into `.t
 
 #782 (typed provenance records), #568 (producer-owned aux run facts), #719 (write-time views, which must carry annotations), #407 (signature scope), #824 (determinism).
 
-Downstream tracking: MorePET/visionx-rs#257 and #222.
+Downstream tracking: [private-repo]#257 and #222.
 

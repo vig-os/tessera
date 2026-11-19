@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-30T03:09:34Z
-updated: 2026-10-30T03:09:34Z
+updated: 2026-11-18T14:54:15Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/721
@@ -13,12 +13,12 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-30T08:02:12.747Z
+synced: 2026-11-19T09:52:27.774Z
 ---
 
 # [Issue 721]: [feat(io): single-pass streaming blob pack (hash while copying into the container)](https://github.com/vig-os/tessera/issues/721)
 
-**Downstream need (MorePET/visionx-rs#138, stage 0 raw pack).** A single-pass streaming blob pack: hash (blake3) **while** copying into the container.
+**Downstream need ([private-repo]#138, stage 0 raw pack).** A single-pass streaming blob pack: hash (blake3) **while** copying into the container.
 
 **Today, on dev 4504efb:**
 - `blob_ref_streaming` (`tessera-io/src/blob.rs:54–81`) opens and reads the source to compute blake3.

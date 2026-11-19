@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-21T00:01:03Z
-updated: 2026-11-08T11:44:05Z
+updated: 2026-11-18T14:57:22Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/654
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: 778
 children: 666, 667, 668, 669, 670, 671, 672, 673, 674, 675
-synced: 2026-11-09T09:04:27.336Z
+synced: 2026-11-19T09:52:35.166Z
 ---
 
 # [Issue 654]: [feat(query): streaming DataFusion TableProvider over table blocks (projection + filter pushdown, chunk-stat pruning, bounded memory)](https://github.com/vig-os/tessera/issues/654)
@@ -87,7 +87,7 @@ _Posted on November 8, 2026 at 11:44 AM_
 
 The consumer needs, in order:
 1. #666: projection + filter pushdown with chunk pruning (year, topic and type filters are highly selective).
-2. #668: multi-product / Collection scans over a quarterly base product plus daily delta products, **over the object store** (an S3-compatible object store, versitygw, gerchowl/g-fleet#1121).
+2. #668: multi-product / Collection scans over a quarterly base product plus daily delta products, **over the object store** (an S3-compatible object store, versitygw, [fleet-config-repo]#1121).
 3. Row ids that survive projection and filtering, so BM25 (#775) and vector (#769) top-k results can be joined back to their rows.
 
 #666, #668 and stable row ids are the W1 gate in #778.

@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-09T08:35:14Z
-updated: 2026-11-09T12:11:52Z
+updated: 2026-11-18T14:53:03Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/789
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-10T09:13:24.854Z
+synced: 2026-11-19T09:52:20.229Z
 ---
 
 # [Issue 789]: [ci(nix-check): x86_64-linux leg hits the 2h job limit with workspace-test starved (tests 100x slower), on three unrelated branches](https://github.com/vig-os/tessera/issues/789)
@@ -49,7 +49,7 @@ Four tests were still running at the cutoff:
 
 The slowdown is general (a `multiblock` read test is as slow as the stream tests), and a version-bump-only branch is
 affected. That points to runner CPU or thread starvation rather than a deadlock in one test. It could be the
-pod-CPU-vs-`available_parallelism()` mismatch on ksb pods, or several heavy legs sharing a node. This hasn't been
+pod-CPU-vs-`available_parallelism()` mismatch on [batch-host] pods, or several heavy legs sharing a node. This hasn't been
 confirmed: comparing this run's test timings with 42556966454's, and the node's load at the time, would settle it.
 
 ## Ask

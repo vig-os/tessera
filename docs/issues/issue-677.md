@@ -1,8 +1,8 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-25T11:53:24Z
-updated: 2026-11-14T05:53:13Z
+updated: 2026-11-18T14:57:57Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/677
@@ -13,12 +13,12 @@ milestone: none
 projects: none
 parent: none
 children: 709, 710, 711, 712, 713, 714, 715, 716, 717
-synced: 2026-11-14T08:34:37.892Z
+synced: 2026-11-19T09:52:32.871Z
 ---
 
 # [Issue 677]: [feat(io): bounded single-table output sink and end-to-end StreamWriter backpressure](https://github.com/vig-os/tessera/issues/677)
 
-Consumer: MorePET/visionx-rs#39, requiring one scan product with single named `pairs`, `markers`, `ms_stats` table blocks and a configurable buffer bound independent of input size. Audited dev / Cargo.lock revision `9424f90c88cee918f2c68784b2bb8d98291a4c53` (also current upstream dev).
+Consumer: [private-repo]#39, requiring one scan product with single named `pairs`, `markers`, `ms_stats` table blocks and a configurable buffer bound independent of input size. Audited dev / Cargo.lock revision `9424f90c88cee918f2c68784b2bb8d98291a4c53` (also current upstream dev).
 
 Two gaps prevent that contract:
 
@@ -70,14 +70,14 @@ gets a dated amendment that records the contract.
    (b) job 0 is held at a barrier while the later jobs finish, the outstanding jobs never pass the window, and on
        release the output is ordered;
    (c) the content hash is the same for 1, 4 and N workers;
-   plus an RSS proof as a ksb job, measuring anon memory and not page cache, on a table larger than the budget.
+   plus an RSS proof as a [batch-host] job, measuring anon memory and not page cache, on a table larger than the budget.
 
 **Ordering:** this is the next implementation PR, ahead of #655 and the #628 spike. It starts once the current
 in-flight PRs (#664, then #660, #662, #661) have landed, so there's no file overlap. #656 (with #566 and a
 security pre-mortem) follows as an ADR. #654's implementation waits on ADR-0062 (#661) being accepted by the owner.
 
 **Consumer acceptance:** yes, please contribute the reproducer (the 19 GB list-mode, under 8 GB RSS). It can be a
-script or a test we run as a ksb job before merge, not a CI test, since the data is too large. A synthetic
+script or a test we run as a [batch-host] job before merge, not a CI test, since the data is too large. A synthetic
 generator with the same shape is ideal.
 
 
@@ -87,10 +87,10 @@ generator with the same shape is ideal.
 
 _Posted on October 25, 2026 at 12:12 PM_
 
-Consumer reproducer is pushed on `MorePET/visionx-rs` branch `chore/39-tessera-677-repro`, commit `5ce849ee87f7ab808749f7e2bddc0d3dbac42e82`, draft PR https://github.com/MorePET/visionx-rs/pull/41 (keep draft; #39 remains on hold).
+Consumer reproducer is pushed on `[private-repo]` branch `chore/39-tessera-677-repro`, commit `5ce849ee87f7ab808749f7e2bddc0d3dbac42e82`, draft PR [private-repo link] (keep draft; #39 remains on hold).
 
 - Example: `crates/visionx-tsra/examples/stream_memory.rs`
-- Complete commands, KSB packaging/submission and patch overrides: https://github.com/MorePET/visionx-rs/blob/chore/39-tessera-677-repro/docs/implementation/39-memory.md
+- Complete commands, KSB packaging/submission and patch overrides: [private-repo link]
 - No patient input or dataset; deterministic seed and bounded native batches matching the decoder Arrow column types/domains. Default is 2.4G events / 19.2GB packet-equivalent input, with one named `pairs` table and small `markers`/`ms_stats` tables.
 
 **Additional blocker discovered at 9424f90:** the exact decoder schema has nullable `ms`. `encode_streaming` constructs the empty stream dtype with bare nonnullable columns, but receives nullable chunks. At only 65,536 rows this hits the Vortex `sequence.rs:312` dtype assertion (`ms=u32?` vs `ms=u32`). Before adding the fatal panic hook, this background-thread panic was swallowed: the caller sealed a file and returned exit 0. The harness now exits 1 on any panic. Please cover nullable columns in the file-backed streaming regression too.
@@ -100,7 +100,7 @@ An explicit `--nonnullable-ms` diagnostic removes only that nullable property to
 Build and reproduce safely on a seat:
 
 ```bash
-git clone --branch chore/39-tessera-677-repro https://github.com/MorePET/visionx-rs /tmp/visionx-677-repro
+git clone --branch chore/39-tessera-677-repro [private-repo link] /tmp/visionx-677-repro
 cd /tmp/visionx-677-repro
 export CARGO_TARGET_DIR=/tmp/claude-1004/visionx-target/39 CARGO_BUILD_JOBS=8
 nix develop -c cargo build --locked --release -p visionx-tsra --example stream_memory
@@ -128,7 +128,7 @@ Gap 2 is externally reproducible: while sequence zero is held on a condition var
 The README gives a validated temporary Nix app wrapper for the already built binary and this exact large-job submission (no dataset):
 
 ```bash
-ksb run --project dogplet-analysis --cpu 4 --mem 12Gi --time 2h   --no-egress "$jobdir#default" -- --rows 2400000000 --rss-budget 8589934592
+[batch-host] run --project dogplet-analysis --cpu 4 --mem 12Gi --time 2h   --no-egress "$jobdir#default" -- --rows 2400000000 --rss-budget 8589934592
 ```
 
 For 9424f90's isolated memory diagnostic append `--nonnullable-ms`; for full acceptance use the nullable default after fixing that stream dtype. We validated wrapper execution and KSB dry-run admission, not a full 19GB job.
@@ -158,7 +158,7 @@ _Posted on October 29, 2026 at 12:09 PM_
 
 _Posted on November 2, 2026 at 03:30 AM_
 
-**Reopened: the closure was an accident.** GitHub closed this on 2026-10-29 11:43 because commit e2e9c02 (PR #692, the #681 design note) has the prose '…and closes #677 without a Vortex change' in its body, and GitHub read that as a closing keyword. Nothing has implemented #677 yet. The path is ADR-0064 (P-logical, PR #718, in review), then the implementation in sub-issues #709–#717, then the flat RSS proof on ksb (RssAnon and cgroup memory.current). This issue closes only when that has landed.
+**Reopened: the closure was an accident.** GitHub closed this on 2026-10-29 11:43 because commit e2e9c02 (PR #692, the #681 design note) has the prose '…and closes #677 without a Vortex change' in its body, and GitHub read that as a closing keyword. Nothing has implemented #677 yet. The path is ADR-0064 (P-logical, PR #718, in review), then the implementation in sub-issues #709–#717, then the flat RSS proof on [batch-host] (RssAnon and cgroup memory.current). This issue closes only when that has landed.
 
 ---
 
@@ -166,7 +166,7 @@ _Posted on November 2, 2026 at 03:30 AM_
 
 _Posted on November 13, 2026 at 11:56 AM_
 
-Consumer told (ADR-0064 step H, #716): https://github.com/MorePET/visionx-rs/issues/221 names the release [v0.1.0-alpha.5](https://github.com/vig-os/tessera/releases/tag/v0.1.0-alpha.5), which carries `StreamWriter::push_table`, the `pairs/NNNN` leaves (`pairs` stays the one logical name), and the measured RSS bound from #715 (peak RssAnon 218.6 MiB at 2.4 G rows, W = 4). Migration note: #842.
+Consumer told (ADR-0064 step H, #716): [private-repo link] names the release [v0.1.0-alpha.5](https://github.com/vig-os/tessera/releases/tag/v0.1.0-alpha.5), which carries `StreamWriter::push_table`, the `pairs/NNNN` leaves (`pairs` stays the one logical name), and the measured RSS bound from #715 (peak RssAnon 218.6 MiB at 2.4 G rows, W = 4). Migration note: #842.
 
 ---
 
@@ -174,12 +174,12 @@ Consumer told (ADR-0064 step H, #716): https://github.com/MorePET/visionx-rs/iss
 
 _Posted on November 14, 2026 at 05:53 AM_
 
-Confirmation from the MorePET/visionx-rs architect, 2026-11-14 (the visionx-rs#221 ask).
+Confirmation from the [private-repo] architect, 2026-11-14 (the visionx-rs#221 ask).
 
 - **What merged:** visionx-rs#41 (6e91f9d) switches the stream-memory reproducer to `StreamWriter::push_table("pairs", spec, groups)` with an exact `spec.rows`, on the `v0.1.0-alpha.5` tag plus your vortex determinism `[patch.crates-io]` (visionx-rs#226).
 - **Assertion:** the reorder diagnostic asserts `StreamStats::peak_in_flight_jobs` equals the window, read from `finish_with_stats`.
 - **Measured locally** (33,554,432 rows, W = 4, disk-backed session): exit 0, peak RssAnon about 190 MB, `peak_in_flight_jobs` = 6.
-- **Full-size run:** pending on visionx-rs#230. It uses cgroup `memory.current` as the acceptance metric (owner decision) and enforces `--memory-current-budget` inside a dedicated ksb job cgroup.
+- **Full-size run:** pending on visionx-rs#230. It uses cgroup `memory.current` as the acceptance metric (owner decision) and enforces `--memory-current-budget` inside a dedicated [batch-host] job cgroup.
 - **One observation:** under load (12–19) on shared ext4, the three fsyncs per block in `write.rs` (file, directory, journal) dominated wall time in some runs: 395 fsyncs per run, and some runs ran about 50× slower. We documented it rather than chased it. Say if you want numbers.
 
 The visionx-rs streaming writer (#39) waits on tessera#848: unknown-length / multi-table streaming.

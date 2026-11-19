@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-16T17:10:26Z
-updated: 2026-10-16T17:10:26Z
+updated: 2026-11-18T14:55:47Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/565
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:49.082Z
+synced: 2026-11-19T09:52:40.875Z
 ---
 
 # [Issue 565]: [build(py): manylinux wheel (auditwheel repair) — the Nix wheel carries a /nix/store RUNPATH and a linux_* tag](https://github.com/vig-os/tessera/issues/565)
@@ -37,7 +37,7 @@ $ readelf -d tessera/_native.abi3.so | grep -E 'RUNPATH|NEEDED'
 
 ## Not this issue: the `LD_LIBRARY_PATH` workaround in #562/#563's repro
 
-A downstream adopter (MorePET/anatomist) needed `LD_LIBRARY_PATH=<nix libstdc++>` to import the wheel from a
+A downstream adopter ([private-repo]) needed `LD_LIBRARY_PATH=<nix libstdc++>` to import the wheel from a
 plain venv on NixOS. That isn't tessera: `_native.so` doesn't link `libstdc++`. The failing module is
 **numpy's PyPI wheel**, which needs a system `libstdc++.so.6` that NixOS doesn't provide:
 

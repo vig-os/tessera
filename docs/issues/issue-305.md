@@ -2,7 +2,7 @@
 type: issue
 state: closed
 created: 2026-07-02T14:26:32Z
-updated: 2026-09-28T17:54:55Z
+updated: 2026-11-18T14:56:11Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/305
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-09-29T07:52:51.331Z
+synced: 2026-11-19T09:52:44.898Z
 ---
 
 # [Issue 305]: [discussion(ingest): GE listmode HDF5 monolith — model its 11 tables as BLF-derived products, not one file](https://github.com/vig-os/tessera/issues/305)
@@ -155,7 +155,7 @@ _Posted on July 3, 2026 at 09:49 AM_
 
 ## Correction — the DP01–06 raw root is the `.dat`, not the BLF
 
-Verified against GEDDF (`MorePET/ge-discovery-data-framework` `hit-parser` reads **raw hits**) + the acquisition `.ini` (`acq_mode = singles`, DAQ config `acq.cfg.LYSO4x9_6_SIPMGEN1`):
+Verified against GEDDF (`[private-repo]` `hit-parser` reads **raw hits**) + the acquisition `.ini` (`acq_mode = singles`, DAQ config `acq.cfg.LYSO4x9_6_SIPMGEN1`):
 
 ```
 DAQ → .dat (126 GB, raw hit stream / singles)

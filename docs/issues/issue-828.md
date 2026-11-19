@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-11T03:36:30Z
-updated: 2026-11-11T03:43:36Z
+updated: 2026-11-19T05:25:59Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/828
-comments: 1
+comments: 3
 labels: feature, priority:high, area:core
 assignees: none
 milestone: none
 projects: none
-parent: none
+parent: 897
 children: none
-synced: 2026-11-11T08:50:28.545Z
+synced: 2026-11-19T09:52:16.708Z
 ---
 
 # [Issue 828]: [perf(format): per-column codec profiles — measured sweep: plain Pco per column is 19 % smaller than .tsra on GE list-mode; a fixed fast profile beats .tsra on size and per-core speed](https://github.com/vig-os/tessera/issues/828)
@@ -385,4 +385,20 @@ Zip-entry breakdown of the real `.tsra` files:
 The in-block Vortex statistics (zone maps every 8,192 rows) and the footer aren't broken out in the manifest. An upper bound: 6.7 k zones × 11 columns × ≤ 6 stats × 8 B ≈ 3.5 MB, about 1 % or less of the file. That can't account for a 9–19 % gap, so the excess is in the column encodings themselves.
 
 **Ask:** report per-column encoded bytes and per-column stats/layout bytes from one block, e.g. via the Vortex layout tree, so the encoding share and the metadata share can be separated exactly.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 19, 2026 at 12:16 AM_
+
+Owner 2026-11-19: adopt the per-column codec profile as the new default `tessera-table-v2`, in the ADR-0066 format-break release, after a design note with the measured sweep. v1 tables still read.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 19, 2026 at 05:25 AM_
+
+This issue is step 7 of the ADR-0066 implementation plan (epic #897; full order in the plan comment there). Its scope and acceptance criteria are in docs/adr/0066-seal-encoding.md, under Implementation plan.
 

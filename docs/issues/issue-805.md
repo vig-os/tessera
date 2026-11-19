@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-11T01:15:14Z
-updated: 2026-11-11T01:15:14Z
+updated: 2026-11-18T14:52:54Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/805
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-11T08:50:39.758Z
+synced: 2026-11-19T09:52:18.797Z
 ---
 
 # [Issue 805]: [feature(capi): a read side for C++ consumers (logical tables as Arrow C Data Interface arrays)](https://github.com/vig-os/tessera/issues/805)
@@ -24,7 +24,7 @@ synced: 2026-11-11T08:50:39.758Z
 - `ListMode-Libraries/DataManagers/src/SimulationDataManager.cpp`: open the shard, open `events`/`pethits`, then `ReadCompound`. The event-id pre-pass reads one column of every shard.
 - `ActivityMap.cpp`: a 3-D float64 activity array.
 
-The repo is MorePET/gPET-sim2listmode at `3d6d566`. Once gPET-sim writes `.tsra` through #800, sim2listmode has no tessera reader at all. The only readers are Rust (`Reader::logical_table`, `LogicalTableView::column/take/locate`, `tessera/crates/tessera-io/src/multiblock.rs:39-392`) and Python.
+The repo is [private-repo] at `3d6d566`. Once gPET-sim writes `.tsra` through #800, sim2listmode has no tessera reader at all. The only readers are Rust (`Reader::logical_table`, `LogicalTableView::column/take/locate`, `tessera/crates/tessera-io/src/multiblock.rs:39-392`) and Python.
 
 ## Ask
 A read side in the C ABI. This is an ADR question for #800's ADR: one crate or two, and one header.

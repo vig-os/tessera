@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-25T11:18:53Z
-updated: 2026-10-30T01:07:09Z
+updated: 2026-11-18T14:55:05Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/667
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: 654
 children: none
-synced: 2026-10-30T08:02:31.136Z
+synced: 2026-11-19T09:52:33.873Z
 ---
 
 # [Issue 667]: [feat(query): positional zip of row-aligned table blocks (ADR-0062 PR2)](https://github.com/vig-os/tessera/issues/667)
@@ -134,7 +134,7 @@ Phase 2 of #654, designed in ADR-0062 §5 and §8 "PR2".
     timeout, through a test hook that exposes the producers' join handles. An implementation that keeps an
     unexecuted partition's receiver alive after the plan is dropped leaves its producer blocked, and the join
     times out.
-  - Bounded memory: the ksb run of ADR-0062 §3 repeated on a zip of two blocks; the anonymous peak stays within
+  - Bounded memory: the [batch-host] run of ADR-0062 §3 repeated on a zip of two blocks; the anonymous peak stays within
     the per-query formula including the key-mode buffers.
 - **Depends on:** PR1.
 

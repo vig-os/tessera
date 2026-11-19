@@ -2,7 +2,7 @@
 type: issue
 state: closed
 created: 2026-10-30T01:12:02Z
-updated: 2026-11-13T13:01:55Z
+updated: 2026-11-18T14:57:54Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/716
@@ -13,14 +13,14 @@ milestone: none
 projects: none
 parent: 677
 children: none
-synced: 2026-11-14T08:34:37.519Z
+synced: 2026-11-19T09:52:29.186Z
 ---
 
-# [Issue 716]: [docs: tell MorePET/visionx-rs about push_table and pairs/NNNN (ADR-0064 step H)](https://github.com/vig-os/tessera/issues/716)
+# [Issue 716]: [docs: tell [private-repo] about push_table and pairs/NNNN (ADR-0064 step H)](https://github.com/vig-os/tessera/issues/716)
 
 Step H of ADR-0064's implementation plan: tell the #677 consumer.
 
-**Scope:** after PR G passes, comment on #677 and open an issue on MorePET/visionx-rs describing the switch from
+**Scope:** after PR G passes, comment on #677 and open an issue on [private-repo] describing the switch from
 `table_job_streaming` to `StreamWriter::push_table`, the new leaf names `pairs/NNNN` (and that `pairs` stays the one
 logical name for `logical_table`, `read`, `sql` and the Python `table`/`logical_column`), that `table_job_streaming`
 refuses tables above `BLOCK_ROWS`, the measured RSS bound, and the tessera release that carries it.
@@ -38,9 +38,9 @@ Proposed, PR for #677). Implement only after the ADR is Accepted. Sub-issue of #
 
 _Posted on November 13, 2026 at 11:55 AM_
 
-From the MorePET/visionx-rs architect, 2026-11-13.
+From the [private-repo] architect, 2026-11-13.
 
-- **#677:** `StreamWriter::push_table` in v0.1.0-alpha.5 (ADR-0064, with the ksb RSS proof in #767 and #839) looks like it satisfies #677. Can #677 be closed and this step H note posted? Our streaming scan writer (MorePET/visionx-rs#39) builds on it.
+- **#677:** `StreamWriter::push_table` in v0.1.0-alpha.5 (ADR-0064, with the [batch-host] RSS proof in #767 and #839) looks like it satisfies #677. Can #677 be closed and this step H note posted? Our streaming scan writer ([private-repo]#39) builds on it.
 - **Pin:** we are bumping visionx-rs to the `v0.1.0-alpha.5` tag, pinning the tag rather than `branch = "dev"`, and adding `partition: None` to every `TableSpec`. Say so if you'd prefer downstream to track `dev`.
 - **Question for #39:** within one `WriteSession`, can several `push_table` streams be open at the same time (`pairs`, `markers`, `ms_stats`, plus QC blocks fed by the same decode pass), or must the tables be pushed one after another? What pattern do you intend for interleaved producers, and does the W+1 staging bound hold per table or per session?
 
@@ -50,7 +50,7 @@ From the MorePET/visionx-rs architect, 2026-11-13.
 
 _Posted on November 13, 2026 at 01:01 PM_
 
-Follow-up from the MorePET/visionx-rs architect, 2026-11-13. We read the alpha.5 source to design visionx-rs#39 on `push_table`. Three points don't fit a single-pass producer of several tables, which is the shape of our decoder:
+Follow-up from the [private-repo] architect, 2026-11-13. We read the alpha.5 source to design visionx-rs#39 on `push_table`. Three points don't fit a single-pass producer of several tables, which is the shape of our decoder:
 
 1. `push_table` needs `spec.rows` exactly before the first row (`tessera-io/src/stream.rs:862`, `:1001-1026`). A list-mode decode only knows its pair, marker and ms_stats counts at the end.
 2. It is one table per call, holding `&mut StreamWriter` (`stream.rs:927-934`). So `pairs`, `markers` and `ms_stats` cannot be fed in parallel from one pass.

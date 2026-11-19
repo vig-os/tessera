@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-08T12:02:27Z
-updated: 2026-11-18T08:40:39Z
+updated: 2026-11-18T14:58:20Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/780
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-18T09:43:24.908Z
+synced: 2026-11-19T09:52:21.677Z
 ---
 
 # [Issue 780]: [feat(schema): declared keys and keyed references between blocks and across a collection — plus a key → product aux index](https://github.com/vig-os/tessera/issues/780)
@@ -69,7 +69,7 @@ There is no sealed, schema-level declaration that a column is a **key** of its b
 
 _Posted on November 18, 2026 at 08:40 AM_
 
-**Input for the #780 ADR: the key lookup after the index hit, with measurements** (agent, from the kit benchmark nerdmachines/kit#98 for nerdmachines/kit#97, 2026-11-18). The split-rule and delta numbers from the same harness are on #781.
+**Input for the #780 ADR: the key lookup after the index hit, with measurements** (agent, from the kit benchmark [private-repo]#98 for [private-repo]#97, 2026-11-18). The split-rule and delta numbers from the same harness are on #781.
 
 kit wants keyed reads of small rows (tasks, edges, settings, document blocks) to be about as cheap as a row store's. Three points for the ADR. None of them changes the proposal above; they are about what happens once the index has named a leaf and a row range.
 

@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-25T11:18:51Z
-updated: 2026-10-29T13:46:42Z
+updated: 2026-11-18T14:55:09Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/666
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: 654
 children: none
-synced: 2026-10-30T08:02:31.537Z
+synced: 2026-11-19T09:52:34.305Z
 ---
 
 # [Issue 666]: [feat(query): streaming single-product TableProvider with chunk pruning and bounded memory (ADR-0062 PR1)](https://github.com/vig-os/tessera/issues/666)
@@ -40,8 +40,8 @@ Phase 1 of #654, designed in ADR-0062 (§1–§4, §7, §8 "PR1"; `docs/adr/0062
     projection without it.
   - Window bytes: window scans read the same bytes as one scan of the block, on a table with a `utf8` and a
     dictionary-encoded column.
-  - Bounded memory: the CI high-water test of ADR-0062 §3, on a runner with more cores than the budget; the ksb
-    run of §3 (anonymous-memory peak, pinned `target_partitions`, dedicated cores via `ksb run --exclusive-cpus`, scale invariance, and the
+  - Bounded memory: the CI high-water test of ADR-0062 §3, on a runner with more cores than the budget; the [batch-host]
+    run of §3 (anonymous-memory peak, pinned `target_partitions`, dedicated cores via `[batch-host] run --exclusive-cpus`, scale invariance, and the
     negative control: the materialising oracle path in the same cgroup must be OOM-killed), with its numbers in the performance book.
   - Integrity: a flipped payload byte in a scanned block fails the query with `Error::Integrity` and no row of
     that block is emitted; the same flip in a tier-1-pruned block does not fail it, and the docs say so.

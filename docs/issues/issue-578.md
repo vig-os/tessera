@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-16T23:03:25Z
-updated: 2026-10-16T23:03:25Z
+updated: 2026-11-18T14:55:18Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/578
@@ -13,12 +13,12 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:42.725Z
+synced: 2026-11-19T09:52:36.575Z
 ---
 
 # [Issue 578]: [docs: make ADRs and capabilities discoverable (ADR index on dev + use-case guide: de-identify vs crypto-shred vs encrypt vs sign)](https://github.com/vig-os/tessera/issues/578)
 
-Found while dogfooding from MorePET/anatomist (2026-10-17).
+Found while dogfooding from [private-repo] (2026-10-17).
 
 **What went wrong:** two agents designing anatomist's adoption (anatomist #91, #103 / ADR-0007) built a crypto-shredding scheme on **whole-file per-subject encryption (ADR-0055, Proposed)** plus `share --to`, and took several review rounds to find out that:
 - tessera **already ships** crypto-shred de-identification: ADR-0047 rung 1, `ingest dicom --crypto-shred --recipient` → `aux/identity/identity.age`, inside the file and outside the seal, with `reidentify` and schema-driven identity fields;

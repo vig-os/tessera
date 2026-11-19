@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-16T16:50:36Z
-updated: 2026-10-18T11:53:42Z
+updated: 2026-11-18T14:55:50Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/564
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-19T07:18:04.867Z
+synced: 2026-11-19T09:52:41.368Z
 ---
 
 # [Issue 564]: [feat: first-class agentic actors[] block + W3C PROV mapping — producer is scalar, generation.config is opaque](https://github.com/vig-os/tessera/issues/564)
@@ -23,7 +23,7 @@ synced: 2026-10-19T07:18:04.867Z
 Agentic pipelines (LLM-coordinated code generation, review, operator approval) are now a
 first-class producer category alongside DAQs, SIMs and recons. anatomist is building a
 canine-CT parser whose steps are proposed, reviewed and merged through agents (Claude Code,
-Codex, …) with a human approver — see MorePET/anatomist#86's proposal to map these onto
+Codex, …) with a human approver — see [private-repo]#86's proposal to map these onto
 `generation.config.agent = {name, model, brief_sha, receipt_sha, pr}`.
 
 `generation.config` can absorb this, but shoehorning it there is wrong for three reasons:
@@ -144,7 +144,7 @@ Writing an anatomist-style job manifest + a derived product from the Python whee
 - Not every agentic run has a human approver (unattended automation). `acted_on_behalf_of`
   stays optional.
 
-Found while walking MorePET/anatomist's adoption path on `.tsra` as its agentic
+Found while walking [private-repo]'s adoption path on `.tsra` as its agentic
 provenance format.
 
 ## Related

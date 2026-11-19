@@ -1,8 +1,8 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-29T01:09:40Z
-updated: 2026-10-29T12:09:48Z
+updated: 2026-11-18T14:56:45Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/688
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-30T08:02:23.933Z
+synced: 2026-11-19T09:52:31.399Z
 ---
 
 # [Issue 688]: [ci: run tessera CI on the vig-os ksb-ci runners instead of GitHub-hosted runners](https://github.com/vig-os/tessera/issues/688)
@@ -28,15 +28,15 @@ The vig-os org has a `ksb-ci` runner group (visibility: all repos). Fleet policy
 
 ## Scope
 - `.github/workflows/nix-check.yml` (ours): the x86_64 nix flake check → `ksb-vig-os-large`. aarch64 stays on
-  `ubuntu-24.04-arm` unless ksb has arm runners (check), because the cross-arch determinism gate needs a real aarch64 leg.
+  `ubuntu-24.04-arm` unless [batch-host] has arm runners (check), because the cross-arch determinism gate needs a real aarch64 leg.
 - `ci.yml` / `codeql.yml` are **devkit-scaffolded** (they regenerate on upgrade): change the runner through the devkit's
   `runner-json` / resolve-toolchain input, not by hand-editing, or the next upgrade reverts it. Light lanes → `ksb-vig-os-small`.
-- macOS dist legs stay on GitHub (no macOS on ksb).
-- Fork PRs never run on ksb: keep a GitHub-hosted fallback for `pull_request` from forks, or document that forks get no heavy CI.
+- macOS dist legs stay on GitHub (no macOS on [batch-host]).
+- Fork PRs never run on [batch-host]: keep a GitHub-hosted fallback for `pull_request` from forks, or document that forks get no heavy CI.
 
 ## Acceptance
-Name the exact label strings that ksb's ARC scale sets register for vig-os (verify; don't guess). Then show one PR run with
-every moved job on a ksb runner (`runner_name` in the jobs API), a wall-clock comparison of the x86_64 nix leg, and no
+Name the exact label strings that [batch-host]'s ARC scale sets register for vig-os (verify; don't guess). Then show one PR run with
+every moved job on a [batch-host] runner (`runner_name` in the jobs API), a wall-clock comparison of the x86_64 nix leg, and no
 `ubuntu-*` labels left except the documented fallbacks.
 ---
 
@@ -46,9 +46,9 @@ _Posted on October 29, 2026 at 07:26 AM_
 
 Groundwork (architect, 2026-10-29), for whoever picks this up:
 
-- vig-os has runner group `ksb-ci` (id 5, visibility all). No runners are registered at rest, which is expected for ARC scale sets: runners register only while a job is waiting. The seat's kube service account can't list `autoscalingrunnersets` (Forbidden), so the vig-os scale-set name is **not yet verified**. By the fleet pattern it would be `ksb-vig-os-small` / `ksb-vig-os-large`. Verify it before wiring: run a one-job probe workflow on the PR branch with `runs-on` set to that label, and record `runner_name` from the jobs API. If nothing picks the job up within a few minutes, ask the ksb admin for the scale-set names. Don't guess.
+- vig-os has runner group `ksb-ci` (id 5, visibility all). No runners are registered at rest, which is expected for ARC scale sets: runners register only while a job is waiting. The seat's kube service account can't list `autoscalingrunnersets` (Forbidden), so the vig-os scale-set name is **not yet verified**. By the fleet pattern it would be `ksb-vig-os-small` / `ksb-vig-os-large`. Verify it before wiring: run a one-job probe workflow on the PR branch with `runs-on` set to that label, and record `runner_name` from the jobs API. If nothing picks the job up within a few minutes, ask the [batch-host] admin for the scale-set names. Don't guess.
 - The devkit routing mechanism, as exo-fleet's `docs/hosts/bifrost/ci-vm-runbook.md` (~L459-467) does it: devkit lanes go through `.vig-os` `DEVKIT_CI_RUNNER=ksb-<org>-large`, and `resolve-toolchain` goes through the repo variable `DEVKIT_CI_RESOLVE_RUNNER=ksb-<org>-small`. A literal `runs-on: ksb-…` in a repo-owned workflow also needs an entry in `.github/actionlint.yaml` `self-hosted-runner.labels`, with a reason, as exo-fleet's does.
-- Examples of repo-owned lanes on ksb: `MorePET/visionx-rs` `.github/workflows/ci-extension.yml` (`ksb-morepet-small` / `-large`).
+- Examples of repo-owned lanes on [batch-host]: `[private-repo]` `.github/workflows/ci-extension.yml` (`ksb-morepet-small` / `-large`).
 
 ---
 
@@ -56,5 +56,5 @@ Groundwork (architect, 2026-10-29), for whoever picks this up:
 
 _Posted on October 29, 2026 at 12:09 PM_
 
-**Owner decision (2026-10-29):** run the x86_64 nix flake check on `ksb-vig-os-large` now, **without the sandbox**, and make the loopback-server checks sandbox-independent (ephemeral ports, private temp dirs, readiness waits, no fixed ports). The S3 check moves to versitygw via #702 (no MinIO). Sandboxed Nix is requested in exo-pet/exo-fleet#1081, and we move back to it once it lands, without waiting for it now. Record the reduced hermeticity as a documented limit in `nix-check.yml` and FEATURE-MATRIX, pointing at exo-fleet#1081.
+**Owner decision (2026-10-29):** run the x86_64 nix flake check on `ksb-vig-os-large` now, **without the sandbox**, and make the loopback-server checks sandbox-independent (ephemeral ports, private temp dirs, readiness waits, no fixed ports). The S3 check moves to versitygw via #702 (no MinIO). Sandboxed Nix is requested in [private-repo]#1081, and we move back to it once it lands, without waiting for it now. Record the reduced hermeticity as a documented limit in `nix-check.yml` and FEATURE-MATRIX, pointing at exo-fleet#1081.
 

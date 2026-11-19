@@ -2,7 +2,7 @@
 type: issue
 state: closed
 created: 2026-10-16T22:38:04Z
-updated: 2026-10-25T14:38:43Z
+updated: 2026-11-18T14:55:23Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/576
@@ -13,14 +13,14 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-26T07:24:50.844Z
+synced: 2026-11-19T09:52:37.446Z
 ---
 
 # [Issue 576]: [security(cli): verify-sig trusts ./.tessera/trust/ from the current directory — a planted key widens trust](https://github.com/vig-os/tessera/issues/576)
 
 ## Context
 
-Dogfooding from MorePET/anatomist#86 (ADR-0007, PR MorePET/anatomist#103) at tessera `dev` `fa581f5`, with synthetic data only.
+Dogfooding from [private-repo]#86 (ADR-0007, PR [private-repo]#103) at tessera `dev` `fa581f5`, with synthetic data only.
 
 ## Problem
 
@@ -48,7 +48,7 @@ $ HOME=$PWD/home tessera verify-sig forged.tsra    # exit 0: accepted through ./
 
 ## Linked
 
-ADR-0037 (trust model), MorePET/anatomist#86.
+ADR-0037 (trust model), [private-repo]#86.
 
 ---
 

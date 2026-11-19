@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-16T20:45:24Z
-updated: 2026-10-16T20:45:24Z
+updated: 2026-11-18T14:55:36Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/569
@@ -13,14 +13,14 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:47.256Z
+synced: 2026-11-19T09:52:39.170Z
 ---
 
 # [Issue 569]: [docs(py): Builder timestamp is identity (part of id) — say so, or Python producers break writer determinism](https://github.com/vig-os/tessera/issues/569)
 
 ## Context
 
-Dogfooding from MorePET/anatomist#86 at tessera `dev` `fa581f5`, synthetic data only.
+Dogfooding from [private-repo]#86 at tessera `dev` `fa581f5`, synthetic data only.
 
 ## Friction
 
@@ -40,5 +40,5 @@ Repro (synthetic): pack the same content twice with `timestamp=datetime.now(...)
 
 ## Linked
 
-ADR-0020, ADR-0042, ADR-0046, MorePET/anatomist#86.
+ADR-0020, ADR-0042, ADR-0046, [private-repo]#86.
 

@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-16T23:16:46Z
-updated: 2026-10-18T12:50:41Z
+updated: 2026-11-18T14:56:27Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/579
@@ -13,12 +13,12 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-19T07:17:59.263Z
+synced: 2026-11-19T09:52:36.128Z
 ---
 
 # [Issue 579]: [bug(dicom de-id): PHI_TAGS is a 12-tag subset; veterinary owner tags and other PS3.15 tags survive into the sealed manifest even with --recipient](https://github.com/vig-os/tessera/issues/579)
 
-Found by MorePET/anatomist's pre-mortem of its tessera adoption ADR (PR #103), with synthetic pydicom data only (invented 'fictus' names).
+Found by [private-repo]'s pre-mortem of its tessera adoption ADR (PR #103), with synthetic pydicom data only (invented 'fictus' names).
 
 **Repro (tessera dev fa581f5):**
 1. Build a synthetic DICOM series that sets `ResponsiblePerson (0010,2297)`, `ResponsiblePersonRole (0010,2298)`, `ResponsibleOrganization (0010,2299)`, `InstitutionAddress (0008,0081)`, `StationName (0008,1010)`, `DeviceSerialNumber (0018,1000)`, `StudyID (0020,0010)` and `ImageComments (0020,4000)` (with an owner name and phone number).
@@ -45,7 +45,7 @@ Found by MorePET/anatomist's pre-mortem of its tessera adoption ADR (PR #103), w
 
 _Posted on October 16, 2026 at 11:31 PM_
 
-Design note from the consumer side: tessera's own schema already marks the Study and Series UIDs `identifying`, yet DICOM ingest seals them, because the strip list is the hard-coded `PHI_TAGS` rather than the schema. Suggest: the de-identification set = a full PS3.15 baseline ∪ every field the product schema marks `identifying`, so a consumer schema (ADR-0050 pattern, e.g. anatomist adding the veterinary owner tags 0010,2297–2299) extends it declaratively, with no code change. Anatomist will supply such a schema with its DICOM ingest (MorePET/anatomist#87).
+Design note from the consumer side: tessera's own schema already marks the Study and Series UIDs `identifying`, yet DICOM ingest seals them, because the strip list is the hard-coded `PHI_TAGS` rather than the schema. Suggest: the de-identification set = a full PS3.15 baseline ∪ every field the product schema marks `identifying`, so a consumer schema (ADR-0050 pattern, e.g. anatomist adding the veterinary owner tags 0010,2297–2299) extends it declaratively, with no code change. Anatomist will supply such a schema with its DICOM ingest ([private-repo]#87).
 
 ---
 

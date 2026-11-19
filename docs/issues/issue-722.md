@@ -2,7 +2,7 @@
 type: issue
 state: closed
 created: 2026-11-02T03:29:14Z
-updated: 2026-11-02T06:09:48Z
+updated: 2026-11-18T14:54:12Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/722
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-02T08:51:35.380Z
+synced: 2026-11-19T09:52:27.300Z
 ---
 
 # [Issue 722]: [ci(nix): summary passes on an empty check set; chain the registry EXIT trap; document cache-trust assumption](https://github.com/vig-os/tessera/issues/722)
@@ -28,6 +28,6 @@ These are the nits from the fresh review of PR #700 (#688, head 8bcb099). The re
 2. **`trap … EXIT` replaces the builder's trap** (`flake.nix` ~:478, the registry check). Save the existing EXIT trap and
    chain to it (stdenv may set one), or use stdenv's `exitHooks` the way `s3-range-read` does.
 3. **Trust in the cached row.** Counting a substituted check as passed is sound only while fork code cannot write to
-   the shared ksb binary cache. State that assumption next to the lookup loop, and check that it holds (link the
+   the shared [batch-host] binary cache. State that assumption next to the lookup loop, and check that it holds (link the
    cache's write policy).
 

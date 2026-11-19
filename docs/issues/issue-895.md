@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-17T16:16:42Z
-updated: 2026-11-18T00:22:30Z
+updated: 2026-11-19T05:25:56Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/895
-comments: 2
+comments: 3
 labels: feature, priority:medium, area:core, adr
 assignees: none
 milestone: none
 projects: none
-parent: none
+parent: 897
 children: none
-synced: 2026-11-18T09:43:23.400Z
+synced: 2026-11-19T09:52:11.596Z
 ---
 
 # [Issue 895]: [feat(schema): product schemas declare number encodings and value ranges instead of hard-coded ingest limits](https://github.com/vig-os/tessera/issues/895)
@@ -49,4 +49,12 @@ Held pending #897 (seal encoding spike). If deterministic CBOR is chosen, 64-bit
 _Posted on November 18, 2026 at 12:22 AM_
 
 Un-held: the owner chose ADR-0066 option A′ (#897, 2026-11-18), and this issue is part of it: schema-declared 64-bit-as-string encodings plus value ranges.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 19, 2026 at 05:25 AM_
+
+This issue is step 1 of the ADR-0066 implementation plan (epic #897; full order in the plan comment there). Its scope and acceptance criteria are in docs/adr/0066-seal-encoding.md, under Implementation plan.
 

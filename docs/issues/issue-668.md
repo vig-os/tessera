@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-25T11:18:54Z
-updated: 2026-10-30T01:07:10Z
+updated: 2026-11-18T14:55:02Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/668
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: 654
 children: none
-synced: 2026-10-30T08:02:30.727Z
+synced: 2026-11-19T09:52:33.419Z
 ---
 
 # [Issue 668]: [feat(query): multi-product and Collection scans, local then object store (ADR-0062 PR3)](https://github.com/vig-os/tessera/issues/668)
@@ -94,7 +94,7 @@ Phase 3 of #654, designed in ADR-0062 §6, §7 and §8 "PR3".
     query, so every pin and slot has been released. A gate-without-failure implementation times out as in #667.
   - Local spool opt-in: with it, a byte changed in the local file after its block was spooled and hashed
     reaches no row; without it, a local scan creates no spool file.
-  - Bounded memory: the ksb run of ADR-0062 §3 over a many-product collection.
+  - Bounded memory: the [batch-host] run of ADR-0062 §3 over a many-product collection.
 - **Depends on:** PR1. **Split if needed:** (a) local multi-product; (b) object store.
 
 

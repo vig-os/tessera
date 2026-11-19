@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T14:11:58Z
-updated: 2026-10-30T02:07:00Z
+updated: 2026-11-18T14:56:52Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/522
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-30T08:03:06.380Z
+synced: 2026-11-19T09:52:42.168Z
 ---
 
 # [Issue 522]: [feat(core): histogram monoid in the chunk-index — exact decode-free histograms, and the .cidx schema decision it forces](https://github.com/vig-os/tessera/issues/522)
@@ -90,5 +90,5 @@ Refs: #347
 
 _Posted on October 30, 2026 at 02:07 AM_
 
-Cross-ref: #719 proposes schema-declared write-time aggregation views (N-D, conditioned, fixed domain edges, monoid partials at declared chunk-tree levels). It generalises this issue's histogram monoid and shares its integer-only/fail-closed/derived-identity requirements. Downstream consumer: MorePET/visionx-rs#18.
+Cross-ref: #719 proposes schema-declared write-time aggregation views (N-D, conditioned, fixed domain edges, monoid partials at declared chunk-tree levels). It generalises this issue's histogram monoid and shares its integer-only/fail-closed/derived-identity requirements. Downstream consumer: [private-repo]#18.
 

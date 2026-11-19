@@ -1,8 +1,8 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-11-09T16:12:57Z
-updated: 2026-11-11T02:19:46Z
+updated: 2026-11-18T14:57:39Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/793
@@ -13,13 +13,13 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-11T08:50:46.231Z
+synced: 2026-11-19T09:52:19.815Z
 ---
 
-# [Issue 793]: [test(io): stream workers_and_windows + session_leaf_memory hang under ksb CI load (>3,240 s vs 400 s / >840 s vs 0.9 s), timing out the x86 nix check](https://github.com/vig-os/tessera/issues/793)
+# [Issue 793]: [test(io): stream workers_and_windows + session_leaf_memory hang under [batch-host] CI load (>3,240 s vs 400 s / >840 s vs 0.9 s), timing out the x86 nix check](https://github.com/vig-os/tessera/issues/793)
 
 ## Defect
-Two tessera-io tests stop making progress inside the `workspace-test` (nextest) flake check on a ksb ARC runner. That pushes the x86_64 `nix flake check` job past its 2 h limit, so CI is red for every PR whose nextest derivation isn't cached.
+Two tessera-io tests stop making progress inside the `workspace-test` (nextest) flake check on a [batch-host] ARC runner. That pushes the x86_64 `nix flake check` job past its 2 h limit, so CI is red for every PR whose nextest derivation isn't cached.
 
 | run | test | result |
 |---|---|---|
@@ -33,7 +33,7 @@ Attempt 1 of the same run timed out the same way. PR #786 doesn't touch tessera-
 A 0.9 s test running for more than 840 s is a hang, not slowness under load. Even the 400 s green timing is suspect for a 20-block in-memory test.
 
 ## Hypotheses (to confirm or refute with evidence, not to assume)
-1. **Thread-spawn failure turned into a wait.** On ksb pods `available_parallelism()` reports the 84 node CPUs, the pod caps pids at 4,096, and Nix strips the runner's thread pins. nextest runs many test processes at once, each with rayon/std pools plus `StreamWriter` workers (up to 16). If a worker spawn fails (EAGAIN), or a pool sizes itself to 84 threads, the writer may wait forever for a worker that never started. A failed spawn must surface as an `Err`; it must never become a hang. See the ksb-arc-nix gotchas and the EAGAIN friction already seen on flock#2617.
+1. **Thread-spawn failure turned into a wait.** On [batch-host] pods `available_parallelism()` reports the 84 node CPUs, the pod caps pids at 4,096, and Nix strips the runner's thread pins. nextest runs many test processes at once, each with rayon/std pools plus `StreamWriter` workers (up to 16). If a worker spawn fails (EAGAIN), or a pool sizes itself to 84 threads, the writer may wait forever for a worker that never started. A failed spawn must surface as an `Err`; it must never become a hang. See the ksb-arc-nix gotchas and the EAGAIN friction already seen on flock#2617.
 2. A credit-window or commit-order deadlock in `StreamWriter` (d3bf9f9, #677) that only shows up under particular scheduling, e.g. the `2/1B` window with 16 workers.
 3. Contention on a shared lock (a counting global allocator in `session_leaf_memory`, or the tempdir on a loaded disk).
 
@@ -57,5 +57,5 @@ Owner decision 2026-11-11: it isn't a hang. The tests are fsync-bound on the ove
 
 _Posted on November 11, 2026 at 02:19 AM_
 
-Owner decision (2026-11-11): the ARC pods get a 1Gi Memory emptyDir at /dev/shm (exo-pet/exo-fleet#1113). The tessera RAM-tmpdir change goes ahead unmodified. It lands only after #1113 is deployed and CI is green on ksb runners. #1081 (sandbox) and #798 (group commit) stay separate follow-ups.
+Owner decision (2026-11-11): the ARC pods get a 1Gi Memory emptyDir at /dev/shm ([private-repo]#1113). The tessera RAM-tmpdir change goes ahead unmodified. It lands only after #1113 is deployed and CI is green on [batch-host] runners. #1081 (sandbox) and #798 (group commit) stay separate follow-ups.
 

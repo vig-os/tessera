@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-08T11:42:36Z
-updated: 2026-11-09T03:32:37Z
+updated: 2026-11-18T14:53:26Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/775
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-09T09:04:23.678Z
+synced: 2026-11-19T09:52:23.252Z
 ---
 
 # [Issue 775]: [feat(io): full-text BM25 search as an ADR-0054 derived cache — tantivy index over a declared text column, composable with filters and #769 vectors](https://github.com/vig-os/tessera/issues/775)
@@ -48,13 +48,13 @@ There is no text index of any kind, and no way to rank rows by relevance to a qu
 4. **Bounds:**
    - **Build:** streams the column in row groups with a bounded writer heap (tantivy `IndexWriter` memory budget), so it never materialises the column.
    - **Query:** reads mmap'd segments, with RSS bounded by the segments touched.
-   - Record build time, size and peak RSS for 1M, 10M and 100M rows as a ksb job (estimate only, to be measured: about 10–30% of the raw text size on disk).
+   - Record build time, size and peak RSS for 1M, 10M and 100M rows as a [batch-host] job (estimate only, to be measured: about 10–30% of the raw text size on disk).
 5. **CLI:** `tessera index text <file> <block> --column abstract [--analyzer en_stem]`, `tessera search <file> <block> 'query' [-k 20]`, and `tessera index verify` (freshness check). Behind a feature (ADR-0057), so the lean build does not pull tantivy.
 
 ## Acceptance
 
 - [ ] An ADR (or an amendment to ADR-0054) fixes the cache layout, the stamp (including the analyzer hash), row-id mapping and the multi-product semantics.
-- [ ] A 10M-row text column indexes and queries in bounded RSS (measured), on a ksb job, not vm-dev.
+- [ ] A 10M-row text column indexes and queries in bounded RSS (measured), on a [batch-host] job, not [dev-vm].
 - [ ] `bm25(...)` composes with a filter and with `vec_topk` (#769) in one SQL statement, and the fused top-k equals a reference implementation on a fixture.
 - [ ] A changed source **or** a changed analyzer config makes the cache stale (test).
 - [ ] The default build is unchanged: no tantivy in the dependency graph without the feature.

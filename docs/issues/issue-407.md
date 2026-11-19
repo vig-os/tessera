@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-08-21T09:27:46Z
-updated: 2026-10-16T17:15:53Z
+updated: 2026-11-18T14:56:18Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/407
@@ -13,7 +13,7 @@ milestone: 0.1.0-beta
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:51.184Z
+synced: 2026-11-19T09:52:43.022Z
 ---
 
 # [Issue 407]: [Signed `aux/` appendix: bring forensic provenance into the ADR-0037 signature scope](https://github.com/vig-os/tessera/issues/407)
@@ -121,7 +121,7 @@ Refs: #403
 
 _Posted on October 16, 2026 at 05:15 PM_
 
-Dogfooding anatomist (MorePET/anatomist#91) at tessera `dev` `fa581f5`: a concrete use case for the signed-aux appendix beyond the ADR-0056 §6a decoder-id framing.
+Dogfooding anatomist ([private-repo]#91) at tessera `dev` `fa581f5`: a concrete use case for the signed-aux appendix beyond the ADR-0056 §6a decoder-id framing.
 
 **Scenario.** Each dog's products (ingest + derived) are wrapped by `age`-encrypted whole-file envelopes (anatomist #91's emulation of ADR-0055). The outer `.sig.json` binds `{ciphertext_hash, recipients, signer}` and lets an auditor who holds **no** decryption key still prove the ciphertext is the one the signer attested to.
 

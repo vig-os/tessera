@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-16T17:15:54Z
-updated: 2026-10-16T23:03:16Z
+updated: 2026-11-18T14:56:24Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/566
@@ -13,14 +13,14 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:48.699Z
+synced: 2026-11-19T09:52:40.461Z
 ---
 
 # [Issue 566]: [feat(py/cli): generalize ADR-0047 crypto-shred identity envelope — Python Builder + `tessera attach-identity`](https://github.com/vig-os/tessera/issues/566)
 
 ## Context
 
-Dogfooding (anatomist MorePET/anatomist#91) at tessera `dev` `fa581f5`. ADR-0047 implements an elegant crypto-shred pattern — an `age`/X25519-encrypted identity envelope rides in `aux/identity/`, outside the seal; `tessera reidentify` recovers it with the recipient private key, `tessera shred` drops it. The whole pattern is exposed **only** through `tessera ingest dicom --crypto-shred --recipient <age-pubkey>`.
+Dogfooding (anatomist [private-repo]#91) at tessera `dev` `fa581f5`. ADR-0047 implements an elegant crypto-shred pattern — an `age`/X25519-encrypted identity envelope rides in `aux/identity/`, outside the seal; `tessera reidentify` recovers it with the recipient private key, `tessera shred` drops it. The whole pattern is exposed **only** through `tessera ingest dicom --crypto-shred --recipient <age-pubkey>`.
 
 ## Gap
 
@@ -72,7 +72,7 @@ error: no such subcommand: `attach-identity`
 
 _Posted on October 16, 2026 at 11:03 PM_
 
-From MorePET/anatomist#86 (ADR-0007, PR MorePET/anatomist#103): following an owner decision (2026-10-17), anatomist bases its crypto-shredding **on the ADR-0047 identity envelope** rather than on a store of its own. This issue therefore **gates** anatomist's per-dog ingest (#87). What anatomist needs from it, concretely (checked at `dev` fa581f5):
+From [private-repo]#86 (ADR-0007, PR [private-repo]#103): following an owner decision (2026-10-17), anatomist bases its crypto-shredding **on the ADR-0047 identity envelope** rather than on a store of its own. This issue therefore **gates** anatomist's per-dog ingest (#87). What anatomist needs from it, concretely (checked at `dev` fa581f5):
 
 1. **A non-DICOM producer.** anatomist's inputs are NIfTI (`ct.nii.gz`) plus a clinical spreadsheet, not DICOM. Today the envelope is reachable only through `ingest dicom|dicom-series --recipient` (`engine.rs:396/434`), and there is no `ingest nifti` subcommand. `IdentityDocument` requires `dicom_header`. The ask: make `dicom_header` optional, or generalise it (for example `source_header: null`), with `curated_identifying` carrying producer-supplied fields such as a clinic id, a patient id, series ids and source file digests.
 2. **Python:** `Builder.attach_identity(doc_json, recipients)` (the safer of the two shapes proposed above), which writes the canonical `aux/identity/identity.age` before or after `pack`, with the seal unchanged. Or the `tessera attach-identity` CLI, which a host-side step can call.

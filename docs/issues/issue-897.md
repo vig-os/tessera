@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-17T19:56:04Z
-updated: 2026-11-18T00:22:29Z
+updated: 2026-11-19T05:25:55Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/897
-comments: 7
+comments: 9
 labels: priority:high, semver:major, spike, area:integrity, adr
 assignees: none
 milestone: none
 projects: none
 parent: none
-children: none
-synced: 2026-11-18T09:43:22.172Z
+children: 895, 912, 913, 914, 720, 915, 828, 916, 917
+synced: 2026-11-19T09:52:10.991Z
 ---
 
 # [Issue 897]: [spike(format): revisit the seal encoding: JCS+I-JSON vs deterministic CBOR vs per-field Merkle (ADR-020)](https://github.com/vig-os/tessera/issues/897)
@@ -151,4 +151,38 @@ The bake-off should compare A (as shipped plus #895), A′ and B (deterministic 
 _Posted on November 18, 2026 at 12:22 AM_
 
 **Owner decision (2026-11-18): option A′.** JSON stays. `manifest_hash` moves out of the manifest, the seal hashes the stored bytes, writers emit JCS form, and readers refuse non-canonical bytes and keep I-JSON. 64-bit values are schema-typed strings (#895, now un-held). Evidence: PR #900 (spike + ADR-0066). Next steps: ADR-0066 → Accepted on PR #900 after a fresh review, then ordered implementation sub-issues taken from the ADR's plan. B (deterministic CBOR) is rejected for the reasons recorded in the spike.
+
+---
+
+# [Comment #8]() by [gerchowl]()
+
+_Posted on November 19, 2026 at 12:16 AM_
+
+Owner decisions 2026-11-19:
+- **Order:** the ADR-0066 format break ships before the bridge.
+- **Migration:** none. There are no files to keep, so old products are refused and no `tessera migrate` verb is built.
+- **Same breaking release:** #720 (content_hash covers primary blocks only, as ADR-0028 §4 says) and #828 (codec profile `tessera-table-v2` as the new default) ride with it.
+
+---
+
+# [Comment #9]() by [gerchowl]()
+
+_Posted on November 19, 2026 at 05:25 AM_
+
+ADR-0066 is Accepted and merged (#900, 7b5cedd). Its implementation plan is filed as the sub-issues of this issue, in this order:
+
+| Step | Issue | What | Depends on |
+|---|---|---|---|
+| 1 | #895 | product schemas declare 64-bit string encodings and value ranges | — |
+| 2 | #912 | writers emit the JCS form | — |
+| 3 | #913 | stored-bytes API and canonical check (core) | — |
+| 4 | #914 | A′ cutover; closes #901 | 2, 3 |
+| 5 | #720 | content_hash covers primary blocks only | 4 |
+| 6 | #915 | tessera-table-v2 design note (owner review) | — |
+| 7 | #828 | tessera-table-v2 becomes the default | 4, 6 |
+| 8 | #916 | final corpus cross-check | 1, 5, 7 |
+| 9 | #917 | cut the format-break alpha | 8 |
+
+The bridge work (#454 → #811) starts after #917 ships. Review nits from #900 are filed as #918.
+
 

@@ -2,7 +2,7 @@
 type: issue
 state: closed
 created: 2026-10-16T16:50:27Z
-updated: 2026-10-25T14:43:42Z
+updated: 2026-11-18T14:55:53Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/562
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-26T07:24:56.587Z
+synced: 2026-11-19T09:52:41.770Z
 ---
 
 # [Issue 562]: [feat(py): expose with_producer / with_generation on Builder — ADR-0058 §4 is unreachable from Python](https://github.com/vig-os/tessera/issues/562)
@@ -38,7 +38,7 @@ The current Builder pymethods (observed through `dir(tessera.Builder)` on the wh
 
 ## Why it matters — a concrete adoption case
 
-anatomist (vet-CT pipeline, see MorePET/anatomist#86) is evaluating `.tsra` as its agentic
+anatomist (vet-CT pipeline, see [private-repo]#86) is evaluating `.tsra` as its agentic
 provenance format. Its mapping needs:
 
 - `producer` ← the orchestrator (anatomist/0.1.0, `git_commit`, `nar_hash`-style identity),
@@ -90,7 +90,7 @@ the above sha; `TESSERA_VERSION` still "0.0.0".
 Builder gains two pymethods and (for ergonomics) one keyword path:
 
 ```python
-b.with_producer(tool="anatomist", version="0.1.0", git_commit="…", git_repo="MorePET/anatomist", dirty=False)
+b.with_producer(tool="anatomist", version="0.1.0", git_commit="…", git_repo="[private-repo]", dirty=False)
 b.with_generation(config={"step": "trees", "template_version": "canine/v1", "agent": {"model": "…"}})
 # or (preferred for Python):
 b.with_generation(config_ref="blake3:…")  # when a config block is carried

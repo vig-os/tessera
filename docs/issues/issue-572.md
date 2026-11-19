@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-16T21:39:12Z
-updated: 2026-10-16T21:39:12Z
+updated: 2026-11-18T14:55:26Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/572
@@ -13,14 +13,14 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-17T06:32:45.896Z
+synced: 2026-11-19T09:52:37.886Z
 ---
 
 # [Issue 572]: [fix(ingest): spec seals the spec path in ingested_via_spec with no label, and the input path unless source_label is set](https://github.com/vig-os/tessera/issues/572)
 
 ## Context
 
-Dogfooding from MorePET/anatomist#86 at tessera `dev` `fa581f5`, with synthetic data only.
+Dogfooding from [private-repo]#86 at tessera `dev` `fa581f5`, with synthetic data only.
 
 ## Gap
 
@@ -38,5 +38,5 @@ On clinical data, paths routinely carry identifiers (ADR-0040's own example: a D
 
 ## Linked
 
-ADR-0040 (PHI hygiene, `--source-label`), ADR-0048, MorePET/anatomist#86.
+ADR-0040 (PHI hygiene, `--source-label`), ADR-0048, [private-repo]#86.
 

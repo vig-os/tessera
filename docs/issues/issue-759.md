@@ -2,7 +2,7 @@
 type: issue
 state: closed
 created: 2026-11-03T20:45:31Z
-updated: 2026-11-04T04:58:49Z
+updated: 2026-11-18T14:53:56Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/759
@@ -13,12 +13,12 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-04T08:35:51.686Z
+synced: 2026-11-19T09:52:25.917Z
 ---
 
 # [Issue 759]: [fix(io): WriteSession keeps every committed leaf's spec as a serde_json::Value tree until seal (~9.7 KB/leaf of duplicated column specs)](https://github.com/vig-os/tessera/issues/759)
 
-Found by the ADR-0064 PR G proof (#715). The diagnosis is `docs/spikes/715-rss-proof-diagnosis.md` on `test/715-ksb-rss-proof` @ 252af87, measured with heaptrack on ksb (jobs `tessera-715-r2-heap*`).
+Found by the ADR-0064 PR G proof (#715). The diagnosis is `docs/spikes/715-rss-proof-diagnosis.md` on `test/715-ksb-rss-proof` @ 252af87, measured with heaptrack on [batch-host] (jobs `tessera-715-r2-heap*`).
 
 `WriteSession::blocks` (`tessera-io/src/write.rs:227`) keeps every committed leaf's `BlockRef` until the seal. Each entry is pushed at `write.rs:880` from the clone at `write.rs:763`, while the caller drops the original (`stream.rs:1151`). Every entry carries its spec as a `serde_json::Value`/`IndexMap` tree. On the consumer's 12-column schema, the live heap grows 12.8 KB per leaf, and RssAnon about 25.4 KB per leaf once allocator retention is included:
 - (a) ~3.1 KB is the manifest's per-leaf content, which is needed until the seal;

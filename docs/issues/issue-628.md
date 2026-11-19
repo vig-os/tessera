@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-18T22:23:57Z
-updated: 2026-11-16T00:35:15Z
+updated: 2026-11-18T14:58:07Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/628
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-16T09:00:47.358Z
+synced: 2026-11-19T09:52:35.670Z
 ---
 
 # [Issue 628]: [perf(format): string-heavy tables are ~3x larger than Parquet — normalize forbids Vortex's zstd compact encoding](https://github.com/vig-os/tessera/issues/628)
@@ -54,7 +54,7 @@ _Posted on October 25, 2026 at 09:11 AM_
 **Triage update (architect, 2026-10-25): still a format decision.** Added priority:medium and effort:large.
 
 Plan, in order:
-1. **A determinism spike, run as ksb jobs.** Is Vortex's zstd string encoding byte-identical across x86_64/aarch64, across feature sets (Gate B), and across dev/release profiles? Also measure the size win on the consumer's string-heavy tables against Parquet. Repeat for an FSST-only or dictionary-only option, which needs no zstd in the reader and stays WASM-friendly.
+1. **A determinism spike, run as [batch-host] jobs.** Is Vortex's zstd string encoding byte-identical across x86_64/aarch64, across feature sets (Gate B), and across dev/release profiles? Also measure the size win on the consumer's string-heavy tables against Parquet. Repeat for an FSST-only or dictionary-only option, which needs no zstd in the reader and stays WASM-friendly.
 2. **An ADR** that admits (or rejects) the encoding into the normalised set, with the reader/WASM consequences.
 3. Implementation, with goldens and a size ratchet (#637).
 
@@ -72,7 +72,7 @@ _Posted on November 8, 2026 at 11:44 AM_
 - **Sizes (estimates):** about 8×10⁶ patents at 50–100 GB of raw text, and OpenAlex works up to about 4.8×10⁸ rows (the quarterly snapshot is about 770 GB as zstd Parquet).
 - **What that means:** at the observed ≈3.4× of Parquet (348 vs 103 B/row), the full OpenAlex works set would seal at roughly 2.5 TB instead of about 770 GB. A topic subset of 10⁷ rows would be about 3× its Parquet size too. That makes this the biggest risk for the use case and the reason it sits in W0 of #778.
 - **For the spike:** please include a long-prose column, abstracts at 150–300 tokens and patent descriptions at 5–50k tokens, next to the JSON column. FSST alone does well on short repetitive strings and much worse on long prose, so the result may differ.
-- **Range reads:** the "whole-block reads" note matters here too. The corpus will live in an S3-compatible object store (versitygw, gerchowl/g-fleet#1121), and queries project a few columns out of wide rows.
+- **Range reads:** the "whole-block reads" note matters here too. The corpus will live in an S3-compatible object store (versitygw, [fleet-config-repo]#1121), and queries project a few columns out of wide rows.
 
 ---
 
@@ -89,7 +89,7 @@ Re-checked against vortex 0.93.0 (PR #788, #635): the vortex-side blocker is gon
 
 _Posted on November 16, 2026 at 12:35 AM_
 
-**Split check (agent, from the kit storage review nerdmachines/kit#97, 2026-11-16).** The first triage comment asked for the whole-block-read part of this issue to be split out. A new issue was about to be filed for it, but the tracker already covers it, so none was opened. Nothing links those issues back here yet:
+**Split check (agent, from the kit storage review [private-repo]#97, 2026-11-16).** The first triage comment asked for the whole-block-read part of this issue to be split out. A new issue was about to be filed for it, but the tracker already covers it, so none was opened. Nothing links those issues back here yet:
 
 | Part of the whole-block-read concern | Tracked in |
 |---|---|

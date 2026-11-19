@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-30T02:06:59Z
-updated: 2026-11-15T09:06:18Z
+updated: 2026-11-18T14:58:01Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/719
@@ -13,14 +13,14 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-16T09:00:38.152Z
+synced: 2026-11-19T09:52:28.702Z
 ---
 
 # [Issue 719]: [feat(format): schema-declared write-time aggregation views as derived blocks (exact, deterministic, parallel)](https://github.com/vig-os/tessera/issues/719)
 
 
 Relates: ADR-0028 §3–§5, ADR-0059 (Proposed), ADR-0042, ADR-0054, #522, #347, #657, #297, #681.
-Downstream consumer: MorePET/visionx-rs#18 (owner decision 2026-10-30).
+Downstream consumer: [private-repo]#18 (owner decision 2026-10-30).
 
 ## Principle (downstream owner, 2026-10-30)
 Every stage of the pipeline has the same shape: **write once, read many; FAIR and agent-readable by construction.**
@@ -151,7 +151,7 @@ it lands **inside the ADR-0059 format event**.
 
 ## Performance requirements: measured cost model (visionx, synthetic, warm cache)
 These are our numbers for the same job done in visionx. They set the bar that a tessera implementation must beat.
-- Workload: paired interleaved harness, main c902b93, 8 exclusive vCPUs, ksb, 90 rotated rounds, 524,288 rows per
+- Workload: paired interleaved harness, main c902b93, 8 exclusive vCPUs, [batch-host], 90 rotated rounds, 524,288 rows per
   decode.
 - Decode alone costs 63.0 / 31.3 / 24.0 ns per event at 1 / 4 / 8 threads.
 - **Added observe cost is about 24 ns per event of wall time, flat across threads** (25.4 / 23.7 / 23.9 ns).
@@ -217,7 +217,7 @@ Downstream note (visionx-rs architect), after discussing it with the tessera arc
 
 _Posted on October 30, 2026 at 02:29 AM_
 
-**Updated cost model** (visionx-rs#125, comment 6513462032). Paired harness, 64× input-size sweep (6.3–403 MB), ksb, 8 exclusive vCPUs, 288 paired records.
+**Updated cost model** (visionx-rs#125, comment 6513462032). Paired harness, 64× input-size sweep (6.3–403 MB), [batch-host], 8 exclusive vCPUs, 288 paired records.
 
 **Added QC observe cost per event** (the slope across input sizes): **40.9 / 11.6 / 5.6 ns/event at 1 / 4 / 8 threads**. It scales about 7.3× with threads.
 
@@ -228,7 +228,7 @@ The earlier "~24 ns/event, flat across threads" figure was this fixed cost sprea
 **Implication for the views design:**
 - On real scans (about 10⁹ rows), the per-event index and increment path dominates. That covers batched index computation, narrow per-batch counters and cache layout.
 - A parallel or tree merge matters mainly for small inputs. It is still worth having, because chunk-level partials make merges frequent.
-- `perf_event_open` is denied inside ksb pods (seccomp), so variant timing is the measurement method there.
+- `perf_event_open` is denied inside [batch-host] pods (seccomp), so variant timing is the measurement method there.
 
 ---
 
@@ -236,7 +236,7 @@ The earlier "~24 ns/event, flat across threads" figure was this fixed cost sprea
 
 _Posted on November 13, 2026 at 11:55 AM_
 
-From the MorePET/visionx-rs architect, 2026-11-13: this issue and #720 block the production path of the visionx-rs QC product (MorePET/visionx-rs#18, and #139, which freezes the dense oracle until the views match it cell for cell). Are they scheduled? A rough position in the queue would let us plan the QC roll-up work.
+From the [private-repo] architect, 2026-11-13: this issue and #720 block the production path of the visionx-rs QC product ([private-repo]#18, and #139, which freezes the dense oracle until the views match it cell for cell). Are they scheduled? A rough position in the queue would let us plan the QC roll-up work.
 
 ---
 
@@ -244,7 +244,7 @@ From the MorePET/visionx-rs architect, 2026-11-13: this issue and #720 block the
 
 _Posted on November 15, 2026 at 09:06 AM_
 
-Downstream evidence from MorePET/visionx-rs, which reinforces items 4, 6 and the time-bucket key. visionx built a recipe interpreter that does this proposal's job early (visionx-rs#222, ADR-0003 D1) and will compile to these view declarations once #719 and #720 land.
+Downstream evidence from [private-repo], which reinforces items 4, 6 and the time-bucket key. visionx built a recipe interpreter that does this proposal's job early (visionx-rs#222, ADR-0003 D1) and will compile to these view declarations once #719 and #720 land.
 
 **1. Closed time-keyed partials must count toward the resident bound, not only open ones.** visionx's first time-keyed implementation (visionx-rs PR #256) bounded only *open* per-worker partials, `(T+1) × (per-second + bucket)`. Each worker still collected every partial it *closed* during a chunk until the ordered merge consumed it. Measured on the Lu-177 cascade recipe (8,328 B per second row and 526,336 B per 10 s bucket row, dense):
 

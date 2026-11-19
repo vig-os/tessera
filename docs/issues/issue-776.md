@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-08T11:42:37Z
-updated: 2026-11-08T11:43:42Z
+updated: 2026-11-18T14:53:23Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/776
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-09T09:04:23.181Z
+synced: 2026-11-19T09:52:22.616Z
 ---
 
 # [Issue 776]: [feat(schema): graph edge tables + a CSR adjacency aux cache — traversals, algorithms and node embeddings without a graph DB as source of truth](https://github.com/vig-os/tessera/issues/776)
@@ -61,7 +61,7 @@ There is no convention for storing edges, no adjacency structure for algorithms,
 ## Acceptance
 
 - [ ] An ADR records the edge-table convention (endpoint addressing, cross-product edges, integrity checking) and the CSR cache layout and stamp.
-- [ ] The CSR cache builds in bounded memory from a streamed edge block, measured at 10⁸ edges on ksb (estimate: 8–16 bytes/edge per direction).
+- [ ] The CSR cache builds in bounded memory from a streamed edge block, measured at 10⁸ edges on [batch-host] (estimate: 8–16 bytes/edge per direction).
 - [ ] A k-hop `neighbours(...)` table function and PageRank over the cache, cross-checked against a reference implementation on a fixture graph.
 - [ ] A derived-results product (pagerank or component id) carries a provenance edge to the edge block it came from.
 - [ ] A docs example: citation graph → co-citation → node embeddings (#768) → `vec_topk` (#769).

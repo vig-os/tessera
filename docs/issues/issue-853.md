@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-14T10:18:36Z
-updated: 2026-11-14T10:19:11Z
+updated: 2026-11-18T14:52:21Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/853
@@ -13,12 +13,12 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-15T08:48:30.917Z
+synced: 2026-11-19T09:52:15.104Z
 ---
 
 # [Issue 853]: [feat: seeded predicate sampling (sample(n, predicate, seed)) with provenance, on top of Vortex pushdown + take](https://github.com/vig-os/tessera/issues/853)
 
-## Request (from MorePET/visionx-rs#237, an event browser; consumer exo-pet/MPECT#426)
+## Request (from [private-repo]#237, an event browser; consumer [private-repo]#426)
 Interactive filtered sampling, such as "100 random coincidences where the energy and dt are in these ranges and the crystal pair is in this set", on ~30 GB event tables.
 
 **Already provided** (tables-sql.md): Vortex filter pushdown with per-chunk statistics, O(1) random `take`, column projection, and DataFusion `sql` over table blocks. The original version of this issue asked for zone maps; those are already covered.

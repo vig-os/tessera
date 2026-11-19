@@ -1,8 +1,8 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-11-14T10:20:04Z
-updated: 2026-11-15T00:50:40Z
+updated: 2026-11-18T14:52:18Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/854
@@ -13,12 +13,12 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-15T08:48:30.082Z
+synced: 2026-11-19T09:52:14.623Z
 ---
 
 # [Issue 854]: [chore(release): stale repo description ("on HDF5"), main stuck at alpha.1 (262 behind dev), legacy v0.1.0 / v1.0.0-rc1 tags outrank the alphas](https://github.com/vig-os/tessera/issues/854)
 
-Consumers that read the repository front page or `main` get the wrong picture of tessera. Found while routing an event-browser request (#853, MorePET/visionx-rs#237): the repo's own front page told us `.tsra` was HDF5.
+Consumers that read the repository front page or `main` get the wrong picture of tessera. Found while routing an event-browser request (#853, [private-repo]#237): the repo's own front page told us `.tsra` was HDF5.
 
 ## 1. Stale repository description
 The GitHub "About" text still reads **"FAIR Data on HDF5 — self-describing, FAIR-principled data format for scientific data products"**. Since then:

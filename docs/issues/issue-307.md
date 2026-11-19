@@ -2,7 +2,7 @@
 type: issue
 state: closed
 created: 2026-07-02T15:01:50Z
-updated: 2026-09-28T17:54:57Z
+updated: 2026-11-18T14:56:08Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/307
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-09-29T07:52:50.991Z
+synced: 2026-11-19T09:52:44.395Z
 ---
 
 # [Issue 307]: [feat(core): Vortex table Column carries no unit/description/short_name — fd5 I1/I2 gap on the data tier](https://github.com/vig-os/tessera/issues/307)
@@ -77,7 +77,7 @@ Built the per-column definitions the vendor HDF5 omits, from the authoritative s
 
 - **GE `petCoincLinkEvents.h`** © 2012 General Electric — raw Galileo coincidence-link bitfields
   (crystal axial/trans-axial IDs, Anger-math energies, signed TOF Δt, time markers, coinc counters).
-- **`MorePET/geddf-code-tim`** — `listParse.cpp` (raw→parsed), `getEnergyAxis_DMI6.m`
+- **`[private-repo]`** — `listParse.cpp` (raw→parsed), `getEnergyAxis_DMI6.m`
   (`keV = ((bin−0.5)/EPeak)×511`), `parseRawListFile.m`. Geometry: **54 axial × 544 trans-axial** (DMI6).
 
 Full dictionary (shaped like `FieldSpec`: short_name · description · unit · vocabulary · dtype) →
@@ -115,7 +115,7 @@ _Posted on July 2, 2026 at 03:16 PM_
 ## Authoritative source found + units confirmed by range analysis
 
 `geddf-code-tim` is MATLAB/C++ only (no Python). The **canonical** source is
-**`MorePET/ge-discovery-data-framework`** — the parser that *wrote* this HDF5:
+**`[private-repo]`** — the parser that *wrote* this HDF5:
 - `docs/DescriptionCSV.md` — the field dictionary (`ID, E/eV, t/ps, N, V_{x,y,z}/mm, L/ps`)
 - `lib/DiscoveryMIGen2/include/ListModeEvent.h` — field defs + unit comments (`timeMarker "in ms"`,
   `coincCount = # coincidences in prior 1ms window`)

@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-26T13:46:38Z
-updated: 2026-11-09T15:33:09Z
+updated: 2026-11-18T14:54:56Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/681
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-16T09:00:44.301Z
+synced: 2026-11-19T09:52:32.399Z
 ---
 
 # [Issue 681]: [fix(io): Vortex 0.75 writer holds encoded segments until the footer (unbounded per-chunk fan-out)](https://github.com/vig-os/tessera/issues/681)
@@ -25,8 +25,8 @@ the stream.
 
 ## Evidence
 
-Consumer reproducer (MorePET/visionx-rs `chore/39-tessera-677-repro`, exact nullable decoder shape,
-switched to `table_job_streaming`), ksb, 4 pinned cores, 12 GiB:
+Consumer reproducer ([private-repo] `chore/39-tessera-677-repro`, exact nullable decoder shape,
+switched to `table_job_streaming`), [batch-host], 4 pinned cores, 12 GiB:
 
 | rows | peak RssAnon | output bytes | at `9424f90` |
 |---:|---:|---:|---:|

@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-21T00:01:04Z
-updated: 2026-10-25T09:11:05Z
+updated: 2026-11-18T14:56:30Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/655
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-26T07:24:25.831Z
+synced: 2026-11-19T09:52:34.725Z
 ---
 
 # [Issue 655]: [feat(ingest): batch ingest mode for the stream writer: no per-fragment fsync/raw staging when the source is re-readable](https://github.com/vig-os/tessera/issues/655)
@@ -41,7 +41,7 @@ Decisions:
 - **Identity:** same canonical bytes and the same `content_hash` in both modes and at any worker count. This is gated in the determinism corpus (Gate A style): one input, both modes, several worker counts, hash-equal.
 - **Measurements, published in the performance book for both modes:**
   - the scratch budget per mode;
-  - throughput on a large source, run as a ksb job, not on the seat;
+  - throughput on a large source, run as a [batch-host] job, not on the seat;
   - where the encode pool saturates (committer, codec or IO). That number comes from a profile, not a guess. If the saturation point needs its own fix, it becomes a separate issue.
 
 Order: second in the next wave, after #632.

@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-11-16T08:31:13Z
-updated: 2026-11-16T08:31:13Z
+updated: 2026-11-18T14:52:02Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/889
@@ -13,14 +13,14 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-16T08:59:31.382Z
+synced: 2026-11-19T09:52:12.486Z
 ---
 
 # [Issue 889]: [io: sequenced shuffled_pushes_from_four_threads test hung (no wake-up within 60 s) under seat load](https://github.com/vig-os/tessera/issues/889)
 
 ## Observed
 
-On ksb-ws on 2026-11-16, at load average about 18, `cargo nextest run -p tessera-core -p tessera-io` (CARGO_BUILD_JOBS=4,
+On [batch-host-ws] on 2026-11-16, at load average about 18, `cargo nextest run -p tessera-core -p tessera-io` (CARGO_BUILD_JOBS=4,
 default nextest parallelism) failed once:
 
 ```text
