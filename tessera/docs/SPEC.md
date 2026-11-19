@@ -23,10 +23,13 @@ double has already lost (`9007199254740992.5` reads as `9007199254740992`); `900
 bound (`9007199254740991.5` rounds to 2^53 and is refused; `9007199254740991.4999999999999999999999` is
 not). Every double beyond 2^53−1 is an integer, so a large float written in scientific notation
 (`6.022e23`) is refused as well. A larger integer (an epoch-nanosecond timestamp, a 64-bit serial or tick counter) is
-carried as a decimal **string**; a writer refuses it with that advice rather than convert it silently, and
-a typed source field that is 64-bit (a DICOM `SV`/`UV` value) is written as a string by its type, never
-by its value. A source field that is a number (a DICOM `DS`/`FD` value such as `KVP`) stays a number and is
-refused beyond the bound, naming the source field (a DICOM tag, a NIfTI header field such as `scl_slope`); a value a person types as a JSON number stays a number too. `NaN` and ±infinity have no JSON spelling and are refused the same way wherever a writer reads one (a TOML `inf`, a NIfTI `scl_slope`, a DICOM `DS` of `NaN`, a typed `--set x=inf`): serialising one into JSON would write `null`, so every f64→JSON conversion on a write path goes through `canonical::json_number` / `canonical::to_json_value`, which refuse it. Text typed after `--set`/`--meta` that Rust reads as a number but JSON does not spell as one (`+5`, `.5`, `01`, `inf`, `Infinity`, `NaN`, `+1e400`) is refused, never stored as a string; the JSON-quoted form (`'"+5"'`) stores the text. A non-zero number that underflows to `0.0` (`5e-400`) is refused too, in `--set`/`--meta`, a JSON value, a TOML float, a `--column-meta` `scale` and a DICOM `DS`; zero in any spelling and an exact denormal (`1e-320`) stay. A NIfTI door validates every header value that feeds the manifest (the sform, the qform quaternion, offset and spacing, `pixdim[4]`, `toffset`, `scl_*`), and an affine entry computed from them, naming the header field. The generic seal-time error advises "write it as a string" only for a free-form `metadata` field; for a typed field (a `scale`, an affine, a transform) it is neutral. Array and table payloads are hashed as raw bytes and are unaffected. Products sealed before
+carried as a decimal **string**; a writer refuses it with that advice rather than convert it silently.
+**The bound is a format invariant**: no product schema can widen or relax it. A schema states how its fields
+meet it (§5, "Field rules"): a metadata field whose dtype can hold a larger integer (`int64`, `uint64`)
+declares `"encoding": "string"` and carries decimal strings by its type, never by its value, and the DICOM
+header dump writes every value (`SV`/`UV` included) as text. A source field that is a number (a DICOM
+`DS`/`FD` value such as `KVP`) stays a number and is refused beyond the bound, or outside the range its schema
+field declares, naming the source field (a DICOM tag, a NIfTI header field such as `scl_slope`); a value a person types as a JSON number stays a number too. `NaN` and ±infinity have no JSON spelling and are refused the same way wherever a writer reads one (a TOML `inf`, a NIfTI `scl_slope`, a DICOM `DS` of `NaN`, a typed `--set x=inf`): serialising one into JSON would write `null`, so every f64→JSON conversion on a write path goes through `canonical::json_number` / `canonical::to_json_value`, which refuse it. Text typed after `--set`/`--meta` that Rust reads as a number but JSON does not spell as one (`+5`, `.5`, `01`, `inf`, `Infinity`, `NaN`, `+1e400`) is refused, never stored as a string; the JSON-quoted form (`'"+5"'`) stores the text. A non-zero number that underflows to `0.0` (`5e-400`) is refused too, in `--set`/`--meta`, a JSON value, a TOML float, a `--column-meta` `scale` and a DICOM `DS`; zero in any spelling and an exact denormal (`1e-320`) stay. A NIfTI door validates every header value that feeds the manifest (the sform, the qform quaternion, offset and spacing, `pixdim[4]`, `toffset`, `scl_*`), and an affine entry computed from them, naming the header field. The generic seal-time error advises "write it as a string" only for a free-form `metadata` field; for a typed field (a `scale`, an affine, a transform) it is neutral. Array and table payloads are hashed as raw bytes and are unaffected. Products sealed before
 this rule (≤ 0.1.0-alpha.5) that hold such a number are refused: their seal never pinned the value (#886).
 
 ## 2. Canonical encoding (hashing)
@@ -169,6 +172,24 @@ spec carries `filename`/`media_type`/`size` — see §5e).
 **Generation** = `{ config✱: object, config_ref✱: string }` (`config` is opaque; `config_ref` is a `blake3:`
 digest of a config block carried in the product). **IngestTransform** = `{ name: string, params✱: object }`
 (`params` is opaque).
+
+**Field rules (the number rules of an embedded schema, #895).** A schema's `fields[]` entry (a FieldSpec) has
+`id`, `description`, `dtype` and optionally `encoding`✱, `minimum`✱, `maximum`✱ (besides `unit`, `vocabulary`,
+`default`, `required`, `recommended`, `sensitivity`, `inherit`). These rules are the schema's contract, not part of
+the seal: a writer MUST NOT seal a product, and a validator MUST NOT report one valid, that breaks them; a verifier
+checking only the seal does not apply them. Every declaration is checked before any value.
+- `dtype` is an array dtype (`int8` … `uint64`, `float16`/`32`/`64`, `bool`) or `string`, `coded`, `json`; any other
+  name is refused.
+- `int64` and `uint64` can hold integers beyond ±(2^53−1) (§1), so a field of either MUST declare
+  `"encoding": "string"`, and no other dtype may. A value of such a field is a JSON string holding the integer's
+  canonical decimal digits (`-?(0|[1-9][0-9]*)`, not `-0`) within the dtype's range, or a non-empty array of them.
+- `minimum` / `maximum` are inclusive bounds, allowed on a numeric dtype only, within ±(2^53−1), with `minimum` ≤
+  `maximum`. A value is then a number, a non-empty array of numbers, or (string-encoded) the decimal strings above,
+  and every element MUST lie within the bounds, compared exactly (an integer is not rounded to a double first:
+  `"9007199254740993"` is above a maximum of `9007199254740991`).
+- A field that declares none of the three keys constrains no value by them; a metadata key the schema doesn't
+  declare is open-world. The three keys are omitted when unset, so a schema without them keeps its bytes (§4).
+`corpus/schema-cases.json` gives the verdict (`ok`, `schema`, `value`) of each rule's cases.
 
 ## 5a. Array block payload (Zarr v3 + pluggable codec)
 A block with `kind == "array"` stores its samples as a **single serialized Zarr v3 store** (ADR-0023).

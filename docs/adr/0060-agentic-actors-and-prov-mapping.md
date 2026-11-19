@@ -1360,3 +1360,14 @@ decisions; each keeps its cost so the trade stays visible.
 - **Verifiable model attestation** (provider-signed outputs, TEE quotes): no mechanism exists to bind
   to yet. When one does, it rides as a counter-signature or `attestation` record (ADR-0037 §3's
   deferred fork), not as an actor field.
+
+## Amendment (2026-11-19) — three newer `FieldSpec` keys: `encoding`, `minimum`, `maximum` (#895)
+[ADR-0066](0066-seal-encoding.md) step 1 adds the number rules recorded in
+[ADR-0020's amendment of 2026-11-19](0020-canonical-encoding-and-identity.md): a metadata `FieldSpec` may declare
+`"encoding": "string"` (required on `int64`/`uint64`) and an inclusive `minimum`/`maximum`. They are newer fields under
+§2.2 and follow its rules unchanged: each is skipped when unset, so a schema that declares none of them keeps its bytes and
+its seal; `FieldSpec::FIELDS` lists them, so this build models them; a build that predates them finds them as unknown keys
+of `schema.fields[i]` and refuses to validate or re-seal against the schema while still verifying and reading the product.
+One addition follows from §2.2's intent: `ProductBuilder::seal` now parses the embedded schema with
+`ProductSchema::from_value`, so a fresh build that embeds a schema with a rule this build doesn't model (or a record in
+array form) is refused at seal, as a re-seal already was. Sealing against such a schema would ignore the rule it declares.
