@@ -10,7 +10,8 @@
 #   action   `open` (open the promotion PR) or `noop` (main already contains the release; `reason` says so)
 #   tag, tag_sha, main_sha
 #   head     how the PR head is built: `tag` (the tag commit itself, when main is its ancestor) or `merge`
-#            (a merge of the tag into main's tip; see WHY A MERGE below)
+#            (a new commit with the tag's tree and the parents [main's tip, the tag commit], which
+#            scripts/promotion-head.sh creates; see WHY A MERGE below)
 #   tree     the tree the PR head has: always the tag's own tree
 #   branch   `release/promote-<tag>`
 #   title    `chore: promote <tag> to main`
@@ -22,15 +23,17 @@
 #     of an old Release run, or a promotion merged before this workflow ran;
 #   - otherwise the tag must be the HIGHEST `v<semver>` tag in the repository, so main never moves to a
 #     release older than the latest;
-#   - when main is not an ancestor of the tag, the merge of the two must be clean AND its tree must be
-#     exactly the tag's tree. A different tree means main holds a change the release does not, and the
-#     PR would publish an unreleased state as "the release": a human decides, this script does not.
+#   - when main is not an ancestor of the tag, merging the two must be clean AND give exactly the tag's
+#     tree. A different tree (or a conflict) means main holds a change the release does not. The `merge`
+#     head is not built by merging: it simply HAS the tag's tree, so it would silently drop that change
+#     from main. This check is what makes that head honest; a human decides, this script does not.
 #
 # WHY A MERGE: main's ruleset requires the PR head to be up to date with main (strict status checks).
 # A head that is the bare tag commit is "behind" whenever main has a commit of its own, as it does
 # after every promotion merge, so it could only merge after an "Update branch", which pushes a new head
-# (dismissing the approval) and restarts the required `nix flake check`. A head that already merges
-# the tag into main's tip is up to date from the start and has the tag's tree, which this script checks.
+# (dismissing the approval) and restarts the required `nix flake check`. A head whose parents are main's
+# tip and the tag commit is up to date from the start; its tree is the tag's by construction, and the
+# rule above proves that is also what merging the tag into main would give.
 #
 # Needs git >= 2.38 (`git merge-tree --write-tree`).
 set -euo pipefail
@@ -166,7 +169,7 @@ self_test() {
   git switch -q dev
   commit a 3 d2
   git tag -a v0.1.0-alpha.2 -m alpha.2
-  expect "main has a merge commit of its own: the head is a merge with the tag's tree" v0.1.0-alpha.2 main "" \
+  expect "main has a merge commit of its own: the head is a [main, tag] commit with the tag's tree" v0.1.0-alpha.2 main "" \
     action=open head=merge "tree=$(tree v0.1.0-alpha.2)" "main_sha=$(sha main)"
   expect_fail "a tag that moved since the Release run built it" "the tag moved, refusing" \
     v0.1.0-alpha.2 main "$(sha v0.1.0-alpha.1)"

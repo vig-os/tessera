@@ -52,13 +52,23 @@ force-pushes; only an organization admin can bypass it. So no workflow merges or
   - **Nothing**, when `main` already contains the release (a re-run, or a promotion already merged).
   - **Refuses** a tag that is not `v<semver>`, a tag that moved since the Release run built it, and a
     release older than the newest `v<semver>` tag: `main` never moves to anything but the latest release.
-  - **The head**: the tag commit itself when `main` is its ancestor; otherwise a merge of the tag into
-    `main`'s tip, which GitHub makes and signs. The ruleset requires the head to be up to date with `main`,
-    and after the first promotion `main` always has a merge commit the next tag lacks. A head that is the
-    bare tag commit would need an "Update branch" after approval, which pushes a new head, dismisses the
-    approval and restarts `nix flake check`.
-  - **Refuses** a merge that conflicts, or whose tree is not exactly the tag's tree. Either means `main`
-    holds a change the release lacks, and merging would publish an unreleased tree as the release.
+  - **The head**: the tag commit itself when `main` is its ancestor; otherwise a new commit whose tree is
+    exactly the tag's tree and whose parents are `main`'s tip and the tag commit. The ruleset requires the
+    head to be up to date with `main`, and after the first promotion `main` always has a merge commit the
+    next tag lacks. A head that is the bare tag commit would need an "Update branch" after approval, which
+    pushes a new head, dismisses the approval and restarts `nix flake check`.
+  - **Refuses** a `main` whose merge with the tag conflicts, or whose tree is not exactly the tag's tree.
+    Either means `main` holds a change the release lacks. The promotion commit has the tag's tree, so it
+    would drop that change from `main`, and merging would publish an unreleased tree as the release.
+- `scripts/promotion-head.sh` builds that head and creates the branch (#925). It makes the two-parent
+  commit with GitHub's Git Data API (`POST /repos/{owner}/{repo}/git/commits`, only message, tree and
+  parents), not by merging, so nothing can conflict. With no custom author, committer or signature,
+  GitHub signs a commit an App creates this way, which the `Signed commits` ruleset (every ref, no bypass
+  actors) requires. GitHub's merges API, used before, produced an unsigned merge commit that the ruleset
+  refused (HTTP 409). Before it creates the branch, the script reads the head back from GitHub and
+  requires the tag's tree, the parents `[main, tag]` and a verified signature
+  (`.verification.verified == true`). A head that fails any of these fails the run with no branch and no
+  PR. There is no fallback.
 - The PR is opened with a token of the `vigos-devkit-upgrade` GitHub App (org secrets
   `DEVKIT_UPGRADE_APP_CLIENT_ID` / `DEVKIT_UPGRADE_APP_PRIVATE_KEY`, the App `devkit-upgrade.yml` also
   uses), so its CI runs and its bot author is exempt from the branch-name check. The token carries
@@ -66,12 +76,11 @@ force-pushes; only an organization admin can bypass it. So no workflow merges or
   relative to `main`, and GitHub refuses an App such a ref or commit without `workflows`. The release-plz
   App is not used because it has no `workflows` permission and keeps none (owner decision, 2026-11-15):
   the release PR it opens never touches a workflow.
-- The head adds either no commit (the bare tag) or GitHub's merge commit, which adds no change. If GitHub
-  refuses the merge, the run deletes the branch it had just created at `main`'s tip, so a re-run starts
-  clean.
+- The head adds either no commit (the bare tag) or the App's two-parent promotion commit, which changes
+  nothing relative to the tag. A head that fails a rule gets no branch, so a re-run starts clean.
 
-The flake check `release-promotion` runs the script's self-test, which proves each of these rules on
-throwaway repositories.
+The flake check `release-promotion` runs both scripts' self-tests, which prove each of these rules on
+throwaway repositories (`promotion-head.sh` against a fake `gh` that answers from a local repository).
 
 ### When the workflow fails
 
@@ -82,9 +91,14 @@ gh workflow run promote-main.yml -f tag=v<version>                 # open the PR
 gh workflow run promote-main.yml -f tag=v<version> -f dry_run=true # print the plan only
 ```
 
-- *`release/promote-v<version>` exists but has no open PR*: an earlier run made the branch and then
-  failed after GitHub's merge (a tree or signature mismatch, kept for inspection), or someone else made
-  it. Inspect the branch, delete it, and re-run.
+A manual run uses the workflow and scripts on `--ref`, which defaults to the default branch (`dev`), so a
+fix to the promotion takes effect for re-runs once it is merged into `dev`.
+
+- *`release/promote-v<version>` exists but has no open PR*: an earlier run created the branch and then
+  failed to open the PR, or someone else made it. Inspect the branch, delete it, and re-run.
+- *the head … is not signature-verified* (or *has tree …* / *has parents …*): GitHub stored a commit
+  that breaks a rule, and no branch was created. Nothing needs cleaning up; find out why (for a signature,
+  the request must carry no author or committer) before re-running.
 - *main holds changes that `v<version>` does not* (or *conflicts*): something reached `main` outside a
   promotion. Bring that change to `dev`, release it, and promote that release.
 - *not the latest release*: a newer tag exists; promote that one instead.
