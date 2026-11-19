@@ -106,6 +106,19 @@ sensitivity = "identifying"
 
 **After the fact**, with `tessera commit --set …` — content-addressed, one new object, lineage preserved.
 
+### Typed values: `--set` and `--meta`
+
+`--set key=value` and `--meta key=value` read `value` as JSON, so `5` is a number, `true` a boolean and
+`'"text"'` a string. The rule for text that is not JSON:
+
+- Text that Rust's `str::parse::<f64>()` reads as a number (`+5`, `.5`, `01`, `inf`, `Infinity`, `NaN`, `+1e400`)
+  is a number you meant, spelled in a way JSON does not allow. It is **refused**, naming the flag and key and why
+  (not finite, past a double's range, or not JSON number spelling: write `5`, not `+5`). It is never stored as a
+  string you did not ask for.
+- A number beyond ±(2^53−1) is refused too: a seal holds a JSON number as a double.
+- To store such text as it is, quote it as a JSON string: `--set k='"+5"'` stores the string `+5`.
+- Any other text (`hello`, `0x10`, `1_000`, `1.2.3`) is a string.
+
 An entry naming a column that does not exist is an error, not a no-op: the failure worth preventing is
 believing you classified `patient_id` when you typed `patient_ids` and the artifact sealed it unclassified.
 

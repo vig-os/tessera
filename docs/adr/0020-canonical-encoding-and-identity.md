@@ -95,7 +95,14 @@ user input (Python `set_field`/`with_generation`, a TOML spec's `[product.metada
 `canonical::parse_user_value`: text that is JSON by the RFC 8259 grammar is JSON, and a number in it beyond the
 bound, or past a double's range (`1e400`, a 401-digit integer, `[1e400]`), is refused naming the flag and the typed
 text. It is never kept as a string, which the CLI used to fall back to whenever `serde_json` could not hold the
-number. Other text is still a string. DICOM curated `DS`/`FD` fields (`KVP`, `SliceThickness`, `PixelSpacing`,
+number. Text that is not JSON but that Rust's `str::parse::<f64>()` reads as a number (`+5`, `.5`, `5.`, `01`, `inf`,
+`Infinity`, `NaN`, `+1e400`) is a number the person meant, spelled in a way JSON does not allow: it is refused, naming
+the flag and key and saying why (not finite, past a double's range, or not JSON number spelling: "write `5`, not
+`+5`"), and the error shows how to keep the text, the JSON-quoted form `--set k='"+5"'`. Non-numeric text (`hello`,
+`0x10`, `1_000`, `1.2.3`) is still a bare string. `NaN` and ±infinity have no JSON spelling, and `serde_json` writes
+them as `null`, so a seal would have pinned `null`: every f64→JSON conversion on a write path goes through
+`canonical::json_number` (one value) or `canonical::to_json_value` (a typed document), which refuse them
+(`Error::NonFiniteNumber`); a TOML spec's `inf`/`nan` is refused at `spec::parse_str`. DICOM curated `DS`/`FD` fields (`KVP`, `SliceThickness`, `PixelSpacing`,
 `RescaleSlope`/`RescaleIntercept`, a series' `ImagePositionPatient`/`ImageOrientationPatient`) stay JSON numbers; one
 beyond the bound is refused when the file is read, naming the tag and its source text (`(0018,0060) KVP = "1E16" is
 outside the range a sealed JSON number can hold (±(2^53−1), I-JSON RFC 7493 §2.2)`), with no advice to write a string
@@ -114,7 +121,8 @@ and it is not refused.
 
 **Consequences.** Products sealed before this rule (≤ 0.1.0-alpha.5) that hold such a number are refused
 (fail closed; their seal never pinned the value). No tracked corpus product holds one, so no golden hash moved.
-Of the typed ingest sources, only DICOM's curated fields write JSON numbers (refused at the door above); the
-DICOM header dump is text (`SV`/`UV` included), GE HDF5 attributes are not read into JSON and a vendor `.ini`
+Of the typed ingest sources, DICOM's curated fields and NIfTI's `scl_slope`/`scl_inter` write JSON numbers (each refused
+at its own door, in that format's words: `nifti: scl_slope = "inf" is not a finite number …`, the same formatter as the
+DICOM refusal); the DICOM header dump is text (`SV`/`UV` included), GE HDF5 attributes are not read into JSON and a vendor `.ini`
 is carried as an opaque blob. The reference
 reader refuses the same numbers, and `corpus/seal-cases.json` holds both readers to the same verdicts.

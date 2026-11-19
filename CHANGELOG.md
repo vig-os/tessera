@@ -198,6 +198,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   number are refused (fail closed); `tessera provenance` reports such a parent as CORRUPT, never as missing, naming it
   by the `id` it claims (new `tessera_io::read_claimed_id`). No corpus seal moved; the DICOM header dump is text, and a
   64-bit DICOM value (`SV`/`UV`) is written as a string by its type. The reference reader refuses the same numbers, and `corpus/seal-cases.json` adds the cases.
+- `tessera-core`, `tessera-io`, `tessera-ingest`, `tessera-cli`: `NaN`, `inf` and `-inf` are refused wherever a writer
+  reads one, and a typed number must be spelled as JSON spells it (#886). `serde_json` writes a non-finite double as
+  `null`, so a TOML `[product.metadata] x = inf`, a NIfTI `scl_slope` of `inf` or `NaN` and a typed value sealed
+  `null` and verified with rc=0. Every f64→JSON conversion on a write path now goes through the new
+  `canonical::json_number` (one value) or `canonical::to_json_value` (a typed document: block specs, manifests,
+  collections, `generation`), which refuse NaN and ±infinity with the new `Error::NonFiniteNumber` (and a value beyond
+  ±(2^53−1) with `InexactInteger`); a TOML `inf`/`nan` is refused by `spec::parse_str`, naming its path
+  (`product[0].metadata.x = inf …`). NIfTI refuses `scl_slope`/`scl_inter` that are non-finite or beyond the bound at the
+  door, naming the header field and its value (`nifti: scl_slope = "inf" is not a finite number …`; before, `1e16`
+  was refused only by the generic message advising a string), and a DICOM `DS` of `NaN`, `inf` or `-inf` is refused by
+  tag as `1E16` already was; both use one formatter. A `--set`/`--meta` text that Rust's `str::parse::<f64>()` reads
+  as a number but JSON does not spell as one (`+5`, `.5`, `01`, `inf`, `Infinity`, `NaN`, `+1e400`,
+  `+9007199254740993`) is refused, naming the flag and key and why, instead of being stored as a string; the
+  JSON-quoted form (`--set k='"+5"'`) stores the text. `hello`, `0x10` and `1_000` are still strings, and `5` and
+  `9007199254740991` still numbers. `01`, `.5` and `+1`, which were strings, are now refused: quote them to keep the text.
 - `tessera-core`: `Manifest::from_json_verified` checks `manifest_hash` over the manifest JSON object as parsed (SPEC
   §4), not over a re-serialisation of the `Manifest` struct. Before, a key spliced into a sealed `manifest.json`
   (`"forged": true`) was dropped by the struct and `tessera verify` reported OK, while a product a newer writer
