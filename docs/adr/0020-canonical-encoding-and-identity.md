@@ -121,8 +121,17 @@ and it is not refused.
 
 **Consequences.** Products sealed before this rule (≤ 0.1.0-alpha.5) that hold such a number are refused
 (fail closed; their seal never pinned the value). No tracked corpus product holds one, so no golden hash moved.
-Of the typed ingest sources, DICOM's curated fields and NIfTI's `scl_slope`/`scl_inter` write JSON numbers (each refused
-at its own door, in that format's words: `nifti: scl_slope = "inf" is not a finite number …`, the same formatter as the
-DICOM refusal); the DICOM header dump is text (`SV`/`UV` included), GE HDF5 attributes are not read into JSON and a vendor `.ini`
+Of the typed ingest sources, every vendor door that writes a JSON number validates its source values before anything is
+written, in that format's words and through one formatter (`ingest::sealable`): DICOM's curated fields (the tag and the
+element's text), and NIfTI's header, as one table of fields (the sform `srow_x/y/z`, the qform `quatern_b/c/d`,
+`qoffset_x/y/z` and `pixdim[0..=3]`, the time step `pixdim[4]` and `toffset`, `scl_slope`/`scl_inter`), each named with its value
+(`nifti: pixdim[1] = "10000000000000000" is outside the range a sealed JSON number can hold …`); an affine entry computed from
+in-range fields that still falls out of range (`1e13` m is `1e16` mm) is refused naming the fields it came from. A NIfTI spacing
+that is zero or negative is still clamped to 1 as the reference `nifti_quatern_to_mat44` does; a non-finite one is refused,
+never clamped. The generic seal-time check can only name a JSON path, so for a typed field (a `column_meta.scale`, an affine, a
+transform) its message is neutral ("outside the range a sealed JSON number can hold") and gives no advice to write a string: only a
+free-form `metadata` field, which accepts one, gets it (`Error::InexactInteger::as_string`). A non-zero number that underflows to
+`0.0` (`5e-400`) would seal a different number, so it is refused wherever a person or a file spells one (`--meta`, a JSON value, a
+TOML float, a `--column-meta` `scale`, a DICOM `DS`); zero in any spelling and an exact denormal (`1e-320`) are kept. The DICOM header dump is text (`SV`/`UV` included), GE HDF5 attributes are not read into JSON and a vendor `.ini`
 is carried as an opaque blob. The reference
 reader refuses the same numbers, and `corpus/seal-cases.json` holds both readers to the same verdicts.
