@@ -235,8 +235,7 @@ Left open: respellings (§3); every new spelling class costs a new rule in Rust 
    `seal-cases.json` (including the T4–T7, S5b, S7 and S8 cases); refresh the snapshots that print `manifest.json`.
 6. **Reference reader**: seal = `blake3(file)`, canonical check with `jcs`, explicit lone-surrogate refusal, I-JSON
    kept.
-7. **`tessera migrate`**: A-verify an alpha product, emit the A′ form; the seal is unchanged, so embedded
-   `aux/signatures/*` carry over valid.
+7. ~~`tessera migrate`~~ dropped (owner, 2026-11-19): alpha products are refused with an error naming both formats.
 8. **#895** (as in A).
 
 ### B — deterministic CBOR (11 items)
@@ -315,7 +314,8 @@ exactly. Its honest cost: one format change to where the seal lives (eight sub-i
 refused instead of stored.
 
 Readers **must** run both the canonical check and I-JSON (§3, S5b and S7). Migration: readers refuse the alpha
-layout; `tessera migrate` converts it losslessly (seal-preserving, so signatures carry over).
+layout and there is no `tessera migrate` (owner, 2026-11-19: there are no real products to keep; see ADR-0066 rule
+10). The seal-preserving property still holds for the mechanism and is what the cutover's corpus proof checks.
 
 **When B is the better choice.** B with numeric reduction is equally sound on the attack replay. It is the only
 option that stores arbitrary 64-bit integers natively, including in schema-less places (opaque

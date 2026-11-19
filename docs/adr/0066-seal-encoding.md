@@ -84,10 +84,24 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
    on.
 9. **Ingest `spec_hash`** stays `digest(JCS(spec))`: it identifies a recipe parsed from TOML (an identity, like
    `id`), not a stored document's seal.
-10. **Migration.** Readers refuse the alpha layout (a pretty `manifest.json` with an in-band `manifest_hash`). A
-    `tessera migrate` verb converts it: verify under the alpha rules, then write the A′ form. The seal is unchanged,
-    so embedded `aux/signatures/*` and every external reference stay valid. One reading path in readers; the alpha
-    path lives only in `migrate`.
+10. **No migration verb** (owner, 2026-11-19). There are no real products to keep, so there is no `tessera migrate`
+    and no second reading path. A reader refuses a product written before this ADR (a pretty `manifest.json`
+    with an in-band `manifest_hash`, no `manifest.seal`) with an error that names the format it found (the
+    `tessera_version` the manifest declares and the layout evidence) and the format the reader requires. Because
+    `TESSERA_VERSION` is deliberately fixed at `"0.0.0"` (ADR-0042; it is stamped into the producer and therefore
+    sealed), the layout evidence, not a version bump, tells the two formats apart. The corpus is re-packed in the
+    cutover; anyone with an alpha product re-ingests it.
+11. **The break ships alone, before the bridge work** (owner, 2026-11-19). It is its own alpha and lands before the
+    C ABI bridge (#454 → #811, ADR-0065), so the bridge is built once against the final format. Two further format
+    changes ride the same alpha because each moves hashes anyway: #720 (rule 12) and #828 (rule 13).
+12. **#720 rides the break** (owner, 2026-11-19). `content_hash` covers the primary blocks only, as ADR-0028 §4
+    already says; derived-sidecar blocks (stats, pyramids, projections, the chunk index's stat columns) leave it.
+    `manifest_hash` still commits to every block, so the integrity of the accelerators is unchanged. Today
+    `ManifestBuilder::seal` folds every block ref into `merkle_root`, so the Accepted ADR and the code disagree.
+13. **#828 rides the break** (owner, 2026-11-19). The per-column codec profile `tessera-table-v2` becomes the default
+    table codec profile, replacing today's fixed BtrBlocks + Pco choice. A design note comes first (rules, the
+    profile's contents per product type, how the choice is recorded in the manifest, determinism across arches),
+    then the code.
 
 ### Rejected alternatives
 
@@ -117,11 +131,21 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
 - Every reader (Rust, the Python reference reader, `tessera-wasm`) must run the canonical check and I-JSON; a
   reader that only hashes would accept a sealed respelling, one without I-JSON a rounded integer. The seal cases
   must carry both.
+- **Seals move, in two steps.** The A′ mechanism keeps every existing seal (13/13, proven in the cutover step before
+  anything else changes). #720 then moves `content_hash` of every product that carries a derived-sidecar block, and
+  #828 moves the block digests, hence `content_hash` and `manifest_hash`, of every table product whose codec choice
+  changes. Both land in the same alpha, so no release carries an intermediate format, and the corpus is
+  regenerated once, after both. Signatures made before the alpha stop verifying against the new seals; with no
+  real products that is accepted.
+- **No upgrade path.** Alpha products are refused, not converted (rule 10). The refusal names both formats so the
+  cause is clear.
+- The bridge (#454 → #811) waits for this alpha (rule 11).
 - Option C (per-field commitments for PHI redaction, ADR-0040) is not decided here; it needs salted per-field
   digests inside the document under either encoding (SD-JWT-style in JSON), and A′ doesn't block it.
 
 ## Amends and supersedes
 
+- **ADR-0028 §4** is not amended: #720 makes the code do what it says (rule 12).
 - **ADR-0020 D4**: the seal is over the stored canonical bytes, and `manifest_hash` is no longer a manifest field.
   D5's three hashes keep their meanings and values. PR #894's I-JSON amendment stays (rule 7).
 - **ADR-0022 and SPEC §6**: the member list gains `manifest.seal` (entry 2), and `manifest.json` loses "any valid
@@ -136,65 +160,95 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
 
 ## Implementation plan
 
-Ordered; the architect files each item as a sub-issue of #897. Every item lands green on its own: the format
-changes once, in item 4, and items 2–3 prepare it without moving a seal.
+Ordered; the architect files one issue per step as a sub-issue of #897. Steps 1–3 prepare the break without moving
+a seal; step 4 is the A′ cutover; steps 5–8 ride the same alpha; step 9 cuts it. Per rule 11 nothing from the
+bridge work (#454 → #811) starts before step 9 is released.
 
-### 1. #895 — product schemas declare 64-bit string encodings and value ranges
-
-- **Depends on:** nothing; may run in parallel with items 2–3.
-- **Scope:** as written in #895. A `FieldSpec` whose `dtype` can exceed ±(2^53−1) (`u64`, `i64`) must declare a
-  string encoding; optional inclusive `minimum`/`maximum`; built-in schemas declare their rules; the hard-coded
-  ingest checks (DICOM SV/UV, curated ranges) read them from the schema. The bound itself stays a format
-  invariant (rule 7).
-- **Acceptance:** a schema with a bare `u64` metadata field is refused; an out-of-range value is refused naming the
-  field and its source; in-range values and every existing seal are unchanged; the Python `Builder` and the
-  reference reader follow the same rule; an ADR-0020/ADR-0060 amendment records it.
-
-### 2. Writers emit the JCS form of every sealed JSON document
-
-- **Depends on:** nothing.
-- **Scope:** every door that writes `manifest.json` or `collection.json` (`pack`, `pack_dir`/exploded form,
-  `WriteSession`, the repository's `objects/`, `tessera commit`/`publish`/`seal`, the ingest engine's
-  `collection.json`, the CLI collection writer, the Python binding) writes exactly `JCS(object)`, still with the
-  in-band `manifest_hash` key. Readers are unchanged; they already accept any JSON. Docs and snapshots that print
-  `manifest.json` show the single-line form, with `jq .` as the readable view.
-- **Acceptance:** a test per door asserts that the bytes written equal `JCS(parse(bytes))`; the 13 tracked `.tsra`
-  are re-packed with `corpus.json` unchanged (no `id`, `content_hash` or `manifest_hash` moves); the reference
-  reader's `run.py` passes unchanged.
-
-### 3. tessera-core: the stored-bytes API and the canonical-bytes check
-
-- **Depends on:** nothing (additive); item 4 switches the readers over to it.
-- **Scope:** `canonical::check_canonical(bytes)`, which strict-parses (duplicate keys, lone surrogates, I-JSON,
-  depth) and refuses bytes that differ from their own JCS form, naming the first differing byte. Add
-  `Manifest::from_stored(bytes, seal)`, `Collection::from_stored(bytes, seal)` and a `to_stored()` on each,
-  returning `(bytes, seal)`, where the stored bytes carry no `manifest_hash`. Typed errors for "non-canonical
-  bytes" and "seal mismatch".
-- **Acceptance:** unit tests over the spike's cases: T4–T7 and S8 refused as non-canonical, S5b refused by I-JSON
-  (a test shows the byte comparison alone would pass it), and S7 (`64.0`) refused. For all 13 tracked manifests,
-  `blake3(to_stored().0)` equals the recorded seal.
-
-### 4. The A′ format cutover (closes #901)
-
-- **Depends on:** items 2 and 3.
-- **Scope, one PR because the format changes once:**
-  - SPEC §2/§4/§6/§7/§9 and the dated amendments to ADR-0020 D4, ADR-0022, ADR-0037, ADR-0054 and ADR-0060.
-  - The container gains the `manifest.seal` member (entry 2) and the stricter member set; the same for the
-    exploded form; collections get `collection.seal`.
-  - Every reader verifies through `from_stored`, and the in-band `manifest_hash` key is refused.
-  - Repository objects hold the stored bytes; `WriteSession`, sign and verify read the seal member (the
-    envelope is unchanged).
-  - Call sites in tessera-cli, tessera-ingest, tessera-py and tessera-wasm.
-  - The Python reference reader: seal = `blake3(file)`, canonical check with `jcs`, I-JSON kept, explicit
-    lone-surrogate refusal.
-  - `seal-cases.json` rewritten as `(bytes, seal)` vectors, including T4–T7, S5b, S7 and S8; the corpus
-    re-packed.
-  - `tessera migrate` converts an alpha product: verify under the alpha rules, write the A′ form, keep
-    `aux/signatures/*`. It is the only path that still reads the alpha layout.
-- **Acceptance:**
-  - All 13 tracked products verify after `migrate`, with every golden unchanged.
-  - An alpha-layout product is refused with advice naming `tessera migrate`.
-  - Rust, the reference reader and `tessera-wasm` reach the same verdict on every seal case.
-  - #901's case (a sealed `64.0` in an integer field) is refused by all three.
-  - A signature made before the cutover still verifies after `migrate`.
-  - A test per writer door shows the written `manifest.seal` equals `blake3(manifest.json)`.
+1. **#895: product schemas declare 64-bit string encodings and value ranges.**
+   - *Crates:* `tessera-core` (`schema`, `FieldSpec`), `tessera-ingest` (the hard-coded DICOM SV/UV and curated range
+     checks read the schema), `tessera-py` (`Builder`) and the Python reference reader.
+   - *Depends on:* nothing; may run in parallel with 2 and 3.
+   - *Scope:* as written in #895. A `FieldSpec` whose `dtype` can exceed ±(2^53−1) (`u64`, `i64`) declares a string
+     encoding; optional inclusive `minimum`/`maximum`; built-in schemas declare their rules. The bound stays a
+     format invariant (rule 7).
+   - *Acceptance:* a schema with a bare `u64` metadata field is refused; an out-of-range value is refused naming the
+     field and its source; in-range values and every existing seal are unchanged; the `Builder` and the reference
+     reader follow the same rule.
+2. **Writers emit the JCS form of every sealed JSON document.**
+   - *Crates:* `tessera-io` (`pack`, `pack_dir`, exploded form, `WriteSession`, repository `objects/`),
+     `tessera-cli` (`commit`/`publish`/`seal`, collection writer), `tessera-ingest` (`collection.json`),
+     `tessera-py`.
+   - *Depends on:* nothing.
+   - *Scope:* every door that writes `manifest.json` or `collection.json` writes exactly `JCS(object)`, still with the
+     in-band `manifest_hash` key; readers are unchanged. Docs and snapshots that print `manifest.json` show the
+     single-line form, with `jq .` as the readable view.
+   - *Acceptance:* a test per door asserts `bytes == JCS(parse(bytes))`; the 13 tracked `.tsra` are re-packed with
+     `corpus.json` unchanged; the reference reader's `run.py` passes unchanged.
+3. **The stored-bytes API and the canonical-bytes check.**
+   - *Crates:* `tessera-core`.
+   - *Depends on:* nothing (additive).
+   - *Scope:* `canonical::check_canonical(bytes)` (strict parse: duplicate keys, lone surrogates, I-JSON, depth; then
+     refuse bytes that differ from their own JCS form, naming the first differing byte); `Manifest::from_stored(bytes,
+     seal)`, `Collection::from_stored(bytes, seal)` and `to_stored()` on each, returning `(bytes, seal)` with no
+     `manifest_hash` in the bytes; typed errors for non-canonical bytes and seal mismatch.
+   - *Acceptance:* unit tests over the spike's cases: T4–T7 and S8 refused as non-canonical, S5b refused by I-JSON (a
+     test shows the byte comparison alone would pass it), S7 (`64.0`) refused; for all 13 tracked manifests
+     `blake3(to_stored().0)` equals the recorded seal.
+4. **The A′ format cutover (closes #901).** One PR, because the layout changes once.
+   - *Crates:* `tessera-core`, `tessera-io`, `tessera-cli`, `tessera-ingest`, `tessera-py`, `tessera-wasm`, the Python
+     reference reader, `corpus/`, SPEC and the ADRs.
+   - *Depends on:* 2 and 3 (1 is not required).
+   - *Scope:*
+     - SPEC §2/§4/§6/§7/§9 and the dated amendments to ADR-0020 D4, ADR-0022, ADR-0037, ADR-0054 and ADR-0060.
+     - The container gains the `manifest.seal` member (entry 2) and the stricter member set; the same for the
+       exploded form; collections get `collection.seal`.
+     - Every reader verifies through `from_stored`; the in-band `manifest_hash` key is refused.
+     - **The alpha layout is refused, with no migration verb (rule 10):** the error names the format found and the
+       format required.
+     - Repository objects hold the stored bytes; `WriteSession`, sign and verify read the seal member (the envelope
+       is unchanged).
+     - The Python reference reader: seal = `blake3(file)`, canonical check with `jcs`, I-JSON kept, explicit
+       lone-surrogate refusal.
+     - `seal-cases.json` rewritten as `(bytes, seal)` vectors, including T4–T7, S5b, S7 and S8; the 13 tracked
+       products re-packed.
+   - *Acceptance:*
+     - All 13 re-packed products verify with every `corpus.json` golden unchanged (the seal-preservation proof; it
+       must hold on this step's own head, before 5–7 move any hash).
+     - An alpha-layout product is refused with an error naming both formats.
+     - Rust, the reference reader and `tessera-wasm` reach the same verdict on every seal case.
+     - #901's case (a sealed `64.0` in an integer field) is refused by all three.
+     - A test per writer door shows the written `manifest.seal` equals `blake3(manifest.json)`.
+5. **#720: `content_hash` covers the primary blocks only (ADR-0028 §4).**
+   - *Crates:* `tessera-core` (`ManifestBuilder::seal`, a `canonical | derived` class on the block ref), `tessera-io`
+     (the writers that attach `.cidx`, pyramid and stats blocks), `tessera-py`, the reference reader, SPEC.
+   - *Depends on:* 4 (so the seal-preservation proof of step 4 stays clean). Its design decision is recorded in the
+     issue, since #720 names the manifest representation of the class and the `manifest_hash` rule as open.
+   - *Scope:* the block class in the manifest; `content_hash` over primary blocks; `manifest_hash` still over every
+     block (rule 12).
+   - *Acceptance:* a test that fails today: adding or regenerating a derived block leaves `content_hash` unchanged
+     and changes `manifest_hash`; changing a primary block changes both.
+6. **#828, design note: `tessera-table-v2`.**
+   - *Crates:* none (a document under `docs/`, plus the ADR or ADR amendment it needs).
+   - *Depends on:* nothing; should finish before 7 starts and may run in parallel with 1–5.
+   - *Scope:* the per-product-type profile table from the #828 sweep, how the profile is named in the manifest,
+     the speed/size trade-off the default takes, and the determinism requirement across arches (ADR-0026, #468,
+     #472). Owner review before 7.
+7. **#828: `tessera-table-v2` becomes the default table codec profile.**
+   - *Crates:* `tessera-io` (`table`), `tessera-core` (the codec field in the table block spec), `tessera-ingest`,
+     `tessera-cli`, `tessera-py`, the reference reader, benches.
+   - *Depends on:* 4 and 6.
+   - *Scope:* implement the note of step 6.
+   - *Acceptance:* per the note; round trips are lossless on the #822 fixtures; the cross-arch determinism gate
+     passes; size and speed meet the note's numbers.
+8. **Corpus and conformance regeneration, once.**
+   - *Crates:* `corpus/`, `tessera-cli` snapshots, the reference reader, `tessera-wasm`.
+   - *Depends on:* 5 and 7.
+   - *Scope:* regenerate every golden that 5 and 7 moved (`content_hash`, `manifest_hash`, block digests); every
+     change is explained by one of them, and `id` does not move.
+   - *Acceptance:* a per-product table of which hash moved and why; Rust, the reference reader and `tessera-wasm`
+     agree on the new corpus.
+9. **Cut the alpha.**
+   - *Crates:* none (release).
+   - *Depends on:* 1 and 8.
+   - *Scope:* release notes name the format break, the refusal of alpha products, the moved hashes and that signatures
+     made before it do not verify. The bridge work (#454 → #811) starts afterwards.
