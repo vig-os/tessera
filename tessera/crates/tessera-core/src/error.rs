@@ -62,8 +62,60 @@ pub enum Error {
     )]
     NonFiniteNumber { what: String, value: String },
 
+    /// The stored bytes of a sealed JSON document (`manifest.json`, `collection.json`) are valid
+    /// I-JSON but are **not their own RFC 8785 (JCS) form**: keys out of JCS order, whitespace, a
+    /// `\u` escape JCS would not write, a number in another spelling (`64.0` for `64`, `1E2` for
+    /// `100`), or a pretty layout. Raised by [`crate::canonical::check_canonical`], so by
+    /// [`crate::Manifest::from_stored`] and [`crate::Collection::from_stored`] before the seal is
+    /// compared (ADR-0066 rules 1 and 4).
+    ///
+    /// The seal is a hash of the stored bytes, so a respelling made after sealing fails the seal
+    /// anyway; this refusal is what stops a respelling the attacker sealed. Without it one value
+    /// would have several sealed byte strings, and readers that interpret the spelling differently
+    /// (Rust refuses `64.0` for a `u64`, JavaScript reads `64`, Python a float) would disagree under
+    /// one valid seal (spike #897, case S7; #901).
+    ///
+    /// `offset` is the 0-based index of the first byte where the stored bytes and their JCS form
+    /// differ (the shorter length when one is a prefix of the other). `found` and `canonical` are up
+    /// to 16 bytes of each from `offset`, ASCII-escaped, so the message shows the difference; either
+    /// is empty where its bytes end at `offset`. A writer that emits "sorted, compact JSON" without
+    /// a JCS library meets this error (Python's `json.dumps` writes `1.0` and `1e-07`): write the
+    /// bytes with a JCS serialiser.
+    #[error(
+        "non-canonical bytes: the stored document differs from its own RFC 8785 (JCS) form at byte \
+         {offset} (stored `{found}`, JCS `{canonical}`); a sealed JSON document must be stored as \
+         exactly its JCS bytes (ADR-0066)"
+    )]
+    NonCanonical {
+        /// 0-based index of the first byte where the stored bytes and their JCS form differ.
+        offset: usize,
+        /// Up to 16 stored bytes from `offset`, ASCII-escaped.
+        found: String,
+        /// Up to 16 bytes of the JCS form from `offset`, ASCII-escaped.
+        canonical: String,
+    },
+
+    /// Stored bytes in the ADR-0066 layout (the seal lives outside the document) carry the in-band
+    /// seal key `manifest_hash` at their top level: the layout of a product or collection written
+    /// before ADR-0066, or a document whose writer put the seal inside the bytes it seals. Raised by
+    /// [`crate::Manifest::from_stored`] and [`crate::Collection::from_stored`] after the canonical
+    /// check, before the seal is compared. `document` names the kind (`manifest`, `collection`).
+    #[error(
+        "the stored {document} carries a top-level `manifest_hash` key; under ADR-0066 the seal is \
+         blake3 over the stored bytes and is kept outside them, so the stored bytes carry no \
+         `manifest_hash`"
+    )]
+    InBandSeal {
+        /// The kind of stored document: `manifest` or `collection`.
+        document: &'static str,
+    },
+
     /// A recomputed hash did not match the one recorded in the manifest — tampering, corruption,
     /// or a producer bug. `what` names the field (`id` / `content_hash` / `manifest_hash`).
+    ///
+    /// For stored bytes ([`crate::Manifest::from_stored`], [`crate::Collection::from_stored`]),
+    /// `what` is `manifest_hash`, `expected` is the seal the caller passed (as recorded beside the
+    /// bytes) and `actual` is `blake3` over the stored bytes.
     #[error("integrity: {what} mismatch — expected {expected}, got {actual}")]
     Integrity {
         what: &'static str,

@@ -686,8 +686,9 @@ pub fn bytes_without(object: &Value, key: &str) -> crate::Result<Vec<u8>> {
 ///
 /// The rest of I-JSON's MUSTs (RFC 7493 §2) are enforced here too, so every sealed document a
 /// reader accepts is valid JCS input:
-/// - §2.1 UTF-8 only, no unpaired surrogate: the text is a `&str`, and `serde_json` refuses an
-///   escaped lone surrogate (`"\ud800"`) in a string or key;
+/// - §2.1 UTF-8 only, no unpaired surrogate: the text is a `&str` (the bytes
+///   [`check_canonical`] reads are validated as UTF-8 by the same parser), and `serde_json` refuses
+///   an escaped lone surrogate (`"\ud800"`) in a string or key;
 /// - §2.2 numbers: [`check_i_json`] refuses an integer beyond ±(2^53−1); `NaN`/`Infinity` aren't
 ///   JSON and a number beyond a double's range (`1e400`) is a parse error;
 /// - §2.3 unique names: the duplicate-key refusal above.
@@ -696,11 +697,84 @@ pub fn bytes_without(object: &Value, key: &str) -> crate::Result<Vec<u8>> {
 /// [`crate::Error::Serde`] for malformed JSON, a lone surrogate or a duplicate key (the message
 /// names the key); [`crate::Error::InexactInteger`] for an integer beyond ±(2^53−1).
 pub fn parse_strict(s: &str) -> crate::Result<Value> {
-    let mut de = serde_json::Deserializer::from_str(s);
+    parse_strict_bytes(s.as_bytes())
+}
+
+/// [`parse_strict`] over bytes: the one strict parser. `serde_json`'s slice reader also refuses
+/// bytes that are not UTF-8 (in a string, or anywhere else), which a `&str` can't hold.
+fn parse_strict_bytes(bytes: &[u8]) -> crate::Result<Value> {
+    let mut de = serde_json::Deserializer::from_slice(bytes);
     let StrictValue(v) = StrictValue::deserialize(&mut de)?;
     de.end()?;
     check_i_json(&v)?;
     Ok(v)
+}
+
+/// Parse the **stored bytes** of a sealed JSON document strictly and refuse them unless they are
+/// exactly their own RFC 8785 (JCS) form; on success, the parsed value (ADR-0066 rules 1 and 4).
+///
+/// Under ADR-0066 a seal is `blake3` over the stored bytes, so the bytes must be the one spelling
+/// of their value: with this check, one seal has one byte string and one meaning in every reader.
+/// The seal alone catches every edit made after sealing, but not a respelling the attacker seals
+/// (`64.0` for `64`, a pretty layout), on which readers disagree (spike #897, case S7).
+///
+/// Two steps, in this order:
+///
+/// 1. **Strict parse**, [`parse_strict`]'s rules: bytes that are not UTF-8, malformed JSON, a
+///    duplicate key, a lone surrogate (`"\ud800"`), nesting deeper than `serde_json`'s recursion
+///    limit (127 nested arrays or objects are accepted, 128 refused), and an integer beyond
+///    ±[`MAX_EXACT_INTEGER`] in any spelling ([`check_i_json`]) are all refused.
+/// 2. **Byte comparison**: the parsed value is serialised with [`to_bytes`] and compared with the
+///    input; the first differing byte is reported. This refuses every other spelling of a value:
+///    key order, whitespace (a trailing newline included), `\u` escapes JCS doesn't write
+///    (`\u0061`, `\/`), and number spellings other than ECMAScript's shortest form (`64.0` for
+///    `64`, `1E2` for `100`, `-0` for `0`, `0.0000001` for `1e-7`).
+///
+/// Step 1 is not redundant with step 2. An integer beyond 2^53 that a double holds exactly
+/// (`9007199254740992`, `1730000000123456800`) is its own JCS form, so the byte comparison alone
+/// would accept it; it is what a writer that rounded `1730000000123456789` emits, so it is refused
+/// by I-JSON in step 1 (ADR-0066 rule 7, spike case S5b).
+///
+/// The check is over any JSON value; the callers ([`crate::Manifest::from_stored`],
+/// [`crate::Collection::from_stored`]) then require an object.
+///
+/// # Errors
+/// - [`crate::Error::Serde`] for bytes that are not UTF-8, malformed JSON, a duplicate key, a lone
+///   surrogate or excess nesting;
+/// - [`crate::Error::InexactInteger`] for an integer beyond ±(2^53−1), naming its path;
+/// - [`crate::Error::NonCanonical`] for valid I-JSON that is not its own JCS form, naming the
+///   offset of the first differing byte.
+pub fn check_canonical(bytes: &[u8]) -> crate::Result<Value> {
+    let value = parse_strict_bytes(bytes)?;
+    let jcs = to_bytes(&value)?;
+    if let Some(offset) = first_difference(bytes, &jcs) {
+        return Err(crate::Error::NonCanonical {
+            offset,
+            found: excerpt(bytes, offset),
+            canonical: excerpt(&jcs, offset),
+        });
+    }
+    Ok(value)
+}
+
+/// The index of the first byte where `a` and `b` differ, or the shorter length when one is a strict
+/// prefix of the other; `None` when they are equal.
+fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
+    if a == b {
+        return None;
+    }
+    Some(
+        a.iter()
+            .zip(b)
+            .position(|(x, y)| x != y)
+            .unwrap_or(a.len().min(b.len())),
+    )
+}
+
+/// Up to 16 bytes of `bytes` from `at`, ASCII-escaped for an error message (empty past the end).
+fn excerpt(bytes: &[u8], at: usize) -> String {
+    let end = bytes.len().min(at.saturating_add(16));
+    bytes.get(at..end).unwrap_or(&[]).escape_ascii().to_string()
 }
 
 /// Deserialize a parsed value into the typed view `T`, **refusing any spelling but the declared
@@ -1364,5 +1438,236 @@ mod tests {
             "{e}"
         );
         assert!(!e.to_string().contains("as a string"), "{e}");
+    }
+
+    // ---------------------------------------------------------------- check_canonical (ADR-0066)
+    //
+    // The respelling cases are the spike's (docs/spikes/897-seal-encoding/src/attacks.rs): T4 key
+    // order, T5 whitespace, T6 a `\u` escape, T7/S7 `64.0` for `64`, S8 a pretty layout; S5b an
+    // integer a double holds exactly beyond 2^53. Each corpus product gets the same replay in
+    // tests/stored_bytes.rs; here they are pinned on a small document with exact offsets.
+
+    use super::check_canonical;
+    use crate::Error;
+
+    /// A small canonical document holding every JSON type, an array shape and a non-ASCII string.
+    const DOC: &str = r#"{"a":[64,32],"b":{"c":null,"d":true},"e":"x\u00e9y","f":1.5,"g":-3}"#;
+
+    fn non_canonical_at(bytes: &[u8]) -> usize {
+        match check_canonical(bytes) {
+            Err(Error::NonCanonical { offset, .. }) => offset,
+            other => panic!(
+                "{:?}: expected NonCanonical, got {other:?}",
+                String::from_utf8_lossy(bytes)
+            ),
+        }
+    }
+
+    #[test]
+    fn a_canonical_document_is_accepted_and_parsed() {
+        // The constant spells `é` as an escape only in the Rust source: the bytes are UTF-8.
+        let doc = DOC.replace(r"\u00e9", "é");
+        let v = check_canonical(doc.as_bytes()).unwrap();
+        assert_eq!(v["a"], json!([64, 32]));
+        assert_eq!(v["e"], json!("xéy"));
+        // Any JSON value, not only an object; and the empty object.
+        assert_eq!(check_canonical(b"[]").unwrap(), json!([]));
+        assert_eq!(check_canonical(b"{}").unwrap(), json!({}));
+        assert_eq!(check_canonical(b"1e-7").unwrap(), json!(1e-7));
+    }
+
+    /// T4: the same members in another order.
+    #[test]
+    fn reordered_keys_are_refused_at_the_first_differing_byte() {
+        assert_eq!(non_canonical_at(br#"{"b":1,"a":2}"#), 2);
+        // Nested: the outer order is canonical, the inner one is not.
+        assert_eq!(non_canonical_at(br#"{"a":{"y":1,"x":2}}"#), 7);
+    }
+
+    /// T5 and S8: whitespace anywhere, a trailing newline, a pretty layout.
+    #[test]
+    fn whitespace_and_a_pretty_layout_are_refused() {
+        assert_eq!(non_canonical_at(br#"{ "a":1}"#), 1);
+        assert_eq!(non_canonical_at(br#"{"a": 1}"#), 5);
+        // A trailing newline: the JCS form is a strict prefix, so the offset is its length.
+        assert_eq!(non_canonical_at(b"{\"a\":1}\n"), 7);
+        let doc = DOC.replace(r"\u00e9", "é");
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        let pretty = serde_json::to_string_pretty(&v).unwrap();
+        assert_eq!(non_canonical_at(pretty.as_bytes()), 1);
+    }
+
+    /// T6: a string escape JCS doesn't write, in a value or a key.
+    #[test]
+    fn escapes_jcs_does_not_write_are_refused() {
+        assert_eq!(non_canonical_at(br#"{"a":"\u0078"}"#), 6);
+        assert_eq!(non_canonical_at(br#"{"\u0061":1}"#), 2);
+        assert_eq!(non_canonical_at(br#"{"a":"\/"}"#), 6);
+        // A non-ASCII character as an escape: JCS writes the UTF-8 bytes.
+        assert_eq!(non_canonical_at(br#"{"a":"\u00e9"}"#), 6);
+        // The escapes JCS does write are canonical.
+        check_canonical(br#"{"a":"\"\\\n\u001f"}"#).unwrap();
+    }
+
+    /// T7 and S7 (#901): an integral number spelled as a float, and the other number respellings.
+    #[test]
+    fn number_respellings_are_refused() {
+        // `"a":[64.0`: the stored `.` is where JCS ends the number.
+        assert_eq!(non_canonical_at(br#"{"a":[64.0,32]}"#), 8);
+        assert_eq!(non_canonical_at(b"1E2"), 1);
+        assert_eq!(non_canonical_at(b"[1e2]"), 2);
+        assert_eq!(non_canonical_at(b"[-0]"), 1);
+        assert_eq!(non_canonical_at(b"[0.0000001]"), 1);
+        assert_eq!(non_canonical_at(b"[1.50]"), 4);
+        assert_eq!(non_canonical_at(b"[1.5E-10]"), 4);
+        // JCS's own forms of the same numbers are canonical.
+        for ok in ["[100]", "[0]", "[1e-7]", "[1.5]", "[1.5e-10]"] {
+            check_canonical(ok.as_bytes()).unwrap();
+        }
+    }
+
+    /// The error names the offset and shows both byte runs from it, ASCII-escaped.
+    #[test]
+    fn the_non_canonical_error_names_the_offset_and_both_spellings() {
+        let e = check_canonical(br#"{"a":[64.0]}"#).unwrap_err();
+        let Error::NonCanonical {
+            offset,
+            found,
+            canonical,
+        } = &e
+        else {
+            panic!("{e:?}")
+        };
+        assert_eq!(
+            (*offset, found.as_str(), canonical.as_str()),
+            (8, ".0]}", "]}")
+        );
+        assert_eq!(
+            e.to_string(),
+            "non-canonical bytes: the stored document differs from its own RFC 8785 (JCS) form at \
+             byte 8 (stored `.0]}`, JCS `]}`); a sealed JSON document must be stored as exactly \
+             its JCS bytes (ADR-0066)"
+        );
+        // Past the end of the canonical bytes, its run is empty; non-ASCII is escaped.
+        let Error::NonCanonical {
+            found, canonical, ..
+        } = check_canonical("\"é\" ".as_bytes()).unwrap_err()
+        else {
+            unreachable!()
+        };
+        assert_eq!((found.as_str(), canonical.as_str()), (" ", ""));
+        let Error::NonCanonical { found, .. } = check_canonical(br#"["\u00e9"]"#).unwrap_err()
+        else {
+            unreachable!()
+        };
+        assert_eq!(found, r#"\\u00e9\"]"#);
+    }
+
+    /// S5b: an integer beyond 2^53 that a double holds exactly is its own JCS form, so the byte
+    /// comparison alone would accept it; the strict parse's I-JSON rule refuses it first.
+    #[test]
+    fn an_exact_double_beyond_2_53_passes_the_byte_comparison_but_is_refused_by_i_json() {
+        for text in [
+            r#"{"daq_start_ns":1730000000123456800}"#,
+            r#"{"seed":9007199254740992}"#,
+            r#"{"n":-9007199254740992}"#,
+        ] {
+            // The byte comparison on its own: raw JCS (no I-JSON check) reproduces the bytes.
+            let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(
+                serde_jcs::to_vec(&parsed).unwrap(),
+                text.as_bytes(),
+                "{text}"
+            );
+            // check_canonical refuses it, by I-JSON, naming the path.
+            let e = check_canonical(text.as_bytes()).unwrap_err();
+            assert!(matches!(e, Error::InexactInteger { .. }), "{text}: {e:?}");
+        }
+        // The bound itself is exact and canonical.
+        check_canonical(br#"{"n":9007199254740991}"#).unwrap();
+    }
+
+    /// The strict parse's other refusals come first, as `Serde` errors: a duplicate key, a lone
+    /// surrogate, bytes that are not UTF-8, malformed JSON, trailing data, excess nesting.
+    #[test]
+    fn the_strict_parse_runs_before_the_byte_comparison() {
+        let serde = |b: &[u8]| match check_canonical(b) {
+            Err(Error::Serde(e)) => e.to_string(),
+            other => panic!(
+                "{:?}: expected Serde, got {other:?}",
+                String::from_utf8_lossy(b)
+            ),
+        };
+        assert!(serde(br#"{"a":1,"a":1}"#).contains("duplicate key"));
+        // Compact and key-sorted, so only the parse can refuse it.
+        assert!(serde(br#"{"a":"\ud800"}"#).contains("hex escape"));
+        assert!(serde(br#"{"a":"\udc00"}"#).contains("surrogate"));
+        assert!(serde(b"{\"a\":\"\xff\"}").contains("unicode"));
+        assert!(serde(b"[\xc3]").contains("expected value"));
+        serde(b"");
+        serde(b"{} {}");
+        serde(b"[1,]");
+    }
+
+    /// Nesting is bounded by `serde_json`'s recursion limit: 127 nested arrays or objects are
+    /// accepted, 128 are refused (the `nesting past 127 levels` case of `corpus/seal-cases.json`).
+    #[test]
+    fn nesting_beyond_127_levels_is_refused() {
+        let nest = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+        check_canonical(nest(127).as_bytes()).unwrap();
+        let e = check_canonical(nest(128).as_bytes()).unwrap_err();
+        assert!(e.to_string().contains("recursion limit"), "{e}");
+    }
+
+    /// The shrunk case of `proptest-regressions/canonical.txt`: JCS has one number type, so the
+    /// double `0.0` is written `0` and reads back as the integer 0. The two `Value`s differ; their
+    /// bytes, which are what a seal covers, do not. This is why the property below compares bytes.
+    #[test]
+    fn an_integral_double_reads_back_as_the_integer_jcs_writes() {
+        let v = json!([0.0]);
+        let bytes = super::to_bytes(&v).unwrap();
+        assert_eq!(bytes, b"[0]");
+        let back = check_canonical(&bytes).unwrap();
+        assert!(back[0].is_u64(), "{back:?}");
+        assert_ne!(back, v);
+        assert_eq!(super::to_bytes(&back).unwrap(), bytes);
+    }
+
+    proptest::proptest! {
+        /// Whatever [`super::to_bytes`] writes, `check_canonical` accepts, and the value it reads
+        /// back writes the same bytes: the writer's form and the reader's check are one definition.
+        /// (The parsed value can differ from `v` as a `Value`, never as JCS: JCS has one number
+        /// type, so the double `0.0` is written `0` and reads back as the integer 0.)
+        #[test]
+        fn to_bytes_output_is_always_canonical(v in json_value()) {
+            let bytes = super::to_bytes(&v).unwrap();
+            let back = check_canonical(&bytes).unwrap();
+            proptest::prop_assert_eq!(super::to_bytes(&back).unwrap(), bytes);
+        }
+    }
+
+    /// Arbitrary I-JSON values: finite doubles, exact integers, any strings (non-ASCII and control
+    /// characters included), nested arrays and objects.
+    fn json_value() -> impl proptest::strategy::Strategy<Value = serde_json::Value> {
+        use proptest::prelude::*;
+        let max = super::MAX_EXACT_INTEGER as i64;
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            (-max..=max).prop_map(|n| json!(n)),
+            any::<f64>()
+                .prop_filter("finite, within the bound", |f| {
+                    super::unsealable_f64(*f).is_none()
+                })
+                .prop_map(|f| json!(f)),
+            any::<String>().prop_map(serde_json::Value::String),
+        ];
+        leaf.prop_recursive(4, 32, 6, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..6).prop_map(serde_json::Value::Array),
+                proptest::collection::btree_map(any::<String>(), inner, 0..6)
+                    .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
+            ]
+        })
     }
 }
