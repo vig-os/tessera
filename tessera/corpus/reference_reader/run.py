@@ -12,7 +12,14 @@ import sys
 import tempfile
 import zipfile
 
-from reader import digest, manifest_seal, manifest_verdict, merkle_root, verify_tsra
+from reader import (
+    digest,
+    manifest_seal,
+    manifest_verdict,
+    merkle_root,
+    schema_verdict,
+    verify_tsra,
+)
 
 CORPUS_DIR = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
@@ -20,6 +27,7 @@ CORPUS_DIR = os.path.dirname(
 FILES_DIR = os.path.join(CORPUS_DIR, "files")
 GOLDEN_JSON = os.path.join(CORPUS_DIR, "corpus.json")
 SEAL_CASES_JSON = os.path.join(CORPUS_DIR, "seal-cases.json")
+SCHEMA_CASES_JSON = os.path.join(CORPUS_DIR, "schema-cases.json")
 
 
 def check_seal_cases() -> int:
@@ -34,6 +42,33 @@ def check_seal_cases() -> int:
             print(f"seal case {c['name']}: expected {c['verdict']}, got {got}")
     print(f"{len(cases) - fails}/{len(cases)} seal cases agreed")
     return fails
+
+
+def check_schema_cases(goldens: list[dict]) -> int:
+    """Each schema case's verdict (SPEC §5 "Field rules", #895), and `ok` for the embedded schema
+    and metadata of every corpus product that carries one; returns the number of disagreements."""
+    with open(SCHEMA_CASES_JSON, encoding="utf-8") as f:
+        cases = json.load(f)["cases"]
+    case_fails = 0
+    for c in cases:
+        got = schema_verdict(c["schema"], c["metadata"])
+        if got != c["verdict"]:
+            case_fails += 1
+            print(f"schema case {c['name']}: expected {c['verdict']}, got {got}")
+    print(f"{len(cases) - case_fails}/{len(cases)} schema cases agreed")
+    checked = own_fails = 0
+    for g in goldens:
+        with zipfile.ZipFile(os.path.join(FILES_DIR, f"{g['name']}.tsra")) as zf:
+            m = json.loads(zf.read("manifest.json"))
+        if m.get("schema") is None:
+            continue
+        checked += 1
+        got = schema_verdict(m["schema"], m.get("metadata", {}))
+        if got != "ok":
+            own_fails += 1
+            print(f"corpus product {g['name']}: its own schema gives {got}")
+    print(f"{checked - own_fails}/{checked} corpus products pass their own schema")
+    return case_fails + own_fails
 
 
 def _resealed(src: str, dst: str, edit, encode) -> None:
@@ -227,6 +262,7 @@ def main() -> int:
     print("-" * 78)
     print(f"{len(goldens) - fails}/{len(goldens)} fixtures passed")
     fails += check_seal_cases()
+    fails += check_schema_cases(goldens)
     misses = check_refusals(goldens)
     return 0 if fails == 0 and misses == 0 else 1
 

@@ -1,0 +1,1028 @@
+{
+ "about": "Number rules of a product schema (#895, SPEC §5 'Field rules'): each case's embedded schema and metadata, and the verdict both readers reach: ok, schema (a field declaration is refused) or value (a metadata value is refused). The Rust reader checks this file in tessera-core/tests/schema_cases.rs, the reference reader in reference_reader/run.py.",
+ "cases": [
+  {
+   "name": "bare-uint64",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64"
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "schema",
+   "note": "a 64-bit field without a string encoding, refused with no value present"
+  },
+  {
+   "name": "bare-int64",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "int64"
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "schema",
+   "note": "the signed twin"
+  },
+  {
+   "name": "uint64-as-string",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "1730000000000000000"
+   },
+   "verdict": "ok",
+   "note": "an epoch-ns value, exact"
+  },
+  {
+   "name": "uint64-max",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "18446744073709551615"
+   },
+   "verdict": "ok",
+   "note": "u64::MAX"
+  },
+  {
+   "name": "uint64-beyond-dtype",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "18446744073709551616"
+   },
+   "verdict": "value",
+   "note": "u64::MAX + 1"
+  },
+  {
+   "name": "uint64-negative",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "-1"
+   },
+   "verdict": "value",
+   "note": "outside the unsigned dtype"
+  },
+  {
+   "name": "int64-min",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "int64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "-9223372036854775808"
+   },
+   "verdict": "ok",
+   "note": "i64::MIN"
+  },
+  {
+   "name": "int64-beyond-dtype",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "int64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "9223372036854775808"
+   },
+   "verdict": "value",
+   "note": "i64::MAX + 1"
+  },
+  {
+   "name": "string-encoded-number",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": 7
+   },
+   "verdict": "value",
+   "note": "by type, never by magnitude: a small number is refused too"
+  },
+  {
+   "name": "string-encoded-minus-zero",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "-0"
+   },
+   "verdict": "value",
+   "note": "one spelling per integer: canonical decimal digits only"
+  },
+  {
+   "name": "string-encoded-plus-sign",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "+7"
+   },
+   "verdict": "value",
+   "note": "one spelling per integer: canonical decimal digits only"
+  },
+  {
+   "name": "string-encoded-leading-zero",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "07"
+   },
+   "verdict": "value",
+   "note": "one spelling per integer: canonical decimal digits only"
+  },
+  {
+   "name": "string-encoded-space",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": " 7"
+   },
+   "verdict": "value",
+   "note": "one spelling per integer: canonical decimal digits only"
+  },
+  {
+   "name": "string-encoded-fraction",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "7.0"
+   },
+   "verdict": "value",
+   "note": "one spelling per integer: canonical decimal digits only"
+  },
+  {
+   "name": "string-encoded-exponent",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "1e3"
+   },
+   "verdict": "value",
+   "note": "one spelling per integer: canonical decimal digits only"
+  },
+  {
+   "name": "string-encoded-empty",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": ""
+   },
+   "verdict": "value",
+   "note": "one spelling per integer: canonical decimal digits only"
+  },
+  {
+   "name": "string-encoded-bare-minus",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "-"
+   },
+   "verdict": "value",
+   "note": "one spelling per integer: canonical decimal digits only"
+  },
+  {
+   "name": "string-encoded-array",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": [
+     "1",
+     "2"
+    ]
+   },
+   "verdict": "ok",
+   "note": "a non-empty array of decimal strings"
+  },
+  {
+   "name": "string-encoded-empty-array",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": []
+   },
+   "verdict": "value",
+   "note": "an empty array holds no integer"
+  },
+  {
+   "name": "string-encoded-mixed-array",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {
+    "n": [
+     "1",
+     2
+    ]
+   },
+   "verdict": "value",
+   "note": "every element is a decimal string"
+  },
+  {
+   "name": "encoding-on-float64",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "schema",
+   "note": "a JSON number holds a float64 already"
+  },
+  {
+   "name": "encoding-on-int32",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "int32",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "schema",
+   "note": "and an int32"
+  },
+  {
+   "name": "encoding-on-bool",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "bool",
+      "encoding": "string"
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "schema",
+   "note": "and a bool"
+  },
+  {
+   "name": "unknown-dtype",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "i8"
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "schema",
+   "note": "numpy's int64 spelling is not a FieldSpec dtype"
+  },
+  {
+   "name": "range-on-string",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "string",
+      "maximum": 1
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "schema",
+   "note": "a range needs a numeric dtype"
+  },
+  {
+   "name": "range-beyond-bound",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "maximum": 1e+300
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "schema",
+   "note": "a schema cannot widen the format bound"
+  },
+  {
+   "name": "range-at-bound",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     }
+    ]
+   },
+   "metadata": {
+    "n": 9007199254740991
+   },
+   "verdict": "ok",
+   "note": "±(2^53−1) itself is in"
+  },
+  {
+   "name": "range-empty",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 2,
+      "maximum": 1
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "schema",
+   "note": "minimum above maximum"
+  },
+  {
+   "name": "in-range",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 1000
+     }
+    ]
+   },
+   "metadata": {
+    "n": 120.5
+   },
+   "verdict": "ok",
+   "note": "unchanged"
+  },
+  {
+   "name": "at-minimum",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 1000
+     }
+    ]
+   },
+   "metadata": {
+    "n": 0
+   },
+   "verdict": "ok",
+   "note": "inclusive"
+  },
+  {
+   "name": "at-maximum",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 1000
+     }
+    ]
+   },
+   "metadata": {
+    "n": 1000
+   },
+   "verdict": "ok",
+   "note": "inclusive"
+  },
+  {
+   "name": "above-maximum",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 1000
+     }
+    ]
+   },
+   "metadata": {
+    "n": 1000.5
+   },
+   "verdict": "value",
+   "note": ""
+  },
+  {
+   "name": "below-minimum",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 1000
+     }
+    ]
+   },
+   "metadata": {
+    "n": -1
+   },
+   "verdict": "value",
+   "note": ""
+  },
+  {
+   "name": "range-array",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 1000
+     }
+    ]
+   },
+   "metadata": {
+    "n": [
+     0.5,
+     0.5
+    ]
+   },
+   "verdict": "ok",
+   "note": "each element checked"
+  },
+  {
+   "name": "range-array-one-out",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 1000
+     }
+    ]
+   },
+   "metadata": {
+    "n": [
+     1,
+     -1
+    ]
+   },
+   "verdict": "value",
+   "note": ""
+  },
+  {
+   "name": "range-string-value",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 1000
+     }
+    ]
+   },
+   "metadata": {
+    "n": "120"
+   },
+   "verdict": "value",
+   "note": "a ranged field needs a number"
+  },
+  {
+   "name": "range-empty-array",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 1000
+     }
+    ]
+   },
+   "metadata": {
+    "n": []
+   },
+   "verdict": "value",
+   "note": "an empty array holds no number"
+  },
+  {
+   "name": "range-nested-array",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 1000
+     }
+    ]
+   },
+   "metadata": {
+    "n": [
+     [
+      1
+     ]
+    ]
+   },
+   "verdict": "value",
+   "note": "one level of array only"
+  },
+  {
+   "name": "exact-integer-compare",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string",
+      "maximum": 9007199254740991
+     }
+    ]
+   },
+   "metadata": {
+    "n": "9007199254740993"
+   },
+   "verdict": "value",
+   "note": "2^53+1 rounds to 2^53 as a double: compared exactly it is above 2^53-1"
+  },
+  {
+   "name": "exact-integer-at-bound",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string",
+      "maximum": 9007199254740991
+     }
+    ]
+   },
+   "metadata": {
+    "n": "9007199254740991"
+   },
+   "verdict": "ok",
+   "note": ""
+  },
+  {
+   "name": "integer-below-fractional-minimum",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "int32",
+      "minimum": 0.5,
+      "maximum": 2.5
+     }
+    ]
+   },
+   "metadata": {
+    "n": 0
+   },
+   "verdict": "value",
+   "note": ""
+  },
+  {
+   "name": "integer-within-fractional-range",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "int32",
+      "minimum": 0.5,
+      "maximum": 2.5
+     }
+    ]
+   },
+   "metadata": {
+    "n": 2
+   },
+   "verdict": "ok",
+   "note": ""
+  },
+  {
+   "name": "undeclared-key",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 1000
+     }
+    ]
+   },
+   "metadata": {
+    "other": -1
+   },
+   "verdict": "ok",
+   "note": "metadata is open-world"
+  },
+  {
+   "name": "unranged-field",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64"
+     }
+    ]
+   },
+   "metadata": {
+    "n": "anything"
+   },
+   "verdict": "ok",
+   "note": "no rule declared, nothing checked"
+  },
+  {
+   "name": "duplicate-id",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "maximum": 10
+     },
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64"
+     }
+    ]
+   },
+   "metadata": {
+    "n": 50
+   },
+   "verdict": "schema",
+   "note": "two fields named n: a first-wins and a last-wins lookup would disagree, so it is refused"
+  },
+  {
+   "name": "default-out-of-range",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 10,
+      "default": 50
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "schema",
+   "note": "a default its own range refuses"
+  },
+  {
+   "name": "default-not-decimal-string",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "uint64",
+      "encoding": "string",
+      "default": 7
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "schema",
+   "note": "a default its own encoding refuses (even with no range)"
+  },
+  {
+   "name": "default-in-range",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "float64",
+      "minimum": 0,
+      "maximum": 10,
+      "default": 5
+     }
+    ]
+   },
+   "metadata": {},
+   "verdict": "ok",
+   "note": ""
+  }
+ ]
+}
