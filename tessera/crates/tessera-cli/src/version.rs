@@ -383,6 +383,7 @@ pub fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::assert_stored_form;
     use tessera_core::block::table::{Column, TableSpec};
     use tessera_core::ProductBuilder as PB;
     use tessera_io::{pack, table::table_block, ColumnData};
@@ -641,11 +642,20 @@ mod tests {
         .unwrap();
         let r = Repository::open(&repo).unwrap();
         let tip = r.read_ref(&lineage).unwrap().unwrap();
+        // `commit` stores the new version's manifest object in its JCS form (#912).
+        let (alg, hex) = tip.split_once(':').unwrap();
+        let object = repo
+            .join("objects")
+            .join(alg)
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        assert_stored_form("commit objects/<tip>", &std::fs::read(object).unwrap());
 
         // publish: history-free, with the snapshot_of breadcrumb; data travels + verifies.
         let pub_out = dir.path().join("published.tsra");
         publish(&repo, &tip, &pub_out, false, &mut Vec::new()).unwrap();
         let mut pr = Reader::open(&pub_out).unwrap();
+        assert_stored_form("publish", pr.manifest_json().as_bytes());
         let pm = pr.manifest().clone();
         assert!(
             !pm.sources.iter().any(|s| s.role == "supersedes"),
@@ -665,7 +675,9 @@ mod tests {
         // publish --anonymous drops even the breadcrumb.
         let anon_out = dir.path().join("anon.tsra");
         publish(&repo, &tip, &anon_out, true, &mut Vec::new()).unwrap();
-        let am = Reader::open(&anon_out).unwrap().manifest().clone();
+        let ar = Reader::open(&anon_out).unwrap();
+        assert_stored_form("publish --anonymous", ar.manifest_json().as_bytes());
+        let am = ar.manifest().clone();
         assert!(
             !am.sources.iter().any(|s| s.role == "snapshot_of"),
             "anonymous drops the back-pointer"
@@ -674,7 +686,9 @@ mod tests {
         // seal: the exact version, history preserved.
         let seal_out = dir.path().join("sealed.tsra");
         seal(&repo, &tip, &seal_out, &mut Vec::new()).unwrap();
-        let sm = Reader::open(&seal_out).unwrap().manifest().clone();
+        let sr = Reader::open(&seal_out).unwrap();
+        assert_stored_form("seal", sr.manifest_json().as_bytes());
+        let sm = sr.manifest().clone();
         assert_eq!(
             sm.manifest_hash.as_deref(),
             Some(tip.as_str()),

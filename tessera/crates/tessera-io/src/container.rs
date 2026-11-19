@@ -779,15 +779,17 @@ fn check_packable(manifest: &Manifest) -> Result<()> {
 /// `volume` + `volume/1` pyramid) is still a valid zip that readers open, so re-packaging it (e.g.
 /// to add an `aux/` member) keeps working.
 ///
-/// The manifest is written as [`Manifest::to_sealed_json`], so a manifest whose JSON doesn't carry
-/// its own seal (edited after sealing, or a parsed view with newer fields) is refused, not packed.
+/// The manifest is written as [`crate::stored::manifest`]: exactly its JCS bytes (ADR-0066 rule 1),
+/// from [`Manifest::to_sealed_json`], so a manifest whose JSON doesn't carry its own seal (edited
+/// after sealing, or a parsed view with newer fields) is refused, not packed.
 pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Result<()> {
     check_packable(manifest)?;
-    pack_manifest_json(&manifest.to_sealed_json()?, payloads, path)
+    pack_manifest_json(&crate::stored::manifest(manifest)?, payloads, path)
 }
 
-/// [`pack`]'s body, over manifest JSON the caller has already sealed or seal-verified.
-fn pack_manifest_json(manifest_json: &str, payloads: &[BlockPayload], path: &Path) -> Result<()> {
+/// [`pack`]'s body, over the stored manifest bytes ([`crate::stored`]) the caller has already
+/// sealed or seal-verified.
+fn pack_manifest_json(manifest_json: &[u8], payloads: &[BlockPayload], path: &Path) -> Result<()> {
     let mut zw = ZipWriter::new(File::create(path)?);
     // STORED + force zip64 so a large study is never silently truncated at 4 GiB / 65 k entries.
     // Pin the entry mtime to the zip epoch (1980-01-01) so the same product packs to byte-identical
@@ -798,7 +800,7 @@ fn pack_manifest_json(manifest_json: &str, payloads: &[BlockPayload], path: &Pat
     zw.write_all(MIMETYPE.as_bytes())?;
 
     zw.start_file(MANIFEST_ENTRY, stored).map_err(cz)?;
-    zw.write_all(manifest_json.as_bytes())?;
+    zw.write_all(manifest_json)?;
 
     for p in payloads {
         zw.start_file(format!("{BLOCKS_PREFIX}{}", p.name), stored)
@@ -903,7 +905,7 @@ fn pack_streaming_to(
     zw.write_all(MIMETYPE.as_bytes())?;
 
     zw.start_file(MANIFEST_ENTRY, stored).map_err(cz)?;
-    zw.write_all(manifest.to_sealed_json()?.as_bytes())?;
+    zw.write_all(&crate::stored::manifest(manifest)?)?;
 
     for (name, frag) in sources {
         // Resolve the manifest-recorded digest UP FRONT (only when verifying) so a typo'd name or
@@ -1657,8 +1659,10 @@ fn manifest_text(path: &Path) -> Result<String> {
 
 /// Explode a `.tsra` into a directory: `manifest.json` + `blocks/<name>` + `aux/<name>` (the opt-in
 /// exploded form of ADR-0022; ADR-0042 adds the aux round-trip). Verifies the seal on open and each
-/// block against its digest. Aux members are copied verbatim under `aux/` (they carry no digest —
-/// seal-ignored). Returns the verified manifest.
+/// block against its digest. `manifest.json` is written in its JCS form
+/// ([`crate::stored::canonical_form`] of the stored bytes, under the same seal). Aux members are
+/// copied verbatim under `aux/` (they carry no digest — seal-ignored). Returns the verified
+/// manifest.
 ///
 /// Every name becomes a path under `outdir` by plain components only (ADR-0063, #685): a block
 /// name through [`BlockName::path_under`], an aux member name through the same grammar
@@ -1692,8 +1696,12 @@ pub fn unpack(path: &Path, outdir: &Path) -> Result<Manifest> {
         })
         .collect::<Result<Vec<_>>>()?;
     std::fs::create_dir_all(&blocks_dir)?;
-    // The stored bytes, not the view's JSON: the view may not reproduce the seal (SPEC §4).
-    std::fs::write(outdir.join("manifest.json"), r.manifest_json())?;
+    // The JCS form of the stored bytes, not the view's JSON: the view may not reproduce the seal
+    // (SPEC §4), while the parsed stored object keeps every key and so its seal (`crate::stored`).
+    std::fs::write(
+        outdir.join("manifest.json"),
+        crate::stored::canonical_form(r.manifest_json())?,
+    )?;
     for (name, out_path) in block_paths {
         let bytes = r.read_block(&name)?;
         write_creating_parents(&out_path, &bytes)?;
@@ -1747,10 +1755,12 @@ fn write_creating_parents(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Pack an exploded directory (`manifest.json` + `blocks/<name>` + optional `aux/<name>`) back into
-/// a sealed `.tsra`. The manifest is seal-verified before packing; each block's payload is read from
-/// `blocks/`. If an `aux/` subtree is present it is appended as non-sealed aux members (ADR-0042) —
-/// round-trip counterpart of [`unpack`], so a `.tsra` that carried an embedded signature + ingest
-/// provenance survives an unpack/repack round with byte-identical seal AND the aux payload intact.
+/// a sealed `.tsra`. The manifest is seal-verified before packing and stored in its JCS form
+/// ([`crate::stored::canonical_form`]: any JSON spelling of a sealed object packs, under its seal);
+/// each block's payload is read from `blocks/`. If an `aux/` subtree is present it is appended as
+/// non-sealed aux members (ADR-0042) — round-trip counterpart of [`unpack`], so a `.tsra` that
+/// carried an embedded signature + ingest provenance survives an unpack/repack round with
+/// byte-identical seal AND the aux payload intact.
 ///
 /// Each block is read from [`BlockName::path_under`] `dir/blocks` (plain components only, ADR-0063),
 /// and a manifest whose names break the leaf rule is refused with [`Error::BlockNameConflict`]: an
@@ -1783,9 +1793,10 @@ pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
         payloads.push(BlockPayload::new(b.name.clone(), bytes));
     }
     check_packable(&manifest)?;
-    // The verified bytes as they are, not the view's JSON: they are what the seal covers (SPEC §4),
-    // so a product from another writer, or with newer fields, packs back unchanged.
-    pack_manifest_json(&mj, &payloads, out)?;
+    // The JCS form of the verified object, not the view's JSON: the parsed object is what the
+    // seal covers (SPEC §4), so a product from another writer, or with newer fields, packs back
+    // under the same seal, stored in the one form every tessera writer emits (ADR-0066 rule 1).
+    pack_manifest_json(&crate::stored::canonical_form(&mj)?, &payloads, out)?;
     // Re-attach the aux/ subtree, each file under its relative path.
     if !members.is_empty() {
         add_aux_members(out, &members)?;

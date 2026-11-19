@@ -309,7 +309,10 @@ pub fn new(
     // Write the self-contained collection dir: collection.json + each member under the shared
     // `member_filename` (sanitized `<stem>.tsra`), the same name `verify`/`ls` resolve (#323).
     std::fs::create_dir_all(out)?;
-    std::fs::write(out.join("collection.json"), sealed.to_sealed_json()?)?;
+    std::fs::write(
+        out.join("collection.json"),
+        tessera_io::stored::collection(&sealed)?,
+    )?;
     for (h, src) in &handles {
         let dst = out.join(member_filename(h.reference(), MemberKind::Product));
         if src.canonicalize().ok() == dst.canonicalize().ok() {
@@ -586,6 +589,8 @@ mod tests {
 
         let cf = out.join("collection.json");
         assert!(cf.exists(), "collection.json written");
+        // The collection writer stores `collection.json` in its JCS form (#912).
+        crate::test_support::assert_stored_form("collection new", &std::fs::read(&cf).unwrap());
         // #323: each member lands under the sanitized stem (`blake3_….tsra`), NOT the raw
         // colon-bearing reference — and that is exactly the name `verify` resolves.
         let c = load(&cf).unwrap();

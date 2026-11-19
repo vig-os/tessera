@@ -31,12 +31,12 @@ tessera bench compare — .tsra vs HDF5 vs Parquet (#388)
            expect clinically. The CONTINUOUS table is the one shaped after real listmode.
 
 format             settings                                                 data    op             cache       size          median [min..max]
-Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  size           -       10.[..]
+Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  size           -        8.[..]
 Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  write+seal     warm[..]
 Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  read full      warm[..]
 Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  read ROI       warm[..]
 Tessera (.tsra)    pcodec (default), 64^3 chunks                            volume  verify         warm[..]
-Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  size           -        9.[..]
+Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  size           -        8.[..]
 Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  write+seal     warm[..]
 Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  read full      warm[..]
 Tessera (.tsra)    zstd (tuned), 64^3 chunks                                volume  read ROI       warm[..]
