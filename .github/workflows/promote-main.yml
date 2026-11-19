@@ -11,11 +11,20 @@
 # (strict status checks). After the first promotion main always has a merge commit the next tag lacks,
 # so a head that is the bare tag commit could only merge after an "Update branch", which pushes a new
 # head, dismisses the approval and restarts `nix flake check`. scripts/promotion-plan.sh decides: the
-# head is the tag commit itself when main is its ancestor, otherwise GitHub's merge API merges the tag
-# into a branch cut at main's tip. Either way the head's tree must be EXACTLY the tag's tree (checked
-# before the merge by the script and after it against what GitHub built), so merging the PR changes
-# nothing that is not in the release. A merge that conflicts or yields another tree fails the run: main
-# then holds a change the release lacks, which a human resolves.
+# head is the tag commit itself when main is its ancestor, otherwise a two-parent commit whose parents
+# are [main's tip, the tag commit] and whose tree is EXACTLY the tag's tree, so merging the PR changes
+# nothing that is not in the release. The plan first refuses a main whose merge with the tag would not
+# be the tag's tree (main then holds a change the release lacks, which that commit would drop from
+# main, so a human resolves it).
+#
+# HOW THE MERGE HEAD IS BUILT (#925): scripts/promotion-head.sh creates it with the Git Data API
+# (`POST /repos/{o}/{r}/git/commits` with only message, tree and parents) and no merge computation, so
+# there is no conflict case. With no custom author, committer or signature, GitHub signs a commit an App
+# creates this way, which the `Signed commits` ruleset (every ref, no bypass actors) requires. The
+# merges API this replaced produced an unsigned merge commit, which that ruleset refused (HTTP 409, run
+# 44571980870). The script reads the commit back and requires the tag's tree, the parents [main, tag]
+# and `.verification.verified == true` BEFORE it creates the branch; a head failing any of them fails
+# the run with no branch created and no PR opened. There is no fallback.
 #
 # TRIGGER = `workflow_run` of Release, NOT `release: published`. cargo-dist's release.yml publishes the
 # GitHub Release with GITHUB_TOKEN, and events caused by GITHUB_TOKEN start no workflows, so a
@@ -35,10 +44,13 @@
 # (Actions PR creation is off), and PRs it opened would start no CI. A failed mint fails the run: there
 # is no fallback token. A PR opened by the App's bot account skips the branch-name check
 # (docs/COMMIT_MESSAGE_STANDARD.md "Exemptions"), which `release/promote-v0.1.0-alpha.N` (dots) would
-# not pass. Its head adds no commit of its own (bare tag) or exactly one, GitHub's bot-authored merge.
+# not pass. Its head adds no commit of its own (bare tag) or exactly one, the App's two-parent
+# promotion commit, which changes nothing relative to the tag.
 #
 # MANUAL RUN: `gh workflow run promote-main.yml -f tag=v<version>` re-plans for an existing release, for
 # instance after a failed run; `-f dry_run=true` prints the plan and stops before minting any token.
+# A manual run executes this workflow and its scripts as they are on `--ref`, which defaults to the
+# default branch (dev); a `workflow_run` run always uses the default branch.
 name: promote-main
 
 on:  # yamllint disable-line rule:truthy
@@ -121,7 +133,7 @@ jobs:
         with:
           client-id: ${{ secrets.DEVKIT_UPGRADE_APP_CLIENT_ID }}
           private-key: ${{ secrets.DEVKIT_UPGRADE_APP_PRIVATE_KEY }}
-          # Least privilege: exactly what this run exercises. Create the branch (and its merge commit),
+          # Least privilege: exactly what this run exercises. Create the promotion commit and the branch,
           # open the PR; `workflows` because the promoted commits change .github/workflows/* (see TOKEN
           # above). The App's `issues: write` is not requested.
           permission-contents: write
@@ -149,7 +161,8 @@ jobs:
             echo "::notice::the promotion PR is already open: $existing"
             exit 0
           fi
-          # A leftover branch (an earlier run that failed after pushing it) is never reused unseen.
+          # A leftover branch (an earlier run that created it and then failed to open the PR, or anyone
+          # else's) is never reused unseen.
           # Exit 2 = no such ref; any other failure is an error, not "absent".
           rc=0
           git ls-remote --exit-code "$SERVER/$REPO" "refs/heads/$BRANCH" >/dev/null || rc=$?
@@ -161,39 +174,13 @@ jobs:
             exit 1
           fi
 
-          if [ "$HEAD_KIND" = tag ]; then
-            gh api "repos/$REPO/git/refs" -f "ref=refs/heads/$BRANCH" -f "sha=$TAG_SHA" >/dev/null
-            head_sha=$TAG_SHA
-            how="the \`$TAG\` commit itself (main is its ancestor)"
-          else
-            gh api "repos/$REPO/git/refs" -f "ref=refs/heads/$BRANCH" -f "sha=$MAIN_SHA" >/dev/null
-            # GitHub makes (and signs) the merge commit server-side; a conflict is an HTTP error here.
-            if ! gh api "repos/$REPO/merges" -f "base=$BRANCH" -f "head=$TAG_SHA" -f "commit_message=$TITLE" \
-              > "$RUNNER_TEMP/merge.json"; then
-              # This run created $BRANCH (it did not exist above) at main's tip, and a refused merge leaves
-              # it there adding nothing: delete it, so a re-run starts clean. Only while it still points at
-              # main's tip, i.e. is exactly what this run made; anything else is left alone.
-              now=$(gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq '.object.sha' || true)
-              if [ "$now" = "$MAIN_SHA" ]; then
-                gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH"
-                echo "::error::GitHub refused to merge $TAG into main's tip ($MAIN_SHA): a conflict, or a permission the App lacks (see the response above). Deleted the $BRANCH this run created; no PR opened."
-              else
-                echo "::error::GitHub refused to merge $TAG into main's tip ($MAIN_SHA): a conflict, or a permission the App lacks (see the response above). $BRANCH now points at '${now:-unknown}', not what this run made, so it was left alone; no PR opened."
-              fi
-              exit 1
-            fi
-            head_sha=$(jq -r '.sha' "$RUNNER_TEMP/merge.json")
-            got_tree=$(jq -r '.commit.tree.sha' "$RUNNER_TEMP/merge.json")
-            if [ "$got_tree" != "$TREE" ]; then
-              echo "::error::GitHub's merge $head_sha has tree $got_tree, not $TAG's tree $TREE. Left $BRANCH for inspection; no PR opened."
-              exit 1
-            fi
-            if [ "$(jq -r '.commit.verification.verified' "$RUNNER_TEMP/merge.json")" != true ]; then
-              echo "::error::GitHub's merge $head_sha is not signature-verified. Left $BRANCH for inspection; no PR opened."
-              exit 1
-            fi
-            how="a merge of \`$TAG\` (\`$TAG_SHA\`) into main's tip (\`$MAIN_SHA\`), made and signed by GitHub"
-          fi
+          # Builds the head (the tag commit, or a new GitHub-signed commit with the tag's tree and the
+          # parents [main, tag]), checks its tree, parents and signature as GitHub stores it, and only
+          # then creates $BRANCH. Any failed rule fails the run with no branch created.
+          scripts/promotion-head.sh "$REPO" "$BRANCH" "$TAG" "$TAG_SHA" "$MAIN_SHA" "$TREE" "$HEAD_KIND" \
+            > "$RUNNER_TEMP/head"
+          head_sha=$(sed -n 's/^head_sha=//p' "$RUNNER_TEMP/head")
+          how=$(sed -n 's/^how=//p' "$RUNNER_TEMP/head")
 
           {
             echo "Promotes \`main\` to the published release **$TAG**, so \`main\` keeps matching the latest release (#854)."
