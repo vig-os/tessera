@@ -138,7 +138,8 @@ impl Repository {
     }
 
     /// Store a sealed manifest as an object **addressed by its `manifest_hash`** (the seal, not a
-    /// byte-digest — so the address attests the whole product). Returns the `manifest_hash`.
+    /// byte-digest — so the address attests the whole product). Returns the `manifest_hash`. The
+    /// object holds the manifest's JCS bytes ([`crate::stored::manifest`]).
     ///
     /// A manifest listing a block name twice is refused with [`Error::DuplicateBlockName`] before
     /// anything is written (ADR-0063 §2a): [`get_manifest`](Self::get_manifest) would refuse it.
@@ -148,7 +149,7 @@ impl Repository {
             .clone()
             .ok_or_else(|| Error::Invalid("put_manifest: manifest is not sealed".into()))?;
         check_unique_names(m.blocks.iter().map(|b| &b.name))?;
-        self.write_raw(&mh, m.to_sealed_json()?.as_bytes())?;
+        self.write_raw(&mh, &crate::stored::manifest(m)?)?;
         Ok(mh)
     }
 

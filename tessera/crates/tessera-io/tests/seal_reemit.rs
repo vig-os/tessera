@@ -1,9 +1,10 @@
 //! A product whose manifest the typed view can't reproduce (a newer-format field, `"study": null`)
-//! survives every tessera path that re-emits a product unchanged, and is refused by every path that
-//! would re-emit the view instead (#573, SPEC §4).
+//! survives every tessera path that re-emits a product under its seal, and is refused by every path
+//! that would re-emit the view instead (#573, SPEC §4).
 
 use serde_json::Value;
 use tessera_core::{Error, Manifest};
+use tessera_io::stored::canonical_form;
 use tessera_io::{pack, pack_dir, unpack, Reader, Repository};
 
 /// `empty_no_blocks` from the corpus, with `edit` applied and resealed per SPEC §4.
@@ -25,17 +26,23 @@ fn round_trip(manifest_json: &str) {
     std::fs::create_dir_all(dir.join("blocks")).unwrap();
     std::fs::write(dir.join("manifest.json"), manifest_json).unwrap();
 
+    // Both doors store the JCS form of the object they read (ADR-0066 rule 1, #912): every key it
+    // arrived with is kept — the newer field, the explicit `null` — so it verifies under its seal.
+    let canonical = String::from_utf8(canonical_form(manifest_json).unwrap()).unwrap();
+    let parsed: Value = serde_json::from_str(manifest_json).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&canonical).unwrap(), parsed);
+
     let packed = tmp.path().join("p.tsra");
     pack_dir(&dir, &packed).unwrap();
-    assert_eq!(
-        Reader::open(&packed).unwrap().manifest_json(),
-        manifest_json
-    );
+    assert_eq!(Reader::open(&packed).unwrap().manifest_json(), canonical);
 
     let out = tmp.path().join("unpacked");
     unpack(&packed, &out).unwrap();
     let written = std::fs::read_to_string(out.join("manifest.json")).unwrap();
-    assert_eq!(written, manifest_json, "unpack must copy the stored bytes");
+    assert_eq!(
+        written, canonical,
+        "unpack must write the stored object, in JCS form"
+    );
 }
 
 #[test]

@@ -13,6 +13,8 @@ mod provenance;
 mod resource;
 #[cfg(feature = "sql")]
 mod sql;
+#[cfg(test)]
+mod test_support;
 mod trust;
 mod version;
 

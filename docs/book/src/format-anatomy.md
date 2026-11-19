@@ -36,3 +36,18 @@ Blocks dispatch by data shape — one spine, the proven engine per shape:
 
 (The `id` and version lines are globbed with `trycmd` wildcards; the `content_hash` / `manifest_hash` /
 block digests are pinned exact — they move only on a deliberate conformance-corpus regeneration.)
+
+## The stored `manifest.json`
+
+Tessera's writers store `manifest.json` (and a collection's `collection.json`) as exactly its RFC 8785 JCS
+form: one line, no whitespace, keys sorted, JCS number and string forms (ADR-0066 rule 1). That is the
+form the seal is computed over, so the file is never pretty-printed. `jq` gives the readable view:
+
+```sh
+unzip -p study.tsra manifest.json          # one line: {"blocks":[...],"content_hash":"blake3:...",...}
+unzip -p study.tsra manifest.json | jq .   # the same object, indented
+```
+
+The stored bytes still carry the in-band `manifest_hash` key, and readers still accept any JSON spelling
+of a sealed object; ADR-0066's cutover (#914) moves the seal to a `manifest.seal` member and makes
+readers refuse bytes that are not their own JCS form.

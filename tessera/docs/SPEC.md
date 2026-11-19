@@ -32,8 +32,10 @@ this rule (≤ 0.1.0-alpha.5) that hold such a number are refused: their seal ne
 ## 2. Canonical encoding (hashing)
 All hashing is over **RFC 8785 JSON Canonicalization Scheme (JCS)** bytes: object keys sorted by
 UTF-16 code unit, no insignificant whitespace, ECMAScript-canonical number forms, UTF-8 output. A
-conformant implementation MUST use a JCS encoder. Non-hashed serializations (e.g. the pretty
-`manifest.json` stored in the container) MAY be any valid JSON — verification re-canonicalizes.
+conformant implementation MUST use a JCS encoder. Non-hashed serializations (e.g. `manifest.json` as
+stored in the container) MAY be any valid JSON — verification re-canonicalizes. Tessera's own writers
+store `manifest.json` and `collection.json` as exactly their JCS bytes, one line (`jq .` gives the
+readable view; ADR-0066 rule 1); readers requiring that form land with ADR-0066's cutover (#914).
 **Number forms** are the classic pitfall: `1`, `1.0`, and `1e0` MUST all canonicalize to `1` (and
 e.g. `-1024.0` → `-1024`); implementations SHOULD use a tested JCS library, not a hand-rolled JSON
 serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping rules verbatim.

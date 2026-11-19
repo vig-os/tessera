@@ -23,6 +23,7 @@ pub mod range;
 pub mod registry;
 pub mod repo;
 pub mod sign;
+pub mod stored;
 pub mod stream;
 pub mod table;
 // Test-only tracing setup (#356). PRIVATE and `cfg(test)` — it installs a global tracing

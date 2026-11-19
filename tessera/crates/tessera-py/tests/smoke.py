@@ -9,6 +9,8 @@ flake check (the assembled `tessera/` package — pure-Python `__init__.py` + `_
 """
 
 import io
+import json
+import math
 import pathlib
 import struct
 import sys
@@ -20,6 +22,48 @@ import polars as pl
 import pyarrow as pa
 
 import tessera
+
+
+def jcs(value) -> bytes:
+    """RFC 8785 JCS bytes of a parsed JSON value: a stdlib-only oracle for the stored-form checks below
+    (the check environment has no JCS library). Keys sort by UTF-16 code unit; strings use `json`'s
+    escapes, which are RFC 8785's (`\\b \\f \\n \\r \\t`, other controls as lowercase `\\u00xx`,
+    nothing else escaped). A number is written in ECMAScript form only where `repr` already is
+    (an integral value below 1e21, or a fraction with |x| >= 1e-4, which `repr` writes as plain
+    decimals); anything else is refused rather than guessed at."""
+
+    def num(x) -> str:
+        if isinstance(x, bool):
+            return "true" if x else "false"
+        if isinstance(x, int):
+            return str(x)
+        assert math.isfinite(x), x
+        if x == int(x) and abs(x) < 1e21:
+            return str(int(x))
+        assert abs(x) >= 1e-4, f"jcs oracle: no ECMAScript form for {x!r} here"
+        return repr(x)
+
+    def enc(v) -> str:
+        if v is None or isinstance(v, (bool, int, float)):
+            return "null" if v is None else num(v)
+        if isinstance(v, str):
+            return json.dumps(v, ensure_ascii=False)
+        if isinstance(v, list):
+            return "[" + ",".join(enc(x) for x in v) + "]"
+        keys = sorted(v, key=lambda k: k.encode("utf-16-be"))
+        return "{" + ",".join(enc(k) + ":" + enc(v[k]) for k in keys) + "}"
+
+    return enc(value).encode("utf-8")
+
+
+def assert_stored_form(tsra, what: str) -> None:
+    """The `manifest.json` member of `tsra` is exactly its own JCS form (ADR-0066 rule 1, #912)."""
+    with zipfile.ZipFile(tsra) as z:
+        stored = z.read("manifest.json")
+    assert stored == jcs(json.loads(stored)), (
+        f"{what}: manifest.json is not its own JCS form: {stored[:120]!r}"
+    )
+
 
 corpus = pathlib.Path(sys.argv[1])
 files = sorted(corpus.glob("*.tsra"))
@@ -39,6 +83,7 @@ for f in files:
     assert r.block_names() == [b["name"] for b in m["blocks"]]
     r.verify()
     tessera.verify(f)
+    assert_stored_form(f, f.name)
 
     for b in m["blocks"]:
         if b["kind"] == "array":
@@ -149,6 +194,7 @@ with tempfile.TemporaryDirectory() as td:
     b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "PT"}')
     cid = b.pack(str(out))
     assert cid.startswith("blake3:")
+    assert_stored_form(out, "Builder.pack")  # the Python write door stores the JCS form
 
     rr = tessera.open(out)
     rr.verify()

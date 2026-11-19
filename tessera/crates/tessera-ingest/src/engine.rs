@@ -295,7 +295,7 @@ fn run_into(
     let collection = cb.seal()?;
 
     let coll_path = out_dir.join("collection.json");
-    std::fs::write(&coll_path, collection.to_sealed_json()?).map_err(|e| {
+    std::fs::write(&coll_path, tessera_io::stored::collection(&collection)?).map_err(|e| {
         Error::Invalid(format!("ingest-engine: write {}: {e}", coll_path.display()))
     })?;
     Ok(collection)
@@ -1563,8 +1563,29 @@ streaming = "batch"
             assert_eq!(a.manifest_hash, b.manifest_hash);
             assert_eq!(a.derived_from, b.derived_from);
         }
-        // and collection.json was written.
-        assert!(out.join("collection.json").exists());
+        // and collection.json was written, like every member manifest, in its JCS form (#912).
+        let stored = |bytes: &[u8], what: &str| {
+            let text = std::str::from_utf8(bytes).unwrap();
+            let jcs = tessera_core::canonical::to_bytes(
+                &tessera_core::canonical::parse_strict(text).unwrap(),
+            )
+            .unwrap();
+            assert!(bytes == jcs.as_slice(), "{what} is not its own JCS form");
+        };
+        stored(
+            &std::fs::read(out.join("collection.json")).unwrap(),
+            "collection.json",
+        );
+        let mut members = 0;
+        for e in std::fs::read_dir(&out).unwrap() {
+            let p = e.unwrap().path();
+            if p.extension().is_some_and(|x| x == "tsra") {
+                let r = tessera_io::Reader::open(&p).unwrap();
+                stored(r.manifest_json().as_bytes(), &p.display().to_string());
+                members += 1;
+            }
+        }
+        assert_eq!(members, coll.members.len(), "every member was checked");
     }
 
     #[test]
