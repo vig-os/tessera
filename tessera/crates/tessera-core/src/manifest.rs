@@ -363,11 +363,16 @@ impl Manifest {
     /// view, recording the view's [`newer_fields`](Self::newer_fields).
     fn parse(s: &str) -> crate::Result<(Self, Value)> {
         let object = crate::canonical::parse_strict(s)?;
-        let newer = newer_fields_of(&object);
-        let mut m: Manifest = crate::canonical::from_declared_form(&object, &newer)?;
+        Ok((Self::from_object(&object)?, object))
+    }
+
+    /// The typed view of a strictly parsed manifest object: declared form, version, newer fields.
+    fn from_object(object: &Value) -> crate::Result<Self> {
+        let newer = newer_fields_of(object);
+        let mut m: Manifest = crate::canonical::from_declared_form(object, &newer)?;
         m.check_version()?;
         m.newer_fields = crate::field_path::render(&newer);
-        Ok((m, object))
+        Ok(m)
     }
 
     /// Parse a manifest, refusing one whose major spec version this reader can't handle.
@@ -406,20 +411,109 @@ impl Manifest {
     /// undigested block.
     pub fn from_json_verified(s: &str) -> crate::Result<Self> {
         let (m, object) = Self::parse(s)?; // parse() checks the version
-        crate::block::check_unique_names(m.blocks.iter().map(|b| &b.name))?;
-        check("id", &m.id, &m.recompute_id()?)?;
-        let recorded = |h: &Option<String>| h.clone().unwrap_or_else(|| "(absent)".into());
-        check(
-            "content_hash",
-            &recorded(&m.content_hash),
-            &m.recompute_content_hash()?,
-        )?;
+        m.verify_received_id_and_content()?;
         check(
             "manifest_hash",
             &recorded(&m.manifest_hash),
             &seal_of(&object)?,
         )?;
         Ok(m)
+    }
+
+    /// The checks a reader runs on a received manifest's typed view before (or after) its seal:
+    /// unique block names, then `id`, then `content_hash`, which must be present.
+    fn verify_received_id_and_content(&self) -> crate::Result<()> {
+        crate::block::check_unique_names(self.blocks.iter().map(|b| &b.name))?;
+        check("id", &self.id, &self.recompute_id()?)?;
+        check(
+            "content_hash",
+            &recorded(&self.content_hash),
+            &self.recompute_content_hash()?,
+        )
+    }
+
+    /// Read a manifest from its **stored bytes** and the seal recorded beside them (ADR-0066): the
+    /// verification order of ADR-0066 rule 4, and the reader's half of [`to_stored`](Self::to_stored).
+    ///
+    /// Under ADR-0066 `manifest.json` is stored as exactly its RFC 8785 (JCS) bytes, with no
+    /// `manifest_hash` key, and the seal is `"blake3:" + hex(blake3(bytes))`, kept outside them (a
+    /// `manifest.seal` member). In order:
+    ///
+    /// 1. [`crate::canonical::check_canonical`]: strict parse (UTF-8, duplicate keys, lone
+    ///    surrogates, I-JSON integers, depth), then the bytes must equal their own JCS form;
+    /// 2. the bytes carry no top-level `manifest_hash` key;
+    /// 3. `seal` equals `blake3` over the bytes: a byte-for-byte comparison of the two strings, so a
+    ///    seal in any other spelling (upper-case hex, no `blake3:` prefix) does not match;
+    /// 4. the typed layer, as [`from_json_verified`](Self::from_json_verified) runs it: declared
+    ///    form, version, unique block names, `id` and `content_hash` (which must be present).
+    ///
+    /// The returned view carries `seal` as its [`manifest_hash`](Self::manifest_hash), so it
+    /// [`is_sealed`](Self::is_sealed), and lists any [`newer_fields`](Self::newer_fields): a key a
+    /// newer writer sealed verifies here and is reported, as in `from_json_verified`.
+    ///
+    /// The seal covers the stored bytes, not the typed view. Canonical bytes the view normalises
+    /// (an explicit `"study": null`, which the view drops) are accepted here, as they are by
+    /// `from_json_verified`; [`verify`](Self::verify) and [`to_stored`](Self::to_stored) on the
+    /// result then fail with [`crate::Error::Integrity`], because the view's bytes are no longer
+    /// the sealed bytes. A reader that re-emits a product copies its stored bytes.
+    ///
+    /// This is additive (ADR-0066 implementation step 3): the readers and writers of `.tsra` and
+    /// the exploded form still use the in-band layout until the cutover (#914).
+    ///
+    /// # Errors
+    /// In the order above: everything [`crate::canonical::check_canonical`] refuses
+    /// ([`crate::Error::Serde`], [`crate::Error::InexactInteger`],
+    /// [`crate::Error::NonCanonical`] with the offset of the first differing byte);
+    /// [`crate::Error::InBandSeal`] for a `manifest_hash` key; [`crate::Error::Integrity`] with
+    /// `what` = `manifest_hash`, `expected` = `seal` and `actual` = the stored bytes' digest; then
+    /// everything [`from_json`](Self::from_json) refuses past the parse (declared form,
+    /// [`crate::Error::UnsupportedVersion`]), [`crate::Error::DuplicateBlockName`],
+    /// [`crate::Error::Integrity`] for `id` or `content_hash` (`expected` reads `(absent)` for a
+    /// missing `content_hash`), and [`crate::Error::MissingDigest`] for an undigested block.
+    pub fn from_stored(bytes: &[u8], seal: &str) -> crate::Result<Self> {
+        let object = stored_object(bytes, seal, "manifest")?;
+        let mut m = Self::from_object(&object)?;
+        m.verify_received_id_and_content()?;
+        m.manifest_hash = Some(seal.to_owned());
+        Ok(m)
+    }
+
+    /// This manifest's **stored form** under ADR-0066: `(bytes, seal)`, where `bytes` is its RFC
+    /// 8785 (JCS) serialisation with no `manifest_hash` key and `seal` is
+    /// `"blake3:" + hex(blake3(bytes))`. The writer's half of [`from_stored`](Self::from_stored):
+    /// `from_stored(&bytes, &seal)` reads back a manifest with the same stored bytes and seal.
+    ///
+    /// `bytes` are exactly the bytes the in-band seal is computed over
+    /// ([`canonical_bytes`](Self::canonical_bytes)), so for a manifest sealed before ADR-0066 `seal`
+    /// equals its recorded [`manifest_hash`](Self::manifest_hash) (ADR-0066 rule 2): moving the seal
+    /// out of the document keeps its value.
+    ///
+    /// The manifest must carry a `content_hash` (a stored manifest is a sealed product) and pass
+    /// [`verify`](Self::verify): `id` and `content_hash` hold, block names are unique, and a
+    /// `manifest_hash` already set must equal `seal`. An unset `manifest_hash` is not required:
+    /// `seal` is computed here.
+    ///
+    /// # Errors
+    /// [`crate::Error::NewerFormatFields`] for a parsed manifest with
+    /// [`newer_fields`](Self::newer_fields) (its bytes would drop sealed content: copy the stored
+    /// bytes instead); [`crate::Error::Invalid`] without a `content_hash`; everything
+    /// [`verify`](Self::verify) raises, including [`crate::Error::Integrity`] for a `manifest_hash`
+    /// that is not `seal` (the struct was changed after sealing, or was parsed from an encoding it
+    /// normalises, such as an explicit `"study": null`); [`crate::Error::InexactInteger`] or
+    /// [`crate::Error::NonFiniteNumber`] for a value no seal can hold.
+    pub fn to_stored(&self) -> crate::Result<(Vec<u8>, String)> {
+        self.refuse_newer_fields()?;
+        if self.content_hash.is_none() {
+            return Err(crate::Error::Invalid(
+                "refusing to store a manifest without content_hash: a stored manifest is a sealed \
+                 product"
+                    .into(),
+            ));
+        }
+        self.verify()?;
+        let bytes = self.canonical_bytes()?;
+        let seal = crate::hash::digest(&bytes);
+        Ok((bytes, seal))
     }
 
     /// Verify this **struct's** three hashes against their recomputed values (and the spec version):
@@ -478,8 +572,29 @@ impl Manifest {
     }
 }
 
+/// A recorded hash for an [`crate::Error::Integrity`] message: the value, or `(absent)`.
+pub(crate) fn recorded(h: &Option<String>) -> String {
+    h.clone().unwrap_or_else(|| "(absent)".into())
+}
+
+/// Steps 1–3 of reading a stored document (ADR-0066 rule 4), shared by the manifest and the
+/// collection: the canonical check, no in-band seal key, and the seal over the bytes. Returns the
+/// parsed object for the typed layer.
+pub(crate) fn stored_object(
+    bytes: &[u8],
+    seal: &str,
+    document: &'static str,
+) -> crate::Result<Value> {
+    let object = crate::canonical::check_canonical(bytes)?;
+    if object.get(SEAL_KEY).is_some() {
+        return Err(crate::Error::InBandSeal { document });
+    }
+    check(SEAL_KEY, seal, &crate::hash::digest(bytes))?;
+    Ok(object)
+}
+
 /// Compare an expected vs recomputed hash, raising a typed integrity error on mismatch.
-fn check(what: &'static str, expected: &str, actual: &str) -> crate::Result<()> {
+pub(crate) fn check(what: &'static str, expected: &str, actual: &str) -> crate::Result<()> {
     if expected != actual {
         return Err(crate::Error::Integrity {
             what,

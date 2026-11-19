@@ -36,8 +36,8 @@ use serde_json::Value;
 
 use crate::field_path::FieldPath;
 use crate::manifest::{
-    refuse_newer, seal_of, unknown_keys, unknown_keys_each, SEAL_KEY, SUPPORTED_MAJOR,
-    TESSERA_VERSION,
+    check, recorded, refuse_newer, seal_of, stored_object, unknown_keys, unknown_keys_each,
+    SEAL_KEY, SUPPORTED_MAJOR, TESSERA_VERSION,
 };
 
 /// Raw acquisition data vs derived/regenerable product. Drives storage's WORM retention mapping
@@ -405,11 +405,16 @@ impl Collection {
     /// Parse the text strictly into the object and its typed view, recording the newer fields.
     fn parse(s: &str) -> crate::Result<(Self, Value)> {
         let object = crate::canonical::parse_strict(s)?;
-        let newer = newer_fields_of(&object);
-        let mut c: Collection = crate::canonical::from_declared_form(&object, &newer)?;
+        Ok((Self::from_object(&object)?, object))
+    }
+
+    /// The typed view of a strictly parsed collection object: declared form, version, newer fields.
+    fn from_object(object: &Value) -> crate::Result<Self> {
+        let newer = newer_fields_of(object);
+        let mut c: Collection = crate::canonical::from_declared_form(object, &newer)?;
         c.check_version()?;
         c.newer_fields = crate::field_path::render(&newer);
-        Ok((c, object))
+        Ok(c)
     }
 
     /// [`from_json`](Self::from_json), plus the seal recomputed over the JSON object **as received**
@@ -459,13 +464,7 @@ impl Collection {
     /// [`crate::Error::Invalid`] if a member's kind breaks the level schema's `member_rule`.
     pub fn from_json_verified(s: &str) -> crate::Result<Self> {
         let (c, object) = Self::parse(s)?;
-        check("id", &c.id, &c.recompute_id()?)?;
-        let recorded = |h: &Option<String>| h.clone().unwrap_or_else(|| "(absent)".into());
-        check(
-            "content_hash",
-            &recorded(&c.content_hash),
-            &c.recompute_content_hash(),
-        )?;
+        c.verify_received_id_and_content()?;
         check(
             "manifest_hash",
             &recorded(&c.manifest_hash),
@@ -473,6 +472,79 @@ impl Collection {
         )?;
         c.validate_schema()?;
         Ok(c)
+    }
+
+    /// The checks a reader runs on a received collection's typed view besides its seal: `id`, then
+    /// `content_hash`, which must be present.
+    fn verify_received_id_and_content(&self) -> crate::Result<()> {
+        check("id", &self.id, &self.recompute_id()?)?;
+        check(
+            "content_hash",
+            &recorded(&self.content_hash),
+            &self.recompute_content_hash(),
+        )
+    }
+
+    /// Read a collection from its **stored bytes** (`collection.json`) and the seal recorded beside
+    /// them (`collection.seal`), under ADR-0066 rules 4 and 5. Mirrors
+    /// [`crate::Manifest::from_stored`]; the reader's half of [`to_stored`](Self::to_stored).
+    ///
+    /// In order: [`crate::canonical::check_canonical`] (strict parse, then the bytes must equal
+    /// their own JCS form); no top-level `manifest_hash` key (a member's `manifest_hash` pin is
+    /// data and stays); `seal` equals `blake3` over the bytes, compared byte for byte; then the
+    /// typed layer as [`from_json_verified`](Self::from_json_verified) runs it: declared form,
+    /// version, `id`, `content_hash` (which must be present) and the level schema's `member_rule`.
+    /// The returned view carries `seal` as its [`manifest_hash`](Self::manifest_hash).
+    ///
+    /// Additive (ADR-0066 implementation step 3): collection writers and readers still use the
+    /// in-band layout until the cutover (#914).
+    ///
+    /// # Errors
+    /// In that order: [`crate::Error::Serde`], [`crate::Error::InexactInteger`] or
+    /// [`crate::Error::NonCanonical`] (offset of the first differing byte) from the canonical check;
+    /// [`crate::Error::InBandSeal`]; [`crate::Error::Integrity`] with `what` = `manifest_hash`,
+    /// `expected` = `seal` and `actual` = the bytes' digest; then the declared-form and
+    /// [`crate::Error::UnsupportedVersion`] errors of [`from_json`](Self::from_json),
+    /// [`crate::Error::Integrity`] for `id` or `content_hash`, and [`crate::Error::Invalid`] for a
+    /// member kind the level schema doesn't permit.
+    pub fn from_stored(bytes: &[u8], seal: &str) -> crate::Result<Self> {
+        let object = stored_object(bytes, seal, "collection")?;
+        let mut c = Self::from_object(&object)?;
+        c.verify_received_id_and_content()?;
+        c.validate_schema()?;
+        c.manifest_hash = Some(seal.to_owned());
+        Ok(c)
+    }
+
+    /// This collection's **stored form** under ADR-0066: `(bytes, seal)`, where `bytes` is its RFC
+    /// 8785 (JCS) serialisation with no top-level `manifest_hash` key and `seal` is
+    /// `"blake3:" + hex(blake3(bytes))`. Mirrors [`crate::Manifest::to_stored`]: `bytes` are the
+    /// bytes the in-band seal is computed over ([`canonical_bytes`](Self::canonical_bytes)), so a
+    /// collection sealed before ADR-0066 keeps its seal's value, and
+    /// [`from_stored`](Self::from_stored) reads them back.
+    ///
+    /// The collection must carry a `content_hash` and pass [`verify`](Self::verify) (`id`,
+    /// `content_hash`, the level schema, and a `manifest_hash` already set must equal `seal`).
+    ///
+    /// # Errors
+    /// [`crate::Error::NewerFormatFields`] for a parsed collection with
+    /// [`newer_fields`](Self::newer_fields); [`crate::Error::Invalid`] without a `content_hash`;
+    /// everything [`verify`](Self::verify) raises, including [`crate::Error::Integrity`] for a
+    /// `manifest_hash` that is not `seal`; [`crate::Error::InexactInteger`] or
+    /// [`crate::Error::NonFiniteNumber`] for a value no seal can hold.
+    pub fn to_stored(&self) -> crate::Result<(Vec<u8>, String)> {
+        refuse_newer(&self.newer_fields)?;
+        if self.content_hash.is_none() {
+            return Err(crate::Error::Invalid(
+                "refusing to store a collection without content_hash: a stored collection is \
+                 sealed"
+                    .into(),
+            ));
+        }
+        self.verify()?;
+        let bytes = self.canonical_bytes()?;
+        let seal = crate::hash::digest(&bytes);
+        Ok((bytes, seal))
     }
 
     /// Verify this **struct's** three hashes against their recomputed values (and the spec version):
@@ -644,19 +716,6 @@ impl Default for CollectionSchemaRegistry {
     fn default() -> Self {
         Self::builtin()
     }
-}
-
-/// Compare an expected vs recomputed hash, raising a typed integrity error on mismatch. Same shape
-/// as the manifest's check.
-fn check(what: &'static str, expected: &str, actual: &str) -> crate::Result<()> {
-    if expected != actual {
-        return Err(crate::Error::Integrity {
-            what,
-            expected: expected.to_string(),
-            actual: actual.to_string(),
-        });
-    }
-    Ok(())
 }
 
 /// A resolved reference to a sealed **product** — its logical `id` + `manifest_hash` carried as one
