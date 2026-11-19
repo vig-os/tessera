@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6](https://github.com/vig-os/tessera/compare/tessera-wasm-v0.1.0-alpha.5...tessera-wasm-v0.1.0-alpha.6) - 2026-11-19
+
+### Fixed
+
+- *(core)* seal only integers a double holds exactly (I-JSON)
+- *(core)* verify a manifest's seal over the object it parsed
+
 ## [0.1.0-alpha.1](https://github.com/vig-os/tessera/releases/tag/tessera-wasm-v0.1.0-alpha.1) - 2026-09-23
 
 ### Added

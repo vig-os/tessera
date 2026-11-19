@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.5...tessera-io-v0.1.0-alpha.6) - 2026-11-19
+
+### Added
+
+- *(io)* [**breaking**] record the codec profile in every sealed table spec
+- *(io)* sequenced table input on StreamWriter, seq-ordered from any thread
+- *(io)* [**breaking**] record the vortex edition in every sealed table spec
+- *(io)* stream a partitioned table whose row count is known only at close
+
+### Fixed
+
+- *(core)* refuse NaN, infinity and loosely spelt numbers at every entry point
+- *(cli)* report a parent refused for an inexact integer as corrupt
+- *(core)* seal only integers a double holds exactly (I-JSON)
+- *(io)* a sequenced table's refusal poisons its writer, so finish seals nothing
+- *(io)* refuse a block name listed twice in the repository's commit
+- *(core,io)* refuse a block name listed twice in one product
+- *(core)* verify a manifest's seal over the object it parsed
+- *(io,py,deps)* read a .tsra the one way every zip reader does (GHSA-m665-v7pm-7grj) ([#862](https://github.com/vig-os/tessera/pull/862))
+- *(io)* hold every .tsra record to the bytes the writer emits
+- *(io)* verify every byte of a .tsra, not only its entries
+- *(io)* serve a local header's small cloud reads from one GET
+- *(io,py,deps)* read a .tsra the one way every zip reader does (GHSA-m665-v7pm-7grj)
+- *(ci)* put the cargo test checks' TMPDIR on a RAM fs
+
+### Other
+
+- *(io)* every leaf of a sequenced table carries the writer's edition
+- *(io)* make the #472 guard's messages match what it asserts
+- *(nix)* fail the #468 and #472 guards unless exactly one test ran
+- *(adr)* state the table forward-read limit of the vortex 0.93 event
+- *(corpus)* regenerate the table goldens for the vortex 0.93 format event
+- *(deps)* [**breaking**] move vortex from the 0.75 fork to 0.93.0 on a rebased fork pin
+- mark logical tables done in the feature matrix
+
 ## [0.1.0-alpha.5](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.4...tessera-io-v0.1.0-alpha.5) - 2026-11-11
 
 ### Added
