@@ -519,8 +519,10 @@ enum Cmd {
         repo: PathBuf,
         /// The lineage id (printed by `import` / `log`).
         lineage: String,
-        /// Metadata field to set, `key=value` (value parsed as JSON, else a bare string;
-        /// a number beyond ±(2^53−1) is refused — quote it, `k='"…"'`, to keep it as text). Repeatable.
+        /// Metadata field to set, `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text). Repeatable.
         #[arg(long = "set")]
         set: Vec<String>,
         /// Attach an already-encoded block from another `.tsra`: `[NAME=]SOURCE.tsra:BLOCK`
@@ -1038,8 +1040,10 @@ enum IngestSrc {
         /// sealed manifest (ADR-0040 PHI hygiene: an absolute path on clinical data is itself PHI).
         #[arg(long, value_name = "LABEL")]
         source_label: Option<String>,
-        /// Attach metadata `key=value` (value parsed as JSON, else string; a
-        /// number beyond ±(2^53−1) is refused) — supplies/overrides schema
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text) — supplies/overrides schema
         /// fields. Repeatable: `--meta study=DUPLET-07 --meta modality=PT`.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
@@ -1072,8 +1076,10 @@ enum IngestSrc {
         /// (an N-slice series would embed N PHI-bearing absolute paths). ADR-0040.
         #[arg(long, value_name = "LABEL")]
         source_label: Option<String>,
-        /// Attach metadata `key=value` (value parsed as JSON, else string; a
-        /// number beyond ±(2^53−1) is refused). Repeatable.
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text). Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
         /// Per-slice-rescale handling (#300): `bit-exact` (default) rejects a series whose slices
@@ -1103,8 +1109,10 @@ enum IngestSrc {
         /// sealed manifest (ADR-0040 PHI hygiene).
         #[arg(long, value_name = "LABEL")]
         source_label: Option<String>,
-        /// Attach metadata `key=value` (value parsed as JSON, else string; a
-        /// number beyond ±(2^53−1) is refused). Repeatable.
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text). Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
         /// Opt-in GEDDF transform (#310): annotate columns (unit/description) + requantize the
@@ -1170,8 +1178,10 @@ enum IngestSrc {
         /// sealed manifest (ADR-0040 PHI hygiene).
         #[arg(long, value_name = "LABEL")]
         source_label: Option<String>,
-        /// Attach metadata `key=value` (value parsed as JSON, else string; a
-        /// number beyond ±(2^53−1) is refused). Repeatable.
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text). Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
     },
@@ -1206,8 +1216,10 @@ enum IngestSrc {
         /// manifest (ADR-0040 PHI hygiene).
         #[arg(long, value_name = "LABEL")]
         source_label: Option<String>,
-        /// Attach metadata `key=value` (value parsed as JSON, else string; a
-        /// number beyond ±(2^53−1) is refused). Repeatable.
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text). Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
     },
@@ -1235,8 +1247,10 @@ enum IngestSrc {
         /// sealed manifest (ADR-0040 PHI hygiene; vendor `.l64` filenames often carry patient ids).
         #[arg(long, value_name = "LABEL")]
         source_label: Option<String>,
-        /// Attach metadata `key=value` (value parsed as JSON, else string; a
-        /// number beyond ±(2^53−1) is refused) — e.g. `--meta study=DUPLET-07`
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text) — e.g. `--meta study=DUPLET-07`
         /// to satisfy the blob schema's recommended `study`. Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,

@@ -27,6 +27,7 @@
 //! Ingest reads untrusted third-party files, so a header-driven panic is the wrong failure mode; the
 //! failure is always a typed [`Error::Invalid`] (#396).
 
+use crate::sealable::refuse_unsealable;
 use tessera_core::block::array::{ArraySpec, WorldFrame};
 use tessera_core::manifest::Manifest;
 use tessera_core::referencing::Referenced;
@@ -692,6 +693,13 @@ fn parse_header(b: &[u8]) -> Result<Header> {
     } else {
         (scl_slope, r.f64(116))
     };
+    // Both are sealed as JSON numbers (the array spec's rescale): refuse one a seal cannot hold here,
+    // by header field and value, before any output exists (SPEC §1, #886). `scl_inter` is read only
+    // when `scl_slope` is non-zero, so only then is it sealed and checked.
+    refuse_unsealable("nifti", "scl_slope", &r.f32(112).to_string(), &[scl_slope])?;
+    if scl_slope != 0.0 {
+        refuse_unsealable("nifti", "scl_inter", &r.f32(116).to_string(), &[rescale.1])?;
+    }
 
     let (world_frame, geometry_source) = parse_geometry(&r)?;
     let axis_referencing = parse_time_axis(&r, shape.len());
@@ -2000,5 +2008,70 @@ mod tests {
         let flat = dir.path().join("single-frame.nii");
         Synth::new(&[2, 2, 2, 1]).write(&flat, &voxels[..per_volume]);
         assert_eq!(read_nifti(&flat).unwrap().shape, vec![2, 2, 2]);
+    }
+
+    /// `scl_slope`/`scl_inter` are sealed as JSON numbers, so NaN, ±infinity and a value beyond
+    /// ±(2^53−1) are refused at the NIfTI door, naming the header field and its value (#886 round 2).
+    /// Before the fix `inf`/`nan` sealed `rescale_slope: null` with rc=0 and `1e16` was refused only by
+    /// the generic message advising "write it as a string".
+    #[test]
+    fn an_unsealable_rescale_is_refused_naming_the_header_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let voxels: Vec<i16> = (0..8).collect();
+        let refused = |offset: usize, v: f32, big: bool| {
+            let mut synth = Synth::new(&[2, 2, 2]);
+            synth.big = big;
+            let mut bytes = synth.bytes(&voxels);
+            let raw = if big {
+                v.to_be_bytes()
+            } else {
+                v.to_le_bytes()
+            };
+            bytes[offset..offset + 4].copy_from_slice(&raw);
+            let p = dir.path().join("rescale.nii");
+            std::fs::write(&p, bytes).unwrap();
+            read_nifti(&p).map(|_| ()).unwrap_err().to_string()
+        };
+        for big in [false, true] {
+            assert_eq!(
+                refused(112, f32::INFINITY, big),
+                "invalid product: nifti: scl_slope = \"inf\" is not a finite number (NaN, \
+                 infinity, or past a double's range), which a sealed JSON number cannot be (RFC 8259 §6)"
+            );
+            assert_eq!(
+                refused(112, f32::NEG_INFINITY, big),
+                "invalid product: nifti: scl_slope = \"-inf\" is not a finite number (NaN, \
+                 infinity, or past a double's range), which a sealed JSON number cannot be (RFC 8259 §6)"
+            );
+            assert_eq!(
+                refused(112, f32::NAN, big),
+                "invalid product: nifti: scl_slope = \"NaN\" is not a finite number (NaN, \
+                 infinity, or past a double's range), which a sealed JSON number cannot be (RFC 8259 §6)"
+            );
+            assert_eq!(
+                refused(112, 1e16, big),
+                "invalid product: nifti: scl_slope = \"10000000000000000\" is outside the range a \
+                 sealed JSON number can hold (±(2^53−1), I-JSON RFC 7493 §2.2)"
+            );
+            assert_eq!(
+                refused(116, f32::NAN, big),
+                "invalid product: nifti: scl_inter = \"NaN\" is not a finite number (NaN, \
+                 infinity, or past a double's range), which a sealed JSON number cannot be (RFC 8259 §6)"
+            );
+        }
+        // `scl_slope = 0` means "no rescale": `scl_inter` is then ignored, not sealed, not checked.
+        let mut b = Synth::new(&[2, 2, 2]).bytes(&voxels);
+        b[112..116].copy_from_slice(&0.0f32.to_le_bytes());
+        b[116..120].copy_from_slice(&f32::NAN.to_le_bytes());
+        let p = dir.path().join("noscale.nii");
+        std::fs::write(&p, b).unwrap();
+        let img = read_nifti(&p).unwrap();
+        assert_eq!((img.rescale_slope, img.rescale_intercept), (1.0, 0.0));
+        // A finite in-range rescale is unchanged.
+        let mut b = Synth::new(&[2, 2, 2]).bytes(&voxels);
+        b[112..116].copy_from_slice(&2.5f32.to_le_bytes());
+        let p = dir.path().join("ok.nii");
+        std::fs::write(&p, b).unwrap();
+        assert_eq!(read_nifti(&p).unwrap().rescale_slope, 2.5);
     }
 }

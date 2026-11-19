@@ -359,7 +359,7 @@ impl Collection {
     /// [`newer_fields`](Self::newer_fields): bytes of this view would leave them out.
     pub fn canonical_bytes(&self) -> crate::Result<Vec<u8>> {
         refuse_newer(&self.newer_fields)?;
-        crate::canonical::bytes_without(&serde_json::to_value(self)?, SEAL_KEY)
+        crate::canonical::bytes_without(&crate::canonical::to_json_value(self)?, SEAL_KEY)
     }
 
     /// Recompute the logical `id` from `id_inputs`.

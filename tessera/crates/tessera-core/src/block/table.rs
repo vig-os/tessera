@@ -252,7 +252,7 @@ impl Block for TableBlock {
         BlockKind::Table
     }
     fn spec_json(&self) -> crate::Result<serde_json::Value> {
-        Ok(serde_json::to_value(&self.spec)?)
+        crate::canonical::to_json_value(&self.spec)
     }
     fn digest(&self) -> crate::Result<String> {
         // Spike: digest the spec. Real impl digests the encoded column chunks.

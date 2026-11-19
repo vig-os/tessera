@@ -42,6 +42,17 @@ pub enum Error {
     )]
     InexactInteger { path: String, value: String },
 
+    /// A number headed for a sealed document is NaN or ±infinity. JSON (RFC 8259 §6) has no spelling
+    /// for either, and `serde_json` would write them as `null`, so a seal would silently pin a
+    /// different value than the one given (#886). Writers refuse it before any value is built; the
+    /// writer's door that read the number names its source in its own words (a DICOM tag, a NIfTI
+    /// header field, a TOML key, a `--set` flag). `what` names the value and `value` is its text.
+    #[error(
+        "{what} = {value} is not a finite number: JSON has no spelling for NaN or infinity \
+         (RFC 8259 §6), so a seal cannot hold it"
+    )]
+    NonFiniteNumber { what: String, value: String },
+
     /// A recomputed hash did not match the one recorded in the manifest — tampering, corruption,
     /// or a producer bug. `what` names the field (`id` / `content_hash` / `manifest_hash`).
     #[error("integrity: {what} mismatch — expected {expected}, got {actual}")]

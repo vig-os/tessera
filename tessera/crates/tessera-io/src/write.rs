@@ -748,7 +748,10 @@ impl WriteSession {
     /// survives crash recovery. Refuses what [`Self::with_field`] refuses, in the recipe.
     pub fn with_generation(&mut self, generation: tessera_core::Generation) -> Result<&mut Self> {
         let mut doc = serde_json::Map::new();
-        doc.insert("generation".into(), serde_json::to_value(&generation)?);
+        doc.insert(
+            "generation".into(),
+            tessera_core::canonical::to_json_value(&generation)?,
+        );
         tessera_core::canonical::check_i_json(&Value::Object(doc))?;
         self.header.generation = Some(generation);
         self.persist_header()?;
@@ -908,7 +911,7 @@ impl WriteSession {
         self.usable()?;
         // A spec the seal would refuse (SPEC §1) is refused before its bytes are journaled; the
         // path is from the block reference (`spec.fill_value`).
-        tessera_core::canonical::check_i_json(&serde_json::to_value(block_ref)?)?;
+        tessera_core::canonical::check_i_json(&tessera_core::canonical::to_json_value(block_ref)?)?;
         let name = &block_ref.name;
         tessera_core::block::check_unique_names(self.blocks.iter().map(|b| &b.name).chain([name]))?;
         leaf_rule_against(self.blocks.iter().map(|b| &b.name), name)?;

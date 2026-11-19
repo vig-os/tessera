@@ -18,6 +18,7 @@ use dicom::core::{DataElement, PrimitiveValue, Tag, VR};
 use dicom::object::{FileDicomObject, InMemDicomObject};
 use dicom::pixeldata::{ConvertOptions, ModalityLutOption, PixelDecoder};
 use tessera_core::block::array::{ArraySpec, WorldFrame};
+use tessera_core::canonical::json_number;
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, ProductBuilder, Result};
 use tessera_io::array::{self, ArrayData};
@@ -258,7 +259,7 @@ fn trimmed_str(obj: &FileDicomObject<InMemDicomObject>, tag: Tag) -> Option<Stri
 
 /// Refuse a DICOM number Tessera seals as a JSON number (a curated `DS`/`FD` field, the rescale, the
 /// series geometry) when `values`, as read from `tag`, hold one a seal cannot: beyond ±(2^53−1) or
-/// past a double's range ([`tessera_core::canonical::beyond_exact_f64`]; SPEC §1, I-JSON RFC 7493
+/// past a double's range, or non-finite ([`tessera_core::canonical::unsealable_f64`]; SPEC §1, I-JSON RFC 7493
 /// §2.2, #886). The value stays a number when it fits (owner decision 2026-11-17). The error names the
 /// tag, its keyword and the element's source text — the file is what the person can check, and they
 /// cannot rewrite it as a string.
@@ -268,9 +269,9 @@ fn sealable_number(
     keyword: &str,
     values: &[f64],
 ) -> Result<()> {
-    if !values
+    if values
         .iter()
-        .any(|&v| tessera_core::canonical::beyond_exact_f64(v))
+        .all(|&v| tessera_core::canonical::unsealable_f64(v).is_none())
     {
         return Ok(());
     }
@@ -280,10 +281,7 @@ fn sealable_number(
         .and_then(|e| e.to_str().ok())
         .map(|s| s.trim().to_owned())
         .unwrap_or_default();
-    Err(Error::Invalid(format!(
-        "dicom: {tag} {keyword} = \"{text}\" is outside the range a sealed JSON number can hold \
-         (±(2^53−1), I-JSON RFC 7493 §2.2)"
-    )))
+    crate::sealable::refuse_unsealable("dicom", &format!("{tag} {keyword}"), &text, values)
 }
 
 /// Extract the schema-mapped [`DicomCuratedTags`] from an already-parsed DICOM object. Any tag
@@ -809,10 +807,13 @@ pub fn to_recon_product(
     // the operational transform (what `stats --physical` applies), but the schema declares
     // `rescale_slope`/`rescale_intercept` as discovery fields — a reader querying metadata for the
     // HU/Bq·mL⁻¹ scaling shouldn't have to open the array block to find it.
-    b.with_field("rescale_slope", serde_json::json!(img.rescale_slope));
+    b.with_field(
+        "rescale_slope",
+        json_number("rescale_slope", img.rescale_slope)?,
+    );
     b.with_field(
         "rescale_intercept",
-        serde_json::json!(img.rescale_intercept),
+        json_number("rescale_intercept", img.rescale_intercept)?,
     );
 
     // #300: a per-slice-rescaled series collapsed to one global int16 scale is a LOSSY transform —
@@ -835,9 +836,17 @@ pub fn to_recon_product(
         b.with_field("rescale_mode", serde_json::json!("global-int16"));
         b.with_field(
             "rescale_slope_per_slice",
-            serde_json::json!(rp.per_slice_slopes),
+            serde_json::Value::Array(
+                rp.per_slice_slopes
+                    .iter()
+                    .map(|&v| json_number("rescale_slope_per_slice", v))
+                    .collect::<Result<_>>()?,
+            ),
         );
-        b.with_field("rescale_max_abs_err", serde_json::json!(rp.max_abs_err));
+        b.with_field(
+            "rescale_max_abs_err",
+            json_number("rescale_max_abs_err", rp.max_abs_err)?,
+        );
     }
 
     // Curated DICOM tags → `recon` schema fields (each is `recommended`, so absence is fine).
@@ -858,13 +867,19 @@ pub fn to_recon_product(
         b.with_field("model_name", serde_json::json!(v));
     }
     if let Some(v) = c.kvp {
-        b.with_field("kvp", serde_json::json!(v));
+        b.with_field("kvp", json_number("kvp", v)?);
     }
     if let Some(v) = c.slice_thickness {
-        b.with_field("slice_thickness", serde_json::json!(v));
+        b.with_field("slice_thickness", json_number("slice_thickness", v)?);
     }
-    if let Some(v) = c.pixel_spacing {
-        b.with_field("pixel_spacing", serde_json::json!(v));
+    if let Some([row, col]) = c.pixel_spacing {
+        b.with_field(
+            "pixel_spacing",
+            serde_json::Value::Array(vec![
+                json_number("pixel_spacing", row)?,
+                json_number("pixel_spacing", col)?,
+            ]),
+        );
     }
 
     // Full DICOM header → `extra["dicom_header"]` (PHI-scrubbed on the de-id path, since the
@@ -1697,11 +1712,43 @@ mod tests {
             "invalid product: dicom: (0028,1053) RescaleSlope = \"1E16\" is outside the range a \
              sealed JSON number can hold (±(2^53−1), I-JSON RFC 7493 §2.2)"
         );
-        assert!(refused(RESCALE_INTERCEPT, "-1E16").contains("(0028,1052) RescaleIntercept"));
-        assert!(refused(SLICE_THICKNESS, "9007199254740992").contains("SliceThickness"));
+        let beyond =
+            "is outside the range a sealed JSON number can hold (±(2^53−1), I-JSON RFC 7493 §2.2)";
+        assert_eq!(
+            refused(RESCALE_INTERCEPT, "-1E16"),
+            format!("invalid product: dicom: (0028,1052) RescaleIntercept = \"-1E16\" {beyond}")
+        );
+        assert_eq!(
+            refused(SLICE_THICKNESS, "9007199254740992"),
+            format!("invalid product: dicom: (0018,0050) SliceThickness = \"9007199254740992\" {beyond}")
+        );
         // A multi-valued tag names the whole source text; past a double's range is refused too.
-        assert!(refused(PIXEL_SPACING, "0.5\\1E400")
-            .contains("(0028,0030) PixelSpacing = \"0.5\\1E400\" is outside"));
+        assert_eq!(
+            refused(PIXEL_SPACING, "0.5\\1E400"),
+            format!(
+                "invalid product: dicom: (0028,0030) PixelSpacing = \"0.5\\1E400\" is not a \
+                 finite number (NaN, infinity, or past a double's range), which a sealed JSON \
+                 number cannot be (RFC 8259 §6)"
+            )
+        );
+        // NaN and infinity have no JSON spelling at all (#886 round 2).
+        let nonfinite =
+            "is not a finite number (NaN, infinity, or past a double's range), which a \
+                         sealed JSON number cannot be (RFC 8259 §6)";
+        for text in ["NaN", "inf", "-inf", "Infinity"] {
+            assert_eq!(
+                refused(KVP, text),
+                format!("invalid product: dicom: (0018,0060) KVP = \"{text}\" {nonfinite}"),
+                "{text}"
+            );
+            assert_eq!(
+                refused(RESCALE_SLOPE, text),
+                format!(
+                    "invalid product: dicom: (0028,1053) RescaleSlope = \"{text}\" {nonfinite}"
+                ),
+                "{text}"
+            );
+        }
 
         // In range: unchanged, still a JSON number.
         let img = with(KVP, "9007199254740991").unwrap();

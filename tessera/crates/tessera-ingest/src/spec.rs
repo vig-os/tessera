@@ -314,8 +314,44 @@ pub fn parse(path: &std::path::Path) -> Result<IngestSpec> {
 }
 
 /// Parse a TOML string into an [`IngestSpec`] — testable without touching the filesystem.
+///
+/// # Errors
+/// [`Error::Invalid`] for text that is not a valid spec; [`Error::NonFiniteNumber`] for a TOML
+/// `inf`, `-inf` or `nan` anywhere in it (`[product.metadata] x = inf`), named by its path. TOML
+/// has those floats and JSON does not: deserializing them into the spec's JSON values would turn
+/// each into `null`, and the seal would pin that instead of the value written (#886).
 pub fn parse_str(toml_text: &str) -> Result<IngestSpec> {
-    toml::from_str(toml_text).map_err(|e| Error::Invalid(format!("ingest-spec: parse: {e}")))
+    let parse_err = |e: toml::de::Error| Error::Invalid(format!("ingest-spec: parse: {e}"));
+    // The non-finite check reads the TOML tree, where the float is still a float.
+    let tree: toml::Value = toml::from_str(toml_text).map_err(parse_err)?;
+    if let Some((path, text)) = non_finite_float(&tree, "") {
+        return Err(Error::NonFiniteNumber {
+            what: path,
+            value: text,
+        });
+    }
+    toml::from_str(toml_text).map_err(parse_err)
+}
+
+/// The first TOML float that is NaN or ±infinity, in document order, with its path and spelling
+/// (`product[0].metadata.x`, `inf`).
+fn non_finite_float(v: &toml::Value, path: &str) -> Option<(String, String)> {
+    match v {
+        toml::Value::Float(f) if !f.is_finite() => Some((path.to_owned(), f.to_string())),
+        toml::Value::Array(a) => a
+            .iter()
+            .enumerate()
+            .find_map(|(i, v)| non_finite_float(v, &format!("{path}[{i}]"))),
+        toml::Value::Table(t) => t.iter().find_map(|(k, v)| {
+            let at = if path.is_empty() {
+                k.clone()
+            } else {
+                format!("{path}.{k}")
+            };
+            non_finite_float(v, &at)
+        }),
+        _ => None,
+    }
 }
 
 /// Validate the spec: unique product names; every `derived_from` reference resolves; the product
@@ -678,6 +714,49 @@ dataset = "events_2p"
         ));
         with("daq_start_ns = \"1730000000000000000\"").unwrap();
         with("max = 9007199254740991").unwrap();
+    }
+
+    /// TOML has `inf`, `-inf` and `nan`; JSON does not, and deserializing one into the spec's JSON
+    /// values turned it into `null`, which sealed with rc=0 (#886 round 2). It is refused at parse,
+    /// naming the key.
+    #[test]
+    fn a_non_finite_toml_float_is_refused_not_sealed_as_null() {
+        let text = include_str!("../../../docs/examples/migrate-petct-study.toml");
+        let with = |line: &str| {
+            let t = text.replacen(
+                "\n[product.metadata]\n",
+                &format!("\n[product.metadata]\n{line}\n"),
+                1,
+            );
+            parse_str(&t)
+        };
+        for (line, shown) in [
+            ("x = inf", "inf"),
+            ("x = +inf", "inf"),
+            ("x = -inf", "-inf"),
+            ("x = nan", "NaN"),
+            ("x = -nan", "NaN"),
+        ] {
+            let err = with(line).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "product[0].metadata.x = {shown} is not a finite number: JSON has no spelling \
+                     for NaN or infinity (RFC 8259 §6), so a seal cannot hold it"
+                ),
+                "{line}"
+            );
+        }
+        // Nested in an array and a table, still named by its path.
+        let err = with("x = [1.0, { y = inf }]").unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("product[0].metadata.x[1].y = inf "),
+            "{err}"
+        );
+        // A finite float and the string "inf" are fine.
+        with("x = 1.5").unwrap();
+        with("x = \"inf\"").unwrap();
     }
 
     #[test]
