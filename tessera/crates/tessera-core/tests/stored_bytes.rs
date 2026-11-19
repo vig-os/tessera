@@ -147,7 +147,7 @@ fn the_stored_seal_of_every_tracked_product_is_its_recorded_seal() {
         let object = canonical::check_canonical(&bytes).unwrap();
         assert!(object.get("manifest_hash").is_none(), "{}", p.path);
         // Round trip: the stored form reads back as the same manifest, judged by its bytes. (Not by
-        // struct `==`: JCS has one number type, so a pretty `1.0` is stored as `1` and reads back as
+        // struct `==`: JCS has one number type, so a view's `1.0` is stored as `1` and reads back as
         // an integer `Value`; the bytes and the seal are what the format pins.)
         let back = Manifest::from_stored(&bytes, &seal).unwrap();
         assert_eq!(back.manifest_hash.as_ref(), Some(&seal), "{}", p.path);
@@ -318,10 +318,17 @@ fn the_in_band_layout_is_refused_by_from_stored() {
             "{}: {e:?}",
             p.path
         );
-        // Today's stored text itself is pretty JSON: refused before the key is even looked at.
+        // Today's stored text (#912: writers emit JCS) is exactly that in-band JCS form, so it is
+        // canonical and refused for its `manifest_hash` key, even under its own recorded seal.
+        assert_eq!(p.text, in_band, "{}: stored as JCS", p.path);
         let e = Manifest::from_stored(p.text.as_bytes(), &p.seal).unwrap_err();
         assert!(
-            matches!(e, Error::NonCanonical { offset: 1, .. }),
+            matches!(
+                e,
+                Error::InBandSeal {
+                    document: "manifest"
+                }
+            ),
             "{}: {e:?}",
             p.path
         );
