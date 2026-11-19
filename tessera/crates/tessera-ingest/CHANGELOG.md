@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6](https://github.com/vig-os/tessera/compare/tessera-ingest-v0.1.0-alpha.5...tessera-ingest-v0.1.0-alpha.6) - 2026-11-19
+
+### Added
+
+- *(io)* [**breaking**] record the codec profile in every sealed table spec
+- *(io)* [**breaking**] record the vortex edition in every sealed table spec
+
+### Fixed
+
+- *(ingest)* inspect every TOML table shape for an underflowing float, and fail closed
+- *(ingest)* validate every NIfTI header value that feeds a seal, and stop advising a string a typed field cannot take
+- *(core)* refuse NaN, infinity and loosely spelt numbers at every entry point
+- *(ingest)* refuse a curated DICOM number a seal cannot hold, naming the tag
+- *(ingest)* refuse an inexact integer in an ingest spec before any write
+- *(core)* verify collections and embedded schemas over the parsed object
+- *(ingest)* exclude twox-hash's rand from the decode-path audit
+- *(core)* verify a manifest's seal over the object it parsed
+- *(io,py,deps)* read a .tsra the one way every zip reader does (GHSA-m665-v7pm-7grj)
+
+### Other
+
+- *(corpus)* regenerate the table goldens for the vortex 0.93 format event
+- *(deps)* [**breaking**] move vortex from the 0.75 fork to 0.93.0 on a rebased fork pin
+
 ## [0.1.0-alpha.5](https://github.com/vig-os/tessera/compare/tessera-ingest-v0.1.0-alpha.4...tessera-ingest-v0.1.0-alpha.5) - 2026-11-11
 
 ### Added

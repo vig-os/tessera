@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6](https://github.com/vig-os/tessera/compare/tessera-py-v0.1.0-alpha.5...tessera-py-v0.1.0-alpha.6) - 2026-11-19
+
+### Added
+
+- *(io)* [**breaking**] record the codec profile in every sealed table spec
+- *(io)* [**breaking**] record the vortex edition in every sealed table spec
+
+### Fixed
+
+- *(py)* name the I-JSON rule for an int a seal cannot hold exactly
+- *(core)* seal only integers a double holds exactly (I-JSON)
+- *(core,io)* refuse a block name listed twice in one product
+- *(core)* verify a manifest's seal over the object it parsed
+- *(io)* hold every .tsra record to the bytes the writer emits
+- *(io,py,deps)* read a .tsra the one way every zip reader does (GHSA-m665-v7pm-7grj)
+
+### Other
+
+- *(py)* expect the neutral seal-time wording in the smoke test
+- *(corpus)* regenerate the table goldens for the vortex 0.93 format event
+
 ## [0.1.0-alpha.5](https://github.com/vig-os/tessera/compare/tessera-py-v0.1.0-alpha.4...tessera-py-v0.1.0-alpha.5) - 2026-11-11
 
 ### Added
