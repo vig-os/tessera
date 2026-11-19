@@ -1,10 +1,11 @@
 //! Integration test for the `tessera inspect <URL>` / `verify <URL>` cloud entry points (#225).
 //!
-//! Drives the real binary (resolved via `CARGO_BIN_EXE_tessera`) against a MinIO instance
+//! Drives the real binary (resolved via `CARGO_BIN_EXE_tessera`) against an S3 server
 //! seeded with a sealed `.tsra` — the binary opens it over the wire via `tessera_io::open_url`,
 //! verifies the seal + every block digest, and exits 0. Skipped when `TESSERA_S3_ENDPOINT` is
-//! unset so local `cargo test --features cloud` without MinIO doesn't fail; the
-//! `minio-range-read` flake check is the authoritative runner.
+//! unset so local `cargo test --features cloud` without a server doesn't fail, unless
+//! `TESSERA_S3_REQUIRED=1` says a server was promised (see `cloud_s3_contract`); the
+//! `s3-range-read` flake check (versitygw on loopback) is the authoritative runner.
 
 #![cfg(feature = "cloud")]
 
@@ -33,19 +34,25 @@ fn sealed_tsra(out: &Path) {
     pack(&manifest, &[payload], out).unwrap();
 }
 
-/// End-to-end CLI cloud test: seed a `.tsra` to MinIO, then `tessera verify s3://<bucket>/<key>`
+/// The S3 tests' required/skip contract (#707): without an endpoint the test skips, unless
+/// `TESSERA_S3_REQUIRED=1` (set by the `s3-range-read` flake check) promised a server. The same
+/// source file as tessera-io's `cloud::s3_contract`, compiled here via `#[path]` so the two crates
+/// cannot drift (#726); that module documents the contract and why it is shared this way. Its unit
+/// tests run here too. The module name carries `cloud` so the check's `cloud` filter selects them.
+#[path = "../../tessera-io/src/cloud/s3_contract.rs"]
+mod cloud_s3_contract;
+
+/// End-to-end CLI cloud test: seed a `.tsra` to S3, then `tessera verify s3://<bucket>/<key>`
 /// must exit 0 with the same "OK ... verified" output the local-path verify produces.
 ///
 /// **Name carries `cloud_`** so a single `cargo nextest run ... cloud` filter (the flake check)
 /// catches both this binary's tests and the `cloud::*` tessera-io unit tests in one pass.
 #[test]
 fn cloud_cli_inspect_and_verify_over_s3_url() {
-    let endpoint = match std::env::var("TESSERA_S3_ENDPOINT") {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("skipping: TESSERA_S3_ENDPOINT not set (run under flake check)"); // guardrails-ok: deliberate conditional-skip notice
-            return;
-        }
+    let Some(endpoint) =
+        cloud_s3_contract::s3_endpoint_or_skip("cloud_cli_inspect_and_verify_over_s3_url")
+    else {
+        return;
     };
     let bucket = std::env::var("TESSERA_S3_BUCKET").unwrap();
     // Seal a `.tsra` locally then upload it via the same object_store builder open_url uses, so

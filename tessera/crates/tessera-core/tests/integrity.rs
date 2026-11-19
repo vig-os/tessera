@@ -25,6 +25,9 @@ fn sample_product() -> Manifest {
         }],
         rows: 2_696_935,
         row_index: Some("ms".into()),
+        partition: None,
+        edition: None,
+        codec_profile: None,
     };
     let events = TableBlock::new("events_3p", spec);
     let mut b = ProductBuilder::new("recon", "DP06", "DP06 CT+events", "2023-12-08T00:00:00Z");
@@ -100,7 +103,7 @@ fn seal_rejects_block_without_digest() {
     // A precomputed ref missing its digest must NOT be silently dropped from the Merkle root.
     let mut b = ProductBuilder::new("recon", "DP06", "x", "2023-12-08T00:00:00Z");
     b.add_block_ref(BlockRef {
-        name: "orphan".into(),
+        name: "orphan".parse().unwrap(),
         kind: BlockKind::Array,
         digest: None,
         spec: serde_json::Value::Null,
@@ -128,6 +131,9 @@ fn tamper_one_block_changes_content_hash() {
             }],
             rows: 2_696_935,
             row_index: Some("ms".into()),
+            partition: None,
+            edition: None,
+            codec_profile: None,
         },
     );
     b.add_block(&events).unwrap();
@@ -149,6 +155,9 @@ fn block_reorder_changes_content_hash() {
             }],
             rows: 1,
             row_index: None,
+            partition: None,
+            edition: None,
+            codec_profile: None,
         },
     );
     let mut a = ProductBuilder::new("p", "n", "d", "2023-12-08T00:00:00Z");
@@ -270,7 +279,7 @@ proptest! {
             .map(|(i, _)| ArrayBlock::new(format!("a{i}"), ArraySpec::new(vec![2, 2, 2], "int16"))).collect();
         let tables: Vec<_> = kinds.iter().enumerate().filter(|(_, k)| !**k)
             .map(|(i, _)| TableBlock::new(format!("t{i}"),
-                TableSpec { columns: vec![Column { name: "c".into(), dtype: "f4".into(), codec: None, ..Default::default() }], rows: i as u64, row_index: None })).collect();
+                TableSpec { columns: vec![Column { name: "c".into(), dtype: "f4".into(), codec: None, ..Default::default() }], rows: i as u64, row_index: None, partition: None, edition: None, codec_profile: None })).collect();
         for a in &arrays { b.add_block(a).unwrap(); }
         for t in &tables { b.add_block(t).unwrap(); }
         let m = b.seal().unwrap();

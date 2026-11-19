@@ -12,7 +12,7 @@
 //! 2. **OCI image index** ([`to_oci_index`]) — a registry-native manifest-of-manifests. Each entry
 //!    references a member's pre-pushed OCI artifact manifest by sha256 digest, carrying the member
 //!    Tessera identity in annotations. Reuses the media-type constants from [`crate::oci`].
-//! 3. **S3/MinIO prefix layout** ([`prefix_layout`]) — a pure layout helper returning
+//! 3. **S3 prefix layout** ([`prefix_layout`]) — a pure layout helper returning
 //!    `(object_key, member_reference)` pairs (`<prefix>/<id>.tsra` + `<prefix>/collection.json`).
 //!    The prefix of N independently range-readable `.tsra` objects IS the collection on S3.
 //!
@@ -211,7 +211,7 @@ pub enum LayoutKind {
     Catalog,
 }
 
-/// Project the collection onto an S3/MinIO key prefix — pure layout, no I/O. Returns
+/// Project the collection onto an S3 key prefix — pure layout, no I/O. Returns
 /// `(object_key, member_reference)` pairs in declared member order, then a final
 /// `("<prefix>/collection.json", <collection_id>)` for the catalog descriptor. A product member is a
 /// `<prefix>/<id>.tsra` object; a **sub-collection** member is a `<prefix>/<id>.collection.json`

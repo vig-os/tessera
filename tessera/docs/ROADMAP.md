@@ -5,12 +5,14 @@ passes") and the RFC ("what it is"). No time/effort estimates — work is agent-
 unit that matters is **dependency order** (what unblocks what), not dev-weeks. Status: ✓/◑/○.
 
 ## Critical path (the dependency spine — do in this order)
+
 ```
 P0 ADRs ─▶ P1 core ─▶ P2 read-API ─▶ P3 io(write) ─▶ P4 conformance ═▶ v0.1
   │                                                        │
   └─ canonical-JSON + identity + container-spec            └─▶ P5 ingest ─▶ P6 integrity/dist ═▶ v0.3
      poison every fixture if deferred → FIRST                              └─▶ P7 bindings/ops ═▶ v0.5 ─▶ P8 stabilize ═▶ v1.0
 ```
+
 **Hard orderings:** canonical-JSON+identity (#20) before *any* hashing/fixtures · read-API (#21b)
 before the write-engine (else reader-hostile) · container spec (#22) before layout/read ·
 conformance corpus (#21c) gates v1.0.
@@ -24,8 +26,8 @@ conformance corpus (#21c) gates v1.0.
 | **P3** | `tessera-io` write engine | S5 zarrs backend; S17 streaming (fragment-append · hash-on-write · incremental Merkle · crash-recovery to watermark); S3 chunk-Merkle integrity tree; container writer; observability (`tracing` on watermarks) | acq→sealed roundtrip; crash-recovery resumes; §D perf-SLA met |
 | **P4** | Conformance + CLI → **v0.1** | #21c conformance corpus + `SPEC.md`; `tessera-cli` (pack/unpack/verify/inspect); perf-SLA CI gates; S6 object-store range-read | 4 release gates green (conformance · roundtrip · SLA · determinism) |
 | **P5** | Ingest → **v0.2/v0.3** | S9 DICOM (files/DICOMweb/DIMSE, PS3.15 verify, lossless tags, rescale/units, egress); then GE-HDF5 · Siemens · raw `.dat`/`.BLF` · NIfTI; S14 cross-shape query demo | lossless DICOM roundtrip + egress; golden DICOM corpus |
-| **P6** | Integrity & distribution → **v0.3** | S16 signing (cosign minimal → source-rooted chain-verify); WORM/Object-Lock; OCI artifact mapping; RO-Crate/DataCite/tessera-index exports | chain-of-custody verify; OCI push/pull; WORM enforced on MinIO |
-| **P7** | Bindings & ops → **v0.5** | `tessera-py` (**pyo3 wrapping the core** — same engine, not a reimpl); `tessera-wasm` (**Rust→WASM** for TS/browser readers); reference podman-compose stack (zot+MinIO+InvenioRDM+cosign); migration tooling (`schema diff/validate`); format-spec semver policy | Python/TS parity passes conformance; ref-stack smoke test |
+| **P6** | Integrity & distribution → **v0.3** | S16 signing (cosign minimal → source-rooted chain-verify); WORM/Object-Lock; OCI artifact mapping; RO-Crate/DataCite/tessera-index exports | chain-of-custody verify; OCI push/pull; WORM enforced on S3 |
+| **P7** | Bindings & ops → **v0.5** | `tessera-py` (**pyo3 wrapping the core** — same engine, not a reimpl); `tessera-wasm` (**Rust→WASM** for TS/browser readers); reference podman-compose stack (zot+versitygw+InvenioRDM+cosign); migration tooling (`schema diff/validate`); format-spec semver policy | Python/TS parity passes conformance; ref-stack smoke test |
 | **P8** | Spec stabilization → **v1.0** | **independent reader** — from `SPEC.md` only, not linking the Rust (see note below); cross-version determinism; freeze `tessera-1.0`; deprecation policy | independent reader passes corpus; 12 mo zero-breaking since v0.5 |
 
 ## The v1.0 independent-reader gate (why bindings don't count)

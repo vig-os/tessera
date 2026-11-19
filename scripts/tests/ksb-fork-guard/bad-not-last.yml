@@ -1,0 +1,8 @@
+# Fixture for scripts/check-ksb-fork-guard.sh --self-test: guard present but a further branch follows the ksb label (must FAIL)
+on:  # yamllint disable-line rule:truthy
+  pull_request:
+jobs:
+  j:
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-small' || 'ubuntu-latest' }}
+    steps:
+      - run: "true"

@@ -1,0 +1,282 @@
+{
+  "product": "gpet-sim2listmode:listmode-singles",
+  "status": "proposed (#801)",
+  "tables": {
+    "listmode_singles": {
+      "sequence_key": [],
+      "order": "producer",
+      "keys": [],
+      "references": [
+        {
+          "columns": [
+            "source_type",
+            "source_event_id"
+          ],
+          "to": {
+            "scope": "source(g4ring_output)",
+            "block": "events",
+            "columns": [
+              "event_id"
+            ]
+          },
+          "note": "source_event_id is remapped by the source_files offsets; resolving it needs them"
+        }
+      ],
+      "columns": [
+        {
+          "name": "edep_keV",
+          "dtype": "f4",
+          "description": "Single energy",
+          "unit": "keV"
+        },
+        {
+          "name": "crystal_id",
+          "dtype": "u4",
+          "description": "GDML copy number",
+          "unit": "1"
+        },
+        {
+          "name": "hit_type",
+          "dtype": "u2",
+          "description": "0 prompt, 1 annihilation 1, 2 annihilation 2",
+          "unit": "1"
+        },
+        {
+          "name": "nHits",
+          "dtype": "u2",
+          "description": "Aggregated Geant4 steps; NULL when not recorded",
+          "unit": "1",
+          "nullable": true
+        },
+        {
+          "name": "absolute_time_ps",
+          "dtype": "f8",
+          "description": "Acquisition time of the single (Poisson clock)",
+          "unit": "ps"
+        },
+        {
+          "name": "relative_time_ps",
+          "dtype": "f8",
+          "description": "Time since the source event start",
+          "unit": "ps"
+        },
+        {
+          "name": "source_event_id",
+          "dtype": "u8",
+          "description": "Event id remapped to be unique within its source",
+          "unit": "1"
+        },
+        {
+          "name": "source_type",
+          "dtype": "u2",
+          "description": "0 intrinsic, 1..N tracer index",
+          "unit": "1"
+        },
+        {
+          "name": "source_x_mm",
+          "dtype": "f4",
+          "description": "Source position of the event (x)",
+          "unit": "mm"
+        },
+        {
+          "name": "source_y_mm",
+          "dtype": "f4",
+          "description": "Source position of the event (y)",
+          "unit": "mm"
+        },
+        {
+          "name": "source_z_mm",
+          "dtype": "f4",
+          "description": "Source position of the event (z)",
+          "unit": "mm"
+        },
+        {
+          "name": "n_compton",
+          "dtype": "u1",
+          "description": "Compton scatters; NULL when not recorded",
+          "unit": "1",
+          "nullable": true
+        },
+        {
+          "name": "n_rayleigh",
+          "dtype": "u1",
+          "description": "Rayleigh scatters; NULL when not recorded",
+          "unit": "1",
+          "nullable": true
+        },
+        {
+          "name": "pos_x_mm",
+          "dtype": "f4",
+          "description": "Energy-weighted position; NULL when the input has none (x)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "pos_y_mm",
+          "dtype": "f4",
+          "description": "Energy-weighted position; NULL when the input has none (y)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "pos_z_mm",
+          "dtype": "f4",
+          "description": "Energy-weighted position; NULL when the input has none (z)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "annih_x_mm",
+          "dtype": "f4",
+          "description": "Annihilation vertex (opt-in); NULL when not recorded (x)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "annih_y_mm",
+          "dtype": "f4",
+          "description": "Annihilation vertex (opt-in); NULL when not recorded (y)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "annih_z_mm",
+          "dtype": "f4",
+          "description": "Annihilation vertex (opt-in); NULL when not recorded (z)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "first_x_mm",
+          "dtype": "f4",
+          "description": "Earliest-deposit position (opt-in); NULL when not recorded (x)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "first_y_mm",
+          "dtype": "f4",
+          "description": "Earliest-deposit position (opt-in); NULL when not recorded (y)",
+          "unit": "mm",
+          "nullable": true
+        },
+        {
+          "name": "first_z_mm",
+          "dtype": "f4",
+          "description": "Earliest-deposit position (opt-in); NULL when not recorded (z)",
+          "unit": "mm",
+          "nullable": true
+        }
+      ]
+    },
+    "source_files": {
+      "sequence_key": [
+        "source",
+        "file_index"
+      ],
+      "keys": [
+        [
+          "source",
+          "file_index"
+        ]
+      ],
+      "references": [],
+      "columns": [
+        {
+          "name": "source",
+          "dtype": "str",
+          "description": "intrinsic | tracers/<name>",
+          "unit": "1"
+        },
+        {
+          "name": "file_index",
+          "dtype": "u4",
+          "description": "Position of the shard in the source's input list",
+          "unit": "1"
+        },
+        {
+          "name": "path",
+          "dtype": "str",
+          "description": "Shard path as given to the run",
+          "unit": "1"
+        },
+        {
+          "name": "event_id_offset",
+          "dtype": "u8",
+          "description": "Offset added to the shard's event ids",
+          "unit": "1"
+        },
+        {
+          "name": "sha256",
+          "dtype": "str",
+          "description": "SHA-256 of the shard",
+          "unit": "1"
+        }
+      ]
+    },
+    "decay_channels": {
+      "sequence_key": [
+        "tracer",
+        "channel"
+      ],
+      "keys": [
+        [
+          "tracer",
+          "channel"
+        ]
+      ],
+      "references": [],
+      "columns": [
+        {
+          "name": "tracer",
+          "dtype": "str",
+          "description": "Tracer name",
+          "unit": "1"
+        },
+        {
+          "name": "channel",
+          "dtype": "u2",
+          "description": "Channel index",
+          "unit": "1"
+        },
+        {
+          "name": "intensity",
+          "dtype": "f8",
+          "description": "Branching intensity",
+          "unit": "1"
+        },
+        {
+          "name": "tau_ps",
+          "dtype": "f8",
+          "description": "Lifetime",
+          "unit": "ps"
+        }
+      ]
+    },
+    "hit_type_counts": {
+      "sequence_key": [
+        "hit_type"
+      ],
+      "keys": [
+        [
+          "hit_type"
+        ]
+      ],
+      "references": [],
+      "columns": [
+        {
+          "name": "hit_type",
+          "dtype": "u2",
+          "description": "hit_type value",
+          "unit": "1"
+        },
+        {
+          "name": "count",
+          "dtype": "u8",
+          "description": "Singles of that hit_type",
+          "unit": "1"
+        }
+      ]
+    }
+  }
+}

@@ -59,6 +59,47 @@ fn corpus_packs_deterministically_and_verifies() {
     }
 }
 
+/// A fresh `pack` of every fixture is **byte-identical** to its committed `corpus/files/<name>.tsra`.
+///
+/// The golden triple pins the manifest, and `corpus_packs_deterministically_and_verifies` pins
+/// same-build determinism, but neither sees the container framing: the local headers, the central
+/// directory and the zip64 records that the `zip` crate writes around the sealed bytes. A `zip`
+/// upgrade or an entry-option change that reframes the archive keeps every hash and still verifies,
+/// yet changes the file an independent reader consumes. This is the gate that catches it (#588, the
+/// zip 2 → 9 upgrade, passed it unchanged). The other writers are pinned to `pack` byte-for-byte by
+/// the `pack_streaming_*` tests in `container.rs`, so they inherit it.
+///
+/// If this fails after an intended format change, regenerate with
+/// `cargo run -p tessera-io --example gen_corpus_files` and treat it as a corpus event (ADR-0022).
+#[test]
+fn committed_corpus_files_are_byte_identical_to_a_fresh_pack() {
+    let dir = tempfile::tempdir().unwrap();
+    let committed = concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/files");
+    let all = fixtures();
+    assert!(
+        !all.is_empty(),
+        "no conformance fixtures: the loop below would prove nothing"
+    );
+    for f in all {
+        let fresh = dir.path().join(format!("{}.tsra", f.name));
+        tessera_io::pack(&f.manifest, &f.payloads, &fresh).unwrap();
+        let want_path = std::path::Path::new(committed).join(format!("{}.tsra", f.name));
+        let want = std::fs::read(&want_path)
+            .unwrap_or_else(|e| panic!("read committed corpus file '{}': {e}", f.name));
+        let got = std::fs::read(&fresh).unwrap();
+        assert!(
+            got == want,
+            "fixture '{}': a fresh pack ({} bytes) differs from the committed {} ({} bytes), first \
+             difference at byte {:?} — the container framing moved",
+            f.name,
+            got.len(),
+            want_path.display(),
+            want.len(),
+            got.iter().zip(&want).position(|(a, b)| a != b)
+        );
+    }
+}
+
 /// The committed `corpus/files/<name>.tsra` test vectors (what an independent v1.0 reader consumes)
 /// must reproduce the golden triple and verify on open. Regenerate after an intended format change:
 /// `cargo run -p tessera-io --example gen_corpus_files`.

@@ -4,7 +4,7 @@ A sealed `.tsra` distributes two ways, both without unpacking it: as an **OCI ar
 addressing) and via **cloud range-reads** (fetch only the blocks a query needs).
 
 > **Note — the snippets in this chapter are *not* executed in-page.** They need a live OCI registry or an
-> S3/MinIO bucket, which a hermetic doc build can't provide. Each is exercised end-to-end by a Nix flake
+> S3 bucket, which a hermetic doc build can't provide. Each is exercised end-to-end by a Nix flake
 > check instead (named below), so the guarantee is tested — just not inline. This is the "referenced
 > check" evidence form from the [Introduction](./intro.md).
 
@@ -32,6 +32,6 @@ $ tessera inspect s3://bucket/studies/duplet-07.tsra    # env-resolved AWS_* / T
 $ tessera verify https://host/path/duplet-07.tsra
 ```
 
-*Referenced check:* `minio-range-read` — spins up loopback MinIO and proves, via a GET counter, that
+*Referenced check:* `s3-range-read` — spins up a loopback versitygw S3 server and proves, via a GET counter, that
 prune-before-fetch skips the non-matching product's data block entirely. Both are behind the
 `--features cloud` build flag; the default build and the WASM core are unaffected.

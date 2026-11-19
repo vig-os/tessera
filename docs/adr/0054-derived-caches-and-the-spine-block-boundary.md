@@ -3,7 +3,7 @@
 Status: **Proposed** (2026-08-07). Extends ADR-0042 (non-sealed `aux/` members) with a general
 rule for *derived columnar caches*, and draws the line ADR-0022 §6 left implicit: which metadata
 belongs in the **sealed JSON spine** versus a **Vortex table block**. Motivated by the RDM /
-catalog design discussion (#324 follow-on): "how does a collection present in a MinIO S3 research
+catalog design discussion (#324 follow-on): "how does a collection present in an S3 research
 data store, and should a `.tsra` carry its metadata pre-shaped as Vortex for fast ingestion?"
 
 ## Context — three questions that are one question
@@ -14,7 +14,7 @@ A research-data-management layer over collections raises what look like three se
    manifests to answer "which products, what patient, what role".
 2. **Per-collection query** — a "SQL over a collection" that joins/unions member metadata (and
    eventually member *data*) into one queryable surface.
-3. **RDM presentation** — how a collection materialises in an S3/MinIO store: via mutable object
+3. **RDM presentation** — how a collection materialises in an S3 store: via mutable object
    **tags**, or as a **projects→items table**.
 
 And underneath them a fourth, sharper one surfaced in design review: **should the metadata be
@@ -99,7 +99,7 @@ ADR-0042 sealed/unsealed line, extended from "one file" to "the whole store."
 
 ## Decision 3 — RDM presentation is a content-addressed table, not object tags
 
-A collection materialises in S3/MinIO as **content-addressed objects + a rebuildable catalog
+A collection materialises in S3 as **content-addressed objects + a rebuildable catalog
 table**, *not* as object tags.
 
 - **Object tags are disqualified for identity/provenance.** They are capped (~10/object), flat,

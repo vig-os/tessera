@@ -1,0 +1,267 @@
+Walking a chain, and reading the recipe at each hop (#452). `inspect` answers "who made THIS product";
+these two verbs answer the chain question ADR-0058 §5 actually poses — what identity did this inherit,
+from where, and what recipe made each hop. Tracked inputs: `spec.toml` + `daq.cfg` + `raw.l64` + `vol.bin`.
+
+# === A three-hop chain: the DAQ config, the acquisition it configured, the recon derived from that.
+#     Each `derived_from` edge pins its parent's seal, which is what makes the chain walkable. ===
+
+```
+$ tessera ingest --spec spec.toml --out out
+ingested collection blake3:abdeaaa09e729e2d4d5062d52581d6b56a2befbd620c2ddaeb471d54160909b6 (3 members) -> out
+  - blake3:cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c -> blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+  - blake3:ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81 -> blake3_ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
+  - blake3:db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def -> blake3_db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
+
+```
+
+# === `generation.config_ref` (ADR-0058 §2) is a digest, not a copy: it points at a config block the
+#     product already carries. Plain `inspect` prints the digest and stops there. ===
+
+```
+$ tessera inspect out/blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+tessera [..] · product=blob
+id            blake3:cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c
+name          daq-config
+timestamp     2024-01-01T00:00:00Z
+producer      ge-listmode-daq/3.2
+  git_repo    vig-os/ge-daq
+  git_commit  0855f5f
+  dirty       false
+generation    config_ref blake3:b1ab9e2dd874…
+content_hash  blake3:5bc5d3de167d7ec0ee4e87b0ee60e9944a93b48fab00d84c12f5ccb92abf69e6
+manifest_hash blake3:6017b90ede78d7921c566ece859366b5f8091ee0866fc9fdcbc24a27615e1a2c
+blocks        1
+  - data                 Blob blake3:b1ab9e2dd8744279805a000f73ca5a213f306a336cfbcf4ceb43c9338a764046
+sources       2
+  - ingested_from <- daq.cfg  [blake3:b1ab9e2dd874…]
+  - ingested_via_spec <- spec.toml  [blake3:6b12472b3bd2…]
+
+```
+
+# === `--resolve-config` dereferences it, so the recipe reads end to end instead of ending at a hash
+#     the operator has to chase by hand. A small text config is printed inline; a large or non-UTF-8
+#     one is named with the `tessera extract` command that streams it (nothing is buffered to decide
+#     which — the Blob spec records its own size). ===
+
+```
+$ tessera inspect --resolve-config out/blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+tessera [..] · product=blob
+id            blake3:cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c
+name          daq-config
+timestamp     2024-01-01T00:00:00Z
+producer      ge-listmode-daq/3.2
+  git_repo    vig-os/ge-daq
+  git_commit  0855f5f
+  dirty       false
+generation    config_ref blake3:b1ab9e2dd874…
+  config      block 'data' (daq.cfg) · 245 B
+  media_type  text/plain
+  │ # Synthetic DAQ acquisition config — the vendor file a `config_ref` points at.
+  │ # Not real acquisition data; every value is illustrative.
+  │ detector_ring = LYSO4x9
+  │ energy_window_keV = 425-650
+  │ coincidence_window_ns = 4.5
+  │ tof_cal_ref = cal-2024-01
+content_hash  blake3:5bc5d3de167d7ec0ee4e87b0ee60e9944a93b48fab00d84c12f5ccb92abf69e6
+manifest_hash blake3:6017b90ede78d7921c566ece859366b5f8091ee0866fc9fdcbc24a27615e1a2c
+blocks        1
+  - data                 Blob blake3:b1ab9e2dd8744279805a000f73ca5a213f306a336cfbcf4ceb43c9338a764046
+sources       2
+  - ingested_from <- daq.cfg  [blake3:b1ab9e2dd874…]
+  - ingested_via_spec <- spec.toml  [blake3:6b12472b3bd2…]
+
+```
+
+# === `--json` is exactly the sealed manifest, so a resolved config is not part of it. Asking for both
+#     is refused rather than silently dropping one flag. ===
+
+```
+$ tessera inspect --json --resolve-config out/blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+? 1
+error: invalid product: --resolve-config cannot be combined with --json: --json is exactly the sealed manifest, and the resolved config is not part of it. Use one or the other.
+
+```
+
+# === Now the chain. `provenance` walks `derived_from` back to the roots, printing the producer and the
+#     recipe for each hop. `[pinned]` means the parent on disk is the exact version the edge committed
+#     to. `[external leaf]` is where provenance is SUPPOSED to end — a vendor path or spec file, never a
+#     Tessera product — so those are not gaps. ===
+
+```
+$ tessera provenance out/blake3_db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
+blob · recon-01  [blake3:28d22d3bd83c…]
+  ↳ ingested_from vol.bin  [external leaf]
+      source    blake3:629eccf35341…
+  ↳ derived_from blob · daq-raw  [pinned]
+      file      out/blake3_ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
+      producer  ge-listmode-daq/3.2 (0855f5f)
+      recipe    2 config keys
+    ↳ ingested_from raw.l64  [external leaf]
+        source    blake3:3258a47581e9…
+    ↳ derived_from blob · daq-config  [pinned]
+        file      out/blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+        producer  ge-listmode-daq/3.2 (0855f5f)
+        recipe    config_ref blake3:b1ab9e2dd874…
+      ↳ ingested_from daq.cfg  [external leaf]
+          source    blake3:b1ab9e2dd874…
+      ↳ ingested_via_spec spec.toml  [external leaf]
+          source    blake3:6b12472b3bd2…
+    ↳ ingested_via_spec spec.toml  [external leaf]
+        source    blake3:6b12472b3bd2…
+  ↳ ingested_via_spec spec.toml  [external leaf]
+      source    blake3:6b12472b3bd2…
+
+8 hop(s) · 6 external leaf/leaves · chain complete
+
+```
+
+# === Hand the recon off on its own (`publish` = a self-contained, history-free artifact) and the chain
+#     can no longer be proven FROM THE ARTIFACT ALONE — the parent simply is not there to check
+#     against. That is rendered, not raised: exit stays 0, because a chain you cannot resolve from one
+#     directory is the normal case, and a verb that failed on it would be useless in a pipeline. ===
+
+```
+$ tessera init repo
+initialized tessera repository at repo
+
+```
+
+```
+$ tessera import repo out/blake3_db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
+imported lineage blake3:db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def
+  version blake3:28d22d3bd83cac04982d70eabdadd04f97ad24bd0eced6590d90d97245e73ad1
+
+```
+
+```
+$ tessera publish repo blake3:28d22d3bd83cac04982d70eabdadd04f97ad24bd0eced6590d90d97245e73ad1 handover.tsra
+published blake3:28d22d3b… → handover.tsra
+  history-free, snapshot_of blake3:28d22d3b…
+
+```
+
+```
+$ tessera provenance handover.tsra
+blob · recon-01  [blake3:56fed17d0571…]
+  ↳ ingested_from vol.bin  [external leaf]
+      source    blake3:629eccf35341…
+  ↳ derived_from blake3:ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81  [unresolved]
+      pins      blake3:61297daacb3d… — no product with this lineage was found (try --search / --collection)
+  ↳ ingested_via_spec spec.toml  [external leaf]
+      source    blake3:6b12472b3bd2…
+  ↳ snapshot_of blake3:28d22d3bd83cac04982d70eabdadd04f97ad24bd0eced6590d90d97245e73ad1  [version not present]
+      version   blake3:28d22d3bd83c… — not present (publish drops history by design)
+
+4 hop(s) · 2 external leaf/leaves · 1 gap(s) — chain INCOMPLETE
+
+```
+
+# === `--require-complete` is the gate mode: same render, nonzero exit. Use it in CI; leave it off to
+#     look at a chain. ===
+
+```
+$ tessera provenance --require-complete handover.tsra
+? 1
+blob · recon-01  [blake3:56fed17d0571…]
+  ↳ ingested_from vol.bin  [external leaf]
+      source    blake3:629eccf35341…
+  ↳ derived_from blake3:ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81  [unresolved]
+      pins      blake3:61297daacb3d… — no product with this lineage was found (try --search / --collection)
+  ↳ ingested_via_spec spec.toml  [external leaf]
+      source    blake3:6b12472b3bd2…
+  ↳ snapshot_of blake3:28d22d3bd83cac04982d70eabdadd04f97ad24bd0eced6590d90d97245e73ad1  [version not present]
+      version   blake3:28d22d3bd83c… — not present (publish drops history by design)
+
+4 hop(s) · 2 external leaf/leaves · 1 gap(s) — chain INCOMPLETE
+error: invalid product: provenance chain for handover.tsra is incomplete (--require-complete): some parents resolved to a different version or were not found. Point --search / --collection at them, or drop --require-complete to see the chain anyway.
+
+```
+
+# === Point it at where the parents live and the gap closes. `snapshot_of` now resolves too: it names a
+#     VERSION rather than a lineage, and the walk reports it without descending through it — a
+#     published artifact points back at its own lineage, so recursing would look like a cycle. ===
+
+```
+$ tessera provenance --search out handover.tsra
+blob · recon-01  [blake3:56fed17d0571…]
+  ↳ ingested_from vol.bin  [external leaf]
+      source    blake3:629eccf35341…
+  ↳ derived_from blob · daq-raw  [pinned]
+      file      out/blake3_ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
+      producer  ge-listmode-daq/3.2 (0855f5f)
+      recipe    2 config keys
+    ↳ ingested_from raw.l64  [external leaf]
+        source    blake3:3258a47581e9…
+    ↳ derived_from blob · daq-config  [pinned]
+        file      out/blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+        producer  ge-listmode-daq/3.2 (0855f5f)
+        recipe    config_ref blake3:b1ab9e2dd874…
+      ↳ ingested_from daq.cfg  [external leaf]
+          source    blake3:b1ab9e2dd874…
+      ↳ ingested_via_spec spec.toml  [external leaf]
+          source    blake3:6b12472b3bd2…
+    ↳ ingested_via_spec spec.toml  [external leaf]
+        source    blake3:6b12472b3bd2…
+  ↳ ingested_via_spec spec.toml  [external leaf]
+      source    blake3:6b12472b3bd2…
+  ↳ snapshot_of blob · recon-01  [pinned]
+      file      out/blake3_db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
+      producer  vig-recon/1.4 (beac041)
+      recipe    3 config keys
+
+9 hop(s) · 6 external leaf/leaves · chain complete
+
+```
+
+# === The same walk as a machine-readable document, for a gate that needs more than an exit code.
+#     `outcome` is a stable token per hop; `complete` and `gaps` are the verdict. ===
+
+```
+$ tessera provenance --json --depth 1 handover.tsra
+{
+  "root": {
+    "id": "blake3:db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def",
+    "manifest_hash": "blake3:56fed17d05713ec0b89c34fc6ebd1534db22ec90e98a569a892614406261bf2e",
+    "product": "blob",
+    "name": "recon-01"
+  },
+  "complete": false,
+  "gaps": 1,
+  "corrupt_candidates": [],
+  "hops": [
+    {
+      "depth": 1,
+      "role": "ingested_from",
+      "reference": "vol.bin",
+      "outcome": "external_leaf",
+      "revisited": false,
+      "pinned": "blake3:629eccf353410b98f4dc48b9eff4c721686179a7ab7c313040f3f0b33ae8cd2d"
+    },
+    {
+      "depth": 1,
+      "role": "derived_from",
+      "reference": "blake3:ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81",
+      "outcome": "unresolved",
+      "revisited": false,
+      "pinned": "blake3:61297daacb3d098025a2b08238cf956153abd985dbb345f0c30feb64c20dfa35"
+    },
+    {
+      "depth": 1,
+      "role": "ingested_via_spec",
+      "reference": "spec.toml",
+      "outcome": "external_leaf",
+      "revisited": false,
+      "pinned": "blake3:6b12472b3bd2bc35d9b14c31518e81c407531c791103006aab51ef6c26a3fb61"
+    },
+    {
+      "depth": 1,
+      "role": "snapshot_of",
+      "reference": "blake3:28d22d3bd83cac04982d70eabdadd04f97ad24bd0eced6590d90d97245e73ad1",
+      "outcome": "version_not_present",
+      "revisited": false,
+      "pinned": "blake3:28d22d3bd83cac04982d70eabdadd04f97ad24bd0eced6590d90d97245e73ad1"
+    }
+  ]
+}
+
+```

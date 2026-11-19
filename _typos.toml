@@ -1,17 +1,72 @@
 # Project allowlist for `typos` (crate-ci/typos, wired in .pre-commit-config.yaml).
 # Medical-imaging domain vocabulary that typos mis-flags as misspellings — these are NOT typos.
+#
+# This file shadows the devkit-shipped `.typos.toml` (typos' discovery order is
+# `typos.toml` → `_typos.toml` → `.typos.toml`), so per MIGRATION.md the devkit
+# template's own entries are folded in below rather than inherited.
 
 [files]
 # Binary conformance test vectors — typos' binary sniffing usually skips these, but any byte run
 # that happens to decode as UTF-8 words gets spell-checked (a widened-payload .tsra tripped on
 # "ba"). They are not text; exclude them structurally instead of per-lucky-file.
-extend-exclude = ["tessera/corpus/files/*.tsra"]
+extend-exclude = [
+  "tessera/corpus/files/*.tsra",
+  "tessera/crates/tessera-io/tests/fixtures/*.tsra",
+]
+
+[default]
+extend-ignore-re = [
+  # blake3 digests in CLI golden output are hex; any 3+ char run that spells an
+  # English-ish word (e.g. "afe" inside `blake3:827e49afe82b…`) gets flagged.
+  "blake3:[0-9a-f]+",
+  # The `--exclude` typo test (tessera-ingest `arrow_table.rs`) has to *contain* misspellings: it proves
+  # that `--exclude patient.nmae` is rejected rather than silently sealing the column the operator
+  # believed they had dropped. Scoped to these exact strings instead of allowlisting `nmae`/`paitent` as
+  # words, so a real occurrence of either anywhere else still fails the gate.
+  "patient\\.nmae",
+  "paitent\\.mrn",
+]
+
 [default.extend-words]
 OT = "OT"      # DICOM modality code: "Other" (0008,0060)
 PN = "PN"      # DICOM value representation: Person Name
 OME = "OME"    # Open Microscopy Environment (OME-Zarr / OME-NGFF)
 
+# ── Project vocabulary ──
+unparseable = "unparseable"  # the spelling used throughout the error/doc prose
+intoto = "intoto"            # in-toto attestation format (`*.intoto.jsonl`)
+Hashi = "Hashi"              # "HashiCorp", split at the CamelCase boundary
+arange = "arange"            # `np.arange` (numpy API name)
+Fo = "Fo"                    # "FoR" — Frame-of-Reference encoding
+COSE = "COSE"                # CBOR Object Signing and Encryption (RFC 9052): COSE_Sign1, the `coset` crate
+# FAIR acronym written with bold markers: `**A**ccessible` tokenizes to
+# "ccessible". Allowlisted deliberately — the ADR/docs prose stays as written,
+# the entry is NOT a typo we failed to fix.
+ccessible = "ccessible"
+# ADR-0056 §7's identifying-column-name heuristic matches the spellings PHI columns actually carry in
+# the wild, and `patname` / `pat_name` is one of them (ADR-0056 §7 lists the family: MRN / patient id /
+# name / DOB / accession / UID). It is a needle in a match list, not prose — and NOT "pathname".
+patname = "patname"
+
+# ── devkit template entries (folded in; this file shadows .typos.toml) ──
+# Shell scripting: sed label syntax uses 'ba' (branch to label 'a')
+ba = "ba"
+# CVE policy term (#637): a finding "unexcepted" = not in the exception register
+unexcepted = "unexcepted"
+# version-check.sh duration placeholder (#759): 'Nd' = N days (cf. Nw/Nh/Nm)
+# Also covers this repo's "coupled-ND" / `AffineNd` referencing vocabulary.
+Nd = "Nd"
+# podman rootless-networking helper package name (#1106), not a misspelling
+passt = "passt"
+# The English prefix in hyphenated compounds: `mis-read`, `mis-parse`,
+# `mis-attributes`.
+mis = "mis"
+
 [default.extend-identifiers]
 aspec = "aspec"           # "array spec" local (tessera-io sparse-encoding spike example)
 flate2 = "flate2"         # crates.io crate name (gzip/deflate) — typos reads the "flate" stem as "flat"
 affine_nd = "affine_nd"   # ADR-0032 `Transform` taxonomy: `affine_1d` (1-D) / `affine_nd` (N-D)
+# extend-identifiers is a whole-identifier exact match, so `affine_nd` above
+# covers neither the enum variant nor the test that embed the same stem.
+AffineNd = "AffineNd"     # `Transform::AffineNd` variant (tessera-core referencing)
+affine_nd_from_world_frame_maps_voxel_to_world = "affine_nd_from_world_frame_maps_voxel_to_world"

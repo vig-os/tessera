@@ -8,9 +8,12 @@ tables — plus the typed-error path and a numpy write→read roundtrip. Driven 
 flake check (the assembled `tessera/` package — pure-Python `__init__.py` + `_native.so` — on PYTHONPATH).
 """
 
+import io
 import pathlib
+import struct
 import sys
 import tempfile
+import zipfile
 
 import numpy as np
 import polars as pl
@@ -70,6 +73,60 @@ for f in files:
             assert df.height == proj.shape[0]
     verified += 1
 
+
+def hide_member_before_central_directory(tsra: bytes) -> bytes:
+    """`tsra` with a complete local entry (`manifest.json`, forged) hidden in front of the central
+    directory, and every end-record pointer moved past it. No central-directory record mentions it, so
+    `zipfile` reads the archive unchanged; a streaming reader walking the local headers lists it as one
+    more member (GHSA-m665-v7pm-7grj, SPEC §6)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("manifest.json", b'{"forged": true}')
+    tiny = buf.getvalue()
+    tiny_eocd = tiny.rindex(b"PK\x05\x06")
+    hidden = tiny[
+        : struct.unpack_from("<I", tiny, tiny_eocd + 16)[0]
+    ]  # local header + bytes only
+
+    out = bytearray(tsra)
+    eocd = out.rindex(b"PK\x05\x06")
+    zip64 = eocd >= 20 and out[eocd - 20 : eocd - 16] == b"PK\x06\x07"
+    if zip64:
+        record = struct.unpack_from("<Q", out, eocd - 20 + 8)[0]
+        cd_start = struct.unpack_from("<Q", out, record + 48)[0]
+    else:
+        cd_start = struct.unpack_from("<I", out, eocd + 16)[0]
+    k = len(hidden)
+    out[cd_start:cd_start] = hidden
+    eocd += k
+    if struct.unpack_from("<I", out, eocd + 16)[0] != 0xFFFFFFFF:
+        struct.pack_into("<I", out, eocd + 16, cd_start + k)
+    if zip64:
+        struct.pack_into("<Q", out, eocd - 20 + 8, record + k)
+        struct.pack_into("<Q", out, record + k + 48, cd_start + k)
+    return bytes(out)
+
+
+# `verify` is the full `tessera verify` pass, container rule included: a member hidden where only a
+# streaming reader looks is refused, though every block digest checks and `zipfile` sees nothing amiss.
+with tempfile.TemporaryDirectory() as td:
+    honest = files[0]
+    cloaked = pathlib.Path(td) / "cloaked.tsra"
+    cloaked.write_bytes(hide_member_before_central_directory(honest.read_bytes()))
+    with zipfile.ZipFile(honest) as a, zipfile.ZipFile(cloaked) as b:
+        assert a.namelist() == b.namelist(), "the central-directory view is unchanged"
+    r = tessera.open(
+        cloaked
+    )  # a cheap open reads only the tail: it does not walk local headers
+    for refuse in (r.verify, lambda: tessera.verify(cloaked)):
+        try:
+            refuse()
+            raise AssertionError(
+                "verified an archive a streaming zip reader reads differently"
+            )
+        except tessera.TesseraError as e:
+            assert "not a canonical .tsra" in str(e), e
+
 # typed-error path: a missing file raises TesseraError, not a bare exception
 try:
     tessera.open(corpus / "does_not_exist.tsra")
@@ -102,20 +159,71 @@ with tempfile.TemporaryDirectory() as td:
     assert rr.table("events")["idx"].to_list() == idx.tolist()
     assert rr.table_arrow("events").column("en").to_pylist() == en.tolist()
 
+# #734: block names are unique within a product, so packing two blocks of one name is refused
+# with the typed reason, and nothing is written.
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "dup.tsra"
+    b = tessera.Builder("recon", "dup", "duplicate block name", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    try:
+        b.pack(str(out))
+        raise AssertionError("packed a product listing block 'volume' twice")
+    except tessera.TesseraError as e:
+        assert "listed more than once" in str(e), f"refused for the wrong reason: {e}"
+    assert not out.exists(), "a refused pack must write nothing"
+
+# #886: a sealed JSON number is a double (I-JSON, RFC 7493 §2.2), so an integer beyond ±(2^53−1)
+# can't be sealed exactly. Metadata refuses it with the fix to apply (write it as a string), naming
+# the value; nothing is written and nothing is converted. (`with_generation` refuses such an int
+# when it is passed: tests/provenance.py.)
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "big.tsra"
+    b = tessera.Builder("recon", "big", "integer beyond 2^53", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "CT"}')
+    b.set_field("daq_start_ns", "1730000000000000000")
+    try:
+        b.pack(str(out))
+        raise AssertionError("sealed an integer beyond 2^53")
+    except tessera.TesseraError as e:
+        want = (
+            "metadata.daq_start_ns = 1730000000000000000 is outside the range a sealed JSON number "
+            "can hold (±(2^53−1), I-JSON RFC 7493 §2.2)"
+        )
+        assert want in str(e) and "write it as a string" in str(e), str(e)
+    assert not out.exists(), "a refused pack must write nothing"
+# Written as a string, the same value seals and reads back exactly.
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "big-str.tsra"
+    b = tessera.Builder("recon", "big", "integer as a string", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "CT"}')
+    b.set_field("daq_start_ns", '"1730000000000000000"')
+    b.pack(str(out))
+    assert (
+        tessera.open(out).manifest()["metadata"]["daq_start_ns"]
+        == "1730000000000000000"
+    )
+
 # str + b1 columns through the ergonomic reads (#421): str crashed _ndarray
 # ("<str" is not a dtype) and b1 silently decoded as int8 instead of bool_.
-import struct
-
 els = ["He", "Li", "", "Beryllium"]  # empty string is the edge worth pinning
 framed = b"".join(struct.pack("<I", len(s.encode())) + s.encode() for s in els)
 flags = np.array([1, 0, 1, 1], dtype="<u1")
 
 with tempfile.TemporaryDirectory() as td:
     out = pathlib.Path(td) / "strcols.tsra"
-    b = tessera.Builder("recon", "sc", "str/b1 column roundtrip", "2024-01-01T00:00:00Z")
+    b = tessera.Builder(
+        "recon", "sc", "str/b1 column roundtrip", "2024-01-01T00:00:00Z"
+    )
     b.add_table(
         "props",
-        [("el", "str", framed), ("stable", "b1", flags.tobytes()), ("z", "u1", bytes([2, 3, 4, 4]))],
+        [
+            ("el", "str", framed),
+            ("stable", "b1", flags.tobytes()),
+            ("z", "u1", bytes([2, 3, 4, 4])),
+        ],
         None,
     )
     b.pack(str(out))
@@ -124,7 +232,9 @@ with tempfile.TemporaryDirectory() as td:
     rr.verify()
     cols = rr.table_dict("props")
     assert cols["el"].tolist() == els, f"str column mangled: {cols['el']!r}"
-    assert cols["stable"].dtype == np.bool_, f"b1 must decode as bool_, got {cols['stable'].dtype}"
+    assert cols["stable"].dtype == np.bool_, (
+        f"b1 must decode as bool_, got {cols['stable'].dtype}"
+    )
     assert cols["stable"].tolist() == [True, False, True, True]
     assert rr.table_arrow("props").column("el").to_pylist() == els
 

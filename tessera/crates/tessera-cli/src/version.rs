@@ -11,7 +11,6 @@
 use std::io::Write;
 use std::path::Path;
 
-use serde_json::Value;
 use tessera_core::provenance::Source;
 use tessera_core::{Error, Manifest, ProductBuilder, Result};
 use tessera_io::{pack, BlockPayload, Reader, Repository};
@@ -29,9 +28,9 @@ pub fn import(repo: &Path, tsra: &Path, out: &mut dyn Write) -> Result<()> {
     let mut r = Reader::open(tsra)?;
     let manifest = r.manifest().clone();
     let mut payloads = Vec::with_capacity(manifest.blocks.len());
-    for name in r.block_names() {
-        let bytes = r.read_block(&name)?;
-        payloads.push(BlockPayload::new(name, bytes));
+    for b in &manifest.blocks {
+        let bytes = r.read_block(&b.name)?;
+        payloads.push(BlockPayload::new(b.name.clone(), bytes));
     }
     let mh = repo.commit(&manifest.id, &manifest, &payloads)?;
     writeln!(out, "imported lineage {}", manifest.id).map_err(Error::from)?;
@@ -72,11 +71,7 @@ pub fn commit(
         ))
     })?;
     let parent = repo.get_manifest(&tip)?;
-    let mut b = ProductBuilder::from_manifest(&parent);
-
-    // Track live block names so a duplicate `--add-block` is rejected (start from the parent's blocks).
-    let mut names: std::collections::BTreeSet<String> =
-        parent.blocks.iter().map(|bl| bl.name.clone()).collect();
+    let mut b = ProductBuilder::from_manifest(&parent)?;
 
     // Removes first — manifest edit only; the data object is left for other versions / gc.
     for name in removes {
@@ -85,19 +80,21 @@ pub fn commit(
                 "--remove-block: no block '{name}' in this version"
             )));
         }
-        names.remove(name);
+        // A `{hash, stats}` chunk-index sidecar describes ONE data block and is bound to it only by
+        // name. Leaving `<name>.cidx` behind when `<name>` goes means the next
+        // `--add-block …:<name>` silently inherits it, and `tessera stats` would then serve the OLD
+        // block's statistics for the NEW block and label them exact. The sidecar is `class: derived`
+        // — regenerable from the data — so removing it with its block loses nothing (#347 review).
+        let sidecar = tessera_io::chunk_index::cidx_name(name);
+        b.remove_block(&sidecar);
     }
 
-    // Adds — copy an already-encoded block from another .tsra (file i/o, no re-encode).
+    // Adds — copy an already-encoded block from another .tsra (file i/o, no re-encode). A name the
+    // version already holds (or that two adds share) is refused by the seal below, with
+    // `Error::DuplicateBlockName`, before anything is stored: rename it, or --remove-block it first.
     let mut payloads = Vec::new();
     for spec in adds {
         let (new_ref, payload) = load_block(spec)?;
-        if !names.insert(new_ref.name.clone()) {
-            return Err(Error::Invalid(format!(
-                "--add-block: a block named '{}' already exists (rename, or --remove-block it first)",
-                new_ref.name
-            )));
-        }
         b.add_block_ref(new_ref);
         payloads.push(payload);
     }
@@ -107,9 +104,10 @@ pub fn commit(
         let (k, v) = kv
             .split_once('=')
             .ok_or_else(|| Error::Invalid(format!("--set expects key=value, got '{kv}'")))?;
-        let value =
-            serde_json::from_str::<Value>(v).unwrap_or_else(|_| Value::String(v.to_string()));
-        b.with_field(k, value);
+        b.with_field(
+            k,
+            tessera_core::canonical::parse_user_value(&format!("--set {k}"), v)?,
+        );
     }
 
     b.add_source(Source::new("supersedes", &tip).with_content_hash(&tip));
@@ -140,7 +138,7 @@ fn load_block(spec: &str) -> Result<(tessera_core::block::BlockRef, BlockPayload
             "--add-block expects [NAME=]SOURCE.tsra:BLOCK, got '{spec}'"
         ))
     })?;
-    let newname = newname.unwrap_or(srcblock).to_string();
+    let newname = tessera_core::block::BlockName::new(newname.unwrap_or(srcblock))?;
     let mut r = Reader::open(Path::new(path))?;
     let src_ref = r
         .manifest()
@@ -365,7 +363,7 @@ pub fn publish(
     let repo = Repository::open(repo)?;
     let src = repo.get_manifest(version)?;
     // from_manifest keeps id/blocks/metadata/derivation edges and drops the parent's supersedes chain.
-    let mut b = ProductBuilder::from_manifest(&src);
+    let mut b = ProductBuilder::from_manifest(&src)?;
     if !anonymous {
         b.add_source(Source::new("snapshot_of", version).with_content_hash(version));
     }
@@ -400,6 +398,9 @@ mod tests {
             }],
             rows: 3,
             row_index: None,
+            partition: None,
+            edition: None,
+            codec_profile: None,
         };
         let data = vec![("x".into(), ColumnData::U32(vec![1, 2, 3]))];
         let (block_ref, payload) = table_block("events", &spec, &data).unwrap();
@@ -421,6 +422,9 @@ mod tests {
             }],
             rows: u64::try_from(vals.len()).unwrap(),
             row_index: None,
+            partition: None,
+            edition: None,
+            codec_profile: None,
         };
         let data = vec![("v".into(), ColumnData::U32(vals.to_vec()))];
         let (br, payload) = table_block(block, &spec, &data).unwrap();
@@ -497,6 +501,56 @@ mod tests {
         let log_out = String::from_utf8(lbuf).unwrap();
         assert_eq!(log_out.lines().count(), 2);
         assert!(log_out.lines().next().unwrap().contains("(tip)"));
+    }
+
+    /// `--set k=<integer beyond ±(2^53−1)>` is refused with the fix (SPEC §1, #886): the value is
+    /// neither sealed approximately nor silently turned into a string, and no version is stored. The
+    /// error names the key as typed and quotes the typed text (`…993.0`, not the double it parses to).
+    #[test]
+    fn commit_set_refuses_an_integer_a_seal_cannot_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let tsra = dir.path().join("p.tsra");
+        write_tsra(&tsra);
+        init(&repo, &mut Vec::new()).unwrap();
+        let mut buf = Vec::new();
+        import(&repo, &tsra, &mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        let lineage = out
+            .lines()
+            .find_map(|l| l.strip_prefix("imported lineage "))
+            .unwrap()
+            .to_string();
+        let before = count_objects(&repo);
+        let set = |kv: &str| commit(&repo, &lineage, &[kv.into()], &[], &[], &mut Vec::new());
+        let err = set("daq_start_ns=1730000000000000000").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "--set daq_start_ns = 1730000000000000000 is outside the range a sealed JSON number \
+             can hold (±(2^53−1), I-JSON RFC 7493 §2.2): a sealed JSON number is an IEEE-754 \
+             double (RFC 8785 §3.2.2.3), which can't hold this integer exactly; write it as a \
+             string"
+        );
+        assert!(matches!(
+            set("daq_start_ns=9007199254740993.0"),
+            Err(Error::InexactInteger { path, value, .. })
+                if path == "--set daq_start_ns" && value == "9007199254740993.0"
+        ));
+        assert_eq!(
+            count_objects(&repo),
+            before,
+            "a refused commit stores nothing"
+        );
+        // The advice works: as a JSON string the value is sealed exactly.
+        set(r#"daq_start_ns="1730000000000000000""#).unwrap();
+        let r = Repository::open(&repo).unwrap();
+        let m = r
+            .get_manifest(&r.read_ref(&lineage).unwrap().unwrap())
+            .unwrap();
+        assert_eq!(
+            m.metadata.get("daq_start_ns"),
+            Some(&serde_json::json!("1730000000000000000"))
+        );
     }
 
     #[test]
@@ -632,6 +686,96 @@ mod tests {
         );
     }
 
+    /// Removing a block must take its chunk-index sidecar with it (#347 review).
+    ///
+    /// The `.cidx` is bound to its data block only by NAME. Leaving `volume.cidx` behind when
+    /// `volume` is removed means the very next `--add-block <other>:volume` silently inherits it,
+    /// and `tessera stats` would then serve the OLD volume's min/max/mean for the NEW block and
+    /// label them `exact: true`. This is the exact command sequence from the review:
+    ///
+    /// ```text
+    /// tessera commit --remove-block volume --add-block other.tsra:volume
+    /// ```
+    #[test]
+    fn removing_a_block_also_removes_its_chunk_index_sidecar() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_io::array::ArrayData;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let p1 = dir.path().join("p1.tsra");
+        let p2 = dir.path().join("p2.tsra");
+
+        // p1: an indexed integer volume -> carries BOTH `volume` and `volume.cidx`.
+        let mut spec = ArraySpec::new(vec![4], "int16");
+        spec.chunks = vec![2];
+        let ((br, pl), side) = tessera_io::array::array_block_with_index(
+            "volume",
+            &spec,
+            &ArrayData::I16(vec![1, 2, 3, 4]),
+        )
+        .unwrap();
+        let (sref, spl) = side.expect("integer array gets a sidecar");
+        let mut b = PB::new("recon", "DP-idx", "v", "2024-01-01T00:00:00Z");
+        b.add_block_ref(br);
+        b.add_block_ref(sref);
+        pack(&b.seal().unwrap(), &[pl, spl], &p1).unwrap();
+
+        // p2: a DIFFERENT volume, same block name, no index.
+        let (br2, pl2) = tessera_io::array::array_block(
+            "volume",
+            &spec,
+            &ArrayData::I16(vec![100, 200, 300, 400]),
+        )
+        .unwrap();
+        let mut b2 = PB::new("recon", "DP-other", "v", "2024-01-01T00:00:00Z");
+        b2.add_block_ref(br2);
+        pack(&b2.seal().unwrap(), &[pl2], &p2).unwrap();
+
+        init(&repo, &mut Vec::new()).unwrap();
+        let mut ibuf = Vec::new();
+        import(&repo, &p1, &mut ibuf).unwrap();
+        let lineage = String::from_utf8(ibuf)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("imported lineage "))
+            .unwrap()
+            .to_string();
+
+        let r = Repository::open(&repo).unwrap();
+        let m0 = r
+            .get_manifest(&r.read_ref(&lineage).unwrap().unwrap())
+            .unwrap();
+        assert!(
+            m0.blocks.iter().any(|b| b.name == "volume.cidx"),
+            "precondition: the imported version carries the sidecar"
+        );
+
+        // Swap the volume for a different one, in one commit.
+        let add = format!("volume={}:volume", p2.to_str().unwrap());
+        commit(
+            &repo,
+            &lineage,
+            &[],
+            &[add],
+            &["volume".into()],
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let m1 = r
+            .get_manifest(&r.read_ref(&lineage).unwrap().unwrap())
+            .unwrap();
+        assert!(
+            m1.blocks.iter().any(|b| b.name == "volume"),
+            "the new volume is attached"
+        );
+        assert!(
+            !m1.blocks.iter().any(|b| b.name == "volume.cidx"),
+            "the STALE sidecar must not survive its block — it would describe the old data"
+        );
+    }
+
     #[test]
     fn commit_add_block_composes_and_remove_drops() {
         let dir = tempfile::tempdir().unwrap();
@@ -690,5 +834,42 @@ mod tests {
             "events dropped"
         );
         assert!(m2.blocks.iter().any(|b| b.name == "roi"), "roi remains");
+    }
+
+    /// #734: `--add-block` of a name the version already holds is refused by the seal's uniqueness
+    /// check, with the typed error, and leaves the repository as it was: no object, same tip.
+    #[test]
+    fn commit_add_block_refuses_a_name_already_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let p1 = dir.path().join("p1.tsra");
+        let p2 = dir.path().join("p2.tsra");
+        write_tsra(&p1); // carries block "events"
+        write_block_tsra(&p2, "events", &[9, 8]); // a different block, also named "events"
+        init(&repo, &mut Vec::new()).unwrap();
+        let mut ibuf = Vec::new();
+        import(&repo, &p1, &mut ibuf).unwrap();
+        let lineage = String::from_utf8(ibuf)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("imported lineage "))
+            .unwrap()
+            .to_string();
+        let r = Repository::open(&repo).unwrap();
+        let tip = r.read_ref(&lineage).unwrap();
+        let before = count_objects(&repo);
+
+        let add = format!("{}:events", p2.to_str().unwrap());
+        let e = commit(&repo, &lineage, &[], &[add], &[], &mut Vec::new()).unwrap_err();
+        assert!(
+            matches!(&e, Error::DuplicateBlockName { name } if name == "events"),
+            "{e}"
+        );
+        assert_eq!(
+            count_objects(&repo),
+            before,
+            "a refused commit stores nothing"
+        );
+        assert_eq!(r.read_ref(&lineage).unwrap(), tip, "the tip is unchanged");
     }
 }
