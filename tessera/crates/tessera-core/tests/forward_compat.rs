@@ -1,12 +1,15 @@
 //! Forward compatibility of collections and embedded product schemas (#873, ADR-0060 §2.2 / §11 P0b).
 //!
-//! The #573 rule, applied beyond the product manifest: a collection's seal is verified over the JSON
-//! object as parsed (SPEC §4), so a key a newer writer added and sealed verifies and is named, a key
-//! spliced in under an old seal is tampering, and a repeated key is refused. An embedded schema that
+//! The #573 rule, applied beyond the product manifest: a collection's seal is verified over its
+//! stored bytes (SPEC §4, ADR-0066), so a key a newer writer added and sealed verifies and is named, a
+//! key spliced in under an old seal is tampering, and a repeated key is refused.
+//!
+//! The tests edit documents as JSON objects that carry their seal in band under `manifest_hash`, a
+//! convention of this file only: [`split`] turns such an object into the stored form (its JCS bytes
+//! without that key, and the seal), which is what every reader reads. An embedded schema that
 //! carries a rule this build doesn't model is refused at validate rather than reported valid.
 
 use serde_json::{json, Value};
-use tessera_core::canonical::hash_without;
 use tessera_core::collection::{CollectionBuilder, CollectionHandle, ProductHandle};
 use tessera_core::schema::Coded;
 use tessera_core::{validate_manifest, Collection, Error, Manifest, ProductBuilder, Role};
@@ -28,16 +31,41 @@ fn sealed_collection() -> Value {
         Role::Derived,
         vec![p.id.clone()],
     );
-    serde_json::from_str(&b.seal().unwrap().to_json().unwrap()).unwrap()
+    with_seal(b.seal().unwrap().to_stored().unwrap())
 }
 
-/// Seal `v` the way SPEC §4 defines it: over the object with only `manifest_hash` removed.
+/// A stored document as this file's test object: its bytes parsed, with the seal in band.
+fn with_seal((bytes, seal): (Vec<u8>, String)) -> Value {
+    let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+    v["manifest_hash"] = json!(seal);
+    v
+}
+
+/// The stored form of a test object: its JCS bytes without `manifest_hash`, and the seal it carries
+/// (empty when it carries none, which no stored bytes hash to).
+fn split(v: &Value) -> (Vec<u8>, String) {
+    let mut bare = v.clone();
+    let seal = bare
+        .as_object_mut()
+        .and_then(|o| o.remove("manifest_hash"))
+        .and_then(|s| s.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    (serde_jcs::to_vec(&bare).unwrap(), seal)
+}
+
+/// Seal `v` the way SPEC §4 defines it: `blake3` over its stored bytes.
 fn reseal(v: &mut Value) {
-    v["manifest_hash"] = json!(hash_without(v, "manifest_hash").unwrap());
+    v["manifest_hash"] = json!(tessera_core::hash::digest(&split(v).0));
 }
 
 fn verify(v: &Value) -> tessera_core::Result<Collection> {
-    Collection::from_json_verified(&v.to_string())
+    let (bytes, seal) = split(v);
+    Collection::from_stored(&bytes, &seal)
+}
+
+fn verify_manifest(v: &Value) -> tessera_core::Result<Manifest> {
+    let (bytes, seal) = split(v);
+    Manifest::from_stored(&bytes, &seal)
 }
 
 /// Set the key at the end of `path` (object keys, or array indices as digits) to `value`.
@@ -112,13 +140,19 @@ fn collection_forward_compat() {
         assert_eq!(integrity(verify(&spliced)), "manifest_hash", "{path:?}");
     }
 
-    // A deleted or nulled seal doesn't launder a splice: an unsealed collection doesn't verify.
-    for drop_key in ["manifest_hash", "content_hash"] {
-        let mut unsealed = sealed.clone();
-        unsealed["forged"] = json!(true);
-        unsealed.as_object_mut().unwrap().remove(drop_key);
-        assert_eq!(integrity(verify(&unsealed)), drop_key);
-    }
+    // A deleted seal doesn't launder a splice: without its `collection.seal` the collection is not
+    // read at all (the alpha layout, ADR-0066 rule 10) ...
+    let mut spliced = sealed.clone();
+    spliced["forged"] = json!(true);
+    let (bytes, _) = split(&spliced);
+    assert!(matches!(
+        Collection::from_stored_members(&bytes, None),
+        Err(Error::UnsupportedLayout { .. })
+    ));
+    // ... and a splice that deletes `content_hash` and reseals is refused for the missing hash.
+    spliced.as_object_mut().unwrap().remove("content_hash");
+    reseal(&mut spliced);
+    assert_eq!(integrity(verify(&spliced)), "content_hash");
 }
 
 #[test]
@@ -133,7 +167,7 @@ fn collection_duplicate_keys_are_refused() {
     ];
     for dup in cases {
         assert_ne!(dup, text, "the fixture must contain the spliced anchor");
-        match Collection::from_json_verified(&dup) {
+        match Collection::from_stored(dup.as_bytes(), "") {
             Err(Error::Serde(e)) => assert!(e.to_string().contains("duplicate key"), "{e}"),
             other => panic!("a duplicate key must be refused, got {other:?}"),
         }
@@ -371,8 +405,8 @@ fn collection_array_form_is_refused() {
 #[test]
 fn manifest_array_form_is_refused() {
     let p = ProductBuilder::new("recon", "p", "d", TS).seal().unwrap();
-    let sealed: Value = serde_json::from_str(&p.to_sealed_json().unwrap()).unwrap();
-    Manifest::from_json_verified(&sealed.to_string()).expect("the writer's own manifest verifies");
+    let sealed = with_seal(p.to_stored().unwrap());
+    verify_manifest(&sealed).expect("the writer's own manifest verifies");
     let producer = sealed["producer"].clone();
     let cases = [
         (
@@ -392,7 +426,7 @@ fn manifest_array_form_is_refused() {
         let mut arr = sealed.clone();
         arr[key] = value;
         reseal(&mut arr);
-        assert_array_form_refused(Manifest::from_json_verified(&arr.to_string()), path);
+        assert_array_form_refused(verify_manifest(&arr), path);
     }
     // The whole manifest as an array of its values in field order.
     let order = [
@@ -413,7 +447,6 @@ fn manifest_array_form_is_refused() {
         "extra",
         "ingest_transform",
         "content_hash",
-        "manifest_hash",
     ];
     // Absent keys take the value their field defaults to, so the array is otherwise well-typed.
     let default = |k: &str| match k {
@@ -574,20 +607,17 @@ fn every_kind_of_skipped_default_accepts_only_its_own_spelling() {
         ("empty Vec", "ingest_transform", json!([]), json!({})),
     ];
     let p = ProductBuilder::new("recon", "p", "d", TS).seal().unwrap();
-    let sealed: Value = serde_json::from_str(&p.to_json().unwrap()).unwrap();
+    let sealed = with_seal(p.to_stored().unwrap());
     for (kind, key, explicit, other) in manifest {
         let mut m = sealed.clone();
         m[key] = explicit;
         reseal(&mut m);
-        let got = Manifest::from_json_verified(&m.to_string())
-            .unwrap_or_else(|e| panic!("{kind}: explicit default refused: {e}"));
+        let got =
+            verify_manifest(&m).unwrap_or_else(|e| panic!("{kind}: explicit default refused: {e}"));
         assert!(got.newer_fields().is_empty(), "{kind}");
         m[key] = other;
         reseal(&mut m);
-        assert!(
-            Manifest::from_json_verified(&m.to_string()).is_err(),
-            "{kind}: other spelling"
-        );
+        assert!(verify_manifest(&m).is_err(), "{kind}: other spelling");
     }
 
     let schema: [(&str, &[&str], Value, Value); 4] = [
@@ -676,12 +706,12 @@ fn a_key_spelling_a_declared_path_cannot_exempt_it() {
 #[test]
 fn newer_field_paths_are_reported_unambiguously() {
     let p = ProductBuilder::new("recon", "p", "d", TS).seal().unwrap();
-    let mut m: Value = serde_json::from_str(&p.to_json().unwrap()).unwrap();
+    let mut m = with_seal(p.to_stored().unwrap());
     m["producer"]["agents"] = json!(["x"]);
     m["producer.agents"] = json!(1);
     m["producer.tool"] = json!(1);
     reseal(&mut m);
-    let got = Manifest::from_json_verified(&m.to_string()).expect("sealed newer fields verify");
+    let got = verify_manifest(&m).expect("sealed newer fields verify");
     let mut newer = got.newer_fields().to_vec();
     newer.sort();
     assert_eq!(

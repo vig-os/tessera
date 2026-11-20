@@ -164,7 +164,7 @@ Query (needs --features sql):
 
 Ingest & pack:
   ingest      Ingest a vendor file (or a declarative --spec) into a sealed .tsra
-  pack        Pack an exploded dir (manifest.json + blocks/) into a sealed .tsra
+  pack        Pack an exploded dir (manifest.json + manifest.seal + blocks/) into a .tsra
   unpack      Explode a .tsra into a directory
   extract     Extract one block's raw bytes (digest-verified)
 
@@ -226,8 +226,11 @@ enum Cmd {
     /// With the `cloud` feature enabled, `file` also accepts `s3://<bucket>/<key>` or
     /// `http(s)://<host>/<key>` — the manifest is read via range-GET over the wire.
     ///
-    /// `--json` emits exactly the serialized sealed manifest — the same object the seal hashes
-    /// cover, not a CLI-shaped view of it. Two things to know before parsing it:
+    /// `--json` emits the sealed manifest as a readable (pretty) object — the fields the seal
+    /// covers, not a CLI-shaped view of them. The seal itself is not a field: under ADR-0066 it is
+    /// `blake3` over the stored `manifest.json` bytes and lives in the `manifest.seal` member, so it
+    /// is printed by the summary's `manifest_hash` line, not by `--json`. Three things to know
+    /// before parsing it:
     ///
     /// * `producer` is polymorphic. It is a JSON OBJECT
     ///   (`{tool, version, git_commit?, git_repo?, dirty?}`) on anything sealed since ADR-0058, and
@@ -235,6 +238,9 @@ enum Cmd {
     ///   an untagged enum, so consumers must accept both; it is absent entirely on pre-stamp files.
     ///   `generation`, `study`, `schema` and the other optional fields are omitted when unset
     ///   rather than emitted as null.
+    ///
+    /// * It is not the stored bytes: `manifest.json` is stored as one line in its JCS form (`unzip -p
+    ///   product.tsra manifest.json` gives those, and `b3sum` of them is the seal).
     ///
     /// * Its stability is the FORMAT's, tracked by the `tessera_version` field the dump itself
     ///   carries — this is the spec version, not the CLI's. Fields are only ever added within a
@@ -643,16 +649,17 @@ enum Cmd {
         /// Output path for the recovered bytes.
         out: PathBuf,
     },
-    /// Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`).
+    /// Explode a `.tsra` into a directory (`manifest.json` + `manifest.seal` + `blocks/<name>`).
     Unpack {
         /// The `.tsra` to explode.
         file: PathBuf,
-        /// Output directory to write `manifest.json` + `blocks/<name>`.
+        /// Output directory to write `manifest.json` + `manifest.seal` + `blocks/<name>`.
         outdir: PathBuf,
     },
-    /// Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`.
+    /// Pack an exploded directory (`manifest.json` + `manifest.seal` + `blocks/`) into a sealed
+    /// `.tsra`.
     Pack {
-        /// Exploded directory containing `manifest.json` + `blocks/`.
+        /// Exploded directory containing `manifest.json` + `manifest.seal` + `blocks/`.
         dir: PathBuf,
         /// Output `.tsra` path.
         out: PathBuf,
@@ -1418,7 +1425,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             if verify {
                 r.verify_payloads(&file.display().to_string())?;
             }
-            // `--json`: the sealed manifest verbatim. #417's motivation was that reading a sealed
+            // `--json`: the sealed manifest's fields. #417's motivation was that reading a sealed
             // `generation` meant a `zipfile` + `json` Python one-liner; this is that escape hatch,
             // typed and supported, so provenance is scriptable without the container internals.
             if json {
@@ -2919,7 +2926,7 @@ mod tests {
         );
         pack(&cb.seal().unwrap(), &[payload], &d.join("child.tsra")).unwrap();
 
-        edit_manifest(&parent_path, |m| {
+        edit_manifest_raw(&parent_path, |m| {
             m["metadata"]["daq_start_ns"] = serde_json::json!(9_007_199_254_740_993_u64);
         });
         assert!(matches!(
@@ -3098,8 +3105,26 @@ mod tests {
     }
 
     /// Rewrite a `.tsra`'s `manifest.json` with `edit`, keeping the recorded hashes and the container
-    /// well-formed (repacked STORED).
+    /// well-formed (repacked STORED). Stored as JCS again, so the edit, not a respelling, is what the
+    /// reader meets.
     fn edit_manifest(path: &std::path::Path, edit: impl Fn(&mut serde_json::Value)) {
+        rewrite_manifest(path, edit, |m| {
+            tessera_core::canonical::to_bytes(m).unwrap()
+        });
+    }
+
+    /// [`edit_manifest`] for an edit JCS refuses to encode (an integer beyond ±(2^53−1)): stored as
+    /// compact `serde_json`, which writes the integer exactly. A reader refuses it at the strict parse,
+    /// before the canonical check (SPEC §7 step 3), so the error is the integer's, not the spelling's.
+    fn edit_manifest_raw(path: &std::path::Path, edit: impl Fn(&mut serde_json::Value)) {
+        rewrite_manifest(path, edit, |m| serde_json::to_vec(m).unwrap());
+    }
+
+    fn rewrite_manifest(
+        path: &std::path::Path,
+        edit: impl Fn(&mut serde_json::Value),
+        encode: impl Fn(&serde_json::Value) -> Vec<u8>,
+    ) {
         let bytes = std::fs::read(path).unwrap();
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let mut entries = Vec::new();
@@ -3111,7 +3136,7 @@ mod tests {
             if name == "manifest.json" {
                 let mut m: serde_json::Value = serde_json::from_slice(&buf).unwrap();
                 edit(&mut m);
-                buf = serde_json::to_vec_pretty(&m).unwrap();
+                buf = encode(&m);
             }
             entries.push((name, buf));
         }
@@ -3634,9 +3659,8 @@ streaming = "batch"
         })
         .unwrap();
 
-        // 1. collection.json exists + verifies.
-        let coll_json = std::fs::read_to_string(out_dir.join("collection.json")).unwrap();
-        let coll = tessera_core::Collection::from_json_verified(&coll_json).unwrap();
+        // 1. collection.json exists + verifies against its collection.seal.
+        let coll = tessera_io::stored::read_collection(&out_dir.join("collection.json")).unwrap();
         assert_eq!(coll.members.len(), 2);
         assert_eq!(coll.study.as_deref(), Some("DP06-2024-01"));
 
@@ -3687,8 +3711,7 @@ streaming = "batch"
             src: None,
         })
         .unwrap();
-        let coll2_json = std::fs::read_to_string(out2.join("collection.json")).unwrap();
-        let coll2 = tessera_core::Collection::from_json_verified(&coll2_json).unwrap();
+        let coll2 = tessera_io::stored::read_collection(&out2.join("collection.json")).unwrap();
         assert_eq!(coll.id, coll2.id);
         assert_eq!(coll.content_hash, coll2.content_hash);
         assert_eq!(coll.manifest_hash, coll2.manifest_hash);

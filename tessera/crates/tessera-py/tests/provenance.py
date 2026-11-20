@@ -30,8 +30,11 @@ def sealed(b: "tessera.Builder", name: str) -> dict:
 
 
 # --- #563: add_source pins the parent's seal --------------------------------------------------
-parent = sealed(builder("parent"), "parent")
-parent_seal = parent["manifest_hash"]
+builder("parent").pack(str(out / "parent.tsra"))
+parent_seal = tessera.open(out / "parent.tsra").manifest_hash
+assert "manifest_hash" not in tessera.open(out / "parent.tsra").manifest(), (
+    "the seal is not in band"
+)
 assert parent_seal.startswith("blake3:"), parent_seal
 
 pinned = builder("pinned")

@@ -9,7 +9,7 @@
 //! **Tail-prefetch.** A `.tsra` is a STORED zip64 whose **central directory + EOCD live at the
 //! tail**, so opening + reading the manifest entry would otherwise issue several small
 //! range-GETs to scan the EOCD, then read the central directory, then read the local file header
-//! and payload of the `mimetype` and `manifest.json` entries. We fetch the final
+//! and payload of the `mimetype`, `manifest.seal` and `manifest.json` entries. We fetch the final
 //! [`TAIL_PREFETCH`] bytes ONCE in [`ObjectStoreReader::new`] and serve any read that lies wholly
 //! inside that cached suffix from memory — opening a typical product drops from many GETs to one
 //! HEAD plus one tail-GET (plus payload GETs for whichever blocks the caller actually reads).
@@ -52,8 +52,8 @@ pub const TAIL_PREFETCH: u64 = 64 * 1024;
 /// from memory. `zip` reads a local file header as several small reads (the fixed 30 bytes, the
 /// name, the extra field; GHSA-m665-v7pm-7grj's header-consistency check reads all three), and
 /// without the window each one is its own range GET. 4 KiB covers a header and a typical
-/// `mimetype` + `manifest.json` start. A read of this size or larger, i.e. a block payload, goes
-/// straight to the network as before, so a large read is never fetched twice.
+/// `mimetype` + `manifest.seal` + `manifest.json` start. A read of this size or larger, i.e. a block
+/// payload, goes straight to the network as before, so a large read is never fetched twice.
 pub const READ_AHEAD: u64 = 4 * 1024;
 
 /// Adapts an `object_store::ObjectStore` into a synchronous `Read + Seek` source so the existing

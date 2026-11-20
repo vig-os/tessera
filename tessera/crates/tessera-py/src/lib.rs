@@ -70,7 +70,21 @@ impl Reader {
         self.inner.manifest().id.clone()
     }
 
-    /// The canonical manifest as a JSON string (parse with `json.loads`).
+    /// The product's seal, `manifest_hash` (`"blake3:<hex>"`): `blake3` over the stored
+    /// `manifest.json` bytes, read from the `manifest.seal` member and verified on open (ADR-0066).
+    /// It is not a key of [`manifest_json`](Self::manifest_json): the seal lives outside the bytes
+    /// it seals.
+    #[getter]
+    fn manifest_hash(&self) -> String {
+        self.inner
+            .manifest()
+            .manifest_hash
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// The manifest as a JSON string (parse with `json.loads`). Its seal is
+    /// [`manifest_hash`](Self::manifest_hash), not a key of it (ADR-0066).
     fn manifest_json(&self) -> PyResult<String> {
         serde_json::to_string(self.inner.manifest()).map_err(err)
     }
@@ -213,8 +227,16 @@ impl Reader {
     /// bounded memory. Raises
     /// `TesseraError` on any failure. The same pass as `tessera verify`.
     fn verify(&mut self) -> PyResult<()> {
-        // Over the stored manifest bytes, as on open (SPEC §4): the typed view may not reproduce them.
-        tessera_core::Manifest::from_json_verified(self.inner.manifest_json()).map_err(err)?;
+        // Over the stored manifest bytes and their seal, as on open (SPEC §4, ADR-0066): the typed
+        // view may not reproduce them.
+        let seal = self
+            .inner
+            .manifest()
+            .manifest_hash
+            .clone()
+            .unwrap_or_default();
+        tessera_core::Manifest::from_stored(self.inner.manifest_json().as_bytes(), &seal)
+            .map_err(err)?;
         let label = self.path.display().to_string();
         self.inner.verify_payloads(&label).map_err(err)
     }
@@ -419,7 +441,7 @@ impl Builder {
     ///
     /// `reference` is the parent's lineage handle (a path, a URL, a product `id`). `content_hash`
     /// **pins the parent's seal** on the edge (SPEC §8) and must be the parent's `manifest_hash`:
-    /// `tessera.open(parent).manifest()["manifest_hash"]`. It is what closes the integrity chain, so
+    /// `tessera.open(parent).manifest_hash`. It is what closes the integrity chain, so
     /// `tessera provenance --require-complete` reports an edge without it as a gap. It is not
     /// format-checked at write time (neither is the Rust `Source::with_content_hash`); a wrong value
     /// surfaces when the chain is walked. Omitted, the key is absent from the manifest, so a product

@@ -94,6 +94,7 @@
           "/crates/tessera-ingest/tests/producer_equality.py" = [ "ingest-producer-equality" ];
           "/crates/tessera-wasm/tests/smoke.cjs" = [ "wasm-bindgen-smoke" ];
           "/corpus/reference_reader/run.py" = [ "reference-reader" ];
+          "/corpus/reference_reader/make_seal_cases.py" = [ "reference-reader" ];
           "/bench/ksb/677-rss-proof/test_run.py" = [ "rss-proof-evaluator" ];
         } // pkgs.lib.optionalAttrs isLinux {
           "/bench/ecosystems/test_common.py" = [ "bench-ecosystems" ];
@@ -1078,7 +1079,14 @@
           pkgs.runCommand "wasm-bindgen-smoke"
             { nativeBuildInputs = [ pkgs.wasm-bindgen-cli pkgs.nodejs ]; } ''
             wasm-bindgen --target nodejs --out-dir "$PWD/glue" ${wasmLib}/wasm/tessera_wasm.wasm
-            node ${./tessera/crates/tessera-wasm/tests/smoke.cjs} "$PWD/glue/tessera_wasm.js"
+            node ${./tessera/crates/tessera-wasm/tests/smoke.cjs} "$PWD/glue/tessera_wasm.js" \
+              ${./tessera/corpus/seal-cases.json} | tee out.txt
+            # The same vacuous-pass guard as `reference-reader`: N/N with N the file's case count.
+            cases=$(node -e 'console.log(require(process.argv[1]).cases.length)' ${./tessera/corpus/seal-cases.json})
+            if [ "$cases" -lt 1 ] || ! grep -qx "$cases/$cases seal cases agreed (wasm)" out.txt; then
+              echo "wasm-bindgen-smoke: expected '$cases/$cases seal cases agreed (wasm)'" >&2
+              exit 1
+            fi
             touch $out
           '';
 
@@ -1398,9 +1406,18 @@
                 echo "reference-reader: expected '$own/$own corpus products pass their own schema'" >&2
                 exit 1
               fi
-              # The crafted refusal archives (#734, #873): a literal count, so losing a case fails too.
-              if ! grep -qx "7/7 refusal cases refused" out.txt; then
-                echo "reference-reader: expected '7/7 refusal cases refused'" >&2
+              # The crafted refusal archives (#734, #873; #914 adds the non-JCS manifest and the
+              # missing `manifest.seal`): a literal count, so losing a case fails too.
+              if ! grep -qx "9/9 refusal cases refused" out.txt; then
+                echo "reference-reader: expected '9/9 refusal cases refused'" >&2
+                exit 1
+              fi
+              # seal-cases.json is generated (ADR-0066): regenerating it from the corpus must give the
+              # committed bytes, so a corpus change without a regenerated file, or a hand edit, fails.
+              ( cd corpus/reference_reader && python3 make_seal_cases.py )
+              if ! cmp -s corpus/seal-cases.json ${./tessera/corpus/seal-cases.json}; then
+                echo "reference-reader: corpus/seal-cases.json is not what make_seal_cases.py generates;" >&2
+                echo "  run it (corpus/reference_reader/README.md) and commit the result" >&2
                 exit 1
               fi
               touch $out

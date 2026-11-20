@@ -7,31 +7,65 @@
 //! the wasm core confirms a product's integrity/authenticity and reads its manifest, and the heavy
 //! columnar read is done in JS via Arrow. So a browser app can prove a `.tsra` is authentic + unaltered
 //! before touching its bytes.
+//!
+//! **Inputs (ADR-0066).** A product's manifest is two members: `manifest.json`, stored as exactly its
+//! JCS bytes, and `manifest.seal`, the 71 bytes `blake3:<hex>` over them. Every verifier here takes
+//! both, as the strings a JS caller read from the container (`manifest_seal` is `undefined` when the
+//! member is missing, which is the pre-ADR-0066 alpha layout and is refused), and verifies through
+//! [`Manifest::from_stored_members`], the same function the native reader uses: the canonical check,
+//! I-JSON, the seal over the stored bytes, then `id` and `content_hash`.
 
 use wasm_bindgen::prelude::*;
 
 use tessera_core::manifest::Manifest;
 use tessera_core::signing::{self, Signature};
+use tessera_core::Error;
 
-/// Verify a product's **three-hash seal** from its manifest JSON: recomputes `content_hash` (the MMR over
-/// the block digests) and `manifest_hash` (the JCS seal) and checks `id`. Returns `true` iff the manifest
-/// is internally consistent + sealed. (A full integrity check of the *payloads* additionally re-hashes the
-/// blocks — done host-side; in the browser the bytes arrive via Arrow.) The seal is checked over the
-/// JSON object as given (SPEC §4, [`Manifest::from_json_verified`]), so fields from a newer format
-/// revision verify and a key spliced into a sealed manifest doesn't; a duplicate key is refused.
+fn read(manifest_json: &str, manifest_seal: Option<&str>) -> tessera_core::Result<Manifest> {
+    Manifest::from_stored_members(manifest_json.as_bytes(), manifest_seal.map(str::as_bytes))
+}
+
+/// Verify a product's **three-hash seal** from its stored `manifest.json` and `manifest.seal`:
+/// `true` iff the bytes are their own JCS form, I-JSON, carry no in-band seal, hash to the seal, and
+/// `id` and `content_hash` hold. (A full integrity check of the *payloads* additionally re-hashes the
+/// blocks — done host-side; in the browser the bytes arrive via Arrow.) Fields from a newer format
+/// revision verify; a key spliced into a sealed manifest, a respelling (`64.0` for `64`, a pretty
+/// layout) and a duplicate key don't.
 #[wasm_bindgen]
-pub fn verify_manifest(manifest_json: &str) -> bool {
-    Manifest::from_json_verified(manifest_json).is_ok()
+pub fn verify_manifest(manifest_json: &str, manifest_seal: Option<String>) -> bool {
+    read(manifest_json, manifest_seal.as_deref()).is_ok()
+}
+
+/// A stored manifest's verdict in the vocabulary of `corpus/seal-cases.json`: `"ok"` (it verifies),
+/// `"tampered"` (an integrity failure: the seal, `id` or `content_hash` doesn't match, or
+/// `content_hash` is missing), or `"refused"` (not read at all: the alpha layout or a malformed
+/// seal, non-canonical bytes, not I-JSON, the seal in band, another declared form, an unsupported
+/// major version, a block listed twice or without a digest). The verdict the native reader and the
+/// Python reference reader reach on the same pair.
+#[wasm_bindgen]
+pub fn seal_verdict(manifest_json: &str, manifest_seal: Option<String>) -> String {
+    match read(manifest_json, manifest_seal.as_deref()) {
+        Ok(_) => "ok",
+        Err(Error::Integrity { .. }) => "tampered",
+        Err(_) => "refused",
+    }
+    .to_owned()
 }
 
 /// Verify an **ed25519 signature** over a product: checks the [`Signature`] envelope (JSON) against the
-/// manifest's `manifest_hash` and the signer's hex public key. `true` iff the signature is valid and the
-/// product is unaltered since signing: the manifest's own seal is verified first, since the signature
-/// binds only `manifest_hash`. Any malformed input returns `false` (never throws).
+/// manifest's seal and the signer's hex public key. `true` iff the signature is valid and the product
+/// is unaltered since signing: the stored manifest is verified against its seal first
+/// ([`verify_manifest`]), since the signature binds only the seal. Any malformed input returns `false`
+/// (never throws).
 #[wasm_bindgen]
-pub fn verify_signature(manifest_json: &str, signature_json: &str, pubkey_hex: &str) -> bool {
+pub fn verify_signature(
+    manifest_json: &str,
+    manifest_seal: Option<String>,
+    signature_json: &str,
+    pubkey_hex: &str,
+) -> bool {
     let (Ok(m), Ok(sig), Ok(vk)) = (
-        Manifest::from_json_verified(manifest_json),
+        read(manifest_json, manifest_seal.as_deref()),
         Signature::from_json(signature_json),
         signing::verifying_key_from_hex(pubkey_hex),
     ) else {
@@ -40,8 +74,9 @@ pub fn verify_signature(manifest_json: &str, signature_json: &str, pubkey_hex: &
     signing::verify_manifest(&m, &sig, &vk)
 }
 
-/// The product `id` from a manifest JSON (the logical identity), or empty string on parse failure — a
-/// lightweight read for indexing without a full verify.
+/// The product `id` a manifest JSON **claims** (the logical identity), or empty string on parse
+/// failure — a lightweight read for indexing, **unverified**: verify with [`verify_manifest`] before
+/// trusting it.
 #[wasm_bindgen]
 pub fn product_id(manifest_json: &str) -> String {
     Manifest::from_json(manifest_json)
@@ -62,39 +97,73 @@ mod tests {
     use tessera_core::signing::{sign_manifest, verifying_key_hex, SignOpts, SigningKey};
     use tessera_core::ProductBuilder;
 
-    fn sealed_json() -> String {
+    fn stored() -> (String, String) {
         let mut b = ProductBuilder::new("recon", "DP", "wasm", "2024-01-01T00:00:00Z");
         b.add_block(&ArrayBlock::new(
             "volume",
             ArraySpec::new(vec![8, 8, 8], "int16"),
         ))
         .unwrap();
-        b.seal().unwrap().to_json().unwrap()
+        let (bytes, seal) = b.seal().unwrap().to_stored().unwrap();
+        (String::from_utf8(bytes).unwrap(), seal)
     }
 
     #[test]
     fn verify_manifest_accepts_sealed_rejects_tampered() {
-        let json = sealed_json();
-        assert!(verify_manifest(&json));
+        let (json, seal) = stored();
+        assert!(verify_manifest(&json, Some(seal.clone())));
         assert!(!product_id(&json).is_empty());
-        // a tampered manifest (flip a hex digit in content_hash) fails the seal recompute.
+        // a tampered manifest (flip a hex digit in content_hash) fails the seal.
         let tampered = json.replacen("blake3:", "blake3:0", 1);
-        assert!(!verify_manifest(&tampered));
-        assert!(!verify_manifest("not json"));
+        assert!(!verify_manifest(&tampered, Some(seal.clone())));
+        assert_eq!(seal_verdict(&tampered, Some(seal.clone())), "tampered");
+        // no seal member: the alpha layout, refused.
+        assert!(!verify_manifest(&json, None));
+        assert_eq!(seal_verdict(&json, None), "refused");
+        assert!(!verify_manifest("not json", Some(seal)));
     }
 
     #[test]
     fn verify_signature_roundtrips_in_the_wasm_surface() {
-        let json = sealed_json();
+        let (json, seal) = stored();
         let key = SigningKey::from_bytes(&[11; 32]);
-        let m = Manifest::from_json(&json).unwrap();
+        let m = read(&json, Some(&seal)).unwrap();
         let sig = sign_manifest(&m, &key, &SignOpts::default()).unwrap();
         let sig_json = serde_json::to_string(&sig).unwrap();
         let pub_hex = verifying_key_hex(&key.verifying_key());
-        assert!(verify_signature(&json, &sig_json, &pub_hex));
+        assert!(verify_signature(
+            &json,
+            Some(seal.clone()),
+            &sig_json,
+            &pub_hex
+        ));
         // wrong key fails; malformed inputs return false (never panic).
         let other = verifying_key_hex(&SigningKey::from_bytes(&[22; 32]).verifying_key());
-        assert!(!verify_signature(&json, &sig_json, &other));
-        assert!(!verify_signature("x", "y", "z"));
+        assert!(!verify_signature(&json, Some(seal), &sig_json, &other));
+        assert!(!verify_signature("x", None, "y", "z"));
+    }
+
+    /// The wasm surface reaches every verdict of `corpus/seal-cases.json`, the file the native
+    /// reader and the reference reader are held to (ADR-0066 step 4: all three agree). The
+    /// `wasm-bindgen-smoke` check runs the same cases through the compiled wasm in Node.
+    #[test]
+    fn seal_verdict_agrees_with_every_seal_case() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/seal-cases.json");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let cases = doc["cases"].as_array().unwrap();
+        assert!(!cases.is_empty());
+        let disagreements: Vec<String> = cases
+            .iter()
+            .filter_map(|c| {
+                let got = seal_verdict(
+                    c["manifest"].as_str().unwrap(),
+                    c["seal"].as_str().map(str::to_owned),
+                );
+                (got != c["verdict"].as_str().unwrap())
+                    .then(|| format!("{}: expected {}, got {got}", c["name"], c["verdict"]))
+            })
+            .collect();
+        assert!(disagreements.is_empty(), "{disagreements:#?}");
     }
 }

@@ -318,11 +318,21 @@ fn a_block_whose_local_header_names_another_member_is_refused() {
 
     assert_eq!(
         names(&cd_view(&bytes)),
-        ["mimetype", "manifest.json", "blocks/report"]
+        [
+            "mimetype",
+            "manifest.seal",
+            "manifest.json",
+            "blocks/report"
+        ]
     );
     assert_eq!(
         names(&stream_view(&bytes)),
-        ["mimetype", "manifest.json", "manifest.json"],
+        [
+            "mimetype",
+            "manifest.seal",
+            "manifest.json",
+            "manifest.json"
+        ],
         "the crafted archive is a real cloak: a streaming reader sees a second manifest"
     );
     assert_refused(&bytes, "name cloak");
@@ -359,9 +369,9 @@ fn a_stored_block_whose_local_header_claims_deflate_is_refused() {
 
     let cd = cd_view(&bytes);
     let stream = stream_view(&bytes);
-    assert_eq!(cd[2], ("blocks/data".to_string(), sealed_payload.clone()));
+    assert_eq!(cd[3], ("blocks/data".to_string(), sealed_payload.clone()));
     assert_eq!(
-        stream[2],
+        stream[3],
         ("blocks/data".to_string(), hidden.to_vec()),
         "the crafted archive is a real cloak: same name, other bytes, valid CRC"
     );
@@ -377,9 +387,15 @@ fn a_central_directory_naming_one_member_twice_is_refused() {
     let honest = sealed_blobs(&[("report", b"quarterly numbers")]);
     let members = cd_view(&honest);
     let get = |n: &str| members.iter().find(|(m, _)| m == n).unwrap().1.clone();
-    let (mime, manifest, report) = (get("mimetype"), get("manifest.json"), get("blocks/report"));
+    let (mime, seal, manifest, report) = (
+        get("mimetype"),
+        get("manifest.seal"),
+        get("manifest.json"),
+        get("blocks/report"),
+    );
     let mut bytes = rezip(&[
         ("mimetype", &mime),
+        ("manifest.seal", &seal),
         ("manifest.json", &manifest),
         ("blocks/r3port", b"forged numbers"),
         ("blocks/report", &report),
@@ -393,13 +409,14 @@ fn a_central_directory_naming_one_member_twice_is_refused() {
         names(&stream),
         [
             "mimetype",
+            "manifest.seal",
             "manifest.json",
             "blocks/report",
             "blocks/report"
         ]
     );
     assert_ne!(
-        stream[2].1, stream[3].1,
+        stream[3].1, stream[4].1,
         "two members, one name, two contents"
     );
     assert_refused(&bytes, "duplicate name");
@@ -430,6 +447,7 @@ fn a_member_hidden_before_the_central_directory_is_refused() {
         names(&stream_view(&bytes)),
         [
             "mimetype",
+            "manifest.seal",
             "manifest.json",
             "blocks/report",
             "manifest.json"
@@ -868,7 +886,7 @@ fn honest_entries() -> Vec<Hand> {
 /// `honest_entries` with `aux` inserted before the block, as the reviewer placed it.
 fn with_aux(aux: Hand) -> Vec<Hand> {
     let mut es = honest_entries();
-    es.insert(2, aux);
+    es.insert(3, aux);
     es
 }
 
@@ -921,9 +939,9 @@ fn assert_each_refused(cases: Vec<(&str, Vec<u8>, &str)>) {
 #[test]
 fn a_data_descriptor_flag_is_refused() {
     let dd = |mut es: Vec<Hand>| {
-        es[1].flags = 0x0008;
-        es[1].local_crc = Some(0);
-        es[1].local_size = Some(0);
+        es[2].flags = 0x0008;
+        es[2].local_crc = Some(0);
+        es[2].local_size = Some(0);
         es
     };
 
@@ -940,13 +958,13 @@ fn a_data_descriptor_flag_is_refused() {
         // genuine manifest bytes and the block's local header as far as the extra field's body.
         let body_len = 16 + forged.len();
         let placeholder = extra_field(0xcafe, &vec![0; body_len]);
-        es[2].local_extra = placeholder;
-        let head = hand_local_header(&es[2]);
-        let mut consumed = es[1].data.clone();
+        es[3].local_extra = placeholder;
+        let head = hand_local_header(&es[3]);
+        let mut consumed = es[2].data.clone();
         consumed.extend_from_slice(&head[..head.len() - body_len]);
         let mut body = fake_descriptor(&consumed);
         body.extend_from_slice(&forged);
-        es[2].local_extra = extra_field(0xcafe, &body);
+        es[3].local_extra = extra_field(0xcafe, &body);
         es
     };
 
@@ -1012,7 +1030,7 @@ fn every_field_a_reader_interprets_is_the_writers() {
     };
     let block = |f: &dyn Fn(&mut Hand)| {
         let mut es = honest_entries();
-        f(&mut es[2]);
+        f(&mut es[3]);
         hand_zip(&es)
     };
 
@@ -1207,18 +1225,19 @@ fn the_member_set_reads_the_same_in_every_order() {
     let reordered = {
         let es = with_aux(Hand::new(b"aux/b", b"second"));
         let mut es2 = es.clone();
-        es2.insert(2, Hand::new(b"aux/a", b"first"));
-        // File: mimetype, manifest.json, aux/a, aux/b, blocks/data. Directory: aux/b before aux/a.
-        hand_zip_listed(&es2, &[0, 1, 3, 2, 4])
+        es2.insert(3, Hand::new(b"aux/a", b"first"));
+        // File: mimetype, manifest.seal, manifest.json, aux/a, aux/b, blocks/data. Directory: aux/b
+        // before aux/a.
+        hand_zip_listed(&es2, &[0, 1, 2, 4, 3, 5])
     };
     let leaf = {
         let mut es = with_aux(Hand::new(b"aux/a/b", b"below"));
-        es.insert(2, Hand::new(b"aux/a", b"a file"));
+        es.insert(3, Hand::new(b"aux/a", b"a file"));
         hand_zip(&es)
     };
     let case = {
         let mut es = with_aux(Hand::new(b"aux/sig", b"lower"));
-        es.insert(2, Hand::new(b"aux/SIG", b"upper"));
+        es.insert(3, Hand::new(b"aux/SIG", b"upper"));
         hand_zip(&es)
     };
     let bad_crc = {

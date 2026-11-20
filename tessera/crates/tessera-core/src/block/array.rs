@@ -773,7 +773,8 @@ mod tests {
         b.add_block(&ArrayBlock::new("volume", mk())).unwrap();
         let m = b.seal().unwrap();
         // the per-axis descriptor travels through manifest JSON and verifies under its manifest_hash.
-        let back = Manifest::from_json_verified(&m.to_json().unwrap()).unwrap();
+        let (bytes, seal) = m.to_stored().unwrap();
+        let back = Manifest::from_stored(&bytes, &seal).unwrap();
         let blk = back
             .blocks
             .iter()

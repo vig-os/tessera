@@ -13,15 +13,11 @@
 //! A sub-collection member stored as `<stem>.collection.json` has its seal at
 //! `<stem>.collection.seal` ([`seal_name_for`]).
 //!
-//! [`crate::Manifest::from_stored_members`] / [`crate::Collection::from_stored_members`] read a
-//! document from its two members, taking the seal member as found (or `None`): a missing seal
-//! member is the alpha layout, refused with [`crate::Error::UnsupportedLayout`] naming what was
-//! found and what is required (rule 10, no migration); a present one must be well formed
+//! Every reader goes through [`crate::Manifest::from_stored_members`] /
+//! [`crate::Collection::from_stored_members`], which take the seal member as found (or `None`): a
+//! missing seal member is the alpha layout, refused with [`crate::Error::UnsupportedLayout`] naming
+//! what was found and what is required; a present one must be well formed
 //! ([`crate::Error::MalformedSeal`]) and is then checked by `from_stored`.
-//!
-//! This module is additive groundwork (ADR-0066 implementation step 4, part 1): the `.tsra`, the
-//! exploded form and the collection files still use the in-band layout, and the cutover (#914,
-//! part 2) switches every writer and reader to these members at once.
 
 use serde_json::Value;
 

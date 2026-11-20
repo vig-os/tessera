@@ -23,7 +23,7 @@ Query (needs --features sql):
 
 Ingest & pack:
   ingest      Ingest a vendor file (or a declarative --spec) into a sealed .tsra
-  pack        Pack an exploded dir (manifest.json + blocks/) into a sealed .tsra
+  pack        Pack an exploded dir (manifest.json + manifest.seal + blocks/) into a .tsra
   unpack      Explode a .tsra into a directory
   extract     Extract one block's raw bytes (digest-verified)
 

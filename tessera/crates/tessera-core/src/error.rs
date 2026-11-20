@@ -96,8 +96,9 @@ pub enum Error {
     },
 
     /// Stored bytes in the ADR-0066 layout (the seal lives outside the document) carry the in-band
-    /// seal key `manifest_hash` at their top level: the layout of a product or collection written
-    /// before ADR-0066, or a document whose writer put the seal inside the bytes it seals. Raised by
+    /// seal key `manifest_hash` at their top level: a document whose writer put the seal inside the
+    /// bytes it seals. (An alpha product, which has no seal member at all, is refused earlier with
+    /// [`Error::UnsupportedLayout`].) Raised by
     /// [`crate::Manifest::from_stored`] and [`crate::Collection::from_stored`] after the canonical
     /// check, before the seal is compared. `document` names the kind (`manifest`, `collection`).
     #[error(

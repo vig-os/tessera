@@ -61,9 +61,13 @@ fn canonical_tsra(m: &Manifest, payload: &BlockPayload) -> Vec<u8> {
         .large_file(true)
         .system(zip::System::Unix);
     let mut w = ZipWriter::new(Cursor::new(Vec::new()));
-    let entries: [(String, Vec<u8>); 3] = [
+    // The stored pair by hand: `to_stored` would refuse the duplicate listing (it verifies).
+    let json = m.canonical_bytes().unwrap();
+    let seal = tessera_core::hash::digest(&json);
+    let entries: [(String, Vec<u8>); 4] = [
         ("mimetype".into(), tessera_io::MIMETYPE.as_bytes().to_vec()),
-        ("manifest.json".into(), m.to_json().unwrap().into_bytes()),
+        ("manifest.seal".into(), seal.into_bytes()),
+        ("manifest.json".into(), json),
         (format!("blocks/{}", payload.name), payload.bytes.clone()),
     ];
     for (name, bytes) in entries {

@@ -1,10 +1,15 @@
 //! The `.tsra` container — a STORED zip64 archive (ADR-0022).
 //!
-//! Layout: `mimetype` (first, uncompressed, magic) · `manifest.json` · `blocks/<name>` payloads.
+//! Layout: `mimetype` (first, uncompressed, magic) · `manifest.seal` · `manifest.json` ·
+//! `blocks/<name>` payloads · `aux/<name>` (ADR-0042). `manifest.json` is stored as exactly its JCS
+//! bytes and `manifest.seal` holds `blake3:<hex>` over them (ADR-0066), so one ranged read of the
+//! front of the file gets the magic, the seal and the manifest.
 //! Entries are **STORED** (payloads are already compressed by their codec) so every block byte
 //! range is directly addressable via the zip central directory — a cloud reader range-reads just
 //! the manifest + the blocks it needs, no whole-archive download. The reader verifies the magic,
-//! the manifest seal, and (on access) each stored block's bytes against its recorded digest.
+//! the manifest against its seal ([`Manifest::from_stored_members`]: a product without
+//! `manifest.seal`, the alpha layout, is refused naming both formats), and (on access) each stored
+//! block's bytes against its recorded digest.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -28,7 +33,8 @@ use zip::{CompressionMethod, DateTime, System, ZipArchive, ZipReadOptions, ZipWr
 /// sniffers identify a `.tsra` without unzipping.
 pub const MIMETYPE: &str = "application/vnd.tessera";
 const MIMETYPE_ENTRY: &str = "mimetype";
-const MANIFEST_ENTRY: &str = "manifest.json";
+const MANIFEST_ENTRY: &str = tessera_core::stored::MANIFEST_MEMBER;
+const SEAL_ENTRY: &str = tessera_core::stored::MANIFEST_SEAL_MEMBER;
 const BLOCKS_PREFIX: &str = "blocks/";
 /// Reserved prefix for **non-sealed auxiliary members** (ADR-0042). The manifest lists exactly what
 /// is sealed (its `blocks`); anything under `aux/` is carried inside the one shareable file but
@@ -104,7 +110,38 @@ fn open_tsra_archive<R: Read + Seek>(reader: R) -> Result<ZipArchive<R>> {
     };
     let archive = ZipArchive::with_config(config, reader).map_err(cz)?;
     require_mimetype_at_byte_zero(&archive)?;
+    require_seal_then_manifest(&archive)?;
     Ok(archive)
+}
+
+/// SPEC §6's next two entries, from central-directory metadata alone: `manifest.seal` is entry 2
+/// and `manifest.json` entry 3 (ADR-0066 rule 3), so one ranged read of the front of the file gets
+/// the magic, the seal and the manifest. An archive with no `manifest.seal` at all passes here: it
+/// is the alpha layout, which [`Manifest::from_stored_members`] refuses with the evidence it finds.
+fn require_seal_then_manifest<R: Read + Seek>(archive: &ZipArchive<R>) -> Result<()> {
+    if archive.index_for_name(SEAL_ENTRY).is_none() {
+        return Ok(());
+    }
+    for (index, want) in [(1, SEAL_ENTRY), (2, MANIFEST_ENTRY)] {
+        let found = if index < archive.len() {
+            archive
+                .by_index_data(index)
+                .map_err(cz)?
+                .name()
+                .map_err(cz)?
+                .into_owned()
+        } else {
+            "(none)".to_owned()
+        };
+        if found != want {
+            return Err(Error::Container(format!(
+                "not a canonical .tsra: entry {} is '{found}', but SPEC §6 orders `{MIMETYPE_ENTRY}`, \
+                 `{SEAL_ENTRY}`, `{MANIFEST_ENTRY}` first",
+                index + 1
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// SPEC §6's leading-entry rule, from central-directory metadata alone (see [`open_tsra_archive`]).
@@ -214,7 +251,8 @@ impl<R: Seek> Seek for SharedSource<R> {
 ///
 /// 1. `zip`'s [`ZipArchive::validate_header_consistency`]: every local header agrees with its
 ///    central-directory record, no name appears twice, no two entries share a byte.
-/// 2. [`check_members`]: every entry is `mimetype`, `manifest.json`, a block the manifest lists, or
+/// 2. [`check_members`]: every entry is `mimetype`, `manifest.seal`, `manifest.json`, a block the
+///    manifest lists, or
 ///    an `aux/` member whose name obeys the block-name grammar (ADR-0042, ADR-0063), and the `aux/`
 ///    names are distinct up to case with none below another ([`check_aux_name_set`]). Anything else
 ///    is bytes no digest covers under a name a reader would take for part of the product, or a name
@@ -264,7 +302,8 @@ fn check_one_reading<A: Read + Seek, S: Read + Seek>(
 }
 
 /// Part 2 of [`check_one_reading`]: the archive holds only what SPEC §6 permits. Duplicates are
-/// already refused, so `mimetype` and `manifest.json` occur at most once; a listed block that is
+/// already refused, so `mimetype`, `manifest.seal` and `manifest.json` occur at most once (and the
+/// open already placed them first, [`require_seal_then_manifest`]); a listed block that is
 /// missing fails later, when its payload is verified. The manifest must list each block name once
 /// ([`Error::DuplicateBlockName`], #734). The open's [`Manifest::verify`] already refuses a repeat,
 /// so through [`Reader`] this never fires; it is defence in depth, kept next to the one place that
@@ -299,11 +338,14 @@ fn check_members<A: Read + Seek>(archive: &ZipArchive<A>, manifest: &Manifest) -
             aux.push(rest.to_string());
             continue;
         }
-        let permitted =
-            name == MIMETYPE_ENTRY || name == MANIFEST_ENTRY || listed.contains(name.as_ref());
+        let permitted = name == MIMETYPE_ENTRY
+            || name == SEAL_ENTRY
+            || name == MANIFEST_ENTRY
+            || listed.contains(name.as_ref());
         if !permitted {
             return Err(Error::Container(format!(
-                "entry '{name}' is not `mimetype`, `manifest.json`, a block the manifest lists, or \
+                "entry '{name}' is not `mimetype`, `manifest.seal`, `manifest.json`, a block the \
+                 manifest lists, or \
                  an `{AUX_PREFIX}` member; no digest covers its bytes, and outside `{AUX_PREFIX}` a \
                  reader would take it for part of the sealed product"
             )));
@@ -779,28 +821,48 @@ fn check_packable(manifest: &Manifest) -> Result<()> {
 /// `volume` + `volume/1` pyramid) is still a valid zip that readers open, so re-packaging it (e.g.
 /// to add an `aux/` member) keeps working.
 ///
-/// The manifest is written as [`crate::stored::manifest`]: exactly its JCS bytes (ADR-0066 rule 1),
-/// from [`Manifest::to_sealed_json`], so a manifest whose JSON doesn't carry its own seal (edited
-/// after sealing, or a parsed view with newer fields) is refused, not packed.
+/// The manifest is written as [`crate::stored::manifest`] (ADR-0066): `manifest.json` is exactly
+/// its JCS bytes and `manifest.seal` their digest, from [`Manifest::to_stored`], so a manifest whose
+/// bytes don't carry its own seal (edited after sealing, or a parsed view with newer fields) is
+/// refused, not packed.
 pub fn pack(manifest: &Manifest, payloads: &[BlockPayload], path: &Path) -> Result<()> {
     check_packable(manifest)?;
-    pack_manifest_json(&crate::stored::manifest(manifest)?, payloads, path)
+    let (json, seal) = crate::stored::manifest(manifest)?;
+    pack_manifest_json(&json, &seal, payloads, path)
 }
 
-/// [`pack`]'s body, over the stored manifest bytes ([`crate::stored`]) the caller has already
-/// sealed or seal-verified.
-fn pack_manifest_json(manifest_json: &[u8], payloads: &[BlockPayload], path: &Path) -> Result<()> {
+/// The leading entries every `.tsra` writer emits, in SPEC §6's order: `mimetype`, then
+/// `manifest.seal`, then `manifest.json`. The one place the order is spelled, so [`pack`],
+/// [`pack_streaming`] and [`write_aux_members`] can't drift.
+fn write_leading_entries<W: Write + Seek>(
+    zw: &mut ZipWriter<W>,
+    manifest_json: &[u8],
+    seal: &str,
+) -> Result<()> {
+    let stored = tsra_entry_options();
+    zw.start_file(MIMETYPE_ENTRY, stored).map_err(cz)?; // first + uncompressed = magic
+    zw.write_all(MIMETYPE.as_bytes())?;
+    zw.start_file(SEAL_ENTRY, stored).map_err(cz)?;
+    zw.write_all(seal.as_bytes())?;
+    zw.start_file(MANIFEST_ENTRY, stored).map_err(cz)?;
+    zw.write_all(manifest_json)?;
+    Ok(())
+}
+
+/// [`pack`]'s body, over a stored manifest pair ([`crate::stored`]) the caller has already sealed
+/// or read through [`Manifest::from_stored_members`].
+fn pack_manifest_json(
+    manifest_json: &[u8],
+    seal: &str,
+    payloads: &[BlockPayload],
+    path: &Path,
+) -> Result<()> {
     let mut zw = ZipWriter::new(File::create(path)?);
     // STORED + force zip64 so a large study is never silently truncated at 4 GiB / 65 k entries.
     // Pin the entry mtime to the zip epoch (1980-01-01) so the same product packs to byte-identical
     // bytes — writer-determinism is a release gate (FEATURE-MATRIX §C); a wall-clock mtime breaks it.
     let stored = tsra_entry_options();
-
-    zw.start_file(MIMETYPE_ENTRY, stored).map_err(cz)?; // first + uncompressed = magic
-    zw.write_all(MIMETYPE.as_bytes())?;
-
-    zw.start_file(MANIFEST_ENTRY, stored).map_err(cz)?;
-    zw.write_all(manifest_json)?;
+    write_leading_entries(&mut zw, manifest_json, seal)?;
 
     for p in payloads {
         zw.start_file(format!("{BLOCKS_PREFIX}{}", p.name), stored)
@@ -822,7 +884,7 @@ fn pack_manifest_json(manifest_json: &[u8], payloads: &[BlockPayload], path: &Pa
 /// match the manifest's `blocks` list (the caller passes them straight from the session's committed
 /// refs). The output is **byte-identical** to `pack(manifest, &Vec<BlockPayload>::from(sources), out)`
 /// — proven by `pack_streaming_equals_pack` below — because both writers share [`tsra_entry_options`]
-/// and emit the mimetype/manifest/blocks in the same order. Like [`pack`], it refuses an unsealed
+/// and emit the mimetype/seal/manifest/blocks in the same order. Like [`pack`], it refuses an unsealed
 /// manifest, or one listing a block name twice ([`Error::DuplicateBlockName`]), before creating `out`.
 pub fn pack_streaming(
     manifest: &Manifest,
@@ -898,14 +960,10 @@ fn pack_streaming_to(
     verify: bool,
 ) -> Result<()> {
     check_packable(manifest)?;
+    let (json, seal) = crate::stored::manifest(manifest)?;
     let mut zw = ZipWriter::new(File::create(out)?);
     let stored = tsra_entry_options();
-
-    zw.start_file(MIMETYPE_ENTRY, stored).map_err(cz)?;
-    zw.write_all(MIMETYPE.as_bytes())?;
-
-    zw.start_file(MANIFEST_ENTRY, stored).map_err(cz)?;
-    zw.write_all(&crate::stored::manifest(manifest)?)?;
+    write_leading_entries(&mut zw, &json, &seal)?;
 
     for (name, frag) in sources {
         // Resolve the manifest-recorded digest UP FRONT (only when verifying) so a typo'd name or
@@ -975,6 +1033,7 @@ pub struct Reader<R: Read + Seek> {
     source: Arc<Mutex<R>>,
     manifest: Manifest,
     /// The `manifest.json` member exactly as stored, which the seal was verified over (SPEC §4).
+    /// Its seal is [`Manifest::manifest_hash`] of [`manifest`](Self::manifest).
     manifest_json: String,
 }
 
@@ -986,8 +1045,12 @@ impl Reader<File> {
 }
 
 impl<R: Read + Seek> Reader<R> {
-    /// Build a reader from any seekable byte source. Checks the `mimetype` magic, parses
-    /// `manifest.json`, and verifies all three hashes (id / content_hash / manifest_hash).
+    /// Build a reader from any seekable byte source. Checks the `mimetype` magic and the leading
+    /// entries, then reads `manifest.json` and `manifest.seal` through
+    /// [`Manifest::from_stored_members`]: the canonical check, the seal over the stored bytes, then
+    /// `id` and `content_hash` (ADR-0066 rule 4). A product without `manifest.seal` (the alpha
+    /// layout) is refused with [`Error::UnsupportedLayout`], naming what it found and what is
+    /// required; there is no migration (ADR-0066 rule 10).
     pub fn from_reader(reader: R) -> Result<Self> {
         let source = Arc::new(Mutex::new(reader));
         let mut archive = open_tsra_archive(SharedSource(Arc::clone(&source)))?;
@@ -1060,12 +1123,26 @@ impl<R: Read + Seek> Reader<R> {
             return Err(Error::Container(format!("bad container magic: {magic:?}")));
         }
 
-        let mut mj = String::new();
+        let seal = match archive.index_for_name(SEAL_ENTRY) {
+            None => None,
+            Some(_) => {
+                // Bounded like the magic: a seal is 71 bytes, so one longer is malformed and is
+                // refused by its format without reading the rest.
+                let mut s = Vec::new();
+                open_member(&mut archive, SEAL_ENTRY, || "missing manifest.seal".into())?
+                    .take(tessera_core::stored::SEAL_LEN as u64 + 1)
+                    .read_to_end(&mut s)?;
+                Some(s)
+            }
+        };
+        let mut mj = Vec::new();
         open_member(&mut archive, MANIFEST_ENTRY, || {
             "missing manifest.json".into()
         })?
-        .read_to_string(&mut mj)?;
-        let manifest = Manifest::from_json_verified(&mj)?;
+        .read_to_end(&mut mj)?;
+        let manifest = Manifest::from_stored_members(&mj, seal.as_deref())?;
+        // `from_stored_members` refused bytes that are not UTF-8, so this cannot fail.
+        let mj = String::from_utf8(mj).map_err(|e| Error::Container(e.to_string()))?;
 
         Ok(Reader {
             archive,
@@ -1432,6 +1509,10 @@ pub fn add_aux_members(path: &Path, members: &[AuxMember]) -> Result<()> {
 /// entry. Pass `["signatures/"]` to clear the whole signature subtree; the caller adds the new one
 /// through `members`.
 ///
+/// The sealed region is copied byte for byte, so this door can only re-emit what [`Reader::open`]
+/// accepts: an A′ product, its `manifest.json` already its JCS form under its `manifest.seal`. A
+/// product in the alpha layout is refused on open (ADR-0066 rule 10) and never rewritten (#931).
+///
 /// Each member name must obey the block-name grammar (ADR-0063: `/`-separated `[A-Za-z0-9._-]+`
 /// segments, no `.`/`..`), so no `aux/` entry this writes can escape `aux/` when the archive is
 /// unzipped or [`unpack`]ed. The `blocks/` and `aux/` entries it copies through from `path` are held
@@ -1451,6 +1532,7 @@ pub fn write_aux_members(
     // verifies magic + manifest seal, so a corrupt input fails before we start rewriting.
     let mut existing: Vec<(String, Vec<u8>)> = Vec::new();
     let mut manifest_json_bytes: Option<Vec<u8>> = None;
+    let mut seal_bytes: Option<Vec<u8>> = None;
     let sealed_manifest = {
         let mut r = Reader::open(path)?;
         // Central-directory-ordered pass so the rewritten archive preserves the sealed entry order.
@@ -1467,6 +1549,8 @@ pub fn write_aux_members(
             zf.read_to_end(&mut buf)?;
             if name == MANIFEST_ENTRY {
                 manifest_json_bytes = Some(buf.clone());
+            } else if name == SEAL_ENTRY {
+                seal_bytes = Some(buf.clone());
             }
             existing.push((name, buf));
         }
@@ -1474,6 +1558,8 @@ pub fn write_aux_members(
     };
     let manifest_json_bytes = manifest_json_bytes
         .ok_or_else(|| Error::Container("existing .tsra has no manifest.json".into()))?;
+    let seal_bytes =
+        seal_bytes.ok_or_else(|| Error::Container("existing .tsra has no manifest.seal".into()))?;
 
     // Names of aux members being added — for the "overwrite by name" behavior. Compare with the
     // AUX_PREFIX added, since existing entries carry the full path.
@@ -1543,18 +1629,23 @@ pub fn write_aux_members(
             actual: reopened_manifest.manifest_hash.clone().unwrap_or_default(),
         });
     }
-    // Also assert the on-disk `manifest.json` entry itself was preserved byte-for-byte — a hash
-    // match with different bytes would still count as a seal-ignore break (JSON reformatting).
+    // Also assert the on-disk `manifest.json` and `manifest.seal` entries themselves were preserved
+    // byte-for-byte — a hash match with different bytes would still count as a seal-ignore break.
     let mut reopened_zip = open_tsra_archive(File::open(path)?)?;
-    let mut got = Vec::new();
-    open_member(&mut reopened_zip, MANIFEST_ENTRY, || {
-        "aux write lost manifest.json".into()
-    })?
-    .read_to_end(&mut got)?;
-    if got != manifest_json_bytes {
-        return Err(Error::Container(
-            "aux write mutated the manifest.json bytes (seal-ignore invariant broken)".into(),
-        ));
+    for (entry, want) in [
+        (MANIFEST_ENTRY, &manifest_json_bytes),
+        (SEAL_ENTRY, &seal_bytes),
+    ] {
+        let mut got = Vec::new();
+        open_member(&mut reopened_zip, entry, || {
+            format!("aux write lost {entry}")
+        })?
+        .read_to_end(&mut got)?;
+        if &got != want {
+            return Err(Error::Container(format!(
+                "aux write mutated the {entry} bytes (seal-ignore invariant broken)"
+            )));
+        }
     }
     Ok(())
 }
@@ -1571,9 +1662,14 @@ fn write_repacked_archive(
 ) -> Result<()> {
     let mut zw = ZipWriter::new(File::create(out)?);
     let stored = tsra_entry_options();
-    // Pass 1: copy through every SEALED entry (mimetype, manifest.json, blocks/*), preserving order.
+    // Pass 1: copy through every SEALED entry (mimetype, manifest.seal, manifest.json, blocks/*),
+    // preserving order.
     for (name, bytes) in existing {
-        if name == MIMETYPE_ENTRY || name == MANIFEST_ENTRY || name.starts_with(BLOCKS_PREFIX) {
+        if name == MIMETYPE_ENTRY
+            || name == SEAL_ENTRY
+            || name == MANIFEST_ENTRY
+            || name.starts_with(BLOCKS_PREFIX)
+        {
             zw.start_file(name, stored).map_err(cz)?;
             zw.write_all(bytes)?;
         }
@@ -1610,8 +1706,9 @@ fn write_repacked_archive(
 /// problem usefully: which product the broken file claims to be. Without that, a tool resolving
 /// provenance can only say "something here is corrupt", not "the parent this edge needs is corrupt".
 ///
-/// The returned manifest is **untrusted**. Its `id`, `manifest_hash` and metadata are claims by a file
-/// that has already failed verification, so use them to name and locate, never to decide. Anything that
+/// The returned manifest is **untrusted**. Its `id` and metadata are claims by a file that has already
+/// failed verification, so use them to name and locate, never to decide. Its `manifest_hash` is `None`:
+/// the seal lives in `manifest.seal` (ADR-0066), which this does not read. Anything that
 /// reads block payloads or acts on metadata must go through [`Reader::open`] and get the refusal.
 ///
 /// It still parses strictly ([`Manifest::from_json`]): a manifest that repeats a key is not one
@@ -1657,12 +1754,12 @@ fn manifest_text(path: &Path) -> Result<String> {
     Ok(mj)
 }
 
-/// Explode a `.tsra` into a directory: `manifest.json` + `blocks/<name>` + `aux/<name>` (the opt-in
-/// exploded form of ADR-0022; ADR-0042 adds the aux round-trip). Verifies the seal on open and each
-/// block against its digest. `manifest.json` is written in its JCS form
-/// ([`crate::stored::canonical_form`] of the stored bytes, under the same seal). Aux members are
-/// copied verbatim under `aux/` (they carry no digest — seal-ignored). Returns the verified
-/// manifest.
+/// Explode a `.tsra` into a directory: `manifest.json` + `manifest.seal` + `blocks/<name>` +
+/// `aux/<name>` (the opt-in exploded form of ADR-0022; ADR-0042 adds the aux round-trip, ADR-0066
+/// the seal file). Verifies the seal on open and each block against its digest. `manifest.json`
+/// and `manifest.seal` are the stored members, copied byte for byte ([`crate::stored::write_pair`]).
+/// Aux members are copied verbatim under `aux/` (they carry no digest — seal-ignored). Returns the
+/// verified manifest.
 ///
 /// Every name becomes a path under `outdir` by plain components only (ADR-0063, #685): a block
 /// name through [`BlockName::path_under`], an aux member name through the same grammar
@@ -1696,11 +1793,16 @@ pub fn unpack(path: &Path, outdir: &Path) -> Result<Manifest> {
         })
         .collect::<Result<Vec<_>>>()?;
     std::fs::create_dir_all(&blocks_dir)?;
-    // The JCS form of the stored bytes, not the view's JSON: the view may not reproduce the seal
-    // (SPEC §4), while the parsed stored object keeps every key and so its seal (`crate::stored`).
-    std::fs::write(
-        outdir.join("manifest.json"),
-        crate::stored::canonical_form(r.manifest_json())?,
+    // The stored bytes, not the view's JSON: the view may not reproduce the seal (it drops a newer
+    // writer's fields), while the stored bytes are what the seal is over.
+    let seal = manifest
+        .manifest_hash
+        .as_deref()
+        .ok_or_else(|| Error::Container("a verified manifest carries its seal".into()))?;
+    crate::stored::write_pair(
+        &outdir.join(MANIFEST_ENTRY),
+        r.manifest_json().as_bytes(),
+        seal,
     )?;
     for (name, out_path) in block_paths {
         let bytes = r.read_block(&name)?;
@@ -1718,7 +1820,8 @@ pub fn unpack(path: &Path, outdir: &Path) -> Result<Manifest> {
 
 /// An entry [`write_aux_members`] copies through from an existing archive: a `blocks/` or `aux/`
 /// entry's name below its prefix obeys the block-name grammar (ADR-0063), or [`Error::Container`].
-/// (Entries outside `mimetype`, `manifest.json`, `blocks/` and `aux/` are not copied, see
+/// (Entries outside `mimetype`, `manifest.seal`, `manifest.json`, `blocks/` and `aux/` are not
+/// copied, see
 /// [`write_repacked_archive`].)
 fn check_passthrough_entry(name: &str) -> Result<()> {
     let rest = name
@@ -1754,10 +1857,11 @@ fn write_creating_parents(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Pack an exploded directory (`manifest.json` + `blocks/<name>` + optional `aux/<name>`) back into
-/// a sealed `.tsra`. The manifest is seal-verified before packing and stored in its JCS form
-/// ([`crate::stored::canonical_form`]: any JSON spelling of a sealed object packs, under its seal);
-/// each block's payload is read from `blocks/`. If an `aux/` subtree is present it is appended as
+/// Pack an exploded directory (`manifest.json` + `manifest.seal` + `blocks/<name>` + optional
+/// `aux/<name>`) back into a sealed `.tsra`. The pair is read through
+/// [`Manifest::from_stored_members`] (the canonical check, the seal, `id`, `content_hash`; a
+/// directory without `manifest.seal` is the alpha layout, refused naming both formats) and packed
+/// byte for byte; each block's payload is read from `blocks/`. If an `aux/` subtree is present it is appended as
 /// non-sealed aux members (ADR-0042) — round-trip counterpart of [`unpack`], so a `.tsra` that
 /// carried an embedded signature + ingest provenance survives an unpack/repack round with
 /// byte-identical seal AND the aux payload intact.
@@ -1770,8 +1874,8 @@ fn write_creating_parents(path: &Path, bytes: &[u8]) -> Result<()> {
 /// refused with [`Error::LogicalTable`] (ADR-0064 §2.4, [`check_partitions`], the seal's check).
 /// Every check runs before `out` is written.
 pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
-    let mj = std::fs::read_to_string(dir.join("manifest.json"))?;
-    let manifest = Manifest::from_json_verified(&mj)?;
+    let (mj, seal_member) = crate::stored::read_pair(&dir.join(MANIFEST_ENTRY))?;
+    let manifest = Manifest::from_stored_members(&mj, seal_member.as_deref())?;
     check_leaf_rule(manifest.blocks.iter().map(|b| &b.name))?;
     check_partitions(&manifest.blocks)?;
     // Collect and check the aux/ subtree first, so a member name the grammar refuses fails before
@@ -1793,10 +1897,13 @@ pub fn pack_dir(dir: &Path, out: &Path) -> Result<()> {
         payloads.push(BlockPayload::new(b.name.clone(), bytes));
     }
     check_packable(&manifest)?;
-    // The JCS form of the verified object, not the view's JSON: the parsed object is what the
-    // seal covers (SPEC §4), so a product from another writer, or with newer fields, packs back
-    // under the same seal, stored in the one form every tessera writer emits (ADR-0066 rule 1).
-    pack_manifest_json(&crate::stored::canonical_form(&mj)?, &payloads, out)?;
+    // The verified stored bytes, not the view's JSON: they are what the seal covers, so a product
+    // from another writer, or with newer fields, packs back under the same seal.
+    let seal = manifest
+        .manifest_hash
+        .as_deref()
+        .ok_or_else(|| Error::Container("a verified manifest carries its seal".into()))?;
+    pack_manifest_json(&mj, seal, &payloads, out)?;
     // Re-attach the aux/ subtree, each file under its relative path.
     if !members.is_empty() {
         add_aux_members(out, &members)?;
@@ -2456,10 +2563,21 @@ mod tests {
     #[test]
     fn an_archive_whose_first_entry_is_not_mimetype_is_refused() {
         let (bytes, mut order) = sealed_multiblock_bytes();
-        order.swap(0, 1); // manifest.json first, mimetype second
+        order.swap(0, 2); // manifest.json first, mimetype third
         assert_refused(
             repack_raw(&bytes, b"", &order),
             "the first entry is 'manifest.json'",
+        );
+    }
+
+    /// SPEC §6 (ADR-0066 rule 3): `manifest.seal` is entry 2 and `manifest.json` entry 3.
+    #[test]
+    fn an_archive_whose_seal_is_not_entry_2_is_refused() {
+        let (bytes, mut order) = sealed_multiblock_bytes();
+        order.swap(1, 2); // mimetype, manifest.json, manifest.seal
+        assert_refused(
+            repack_raw(&bytes, b"", &order),
+            "entry 2 is 'manifest.json'",
         );
     }
 
