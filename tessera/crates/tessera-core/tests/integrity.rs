@@ -106,6 +106,7 @@ fn seal_rejects_block_without_digest() {
         name: "orphan".parse().unwrap(),
         kind: BlockKind::Array,
         digest: None,
+        class: tessera_core::block::BlockClass::Primary,
         spec: serde_json::Value::Null,
     });
     assert!(b.seal().is_err(), "sealing a digest-less block must fail");

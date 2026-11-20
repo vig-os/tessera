@@ -72,8 +72,15 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
   string→string, hashed verbatim under JCS. The keys `product`, `name`, `timestamp` are the writer's
   recommended default — **not** a reader-enforced requirement; any string→string mapping is valid.
   Stable across rename / byte re-encode.
-- **`content_hash`** (data fingerprint): `merkle_root([block.digest for block in blocks])`, blocks in
-  manifest order. Each block's `digest` is `digest(<the block's stored payload bytes>)`.
+- **`content_hash`** (data fingerprint): `merkle_root([block.digest for block in blocks if block is
+  primary])`, blocks in manifest order. Each block's `digest` is `digest(<the block's stored payload bytes>)`.
+  A block is **primary** unless its BlockRef carries `"class": "derived"` (§5). A **derived** block (a chunk
+  index, §5d; a multiscale-pyramid level above 0) is a pure function of primary data, regenerable, so it is not
+  part of `content_hash` (ADR-0028 §4): adding, regenerating or dropping one leaves `content_hash` unchanged.
+  With no primary block (no blocks, or derived blocks only) the list is empty and `content_hash` is the root of
+  the empty list (§3). `manifest_hash` covers every BlockRef, derived ones and their `class` included, so the
+  seal commits to every block; a reader that uses a derived block relies on `manifest_hash` (or on recomputing
+  the block), never on `content_hash`, for its integrity.
 - **`manifest_hash`** (the seal): `digest(<the stored bytes of manifest.json>)` (ADR-0066). The bytes are
   the manifest's JCS form (§2) and carry **no** `manifest_hash` key; the seal is kept beside them, in the
   `manifest.seal` member (§6): the 71 ASCII bytes `blake3:<64 lower-case hex>`, nothing else. It
@@ -165,7 +172,14 @@ dropped.
 | `content_hash` ✱ | string | §4; present once sealed |
 | (`manifest_hash`) | — | not a field: the seal lives in `manifest.seal` (§4, §6); a manifest carrying the key is refused |
 
-**BlockRef** = `{ name: string, kind: "array"|"table"|"chunk_index"|"blob", digest✱: string, spec: object }`.
+**BlockRef** = `{ name: string, kind: "array"|"table"|"chunk_index"|"blob", digest✱: string, class✱: "derived",
+spec: object }`.
+`class` says whether the block is part of `content_hash` (§4). It is absent for a **primary** block, and a writer
+MUST NOT write it for one; for a **derived** block it is exactly the string `"derived"`. A reader MUST refuse any
+other value, `"primary"` and `null` included, so a class has one spelling. The writer that attaches an accelerator
+marks it derived (the chunk-index sidecar `<name>.cidx`, §5d; the levels above 0 of a multiscale pyramid); a
+block a user supplies is primary. Every block, whatever its class, carries a digest that is checked against its
+payload.
 `name` MUST follow the block-name grammar of [ADR-0063](../../docs/adr/0063-block-name-grammar.md): one or
 more `/`-separated segments of `[A-Za-z0-9._-]+`, no segment `.` or `..`, at most 255 bytes. A reader MUST
 refuse a name outside it. Block names are **unique** within a product: no two BlockRefs of one `blocks`
@@ -180,7 +194,7 @@ rule in-zip, but MUST NOT explode it to a directory.
 `digest` MUST be present in a sealed product: a reader refuses a manifest with a block that lacks one.
 `spec` is shape-specific and opaque to the spine (an array
 spec carries `shape`/`dtype`/`chunks`/`axes`/`codec`/…; a table spec carries `columns`/`rows`/…; a
-`chunk_index` sidecar spec carries `class`/`recipe`/`indexes`/`entries`/`root` — see §5d; a `blob`
+`chunk_index` sidecar spec carries `recipe`/`indexes`/`entries`/`root` — see §5d; a `blob`
 spec carries `filename`/`media_type`/`size` — see §5e).
 **Source** = `{ role: string, reference: string, content_hash✱: string }`.
 **Producer** = `{ tool: string, version: string, git_commit✱: string, git_repo✱: string, dirty✱: bool }`.
@@ -445,11 +459,14 @@ or table row-groups). It is **optional** — present only when a writer chooses 
 - **Naming.** The sidecar for a data block `<name>` is the sibling block `<name>.cidx`.
 - **Payload.** Canonical JSON of the index: `{ "entries": [ { "digest": string, "stats": { "count": u64,
   "min": i64|null, "max": i64|null, "sum": i128, "sum_sq": i128 } }, … ] }` — one entry per sub-block, in
-  storage order. The block `digest` is `digest(payload)` like any block, so it rolls into `content_hash`
-  (the sidecar is integrity-covered, not free-floating).
-- **Spec (self-description).** `{ "class": "derived", "recipe": "chunk_index@1", "indexes": "<name>",
-  "entries": <count>, "root": "blake3:…" }`. `class:"derived"` + `recipe` mark it **regenerable** from the
-  indexed data block (a consumer MAY drop and rebuild it). `root` is the sub-block MMR root over the
+  storage order. The block `digest` is `digest(payload)` like any block, so the seal covers it (the sidecar is
+  integrity-covered, not free-floating).
+- **Class.** The sidecar's BlockRef carries `"class": "derived"` (§5): it is not part of `content_hash` (§4), so
+  emitting, rebuilding or dropping it moves `manifest_hash` only.
+- **Spec (self-description).** `{ "recipe": "chunk_index@1", "indexes": "<name>", "entries": <count>,
+  "root": "blake3:…" }`. The derived class + `recipe` mark it **regenerable** from the indexed data block (a
+  consumer MAY drop and rebuild it). Products sealed before the class moved to the BlockRef (#720) also carry
+  `"class": "derived"` inside the spec, which is opaque and changes nothing. `root` is the sub-block MMR root over the
   per-entry digests (the §3 construction), i.e. the data block's per-chunk confirmable Merkle root.
 - **Use.** A consumer reads the sidecar for **per-chunk inclusion proofs** and **predicate pruning**
   (skip a sub-block whose `[min,max]` cannot match a query) without re-reading the data; the rolled-up
@@ -592,8 +609,9 @@ first:
 5. refuse a top-level `manifest_hash` key (the seal in band);
 6. compare `manifest.seal` with `digest(manifest.json)`, byte for byte: a mismatch is an integrity failure;
 7. the typed layer: refuse a value in a form §5 doesn't declare, a `tessera_version` major > supported, a
-   block name listed twice (§5); check `id` from `id_inputs`, then refuse a block without a digest, then
-   check `content_hash` from the block digests (required) — a mismatch is an integrity failure.
+   block name listed twice (§5), a block `class` other than `"derived"` (§5); check `id` from `id_inputs`, then
+   refuse a block without a digest, then check `content_hash` from the primary blocks' digests (required, §4)
+   — a mismatch is an integrity failure.
 
 On reading a block, the reader MUST verify the bytes against the BlockRef `digest`. Full verification of a file also checks the container's canonical layout and member
 set (§6, "One reading"), so a `.tsra` that verifies reads the same under every zip reader, byte for byte.
@@ -623,5 +641,8 @@ seal; S7 the same sealed by the attacker, #901; S8 a pretty layout sealed: all r
 (refused). On one product: the encodings a typed model loses (`"study": null`, an omitted `sources`, a nested
 newer key; all verify), a seal member missing, malformed or another product's, text that is not I-JSON, a
 record spelled as a JSON array or a `kind` as an object, a declared field of another JSON type or shape, a
-block without a digest, and nesting past 127 levels. A conformant reader MUST reach every case's `verdict`
+block without a digest, nesting past 127 levels, and the derived class (§4, §5): a derived block added or
+regenerated (verifies, `content_hash` unchanged), one counted in `content_hash` and a primary block marked derived
+under the old root (tampered), all blocks derived with the empty root (verifies), and a `class` of `"primary"`,
+`null`, another string, a number or an array (refused). A conformant reader MUST reach every case's `verdict`
 from its pair. The file is generated by `tessera/corpus/reference_reader/make_seal_cases.py` from the corpus.

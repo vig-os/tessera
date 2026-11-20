@@ -137,6 +137,7 @@ fn staged_table_ref(
         name: tessera_core::block::BlockName::new(name)?,
         kind: tessera_core::block::BlockKind::Table,
         digest: None,
+        class: tessera_core::block::BlockClass::Primary,
         spec: tessera_core::canonical::to_json_value(&crate::table::sealed_spec(spec)?)?,
     })
 }

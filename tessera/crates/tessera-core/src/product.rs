@@ -192,15 +192,11 @@ impl ProductBuilder {
         crate::block::check_unique_names(self.refs.iter().map(|r| &r.name))?;
         crate::block::check_leaf_rule(self.refs.iter().map(|r| &r.name))?;
         crate::block::check_partitions(&self.refs)?;
-        let mut digests = Vec::with_capacity(self.refs.len());
-        for r in &self.refs {
-            match &r.digest {
-                Some(d) => digests.push(d.clone()),
-                None => return Err(crate::Error::MissingDigest(r.name.to_string())),
-            }
-        }
+        // ADR-0028 §4: `content_hash` is over the primary blocks only; `manifest_hash` (the seal over
+        // the stored manifest) covers every block ref, derived ones and their class included.
+        let content_hash = crate::block::content_root(&self.refs)?;
         self.manifest.blocks = self.refs;
-        self.manifest.content_hash = Some(crate::hash::merkle_root(&digests));
+        self.manifest.content_hash = Some(content_hash);
         // Self-describing (FAIR-Reusable): embed the resolved product schema so the sealed `.tsra`
         // carries its own contract and the seal commits to it. A caller-supplied schema
         // (`with_schema`) or an inherited one (`from_manifest`) wins; otherwise embed the built-in
@@ -251,6 +247,7 @@ mod tests {
             name: name.parse().unwrap(),
             kind: BlockKind::Array,
             digest: Some(digest.into()),
+            class: crate::block::BlockClass::Primary,
             spec: serde_json::json!({ "dtype": "int16", "shape": [2] }),
         }
     }

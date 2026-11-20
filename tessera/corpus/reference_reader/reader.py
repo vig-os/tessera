@@ -22,7 +22,10 @@ Spec notes used here (only):
   - All hashing inputs derived from JSON are RFC 8785 (JCS) canonical bytes.
   - JSON input is I-JSON (SPEC §1): a number whose value is an integer beyond ±(2^53−1) is refused.
   - id            = digest(JCS(id_inputs))
-  - content_hash  = merkle_root([block.digest for block in manifest.blocks])
+  - content_hash  = merkle_root([block.digest for block in manifest.blocks if block is primary]):
+    a block ref's optional "class" is absent (primary) or exactly "derived" (an accelerator such as
+    a chunk index, covered by manifest_hash but not by content_hash, ADR-0028 §4); any other value,
+    "primary" and null included, is refused as outside the declared shape.
   - Block names are unique within a product (SPEC §5, exact string equality):
     a manifest listing one name twice is refused before any digest lookup.
   - manifest_hash = digest(manifest.json bytes as stored) = the content of manifest.seal
@@ -90,6 +93,13 @@ def merkle_root(digest_strings: list[str]) -> str:
     for _, p in reversed(peaks[:-1]):
         acc = _node_hash(p, acc)
     return "blake3:" + acc.hex()
+
+
+def content_root(blocks: list[dict[str, Any]]) -> str:
+    """content_hash (SPEC §4, ADR-0028 §4): the Merkle root over the primary blocks' digests, in
+    manifest order. A derived block (`"class": "derived"`) is skipped; with no primary block the
+    root is that of the empty list. The caller has refused blocks without a digest."""
+    return merkle_root([b["digest"] for b in blocks if b.get("class") != DERIVED])
 
 
 def jcs_bytes(obj: Any) -> bytes:
@@ -281,6 +291,8 @@ def _rec(**fields: tuple) -> tuple:
 
 
 _REQ, _DEF = True, False
+# A block ref's `class` (SPEC §5): absent for a primary block, else exactly this.
+DERIVED = "derived"
 BLOCK_KINDS = ("array", "table", "chunk_index", "blob")
 PRODUCER = _rec(
     tool=(STR, _REQ),
@@ -310,6 +322,8 @@ MANIFEST = _rec(
                 name=(NAME, _REQ),
                 kind=(("enum", BLOCK_KINDS), _REQ),
                 digest=(_opt(STR), _DEF),
+                # ADR-0028 §4: absent = primary; present, the only spelling is "derived".
+                **{"class": (("enum", (DERIVED,)), _DEF)},
                 spec=(ANY, _DEF),
             ),
         ),
@@ -440,7 +454,7 @@ def stored_verdict(raw: bytes | str, seal: bytes | str | None) -> str:
         return "tampered"
     if any(b.get("digest") is None for b in blocks):
         return "refused"
-    if merkle_root([b["digest"] for b in blocks]) != m.get("content_hash"):
+    if content_root(blocks) != m.get("content_hash"):
         return "tampered"
     return "ok"
 
@@ -535,8 +549,8 @@ def _verify_tsra(path: str) -> VerifyResult:
         # (f) recompute id
         computed_id = digest(jcs_bytes(manifest["id_inputs"]))
 
-        # (g) recompute content_hash from block digests in manifest order;
-        #     also verify each stored block's bytes against its digest.
+        # (g) recompute content_hash from the primary blocks' digests in manifest order;
+        #     also verify every stored block's bytes (derived ones too) against its digest.
         blocks = manifest.get("blocks", [])
         duplicates = duplicate_block_names(blocks)
         if duplicates:
@@ -561,9 +575,7 @@ def _verify_tsra(path: str) -> VerifyResult:
                     f"block {name!r}: payload digest {actual} != recorded {recorded}"
                 )
 
-        computed_content_hash = (
-            "" if undigested else merkle_root([b["digest"] for b in blocks])
-        )
+        computed_content_hash = "" if undigested else content_root(blocks)
 
         ok = (
             not notes

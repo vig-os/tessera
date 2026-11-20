@@ -40,7 +40,8 @@ records the **concrete** codec: `auto` is resolved at write time and a reader ne
   `mean`, or `sum`.
 - `pyramid` — build a multiscale overview (full-res + 2× downsampled levels) into a new **derived**
   `.tsra`, each level carrying its `at_level` affine (OME-Zarr `multiscales` geometry) and a
-  `derived_from` provenance edge back to the source.
+  `derived_from` provenance edge back to the source. Levels above 0 are derived blocks
+  (`class: "derived"`, SPEC §5), so the pyramid's `content_hash` is level 0's alone.
 
 ## Stats without decoding
 
