@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-11T03:36:30Z
-updated: 2026-11-19T05:25:59Z
+updated: 2026-11-19T11:51:22Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/828
-comments: 3
+comments: 5
 labels: feature, priority:high, area:core
 assignees: none
 milestone: none
 projects: none
 parent: 897
 children: none
-synced: 2026-11-19T09:52:16.708Z
+synced: 2026-11-20T09:39:14.750Z
 ---
 
 # [Issue 828]: [perf(format): per-column codec profiles — measured sweep: plain Pco per column is 19 % smaller than .tsra on GE list-mode; a fixed fast profile beats .tsra on size and per-core speed](https://github.com/vig-os/tessera/issues/828)
@@ -401,4 +401,43 @@ Owner 2026-11-19: adopt the per-column codec profile as the new default `tessera
 _Posted on November 19, 2026 at 05:25 AM_
 
 This issue is step 7 of the ADR-0066 implementation plan (epic #897; full order in the plan comment there). Its scope and acceptance criteria are in docs/adr/0066-seal-encoding.md, under Implementation plan.
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 19, 2026 at 11:03 AM_
+
+**`tessera-table-v2` is decided** (owner, 2026-11-19). The design note is accepted: [`docs/spikes/915-tessera-table-v2.md`](https://github.com/vig-os/tessera/blob/docs/915-table-v2-design-note/docs/spikes/915-tessera-table-v2.md) (#915, PR #919). It gates this issue and sets its acceptance criteria.
+
+Decided profile, one rule for every product type, with the codec forced rather than sampled:
+- integers of 16 bits or more and floats → `vortex.pco`, level 8, 8,192-value pages;
+- `i1`/`u1` → `vortex.zstd`, one frame per 65,536-row group, no dictionary; measurement M6 fixes the level (provisional 9);
+- `b1`/`utf8` keep v1's codec set.
+
+There are no per-product-type level tables and no logical transforms (O0). The value goes in the existing sealed `TableSpec.codec_profile` field as `"tessera-table-v2"`, with no per-column codec record (O3). Readers still never refuse an unknown profile, because a profile may never change decoded values.
+
+Accepted trade-off (O2): random take decodes a whole row group per column, with A4's floors. The page-granular Pco take/filter kernel is a separate reader-side follow-up and is not part of this issue.
+
+Acceptance criteria (note §5 and §8):
+- A1 size: GE ≤ 3.25 B/ev, Siemens ≤ 7.10 B/ev;
+- A2: lossless on both #822 fixtures;
+- A3: encode per core ≥ 1.00× v1;
+- A4: take ≤ 100 ms, plus the projection and pruning floors;
+- A5: decode ≥ 500 MiB/s per core;
+- A6: corpus size table;
+- A7: determinism gate;
+- A8: the #468, #472, drift and v1-decode guards;
+- M1–M7 reported in the PR.
+
+Before merge, the PR needs a green both-legs `workflow_dispatch` run of `nix-check.yml` on its head (O4). The ADR-0024 amendment and the SPEC §5b text land with this issue.
+
+
+---
+
+# [Comment #5]() by [gerchowl]()
+
+_Posted on November 19, 2026 at 11:51 AM_
+
+Watch item from the review of #919: the Siemens size floor (A1, at most 7.10 B/event) has almost no margin. It starts from the sweep's 6.891 row, which kept `prompt` on Pco, then adds +2.9 % for zstd on the 8-bit columns and +0.85 %. That lands near 7.10–7.15 B/event, and v2 puts zstd on all nine `u1` columns. Measure M1/M6 early. If the floor breaks, it goes back to the owner, as the note says.
 

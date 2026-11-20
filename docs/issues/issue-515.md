@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-19T05:25:20Z
+updated: 2026-11-20T08:08:30Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-19T09:52:42.512Z
+synced: 2026-11-20T09:39:15.237Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -25,9 +25,9 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 The following updates are currently rate-limited. To force their creation now, click on a checkbox below.
 
  - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-digest -->chore(deps): update actions/create-github-app-token digest to f418cff
- - [ ] <!-- unlimit-branch=renovate/tessera-core-digest -->fix(deps): update tessera-core digest to 7b5cedd
+ - [ ] <!-- unlimit-branch=renovate/tessera-core-digest -->fix(deps): update tessera-core digest to 94f2499
  - [ ] <!-- unlimit-branch=renovate/bytes-1.x-lockfile -->chore(deps): update rust crate bytes to v1.12.2
- - [ ] <!-- unlimit-branch=renovate/clap-4.x-lockfile -->chore(deps): update rust crate clap to v4.6.8
+ - [ ] <!-- unlimit-branch=renovate/clap-4.x-lockfile -->chore(deps): update rust crate clap to v4.6.9
  - [ ] <!-- unlimit-branch=renovate/dicom-0.x-lockfile -->chore(deps): update rust crate dicom to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/dicom-transfer-syntax-registry-0.x-lockfile -->chore(deps): update rust crate dicom-transfer-syntax-registry to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/zarrs-0.x-lockfile -->chore(deps): update rust crate zarrs to v0.23.14
@@ -45,10 +45,11 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unlimit-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.54.1
  - [ ] <!-- unlimit-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
- - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.7.2
+ - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.8.1
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.27.0
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
+ - [ ] <!-- unlimit-branch=renovate/serde_jcs-0.x -->fix(deps): update rust crate serde_jcs to v0.3.0
  - [ ] <!-- unlimit-branch=renovate/pyarrow-26.x -->build(pip): update dependency pyarrow to v26
  - [ ] <!-- unlimit-branch=renovate/ed25519-dalek-3.x -->chore(deps): update rust crate ed25519-dalek to v3
  - [ ] <!-- unlimit-branch=renovate/toml-1.x -->chore(deps): update rust crate toml to v1
@@ -85,9 +86,9 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
  - `tessera-core ea2e47aeafe4a509ef3206e0e6f6d90882031945` → [Updates: ``]
  - `serde_json 1`
- - `serde_jcs 0.2.0`
+ - `serde_jcs 0.2.0` → [Updates: `0.3.0`]
  - `blake3 1`
- - `zip 9` → [Updates: `lock file @ 9.7.2`]
+ - `zip 9` → [Updates: `lock file @ 9.8.1`]
  - `minicbor 2.3.1`
  - `cbor4ii 1.2.5`
  - `serde 1`
@@ -98,7 +99,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
  - `serde 1` → [Updates: `lock file @ 1.0.229`]
  - `serde_json 1` → [Updates: `lock file @ 1.0.154`]
- - `serde_jcs 0.2`
+ - `serde_jcs 0.2` → [Updates: `0.3`]
  - `blake3 1`
  - `thiserror 2` → [Updates: `lock file @ 2.0.21`]
  - `tracing 0.1`
@@ -108,7 +109,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `age 0.11` → [Updates: `0.12`]
  - `time 0.3` → [Updates: `lock file @ 0.3.55`]
  - `proptest 1` → [Updates: `lock file @ 1.12.0`]
- - `zip 9.0.5` → [Updates: `lock file @ 9.7.2`]
+ - `zip 9.0.5` → [Updates: `lock file @ 9.8.1`]
  - `zarrs 0.23` → [Updates: `lock file @ 0.23.14`]
  - `bytes 1` → [Updates: `lock file @ 1.12.2`]
  - `half 2`
@@ -122,7 +123,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `vortex-scan 0.93`
  - `vortex-session 0.93`
  - `futures 0.3` → [Updates: `lock file @ 0.3.34`]
- - `clap 4` → [Updates: `lock file @ 4.6.8`]
+ - `clap 4` → [Updates: `lock file @ 4.6.9`]
  - `png 0.17` → [Updates: `0.18`]
  - `dicom 0.10` → [Updates: `lock file @ 0.10.1`]
  - `dicom-transfer-syntax-registry 0.10` → [Updates: `lock file @ 0.10.1`]

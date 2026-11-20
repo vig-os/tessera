@@ -2,7 +2,7 @@
 type: issue
 state: closed
 created: 2026-08-07T13:06:59Z
-updated: 2026-09-24T11:48:58Z
+updated: 2026-11-19T19:07:50Z
 author: c-vigo
 author_url: https://github.com/c-vigo
 url: https://github.com/vig-os/tessera/issues/364
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-06T08:33:34.156Z
+synced: 2026-11-20T09:39:15.686Z
 ---
 
 # [Issue 364]: [chore(ci): adopt devkit scaffold; migrate sync to standard org Apps and retire dedicated App](https://github.com/vig-os/tessera/issues/364)
@@ -175,7 +175,7 @@ Credentials at `:57-58` and `:98-99` are the repo secrets `APP_SYNC_ISSUES_ID` /
 
 **Migration principle, unchanged:** no secret is deleted while any pinned
 workflow still references it, and the *silent* failure mode is the one to guard
-against — `exo-pet/playground-carlos`'s sync job reported success while syncing
+against — `[private-repo]`'s sync job reported success while syncing
 nothing for a week when `COMMIT_APP_ID` was unavailable. Step 3 must check the
 committed content and the committer, not just the green check.
 

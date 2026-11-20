@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-18T21:36:11Z
-updated: 2026-11-19T00:44:05Z
+updated: 2026-11-19T19:29:54Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/910
-comments: 3
+comments: 4
 labels: feature, area:io
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-19T09:52:05.409Z
+synced: 2026-11-20T09:39:13.351Z
 ---
 
 # [Issue 910]: [feat(io): read API over committed-but-unsealed fragments of an open WriteSession — live snapshot at watermark W (kit D32)](https://github.com/vig-os/tessera/issues/910)
@@ -159,5 +159,19 @@ Three substantive corrections (fragment retention and the decision-2 sentence) a
 Everything else from the 2026-11-19 extension and the 2026-11-19 round-2 correction (shape of `WriteSession::committed_fragments(range)`, zone-map pruning on committed-unsealed, integrity against born digest + newest signed checkpoint via #795, plug-in to the ADR-0062 provider, aggregate byte limits per reader principal, typed `FragmentLeaseExpired` with cause, seal and compaction always proceed, fragment rotation revokes raw access on new snapshots) stands.
 
 Links: kit #139 (round-3 revision 2026-11-19), kit ADR 0010 §4, kit D32; this issue and tessera #908, #795. The kit side is still **proposed**.
+
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 19, 2026 at 07:29 PM_
+
+**Correction 2026-11-19 (nerdmachines/kit#116, closing check of kit #139):** this corrects two phrases in [the round-3 follow-up](https://github.com/vig-os/tessera/issues/910#issuecomment-6996072010). The earlier text stays as it was, as evidence.
+
+1. **"Fragment rotation revokes raw access on new snapshots"** is withdrawn. Segment or fragment rotation **isolates future bytes only**: the writer stops publishing to the old segment, so a reader holding it sees no new rows there. Rotation revokes nothing. The only revocation of the right to receive bytes is expiry of kit's read-authorization lease, and bytes already disclosed or mapped cannot be recalled.
+2. **"Lease expiry stops new handles and accounting"** should read **"stops new handles and new allocations"**. After expiry, no new fragment handles are issued and no new bytes are allocated against the reader's budget. Bytes already retained **stay charged** to the reader principal until it closes its fds or exits, as the next bullet in that comment already says.
+
+Nothing else in the request changes.
 
 
