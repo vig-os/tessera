@@ -12,6 +12,9 @@ Spec notes used here (only):
       with no "manifest_hash" key, in the shape SPEC §5 declares: see MANIFEST below and README
       "What it checks"),
       blocks/<name>... (one per block, payload bytes).
+    Each member name appears once (a reader resolving a repeat to its first or its last entry
+    would read a different member than another reader), and every entry is STORED: an archive
+    with either fault is refused before any member is read.
   - A product without manifest.seal is the pre-ADR-0066 alpha layout: refused, no migration.
   - Hashing: digest(b) = "blake3:" + hex(blake3(b))    (256-bit, lowercase)
   - merkle_root(digests) = the Merkle Mountain Range (MMR) root, domain-separated
@@ -479,16 +482,25 @@ def _verify_tsra(path: str) -> VerifyResult:
     with zipfile.ZipFile(path, "r") as zf:
         names = zf.namelist()
 
-        # (a) mimetype: first entry, exactly application/vnd.tessera, STORED
+        # (a) SPEC §6's member set, from the central directory, before any member is read: each
+        #     name once (zipfile resolves a repeated name to its last entry, another reader to its
+        #     first, so the two would verify different members), and every entry STORED.
+        repeated = sorted({n for n in names if names.count(n) > 1})
+        if repeated:
+            raise NotAManifest(f"member names listed more than once: {repeated}")
+        compressed = [
+            i.filename for i in zf.infolist() if i.compress_type != zipfile.ZIP_STORED
+        ]
+        if compressed:
+            raise NotAManifest(f"entries not STORED (SPEC §6): {compressed}")
+
+        # (b) mimetype: first entry, exactly application/vnd.tessera
         if not names or names[0] != MIMETYPE_NAME:
             notes.append(f"first entry must be {MIMETYPE_NAME!r}; got {names[:1]}")
-        mt_info = zf.getinfo(MIMETYPE_NAME)
-        if mt_info.compress_type != zipfile.ZIP_STORED:
-            notes.append("mimetype is not STORED")
         if zf.read(MIMETYPE_NAME) != MIMETYPE_VALUE:
             notes.append("mimetype content mismatch")
 
-        # (b) manifest.seal then manifest.json, entries 2 and 3 (ADR-0066 rule 3). No seal is the
+        # (c) manifest.seal then manifest.json, entries 2 and 3 (ADR-0066 rule 3). No seal is the
         #     alpha layout: refused, no migration (rule 10).
         if SEAL_NAME not in names:
             raise NotAManifest(
@@ -510,20 +522,20 @@ def _verify_tsra(path: str) -> VerifyResult:
             raise NotAManifest(
                 "manifest.json carries its seal in band (`manifest_hash`)"
             )
-        # (c) the seal: the digest of the stored bytes, never a re-serialisation.
+        # (d) the seal: the digest of the stored bytes, never a re-serialisation.
         computed_manifest_hash = digest(raw)
         if computed_manifest_hash.encode("ascii") != seal:
             notes.append(f"{SEAL_NAME} {seal.decode('ascii')} != digest(manifest.json)")
         manifest = parse_manifest(raw)
 
-        # (d) version gate
+        # (e) version gate
         if not version_supported(manifest["tessera_version"]):
             notes.append(f"unsupported tessera_version {manifest['tessera_version']!r}")
 
-        # (e) recompute id
+        # (f) recompute id
         computed_id = digest(jcs_bytes(manifest["id_inputs"]))
 
-        # (f) recompute content_hash from block digests in manifest order;
+        # (g) recompute content_hash from block digests in manifest order;
         #     also verify each stored block's bytes against its digest.
         blocks = manifest.get("blocks", [])
         duplicates = duplicate_block_names(blocks)

@@ -95,6 +95,7 @@
           "/crates/tessera-wasm/tests/smoke.cjs" = [ "wasm-bindgen-smoke" ];
           "/corpus/reference_reader/run.py" = [ "reference-reader" ];
           "/corpus/reference_reader/make_seal_cases.py" = [ "reference-reader" ];
+          "/corpus/reference_reader/make_refusal_fixtures.py" = [ "reference-reader" ];
           "/bench/ksb/677-rss-proof/test_run.py" = [ "rss-proof-evaluator" ];
         } // pkgs.lib.optionalAttrs isLinux {
           "/bench/ecosystems/test_common.py" = [ "bench-ecosystems" ];
@@ -1406,10 +1407,11 @@
                 echo "reference-reader: expected '$own/$own corpus products pass their own schema'" >&2
                 exit 1
               fi
-              # The crafted refusal archives (#734, #873; #914 adds the non-JCS manifest and the
-              # missing `manifest.seal`): a literal count, so losing a case fails too.
-              if ! grep -qx "9/9 refusal cases refused" out.txt; then
-                echo "reference-reader: expected '9/9 refusal cases refused'" >&2
+              # The crafted refusal archives (#734, #873; #914 adds the non-JCS manifest, the missing
+              # `manifest.seal` and the four committed corpus/refusals fixtures outside SPEC §6's member
+              # set): a literal count, so losing a case fails too.
+              if ! grep -qx "13/13 refusal cases refused" out.txt; then
+                echo "reference-reader: expected '13/13 refusal cases refused'" >&2
                 exit 1
               fi
               # seal-cases.json is generated (ADR-0066): regenerating it from the corpus must give the
@@ -1417,6 +1419,14 @@
               ( cd corpus/reference_reader && python3 make_seal_cases.py )
               if ! cmp -s corpus/seal-cases.json ${./tessera/corpus/seal-cases.json}; then
                 echo "reference-reader: corpus/seal-cases.json is not what make_seal_cases.py generates;" >&2
+                echo "  run it (corpus/reference_reader/README.md) and commit the result" >&2
+                exit 1
+              fi
+              # So are the refusal fixtures the Rust reader opens too (tessera-io tests/canonical_members.rs).
+              rm -r corpus/refusals
+              ( cd corpus/reference_reader && python3 make_refusal_fixtures.py )
+              if ! diff -r corpus/refusals ${./tessera/corpus/refusals}; then
+                echo "reference-reader: corpus/refusals is not what make_refusal_fixtures.py generates;" >&2
                 echo "  run it (corpus/reference_reader/README.md) and commit the result" >&2
                 exit 1
               fi

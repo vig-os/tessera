@@ -11,6 +11,7 @@
 # "ba"). They are not text; exclude them structurally instead of per-lucky-file.
 extend-exclude = [
   "tessera/corpus/files/*.tsra",
+  "tessera/corpus/refusals/*.tsra",
   "tessera/crates/tessera-io/tests/fixtures/*.tsra",
 ]
 

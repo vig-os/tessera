@@ -29,6 +29,15 @@ FILES_DIR = os.path.join(CORPUS_DIR, "files")
 GOLDEN_JSON = os.path.join(CORPUS_DIR, "corpus.json")
 SEAL_CASES_JSON = os.path.join(CORPUS_DIR, "seal-cases.json")
 SCHEMA_CASES_JSON = os.path.join(CORPUS_DIR, "schema-cases.json")
+REFUSALS_DIR = os.path.join(CORPUS_DIR, "refusals")
+# The committed refusal fixtures (make_refusal_fixtures.py) and the note each refusal must carry.
+# The Rust reader refuses the same files (tessera-io tests/canonical_members.rs).
+REFUSAL_FIXTURES = {
+    "duplicate-manifest-seal.tsra": "listed more than once: ['manifest.seal']",
+    "duplicate-manifest-json.tsra": "listed more than once: ['manifest.json']",
+    "deflated-manifest-seal.tsra": "not STORED (SPEC §6): ['manifest.seal']",
+    "deflated-manifest-json.tsra": "not STORED (SPEC §6): ['manifest.json']",
+}
 
 
 def check_seal_cases() -> int:
@@ -173,7 +182,9 @@ def check_refusals(goldens: list[dict]) -> int:
     block's own; a block name that is not a string; a block without a digest; a manifest.json in
     UTF-16 or with a byte-order mark (SPEC §4: UTF-8 I-JSON); a manifest.json that is not its own
     JCS form (ADR-0066 rule 4); an archive without manifest.seal (the alpha layout, rule 10); an
-    archive zipfile can't read (a member marked encrypted). Returns the number of misses."""
+    archive zipfile can't read (a member marked encrypted); and the committed fixtures outside
+    SPEC §6's member set (a repeated or a DEFLATED manifest.seal or manifest.json, each of which a
+    last-entry-wins reader verifies). Returns the number of misses."""
     src = None
     for g in goldens:
         path = os.path.join(FILES_DIR, f"{g['name']}.tsra")
@@ -258,7 +269,15 @@ def check_refusals(goldens: list[dict]) -> int:
             refused = not res.ok and any(reason in n for n in res.notes)
             print(f"refusal: {case}: {'refused' if refused else 'MISSED'}")
             misses += 0 if refused else 1
-    print(f"{len(refusals) - misses}/{len(refusals)} refusal cases refused")
+    fixtures = sorted(os.listdir(REFUSALS_DIR))
+    assert fixtures == sorted(REFUSAL_FIXTURES), fixtures
+    for fixture in fixtures:
+        res = verify_tsra(os.path.join(REFUSALS_DIR, fixture))
+        refused = not res.ok and any(REFUSAL_FIXTURES[fixture] in n for n in res.notes)
+        print(f"refusal: {fixture}: {'refused' if refused else 'MISSED'}")
+        misses += 0 if refused else 1
+    total = len(refusals) + len(fixtures)
+    print(f"{total - misses}/{total} refusal cases refused")
     return misses
 
 
