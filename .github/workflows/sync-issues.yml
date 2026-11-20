@@ -43,7 +43,7 @@ permissions: {}  # restrict default; job declares its own
 jobs:
   resolve-toolchain:
     name: Resolve toolchain
-    runs-on: ubuntu-26.04
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-26.04') || vars.CI_RUNNER_SMALL || vars.DEVKIT_CI_RESOLVE_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 2
     permissions:
       contents: read
@@ -52,6 +52,9 @@ jobs:
       mode: ${{ steps.resolve.outputs.mode }}
       image: ${{ steps.resolve.outputs.image }}
       image-tag: ${{ steps.resolve.outputs.image-tag }}
+      runners: ${{ steps.resolve.outputs.runners }}
+      runner-sources: ${{ steps.resolve.outputs.runner-sources }}
+      runner-json: ${{ steps.resolve.outputs.runner-json }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -61,17 +64,25 @@ jobs:
             .vig-os
             .github/actions/resolve-toolchain
           sparse-checkout-cone-mode: false
+          # Own path: on a persistent runner the sparse clone must not occupy the
+          # shared workspace root later jobs reuse (#1860).
+          path: .devkit-resolve
 
       - name: Resolve toolchain
         id: resolve
-        uses: ./.github/actions/resolve-toolchain
+        uses: ./.devkit-resolve/.github/actions/resolve-toolchain
         with:
+          runner-small: ${{ vars.CI_RUNNER_SMALL }}
+          runner-large: ${{ vars.CI_RUNNER_LARGE }}
+          runner-xlarge: ${{ vars.CI_RUNNER_XLARGE }}
+          legacy-resolve-runner: ${{ vars.DEVKIT_CI_RESOLVE_RUNNER }}
+          working-directory: .devkit-resolve
           registry-token: ${{ secrets.GHCR_PULL_TOKEN || github.token }}
           registry-username: ${{ github.actor }}
 
   sync:
     needs: [resolve-toolchain]
-    runs-on: ubuntu-26.04
+    runs-on: ${{ fromJSON(needs.resolve-toolchain.outputs.runners).small }}
     container:
       image: ${{ needs.resolve-toolchain.outputs.image }}
       credentials:
@@ -118,10 +129,22 @@ jobs:
           fi
 
       - name: Checkout repository
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.inputs.target-branch || 'sync/issue-mirror' }}
           persist-credentials: false
+
+      - name: Record checkout SHA
+        id: checkout-state
+        # actions/checkout reports the SHA it checked out; no git call, so this
+        # also works before a container job marks the workspace safe (#2055).
+        env:
+          CHECKOUT_SHA: ${{ steps.checkout.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test -n "$CHECKOUT_SHA" || { echo "::error::actions/checkout reported no commit SHA"; exit 1; }
+          echo "sha=$CHECKOUT_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Set up devkit toolchain
         uses: ./.github/actions/setup-devkit-toolchain
@@ -192,7 +215,7 @@ jobs:
 
       - name: Sync Issues and PRs
         id: sync
-        uses: vig-os/sync-issues-action@b62c8eca72f4ee7177caee4f689ee080a5997164  # v0.5.0
+        uses: vig-os/sync-issues-action@476599474d45b95d0d297ef70aabe6eb3418d978  # v0.5.1
         with:
           client-id: ${{ secrets.COMMIT_APP_CLIENT_ID }}
           app-private-key: ${{ secrets.COMMIT_APP_PRIVATE_KEY }}
@@ -203,6 +226,14 @@ jobs:
           state-file: '.sync-state/last-sync.txt'
           updated-since: ${{ (github.event.inputs.force-update == 'true' && '1970-01-01T00:00:00Z') || steps.cutoff.outputs.updated-since }}
 
+      - name: Require pinned commit base for API write 1
+        if: steps.sync.outputs.modified-files != ''
+        env:
+          BASE_SHA: ${{ steps.checkout-state.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test -n "$BASE_SHA" || { echo "::error::BASE_SHA is empty; refusing unpinned API commit"; exit 1; }
+
       - name: Commit and push changes via API
         id: commit
         if: steps.sync.outputs.modified-files != ''
@@ -212,12 +243,16 @@ jobs:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           TARGET_BRANCH: refs/heads/${{ github.event.inputs.target-branch || 'sync/issue-mirror' }}
+          BASE_SHA: ${{ steps.checkout-state.outputs.sha }}
           MAX_ATTEMPTS: "3"
           COMMIT_MESSAGE: "${{ github.event.inputs.commit-msg || 'chore: sync issues and PRs' }}"
           FILE_PATHS: ${{ steps.sync.outputs.modified-files }}
 
       - name: Save sync state
-        if: always()
+        # Advance the watermark only once the delta landed (#1757): a failed
+        # push keeps the old cutoff so the next run retries it; a skipped
+        # commit (nothing changed) still saves.
+        if: ${{ steps.sync.outcome == 'success' && steps.commit.outcome != 'failure' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .sync-state
