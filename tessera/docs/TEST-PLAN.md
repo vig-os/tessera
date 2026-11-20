@@ -22,7 +22,7 @@ The benchmarks (fd5 #192/#193/#194 + this spike) are the *performance* guard; th
 | `merkle_root_order_sensitive` | reordering block digests changes the root | hash |
 | `id_stable_and_distinct` | same identity inputs → same id; different → different | identity |
 | `id_timestamp_normalised` | `…T00:00:00`, `…+00:00`, `…+01:00`(same instant) → ONE id (RFC3339/UTC) | identity |
-| `manifest_json_roundtrip_proptest` | `from_json(to_json(m)) == m` over arbitrary manifests | manifest |
+| `manifest_json_roundtrip_proptest` | `from_stored(to_stored(m)) == m` over arbitrary manifests | manifest |
 | `seal_idempotent` | two identical builds → byte-equal id + content_hash + JSON | product |
 | `seal_immutability_invariants` | post-seal: content_hash set, blocks==refs, no `None` digest | product |
 | `seal_rejects_missing_block_digest` | a block with no digest fails `seal()` (no silent drop) | product |

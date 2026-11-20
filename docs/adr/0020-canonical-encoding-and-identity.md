@@ -182,3 +182,23 @@ products and the goldens derived from them are regenerated in the same PR, each 
 under the old `sim` schema can no longer be re-sealed or validated by this build (its schema declares a bare `int64`),
 and a `seed` written as a number is refused by type. The ADR-0065 bridge's consumer drafts (#801) declare 14 bare 64-bit
 fields; each needs `"encoding": "string"` before a product is sealed against it.
+
+## Amendment (2026-11-20) — D4: the seal is over the stored canonical bytes (ADR-0066 A′, #914)
+Step 4 of [ADR-0066](0066-seal-encoding.md)'s implementation plan, the format cutover. D4's canonical encoding is
+unchanged; what it is applied to changes.
+
+- **Stored form.** `manifest.json` (and `collection.json`) is stored as exactly its own JCS bytes, with no
+  `manifest_hash` key. A reader refuses bytes that differ from their JCS form, after a strict parse that keeps the
+  2026-11-16 I-JSON rule (the byte comparison alone would accept an integer beyond 2^53 that a double holds exactly).
+- **Seal.** `manifest_hash = digest(<stored bytes>)`, kept beside them in a `manifest.seal` member (`collection.seal`
+  for a collection). It is no longer a manifest field: D5's three hashes keep their meanings and their **values**
+  (the stored bytes are the bytes `JCS(manifest − manifest_hash)` produced, proven on all 13 tracked products), but the
+  seal now lives outside the document it seals. "Verify the parsed object" (#573) becomes "verify the stored bytes":
+  there is no re-serialisation left between what is stored and what is hashed.
+- **`id`** keeps `digest(JCS(id_inputs))` (ADR-0066 rule 6); the ingest `spec_hash` keeps `digest(JCS(spec))`
+  (rule 9).
+- **No migration** (rule 10): a product in the alpha layout (no `manifest.seal`) is refused with an error naming the
+  layout found and the layout required. `TESSERA_VERSION` stays `"0.0.0"`.
+
+The Verification section above is superseded by SPEC §7's order: strict parse → canonical check → no in-band seal →
+seal over the bytes → typed layer (`Manifest::from_stored_members`, the one reader door).

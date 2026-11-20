@@ -252,3 +252,12 @@ domain field name appear in catalog/cache code?* — grep must come back empty.
   radiology bag.
 - **Not building the DuckDB cross-product *data* query here.** Deferred to its own ADR; only the
   metadata catalog (tier 1) is in scope.
+
+## Amendment (2026-11-20) — the seal is over the canonical bytes, stored as such (ADR-0066 A′, #914)
+The load-bearing fact above — "the seal is over a canonicalization, not over file bytes" — becomes: **the seal is
+over the canonical bytes, stored as such** ([ADR-0066](0066-seal-encoding.md) rules 1–4). `manifest.json` is stored as
+exactly its JCS form and the seal is `blake3` of the file (`b3sum manifest.json` checks it); a reader refuses bytes
+that are not their own JCS form. The property this ADR protects — the spine's seal is independent of how a codec or
+a tool lays out bytes — is unchanged, and is now enforced at read rather than assumed: a respelling (a re-indented
+file, `64.0` for `64`) is refused instead of verifying under the same seal. The remark on dCBOR is answered by the
+#897 spike: deterministic CBOR was weighed and rejected in ADR-0066 (option B).

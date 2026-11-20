@@ -37,17 +37,22 @@ Blocks dispatch by data shape — one spine, the proven engine per shape:
 (The `id` and version lines are globbed with `trycmd` wildcards; the `content_hash` / `manifest_hash` /
 block digests are pinned exact — they move only on a deliberate conformance-corpus regeneration.)
 
-## The stored `manifest.json`
+## The stored `manifest.json` and its `manifest.seal`
 
-Tessera's writers store `manifest.json` (and a collection's `collection.json`) as exactly its RFC 8785 JCS
-form: one line, no whitespace, keys sorted, JCS number and string forms (ADR-0066 rule 1). That is the
-form the seal is computed over, so the file is never pretty-printed. `jq` gives the readable view:
+A `.tsra` starts `mimetype`, `manifest.seal`, `manifest.json` (ADR-0066). `manifest.json` (and a collection's
+`collection.json`) is stored as exactly its RFC 8785 JCS form: one line, no whitespace, keys sorted, JCS
+number and string forms, and no `manifest_hash` key. The seal is `blake3` of exactly those bytes, stored in
+`manifest.seal` (`collection.seal` beside a collection), so checking it needs no JSON library. `jq` gives the
+readable view:
 
 ```sh
 unzip -p study.tsra manifest.json          # one line: {"blocks":[...],"content_hash":"blake3:...",...}
 unzip -p study.tsra manifest.json | jq .   # the same object, indented
+unzip -p study.tsra manifest.seal          # blake3:<64 hex>
+unzip -p study.tsra manifest.json | b3sum  # the same 64 hex digits
 ```
 
-The stored bytes still carry the in-band `manifest_hash` key, and readers still accept any JSON spelling
-of a sealed object; ADR-0066's cutover (#914) moves the seal to a `manifest.seal` member and makes
-readers refuse bytes that are not their own JCS form.
+Readers refuse a `manifest.json` that is not its own JCS form (a re-indented file, `64.0` for `64`), even
+under a seal recomputed over it: one seal has one byte string and one meaning. A product written before
+this layout (no `manifest.seal`) is refused with an error naming the layout it found and the one required;
+there is no migration, so re-ingest it from its source.
