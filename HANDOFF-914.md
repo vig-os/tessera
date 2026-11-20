@@ -52,3 +52,25 @@ This file is for the next agent; delete it before opening any PR.
 ## Env
 CARGO_TARGET_DIR=/mnt/HDD/larsgerchow/tessera-target-slot1, CARGO_BUILD_JOBS=4, SCCACHE_DIR=/mnt/HDD/larsgerchow/sccache;
 logs in /mnt/HDD/larsgerchow/t914/.
+
+## Round 2 (split accepted) — PR A is `feature/914-stored-seal-groundwork`
+PR A (#938) carries the additive part, written fresh from origin/dev (not cherry-picked from c7823582): core `stored`
+module, `Error::UnsupportedLayout`, `Error::MalformedSeal`, `Manifest/Collection::from_stored_members`, io
+`stored::{seal_path, write_pair, read_pair}`, the #933 item-1 tests, and `from_stored_members` tests in
+`tessera-core/tests/stored_bytes.rs`. Docs there say "additive until the cutover (#914, part 2)": PR B must
+reword them (core `stored.rs` module doc, the two `from_stored_members` docs, io `stored.rs` section comment).
+
+PR B = rebase this WIP onto dev after A merges. Conflicts to expect, resolve to A's version then re-apply B:
+`tessera-core/src/{stored.rs,error.rs,manifest.rs,collection.rs,lib.rs}`, `tessera-core/tests/stored_bytes.rs`
+(A appended three tests at the end; B's rewrite of the file must keep them, adapted to A′ products:
+`a_document_without_its_seal_member…` uses today's in-band texts as the alpha layout and becomes B's
+`a_product_without_its_seal_member…`; drop the duplicate), `tessera-io/src/stored.rs` (A has the pair helpers with
+the old `manifest/collection/canonical_form` still present; B replaces those three).
+
+PR B must still contain: every writer/reader switch (container pack/open/leading entries, pack_streaming,
+WriteSession, repo objects, unpack/pack_dir, aux door, collection writers/readers in cli + ingest, py, wasm API),
+the removals (`from_json_verified`, `to_sealed_json`, `seal_of`, `from_json_with_seal`, `hash_without`,
+`bytes_without`, `stored::canonical_form`), the 13 re-packed `.tsra` + `alpha_layout.tsra` fixture, the regenerated
+`seal-cases.json` + `make_seal_cases.py`, the reference reader, flake `wasm-bindgen-smoke` guard, SPEC + ADR
+amendments + book + FEATURE-MATRIX + CHANGELOG, plus the open items above (header_consistency, cli/ingest/trycmd/py).
+Lesson: zip 9 `ZipFile::name()` returns `Result` (two test helpers broke on it).
