@@ -4,10 +4,13 @@
 //! - [`id`](Manifest::id) — *logical identity*: `blake3` over canonical-JSON of [`id_inputs`].
 //!   Rename- and re-encode-stable; survives re-ingest of the same logical product.
 //! - [`content_hash`](Manifest::content_hash) — *data fingerprint*: Merkle root over the ordered
-//!   block digests. Changes iff payload bytes change.
+//!   digests of the **primary** blocks. Changes iff primary payload bytes change; a derived block
+//!   ([`crate::block::BlockClass::Derived`]: a chunk index, a pyramid level above 0) is not part of
+//!   it (ADR-0028 §4).
 //! - [`manifest_hash`](Manifest::manifest_hash) — *the seal*: `blake3` over the **stored bytes** of
 //!   `manifest.json` (ADR-0066). Covers metadata + sources + block refs (which carry the block
-//!   digests), so it transitively commits to all payloads — tamper anything, it changes.
+//!   digests and classes), so it transitively commits to all payloads, derived ones included — tamper
+//!   anything, it changes.
 //!
 //! **What the seal covers (SPEC §4, ADR-0066).** `manifest.json` is stored as exactly its RFC 8785
 //! (JCS) bytes, with no `manifest_hash` key, and the seal is `blake3` over those bytes, kept beside
@@ -95,7 +98,8 @@ pub struct Manifest {
     /// conformance corpus keep its goldens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ingest_transform: Vec<crate::provenance::IngestTransform>,
-    /// Merkle root over block digests; `Some` once sealed, `None` while building.
+    /// Merkle root over the primary blocks' digests, in manifest order (derived blocks are not
+    /// part of it, ADR-0028 §4); `Some` once sealed, `None` while building.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
     /// The seal: `blake3` over this manifest's stored bytes ([`to_stored`](Self::to_stored)).
@@ -296,17 +300,11 @@ impl Manifest {
         crate::identity::compute_id(&self.id_inputs)
     }
 
-    /// Recompute the content Merkle root from the block digests. Errors if any block ref is
-    /// missing its digest.
+    /// Recompute `content_hash`: the Merkle root over the primary blocks' digests, in manifest
+    /// order ([`crate::block::content_root`]; derived blocks are not part of it, ADR-0028 §4).
+    /// Errors if any block ref, of either class, is missing its digest.
     pub fn recompute_content_hash(&self) -> crate::Result<String> {
-        let mut digests = Vec::with_capacity(self.blocks.len());
-        for b in &self.blocks {
-            match &b.digest {
-                Some(d) => digests.push(d.clone()),
-                None => return Err(crate::Error::MissingDigest(b.name.to_string())),
-            }
-        }
-        Ok(crate::hash::merkle_root(&digests))
+        crate::block::content_root(&self.blocks)
     }
 
     /// The seal (`manifest_hash`) this struct gets when written out: `blake3` over
@@ -584,6 +582,8 @@ mod tests {
             name: BlockName::new("b").unwrap(),
             kind: BlockKind::Blob,
             digest: Some("blake3:00".into()),
+            // Derived, so the fully populated instance writes the `class` key.
+            class: crate::block::BlockClass::Derived,
             spec: json!({}),
         }];
         m.sources = vec![Source::new("r", "x").with_content_hash("blake3:00")];

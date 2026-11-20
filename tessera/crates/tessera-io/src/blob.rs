@@ -34,6 +34,7 @@ pub fn blob_block(
         name: name.clone(),
         kind: BlockKind::Blob,
         digest: Some(digest),
+        class: tessera_core::block::BlockClass::Primary,
         spec: tessera_core::canonical::to_json_value(&spec)?,
     };
     Ok((block_ref, BlockPayload::new(name, bytes)))
@@ -70,6 +71,7 @@ pub fn blob_ref_streaming(
         name,
         kind: BlockKind::Blob,
         digest: Some(digest),
+        class: tessera_core::block::BlockClass::Primary,
         spec: tessera_core::canonical::to_json_value(&spec)?,
     })
 }
@@ -125,6 +127,7 @@ pub fn blob_ref_streaming_parallel(
         name,
         kind: BlockKind::Blob,
         digest: Some(digest),
+        class: tessera_core::block::BlockClass::Primary,
         spec: tessera_core::canonical::to_json_value(&spec)?,
     })
 }

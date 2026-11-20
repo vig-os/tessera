@@ -2601,6 +2601,7 @@ mod tests {
                     name: bn(&nm),
                     kind: tessera_core::block::BlockKind::Array,
                     digest: Some(digest),
+                    class: tessera_core::block::BlockClass::Primary,
                     spec: serde_json::json!({}),
                 });
                 BlockPayload::new(bn(&nm), bytes)
@@ -2657,6 +2658,7 @@ mod tests {
                     name: bn(&nm),
                     kind: tessera_core::block::BlockKind::Array,
                     digest: Some(digest),
+                    class: tessera_core::block::BlockClass::Primary,
                     spec: serde_json::json!({}),
                 });
                 BlockPayload::new(bn(&nm), bytes)
@@ -2707,6 +2709,7 @@ mod tests {
             name: bn("data"),
             kind: tessera_core::block::BlockKind::Blob,
             digest: Some(digest_a.clone()),
+            class: tessera_core::block::BlockClass::Primary,
             spec: serde_json::json!({}),
         });
         let sealed = bldr.seal().unwrap();
@@ -2758,6 +2761,7 @@ mod tests {
             name: bn("data"),
             kind: tessera_core::block::BlockKind::Blob,
             digest: Some(digest),
+            class: tessera_core::block::BlockClass::Primary,
             spec: serde_json::json!({}),
         });
         let sealed = bldr.seal().unwrap();
@@ -2947,6 +2951,7 @@ mod tests {
                 name: bn(name),
                 kind: tessera_core::block::BlockKind::Table,
                 digest: Some(digest),
+                class: tessera_core::block::BlockClass::Primary,
                 spec: serde_json::json!({}),
             });
         }

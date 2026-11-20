@@ -132,7 +132,8 @@ pub fn commit(
 
 /// Load an already-encoded block from another sealed `.tsra` for `--add-block`. `spec` is
 /// `[NEWNAME=]SOURCE.tsra:SRCBLOCK`; the block's bytes (digest-verified on read) and its descriptor
-/// (kind/digest/spec) are copied verbatim — no re-encoding.
+/// (kind/digest/class/spec) are copied verbatim — no re-encoding. A derived block (a `.cidx`) stays
+/// derived, so it stays out of the new version's `content_hash` (ADR-0028 §4).
 fn load_block(spec: &str) -> Result<(tessera_core::block::BlockRef, BlockPayload)> {
     let (newname, locator) = match spec.split_once('=') {
         Some((n, rest)) => (Some(n), rest),
@@ -157,6 +158,7 @@ fn load_block(spec: &str) -> Result<(tessera_core::block::BlockRef, BlockPayload
         name: newname.clone(),
         kind: src_ref.kind,
         digest: src_ref.digest,
+        class: src_ref.class,
         spec: src_ref.spec,
     };
     Ok((new_ref, BlockPayload::new(newname, bytes)))
@@ -798,6 +800,38 @@ mod tests {
             !m1.blocks.iter().any(|b| b.name == "volume.cidx"),
             "the STALE sidecar must not survive its block — it would describe the old data"
         );
+    }
+
+    /// `--add-block` copies a block's descriptor verbatim, its class included (ADR-0028 §4): a
+    /// derived `.cidx` stays derived, so it stays out of the new version's `content_hash`, and a
+    /// primary block stays primary.
+    #[test]
+    fn add_block_keeps_the_class_of_the_block_it_copies() {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_core::block::BlockClass;
+        use tessera_io::array::ArrayData;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.tsra");
+        let mut spec = ArraySpec::new(vec![4], "int16");
+        spec.chunks = vec![2];
+        let ((br, pl), side) = tessera_io::array::array_block_with_index(
+            "volume",
+            &spec,
+            &ArrayData::I16(vec![1, 2, 3, 4]),
+        )
+        .unwrap();
+        let (sref, spl) = side.expect("integer array gets a sidecar");
+        let mut b = PB::new("recon", "DP-idx", "v", "2024-01-01T00:00:00Z");
+        b.add_block_ref(br);
+        b.add_block_ref(sref);
+        pack(&b.seal().unwrap(), &[pl, spl], &src).unwrap();
+
+        let src = src.to_str().unwrap();
+        let (cidx, _) = load_block(&format!("copy.cidx={src}:volume.cidx")).unwrap();
+        assert_eq!(cidx.class, BlockClass::Derived);
+        let (volume, _) = load_block(&format!("{src}:volume")).unwrap();
+        assert_eq!(volume.class, BlockClass::Primary);
     }
 
     #[test]

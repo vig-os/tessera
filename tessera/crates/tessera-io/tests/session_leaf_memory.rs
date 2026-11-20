@@ -135,6 +135,7 @@ fn held_by_leaves(n: usize) -> (usize, usize) {
                 name: BlockName::new(block_name("events", i, total).unwrap()).unwrap(),
                 kind: BlockKind::Table,
                 digest: None,
+                class: tessera_core::block::BlockClass::Primary,
                 spec: serde_json::to_value(&leaf).unwrap(),
             };
             serde_json::to_string(&r).unwrap()

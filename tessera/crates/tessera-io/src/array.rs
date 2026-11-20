@@ -699,6 +699,7 @@ pub fn array_block(
         name: name.clone(),
         kind: BlockKind::Array,
         digest: Some(digest),
+        class: tessera_core::block::BlockClass::Primary,
         spec: tessera_core::canonical::to_json_value(&stored_spec)?,
     };
     Ok((block_ref, BlockPayload::new(name, payload)))
@@ -709,7 +710,8 @@ type EncodedBlock = (BlockRef, BlockPayload);
 
 /// Fused block emit (ADR-0028 §5): encode the array block **and** build its `{hash, stats}` chunk-index
 /// sidecar in one call — the per-block primitive the streaming committer emits (the data block plus its
-/// additive companion `<name>.cidx`, whose digest rolls into `content_hash`). Integer arrays get a
+/// additive companion `<name>.cidx`, a derived block: the seal covers it, `content_hash` does not,
+/// ADR-0028 §4). Integer arrays get a
 /// sidecar; float arrays (no integer chunk stats yet — ADR-0024 canonicalisation pending) return `None`
 /// for it. Real encode/index errors propagate; only the "not an integer array" case yields `None`.
 ///
