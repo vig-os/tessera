@@ -101,12 +101,20 @@ pub fn seal_path(document: &Path) -> Result<PathBuf> {
 /// passes a pair it sealed or verified ([`Manifest::to_stored`], [`Collection::to_stored`]); this
 /// only places it.
 ///
+/// **Crash-consistent.** Each file is written durably and atomically (a temp file beside it,
+/// fsync, rename, fsync of the directory), the document first and the seal last, so neither file
+/// is ever torn. A crash between the two renames leaves the new document beside the previous seal,
+/// which a reader refuses as a seal mismatch ([`Error::Integrity`]), or, when there was no previous
+/// seal, beside none, which a reader refuses as the alpha layout ([`Error::UnsupportedLayout`]).
+/// Neither verifies, so a half-written pair is never read as sealed; writing the pair again
+/// completes it. A crash can leave a `<name>.tmp` file, which the next write replaces.
+///
 /// # Errors
 /// [`Error::Io`] for a write that fails; [`Error::Invalid`] as [`seal_path`].
 pub fn write_pair(document: &Path, bytes: &[u8], seal: &str) -> Result<()> {
     let seal_file = seal_path(document)?;
-    std::fs::write(document, bytes)?;
-    std::fs::write(seal_file, seal.as_bytes())?;
+    crate::write::write_durable(document, bytes)?;
+    crate::write::write_durable(&seal_file, seal.as_bytes())?;
     Ok(())
 }
 
@@ -216,6 +224,54 @@ mod tests {
         assert!(
             canonical_form(r#"{"n":9007199254740993}"#).is_err(),
             "inexact integer"
+        );
+    }
+
+    /// #939 item 5: a crash between the document's rename and the seal's leaves a pair no reader
+    /// verifies (the new document beside the old seal is a seal mismatch; with no old seal it is the
+    /// alpha layout), and the old pair is intact while the document's own rename is pending.
+    #[test]
+    fn a_crash_inside_write_pair_never_leaves_a_pair_that_verifies() {
+        use crate::write::seam;
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("collection.json");
+        let stored = |title: &str| {
+            tessera_core::CollectionBuilder::new("c", title, "2024-01-01T00:00:00Z")
+                .seal()
+                .unwrap()
+                .to_stored()
+                .unwrap()
+        };
+        let read = || {
+            let (bytes, seal) = read_pair(&doc).unwrap();
+            Collection::from_stored_members(&bytes, seal.as_deref())
+        };
+        let write_crashing_at = |nth: usize, (bytes, seal): &(Vec<u8>, String)| {
+            let _crash = seam::arm(&seam::FAIL_NTH_DURABLE_RENAME, nth);
+            assert!(write_pair(&doc, bytes, seal).is_err());
+        };
+        let (old, new) = (stored("old"), stored("new"));
+
+        // First write ever, crash before the seal's rename: the document without a seal.
+        write_crashing_at(2, &new);
+        assert_eq!(std::fs::read(&doc).unwrap(), new.0);
+        assert!(matches!(read(), Err(Error::UnsupportedLayout { .. })));
+
+        // Over an existing pair: a crash before the document's rename keeps the old pair whole …
+        write_pair(&doc, &old.0, &old.1).unwrap();
+        write_crashing_at(1, &new);
+        assert_eq!(
+            read().unwrap().manifest_hash.as_deref(),
+            Some(old.1.as_str())
+        );
+        // … and a crash before the seal's rename is a seal mismatch, neither old nor new.
+        write_crashing_at(2, &new);
+        assert!(matches!(read(), Err(Error::Integrity { .. })));
+        // Writing the pair again completes it.
+        write_pair(&doc, &new.0, &new.1).unwrap();
+        assert_eq!(
+            read().unwrap().manifest_hash.as_deref(),
+            Some(new.1.as_str())
         );
     }
 }

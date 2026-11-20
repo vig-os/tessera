@@ -112,9 +112,10 @@ pub enum Error {
 
     /// A stored document has no seal member beside it: the layout of a product or collection
     /// written before ADR-0066 (a pretty or JCS `manifest.json` with an in-band `manifest_hash`, no
-    /// `manifest.seal`). There is no migration (ADR-0066 rule 10): such a product is refused, and
-    /// the message names the format found and the format this reader requires, so the cause is
-    /// plain. Raised by [`crate::Manifest::from_stored_members`] and
+    /// `manifest.seal`), or an ADR-0066 document whose seal member was lost (`found` calls it the
+    /// alpha layout only when the bytes show it). There is no migration (ADR-0066 rule 10): such a
+    /// product is refused, and the message names the format found and the format this reader
+    /// requires, so the cause is plain. Raised by [`crate::Manifest::from_stored_members`] and
     /// [`crate::Collection::from_stored_members`] before any other check.
     ///
     /// `found` is the evidence: the `tessera_version` the document declares (alpha and ADR-0066
@@ -133,15 +134,16 @@ pub enum Error {
 
     /// A seal member (`manifest.seal`, `collection.seal`) is not the 71 ASCII bytes
     /// `blake3:<64 lower-case hex>` (ADR-0066 rule 3): another length, upper-case hex, another
-    /// prefix, a trailing newline. `found` is its content, ASCII-escaped and cut at 80 bytes.
+    /// prefix, a trailing newline. `found` is its first 80 bytes, ASCII-escaped after the cut (so up
+    /// to 320 characters: an escaped byte is at most `\xNN`).
     #[error(
         "`{member}` must hold exactly the 71 ASCII bytes `blake3:<64 lower-case hex>` (ADR-0066 \
          rule 3); it holds `{found}`"
     )]
     MalformedSeal {
-        /// The seal member's name.
-        member: &'static str,
-        /// Its content, ASCII-escaped, at most 80 bytes.
+        /// The seal member's name (`manifest.seal`, `collection.seal`, `<stem>.collection.seal`).
+        member: String,
+        /// Its first 80 bytes, ASCII-escaped (at most 320 characters).
         found: String,
     },
 

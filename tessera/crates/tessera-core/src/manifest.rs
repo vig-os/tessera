@@ -494,7 +494,7 @@ impl Manifest {
     /// [`crate::Error::UnsupportedLayout`] without a seal; [`crate::Error::MalformedSeal`] for a
     /// seal in another format; then everything [`from_stored`](Self::from_stored) refuses.
     pub fn from_stored_members(json: &[u8], seal: Option<&[u8]>) -> crate::Result<Self> {
-        let seal = crate::stored::require_seal(crate::stored::MANIFEST_LAYOUT, json, seal)?;
+        let seal = crate::stored::require_seal(crate::stored::MANIFEST_MEMBER, json, seal)?;
         Self::from_stored(json, seal)
     }
 

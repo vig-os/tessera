@@ -541,12 +541,22 @@ fn a_document_without_its_seal_member_is_refused_naming_both_formats() {
             for needle in evidence {
                 assert!(found.contains(needle), "{}: {needle} in {found}", p.path);
             }
-            assert_eq!(
-                found.contains("in-band"),
-                !evidence.is_empty(),
-                "{}: {found}",
-                p.path
-            );
+            // The alpha label and the non-JCS evidence only when the bytes show them (#939 items
+            // 2 and 3): the JCS bytes without the key and without their seal are neither.
+            let alpha = !evidence.is_empty();
+            let non_jcs = evidence.contains(&"not stored as its JCS bytes");
+            for (label, shown) in [
+                ("in-band", alpha),
+                ("(alpha) layout", alpha),
+                ("not stored as its JCS bytes", non_jcs),
+            ] {
+                assert_eq!(
+                    found.contains(label),
+                    shown,
+                    "{}: {label} in {found}",
+                    p.path
+                );
+            }
             assert!(required.contains("`manifest.seal`"), "{required}");
             assert!(e.to_string().contains("no migration"), "{e}");
         }
@@ -569,16 +579,14 @@ fn a_document_with_its_seal_member_reads_through_from_stored() {
         for bad in [
             format!("{seal}\n"),
             seal.to_uppercase(),
+            format!("blake3:{}", seal["blake3:".len()..].to_uppercase()),
             seal.trim_start_matches("blake3:").to_owned(),
         ] {
             let e = Manifest::from_stored_members(bytes.as_bytes(), Some(bad.as_bytes()));
             assert!(
                 matches!(
                     e,
-                    Err(Error::MalformedSeal {
-                        member: "manifest.seal",
-                        ..
-                    })
+                    Err(Error::MalformedSeal { ref member, .. }) if member == "manifest.seal"
                 ),
                 "{}: {bad:?}: {e:?}",
                 p.path

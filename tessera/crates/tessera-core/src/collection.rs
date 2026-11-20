@@ -526,7 +526,24 @@ impl Collection {
     /// [`crate::Error::UnsupportedLayout`], [`crate::Error::MalformedSeal`], then everything
     /// [`from_stored`](Self::from_stored) refuses.
     pub fn from_stored_members(json: &[u8], seal: Option<&[u8]>) -> crate::Result<Self> {
-        let seal = crate::stored::require_seal(crate::stored::COLLECTION_LAYOUT, json, seal)?;
+        Self::from_stored_members_as(crate::stored::COLLECTION_FILE, json, seal)
+    }
+
+    /// [`from_stored_members`](Self::from_stored_members) for a collection stored under the file
+    /// name `document`: `collection.json`, or `<stem>.collection.json` for a sub-collection member
+    /// ([`member_filename`]). The name only labels the refusals: a missing seal names
+    /// `<stem>.collection.seal`, the seal file beside that document
+    /// ([`crate::stored::seal_name_for`]).
+    ///
+    /// # Errors
+    /// [`crate::Error::Invalid`] when `document` does not end in `.json`; then as
+    /// [`from_stored_members`](Self::from_stored_members).
+    pub fn from_stored_members_as(
+        document: &str,
+        json: &[u8],
+        seal: Option<&[u8]>,
+    ) -> crate::Result<Self> {
+        let seal = crate::stored::require_seal(document, json, seal)?;
         Self::from_stored(json, seal)
     }
 
