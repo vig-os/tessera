@@ -478,6 +478,26 @@ impl Manifest {
         Ok(m)
     }
 
+    /// Read a product's manifest from its two stored members as an ADR-0066 container holds them:
+    /// `manifest.json` and `manifest.seal` (`None` when the container has no such member).
+    ///
+    /// A missing seal is the pre-ADR-0066 alpha layout, refused with no migration (ADR-0066 rule 10)
+    /// by an error that names what was found (the declared `tessera_version`, the missing
+    /// `manifest.seal`, an in-band `manifest_hash`, a non-JCS layout) and the layout required. A
+    /// present seal must be the 71 ASCII bytes `blake3:<64 lower-case hex>`; then
+    /// [`from_stored`](Self::from_stored) runs.
+    ///
+    /// Additive (ADR-0066 step 4, part 1): the readers of `.tsra` and the exploded form switch to it
+    /// in the cutover (#914, part 2).
+    ///
+    /// # Errors
+    /// [`crate::Error::UnsupportedLayout`] without a seal; [`crate::Error::MalformedSeal`] for a
+    /// seal in another format; then everything [`from_stored`](Self::from_stored) refuses.
+    pub fn from_stored_members(json: &[u8], seal: Option<&[u8]>) -> crate::Result<Self> {
+        let seal = crate::stored::require_seal(crate::stored::MANIFEST_LAYOUT, json, seal)?;
+        Self::from_stored(json, seal)
+    }
+
     /// This manifest's **stored form** under ADR-0066: `(bytes, seal)`, where `bytes` is its RFC
     /// 8785 (JCS) serialisation with no `manifest_hash` key and `seal` is
     /// `"blake3:" + hex(blake3(bytes))`. The writer's half of [`from_stored`](Self::from_stored):

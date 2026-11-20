@@ -507,3 +507,140 @@ fn a_collection_respelled_edited_or_in_band_is_refused() {
     let e = Collection::from_stored(wrong.as_bytes(), &digest(wrong.as_bytes())).unwrap_err();
     assert!(matches!(e, Error::Invalid(_)), "{e:?}");
 }
+
+// ------------------------------------------------------------------ the two stored members
+
+/// ADR-0066 rule 10: a product without its seal member is the alpha layout, refused before any
+/// other check, naming the declared version and the layout evidence, and the layout required.
+/// Every tracked product as stored today is that layout (JCS `manifest.json` with the seal in
+/// band, no `manifest.seal`); its pretty form, as written before #912, is too.
+#[test]
+fn a_document_without_its_seal_member_is_refused_naming_both_formats() {
+    for p in &products() {
+        let object: Value = serde_json::from_str(&p.text).unwrap();
+        let pretty = serde_json::to_string_pretty(&object).unwrap();
+        let (stored, _) = stored(p);
+        for (bytes, evidence) in [
+            (p.text.as_str(), &["in-band `manifest_hash`"][..]),
+            (
+                pretty.as_str(),
+                &["in-band `manifest_hash`", "not stored as its JCS bytes"][..],
+            ),
+            (stored.as_str(), &[][..]),
+        ] {
+            let e = Manifest::from_stored_members(bytes.as_bytes(), None).unwrap_err();
+            let Error::UnsupportedLayout { found, required } = &e else {
+                panic!("{}: expected UnsupportedLayout, got {e:?}", p.path)
+            };
+            assert!(
+                found.contains("tessera_version \"0.0.0\""),
+                "{}: {found}",
+                p.path
+            );
+            assert!(found.contains("no `manifest.seal`"), "{}: {found}", p.path);
+            for needle in evidence {
+                assert!(found.contains(needle), "{}: {needle} in {found}", p.path);
+            }
+            assert_eq!(
+                found.contains("in-band"),
+                !evidence.is_empty(),
+                "{}: {found}",
+                p.path
+            );
+            assert!(required.contains("`manifest.seal`"), "{required}");
+            assert!(e.to_string().contains("no migration"), "{e}");
+        }
+    }
+}
+
+/// With its seal member, a stored pair reads exactly as `from_stored` reads it; a seal member in
+/// another format (a trailing newline, upper-case hex, no prefix) is refused for its format.
+#[test]
+fn a_document_with_its_seal_member_reads_through_from_stored() {
+    for p in &products() {
+        let (bytes, seal) = stored(p);
+        let m = Manifest::from_stored_members(bytes.as_bytes(), Some(seal.as_bytes())).unwrap();
+        assert_eq!(
+            m.manifest_hash.as_deref(),
+            Some(seal.as_str()),
+            "{}",
+            p.path
+        );
+        for bad in [
+            format!("{seal}\n"),
+            seal.to_uppercase(),
+            seal.trim_start_matches("blake3:").to_owned(),
+        ] {
+            let e = Manifest::from_stored_members(bytes.as_bytes(), Some(bad.as_bytes()));
+            assert!(
+                matches!(
+                    e,
+                    Err(Error::MalformedSeal {
+                        member: "manifest.seal",
+                        ..
+                    })
+                ),
+                "{}: {bad:?}: {e:?}",
+                p.path
+            );
+        }
+    }
+    let (bytes, seal) = sealed_collection().to_stored().unwrap();
+    let c = Collection::from_stored_members(&bytes, Some(seal.as_bytes())).unwrap();
+    assert_eq!(c.manifest_hash.as_deref(), Some(seal.as_str()));
+    match Collection::from_stored_members(&bytes, None) {
+        Err(Error::UnsupportedLayout { found, required }) => {
+            assert!(found.contains("no `collection.seal`"), "{found}");
+            assert!(required.contains("`collection.seal`"), "{required}");
+        }
+        other => panic!("expected UnsupportedLayout, got {other:?}"),
+    }
+}
+
+/// `from_stored` checks `id` and `content_hash` after the seal (#933 item 1): honest JCS bytes,
+/// sealed by the forger, with a wrong `content_hash`, no `content_hash` or a wrong `id`, are each
+/// refused naming the field, for the manifest and the collection alike. Without the check these
+/// verify: the seal is the forger's own.
+#[test]
+fn from_stored_refuses_forged_identity_and_content_hashes() {
+    let forged = |object: &Value, edit: &dyn Fn(&mut Value)| {
+        let mut v = object.clone();
+        edit(&mut v);
+        let bytes = raw_jcs(&v);
+        let seal = digest(bytes.as_bytes());
+        (bytes, seal)
+    };
+    let wrong = || json!(format!("blake3:{}", "9".repeat(64)));
+    type Edit = Box<dyn Fn(&mut Value)>;
+    let edits: [(&str, &str, Edit); 3] = [
+        (
+            "bad content_hash",
+            "content_hash",
+            Box::new(move |v| v["content_hash"] = wrong()),
+        ),
+        (
+            "no content_hash",
+            "content_hash",
+            Box::new(|v| {
+                v.as_object_mut().unwrap().remove("content_hash");
+            }),
+        ),
+        ("bad id", "id", Box::new(move |v| v["id"] = wrong())),
+    ];
+    let (product, _) = stored(&products()[0]);
+    let product: Value = serde_json::from_str(&product).unwrap();
+    let (c_bytes, _) = sealed_collection().to_stored().unwrap();
+    let collection: Value = serde_json::from_slice(&c_bytes).unwrap();
+    for (case, field, edit) in &edits {
+        let (bytes, seal) = forged(&product, edit);
+        match Manifest::from_stored(bytes.as_bytes(), &seal) {
+            Err(Error::Integrity { what, .. }) => assert_eq!(what, *field, "manifest {case}"),
+            other => panic!("manifest {case}: expected Integrity, got {other:?}"),
+        }
+        let (bytes, seal) = forged(&collection, edit);
+        match Collection::from_stored(bytes.as_bytes(), &seal) {
+            Err(Error::Integrity { what, .. }) => assert_eq!(what, *field, "collection {case}"),
+            other => panic!("collection {case}: expected Integrity, got {other:?}"),
+        }
+    }
+}

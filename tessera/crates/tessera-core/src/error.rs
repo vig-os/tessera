@@ -110,6 +110,41 @@ pub enum Error {
         document: &'static str,
     },
 
+    /// A stored document has no seal member beside it: the layout of a product or collection
+    /// written before ADR-0066 (a pretty or JCS `manifest.json` with an in-band `manifest_hash`, no
+    /// `manifest.seal`). There is no migration (ADR-0066 rule 10): such a product is refused, and
+    /// the message names the format found and the format this reader requires, so the cause is
+    /// plain. Raised by [`crate::Manifest::from_stored_members`] and
+    /// [`crate::Collection::from_stored_members`] before any other check.
+    ///
+    /// `found` is the evidence: the `tessera_version` the document declares (alpha and ADR-0066
+    /// documents both declare `0.0.0`, so the version cannot tell them apart; the layout can), the
+    /// missing seal member, an in-band `manifest_hash` key, and bytes that are not their JCS form.
+    #[error(
+        "unsupported layout: {found}; this reader requires the ADR-0066 layout ({required}). \
+         There is no migration (ADR-0066 rule 10): re-ingest the product from its source"
+    )]
+    UnsupportedLayout {
+        /// The layout evidence, in words.
+        found: String,
+        /// The layout this reader reads, in words.
+        required: String,
+    },
+
+    /// A seal member (`manifest.seal`, `collection.seal`) is not the 71 ASCII bytes
+    /// `blake3:<64 lower-case hex>` (ADR-0066 rule 3): another length, upper-case hex, another
+    /// prefix, a trailing newline. `found` is its content, ASCII-escaped and cut at 80 bytes.
+    #[error(
+        "`{member}` must hold exactly the 71 ASCII bytes `blake3:<64 lower-case hex>` (ADR-0066 \
+         rule 3); it holds `{found}`"
+    )]
+    MalformedSeal {
+        /// The seal member's name.
+        member: &'static str,
+        /// Its content, ASCII-escaped, at most 80 bytes.
+        found: String,
+    },
+
     /// A recomputed hash did not match the one recorded in the manifest — tampering, corruption,
     /// or a producer bug. `what` names the field (`id` / `content_hash` / `manifest_hash`).
     ///

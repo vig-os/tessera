@@ -516,6 +516,20 @@ impl Collection {
         Ok(c)
     }
 
+    /// Read a collection from its two stored files, `collection.json` and `collection.seal`
+    /// (`None` when the seal file is absent). Mirrors [`crate::Manifest::from_stored_members`]: a
+    /// missing seal is the alpha layout, refused naming what was found and what is required
+    /// (ADR-0066 rule 10); a present one must be well formed, then [`from_stored`](Self::from_stored)
+    /// runs. Additive until the cutover (#914, part 2).
+    ///
+    /// # Errors
+    /// [`crate::Error::UnsupportedLayout`], [`crate::Error::MalformedSeal`], then everything
+    /// [`from_stored`](Self::from_stored) refuses.
+    pub fn from_stored_members(json: &[u8], seal: Option<&[u8]>) -> crate::Result<Self> {
+        let seal = crate::stored::require_seal(crate::stored::COLLECTION_LAYOUT, json, seal)?;
+        Self::from_stored(json, seal)
+    }
+
     /// This collection's **stored form** under ADR-0066: `(bytes, seal)`, where `bytes` is its RFC
     /// 8785 (JCS) serialisation with no top-level `manifest_hash` key and `seal` is
     /// `"blake3:" + hex(blake3(bytes))`. Mirrors [`crate::Manifest::to_stored`]: `bytes` are the
