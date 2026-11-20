@@ -786,3 +786,55 @@ fn stored_x_of(d: &Path, repo: &Path, lineage: &str, key: &str, text: &str) -> s
         serde_json::from_str(&ok(&["inspect", out.to_str().unwrap(), "--json"])).unwrap();
     manifest["metadata"][key].clone()
 }
+
+/// A re-seal keeps the rules of the schema the product **embeds**, not the registry's current one
+/// (#895 round 2, SPEC §5 Field rules, ADR-0060's 2026-11-19 amendment): `recon` 1.0 declared no
+/// ranges, so `commit --set kvp=5000` on a product embedding it is sealed, and the new version still
+/// embeds `recon` 1.0. The fixture is the corpus `recon_int16` with its embedded schema written in the
+/// 1.0 form (no `minimum`/`maximum`), as a product sealed before #895 is.
+#[test]
+fn commit_set_keeps_the_rules_of_the_embedded_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let old = d.join("recon_1_0.tsra");
+    let f = tessera_io::conformance::fixtures()
+        .into_iter()
+        .find(|f| f.name == "recon_int16")
+        .unwrap();
+    let mut m = f.manifest;
+    let schema = m
+        .schema
+        .as_mut()
+        .expect("the corpus product embeds its schema");
+    schema["version"] = serde_json::json!("1.0");
+    for field in schema["fields"].as_array_mut().unwrap() {
+        let field = field.as_object_mut().unwrap();
+        field.remove("minimum");
+        field.remove("maximum");
+    }
+    m.manifest_hash = None;
+    m.manifest_hash = Some(m.compute_manifest_hash().unwrap());
+    tessera_io::pack(&m, &f.payloads, &old).unwrap();
+    ok(&["verify", old.to_str().unwrap()]);
+
+    let repo = d.join("repo");
+    ok(&["init", repo.to_str().unwrap()]);
+    let imported = ok(&["import", repo.to_str().unwrap(), old.to_str().unwrap()]);
+    let lineage = imported
+        .lines()
+        .find_map(|l| l.strip_prefix("imported lineage "))
+        .unwrap()
+        .to_owned();
+    assert_eq!(stored_x_of(d, &repo, &lineage, "kvp", "5000"), 5000);
+    let published = std::fs::read_dir(d)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().contains("published-"))
+        .unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&ok(&["inspect", published.to_str().unwrap(), "--json"])).unwrap();
+    assert_eq!(
+        manifest["schema"]["version"], "1.0",
+        "the new version keeps the embedded schema"
+    );
+}

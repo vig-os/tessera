@@ -1023,6 +1023,28 @@
    "metadata": {},
    "verdict": "ok",
    "note": ""
+  },
+  {
+   "name": "int32-holds-a-fraction",
+   "schema": {
+    "product": "p",
+    "version": "1",
+    "description": "d",
+    "fields": [
+     {
+      "id": "n",
+      "description": "d",
+      "dtype": "int32",
+      "minimum": 0,
+      "maximum": 10
+     }
+    ]
+   },
+   "metadata": {
+    "n": 1.5
+   },
+   "verdict": "ok",
+   "note": "int32 field accepts 1.5: a value's JSON type is not checked against its dtype, only its range (documented, SPEC §5 Field rules)"
   }
  ]
 }
