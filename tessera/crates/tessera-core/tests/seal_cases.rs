@@ -2,7 +2,9 @@
 //! reference reader (`corpus/reference_reader/run.py`, the `reference-reader` flake check) checks
 //! too. Both readers held to one file of verdicts agree by construction (#573, SPEC §4).
 //!
-//! The cases are the 8 corpus manifests as sealed, each with a newer-format field added and resealed
+//! The cases are the 8 corpus manifests as sealed when the file was written (the three `recon` ones
+//! embed `recon` 1.0, from before #895 moved their seals; each case is a self-contained sealed text
+//! with its own verdict, so it needs no corpus file), each with a newer-format field added and resealed
 //! (must verify), and each with a field spliced in under the old seal (must fail), plus the encodings
 //! a struct round-trip loses (`"study": null`, an omitted `sources`, a nested newer field), a splice
 //! whose seal was deleted or nulled (tampered: a missing seal is not a pass), and text that is not

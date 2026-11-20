@@ -190,7 +190,9 @@ bridge work (#454 → #811) starts before step 9 is released.
    - *Depends on:* nothing; may run in parallel with 2 and 3.
    - *Scope:* as written in #895. A `FieldSpec` whose `dtype` can exceed ±(2^53−1) (`u64`, `i64`) declares a string
      encoding; optional inclusive `minimum`/`maximum`; built-in schemas declare their rules. The bound stays a
-     format invariant (rule 7).
+     format invariant (rule 7). Recorded in the amendments of 2026-11-19 to
+     [ADR-0020](0020-canonical-encoding-and-identity.md) and
+     [ADR-0060](0060-agentic-actors-and-prov-mapping.md).
    - *Acceptance:* a schema with a bare `u64` metadata field is refused; an out-of-range value is refused naming the
      field and its source; in-range values are unchanged. The built-in schemas are embedded in the manifests, so a
      schema that gains a declaration moves the seal of the products that embed it. This PR regenerates those

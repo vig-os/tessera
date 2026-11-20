@@ -160,24 +160,7 @@ fn repo_with_product(d: &Path) -> (std::path::PathBuf, String) {
 
 /// Commit `x=<text>` and read back what the seal holds under `metadata.x`.
 fn stored_x(d: &Path, repo: &Path, lineage: &str, text: &str) -> serde_json::Value {
-    let set = format!("x={text}");
-    let committed = ok(&["commit", repo.to_str().unwrap(), lineage, "--set", &set]);
-    let version = committed
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("version"))
-        .unwrap()
-        .trim()
-        .to_owned();
-    let out = d.join(format!("published-{}.tsra", version.replace(':', "_")));
-    ok(&[
-        "publish",
-        repo.to_str().unwrap(),
-        &version,
-        out.to_str().unwrap(),
-    ]);
-    let manifest: serde_json::Value =
-        serde_json::from_str(&ok(&["inspect", out.to_str().unwrap(), "--json"])).unwrap();
-    manifest["metadata"]["x"].clone()
+    stored_x_of(d, repo, lineage, "x", text)
 }
 
 /// A text Rust reads as a number but JSON does not spell as one (`+5`, `Infinity`, `+1e400`) used to be
@@ -746,4 +729,112 @@ fn ingest_nifti_refuses_every_unsealable_header_value_naming_the_field() {
         "--out",
         out.to_str().unwrap(),
     ]);
+}
+
+/// `commit --set` holds a value to the range its field declares in the schema the version carries
+/// (#895): a corpus `recon` product embeds `recon` 1.1, whose `kvp` is ranged 0–1000 kV, so
+/// `--set kvp=5000` is refused naming the flag and nothing is stored, while `--set kvp=120` commits.
+#[test]
+fn commit_set_refuses_a_value_outside_its_schema_range_naming_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let corpus = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../corpus/files/recon_int16.tsra"
+    );
+    let repo = d.join("repo");
+    ok(&["init", repo.to_str().unwrap()]);
+    let imported = ok(&["import", repo.to_str().unwrap(), corpus]);
+    let lineage = imported
+        .lines()
+        .find_map(|l| l.strip_prefix("imported lineage "))
+        .unwrap()
+        .to_owned();
+    let before = files(&repo);
+    refused(
+        &[
+            "commit",
+            repo.to_str().unwrap(),
+            &lineage,
+            "--set",
+            "kvp=5000",
+        ],
+        "--set kvp: field 'kvp' of schema 'recon': 5000 is above its maximum 1000",
+    );
+    assert_eq!(files(&repo), before, "a refused --set stores nothing");
+    assert_eq!(stored_x_of(d, &repo, &lineage, "kvp", "120"), 120);
+}
+
+/// Commit `key=<text>` and read back what the seal holds under `metadata.<key>`.
+fn stored_x_of(d: &Path, repo: &Path, lineage: &str, key: &str, text: &str) -> serde_json::Value {
+    let set = format!("{key}={text}");
+    let committed = ok(&["commit", repo.to_str().unwrap(), lineage, "--set", &set]);
+    let version = committed
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("version"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let out = d.join(format!("published-{}.tsra", version.replace(':', "_")));
+    ok(&[
+        "publish",
+        repo.to_str().unwrap(),
+        &version,
+        out.to_str().unwrap(),
+    ]);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&ok(&["inspect", out.to_str().unwrap(), "--json"])).unwrap();
+    manifest["metadata"][key].clone()
+}
+
+/// A re-seal keeps the rules of the schema the product **embeds**, not the registry's current one
+/// (#895 round 2, SPEC §5 Field rules, ADR-0060's 2026-11-19 amendment): `recon` 1.0 declared no
+/// ranges, so `commit --set kvp=5000` on a product embedding it is sealed, and the new version still
+/// embeds `recon` 1.0. The fixture is the corpus `recon_int16` with its embedded schema written in the
+/// 1.0 form (no `minimum`/`maximum`), as a product sealed before #895 is.
+#[test]
+fn commit_set_keeps_the_rules_of_the_embedded_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let old = d.join("recon_1_0.tsra");
+    let f = tessera_io::conformance::fixtures()
+        .into_iter()
+        .find(|f| f.name == "recon_int16")
+        .unwrap();
+    let mut m = f.manifest;
+    let schema = m
+        .schema
+        .as_mut()
+        .expect("the corpus product embeds its schema");
+    schema["version"] = serde_json::json!("1.0");
+    for field in schema["fields"].as_array_mut().unwrap() {
+        let field = field.as_object_mut().unwrap();
+        field.remove("minimum");
+        field.remove("maximum");
+    }
+    m.manifest_hash = None;
+    m.manifest_hash = Some(m.compute_manifest_hash().unwrap());
+    tessera_io::pack(&m, &f.payloads, &old).unwrap();
+    ok(&["verify", old.to_str().unwrap()]);
+
+    let repo = d.join("repo");
+    ok(&["init", repo.to_str().unwrap()]);
+    let imported = ok(&["import", repo.to_str().unwrap(), old.to_str().unwrap()]);
+    let lineage = imported
+        .lines()
+        .find_map(|l| l.strip_prefix("imported lineage "))
+        .unwrap()
+        .to_owned();
+    assert_eq!(stored_x_of(d, &repo, &lineage, "kvp", "5000"), 5000);
+    let published = std::fs::read_dir(d)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().contains("published-"))
+        .unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&ok(&["inspect", published.to_str().unwrap(), "--json"])).unwrap();
+    assert_eq!(
+        manifest["schema"]["version"], "1.0",
+        "the new version keeps the embedded schema"
+    );
 }

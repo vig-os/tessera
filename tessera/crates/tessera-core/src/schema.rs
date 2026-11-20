@@ -23,10 +23,12 @@ use crate::field_path::FieldPath;
 use crate::manifest::Manifest;
 
 pub mod contract;
+pub mod rules;
 pub use contract::{
     ArrayContract, ColumnReference, ContractViolation, ReferenceScope, ReferenceTarget,
     TableContract, TableOrder,
 };
+pub use rules::{Encoding, FieldDefinitionViolation, FieldValueViolation};
 
 /// Schema-driven **sensitivity tier** for a metadata field (ADR-0040 §1 — the spike that
 /// teaches the engine to *reason* about PHI without yet redacting/encrypting). Four tiers on an
@@ -84,7 +86,24 @@ pub struct FieldSpec {
     /// Human + AI-readable description.
     pub description: String,
     /// Value dtype: a [`crate::dtype::DType`] name, or `"string"` / `"coded"` / `"json"` for metadata.
+    /// Any other name is refused by [`ProductSchema::check_definition`]. `int64` and `uint64` can
+    /// hold integers beyond ±(2^53−1), so a field of either declares
+    /// [`encoding`](Self::encoding) `"string"` ([`rules`], #895).
     pub dtype: String,
+    /// How the values are spelled when not as JSON numbers: `"string"` makes each value the
+    /// canonical decimal string of an integer of [`dtype`](Self::dtype). Required on `int64` /
+    /// `uint64` and refused on any other dtype ([`rules`]). `skip_serializing_if` keeps an absent
+    /// encoding out of the embedded schema, so a field without one keeps its bytes (ADR-0060).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<Encoding>,
+    /// Inclusive lower bound on every value (a number, or each element of an array of numbers),
+    /// within ±(2^53−1). Numeric dtypes only; refused where a value enters, naming the field and the
+    /// value's source ([`ProductSchema::check_value`]). Absent ⇒ no bound and no key in the bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<f64>,
+    /// Inclusive upper bound, as [`minimum`](Self::minimum).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<f64>,
     /// UCUM physical unit, if any (e.g. "HU", "Bq/mL", "ps", "keV", "mm").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
@@ -132,6 +151,9 @@ impl FieldSpec {
         "id",
         "description",
         "dtype",
+        "encoding",
+        "minimum",
+        "maximum",
         "unit",
         "vocabulary",
         "default",
@@ -148,6 +170,9 @@ impl FieldSpec {
             id: id.into(),
             description: description.into(),
             dtype: dtype.into(),
+            encoding: None,
+            minimum: None,
+            maximum: None,
             unit: None,
             vocabulary: None,
             default: None,
@@ -186,6 +211,30 @@ impl FieldSpec {
     pub fn vocabulary(mut self, vocab: &str) -> Self {
         self.vocabulary = Some(vocab.into());
         self
+    }
+
+    /// Builder: carry the values as canonical decimal strings ([`Encoding::String`]), as an
+    /// `int64` / `uint64` field must.
+    pub fn string_encoded(mut self) -> Self {
+        self.encoding = Some(Encoding::String);
+        self
+    }
+
+    /// Builder: an inclusive lower bound on the values.
+    pub fn minimum(mut self, minimum: f64) -> Self {
+        self.minimum = Some(minimum);
+        self
+    }
+
+    /// Builder: an inclusive upper bound on the values.
+    pub fn maximum(mut self, maximum: f64) -> Self {
+        self.maximum = Some(maximum);
+        self
+    }
+
+    /// Builder: an inclusive range `[minimum, maximum]` on the values.
+    pub fn range(self, minimum: f64, maximum: f64) -> Self {
+        self.minimum(minimum).maximum(maximum)
     }
 
     /// Builder: classify the field's PHI **sensitivity tier** (ADR-0040 §1). Defaults to
@@ -300,10 +349,17 @@ impl ProductSchema {
         "arrays",
     ];
 
-    /// Validate a manifest against this schema: every required block role must have enough
-    /// matching blocks, and every required field must be present in `metadata` (or carry a
-    /// default). Returns a typed [`crate::Error::Invalid`] naming the first violation.
+    /// Validate a manifest against this schema: the schema's own field declarations must follow the
+    /// number rules ([`Self::check_definition`]), every metadata value must meet its field's encoding
+    /// and range ([`Self::check_metadata`]), every required block role must have enough matching
+    /// blocks, and every required field must be present in `metadata` (or carry a default).
+    ///
+    /// # Errors
+    /// [`crate::Error::SchemaField`] or [`crate::Error::FieldValue`] from the two checks, else a
+    /// typed [`crate::Error::Invalid`] naming the first violation.
     pub fn validate(&self, m: &Manifest) -> crate::Result<()> {
+        self.check_definition()?;
+        self.check_metadata(&m.metadata)?;
         for req in &self.blocks {
             if req.min_count == 0 {
                 continue;
@@ -336,6 +392,78 @@ impl ProductSchema {
                 "schema '{}' requires a generation record (producer config/config_ref) — ADR-0058 §3",
                 self.product
             )));
+        }
+        Ok(())
+    }
+
+    /// The field declared with stable id `id`, if any.
+    pub fn field(&self, id: &str) -> Option<&FieldSpec> {
+        self.fields.iter().find(|f| f.id == id)
+    }
+
+    /// Check every field declaration against the number rules (#895, [`rules`]): each `id` declared
+    /// once; a known dtype; a string encoding exactly on `int64` / `uint64`; a range only on a numeric
+    /// dtype, within ±(2^53−1) and not empty; a `default` its own rules accept.
+    ///
+    /// # Errors
+    /// [`crate::Error::SchemaField`] naming the schema, the first offending field (declaration
+    /// order) and the rule.
+    pub fn check_definition(&self) -> crate::Result<()> {
+        let mut seen = std::collections::BTreeSet::new();
+        for f in &self.fields {
+            let duplicate = !seen.insert(f.id.as_str());
+            let checked = if duplicate {
+                Err(FieldDefinitionViolation::DuplicateId)
+            } else {
+                f.check_definition()
+            };
+            checked.map_err(|violation| crate::Error::SchemaField {
+                product: self.product.clone(),
+                field: f.id.clone(),
+                violation: Box::new(violation),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Check one metadata value against the encoding and range its field declares
+    /// ([`FieldSpec::check_value`]). `origin` says where the value came from, in the words of the
+    /// door that read it: a DICOM tag with its source text (`dicom: (0018,0060) KVP = "5000"`), an
+    /// ingest-spec key (`product[0].metadata.kvp`), a CLI flag (`--set kvp`), or `metadata.kvp` at
+    /// seal. A key the schema does not declare passes (metadata is open-world).
+    ///
+    /// # Errors
+    /// [`crate::Error::FieldValue`] naming `origin`, the field, the schema and the rule.
+    pub fn check_value(
+        &self,
+        id: &str,
+        value: &serde_json::Value,
+        origin: &str,
+    ) -> crate::Result<()> {
+        let Some(f) = self.field(id) else {
+            return Ok(());
+        };
+        f.check_value(value)
+            .map_err(|violation| crate::Error::FieldValue {
+                origin: origin.to_owned(),
+                product: self.product.clone(),
+                field: f.id.clone(),
+                violation: Box::new(violation),
+            })
+    }
+
+    /// [`Self::check_value`] for every entry of a manifest's `metadata`, each named
+    /// `metadata.<id>`, in key order. Run at seal by [`crate::ProductBuilder::seal`], so every writer
+    /// door (Rust, the CLI, Python's `Builder`, ingest) is held to it.
+    ///
+    /// # Errors
+    /// [`crate::Error::FieldValue`] for the first offending entry.
+    pub fn check_metadata(
+        &self,
+        metadata: &BTreeMap<String, serde_json::Value>,
+    ) -> crate::Result<()> {
+        for (id, value) in metadata {
+            self.check_value(id, value, &format!("metadata.{id}"))?;
         }
         Ok(())
     }
@@ -576,11 +704,25 @@ fn newer_fields_of(v: &serde_json::Value) -> Vec<FieldPath> {
 /// model, named by its path in the manifest (`schema.fields[0].pattern`): a gate that can't
 /// evaluate a rule never reports "valid" ([`ProductSchema::from_value`]).
 pub fn validate_manifest(m: &Manifest) -> crate::Result<()> {
-    let Some(v) = &m.schema else {
-        return SchemaRegistry::builtin().validate(m);
-    };
-    let schema = ProductSchema::checked(v, &FieldPath::root().key("schema"))?;
-    schema.validate(m)
+    match declared_schema(m)? {
+        Some(schema) => schema.validate(m),
+        None => Ok(()),
+    }
+}
+
+/// The schema `m` answers to: its **embedded** one when present, else the built-in registry's for
+/// its product, else `None` (open-world). The embedded copy is parsed by
+/// [`ProductSchema::from_value`], so a rule this build doesn't model is refused rather than ignored.
+///
+/// # Errors
+/// [`crate::Error::Invalid`] for an embedded schema that isn't a `ProductSchema`;
+/// [`crate::Error::NewerFormatFields`] for one with a rule this build doesn't model, named by its
+/// path in the manifest (`schema.fields[0].pattern`).
+pub fn declared_schema(m: &Manifest) -> crate::Result<Option<ProductSchema>> {
+    match &m.schema {
+        Some(v) => ProductSchema::checked(v, &FieldPath::root().key("schema")).map(Some),
+        None => Ok(SchemaRegistry::builtin().get(&m.product).cloned()),
+    }
 }
 
 /// The registry of built-in product schemas. Domain-agnostic: lookups for unknown products
@@ -833,14 +975,21 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                     "string",
                 )
                 .inheritable(),
+                // Domain ranges (#895): only a physically impossible value is refused, naming the
+                // DICOM tag; never an unusual but real one. `kvp` is wide enough for every medical
+                // scanner (a negative or a megavolt tube is refused). `slice_thickness` has no
+                // maximum: DICOM sets none, and a CT localizer records its scan length there (GE
+                // Discovery MI scouts read 1000.6 and 1300.8 mm), so only a negative one is refused.
                 FieldSpec::recommended("kvp", "DICOM KVP (0018,0060), CT peak kilovoltage", "float64")
-                    .unit("kV"),
+                    .unit("kV")
+                    .range(0.0, 1000.0),
                 FieldSpec::recommended(
                     "slice_thickness",
                     "DICOM SliceThickness (0018,0050), nominal slice thickness",
                     "float64",
                 )
-                .unit("mm"),
+                .unit("mm")
+                .minimum(0.0),
                 FieldSpec::recommended(
                     "pixel_spacing",
                     "DICOM PixelSpacing (0028,0030), [row_spacing, col_spacing] in mm",
@@ -855,7 +1004,7 @@ fn builtin_schemas() -> Vec<ProductSchema> {
             )],
             ..schema(
                 "recon",
-                "1.0",
+                "1.1",
                 "A reconstructed image volume (CT/PET/μ-map).",
             )
         },
@@ -981,14 +1130,16 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                     "Simulation toolkit (e.g. GATE/Geant4)",
                     "string",
                 ),
-                FieldSpec::optional("seed", "RNG seed for reproducibility", "int64"),
+                // A seed is a full 64-bit integer, beyond what a sealed JSON number holds exactly, so
+                // it is a decimal string by type (#895): `"seed": "42"`.
+                FieldSpec::optional("seed", "RNG seed for reproducibility", "int64").string_encoded(),
             ],
             blocks: vec![one(
                 "output",
                 None,
                 "Simulation output (hits table or scored volume)",
             )],
-            ..schema("sim", "1.0", "Monte-Carlo simulation output.")
+            ..schema("sim", "1.1", "Monte-Carlo simulation output.")
         },
         ProductSchema {
             fields: vec![
@@ -1158,6 +1309,9 @@ mod tests {
                 id: "f".into(),
                 description: "d".into(),
                 dtype: "string".into(),
+                encoding: Some(Encoding::String),
+                minimum: Some(0.0),
+                maximum: Some(1.0),
                 unit: s("mm"),
                 vocabulary: s("DICOM"),
                 default: Some(serde_json::json!("x")),

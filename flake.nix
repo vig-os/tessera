@@ -1386,6 +1386,18 @@
                 echo "reference-reader: expected '$cases/$cases seal cases agreed'" >&2
                 exit 1
               fi
+              # The schema number-rule cases (#895), with the same guard; and every corpus product that
+              # embeds a schema passes it (at least one does, or the loop proved nothing).
+              cases=$(python3 -c 'import json; print(len(json.load(open("corpus/schema-cases.json"))["cases"]))')
+              if [ "$cases" -lt 1 ] || ! grep -qx "$cases/$cases schema cases agreed" out.txt; then
+                echo "reference-reader: expected '$cases/$cases schema cases agreed'" >&2
+                exit 1
+              fi
+              own=$(python3 -c 'import glob, json, zipfile; print(sum(json.loads(zipfile.ZipFile(p).read("manifest.json")).get("schema") is not None for p in glob.glob("corpus/files/*.tsra")))')
+              if [ "$own" -lt 1 ] || ! grep -qx "$own/$own corpus products pass their own schema" out.txt; then
+                echo "reference-reader: expected '$own/$own corpus products pass their own schema'" >&2
+                exit 1
+              fi
               # The crafted refusal archives (#734, #873): a literal count, so losing a case fails too.
               if ! grep -qx "7/7 refusal cases refused" out.txt; then
                 echo "reference-reader: expected '7/7 refusal cases refused'" >&2

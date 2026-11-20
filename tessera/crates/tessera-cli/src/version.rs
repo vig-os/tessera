@@ -99,15 +99,20 @@ pub fn commit(
         payloads.push(payload);
     }
 
-    // Metadata sets.
+    // Metadata sets. Each value is checked against the encoding and range its field declares in the
+    // schema the new version carries (the parent's embedded one, else the registry's; #895), naming
+    // the flag. The seal checks them again, as `metadata.<k>`.
+    let schema = tessera_core::schema::declared_schema(&parent)?;
     for kv in sets {
         let (k, v) = kv
             .split_once('=')
             .ok_or_else(|| Error::Invalid(format!("--set expects key=value, got '{kv}'")))?;
-        b.with_field(
-            k,
-            tessera_core::canonical::parse_user_value(&format!("--set {k}"), v)?,
-        );
+        let flag = format!("--set {k}");
+        let value = tessera_core::canonical::parse_user_value(&flag, v)?;
+        if let Some(schema) = &schema {
+            schema.check_value(k, &value, &flag)?;
+        }
+        b.with_field(k, value);
     }
 
     b.add_source(Source::new("supersedes", &tip).with_content_hash(&tip));

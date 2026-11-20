@@ -30,6 +30,26 @@ cd tessera && cargo run -q -p tessera-core --example schema_reference \
   > tests/derived-docs/schema-reference.md
 ```
 
+## Numbers: 64-bit encodings and ranges
+
+A sealed JSON number is a double, so it holds every integer only up to ±(2^53−1). That bound is the format's
+(SPEC §1), and no schema can widen it. A schema says how each field meets it:
+
+- A field of dtype `int64` or `uint64` declares `"encoding": "string"`. Its values are then decimal strings,
+  by type: `"seed": "42"`, `"t_ns": "1730000000000000000"`, never `"seed": 42`. A bare `int64` field is refused
+  when a product is sealed or validated against the schema.
+- A numeric field may declare an inclusive `minimum` and/or `maximum`. A value outside them is refused where it
+  enters, naming the field and where the value came from. `tessera ingest dicom` over a file whose KVP is 5000
+  fails, before any output is written, with:
+
+```text
+dicom: (0018,0060) KVP = "5000": field 'kvp' of schema 'recon': 5000 is above its maximum 1000
+```
+
+The same check names the ingest-spec key (`product[0].metadata.kvp`), the flag (`--set kvp`, `--meta kvp`) or,
+from Python's `Builder` and any other writer, `metadata.kvp` at seal. The table below shows each field's range
+and encoding in the `dtype` and `range` columns.
+
 ## The built-in products
 
 {{#include ../../../tessera/tests/derived-docs/schema-reference.md}}

@@ -181,6 +181,13 @@ impl ProductBuilder {
     ///
     /// Every partitioned table must be valid (ADR-0064 §2.4, [`crate::block::check_partitions`]),
     /// or the seal is refused with [`crate::Error::LogicalTable`].
+    ///
+    /// The product's schema (the embedded one, else the built-in registry's for its product) must
+    /// follow the number rules (#895): a field declaration that breaks them is refused with
+    /// [`crate::Error::SchemaField`], and a metadata value outside its field's encoding or range with
+    /// [`crate::Error::FieldValue`] named `metadata.<id>`. An embedded schema this build cannot read
+    /// is refused with [`crate::Error::Invalid`], or [`crate::Error::NewerFormatFields`] for a rule
+    /// it doesn't model (ADR-0060 §2.2).
     pub fn seal(mut self) -> crate::Result<Manifest> {
         crate::block::check_unique_names(self.refs.iter().map(|r| &r.name))?;
         crate::block::check_leaf_rule(self.refs.iter().map(|r| &r.name))?;
@@ -203,6 +210,14 @@ impl ProductBuilder {
             if let Some(s) = crate::schema::SchemaRegistry::builtin().get(&self.manifest.product) {
                 self.manifest.schema = Some(s.to_value()?);
             }
+        }
+        // The number rules (#895): the embedded schema's field declarations, then every metadata
+        // value against the encoding and range its field declares. Every writer seals here, so no
+        // door can seal a value its own schema refuses. A schema this build can't read, or one with
+        // a rule it doesn't model, is refused (ADR-0060 §2.2): sealing against it would ignore a rule.
+        if let Some(schema) = crate::schema::declared_schema(&self.manifest)? {
+            schema.check_definition()?;
+            schema.check_metadata(&self.manifest.metadata)?;
         }
         // Sealed provenance: stamp the producing tool/build so a reader knows what wrote the file
         // (ADR-0058 §1 — structured [`ProducerRef::tessera()`], tool + `TESSERA_VERSION` +

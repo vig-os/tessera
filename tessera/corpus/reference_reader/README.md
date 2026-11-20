@@ -22,7 +22,8 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
 Exit code 0 ⇔ all fixtures reproduce their goldens, every manifest in `corpus/seal-cases.json` reaches its
-`verdict`, and the reader refuses each crafted refusal archive for its stated reason. The Rust reader checks the
+`verdict`, every case in `corpus/schema-cases.json` reaches its `verdict` (and every corpus product passes its own
+embedded schema), and the reader refuses each crafted refusal archive for its stated reason. The Rust reader checks the
 same seal-case file (`tessera-core/tests/seal_cases.rs`), so the two readers are compared case by case. The refusal
 archives today list a block name twice (SPEC §5, #734), with a foreign digest and with the block's own, built from a
 corpus fixture and re-sealed; the Rust reader refuses the same two (`tessera-io/tests/unique_block_names.rs`).
@@ -58,6 +59,13 @@ not ok). In SPEC §7's order, so a manifest with two faults gets the verdict of 
 6. **Refused:** a block without a `digest` (SPEC §5).
 7. **Tampered:** `content_hash` ≠ the MMR root of the block digests, or `manifest_hash` ≠ the seal over the parsed
    object without `manifest_hash` (a missing hash is tampered).
+
+Separately from the seal, `schema_verdict(schema, metadata)` applies a product schema's **number rules** (SPEC §5
+"Field rules", #895) and returns `ok`, `schema` (a field declaration is refused: an unknown dtype, an `int64`/`uint64`
+without `"encoding": "string"`, an encoding on another dtype, a range on a non-numeric dtype, beyond ±(2^53−1) or
+empty) or `value` (a metadata value breaks its field's encoding or range; integers are compared exactly). `run.py`
+checks it against every case of `corpus/schema-cases.json`, which `tessera-core/tests/schema_cases.rs` checks for the
+Rust reader, and against each corpus product's own embedded schema (all pass).
 
 Deliberate differences from the Rust reader, each outside what these verdicts cover:
 

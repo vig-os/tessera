@@ -2892,12 +2892,18 @@ mod tests {
     fn a_newer_schema_rule_is_displayed_and_not_validated() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.tsra");
-        let mut b = ProductBuilder::new("custom", "p", "d", "2024-01-01T00:00:00Z");
-        b.with_schema(serde_json::json!({
+        // Sealed as a newer writer would: this build refuses to seal a schema with a rule it doesn't
+        // model (#895, ADR-0060 §2.2), so the schema is attached and the seal recomputed by hand.
+        let mut m = ProductBuilder::new("custom", "p", "d", "2024-01-01T00:00:00Z")
+            .seal()
+            .unwrap();
+        m.schema = Some(serde_json::json!({
             "product": "custom", "version": "2.0", "description": "d",
             "fields": [{ "id": "site", "description": "s", "dtype": "string", "pattern": "^A" }]
         }));
-        pack(&b.seal().unwrap(), &[], &path).unwrap();
+        m.manifest_hash = None;
+        m.manifest_hash = Some(m.compute_manifest_hash().unwrap());
+        pack(&m, &[], &path).unwrap();
 
         let mut buf = Vec::new();
         ls(&path, Some("schema"), false, &mut buf).unwrap();

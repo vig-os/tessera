@@ -221,6 +221,32 @@ pub enum Error {
         violation: crate::schema::ContractViolation,
     },
 
+    /// A product schema declares a metadata field against the number rules (#895,
+    /// [`crate::schema::rules`]): an `int64`/`uint64` field without `"encoding": "string"`, an
+    /// encoding on another dtype, a range on a non-numeric dtype or beyond ±(2^53−1), an empty range,
+    /// or an unknown dtype. Raised by [`crate::ProductSchema::check_definition`], which validation and
+    /// every seal run, before any value is looked at.
+    #[error("schema '{product}': field '{field}' {violation}")]
+    SchemaField {
+        product: String,
+        field: String,
+        /// Boxed so the variant does not widen every `Result<_, Error>` (clippy `result_large_err`).
+        violation: Box<crate::schema::FieldDefinitionViolation>,
+    },
+
+    /// A metadata value breaks the encoding or range its schema field declares (#895), raised by
+    /// [`crate::ProductSchema::check_value`] where the value enters. `origin` names where it came from
+    /// in that door's own words (`dicom: (0018,0060) KVP = "5000"`, `product[0].metadata.kvp`,
+    /// `--set kvp`, `metadata.kvp` at seal), so the person can find the value to fix.
+    #[error("{origin}: field '{field}' of schema '{product}': {violation}")]
+    FieldValue {
+        origin: String,
+        product: String,
+        field: String,
+        /// Boxed, as in [`Error::SchemaField`].
+        violation: Box<crate::schema::FieldValueViolation>,
+    },
+
     /// A block name that fails the block-name grammar (ADR-0063, [`crate::block::name`]): empty,
     /// `.` or `..`, an absolute path, an empty segment, a `\`, `:` or NUL, a character outside
     /// `[A-Za-z0-9._-]`, or over 255 bytes. Refused wherever a name enters — a builder, a manifest,

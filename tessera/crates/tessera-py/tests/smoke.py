@@ -252,6 +252,49 @@ with tempfile.TemporaryDirectory() as td:
         == "1730000000000000000"
     )
 
+# #895: the Builder is held to the number rules its product schema declares. `recon` ranges `kvp`
+# to 0–1000 kV: an out-of-range value is refused naming the field (at seal, so as `metadata.kvp`),
+# nothing is written, and an in-range value seals unchanged.
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "kvp.tsra"
+    b = tessera.Builder("recon", "kvp", "out-of-range kvp", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "CT"}')
+    b.set_field("kvp", "5000")
+    try:
+        b.pack(str(out))
+        raise AssertionError("sealed kvp = 5000 against recon's 0–1000 kV range")
+    except tessera.TesseraError as e:
+        want = "metadata.kvp: field 'kvp' of schema 'recon': 5000 is above its maximum 1000"
+        assert want in str(e), str(e)
+    assert not out.exists(), "a refused pack must write nothing"
+    b = tessera.Builder("recon", "kvp", "in-range kvp", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "CT"}')
+    b.set_field("kvp", "120.5")
+    b.pack(str(out))
+    assert tessera.open(out).manifest()["metadata"]["kvp"] == 120.5
+# …and `sim` declares `seed` a string-encoded int64, so the seed is a decimal string by type: a
+# number is refused however small, the string seals.
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "seed.tsra"
+    b = tessera.Builder("sim", "seed", "seed as a number", "2024-01-01T00:00:00Z")
+    b.add_array("output", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("seed", "42")
+    try:
+        b.pack(str(out))
+        raise AssertionError("sealed a numeric seed against sim's string-encoded int64")
+    except tessera.TesseraError as e:
+        assert (
+            "metadata.seed: field 'seed' of schema 'sim': 42 is not a decimal string of int64"
+            in str(e)
+        ), str(e)
+    b = tessera.Builder("sim", "seed", "seed as a string", "2024-01-01T00:00:00Z")
+    b.add_array("output", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("seed", '"42"')
+    b.pack(str(out))
+    assert tessera.open(out).manifest()["metadata"]["seed"] == "42"
+
 # str + b1 columns through the ergonomic reads (#421): str crashed _ndarray
 # ("<str" is not a dtype) and b1 silently decoded as int8 instead of bool_.
 els = ["He", "Li", "", "Beryllium"]  # empty string is the edge worth pinning

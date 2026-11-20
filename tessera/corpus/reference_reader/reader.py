@@ -491,3 +491,119 @@ def _verify_tsra(path: str) -> VerifyResult:
             block_digest_ok=block_digest_ok,
             notes=notes,
         )
+
+
+# ---------------------------------------------------------------------------------------------
+# Number rules of a product schema (SPEC §5 "Field rules", #895). Not part of the seal: a schema's
+# contract, checked where a product is made or validated. `run.py` holds this to the Rust reader's
+# verdicts over `corpus/schema-cases.json`.
+
+# FieldSpec dtypes: the array dtypes plus the metadata kinds (SPEC §5).
+_NUMBER_DTYPES = {
+    "int8",
+    "int16",
+    "int32",
+    "uint8",
+    "uint16",
+    "uint32",
+    "float16",
+    "float32",
+    "float64",
+}
+_WIDE_DTYPES = {"int64": (-(2**63), 2**63 - 1), "uint64": (0, 2**64 - 1)}
+_OTHER_DTYPES = {"bool", "string", "coded", "json"}
+_DECIMAL = re.compile(r"-?(0|[1-9][0-9]*)")
+
+
+def _is_number(v: Any) -> bool:
+    """A JSON number (Python's `bool` is an `int`, and JSON's true/false are not numbers)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def field_definition_error(f: dict[str, Any]) -> str | None:
+    """Why the FieldSpec `f` is refused, or None: an unknown dtype; int64/uint64 without
+    `"encoding": "string"`; an encoding on any other dtype; a range on a non-numeric dtype,
+    beyond ±(2^53−1), or empty (minimum above maximum)."""
+    dtype, encoding = f.get("dtype"), f.get("encoding")
+    lo, hi = f.get("minimum"), f.get("maximum")
+    if (
+        dtype not in _NUMBER_DTYPES
+        and dtype not in _WIDE_DTYPES
+        and dtype not in _OTHER_DTYPES
+    ):
+        return f"dtype {dtype!r} is not a FieldSpec dtype"
+    if dtype in _WIDE_DTYPES and encoding != "string":
+        return f"dtype {dtype} can exceed ±(2^53−1) and declares no string encoding"
+    if dtype not in _WIDE_DTYPES and encoding is not None:
+        return f"encoding {encoding!r} on dtype {dtype}"
+    if lo is None and hi is None:
+        return None
+    if dtype in _OTHER_DTYPES:
+        return f"a range on dtype {dtype}"
+    for name, bound in (("minimum", lo), ("maximum", hi)):
+        if bound is not None and not (
+            _is_number(bound) and abs(bound) <= MAX_EXACT_INTEGER
+        ):
+            return f"{name} {bound!r} is outside ±(2^53−1)"
+    if lo is not None and hi is not None and lo > hi:
+        return f"minimum {lo} above maximum {hi}"
+    return None
+
+
+def _default_error(f: dict[str, Any]) -> str | None:
+    """Why the field's `default` breaks its own rules, or None (absent or JSON `null`)."""
+    if f.get("default") is None:
+        return None
+    why = field_value_error(f, f["default"])
+    return f"default: {why}" if why else None
+
+
+def field_value_error(f: dict[str, Any], value: Any) -> str | None:
+    """Why `value` breaks the FieldSpec `f` (whose definition passed), or None. A string-encoded
+    field takes the canonical decimal string of an integer of its dtype, or a non-empty array of
+    them; a ranged field a number, or a non-empty array of numbers, each within
+    [minimum, maximum]. Python compares an int with a float exactly, as the rule requires."""
+    wide = _WIDE_DTYPES.get(f["dtype"]) if f.get("encoding") == "string" else None
+    lo, hi = f.get("minimum"), f.get("maximum")
+    if wide is None and lo is None and hi is None:
+        return None
+    items = value if isinstance(value, list) else [value]
+    if not items:
+        return "an empty array"
+    for item in items:
+        if wide is not None:
+            if not (
+                isinstance(item, str) and _DECIMAL.fullmatch(item) and item != "-0"
+            ):
+                return f"{item!r} is not a decimal string"
+            n = int(item)
+            if not wide[0] <= n <= wide[1]:
+                return f"{item} is outside {f['dtype']}"
+        elif _is_number(item):
+            n = item
+        else:
+            return f"{item!r} is not a number"
+        if lo is not None and n < lo:
+            return f"{item} is below the minimum {lo}"
+        if hi is not None and n > hi:
+            return f"{item} is above the maximum {hi}"
+    return None
+
+
+def schema_verdict(schema: dict[str, Any], metadata: dict[str, Any]) -> str:
+    """`ok`, `schema` (a field declaration is refused: a repeated id, a rule above, or a `default`
+    its own rules refuse) or `value` (a metadata value is refused): every declaration is checked
+    before any value, values in metadata key order. `schema` is one the shape and newer-field
+    checks already accept (SPEC §4/§5): a key this reader doesn't model, or a value of the wrong
+    JSON type, is refused there, before this function is asked."""
+    fields = schema.get("fields", [])
+    ids = [f["id"] for f in fields]
+    if len(set(ids)) != len(ids):
+        return "schema"  # a field id names one field
+    if any(field_definition_error(f) or _default_error(f) for f in fields):
+        return "schema"
+    by_id = {f["id"]: f for f in fields}
+    for key in sorted(metadata):
+        if key in by_id and field_value_error(by_id[key], metadata[key]):
+            return "value"
+    return "ok"
