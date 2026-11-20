@@ -151,7 +151,7 @@ A reconstructed image volume (CT/PET/μ-map).
 | `manufacturer` | recommended | string | — | — | Public | DICOM Manufacturer (0008,0070) — device vendor |
 | `model_name` | recommended | string | — | — | Public | DICOM ManufacturerModelName (0008,1090) — device model |
 | `kvp` | recommended | float64 | 0 – 1000 | kV | Public | DICOM KVP (0018,0060), CT peak kilovoltage |
-| `slice_thickness` | recommended | float64 | 0 – 1000 | mm | Public | DICOM SliceThickness (0018,0050), nominal slice thickness |
+| `slice_thickness` | recommended | float64 | ≥ 0 | mm | Public | DICOM SliceThickness (0018,0050), nominal slice thickness |
 | `pixel_spacing` | recommended | json | — | mm | Public | DICOM PixelSpacing (0028,0030), [row_spacing, col_spacing] in mm |
 
 | block role | kind | min | description |

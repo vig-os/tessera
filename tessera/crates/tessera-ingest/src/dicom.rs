@@ -1957,6 +1957,32 @@ mod tests {
         );
     }
 
+    /// A CT localizer (scout) puts its scan length in SliceThickness, so a real one reads e.g.
+    /// "1300.8" mm (#895 round 2: GE Discovery MI scouts carry 1000.636353 and 1300.8). The standard
+    /// sets no upper bound on the tag, so the `recon` schema sets none: the file ingests and the value
+    /// is sealed as read. Only a negative thickness is impossible, and that is still refused.
+    #[test]
+    fn a_scout_slice_thickness_past_a_metre_ingests() {
+        for text in ["1000.636353", "1300.8"] {
+            let img = read_object(&dcm_with_curated_and(
+                8,
+                8,
+                1,
+                vec![DataElement::new(
+                    SLICE_THICKNESS,
+                    VR::DS,
+                    PrimitiveValue::from(text),
+                )],
+            ))
+            .unwrap_or_else(|e| panic!("{text}: {e}"));
+            let (m, _) =
+                to_recon_product(&img, "scout", "2024-01-01T00:00:00Z", "1.2.3", None, &[])
+                    .unwrap();
+            let want: f64 = text.parse().unwrap();
+            assert_eq!(m.metadata["slice_thickness"], serde_json::json!(want));
+        }
+    }
+
     /// The `recon` schema's ranges reach the DICOM door (#895): a curated value outside its field's
     /// range is refused when the file is read, before any product exists, naming the field, the tag
     /// and the element's text; values inside it are sealed exactly as before.
@@ -1996,9 +2022,9 @@ mod tests {
             (KVP, "1000", "kvp", serde_json::json!(1000.0)),
             (
                 SLICE_THICKNESS,
-                "1000",
+                "0",
                 "slice_thickness",
-                serde_json::json!(1000.0),
+                serde_json::json!(0.0),
             ),
         ] {
             let img = with(tag, text).unwrap();

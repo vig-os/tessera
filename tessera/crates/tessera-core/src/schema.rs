@@ -975,9 +975,11 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                     "string",
                 )
                 .inheritable(),
-                // Domain ranges (#895): wide enough for every medical scanner, so only a physically
-                // impossible value (a negative or a megavolt tube, a slice thicker than a metre) is
-                // refused, naming the DICOM tag; never an unusual but real one.
+                // Domain ranges (#895): only a physically impossible value is refused, naming the
+                // DICOM tag; never an unusual but real one. `kvp` is wide enough for every medical
+                // scanner (a negative or a megavolt tube is refused). `slice_thickness` has no
+                // maximum: DICOM sets none, and a CT localizer records its scan length there (GE
+                // Discovery MI scouts read 1000.6 and 1300.8 mm), so only a negative one is refused.
                 FieldSpec::recommended("kvp", "DICOM KVP (0018,0060), CT peak kilovoltage", "float64")
                     .unit("kV")
                     .range(0.0, 1000.0),
@@ -987,7 +989,7 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                     "float64",
                 )
                 .unit("mm")
-                .range(0.0, 1000.0),
+                .minimum(0.0),
                 FieldSpec::recommended(
                     "pixel_spacing",
                     "DICOM PixelSpacing (0028,0030), [row_spacing, col_spacing] in mm",
