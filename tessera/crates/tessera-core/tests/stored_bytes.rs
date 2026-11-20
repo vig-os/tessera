@@ -3,15 +3,17 @@
 //!
 //! Two claims, both on real products:
 //!
-//! - **The seal keeps its value** (ADR-0066 rule 2). For all 13 tracked `.tsra` (12 distinct
-//!   manifests: the two `study.tsra` fixtures are byte-identical), `blake3(to_stored().0)` equals
-//!   the seal recorded in the product, and for the 8 corpus files also the `manifest_hash` golden
-//!   in `corpus/corpus.json`. So the A′ seal equals today's seal for every existing product.
+//! - **The seal keeps its value** (ADR-0066 rule 2). All 13 tracked `.tsra` (12 distinct
+//!   manifests: the two `study.tsra` fixtures are byte-identical) are stored in the A′ layout and
+//!   read through `from_stored_members`; `blake3(manifest.json)` is the `manifest.seal` they carry,
+//!   `to_stored` reproduces both, and for the 8 corpus files the seal is the `manifest_hash` golden
+//!   in `corpus/corpus.json`, unchanged from the alpha layout (the cutover's seal-preservation proof).
 //! - **One seal, one byte string** (rules 1 and 4). The spike's respelling attacks
 //!   (docs/spikes/897-seal-encoding/src/attacks.rs) replayed on each product's stored bytes: T4–T7
 //!   under the old seal and S7/S8 sealed by the attacker are refused as non-canonical; S5b (an exact
 //!   double beyond 2^53, its own JCS form) is refused by I-JSON; an edit under the old seal is a
-//!   seal mismatch; an in-band `manifest_hash` key is refused.
+//!   seal mismatch; an in-band `manifest_hash` key is refused; and a product without `manifest.seal`
+//!   (the alpha layout) is refused naming both formats.
 //!
 //! tessera-core has no zip dependency, so `manifest.json` is read straight from the STORED zip64
 //! local headers (SPEC §6 requires STORED members with sizes in the header).
@@ -89,7 +91,7 @@ fn stored_member(zip: &[u8], name: &str) -> Vec<u8> {
     panic!("no STORED member {name}");
 }
 
-/// One tracked product: its `manifest.json` as stored today and the in-band seal it records.
+/// One tracked product: its `manifest.json` and its `manifest.seal`, as stored.
 struct Product {
     path: &'static str,
     text: String,
@@ -102,10 +104,10 @@ fn products() -> Vec<Product> {
         .map(|&path| {
             let zip = std::fs::read(workspace(path)).unwrap_or_else(|e| panic!("{path}: {e}"));
             let text = String::from_utf8(stored_member(&zip, "manifest.json")).unwrap();
-            let seal = Manifest::from_json_verified(&text)
-                .unwrap_or_else(|e| panic!("{path} verifies in-band: {e}"))
-                .manifest_hash
-                .unwrap();
+            let seal = String::from_utf8(stored_member(&zip, "manifest.seal")).unwrap();
+            let m = Manifest::from_stored_members(text.as_bytes(), Some(seal.as_bytes()))
+                .unwrap_or_else(|e| panic!("{path} verifies: {e}"));
+            assert_eq!(m.manifest_hash.as_ref(), Some(&seal), "{path}");
             Product { path, text, seal }
         })
         .collect()
@@ -139,10 +141,20 @@ fn the_stored_seal_of_every_tracked_product_is_its_recorded_seal() {
     );
 
     for p in &products {
-        let m = Manifest::from_json_verified(&p.text).unwrap();
+        let m = Manifest::from_stored(p.text.as_bytes(), &p.seal).unwrap();
         let (bytes, seal) = m.to_stored().unwrap_or_else(|e| panic!("{}: {e}", p.path));
         assert_eq!(digest(&bytes), seal, "{}", p.path);
-        assert_eq!(seal, p.seal, "{}: the A′ seal is the recorded seal", p.path);
+        assert_eq!(
+            seal, p.seal,
+            "{}: manifest.seal is blake3(manifest.json)",
+            p.path
+        );
+        assert_eq!(
+            bytes,
+            p.text.as_bytes(),
+            "{}: stored as to_stored writes",
+            p.path
+        );
         // The stored bytes carry no seal key and are their own JCS form.
         let object = canonical::check_canonical(&bytes).unwrap();
         assert!(object.get("manifest_hash").is_none(), "{}", p.path);
@@ -163,23 +175,15 @@ fn the_stored_seal_of_every_tracked_product_is_its_recorded_seal() {
             .iter()
             .find(|p| p.path == path)
             .unwrap_or_else(|| panic!("{path}"));
-        let (_, seal) = Manifest::from_json_verified(&p.text)
-            .unwrap()
-            .to_stored()
-            .unwrap();
-        assert_eq!(&seal, golden, "{name}: corpus.json golden");
+        assert_eq!(&p.seal, golden, "{name}: corpus.json golden");
     }
 }
 
 // ------------------------------------------------------------------ the attack replay
 
-/// The product's stored bytes and seal, as `to_stored` writes them.
+/// The product's stored bytes and seal.
 fn stored(p: &Product) -> (String, String) {
-    let (bytes, seal) = Manifest::from_json_verified(&p.text)
-        .unwrap()
-        .to_stored()
-        .unwrap();
-    (String::from_utf8(bytes).unwrap(), seal)
+    (p.text.clone(), p.seal.clone())
 }
 
 fn expect_non_canonical(path: &str, case: &str, bytes: &str, seal: &str) -> usize {
@@ -304,34 +308,122 @@ fn an_edit_under_the_old_seal_is_a_seal_mismatch_naming_both_values() {
 #[test]
 fn the_in_band_layout_is_refused_by_from_stored() {
     for p in &products() {
-        // Today's object, as JCS with its `manifest_hash`, sealed over those very bytes.
-        let object: Value = serde_json::from_str(&p.text).unwrap();
+        // The alpha layout's object: the stored object with its `manifest_hash` back in band, as
+        // JCS, sealed over those very bytes.
+        let mut object: Value = serde_json::from_str(&p.text).unwrap();
+        assert!(object.get("manifest_hash").is_none(), "{}", p.path);
+        object["manifest_hash"] = json!(p.seal);
         let in_band = raw_jcs(&object);
-        let e = Manifest::from_stored(in_band.as_bytes(), &digest(in_band.as_bytes())).unwrap_err();
+        for seal in [digest(in_band.as_bytes()), p.seal.clone()] {
+            let e = Manifest::from_stored(in_band.as_bytes(), &seal).unwrap_err();
+            assert!(
+                matches!(
+                    e,
+                    Error::InBandSeal {
+                        document: "manifest"
+                    }
+                ),
+                "{}: {e:?}",
+                p.path
+            );
+        }
+    }
+}
+
+/// ADR-0066 rule 10: a product without `manifest.seal` is the alpha layout, refused before any
+/// other check, naming the declared version and the layout evidence, and the layout required.
+#[test]
+fn a_product_without_its_seal_member_is_refused_naming_both_formats() {
+    for p in &products() {
+        // The alpha layout of this very product: pretty, in-band seal, no seal member.
+        let mut object: Value = serde_json::from_str(&p.text).unwrap();
+        object["manifest_hash"] = json!(p.seal);
+        let alpha = serde_json::to_string_pretty(&object).unwrap();
+        // So is this product's own A′ manifest.json once its seal member is lost.
+        for (bytes, evidence) in [
+            (
+                alpha.as_str(),
+                &["in-band `manifest_hash`", "not stored as its JCS bytes"][..],
+            ),
+            (p.text.as_str(), &[][..]),
+        ] {
+            let e = Manifest::from_stored_members(bytes.as_bytes(), None).unwrap_err();
+            let Error::UnsupportedLayout { found, required } = &e else {
+                panic!("{}: expected UnsupportedLayout, got {e:?}", p.path)
+            };
+            assert!(
+                found.contains("tessera_version \"0.0.0\""),
+                "{}: {found}",
+                p.path
+            );
+            assert!(found.contains("no `manifest.seal`"), "{}: {found}", p.path);
+            for needle in evidence {
+                assert!(found.contains(needle), "{}: {needle} in {found}", p.path);
+            }
+            assert!(required.contains("`manifest.seal`"), "{required}");
+            assert!(e.to_string().contains("no migration"), "{e}");
+        }
+        // A seal member in another format is refused for its format, before the digest.
+        let mut bad = p.seal.clone();
+        bad.push('\n');
+        let e = Manifest::from_stored_members(p.text.as_bytes(), Some(bad.as_bytes()));
         assert!(
             matches!(
                 e,
-                Error::InBandSeal {
-                    document: "manifest"
-                }
+                Err(Error::MalformedSeal {
+                    member: "manifest.seal",
+                    ..
+                })
             ),
             "{}: {e:?}",
             p.path
         );
-        // Today's stored text (#912: writers emit JCS) is exactly that in-band JCS form, so it is
-        // canonical and refused for its `manifest_hash` key, even under its own recorded seal.
-        assert_eq!(p.text, in_band, "{}: stored as JCS", p.path);
-        let e = Manifest::from_stored(p.text.as_bytes(), &p.seal).unwrap_err();
-        assert!(
-            matches!(
-                e,
-                Error::InBandSeal {
-                    document: "manifest"
-                }
-            ),
-            "{}: {e:?}",
-            p.path
-        );
+    }
+}
+
+/// `from_stored` checks `id` and `content_hash` after the seal (#933 item 1): honest JCS bytes,
+/// sealed by the forger, with a wrong `content_hash`, no `content_hash` or a wrong `id`, are each
+/// refused naming the field, for the manifest and the collection alike.
+#[test]
+fn from_stored_refuses_forged_identity_and_content_hashes() {
+    let forged = |object: &Value, edit: &dyn Fn(&mut Value)| {
+        let mut v = object.clone();
+        edit(&mut v);
+        let bytes = raw_jcs(&v);
+        let seal = digest(bytes.as_bytes());
+        (bytes, seal)
+    };
+    let wrong = || json!(format!("blake3:{}", "9".repeat(64)));
+    type Edit = Box<dyn Fn(&mut Value)>;
+    let edits: [(&str, &str, Edit); 3] = [
+        (
+            "bad content_hash",
+            "content_hash",
+            Box::new(move |v| v["content_hash"] = wrong()),
+        ),
+        (
+            "no content_hash",
+            "content_hash",
+            Box::new(|v| {
+                v.as_object_mut().unwrap().remove("content_hash");
+            }),
+        ),
+        ("bad id", "id", Box::new(move |v| v["id"] = wrong())),
+    ];
+    let product: Value = serde_json::from_str(&products()[0].text).unwrap();
+    let (c_bytes, _) = sealed_collection().to_stored().unwrap();
+    let collection: Value = serde_json::from_slice(&c_bytes).unwrap();
+    for (case, field, edit) in &edits {
+        let (bytes, seal) = forged(&product, edit);
+        match Manifest::from_stored(bytes.as_bytes(), &seal) {
+            Err(Error::Integrity { what, .. }) => assert_eq!(what, *field, "manifest {case}"),
+            other => panic!("manifest {case}: expected Integrity, got {other:?}"),
+        }
+        let (bytes, seal) = forged(&collection, edit);
+        match Collection::from_stored(bytes.as_bytes(), &seal) {
+            Err(Error::Integrity { what, .. }) => assert_eq!(what, *field, "collection {case}"),
+            other => panic!("collection {case}: expected Integrity, got {other:?}"),
+        }
     }
 }
 
@@ -363,7 +455,7 @@ fn the_seal_is_compared_byte_for_byte() {
 #[test]
 fn to_stored_refuses_what_from_stored_would_refuse() {
     let p = &products()[0];
-    let m = Manifest::from_json_verified(&p.text).unwrap();
+    let m = Manifest::from_stored(p.text.as_bytes(), &p.seal).unwrap();
 
     // Without a content_hash, a manifest is not a sealed product.
     let mut unsealed = m.clone();
@@ -481,7 +573,9 @@ fn a_collection_respelled_edited_or_in_band_is_refused() {
         "{e:?}"
     );
 
-    let in_band = raw_jcs(&serde_json::to_value(&c).unwrap());
+    let mut in_band = serde_json::to_value(&c).unwrap();
+    in_band["manifest_hash"] = json!(seal);
+    let in_band = raw_jcs(&in_band);
     let e = Collection::from_stored(in_band.as_bytes(), &digest(in_band.as_bytes())).unwrap_err();
     assert!(
         matches!(
@@ -501,9 +595,7 @@ fn a_collection_respelled_edited_or_in_band_is_refused() {
         CollectionMember::new("sub", format!("blake3:{}", "3".repeat(64)), Role::Raw)
             .with_kind(MemberKind::Collection);
     wrong.content_hash = Some(wrong.recompute_content_hash());
-    let mut wrong = serde_json::to_value(&wrong).unwrap();
-    wrong.as_object_mut().unwrap().remove("manifest_hash");
-    let wrong = raw_jcs(&wrong);
+    let wrong = raw_jcs(&serde_json::to_value(&wrong).unwrap());
     let e = Collection::from_stored(wrong.as_bytes(), &digest(wrong.as_bytes())).unwrap_err();
     assert!(matches!(e, Error::Invalid(_)), "{e:?}");
 }

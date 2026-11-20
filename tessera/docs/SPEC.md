@@ -33,12 +33,18 @@ field declares, naming the source field (a DICOM tag, a NIfTI header field such 
 this rule (≤ 0.1.0-alpha.5) that hold such a number are refused: their seal never pinned the value (#886).
 
 ## 2. Canonical encoding (hashing)
-All hashing is over **RFC 8785 JSON Canonicalization Scheme (JCS)** bytes: object keys sorted by
+All hashing of JSON is over **RFC 8785 JSON Canonicalization Scheme (JCS)** bytes: object keys sorted by
 UTF-16 code unit, no insignificant whitespace, ECMAScript-canonical number forms, UTF-8 output. A
-conformant implementation MUST use a JCS encoder. Non-hashed serializations (e.g. `manifest.json` as
-stored in the container) MAY be any valid JSON — verification re-canonicalizes. Tessera's own writers
-store `manifest.json` and `collection.json` as exactly their JCS bytes, one line (`jq .` gives the
-readable view; ADR-0066 rule 1); readers requiring that form land with ADR-0066's cutover (#914).
+conformant implementation MUST use a JCS encoder.
+
+**Stored form (ADR-0066).** A sealed document (`manifest.json`, `collection.json`) MUST be stored as
+exactly its own JCS bytes: no whitespace (not even a trailing newline), keys in JCS order, JCS string
+escapes and number forms, UTF-8, one line, and no `manifest_hash` key. The seal is a hash of those bytes
+as stored (§4), never of a re-serialisation, so a writer MUST emit them with a JCS encoder and a reader
+MUST refuse bytes that differ from their own JCS form (§7): with that rule one seal has one byte string and
+one meaning in every reader. `jq .` gives the readable view, and `b3sum manifest.json` checks the seal.
+A writer that emits "sorted, compact JSON" without a JCS library is refused (Python's `json.dumps` writes
+`1.0`, `1e-07`, `-0.0`).
 **Number forms** are the classic pitfall: `1`, `1.0`, and `1e0` MUST all canonicalize to `1` (and
 e.g. `-1024.0` → `-1024`); implementations SHOULD use a tested JCS library, not a hand-rolled JSON
 serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping rules verbatim.
@@ -68,16 +74,24 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
   Stable across rename / byte re-encode.
 - **`content_hash`** (data fingerprint): `merkle_root([block.digest for block in blocks])`, blocks in
   manifest order. Each block's `digest` is `digest(<the block's stored payload bytes>)`.
-- **`manifest_hash`** (the seal): `digest(JCS(manifest_without_manifest_hash))` — the manifest object
-  with **exactly one key deleted** (`manifest_hash`); no other normalization, key insertion, or
-  empty-stripping is applied beyond JCS. All other fields, including `content_hash`, stay present. It
-  transitively commits to every block digest and all metadata.
-  - A reader computes it over the object **as parsed from `manifest.json`**, never over a re-serialisation
-    of its own typed model: keys it doesn't model, an explicit `null` (`"study": null`) and an omitted
-    default (no `sources` key) are hashed exactly as received. So a key a newer writer added verifies, and a
-    key spliced into a sealed manifest does not. A product's manifest MUST carry `content_hash` and
-    `manifest_hash`; a reader treats a missing one as an integrity failure, since deleting the seal would
-    otherwise launder any edit.
+- **`manifest_hash`** (the seal): `digest(<the stored bytes of manifest.json>)` (ADR-0066). The bytes are
+  the manifest's JCS form (§2) and carry **no** `manifest_hash` key; the seal is kept beside them, in the
+  `manifest.seal` member (§6): the 71 ASCII bytes `blake3:<64 lower-case hex>`, nothing else. It
+  transitively commits to every block digest and all metadata, including `content_hash`.
+  - A reader computes it over the bytes **as stored**, never over a re-serialisation of its own typed model:
+    keys it doesn't model, an explicit `null` (`"study": null`) and an omitted default (no `sources` key)
+    are covered exactly as received. So a key a newer writer added verifies, and a key spliced into a sealed
+    manifest does not. A product MUST carry `manifest.seal` and its manifest MUST carry `content_hash`; a
+    reader treats a mismatched seal or a missing `content_hash` as an integrity failure. A `manifest.json`
+    that carries a `manifest_hash` key is refused.
+  - The seal's value is the one the pre-ADR-0066 rule computed (`digest(JCS(manifest − manifest_hash))`):
+    those are the same bytes. Moving the seal out of the document changed where it lives, not what it is,
+    so every `Source` pin, collection member pin, signature and citation `id@manifest_hash` made before
+    keeps its value.
+  - **No migration (ADR-0066 rule 10).** A product in the pre-ADR-0066 (alpha) layout (no `manifest.seal`,
+    usually a pretty `manifest.json` with an in-band `manifest_hash`) MUST be refused, with an error naming
+    the layout found (the declared `tessera_version` and the evidence) and the layout required. Both layouts
+    declare `tessera_version` `0.0.0`, so the layout, not the version, is what a reader checks.
   - `manifest.json` MUST be I-JSON (RFC 7493; JCS requires it, RFC 8785 §3.1): no key repeated within any
     object, at any depth (keys compare after unescaping), no lone surrogate, no `NaN`/`Infinity`, no number
     outside a double's range and no integer beyond ±(2^53−1) (§1), and nested at most 127 objects and arrays
@@ -97,10 +111,11 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
     path is written so no two paths read the same: a key of ASCII letters, digits and `_`, not starting with a
     digit, is written bare (after a `.` unless first), any other key as its JSON string literal in brackets, and
     an array index as `[n]`: `producer.agents`, `blocks[0].stats`, `["producer.agents"]`, `tables["a.b"].order`.
-  - The same rules cover a **collection** (`collection.json`, ADR-0033): its `manifest_hash` is computed over
-    the collection object as parsed with only `manifest_hash` removed, both hashes are required, it MUST be
-    I-JSON, and a key the reader doesn't model (top level, `level`, `members[]`) verifies, is warned about
-    and blocks a re-seal.
+  - The same rules cover a **collection** (`collection.json`, ADR-0033, ADR-0066 rule 5): it is stored as its
+    JCS bytes with no top-level `manifest_hash` key (a member's `manifest_hash` pin stays: it is data), its
+    seal is `digest(<those bytes>)` in a `collection.seal` file beside it (`<stem>.collection.seal` beside a
+    sub-collection's `<stem>.collection.json`), `content_hash` is required, it MUST be I-JSON, and a key the
+    reader doesn't model (top level, `level`, `members[]`) verifies, is warned about and blocks a re-seal.
   - An **embedded schema** (`schema`, §5) is different: it is a rule set, not data. A reader that finds a
     key it doesn't model anywhere in it (top level, `fields[]`, `blocks[]`, `tables.<role>` and its
     `columns[]`/`references[]`, `arrays.<role>`; a field's `default` is opaque) MUST NOT report the product
@@ -148,7 +163,7 @@ dropped.
 | `extra` ✱ | object | non-standard extension namespace |
 | `ingest_transform` ✱ | array<IngestTransform> | recorded ingest normalisations, in order (ADR-0056 §6.2) |
 | `content_hash` ✱ | string | §4; present once sealed |
-| `manifest_hash` ✱ | string | §4; present once sealed |
+| (`manifest_hash`) | — | not a field: the seal lives in `manifest.seal` (§4, §6); a manifest carrying the key is refused |
 
 **BlockRef** = `{ name: string, kind: "array"|"table"|"chunk_index"|"blob", digest✱: string, spec: object }`.
 `name` MUST follow the block-name grammar of [ADR-0063](../../docs/adr/0063-block-name-grammar.md): one or
@@ -456,8 +471,15 @@ via `tessera extract <tsra> <block> <out>`.
 A ZIP archive (zip64). Entries, in order:
 1. **`mimetype`** — STORED (uncompressed), first entry, content exactly `application/vnd.tessera`
    (the magic; lets sniffers identify without unzipping).
-2. **`manifest.json`** — the manifest (§5), any valid JSON.
-3. **`blocks/<name>`** — one entry per block, the block's payload bytes.
+2. **`manifest.seal`** — the seal (§4): exactly the 71 ASCII bytes `blake3:<64 lower-case hex>`, the
+   digest of entry 3's bytes. Second, so one ranged read of the front of the file gets the magic, the seal
+   and the manifest (ADR-0066 rule 3).
+3. **`manifest.json`** — the manifest (§5), stored as exactly its JCS bytes (§2).
+4. **`blocks/<name>`** — one entry per block, the block's payload bytes.
+5. **`aux/<name>`** — zero or more unsealed members (ADR-0042, below).
+
+A reader MUST refuse an archive that holds `manifest.seal` anywhere but entry 2, or `manifest.json` anywhere
+but entry 3 after it. An archive with no `manifest.seal` is the alpha layout (§4) and is refused as such.
 
 The archive MUST begin at byte 0 of the file: no prefix, so the first local file header is `mimetype`'s.
 Sniffing depends on this, and so does a cheap open. A reader may take the archive offset as 0 and check
@@ -517,8 +539,8 @@ every byte of the file belongs to exactly one structure and no field is left for
    of the file. Bytes after it, or a comment, can hold a second archive that a prefix-adjusting reader opens
    instead of this one.
 
-**Members a `.tsra` may hold.** Exactly `mimetype`, `manifest.json`, one `blocks/<name>` for each block the
-manifest lists, and zero or more `aux/<name>` members (ADR-0042). Any other entry, a `blocks/` member the
+**Members a `.tsra` may hold.** Exactly `mimetype`, `manifest.seal`, `manifest.json`, one `blocks/<name>`
+for each block the manifest lists, and zero or more `aux/<name>` members (ADR-0042). Any other entry, a `blocks/` member the
 manifest does not list included, MUST be refused: no digest covers its bytes, and every reader would take it
 for part of the product. The `<name>` of an `aux/` member obeys the block-name grammar (ADR-0063): one or
 more `/`-separated segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 255 bytes. So no `..`, no
@@ -550,16 +572,30 @@ byte range directly addressable via the central directory). For **writer-determi
 modification times MUST be pinned to the zip epoch (1980-01-01 00:00:00) — the same product MUST pack
 to byte-identical archive bytes. Both rules are part of the canonical encoding above, so full verification
 enforces them. The zip **central directory** is the internal index: a cloud reader
-ranged-reads it, then ranged-reads only `manifest.json` and the block entries it needs.
-An opt-in **exploded** form is the same tree unzipped under an object-store prefix.
+ranged-reads it, then ranged-reads only `manifest.seal`, `manifest.json` and the block entries it needs.
+An opt-in **exploded** form is the same tree unzipped under a directory or an object-store prefix:
+`manifest.json` and `manifest.seal` side by side, with the bytes the container holds, plus `blocks/` and
+`aux/`. A reader holds it to the same rules: a directory without `manifest.seal` is the alpha layout.
 
 ## 7. Verification (reader procedure)
-On open a reader MUST: (a) read `mimetype`, reject if ≠ `application/vnd.tessera`; (b) parse
-`manifest.json`; (c) reject if `tessera_version` major > supported, or if `blocks` lists a name twice
-(§5); (d) recompute and check `id` from
-`id_inputs`, `content_hash` from block digests, and `manifest_hash` over the parsed manifest object
-(§4) — any mismatch is an integrity failure; a duplicate key is refused before any hash is computed. On reading a block, the reader MUST verify the bytes against the
-BlockRef `digest`. Full verification of a file also checks the container's canonical layout and member
+On open a reader MUST, in this order (ADR-0066 rule 4), so a product with two faults gets the verdict of the
+first:
+
+1. read `mimetype`, reject if ≠ `application/vnd.tessera`, and check the leading entries (§6);
+2. read `manifest.seal`: refuse a product without it (the alpha layout, §4, naming the layout found and the
+   layout required) and a seal that is not exactly `blake3:<64 lower-case hex>`;
+3. **strict parse** of `manifest.json`: refuse what is not I-JSON (§1, §4: UTF-8, no repeated key, no lone
+   surrogate, no `NaN`/`Infinity`, no number out of range or integer beyond ±(2^53−1), nesting ≤ 127);
+4. **canonical check**: JCS-serialise the parsed value and refuse the bytes if they differ (§2). Step 3 is
+   not redundant with it: an integer beyond 2^53 that a double holds exactly (`1730000000123456800`) is its
+   own JCS form, and is what a rounding writer emits;
+5. refuse a top-level `manifest_hash` key (the seal in band);
+6. compare `manifest.seal` with `digest(manifest.json)`, byte for byte: a mismatch is an integrity failure;
+7. the typed layer: refuse a value in a form §5 doesn't declare, a `tessera_version` major > supported, a
+   block name listed twice (§5); check `id` from `id_inputs`, then refuse a block without a digest, then
+   check `content_hash` from the block digests (required) — a mismatch is an integrity failure.
+
+On reading a block, the reader MUST verify the bytes against the BlockRef `digest`. Full verification of a file also checks the container's canonical layout and member
 set (§6, "One reading"), so a `.tsra` that verifies reads the same under every zip reader, byte for byte.
 
 ## 8. Versioning
@@ -577,10 +613,15 @@ golden triple. Reproducing the triple needs only the container (§6) + canonical
 regenerated (and the spec version bumped) only on an intended format change:
 `cargo run -p tessera-io --example gen_corpus` / `--example gen_corpus_files`.
 
-`tessera/corpus/seal-cases.json` adds manifest-only vectors for §4's seal rule: each corpus manifest with a
-newer-format key added and resealed (verifies), the same key spliced in under the old seal (fails), the
-encodings a typed model loses (`"study": null`, an omitted `sources`, a nested newer key; all verify) and a
-splice whose seal was deleted or nulled (fails), text that is not I-JSON (refused), and a block, the producer
-or the whole manifest spelled as a JSON array, or a block `kind` as an object (refused, §4), a declared field of
-another JSON type or shape, a block without a digest, and nesting past 127 levels (refused, §4/§5). A conformant
-reader MUST reach every case's `verdict` from its `manifest` text.
+`tessera/corpus/seal-cases.json` adds stored-manifest vectors for §4's seal rule and §7's order: each case is
+a pair `(manifest, seal)`, the bytes of `manifest.json` and the content of `manifest.seal` (`null` when the
+member is missing), with a `verdict` (`ok`, `tampered`, `refused`). Per corpus product: as stored (verifies),
+a newer-format key added and resealed (verifies), the same key spliced in under the old seal (tampered), the
+#897 spike's respellings (T4 key order, T5 whitespace, T6 a `\u` escape, T7 `64` as `64.0` under the old
+seal; S7 the same sealed by the attacker, #901; S8 a pretty layout sealed: all refused as non-canonical), S5b
+(an exact double beyond 2^53, its own JCS form: refused by I-JSON), the alpha layout and the seal in band
+(refused). On one product: the encodings a typed model loses (`"study": null`, an omitted `sources`, a nested
+newer key; all verify), a seal member missing, malformed or another product's, text that is not I-JSON, a
+record spelled as a JSON array or a `kind` as an object, a declared field of another JSON type or shape, a
+block without a digest, and nesting past 127 levels. A conformant reader MUST reach every case's `verdict`
+from its pair. The file is generated by `tessera/corpus/reference_reader/make_seal_cases.py` from the corpus.

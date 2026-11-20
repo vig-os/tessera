@@ -25,6 +25,7 @@ pub mod provenance;
 pub mod referencing;
 pub mod schema;
 pub mod signing;
+pub mod stored;
 
 pub use collection::{Collection, CollectionBuilder, CollectionMember, Role};
 pub use error::{Error, Result};
@@ -78,8 +79,10 @@ mod tests {
         let mut b = ProductBuilder::new("recon", "rt", "round-trip", "2024-01-01T00:00:00Z");
         b.add_block(&vol).unwrap();
         let m = b.seal().unwrap();
-        // Persisted as JSON, re-read, the seal must reproduce byte-for-byte and verify.
-        let parsed = Manifest::from_json_verified(&m.to_json().unwrap()).unwrap();
+        // Stored, re-read, the seal must reproduce byte-for-byte and verify.
+        let (bytes, seal) = m.to_stored().unwrap();
+        assert_eq!(Some(&seal), m.manifest_hash.as_ref());
+        let parsed = Manifest::from_stored(&bytes, &seal).unwrap();
         assert_eq!(parsed.manifest_hash, m.manifest_hash);
         assert_eq!(
             parsed.compute_manifest_hash().unwrap(),

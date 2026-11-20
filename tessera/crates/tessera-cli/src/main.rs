@@ -226,8 +226,11 @@ enum Cmd {
     /// With the `cloud` feature enabled, `file` also accepts `s3://<bucket>/<key>` or
     /// `http(s)://<host>/<key>` — the manifest is read via range-GET over the wire.
     ///
-    /// `--json` emits exactly the serialized sealed manifest — the same object the seal hashes
-    /// cover, not a CLI-shaped view of it. Two things to know before parsing it:
+    /// `--json` emits the sealed manifest as a readable (pretty) object — the fields the seal
+    /// covers, not a CLI-shaped view of them. The seal itself is not a field: under ADR-0066 it is
+    /// `blake3` over the stored `manifest.json` bytes and lives in the `manifest.seal` member, so it
+    /// is printed by the summary's `manifest_hash` line, not by `--json`. Three things to know
+    /// before parsing it:
     ///
     /// * `producer` is polymorphic. It is a JSON OBJECT
     ///   (`{tool, version, git_commit?, git_repo?, dirty?}`) on anything sealed since ADR-0058, and
@@ -235,6 +238,9 @@ enum Cmd {
     ///   an untagged enum, so consumers must accept both; it is absent entirely on pre-stamp files.
     ///   `generation`, `study`, `schema` and the other optional fields are omitted when unset
     ///   rather than emitted as null.
+    ///
+    /// * It is not the stored bytes: `manifest.json` is stored as one line in its JCS form (`unzip -p
+    ///   product.tsra manifest.json` gives those, and `b3sum` of them is the seal).
     ///
     /// * Its stability is the FORMAT's, tracked by the `tessera_version` field the dump itself
     ///   carries — this is the spec version, not the CLI's. Fields are only ever added within a
@@ -1418,7 +1424,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             if verify {
                 r.verify_payloads(&file.display().to_string())?;
             }
-            // `--json`: the sealed manifest verbatim. #417's motivation was that reading a sealed
+            // `--json`: the sealed manifest's fields. #417's motivation was that reading a sealed
             // `generation` meant a `zipfile` + `json` Python one-liner; this is that escape hatch,
             // typed and supported, so provenance is scriptable without the container internals.
             if json {
@@ -3109,9 +3115,10 @@ mod tests {
             let mut buf = Vec::new();
             std::io::Read::read_to_end(&mut f, &mut buf).unwrap();
             if name == "manifest.json" {
+                // Stored as JCS again, so the edit, not a respelling, is what the reader meets.
                 let mut m: serde_json::Value = serde_json::from_slice(&buf).unwrap();
                 edit(&mut m);
-                buf = serde_json::to_vec_pretty(&m).unwrap();
+                buf = tessera_core::canonical::to_bytes(&m).unwrap();
             }
             entries.push((name, buf));
         }
@@ -3634,9 +3641,8 @@ streaming = "batch"
         })
         .unwrap();
 
-        // 1. collection.json exists + verifies.
-        let coll_json = std::fs::read_to_string(out_dir.join("collection.json")).unwrap();
-        let coll = tessera_core::Collection::from_json_verified(&coll_json).unwrap();
+        // 1. collection.json exists + verifies against its collection.seal.
+        let coll = tessera_io::stored::read_collection(&out_dir.join("collection.json")).unwrap();
         assert_eq!(coll.members.len(), 2);
         assert_eq!(coll.study.as_deref(), Some("DP06-2024-01"));
 
@@ -3687,8 +3693,7 @@ streaming = "batch"
             src: None,
         })
         .unwrap();
-        let coll2_json = std::fs::read_to_string(out2.join("collection.json")).unwrap();
-        let coll2 = tessera_core::Collection::from_json_verified(&coll2_json).unwrap();
+        let coll2 = tessera_io::stored::read_collection(&out2.join("collection.json")).unwrap();
         assert_eq!(coll.id, coll2.id);
         assert_eq!(coll.content_hash, coll2.content_hash);
         assert_eq!(coll.manifest_hash, coll2.manifest_hash);

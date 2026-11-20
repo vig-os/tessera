@@ -113,7 +113,8 @@ else:  # pragma: no cover
 # ---------------------------------------------------------------------------
 # ANCHOR: provenance
 # Record who made a product, how, and which sealed parent it came from (ADR-0058).
-parent = tessera.open(out_dir / "demo.tsra").manifest()
+parent_reader = tessera.open(out_dir / "demo.tsra")
+parent = parent_reader.manifest()
 
 d = tessera.Builder(
     "recon", "demo-ct-01-masked", "a derived volume", "2024-01-01T00:00:00Z"
@@ -133,7 +134,7 @@ d.with_generation(
     config={"step": "mask", "threshold_HU": -500, "agent": {"model": "m"}}
 )
 # Pin the parent's SEAL on the edge, or `tessera provenance --require-complete` reports a gap.
-d.add_source("derived_from", parent["id"], content_hash=parent["manifest_hash"])
+d.add_source("derived_from", parent["id"], content_hash=parent_reader.manifest_hash)
 d.pack(str(out_dir / "masked.tsra"))
 # ANCHOR_END: provenance
 # ---------------------------------------------------------------------------
@@ -149,7 +150,7 @@ assert masked["sources"] == [
     {
         "role": "derived_from",
         "reference": parent["id"],
-        "content_hash": parent["manifest_hash"],
+        "content_hash": parent_reader.manifest_hash,
     }
 ], masked["sources"]
 

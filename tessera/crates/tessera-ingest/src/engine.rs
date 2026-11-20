@@ -295,7 +295,7 @@ fn run_into(
     let collection = cb.seal()?;
 
     let coll_path = out_dir.join("collection.json");
-    std::fs::write(&coll_path, tessera_io::stored::collection(&collection)?).map_err(|e| {
+    tessera_io::stored::write_collection(&coll_path, &collection).map_err(|e| {
         Error::Invalid(format!("ingest-engine: write {}: {e}", coll_path.display()))
     })?;
     Ok(collection)
@@ -1563,17 +1563,20 @@ streaming = "batch"
             assert_eq!(a.manifest_hash, b.manifest_hash);
             assert_eq!(a.derived_from, b.derived_from);
         }
-        // and collection.json was written, like every member manifest, in its JCS form (#912).
-        let stored = |bytes: &[u8], what: &str| {
-            let text = std::str::from_utf8(bytes).unwrap();
-            let jcs = tessera_core::canonical::to_bytes(
-                &tessera_core::canonical::parse_strict(text).unwrap(),
-            )
-            .unwrap();
-            assert!(bytes == jcs.as_slice(), "{what} is not its own JCS form");
+        // and collection.json was written, like every member manifest, as the ADR-0066 stored
+        // pair: its JCS bytes, with collection.seal = blake3 of exactly those bytes beside it.
+        let stored = |bytes: &[u8], seal: &[u8], what: &str| {
+            let object = tessera_core::canonical::check_canonical(bytes)
+                .unwrap_or_else(|e| panic!("{what} is not its own JCS form: {e}"));
+            assert!(
+                object.get("manifest_hash").is_none(),
+                "{what}: seal in band"
+            );
+            assert_eq!(seal, tessera_core::hash::digest(bytes).as_bytes(), "{what}");
         };
         stored(
             &std::fs::read(out.join("collection.json")).unwrap(),
+            &std::fs::read(out.join("collection.seal")).unwrap(),
             "collection.json",
         );
         let mut members = 0;
@@ -1581,7 +1584,12 @@ streaming = "batch"
             let p = e.unwrap().path();
             if p.extension().is_some_and(|x| x == "tsra") {
                 let r = tessera_io::Reader::open(&p).unwrap();
-                stored(r.manifest_json().as_bytes(), &p.display().to_string());
+                let seal = r.manifest().manifest_hash.clone().unwrap();
+                stored(
+                    r.manifest_json().as_bytes(),
+                    seal.as_bytes(),
+                    &p.display().to_string(),
+                );
                 members += 1;
             }
         }

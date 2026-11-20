@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use tessera_core::collection::{member_filename, Collection, MemberKind};
+use tessera_core::collection::{member_filename, MemberKind};
 use tessera_core::provenance::{is_version_pointer, walk, EdgeOutcome, Resolver, Step, Visit};
 use tessera_core::{Error, Manifest, Result};
 use tessera_io::Reader;
@@ -210,9 +210,9 @@ pub fn discover(
     }
     if let Some(cj) = collection {
         // An explicit --collection that cannot be read IS fatal: the operator named it, so silently
-        // resolving nothing from it would look like "the parents just aren't there".
-        let text = std::fs::read_to_string(cj)?;
-        let c = Collection::from_json(&text)?;
+        // resolving nothing from it would look like "the parents just aren't there". It is read
+        // verified against its `collection.seal`, like every collection reader (ADR-0066).
+        let c = tessera_io::stored::read_collection(cj)?;
         let base = cj.parent().unwrap_or(Path::new("."));
         for m in &c.members {
             if m.kind == MemberKind::Product {

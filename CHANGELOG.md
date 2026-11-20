@@ -95,6 +95,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking format change (ADR-0066 A′, #914, #901):** the seal is `blake3` over the **stored bytes** of
+  `manifest.json`, which is stored as exactly its RFC 8785 JCS form with no `manifest_hash` key; the seal lives in a
+  new `manifest.seal` member, entry 2 of the `.tsra` (after `mimetype`, before `manifest.json`), beside
+  `manifest.json` in the exploded form, and in `collection.seal` beside a `collection.json`. Every reader (Rust,
+  `tessera-py`, `tessera-wasm`, the Python reference reader) refuses bytes that are not their own JCS form, so a
+  respelling the attacker seals (#901's `64.0` for an integer `64`, a pretty layout) no longer verifies or splits
+  readers. **Products written before this change are refused**, with an error naming the layout found (the declared
+  `tessera_version`, the missing `manifest.seal`, an in-band `manifest_hash`, a non-JCS `manifest.json`) and the
+  layout required; there is no migration verb: re-ingest them. Every seal keeps its value (the 13 tracked products
+  are re-packed with every `corpus.json` golden unchanged), so `Source` pins, collection pins and signatures over a
+  re-packed product still hold. `TESSERA_VERSION` stays `"0.0.0"`. Repository manifest objects hold the stored bytes,
+  so `objects/<manifest_hash>` hashes to its own name.
+- **Breaking, `tessera-core`:** `Manifest::manifest_hash` and `Collection::manifest_hash` are no longer serialised
+  (the seal is not a field). Readers verify through `Manifest::from_stored_members` / `Collection::from_stored_members`
+  (`from_stored` with the seal checked); writers store `to_stored()`. New errors `Error::UnsupportedLayout` (the alpha
+  layout) and `Error::MalformedSeal` (a seal member that is not `blake3:<64 lower-case hex>`), and the
+  `tessera_core::stored` module (member names, `parse_seal`, `seal_name_for`).
+- **Breaking, `tessera-io`:** `stored::manifest` / `stored::collection` return the `(bytes, seal)` pair;
+  `stored::write_pair`, `read_pair`, `write_collection`, `read_collection` and `seal_path` are the one place
+  documents and seals are written and read on disk. `prefix_layout` lists the `collection.seal` objects.
+- **Breaking, `tessera-wasm`:** `verify_manifest(manifest_json, manifest_seal)` and
+  `verify_signature(manifest_json, manifest_seal, signature_json, pubkey_hex)` take the seal member; the new
+  `seal_verdict` returns the `corpus/seal-cases.json` verdict, and the `wasm-bindgen-smoke` check runs every seal
+  case through the compiled wasm in Node.
+- `tessera-py`: `Reader.manifest_hash` gives the seal; `manifest()` no longer has a `manifest_hash` key.
+- `tessera inspect --json` prints the manifest's fields without `manifest_hash` (the summary's `manifest_hash` line
+  shows the seal).
 - **Breaking, `tessera-core`:** a product schema with a bare `int64` / `uint64` metadata field, one without
   `"encoding": "string"`, is refused at the seal (`Error::SchemaField`), as are an unknown dtype, an encoding or range
   on a field it doesn't fit, an empty range, an impossible `default` and a repeated field id (#895). A product
@@ -173,6 +200,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. It is deprecated in favour of `push_table`.
 
 ### Removed
+
+- `tessera-core`: `Manifest::from_json_verified`, `Manifest::to_sealed_json`, `manifest::seal_of`,
+  `Collection::from_json_verified`, `Collection::to_sealed_json`, `Collection::from_json_with_seal`,
+  `canonical::hash_without` and `canonical::bytes_without`: each verified or sealed a re-serialisation of a parsed
+  object, the path ADR-0066 removes (one verify path, `from_stored`; #931 item 1). `tessera-io`:
+  `stored::canonical_form` (re-spelling a document a door copies; doors now copy the stored bytes verbatim).
 
 ### Fixed
 

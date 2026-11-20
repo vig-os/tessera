@@ -212,12 +212,15 @@ pub enum LayoutKind {
 }
 
 /// Project the collection onto an S3 key prefix — pure layout, no I/O. Returns
-/// `(object_key, member_reference)` pairs in declared member order, then a final
-/// `("<prefix>/collection.json", <collection_id>)` for the catalog descriptor. A product member is a
-/// `<prefix>/<id>.tsra` object; a **sub-collection** member is a `<prefix>/<id>.collection.json`
+/// `(object_key, member_reference)` pairs: one per member in declared member order, then the seal
+/// object of each sub-collection member (`<prefix>/<id>.collection.seal`, ADR-0066 rule 5), then
+/// `("<prefix>/collection.seal", <collection_id>)` and, last, `("<prefix>/collection.json",
+/// <collection_id>)` for the catalog descriptor. A product member is a `<prefix>/<id>.tsra` object
+/// (its seal travels inside it); a **sub-collection** member is a `<prefix>/<id>.collection.json`
 /// descriptor (ADR-0049 §4 — `kind` is authoritative, the suffix is *derived* from it). The prefix
-/// of N independently range-readable objects under this layout IS the collection on S3 (the third
-/// projection): a reader range-reads `collection.json` once, then each member it actually needs.
+/// of independently range-readable objects under this layout IS the collection on S3 (the third
+/// projection): a reader reads `collection.json` and `collection.seal` once, then each member it
+/// actually needs.
 pub fn prefix_layout(c: &Collection, prefix: &str) -> Vec<(String, String)> {
     let prefix = prefix.trim_end_matches('/');
     let mut out: Vec<(String, String)> = c
@@ -237,6 +240,17 @@ pub fn prefix_layout(c: &Collection, prefix: &str) -> Vec<(String, String)> {
             )
         })
         .collect();
+    for m in c
+        .members
+        .iter()
+        .filter(|m| m.kind == MemberKind::Collection)
+    {
+        out.push((
+            format!("{prefix}/{}.collection.seal", m.reference),
+            m.reference.clone(),
+        ));
+    }
+    out.push((format!("{prefix}/collection.seal"), c.id.clone()));
     out.push((format!("{prefix}/collection.json"), c.id.clone()));
     out
 }
@@ -448,6 +462,11 @@ mod tests {
         assert!(layout
             .iter()
             .any(|(k, r)| r == &recon.id && k.ends_with(".tsra")));
+        // Every descriptor travels with its seal object (ADR-0066 rule 5).
+        assert!(layout
+            .iter()
+            .any(|(k, r)| r == &exam.id && k.ends_with(&format!("{}.collection.seal", exam.id))));
+        assert_eq!(layout[layout.len() - 2].0, "s3://b/cohort/collection.seal");
 
         // to_oci_index: refuses the nested member loudly (recursive index-of-indexes = #294).
         assert!(to_oci_index(

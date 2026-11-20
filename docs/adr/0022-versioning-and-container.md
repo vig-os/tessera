@@ -67,3 +67,15 @@ unchanged block objects). Sealing/distribution then re-wraps into one `.tsra`, o
 - Versioning needs no new format field — it rides `sources` + `manifest_hash`, already present.
 - One canonical byte stream (`.tsra`) with an opt-in exploded/OCI form for cloud-native workflows.
 - Container read/write is implemented in `tessera-io` (P2/P3); this ADR is the contract.
+
+## Amendment (2026-11-20) — the `manifest.seal` member (ADR-0066 A′, #914)
+The container's member list gains **`manifest.seal`**, entry 2, after `mimetype` and before `manifest.json`: the 71
+ASCII bytes `blake3:<64 hex>`, the digest of `manifest.json`'s stored bytes ([ADR-0066](0066-seal-encoding.md) rule 3).
+One ranged read of the front of the file gets the magic, the seal and the manifest. `manifest.json` loses "any valid
+JSON": it is stored as exactly its JCS bytes, with no `manifest_hash` key, and a reader no longer "omits
+`manifest_hash`" — it hashes the bytes as stored. The canonical member set (SPEC §6) is now `mimetype`,
+`manifest.seal`, `manifest.json`, the listed `blocks/`, and `aux/`; a reader refuses `manifest.seal` or
+`manifest.json` out of that order. The exploded form carries `manifest.seal` beside `manifest.json`; a collection
+carries `collection.seal` beside `collection.json`. A container without `manifest.seal` is the alpha layout and is
+refused (no migration, rule 10). The repository's `objects/<manifest_hash>` now holds exactly the bytes that hash to
+its name, so ADR-0036's content addressing is literal for manifests too.

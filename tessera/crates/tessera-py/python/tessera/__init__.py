@@ -84,8 +84,15 @@ class Reader:
     def product(self) -> str:
         return self._r.product
 
+    @property
+    def manifest_hash(self) -> str:
+        """The product's seal (``"blake3:<hex>"``): blake3 over the stored ``manifest.json`` bytes,
+        read from the ``manifest.seal`` member and verified on open (ADR-0066). Not a key of
+        ``manifest()``: the seal lives outside the bytes it seals."""
+        return self._r.manifest_hash
+
     def manifest(self) -> dict:
-        """The manifest as a Python dict (parsed from the canonical JSON)."""
+        """The manifest as a Python dict. Its seal is ``manifest_hash``, not a key (ADR-0066)."""
         return _json.loads(self._r.manifest_json())
 
     def manifest_json(self) -> str:

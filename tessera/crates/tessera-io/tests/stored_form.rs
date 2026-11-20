@@ -1,51 +1,72 @@
-//! Every `tessera-io` door that writes a sealed `manifest.json` writes exactly `JCS(object)`
-//! (ADR-0066 rule 1, step 2, #912), with the in-band `manifest_hash` kept and the seal unchanged.
+//! Every `tessera-io` door that writes a sealed manifest writes the ADR-0066 stored pair:
+//! `manifest.json` is exactly its own JCS form with no `manifest_hash` key, and `manifest.seal` is
+//! the 71 bytes `blake3(manifest.json)`, entry 2 of the `.tsra` (rules 1–3). Every reading door
+//! refuses a missing or mismatched seal, and the alpha layout (rule 10, no migration).
 //!
-//! One test per door: `pack`, `pack_streaming`, `pack_streaming_verified`, `WriteSession::seal`,
-//! `Repository::put_manifest` (`objects/`), `unpack` (the exploded form) and `pack_dir`. Each
-//! asserts `bytes == JCS(parse(bytes))` on what the door wrote and that the bytes still verify to
-//! the seal the product had. The last test holds every tracked `.tsra` in the repository to the
-//! same form.
+//! One test per writing door: `pack`, `pack_streaming`, `pack_streaming_verified`,
+//! `WriteSession::seal`, `Repository::put_manifest` (`objects/`), `unpack` (the exploded form),
+//! `pack_dir` and `add_aux_members` (the door `sign` and ingest provenance use). Each reads what the
+//! door wrote from the raw zip members or files, not through `Reader` (whose verification is what
+//! the refusal tests hold), and checks the seal is the one the product had: A′ moves where the seal
+//! lives, never its value. The last test holds every tracked `.tsra` in the repository to the form.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use tessera_core::canonical;
-use tessera_core::manifest::{seal_of, Manifest};
+use tessera_core::{canonical, Error};
 use tessera_io::conformance::{fixtures, Fixture};
 use tessera_io::{
-    pack, pack_dir, pack_streaming, pack_streaming_verified, unpack, Reader, Repository,
-    WriteSession,
+    add_aux_members, pack, pack_dir, pack_streaming, pack_streaming_verified, unpack, AuxMember,
+    Reader, Repository, WriteSession,
 };
 
-/// `bytes` are their own JCS form, and they verify to `seal`.
+/// `bytes` and `seal_member` are the stored pair: `bytes` its own JCS form without an in-band
+/// seal, and `seal_member` exactly `blake3(bytes)`, which is `seal`, the product's seal.
 #[track_caller]
-fn assert_stored_form(door: &str, bytes: &[u8], seal: &str) {
-    let text = std::str::from_utf8(bytes).unwrap_or_else(|e| panic!("{door}: not UTF-8: {e}"));
-    let jcs = canonical::to_bytes(&canonical::parse_strict(text).unwrap()).unwrap();
+fn assert_stored_pair(door: &str, bytes: &[u8], seal_member: &[u8], seal: &str) {
+    let object = canonical::check_canonical(bytes).unwrap_or_else(|e| {
+        panic!(
+            "{door}: the written manifest.json is not its own JCS form: {e}\n{}",
+            String::from_utf8_lossy(&bytes[..bytes.len().min(200)])
+        )
+    });
     assert!(
-        bytes == jcs.as_slice(),
-        "{door}: the written document is not its own JCS form (first difference at byte {:?}):\n{}",
-        bytes.iter().zip(&jcs).position(|(a, b)| a != b),
-        text.chars().take(200).collect::<String>()
-    );
-    let m = Manifest::from_json_verified(text).unwrap_or_else(|e| panic!("{door}: {e}"));
-    assert_eq!(
-        m.manifest_hash.as_deref(),
-        Some(seal),
-        "{door}: the seal moved"
+        object.get("manifest_hash").is_none(),
+        "{door}: the seal is in band"
     );
     assert_eq!(
-        seal_of(&canonical::parse_strict(text).unwrap()).unwrap(),
-        seal
+        seal_member,
+        tessera_core::hash::digest(bytes).as_bytes(),
+        "{door}: manifest.seal is not blake3(manifest.json)"
     );
+    assert_eq!(seal_member, seal.as_bytes(), "{door}: the seal moved");
 }
 
-fn stored_manifest(tsra: &Path) -> Vec<u8> {
-    Reader::open(tsra)
-        .unwrap()
-        .manifest_json()
-        .as_bytes()
-        .to_vec()
+/// The raw `(manifest.json, manifest.seal)` members of a `.tsra`, and that they are entries 2 and 3
+/// (after `mimetype`), read with `zip` directly.
+fn raw_pair(tsra: &Path) -> (Vec<u8>, Vec<u8>) {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(tsra).unwrap()).unwrap();
+    let leading: Vec<String> = (0..3)
+        .map(|i| zip.by_index(i).unwrap().name().unwrap().into_owned())
+        .collect();
+    assert_eq!(
+        leading,
+        ["mimetype", "manifest.seal", "manifest.json"],
+        "{}: SPEC §6's leading entries",
+        tsra.display()
+    );
+    let mut member = |name: &str| {
+        let mut out = Vec::new();
+        zip.by_name(name).unwrap().read_to_end(&mut out).unwrap();
+        out
+    };
+    (member("manifest.json"), member("manifest.seal"))
+}
+
+#[track_caller]
+fn assert_tsra(door: &str, tsra: &Path, seal: &str) {
+    let (json, seal_member) = raw_pair(tsra);
+    assert_stored_pair(door, &json, &seal_member, seal);
 }
 
 fn seal(f: &Fixture) -> &str {
@@ -80,21 +101,17 @@ fn fragments(f: &Fixture, dir: &Path) -> Vec<(tessera_core::block::BlockName, Pa
 }
 
 #[test]
-fn pack_writes_the_jcs_form() {
+fn pack_writes_the_stored_pair() {
     let tmp = tempfile::tempdir().unwrap();
     for f in all() {
         let out = tmp.path().join(format!("{}.tsra", f.name));
         pack(&f.manifest, &f.payloads, &out).unwrap();
-        assert_stored_form(
-            &format!("pack {}", f.name),
-            &stored_manifest(&out),
-            seal(&f),
-        );
+        assert_tsra(&format!("pack {}", f.name), &out, seal(&f));
     }
 }
 
 #[test]
-fn pack_streaming_writes_the_jcs_form() {
+fn pack_streaming_writes_the_stored_pair() {
     let tmp = tempfile::tempdir().unwrap();
     for f in all() {
         let frags = fragments(&f, tmp.path());
@@ -104,23 +121,19 @@ fn pack_streaming_writes_the_jcs_form() {
             .collect();
         let plain = tmp.path().join(format!("{}-s.tsra", f.name));
         pack_streaming(&f.manifest, &sources, &plain).unwrap();
-        assert_stored_form(
-            &format!("pack_streaming {}", f.name),
-            &stored_manifest(&plain),
-            seal(&f),
-        );
+        assert_tsra(&format!("pack_streaming {}", f.name), &plain, seal(&f));
         let verified = tmp.path().join(format!("{}-v.tsra", f.name));
         pack_streaming_verified(&f.manifest, &sources, &verified).unwrap();
-        assert_stored_form(
+        assert_tsra(
             &format!("pack_streaming_verified {}", f.name),
-            &stored_manifest(&verified),
+            &verified,
             seal(&f),
         );
     }
 }
 
 #[test]
-fn write_session_seal_writes_the_jcs_form() {
+fn write_session_seal_writes_the_stored_pair() {
     let tmp = tempfile::tempdir().unwrap();
     for f in all() {
         let m = &f.manifest;
@@ -137,17 +150,15 @@ fn write_session_seal_writes_the_jcs_form() {
         }
         let out = tmp.path().join(format!("{}-ws.tsra", f.name));
         let sealed = ws.seal(&out).unwrap();
-        assert_stored_form(
+        assert_tsra(
             &format!("WriteSession::seal {}", f.name),
-            &stored_manifest(&out),
+            &out,
             sealed.manifest_hash.as_deref().unwrap(),
         );
     }
 }
 
-/// The file a repository keeps a manifest object in: `objects/<alg>/<hex[..2]>/<hex[2..]>`. Read
-/// directly, because `Repository::read_object` is for block objects (it checks a byte digest, and a
-/// manifest object is addressed by its seal).
+/// The file a repository keeps an object in: `objects/<alg>/<hex[..2]>/<hex[2..]>`.
 fn object_file(root: &Path, address: &str) -> PathBuf {
     let (alg, hex) = address.split_once(':').unwrap();
     root.join("objects")
@@ -156,111 +167,201 @@ fn object_file(root: &Path, address: &str) -> PathBuf {
         .join(&hex[2..])
 }
 
+/// A manifest object is the stored bytes, filed under their own digest: the address is the seal
+/// (ADR-0066 makes ADR-0036's content addressing literal). An edited object is refused on read.
 #[test]
-fn repository_objects_hold_the_jcs_form() {
+fn repository_objects_are_the_stored_bytes_under_their_seal() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");
     let repo = Repository::init(&root).unwrap();
     for f in all() {
         let mh = repo.put_manifest(&f.manifest).unwrap();
         assert_eq!(mh, seal(&f));
-        assert_stored_form(
+        let path = object_file(&root, &mh);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_stored_pair(
             &format!("put_manifest {}", f.name),
-            &std::fs::read(object_file(&root, &mh)).unwrap(),
+            &bytes,
+            mh.as_bytes(),
             seal(&f),
         );
+        assert_eq!(repo.get_manifest(&mh).unwrap().manifest_hash, Some(mh));
+    }
+    // An object whose bytes no longer hash to its address is refused for the seal.
+    let f = &all()[0];
+    let path = object_file(&root, seal(f));
+    // Still its own JCS form (one character of a string value changed), so the seal is what fails.
+    let text = std::fs::read_to_string(&path).unwrap();
+    let edited = text.replacen("\"name\":\"", "\"name\":\"x", 1);
+    assert_ne!(edited, text);
+    std::fs::write(&path, edited).unwrap();
+    assert!(matches!(
+        repo.get_manifest(seal(f)),
+        Err(Error::Integrity {
+            what: "manifest_hash",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn unpack_and_pack_dir_write_the_stored_pair() {
+    let tmp = tempfile::tempdir().unwrap();
+    for f in all() {
+        let tsra = tmp.path().join(format!("{}.tsra", f.name));
+        pack(&f.manifest, &f.payloads, &tsra).unwrap();
+        let exploded = tmp.path().join(format!("{}-exploded", f.name));
+        unpack(&tsra, &exploded).unwrap();
+        assert_stored_pair(
+            &format!("unpack {}", f.name),
+            &std::fs::read(exploded.join("manifest.json")).unwrap(),
+            &std::fs::read(exploded.join("manifest.seal")).unwrap(),
+            seal(&f),
+        );
+        let packed = tmp.path().join(format!("{}-dir.tsra", f.name));
+        pack_dir(&exploded, &packed).unwrap();
+        assert_tsra(&format!("pack_dir {}", f.name), &packed, seal(&f));
+        // The round trip copies the members byte for byte.
+        assert_eq!(raw_pair(&packed), raw_pair(&tsra), "{}", f.name);
     }
 }
 
-/// `f` as a `.tsra` at `path` whose `manifest.json` is the pretty form every tessera writer stored
-/// before #912 (`Manifest::to_sealed_json`), packed by hand: no tessera writer emits it any more.
-fn pretty_tsra(f: &Fixture, path: &Path) {
+/// The door `sign` and the ingest provenance stamp use (#931 item 2): adding `aux/` members copies
+/// the stored pair through byte for byte, so it can only re-emit what `Reader` accepts.
+#[test]
+fn add_aux_members_keeps_the_stored_pair() {
+    let tmp = tempfile::tempdir().unwrap();
+    for f in all() {
+        let tsra = tmp.path().join(format!("{}.tsra", f.name));
+        pack(&f.manifest, &f.payloads, &tsra).unwrap();
+        let before = raw_pair(&tsra);
+        add_aux_members(&tsra, &[AuxMember::new("provenance.json", b"{}".to_vec())]).unwrap();
+        assert_tsra(&format!("add_aux_members {}", f.name), &tsra, seal(&f));
+        assert_eq!(raw_pair(&tsra), before, "{}", f.name);
+    }
+}
+
+/// `f` packed, then rewritten with `edit` applied to its members (name → bytes, `None` drops the
+/// member), entry order kept, the way a hostile or broken writer would leave it.
+fn rewritten(f: &Fixture, path: &Path, edit: impl Fn(&str, Vec<u8>) -> Option<Vec<u8>>) {
     use std::io::Write as _;
+    pack(&f.manifest, &f.payloads, path).unwrap();
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    let mut members = Vec::new();
+    for i in 0..zip.len() {
+        let mut m = zip.by_index(i).unwrap();
+        let name = m.name().unwrap().into_owned();
+        let mut bytes = Vec::new();
+        m.read_to_end(&mut bytes).unwrap();
+        if let Some(bytes) = edit(&name, bytes) {
+            members.push((name, bytes));
+        }
+    }
     let stored = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
         .last_modified_time(zip::DateTime::default())
         .large_file(true)
         .system(zip::System::Unix);
     let mut zw = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
-    zw.start_file("mimetype", stored).unwrap();
-    zw.write_all(tessera_io::MIMETYPE.as_bytes()).unwrap();
-    zw.start_file("manifest.json", stored).unwrap();
-    zw.write_all(f.manifest.to_sealed_json().unwrap().as_bytes())
-        .unwrap();
-    for p in &f.payloads {
-        zw.start_file(format!("blocks/{}", p.name), stored).unwrap();
-        zw.write_all(&p.bytes).unwrap();
+    for (name, bytes) in members {
+        zw.start_file(name, stored).unwrap();
+        zw.write_all(&bytes).unwrap();
     }
     zw.finish().unwrap();
 }
 
-/// `unpack` copies a document rather than serialise a typed value: from a `.tsra` whose stored
-/// manifest is pretty-printed, it writes the JCS form of what it read, under the same seal.
+/// Every reading door refuses a product without its seal (the alpha layout) and one whose seal is
+/// not the digest of its manifest: `Reader` (so every verb over a `.tsra`), `pack_dir` over an
+/// exploded directory, and the doors built on them (`unpack`, `add_aux_members`).
 #[test]
-fn unpack_writes_the_jcs_form_of_a_pretty_stored_manifest() {
+fn a_missing_or_mismatched_seal_is_refused_by_every_reading_door() {
     let tmp = tempfile::tempdir().unwrap();
-    for f in all() {
-        let pretty = tmp.path().join(format!("{}-pretty.tsra", f.name));
-        pretty_tsra(&f, &pretty);
-        assert_ne!(
-            stored_manifest(&pretty),
-            canonical::to_bytes(
-                &canonical::parse_strict(&f.manifest.to_sealed_json().unwrap()).unwrap()
-            )
-            .unwrap(),
-            "{}: the input must be pretty, or this test proves nothing",
-            f.name
+    let f = all().into_iter().find(|f| !f.payloads.is_empty()).unwrap();
+    let other = format!("blake3:{}", "0".repeat(64));
+    let alpha = |e: Error| matches!(e, Error::UnsupportedLayout { .. });
+    let mismatch = |e: Error| {
+        matches!(
+            e,
+            Error::Integrity {
+                what: "manifest_hash",
+                ..
+            }
+        )
+    };
+
+    let no_seal = tmp.path().join("no-seal.tsra");
+    rewritten(&f, &no_seal, |name, b| {
+        (name != "manifest.seal").then_some(b)
+    });
+    let wrong_seal = tmp.path().join("wrong-seal.tsra");
+    rewritten(&f, &wrong_seal, |name, b| {
+        Some(if name == "manifest.seal" {
+            other.clone().into_bytes()
+        } else {
+            b
+        })
+    });
+    for (path, refused) in [
+        (&no_seal, &alpha as &dyn Fn(Error) -> bool),
+        (&wrong_seal, &mismatch),
+    ] {
+        let name = path.display().to_string();
+        assert!(refused(Reader::open(path).err().unwrap()), "{name}: open");
+        let out = tmp.path().join("exploded");
+        assert!(refused(unpack(path, &out).unwrap_err()), "{name}: unpack");
+        assert!(
+            refused(add_aux_members(path, &[AuxMember::new("x", vec![])]).unwrap_err()),
+            "{name}: add_aux_members"
         );
-        let exploded = tmp.path().join(format!("{}-exploded", f.name));
-        unpack(&pretty, &exploded).unwrap();
-        assert_stored_form(
-            &format!("unpack {}", f.name),
-            &std::fs::read(exploded.join("manifest.json")).unwrap(),
-            seal(&f),
-        );
+    }
+
+    // The exploded form: `pack_dir` refuses a directory without manifest.seal, or with another.
+    let tsra = tmp.path().join("ok.tsra");
+    pack(&f.manifest, &f.payloads, &tsra).unwrap();
+    let dir = tmp.path().join("dir");
+    unpack(&tsra, &dir).unwrap();
+    let out = tmp.path().join("out.tsra");
+    std::fs::write(dir.join("manifest.seal"), &other).unwrap();
+    assert!(
+        mismatch(pack_dir(&dir, &out).unwrap_err()),
+        "pack_dir: wrong"
+    );
+    std::fs::remove_file(dir.join("manifest.seal")).unwrap();
+    assert!(
+        alpha(pack_dir(&dir, &out).unwrap_err()),
+        "pack_dir: missing"
+    );
+    assert!(!out.exists(), "a refused pack_dir writes nothing");
+}
+
+/// ADR-0066 rule 10: a product written before the cutover (this fixture is `empty_no_blocks.tsra`
+/// as `origin/dev` stored it before #914: its `manifest.json` with the in-band `manifest_hash`, no
+/// `manifest.seal`) is refused by `Reader`, with an error naming the format it found and the format
+/// required. There is no migration verb.
+#[test]
+fn an_alpha_product_from_before_the_cutover_is_refused_naming_both_formats() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/alpha_layout.tsra");
+    let e = Reader::open(&fixture)
+        .err()
+        .expect("an alpha product is refused");
+    let msg = e.to_string();
+    for needle in [
+        "pre-ADR-0066 (alpha) layout",
+        "tessera_version \"0.0.0\"",
+        "there is no `manifest.seal`",
+        "in-band `manifest_hash`",
+        "requires the ADR-0066 layout",
+        "stored as exactly its RFC 8785 JCS bytes",
+        "no migration",
+    ] {
+        assert!(msg.contains(needle), "{needle:?} missing from: {msg}");
     }
 }
 
-/// `pack_dir` copies a document too: from an exploded directory whose `manifest.json` is
-/// pretty-printed, it packs the JCS form of what it read, under the same seal. (Unpacking what it
-/// wrote checks the round trip; the failing-input case for `unpack` is the test above.)
+/// Every `.tsra` tracked in the repository (the conformance corpus and the test fixtures) is stored
+/// in the A′ layout, under the seal it verifies to.
 #[test]
-fn unpack_and_pack_dir_write_the_jcs_form_of_what_they_copy() {
-    let tmp = tempfile::tempdir().unwrap();
-    for f in all() {
-        let pretty_dir = tmp.path().join(format!("{}-pretty", f.name));
-        std::fs::create_dir_all(pretty_dir.join("blocks")).unwrap();
-        for (r, p) in f.manifest.blocks.iter().zip(&f.payloads) {
-            let path = r.name.path_under(&pretty_dir.join("blocks")).unwrap();
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, &p.bytes).unwrap();
-        }
-        let pretty = f.manifest.to_sealed_json().unwrap();
-        std::fs::write(pretty_dir.join("manifest.json"), &pretty).unwrap();
-
-        let packed = tmp.path().join(format!("{}-dir.tsra", f.name));
-        pack_dir(&pretty_dir, &packed).unwrap();
-        assert_stored_form(
-            &format!("pack_dir {}", f.name),
-            &stored_manifest(&packed),
-            seal(&f),
-        );
-
-        let exploded = tmp.path().join(format!("{}-exploded", f.name));
-        unpack(&packed, &exploded).unwrap();
-        assert_stored_form(
-            &format!("unpack {}", f.name),
-            &std::fs::read(exploded.join("manifest.json")).unwrap(),
-            seal(&f),
-        );
-    }
-}
-
-/// Every `.tsra` tracked in the repository (the conformance corpus and the test fixtures) stores
-/// its manifest in the JCS form, under the seal it verifies to. A fixture written before #912 fails
-/// here until it is re-packed.
-#[test]
-fn every_tracked_tsra_stores_the_jcs_form() {
+fn every_tracked_tsra_stores_the_stored_pair() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let tracked = [
         "../corpus/files/blob_opaque.tsra",
@@ -281,6 +382,6 @@ fn every_tracked_tsra_stores_the_jcs_form() {
         let path = crates.join(rel);
         let r = Reader::open(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
         let mh = r.manifest().manifest_hash.clone().unwrap();
-        assert_stored_form(rel, r.manifest_json().as_bytes(), &mh);
+        assert_tsra(rel, &path, &mh);
     }
 }

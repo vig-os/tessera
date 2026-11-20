@@ -1078,7 +1078,14 @@
           pkgs.runCommand "wasm-bindgen-smoke"
             { nativeBuildInputs = [ pkgs.wasm-bindgen-cli pkgs.nodejs ]; } ''
             wasm-bindgen --target nodejs --out-dir "$PWD/glue" ${wasmLib}/wasm/tessera_wasm.wasm
-            node ${./tessera/crates/tessera-wasm/tests/smoke.cjs} "$PWD/glue/tessera_wasm.js"
+            node ${./tessera/crates/tessera-wasm/tests/smoke.cjs} "$PWD/glue/tessera_wasm.js" \
+              ${./tessera/corpus/seal-cases.json} | tee out.txt
+            # The same vacuous-pass guard as `reference-reader`: N/N with N the file's case count.
+            cases=$(node -e 'console.log(require(process.argv[1]).cases.length)' ${./tessera/corpus/seal-cases.json})
+            if [ "$cases" -lt 1 ] || ! grep -qx "$cases/$cases seal cases agreed (wasm)" out.txt; then
+              echo "wasm-bindgen-smoke: expected '$cases/$cases seal cases agreed (wasm)'" >&2
+              exit 1
+            fi
             touch $out
           '';
 

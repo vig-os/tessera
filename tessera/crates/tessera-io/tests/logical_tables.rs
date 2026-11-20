@@ -242,7 +242,8 @@ fn an_invalid_node_is_refused_with_its_variant_by_every_entry_point() {
 
     let exploded = root.path().join("exploded");
     std::fs::create_dir_all(exploded.join("blocks/pairs")).unwrap();
-    std::fs::write(exploded.join("manifest.json"), m.to_json().unwrap()).unwrap();
+    let (json, seal) = tessera_io::stored::manifest(&m).unwrap();
+    tessera_io::stored::write_pair(&exploded.join("manifest.json"), &json, &seal).unwrap();
     for p in &payloads {
         std::fs::write(exploded.join("blocks").join(p.name.as_str()), &p.bytes).unwrap();
     }
