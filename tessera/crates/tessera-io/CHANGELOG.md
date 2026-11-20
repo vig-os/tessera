@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.7](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.6...tessera-io-v0.1.0-alpha.7) - 2026-11-20
+
+### Added
+
+- [**breaking**] seal the stored canonical bytes (ADR-0066 A′ cutover)
+- *(core)* stored-bytes seal groundwork (ADR-0066 A′, part 1 of 2)
+- *(io)* writers emit the JCS form of every sealed JSON document
+
+### Fixed
+
+- *(corpus)* refuse a repeated or compressed member in the reference reader
+- *(core)* name a lost seal member exactly and make write_pair crash-consistent
+
 ## [0.1.0-alpha.6](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.5...tessera-io-v0.1.0-alpha.6) - 2026-11-19
 
 ### Added
