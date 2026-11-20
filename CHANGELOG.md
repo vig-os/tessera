@@ -124,7 +124,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking, `tessera-wasm`:** `verify_manifest(manifest_json, manifest_seal)` and
   `verify_signature(manifest_json, manifest_seal, signature_json, pubkey_hex)` take the seal member; the new
   `seal_verdict` returns the `corpus/seal-cases.json` verdict, and the `wasm-bindgen-smoke` check runs every seal
-  case through the compiled wasm in Node.
+  case through the compiled wasm in Node. The members, and `product_id`'s manifest, are the stored **bytes**
+  (`Uint8Array`), no longer strings: a default `TextDecoder` drops a leading byte-order mark and maps invalid UTF-8
+  to U+FFFD, so a string-taking verifier accepted manifests the native reader refuses. The strict UTF-8 parse is
+  in Rust, and the seal is checked over exactly the bytes passed.
 - `tessera-py`: `Reader.manifest_hash` gives the seal; `manifest()` no longer has a `manifest_hash` key.
 - `tessera inspect --json` prints the manifest's fields without `manifest_hash` (the summary's `manifest_hash` line
   shows the seal).

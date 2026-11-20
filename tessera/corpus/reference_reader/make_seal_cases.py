@@ -1,10 +1,11 @@
 """
 Generate ../seal-cases.json: the stored-manifest conformance vectors of SPEC §7 / ADR-0066.
 
-Each case is a stored pair as a container holds it — `manifest` (the bytes of manifest.json, as a
-string) and `seal` (the content of manifest.seal, or null when the member is missing) — with the
-verdict every reader must reach (the Rust reader, tessera-core tests/seal_cases.rs; this directory's
-run.py; tessera-wasm, natively and in Node) and the newer-field paths the Rust view reports.
+Each case is a stored pair as a container holds it — `manifest` (the bytes of manifest.json, as the
+UTF-8 string they spell, or `manifest_hex` when they are not UTF-8) and `seal` (the content of
+manifest.seal, or null when the member is missing) — with the verdict every reader must reach (the
+Rust reader, tessera-core tests/seal_cases.rs; this directory's run.py; tessera-wasm, natively and in
+Node) and the newer-field paths the Rust view reports.
 
 Every case is derived from a corpus product in ../files (stored in the ADR-0066 layout) by one named
 edit, so the file is reproducible: run it after an intended corpus change and review the diff.
@@ -34,8 +35,9 @@ OUT = os.path.join(CORPUS_DIR, "seal-cases.json")
 
 ABOUT = (
     "Stored-manifest seal cases (SPEC §4, §7; ADR-0066; #573, #901). Each case is a stored pair: "
-    "'manifest' is the bytes of manifest.json and 'seal' the content of manifest.seal (null = the "
-    "member is missing). Every reader reaches every verdict: the Rust reader (tessera-core "
+    "'manifest' is the bytes of manifest.json as the UTF-8 string they spell ('manifest_hex', "
+    "lower-case hex, in its place when they are not UTF-8) and 'seal' the content of manifest.seal "
+    "(null = the member is missing). A reader takes the bytes, never a string decoded from them. Every reader reaches every verdict: the Rust reader (tessera-core "
     "tests/seal_cases.rs), the reference reader (reference_reader/run.py) and tessera-wasm "
     "(seal_verdict, natively and in Node), so they agree by construction. Verdicts, in ADR-0066 "
     "rule 4's order (a case with two faults has the verdict of the first): 'refused' = not read: no "
@@ -115,6 +117,16 @@ def corpus() -> list[tuple[str, dict, bytes, str]]:
     return out
 
 
+def manifest_member(b: bytes) -> dict[str, str]:
+    """The case's manifest.json bytes: as the string they spell (`manifest`) when they are UTF-8,
+    else as lower-case hex (`manifest_hex`), so a case can carry bytes no JSON string holds. A
+    reader under test takes the bytes either way, never a string decoded from them."""
+    try:
+        return {"manifest": b.decode("utf-8")}
+    except UnicodeDecodeError:
+        return {"manifest_hex": b.hex()}
+
+
 class Cases:
     def __init__(self) -> None:
         self.cases: list[dict] = []
@@ -134,7 +146,7 @@ class Cases:
                 "name": name,
                 "verdict": verdict,
                 "newer_fields": newer or [],
-                "manifest": manifest.decode("utf-8"),
+                **manifest_member(manifest),
                 "seal": seal,
             }
         )
@@ -327,7 +339,22 @@ def recon_int16(c: Cases, obj: dict, raw: bytes, seal: str, other_seal: str) -> 
         inject(edited(obj, set_key("extra", {"x": "@X@"})), {"@X@": "1" + "0" * 190}),
         seal,
     )
-    c.add(f"{p}/byte-order-mark", "refused", "﻿".encode() + raw, seal)
+    c.add(f"{p}/byte-order-mark", "refused", "\ufeff".encode() + raw, seal)
+    # Bytes a string API can't hold: a reader that takes the members as text decoded from the
+    # bytes (a default TextDecoder drops a leading BOM and maps invalid UTF-8 to U+FFFD) would
+    # verify the BOM case above under its original seal, and the 0xFF byte under the seal of its
+    # U+FFFD spelling. The seal is over the stored bytes, so each is refused; the U+FFFD spelling
+    # itself verifies, so the refusals are about the bytes, not the character.
+    c.resealed(f"{p}/byte-order-mark-resealed", "refused", "\ufeff".encode() + raw)
+    ffff = canon(edited(obj, set_key("description", "@D@")))
+    c.resealed(f"{p}/invalid-utf8-resealed", "refused", ffff.replace(b"@D@", b"\xff"))
+    c.add(
+        f"{p}/invalid-utf8-under-the-seal-of-its-replacement",
+        "refused",
+        ffff.replace(b"@D@", b"\xff"),
+        digest(ffff.replace(b"@D@", "\ufffd".encode())),
+    )
+    resealed("replacement-character-resealed", "ok", set_key("description", "\ufffd"))
 
     def deep(levels: int) -> Callable[[dict], None]:
         def edit(m: dict) -> None:

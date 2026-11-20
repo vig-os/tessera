@@ -76,11 +76,15 @@ manifest seal, MMR `content_hash`, inclusion/consistency proofs, ed25519 **verif
 ```js
 import init, { verify_manifest, seal_verdict, verify_signature, product_id } from "./tessera_wasm.js";
 await init();
-// The two stored members of a .tsra (ADR-0066): manifest.json and manifest.seal, as strings.
+// The two stored members of a .tsra (ADR-0066), manifest.json and manifest.seal, as their bytes:
+// Uint8Arrays read straight from the container, never strings decoded from them.
 verify_manifest(manifestJson, manifestSeal); // canonical check + seal + id + content_hash
 seal_verdict(manifestJson, manifestSeal);    // "ok" | "tampered" | "refused", as corpus/seal-cases.json
 ```
 
+The seal is over the stored bytes, so the bindings take the bytes and parse them as strict UTF-8 in
+Rust. Decoding them first would verify a different document: a default `TextDecoder` drops a leading
+byte-order mark and maps invalid UTF-8 to U+FFFD, both of which the native reader refuses.
 A product without `manifest.seal` (pass `undefined`) is the pre-ADR-0066 alpha layout and is refused.
 
 *Referenced checks:* `wasm-core` (the core compiles to wasm32) + `wasm-bindgen-smoke` (bindings build →

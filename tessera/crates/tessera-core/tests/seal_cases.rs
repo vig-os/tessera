@@ -19,7 +19,7 @@ use serde_json::Value;
 use tessera_core::{Error, Manifest};
 
 /// The number of cases the generator writes: a lost or gained case is a visible change here.
-const CASES: usize = 146;
+const CASES: usize = 150;
 
 fn cases() -> Vec<Value> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/seal-cases.json");
@@ -28,9 +28,21 @@ fn cases() -> Vec<Value> {
     doc["cases"].as_array().expect("cases array").clone()
 }
 
+/// A case's `manifest.json` bytes: the UTF-8 string they spell (`manifest`), or `manifest_hex` for
+/// bytes no JSON string holds (invalid UTF-8).
+fn manifest_bytes(c: &Value) -> Vec<u8> {
+    match c["manifest_hex"].as_str() {
+        Some(hex) => (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("manifest_hex is hex"))
+            .collect(),
+        None => c["manifest"].as_str().unwrap().as_bytes().to_vec(),
+    }
+}
+
 /// A case's stored members: the manifest bytes and the seal member (`None` when absent).
 fn members(c: &Value) -> (Vec<u8>, Option<Vec<u8>>) {
-    let bytes = c["manifest"].as_str().unwrap().as_bytes().to_vec();
+    let bytes = manifest_bytes(c);
     let seal = c["seal"].as_str().map(|s| s.as_bytes().to_vec());
     (bytes, seal)
 }
@@ -330,4 +342,23 @@ fn integers_beyond_2_pow_53_are_refused_by_path() {
             "{name}: {err}"
         );
     }
+}
+
+/// Bytes a string API would change before the seal check (a default `TextDecoder` drops a leading
+/// byte-order mark and maps invalid UTF-8 to U+FFFD) are refused by the strict parse, whatever the
+/// seal: the seal is over the stored bytes, never over text decoded from them. The U+FFFD
+/// spelling itself verifies, so the refusal is about the bytes.
+#[test]
+fn bytes_a_text_decoder_would_change_are_refused_by_the_strict_parse() {
+    for name in [
+        "byte-order-mark",
+        "byte-order-mark-resealed",
+        "invalid-utf8-resealed",
+        "invalid-utf8-under-the-seal-of-its-replacement",
+    ] {
+        let c = case(&format!("recon_int16/{name}"));
+        let err = read(&c).unwrap_err();
+        assert!(matches!(err, Error::Serde(_)), "{name}: {err}");
+    }
+    assert!(read(&case("recon_int16/replacement-character-resealed")).is_ok());
 }

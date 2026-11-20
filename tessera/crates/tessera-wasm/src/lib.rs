@@ -10,10 +10,16 @@
 //!
 //! **Inputs (ADR-0066).** A product's manifest is two members: `manifest.json`, stored as exactly its
 //! JCS bytes, and `manifest.seal`, the 71 bytes `blake3:<hex>` over them. Every verifier here takes
-//! both, as the strings a JS caller read from the container (`manifest_seal` is `undefined` when the
+//! both as the **bytes** the container holds (`Uint8Array`; `manifest_seal` is `undefined` when the
 //! member is missing, which is the pre-ADR-0066 alpha layout and is refused), and verifies through
-//! [`Manifest::from_stored_members`], the same function the native reader uses: the canonical check,
-//! I-JSON, the seal over the stored bytes, then `id` and `content_hash`.
+//! [`Manifest::from_stored_members`], the same function the native reader uses: the strict UTF-8 and
+//! I-JSON parse, the canonical check, the seal over the stored bytes, then `id` and `content_hash`.
+//!
+//! Bytes, not strings: the seal is over the stored bytes, and a string is not them. A default
+//! `TextDecoder` drops a leading byte-order mark and maps invalid UTF-8 to U+FFFD, so a verifier
+//! handed decoded text would check a different document than the one stored, and accept a manifest
+//! the native reader refuses (`corpus/seal-cases.json` pins both: `recon_int16/byte-order-mark` and
+//! `recon_int16/invalid-utf8-under-the-seal-of-its-replacement`).
 
 use wasm_bindgen::prelude::*;
 
@@ -21,8 +27,8 @@ use tessera_core::manifest::Manifest;
 use tessera_core::signing::{self, Signature};
 use tessera_core::Error;
 
-fn read(manifest_json: &str, manifest_seal: Option<&str>) -> tessera_core::Result<Manifest> {
-    Manifest::from_stored_members(manifest_json.as_bytes(), manifest_seal.map(str::as_bytes))
+fn read(manifest_json: &[u8], manifest_seal: Option<&[u8]>) -> tessera_core::Result<Manifest> {
+    Manifest::from_stored_members(manifest_json, manifest_seal)
 }
 
 /// Verify a product's **three-hash seal** from its stored `manifest.json` and `manifest.seal`:
@@ -32,7 +38,7 @@ fn read(manifest_json: &str, manifest_seal: Option<&str>) -> tessera_core::Resul
 /// revision verify; a key spliced into a sealed manifest, a respelling (`64.0` for `64`, a pretty
 /// layout) and a duplicate key don't.
 #[wasm_bindgen]
-pub fn verify_manifest(manifest_json: &str, manifest_seal: Option<String>) -> bool {
+pub fn verify_manifest(manifest_json: &[u8], manifest_seal: Option<Vec<u8>>) -> bool {
     read(manifest_json, manifest_seal.as_deref()).is_ok()
 }
 
@@ -43,7 +49,7 @@ pub fn verify_manifest(manifest_json: &str, manifest_seal: Option<String>) -> bo
 /// major version, a block listed twice or without a digest). The verdict the native reader and the
 /// Python reference reader reach on the same pair.
 #[wasm_bindgen]
-pub fn seal_verdict(manifest_json: &str, manifest_seal: Option<String>) -> String {
+pub fn seal_verdict(manifest_json: &[u8], manifest_seal: Option<Vec<u8>>) -> String {
     match read(manifest_json, manifest_seal.as_deref()) {
         Ok(_) => "ok",
         Err(Error::Integrity { .. }) => "tampered",
@@ -59,8 +65,8 @@ pub fn seal_verdict(manifest_json: &str, manifest_seal: Option<String>) -> Strin
 /// (never throws).
 #[wasm_bindgen]
 pub fn verify_signature(
-    manifest_json: &str,
-    manifest_seal: Option<String>,
+    manifest_json: &[u8],
+    manifest_seal: Option<Vec<u8>>,
     signature_json: &str,
     pubkey_hex: &str,
 ) -> bool {
@@ -74,12 +80,14 @@ pub fn verify_signature(
     signing::verify_manifest(&m, &sig, &vk)
 }
 
-/// The product `id` a manifest JSON **claims** (the logical identity), or empty string on parse
-/// failure — a lightweight read for indexing, **unverified**: verify with [`verify_manifest`] before
-/// trusting it.
+/// The product `id` a stored `manifest.json` **claims** (the logical identity), or empty string when
+/// the bytes are not UTF-8 or don't parse — a lightweight read for indexing, **unverified**: verify
+/// with [`verify_manifest`] before trusting it.
 #[wasm_bindgen]
-pub fn product_id(manifest_json: &str) -> String {
-    Manifest::from_json(manifest_json)
+pub fn product_id(manifest_json: &[u8]) -> String {
+    std::str::from_utf8(manifest_json)
+        .ok()
+        .and_then(|text| Manifest::from_json(text).ok())
         .map(|m| m.id)
         .unwrap_or_default()
 }
@@ -97,7 +105,7 @@ mod tests {
     use tessera_core::signing::{sign_manifest, verifying_key_hex, SignOpts, SigningKey};
     use tessera_core::ProductBuilder;
 
-    fn stored() -> (String, String) {
+    fn stored() -> (Vec<u8>, Vec<u8>) {
         let mut b = ProductBuilder::new("recon", "DP", "wasm", "2024-01-01T00:00:00Z");
         b.add_block(&ArrayBlock::new(
             "volume",
@@ -105,7 +113,7 @@ mod tests {
         ))
         .unwrap();
         let (bytes, seal) = b.seal().unwrap().to_stored().unwrap();
-        (String::from_utf8(bytes).unwrap(), seal)
+        (bytes, seal.into_bytes())
     }
 
     #[test]
@@ -114,13 +122,14 @@ mod tests {
         assert!(verify_manifest(&json, Some(seal.clone())));
         assert!(!product_id(&json).is_empty());
         // a tampered manifest (flip a hex digit in content_hash) fails the seal.
-        let tampered = json.replacen("blake3:", "blake3:0", 1);
+        let text = String::from_utf8(json.clone()).unwrap();
+        let tampered = text.replacen("blake3:", "blake3:0", 1).into_bytes();
         assert!(!verify_manifest(&tampered, Some(seal.clone())));
         assert_eq!(seal_verdict(&tampered, Some(seal.clone())), "tampered");
         // no seal member: the alpha layout, refused.
         assert!(!verify_manifest(&json, None));
         assert_eq!(seal_verdict(&json, None), "refused");
-        assert!(!verify_manifest("not json", Some(seal)));
+        assert!(!verify_manifest(b"not json", Some(seal)));
     }
 
     #[test]
@@ -140,7 +149,19 @@ mod tests {
         // wrong key fails; malformed inputs return false (never panic).
         let other = verifying_key_hex(&SigningKey::from_bytes(&[22; 32]).verifying_key());
         assert!(!verify_signature(&json, Some(seal), &sig_json, &other));
-        assert!(!verify_signature("x", None, "y", "z"));
+        assert!(!verify_signature(b"x", None, "y", "z"));
+    }
+
+    /// A case's `manifest.json` bytes: the UTF-8 string they spell (`manifest`), or `manifest_hex` for
+    /// bytes no JSON string holds (invalid UTF-8).
+    fn manifest_bytes(c: &serde_json::Value) -> Vec<u8> {
+        match c["manifest_hex"].as_str() {
+            Some(hex) => (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("manifest_hex is hex"))
+                .collect(),
+            None => c["manifest"].as_str().unwrap().as_bytes().to_vec(),
+        }
     }
 
     /// The wasm surface reaches every verdict of `corpus/seal-cases.json`, the file the native
@@ -157,8 +178,8 @@ mod tests {
             .iter()
             .filter_map(|c| {
                 let got = seal_verdict(
-                    c["manifest"].as_str().unwrap(),
-                    c["seal"].as_str().map(str::to_owned),
+                    &manifest_bytes(c),
+                    c["seal"].as_str().map(|s| s.as_bytes().to_vec()),
                 );
                 (got != c["verdict"].as_str().unwrap())
                     .then(|| format!("{}: expected {}, got {got}", c["name"], c["verdict"]))

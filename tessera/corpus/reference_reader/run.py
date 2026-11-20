@@ -37,7 +37,13 @@ def check_seal_cases() -> int:
         cases = json.load(f)["cases"]
     fails = 0
     for c in cases:
-        got = stored_verdict(c["manifest"], c["seal"])
+        # The member bytes: the UTF-8 string they spell, or `manifest_hex` when they are not UTF-8.
+        raw = (
+            bytes.fromhex(c["manifest_hex"])
+            if "manifest_hex" in c
+            else c["manifest"].encode("utf-8")
+        )
+        got = stored_verdict(raw, c["seal"])
         if got != c["verdict"]:
             fails += 1
             print(f"seal case {c['name']}: expected {c['verdict']}, got {got}")
