@@ -92,7 +92,7 @@ const QUARANTINE: &str = "quarantine";
 /// thread-local and armed through a guard that disarms it on drop, so a test that panics before a
 /// seam fires can't leave it armed for the next test on its thread.
 #[cfg(test)]
-mod seam {
+pub(crate) mod seam {
     use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use std::thread::LocalKey;
@@ -612,13 +612,14 @@ impl Write for StagedBlock {
 }
 
 /// Write `bytes` to `path` **durably + atomically**: the one path every whole-file write of a session
-/// takes (the header, the journal [`WriteSession::recover`] rewrites, a quarantine's journal). It writes
+/// takes (the header, the journal [`WriteSession::recover`] rewrites, a quarantine's journal), and
+/// each file of a stored pair ([`crate::stored::write_pair`]). It writes
 /// a temp file beside `path` (`<file name>.tmp`, in the same directory, so the rename never crosses
 /// filesystems), fsyncs it, renames it over `path`, then fsyncs the directory so the rename itself is
 /// on disk. The rename is atomic, so a crash at any point leaves either the old file or the complete
 /// new one, never a torn, truncated or missing one. A failure removes the temp file again and leaves
 /// `path` as it was; a crash can leave the temp file, which the next write to `path` replaces.
-fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp_name = path
         .file_name()
         .expect("a durable write names a file")

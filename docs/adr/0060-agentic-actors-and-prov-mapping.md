@@ -1374,3 +1374,14 @@ array form) is refused at seal, as a re-seal already was. Sealing against such a
 A re-seal applies the rules of the schema the product embeds, never the registry's current version of it: a product
 embedding `recon` 1.0 declares no ranges, so `commit --set kvp=5000` on it is sealed, while the same edit on a product
 embedding `recon` 1.1 is refused (pinned by `commit_set_keeps_the_rules_of_the_embedded_schema`).
+
+## Amendment (2026-11-20) — §2's mechanism: the seal is over the stored bytes (ADR-0066 A′, #914)
+§2's newer-field rules are unchanged: a key a newer writer added and sealed verifies, is warned about
+(`newer_fields`) and blocks a re-seal; the same key spliced in under an old seal is tampering. The mechanism that
+carries them changes: "the seal over the parsed object" (`from_json_verified`, which recomputed
+`digest(JCS(object − manifest_hash))` over what it parsed) is replaced by **the seal over the stored bytes**
+(`Manifest::from_stored_members`, [ADR-0066](0066-seal-encoding.md) rule 4). The stored bytes must be their own JCS
+form, so they are the parsed object's one spelling, and a newer key is covered because it is in the bytes, not
+because a re-serialisation kept it. `from_json_verified` and `seal_of` no longer exist: there is one verify path.
+`inspect --json` prints the typed view's fields (a newer key is listed as not interpreted), and a product is
+re-emitted by copying its stored bytes and seal (`unpack`, `pack`, `add_aux_members`), never by serialising the view.

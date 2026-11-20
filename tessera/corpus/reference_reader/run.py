@@ -1,7 +1,8 @@
 """
 Run the independent reader over the conformance corpus and compare the triple
 (id, content_hash, manifest_hash) against ../corpus.json goldens, then reach the
-verdict of every manifest in ../seal-cases.json (the Rust reader checks the same file).
+verdict of every stored manifest in ../seal-cases.json (the Rust reader and tessera-wasm check the
+same file).
 """
 
 from __future__ import annotations
@@ -14,10 +15,10 @@ import zipfile
 
 from reader import (
     digest,
-    manifest_seal,
-    manifest_verdict,
+    jcs_bytes,
     merkle_root,
     schema_verdict,
+    stored_verdict,
     verify_tsra,
 )
 
@@ -28,6 +29,15 @@ FILES_DIR = os.path.join(CORPUS_DIR, "files")
 GOLDEN_JSON = os.path.join(CORPUS_DIR, "corpus.json")
 SEAL_CASES_JSON = os.path.join(CORPUS_DIR, "seal-cases.json")
 SCHEMA_CASES_JSON = os.path.join(CORPUS_DIR, "schema-cases.json")
+REFUSALS_DIR = os.path.join(CORPUS_DIR, "refusals")
+# The committed refusal fixtures (make_refusal_fixtures.py) and the note each refusal must carry.
+# The Rust reader refuses the same files (tessera-io tests/canonical_members.rs).
+REFUSAL_FIXTURES = {
+    "duplicate-manifest-seal.tsra": "listed more than once: ['manifest.seal']",
+    "duplicate-manifest-json.tsra": "listed more than once: ['manifest.json']",
+    "deflated-manifest-seal.tsra": "not STORED (SPEC §6): ['manifest.seal']",
+    "deflated-manifest-json.tsra": "not STORED (SPEC §6): ['manifest.json']",
+}
 
 
 def check_seal_cases() -> int:
@@ -36,7 +46,13 @@ def check_seal_cases() -> int:
         cases = json.load(f)["cases"]
     fails = 0
     for c in cases:
-        got = manifest_verdict(c["manifest"])
+        # The member bytes: the UTF-8 string they spell, or `manifest_hex` when they are not UTF-8.
+        raw = (
+            bytes.fromhex(c["manifest_hex"])
+            if "manifest_hex" in c
+            else c["manifest"].encode("utf-8")
+        )
+        got = stored_verdict(raw, c["seal"])
         if got != c["verdict"]:
             fails += 1
             print(f"seal case {c['name']}: expected {c['verdict']}, got {got}")
@@ -73,8 +89,9 @@ def check_schema_cases(goldens: list[dict]) -> int:
 
 def _resealed(src: str, dst: str, edit, encode) -> None:
     """Copy fixture `src` to `dst` with `edit` applied to its manifest and the manifest re-sealed
-    (`content_hash` too, when every block still has a digest): built the way a hostile producer
-    would, so only the reader's own refusal can stop it."""
+    (`content_hash` too, when every block still has a digest): stored as its JCS bytes, encoded by
+    `encode`, with manifest.seal = digest of exactly the bytes written. Built the way a hostile
+    producer would, so only the reader's own refusal can stop it."""
     with zipfile.ZipFile(src) as zf:
         members = [(i.filename, zf.read(i.filename)) for i in zf.infolist()]
     manifest = json.loads(dict(members)["manifest.json"])
@@ -82,12 +99,14 @@ def _resealed(src: str, dst: str, edit, encode) -> None:
     digests = [b.get("digest") for b in manifest["blocks"]]
     if all(isinstance(d, str) for d in digests):
         manifest["content_hash"] = merkle_root(digests)
-    manifest["manifest_hash"] = manifest_seal(manifest)
+    stored = encode(jcs_bytes(manifest).decode("utf-8"))
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_STORED) as out:
         for name, data in members:
-            out.writestr(
-                name, encode(json.dumps(manifest)) if name == "manifest.json" else data
-            )
+            if name == "manifest.json":
+                data = stored
+            elif name == "manifest.seal":
+                data = digest(stored).encode("ascii")
+            out.writestr(name, data)
 
 
 def _listed_twice(second_digest: str | None):
@@ -131,6 +150,20 @@ def same(path: str) -> None:
     """No change to the written archive."""
 
 
+def _drop_member(name: str):
+    """The archive rewritten without member `name`, entry order otherwise kept."""
+
+    def post(path: str) -> None:
+        with zipfile.ZipFile(path) as zf:
+            members = [(i.filename, zf.read(i.filename)) for i in zf.infolist()]
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as out:
+            for n, data in members:
+                if n != name:
+                    out.writestr(n, data)
+
+    return post
+
+
 def _first_member_marked_encrypted(path: str) -> None:
     """Set the 'encrypted' flag (bit 0) on the archive's first member, in its local header and
     its central-directory entry: a zip reader can no longer read it."""
@@ -147,9 +180,11 @@ def check_refusals(goldens: list[dict]) -> int:
     """`verify_tsra` refuses each crafted archive for its reason, and returns a result rather than
     raising: a block listed twice (SPEC §5), whether the second entry's digest is foreign or the
     block's own; a block name that is not a string; a block without a digest; a manifest.json in
-    UTF-16 or with a byte-order mark (SPEC §4: UTF-8 I-JSON); an archive zipfile can't read (a
-    member marked encrypted). Returns the number
-    of misses."""
+    UTF-16 or with a byte-order mark (SPEC §4: UTF-8 I-JSON); a manifest.json that is not its own
+    JCS form (ADR-0066 rule 4); an archive without manifest.seal (the alpha layout, rule 10); an
+    archive zipfile can't read (a member marked encrypted); and the committed fixtures outside
+    SPEC §6's member set (a repeated or a DEFLATED manifest.seal or manifest.json, each of which a
+    last-entry-wins reader verifies). Returns the number of misses."""
     src = None
     for g in goldens:
         path = os.path.join(FILES_DIR, f"{g['name']}.tsra")
@@ -203,6 +238,20 @@ def check_refusals(goldens: list[dict]) -> int:
             same,
         ),
         (
+            "manifest not in its JCS form (pretty, resealed)",
+            _unchanged,
+            "non-canonical bytes",
+            lambda text: utf8(json.dumps(json.loads(text), indent=2)),
+            same,
+        ),
+        (
+            "no manifest.seal (the alpha layout)",
+            _unchanged,
+            "alpha",
+            utf8,
+            _drop_member("manifest.seal"),
+        ),
+        (
             "first member marked encrypted",
             _unchanged,
             "encrypted",
@@ -220,7 +269,15 @@ def check_refusals(goldens: list[dict]) -> int:
             refused = not res.ok and any(reason in n for n in res.notes)
             print(f"refusal: {case}: {'refused' if refused else 'MISSED'}")
             misses += 0 if refused else 1
-    print(f"{len(refusals) - misses}/{len(refusals)} refusal cases refused")
+    fixtures = sorted(os.listdir(REFUSALS_DIR))
+    assert fixtures == sorted(REFUSAL_FIXTURES), fixtures
+    for fixture in fixtures:
+        res = verify_tsra(os.path.join(REFUSALS_DIR, fixture))
+        refused = not res.ok and any(REFUSAL_FIXTURES[fixture] in n for n in res.notes)
+        print(f"refusal: {fixture}: {'refused' if refused else 'MISSED'}")
+        misses += 0 if refused else 1
+    total = len(refusals) + len(fixtures)
+    print(f"{total - misses}/{total} refusal cases refused")
     return misses
 
 

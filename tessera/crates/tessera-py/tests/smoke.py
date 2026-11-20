@@ -57,12 +57,24 @@ def jcs(value) -> bytes:
 
 
 def assert_stored_form(tsra, what: str) -> None:
-    """The `manifest.json` member of `tsra` is exactly its own JCS form (ADR-0066 rule 1, #912)."""
+    """`tsra` stores the ADR-0066 pair: entries 1–3 are `mimetype`, `manifest.seal`, `manifest.json`;
+    `manifest.json` is exactly its own JCS form with no `manifest_hash` key; `manifest.seal` is the
+    `blake3:<64 hex>` seal the reader verified it against on open (blake3 itself is the Rust reader's
+    check: the check environment has no blake3 library)."""
     with zipfile.ZipFile(tsra) as z:
+        names = z.namelist()
         stored = z.read("manifest.json")
+        seal = z.read("manifest.seal").decode("ascii")
+    assert names[:3] == ["mimetype", "manifest.seal", "manifest.json"], (
+        what,
+        names[:3],
+    )
     assert stored == jcs(json.loads(stored)), (
         f"{what}: manifest.json is not its own JCS form: {stored[:120]!r}"
     )
+    assert "manifest_hash" not in json.loads(stored), f"{what}: the seal is in band"
+    assert len(seal) == 71 and seal.startswith("blake3:"), (what, seal)
+    assert tessera.open(tsra).manifest_hash == seal, f"{what}: Reader.manifest_hash"
 
 
 corpus = pathlib.Path(sys.argv[1])

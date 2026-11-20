@@ -5,17 +5,18 @@
 //!   Rename- and re-encode-stable; survives re-ingest of the same logical product.
 //! - [`content_hash`](Manifest::content_hash) — *data fingerprint*: Merkle root over the ordered
 //!   block digests. Changes iff payload bytes change.
-//! - [`manifest_hash`](Manifest::manifest_hash) — *the seal*: `blake3` over canonical-JSON of the
-//!   whole manifest (this field excluded). Covers metadata + sources + block refs (which carry the
-//!   block digests), so it transitively commits to all payloads — tamper anything, it changes.
+//! - [`manifest_hash`](Manifest::manifest_hash) — *the seal*: `blake3` over the **stored bytes** of
+//!   `manifest.json` (ADR-0066). Covers metadata + sources + block refs (which carry the block
+//!   digests), so it transitively commits to all payloads — tamper anything, it changes.
 //!
-//! **What the seal covers (SPEC §4).** The seal is computed over the manifest JSON *object*, with
-//! `manifest_hash` removed and nothing else changed ([`seal_of`]). A reader recomputes it over the
-//! object it parsed, never over this struct: the struct is a *view* that drops keys it doesn't model,
-//! turns an explicit `null` into an absent field and fills omitted defaults, and a seal over the view
-//! would pass a spliced-in key and fail a newer writer's valid product (#573). A writer seals the
-//! object it is about to write through the same function, so the two can't drift. Keys the view
-//! doesn't model are reported by [`Manifest::newer_fields`] (ADR-0060 §2.2).
+//! **What the seal covers (SPEC §4, ADR-0066).** `manifest.json` is stored as exactly its RFC 8785
+//! (JCS) bytes, with no `manifest_hash` key, and the seal is `blake3` over those bytes, kept beside
+//! them in a `manifest.seal` member ([`crate::stored`]). A reader never re-serialises what it read:
+//! [`Manifest::from_stored`] refuses bytes that are not their own JCS form, then compares the seal
+//! with the digest of the bytes as stored, then builds the typed view. The view drops keys it doesn't
+//! model (a newer writer's fields, reported by [`Manifest::newer_fields`], ADR-0060 §2.2), so a
+//! product is re-emitted by copying its stored bytes, never by serialising the view. A writer stores
+//! [`Manifest::to_stored`]: the bytes it seals are the bytes it writes.
 
 use std::collections::BTreeMap;
 
@@ -97,9 +98,11 @@ pub struct Manifest {
     /// Merkle root over block digests; `Some` once sealed, `None` while building.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
-    /// The seal: `blake3` over canonical-JSON of this manifest with `manifest_hash` itself
-    /// omitted. `Some` once sealed, `None` while building.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The seal: `blake3` over this manifest's stored bytes ([`to_stored`](Self::to_stored)).
+    /// `Some` once sealed, `None` while building. **Never serialised** (ADR-0066 rule 1): the seal
+    /// is kept outside the bytes it seals, in the `manifest.seal` member, and a reader sets it from
+    /// there ([`from_stored`](Self::from_stored)).
+    #[serde(skip)]
     pub manifest_hash: Option<String>,
     /// Keys of the parsed manifest this build does not model (see [`Self::newer_fields`]). Never
     /// serialised: it describes the received object, not the product.
@@ -107,18 +110,8 @@ pub struct Manifest {
     newer_fields: Vec<String>,
 }
 
-/// The seal of a manifest JSON object (SPEC §4): `digest(JCS(object − "manifest_hash"))`.
-///
-/// The one seal function: [`Manifest::compute_manifest_hash`] applies it to the object a writer
-/// emits, and [`Manifest::from_json_verified`] to the object a reader parsed.
-///
-/// # Errors
-/// [`crate::Error::Canonicalization`] if `object` is not a JSON object.
-pub fn seal_of(object: &Value) -> crate::Result<String> {
-    crate::canonical::hash_without(object, SEAL_KEY)
-}
-
-/// The one key the seal leaves out (SPEC §4). A [`crate::Collection`] is sealed under the same key.
+/// The in-band seal key of the alpha layout. Stored bytes that carry it at their top level are
+/// refused ([`crate::Error::InBandSeal`]); a [`crate::Collection`] is held to the same rule.
 pub(crate) const SEAL_KEY: &str = "manifest_hash";
 
 /// Every key of the object `obj` at `at` that its type doesn't declare (`declared`, the type's
@@ -255,7 +248,6 @@ impl Manifest {
         "extra",
         "ingest_transform",
         "content_hash",
-        "manifest_hash",
     ];
 
     /// Fields of the parsed manifest that this build does not model: keys a **newer format
@@ -264,10 +256,9 @@ impl Manifest {
     /// starting with a letter or `_` is quoted, so a path never reads as another: a top-level key
     /// named `producer.agents` is `["producer.agents"]` (the grammar is in SPEC §4, "Forward
     /// reading"). Empty for a manifest this build wrote, and for every
-    /// manifest not parsed by [`from_json`](Self::from_json) / [`from_json_verified`](Self::from_json_verified).
+    /// manifest not parsed by [`from_json`](Self::from_json) / [`from_stored`](Self::from_stored).
     ///
-    /// These fields are covered by the seal ([`from_json_verified`](Self::from_json_verified) hashes
-    /// the parsed object), but not interpreted, and this struct does not carry them. So every
+    /// These fields are covered by the seal (it is over the stored bytes), but not interpreted, and this struct does not carry them. So every
     /// operation that would build a new seal from this manifest refuses with
     /// [`crate::Error::NewerFormatFields`] instead of dropping them (ADR-0060 §2.2).
     pub fn newer_fields(&self) -> &[String] {
@@ -289,46 +280,15 @@ impl Manifest {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
-    /// Canonical (RFC 8785 JCS) bytes of this manifest with `manifest_hash` excluded — the
-    /// exact bytes [`manifest_hash`](Self::manifest_hash) is computed over when this struct is
-    /// written out.
+    /// Canonical (RFC 8785 JCS) bytes of this struct: the bytes [`to_stored`](Self::to_stored)
+    /// stores and [`compute_manifest_hash`](Self::compute_manifest_hash) hashes. They never carry
+    /// `manifest_hash` (the field is not serialised).
     ///
     /// # Errors
     /// As [`compute_manifest_hash`](Self::compute_manifest_hash).
     pub fn canonical_bytes(&self) -> crate::Result<Vec<u8>> {
         self.refuse_newer_fields()?;
-        crate::canonical::bytes_without(&crate::canonical::to_json_value(self)?, SEAL_KEY)
-    }
-
-    /// This manifest's JSON, for a writer to emit **as a sealed product**: refused unless the bytes
-    /// it returns carry their own seal, i.e. [`seal_of`] over them equals `manifest_hash`.
-    ///
-    /// Every writer that puts a manifest into a product or a repository goes through this, so no
-    /// tessera writer emits a manifest whose seal doesn't hold.
-    ///
-    /// # Errors
-    /// - [`crate::Error::NewerFormatFields`] for a parsed manifest with [`newer_fields`](Self::newer_fields):
-    ///   this struct doesn't carry them, so its JSON would drop sealed content.
-    /// - [`crate::Error::Invalid`] if the manifest is unsealed, or its JSON doesn't reproduce its seal:
-    ///   it was edited after sealing, or it was parsed from an encoding this struct normalises (an
-    ///   explicit `null`, an omitted `sources`). Copy such a product's original bytes instead.
-    pub fn to_sealed_json(&self) -> crate::Result<String> {
-        self.refuse_newer_fields()?;
-        let Some(mh) = &self.manifest_hash else {
-            return Err(crate::Error::Invalid(
-                "refusing to emit an unsealed manifest as a product".into(),
-            ));
-        };
-        let json = self.to_json()?;
-        let resealed = seal_of(&serde_json::from_str(&json)?)?;
-        if &resealed != mh {
-            return Err(crate::Error::Invalid(format!(
-                "refusing to emit a manifest whose JSON does not reproduce its seal {mh} (it \
-                 seals {resealed}): it was changed after sealing, or it was parsed from an \
-                 encoding this build normalises; copy the product's original bytes instead"
-            )));
-        }
-        Ok(json)
+        crate::canonical::to_bytes(&crate::canonical::to_json_value(self)?)
     }
 
     /// Recompute the logical `id` from `id_inputs`.
@@ -349,21 +309,14 @@ impl Manifest {
         Ok(crate::hash::merkle_root(&digests))
     }
 
-    /// The seal (`manifest_hash`) this struct gets when written out: [`seal_of`] over its JSON
-    /// object. The same function a reader applies to the object it parses.
+    /// The seal (`manifest_hash`) this struct gets when written out: `blake3` over
+    /// [`canonical_bytes`](Self::canonical_bytes), the bytes [`to_stored`](Self::to_stored) stores.
     ///
     /// # Errors
     /// [`crate::Error::NewerFormatFields`] for a parsed manifest with [`newer_fields`](Self::newer_fields):
     /// a seal over this struct would leave them out, which is a re-seal that drops sealed content.
     pub fn compute_manifest_hash(&self) -> crate::Result<String> {
         Ok(crate::hash::digest(&self.canonical_bytes()?))
-    }
-
-    /// Parse the text strictly ([`crate::canonical::parse_strict`]) into the object and its typed
-    /// view, recording the view's [`newer_fields`](Self::newer_fields).
-    fn parse(s: &str) -> crate::Result<(Self, Value)> {
-        let object = crate::canonical::parse_strict(s)?;
-        Ok((Self::from_object(&object)?, object))
     }
 
     /// The typed view of a strictly parsed manifest object: declared form, version, newer fields.
@@ -376,7 +329,8 @@ impl Manifest {
     }
 
     /// Parse a manifest, refusing one whose major spec version this reader can't handle.
-    /// Does not verify hashes — use [`from_json_verified`](Self::from_json_verified) for that.
+    /// **Does not verify anything**: the result is an untrusted claim (a diagnostic read, an
+    /// unverified id). A reader verifies with [`from_stored_members`](Self::from_stored_members).
     ///
     /// # Errors
     /// [`crate::Error::Serde`] for malformed JSON, a **duplicate key** in any object
@@ -388,36 +342,7 @@ impl Manifest {
     /// it (SPEC §1, I-JSON: no seal pins it; the message names its path);
     /// [`crate::Error::UnsupportedVersion`] for a newer major version.
     pub fn from_json(s: &str) -> crate::Result<Self> {
-        Ok(Self::parse(s)?.0)
-    }
-
-    /// Parse, version-check and verify the three hashes of a manifest **as received** (SPEC §4).
-    ///
-    /// `id` is recomputed from `id_inputs`, `content_hash` from the block digests, and
-    /// `manifest_hash` over the parsed JSON object with only `manifest_hash` removed. So a key a
-    /// newer writer added verifies (and is listed by [`newer_fields`](Self::newer_fields)), a key
-    /// spliced into a sealed manifest fails, and `"study": null` or an omitted `sources` verifies as
-    /// sealed — the same verdict as any SPEC-conformant reader.
-    ///
-    /// The manifest must be **sealed**: bytes without `content_hash` or `manifest_hash` have no seal
-    /// to verify, so a missing hash is an integrity failure, not a pass (otherwise deleting the seal
-    /// would launder any edit). Check a manifest still being built with [`verify`](Self::verify).
-    ///
-    /// # Errors
-    /// Everything [`from_json`](Self::from_json) refuses, then [`crate::Error::DuplicateBlockName`]
-    /// for a block list naming a block twice (ADR-0063 §2a, SPEC §5; before any hash), then
-    /// [`crate::Error::Integrity`] naming the first hash that is missing (`actual` is the recomputed
-    /// value, `expected` reads `(absent)`) or doesn't match, or [`crate::Error::MissingDigest`] for an
-    /// undigested block.
-    pub fn from_json_verified(s: &str) -> crate::Result<Self> {
-        let (m, object) = Self::parse(s)?; // parse() checks the version
-        m.verify_received_id_and_content()?;
-        check(
-            "manifest_hash",
-            &recorded(&m.manifest_hash),
-            &seal_of(&object)?,
-        )?;
-        Ok(m)
+        Self::from_object(&crate::canonical::parse_strict(s)?)
     }
 
     /// The checks a reader runs on a received manifest's typed view before (or after) its seal:
@@ -444,21 +369,21 @@ impl Manifest {
     /// 2. the bytes carry no top-level `manifest_hash` key;
     /// 3. `seal` equals `blake3` over the bytes: a byte-for-byte comparison of the two strings, so a
     ///    seal in any other spelling (upper-case hex, no `blake3:` prefix) does not match;
-    /// 4. the typed layer, as [`from_json_verified`](Self::from_json_verified) runs it: declared
-    ///    form, version, unique block names, `id` and `content_hash` (which must be present).
+    /// 4. the typed layer: declared form, version, unique block names, `id` and `content_hash`
+    ///    (which must be present).
     ///
     /// The returned view carries `seal` as its [`manifest_hash`](Self::manifest_hash), so it
     /// [`is_sealed`](Self::is_sealed), and lists any [`newer_fields`](Self::newer_fields): a key a
-    /// newer writer sealed verifies here and is reported, as in `from_json_verified`.
+    /// newer writer sealed verifies here and is reported.
     ///
     /// The seal covers the stored bytes, not the typed view. Canonical bytes the view normalises
-    /// (an explicit `"study": null`, which the view drops) are accepted here, as they are by
-    /// `from_json_verified`; [`verify`](Self::verify) and [`to_stored`](Self::to_stored) on the
-    /// result then fail with [`crate::Error::Integrity`], because the view's bytes are no longer
-    /// the sealed bytes. A reader that re-emits a product copies its stored bytes.
+    /// (an explicit `"study": null`, which the view drops) are accepted here;
+    /// [`verify`](Self::verify) and [`to_stored`](Self::to_stored) on the result then fail with
+    /// [`crate::Error::Integrity`], because the view's bytes are no longer the sealed bytes. A
+    /// reader that re-emits a product copies its stored bytes.
     ///
-    /// This is additive (ADR-0066 implementation step 3): the readers and writers of `.tsra` and
-    /// the exploded form still use the in-band layout until the cutover (#914).
+    /// A container reader calls [`from_stored_members`](Self::from_stored_members), which also
+    /// refuses a missing or malformed `manifest.seal`.
     ///
     /// # Errors
     /// In the order above: everything [`crate::canonical::check_canonical`] refuses
@@ -478,8 +403,9 @@ impl Manifest {
         Ok(m)
     }
 
-    /// Read a product's manifest from its two stored members as an ADR-0066 container holds them:
-    /// `manifest.json` and `manifest.seal` (`None` when the container has no such member).
+    /// Read a product's manifest from its two stored members as a container holds them:
+    /// `manifest.json` and `manifest.seal` (`None` when the container has no such member). The one
+    /// door every reader of a `.tsra`, an exploded directory or a repository object goes through.
     ///
     /// A missing seal is the pre-ADR-0066 alpha layout, refused with no migration (ADR-0066 rule 10)
     /// by an error that names what was found (the declared `tessera_version`, the missing
@@ -487,14 +413,11 @@ impl Manifest {
     /// present seal must be the 71 ASCII bytes `blake3:<64 lower-case hex>`; then
     /// [`from_stored`](Self::from_stored) runs.
     ///
-    /// Additive (ADR-0066 step 4, part 1): the readers of `.tsra` and the exploded form switch to it
-    /// in the cutover (#914, part 2).
-    ///
     /// # Errors
     /// [`crate::Error::UnsupportedLayout`] without a seal; [`crate::Error::MalformedSeal`] for a
     /// seal in another format; then everything [`from_stored`](Self::from_stored) refuses.
     pub fn from_stored_members(json: &[u8], seal: Option<&[u8]>) -> crate::Result<Self> {
-        let seal = crate::stored::require_seal(crate::stored::MANIFEST_LAYOUT, json, seal)?;
+        let seal = crate::stored::require_seal(crate::stored::MANIFEST_MEMBER, json, seal)?;
         Self::from_stored(json, seal)
     }
 
@@ -503,10 +426,9 @@ impl Manifest {
     /// `"blake3:" + hex(blake3(bytes))`. The writer's half of [`from_stored`](Self::from_stored):
     /// `from_stored(&bytes, &seal)` reads back a manifest with the same stored bytes and seal.
     ///
-    /// `bytes` are exactly the bytes the in-band seal is computed over
-    /// ([`canonical_bytes`](Self::canonical_bytes)), so for a manifest sealed before ADR-0066 `seal`
-    /// equals its recorded [`manifest_hash`](Self::manifest_hash) (ADR-0066 rule 2): moving the seal
-    /// out of the document keeps its value.
+    /// `bytes` are [`canonical_bytes`](Self::canonical_bytes), the bytes the alpha layout's
+    /// in-band seal was computed over, so a product sealed before ADR-0066 keeps its seal's value
+    /// (ADR-0066 rule 2): moving the seal out of the document did not change it.
     ///
     /// The manifest must carry a `content_hash` (a stored manifest is a sealed product) and pass
     /// [`verify`](Self::verify): `id` and `content_hash` hold, block names are unique, and a
@@ -542,7 +464,7 @@ impl Manifest {
     /// all three.
     ///
     /// The seal is recomputed over this struct's JSON. For a manifest read from bytes, verify the bytes
-    /// with [`from_json_verified`](Self::from_json_verified) instead: the parsed struct is a view, and
+    /// with [`from_stored`](Self::from_stored) instead: the parsed struct is a view, and
     /// a view of a valid product with [`newer_fields`](Self::newer_fields) fails here with
     /// [`crate::Error::NewerFormatFields`], and one parsed from an encoding the struct normalises
     /// (`"study": null`) fails with `Integrity`.
@@ -699,12 +621,12 @@ mod tests {
     fn a_newer_field_is_sealed_and_named_and_a_spliced_one_is_tampering() {
         let mut m = Manifest::new("recon", "n", "d", "2024-01-01T00:00:00Z");
         m.content_hash = Some(m.recompute_content_hash().unwrap());
-        m.manifest_hash = Some(m.compute_manifest_hash().unwrap());
+        let (_, seal) = m.to_stored().unwrap();
         let mut v = serde_json::to_value(&m).unwrap();
         v["sources"] = json!([{"role": "r", "reference": "x", "weight": 0.5}]);
         v["actors"] = json!([]);
-        let spliced = v.to_string();
-        let err = Manifest::from_json_verified(&spliced).unwrap_err();
+        let spliced = crate::canonical::to_bytes(&v).unwrap();
+        let err = Manifest::from_stored(&spliced, &seal).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -715,8 +637,7 @@ mod tests {
             ),
             "{err}"
         );
-        v["manifest_hash"] = json!(seal_of(&v).unwrap());
-        let ok = Manifest::from_json_verified(&v.to_string()).unwrap();
+        let ok = Manifest::from_stored(&spliced, &crate::hash::digest(&spliced)).unwrap();
         assert_eq!(ok.newer_fields(), ["actors", "sources[0].weight"]);
     }
 }

@@ -13,15 +13,11 @@
 //! A sub-collection member stored as `<stem>.collection.json` has its seal at
 //! `<stem>.collection.seal` ([`seal_name_for`]).
 //!
-//! [`crate::Manifest::from_stored_members`] / [`crate::Collection::from_stored_members`] read a
-//! document from its two members, taking the seal member as found (or `None`): a missing seal
-//! member is the alpha layout, refused with [`crate::Error::UnsupportedLayout`] naming what was
-//! found and what is required (rule 10, no migration); a present one must be well formed
+//! Every reader goes through [`crate::Manifest::from_stored_members`] /
+//! [`crate::Collection::from_stored_members`], which take the seal member as found (or `None`): a
+//! missing seal member is the alpha layout, refused with [`crate::Error::UnsupportedLayout`] naming
+//! what was found and what is required; a present one must be well formed
 //! ([`crate::Error::MalformedSeal`]) and is then checked by `from_stored`.
-//!
-//! This module is additive groundwork (ADR-0066 implementation step 4, part 1): the `.tsra`, the
-//! exploded form and the collection files still use the in-band layout, and the cutover (#914,
-//! part 2) switches every writer and reader to these members at once.
 
 use serde_json::Value;
 
@@ -50,7 +46,7 @@ pub fn seal_name_for(name: &str) -> Option<String> {
 ///
 /// # Errors
 /// [`crate::Error::MalformedSeal`] naming `member` and the content found.
-pub fn parse_seal<'a>(bytes: &'a [u8], member: &'static str) -> crate::Result<&'a str> {
+pub fn parse_seal<'a>(bytes: &'a [u8], member: &str) -> crate::Result<&'a str> {
     let well_formed = bytes.len() == SEAL_LEN
         && bytes.starts_with(b"blake3:")
         && bytes[7..]
@@ -59,34 +55,20 @@ pub fn parse_seal<'a>(bytes: &'a [u8], member: &'static str) -> crate::Result<&'
     match std::str::from_utf8(bytes) {
         Ok(s) if well_formed => Ok(s),
         _ => Err(crate::Error::MalformedSeal {
-            member,
+            member: member.to_owned(),
             found: bytes[..bytes.len().min(80)].escape_ascii().to_string(),
         }),
     }
 }
 
-/// The document and seal member names of one kind of stored document.
-#[derive(Clone, Copy)]
-pub(crate) struct Layout {
-    pub(crate) document: &'static str,
-    pub(crate) seal: &'static str,
-}
-
-pub(crate) const MANIFEST_LAYOUT: Layout = Layout {
-    document: MANIFEST_MEMBER,
-    seal: MANIFEST_SEAL_MEMBER,
-};
-
-pub(crate) const COLLECTION_LAYOUT: Layout = Layout {
-    document: COLLECTION_FILE,
-    seal: COLLECTION_SEAL_FILE,
-};
-
-/// The refusal of a document found without its seal member (ADR-0066 rule 10): the evidence of
-/// what was found, in words, and the layout required. Reads the bytes only to describe them.
-pub(crate) fn unsupported_layout(layout: Layout, bytes: &[u8]) -> crate::Error {
-    let Layout { document, seal } = layout;
+/// The refusal of a document stored as `document` and found without its seal member `seal`
+/// (ADR-0066 rule 10): the evidence of what was found, in words, and the layout required. Reads the
+/// bytes only to describe them. The document is called the pre-ADR-0066 (alpha) layout only when
+/// its bytes show it (an in-band `manifest_hash`, or bytes that are not their JCS form); JCS bytes
+/// without the key are an ADR-0066 document whose seal member is missing.
+pub(crate) fn unsupported_layout(document: &str, seal: &str, bytes: &[u8]) -> crate::Error {
     let mut found = Vec::new();
+    let mut alpha = false;
     match crate::canonical::parse_strict(&String::from_utf8_lossy(bytes)) {
         Ok(v) => {
             match v.get("tessera_version") {
@@ -97,11 +79,13 @@ pub(crate) fn unsupported_layout(layout: Layout, bytes: &[u8]) -> crate::Error {
             }
             found.push(format!("there is no `{seal}`"));
             if v.get(crate::manifest::SEAL_KEY).is_some() {
+                alpha = true;
                 found.push(format!(
                     "`{document}` carries an in-band `manifest_hash` key"
                 ));
             }
             if crate::canonical::check_canonical(bytes).is_err() {
+                alpha = true;
                 found.push(format!(
                     "`{document}` is not stored as its JCS bytes (a pretty or respelled layout)"
                 ));
@@ -112,9 +96,13 @@ pub(crate) fn unsupported_layout(layout: Layout, bytes: &[u8]) -> crate::Error {
             found.push(format!("`{document}` does not parse as I-JSON ({e})"));
         }
     }
-    let found = format!("a pre-ADR-0066 (alpha) layout: {}", found.join(", "));
+    let kind = if alpha {
+        "a pre-ADR-0066 (alpha) layout"
+    } else {
+        "a document without its seal member"
+    };
     crate::Error::UnsupportedLayout {
-        found,
+        found: format!("{kind}: {}", found.join(", ")),
         required: format!(
             "`{document}` stored as exactly its RFC 8785 JCS bytes with no `manifest_hash` key, \
              and its seal `blake3:<64 hex>` = blake3 of those bytes in `{seal}`"
@@ -122,15 +110,25 @@ pub(crate) fn unsupported_layout(layout: Layout, bytes: &[u8]) -> crate::Error {
     }
 }
 
-/// The seal member as found, or the alpha-layout refusal when it is missing; then its format.
+/// The seal member of the document stored as `document`, as found, or the refusal when it is
+/// missing; then its format.
+///
+/// # Errors
+/// [`crate::Error::Invalid`] when `document` does not end in `.json` (it has no seal name);
+/// [`crate::Error::UnsupportedLayout`] without a seal; [`crate::Error::MalformedSeal`].
 pub(crate) fn require_seal<'a>(
-    layout: Layout,
+    document: &str,
     document_bytes: &[u8],
     seal: Option<&'a [u8]>,
 ) -> crate::Result<&'a str> {
+    let seal_name = seal_name_for(document).ok_or_else(|| {
+        crate::Error::Invalid(format!(
+            "`{document}`: a sealed document's name ends in `.json`"
+        ))
+    })?;
     match seal {
-        None => Err(unsupported_layout(layout, document_bytes)),
-        Some(s) => parse_seal(s, layout.seal),
+        None => Err(unsupported_layout(document, &seal_name, document_bytes)),
+        Some(s) => parse_seal(s, &seal_name),
     }
 }
 
@@ -155,6 +153,8 @@ mod tests {
         for bad in [
             format!("{ok}\n"),
             ok.to_uppercase(),
+            // Only the hex upper-cased, prefix intact (#939 item 1).
+            format!("blake3:{}", "0A".repeat(32)),
             ok.replace("blake3:", "sha256:"),
             ok[..70].to_string(),
             format!("blake3:{}", "0g".repeat(32)),
@@ -164,10 +164,7 @@ mod tests {
             assert!(
                 matches!(
                     e,
-                    crate::Error::MalformedSeal {
-                        member: "manifest.seal",
-                        ..
-                    }
+                    crate::Error::MalformedSeal { ref member, .. } if member == "manifest.seal"
                 ),
                 "{bad:?}: {e:?}"
             );
@@ -177,7 +174,7 @@ mod tests {
     #[test]
     fn the_alpha_layout_refusal_names_what_it_found_and_what_it_requires() {
         let alpha = "{\n  \"tessera_version\": \"0.0.0\",\n  \"manifest_hash\": \"blake3:00\"\n}";
-        let e = require_seal(MANIFEST_LAYOUT, alpha.as_bytes(), None).unwrap_err();
+        let e = require_seal(MANIFEST_MEMBER, alpha.as_bytes(), None).unwrap_err();
         let msg = e.to_string();
         for needle in [
             "tessera_version \"0.0.0\"",
@@ -186,8 +183,38 @@ mod tests {
             "not stored as its JCS bytes",
             "requires the ADR-0066 layout",
             "no migration",
+            "(alpha) layout",
         ] {
             assert!(msg.contains(needle), "{needle:?} missing from: {msg}");
         }
+    }
+
+    /// #939 items 2 and 3: JCS bytes without the in-band key and without their seal member are not
+    /// called the alpha layout nor "not stored as its JCS bytes", and a sub-collection member's
+    /// refusal names its own seal file.
+    #[test]
+    fn a_jcs_document_without_its_seal_is_not_called_the_alpha_layout() {
+        let jcs = br#"{"tessera_version":"0.0.0"}"#;
+        for (document, seal) in [
+            (MANIFEST_MEMBER, "manifest.seal"),
+            ("blake3_ab.collection.json", "blake3_ab.collection.seal"),
+        ] {
+            let msg = require_seal(document, jcs, None).unwrap_err().to_string();
+            assert!(msg.contains(&format!("there is no `{seal}`")), "{msg}");
+            assert!(msg.contains(&format!("in `{seal}`")), "{msg}");
+            assert!(msg.contains("a document without its seal member"), "{msg}");
+            for absent in ["(alpha) layout", "not stored as its JCS bytes", "in-band"] {
+                assert!(!msg.contains(absent), "{absent:?} in: {msg}");
+            }
+        }
+        let e = require_seal("blake3_ab.collection.json", jcs, Some(b"x")).unwrap_err();
+        assert!(
+            matches!(&e, crate::Error::MalformedSeal { member, .. } if member == "blake3_ab.collection.seal"),
+            "{e:?}"
+        );
+        assert!(matches!(
+            require_seal("collection", jcs, None),
+            Err(crate::Error::Invalid(_))
+        ));
     }
 }

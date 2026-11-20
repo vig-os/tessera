@@ -272,15 +272,35 @@ fn recover_refuses_a_leaf_rule_conflict_in_the_journal() {
     assert_eq!(tree(root.path()), before);
 }
 
-/// A STORED `.tsra` written entry by entry, with the given manifest JSON — the way a hostile producer
-/// (not this crate's writers, which can't emit a bad name) would build one.
+/// `manifest_json` as the stored pair a hostile producer seals: its JCS bytes and their digest.
+fn sealed_pair(manifest_json: &str) -> (Vec<u8>, String) {
+    let bytes = tessera_core::canonical::to_bytes(
+        &serde_json::from_str::<serde_json::Value>(manifest_json).unwrap(),
+    )
+    .unwrap();
+    let seal = tessera_core::hash::digest(&bytes);
+    (bytes, seal)
+}
+
+/// An exploded directory's `manifest.json` + `manifest.seal`, sealed over `manifest_json`.
+fn write_exploded_manifest(dir: &Path, manifest_json: &str) {
+    let (bytes, seal) = sealed_pair(manifest_json);
+    tessera_io::stored::write_pair(&dir.join("manifest.json"), &bytes, &seal).unwrap();
+}
+
+/// A STORED `.tsra` written entry by entry, with the given manifest JSON sealed in the ADR-0066
+/// layout — the way a hostile producer (not this crate's writers, which can't emit a bad name) would
+/// build one.
 fn raw_tsra(path: &Path, manifest_json: &str, entries: &[(String, Vec<u8>)]) {
+    let (bytes, seal) = sealed_pair(manifest_json);
     let mut zw = ZipWriter::new(std::fs::File::create(path).unwrap());
     let o = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     zw.start_file("mimetype", o).unwrap();
     zw.write_all(tessera_io::MIMETYPE.as_bytes()).unwrap();
+    zw.start_file("manifest.seal", o).unwrap();
+    zw.write_all(seal.as_bytes()).unwrap();
     zw.start_file("manifest.json", o).unwrap();
-    zw.write_all(manifest_json.as_bytes()).unwrap();
+    zw.write_all(&bytes).unwrap();
     for (name, bytes) in entries {
         zw.start_file(name.as_str(), o).unwrap();
         zw.write_all(bytes).unwrap();
@@ -366,7 +386,7 @@ fn pack_dir_refuses_a_bad_block_name() {
         std::fs::create_dir_all(dir.join("blocks")).unwrap();
         std::fs::write(root.path().join("secret"), b"not yours").unwrap();
         let (mj, _) = manifest_json_named(&bad);
-        std::fs::write(dir.join("manifest.json"), mj).unwrap();
+        write_exploded_manifest(&dir, &mj);
         let before = tree(root.path());
         let e = pack_dir(&dir, &root.path().join("out.tsra")).unwrap_err();
         assert!(e.to_string().contains("invalid block name"), "{bad:?}: {e}");
@@ -446,7 +466,7 @@ fn an_old_style_pyramid_still_reads_but_does_not_explode() {
 
     let dir = root.path().join("exploded");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("manifest.json"), m.to_json().unwrap()).unwrap();
+    write_exploded_manifest(&dir, &m.to_json().unwrap());
     let e = pack_dir(&dir, &root.path().join("re.tsra")).unwrap_err();
     assert!(is_conflict(&e, "volume", "volume/1"), "{e}");
     assert!(!root.path().join("re.tsra").exists());

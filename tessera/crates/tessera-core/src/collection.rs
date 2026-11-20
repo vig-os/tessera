@@ -13,16 +13,15 @@
 //!   the manifest uses for block digests, so the collection is itself verifiable + has cheap
 //!   inclusion/consistency proofs once the streaming-write engine wants them. Member order is
 //!   significant.
-//! - [`manifest_hash`](Collection::manifest_hash) — `blake3` over canonical-JSON of the whole
-//!   collection with `manifest_hash` itself omitted. The seal — transitively commits to every
-//!   member's `manifest_hash` (which itself commits to that member's payload), so tampering with
-//!   any member or with the catalog changes the collection seal.
+//! - [`manifest_hash`](Collection::manifest_hash) — `blake3` over the stored bytes of
+//!   `collection.json`, kept beside them in `collection.seal` (ADR-0066 rule 5). The seal —
+//!   transitively commits to every member's `manifest_hash` (which itself commits to that member's
+//!   payload), so tampering with any member or with the catalog changes the collection seal.
 //!
-//! **What the seal covers** is the product manifest's rule (SPEC §4, #873): the collection JSON
-//! *object* as parsed, with only `manifest_hash` removed ([`crate::manifest::seal_of`]), never a
-//! re-serialisation of this struct. So a key a newer writer added and sealed verifies and is named by
-//! [`Collection::newer_fields`], a key spliced in under an old seal fails, and a repeated key is
-//! refused ([`crate::canonical::parse_strict`]).
+//! **What the seal covers** is the product manifest's rule (SPEC §4, ADR-0066): the stored bytes,
+//! which must be their own JCS form, never a re-serialisation of this struct. So a key a newer
+//! writer added and sealed verifies and is named by [`Collection::newer_fields`], a key spliced in
+//! under an old seal fails, and a repeated key is refused ([`crate::canonical::check_canonical`]).
 //!
 //! [`Role`] tags a member as `Raw` (acquisition data, irreplaceable) or `Derived` (regenerable
 //! output). Storage layers map this to WORM retention mode — `Role::Raw` → Compliance (immutable),
@@ -36,8 +35,8 @@ use serde_json::Value;
 
 use crate::field_path::FieldPath;
 use crate::manifest::{
-    check, recorded, refuse_newer, seal_of, stored_object, unknown_keys, unknown_keys_each,
-    SEAL_KEY, SUPPORTED_MAJOR, TESSERA_VERSION,
+    check, recorded, refuse_newer, stored_object, unknown_keys, unknown_keys_each, SUPPORTED_MAJOR,
+    TESSERA_VERSION,
 };
 
 /// Raw acquisition data vs derived/regenerable product. Drives storage's WORM retention mapping
@@ -200,8 +199,10 @@ pub struct Collection {
     /// MMR root over the members' `manifest_hash`es; `Some` once sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
-    /// The seal: blake3 over canonical-JSON of this collection with `manifest_hash` omitted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The seal: blake3 over this collection's stored bytes ([`to_stored`](Self::to_stored)).
+    /// **Never serialised** (ADR-0066 rules 1 and 5): it is kept in `collection.seal`, and a reader
+    /// sets it from there ([`from_stored`](Self::from_stored)).
+    #[serde(skip)]
     pub manifest_hash: Option<String>,
     /// Keys of the parsed collection this build does not model (see [`Self::newer_fields`]).
     /// Never serialised: it describes the received object, not the collection.
@@ -292,7 +293,6 @@ impl Collection {
         "level",
         "members",
         "content_hash",
-        "manifest_hash",
     ];
 
     /// Fields of the parsed collection that this build does not model: keys a **newer format
@@ -300,11 +300,11 @@ impl Collection {
     /// [`crate::Manifest::newer_fields`] renders them: a top-level key named `members[1].weight` is
     /// `["members[1].weight"]`, never the member's field. Empty for
     /// a collection this build wrote and for one not parsed by [`from_json`](Self::from_json) /
-    /// [`from_json_verified`](Self::from_json_verified).
+    /// [`from_stored`](Self::from_stored).
     ///
-    /// They are covered by the seal (verification hashes the parsed object) but not interpreted, and
-    /// this struct doesn't carry them, so every operation that would build a new seal from this view
-    /// or emit it as sealed ([`to_sealed_json`](Self::to_sealed_json)) refuses with
+    /// They are covered by the seal (it is over the stored bytes) but not interpreted, and this
+    /// struct doesn't carry them, so every operation that would build a new seal from this view or
+    /// store it ([`to_stored`](Self::to_stored)) refuses with
     /// [`crate::Error::NewerFormatFields`] instead of dropping them (ADR-0060 §2.2). Only the display
     /// form [`to_json`](Self::to_json) leaves them out.
     pub fn newer_fields(&self) -> &[String] {
@@ -316,50 +316,20 @@ impl Collection {
         self.manifest_hash.is_some()
     }
 
-    /// Pretty JSON, for humans / display. NOT the hashed form — see [`canonical_bytes`]. A writer
-    /// emitting a sealed `collection.json` uses [`to_sealed_json`](Self::to_sealed_json).
+    /// Pretty JSON, for humans / display. NOT the stored form — see [`to_stored`](Self::to_stored).
     pub fn to_json(&self) -> crate::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
-    /// This collection's JSON, for a writer to emit as a **sealed** `collection.json`: refused unless
-    /// the bytes carry their own seal ([`seal_of`] over them equals `manifest_hash`). Mirrors
-    /// [`crate::Manifest::to_sealed_json`].
-    ///
-    /// # Errors
-    /// - [`crate::Error::NewerFormatFields`] for a parsed collection with
-    ///   [`newer_fields`](Self::newer_fields): its JSON would drop sealed content.
-    /// - [`crate::Error::Invalid`] if it is unsealed, or its JSON doesn't reproduce its seal (edited
-    ///   after sealing, or parsed from an encoding this struct normalises, such as an omitted
-    ///   `collection_schema`): copy the original bytes instead.
-    pub fn to_sealed_json(&self) -> crate::Result<String> {
-        refuse_newer(&self.newer_fields)?;
-        let Some(mh) = &self.manifest_hash else {
-            return Err(crate::Error::Invalid(
-                "refusing to emit an unsealed collection as sealed".into(),
-            ));
-        };
-        let json = self.to_json()?;
-        let resealed = seal_of(&serde_json::from_str(&json)?)?;
-        if &resealed != mh {
-            return Err(crate::Error::Invalid(format!(
-                "refusing to emit a collection whose JSON does not reproduce its seal {mh} (it \
-                 seals {resealed}); copy the original bytes instead"
-            )));
-        }
-        Ok(json)
-    }
-
-    /// Canonical (RFC 8785 JCS) bytes of this collection with `manifest_hash` excluded — the
-    /// exact bytes [`manifest_hash`](Self::manifest_hash) is computed over when this struct is
-    /// written out.
+    /// Canonical (RFC 8785 JCS) bytes of this struct: the bytes [`to_stored`](Self::to_stored)
+    /// stores and [`compute_manifest_hash`](Self::compute_manifest_hash) hashes.
     ///
     /// # Errors
     /// [`crate::Error::NewerFormatFields`] for a parsed collection with
     /// [`newer_fields`](Self::newer_fields): bytes of this view would leave them out.
     pub fn canonical_bytes(&self) -> crate::Result<Vec<u8>> {
         refuse_newer(&self.newer_fields)?;
-        crate::canonical::bytes_without(&crate::canonical::to_json_value(self)?, SEAL_KEY)
+        crate::canonical::to_bytes(&crate::canonical::to_json_value(self)?)
     }
 
     /// Recompute the logical `id` from `id_inputs`.
@@ -392,20 +362,14 @@ impl Collection {
         crate::hash::merkle_root(&leaves)
     }
 
-    /// The seal (`manifest_hash`) this struct gets when written out: [`seal_of`] over its JSON
-    /// object, the function a reader applies to the object it parses.
+    /// The seal (`manifest_hash`) this struct gets when written out: `blake3` over
+    /// [`canonical_bytes`](Self::canonical_bytes).
     ///
     /// # Errors
     /// As [`canonical_bytes`](Self::canonical_bytes): a re-seal of a view with
     /// [`newer_fields`](Self::newer_fields) is refused, since it would drop sealed content.
     pub fn compute_manifest_hash(&self) -> crate::Result<String> {
         Ok(crate::hash::digest(&self.canonical_bytes()?))
-    }
-
-    /// Parse the text strictly into the object and its typed view, recording the newer fields.
-    fn parse(s: &str) -> crate::Result<(Self, Value)> {
-        let object = crate::canonical::parse_strict(s)?;
-        Ok((Self::from_object(&object)?, object))
     }
 
     /// The typed view of a strictly parsed collection object: declared form, version, newer fields.
@@ -417,20 +381,9 @@ impl Collection {
         Ok(c)
     }
 
-    /// [`from_json`](Self::from_json), plus the seal recomputed over the JSON object **as received**
-    /// ([`seal_of`]): what a display compares with [`manifest_hash`](Self::manifest_hash) to show
-    /// whether the seal holds, without the full [`from_json_verified`](Self::from_json_verified).
-    ///
-    /// # Errors
-    /// As [`from_json`](Self::from_json).
-    pub fn from_json_with_seal(s: &str) -> crate::Result<(Self, String)> {
-        let (c, object) = Self::parse(s)?;
-        let seal = seal_of(&object)?;
-        Ok((c, seal))
-    }
-
     /// Parse a collection JSON, refusing one whose major spec version this reader can't handle.
-    /// Does not verify hashes — use [`from_json_verified`](Self::from_json_verified) for that.
+    /// **Does not verify anything** (a display of a possibly tampered catalog); a reader verifies
+    /// with [`from_stored_members`](Self::from_stored_members).
     ///
     /// # Errors
     /// [`crate::Error::Serde`] for malformed JSON, a **duplicate key** in any object
@@ -443,35 +396,7 @@ impl Collection {
     /// it (SPEC §1, I-JSON: no seal pins it; the message names its path);
     /// [`crate::Error::UnsupportedVersion`] for a newer major version.
     pub fn from_json(s: &str) -> crate::Result<Self> {
-        Ok(Self::parse(s)?.0)
-    }
-
-    /// Parse, version-check and verify a collection **as received** (SPEC §4), then validate its
-    /// members against its level schema.
-    ///
-    /// `id` is recomputed from `id_inputs`, `content_hash` from the members, and `manifest_hash`
-    /// over the parsed JSON object with only `manifest_hash` removed: a key a newer writer added and
-    /// sealed verifies (and is listed by [`newer_fields`](Self::newer_fields)), a key spliced in under
-    /// an old seal fails, and an omitted defaulted key (`collection_schema`) verifies as sealed.
-    ///
-    /// The collection must be **sealed**: bytes without `content_hash` or `manifest_hash` have no
-    /// seal to verify, so deleting the seal can't launder an edit. Check a collection still being
-    /// built with [`verify`](Self::verify).
-    ///
-    /// # Errors
-    /// Everything [`from_json`](Self::from_json) refuses; then [`crate::Error::Integrity`] naming the
-    /// first hash that is missing (`expected` reads `(absent)`) or doesn't match; then
-    /// [`crate::Error::Invalid`] if a member's kind breaks the level schema's `member_rule`.
-    pub fn from_json_verified(s: &str) -> crate::Result<Self> {
-        let (c, object) = Self::parse(s)?;
-        c.verify_received_id_and_content()?;
-        check(
-            "manifest_hash",
-            &recorded(&c.manifest_hash),
-            &seal_of(&object)?,
-        )?;
-        c.validate_schema()?;
-        Ok(c)
+        Self::from_object(&crate::canonical::parse_strict(s)?)
     }
 
     /// The checks a reader runs on a received collection's typed view besides its seal: `id`, then
@@ -492,12 +417,9 @@ impl Collection {
     /// In order: [`crate::canonical::check_canonical`] (strict parse, then the bytes must equal
     /// their own JCS form); no top-level `manifest_hash` key (a member's `manifest_hash` pin is
     /// data and stays); `seal` equals `blake3` over the bytes, compared byte for byte; then the
-    /// typed layer as [`from_json_verified`](Self::from_json_verified) runs it: declared form,
-    /// version, `id`, `content_hash` (which must be present) and the level schema's `member_rule`.
+    /// typed layer: declared form, version, `id`, `content_hash` (which must be present) and the
+    /// level schema's `member_rule`.
     /// The returned view carries `seal` as its [`manifest_hash`](Self::manifest_hash).
-    ///
-    /// Additive (ADR-0066 implementation step 3): collection writers and readers still use the
-    /// in-band layout until the cutover (#914).
     ///
     /// # Errors
     /// In that order: [`crate::Error::Serde`], [`crate::Error::InexactInteger`] or
@@ -517,24 +439,41 @@ impl Collection {
     }
 
     /// Read a collection from its two stored files, `collection.json` and `collection.seal`
-    /// (`None` when the seal file is absent). Mirrors [`crate::Manifest::from_stored_members`]: a
-    /// missing seal is the alpha layout, refused naming what was found and what is required
-    /// (ADR-0066 rule 10); a present one must be well formed, then [`from_stored`](Self::from_stored)
-    /// runs. Additive until the cutover (#914, part 2).
+    /// (`None` when the seal file is absent): the one door every collection reader goes through.
+    /// Mirrors [`crate::Manifest::from_stored_members`]: a missing seal is the alpha layout, refused
+    /// naming what was found and what is required (ADR-0066 rule 10); a present one must be
+    /// well formed, then [`from_stored`](Self::from_stored) runs.
     ///
     /// # Errors
     /// [`crate::Error::UnsupportedLayout`], [`crate::Error::MalformedSeal`], then everything
     /// [`from_stored`](Self::from_stored) refuses.
     pub fn from_stored_members(json: &[u8], seal: Option<&[u8]>) -> crate::Result<Self> {
-        let seal = crate::stored::require_seal(crate::stored::COLLECTION_LAYOUT, json, seal)?;
+        Self::from_stored_members_as(crate::stored::COLLECTION_FILE, json, seal)
+    }
+
+    /// [`from_stored_members`](Self::from_stored_members) for a collection stored under the file
+    /// name `document`: `collection.json`, or `<stem>.collection.json` for a sub-collection member
+    /// ([`member_filename`]). The name only labels the refusals: a missing seal names
+    /// `<stem>.collection.seal`, the seal file beside that document
+    /// ([`crate::stored::seal_name_for`]).
+    ///
+    /// # Errors
+    /// [`crate::Error::Invalid`] when `document` does not end in `.json`; then as
+    /// [`from_stored_members`](Self::from_stored_members).
+    pub fn from_stored_members_as(
+        document: &str,
+        json: &[u8],
+        seal: Option<&[u8]>,
+    ) -> crate::Result<Self> {
+        let seal = crate::stored::require_seal(document, json, seal)?;
         Self::from_stored(json, seal)
     }
 
     /// This collection's **stored form** under ADR-0066: `(bytes, seal)`, where `bytes` is its RFC
     /// 8785 (JCS) serialisation with no top-level `manifest_hash` key and `seal` is
-    /// `"blake3:" + hex(blake3(bytes))`. Mirrors [`crate::Manifest::to_stored`]: `bytes` are the
-    /// bytes the in-band seal is computed over ([`canonical_bytes`](Self::canonical_bytes)), so a
-    /// collection sealed before ADR-0066 keeps its seal's value, and
+    /// `"blake3:" + hex(blake3(bytes))`. Mirrors [`crate::Manifest::to_stored`]: `bytes` are
+    /// [`canonical_bytes`](Self::canonical_bytes), the bytes the alpha layout's in-band seal was
+    /// computed over, so a collection sealed before ADR-0066 keeps its seal's value, and
     /// [`from_stored`](Self::from_stored) reads them back.
     ///
     /// The collection must carry a `content_hash` and pass [`verify`](Self::verify) (`id`,
@@ -567,7 +506,7 @@ impl Collection {
     /// sealed one verifies all three. Mirrors [`crate::manifest::Manifest::verify`].
     ///
     /// The seal is recomputed over this struct's JSON. For a collection read from bytes, verify the
-    /// bytes with [`from_json_verified`](Self::from_json_verified) instead: a view with
+    /// bytes with [`from_stored`](Self::from_stored) instead: a view with
     /// [`newer_fields`](Self::newer_fields) fails here with [`crate::Error::NewerFormatFields`], and
     /// one parsed from an encoding the struct normalises fails with `Integrity`.
     pub fn verify(&self) -> crate::Result<()> {
@@ -1025,7 +964,8 @@ mod tests {
         let raw = raw_listmode();
         let recon = derived_recon(&raw);
         let c = build_collection(&raw, &recon);
-        let parsed = Collection::from_json_verified(&c.to_json().unwrap()).unwrap();
+        let (bytes, seal) = c.to_stored().unwrap();
+        let parsed = Collection::from_stored(&bytes, &seal).unwrap();
         assert_eq!(parsed.manifest_hash, c.manifest_hash);
         assert_eq!(parsed.content_hash, c.content_hash);
         assert_eq!(parsed.members.len(), 2);
@@ -1080,27 +1020,29 @@ mod tests {
         assert!(newer_fields_of(&v).is_empty());
     }
 
-    /// `to_sealed_json` emits only bytes that carry their own seal (#873).
+    /// `to_stored` emits only bytes that carry their own seal (#873), and a view with newer fields is
+    /// refused rather than re-serialised without them.
     #[test]
-    fn to_sealed_json_refuses_a_view_that_does_not_reproduce_its_seal() {
+    fn to_stored_refuses_a_view_that_does_not_reproduce_its_seal() {
         let sealed = CollectionBuilder::new("c", "d", TS).seal().unwrap();
-        let json = sealed.to_sealed_json().unwrap();
-        Collection::from_json_verified(&json).unwrap();
-        let mut v: Value = serde_json::from_str(&json).unwrap();
+        let (bytes, seal) = sealed.to_stored().unwrap();
+        Collection::from_stored(&bytes, &seal).unwrap();
+        let mut v: Value = serde_json::from_slice(&bytes).unwrap();
         v["annotations"] = serde_json::json!(1);
-        v["manifest_hash"] = serde_json::json!(seal_of(&v).unwrap());
-        let newer = Collection::from_json_verified(&v.to_string()).unwrap();
+        let newer_bytes = crate::canonical::to_bytes(&v).unwrap();
+        let newer =
+            Collection::from_stored(&newer_bytes, &crate::hash::digest(&newer_bytes)).unwrap();
         assert!(matches!(
-            newer.to_sealed_json(),
+            newer.to_stored(),
             Err(crate::Error::NewerFormatFields { .. })
         ));
         let mut edited = sealed.clone();
         edited.description = "changed".into();
         assert!(matches!(
-            edited.to_sealed_json(),
-            Err(crate::Error::Invalid(_))
+            edited.to_stored(),
+            Err(crate::Error::Integrity { .. })
         ));
-        assert!(Collection::new("c", "d", TS).to_sealed_json().is_err());
+        assert!(Collection::new("c", "d", TS).to_stored().is_err());
     }
 
     // ---- ADR-0049 recursion mechanism (Part 1) ----
@@ -1217,7 +1159,8 @@ mod tests {
         assert_eq!(sealed.members[1].kind, MemberKind::Collection);
         assert_eq!(sealed.members[1].reference, exam.id);
 
-        let parsed = Collection::from_json_verified(&sealed.to_json().unwrap()).unwrap();
+        let (bytes, seal) = sealed.to_stored().unwrap();
+        let parsed = Collection::from_stored(&bytes, &seal).unwrap();
         assert_eq!(parsed.members[1].kind, MemberKind::Collection);
         assert_eq!(parsed.content_hash, sealed.content_hash);
     }
@@ -1391,10 +1334,14 @@ mod tests {
         );
         let e = d.seal().unwrap();
         assert_eq!(e.collection_schema, "exam");
-        let json = e.to_json().unwrap();
-        assert!(json.contains("\"collection_schema\": \"exam\""));
+        let (bytes, seal) = e.to_stored().unwrap();
+        let json = String::from_utf8(bytes).unwrap();
+        assert!(json.contains("\"collection_schema\":\"exam\""));
         // The schema is bound in the seal: flipping it on-disk breaks manifest_hash verification.
         let tampered = json.replace("\"exam\"", "\"dataset\"");
-        assert!(Collection::from_json_verified(&tampered).is_err());
+        assert!(matches!(
+            Collection::from_stored(tampered.as_bytes(), &seal),
+            Err(crate::Error::Integrity { .. })
+        ));
     }
 }

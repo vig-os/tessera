@@ -283,7 +283,8 @@ proptest! {
         for a in &arrays { b.add_block(a).unwrap(); }
         for t in &tables { b.add_block(t).unwrap(); }
         let m = b.seal().unwrap();
-        let round = Manifest::from_json(&m.to_json().unwrap()).unwrap();
+        let (bytes, seal) = m.to_stored().unwrap();
+        let round = Manifest::from_stored(&bytes, &seal).unwrap();
         prop_assert_eq!(m, round);
     }
 }

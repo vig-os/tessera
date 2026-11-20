@@ -9,7 +9,9 @@
 //! ```
 //!
 //! Objects are addressed by the **blake3 digest we already compute** (`BlockRef.digest`,
-//! `manifest_hash`) — no second hash is introduced. Identical bytes share one path, so a new version
+//! `manifest_hash`) — no second hash is introduced. A manifest object holds the manifest's stored
+//! bytes (ADR-0066), so every object, block or manifest, is literally the bytes that hash to its
+//! address. Identical bytes share one path, so a new version
 //! that only changes metadata re-stores exactly one object (its manifest): the copy is proportional to
 //! the *delta*, not the dataset. The version DAG is the `supersedes`/`derived_from` edges already inside
 //! each manifest (ADR-0022); `refs/<lineage>` is the only mutable state, and the `log` is a pure cache
@@ -137,9 +139,10 @@ impl Repository {
         Ok(bytes)
     }
 
-    /// Store a sealed manifest as an object **addressed by its `manifest_hash`** (the seal, not a
-    /// byte-digest — so the address attests the whole product). Returns the `manifest_hash`. The
-    /// object holds the manifest's JCS bytes ([`crate::stored::manifest`]).
+    /// Store a sealed manifest as an object **addressed by its `manifest_hash`**: the seal, which
+    /// under ADR-0066 is the digest of the object's own bytes, the manifest's stored form
+    /// ([`crate::stored::manifest`]), so the address attests the whole product and `b3sum` of the
+    /// object reproduces it. Returns the `manifest_hash`.
     ///
     /// A manifest listing a block name twice is refused with [`Error::DuplicateBlockName`] before
     /// anything is written (ADR-0063 §2a): [`get_manifest`](Self::get_manifest) would refuse it.
@@ -149,25 +152,23 @@ impl Repository {
             .clone()
             .ok_or_else(|| Error::Invalid("put_manifest: manifest is not sealed".into()))?;
         check_unique_names(m.blocks.iter().map(|b| &b.name))?;
-        self.write_raw(&mh, &crate::stored::manifest(m)?)?;
+        let (bytes, seal) = crate::stored::manifest(m)?;
+        self.write_raw(&seal, &bytes)?;
         Ok(mh)
     }
 
-    /// Read a manifest object back, verifying its seal **and** that the seal equals the requested
-    /// address (an object filed under the wrong name is an integrity error).
+    /// Read a manifest object back through [`Manifest::from_stored`], with the requested address
+    /// as the seal: the bytes must be their own JCS form and hash to the address (an object filed
+    /// under the wrong name, or edited, is [`Error::Integrity`] for `manifest_hash`), then `id` and
+    /// `content_hash` are checked. An object from before ADR-0066 is refused (no migration, ADR-0066
+    /// rule 10), by the fault its bytes show: [`Error::NonCanonical`] for a pretty object (written
+    /// before #912) and [`Error::InBandSeal`] for a JCS one with the in-band key (written after it).
+    /// Its address is its seal, so there is no missing seal member to report as
+    /// [`Error::UnsupportedLayout`]; both messages say the stored bytes must be their own JCS form
+    /// without the key. Re-ingest and re-commit such a product.
     pub fn get_manifest(&self, manifest_hash: &str) -> Result<Manifest> {
         let bytes = self.read_raw(manifest_hash)?;
-        let s = std::str::from_utf8(&bytes)
-            .map_err(|e| Error::Invalid(format!("manifest {manifest_hash}: not UTF-8: {e}")))?;
-        let m = Manifest::from_json_verified(s)?; // recomputes + checks all three hashes
-        match &m.manifest_hash {
-            Some(mh) if mh == manifest_hash => Ok(m),
-            other => Err(Error::Integrity {
-                what: "manifest_address",
-                expected: manifest_hash.into(),
-                actual: other.clone().unwrap_or_default(),
-            }),
-        }
+        Manifest::from_stored(&bytes, manifest_hash)
     }
 
     fn ref_path(&self, lineage: &str) -> PathBuf {

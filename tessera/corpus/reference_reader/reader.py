@@ -7,9 +7,15 @@ Implemented from the Tessera SPEC (v0). Verifies the three identity hashes
 Spec notes used here (only):
   - Container is a ZIP (zip64), entries STORED, in order:
       mimetype (== "application/vnd.tessera"),
-      manifest.json (I-JSON, nested at most 127 deep, in the shape SPEC §5 declares: see
-      MANIFEST below and README "What it checks"),
+      manifest.seal (the 71 ASCII bytes "blake3:" + 64 lower-case hex = digest(manifest.json)),
+      manifest.json (I-JSON, nested at most 127 deep, stored as exactly its own RFC 8785 JCS bytes
+      with no "manifest_hash" key, in the shape SPEC §5 declares: see MANIFEST below and README
+      "What it checks"),
       blocks/<name>... (one per block, payload bytes).
+    Each member name appears once (a reader resolving a repeat to its first or its last entry
+    would read a different member than another reader), and every entry is STORED: an archive
+    with either fault is refused before any member is read.
+  - A product without manifest.seal is the pre-ADR-0066 alpha layout: refused, no migration.
   - Hashing: digest(b) = "blake3:" + hex(blake3(b))    (256-bit, lowercase)
   - merkle_root(digests) = the Merkle Mountain Range (MMR) root, domain-separated
     leaf(d)=blake3(0x00++utf8(d)) / node(l,r)=blake3(0x01++l++r); empty = blake3(b"").
@@ -19,7 +25,8 @@ Spec notes used here (only):
   - content_hash  = merkle_root([block.digest for block in manifest.blocks])
   - Block names are unique within a product (SPEC §5, exact string equality):
     a manifest listing one name twice is refused before any digest lookup.
-  - manifest_hash = digest(JCS(manifest without "manifest_hash" key))
+  - manifest_hash = digest(manifest.json bytes as stored) = the content of manifest.seal
+    (ADR-0066): never a re-serialisation, so the bytes must be their own JCS form.
   - A block without a digest is refused (SPEC §5: a sealed product's blocks carry one).
 """
 
@@ -39,6 +46,9 @@ SUPPORTED_MAJOR = 0
 MIMETYPE_VALUE = b"application/vnd.tessera"
 MIMETYPE_NAME = "mimetype"
 MANIFEST_NAME = "manifest.json"
+SEAL_NAME = "manifest.seal"
+# A seal member: exactly "blake3:" + 64 lower-case hex digits, nothing else (ADR-0066 rule 3).
+SEAL_FORMAT = re.compile(rb"blake3:[0-9a-f]{64}")
 BLOCK_PREFIX = "blocks/"
 
 
@@ -165,12 +175,31 @@ def _nesting(v: Any) -> int:
     return deepest
 
 
-def parse_manifest(raw: bytes | str) -> dict[str, Any]:
-    """Parse manifest.json, refusing text that is not UTF-8 JSON (a byte-order mark included), a
-    duplicate key in any object at any depth, NaN/Infinity, a number out of a double's range or
-    whose value is an integer beyond ±(2^53−1),
-    (checked by encoding the text back to UTF-8) a lone surrogate escape, nesting deeper than MAX_NESTING, and a manifest outside its
-    declared shape (`MANIFEST`)."""
+def _lone_surrogate(v: Any) -> str | None:
+    """The first string or key in `v` holding an unpaired UTF-16 surrogate (U+D800..U+DFFF), which
+    `json.loads` accepts from a `\\ud800` escape but UTF-8 (RFC 7493 §2.1, I-JSON) cannot hold."""
+    stack = [v]
+    while stack:
+        x = stack.pop()
+        texts: list[str] = []
+        if isinstance(x, str):
+            texts = [x]
+        elif isinstance(x, dict):
+            texts = list(x.keys())
+            stack.extend(x.values())
+        elif isinstance(x, list):
+            stack.extend(x)
+        for t in texts:
+            if any(0xD800 <= ord(c) <= 0xDFFF for c in t):
+                return t
+    return None
+
+
+def parse_strict(raw: bytes | str) -> Any:
+    """Parse a sealed JSON document, refusing what is not I-JSON (SPEC §1, §4): text that is not
+    UTF-8 JSON (a byte-order mark included), a duplicate key in any object at any depth, NaN or
+    Infinity, a number out of a double's range or whose value is an integer beyond ±(2^53−1), a lone
+    surrogate (refused explicitly, `_lone_surrogate`), and nesting deeper than MAX_NESTING."""
     try:
         # UTF-8 only, strictly: json.loads would also guess UTF-16/32 from bytes. A byte-order
         # mark decodes to U+FEFF, which json.loads then refuses, as the Rust reader does.
@@ -193,10 +222,34 @@ def parse_manifest(raw: bytes | str) -> dict[str, Any]:
         raise NotAManifest(
             f"nested more than {MAX_NESTING} objects/arrays deep (SPEC §4)"
         )
-    try:
-        json.dumps(m, ensure_ascii=False).encode("utf-8")
-    except UnicodeEncodeError as e:
-        raise NotAManifest(f"lone surrogate: {e}") from e
+    surrogate = _lone_surrogate(m)
+    if surrogate is not None:
+        raise NotAManifest(f"lone surrogate in {surrogate!r} (RFC 7493 §2.1)")
+    return m
+
+
+def check_canonical(raw: bytes) -> Any:
+    """`parse_strict`, then refuse bytes that are not exactly their own RFC 8785 JCS form (ADR-0066
+    rule 4): key order, whitespace, escapes and number spellings other than JCS's (`64.0` for `64`)
+    each give one value a second sealed byte string, which readers may read differently (#901)."""
+    value = parse_strict(raw)
+    canonical = jcs_bytes(value)
+    if canonical != raw:
+        at = next(
+            (i for i, (a, b) in enumerate(zip(raw, canonical)) if a != b),
+            min(len(raw), len(canonical)),
+        )
+        raise NotAManifest(
+            f"non-canonical bytes: differs from its JCS form at byte {at} (ADR-0066)"
+        )
+    return value
+
+
+def parse_manifest(raw: bytes | str) -> dict[str, Any]:
+    """Parse manifest.json strictly (`parse_strict`) and refuse a manifest outside its declared
+    shape (`MANIFEST`). Not a verification: `stored_verdict` is (the canonical check and the seal
+    come first)."""
+    m = parse_strict(raw)
     e = shape_error(m, MANIFEST, "")
     if e:
         raise NotAManifest(e)
@@ -279,7 +332,6 @@ MANIFEST = _rec(
         _DEF,
     ),
     content_hash=(_opt(STR), _DEF),
-    manifest_hash=(_opt(STR), _DEF),
 )
 
 
@@ -344,13 +396,6 @@ def shape_error(value: Any, t: tuple, at: str) -> str | None:
     return None
 
 
-def manifest_seal(manifest: dict[str, Any]) -> str:
-    """manifest_hash: JCS over the manifest object WITHOUT the manifest_hash key (SPEC §4)."""
-    return digest(
-        jcs_bytes({k: v for k, v in manifest.items() if k != "manifest_hash"})
-    )
-
-
 def version_supported(version: str) -> bool:
     """Whether a reader of major SUPPORTED_MAJOR reads `version`: its major (the text before the
     first '.') is an unsigned decimal integer (an optional '+', ASCII digits) no larger than ours."""
@@ -360,15 +405,30 @@ def version_supported(version: str) -> bool:
     return int(major) <= SUPPORTED_MAJOR
 
 
-def manifest_verdict(raw: bytes | str) -> str:
-    """A manifest's own three hashes, without block payloads: "ok", "tampered" or "refused".
-    Refused: not I-JSON, outside its declared shape, a major tessera_version this reader doesn't
-    support, a block name listed twice, or a block without a digest (SPEC §5: a sealed product's
-    blocks carry one). The checks run in SPEC §7's order, the hashes `id`, `content_hash`,
-    `manifest_hash` last, so a manifest with two faults gets the verdict of the first."""
+def stored_verdict(raw: bytes | str, seal: bytes | str | None) -> str:
+    """A stored manifest's verdict over its two members, `manifest.json` (`raw`) and `manifest.seal`
+    (`seal`, None when the container has none), without block payloads: "ok", "tampered" or
+    "refused". In ADR-0066 rule 4's order, so a manifest with two faults gets the verdict of the
+    first:
+
+    refused: no seal (the alpha layout), a seal not exactly "blake3:" + 64 lower-case hex, not
+    I-JSON, not its own JCS form, a "manifest_hash" key in band; tampered: the seal is not the
+    digest of the bytes; then the typed layer: refused outside the declared shape, for an
+    unsupported major tessera_version, a block name listed twice or a block without a digest;
+    tampered for an `id` or `content_hash` (a missing one too) that doesn't match."""
+    raw = raw.encode("utf-8") if isinstance(raw, str) else raw
+    seal = seal.encode("utf-8") if isinstance(seal, str) else seal
+    if seal is None or not SEAL_FORMAT.fullmatch(seal):
+        return "refused"
     try:
-        m = parse_manifest(raw)
+        m = check_canonical(raw)
     except NotAManifest:
+        return "refused"
+    if isinstance(m, dict) and "manifest_hash" in m:
+        return "refused"
+    if digest(raw).encode("ascii") != seal:
+        return "tampered"
+    if shape_error(m, MANIFEST, ""):
         return "refused"
     if not version_supported(m["tessera_version"]):
         return "refused"
@@ -382,7 +442,7 @@ def manifest_verdict(raw: bytes | str) -> str:
         return "refused"
     if merkle_root([b["digest"] for b in blocks]) != m.get("content_hash"):
         return "tampered"
-    return "ok" if manifest_seal(m) == m.get("manifest_hash") else "tampered"
+    return "ok"
 
 
 @dataclass
@@ -422,26 +482,60 @@ def _verify_tsra(path: str) -> VerifyResult:
     with zipfile.ZipFile(path, "r") as zf:
         names = zf.namelist()
 
-        # (a) mimetype: first entry, exactly application/vnd.tessera, STORED
+        # (a) SPEC §6's member set, from the central directory, before any member is read: each
+        #     name once (zipfile resolves a repeated name to its last entry, another reader to its
+        #     first, so the two would verify different members), and every entry STORED.
+        repeated = sorted({n for n in names if names.count(n) > 1})
+        if repeated:
+            raise NotAManifest(f"member names listed more than once: {repeated}")
+        compressed = [
+            i.filename for i in zf.infolist() if i.compress_type != zipfile.ZIP_STORED
+        ]
+        if compressed:
+            raise NotAManifest(f"entries not STORED (SPEC §6): {compressed}")
+
+        # (b) mimetype: first entry, exactly application/vnd.tessera
         if not names or names[0] != MIMETYPE_NAME:
             notes.append(f"first entry must be {MIMETYPE_NAME!r}; got {names[:1]}")
-        mt_info = zf.getinfo(MIMETYPE_NAME)
-        if mt_info.compress_type != zipfile.ZIP_STORED:
-            notes.append("mimetype is not STORED")
         if zf.read(MIMETYPE_NAME) != MIMETYPE_VALUE:
             notes.append("mimetype content mismatch")
 
-        # (b) manifest.json, refused outside its declared shape (raises NotAManifest)
-        manifest = parse_manifest(zf.read(MANIFEST_NAME))
+        # (c) manifest.seal then manifest.json, entries 2 and 3 (ADR-0066 rule 3). No seal is the
+        #     alpha layout: refused, no migration (rule 10).
+        if SEAL_NAME not in names:
+            raise NotAManifest(
+                f"no {SEAL_NAME}: a pre-ADR-0066 (alpha) layout, not read (re-ingest the product)"
+            )
+        if names[1:3] != [SEAL_NAME, MANIFEST_NAME]:
+            notes.append(
+                f"entries 2 and 3 must be {SEAL_NAME}, {MANIFEST_NAME}; got {names[1:3]}"
+            )
+        raw = zf.read(MANIFEST_NAME)
+        seal = zf.read(SEAL_NAME)
+        if not SEAL_FORMAT.fullmatch(seal):
+            raise NotAManifest(
+                f"{SEAL_NAME} is not blake3:<64 lower-case hex>: {seal[:80]!r}"
+            )
+        # The canonical check and the in-band refusal, before the seal and the typed layer.
+        value = check_canonical(raw)
+        if isinstance(value, dict) and "manifest_hash" in value:
+            raise NotAManifest(
+                "manifest.json carries its seal in band (`manifest_hash`)"
+            )
+        # (d) the seal: the digest of the stored bytes, never a re-serialisation.
+        computed_manifest_hash = digest(raw)
+        if computed_manifest_hash.encode("ascii") != seal:
+            notes.append(f"{SEAL_NAME} {seal.decode('ascii')} != digest(manifest.json)")
+        manifest = parse_manifest(raw)
 
-        # (c) version gate
+        # (e) version gate
         if not version_supported(manifest["tessera_version"]):
             notes.append(f"unsupported tessera_version {manifest['tessera_version']!r}")
 
-        # (d) recompute id
+        # (f) recompute id
         computed_id = digest(jcs_bytes(manifest["id_inputs"]))
 
-        # (e) recompute content_hash from block digests in manifest order;
+        # (g) recompute content_hash from block digests in manifest order;
         #     also verify each stored block's bytes against its digest.
         blocks = manifest.get("blocks", [])
         duplicates = duplicate_block_names(blocks)
@@ -471,14 +565,10 @@ def _verify_tsra(path: str) -> VerifyResult:
             "" if undigested else merkle_root([b["digest"] for b in blocks])
         )
 
-        # (f) recompute manifest_hash: JCS over manifest WITHOUT manifest_hash key.
-        computed_manifest_hash = manifest_seal(manifest)
-
         ok = (
             not notes
             and computed_id == manifest["id"]
             and computed_content_hash == manifest.get("content_hash")
-            and computed_manifest_hash == manifest.get("manifest_hash")
             and all(b[1] for b in block_digest_ok)
         )
 

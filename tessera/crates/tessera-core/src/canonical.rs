@@ -647,35 +647,6 @@ pub fn hash<T: Serialize>(value: &T) -> crate::Result<String> {
     Ok(crate::hash::digest(&to_bytes(value)?))
 }
 
-/// The digest of a JSON **object** with exactly one key removed: `digest(JCS(object − key))`.
-///
-/// This is how a seal is computed over the object a reader *received* (SPEC §4): no other key is
-/// added, dropped or normalised, so unknown keys, an explicit `null` and an omitted default all stay
-/// exactly as they arrived. Writer and reader call this one function, so the seal a writer stamps is
-/// by construction the one a reader recomputes over the writer's output.
-///
-/// # Errors
-/// [`crate::Error::Canonicalization`] if `object` is not a JSON object.
-pub fn hash_without(object: &Value, key: &str) -> crate::Result<String> {
-    Ok(crate::hash::digest(&bytes_without(object, key)?))
-}
-
-/// The canonical bytes [`hash_without`] hashes: `JCS(object − key)`.
-///
-/// # Errors
-/// [`crate::Error::Canonicalization`] if `object` is not a JSON object.
-pub fn bytes_without(object: &Value, key: &str) -> crate::Result<Vec<u8>> {
-    let Value::Object(map) = object else {
-        return Err(crate::Error::Canonicalization(format!(
-            "a seal is computed over a JSON object, got {}",
-            json_type(object)
-        )));
-    };
-    let mut bare = map.clone();
-    bare.remove(key);
-    to_bytes(&bare)
-}
-
 /// Parse JSON text into a [`Value`], **refusing a duplicate key** in any object at any depth.
 ///
 /// RFC 8259 §4 only says names *SHOULD* be unique and leaves the meaning of a repeat to the parser;
@@ -1057,10 +1028,10 @@ mod tests {
             "a free-form metadata field keeps the advice"
         );
         for v in [json!(u64::MAX), json!(i64::MIN), json!(1e300_f64)] {
-            let object = json!({ "manifest_hash": "x", "extra": { "v": v } });
+            let object = json!({ "extra": { "v": v } });
             assert!(
                 matches!(
-                    super::hash_without(&object, "manifest_hash"),
+                    super::hash(&object),
                     Err(crate::Error::InexactInteger { ref path, .. }) if path == "extra.v"
                 ),
                 "{v}"

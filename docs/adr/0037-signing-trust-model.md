@@ -195,3 +195,13 @@ closed, never open. `trust remove <handle>` no longer finds a key that lives onl
 - **Open:** archival TUF-root snapshot for sigstore-bundle; the signatures-as-hashed-block +
   `attestation.required` decision (§3); revocation distribution (a signed revocation list + `signed_at`
   cutoff); counter-signature container shape (`<file>.tsra.sig.d/<key_id>.json`).
+
+## Amendment (2026-11-20) — the seal a signature binds is read from `manifest.seal` (ADR-0066 A′, #914)
+No change to the envelope (`ed25519-env-v1`), its six bound fields or their values ([ADR-0066](0066-seal-encoding.md)
+rule 8): the one field that comes from the product, `manifest_hash`, keeps its value across the cutover. What
+changes is where `sign` and `verify-sig` read it: from the product's `manifest.seal` member, verified against the
+stored `manifest.json` bytes on open, instead of from an in-band manifest key. The envelope's own payload stays a JCS
+re-serialisation of its six known string fields after a strict parse, which gives the re-serialisation bypass class
+nothing to act on. So a signature over a product's seal keeps verifying across this step once the product is re-packed;
+the later steps of the same alpha (#720, #828) move seals, and a signature over a moved seal stops verifying
+(ADR-0066, Consequences).

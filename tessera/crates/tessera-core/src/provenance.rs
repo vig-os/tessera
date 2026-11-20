@@ -895,11 +895,12 @@ mod tests {
         // byte-for-byte, so an existing sealed .tsra never fails integrity under the new reader.
         let mut sealed = Manifest::new("recon", "n", "d", TS);
         sealed.producer = Some(ProducerRef::Legacy("acme-daq/1.2".into()));
+        sealed.content_hash = Some(sealed.recompute_content_hash().unwrap());
         sealed.manifest_hash = Some(sealed.compute_manifest_hash().unwrap());
-        let reparsed = Manifest::from_json(&sealed.to_json().unwrap()).unwrap();
-        reparsed
-            .verify()
+        let (bytes, seal) = sealed.to_stored().unwrap();
+        let reparsed = Manifest::from_stored(&bytes, &seal)
             .expect("legacy-producer seal must still verify after round-trip");
+        reparsed.verify().unwrap();
         assert!(
             matches!(&reparsed.producer, Some(ProducerRef::Legacy(s)) if s == "acme-daq/1.2"),
             "the legacy producer survives the round-trip unchanged"
