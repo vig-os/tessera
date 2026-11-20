@@ -79,9 +79,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a sequenced table still open or dropped unclosed (`NotClosed`). `SequencedOptions` and `SequencedStats`
   configure and observe it. `tessera-core` adds the `StreamedTableError` reasons `Duplicate`, `BeforeFirst`,
   `TooFarAhead`, `WouldBlock`, `Missing`, `CountMismatch`, `Aborted`, `Stalled`, `Failed` and `NotClosed`.
+- **Breaking for `FieldSpec` struct literals, `tessera-core`:** a product schema's metadata field declares
+  `encoding` (`Some(Encoding::String)`, a 64-bit integer sealed as a decimal string) and an inclusive `minimum` /
+  `maximum` (`Option<f64>`, within ±(2^53−1)), with the builders `string_encoded`, `minimum`, `maximum` and `range`
+  (ADR-0020 and ADR-0060 2026-11-19 amendments, #895). `FieldSpec` isn't `#[non_exhaustive]`, so a struct literal
+  outside tessera stops compiling until it names the three fields; build them with `None`. Unset, the keys are
+  omitted, so a schema that declares none of them keeps its bytes. New `ProductSchema::check_definition`,
+  `check_value` and `check_metadata`, `schema::declared_schema`, and the typed `Error::SchemaField` and
+  `Error::FieldValue`, which name the field and the value's source (a DICOM tag and its text, a spec key, a CLI flag).
+  The built-in `recon` 1.1 ranges `kvp` to 0–1000 kV and holds `slice_thickness` to at least 0 mm; `sim` 1.1
+  declares `seed` a string-encoded `int64`. This moves the seal of the three `recon` corpus products.
+- `tessera-ingest`: `dicom::read_object_with` and `dicom::to_recon_product_with` read a DICOM object and build its
+  `recon` product against a given `recon` schema, so the curated numbers' spelling and ranges come from that schema
+  rather than the built-in one; `read_object` and `to_recon_product` use the built-in schema (#895).
 
 ### Changed
 
+- **Breaking, `tessera-core`:** a product schema with a bare `int64` / `uint64` metadata field, one without
+  `"encoding": "string"`, is refused at the seal (`Error::SchemaField`), as are an unknown dtype, an encoding or range
+  on a field it doesn't fit, an empty range, an impossible `default` and a repeated field id (#895). A product
+  embedding the old `sim` 1.0 schema can no longer be re-sealed or validated by this build, and a numeric `seed` is
+  refused. Re-sealing keeps the rules of the schema the product embeds, so a product embedding `recon` 1.0 takes any
+  `kvp`.
+- **Breaking, `tessera-ingest`:** a curated DICOM numeric tag (`KVP`, `SliceThickness`, `PixelSpacing`) whose
+  non-empty text is not a number is refused when the file is read, naming the tag and its text, where it was
+  dropped without a word; an empty tag is still left out (#895).
 - `tessera-core`: newer-field paths (`Manifest::newer_fields`, `Collection::newer_fields`, `ProductSchema::view_of`,
   `Error::NewerFormatFields`) quote a key that isn't a plain identifier, `["producer.agents"]`, so no two paths read
   the same (SPEC §4); code that parses these strings sees the new form. Plain paths are unchanged (#873, see

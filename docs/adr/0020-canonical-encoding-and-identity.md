@@ -170,8 +170,9 @@ sees the tag, key or flag: the DICOM door per tag, `ingest::spec::validate` per 
 `commit --set` and `ingest … --meta` per flag. The Python reference reader applies the same two checks
 (`schema_verdict`), and `corpus/schema-cases.json` holds Rust and Python to the same verdicts.
 
-**Built-in schemas.** `recon` 1.1 ranges `kvp` (kV) and `slice_thickness` (mm) to 0–1000: wide enough for every medical
-scanner, so only a physically impossible value is refused. `sim` 1.1 declares `seed` a string-encoded `int64`. No other
+**Built-in schemas.** `recon` 1.1 ranges `kvp` to 0–1000 kV, wide enough for every medical scanner, so only a physically
+impossible value is refused. `slice_thickness` has a minimum of 0 mm and no maximum: DICOM sets no upper bound on
+SliceThickness, and a CT localizer records its scan length there (GE Discovery MI scouts read 1000.6 and 1300.8 mm). `sim` 1.1 declares `seed` a string-encoded `int64`. No other
 built-in field is 64-bit or ranged; `rescale_*` and `pixel_spacing` keep only the format bound.
 
 **Consequences.** The new keys are absent unless set (`skip_serializing_if`), so a schema that declares none of them keeps

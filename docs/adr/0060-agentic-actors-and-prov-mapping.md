@@ -1371,3 +1371,6 @@ of `schema.fields[i]` and refuses to validate or re-seal against the schema whil
 One addition follows from §2.2's intent: `ProductBuilder::seal` now parses the embedded schema with
 `ProductSchema::from_value`, so a fresh build that embeds a schema with a rule this build doesn't model (or a record in
 array form) is refused at seal, as a re-seal already was. Sealing against such a schema would ignore the rule it declares.
+A re-seal applies the rules of the schema the product embeds, never the registry's current version of it: a product
+embedding `recon` 1.0 declares no ranges, so `commit --set kvp=5000` on it is sealed, while the same edit on a product
+embedding `recon` 1.1 is refused (pinned by `commit_set_keeps_the_rules_of_the_embedded_schema`).

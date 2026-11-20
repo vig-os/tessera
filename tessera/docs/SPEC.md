@@ -189,6 +189,11 @@ checking only the seal does not apply them. Every declaration is checked before 
   `"9007199254740993"` is above a maximum of `9007199254740991`).
 - A field that declares none of the three keys constrains no value by them; a metadata key the schema doesn't
   declare is open-world. The three keys are omitted when unset, so a schema without them keeps its bytes (§4).
+- Apart from the string encoding, a value's JSON type is not checked against its `dtype`: an `int32` field
+  holds `1.5`.
+- The rules are the product's embedded schema's, at every seal: re-sealing a product (`commit --set`) keeps the
+  schema it embeds, not the registry's current version. A product embedding `recon` 1.0 declares no ranges, so
+  `commit --set kvp=5000` on it is sealed.
 `corpus/schema-cases.json` gives the verdict (`ok`, `schema`, `value`) of each rule's cases.
 
 ## 5a. Array block payload (Zarr v3 + pluggable codec)
