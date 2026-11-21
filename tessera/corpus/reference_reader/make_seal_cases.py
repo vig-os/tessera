@@ -10,7 +10,7 @@ Node) and the newer-field paths the Rust view reports.
 Every case is derived from a corpus product in ../files (stored in the ADR-0066 layout) by one named
 edit, so the file is reproducible: run it after an intended corpus change and review the diff.
 
-    uv run --no-project --with blake3 --with jcs==0.2.1 python make_seal_cases.py
+    uv run --no-project --with blake3 --with jcs==0.2.1 python -B make_seal_cases.py
 
 Spellings no JCS encoder emits (an integer beyond 2^53, NaN, `64.0`, a duplicate key, a BOM) are
 written by injecting the raw token into the canonical bytes at a placeholder, so each case carries
