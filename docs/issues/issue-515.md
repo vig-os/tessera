@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-20T08:08:30Z
+updated: 2026-11-20T21:27:21Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-20T09:39:15.237Z
+synced: 2026-11-21T09:10:56.583Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -25,7 +25,7 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 The following updates are currently rate-limited. To force their creation now, click on a checkbox below.
 
  - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-digest -->chore(deps): update actions/create-github-app-token digest to f418cff
- - [ ] <!-- unlimit-branch=renovate/tessera-core-digest -->fix(deps): update tessera-core digest to 94f2499
+ - [ ] <!-- unlimit-branch=renovate/tessera-core-digest -->fix(deps): update tessera-core digest to 4863a78
  - [ ] <!-- unlimit-branch=renovate/bytes-1.x-lockfile -->chore(deps): update rust crate bytes to v1.12.2
  - [ ] <!-- unlimit-branch=renovate/clap-4.x-lockfile -->chore(deps): update rust crate clap to v4.6.9
  - [ ] <!-- unlimit-branch=renovate/dicom-0.x-lockfile -->chore(deps): update rust crate dicom to v0.10.1

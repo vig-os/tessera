@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-30T02:08:08Z
-updated: 2026-11-19T05:25:57Z
+updated: 2026-11-20T21:27:12Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/720
-comments: 4
+comments: 5
 labels: bug, priority:high
 assignees: none
 milestone: none
 projects: none
 parent: 897
 children: none
-synced: 2026-11-19T09:52:28.287Z
+synced: 2026-11-21T09:10:56.206Z
 ---
 
 # [Issue 720]: [bug(core): derived-sidecar blocks are folded into content_hash, contradicting Accepted ADR-0028 §4](https://github.com/vig-os/tessera/issues/720)
@@ -102,4 +102,20 @@ Owner 2026-11-19: fix this per ADR-0028 §4 (content_hash covers primary blocks 
 _Posted on November 19, 2026 at 05:25 AM_
 
 This issue is step 5 of the ADR-0066 implementation plan (epic #897; full order in the plan comment there). Its scope and acceptance criteria are in docs/adr/0066-seal-encoding.md, under Implementation plan.
+
+---
+
+# [Comment #5]() by [gerchowl]()
+
+_Posted on November 20, 2026 at 09:27 PM_
+
+Architect: implementation decision for step 5 of ADR-0066 (owner ruling 2026-11-19, rule 12; ADR-0028 §4 unamended)
+
+- **Representation.** A block ref gains an optional `"class": "derived"`. When the key is absent the block is primary. The key is never written for primary blocks, so a product without derived blocks keeps its bytes and seals. A reader refuses any other value of `class`.
+- **Who sets it.** The writer that attaches the accelerator: the chunk-index `.cidx`, pyramid levels above level 0, and stats, projection and thumbnail blocks. The PR lists every writer it tags, and why. A user-supplied block is primary unless an API asks for it to be derived explicitly.
+- **Hashes.** `content_hash` = `merkle_root` over the primary blocks only, in manifest order. `manifest_hash` still covers the whole manifest, so it commits to every block and its class (rule 12). `id` is unchanged.
+- **Edge case.** A product with only derived blocks has `content_hash` equal to the Merkle root of the empty set, the same as `empty_no_blocks`. `from` and `recipe` (which block a derived block was computed from, and how) are not added here.
+- **Out of scope.** The five-root hash topology from the 2026-11-03 comment (`derived_hash`, `schema_hash`, `metadata_hash`) and the #778 carriers stay with ADR-0059 / follow-ups. This step only makes the code match ADR-0028 §4.
+
+Acceptance is as in the ADR-0066 plan step 5.
 

@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-18T20:04:30Z
-updated: 2026-11-19T03:58:52Z
+updated: 2026-11-21T02:44:45Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/905
-comments: 3
+comments: 5
 labels: feature, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-19T09:52:09.276Z
+synced: 2026-11-21T09:10:54.538Z
 ---
 
 # [Issue 905]: [feat(io): a commit log for small keyed commits — append as the commit point, replay on open, flush into a #781 delta](https://github.com/vig-os/tessera/issues/905)
@@ -844,5 +844,143 @@ I recommend the first, with the second as the rule until a local disk is measure
 
 - #911 holds exactly the files that produced this run; its CI is green, and I am marking it ready for review.
 - Still not measured: a local disk without virtiofs, power loss, a torn journal line, more than one lane or writer, group commit, growth at 100 rows per commit, #907's partial-fragment staging (not built).
+
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 20, 2026 at 11:54 PM_
+
+*Edited 2026-11-21 after review: "which kit#97 had paraphrased" → "first recorded on nerdmachines/kit#42"; "Durability classes ... are four, not three" → "owner-agreed direction (2026-11-21), to be finished under nerdmachines/kit#97"; "filed as a vigil issue" now cites [vigil#254](https://github.com/vig-os/vigil/issues/254) inline.*
+
+Correction, 2026-11-21: recording the owner's answers on D61 (nerdmachines/kit) and amending the earlier "Arrow IPC log" paraphrase this issue repeated.
+
+**On the 2026-11-18 sentence about logs.** Owner's words today (on nerdmachines/kit#42): "the question was how logs are written, or cached, batched,.. this is vigil territory we said, which should stay compressed json. The other general one was, how does 'live' app state etc. be handled. First guess was sqlite, which was then dropped through various arguments."
+
+"The log is Arrow IPC, batched into tessera blocks" (which was **first recorded on nerdmachines/kit#42** on 2026-11-18 as an agent paraphrase of the sentence about logs, and this issue, kit#97 and kit#115 then repeated) is an **agent paraphrase**. It did not decide that keyed collections commit through an Arrow IPC log. Logs **about the system** are vigil's (nerdmachines/kit#55; OTLP JSON Lines per vigil ADR-0001; compression of rotated segments filed as [vigil#254](https://github.com/vig-os/vigil/issues/254)). **The keyed-collection commit path is open (D61 in nerdmachines/kit's `docs/open-questions.md`).** Append-only domain data of the app (chat history, run logbook, edge/receipt log, device operation records) stays in **typed collections**.
+
+**Target for tessera#905 (point 3 of the owner answer).** The existing path reduced to **one sync per commit** (today three: 612 `fsync` calls for 200 commits) and **no growth** over a session. The lower bound shows this shape meets the budget.
+
+**Budget scope (point 2 of the owner answer).** The small-commit budget applies to the new `committed` durability class and is judged on **reference hardware with local storage**, not on a loaded VM's virtiofs mount. The 100-rows rate line (lower bound measured 781 / 509 / 494 commits per second) is **not judged** from the virtiofs runs. **Re-measure on local storage: pending.**
+
+**Durability classes** per collection, as values of the P9 `durability` tag (nerdmachines/kit#97), are **owner-agreed direction (2026-11-21), to be finished under nerdmachines/kit#97**: `ephemeral`, `relaxed`, `committed`, `sealed`. `committed` means durable before the acknowledgement, one sync per commit, with group commit allowed across concurrent writers. Dropping SQLite stands.
+
+Tiering (owner direction): a local commit log internal to the store (one sync), the in-memory overlay for reads, and sealed blocks tiered asynchronously to object storage. One engine and one contract; the commit log is never a second database that apps see.
+
+Recorded in kit#119 (branch `docs/storage-review-marks`), the usual dated markers on the pages that had carried the paraphrase.
+
+
+---
+
+# [Comment #5]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 02:44 AM_
+
+**Run `kit-r119-local`: the #905 probe on a local ext4 medium (virtio-blk, no virtiofs), with an fdatasync baseline** (agent, 2026-11-21; for nerdmachines/kit#97)
+
+**Why.** The three earlier runs (`tessera-905-commit-2`, `-3`, `-5`) all used `/data/ssd-outputs`, which is a **virtiofs** mount from the ksb batch pod to a compute-VM volume on the host's NTFS-on-NVMe (`fuseblk`); two userspace FS daemons sit in the fsync path. The owner decided on 2026-11-21 that the small-commit budget is judged on local-disk numbers, not that path's. This run moves the probe onto the only writable **non-virtiofs** medium the ksb batch pod exposes to an operator job: its own overlayfs root, whose upperdir is on `/dev/vdc` ext4 inside the compute VM. `/dev/vdc` is a virtio-blk device from the pod's perspective, so `fsync`/`fdatasync` go through the Linux block layer, not virtiofsd.
+
+`commit_cost.rs` is byte-identical to tessera#911 head `81d9d7869c332a627f2726d0deb427ad24b82eec`; the only change from #911's flake is the job script (one medium, plus the fdatasync baseline). Tessera dev `81914f6` on its Vortex fork pin, same row shape (≈ 350 bytes). 28 records, **no mismatch** in any record; the SIGKILL check loses nothing (acked=501 recovered=501 at 1 row, acked=201 recovered=201 at 100 rows).
+
+## Setup
+
+- Host: ksb (`WS00860001`), batch pod `kit-r119-local`; **4 exclusive CPUs**, 8 GiB; Intel Xeon w9-3575X, 84 cores.
+- Medium: **ext4 on `/dev/vdc` (virtio-blk)**, 512 GiB (overlayfs upperdir on the pod's root). `rotational=1` (virtio-blk default; the host backing is almost certainly SSD given ksb's layout, but this is not confirmed from inside the pod). No virtiofs, no NFS, no tmpfs in the sync path.
+- `strace -c` on 200 commits: **612 fsync** for the existing path (3 syncs per commit + session setup), **200 fdatasync + 2 fsync** for the lower bound — same counts as the three virtiofs runs.
+- **Host was heavily and unevenly loaded throughout the run**: load averages before each stage were fdatasync-baseline 177, trial 1 143, trial 2 97, trial 3 54, rowlog growth 134, tessera growth 77, crash 25. The host runs 88 threads. The p99 numbers below are dominated by this contention, not by the medium.
+
+## fdatasync baseline on local-ext4
+
+4 KiB append + `fdatasync`, 2000 calls on the same medium, timed under load 177 → 143:
+
+| | p50 | p99 | max |
+|---|---:|---:|---:|
+| 4 KiB append + fdatasync | **0.72 ms** | 51.0 ms | 9.73 s |
+
+Probe's own `sync_all` (128 B + fsync, 64 calls on the same medium): p50 **0.64 ms**, p99 1.19 ms (median over the fewer calls; `/data/ssd-outputs` virtiofs on `tessera-905-commit-5`: p50 0.52 ms, so the medium itself is comparable).
+
+## One row per commit, local-ext4 (medians of three trials; p99 worst over trials)
+
+| Line | Budget | Existing path | Lower bound |
+|---|---:|---:|---:|
+| p50 | ≤ 2 ms | 4.12 ms ✗ | 0.49 ms |
+| p99, worst of three (median) | ≤ 10 ms | 1,469 ms ✗ (1,285) | 204 ms ✗ (178) |
+| Commits per second | ≥ 500 | 12 ✗ (trials 92, 12, 11) | 124 ✗ (trials 1,251, 124, 108) |
+| Last tenth / first tenth, 100,000 commits | ≤ 1.2 | 2.82 ✗ | 3.60 ✗ |
+| Staged / raw bytes | ≤ 2 | 19.96 ✗ | 1.38 |
+| **Verdict (probe)** | | **fail**, every line | **fail** (p99, rate, flat) |
+
+## 100 rows per commit, local-ext4
+
+| Line | Budget | Existing path | Lower bound |
+|---|---:|---:|---:|
+| p50 | ≤ 2 ms | 16.1 ms ✗ | 0.94 ms |
+| p99, worst of three (median) | ≤ 10 ms | 2,068 ms ✗ (1,407) | 2,086 ms ✗ (1,247) |
+| Commits per second | ≥ 500 | 9 ✗ (trials 53, 5, 9) | 16 ✗ (trials 10, 16, **1,437**) |
+| Staged / raw bytes | ≤ 2 | 1.22 | 1.03 |
+| **Verdict (probe)** | | **fail** | **fail** (p99, rate, flat) |
+
+The lower bound's third trial at 100 rows produced **1,437 commits/s**, which is 2.9× the 500/s budget on this medium when the host was momentarily quieter; the median across the three trials is pulled down by the loaded trials.
+
+## 100,000-commit session (one row per commit, one trial per arm)
+
+| | Existing path | Lower bound |
+|---|---:|---:|
+| Wall time | 3,147 s (52 min) | 849 s (ratio from rate) |
+| Commits per second over the session | 32 | 118 |
+| p50 / p99 per commit | 13.1 / 421.9 ms | 0.60 / 120.8 ms |
+| Mean first tenth → last tenth | 11.05 → 31.21 ms (ratio 2.82) | 7.73 → 27.83 ms (ratio 3.60) |
+| of which append | 9.10 → 29.26 ms | — |
+| of which encode | 1.95 → 1.94 ms | — |
+| Recovery after the run | `recover`: **1.89 s** | replay: **0.29 s** |
+| Bytes staged | 715 MB | 49.3 MB |
+
+**Recover is 6.5× faster than on virtiofs** (run 5: 12.4 s on the same 100,000 commits). Append-growth within the session (ratio 2.82 existing / 3.60 lower bound) is driven mostly by the host-load swing within the session, not by the probe's intrinsic admit cost; run 5's lower-bound ratio on a quieter trial was 0.86.
+
+## This run vs. the three virtiofs runs
+
+| | commit-2 (SSD/virtiofs) | commit-3 (SSD/virtiofs) | commit-5 (SSD/virtiofs) | **local-ext4 (this run)** |
+|---|---:|---:|---:|---:|
+| Existing path, 1 row: p50 / worst p99 / per second | 3.71 ms / 12.76 ms / 256 | 8.64 ms / 29.38 ms / 111 | 6.27 ms / 23.62 ms / 156 | 4.12 ms / **1,469 ms** / 12 |
+| Existing path, 100 rows: p50 / worst p99 / per second | 15.57 ms / 31.54 ms / 57 | 27.62 ms / 110.26 ms / 33 | 25.78 ms / 74.66 ms / 37 | 16.1 ms / 2,068 ms / 9 |
+| Lower bound, 1 row: p50 / worst p99 / per second | 0.56 ms / 4.91 ms / 1,718 | 0.87 ms / 6.35 ms / 904 | 0.78 ms / 3.71 ms / 1,155 | **0.49 ms** / 204 ms / 124 (best trial 1,251) |
+| Lower bound, 100 rows: p50 / worst p99 / per second | 1.06 ms / 6.57 ms / 781 | 1.74 ms / 6.30 ms / 509 | 1.60 ms / 8.15 ms / 494 | 0.94 ms / 2,086 ms / 16 (best trial **1,437**) |
+| Existing path, growth at 1 row | 1.79 (20,000) | 5.68 (100,000) | 2.92 (100,000) | 2.82 (100,000) |
+| Lower bound, growth at 1 row | not run | 1.00 | 0.86 | 3.60 (100,000) |
+| `recover` of the 100,000-commit session | — | 19.5 s | 12.4 s | **1.89 s** |
+| `sync_all` p50 on the medium | 0.43 ms | 0.61 ms | 0.52 ms | 0.64 ms |
+| Host load during the run | ~66 (one reading) | not recorded | 93 to 183 | **25 to 177 (per stage)** |
+
+## Probe's own verdict records (`verdict.jsonl`)
+
+| Arm | Rows per commit | Verdict |
+|---|---:|---|
+| Existing path | 1 | **fail**, every line |
+| Existing path | 100 | **fail** |
+| Lower bound | 1 | **fail** (p99, rate, flat) |
+| Lower bound | 100 | **fail** (p99, rate, flat) |
+
+The judging rules are #911's probe's reading, not the owner's words.
+
+## What differs from the earlier setup
+
+- **Medium: local ext4 on virtio-blk** (no virtiofs, no NFS, no tmpfs in the sync path), instead of `/data/ssd-outputs` virtiofs on NTFS-via-fuseblk.
+- **One medium per run**, not two (tmpfs skipped — tmpfs has free syncs and doesn't test the medium claim).
+- **fdatasync baseline added** (4 KiB append + fdatasync × 2000), so the probe's commit cost can be read against the device's raw sync cost on the same medium.
+- **Host load recorded before every stage** (in `host.txt`).
+
+Unchanged: probe source byte-identical to #911, Tessera dev `81914f6` on Vortex `5c55cf7`, row shape, trial counts, SIGKILL recovery check, `WriteSession::recover` watermark + byte-equal fragments, `strace -c` of the sync calls.
+
+## What this run does and does not say
+
+- **The medium is not the bottleneck on this host.** `sync_all` p50 is 0.64 ms, inside the virtiofs band (0.43–0.61 ms); the fdatasync baseline on this medium is 0.72 ms p50. On the lower bound's one quiet trial at 100 rows per commit, the rate reached **1,437 commits/s** (2.9× the 500/s budget).
+- **The run does not settle the budget on reference hardware**, because the host load was between 25 and 177 on 88 threads over the run's 105 minutes. Every stage with load above ~90 saw p99 tail latencies in the hundreds of milliseconds to seconds, and the fdatasync baseline alone recorded a 9.7 s maximum. The medians across trials are pulled down by the busy trials; the probe's "fail every line" verdict on this run reflects host contention, not the device.
+- **The existing path fails every line in every one of the four runs so far**, by a wide margin, independent of medium or load. This is unchanged.
+- **Recover improved dramatically** on local ext4 (1.89 s vs. 12.4 s on virtiofs for 100,000 commits).
+
+## Not measured
+
+A quiet host (either a dedicated run with the batch queue drained, or reference hardware outside ksb); power loss; a torn journal line; more than one lane or writer; group commit; growth at 100 rows per commit; #907's partial-fragment staging (not built). The fdatasync baseline is single-threaded on the same ext4.
 
 

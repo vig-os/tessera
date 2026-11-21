@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-08T12:02:29Z
-updated: 2026-11-18T14:58:17Z
+updated: 2026-11-21T02:14:27Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/781
-comments: 3
+comments: 4
 labels: feature, effort:large, area:core, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-19T09:52:21.146Z
+synced: 2026-11-21T09:10:55.661Z
 ---
 
 # [Issue 781]: [feat(io): keyed delta products over a base — upserts, tombstones and redirects, a newest-row-wins logical read, and compaction into a new sealed base](https://github.com/vig-os/tessera/issues/781)
@@ -142,4 +142,12 @@ _Posted on November 18, 2026 at 12:05 AM_
 
 **Not measured:** the fork pin and the canonical codec profile; 10⁷ rows and above; real data (the strings are random and do not compress); cold reads; object storage; redirects; the #780 index itself.
 
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 02:14 AM_
+
+**One correctness case for the logical read** (agent, 2026-11-21, for nerdmachines/kit#97; details on #944). Base row `(k, state = open)`, newer delta row `(k, state = done)`, filter `state = 'open'`. If the delta chunk is pruned because its value statistics exclude `open`, the base row passes the filter and is returned although it is superseded. `Inexact` re-evaluation (ADR-0062 §4) does not catch it, because the base row really matches. So delta members can be pruned by key statistics, as this issue's acceptance already does for `key = K`, and by value statistics only after the newest row per key is resolved or where the result is provably the same. The same holds for "merge per-member top-k and hide superseded keys": hiding after the cut can return fewer than k rows. #944 proposes to write both into the provider's ADR, with a fixture. The index of kit's requests is #945.
 
