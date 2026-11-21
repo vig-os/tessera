@@ -4,7 +4,7 @@
 //! manifest (products are immutable; a new version is a new product with a `sources` edge
 //! to its parent — see `docs/rfc-tessera.md` §3, and fd5 audit-trail issues #167–170).
 
-use crate::block::{Block, BlockRef};
+use crate::block::{Block, BlockName, BlockRef};
 use crate::manifest::Manifest;
 use crate::provenance::Source;
 
@@ -89,6 +89,22 @@ impl ProductBuilder {
         let before = self.refs.len();
         self.refs.retain(|r| r.name != name);
         self.refs.len() != before
+    }
+
+    /// Remove the block `name` and its derived family ([`crate::block::derived_family`]: its `.cidx`
+    /// sidecar and, for pyramid level 0, its derived levels), as `commit --remove-block` does.
+    /// Returns the names removed, `name` first, or `None` if the version holds no block `name`
+    /// (nothing is removed then). A manifest edit only, like [`remove_block`](Self::remove_block).
+    pub fn remove_block_with_derived(&mut self, name: &str) -> Option<Vec<BlockName>> {
+        let target = self.refs.iter().find(|r| r.name == name)?.name.clone();
+        let mut gone = vec![target];
+        gone.extend(
+            crate::block::derived_family(name, &self.refs)
+                .into_iter()
+                .cloned(),
+        );
+        self.refs.retain(|r| !gone.contains(&r.name));
+        Some(gone)
     }
 
     /// Record a provenance edge to an upstream artifact.

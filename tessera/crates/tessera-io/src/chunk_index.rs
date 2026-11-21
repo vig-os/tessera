@@ -19,9 +19,11 @@ use tessera_core::Result;
 
 use crate::BlockPayload;
 
-/// The conventional sibling name for the chunk-index of a data block named `data_name`.
+/// The conventional sibling name for the chunk-index of a data block named `data_name`
+/// (`<data_name>.cidx`): [`tessera_core::block::cidx_name`], the one rule the cascade on removal
+/// ([`tessera_core::block::derived_family`]) uses too.
 pub fn cidx_name(data_name: &str) -> String {
-    format!("{data_name}.cidx")
+    tessera_core::block::cidx_name(data_name)
 }
 
 /// Build the additive chunk-index companion block for `data_name` from its computed [`ChunkIndex`]

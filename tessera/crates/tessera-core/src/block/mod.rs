@@ -141,6 +141,69 @@ impl BlockRef {
     }
 }
 
+/// The name of the chunk-index sidecar (`.cidx`, SPEC §5d) of the data block `data_name`: the sibling
+/// `<data_name>.cidx`. The one naming rule its writer
+/// (`tessera_io::chunk_index::chunk_index_block`) and [`derived_family`] share.
+pub fn cidx_name(data_name: &str) -> String {
+    format!("{data_name}.cidx")
+}
+
+/// The name of level `level` of a multiscale pyramid of `base`: `<base>/<level>`, the level in
+/// decimal without leading zeros (`volume/0` is full resolution and primary; `volume/1`, … are its
+/// derived downsamples). The one naming rule `tessera pyramid` and [`derived_family`] share.
+pub fn pyramid_level_name(base: &str, level: u32) -> String {
+    format!("{base}/{level}")
+}
+
+/// `name` as a pyramid level (`<base>/<level>`, as [`pyramid_level_name`] writes it): its base and
+/// level, or `None` when the last segment is not a level number in that one spelling.
+fn pyramid_level(name: &str) -> Option<(&str, u32)> {
+    let (base, last) = name.rsplit_once('/')?;
+    let level: u32 = last.parse().ok()?;
+    (pyramid_level_name(base, level) == name).then_some((base, level))
+}
+
+/// The blocks of `blocks` that are derived from the block `name`, by the naming rules their writers
+/// use, so they go when `name` is removed (`tessera commit --remove-block`, ADR-0028 §4):
+///
+/// - its chunk-index sidecar [`cidx_name`]`(name)`, whatever its class: a sidecar is bound to its
+///   block by name only, and products sealed before the class existed (#720) carry it primary, so
+///   leaving it behind would let the next block of that name inherit statistics of the old one
+///   (#347);
+/// - when `name` is level 0 of a pyramid (`<base>/0`), every **derived** level `<base>/<n>`,
+///   `n ≥ 1`, and the sidecar of each. Only derived ones: a primary block of that name is data of its
+///   own, not a downsample of level 0.
+///
+/// Without this, removing level 0 left its downsamples as the product's only blocks: real data under
+/// the empty set's `content_hash`. In manifest order; `name` itself is not listed.
+pub fn derived_family<'a>(name: &str, blocks: &'a [BlockRef]) -> Vec<&'a BlockName> {
+    let cidx = cidx_name(name);
+    let pyramid_base = match pyramid_level(name) {
+        Some((base, 0)) => Some(base),
+        _ => None,
+    };
+    let is_level = |n: &str| {
+        pyramid_base.is_some_and(
+            |base| matches!(pyramid_level(n), Some((b, level)) if b == base && level > 0),
+        )
+    };
+    let derived_levels: Vec<&str> = blocks
+        .iter()
+        .filter(|b| !b.is_primary() && is_level(b.name.as_str()))
+        .map(|b| b.name.as_str())
+        .collect();
+    blocks
+        .iter()
+        .filter(|b| {
+            let n = b.name.as_str();
+            n == cidx
+                || derived_levels.contains(&n)
+                || derived_levels.iter().any(|level| n == cidx_name(level))
+        })
+        .map(|b| &b.name)
+        .collect()
+}
+
 /// The product's `content_hash` over `blocks` (SPEC §4, ADR-0028 §4): the Merkle root of the
 /// [primary](BlockClass::Primary) blocks' digests, in manifest order. Derived blocks are skipped; a
 /// list with no primary block (empty, or derived blocks only) gives the root of the empty set.
@@ -235,6 +298,46 @@ mod tests {
             );
         }
         assert!(serde_json::to_value(BlockClass::Primary).is_err());
+    }
+
+    /// Removing a block takes its derived family with it: its `.cidx` whatever the class, and for
+    /// pyramid level 0 every derived level and their sidecars, never a primary block of a level
+    /// name, a non-canonical level spelling, another base's levels, or a partition leaf.
+    #[test]
+    fn derived_family_follows_the_writers_naming_rules() {
+        let d = BlockClass::Derived;
+        let p = BlockClass::Primary;
+        let blocks = [
+            block("volume/0", "blake3:00", p),
+            block("volume/0.cidx", "blake3:01", p), // a pre-#720 sidecar: primary, still bound by name
+            block("volume/1", "blake3:02", d),
+            block("volume/1.cidx", "blake3:03", d),
+            block("volume/2", "blake3:04", d),
+            block("volume/3", "blake3:05", p), // primary: data of its own
+            block("volume/02", "blake3:06", d), // not a level spelling the writer uses
+            block("other/1", "blake3:07", d),
+            block("pairs/0000", "blake3:08", p),
+            block("pairs/0001", "blake3:09", d),
+        ];
+        let names = |name: &str| -> Vec<&str> {
+            derived_family(name, &blocks)
+                .iter()
+                .map(|n| n.as_str())
+                .collect()
+        };
+        assert_eq!(
+            names("volume/0"),
+            ["volume/0.cidx", "volume/1", "volume/1.cidx", "volume/2"]
+        );
+        assert_eq!(names("volume/1"), ["volume/1.cidx"]);
+        assert!(names("volume/3").is_empty());
+        assert!(
+            names("pairs/0000").is_empty(),
+            "a partition leaf is no pyramid level 0"
+        );
+        assert!(names("absent").is_empty());
+        assert_eq!(cidx_name("volume/0"), "volume/0.cidx");
+        assert_eq!(pyramid_level_name("volume", 2), "volume/2");
     }
 
     /// `content_root` folds the primary digests in manifest order, skips derived ones, gives the

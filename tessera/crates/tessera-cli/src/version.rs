@@ -45,9 +45,13 @@ pub fn import(repo: &Path, tsra: &Path, out: &mut dyn Write) -> Result<()> {
 /// All three deltas are **pure object-store + manifest work over already-encoded blocks** — no codec
 /// runs in the versioning layer:
 /// - `--set k=v` — write one new manifest object (metadata).
-/// - `--remove-block N` — drop a `BlockRef` (manifest edit; the object stays for other versions).
+/// - `--remove-block N` — drop a `BlockRef` and its derived family (manifest edit; the objects stay
+///   for other versions): its `N.cidx` sidecar and, when `N` is pyramid level 0 (`BASE/0`), the
+///   derived levels `BASE/1…` and their sidecars ([`tessera_core::block::derived_family`]), so no
+///   accelerator outlives the data it was computed from (ADR-0028 §4).
 /// - `--add-block [N=]SRC.tsra:BLK` — copy an already-encoded + digested block from another `.tsra`
-///   (store the object if absent + add a `BlockRef`). Composition, **not** encoding.
+///   (store the object if absent + add a `BlockRef`). Composition, **not** encoding. The copy lands
+///   **primary**, whatever its class in `SRC`, with one exception: see [`pair_travelling_sidecars`].
 ///
 /// Encoding *raw* data into a new block (array→zarr/pcodec, table→Vortex) is `ingest`/`pack`'s job —
 /// the "extra handling" tier, deliberately kept out of the versioning layer.
@@ -73,30 +77,32 @@ pub fn commit(
     let parent = repo.get_manifest(&tip)?;
     let mut b = ProductBuilder::from_manifest(&parent)?;
 
-    // Removes first — manifest edit only; the data object is left for other versions / gc.
+    // Removes first — manifest edit only; the data objects are left for other versions / gc. A
+    // block's derived family goes with it: an accelerator is a function of the block it was computed
+    // from and bound to it by name only. A `.cidx` left behind would be inherited by the next
+    // `--add-block …:<name>`, and `tessera stats` would serve the OLD block's statistics for the NEW
+    // one, labelled exact (#347 review); pyramid levels left behind without level 0 would be the
+    // product's only blocks, real data under the empty set's `content_hash` (#720 review).
     for name in removes {
-        if !b.remove_block(name) {
+        if b.remove_block_with_derived(name).is_none() {
             return Err(Error::Invalid(format!(
                 "--remove-block: no block '{name}' in this version"
             )));
         }
-        // A `{hash, stats}` chunk-index sidecar describes ONE data block and is bound to it only by
-        // name. Leaving `<name>.cidx` behind when `<name>` goes means the next
-        // `--add-block …:<name>` silently inherits it, and `tessera stats` would then serve the OLD
-        // block's statistics for the NEW block and label them exact. The sidecar is `class: derived`
-        // — regenerable from the data — so removing it with its block loses nothing (#347 review).
-        let sidecar = tessera_io::chunk_index::cidx_name(name);
-        b.remove_block(&sidecar);
     }
 
     // Adds — copy an already-encoded block from another .tsra (file i/o, no re-encode). A name the
     // version already holds (or that two adds share) is refused by the seal below, with
     // `Error::DuplicateBlockName`, before anything is stored: rename it, or --remove-block it first.
+    let mut added = adds
+        .iter()
+        .map(|spec| load_block(spec))
+        .collect::<Result<Vec<_>>>()?;
+    pair_travelling_sidecars(&mut added);
     let mut payloads = Vec::new();
-    for spec in adds {
-        let (new_ref, payload) = load_block(spec)?;
-        b.add_block_ref(new_ref);
-        payloads.push(payload);
+    for a in added {
+        b.add_block_ref(a.block_ref);
+        payloads.push(a.payload);
     }
 
     // Metadata sets. Each value is checked against the encoding and range its field declares in the
@@ -130,11 +136,28 @@ pub fn commit(
     Ok(())
 }
 
+/// A block `--add-block` copies, with where it came from.
+struct AddedBlock {
+    /// The ref the new version gets: the source's kind, digest and spec, under the new name, and
+    /// primary until [`pair_travelling_sidecars`] says otherwise.
+    block_ref: tessera_core::block::BlockRef,
+    payload: BlockPayload,
+    /// The source `.tsra`, canonicalised, so two spellings of one file compare equal.
+    source: std::path::PathBuf,
+    /// The block's ref in the source product.
+    source_ref: tessera_core::block::BlockRef,
+}
+
 /// Load an already-encoded block from another sealed `.tsra` for `--add-block`. `spec` is
-/// `[NEWNAME=]SOURCE.tsra:SRCBLOCK`; the block's bytes (digest-verified on read) and its descriptor
-/// (kind/digest/class/spec) are copied verbatim — no re-encoding. A derived block (a `.cidx`) stays
-/// derived, so it stays out of the new version's `content_hash` (ADR-0028 §4).
-fn load_block(spec: &str) -> Result<(tessera_core::block::BlockRef, BlockPayload)> {
+/// `[NEWNAME=]SOURCE.tsra:SRCBLOCK`; the block's bytes (digest-verified on read) and its kind, digest
+/// and spec are copied verbatim — no re-encoding.
+///
+/// The copy is **primary**, whatever its class in the source (ADR-0028 §4, #720). A derived block is
+/// derived *of the product that computed it*: a pyramid level is a downsample of that product's
+/// level 0, a `.cidx` an index of that product's block. In another product it is a function of
+/// nothing there, so it is data the user supplies, and a block a user supplies is primary: it is part
+/// of the new version's `content_hash`. There is no option to land a copy derived.
+fn load_block(spec: &str) -> Result<AddedBlock> {
     let (newname, locator) = match spec.split_once('=') {
         Some((n, rest)) => (Some(n), rest),
         None => (None, spec),
@@ -154,14 +177,60 @@ fn load_block(spec: &str) -> Result<(tessera_core::block::BlockRef, BlockPayload
         .ok_or_else(|| Error::Invalid(format!("no block '{srcblock}' in {path}")))?
         .clone();
     let bytes = r.read_block(srcblock)?; // digest-verified on read
-    let new_ref = tessera_core::block::BlockRef {
+    let block_ref = tessera_core::block::BlockRef {
         name: newname.clone(),
         kind: src_ref.kind,
-        digest: src_ref.digest,
-        class: src_ref.class,
-        spec: src_ref.spec,
+        digest: src_ref.digest.clone(),
+        class: tessera_core::block::BlockClass::Primary,
+        spec: src_ref.spec.clone(),
     };
-    Ok((new_ref, BlockPayload::new(newname, bytes)))
+    Ok(AddedBlock {
+        block_ref,
+        payload: BlockPayload::new(newname, bytes),
+        source: std::fs::canonicalize(path)?,
+        source_ref: src_ref,
+    })
+}
+
+/// The one exception to "a copy lands primary": a chunk-index sidecar that travels **with the block
+/// it indexes**, in the same `commit`, keeps its derived class. Exactly when all of these hold:
+///
+/// - in the source it is a derived `chunk_index` block whose spec says it `indexes` the block `D`;
+/// - the same commit adds `D` from the same source file (the same file, canonicalised);
+/// - neither is renamed: `D` lands as `D`, and the sidecar as [`cidx_name`]`(D)`, its name in the
+///   source.
+///
+/// Then the new version holds byte-for-byte the pair the source sealed (each copy is digest-verified
+/// on read), under the names that bind them (a sidecar is bound to its block by name, and its spec's
+/// `indexes` still names the right block). So the sidecar is still the function of `D` the source's
+/// writer computed: dropping and rebuilding it gives the same bytes, and leaving it out of
+/// `content_hash` hides no data. Any other copied sidecar (alone, renamed, or with a `D` from another
+/// file) indexes nothing it can be checked against here and stays primary.
+///
+/// [`cidx_name`]: tessera_core::block::cidx_name
+fn pair_travelling_sidecars(added: &mut [AddedBlock]) {
+    use tessera_core::block::{cidx_name, BlockClass, BlockKind};
+    let travelling: Vec<usize> = (0..added.len())
+        .filter(|&i| {
+            let a = &added[i];
+            let src = &a.source_ref;
+            let Some(indexes) = src.spec.get("indexes").and_then(|v| v.as_str()) else {
+                return false;
+            };
+            src.kind == BlockKind::ChunkIndex
+                && src.class == BlockClass::Derived
+                && src.name == cidx_name(indexes)
+                && a.block_ref.name == src.name
+                && added.iter().any(|d| {
+                    d.source == a.source
+                        && d.source_ref.name == indexes
+                        && d.block_ref.name == indexes
+                })
+        })
+        .collect();
+    for i in travelling {
+        added[i].block_ref.class = BlockClass::Derived;
+    }
 }
 
 /// `tessera log REPO LINEAGE` — the lineage's versions, newest first.
@@ -802,17 +871,91 @@ mod tests {
         );
     }
 
-    /// `--add-block` copies a block's descriptor verbatim, its class included (ADR-0028 §4): a
-    /// derived `.cidx` stays derived, so it stays out of the new version's `content_hash`, and a
-    /// primary block stays primary.
+    /// Import `tsra` into a fresh repository at `repo`; its lineage.
+    fn imported(repo: &Path, tsra: &Path) -> String {
+        init(repo, &mut Vec::new()).unwrap();
+        let mut out = Vec::new();
+        import(repo, tsra, &mut out).unwrap();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("imported lineage "))
+            .unwrap()
+            .to_string()
+    }
+
+    /// The tip manifest of `lineage`.
+    fn tip(repo: &Path, lineage: &str) -> tessera_core::Manifest {
+        let r = Repository::open(repo).unwrap();
+        r.get_manifest(&r.read_ref(lineage).unwrap().unwrap())
+            .unwrap()
+    }
+
+    /// An int16 `recon` volume of `shape` named `name`, sealed at `path`.
+    fn write_volume(path: &Path, name: &str, offset: i16, shape: [u64; 3]) {
+        use tessera_core::block::array::ArraySpec;
+        use tessera_io::array::ArrayData;
+        let spec = ArraySpec::new(shape.to_vec(), "int16");
+        let n = shape.iter().product::<u64>() as usize;
+        let data = ArrayData::I16((0..n).map(|k| (k % 1000) as i16 + offset).collect());
+        let (br, pl) = tessera_io::array::array_block(name, &spec, &data).unwrap();
+        let mut b = PB::new("recon", "DP-vol", "v", "2024-01-01T00:00:00Z");
+        b.add_block_ref(br);
+        pack(&b.seal().unwrap(), &[pl], path).unwrap();
+    }
+
+    /// #720 review: a derived block is derived of the product that computed it. Copied into another
+    /// product with `--add-block` it is data the user supplies, so it lands primary and moves
+    /// `content_hash` (a pyramid level kept derived would add data under an unchanged identity).
     #[test]
-    fn add_block_keeps_the_class_of_the_block_it_copies() {
+    fn add_block_lands_a_copied_derived_block_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, pyr, repo) = (
+            dir.path().join("src.tsra"),
+            dir.path().join("pyr.tsra"),
+            dir.path().join("repo"),
+        );
+        write_volume(&src, "volume", 0, [8, 8, 8]);
+        crate::nav::build_pyramid(&src, "volume", None, &pyr).unwrap();
+        let lvl1 = Reader::open(&pyr).unwrap().manifest().blocks[1].clone();
+        assert!(
+            !lvl1.is_primary(),
+            "precondition: the source level is derived"
+        );
+
+        let lineage = imported(&repo, &src);
+        let before = tip(&repo, &lineage);
+        let add = format!("ct_overview={}:volume/1", pyr.to_str().unwrap());
+        commit(&repo, &lineage, &[], &[add], &[], &mut Vec::new()).unwrap();
+        let after = tip(&repo, &lineage);
+        let copied = after
+            .blocks
+            .iter()
+            .find(|b| b.name == "ct_overview")
+            .expect("the copied level is attached");
+        assert!(copied.is_primary(), "a copied derived block lands primary");
+        assert_eq!(copied.digest, lvl1.digest, "its bytes are the source's");
+        assert_ne!(
+            after.content_hash, before.content_hash,
+            "new data moves content_hash"
+        );
+    }
+
+    /// The one exception: a `.cidx` that travels with the block it indexes, from the same file and
+    /// under the same names, stays derived (it is still that block's index). Alone, renamed, or with
+    /// a block of that name from another file, it lands primary.
+    #[test]
+    fn a_copied_sidecar_stays_derived_only_beside_the_block_it_indexes() {
         use tessera_core::block::array::ArraySpec;
         use tessera_core::block::BlockClass;
         use tessera_io::array::ArrayData;
 
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src.tsra");
+        let (src, other, base) = (
+            dir.path().join("src.tsra"),
+            dir.path().join("other.tsra"),
+            dir.path().join("base.tsra"),
+        );
         let mut spec = ArraySpec::new(vec![4], "int16");
         spec.chunks = vec![2];
         let ((br, pl), side) = tessera_io::array::array_block_with_index(
@@ -826,12 +969,96 @@ mod tests {
         b.add_block_ref(br);
         b.add_block_ref(sref);
         pack(&b.seal().unwrap(), &[pl, spl], &src).unwrap();
+        write_volume(&other, "volume", 7, [8, 8, 8]);
+        write_volume(&base, "base", 0, [8, 8, 8]);
+        let (s, o) = (src.to_str().unwrap(), other.to_str().unwrap());
 
-        let src = src.to_str().unwrap();
-        let (cidx, _) = load_block(&format!("copy.cidx={src}:volume.cidx")).unwrap();
-        assert_eq!(cidx.class, BlockClass::Derived);
-        let (volume, _) = load_block(&format!("{src}:volume")).unwrap();
-        assert_eq!(volume.class, BlockClass::Primary);
+        // (adds, the class the `.cidx` copy must land with)
+        let cases: [(Vec<String>, &str, BlockClass); 4] = [
+            (
+                vec![format!("{s}:volume"), format!("{s}:volume.cidx")],
+                "volume.cidx",
+                BlockClass::Derived,
+            ),
+            (
+                vec![format!("{s}:volume.cidx")],
+                "volume.cidx",
+                BlockClass::Primary,
+            ),
+            (
+                vec![format!("v2={s}:volume"), format!("v2.cidx={s}:volume.cidx")],
+                "v2.cidx",
+                BlockClass::Primary,
+            ),
+            (
+                vec![format!("{o}:volume"), format!("{s}:volume.cidx")],
+                "volume.cidx",
+                BlockClass::Primary,
+            ),
+        ];
+        for (i, (adds, cidx, want)) in cases.into_iter().enumerate() {
+            let repo = dir.path().join(format!("repo{i}"));
+            let lineage = imported(&repo, &base);
+            commit(&repo, &lineage, &[], &adds, &[], &mut Vec::new()).unwrap();
+            let m = tip(&repo, &lineage);
+            let got = m.blocks.iter().find(|b| b.name == cidx).unwrap().class;
+            assert_eq!(got, want, "{adds:?}");
+            // Primary blocks only: `base` and the added data block, plus the sidecar if primary.
+            let primary: Vec<String> = m
+                .blocks
+                .iter()
+                .filter(|b| b.is_primary())
+                .map(|b| b.digest.clone().unwrap())
+                .collect();
+            assert_eq!(
+                m.content_hash.as_deref(),
+                Some(tessera_core::hash::merkle_root(&primary).as_str())
+            );
+        }
+    }
+
+    /// #720 review: removing pyramid level 0 takes its derived levels with it, so the result is
+    /// never downsamples alone under the empty set's `content_hash`; removing a derived level leaves
+    /// level 0 and the other levels.
+    #[test]
+    fn removing_level_0_of_a_pyramid_removes_its_derived_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, pyr) = (dir.path().join("src.tsra"), dir.path().join("pyr.tsra"));
+        // 256×4×4 halves to 128×2×2 and 64×1×1: levels 0, 1 and 2.
+        write_volume(&src, "volume", 0, [256, 4, 4]);
+        crate::nav::build_pyramid(&src, "volume", None, &pyr).unwrap();
+        let names_of = |m: &tessera_core::Manifest| -> Vec<String> {
+            m.blocks.iter().map(|b| b.name.to_string()).collect()
+        };
+        let levels = names_of(Reader::open(&pyr).unwrap().manifest());
+        assert_eq!(levels, ["volume/0", "volume/1", "volume/2"], "precondition");
+
+        // A derived level goes alone.
+        let repo = dir.path().join("repo-level");
+        let lineage = imported(&repo, &pyr);
+        commit(
+            &repo,
+            &lineage,
+            &[],
+            &[],
+            &["volume/1".into()],
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(names_of(&tip(&repo, &lineage)), ["volume/0", "volume/2"]);
+
+        // Level 0 takes every derived level with it.
+        let repo = dir.path().join("repo-base");
+        let lineage = imported(&repo, &pyr);
+        let base = tessera_core::block::pyramid_level_name("volume", 0);
+        let add = format!("{}:volume", src.to_str().unwrap());
+        commit(&repo, &lineage, &[], &[add], &[base], &mut Vec::new()).unwrap();
+        let m = tip(&repo, &lineage);
+        assert_eq!(names_of(&m), ["volume"]);
+        assert_eq!(
+            m.content_hash.as_deref(),
+            Some(tessera_core::hash::merkle_root(&[m.blocks[0].digest.clone().unwrap()]).as_str())
+        );
     }
 
     #[test]
