@@ -1577,7 +1577,7 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
     let mut blocks: Vec<(tessera_core::block::BlockRef, tessera_io::BlockPayload)> = Vec::new();
     // Level 0 — the full-resolution volume.
     blocks.push(tessera_io::array::array_block(
-        &format!("{block}/0"),
+        &tessera_core::block::pyramid_level_name(block, 0),
         &cur_spec,
         &data,
     )?);
@@ -1590,7 +1590,7 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
             break;
         };
         level += 1;
-        let lname = format!("{block}/{level}");
+        let lname = tessera_core::block::pyramid_level_name(block, level);
         let (bref, payload) = tessera_io::array::array_block(&lname, &ds_spec, &ds_data)?;
         blocks.push((bref.derived(), payload));
         cur_spec = ds_spec;
@@ -1866,7 +1866,7 @@ fn stats_from_chunk_index<R: std::io::Read + std::io::Seek>(
     if !dtype_ok {
         return None;
     }
-    let sidecar = format!("{block}.cidx");
+    let sidecar = tessera_core::block::cidx_name(block);
     let bref = r.manifest().blocks.iter().find(|b| b.name == sidecar)?;
     // The sidecar's own spec records which block it indexes; refuse an index about something else.
     if bref.spec.get("indexes").and_then(|v| v.as_str()) != Some(block) {

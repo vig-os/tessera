@@ -13,10 +13,12 @@ RSS, so integrity doesn't cost you the payload in RAM.
 
 ## The Merkle structure
 
-`content_hash` is a recursive Merkle Mountain Range over the ordered block digests (ADR-0028), which buys
-two proofs beyond a flat hash:
+`content_hash` is a recursive Merkle Mountain Range over the ordered digests of the **primary** blocks only
+(ADR-0028 §4). A derived block (`"class": "derived"`: a chunk index, a pyramid level above 0) is a regenerable
+accelerator and is not part of it; `manifest_hash` covers it, and its bytes are checked against its digest like any
+block's. The tree buys two proofs beyond a flat hash:
 
-- **Inclusion proof** — confirm one block or chunk belongs under `content_hash` without re-reading the
+- **Inclusion proof** — confirm one primary block or chunk belongs under `content_hash` without re-reading the
   rest (an audit path).
 - **Consistency proof** — prove one revision's `content_hash` is an append-only *prefix* of a later one
   (the [versioning](./versioning.md) guarantee: a later version provably only *added*).

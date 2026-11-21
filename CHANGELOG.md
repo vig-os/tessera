@@ -98,12 +98,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking format change (#720, ADR-0028 §4, ADR-0066 rule 12):** `content_hash` is the Merkle root over the
   **primary** blocks only. A block ref gains an optional `"class": "derived"`, set by the writers of accelerator
   blocks: the chunk-index sidecar `<name>.cidx` (`tessera_io::chunk_index::chunk_index_block`, so every `*_indexed`
-  path and `array_block_with_index` / `table_block_with_index`) and the levels above 0 of `tessera pyramid`. A
+  path and `array_block_with_index` / `table_block_with_index`) and the levels above 0 of `tessera pyramid`.
+  `tessera commit --add-block` lands a copied block **primary**, whatever its class in the source (a derived block
+  is derived of the product that computed it), except a `.cidx` copied with the block it indexes, from the same file
+  and under the same names, which stays derived. `tessera commit --remove-block` removes the block's derived family
+  with it: its `.cidx` (as before) and, for a pyramid's `<base>/0`, its derived levels and their sidecars
+  (`ProductBuilder::remove_block_with_derived`, `block::derived_family`, with the writers' naming rules
+  `block::cidx_name` / `block::pyramid_level_name`). A
   derived block is still sealed: `manifest_hash` covers it, its digest and its class, and its payload is checked
   against its digest like any block's. Adding, regenerating or dropping one moves `manifest_hash` only; a product
   whose blocks are all derived has the `content_hash` of the empty set. The key is never written for a primary
-  block, so products without derived blocks are byte-identical (all 13 tracked products and every `corpus.json`
-  golden are unchanged). **What breaks:** a product written with a `.cidx` or by `tessera pyramid` now has a
+  block, so products without derived blocks are byte-identical (all 18 tracked `.tsra` files and every
+  `corpus.json` golden are unchanged). **What breaks:** a product written with a `.cidx` or by `tessera pyramid` now has a
   different `content_hash` (and `manifest_hash`) than the same input gave before, and a reader from before this
   change can't verify it: it reports `blocks[n].class` as a newer field and finds `content_hash` tampered. A product
   sealed before this change still verifies, unchanged: its refs carry no `class`, so its sidecars and levels read as
@@ -113,7 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (so struct literals must set it), with `BlockRef::derived()`, `BlockRef::is_primary()` and the shared fold
   `block::content_root`, which `ProductBuilder::seal`, `Manifest::recompute_content_hash` and the streaming
   `WriteSession` running root all use. The `.cidx` spec no longer carries `class` (it moved to the ref);
-  `corpus/seal-cases.json` gains 11 derived-block cases (161 in all).
+  `corpus/seal-cases.json` gains 14 derived-block cases (164 in all).
 - **Breaking format change (ADR-0066 A′, #914, #901):** the seal is `blake3` over the **stored bytes** of
   `manifest.json`, which is stored as exactly its RFC 8785 JCS form with no `manifest_hash` key; the seal lives in a
   new `manifest.seal` member, entry 2 of the `.tsra` (after `mimetype`, before `manifest.json`), beside

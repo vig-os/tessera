@@ -545,6 +545,9 @@ def recon_int16(c: Cases, obj: dict, raw: bytes, seal: str, other_seal: str) -> 
         ("block-class-unknown-resealed", "canonical"),
         ("block-class-number-resealed", 1),
         ("block-class-array-form-resealed", ["derived"]),
+        ("block-class-empty-string-resealed", ""),
+        ("block-class-boolean-resealed", True),
+        ("block-class-object-form-resealed", {}),
     ]:
         resealed(
             case, "refused", lambda m, v=value: m["blocks"][0].update({"class": v})
