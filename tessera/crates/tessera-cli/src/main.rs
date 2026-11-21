@@ -489,7 +489,8 @@ enum Cmd {
     ///
     /// Emits a `recon` product with `<block>/0` (full resolution), `<block>/1`, `<block>/2`, … (each a
     /// 2× max-downsample carrying its `at_level` affine), `derived_from` the source. Coarse levels give
-    /// fast overviews.
+    /// fast overviews. The levels above 0 are derived blocks (`class: "derived"`): the product's
+    /// `content_hash` is level 0's alone, whatever `--levels` is, and the seal covers every level.
     Pyramid {
         /// The source `.tsra`.
         file: PathBuf,
@@ -535,9 +536,17 @@ enum Cmd {
         set: Vec<String>,
         /// Attach an already-encoded block from another `.tsra`: `[NAME=]SOURCE.tsra:BLOCK`
         /// (composition, not encoding). Repeatable.
+        ///
+        /// The copy lands primary (part of `content_hash`), whatever its class in SOURCE. A derived
+        /// block is never copied: when SOURCE indexes BLOCK, the index `NAME.cidx` is rebuilt from
+        /// the copied bytes and lands derived. A `.cidx` copied explicitly is primary data, and may
+        /// not take the name of an index being rebuilt.
         #[arg(long = "add-block")]
         add_block: Vec<String>,
         /// Remove a block by name (manifest edit; the object stays for other versions). Repeatable.
+        ///
+        /// Its derived blocks go with it: its `.cidx`, and for pyramid level 0 (`BASE/0`) the
+        /// levels above it and their indexes.
         #[arg(long = "remove-block")]
         remove_block: Vec<String>,
     },
@@ -1476,8 +1485,10 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             }
             println!("blocks        {}", m.blocks.len());
             for b in &m.blocks {
+                // A derived block (ADR-0028 §4) is sealed but no leaf of `content_hash`: say so.
+                let class = if b.is_primary() { "" } else { "  derived" };
                 println!(
-                    "  - {:<20} {:<6?} {}",
+                    "  - {:<20} {:<6?} {}{class}",
                     b.name,
                     b.kind,
                     b.digest.as_deref().unwrap_or("-")

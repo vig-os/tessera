@@ -618,6 +618,7 @@ mod tests {
             name: name.parse().unwrap(),
             kind,
             digest: Some(crate::hash::digest(name.as_bytes())),
+            class: crate::block::BlockClass::Primary,
             spec,
         }
     }

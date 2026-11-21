@@ -10,8 +10,10 @@
 //! At completion [`WriteSession::seal`] builds the manifest through the same [`ProductBuilder`] a
 //! batch writer uses, so a streamed product is byte-identical to a batch-sealed one (same `id` /
 //! `content_hash` / `manifest_hash`). Each [`Lane`]'s running [`MerkleAccumulator`] gives an
-//! integrity root over that lane's blocks at every watermark, and is cross-checked at the seal against
-//! the lane's blocks in the sealed manifest.
+//! integrity root over that lane's primary blocks at every watermark, and is cross-checked at the seal
+//! against the lane's primary blocks in the sealed manifest. A derived block (a chunk-index sidecar,
+//! ADR-0028 §4) is journaled and sealed like any block but is no leaf of these roots, as it is no leaf
+//! of `content_hash`.
 //!
 //! **Lanes (ADR-0065 §7.3, #832).** Every block is committed on a [`Lane`]: one per table role,
 //! plus the arrays lane, which also takes every block appended without one. The seal orders the
@@ -318,7 +320,8 @@ pub struct WriteSession {
     /// The committed blocks, in commit order, until the seal (#759).
     blocks: Vec<Committed>,
     /// The lanes committed on, in the order of their first commit, each with the running Merkle
-    /// accumulator over its own blocks in commit order.
+    /// accumulator over its own primary blocks in commit order (derived blocks are no leaf of
+    /// `content_hash`, ADR-0028 §4).
     lanes: Vec<(Lane, MerkleAccumulator)>,
     /// Numbers the session's staged files, shared by every [`BlockStaging`] handle.
     staged_seq: Arc<AtomicU64>,
@@ -769,8 +772,8 @@ impl WriteSession {
 
     /// Durably append one already-encoded block: write the fragment, fsync it and its directory
     /// (and every directory created for it), then commit a journal line (the atomic commit point),
-    /// fsync, then fold the digest into the running Merkle root (the module's crash-consistency
-    /// contract). `block_ref` MUST carry a digest computed over `payload`.
+    /// fsync, then fold the digest into the running Merkle root if the block is primary (the module's
+    /// crash-consistency contract). `block_ref` MUST carry a digest computed over `payload`.
     ///
     /// **Failure.** A failure before the journal line leaves no trace: the fragment is deleted
     /// again. A failure once the journal write has begun (the write itself, or its fsync)
@@ -975,6 +978,7 @@ impl WriteSession {
         fragment: RemoveOnDrop,
     ) -> Result<()> {
         let kind = block_ref.kind;
+        let primary = block_ref.is_primary();
         // A lane line nests the block one level deeper, so it is parsed back too: `recover` must be
         // able to read every line the journal holds (see `Committed::of`).
         let lane_line = match lane {
@@ -1011,11 +1015,13 @@ impl WriteSession {
             .into());
         }
         fragment.disarm();
-        // 3. the lane's running integrity root
+        // 3. the lane's running integrity root, over its primary blocks: the leaves of `content_hash`
         if lane_id == self.lanes.len() {
             self.lanes.push((lane, MerkleAccumulator::new()));
         }
-        self.lanes[lane_id].1.push(&digest);
+        if primary {
+            self.lanes[lane_id].1.push(&digest);
+        }
         // Write-path observability (SSoT): every durably-committed block — batch, stream, or ingest —
         // flows through here, so one structured event gives devs/users full I/O info on write (name,
         // kind, bytes, content digest, and the new integrity watermark). Zero-cost when no subscriber.
@@ -1047,9 +1053,10 @@ impl WriteSession {
         self.blocks.len()
     }
 
-    /// The content Merkle root over all committed blocks in seal order: the `content_hash` a seal
-    /// here would produce. O(1) while at most one lane is in use; with more, the lanes' blocks are
-    /// reordered and their digests folded again, O(blocks).
+    /// The content Merkle root over the committed primary blocks in seal order: the `content_hash` a
+    /// seal here would produce (derived blocks are not part of it, ADR-0028 §4). O(1) while at most
+    /// one lane is in use; with more, the lanes' blocks are reordered and their digests folded
+    /// again, O(blocks).
     pub fn running_root(&self) -> String {
         match self.lanes.as_slice() {
             [] => MerkleAccumulator::new().root(),
@@ -1060,6 +1067,9 @@ impl WriteSession {
                     let block = self.blocks[i]
                         .block_ref()
                         .expect("a committed line parses: Committed::of checked it");
+                    if !block.is_primary() {
+                        continue;
+                    }
                     acc.push(
                         block
                             .digest
@@ -1184,7 +1194,9 @@ impl WriteSession {
                     lanes.len() - 1
                 }
             };
-            lanes[lane].1.push(&line.digest);
+            if line.block.is_primary() {
+                lanes[lane].1.push(&line.digest);
+            }
             blocks.push(Committed {
                 name: line.block.name.clone(),
                 line: line.entry.clone().into(),
@@ -1207,10 +1219,10 @@ impl WriteSession {
 
     /// Compact + seal: build the manifest through [`ProductBuilder`] (identical to a batch writer
     /// adding the same blocks in seal order: by [`Lane`], then by commit order within a lane),
-    /// verify that each lane's running root equals the root over that lane's blocks in the sealed
-    /// manifest, and pack the fragments into a
-    /// sealed `.tsra` at `out`. Returns the sealed manifest. A poisoned session (see
-    /// [`Self::append_block`]) refuses to seal: [`Self::recover`] it first.
+    /// verify that each lane's running root equals the root over that lane's primary blocks in the
+    /// sealed manifest, and pack the fragments into a sealed `.tsra` at `out`. Returns the sealed
+    /// manifest. A poisoned session (see [`Self::append_block`]) refuses to seal: [`Self::recover`]
+    /// it first.
     ///
     /// **Constant-memory.** Each fragment is streamed straight off disk into the zip via
     /// [`pack_streaming`] (one buffered `io::copy` per block), so the whole engine (encode, commit,
@@ -1255,8 +1267,8 @@ impl WriteSession {
         }
         let sealed = b.seal()?;
         // Integrity self-check, per lane: each lane's running root, folded in commit order, must
-        // equal the root over that lane's digests in the sealed manifest; and the digests in seal
-        // order must fold to the sealed `content_hash`.
+        // equal the root over that lane's primary digests in the sealed manifest; and the primary
+        // digests in seal order must fold to the sealed `content_hash` (ADR-0028 §4).
         if sealed.blocks.len() != order.len() {
             return Err(Error::Container(format!(
                 "seal: the manifest holds {} blocks, the session committed {}",
@@ -1275,8 +1287,10 @@ impl WriteSession {
                 .digest
                 .as_deref()
                 .ok_or_else(|| Error::MissingDigest(block.name.to_string()))?;
-            sealed_lanes[self.blocks[i].lane].push(digest);
-            all.push(digest);
+            if block.is_primary() {
+                sealed_lanes[self.blocks[i].lane].push(digest);
+                all.push(digest);
+            }
         }
         if sealed.content_hash.as_deref() != Some(all.root().as_str()) {
             return Err(Error::Integrity {
@@ -1976,6 +1990,58 @@ mod tests {
         // seal() self-checks root == content_hash; assert it here too for clarity
         let sealed = ws.seal(&dir.path().join("s.tsra")).unwrap();
         assert_eq!(sealed.content_hash.as_deref(), Some(final_root.as_str()));
+    }
+
+    /// ADR-0028 §4: a derived block (a chunk-index sidecar) is journaled, recovered and sealed like
+    /// any block, but is no leaf of the running root or of `content_hash`; the seal covers it. On one
+    /// lane and on two (where `running_root` refolds in seal order), and across a recovery.
+    #[test]
+    fn a_derived_block_is_sealed_but_leaves_the_running_root_and_content_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = {
+            let mut i = tessera_core::chunk_index::ChunkIndex::new();
+            i.push(tessera_core::hash::digest(b"chunk"), &[1, 2]);
+            i
+        };
+        let (cidx, cidx_payload) = crate::chunk_index::chunk_index_block("a", &idx).unwrap();
+        let (a, pa) = block("a", 0);
+        let (b, pb) = block("b", 5);
+        let primary_root = tessera_core::hash::merkle_root(&[
+            a.digest.clone().unwrap(),
+            b.digest.clone().unwrap(),
+        ]);
+        for (tag, cidx_lane) in [("one lane", Lane::Arrays), ("two lanes", Lane::table("t"))] {
+            let stage = dir.path().join(format!("stage-{tag}"));
+            let mut ws = WriteSession::create(&stage, "recon", "p", "d", TS).unwrap();
+            ws.append_block(a.clone(), &pa).unwrap();
+            let before = ws.running_root();
+            ws.append_block_on(cidx_lane, cidx.clone(), &cidx_payload.bytes)
+                .unwrap();
+            assert_eq!(
+                ws.running_root(),
+                before,
+                "{tag}: a derived block moves no root"
+            );
+            ws.append_block(b.clone(), &pb).unwrap();
+            assert_eq!(ws.running_root(), primary_root, "{tag}");
+            drop(ws);
+            let ws = WriteSession::recover(&stage).unwrap();
+            assert_eq!(ws.running_root(), primary_root, "{tag}: after recovery");
+            let sealed = ws.seal(&dir.path().join(format!("{tag}.tsra"))).unwrap();
+            assert_eq!(
+                sealed.content_hash.as_deref(),
+                Some(primary_root.as_str()),
+                "{tag}"
+            );
+            assert_eq!(sealed.blocks.len(), 3, "{tag}: the sidecar is sealed");
+            assert!(
+                sealed
+                    .blocks
+                    .iter()
+                    .any(|r| r.name == "a.cidx" && !r.is_primary()),
+                "{tag}"
+            );
+        }
     }
 
     #[test]

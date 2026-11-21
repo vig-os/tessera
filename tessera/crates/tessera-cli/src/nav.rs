@@ -1554,6 +1554,11 @@ fn open_array(
 /// Every level, the full-resolution one included, is a leaf under `BLOCK/` (ADR-0063's leaf rule):
 /// before ADR-0063 level 0 was the bare `BLOCK`, the parent of the other levels, so such a product
 /// reads in-zip but cannot be unpacked to a directory.
+///
+/// Level 0 is the product's primary data. Every level above it is a 2×-max-downsample of the one
+/// below, a pure function of level 0, so it is written as a **derived** block (ADR-0028 §4): the
+/// product's `content_hash` is level 0's alone, equal however many levels are built, and the seal
+/// (`manifest_hash`) covers every level.
 pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) -> Result<usize> {
     let (spec, blob) = open_array(file, block)?;
     if spec.shape.len() != 3 {
@@ -1572,7 +1577,7 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
     let mut blocks: Vec<(tessera_core::block::BlockRef, tessera_io::BlockPayload)> = Vec::new();
     // Level 0 — the full-resolution volume.
     blocks.push(tessera_io::array::array_block(
-        &format!("{block}/0"),
+        &tessera_core::block::pyramid_level_name(block, 0),
         &cur_spec,
         &data,
     )?);
@@ -1585,8 +1590,9 @@ pub fn build_pyramid(file: &Path, block: &str, levels: Option<u32>, out: &Path) 
             break;
         };
         level += 1;
-        let lname = format!("{block}/{level}");
-        blocks.push(tessera_io::array::array_block(&lname, &ds_spec, &ds_data)?);
+        let lname = tessera_core::block::pyramid_level_name(block, level);
+        let (bref, payload) = tessera_io::array::array_block(&lname, &ds_spec, &ds_data)?;
+        blocks.push((bref.derived(), payload));
         cur_spec = ds_spec;
         data = ds_data;
         // Stop once the coarsest level is a single overview tile.
@@ -1860,7 +1866,7 @@ fn stats_from_chunk_index<R: std::io::Read + std::io::Seek>(
     if !dtype_ok {
         return None;
     }
-    let sidecar = format!("{block}.cidx");
+    let sidecar = tessera_core::block::cidx_name(block);
     let bref = r.manifest().blocks.iter().find(|b| b.name == sidecar)?;
     // The sidecar's own spec records which block it indexes; refuse an index about something else.
     if bref.spec.get("indexes").and_then(|v| v.as_str()) != Some(block) {
@@ -2835,6 +2841,7 @@ mod tests {
             name: tessera_core::block::BlockName::new("b").unwrap(),
             kind,
             digest: None,
+            class: tessera_core::block::BlockClass::Primary,
             spec,
         };
         let table = block(
@@ -3407,6 +3414,28 @@ mod tests {
         assert!(names.iter().all(|n| n.starts_with("volume/")), "{names:?}");
         let (s0, _) = open_array(&out, "volume/0").unwrap();
         assert_eq!(s0.shape, vec![8, 8, 8]);
+        // ADR-0028 §4: level 0 is the primary data, every coarser level is derived, so the product's
+        // `content_hash` is level 0's alone, and a pyramid with fewer levels has the same one under
+        // a different seal.
+        let m = r.manifest();
+        assert!(m.blocks[0].is_primary(), "level 0 is primary");
+        assert!(
+            m.blocks[1..].iter().all(|b| !b.is_primary()),
+            "levels above 0 are derived"
+        );
+        let level0 = vec![m.blocks[0].digest.clone().unwrap()];
+        assert_eq!(
+            m.content_hash.as_deref(),
+            Some(tessera_core::hash::merkle_root(&level0).as_str())
+        );
+        let one_level = dir.path().join("pyr1.tsra");
+        assert_eq!(
+            build_pyramid(&src, "volume", Some(0), &one_level).unwrap(),
+            1
+        );
+        let one = Reader::open(&one_level).unwrap();
+        assert_eq!(one.manifest().content_hash, m.content_hash);
+        assert_ne!(one.manifest().manifest_hash, m.manifest_hash);
         // derived_from the source is recorded.
         assert!(r
             .manifest()

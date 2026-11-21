@@ -61,7 +61,8 @@ with two faults gets the verdict of the first:
    of the Rust `Manifest`, `BlockRef`, `Source`, `Producer`, `Generation` and `IngestTransform`, checked at every
    depth: each record is an object (never the array form), each declared field has its JSON type (string, boolean,
    an object for a map, an array for a list), a block `kind` is one of `array`/`table`/`chunk_index`/`blob`, a block
-   `name` follows the ADR-0063 grammar, every `id_inputs` value is a string, `producer` is a Producer object or a
+   `class`, when present, is exactly `"derived"` (`"primary"` and `null` are refused: a primary block has no
+   `class` key), a block `name` follows the ADR-0063 grammar, every `id_inputs` value is a string, `producer` is a Producer object or a
    legacy string, and a required field is present. `null` stands for an absent value only where the Rust
    field is optional (`producer`, `generation`, `schema`, `study`, `content_hash`, a block's `digest`, a source's
    `content_hash`, Producer's `git_*`/`dirty`, `generation.config_ref`); the maps and lists refuse it. Opaque
@@ -76,7 +77,9 @@ with two faults gets the verdict of the first:
 4. **Refused:** a block name listed twice (SPEC §5).
 5. **Tampered:** `id` ≠ `digest(JCS(id_inputs))`.
 6. **Refused:** a block without a `digest` (SPEC §5).
-7. **Tampered:** `content_hash` ≠ the MMR root of the block digests (a missing one is tampered).
+7. **Tampered:** `content_hash` ≠ the MMR root of the **primary** block digests in manifest order (a missing one
+   is tampered). A derived block (`"class": "derived"`, ADR-0028 §4) is skipped: its digest is covered by the seal
+   and checked against its payload like any block's, but it is no leaf of `content_hash`.
 
 Separately from the seal, `schema_verdict(schema, metadata)` applies a product schema's **number rules** (SPEC §5
 "Field rules", #895) and returns `ok`, `schema` (a field declaration is refused: an unknown dtype, an `int64`/`uint64`
