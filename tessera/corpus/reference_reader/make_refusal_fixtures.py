@@ -13,7 +13,7 @@ compressed member, verifies each of them: the members it ends up reading are the
   is the manifest with another description under the product's seal, the last is the product's.
 - deflated-manifest-seal.tsra, deflated-manifest-json.tsra: that member DEFLATED, not STORED.
 
-    uv run --no-project --with-requirements requirements.txt python make_refusal_fixtures.py
+    uv run --no-project --with-requirements requirements.txt python -B make_refusal_fixtures.py
 
 Written with fixed entry metadata, so a run reproduces the committed bytes (the reference-reader
 check compares them).

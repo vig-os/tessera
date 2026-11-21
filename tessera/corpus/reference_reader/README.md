@@ -17,9 +17,9 @@ triple needs only the stored bytes, not the pcodec/Vortex codecs.
 ## Run it
 
 ```sh
-uv run --no-project --with-requirements requirements.txt python run.py   # PASS/FAIL table over corpus/files
-uv run --no-project --with-requirements requirements.txt python make_seal_cases.py   # regenerate ../seal-cases.json
-uv run --no-project --with-requirements requirements.txt python make_refusal_fixtures.py   # regenerate ../refusals
+uv run --no-project --with-requirements requirements.txt python -B run.py   # PASS/FAIL table over corpus/files
+uv run --no-project --with-requirements requirements.txt python -B make_seal_cases.py   # regenerate ../seal-cases.json
+uv run --no-project --with-requirements requirements.txt python -B make_refusal_fixtures.py   # regenerate ../refusals
 ```
 
 Exit code 0 ⇔ all fixtures reproduce their goldens, every stored pair in `corpus/seal-cases.json` reaches its

@@ -12,3 +12,7 @@
 # Migrated from the managed root .gitignore on upgrade (#1111).
 /result
 /result-*
+
+# Python bytecode (#880): running the reference reader outside nix must not dirty a worktree.
+__pycache__/
+*.py[cod]
