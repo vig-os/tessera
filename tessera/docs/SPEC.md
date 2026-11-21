@@ -180,8 +180,11 @@ other value, `"primary"` and `null` included, so a class has one spelling. The w
 marks it derived (the chunk-index sidecar `<name>.cidx`, §5d; the levels above 0 of a multiscale pyramid,
 `<base>/1`, `<base>/2`, … beside the primary `<base>/0`); a block a user supplies is primary. A derived block is
 derived of the product that computed it, so a block **copied** into another product is primary there, whatever its
-class at the source; the one exception is a `.cidx` copied together with the block it `indexes`, from the same
-product and under the same names, which is still that block's index and stays derived. A writer that **removes** a
+class at the source. A derived block is never copied: it is computed by the writer that marks it derived. A
+`.cidx` is bound to its block by name only (its `indexes` records the name, not the block's digest), so a copied
+one proves nothing about the block it claims to describe. A writer that copies a block whose source carries an
+index MUST NOT copy the index; it MAY rebuild it from the copied block, which is then derived, and a copied
+`.cidx` is primary under its own name. A writer that **removes** a
 block removes its derived family with it: its `<name>.cidx`, and for a pyramid's `<base>/0` every derived level
 `<base>/<n>` and its `.cidx`, so no accelerator outlives its data. Every block, whatever its class, carries a digest
 that is checked against its payload.
