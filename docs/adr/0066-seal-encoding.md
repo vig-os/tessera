@@ -112,7 +112,7 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
     already says; derived-sidecar blocks (stats, pyramids, projections, the chunk index's stat columns) leave it.
     `manifest_hash` still commits to every block, so the integrity of the accelerators is unchanged. Today
     `ManifestBuilder::seal` folds every block ref into `merkle_root`, so the Accepted ADR and the code disagree.
-13. **#828 rides the break** (owner, 2026-11-19). The per-column codec profile `tessera-table-v2` becomes the default
+13. **#828 rides the break** (owner, 2026-11-19; *deferred 2026-11-22, see step 7: #828 does not ride it*). The per-column codec profile `tessera-table-v2` becomes the default
     table codec profile, replacing today's fixed BtrBlocks + Pco choice. A design note comes first (rules, the
     profile's contents per product type, how the choice is recorded in the manifest, determinism across arches),
     then the code.
@@ -260,7 +260,9 @@ bridge work (#454 → #811) starts before step 9 is released.
      the speed/size trade-off the default takes, and the determinism requirement across arches (ADR-0026, #468,
      #472). Owner review before 7.
    - *Note:* [`docs/spikes/915-tessera-table-v2.md`](../spikes/915-tessera-table-v2.md) (#915).
-7. **#828: `tessera-table-v2` becomes the default table codec profile.**
+7. **#828: `tessera-table-v2` becomes the default table codec profile.** *Status: deferred: owner decision
+   2026-11-22, see #828* (the profile missed its A3, A4 and A5 floors; `tessera-table-v1` stays the default; the
+   design note's 2026-11-22 amendment, §10, holds the evidence and the open archival question).
    - *Crates:* `tessera-io` (`table`), `tessera-core` (the codec field in the table block spec), `tessera-ingest`,
      `tessera-cli`, `tessera-py`, the reference reader, benches.
    - *Depends on:* 4 and 6.
