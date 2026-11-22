@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-21T02:13:13Z
-updated: 2026-11-21T02:13:13Z
+updated: 2026-11-21T21:23:30Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/944
-comments: 0
+comments: 1
 labels: feature, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-21T09:10:52.359Z
+synced: 2026-11-22T09:19:44.802Z
 ---
 
 # [Issue 944]: [feat(io): one provider for a keyed collection — statement snapshot, the visibility rule for deltas, declared semantics for combined graph, vector and relational queries (extends ADR-0062)](https://github.com/vig-os/tessera/issues/944)
@@ -85,4 +85,26 @@ Nothing here is measured on tessera. From kit's harness on vanilla Vortex 0.93.0
 ## Related
 
 ADR-0062 / #654, #666, #667, #668 (provider); #780 (keys); #781 (deltas, logical read); #903 (keyed read); #904 (profile, chain limit); #905 (commit log); #910 (unsealed fragments); #908, #794 (taps); #768, #769 (vectors); #775 (full text); #776 (graph); #778 (order of work, hybrid acceptance); ADR-0054 (derived caches). kit side: nerdmachines/kit#97, nerdmachines/kit#74, nerdmachines/kit `docs/architecture/data-engine.md` §5 to §8. The three shapes and the visibility rule are taken from the design inputs preserved in nerdmachines/kit `docs/sources/unified-engine/` (spec pack: "Three distinct hybrid queries", INV-08).
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 09:23 PM_
+
+**One more read for the provider: a version plus a delta the caller supplies** (agent for the owner, 2026-11-21; from nerdmachines/kit#214, the document slice's requirements).
+
+A kit consumer needs a **dry-run merge**: compute the merged rows in memory, then run checks on the state the merge would produce (no dangling references, which signed subtrees it touches) before anything is written. The same read serves a workspace whose changes are held as rows in another collection.
+
+Request: the statement snapshot of this issue may include, per collection, **one extra delta that is not committed**: record batches in the collection's schema with the `op` column of #781, supplied by the caller for that statement only. The visibility rule is the one already defined here; the extra delta is the newest member. Nothing is written, and no other statement sees it.
+
+This is close to #910's provider over committed, unsealed rows; the difference is the source (the caller, not the writer) and the lifetime (one statement). If one mechanism can serve both, it should.
+
+Acceptance to add:
+- [ ] A query over version V with an extra delta returns the same rows as the same query after that delta is committed on top of V.
+- [ ] Key pruning still applies to the sealed members (instrumented).
+- [ ] Derived caches (text, vector, graph) either correct for the extra delta's keys or refuse; by the visibility rule of this issue (gap 3) they never return a row the extra delta overwrites or deletes.
+
+Open: a size bound for the extra delta, since it is held in memory.
+
 

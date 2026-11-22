@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-08T12:02:29Z
-updated: 2026-11-21T02:14:27Z
+updated: 2026-11-21T20:38:55Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/781
-comments: 4
+comments: 6
 labels: feature, effort:large, area:core, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-21T09:10:55.661Z
+synced: 2026-11-22T09:19:46.937Z
 ---
 
 # [Issue 781]: [feat(io): keyed delta products over a base — upserts, tombstones and redirects, a newest-row-wins logical read, and compaction into a new sealed base](https://github.com/vig-os/tessera/issues/781)
@@ -150,4 +150,29 @@ _Posted on November 18, 2026 at 12:05 AM_
 _Posted on November 21, 2026 at 02:14 AM_
 
 **One correctness case for the logical read** (agent, 2026-11-21, for nerdmachines/kit#97; details on #944). Base row `(k, state = open)`, newer delta row `(k, state = done)`, filter `state = 'open'`. If the delta chunk is pruned because its value statistics exclude `open`, the base row passes the filter and is returned although it is superseded. `Inexact` re-evaluation (ADR-0062 §4) does not catch it, because the base row really matches. So delta members can be pruned by key statistics, as this issue's acceptance already does for `key = K`, and by value statistics only after the newest row per key is resolved or where the result is provably the same. The same holds for "merge per-member top-k and hide superseded keys": hiding after the cut can return fewer than k rows. #944 proposes to write both into the provider's ADR, with a fixture. The index of kit's requests is #945.
+
+---
+
+# [Comment #5]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 11:09 AM_
+
+Cross-reference from the kit storage review (agent, 2026-11-21): #946 reports that the repository's ref advance (`repo.rs` `set_ref` / `commit`) is not an atomic compare-and-set and that `gc` marks only product manifests. Two points there bear on this issue: advancing `current` needs a ref that can target a collection, and `gc` has to mark through a `current` collection's members so that a pinned base and its deltas stay alive (item 6 of #946).
+
+---
+
+# [Comment #6]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 08:38 PM_
+
+**Delta order and reuse when two lineages share a base** (agent for the owner, 2026-11-21; from nerdmachines/kit#214).
+
+The owner's direction is that workspaces (branches) live in the kit, built as a second lineage of `current` collections over the same base (#947). Two points in this issue's proposal then need a decision. Both are from reading the text; nothing was built.
+
+1. **`seq` is sealed into the delta.** Item 1 says `Role::Delta { base, seq }` and "Deltas are ordered by `seq`". Two lineages over one base both issue 1, 2, 3, so `seq` no longer orders the deltas a reader sees. Proposal: **the order is the order of the `current` collection's member list.** The collection is already the authority on which deltas are visible; let it be the authority on their order too. `seq` is then either dropped or kept as a writer-local hint that no reader relies on. The optional version column stays as the declared tie-breaker within one delta.
+
+2. **A delta is sealed against one base.** A merge in the kit writes a new delta on the main lineage. If the main lineage has compacted since the fork, the workspace's deltas name the old base and the new delta must name the new one. That works as long as the rule is stated: **a delta is valid in a `current` collection only if its `base` is that collection's base** (checked at seal of the collection and at verify). A delta is never re-pointed; it is rewritten.
+
+One consequence for the read: with order taken from the member list, the logical read needs no per-delta metadata beyond the key statistics, which keeps the pruning in the second acceptance item unchanged.
+
 

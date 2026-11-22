@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-07-02T13:07:09Z
-updated: 2026-09-28T17:59:19Z
+updated: 2026-11-21T20:39:35Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/292
-comments: 0
+comments: 1
 labels: discussion, docs
 assignees: none
 milestone: 0.1.0-beta
 projects: none
 parent: none
 children: none
-synced: 2026-09-29T07:52:56.441Z
+synced: 2026-11-22T09:19:47.728Z
 ---
 
 # [Issue 292]: [ADR: tsra ownership boundary — own the format + proofs, ride OCI+S3 for transport (not DataLad/git-annex as a dependency)](https://github.com/vig-os/tessera/issues/292)
@@ -95,3 +95,35 @@ Everything tsra owns is a **pure function or a proof** — no long-lived server,
 ## References
 
 RFC §10 (distribution/RDM; DataLad = optional bridge, not backbone) · §14 (normative vs informative; format mandates *contracts* only) · ADR-0033 (collections → 3 projections) · ADR-0036 (versioning objects+refs) · ADR-0042 (non-sealed `aux/`) · ADR-0002 (cloud/concurrency) · #291 · #225 (cloud range-read) · #223 (collection model)
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 08:39 PM_
+
+**The kit's requests cross the line this issue draws: a note and a proposal** (agent for the owner, 2026-11-21; from nerdmachines/kit#214). The owner asked whether tessera is "just a file format with handlers" or whether a different split of responsibility is better. Nothing below is decided.
+
+**The tension.** This issue says: "Everything tsra owns is a **pure function or a proof** — no long-lived server, no storage, no network state." That was written for transport. Since then these have been requested or built here, and all of them are local state: the repository with refs and `gc` (ADR-0036, `tessera-io/src/repo.rs`), the commit log with replay on open (#905), keyed deltas, `current` and compaction (#781), retention (#906), refs to collections (#947), and a writer lock and durability order (#946). The stream writer's journal already was state.
+
+**Proposal: keep the line, and add one layer below it.**
+
+| Layer | What it holds | State |
+|---|---|---|
+| Format and proofs (`tessera-core`) | schemas, canonical bytes, seal, Merkle, verify | none; pure |
+| Handlers (`tessera-io`) | read and write one product, range reads, which bytes to fetch | per call |
+| **Local store** (a crate of its own in this workspace) | objects, refs with a real compare-and-set, `gc`, commit log and replay, overlay, flush, compaction, the keyed read | on local disk, behind a library; one fenced writer |
+| Query adapter (`tessera-query`, ADR-0062 §1) | the DataFusion provider for one logical table, over the scan and the store | per query |
+| Above tessera (kit, or any other consumer) | workspaces and merge, policy, placement, queries across collections, sync between nodes, every service | servers and network |
+
+The sentence in this issue then reads: tessera owns pure functions, proofs **and an embedded local store; never a server and never network state**. The test stays the one used in the kit's record: if an independent implementation that opens the same directory must know a rule to return the right rows and bytes, the rule is tessera's.
+
+**Why a crate of its own and not `tessera-io`, and why not in the kit:**
+- The format crate changes when the format changes; the store changes for durability and concurrency. They have different tests (conformance and goldens against a crash harness) and should not block each other. The Python and WASM bindings should not carry locks and syncs.
+- Other consumers need keyed deltas and compaction without the kit (the corpus case in #781's motivation).
+- If the store lived in the kit, the recovery rules for a tessera directory would be specified in two repositories.
+
+- ADR-0062 §1 already made this kind of cut: an engine-neutral scan in `tessera-io` and the DataFusion adapter alone in `tessera-query`, so that the crate the wheel links stays free of DataFusion. `tessera-wasm` depends on `tessera-core` only.
+
+**Not checked:** how much of `tessera-io`'s stream writer and journal would move into such a crate, and what that costs.
+
+

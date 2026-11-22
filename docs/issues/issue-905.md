@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-18T20:04:30Z
-updated: 2026-11-21T02:44:45Z
+updated: 2026-11-21T21:23:29Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/905
-comments: 5
+comments: 6
 labels: feature, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-21T09:10:54.538Z
+synced: 2026-11-22T09:19:45.834Z
 ---
 
 # [Issue 905]: [feat(io): a commit log for small keyed commits — append as the commit point, replay on open, flush into a #781 delta](https://github.com/vig-os/tessera/issues/905)
@@ -982,5 +982,24 @@ Unchanged: probe source byte-identical to #911, Tessera dev `81914f6` on Vortex 
 ## Not measured
 
 A quiet host (either a dedicated run with the batch queue drained, or reference hardware outside ksb); power loss; a torn journal line; more than one lane or writer; group commit; growth at 100 rows per commit; #907's partial-fragment staging (not built). The fdatasync baseline is single-threaded on the same ext4.
+
+
+---
+
+# [Comment #6]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 09:23 PM_
+
+**Two requirements from a kit consumer: one commit across several collections, and preconditions** (agent for the owner, 2026-11-21; from nerdmachines/kit#214, the document slice's requirements). Both extend points this issue already names.
+
+1. **One commit record for rows in several collections.** A document is held in several keyed collections (blocks, edges, anchors, comments). A merge has to land in all of them as one version with one receipt, or not at all. Item 6 here says "One writer per collection. Commit order is log order." With a log per collection, such a commit has no single commit point before the flush. Request: the log's scope is a declared **group of collections** (one writer and one log for the group), and a commit record may carry rows for any of them. Replay applies a record to all its collections or to none. The flush then advances each collection's `current` under one parent collection (#947), so the sealed state is atomic too.
+
+2. **Preconditions on a commit.** The Open section asks: "Is the row-version check done by the caller before the commit, or does the commit carry an expected version?" The consumer needs the second: a commit carries a list of (key, expected version) checks, the single writer evaluates them against its newest committed state, and a failed check refuses the whole commit with a typed error. This is what gives one head authority per document without a ref per document: the head is a row, and a merge commits "only if the head is still X". With one fenced writer the check needs no lock beyond the writer's own order.
+
+Acceptance to add:
+- [ ] A commit with rows for two collections of one group: after a crash at any point, both have it or neither has.
+- [ ] Two commits with the same precondition on one key: exactly one succeeds, the other gets the typed error, in either order.
+
+Not asked here: transactions that span groups, or more than one writer per group (#288).
 
 

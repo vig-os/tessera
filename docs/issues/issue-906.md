@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-18T20:04:31Z
-updated: 2026-11-18T21:19:20Z
+updated: 2026-11-21T21:23:32Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/906
-comments: 0
+comments: 2
 labels: feature, area:core, adr
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-19T09:52:08.708Z
+synced: 2026-11-22T09:19:45.314Z
 ---
 
 # [Issue 906]: [feat(repo): declared retention classes for keyed collections — make superseded bases and deltas reclaimable at compaction](https://github.com/vig-os/tessera/issues/906)
@@ -64,4 +64,20 @@ A retention policy can be declared (#781) but nothing can act on it: no verb mak
 ## Related
 
 #781 (retention policy line, compaction), #904 (profile), #905 (commit log), ADR-0036 (gc open), ADR-0033 (WORM roles), #591 (redacting commit), #795.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 08:39 PM_
+
+Addition to **Open** (agent for the owner, 2026-11-21; from nerdmachines/kit#214 and #947): **retention across a fork.** With workspaces built in the kit as a second lineage of `current` collections over the same base (#947), a class is declared per collection while reachability is per repository. A generation that the main lineage's class would release must stay while any ref of any lineage still reaches it, and `gc` decides on reachability alone. A class may want an upper bound on how long a workspace may hold a superseded generation; the kit would enforce that by forgetting the workspace, not tessera by reclaiming under it.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 09:23 PM_
+
+Second addition to **Open** (agent for the owner, 2026-11-21; from nerdmachines/kit#214, the document slice's requirements): **a class needs a lower bound set by live workspaces.** A three-way merge of a workspace needs the main lineage's deltas written since the workspace's fork point, or a readable version at that point. Under `latest-only`, a compaction on the main lineage would release them while the workspace is still open. Proposal: retention never releases a generation that a pin reaches (durable pins, comment on #947), and the kit pins each live fork point and each merge base. A class then reads "`latest-only`, except what is pinned". The kit bounds how old a pin may get (an offline node's fork point cannot be held forever) by removing the pin, after which the workspace merges without an ancestor, by value.
 

@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-21T02:14:04Z
-updated: 2026-11-21T02:14:04Z
+updated: 2026-11-21T20:39:37Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/945
-comments: 0
+comments: 2
 labels: feature, epic, area:core, area:io
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-21T09:10:52.010Z
+synced: 2026-11-22T09:19:44.197Z
 ---
 
 # [Issue 945]: [epic: what the kit's data engine needs from tessera — index of the requests and what blocks kit first](https://github.com/vig-os/tessera/issues/945)
@@ -85,4 +85,20 @@ The order of work is the owner's and the architect's; the triage on #778 (2026-1
 ## Related
 
 nerdmachines/kit#97 (decisions), nerdmachines/kit#42 (owner answers of 2026-11-18 and 2026-11-21), nerdmachines/kit#74 (kit-query), nerdmachines/kit#98 (stage-one benchmark), nerdmachines/kit#113 (rerun of the withdrawn write-side results). #778 (order of work), #654 (provider epic).
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 11:09 AM_
+
+Added to the index (agent, 2026-11-21): #946, a correctness report on the repository's ref and object writes (`repo.rs`: the ref compare-and-set is a read followed by a write, nothing is synced or renamed, `gc` can race a commit). It was found by reading the code while checking what advancing `current` (#781) can rely on. It sits before anything in kit that advances a ref from more than one process. Related prior issue: #288 (multi-writer commits, Icechunk's conditional write).
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 08:39 PM_
+
+Added to the index (agent, 2026-11-21), after the owner's direction that workspaces and merges live in the kit: #947 (refs to collections, a version edge on collections, `gc` through members), a comment on #781 (delta order from the member list when two lineages share a base), a comment on #906 (retention across a fork), and a comment on #292 (the ownership boundary once a local store is part of tessera). Order of need for the kit: #946, then #947 with #781.
 
