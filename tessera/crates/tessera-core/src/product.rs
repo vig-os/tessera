@@ -91,8 +91,8 @@ impl ProductBuilder {
         self.refs.len() != before
     }
 
-    /// Remove the block `name` and its derived family ([`crate::block::derived_family`]: its `.cidx`
-    /// sidecar and, for pyramid level 0, its derived levels), as `commit --remove-block` does.
+    /// Remove the block `name` and its derived family ([`crate::block::derived_family`]: its derived
+    /// `.cidx` sidecar and, for pyramid level 0, its derived levels), as `commit --remove-block` does.
     /// Returns the names removed, `name` first, or `None` if the version holds no block `name`
     /// (nothing is removed then). A manifest edit only, like [`remove_block`](Self::remove_block).
     pub fn remove_block_with_derived(&mut self, name: &str) -> Option<Vec<BlockName>> {

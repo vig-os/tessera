@@ -182,11 +182,12 @@ marks it derived (the chunk-index sidecar `<name>.cidx`, §5d; the levels above 
 derived of the product that computed it, so a block **copied** into another product is primary there, whatever its
 class at the source. A derived block is never copied: it is computed by the writer that marks it derived. A
 `.cidx` is bound to its block by name only (its `indexes` records the name, not the block's digest), so a copied
-one proves nothing about the block it claims to describe. A writer that copies a block whose source carries an
-index MUST NOT copy the index; it MAY rebuild it from the copied block, which is then derived, and a copied
-`.cidx` is primary under its own name. A writer that **removes** a
-block removes its derived family with it: its `<name>.cidx`, and for a pyramid's `<base>/0` every derived level
-`<base>/<n>` and its `.cidx`, so no accelerator outlives its data. Every block, whatever its class, carries a digest
+one proves nothing about the block it claims to describe. A writer that copies blocks MUST NOT copy a chunk index
+(a block of kind `chunk_index`, or whose spec carries `indexes`), whatever its name or class; when the source
+indexes the copied block it MAY rebuild the index from the copied block, which is then derived. A writer that
+**removes** a block removes its derived family with it: its derived `<name>.cidx`, and for a pyramid's `<base>/0`
+every derived level `<base>/<n>` and its derived `.cidx`, so no accelerator outlives its data. A primary block of
+one of those names is data of its own and stays. Every block, whatever its class, carries a digest
 that is checked against its payload.
 `name` MUST follow the block-name grammar of [ADR-0063](../../docs/adr/0063-block-name-grammar.md): one or
 more `/`-separated segments of `[A-Za-z0-9._-]+`, no segment `.` or `..`, at most 255 bytes. A reader MUST
@@ -476,6 +477,9 @@ or table row-groups). It is **optional** — present only when a writer chooses 
   consumer MAY drop and rebuild it). Products sealed before the class moved to the BlockRef (#720) also carry
   `"class": "derived"` inside the spec, which is opaque and changes nothing. `root` is the sub-block MMR root over the
   per-entry digests (the §3 construction), i.e. the data block's per-chunk confirmable Merkle root.
+- **Trust.** A reader MUST NOT take statistics (aggregates, pruning bounds) from a chunk index unless its class is
+  derived and its `indexes` names the block; otherwise it computes them from the data, as for an unindexed block.
+  A primary block that looks like an index is a claim someone supplied, not the writer's index (#720).
 - **Use.** A consumer reads the sidecar for **per-chunk inclusion proofs** and **predicate pruning**
   (skip a sub-block whose `[min,max]` cannot match a query) without re-reading the data; the rolled-up
   `stats` are the leaves of the multiscale aggregate pyramid (ADR-0028 §3). A consumer that doesn't need

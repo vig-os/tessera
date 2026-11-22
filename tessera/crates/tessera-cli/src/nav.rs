@@ -1866,12 +1866,11 @@ fn stats_from_chunk_index<R: std::io::Read + std::io::Seek>(
     if !dtype_ok {
         return None;
     }
-    let sidecar = tessera_core::block::cidx_name(block);
-    let bref = r.manifest().blocks.iter().find(|b| b.name == sidecar)?;
-    // The sidecar's own spec records which block it indexes; refuse an index about something else.
-    if bref.spec.get("indexes").and_then(|v| v.as_str()) != Some(block) {
-        return None;
-    }
+    // Only the writer's own index: derived, a chunk index, declaring this block (#720). A primary
+    // block that looks like one is a claim someone supplied, and a refusal here falls back to the data.
+    let sidecar = tessera_core::block::trusted_chunk_index(&r.manifest().blocks, block)?
+        .name
+        .clone();
     let bytes = r.read_block(&sidecar).ok()?;
     let index = tessera_core::chunk_index::ChunkIndex::from_bytes(&bytes).ok()?;
 

@@ -82,10 +82,11 @@ pub fn commit(
 
     // Removes first — manifest edit only; the data objects are left for other versions / gc. A
     // block's derived family goes with it: an accelerator is a function of the block it was computed
-    // from and bound to it by name only. A `.cidx` left behind would be inherited by the next
+    // from and bound to it by name only. A derived `.cidx` left behind would be inherited by the next
     // `--add-block …:<name>`, and `tessera stats` would serve the OLD block's statistics for the NEW
     // one, labelled exact (#347 review); pyramid levels left behind without level 0 would be the
-    // product's only blocks, real data under the empty set's `content_hash` (#720 review).
+    // product's only blocks, real data under the empty set's `content_hash` (#720 review). A primary
+    // block of one of those names is data of its own and stays; no reader takes aggregates from it.
     let mut removed_derived = 0;
     for name in removes {
         let gone = b.remove_block_with_derived(name).ok_or_else(|| {
@@ -172,16 +173,22 @@ struct AddedBlock {
 }
 
 /// Load an already-encoded block from another sealed `.tsra` for `--add-block`. `spec` is
-/// `[NEWNAME=]SOURCE.tsra:SRCBLOCK`; the block's bytes (digest-verified on read) and its kind, digest
-/// and spec are copied verbatim — no re-encoding.
+/// `[NEWNAME=]SOURCE.tsra:SRCBLOCK`; the block's bytes and its kind, digest and spec are copied
+/// verbatim — no re-encoding. SOURCE is verified first exactly as `tessera verify` does it (its
+/// container layout and every payload), so a product `verify` rejects is never read from.
 ///
 /// The copy is **primary**, whatever its class in the source (ADR-0028 §4, #720). A derived block is
 /// derived *of the product that computed it*: a pyramid level is a downsample of that product's
-/// level 0, a `.cidx` an index of that product's block. In another product it is a function of
-/// nothing there, so it is data the user supplies, and a block a user supplies is primary: it is part
-/// of the new version's `content_hash`. There is no option to land a copy derived. That holds for an
-/// index too: `--add-block SRC.tsra:volume.cidx` lands primary, and copying `volume` never brings the
-/// source's `volume.cidx` along (see [`rebuild_indexes`]).
+/// level 0. In another product it is a function of nothing there, so it is data the user supplies,
+/// and a block a user supplies is primary: it is part of the new version's `content_hash`. There is
+/// no option to land a copy derived.
+///
+/// A **chunk index** is refused, whatever it is called and whatever its class
+/// ([`BlockRef::is_chunk_index`]): its statistics are a claim about a block that only a name binds
+/// it to, so it is rebuilt from the data and never copied. Copying the data block from a source that
+/// indexes it gets the index ([`rebuild_indexes`]).
+///
+/// [`BlockRef::is_chunk_index`]: tessera_core::block::BlockRef::is_chunk_index
 fn load_block(spec: &str) -> Result<AddedBlock> {
     let (newname, locator) = match spec.split_once('=') {
         Some((n, rest)) => (Some(n), rest),
@@ -201,6 +208,20 @@ fn load_block(spec: &str) -> Result<AddedBlock> {
         .find(|b| b.name == srcblock)
         .ok_or_else(|| Error::Invalid(format!("no block '{srcblock}' in {path}")))?
         .clone();
+    if src_ref.is_chunk_index() {
+        let data = src_ref
+            .spec
+            .get("indexes")
+            .and_then(|v| v.as_str())
+            .map_or_else(|| "its data block".to_string(), |d| format!("'{d}'"));
+        return Err(Error::Invalid(format!(
+            "--add-block: '{srcblock}' in {path} is a chunk index. Chunk indexes are rebuilt from \
+             the data and never copied: copy {data} from a source that indexes it (commit rebuilds \
+             its index), or re-write the product"
+        )));
+    }
+    // The same strictness as `tessera verify`, before a byte is taken from the source.
+    r.verify_payloads(path)?;
     let bytes = r.read_block(srcblock)?; // digest-verified on read
     let index_name = tessera_core::block::cidx_name(srcblock);
     let source_indexed = r.manifest().blocks.iter().any(|b| b.name == index_name);
@@ -231,9 +252,8 @@ fn load_block(spec: &str) -> Result<AddedBlock> {
 /// byte the index a writer would emit for that block, so it may stay out of `content_hash`.
 ///
 /// A block the writer would not index (a float array, a table without an integer `row_index`) gets
-/// none. A rebuilt index's name may not also be claimed by an explicit `--add-block`: the copy would
-/// sit, under the name `stats` reads, beside the index computed from the data. That is refused,
-/// with the way out (copy the source's index under another name, where it lands primary).
+/// none. A rebuilt index's name may not also be claimed by an explicit `--add-block` (no index, which
+/// [`load_block`] refuses, but a block copied under that name): that is refused, naming the clash.
 fn rebuild_indexes(
     added: &[AddedBlock],
 ) -> Result<Vec<(tessera_core::block::BlockRef, BlockPayload)>> {
@@ -246,9 +266,8 @@ fn rebuild_indexes(
         };
         if added.iter().any(|o| o.block_ref.name == index_ref.name) {
             return Err(Error::Invalid(format!(
-                "--add-block: '{0}' is the index commit rebuilds for '{1}' from its bytes; a copied \
-                 index is never trusted under that name. Drop the copy, or land it under another \
-                 name ('other.cidx=SOURCE.tsra:{0}'), where it is primary data",
+                "--add-block: '{0}' is the name of the index commit rebuilds for '{1}' from its \
+                 bytes; land the other copy under another name",
                 index_ref.name, a.block_ref.name
             )));
         }
@@ -992,10 +1011,11 @@ mod tests {
         );
     }
 
-    /// #720 round 3: a derived block is computed by the writer that marks it derived, never copied.
-    /// Copying a block whose source carried an index rebuilds the index from the copied bytes (byte
-    /// for byte the writer's own, under the name the block lands with) and lands it derived. A copied
-    /// `.cidx` lands primary, under any name: alone, or renamed (`other.cidx=SRC:volume.cidx`).
+    /// #720 rounds 3 and 4: a derived block is computed by the writer that marks it derived, never
+    /// copied. Copying a block whose source carried an index rebuilds the index from the copied bytes
+    /// (byte for byte the writer's own, under the name the block lands with) and lands it derived. A
+    /// copy of the index itself is refused, under any name: alone, renamed
+    /// (`other.cidx=SRC:volume.cidx`), or beside its block, and the lineage does not move.
     #[test]
     fn copying_a_block_rebuilds_its_index_and_never_copies_it() {
         use tessera_core::block::array::ArraySpec;
@@ -1031,44 +1051,39 @@ mod tests {
                 .0
         };
 
-        // (adds, then each `.cidx` the tip must hold: (name, class, the ref it must equal if rebuilt))
-        type Want = Vec<(
-            &'static str,
-            BlockClass,
-            Option<tessera_core::block::BlockRef>,
-        )>;
+        // (adds, then each `.cidx` the tip must hold: (name, class, the rebuilt ref it must equal))
+        type Want = Vec<(&'static str, BlockClass, tessera_core::block::BlockRef)>;
         let cases: Vec<(Vec<String>, Want)> = vec![
             // The data block alone: its index is rebuilt, byte-identical to a fresh build.
             (
                 vec![format!("{s}:volume")],
-                vec![("volume.cidx", BlockClass::Derived, Some(fresh("volume")))],
+                vec![("volume.cidx", BlockClass::Derived, fresh("volume"))],
             ),
             // Renamed: the rebuilt index follows the name the block lands with.
             (
                 vec![format!("ct={s}:volume")],
-                vec![("ct.cidx", BlockClass::Derived, Some(fresh("ct")))],
-            ),
-            // The `.cidx` alone is a copy like any other: primary.
-            (
-                vec![format!("{s}:volume.cidx")],
-                vec![("volume.cidx", BlockClass::Primary, None)],
-            ),
-            // Only the `.cidx` renamed: primary, and nothing is rebuilt.
-            (
-                vec![format!("other.cidx={s}:volume.cidx")],
-                vec![("other.cidx", BlockClass::Primary, None)],
-            ),
-            // Both: the copy is primary under its new name, and the index is rebuilt beside it.
-            (
-                vec![format!("{s}:volume"), format!("other.cidx={s}:volume.cidx")],
-                vec![
-                    ("volume.cidx", BlockClass::Derived, Some(fresh("volume"))),
-                    ("other.cidx", BlockClass::Primary, None),
-                ],
+                vec![("ct.cidx", BlockClass::Derived, fresh("ct"))],
             ),
             // A source with no index: none is invented.
             (vec![format!("{o}:volume")], vec![]),
         ];
+        // Each copy of the index is refused (round 3 landed these primary; round 4 refuses them).
+        let refused = [
+            // The `.cidx` alone.
+            vec![format!("{s}:volume.cidx")],
+            // Only the `.cidx` renamed.
+            vec![format!("other.cidx={s}:volume.cidx")],
+            // The block, and its index under another name.
+            vec![format!("{s}:volume"), format!("other.cidx={s}:volume.cidx")],
+        ];
+        for (i, adds) in refused.iter().enumerate() {
+            let repo = dir.path().join(format!("refused{i}"));
+            let lineage = imported(&repo, &base);
+            let before = tip(&repo, &lineage).manifest_hash;
+            let err = commit(&repo, &lineage, &[], adds, &[], &mut Vec::new()).unwrap_err();
+            assert!(err.to_string().contains("never copied"), "{adds:?}: {err}");
+            assert_eq!(tip(&repo, &lineage).manifest_hash, before, "{adds:?}");
+        }
         for (i, (adds, want)) in cases.into_iter().enumerate() {
             let repo = dir.path().join(format!("repo{i}"));
             let lineage = imported(&repo, &base);
@@ -1083,38 +1098,57 @@ mod tests {
             for (name, class, rebuilt) in &want {
                 let b = got.iter().find(|b| b.name == *name).unwrap();
                 assert_eq!(b.class, *class, "{adds:?}: {name}");
-                match rebuilt {
-                    Some(r) => assert_eq!(*b, r, "{adds:?}: {name} is the writer's own index"),
-                    None => assert_eq!(b.digest, sref.digest, "{adds:?}: {name} is the copy"),
-                }
+                assert_eq!(*b, rebuilt, "{adds:?}: {name} is the writer's own index");
             }
             assert_primary_content_hash(&m);
         }
     }
 
-    /// #720 round 3, the lying-index attack. A crafted int16 product carries a derived `volume.cidx`
-    /// claiming min = max = 7 for data that spans -1024..=3071. It verifies, and `stats` believes it.
-    /// Copying `volume` out of it must never carry that index along: the commit rebuilds the index
-    /// from the data, so `stats` reports the real range, and an explicit copy of the lying index
-    /// under the rebuilt index's name is refused.
-    #[test]
-    fn a_lying_index_never_travels_with_the_block_it_lies_about() {
+    /// A 16³ int16 `volume` whose values span -1024..=3071, beside a forged chunk index of it that
+    /// claims min = max = 7, stored as `index_name` with `class`, sealed at `path`. The forgery has
+    /// the right kind, spec and entry count (one 64³ chunk covers the volume), so only the data can
+    /// tell it is false.
+    fn write_lying(path: &Path, index_name: &str, class: tessera_core::block::BlockClass) {
         use tessera_core::block::array::ArraySpec;
         use tessera_io::array::ArrayData;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (lying, base) = (dir.path().join("lying.tsra"), dir.path().join("base.tsra"));
         let spec = ArraySpec::new(vec![16, 16, 16], "int16");
         let data = ArrayData::I16((0..4096).map(|k| k as i16 - 1024).collect());
         let (br, pl) = tessera_io::array::array_block("volume", &spec, &data).unwrap();
-        // One 64³ chunk covers the whole 16³ volume: a forged entry with the right count.
         let mut forged = tessera_core::chunk_index::ChunkIndex::new();
         forged.push(tessera_core::hash::digest(b"forged"), &[7; 4096]);
-        let (fref, fpl) = tessera_io::chunk_index::chunk_index_block("volume", &forged).unwrap();
+        let (mut fref, fpl) =
+            tessera_io::chunk_index::chunk_index_block("volume", &forged).unwrap();
+        fref.name = tessera_core::block::BlockName::new(index_name).unwrap();
+        fref.class = class;
+        let fpl = BlockPayload::new(fref.name.clone(), fpl.bytes);
         let mut b = PB::new("recon", "DP-lie", "v", "2024-01-01T00:00:00Z");
         b.add_block_ref(br);
         b.add_block_ref(fref);
-        pack(&b.seal().unwrap(), &[pl, fpl], &lying).unwrap();
+        pack(&b.seal().unwrap(), &[pl, fpl], path).unwrap();
+    }
+
+    /// `stats` of `volume` at `path` reports the data's true range, -1024..=3071, by `method`.
+    fn assert_true_range(path: &Path, method: &str) {
+        let v = stats_of(path, "volume");
+        assert_eq!(v["method"], method, "{v}");
+        assert_eq!(v["raw"]["min"].as_f64(), Some(-1024.0), "{v}");
+        assert_eq!(v["raw"]["max"].as_f64(), Some(3071.0), "{v}");
+    }
+
+    /// #720 round 3, the lying-index attack. A crafted int16 product carries a derived `volume.cidx`
+    /// claiming min = max = 7 for data that spans -1024..=3071. It verifies, and `stats` believes it.
+    /// Copying `volume` out of it must never carry that index along: the commit rebuilds the index
+    /// from the data, so `stats` reports the real range, and an explicit copy of the lying index is
+    /// refused.
+    #[test]
+    fn a_lying_index_never_travels_with_the_block_it_lies_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let (lying, base) = (dir.path().join("lying.tsra"), dir.path().join("base.tsra"));
+        write_lying(
+            &lying,
+            "volume.cidx",
+            tessera_core::block::BlockClass::Derived,
+        );
         write_volume(&base, "base", 0, [8, 8, 8]);
 
         // Precondition: the attack is real. The product verifies and `stats` serves the lie.
@@ -1133,7 +1167,7 @@ mod tests {
         let before = tip(&repo, &lineage);
         let adds = [format!("{l}:volume"), format!("{l}:volume.cidx")];
         let err = commit(&repo, &lineage, &[], &adds, &[], &mut Vec::new()).unwrap_err();
-        assert!(err.to_string().contains("rebuilds"), "{err}");
+        assert!(err.to_string().contains("never copied"), "{err}");
         assert_eq!(tip(&repo, &lineage).manifest_hash, before.manifest_hash);
 
         // The block alone: its index is rebuilt from the data, and `stats` reports the real range.
@@ -1150,13 +1184,164 @@ mod tests {
         .unwrap();
         let out = dir.path().join("out.tsra");
         seal_tip(&repo, &lineage, &out);
-        let v = stats_of(&out, "volume");
+        // The rebuilt index is used, and it is true.
+        assert_true_range(&out, "chunk-index-aggregate");
+    }
+
+    /// #720 round 4, the reviewer's attack: the data block from a source with NO index (so nothing
+    /// is rebuilt) beside the lying index, in one commit or two. Every copy of the index is refused,
+    /// whatever it is called and whatever its class in the source, and no version is written. Only
+    /// the data block lands, and `stats` computes its true range from the data.
+    #[test]
+    fn a_chunk_index_is_never_copied_under_any_name_or_class() {
+        use tessera_core::block::BlockClass;
+        let dir = tempfile::tempdir().unwrap();
+        let (plain, base) = (dir.path().join("plain.tsra"), dir.path().join("base.tsra"));
+        // `plain` holds the same volume, unindexed: the lying product minus its index.
+        {
+            let lying = dir.path().join("lying-for-plain.tsra");
+            write_lying(&lying, "volume.cidx", BlockClass::Derived);
+            let mut r = Reader::open(&lying).unwrap();
+            let vref = r.manifest().blocks[0].clone();
+            let bytes = r.read_block("volume").unwrap();
+            let mut b = PB::new("recon", "DP-plain", "v", "2024-01-01T00:00:00Z");
+            b.add_block_ref(vref);
+            pack(
+                &b.seal().unwrap(),
+                &[BlockPayload::new("volume".parse().unwrap(), bytes)],
+                &plain,
+            )
+            .unwrap();
+        }
+        write_volume(&base, "base", 0, [8, 8, 8]);
+        let p = plain.to_str().unwrap();
+        // The forged index under `.cidx` and non-`.cidx` names, derived and primary.
+        let mut sources = Vec::new();
+        for (i, (name, class)) in [
+            ("volume.cidx", BlockClass::Derived),
+            ("volume.cidx", BlockClass::Primary),
+            ("notes", BlockClass::Derived),
+            ("notes", BlockClass::Primary),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = dir.path().join(format!("lying{i}.tsra"));
+            write_lying(&path, name, class);
+            sources.push(format!("{}:{name}", path.to_str().unwrap()));
+        }
+        let renamed = format!("volume.cidx={}", sources[2]);
+        let attempts: Vec<Vec<String>> = sources
+            .iter()
+            .flat_map(|l| [vec![format!("{p}:volume"), l.clone()], vec![l.clone()]])
+            .chain([vec![format!("{p}:volume"), renamed]])
+            .collect();
+        for (i, adds) in attempts.iter().enumerate() {
+            let repo = dir.path().join(format!("repo{i}"));
+            let lineage = imported(&repo, &base);
+            let before = tip(&repo, &lineage).manifest_hash;
+            let err = commit(&repo, &lineage, &[], adds, &[], &mut Vec::new()).unwrap_err();
+            assert!(err.to_string().contains("never copied"), "{adds:?}: {err}");
+            assert_eq!(tip(&repo, &lineage).manifest_hash, before, "{adds:?}");
+        }
+
+        // As two commits: the index first is refused; the data block then lands alone.
+        let repo = dir.path().join("repo-two");
+        let lineage = imported(&repo, &base);
+        let before = tip(&repo, &lineage).manifest_hash;
+        assert!(commit(
+            &repo,
+            &lineage,
+            &[],
+            &[sources[0].clone()],
+            &[],
+            &mut Vec::new()
+        )
+        .is_err());
+        assert_eq!(tip(&repo, &lineage).manifest_hash, before);
+        commit(
+            &repo,
+            &lineage,
+            &[],
+            &[format!("{p}:volume")],
+            &[],
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let m = tip(&repo, &lineage);
+        let names: Vec<&str> = m.blocks.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["base", "volume"], "only the data block landed");
+        let out = dir.path().join("out.tsra");
+        seal_tip(&repo, &lineage, &out);
+        assert_true_range(&out, "full-decode-exact-integer");
+    }
+
+    /// #720 round 4: a product written with a primary chunk index (no commit involved, the writer
+    /// builds it directly) verifies, but `stats` never takes aggregates from it: a primary block is
+    /// data someone supplied, not the writer's index, so `stats` computes from the data, as it does
+    /// for an unindexed block. The same forgery derived is served, which is what makes it the test.
+    #[test]
+    fn stats_never_trusts_a_primary_chunk_index() {
+        use tessera_core::block::BlockClass;
+        let dir = tempfile::tempdir().unwrap();
+        let (primary, derived) = (dir.path().join("p.tsra"), dir.path().join("d.tsra"));
+        write_lying(&primary, "volume.cidx", BlockClass::Primary);
+        write_lying(&derived, "volume.cidx", BlockClass::Derived);
+        Reader::open(&primary)
+            .unwrap()
+            .verify_payloads("primary")
+            .unwrap();
         assert_eq!(
-            v["method"], "chunk-index-aggregate",
-            "the rebuilt index is used"
+            stats_of(&derived, "volume")["raw"]["min"].as_f64(),
+            Some(7.0),
+            "precondition: a derived forgery is served"
         );
-        assert_eq!(v["raw"]["min"].as_f64(), Some(-1024.0));
-        assert_eq!(v["raw"]["max"].as_f64(), Some(3071.0));
+        assert_true_range(&primary, "full-decode-exact-integer");
+    }
+
+    /// #720 round 4 nit: `--remove-block volume` cascades only to DERIVED blocks. A primary
+    /// `volume.cidx` (only a hand-built product carries one) is data of its own: it stays, and the
+    /// summary counts no derived removal.
+    #[test]
+    fn removal_never_cascades_to_a_primary_index() {
+        use tessera_core::block::BlockClass;
+        let dir = tempfile::tempdir().unwrap();
+        let (src, repo) = (dir.path().join("p.tsra"), dir.path().join("repo"));
+        write_lying(&src, "volume.cidx", BlockClass::Primary);
+        let lineage = imported(&repo, &src);
+        let mut out = Vec::new();
+        commit(&repo, &lineage, &[], &[], &["volume".into()], &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("  blocks     +0 -1\n"), "{out}");
+        let m = tip(&repo, &lineage);
+        let names: Vec<&str> = m.blocks.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["volume.cidx"]);
+        assert!(m.blocks[0].is_primary());
+    }
+
+    /// #720 round 4 nit: `--add-block` reads only from a source `tessera verify` accepts. A source
+    /// with bytes after its end records opens (its seal holds) but does not verify, and the copy is
+    /// refused with `verify`'s own error before anything is written.
+    #[test]
+    fn add_block_refuses_a_source_verify_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, base) = (dir.path().join("src.tsra"), dir.path().join("base.tsra"));
+        write_volume(&src, "volume", 0, [8, 8, 8]);
+        write_volume(&base, "base", 0, [8, 8, 8]);
+        let mut bytes = std::fs::read(&src).unwrap();
+        bytes.extend_from_slice(b"trailing");
+        std::fs::write(&src, bytes).unwrap();
+        let mut r = Reader::open(&src).expect("precondition: the seal still opens");
+        let want = r.verify_payloads("x").unwrap_err();
+        assert!(matches!(want, Error::Container(_)), "precondition: {want}");
+
+        let repo = dir.path().join("repo");
+        let lineage = imported(&repo, &base);
+        let before = tip(&repo, &lineage).manifest_hash;
+        let add = format!("{}:volume", src.to_str().unwrap());
+        let err = commit(&repo, &lineage, &[], &[add], &[], &mut Vec::new()).unwrap_err();
+        assert!(matches!(err, Error::Container(_)), "{err}");
+        assert_eq!(tip(&repo, &lineage).manifest_hash, before);
     }
 
     /// #720 review: removing pyramid level 0 takes its derived levels with it, so the result is

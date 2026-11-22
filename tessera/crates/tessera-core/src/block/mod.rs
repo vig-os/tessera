@@ -139,6 +139,33 @@ impl BlockRef {
     pub fn is_primary(&self) -> bool {
         self.class.is_primary()
     }
+
+    /// True when the block is a chunk index by what it is, whatever it is called and whatever its
+    /// class: its kind is [`BlockKind::ChunkIndex`], or its spec names a block it indexes
+    /// (`indexes`, SPEC §5d). The test `tessera commit --add-block` refuses a copy by (#720): a chunk
+    /// index is computed from the data by the writer, never copied, so a `.cidx` suffix is neither
+    /// needed nor enough to be one.
+    pub fn is_chunk_index(&self) -> bool {
+        self.kind == BlockKind::ChunkIndex || self.spec.get("indexes").is_some()
+    }
+}
+
+/// The chunk index of the data block `data_name` that a reader may take aggregates from: the block
+/// named [`cidx_name`]`(data_name)`, of kind [`BlockKind::ChunkIndex`], **derived**, whose spec says
+/// it `indexes` `data_name`. `None` otherwise, and the reader computes from the data, as it does for
+/// an unindexed block.
+///
+/// Derived is the writer's mark (ADR-0028 §4): only a writer computing the index from the block lands
+/// one derived, and `tessera commit` never copies one (#720). A primary block that looks like an
+/// index is data someone supplied; its statistics are a claim about the block, not a function of it,
+/// so it is never consulted. A reader still checks the index against the block's shape before use.
+pub fn trusted_chunk_index<'a>(blocks: &'a [BlockRef], data_name: &str) -> Option<&'a BlockRef> {
+    let name = cidx_name(data_name);
+    blocks.iter().find(|b| b.name == name).filter(|b| {
+        b.kind == BlockKind::ChunkIndex
+            && !b.is_primary()
+            && b.spec.get("indexes").and_then(|v| v.as_str()) == Some(data_name)
+    })
 }
 
 /// The name of the chunk-index sidecar (`.cidx`, SPEC §5d) of the data block `data_name`: the sibling
@@ -166,13 +193,13 @@ fn pyramid_level(name: &str) -> Option<(&str, u32)> {
 /// The blocks of `blocks` that are derived from the block `name`, by the naming rules their writers
 /// use, so they go when `name` is removed (`tessera commit --remove-block`, ADR-0028 §4):
 ///
-/// - its chunk-index sidecar [`cidx_name`]`(name)`, whatever its class: a sidecar is bound to its
-///   block by name only, and products sealed before the class existed (#720) carry it primary, so
-///   leaving it behind would let the next block of that name inherit statistics of the old one
-///   (#347);
+/// - its chunk-index sidecar [`cidx_name`]`(name)`, when **derived**;
 /// - when `name` is level 0 of a pyramid (`<base>/0`), every **derived** level `<base>/<n>`,
-///   `n ≥ 1`, and the sidecar of each. Only derived ones: a primary block of that name is data of its
-///   own, not a downsample of level 0.
+///   `n ≥ 1`, and the derived sidecar of each.
+///
+/// Only derived blocks: a primary block of one of those names is data of its own, not something
+/// computed from `name`. A primary `name.cidx` stays, and no reader takes aggregates from it
+/// ([`trusted_chunk_index`]), so the next block of that name inherits nothing from it (#347, #720).
 ///
 /// Without this, removing level 0 left its downsamples as the product's only blocks: real data under
 /// the empty set's `content_hash`. In manifest order; `name` itself is not listed.
@@ -194,6 +221,7 @@ pub fn derived_family<'a>(name: &str, blocks: &'a [BlockRef]) -> Vec<&'a BlockNa
         .collect();
     blocks
         .iter()
+        .filter(|b| !b.is_primary())
         .filter(|b| {
             let n = b.name.as_str();
             n == cidx
@@ -300,20 +328,24 @@ mod tests {
         assert!(serde_json::to_value(BlockClass::Primary).is_err());
     }
 
-    /// Removing a block takes its derived family with it: its `.cidx` whatever the class, and for
-    /// pyramid level 0 every derived level and their sidecars, never a primary block of a level
-    /// name, a non-canonical level spelling, another base's levels, or a partition leaf.
+    /// Removing a block takes its derived family with it: its derived `.cidx`, and for pyramid level
+    /// 0 every derived level and their derived sidecars, never a primary block of one of those names
+    /// (a `.cidx` or a level), a non-canonical level spelling, another base's levels, or a partition
+    /// leaf.
     #[test]
     fn derived_family_follows_the_writers_naming_rules() {
         let d = BlockClass::Derived;
         let p = BlockClass::Primary;
         let blocks = [
             block("volume/0", "blake3:00", p),
-            block("volume/0.cidx", "blake3:01", p), // a pre-#720 sidecar: primary, still bound by name
+            block("volume/0.cidx", "blake3:01", d),
             block("volume/1", "blake3:02", d),
             block("volume/1.cidx", "blake3:03", d),
             block("volume/2", "blake3:04", d),
-            block("volume/3", "blake3:05", p), // primary: data of its own
+            block("volume/2.cidx", "blake3:0a", p), // primary: data of its own, not an index of /2
+            block("volume/3", "blake3:05", p),      // primary: data of its own
+            block("ct", "blake3:0b", p),
+            block("ct.cidx", "blake3:0c", p), // primary: data of its own, not an index of ct
             block("volume/02", "blake3:06", d), // not a level spelling the writer uses
             block("other/1", "blake3:07", d),
             block("pairs/0000", "blake3:08", p),
@@ -332,12 +364,62 @@ mod tests {
         assert_eq!(names("volume/1"), ["volume/1.cidx"]);
         assert!(names("volume/3").is_empty());
         assert!(
+            names("volume/2").is_empty(),
+            "a primary .cidx is no sidecar"
+        );
+        assert!(names("ct").is_empty(), "a primary .cidx is no sidecar");
+        assert!(
             names("pairs/0000").is_empty(),
             "a partition leaf is no pyramid level 0"
         );
         assert!(names("absent").is_empty());
         assert_eq!(cidx_name("volume/0"), "volume/0.cidx");
         assert_eq!(pyramid_level_name("volume", 2), "volume/2");
+    }
+
+    /// A reader takes aggregates only from a derived chunk-index block named for, and declaring, the
+    /// block; `is_chunk_index` knows an index by its kind or its `indexes` key, never by its name.
+    #[test]
+    fn only_a_derived_index_of_the_block_is_trusted() {
+        let index = |name: &str, kind: BlockKind, class: BlockClass, indexes: &str| BlockRef {
+            name: BlockName::new(name).unwrap(),
+            kind,
+            digest: Some("blake3:00".into()),
+            class,
+            spec: json!({"recipe": "chunk_index@1", "indexes": indexes}),
+        };
+        let (d, p, ci) = (
+            BlockClass::Derived,
+            BlockClass::Primary,
+            BlockKind::ChunkIndex,
+        );
+        let good = index("volume.cidx", ci, d, "volume");
+        assert_eq!(
+            trusted_chunk_index(std::slice::from_ref(&good), "volume"),
+            Some(&good)
+        );
+        for (bad, why) in [
+            (index("volume.cidx", ci, p, "volume"), "primary"),
+            (index("volume.cidx", ci, d, "ct"), "indexes another block"),
+            (
+                index("volume.cidx", BlockKind::Array, d, "volume"),
+                "not a chunk index",
+            ),
+            (index("volume.idx", ci, d, "volume"), "not the sidecar name"),
+        ] {
+            assert_eq!(trusted_chunk_index(&[bad], "volume"), None, "{why}");
+        }
+
+        assert!(good.is_chunk_index());
+        assert!(index("notes", ci, p, "volume").is_chunk_index(), "by kind");
+        assert!(
+            index("notes", BlockKind::Array, p, "volume").is_chunk_index(),
+            "by schema"
+        );
+        let mut plain = block("volume.cidx", "blake3:00", p);
+        assert!(!plain.is_chunk_index(), "a name is not an index");
+        plain.spec = json!({"dtype": "int16"});
+        assert!(!plain.is_chunk_index());
     }
 
     /// `content_root` folds the primary digests in manifest order, skips derived ones, gives the

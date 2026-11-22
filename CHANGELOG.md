@@ -103,9 +103,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is derived of the product that computed it). It never copies a derived block: when the source indexes the copied
   block, `commit` rebuilds `<name>.cidx` from the copied bytes, with the writers' own `array_chunk_index` /
   `table_chunk_index` (`tessera_io::chunk_index::rebuild_chunk_index_block`), and lands that derived. A source's
-  index is bound to its block by name only, so its bytes are never trusted; a `.cidx` copied explicitly is primary,
-  and one that would take a rebuilt index's name is refused. `tessera commit --remove-block` removes the block's derived family
-  with it: its `.cidx` (as before) and, for a pyramid's `<base>/0`, its derived levels and their sidecars
+  index is bound to its block by name only, so its bytes are never trusted: `--add-block` refuses to copy any chunk
+  index (kind `chunk_index`, or a spec with `indexes`), whatever its name or class, and reads only from a source
+  `tessera verify` accepts. `tessera stats` and `LogicalTableView` pruning take aggregates only from a derived index
+  of the block (`block::trusted_chunk_index`); a primary look-alike is ignored and the data is read instead.
+  `tessera commit --remove-block` removes the block's derived family with it: its derived `.cidx` (a primary one
+  stays) and, for a pyramid's `<base>/0`, its derived levels and their sidecars
   (`ProductBuilder::remove_block_with_derived`, `block::derived_family`, with the writers' naming rules
   `block::cidx_name` / `block::pyramid_level_name`); the commit summary counts the cascade, `-1 (+2 derived)`. A
   derived block is still sealed: `manifest_hash` covers it, its digest and its class, and its payload is checked

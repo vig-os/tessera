@@ -537,16 +537,16 @@ enum Cmd {
         /// Attach an already-encoded block from another `.tsra`: `[NAME=]SOURCE.tsra:BLOCK`
         /// (composition, not encoding). Repeatable.
         ///
-        /// The copy lands primary (part of `content_hash`), whatever its class in SOURCE. A derived
-        /// block is never copied: when SOURCE indexes BLOCK, the index `NAME.cidx` is rebuilt from
-        /// the copied bytes and lands derived. A `.cidx` copied explicitly is primary data, and may
-        /// not take the name of an index being rebuilt.
+        /// SOURCE must pass `tessera verify`. The copy lands primary (part of `content_hash`),
+        /// whatever its class in SOURCE. A chunk index is never copied, whatever it is called:
+        /// when SOURCE indexes BLOCK, the index `NAME.cidx` is rebuilt from the copied bytes and
+        /// lands derived.
         #[arg(long = "add-block")]
         add_block: Vec<String>,
         /// Remove a block by name (manifest edit; the object stays for other versions). Repeatable.
         ///
-        /// Its derived blocks go with it: its `.cidx`, and for pyramid level 0 (`BASE/0`) the
-        /// levels above it and their indexes.
+        /// Its derived blocks go with it: its derived `.cidx`, and for pyramid level 0 (`BASE/0`)
+        /// the derived levels above it and their indexes.
         #[arg(long = "remove-block")]
         remove_block: Vec<String>,
     },
