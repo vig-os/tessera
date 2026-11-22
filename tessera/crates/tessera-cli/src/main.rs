@@ -61,7 +61,7 @@ fn open_local_or_url(arg: &std::path::Path) -> tessera_core::Result<Box<dyn Tsra
 /// methods `inspect` / `verify` / `extract` actually need (manifest access, per-block read,
 /// bounded-memory stream). Hides the concrete `R` (local `File` vs `ObjectStoreReader`)
 /// behind a single boxed handle.
-trait TsraSource {
+pub(crate) trait TsraSource {
     fn manifest(&self) -> &tessera_core::Manifest;
     /// Bounded-memory copy of a block's bytes into `w`, digest-verified after the last byte.
     /// Delegates to [`Reader::stream_block`] — preserves the same integrity contract: on
@@ -275,6 +275,14 @@ enum Cmd {
         /// no carried block — plain `inspect` never does.
         #[arg(long)]
         resolve_config: bool,
+        /// Under each table block, list the Vortex encodings its payload stores for each column, as
+        /// `<column>=<encoding>[,<encoding>…]`. The manifest records no per-column codec: the codec
+        /// profile chooses it (under `tessera-table-v2`, from the column's dtype; SPEC §5b), and this
+        /// reads what was written from the payload itself. Reads every table block's payload, one
+        /// block at a time and each whole into memory, so it costs a full read of the table bytes.
+        /// Cannot be combined with `--json`.
+        #[arg(long)]
+        encodings: bool,
     },
     /// Walk a product's `derived_from` provenance DAG — producer + recipe + identity per hop.
     ///
@@ -1324,6 +1332,14 @@ fn warn_newer_fields(m: &tessera_core::Manifest) {
     warn_not_interpreted("fields", m.newer_fields());
 }
 
+/// Print the "codec profile not known to this reader" note of every such table block on stderr
+/// (SPEC §5b). Informational: the exit status is unaffected.
+fn note_unknown_codec_profiles(m: &tessera_core::Manifest) {
+    for note in nav::unknown_codec_profile_notes(m) {
+        eprintln!("{note}");
+    }
+}
+
 /// The one stderr warning for keys from a newer format revision (#573, #873): `what` names them
 /// (`fields`, `collection 'x': fields`, `embedded schema rules`). Silent when `newer` is empty.
 pub(crate) fn warn_not_interpreted(what: &str, newer: &[String]) {
@@ -1408,6 +1424,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             verify,
             json,
             resolve_config,
+            encodings,
         } => {
             // `--json` promises *exactly* the serialized manifest (#417/#479 pinned that), and a
             // resolved config is not in the manifest. Refuse the pair rather than silently dropping
@@ -1416,6 +1433,14 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 return Err(tessera_core::Error::Invalid(
                     "--resolve-config cannot be combined with --json: --json is exactly the sealed \
                      manifest, and the resolved config is not part of it. Use one or the other."
+                        .into(),
+                ));
+            }
+            if json && encodings {
+                return Err(tessera_core::Error::Invalid(
+                    "--encodings cannot be combined with --json: --json is exactly the sealed \
+                     manifest, and the stored encodings are read from the payloads, not the \
+                     manifest. Use one or the other."
                         .into(),
                 ));
             }
@@ -1430,6 +1455,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             // typed and supported, so provenance is scriptable without the container internals.
             if json {
                 println!("{}", serde_json::to_string_pretty(r.manifest())?);
+                note_unknown_codec_profiles(r.manifest());
                 return Ok(());
             }
             // Resolve BEFORE printing anything: an unresolvable `config_ref` must fail cleanly, not
@@ -1438,6 +1464,11 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             let resolved = resolve_config
                 .then(|| resolved_config_lines(r.as_mut(), &file, full))
                 .transpose()?;
+            let stored = if encodings {
+                nav::table_encodings(r.as_mut())?
+            } else {
+                std::collections::BTreeMap::new()
+            };
             let m = r.manifest();
             println!("tessera {} · product={}", m.tessera_version, m.product);
             println!("id            {}", m.id);
@@ -1485,7 +1516,11 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 if let Some(line) = nav::table_codec_line(b) {
                     println!("{line}");
                 }
+                if let Some(cols) = stored.get(b.name.as_str()) {
+                    println!("{}", nav::encodings_line(cols));
+                }
             }
+            note_unknown_codec_profiles(m);
             if !m.sources.is_empty() {
                 println!("sources       {}", m.sources.len());
                 for s in &m.sources {
@@ -1556,13 +1591,16 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 let n = r.manifest().blocks.len();
                 r.verify_payloads(&label)?;
                 warn_newer_fields(r.manifest());
+                note_unknown_codec_profiles(r.manifest());
                 println!("OK  {label} verified ({n} blocks)");
             } else {
                 let workers = resource::resolve_write_config(workers, None)?.worker_count();
                 // Returns the block count (verified with L1 seal + L2 payloads) — no extra reopen.
                 let n = tessera_io::verify_payloads_parallel(&file, &label, workers)?;
-                // The file just verified; this re-reads only its manifest, for the warning.
-                warn_newer_fields(&tessera_io::read_manifest_unverified(&file)?);
+                // The file just verified; this re-reads only its manifest, for the warnings.
+                let m = tessera_io::read_manifest_unverified(&file)?;
+                warn_newer_fields(&m);
+                note_unknown_codec_profiles(&m);
                 println!("OK  {label} verified ({n} blocks)");
             }
             Ok(())
@@ -3359,6 +3397,7 @@ mod tests {
             verify: false,
             json: false,
             resolve_config: false,
+            encodings: false,
         })
         .unwrap();
         run(Cmd::Schema {
@@ -3502,6 +3541,7 @@ mod tests {
                 verify: true,
                 json: false,
                 resolve_config: false,
+                encodings: false,
             }),
             Err(tessera_core::Error::BlockIntegrity { .. })
         ));
@@ -3575,6 +3615,7 @@ mod tests {
             verify: false,
             json: false,
             resolve_config: false,
+            encodings: false,
         })
         .unwrap();
         let r = Reader::open(&out).unwrap();

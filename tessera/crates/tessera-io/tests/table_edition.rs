@@ -20,8 +20,9 @@ const TS: &str = "2024-01-01T00:00:00Z";
 /// change of the constant shows up here as the format event it is.
 const EDITION: &str = "core2026.08.3";
 
-/// The codec profile the pinned writer records, spelled out for the same reason.
-const PROFILE: &str = "tessera-table-v1";
+/// The codec profile the pinned writer records, spelled out for the same reason (`tessera-table-v2`
+/// since #828).
+const PROFILE: &str = "tessera-table-v2";
 
 /// What a reader sees of a writer-stamped block: both keys, raw and parsed.
 fn stamped() -> (

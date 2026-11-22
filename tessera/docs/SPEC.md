@@ -270,8 +270,10 @@ A reader MAY decode only a sub-region by reconstructing the store and reading th
 ## 5b. Table block payload (Vortex)
 A block with `kind == "table"` stores its columns as a **single chunked Vortex file** (ADR-0024,
 ADR-0026) — the exact bytes a [Vortex](https://github.com/spiraldb/vortex) reader opens. The table
-spec carries an ordered `columns` list (`name`, `dtype`, optional `codec`), a `rows` count, and an
-optional `row_index`.
+spec carries an ordered `columns` list (`name`, `dtype`), a `rows` count, and an optional `row_index`. A table
+column's `codec` key is not part of the format's codec rule: the block's codec profile chooses each column's codec
+from its dtype (below), so a table writer MUST NOT set it and tessera's table writers refuse a column that does
+*(#828)*. A reader ignores it; manifests sealed before #828 may carry it.
 
 - **Row groups.** The table is **always** written as a chunked Vortex array with a fixed
   **`ROWS_PER_GROUP = 65536`** rows per chunk (the last chunk is the remainder; an empty table is one
@@ -323,12 +325,15 @@ optional `row_index`.
   preserved exactly.
 - **Payload.** The block payload is exactly the serialized Vortex file (data arrays + per-column
   statistics + a flatbuffer footer); its `digest` (§3) is computed over those bytes.
-- **Determinism.** The Vortex writer is byte-deterministic for fixed input + version, **with the ALP
-  float schemes excluded** from the compressor (`vortex.float.alp` / `vortex.float.alprd`): ALP's
-  exponent search is float-codegen-sensitive and otherwise makes the bytes depend on the writer's
-  build profile. Excluding it makes the payload a pure function of the logical data (floats store
-  flat/Pco). Cross-*version* stability is still not guaranteed pre-1.0 — pin the Vortex version
-  (recorded in the corpus provenance).
+- **Determinism.** The Vortex writer is byte-deterministic for fixed input + version + codec profile, with the ALP
+  float schemes (`vortex.float.alp` / `vortex.float.alprd`) excluded: ALP's exponent search is
+  float-codegen-sensitive and otherwise makes the bytes depend on the writer's build profile. Under
+  `tessera-table-v2` every ≥ 16-bit column goes through Pco, whose mode and bin choices call the platform math
+  library (`log2`, `powf`); a writer MUST therefore produce the same bytes for the same rows on every
+  architecture, build profile and worker count, and the conformance corpus is the evidence. What is gated: x86_64
+  and aarch64 Linux (glibc), dev and release profiles, and worker counts 1 and N. Other targets (e.g. the macOS
+  release binaries) are not gated yet. Cross-*version* stability is still not guaranteed pre-1.0 — pin the Vortex
+  version and, under `tessera-table-v2`, the `pco` and libzstd versions (recorded in the corpus provenance).
 - **Edition.** `TableSpec.edition` (optional string, e.g. `"core2026.08.3"`) names the Vortex
   **edition** the payload was written under: the frozen set of encoding wire IDs the writer was allowed to
   emit *(ADR-0024, 2026-11-15 amendment)*. A writer MUST set it to the edition it encoded under, on every
@@ -342,8 +347,8 @@ optional `row_index`.
   (that is the writer's codec set, ADR-0024 §Codec set, and the pinned Vortex compressor, both changed only as
   a format event).
 - **Codec profile.** `TableSpec.codec_profile` (optional string, `tessera-table-v<N>`, today
-  `"tessera-table-v1"`) names the writer's **codec set**: which of the edition's schemes the compressor may choose
-  from, together with the pinned Vortex compressor that chooses among them *(ADR-0024, 2026-11-16 amendment)*. A
+  `"tessera-table-v2"`) names the writer's **codec rule**: which encodings it writes for which columns
+  *(ADR-0024, 2026-11-16 and 2026-11-22 amendments)*. A
   writer MUST set it to the profile it encoded with, on every table block and partition leaf, beside `edition`, and
   MUST NOT record a profile it did not encode with. Like `edition` it is bound by `manifest_hash` and not by
   `content_hash`. **Same input + same edition + same profile → same bytes**: two table blocks of the same rows that
@@ -351,8 +356,44 @@ optional `row_index`.
   decodability, which the edition governs. A reader MUST NOT refuse a table block because its profile is
   **unknown** or **absent**; it decodes such a block as any other. Absent means the block predates the field
   (every product before #869, `0.1.0-alpha.5` included); the key is then omitted, never written as `null`, and the
-  block's manifest bytes are unchanged. A profile id is bumped on any change to the codec set or on a Vortex change
-  to the compressor's choices, each a format event.
+  block's manifest bytes are unchanged. A profile id is bumped on any change to its rule, its parameters, the
+  codec versions it pins, or on a Vortex change to what is written, each a format event.
+
+  **`tessera-table-v2`** *(#828; design note `docs/spikes/915-tessera-table-v2.md`)* chooses each column's codec
+  from its dtype alone, forced, never sampled or estimated:
+
+  | Column dtype | Encoding | Parameters |
+  |---|---|---|
+  | `i2 i4 i8 u2 u4 u8 f4 f8` | `vortex.pco` | level 8, 8,192 values per page, one Pco chunk per row-group |
+  | `i1 u1` | `vortex.zstd` | level 9, one frame per row-group, no dictionary, single-threaded |
+  | any numeric, nullable | as its dtype; the validity mask is Vortex's own child | as above |
+  | `b1`, `str` | `tessera-table-v1`'s BtrBlocks codec set (no Zstd scheme) | unchanged |
+
+  Each numeric column is stored as one Vortex leaf per row-group (`ROWS_PER_GROUP` rows) behind zone maps every
+  8,192 rows, with no dictionary layout; zone-map statistics are compressed with the BtrBlocks codec set. The
+  pinned `pco` and libzstd versions are part of the profile. `tessera-table-v1` (BtrBlocks, compact preset, ALP,
+  ALPRD, integer Pco, Delta and OnPair excluded, sampled per chunk) is the profile of every table block written
+  before #828; it is no longer written and still read.
+
+  Two invariants hold for **every** profile, and are what makes "a reader MUST NOT refuse an unknown profile"
+  sound:
+  1. **A profile may change which encodings are written, never the decoded values.** No transform (column
+     differences, delta, narrowing, widening into another stored dtype) may sit behind a profile id; one that
+     needs a transform must express it as a Vortex encoding, decodable by wire ID, or as a new block kind.
+  2. **A profile may only write arrays that every reader of its edition decodes** once it registers the
+     edition's encodings. A reader that has not registered one (`vortex.zstd` sits behind `vortex-file`'s
+     non-default `zstd` feature) fails with an `Unknown encoding: <wire ID>` error, a build choice
+     of that reader; an array that no reader of the edition can decode (8-bit `vortex.pco`, which Vortex maps to
+     no type) is never written.
+
+  A profile id is refused only (a) by a writer asked to record a profile it does not write, and (b) by a check
+  that re-encodes rows to compare them with a sealed block: it MUST report that it cannot check a profile that is
+  not its own and exit non-zero, never a match or mismatch it cannot establish. A decode that meets a wire ID the
+  reader lacks fails as any other decode. `tessera verify` and `inspect` print
+  `note: table block <name>: codec profile <X> is not known to this reader; decoding by Vortex wire IDs` for a
+  profile they do not know; the exit status is unaffected. `blocks[].spec` is an opaque map to ADR-0060's
+  newer-field rules, so an unknown profile is neither a newer field nor a reason to refuse a re-seal; a re-seal
+  copies the payload bytes, and a path that re-encodes a block records its own profile.
 - **Forward-read limit.** Reading is backward-compatible only: a newer reader decodes older table blocks, but
   an older reader can't be assumed to decode newer ones. Decoding a table block written under an edition needs
   a Vortex at or above that edition's minimum library version (for `core2026.08.3`, Vortex 0.85). In tessera

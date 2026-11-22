@@ -46,7 +46,10 @@ half = "2"                                           # float16 array dtype (alre
 # Table block backend: Vortex (the settled columnar backend) — deterministic single-file writer +
 # reader. vortex-file pulls the default encoding crates (pco/alp/fsst/…); the sub-crates give the
 # exact import paths the probe verified. CurrentThreadRuntime drives the async write/read (no tokio).
-vortex-file = "0.93"
+# `zstd`: register and write `vortex.zstd`, the 8-bit integer codec of `tessera-table-v2` (#828, ADR-0024
+# amendment 2026-11-22). It also compiles BtrBlocks' Zstd schemes in; `table.rs` excludes them, so `b1`/`utf8`
+# columns keep v1's codec set.
+vortex-file = { version = "0.93", features = ["zstd"] }
 vortex-array = "0.93"
 # compressor builder — exclude non-deterministic ALP, register deterministic Pco for float columns.
 vortex-btrblocks = { version = "0.93", features = ["pco"] }
@@ -55,6 +58,12 @@ vortex-buffer = "0.93"
 vortex-edition = "0.93"
 vortex-io = "0.93"
 vortex-layout = "0.93"
+# The forced numeric codecs of `tessera-table-v2` (#828): `Pco::from_primitive` and
+# `ZstdData::from_primitive_without_dict`, called per row-group chunk with no estimate or sample.
+vortex-pco = "0.93"
+vortex-zstd = "0.93"
+# `VortexResult`, the return type of the `CompressorPlugin` the forced numeric path implements.
+vortex-error = "0.93"
 # `StrictSortedBuffer`, the row-index selection type `ScanBuilder::with_row_indices` takes.
 vortex-scan = "0.93"
 vortex-session = "0.93"
@@ -211,4 +220,5 @@ vortex-sequence = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa
 vortex-session = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
 vortex-sparse = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
 vortex-utils = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
+vortex-zstd = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }
 vortex-zigzag = { git = "https://github.com/gerchowl/vortex", rev = "5c55cf7fa35bac652849cf1a0e76a1a97035f715" }

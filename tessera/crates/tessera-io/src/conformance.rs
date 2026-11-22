@@ -155,9 +155,9 @@ pub fn fixtures() -> Vec<Fixture> {
         const N: usize = 4096;
         let spec = TableSpec {
             columns: vec![
-                col("t", "u8", Some("zstd")),
-                col("e0", "f4", Some("zstd")),
-                col("e1", "f4", Some("zstd")),
+                col("t", "u8", None),
+                col("e0", "f4", None),
+                col("e1", "f4", None),
             ],
             rows: N as u64,
             row_index: Some("t".into()),
@@ -328,10 +328,285 @@ pub fn fixtures() -> Vec<Fixture> {
         });
     }
 
+    // 9 — `tessera-table-v2` dtypes (#828, design note #915 §2.5 item 2): one column per numeric
+    // dtype (8-bit → Zstd, the rest → Pco), nullable variants, a constant and a 2-distinct column,
+    // float edge cases (NaN payloads, ±inf, −0.0, denormals), a decimal-quantised column (`k × 0.1`,
+    // Pco's `FloatMult` mode) and a low-bit-mantissa column (`FloatQuant`), over 65,536 + 8,193 rows
+    // so the row-group and the 8,192-value page/zone boundaries are crossed; plus an empty table.
+    // The cross-arch gate re-derives its hashes on x86_64 and aarch64 (M7).
+    {
+        let (spec, data) = table_v2_dtypes();
+        let empty_spec = TableSpec {
+            columns: vec![
+                col("t", "u8", None),
+                col("c", "u1", None),
+                col("e", "f4", None),
+            ],
+            rows: 0,
+            row_index: None,
+            partition: None,
+            edition: None,
+            codec_profile: None,
+        };
+        let empty: TableData = vec![
+            ("t".into(), ColumnData::U64(Vec::new())),
+            ("c".into(), ColumnData::U8(Vec::new())),
+            ("e".into(), ColumnData::F32(Vec::new())),
+        ];
+        let mut b = ProductBuilder::new("table", "table-v2-dtypes", "every v2 codec route", TS);
+        let pl = push_table(&mut b, "dtypes", &spec, data);
+        let empty_pl = push_table(&mut b, "empty", &empty_spec, empty);
+        out.push(Fixture {
+            name: "table_v2_dtypes",
+            manifest: b.seal().unwrap(),
+            payloads: vec![pl, empty_pl],
+        });
+    }
+
     out
+}
+
+/// The `dtypes` table of the `table_v2_dtypes` fixture: (spec, data). Fixed inputs only.
+fn table_v2_dtypes() -> (TableSpec, TableData) {
+    const ROWS: usize = table::ROWS_PER_GROUP + 8_193;
+    let f8_edges = [
+        f64::from_bits(0x7ff8_0000_0000_beef), // quiet NaN with a payload
+        f64::from_bits(0xfff4_0000_0000_0001), // signalling NaN, sign set
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -0.0,
+        f64::from_bits(1),                     // smallest denormal
+        f64::from_bits(0x000f_ffff_ffff_ffff), // largest denormal
+        f64::MAX,
+    ];
+    let f4_edges = [
+        f32::from_bits(0x7fc0_beef),
+        f32::from_bits(0xff80_0001),
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -0.0,
+        f32::from_bits(1),
+        f32::MIN,
+    ];
+    let mut columns = Vec::new();
+    let mut data: TableData = Vec::new();
+    let mut add = |name: &str, dtype: &str, nullable: bool, c: ColumnData| {
+        let mut column = col(name, dtype, None);
+        column.nullable = nullable;
+        columns.push(column);
+        data.push((name.into(), c));
+    };
+    let ks = || 0..ROWS;
+    add(
+        "i1",
+        "i1",
+        false,
+        ColumnData::I8(ks().map(|k| ((k * 7) % 256) as u8 as i8).collect()),
+    );
+    add(
+        "u1",
+        "u1",
+        false,
+        ColumnData::U8(ks().map(|k| (k % 40) as u8).collect()),
+    );
+    add(
+        "i2",
+        "i2",
+        false,
+        ColumnData::I16(ks().map(|k| ((k * 37) % 2000) as i16 - 1000).collect()),
+    );
+    add(
+        "u2",
+        "u2",
+        false,
+        ColumnData::U16(ks().map(|k| (k % 544) as u16).collect()),
+    );
+    add(
+        "i4",
+        "i4",
+        false,
+        ColumnData::I32(ks().map(|k| (k as i32) * 3 - 100_000).collect()),
+    );
+    add(
+        "u4",
+        "u4",
+        false,
+        ColumnData::U32(ks().map(|k| (k / 1_000) as u32).collect()),
+    );
+    add(
+        "i8",
+        "i8",
+        false,
+        ColumnData::I64(
+            ks().map(|k| match k % 1_000 {
+                0 => i64::MIN,
+                1 => i64::MAX,
+                r => r as i64 - 500,
+            })
+            .collect(),
+        ),
+    );
+    add(
+        "u8",
+        "u8",
+        false,
+        ColumnData::U64(
+            ks().map(|k| if k % 997 == 0 { u64::MAX } else { k as u64 })
+                .collect(),
+        ),
+    );
+    add(
+        "f4",
+        "f4",
+        false,
+        ColumnData::F32(
+            ks().map(|k| match k % 101 {
+                r if r < f4_edges.len() => f4_edges[r],
+                r => r as f32 * 0.25,
+            })
+            .collect(),
+        ),
+    );
+    add(
+        "f8",
+        "f8",
+        false,
+        ColumnData::F64(
+            ks().map(|k| match k % 101 {
+                r if r < f8_edges.len() => f8_edges[r],
+                r => (r as f64).sqrt(),
+            })
+            .collect(),
+        ),
+    );
+    // `k × 0.1`: decimal-quantised values, the shape Pco's `FloatMult` mode detects.
+    add(
+        "f8_mult",
+        "f8",
+        false,
+        ColumnData::F64(ks().map(|k| (k % 4_096) as f64 * 0.1).collect()),
+    );
+    // The low 20 mantissa bits always zero: the shape Pco's `FloatQuant` mode detects.
+    add(
+        "f8_quant",
+        "f8",
+        false,
+        ColumnData::F64(
+            ks().map(|k| f64::from_bits(((1.0 + (k % 5_000) as f64 / 7.0).to_bits() >> 20) << 20))
+                .collect(),
+        ),
+    );
+    add("constant", "i4", false, ColumnData::I32(vec![42; ROWS]));
+    add(
+        "two",
+        "u1",
+        false,
+        ColumnData::U8(ks().map(|k| u8::from(k % 3 == 0)).collect()),
+    );
+    let every_third = || ks().map(|k| k % 3 != 0).collect::<Vec<bool>>();
+    add(
+        "n_u1",
+        "u1",
+        true,
+        ColumnData::Nullable {
+            values: Box::new(ColumnData::U8(
+                ks().map(|k| if k % 3 == 0 { 0 } else { (k % 9) as u8 })
+                    .collect(),
+            )),
+            validity: every_third(),
+        },
+    );
+    add(
+        "n_i2",
+        "i2",
+        true,
+        ColumnData::Nullable {
+            values: Box::new(ColumnData::I16(
+                ks().map(|k| if k % 3 == 0 { 0 } else { (k % 500) as i16 })
+                    .collect(),
+            )),
+            validity: every_third(),
+        },
+    );
+    add(
+        "n_f8",
+        "f8",
+        true,
+        ColumnData::Nullable {
+            values: Box::new(ColumnData::F64(
+                ks().map(|k| {
+                    if k % 3 == 0 {
+                        0.0
+                    } else {
+                        f8_edges[k % f8_edges.len()]
+                    }
+                })
+                .collect(),
+            )),
+            validity: every_third(),
+        },
+    );
+    add(
+        "flag",
+        "b1",
+        false,
+        ColumnData::Bool(ks().map(|k| k % 5 < 2).collect()),
+    );
+    add(
+        "tag",
+        "str",
+        false,
+        ColumnData::Utf8(ks().map(|k| format!("tag-{}", k % 7)).collect()),
+    );
+    let spec = TableSpec {
+        columns,
+        rows: ROWS as u64,
+        row_index: None,
+        partition: None,
+        edition: None,
+        codec_profile: None,
+    };
+    (spec, data)
 }
 
 /// The golden records for the whole corpus.
 pub fn goldens() -> Vec<Golden> {
     fixtures().iter().map(Fixture::golden).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `table_v2_dtypes` fixture must drive Pco's float modes, or the cross-arch gate tests
+    /// nothing about measurement M7 (design note #915 §2.5 item 2). `vortex-pco` encodes each
+    /// row-group with `pco`'s `FileCompressor::chunk_compressor` at the profile's level and paging
+    /// and keeps the chunk metadata private, so this asks that same call which mode it picks for
+    /// every row-group of the two columns built for it.
+    #[test]
+    fn table_v2_dtypes_drives_pcos_float_modes() {
+        let (_, data) = table_v2_dtypes();
+        let config = pco::ChunkConfig::default()
+            .with_compression_level(table::TABLE_V2_PCO_LEVEL)
+            .with_paging_spec(pco::PagingSpec::EqualPagesUpTo(
+                table::TABLE_V2_PCO_VALUES_PER_PAGE,
+            ));
+        let column = |name: &str| match &data.iter().find(|(n, _)| n == name).unwrap().1 {
+            ColumnData::F64(v) => v.clone(),
+            other => panic!("{name} is {}", other.numpy_code()),
+        };
+        for (name, want) in [("f8_mult", "FloatMult"), ("f8_quant", "FloatQuant")] {
+            for (g, group) in column(name).chunks(table::ROWS_PER_GROUP).enumerate() {
+                let cc = pco::wrapped::FileCompressor::default()
+                    .chunk_compressor(group, &config)
+                    .unwrap();
+                let mode = format!("{:?}", cc.meta().mode);
+                assert!(
+                    mode.starts_with(want),
+                    "{name} row-group {g}: pco picked {mode}, not {want}; the fixture no longer \
+                     exercises that mode"
+                );
+            }
+        }
+    }
 }

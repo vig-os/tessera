@@ -13,7 +13,12 @@ pub struct Column {
     pub name: String,
     /// Arrow-ish dtype string, e.g. "i2", "u4", "f4".
     pub dtype: String,
-    /// Per-column codec — columnar layout lets each column compress optimally.
+    /// A per-column codec name. **Table writers refuse a column that sets it** (#828): under a codec
+    /// profile ([`TableSpec::codec_profile`]) a column's codec is a pure function of the profile and
+    /// the column's dtype (SPEC §5b), so a sealed per-column value could only repeat that or
+    /// contradict the payload. Leave it `None`. The encoding a column actually uses is in the
+    /// payload's Vortex footer (`tessera inspect --encodings`). The field stays so that manifests
+    /// sealed before #828 that carry it still parse, verify and keep their bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codec: Option<String>,
     /// Human-facing short label (fd5 I1/I2), distinct from `name` (the rename-safe storage id).
@@ -119,7 +124,8 @@ impl Column {
             ..Default::default()
         }
     }
-    /// Builder: per-column codec.
+    /// Builder: per-column codec. A table writer refuses a column that sets one (see
+    /// [`Column::codec`]); it exists for specs that are not written by a tessera table writer.
     pub fn with_codec(mut self, codec: impl Into<String>) -> Self {
         self.codec = Some(codec.into());
         self
@@ -206,11 +212,14 @@ pub struct TableSpec {
     /// admitted them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edition: Option<String>,
-    /// The tessera **codec profile** the block's payload was written with, e.g. `"tessera-table-v1"`
-    /// (ADR-0024, 2026-11-16 amendment, #869): the writer's codec set (which of the edition's
-    /// schemes the compressor may choose from) together with the pinned Vortex compressor that
-    /// chooses among them. Named `tessera-table-v<N>`; `N` moves on any change to the codec set or
-    /// on a Vortex bump that changes the compressor's choices, each a format event.
+    /// The tessera **codec profile** the block's payload was written with, e.g. `"tessera-table-v2"`
+    /// (ADR-0024, 2026-11-16 and 2026-11-22 amendments, #869, #828): the writer's codec rule, which
+    /// encodings it writes for which columns. `tessera-table-v2` chooses each column's codec from
+    /// its dtype alone (≥ 16-bit integers and floats `vortex.pco`, 8-bit integers `vortex.zstd`,
+    /// `b1`/`str` the BtrBlocks codec set of `tessera-table-v1`; SPEC §5b), so the manifest needs no
+    /// per-column codec record. Named `tessera-table-v<N>`; `N` moves on any change to the rule, its
+    /// parameters, its pinned codec versions or a Vortex change to what is written, each a format
+    /// event. A profile may change which encodings are written, never the decoded values.
     ///
     /// Sealed, beside [`TableSpec::edition`], so that "same input + same edition + same profile →
     /// same bytes" can be checked from the product alone: two blocks of the same rows that record

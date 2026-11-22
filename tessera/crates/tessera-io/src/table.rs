@@ -46,6 +46,8 @@
 //! full-materialise, and wrongly concluded "Vortex decode is slow." The runtime
 //! choice + intended access pattern were the missing signposts.)
 
+use std::sync::Arc;
+
 use futures::StreamExt;
 use tessera_core::block::partition::{leaf_name, Partition};
 use tessera_core::block::table::{Column, TableSpec};
@@ -55,28 +57,42 @@ use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
 use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::arrays::{BoolArray, ChunkedArray, PrimitiveArray, StructArray, VarBinViewArray};
+use vortex_array::dtype::FieldPath;
 use vortex_array::expr::{root, select};
 use vortex_array::iter::ArrayIteratorAdapter;
 use vortex_array::scalar_fn::session::ScalarFnSession;
 use vortex_array::session::ArraySession;
 use vortex_array::ExecutionCtx;
 use vortex_array::{ArrayRef, IntoArray, VortexSessionExecute};
+use vortex_btrblocks::schemes::binary::{
+    ZstdBuffersScheme as BinaryZstdBuffersScheme, ZstdScheme as BinaryZstdScheme,
+};
 use vortex_btrblocks::schemes::float::{ALPRDScheme, ALPScheme};
 use vortex_btrblocks::schemes::integer::{DeltaScheme, PcoScheme as IntPcoScheme};
-use vortex_btrblocks::schemes::string::OnPairScheme;
+use vortex_btrblocks::schemes::string::{OnPairScheme, ZstdScheme as StringZstdScheme};
 use vortex_btrblocks::{BtrBlocksCompressorBuilder, CompressionSession, SchemeExt};
 use vortex_buffer::{Buffer, ByteBuffer, ByteBufferMut};
 use vortex_edition::declarations::core::CORE_2026_08_3;
 use vortex_edition::{EditionId, EditionSessionExt, EDITION_DECLARATIONS, EDITION_FAMILIES};
+use vortex_error::VortexResult;
 use vortex_file::{
     register_default_encodings, OpenOptionsSessionExt, WriteOptionsSessionExt, WriteStrategyBuilder,
 };
 use vortex_io::runtime::current::{CurrentThreadRuntime, CurrentThreadWorkerPool};
 use vortex_io::runtime::BlockingRuntime;
 use vortex_io::session::{RuntimeSession, RuntimeSessionExt};
+use vortex_layout::layouts::buffered::BufferedStrategy;
+use vortex_layout::layouts::chunked::writer::ChunkedLayoutStrategy;
+use vortex_layout::layouts::compressed::{CompressingStrategy, CompressorPlugin};
+use vortex_layout::layouts::flat::writer::FlatLayoutStrategy;
+use vortex_layout::layouts::repartition::{RepartitionStrategy, RepartitionWriterOptions};
+use vortex_layout::layouts::zoned::writer::{ZonedLayoutOptions, ZonedStrategy};
 use vortex_layout::session::LayoutSession;
+use vortex_layout::LayoutStrategy;
+use vortex_pco::Pco;
 use vortex_scan::strict_sorted_buffer::StrictSortedBuffer;
 use vortex_session::VortexSession;
+use vortex_zstd::{Zstd, ZstdData};
 
 use crate::BlockPayload;
 
@@ -759,21 +775,74 @@ pub const TABLE_EDITION: EditionId = CORE_2026_08_3;
 /// The tessera **codec profile** every table block is written with, sealed beside
 /// [`TABLE_EDITION`] as [`TableSpec::codec_profile`] (ADR-0024, 2026-11-16 amendment, #869).
 ///
-/// It names the codec set of [`deterministic_table_compressor`] (which of the edition's schemes
-/// the compressor may choose from: today Pco kept, ALP, ALPRD, integer Pco, Delta and OnPair
-/// excluded) together with the pinned Vortex compressor that chooses among them. With the
-/// edition it makes "same input + same edition + same profile → same bytes" checkable from the
-/// product alone.
+/// `tessera-table-v2` (#828, design note `docs/spikes/915-tessera-table-v2.md`, ADR-0024 amendment
+/// of 2026-11-22) chooses each column's codec from its dtype alone, never by sampling
+/// ([`TableColumnCodec::for_dtype`]):
 ///
-/// Bump `N` in `tessera-table-v<N>` on any change to the codec set (an exclusion, a scheme, the
-/// preset) and on a Vortex bump that changes the compressor's choices; each is a format event,
-/// recorded in ADR-0024. The test `codec_set_matches_the_pinned_codec_profile` fails when the
-/// compressor's configuration or [`TABLE_EDITION`] changes and this constant and its pin don't,
-/// and says to bump it.
+/// | dtype | encoding | parameters |
+/// |---|---|---|
+/// | `i2 i4 i8 u2 u4 u8 f4 f8` | `vortex.pco` | level [`TABLE_V2_PCO_LEVEL`], [`TABLE_V2_PCO_VALUES_PER_PAGE`] values per page, one Pco chunk per row-group |
+/// | `i1 u1` | `vortex.zstd` | level [`TABLE_V2_ZSTD_LEVEL`], one frame per row-group, no dictionary, single-threaded |
+/// | nullable numeric | as its dtype; the validity mask is Vortex's own child | |
+/// | `b1`, `str` | the BtrBlocks codec set of `tessera-table-v1` ([`deterministic_table_compressor`]) | unchanged |
 ///
-/// The profile promises determinism of bytes, not decodability: readers decode by edition and
-/// never refuse a block for an unknown or absent profile.
-pub const TABLE_CODEC_PROFILE: &str = "tessera-table-v1";
+/// A column's codec is a pure function of (profile, dtype), so the manifest records no per-column
+/// codec (the encoding actually written is in the Vortex footer). The pinned `pco` and libzstd
+/// versions are part of the profile: their encoders promise decodability, not identical bytes
+/// across releases, so bumping either is a profile bump.
+///
+/// Bump `N` in `tessera-table-v<N>` on any change to the rule, its parameters, the BtrBlocks codec
+/// set (an exclusion, a scheme, the preset), the codec versions, or a Vortex bump that changes
+/// what is written; each is a format event, recorded in ADR-0024. The test
+/// `codec_set_matches_the_pinned_codec_profile` fails when any of them changes and this constant
+/// and its pin don't, and says to bump it.
+///
+/// Two invariants hold for every profile (SPEC §5b): a profile may change which encodings are
+/// written, **never the decoded values** (no tessera-level transform sits behind a profile id), and
+/// it may only write arrays that every reader of its edition decodes once it registers the
+/// edition's encodings. That is what lets readers decode by wire ID and never refuse a block for
+/// an unknown or absent profile; a v1 block decodes under a v2 reader with no code path of its own.
+pub const TABLE_CODEC_PROFILE: &str = "tessera-table-v2";
+
+/// Every codec profile a tessera writer has written, oldest first; [`TABLE_CODEC_PROFILE`] is the
+/// last. A reader decodes any of them (and any other) by Vortex wire ID; this list only decides
+/// whether `tessera verify`/`inspect` print the "not known to this reader" note
+/// ([`unknown_codec_profile_note`]).
+pub const KNOWN_TABLE_CODEC_PROFILES: &[&str] = &["tessera-table-v1", "tessera-table-v2"];
+
+/// The informational note a reader prints for a table block whose recorded codec profile it does
+/// not know (design note #915 §2.3), or `None` for a known or absent profile. The note never
+/// changes an exit status: decoding needs only the Vortex wire IDs, which the edition governs.
+pub fn unknown_codec_profile_note(block: &str, spec: &TableSpec) -> Option<String> {
+    let profile = spec.codec_profile.as_deref()?;
+    (!KNOWN_TABLE_CODEC_PROFILES.contains(&profile)).then(|| {
+        format!(
+            "note: table block {block}: codec profile {profile} is not known to this reader; \
+             decoding by Vortex wire IDs"
+        )
+    })
+}
+
+/// The Pco compression level `tessera-table-v2` writes every ≥ 16-bit numeric column with:
+/// `pco::DEFAULT_COMPRESSION_LEVEL`, the level of the #828 sweep's "uniform" rows. Part of the
+/// profile.
+pub const TABLE_V2_PCO_LEVEL: usize = 8;
+
+/// Values per Pco page in `tessera-table-v2`: at most 8,192, split into equal pages, so a slice
+/// decodes only the pages it covers. Part of the profile. A full row-group of a non-nullable column
+/// splits into eight pages that line up with its zones ([`TABLE_V2_ZONE_ROWS`]). Pco pages count
+/// *valid* values and are equal-sized, so the pages of a nullable column or of a partial last
+/// row-group do not line up with the zones (measurement M5 of #828); pruning works on zones and
+/// row-groups and is unaffected.
+pub const TABLE_V2_PCO_VALUES_PER_PAGE: usize = 8_192;
+
+/// Rows per zone-map entry under `tessera-table-v2`: 8,192, the default Vortex writer's row block,
+/// kept so zone-map pruning is unchanged from `tessera-table-v1`. Part of the profile.
+pub const TABLE_V2_ZONE_ROWS: usize = 8_192;
+
+/// The Zstd level `tessera-table-v2` writes every 8-bit integer column with. Part of the profile;
+/// measurement M6 of #828 chose it (one frame per [`ROWS_PER_GROUP`] rows, levels 1, 3 and 9).
+pub const TABLE_V2_ZSTD_LEVEL: i32 = 9;
 
 /// The spec a table block is sealed with: `spec` with [`TableSpec::edition`] set to
 /// [`TABLE_EDITION`], the edition this writer encodes under (ADR-0024, 2026-11-15 amendment), and
@@ -787,8 +856,20 @@ pub const TABLE_CODEC_PROFILE: &str = "tessera-table-v1";
 /// # Errors
 /// [`Error::Codec`] if `spec.edition` or `spec.codec_profile` names any other value: this writer
 /// can only write its own, and recording another name over bytes it didn't produce would make the
-/// field a lie.
+/// field a lie. The same holds for a column that sets [`Column::codec`]: under a codec profile a
+/// column's codec is a function of (profile, dtype), so a sealed per-column value could only
+/// repeat that or contradict the payload (design note #915 §2.2, O3).
 pub(crate) fn sealed_spec(spec: &TableSpec) -> Result<TableSpec> {
+    if let Some(col) = spec.columns.iter().find(|c| c.codec.is_some()) {
+        return Err(Error::Codec(format!(
+            "table column '{}' sets codec `{}`, but a table column's codec is chosen by the \
+             writer's codec profile `{TABLE_CODEC_PROFILE}` from its dtype \
+             (tessera_io::table::TABLE_CODEC_PROFILE, recorded as the block's `codec_profile`); \
+             leave the column's `codec` unset",
+            col.name,
+            col.codec.as_deref().unwrap_or_default()
+        )));
+    }
     let edition = TABLE_EDITION.to_string();
     Ok(TableSpec {
         edition: Some(WriterOwned::EDITION.record(spec.edition.as_deref(), &edition)?),
@@ -1070,9 +1151,16 @@ pub fn block_partition(idx: u64, total: u64) -> Option<Partition> {
 ///   excluded so that a Vortex bump does not widen the codec set as a side effect. Admitting one is
 ///   a format decision, with its own determinism evidence (#635).
 ///
+/// - **No Zstd scheme.** `vortex-file`'s `zstd` feature (needed to write and read `vortex.zstd`
+///   for 8-bit integers under `tessera-table-v2`) also compiles BtrBlocks' string and binary Zstd
+///   schemes in, which the compact preset keeps. They are excluded, so this codec set, and with it
+///   every `b1`/`utf8` column and every zone-map table, is exactly `tessera-table-v1`'s (#628 stays
+///   its own decision).
+///
 /// The schemes come from the session, and the encodings they may emit are restricted to
-/// [`TABLE_EDITION`]. This configuration is what [`TABLE_CODEC_PROFILE`] names: changing it
-/// means bumping the profile (ADR-0024, 2026-11-16 amendment).
+/// [`TABLE_EDITION`]. Under `tessera-table-v2` this codec set encodes the `b1` and `utf8` columns
+/// and the zone-map statistics; numeric columns take the forced path of [`TableColumnCodec`].
+/// Changing it means bumping the profile (ADR-0024, 2026-11-16 amendment).
 fn deterministic_table_compressor(s: &VortexSession) -> BtrBlocksCompressorBuilder {
     BtrBlocksCompressorBuilder::from_session(s)
         .with_compact()
@@ -1082,7 +1170,174 @@ fn deterministic_table_compressor(s: &VortexSession) -> BtrBlocksCompressorBuild
             IntPcoScheme.id(),
             DeltaScheme::default().id(),
             OnPairScheme::default().id(),
+            StringZstdScheme.id(),
+            BinaryZstdScheme.id(),
+            BinaryZstdBuffersScheme.id(),
         ])
+}
+
+/// The codec `tessera-table-v2` forces on a numeric column, chosen by its dtype alone (design
+/// note #915 §2.1). `b1` and `utf8` have none: they stay on [`deterministic_table_compressor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableColumnCodec {
+    /// `vortex.pco` at [`TABLE_V2_PCO_LEVEL`] with [`TABLE_V2_PCO_VALUES_PER_PAGE`] values per
+    /// page: every integer of 16 bits or more and every float.
+    Pco,
+    /// `vortex.zstd` at [`TABLE_V2_ZSTD_LEVEL`], one frame per row-group, no dictionary: `i1` and
+    /// `u1`. `vortex-pco` maps no 8-bit type (a stock reader panics on one), so 8-bit Pco would
+    /// break the edition's decodability promise (note §6 D′).
+    Zstd,
+}
+
+impl TableColumnCodec {
+    /// The codec of a column of numpy-style `dtype` under `tessera-table-v2`, or `None` for a
+    /// dtype the BtrBlocks codec set keeps (`b1`, `str`). Nullability does not change it.
+    pub fn for_dtype(dtype: &str) -> Option<Self> {
+        match dtype {
+            "i2" | "i4" | "i8" | "u2" | "u4" | "u8" | "f4" | "f8" => Some(Self::Pco),
+            "i1" | "u1" => Some(Self::Zstd),
+            _ => None,
+        }
+    }
+
+    /// Encode one row-group chunk of a numeric column. The chunk is canonicalised to its primitive
+    /// array first (the repartition before it already did); the validity mask travels as the
+    /// encoded array's own child, in the canonical form of [`canonical_validity`] (compressed with
+    /// `validity_codec`, the BtrBlocks codec set). One call encodes one chunk on one thread, so the
+    /// bytes do not depend on the worker count.
+    fn encode_chunk(
+        self,
+        chunk: &ArrayRef,
+        validity_codec: &dyn CompressorPlugin,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<ArrayRef> {
+        let p: PrimitiveArray = chunk.clone().execute(ctx)?;
+        let validity = canonical_validity(&p, validity_codec, ctx)?;
+        match self {
+            Self::Pco => {
+                let data = vortex_pco::PcoData::from_primitive(
+                    p.as_view(),
+                    TABLE_V2_PCO_LEVEL,
+                    TABLE_V2_PCO_VALUES_PER_PAGE,
+                    ctx,
+                )?;
+                Ok(Pco::try_new(p.dtype().clone(), data, validity)?.into_array())
+            }
+            Self::Zstd => {
+                // One frame for the whole row-group. `values_per_frame = 0` means "one frame" to
+                // `vortex-zstd`, but it then strides by the VALID value count, which is 0 for an
+                // all-NULL chunk and panics (`step_by(0)`). The row count is never below the valid
+                // count and never 0 here (empty chunks are not emitted), so it gives the same single
+                // frame without that edge.
+                let values_per_frame = p.len().max(1);
+                let data = ZstdData::from_primitive_without_dict(
+                    &p,
+                    TABLE_V2_ZSTD_LEVEL,
+                    values_per_frame,
+                    ctx,
+                )?;
+                Ok(Zstd::try_new(p.dtype().clone(), data, validity)?.into_array())
+            }
+        }
+    }
+}
+
+/// The validity of a numeric chunk as a pure function of its mask, so the encoded bytes do not
+/// depend on how the chunk was assembled: `NonNullable` for a non-nullable column, `AllValid` /
+/// `AllInvalid` when every row is valid / NULL, else the mask as a bool array compressed by
+/// `codec` (the BtrBlocks codec set). Pco and Zstd store the validity they are given unchanged, so
+/// without this a batch encode (whose row-groups are slices of one masked column, carrying an
+/// explicit all-true mask array) and a streamed encode of the same rows (whose fresh row-groups are
+/// `AllValid`) wrote different bytes for the same rows.
+fn canonical_validity(
+    p: &PrimitiveArray,
+    codec: &dyn CompressorPlugin,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<vortex_array::validity::Validity> {
+    use vortex_array::validity::Validity;
+    let validity = p.validity()?;
+    if matches!(validity, Validity::NonNullable) {
+        return Ok(validity);
+    }
+    let mask = validity.execute_mask(p.len(), ctx)?;
+    Ok(if mask.all_true() {
+        Validity::AllValid
+    } else if mask.all_false() {
+        Validity::AllInvalid
+    } else {
+        let bools = BoolArray::new(mask.to_bit_buffer(), Validity::NonNullable).into_array();
+        Validity::Array(codec.compress_chunk(&bools, ctx)?)
+    })
+}
+
+/// The write strategy of one numeric column under `tessera-table-v2`: the layout Vortex's default
+/// strategy builds for a column (zone maps every 8,192 rows, their statistics compressed by
+/// `stats`, chunked flat leaves), with two differences. Chunks are cut at exactly
+/// [`ROWS_PER_GROUP`] rows, so one Pco chunk or Zstd frame covers one row-group whatever the
+/// column's width; and the compressor is `codec`, so there is no dictionary probe, no scheme
+/// sample and no estimate.
+fn numeric_column_strategy(
+    codec: TableColumnCodec,
+    stats: Arc<dyn CompressorPlugin>,
+) -> Arc<dyn LayoutStrategy> {
+    let flat = Arc::new(FlatLayoutStrategy::default());
+    // Leaves: one flat layout per compressed chunk, buffered so a column's segments sit together.
+    let chunked = ChunkedLayoutStrategy::new(Arc::clone(&flat) as Arc<dyn LayoutStrategy>);
+    let buffered = BufferedStrategy::new(chunked, 2 << 20);
+    let validity_codec = Arc::clone(&stats);
+    let compress = move |chunk: &ArrayRef, ctx: &mut ExecutionCtx| {
+        codec.encode_chunk(chunk, validity_codec.as_ref(), ctx)
+    };
+    let compressing = CompressingStrategy::new(buffered, compress);
+    // Re-join the zones into whole row-groups before compressing (the input is ROWS_PER_GROUP-aligned).
+    let row_groups = RepartitionStrategy::new(
+        compressing,
+        RepartitionWriterOptions {
+            block_size_minimum: 0,
+            block_len_multiple: ROWS_PER_GROUP,
+            block_size_target: None,
+            canonicalize: true,
+        },
+    );
+    let zoned = ZonedStrategy::new(
+        row_groups,
+        CompressingStrategy::new(flat as Arc<dyn LayoutStrategy>, stats),
+        ZonedLayoutOptions {
+            block_size: std::num::NonZeroUsize::new(TABLE_V2_ZONE_ROWS).expect("nonzero"),
+            ..Default::default()
+        },
+    );
+    Arc::new(RepartitionStrategy::new(
+        zoned,
+        RepartitionWriterOptions {
+            block_size_minimum: 0,
+            block_len_multiple: TABLE_V2_ZONE_ROWS,
+            block_size_target: None,
+            canonicalize: false,
+        },
+    ))
+}
+
+/// The `tessera-table-v2` write strategy for a table of `spec`'s columns: Vortex's default file
+/// strategy with [`deterministic_table_compressor`] (for `b1`/`utf8` columns and all statistics),
+/// and every numeric column routed to [`numeric_column_strategy`] with the codec its dtype names.
+/// Shared by the batch and streaming encoders, so they stay byte-identical (there is one encoder).
+fn table_write_strategy(s: &VortexSession, spec: &TableSpec) -> Arc<dyn LayoutStrategy> {
+    let btr = deterministic_table_compressor(s);
+    let stats: Arc<dyn CompressorPlugin> = Arc::new(btr.clone().build());
+    spec.columns
+        .iter()
+        .filter_map(|c| TableColumnCodec::for_dtype(&c.dtype).map(|codec| (c, codec)))
+        .fold(
+            WriteStrategyBuilder::from_session(s).with_btrblocks_builder(btr),
+            |b, (c, codec)| {
+                b.with_field_writer(
+                    FieldPath::from_name(c.name.as_str()),
+                    numeric_column_strategy(codec, Arc::clone(&stats)),
+                )
+            },
+        )
+        .build()
 }
 
 /// The table is written as a **chunked** Vortex file: the columns are sliced into fixed
@@ -1116,9 +1371,7 @@ pub fn encode(spec: &TableSpec, data: &TableData) -> Result<Vec<u8>> {
         })
         .collect::<Result<_>>()?;
     let chunked = ChunkedArray::from_iter(chunks).into_array();
-    let strategy = WriteStrategyBuilder::from_session(&s)
-        .with_btrblocks_builder(deterministic_table_compressor(&s))
-        .build();
+    let strategy = table_write_strategy(&s, spec);
     let mut buf = ByteBufferMut::empty();
     rt.block_on(
         s.write_options()
@@ -1145,6 +1398,60 @@ pub fn encode(spec: &TableSpec, data: &TableData) -> Result<Vec<u8>> {
         "encoded table block"
     );
     Ok(payload)
+}
+
+/// Per column, in payload order: `(column name, the distinct encoding ids of its stored chunks)`
+/// ([`column_encodings`]).
+pub type ColumnEncodings = Vec<(String, Vec<String>)>;
+
+/// The Vortex encodings a table block stores for each column: for every column, in the payload's
+/// order, the distinct encoding ids of its stored chunks (`vortex.pco`, `vortex.zstd`,
+/// `fastlanes.bitpacked`, …) in first-seen order. Read from the stored arrays as written, so it
+/// reports what the writer chose (under `tessera-table-v2` a pure function of the column's dtype;
+/// SPEC §5b) without decoding any value. The manifest records no per-column codec: this is the
+/// source of truth for which encoding a column actually uses. Reads every segment of the block.
+///
+/// # Errors
+/// [`Error::Codec`] if `blob` is not a readable Vortex file.
+pub fn column_encodings(blob: &[u8]) -> Result<ColumnEncodings> {
+    let (rt, s) = runtime_session();
+    let file = s
+        .open_options()
+        .open_buffer(ByteBuffer::copy_from(blob))
+        .map_err(ze)?;
+    let names: Vec<String> = file
+        .dtype()
+        .as_struct_fields_opt()
+        .ok_or_else(|| Error::Codec("table payload is not a struct of columns".into()))?
+        .names()
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    let chunks = rt.block_on(
+        file.scan()
+            .map_err(ze)?
+            .into_array_stream()
+            .map_err(ze)?
+            .collect::<Vec<_>>(),
+    );
+    let mut out: ColumnEncodings = names.iter().map(|n| (n.clone(), Vec::new())).collect();
+    for chunk in chunks {
+        let chunk = chunk.map_err(ze)?;
+        let st = chunk
+            .as_opt::<vortex_array::arrays::Struct>()
+            .ok_or_else(|| Error::Codec("table chunk is not a struct".into()))?;
+        for (name, seen) in &mut out {
+            let id = st
+                .unmasked_field_by_name(name.as_str())
+                .map_err(ze)?
+                .encoding_id()
+                .to_string();
+            if !seen.contains(&id) {
+                seen.push(id);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Decode ONLY the rows at `rows` from a table block, via Vortex **row-index pushdown**.
@@ -1286,9 +1593,7 @@ where
     });
     let array_iter = ArrayIteratorAdapter::new(dtype, chunk_iter);
 
-    let strategy = WriteStrategyBuilder::from_session(&s)
-        .with_btrblocks_builder(deterministic_table_compressor(&s))
-        .build();
+    let strategy = table_write_strategy(&s, spec);
     let summary = s
         .write_options()
         .with_strategy(strategy)
@@ -1966,16 +2271,35 @@ mod tests {
 
     /// The profile id [`codec_set_matches_the_pinned_codec_profile`] pins, beside the codec set it
     /// names.
-    const PINNED_PROFILE: &str = "tessera-table-v1";
+    const PINNED_PROFILE: &str = "tessera-table-v2";
 
-    /// The codec set `tessera-table-v1` names: the edition the compressor is restricted to, then
-    /// the built table compressor as it prints itself, i.e. the schemes it may choose from in the
-    /// order it tries them (with the modes the edition refined them to, e.g. `FoRScheme { mode: V1
-    /// }`) and its root exclusions. Written out by hand, never derived: this literal is the record
-    /// of what the profile means. Some schemes print alike, and their positions tell them apart:
-    /// `NullDominatedSparseScheme` (the float one, then the string one) and `PcoScheme` (the float
-    /// one; integer Pco is excluded, and admitting it would add a second `PcoScheme` line).
+    /// The codec rule `tessera-table-v2` names. First the edition, then the forced numeric rule
+    /// ([`TableColumnCodec::for_dtype`] over every dtype, with each codec's parameters), then the
+    /// pinned codec library versions from `Cargo.lock` (their encoders promise decodability, not
+    /// the same bytes across releases), then the BtrBlocks codec set for `b1`/`utf8` and the zone
+    /// maps as the built compressor prints itself: the schemes it may choose from in the order it
+    /// tries them (with the modes the edition refined them to, e.g. `FoRScheme { mode: V1 }`) and
+    /// its root exclusions. That last part is `tessera-table-v1`'s codec set unchanged. Written out
+    /// by hand, never derived: this literal is the record of what the profile means. Some schemes
+    /// print alike, and their positions tell them apart: `NullDominatedSparseScheme` (the float
+    /// one, then the string one) and `PcoScheme` (the float one; integer Pco is excluded, and
+    /// admitting it would add a second `PcoScheme` line).
     const PINNED_CODEC_SET: &str = r#"edition core2026.08.3
+i1 Zstd level=9 frame=row-group dictionary=none
+u1 Zstd level=9 frame=row-group dictionary=none
+i2 Pco level=8 values_per_page=8192 chunk=row-group
+i4 Pco level=8 values_per_page=8192 chunk=row-group
+i8 Pco level=8 values_per_page=8192 chunk=row-group
+u2 Pco level=8 values_per_page=8192 chunk=row-group
+u4 Pco level=8 values_per_page=8192 chunk=row-group
+u8 Pco level=8 values_per_page=8192 chunk=row-group
+f4 Pco level=8 values_per_page=8192 chunk=row-group
+f8 Pco level=8 values_per_page=8192 chunk=row-group
+b1 BtrBlocks
+str BtrBlocks
+row_group=65536 zone=8192
+pco 1.0.2
+zstd-sys 2.1.3+zstd.1.5.7
 CascadingCompressor {
     schemes: [
         FoRScheme {
@@ -2019,21 +2343,74 @@ CascadingCompressor {
     ],
 }"#;
 
-    /// ADR-0024's 2026-11-16 amendment (#869): the codec set and the profile id move together. A
-    /// change to [`deterministic_table_compressor`]'s exclusions or preset, to [`TABLE_EDITION`],
-    /// or a Vortex bump that adds, drops, reorders or reconfigures a scheme changes the printed
-    /// codec set and fails here until the profile is bumped and re-pinned. A heuristic change
-    /// inside an unchanged scheme does not print; the corpus goldens (`conformance`,
-    /// `ingest_corpus`) catch it, because the table bytes move. The print uses Rust type names, so
-    /// a Vortex rename alone also fails here: that one is re-pinned without a bump, once the
-    /// regenerated goldens show the table bytes did not move.
+    /// The locked version of crate `name` in the workspace `Cargo.lock`, for the drift guard.
+    fn locked_version(name: &str) -> String {
+        let lock =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"))
+                .expect("read the workspace Cargo.lock");
+        let needle = format!("name = \"{name}\"\nversion = \"");
+        let mut found = lock.match_indices(&needle).map(|(i, _)| {
+            let rest = &lock[i + needle.len()..];
+            rest[..rest.find('"').expect("closing quote")].to_owned()
+        });
+        let version = found
+            .next()
+            .unwrap_or_else(|| panic!("{name} is not in Cargo.lock"));
+        assert!(
+            found.next().is_none(),
+            "two versions of {name} in Cargo.lock: the profile must name one"
+        );
+        version
+    }
+
+    /// The printed `tessera-table-v2` rule: see [`PINNED_CODEC_SET`].
+    fn live_codec_set() -> String {
+        let (_rt, s) = runtime_session();
+        let mut out = format!("edition {TABLE_EDITION}\n");
+        for dtype in [
+            "i1", "u1", "i2", "i4", "i8", "u2", "u4", "u8", "f4", "f8", "b1", "str",
+        ] {
+            let rule = match TableColumnCodec::for_dtype(dtype) {
+                Some(TableColumnCodec::Pco) => format!(
+                    "Pco level={TABLE_V2_PCO_LEVEL} values_per_page={TABLE_V2_PCO_VALUES_PER_PAGE} \
+                     chunk=row-group"
+                ),
+                Some(TableColumnCodec::Zstd) => {
+                    format!("Zstd level={TABLE_V2_ZSTD_LEVEL} frame=row-group dictionary=none")
+                }
+                None => "BtrBlocks".into(),
+            };
+            out.push_str(&format!("{dtype} {rule}\n"));
+        }
+        out.push_str(&format!(
+            "row_group={ROWS_PER_GROUP} zone={TABLE_V2_ZONE_ROWS}\n"
+        ));
+        out.push_str(&format!("pco {}\n", locked_version("pco")));
+        out.push_str(&format!("zstd-sys {}\n", locked_version("zstd-sys")));
+        out.push_str(&format!(
+            "{:#?}",
+            *deterministic_table_compressor(&s).build()
+        ));
+        out
+    }
+
+    /// ADR-0024's 2026-11-16 amendment (#869) and its 2026-11-22 amendment (#828): the codec rule
+    /// and the profile id move together. A change to the dtype rule or its parameters, to the
+    /// locked `pco` or `zstd-sys` (libzstd) version, to [`deterministic_table_compressor`]'s
+    /// exclusions or preset, to [`TABLE_EDITION`], or a Vortex bump that adds, drops, reorders or
+    /// reconfigures a scheme changes the printed rule and fails here until the profile is bumped
+    /// and re-pinned. A heuristic change inside an unchanged scheme or codec does not print; the
+    /// corpus goldens (`conformance`, `ingest_corpus`) catch it, because the table bytes move. The
+    /// print uses Rust type names, so a Vortex rename alone also fails here: that one is re-pinned
+    /// without a bump, once the regenerated goldens show the table bytes did not move.
     #[test]
     fn codec_set_matches_the_pinned_codec_profile() {
-        let (_rt, s) = runtime_session();
-        let live = format!(
-            "edition {TABLE_EDITION}\n{:#?}",
-            *deterministic_table_compressor(&s).build()
+        assert_eq!(
+            TABLE_V2_PCO_LEVEL,
+            pco::DEFAULT_COMPRESSION_LEVEL,
+            "TABLE_V2_PCO_LEVEL is documented as pco's default level"
         );
+        let live = live_codec_set();
         assert_eq!(
             live, PINNED_CODEC_SET,
             "the table codec set changed but the codec profile did not: bump TABLE_CODEC_PROFILE \
@@ -2062,6 +2439,26 @@ CascadingCompressor {
                 // Deliberately NOT `deterministic_table_compressor()`: the point is that the stock
                 // strategy diverges too.
                 .with_strategy(WriteStrategyBuilder::from_session(&s).build())
+                .write(&mut buf, arr.to_array_stream()),
+        )
+        .expect("vortex write");
+        buf.freeze().to_vec()
+    }
+
+    /// Encode one `i64` column through Vortex's file strategy with tessera's BtrBlocks codec set
+    /// ([`deterministic_table_compressor`]), the path `b1`/`utf8` columns and zone maps take.
+    fn encode_i64_via_table_btrblocks(values: &[i64]) -> Vec<u8> {
+        let rt = CurrentThreadRuntime::new();
+        let s = new_session(&rt);
+        let arr: ArrayRef = Buffer::copy_from(values).into_array();
+        let mut buf = ByteBufferMut::empty();
+        rt.block_on(
+            s.write_options()
+                .with_strategy(
+                    WriteStrategyBuilder::from_session(&s)
+                        .with_btrblocks_builder(deterministic_table_compressor(&s))
+                        .build(),
+                )
                 .write(&mut buf, arr.to_array_stream()),
         )
         .expect("vortex write");
@@ -2129,6 +2526,561 @@ CascadingCompressor {
         let mut fields = Vec::new();
         walk(file.footer().layout(), &mut fields);
         fields
+    }
+
+    /// The layout of column `field` in `bytes`: every flat leaf under its data path (zone maps
+    /// excluded) as `(row_count, segment id)`, and whether any layout on that path is a dictionary.
+    fn column_data_leaves(bytes: &[u8], field: &str) -> (Vec<(u64, u32)>, bool) {
+        fn walk(layout: &vortex_layout::LayoutRef, leaves: &mut Vec<(u64, u32)>, dict: &mut bool) {
+            let id = layout.encoding_id().to_string();
+            *dict |= id == "vortex.dict";
+            if id == "vortex.flat" {
+                let seg = *layout
+                    .segment_ids()
+                    .first()
+                    .expect("a flat leaf has a segment");
+                leaves.push((layout.row_count(), *seg));
+                return;
+            }
+            let children = layout.children().expect("layout children");
+            for (name, child) in layout.child_names().zip(children) {
+                if &*name != "zones" {
+                    walk(&child, leaves, dict);
+                }
+            }
+        }
+        let (_rt, s) = runtime_session();
+        let file = s
+            .open_options()
+            .open_buffer(ByteBuffer::copy_from(bytes))
+            .expect("open written vortex file");
+        let root = file.footer().layout().clone();
+        let child = root
+            .child_names()
+            .zip(root.children().expect("struct children"))
+            .find(|(n, _)| &**n == field)
+            .unwrap_or_else(|| panic!("no column {field}"))
+            .1;
+        let (mut leaves, mut dict) = (Vec::new(), false);
+        walk(&child, &mut leaves, &mut dict);
+        (leaves, dict)
+    }
+
+    /// One column per dtype `tessera-table-v2` routes, over two full row-groups plus a partial one
+    /// that crosses a zone boundary: (spec, data).
+    fn every_dtype_table() -> (TableSpec, TableData) {
+        let rows = ROWS_PER_GROUP * 2 + 8_193;
+        let r = |f: &dyn Fn(usize) -> i64| (0..rows).map(f).collect::<Vec<i64>>();
+        let cols: Vec<(&str, &str, ColumnData)> = vec![
+            (
+                "i1",
+                "i1",
+                ColumnData::I8(
+                    r(&|k| (k % 40) as i64 - 20)
+                        .into_iter()
+                        .map(|v| v as i8)
+                        .collect(),
+                ),
+            ),
+            (
+                "u1",
+                "u1",
+                ColumnData::U8(
+                    r(&|k| (k * 7 % 40) as i64)
+                        .into_iter()
+                        .map(|v| v as u8)
+                        .collect(),
+                ),
+            ),
+            (
+                "i2",
+                "i2",
+                ColumnData::I16(
+                    r(&|k| (k * 37 % 2000) as i64 - 1000)
+                        .into_iter()
+                        .map(|v| v as i16)
+                        .collect(),
+                ),
+            ),
+            (
+                "u2",
+                "u2",
+                ColumnData::U16(
+                    r(&|k| (k % 600) as i64)
+                        .into_iter()
+                        .map(|v| v as u16)
+                        .collect(),
+                ),
+            ),
+            (
+                "i4",
+                "i4",
+                ColumnData::I32(
+                    r(&|k| k as i64 * 3 - 100_000)
+                        .into_iter()
+                        .map(|v| v as i32)
+                        .collect(),
+                ),
+            ),
+            (
+                "u4",
+                "u4",
+                ColumnData::U32((0..rows as u32).map(|k| k / 3).collect()),
+            ),
+            ("i8", "i8", ColumnData::I64(r(&|k| (k as i64) << 20))),
+            ("u8", "u8", ColumnData::U64((0..rows as u64).collect())),
+            (
+                "f4",
+                "f4",
+                ColumnData::F32((0..rows).map(|k| (k % 97) as f32 * 0.5).collect()),
+            ),
+            (
+                "f8",
+                "f8",
+                ColumnData::F64((0..rows).map(|k| k as f64 * 1e-3).collect()),
+            ),
+            (
+                "b1",
+                "b1",
+                ColumnData::Bool((0..rows).map(|k| k % 3 == 0).collect()),
+            ),
+            (
+                "s",
+                "str",
+                ColumnData::Utf8((0..rows).map(|k| format!("tag-{}", k % 5)).collect()),
+            ),
+        ];
+        let mut spec = TableSpec {
+            columns: cols.iter().map(|(n, d, _)| col(n, d)).collect(),
+            rows: rows as u64,
+            row_index: None,
+            partition: None,
+            edition: None,
+            codec_profile: None,
+        };
+        let mut data: TableData = cols
+            .into_iter()
+            .map(|(n, _, c)| (n.to_string(), c))
+            .collect();
+        // Nullable, NULL only in the first 1,024 rows: the first row-group has a mixed mask, every
+        // later one is all-valid (the case where a batch slice and a streamed group used to
+        // carry different validity forms).
+        spec.columns.push(col("n", "i4").nullable());
+        data.push((
+            "n".into(),
+            ColumnData::Nullable {
+                values: Box::new(ColumnData::I32(
+                    (0..rows)
+                        .map(|k| if k < 1024 { 0 } else { k as i32 % 777 })
+                        .collect(),
+                )),
+                validity: (0..rows).map(|k| k >= 1024).collect(),
+            },
+        ));
+        // Nullable Pco column whose whole first row-group is NULL (no value to compress there).
+        spec.columns.push(col("z", "i2").nullable());
+        data.push((
+            "z".into(),
+            ColumnData::Nullable {
+                values: Box::new(ColumnData::I16(
+                    (0..rows)
+                        .map(|k| {
+                            if k < ROWS_PER_GROUP {
+                                0
+                            } else {
+                                (k % 300) as i16
+                            }
+                        })
+                        .collect(),
+                )),
+                validity: (0..rows).map(|k| k >= ROWS_PER_GROUP).collect(),
+            },
+        ));
+        (spec, data)
+    }
+
+    /// Decision (note §2.1, O0/O1): the codec is the dtype's, forced. Every stored chunk of a
+    /// ≥ 16-bit integer or float column is `vortex.pco`, of an 8-bit one `vortex.zstd`, and `b1`/
+    /// `str` stay on BtrBlocks (neither codec). Under `tessera-table-v1` BtrBlocks samples each
+    /// chunk and writes FoR, bit-packing, dictionary, … here.
+    #[test]
+    fn v2_forces_the_codec_its_dtype_names() {
+        let (spec, data) = every_dtype_table();
+        let bytes = encode(&spec, &data).unwrap();
+        let stored = column_encodings(&bytes).unwrap();
+        assert_eq!(stored.len(), spec.columns.len());
+        for (c, (name, encodings)) in spec.columns.iter().zip(&stored) {
+            assert_eq!(&c.name, name);
+            assert!(!encodings.is_empty(), "column {} has no chunks", c.name);
+            match TableColumnCodec::for_dtype(&c.dtype) {
+                Some(TableColumnCodec::Pco) => assert!(
+                    encodings.iter().all(|e| e == "vortex.pco"),
+                    "column {} ({}) must be all vortex.pco, got {encodings:?}",
+                    c.name,
+                    c.dtype
+                ),
+                Some(TableColumnCodec::Zstd) => assert!(
+                    encodings.iter().all(|e| e == "vortex.zstd"),
+                    "column {} ({}) must be all vortex.zstd, got {encodings:?}",
+                    c.name,
+                    c.dtype
+                ),
+                None => assert!(
+                    encodings
+                        .iter()
+                        .all(|e| e != "vortex.pco" && e != "vortex.zstd"),
+                    "column {} ({}) must keep v1's BtrBlocks set, got {encodings:?}",
+                    c.name,
+                    c.dtype
+                ),
+            }
+        }
+    }
+
+    /// Decision (note §2.1, §3, O2): one Pco chunk / Zstd frame per row-group. Every numeric
+    /// column's data leaves hold exactly [`ROWS_PER_GROUP`] rows (the last the remainder),
+    /// whatever its width, and no dictionary layout sits in front of them; a take or a
+    /// non-contiguous filter therefore decodes whole row-groups, never more. Under
+    /// `tessera-table-v1` Vortex coalesces chunks to ≈ 1 MiB of raw bytes (a 2-byte column's
+    /// leaf spans several row-groups) and dictionary-encodes low-cardinality columns.
+    #[test]
+    fn v2_cuts_every_numeric_column_at_its_row_groups() {
+        let (spec, data) = every_dtype_table();
+        let bytes = encode(&spec, &data).unwrap();
+        let rows = spec.rows as usize;
+        let want: Vec<u64> = (0..rows.div_ceil(ROWS_PER_GROUP))
+            .map(|g| (rows - g * ROWS_PER_GROUP).min(ROWS_PER_GROUP) as u64)
+            .collect();
+        for c in spec
+            .columns
+            .iter()
+            .filter(|c| TableColumnCodec::for_dtype(&c.dtype).is_some())
+        {
+            let (leaves, dict) = column_data_leaves(&bytes, &c.name);
+            let got: Vec<u64> = leaves.iter().map(|(n, _)| *n).collect();
+            assert_eq!(got, want, "column {} ({}) data leaves", c.name, c.dtype);
+            assert!(
+                !dict,
+                "column {} ({}) is dictionary-encoded",
+                c.name, c.dtype
+            );
+        }
+    }
+
+    /// Decision (note §2.1, O1): an 8-bit row-group is ONE Zstd frame with NO dictionary (one
+    /// buffer), and a nullable 8-bit column whose whole row-group is NULL encodes (Zstd's
+    /// "one frame" stride is the valid count, 0 here) and round-trips.
+    #[test]
+    fn v2_writes_each_8_bit_row_group_as_one_zstd_frame_without_a_dictionary() {
+        let rows = ROWS_PER_GROUP * 2;
+        let spec = TableSpec {
+            columns: vec![col("c", "u1"), col("n", "i1").nullable()],
+            rows: rows as u64,
+            row_index: None,
+            partition: None,
+            edition: None,
+            codec_profile: None,
+        };
+        let data: TableData = vec![
+            (
+                "c".into(),
+                ColumnData::U8((0..rows).map(|k| (k % 40) as u8).collect()),
+            ),
+            (
+                "n".into(),
+                ColumnData::Nullable {
+                    values: Box::new(ColumnData::I8(vec![0; rows])),
+                    // The first row-group all NULL, the second all valid.
+                    validity: (0..rows).map(|k| k >= ROWS_PER_GROUP).collect(),
+                },
+            ),
+        ];
+        let bytes = encode(&spec, &data).unwrap();
+        for name in ["c", "n"] {
+            let (leaves, _) = column_data_leaves(&bytes, name);
+            assert_eq!(leaves.len(), 2, "{name}: one leaf per row-group");
+            let chunks = read_stored_chunks(&bytes);
+            assert_eq!(chunks.len(), 2, "one stored chunk per row-group");
+            for (g, chunk) in chunks.iter().enumerate() {
+                let st = chunk.as_opt::<vortex_array::arrays::Struct>().unwrap();
+                let field = st.unmasked_field_by_name(name).unwrap();
+                assert_eq!(field.encoding_id().to_string(), "vortex.zstd", "{name}");
+                // One frame and no dictionary buffer; an all-NULL row-group has no value to
+                // compress, so no frame at all.
+                let frames = usize::from(!(name == "n" && g == 0));
+                assert_eq!(
+                    field.nbuffers(),
+                    frames,
+                    "{name} row-group {g}: a v2 8-bit chunk is one Zstd frame, no dictionary"
+                );
+            }
+        }
+        let got = decode(&spec, &bytes).unwrap();
+        assert_eq!(got, data);
+    }
+
+    /// S13 for `tessera-table-v2`: every dtype round-trips bit-exactly through the forced codecs,
+    /// including NaN payloads, ±inf, −0.0, denormals, the integer extremes and NULLs.
+    #[test]
+    fn v2_round_trips_every_dtype_bit_exactly() {
+        let (mut spec, mut data) = every_dtype_table();
+        let rows = spec.rows as usize;
+        let f8 = [
+            f64::from_bits(0x7ff8_0000_0000_beef),
+            f64::from_bits(0xfff4_0000_0000_0001), // signalling NaN, sign set
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -0.0,
+            f64::from_bits(1),
+            f64::MIN_POSITIVE / 2.0,
+            f64::MAX,
+        ];
+        let f4 = [
+            f32::from_bits(0x7fc0_beef),
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.0,
+            f32::from_bits(1),
+            f32::MIN,
+        ];
+        for (name, c) in data.iter_mut() {
+            match (name.as_str(), c) {
+                ("f8", ColumnData::F64(v)) => v[..f8.len()].copy_from_slice(&f8),
+                ("f4", ColumnData::F32(v)) => v[..f4.len()].copy_from_slice(&f4),
+                ("i8", ColumnData::I64(v)) => v[..3].copy_from_slice(&[i64::MIN, -1, i64::MAX]),
+                ("u8", ColumnData::U64(v)) => v[..2].copy_from_slice(&[u64::MAX, 0]),
+                ("i1", ColumnData::I8(v)) => v[..2].copy_from_slice(&[i8::MIN, i8::MAX]),
+                ("u1", ColumnData::U8(v)) => v[..2].copy_from_slice(&[u8::MAX, 0]),
+                _ => {}
+            }
+        }
+        spec.columns.push(col("nf", "f8").nullable());
+        data.push((
+            "nf".into(),
+            ColumnData::Nullable {
+                values: Box::new(ColumnData::F64(
+                    (0..rows)
+                        .map(|k| if k % 4 == 0 { 0.0 } else { f8[k % f8.len()] })
+                        .collect(),
+                )),
+                validity: (0..rows).map(|k| k % 4 != 0).collect(),
+            },
+        ));
+        let got = decode(&spec, &encode(&spec, &data).unwrap()).unwrap();
+        let bits = |c: &ColumnData| -> Vec<u64> {
+            match c {
+                ColumnData::F32(v) => v.iter().map(|x| x.to_bits() as u64).collect(),
+                ColumnData::F64(v) => v.iter().map(|x| x.to_bits()).collect(),
+                ColumnData::Nullable { values, .. } => match values.as_ref() {
+                    ColumnData::F64(v) => v.iter().map(|x| x.to_bits()).collect(),
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            }
+        };
+        let is_float = |c: &ColumnData| match c {
+            ColumnData::Nullable { values, .. } => matches!(values.as_ref(), ColumnData::F64(_)),
+            c => matches!(c, ColumnData::F32(_) | ColumnData::F64(_)),
+        };
+        for ((gn, g), (_, w)) in got.iter().zip(&data) {
+            if is_float(w) {
+                assert_eq!(bits(g), bits(w), "column {gn}");
+                if let (
+                    ColumnData::Nullable { validity: gv, .. },
+                    ColumnData::Nullable { validity: wv, .. },
+                ) = (g, w)
+                {
+                    assert_eq!(gv, wv, "column {gn} validity");
+                }
+            } else {
+                assert_eq!(g, w, "column {gn}");
+            }
+        }
+    }
+
+    /// S15 for `tessera-table-v2`: the same rows give the same bytes, batch and streaming,
+    /// including a nullable column whose later row-groups are all-valid (before
+    /// [`canonical_validity`], the batch slices kept an explicit all-true mask there and the
+    /// streamed groups an `AllValid` one, so the two encodes differed).
+    #[test]
+    fn v2_is_writer_deterministic_batch_and_streaming() {
+        let (spec, data) = every_dtype_table();
+        let a = encode(&spec, &data).unwrap();
+        assert_eq!(a, encode(&spec, &data).unwrap(), "two batch encodes differ");
+        let rows = spec.rows as usize;
+        let groups: Vec<TableData> = (0..rows.div_ceil(ROWS_PER_GROUP))
+            .map(|g| {
+                let (lo, hi) = (g * ROWS_PER_GROUP, ((g + 1) * ROWS_PER_GROUP).min(rows));
+                data.iter()
+                    .map(|(n, c)| (n.clone(), c.slice(lo, hi)))
+                    .collect()
+            })
+            .collect();
+        assert!(
+            encode_streaming(&spec, groups).unwrap() == a,
+            "streaming and batch encodes differ"
+        );
+    }
+
+    /// A Vortex read source over `bytes` that records every byte range a reader requests.
+    #[derive(Clone)]
+    struct RecordingRead {
+        bytes: ByteBuffer,
+        reads: Arc<std::sync::Mutex<Vec<(u64, u64)>>>,
+    }
+
+    impl vortex_io::VortexReadAt for RecordingRead {
+        fn concurrency(&self) -> usize {
+            1
+        }
+        fn size(&self) -> futures::future::BoxFuture<'static, VortexResult<u64>> {
+            vortex_io::VortexReadAt::size(&self.bytes)
+        }
+        fn read_at(
+            &self,
+            offset: u64,
+            length: usize,
+            alignment: vortex_buffer::Alignment,
+        ) -> futures::future::BoxFuture<'static, VortexResult<vortex_array::buffer::BufferHandle>>
+        {
+            self.reads
+                .lock()
+                .unwrap()
+                .push((offset, offset + length as u64));
+            vortex_io::VortexReadAt::read_at(&self.bytes, offset, length, alignment)
+        }
+    }
+
+    /// The row-groups (indices of the `t_ms` column's data leaves) whose bytes a scan of `bytes`
+    /// with `filter` reads after the file is open: the leaves the reader requests at least one
+    /// byte of. Leaves served from the footer's initial tail read are invisible to this count.
+    fn row_groups_read(bytes: &[u8], filter: Option<vortex_array::expr::Expression>) -> Vec<usize> {
+        let (rt, s) = runtime_session();
+        let src = RecordingRead {
+            bytes: ByteBuffer::copy_from(bytes),
+            reads: Arc::default(),
+        };
+        let file = rt
+            .block_on(
+                s.open_options()
+                    .with_initial_read_size(0)
+                    .open_read(src.clone()),
+            )
+            .expect("open");
+        src.reads.lock().unwrap().clear();
+        let scan = file.scan().expect("scan");
+        let scan = match filter {
+            Some(f) => scan.with_filter(f.bind(file.dtype()).expect("bind filter")),
+            None => scan,
+        };
+        let chunks = rt.block_on(
+            scan.into_array_stream()
+                .expect("stream")
+                .collect::<Vec<_>>(),
+        );
+        for c in chunks {
+            c.expect("chunk");
+        }
+        let segments = file.footer().segment_map().clone();
+        let reads = src.reads.lock().unwrap().clone();
+        column_data_leaves(bytes, "t_ms")
+            .0
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, seg))| {
+                let spec = &segments[*seg as usize];
+                let (lo, hi) = (spec.offset, spec.offset + u64::from(spec.length));
+                reads.iter().any(|&(a, b)| a < hi && lo < b)
+            })
+            .map(|(g, _)| g)
+            .collect()
+    }
+
+    /// A4 (note §3, §5): zone-map pruning is unchanged under v2. A `t_ms` window filter over a
+    /// block decodes only the row-groups whose zones overlap the window: the reader requests no
+    /// byte of any other row-group's data. The unfiltered scan is the control: it shows which
+    /// row-groups the count can see at all, so the assertion cannot hold vacuously.
+    #[test]
+    fn a_time_window_filter_reads_only_the_overlapping_row_groups() {
+        use vortex_array::expr::{and, get_item, gt_eq, lit, lt};
+        const GROUPS: usize = 16;
+        let rows = GROUPS * ROWS_PER_GROUP;
+        // Row-group g holds t_ms in [1000 g, 1000 g + 999], noisy within, so each leaf is tens
+        // of KiB and its zones never straddle another group's range.
+        let t_ms: Vec<u32> = (0..rows)
+            .map(|k| {
+                let g = (k / ROWS_PER_GROUP) as u32;
+                g * 1000 + (k as u32).wrapping_mul(2_654_435_761) % 1000
+            })
+            .collect();
+        let spec = TableSpec {
+            columns: vec![col("t_ms", "u4")],
+            rows: rows as u64,
+            row_index: None,
+            partition: None,
+            edition: None,
+            codec_profile: None,
+        };
+        let bytes = encode(&spec, &vec![("t_ms".into(), ColumnData::U32(t_ms))]).unwrap();
+        let visible = row_groups_read(&bytes, None);
+        let window: Vec<usize> = vec![5, 6];
+        assert!(
+            window.iter().all(|g| visible.contains(g)) && visible.len() >= window.len() + 4,
+            "the control scan must see the window's row-groups and several others: {visible:?}"
+        );
+        let t = || get_item("t_ms", root());
+        let filter = and(gt_eq(t(), lit(5_000u32)), lt(t(), lit(7_000u32)));
+        assert_eq!(
+            row_groups_read(&bytes, Some(filter)),
+            window,
+            "a [5000, 7000) window must read row-groups 5 and 6 only"
+        );
+    }
+
+    /// Note §2.2 (O3): a table column may not seal a `codec`; the profile names it. The refusal
+    /// points at `codec_profile`.
+    #[test]
+    fn a_table_column_that_sets_a_codec_is_refused() {
+        let spec = TableSpec {
+            columns: vec![col("t", "u8").with_codec("zstd")],
+            rows: 1,
+            row_index: None,
+            partition: None,
+            edition: None,
+            codec_profile: None,
+        };
+        let err = match table_block(
+            "events",
+            &spec,
+            &vec![("t".into(), ColumnData::U64(vec![1]))],
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a column codec must be refused"),
+        };
+        assert!(
+            err.contains("codec_profile") && err.contains("'t'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Note §2.3: a profile this reader does not know gets the informational note; a known or
+    /// absent one does not.
+    #[test]
+    fn an_unknown_codec_profile_gets_the_note() {
+        let mut spec = every_dtype_table().0;
+        assert_eq!(unknown_codec_profile_note("events", &spec), None);
+        for known in KNOWN_TABLE_CODEC_PROFILES {
+            spec.codec_profile = Some((*known).into());
+            assert_eq!(unknown_codec_profile_note("events", &spec), None);
+        }
+        spec.codec_profile = Some("tessera-table-v9".into());
+        assert_eq!(
+            unknown_codec_profile_note("events", &spec).as_deref(),
+            Some(
+                "note: table block events: codec profile tessera-table-v9 is not known to this \
+                 reader; decoding by Vortex wire IDs"
+            )
+        );
     }
 
     /// **#472 — a persisted float statistic must not carry the platform's default NaN.**
@@ -2232,7 +3184,11 @@ CascadingCompressor {
     ///
     /// Each shape must actually produce patches, or the guard checks nothing; that is asserted
     /// too. The shapes run through a bare vortex write with the stock strategy (so the finding
-    /// cannot be blamed on our compressor configuration) and through our seal path.
+    /// cannot be blamed on our compressor configuration) and through the BtrBlocks codec set
+    /// tessera still writes with ([`deterministic_table_compressor`]). Under `tessera-table-v2`
+    /// that set encodes the `b1`/`utf8` columns (whose dictionary codes are integers) and the
+    /// zone-map statistics, while numeric columns go to Pco or Zstd, which construct no `Patches`;
+    /// the seal path of the same shapes is checked to write none.
     #[test]
     fn patch_indices_persist_no_sortedness_statistic() {
         use vortex_array::expr::stats::Stat;
@@ -2249,7 +3205,7 @@ CascadingCompressor {
         ];
 
         for (shape, values) in shapes {
-            let sealed = encode(
+            let sealed_v2 = encode(
                 &TableSpec {
                     columns: vec![col("x", "i8")],
                     rows: values.len() as u64,
@@ -2261,9 +3217,17 @@ CascadingCompressor {
                 &vec![("x".into(), ColumnData::I64(values.clone()))],
             )
             .expect("encode");
+            assert!(
+                named_nodes(&read_stored_chunks(&sealed_v2), "patch_indices").is_empty(),
+                "{shape}: the tessera-table-v2 seal path wrote patches for an i8 column, so a \
+                 numeric column no longer takes the forced Pco path"
+            );
             for (path, bytes) in [
                 ("bare vortex write", encode_bare_i64_via_vortex(&values)),
-                ("seal path", sealed),
+                (
+                    "table BtrBlocks codec set",
+                    encode_i64_via_table_btrblocks(&values),
+                ),
             ] {
                 let indices = named_nodes(&read_stored_chunks(&bytes), "patch_indices");
                 assert!(

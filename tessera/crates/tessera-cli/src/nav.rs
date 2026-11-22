@@ -781,6 +781,52 @@ pub(crate) fn table_codec_line(b: &BlockRef) -> Option<String> {
     ))
 }
 
+/// `inspect --encodings`: for every table block of the product, the Vortex encodings its payload
+/// stores per column ([`tessera_io::table::column_encodings`]), keyed by block name.
+pub(crate) fn table_encodings(
+    r: &mut dyn crate::TsraSource,
+) -> tessera_core::Result<std::collections::BTreeMap<String, tessera_io::table::ColumnEncodings>> {
+    let names: Vec<String> = r
+        .manifest()
+        .blocks
+        .iter()
+        .filter(|b| b.kind == BlockKind::Table)
+        .map(|b| b.name.to_string())
+        .collect();
+    let mut out = std::collections::BTreeMap::new();
+    for name in names {
+        let mut bytes = Vec::new();
+        r.stream_block_to(&name, &mut bytes)?;
+        out.insert(name, tessera_io::table::column_encodings(&bytes)?);
+    }
+    Ok(out)
+}
+
+/// The `inspect --encodings` line under a table block: `<column>=<encoding>[,<encoding>…]` per
+/// column, in payload order.
+pub(crate) fn encodings_line(cols: &tessera_io::table::ColumnEncodings) -> String {
+    let parts: Vec<String> = cols
+        .iter()
+        .map(|(c, e)| format!("{c}={}", e.join(",")))
+        .collect();
+    format!("      encodings {}", parts.join(" "))
+}
+
+/// The informational note for every table block whose recorded codec profile this reader does not
+/// know (SPEC §5b; `tessera_io::table::unknown_codec_profile_note`), in manifest order. Decoding
+/// needs only the Vortex wire IDs, so the note never changes an exit status.
+pub(crate) fn unknown_codec_profile_notes(m: &tessera_core::Manifest) -> Vec<String> {
+    m.blocks
+        .iter()
+        .filter(|b| b.kind == BlockKind::Table)
+        .filter_map(|b| {
+            let spec: tessera_core::block::table::TableSpec =
+                serde_json::from_value(b.spec.clone()).ok()?;
+            tessera_io::table::unknown_codec_profile_note(b.name.as_str(), &spec)
+        })
+        .collect()
+}
+
 /// The `inspect` render of the sealed ADR-0058 §1 **producer identity**.
 ///
 /// [`ProducerRef::display`](tessera_core::ProducerRef::display) folds the build fields into a
