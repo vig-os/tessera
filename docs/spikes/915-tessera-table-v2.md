@@ -428,38 +428,45 @@ round-1 measurement (PR #949 body) and the round-2 load-independent re-measure i
 
 ### 10.1 What failed
 
-Real writer, #822 fixtures, one core; v1 = `tessera-table-v1`, v2 = this note's profile as implemented.
+Real writer, #822 fixtures, one core; v1 = `tessera-table-v1`, v2 = this note's profile as implemented. The
+instruction counts (exact, whole process) have no §5 floor; they show the encode cost without any load effect.
 
-| § 5 row | Floor | GE v1 → v2 | Siemens v1 → v2 | |
-|---|---|---:|---:|:--:|
-| A1 size, B/event | ≤ 3.25 / ≤ 7.10 | 3.904 → 3.219 (−17.5 %) | 7.507 → 6.963 (−7.2 %) | ✓ |
-| A3 encode, CPU ns/event (ksb, exclusive slice) | v1/v2 ≥ 1.00× | 119.5 → 238.5 (**0.50×**) | 135.1 → 261.3 (**0.52×**) | ✗ |
-| A3 user instructions/event (seat, exact, whole process) | — | 557 → 1,702 (+1,145) | 590 → 1,498 (+908) | ✗ |
-| A4 take ×500 on a full block, ms (ksb) | ≤ 100 | 6.5 → **119.5** (18×) | 9.6 → 89.2 (9×) | ✗ |
-| A5 full-scan decode, CPU-MiB/s (ksb) | ≥ 500 | 1,572 → **381** (4.1×) | 747 → 386 (1.9×) | ✗ |
+| § 5 row | Floor | GE v1 → v2 | Siemens v1 → v2 |
+|---|---|---:|---:|
+| A1 size, B/event | ≤ 3.25 / ≤ 7.10 | 3.904 → 3.219 (−17.5 %) ✓ | 7.507 → 6.963 (−7.2 %) ✓ |
+| A3 encode, CPU ns/event (ksb) | v1/v2 ≥ 1.00× | 119.5 → 238.5 (**0.50×**) ✗ | 135.1 → 261.3 (**0.52×**) ✗ |
+| User instructions/event (seat) | none | 557 → 1,702 (+1,145) | 590 → 1,498 (+908) |
+| A4 take ×500, full block, ms (ksb) | ≤ 100 | 6.5 → **119.5** (18×) ✗ | 9.6 → 89.2 (9×) ✓ |
+| A5 full-scan decode, CPU-MiB/s (ksb) | ≥ 500 | 1,572 → **381** (4.1×) ✗ | 747 → 386 (1.9×) ✗ |
 
 On the round-1 seat A4 (79.4 ms) and A5 (610 MiB/s) passed for GE, but the floors leave the host unnamed, and on
 the reserved ksb core both miss; the CPU and instruction ratios do not depend on the host.
 
 **The cost is in the profile itself, not in a parameter.** The 12-point sweep (Pco level {4, 6, 8} × values per
 page {8,192, 65,536} × chunk framing {65,536, 262,144} rows) reaches at most 0.60× (GE) / 0.57× (Siemens) on A3,
-and only level 8 keeps GE's A1. What costs is what v2 is: forced Pco on every ≥ 16-bit column (round-1 `perf`: 66 % of the v2
-writer's CPU on GE is in `pco`, about 37 % in its per-chunk histogram and bin optimisation; the §2.4 codec figure
-was measured on one chunk per 2^22-row column, so it hid that per-chunk cost), forced Zstd level 9 on the 8-bit columns (Siemens' CPU is
-flat across the Pco levels, 235–266 ns/event), and the decode side of both: no take or compare kernel, so every
-take decodes whole chunks (§3), and a Pco decode slower than v1's FoR, bit-packing and dictionary kernels.
+and only level 8 keeps GE's A1. What costs is what v2 is:
+
+- forced Pco on every ≥ 16-bit column: in the round-1 profile of the v2 writer on GE, 66 % of the CPU is in `pco`,
+  and 37 % in its three hottest symbols, histogram building, bin optimisation and the compression-table lookup
+  ([`828-m4b-a3.md`](828-m4b-a3.md) §6). Pco chooses its bins once per chunk, and v2 writes a chunk per 65,536-row
+  group, while the §2.4 codec figure was measured on one chunk per 2^22-row column, so it hid that per-chunk cost;
+- forced Zstd level 9 on the 8-bit columns: Siemens' CPU is flat across the Pco levels (235–266 ns/event);
+- the decode side of both: no take or compare kernel, so every take decodes whole chunks (§3), and a Pco decode
+  slower than v1's FoR, bit-packing and dictionary kernels.
 
 ### 10.2 Decision (owner, 2026-11-22)
 
 - `tessera-table-v1` stays the default table profile. `TABLE_CODEC_PROFILE` is unchanged.
-- #828 leaves the ADR-0066 format-break release; #917 ships A′ (#940) and #720 without it. ADR-0066 step 7 is
+- Issue #828 leaves the ADR-0066 format-break release; #917 ships A′ (#940) and #720 without it. ADR-0066 step 7 is
   deferred.
 - The v2 implementation stays parked, unmerged, on its branch (PR #949, draft). The parts that change no product
   bytes by default (`inspect --encodings`, the measurement tooling, the `table_v2_dtypes` fixture) may land on
   their own once #804 merges (the approved split's PR A).
 - §§ 0–9 stay as the record of what was decided on 2026-11-19 and why; they no longer describe a planned default.
 
-### 10.3 Open question (owner's to answer): is v2 worth having as an opt-in archival profile?
+### 10.3 Open question: v2 as an opt-in archival profile?
+
+This is the owner's to answer: is v2 worth having as an opt-in archival profile?
 
 An archival product is written once, kept long and read rarely: size matters, encode cost matters less, decode and
 take speed hardly. v2's trade (−17.5 % / −7.2 % size for 2× encode CPU, 2–4× slower decode, 9–18× slower take) fits

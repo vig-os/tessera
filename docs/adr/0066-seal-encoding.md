@@ -112,10 +112,10 @@ TOML, YAML, RON, Ion, Protobuf, MessagePack and the others are rejected in the i
     already says; derived-sidecar blocks (stats, pyramids, projections, the chunk index's stat columns) leave it.
     `manifest_hash` still commits to every block, so the integrity of the accelerators is unchanged. Today
     `ManifestBuilder::seal` folds every block ref into `merkle_root`, so the Accepted ADR and the code disagree.
-13. **#828 rides the break** (owner, 2026-11-19; *deferred 2026-11-22, see step 7: #828 does not ride it*). The per-column codec profile `tessera-table-v2` becomes the default
-    table codec profile, replacing today's fixed BtrBlocks + Pco choice. A design note comes first (rules, the
-    profile's contents per product type, how the choice is recorded in the manifest, determinism across arches),
-    then the code.
+13. **#828 rides the break** (owner, 2026-11-19; *deferred 2026-11-22, see step 7: #828 does not ride it*).
+    The per-column codec profile `tessera-table-v2` becomes the default table codec profile, replacing today's
+    fixed BtrBlocks + Pco choice. A design note comes first (rules, the profile's contents per product type, how
+    the choice is recorded in the manifest, determinism across arches), then the code.
 
 ### Rejected alternatives
 
