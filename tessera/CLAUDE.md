@@ -86,6 +86,14 @@ build is ~link time.
     poisoning a cached session passed 345/345 and was caught only by `tessera-py-import`). Issue
     #356 is the mirror case — it fails only in shared-process `cargo test`. Both isolation modes
     hide a different bug class; the flake is the only thing that runs both.
+- **Agents test on ksb, not on the seat (#957).** Until the seat's `/mnt/HDD` build slots stop stalling
+  (gerchowl/g-fleet#1676), the default way to build and test one crate is
+  `scripts/ksb-test.sh <rev> <crate> [FILTERSET]` (e.g. `scripts/ksb-test.sh HEAD tessera-cli --bins`, or
+  `scripts/ksb-test.sh HEAD tessera-io 'test(roundtrip)'`). It runs that crate's nextest suite at that commit
+  (pushed or not) as a ksb job, built in crane derivations of this flake (`legacyPackages.ksbTest`), and prints
+  the summary, every failing test's output and the run's real exit code. The same request on the same commit is
+  cached (a failure stays failed; `--rerun` runs it again). It does not cover the private DUPLET data or
+  hardware counters; `--help` and CONTRIBUTING.md say what else differs from `workspace-test`.
 - **Commits:** commit inside `nix develop` so the `prek` gates fire. If a hook fails to *install*,
   that is a bug worth fixing at the source — do not reach for `--no-verify` by reflex, because it
   disables every other gate in `.pre-commit-config.yaml` too. **Commits are signed**
