@@ -472,8 +472,8 @@ arrow-array v59.3.2
 |   |               |   `-- tessera-io vWORKSPACE (*)
 |   |               |-- vortex-layout feature "default"
 |   |           `-- vortex-layout v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
-|   |           |       `-- vortex-file feature "default" (*)
-|   |           |   `-- vortex-file feature "wasm-bindgen"
+|   |           |       `-- tessera-io vWORKSPACE (*)
+|   |           |   `-- vortex-file feature "zstd"
 |   |           |   |               `-- tessera-py feature "default" (command-line)
 |   |           |   |           `-- tessera-py vWORKSPACE
 |   |           |   |           |       `-- tessera-cli feature "static-hdf5" (command-line)
@@ -508,7 +508,9 @@ arrow-array v59.3.2
 |   |           |   |       |   `-- tessera-cli feature "cloud" (command-line)
 |   |           |   |       |-- tessera-io feature "cloud" (command-line)
 |   |           |   |   `-- tessera-io vWORKSPACE
+|   |           |   |   `-- vortex-file feature "default" (*)
 |   |           |   |-- vortex-file feature "default"
+|   |           |   |-- vortex-file feature "wasm-bindgen"
 |   |           |-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
 |   |       `-- arrow-cast v59.3.2 (*)
 |   |       `-- arrow-ord v59.3.2 (*)

@@ -5,11 +5,33 @@ id            [..]
 name          lm-3p
 timestamp     2024-01-01T00:00:00Z
 producer      tessera/0.0.0
-content_hash  blake3:b8c5176eed20a216f9fcd1dd768fb786b073c99bd99f1b498f99442c691620e2
-manifest_hash blake3:c9a56e24e28b2b7b8192d992b40f8f99dc328b5c73ffdaea32d374be16c9ebd7
+content_hash  blake3:5ec7e0f7d028fcabc1a5147d510f452db87d286ac4cc89bbd2417a21a442317e
+manifest_hash blake3:46f3fd2157e401b3fe686c9b3f19135dd2c4a1d15d3c340e4aa93462cf232a10
 blocks        1
-  - events               Table blake3:8e510d9e0778c6a4cc109ea09ab10a5982a0856453befdad55c3f73aa84a6781
-      edition core2026.08.3  codec_profile tessera-table-v1
+  - events               Table blake3:1373e563f4fee9eb258b480815c85226d937b5c014d2565aebc7bb041d405f3a
+      edition core2026.08.3  codec_profile tessera-table-v2
+
+```
+
+The manifest records no codec per column: under `tessera-table-v2` it is a function of the column's dtype (SPEC
+§5b). `--encodings` reads each table block's payload and lists the Vortex encodings it stores per column.
+
+```
+$ tessera inspect ../../corpus/files/table_v2_dtypes.tsra --encodings
+tessera 0.0.0 · product=table
+id            blake3:3f166accfd8603dbc6881728c6ea4ffd9b033f879434dfe69a4338b5a8db59f3
+name          table-v2-dtypes
+timestamp     2024-01-01T00:00:00Z
+producer      tessera/0.0.0
+content_hash  blake3:64500ca4323149e98a849b213a4445bc1fe451f575b70b87c4c530955318b7d7
+manifest_hash blake3:247672a85f0179ca65dffcc5e177e31c1d1dce36f50f38eecb8e7ff6df5d45b9
+blocks        2
+  - dtypes               Table blake3:cca7d92bc10bf314316b61d881b49167e25ec2b369cb91cdf0b757a1a1fff07b
+      edition core2026.08.3  codec_profile tessera-table-v2
+      encodings i1=vortex.zstd u1=vortex.zstd i2=vortex.pco u2=vortex.pco i4=vortex.pco u4=vortex.pco i8=vortex.pco u8=vortex.pco f4=vortex.pco f8=vortex.pco f8_mult=vortex.pco f8_quant=vortex.pco constant=vortex.pco two=vortex.zstd n_u1=vortex.zstd n_i2=vortex.pco n_f8=vortex.pco flag=vortex.bool tag=vortex.dict
+  - empty                Table blake3:7cd0811d8331bd3f8071f1e723c640f7d87e4e276e80c411fed1ad3c64bf98d7
+      edition core2026.08.3  codec_profile tessera-table-v2
+      encodings t= c= e=
 
 ```
 

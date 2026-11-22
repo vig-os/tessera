@@ -107,6 +107,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are re-packed with every `corpus.json` golden unchanged), so `Source` pins, collection pins and signatures over a
   re-packed product still hold. `TESSERA_VERSION` stays `"0.0.0"`. Repository manifest objects hold the stored bytes,
   so `objects/<manifest_hash>` hashes to its own name.
+- **Breaking format change (ADR-0066 rule 13, #828): `tessera-table-v2` is the table codec profile.** Every table
+  column's codec is now chosen from its dtype alone, forced, never sampled: integers of 16 bits or more and floats are
+  `vortex.pco` (level 8, 8,192 values per page, one chunk per 65,536-row group), `i1`/`u1` are `vortex.zstd` (level 9,
+  one frame per row-group, no dictionary), and `b1`/`str` keep the BtrBlocks codec set of `tessera-table-v1`
+  (ADR-0024's 2026-11-22 amendment, SPEC §5b; design note `docs/spikes/915-tessera-table-v2.md`). Table payload bytes
+  move, so the block digests, `content_hash` and `manifest_hash` of every table-bearing product move and the goldens
+  are regenerated. Zone-map pruning, projection and DuckDB/Arrow interop are unchanged; a random `take` or a
+  non-contiguous filter now decodes whole row-groups per column. `tessera-table-v1` blocks still decode. The pinned
+  `pco` (1.0.2) and libzstd (1.5.7) versions are part of the profile. `tessera-io` gains direct dependencies on
+  `vortex-pco`, `vortex-zstd` and `vortex-error` and enables `vortex-file`'s `zstd` feature (`vortex-zstd` joins the
+  fork `[patch]`); `zstd-sys` moves 2.0.16 → 2.1.3, the same libzstd 1.5.7.
+- **Breaking, `tessera-io`:** every table writer refuses a table column that sets `Column::codec` (`Error::Codec`,
+  pointing to `codec_profile`): under a codec profile a column's codec is a function of its dtype, so the sealed field
+  could only repeat or contradict the payload (#828, O3). The corpus `listmode_events` fixture drops its three
+  `codec: "zstd"`.
+- `tessera-io`: `table::TABLE_CODEC_PROFILE` is `"tessera-table-v2"`; new `table::TableColumnCodec` (the dtype rule),
+  `TABLE_V2_PCO_LEVEL`, `TABLE_V2_PCO_VALUES_PER_PAGE`, `TABLE_V2_ZSTD_LEVEL`, `KNOWN_TABLE_CODEC_PROFILES`,
+  `unknown_codec_profile_note` and `column_encodings` (the encodings a payload stores per column, read without
+  decoding). `tessera-cli`: `inspect --encodings` lists them under each table block, and `inspect`/`verify` print
+  `note: table block <name>: codec profile <X> is not known to this reader; decoding by Vortex wire IDs` on stderr
+  for a profile they do not know (exit status unaffected). New corpus fixture `table_v2_dtypes`, new bench
+  `tessera-io --bench table_read`, and the measurement examples `table_profile` and `table_8bit_codecs`.
 - **Breaking, `tessera-core`:** `Manifest::manifest_hash` and `Collection::manifest_hash` are no longer serialised
   (the seal is not a field). Readers verify through `Manifest::from_stored_members` / `Collection::from_stored_members`
   (`from_stored` with the seal checked); writers store `to_stored()`. New errors `Error::UnsupportedLayout` (the alpha

@@ -19,7 +19,7 @@ use serde_json::Value;
 use tessera_core::{Error, Manifest};
 
 /// The number of cases the generator writes: a lost or gained case is a visible change here.
-const CASES: usize = 150;
+const CASES: usize = 160;
 
 fn cases() -> Vec<Value> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/seal-cases.json");
@@ -111,7 +111,7 @@ fn every_corpus_product_has_every_case_family() {
         .iter()
         .filter_map(|n| n.strip_suffix("/as-stored"))
         .collect();
-    assert_eq!(corpus.len(), 8, "one as-stored case per corpus file");
+    assert_eq!(corpus.len(), 9, "one as-stored case per corpus file");
     let mut shaped = 0;
     for base in &corpus {
         for suffix in [

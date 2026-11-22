@@ -30,8 +30,11 @@ vortex-array.workspace = true
 vortex-btrblocks.workspace = true
 vortex-buffer.workspace = true
 vortex-edition.workspace = true
+vortex-error.workspace = true
 vortex-io.workspace = true
 vortex-layout.workspace = true
+vortex-pco.workspace = true
+vortex-zstd.workspace = true
 vortex-scan.workspace = true
 vortex-session.workspace = true
 futures.workspace = true
@@ -67,6 +70,9 @@ tempfile = "3"
 zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tracing-subscriber.workspace = true
+# examples/table_profile.rs (#828 measurement M6): native 8-bit Pco through the standalone codec, which
+# `vortex-pco` does not map. The version is the one `vortex-pco` already pulls in (`Cargo.lock`).
+pco = "1.0.2"
 
 [[bench]]
 name = "codec"
@@ -74,4 +80,8 @@ harness = false
 
 [[bench]]
 name = "throughput"
+harness = false
+
+[[bench]]
+name = "table_read"
 harness = false

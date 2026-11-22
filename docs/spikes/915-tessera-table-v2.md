@@ -55,7 +55,12 @@ v2 gives every column an entropy coder, which is what the sweep measured, and re
 | `i2 i4 i8 u2 u4 u8 f4 f8` | `vortex.pco` | level 8 (`pco::DEFAULT_COMPRESSION_LEVEL`), 8,192 values per page, one Pco chunk per 65,536-row group | the dtype; no estimate, no sample |
 | `i1 u1` | `vortex.zstd` | one level for every 8-bit column (M6 picks it from {1, 3, 9}; provisional 9), one frame per row-group (`values_per_frame = 0` on the row-group chunk), no dictionary (`ZstdData::from_primitive_without_dict`), single-threaded | the dtype; **O1** |
 | any numeric, `nullable` | as its dtype; the validity mask is Vortex's own child | as above | the dtype |
-| `b1`, `utf8` | v1's codec set (BtrBlocks compact, same exclusions, and the string/binary Zstd schemes **excluded**, so enabling zstd for integers does not move string bytes; #628 stays its own event) | unchanged | BtrBlocks, as v1 |
+| `b1`, `utf8` | v1's codec set (BtrBlocks compact, same exclusions, and the string/binary Zstd schemes **excluded**, so enabling zstd for integers does not change the encodings or buffers of string columns; #628 stays its own event) | unchanged | BtrBlocks, as v1 |
+
+*Correction (#828, 2026-11-22):* the file bytes of a `b1`/`utf8`-only table still move. A Vortex file serialises the
+sorted list of every encoding ID its session registers and its edition allows, and each array names its encoding by an
+index into it, so registering `vortex.zstd` changes that footer table for every table block. The encodings and their
+buffers are unchanged (`tessera-io/tests/table_v1_frozen.rs`).
 
 Layout constants stay frozen: `ROWS_PER_GROUP = 2^16`, `BLOCK_ROWS = 2^22`, zone maps every 8,192 rows, edition
 `core2026.08.3`. `vortex.pco` and `vortex.zstd` are both core-edition members since `core2025.06`

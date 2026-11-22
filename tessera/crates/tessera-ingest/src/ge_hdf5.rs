@@ -1676,9 +1676,10 @@ mod tests {
     /// The `content_hash` both paths seal for these rows. ADR-0064 PR D's switch from `events_NNNN` to
     /// `events/NNNN` left it unchanged (`blake3:1d5468…5123`, read against the unswitched writers at
     /// `11280ba`). The vortex 0.93 table-byte event (ADR-0024's 2026-11-09 amendment, #635) moved it,
-    /// because every table block is re-encoded.
+    /// and so did `tessera-table-v2` (its 2026-11-22 amendment, #828), because each re-encodes every
+    /// table block.
     const WRITER_CONTENT_HASH: &str =
-        "blake3:9208e00be90730986dbcf3aa89f0d5da21a4d6bfd39eb0582115d027add95c27";
+        "blake3:cd5e746b089d30eab987b9940655c95636b2f2a787851b5df9774c82ed597df2";
 
     /// ADR-0064 §6's block projection: per block, in manifest order, `name`, `kind`, `digest`,
     /// `spec.rows`, `spec.row_index` and `spec.partition`.

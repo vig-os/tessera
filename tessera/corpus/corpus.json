@@ -17,8 +17,8 @@
     "name": "listmode_events",
     "product": "listmode",
     "id": "blake3:55b8eac168d668c6e15ab3bdd1d78c0494384dbc6941ad48f9ee7237cf6e9457",
-    "content_hash": "blake3:b8c5176eed20a216f9fcd1dd768fb786b073c99bd99f1b498f99442c691620e2",
-    "manifest_hash": "blake3:c9a56e24e28b2b7b8192d992b40f8f99dc328b5c73ffdaea32d374be16c9ebd7"
+    "content_hash": "blake3:5ec7e0f7d028fcabc1a5147d510f452db87d286ac4cc89bbd2417a21a442317e",
+    "manifest_hash": "blake3:46f3fd2157e401b3fe686c9b3f19135dd2c4a1d15d3c340e4aa93462cf232a10"
   },
   {
     "name": "spectrum_lifetime",
@@ -31,8 +31,8 @@
     "name": "multiblock_study",
     "product": "recon",
     "id": "blake3:216739168370b68f066c955f6c613839f5a8f2c62c4aad5af656c23909f55a2a",
-    "content_hash": "blake3:377a60687d37d395aa4504a24114f4d389f2348b52c9165e048f83f2371ff80c",
-    "manifest_hash": "blake3:4d0e99d14b2a6b01037fd06efee7c5effceb623c7bcbe2489de2f849b0192dc6"
+    "content_hash": "blake3:d655d057695450254bae9369456c6657baa493a99778bf93e4297f27650e6b9d",
+    "manifest_hash": "blake3:bbb6ddb65903eafb6af808f2331c847bd293a497d7d80c28eddd1fb7cd18bc53"
   },
   {
     "name": "empty_no_blocks",
@@ -54,5 +54,12 @@
     "id": "blake3:70900b373daacb02d47855efbb1d01134881bab74603b3c34b47710d467974b6",
     "content_hash": "blake3:8e2d917e6f414710c4d845a9a09922fc782314b1d547c8c63b1ca5e39277986a",
     "manifest_hash": "blake3:458165b6587b7e7fd3e616e45df122264567f4b6fc76201cfa159c4a3f69d76a"
+  },
+  {
+    "name": "table_v2_dtypes",
+    "product": "table",
+    "id": "blake3:3f166accfd8603dbc6881728c6ea4ffd9b033f879434dfe69a4338b5a8db59f3",
+    "content_hash": "blake3:64500ca4323149e98a849b213a4445bc1fe451f575b70b87c4c530955318b7d7",
+    "manifest_hash": "blake3:247672a85f0179ca65dffcc5e177e31c1d1dce36f50f38eecb8e7ff6df5d45b9"
   }
 ]

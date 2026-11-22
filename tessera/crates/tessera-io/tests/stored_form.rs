@@ -372,6 +372,7 @@ fn every_tracked_tsra_stores_the_stored_pair() {
         "../corpus/files/recon_int16.tsra",
         "../corpus/files/segmentation_uint8.tsra",
         "../corpus/files/spectrum_lifetime.tsra",
+        "../corpus/files/table_v2_dtypes.tsra",
         "tessera-cli/tests/cmd/logical_tables.in/scan.tsra",
         "tessera-cli/tests/cmd/persona_signing.in/study.tsra",
         "tessera-cli/tests/cmd/versioning.in/study.tsra",

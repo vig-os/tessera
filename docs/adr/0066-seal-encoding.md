@@ -260,7 +260,9 @@ bridge work (#454 → #811) starts before step 9 is released.
      the speed/size trade-off the default takes, and the determinism requirement across arches (ADR-0026, #468,
      #472). Owner review before 7.
    - *Note:* [`docs/spikes/915-tessera-table-v2.md`](../spikes/915-tessera-table-v2.md) (#915).
-7. **#828: `tessera-table-v2` becomes the default table codec profile.**
+7. **#828: `tessera-table-v2` becomes the default table codec profile.** *Status: implemented in #828 (2026-11-22);
+   the rule is recorded in [ADR-0024](0024-table-block-payload.md)'s 2026-11-22 amendment and SPEC §5b, and the
+   moved goldens are listed in the #828 PR.*
    - *Crates:* `tessera-io` (`table`), `tessera-core` (the codec field in the table block spec), `tessera-ingest`,
      `tessera-cli`, `tessera-py`, the reference reader, benches.
    - *Depends on:* 4 and 6.

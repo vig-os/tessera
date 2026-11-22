@@ -1,7 +1,8 @@
 # ADR-0024 — Table block payload: a single deterministic Vortex file
 
 Status: **Accepted** (2026-06-26; amended 2026-11-09, vortex 0.93 format event, 2026-11-15, the sealed
-`TableSpec.edition`, #635, and 2026-11-16, the sealed `TableSpec.codec_profile`, #869) · Relates to:
+`TableSpec.edition`, #635, 2026-11-16, the sealed `TableSpec.codec_profile`, #869, and 2026-11-22, the
+`tessera-table-v2` codec profile, #828) · Relates to:
 ADR-0020 (identity/hashing), ADR-0022 (`.tsra` container), ADR-0023 (array payload). Implements the table half of ROADMAP
 **P3 / S5** (`#203`).
 
@@ -190,3 +191,63 @@ named, fixed set of constants, never a choice the writer makes at run time from 
   else (listed in the PR for #869). No schema version moves, for the reason in the previous amendment's Schema
   convention bullet. `tessera inspect` shows the edition and the profile under each table block, `-` for an absent
   key. `tessera/docs/SPEC.md` §5b states the field normatively.
+
+## Amendment — `tessera-table-v2`, the per-column codec profile (2026-11-22, #828)
+
+Owner decisions of 2026-11-19 on the design note [`docs/spikes/915-tessera-table-v2.md`](../spikes/915-tessera-table-v2.md)
+(#915, PR #919; O0–O4) and ADR-0066 rule 13: the per-column codec profile becomes the default table profile in the
+ADR-0066 format-break alpha. This amendment records it; the note holds the evidence and the rejected alternatives.
+
+- **The rule.** `tessera-table-v2` chooses each column's codec from its dtype alone. It is forced: no scheme is
+  sampled or estimated at write time.
+
+  | Column dtype | Encoding | Parameters |
+  |---|---|---|
+  | `i2 i4 i8 u2 u4 u8 f4 f8` | `vortex.pco` | level 8 (`pco::DEFAULT_COMPRESSION_LEVEL`), 8,192 values per page, one Pco chunk per row-group |
+  | `i1 u1` | `vortex.zstd` | level 9, one frame per row-group, no dictionary, single-threaded (O1) |
+  | nullable numeric | as its dtype; the validity mask is Vortex's own child | as above |
+  | `b1`, `str` | the codec set of §Codec set (`tessera-table-v1`'s), with BtrBlocks' Zstd schemes excluded | unchanged |
+
+  The same rule serves every product type: there are no per-product-type level tables and no logical transforms
+  (O0). Each numeric column is written as one Vortex leaf per `ROWS_PER_GROUP` row-group behind zone maps every
+  8,192 rows, with no dictionary layout. The zone-map statistics and the `b1`/`str` columns keep the BtrBlocks
+  codec set: a `b1`/`str` column stores the same encodings with byte-identical buffers as under `tessera-table-v1`
+  (a test pins a frozen v1 payload). Its FILE bytes still move, in the footer only: a Vortex file serialises the
+  sorted list of every encoding ID its session registers and its edition allows, and each array names its encoding
+  by an index into that list, so registering `vortex.zstd` changes the list and the indices for every table block,
+  whichever encodings it uses. Layout constants (`ROWS_PER_GROUP`, `BLOCK_ROWS`, zones every 8,192 rows) and the edition
+  (`core2026.08.3`; `vortex.pco` and `vortex.zstd` are core members since `core2025.06`) are unchanged.
+- **Implementation.** `tessera_io::table` routes every numeric column through `with_field_writer` to a layout
+  strategy whose compressor is `Pco::from_primitive` or `ZstdData::from_primitive_without_dict`
+  (`TableColumnCodec`); `vortex-file`'s `zstd` feature registers `vortex.zstd` for reading. Zstd's
+  `values_per_frame` is the row-group's row count, which is one frame like `0` but does not divide by the valid
+  count (0 for an all-NULL row-group).
+- **Versions are part of the profile.** The `pco` crate (1.0.2) and libzstd (`zstd-sys 2.1.3+zstd.1.5.7`) promise
+  decodability, not identical bytes across releases. Both are pinned by `Cargo.lock` and printed by the drift guard
+  `codec_set_matches_the_pinned_codec_profile`, which now pins the whole rule (dtype → codec and parameters,
+  the versions, then the BtrBlocks set). Bumping either is a profile bump and an amendment here.
+- **Naming (O3).** `TableSpec.codec_profile = "tessera-table-v2"`, set by `sealed_spec` as before. There is no
+  per-column codec record: a column's codec is a function of (profile, dtype), and the encoding written is in the
+  Vortex footer (`tessera inspect --encodings`). `Column.codec` on a table column is refused by every table writer
+  with an error that points to `codec_profile` (it could only repeat the rule or contradict the payload).
+- **Two invariants of every profile** (SPEC §5b), which keep "readers never refuse an unknown profile" sound:
+  (1) a profile may change which encodings are written, never the decoded values, so no tessera-level transform
+  sits behind a profile id; (2) a profile may only write arrays that every reader of its edition decodes once it
+  registers the edition's encodings. Native 8-bit Pco is therefore not written: `vortex-pco` maps no 8-bit type and
+  a stock reader panics on one (note §6 D′). It becomes admissible as a later profile once a released Vortex
+  decodes it.
+- **Refusal points.** A writer asked to record another profile (unchanged); a check that re-encodes rows to compare
+  them with a sealed block reports that it cannot check a foreign profile and exits non-zero (no such check exists
+  yet; #796 is the first). A decode that meets an unregistered wire ID fails as any decode; naming the edition there
+  is #871. `tessera verify`/`inspect` print an informational note, exit status unaffected, for a profile they do
+  not know (`table::KNOWN_TABLE_CODEC_PROFILES`).
+- **Trade-off (O2).** Projection, zone-map pruning (a test reads only the overlapping row-groups of a window
+  filter) and DuckDB/Arrow interop are unchanged. Random `take` and non-contiguous filters decode whole row-groups
+  (`vortex.pco` and `vortex.zstd` have no take kernel) instead of v1's O(1) kernels. The page-granular Pco take
+  kernel is a reader-side follow-up that moves no bytes (#921). Measured size and speed are in the #828 PR.
+- **v1 still reads.** Decoding is by wire ID, so a `tessera-table-v1` payload decodes under this reader with no code
+  path of its own; a frozen v1 payload is decoded bit-exactly by a test. ADR-0066 rule 10 refuses pre-A′ products
+  at the container, so no new-format product carries v1 blocks.
+- **What moves.** The payload bytes, hence the block digests, `content_hash` and `manifest_hash`, of every table
+  product whose numeric columns change codec; the corpus goldens are regenerated in #828, each move explained.
+  ADR-0060 needs no amendment: `blocks[].spec` is opaque to the newer-field walk.
