@@ -295,8 +295,29 @@ impl ColumnData {
         self.as_i64().map(|v| ChunkStats::from_values(&v))
     }
 
-    /// Flatten the column to little-endian bytes for zero-copy reconstruction in another runtime —
-    /// e.g. `numpy.frombuffer(buf, "<" + numpy_code)`.
+    /// The column's values and, for a [`ColumnData::Nullable`] column, its validity mask
+    /// (`validity[i] == true` ⇔ row `i` is present), as two separate typed parts. A non-nullable
+    /// column is its own values with no mask (`None`); the values part is never itself `Nullable`.
+    ///
+    /// This is how a consumer in another runtime takes a nullable column apart (the Python binding
+    /// builds a masked array from it, #804): [`Self::to_le_bytes`] of the values part is a plain
+    /// `numpy.frombuffer(buf, "<" + numpy_code)` buffer for every column, and the mask travels
+    /// beside it rather than inside it. Under a NULL the values part holds the dtype default after a
+    /// decode (see [`ColumnData::Nullable`]).
+    pub fn values_and_validity(&self) -> (&ColumnData, Option<&[bool]>) {
+        match self {
+            ColumnData::Nullable { values, validity } => (values, Some(validity)),
+            other => (other, None),
+        }
+    }
+
+    /// Flatten the column to little-endian bytes. For a non-nullable column this is the buffer
+    /// another runtime reconstructs zero-copy, e.g. `numpy.frombuffer(buf, "<" + numpy_code)`.
+    ///
+    /// For a [`ColumnData::Nullable`] column it is `values ‖ pack_validity(validity)`, the staging
+    /// and digest form that [`Self::from_column_bytes`] inverts given the row count; it is **not** a
+    /// numpy buffer (the trailer would read as extra elements). To hand a nullable column to another
+    /// runtime, take it apart with [`Self::values_and_validity`] instead.
     pub fn to_le_bytes(&self) -> Vec<u8> {
         use crate::array::le_bytes;
         match self {
@@ -2918,6 +2939,32 @@ CascadingCompressor {
             assert_eq!(back, c);
         }
         assert!(ColumnData::from_le_bytes("f4", &[0u8; 3]).is_err()); // not a multiple of width
+    }
+
+    /// #804: a nullable column comes apart into a plain values column (whose `to_le_bytes` is a
+    /// numpy buffer of exactly `len` elements) and its mask, so no consumer has to split a
+    /// `ceil(rows/8)` trailer off by arithmetic. A non-nullable column is its own values, no mask.
+    #[test]
+    fn values_and_validity_separates_the_mask_from_the_values() {
+        let values = ColumnData::I32(vec![7, 0, -3, 0, 5, 6, 7, 8, 9, 10, 11]);
+        let validity = vec![
+            true, false, true, false, true, true, true, true, true, true, false,
+        ];
+        let nullable = ColumnData::Nullable {
+            values: Box::new(values.clone()),
+            validity: validity.clone(),
+        };
+        let (v, m) = nullable.values_and_validity();
+        assert_eq!(v, &values);
+        assert_eq!(m, Some(validity.as_slice()));
+        assert_eq!(v.to_le_bytes().len(), 4 * 11, "values only, no trailer");
+        // The staging form still carries the trailer, and only `from_column_bytes` inverts it.
+        assert_eq!(nullable.to_le_bytes().len(), 4 * 11 + 2);
+
+        let plain = ColumnData::F64(vec![0.5, f64::NAN]);
+        let (v, m) = plain.values_and_validity();
+        assert_eq!(v.to_le_bytes(), plain.to_le_bytes());
+        assert_eq!(m, None);
     }
 
     /// Streaming a table with NULLABLE columns must produce the batch bytes, not a dtype panic:

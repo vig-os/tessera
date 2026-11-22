@@ -27,6 +27,26 @@ that is invalid (a gap, a foreign child, leaves out of order, ...), raises `Tess
 {{#include ../../../tessera/crates/tessera-py/tests/write_example.py:logical}}
 ```
 
+A **nullable** column (one whose schema declares `nullable`) reads as an `np.ma.MaskedArray`, masked (`mask=True`)
+at each NULL, from `column`, `logical_column` and `table_dict`. The type follows the schema, not the rows: a
+nullable column that holds no NULL is still a masked array (with nothing masked), and a column that is not
+nullable is always a plain `np.ndarray`. `table_arrow` gives a nullable column a real Arrow validity bitmap
+(`null_count` counts the NULLs), and `table` hands polars native nulls. A NULL is not a NaN: a present NaN stays a
+value in every form. Under a NULL the masked array's `.data` holds the dtype default (`0`), never what the
+producer had there (the format does not keep it). Nullability covers the fixed-width numeric dtypes; a sealed
+table cannot hold a nullable `str` or `b1` column. The native layer passes the values and the validity separately,
+`(le_bytes, numpy_code, validity)` with `validity` `None` for a column that is not nullable, so nothing has to
+split a mask off the values. The Python `Builder` cannot write a nullable column yet
+([#950](https://github.com/vig-os/tessera/issues/950)).
+
+```python
+{{#include ../../../tessera/crates/tessera-py/tests/nullable_columns.py:nullable}}
+```
+
+*This snippet is `{{#include}}`d from `tessera/crates/tessera-py/tests/nullable_columns.py`, which the
+`tessera-py-import` and `tessera-wheel-import` checks run on a committed fixture, holding every read above to the
+Rust reader's values and masks.*
+
 Reading:
 
 ```python

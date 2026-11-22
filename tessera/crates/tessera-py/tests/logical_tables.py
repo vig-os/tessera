@@ -49,10 +49,18 @@ assert df["i"].to_list() == WANT_I.tolist() and df["x"].to_list() == WANT_X.toli
 
 # The native surface the wrappers sit on resolves the same way.
 cols = r._r.read_table("pairs")
-assert [n for n, _, _ in cols] == ["i", "x"]
+assert [n for n, _, _, _ in cols] == ["i", "x"]
 assert np.array_equal(np.frombuffer(cols[0][1], "<u8"), WANT_I)
-buf, code = r._r.read_table_column("pairs", "x")
-assert code == "f8" and np.array_equal(np.frombuffer(buf, "<f8"), WANT_X)
+assert [validity for _, _, _, validity in cols] == [
+    None,
+    None,
+]  # neither column is nullable
+buf, code, validity = r._r.read_table_column("pairs", "x")
+assert (
+    code == "f8"
+    and np.array_equal(np.frombuffer(buf, "<f8"), WANT_X)
+    and validity is None
+)
 
 # A leaf is still one table, read by its full name.
 assert np.array_equal(r.column("pairs/0001", "i"), WANT_I[3:6])

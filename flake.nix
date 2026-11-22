@@ -91,6 +91,7 @@
           "/crates/tessera-py/tests/write_example.py" = [ "tessera-py-import" "tessera-wheel-import" ];
           "/crates/tessera-py/tests/provenance.py" = [ "tessera-py-import" "tessera-wheel-import" ];
           "/crates/tessera-py/tests/logical_tables.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/nullable_columns.py" = [ "tessera-py-import" "tessera-wheel-import" ];
           "/crates/tessera-ingest/tests/producer_equality.py" = [ "ingest-producer-equality" ];
           "/crates/tessera-wasm/tests/smoke.cjs" = [ "wasm-bindgen-smoke" ];
           "/corpus/reference_reader/run.py" = [ "reference-reader" ];
@@ -139,6 +140,7 @@
               "/crates/tessera-py/tests/write_example.py"
               "/crates/tessera-py/tests/provenance.py"
               "/crates/tessera-py/tests/logical_tables.py"
+              "/crates/tessera-py/tests/nullable_columns.py"
             ];
           in
           {
@@ -439,6 +441,9 @@
 
         # The committed partitioned-table fixture the Python checks read (ADR-0064, #717).
         pairsFixture = ./tessera/crates/tessera-py/tests/fixtures/partitioned_pairs.tsra;
+        # The committed nullable-column fixture and the Rust reader's decode of it (#804).
+        nullableFixture = ./tessera/crates/tessera-py/tests/fixtures/nullable_obs.tsra;
+        nullableExpected = ./tessera/crates/tessera-py/tests/fixtures/nullable_obs.expected.json;
 
         # The release scripts with the library they source (scripts/lib/semver.sh), laid out as in the
         # repo so each finds `lib/` next to itself. Only these files: an edit elsewhere in scripts/
@@ -1516,7 +1521,7 @@
             python3 ${./tessera/crates/tessera-py/tests/smoke.py} ${./tessera/corpus/files}
             # Docstring-vs-behaviour drift gate (#412): probes every dtype code against the live
             # module and asserts the accepted sets exactly match what the docstrings advertise.
-            python3 ${./tessera/crates/tessera-py/tests/api_drift.py}
+            python3 ${./tessera/crates/tessera-py/tests/api_drift.py} ${nullableFixture}
             # Array-codec round-trip + pinned default content_hash (#533).
             python3 ${./tessera/crates/tessera-py/tests/codec_roundtrip.py}
             # The WRITE path as documentation (#389): the book `{{#include}}`s anchored regions of this
@@ -1526,6 +1531,8 @@
             python3 ${./tessera/crates/tessera-py/tests/provenance.py}
             # Table reads on logical names over a partitioned table, and the typed NotABlockError (#717).
             python3 ${./tessera/crates/tessera-py/tests/logical_tables.py} ${pairsFixture}
+            # Nullable columns read as masked arrays / Arrow nulls, equal to the Rust reader (#804).
+            python3 ${./tessera/crates/tessera-py/tests/nullable_columns.py} ${nullableFixture} ${nullableExpected}
             touch $out
           '';
 
@@ -1546,7 +1553,7 @@
             export LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib
             python3 ${./tessera/crates/tessera-py/tests/smoke.py} ${./tessera/corpus/files}
             # Same drift gate as tessera-py-import, proven through the installed wheel.
-            python3 ${./tessera/crates/tessera-py/tests/api_drift.py}
+            python3 ${./tessera/crates/tessera-py/tests/api_drift.py} ${nullableFixture}
             # Array-codec round-trip + pinned default content_hash (#533).
             python3 ${./tessera/crates/tessera-py/tests/codec_roundtrip.py}
             # …and the documented write path, so the book's example works through the real wheel too.
@@ -1555,6 +1562,8 @@
             python3 ${./tessera/crates/tessera-py/tests/provenance.py}
             # Table reads on logical names over a partitioned table, and the typed NotABlockError (#717).
             python3 ${./tessera/crates/tessera-py/tests/logical_tables.py} ${pairsFixture}
+            # Nullable columns read as masked arrays / Arrow nulls, equal to the Rust reader (#804).
+            python3 ${./tessera/crates/tessera-py/tests/nullable_columns.py} ${nullableFixture} ${nullableExpected}
             touch $out
           '';
 

@@ -38,6 +38,42 @@ fn err<E: std::fmt::Display>(e: E) -> PyErr {
     TesseraError::new_err(e.to_string())
 }
 
+/// One decoded table column as the native layer hands it to Python: `(le_bytes, numpy_code,
+/// validity)`.
+///
+/// - `le_bytes` holds the column's values only, little-endian: exactly one element per row, so
+///   `numpy.frombuffer(le_bytes, "<" + numpy_code)` reconstructs it (`str` and `b1` decode as
+///   `tessera._ndarray` documents).
+/// - `validity` is `None` for a column that is not nullable. For a nullable one it is `bytes` of
+///   one byte per row, `1` where the row holds a value and `0` at a NULL
+///   (`numpy.frombuffer(validity, numpy.bool_)`); `le_bytes` holds the dtype default under a NULL.
+///
+/// The values and the mask are separate on purpose (#804): a nullable column used to arrive as one
+/// buffer with its bit-packed mask appended, which numpy read as extra elements.
+type NativeColumn<'py> = (Bound<'py, PyBytes>, String, Option<Bound<'py, PyBytes>>);
+
+/// A [`NativeColumn`] with its name in front, flat: `(column_name, le_bytes, numpy_code, validity)`.
+type NamedColumn<'py> = (
+    String,
+    Bound<'py, PyBytes>,
+    String,
+    Option<Bound<'py, PyBytes>>,
+);
+
+/// Take `column` apart into a [`NativeColumn`].
+fn native_column<'py>(py: Python<'py>, column: &ColumnData) -> NativeColumn<'py> {
+    let (values, validity) = column.values_and_validity();
+    let validity = validity.map(|v| {
+        let bytes: Vec<u8> = v.iter().map(|&present| u8::from(present)).collect();
+        PyBytes::new(py, &bytes)
+    });
+    (
+        PyBytes::new(py, &values.to_le_bytes()),
+        values.numpy_code().to_string(),
+        validity,
+    )
+}
+
 /// A handle to a sealed `.tsra` archive. Opening verifies the magic + manifest seal; reading a block
 /// verifies its bytes against the recorded digest.
 #[pyclass(module = "tessera")]
@@ -141,19 +177,17 @@ impl Reader {
         ))
     }
 
-    /// Decode the **table** `name` to an ordered list of `(column_name, le_bytes, numpy_code)`.
-    /// Reconstruct each column with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
+    /// Decode the **table** `name` to an ordered list of `(column_name, le_bytes, numpy_code,
+    /// validity)`, one entry per column. `le_bytes` holds the values only, one element per row
+    /// (`numpy.frombuffer(le_bytes, "<" + numpy_code)`); `validity` is `None` for a column that is
+    /// not nullable, else `bytes` of one byte per row, `1` present and `0` at a NULL (#804).
     ///
     /// `name` is a logical table name, resolved as every reader resolves it (ADR-0064): one block, a
     /// partitioned table (`pairs` over `pairs/0000`, `pairs/0001`, …, concatenated in leaf order), or
     /// a legacy `events_NNNN` group. One leaf can still be read by its full name. A name that is not
     /// a table, or a partitioned table that is invalid, raises `TesseraError`. The whole table is
     /// materialised: each block is decoded once and appended.
-    fn read_table<'py>(
-        &mut self,
-        py: Python<'py>,
-        name: &str,
-    ) -> PyResult<Vec<(String, Bound<'py, PyBytes>, String)>> {
+    fn read_table<'py>(&mut self, py: Python<'py>, name: &str) -> PyResult<Vec<NamedColumn<'py>>> {
         let view = self.inner.logical_table(name).map_err(err)?;
         let mut data: Option<TableData> = None;
         for block in view.block_names() {
@@ -173,11 +207,8 @@ impl Reader {
             .unwrap_or_default()
             .iter()
             .map(|(n, c)| {
-                (
-                    n.clone(),
-                    PyBytes::new(py, &c.to_le_bytes()),
-                    c.numpy_code().to_string(),
-                )
+                let (values, code, validity) = native_column(py, c);
+                (n.clone(), values, code, validity)
             })
             .collect())
     }
@@ -185,36 +216,32 @@ impl Reader {
     /// Decode a **single column** `column` of the table `name` via Vortex projection — reads only
     /// that column's segments, not the whole table. `name` resolves as in [`Self::read_table`]: a
     /// partitioned table's column is every leaf's, concatenated in leaf order. Returns
-    /// `(le_bytes, numpy_code)`; reconstruct with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
+    /// `(le_bytes, numpy_code, validity)`, as one entry of [`Self::read_table`]: the values only,
+    /// and `validity` `None` unless the column is nullable.
     fn read_table_column<'py>(
         &mut self,
         py: Python<'py>,
         name: &str,
         column: &str,
-    ) -> PyResult<(Bound<'py, PyBytes>, String)> {
+    ) -> PyResult<NativeColumn<'py>> {
         let view = self.inner.logical_table(name).map_err(err)?;
         let c = view.column(&mut self.inner, column).map_err(err)?;
-        Ok((
-            PyBytes::new(py, &c.to_le_bytes()),
-            c.numpy_code().to_string(),
-        ))
+        Ok(native_column(py, &c))
     }
 
     /// The same read as [`Self::read_table_column`], which resolves logical table names too (a
     /// partitioned `pairs` over `pairs/0000`, …, or a legacy `events` over `events_NNNN`); kept so
-    /// existing callers keep working. Returns `(le_bytes, numpy_code)`.
+    /// existing callers keep working. Returns `(le_bytes, numpy_code, validity)`, as
+    /// [`Self::read_table_column`] does.
     fn read_logical_table_column<'py>(
         &mut self,
         py: Python<'py>,
         prefix: &str,
         column: &str,
-    ) -> PyResult<(Bound<'py, PyBytes>, String)> {
+    ) -> PyResult<NativeColumn<'py>> {
         let view = self.inner.logical_table(prefix).map_err(err)?;
         let c = view.column(&mut self.inner, column).map_err(err)?;
-        Ok((
-            PyBytes::new(py, &c.to_le_bytes()),
-            c.numpy_code().to_string(),
-        ))
+        Ok(native_column(py, &c))
     }
 
     /// Full integrity pass: recompute the three-hash seal, check the container's canonical layout

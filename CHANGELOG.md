@@ -133,6 +133,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `block::content_root`, which `ProductBuilder::seal`, `Manifest::recompute_content_hash` and the streaming
   `WriteSession` running root all use. The `.cidx` spec no longer carries `class` (it moved to the ref);
   `corpus/seal-cases.json` gains 14 derived-block cases (164 in all).
+- `tessera-py` (**breaking return type**, #804): a nullable table column reads as an `np.ma.MaskedArray`, masked
+  (`mask=True`) at each NULL, from `Reader.column`, `logical_column` and `table_dict`, whether or not its rows hold
+  a NULL; a column that is not nullable is still a plain `np.ndarray`. `table_arrow` gives a nullable column a real
+  Arrow validity bitmap (`null_count` counts the NULLs) and `table` native polars nulls; a present NaN stays a value.
+  The native `read_table` entries are now `(name, le_bytes, numpy_code, validity)` and `read_table_column` /
+  `read_logical_table_column` return `(le_bytes, numpy_code, validity)`: `le_bytes` holds the values only and
+  `validity` is `None` for a column that is not nullable, else one byte per row (`1` present, `0` NULL).
+  `tessera-io` adds `ColumnData::values_and_validity`, which takes a column apart into those two parts.
 - **Breaking format change (ADR-0066 A′, #914, #901):** the seal is `blake3` over the **stored bytes** of
   `manifest.json`, which is stored as exactly its RFC 8785 JCS form with no `manifest_hash` key; the seal lives in a
   new `manifest.seal` member, entry 2 of the `.tsra` (after `mimetype`, before `manifest.json`), beside
@@ -259,6 +267,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `tessera-py`: a nullable table column no longer reads back with its bit-packed validity mask appended to its
+  values (#804). The native layer handed Python `ColumnData::to_le_bytes`, which for a nullable column is the
+  staging form `values ‖ ceil(rows/8)` mask bytes, so `np.frombuffer` either raised (an `i4`/`f8` column whose
+  length the trailer broke) or silently returned extra elements made of mask bits (a `u2` column of 11 rows read as
+  12), and every NULL read as `0` with no mask. The values and the mask now cross the boundary separately. The
+  other consumers of `to_le_bytes` were not affected: the CLI `read`/export renders a nullable column from its
+  `ColumnData` (NULL as JSON `null`, CSV `nan`), `tessera sql` builds an Arrow validity bitmap, the streaming
+  staging fragments invert the trailer with `from_column_bytes` given the row count, and the chunk-index digest
+  hashes the staging form by design; the WASM binding reads no table payloads.
 - `tessera-core`: a partition marker whose forged index makes the canonical leaf name longer than 255 bytes is
   refused as `LogicalTableError::NonCanonicalLeaf`, not a bare `Error::InvalidBlockName` (#733).
 - `tessera-core`: `table_group` refuses a marked legacy-named block under a node (`a/pairs_0001`) with the error the
