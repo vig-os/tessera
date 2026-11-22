@@ -1,16 +1,18 @@
         `-- vortex-layout feature "default" (*)
         |-- vortex-file feature "wasm-bindgen" (*)
-    `-- tessera-io vWORKSPACE (*)
+    `-- vortex-file feature "zstd" (*)
     `-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     `-- vortex-layout feature "wasm-bindgen"
     |   `-- tessera-io vWORKSPACE (*)
     |-- vortex-layout feature "default"
-`-- vortex-btrblocks feature "pco"
+`-- vortex-btrblocks feature "zstd"
 `-- vortex-layout v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
 vortex-btrblocks v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
-|       `-- vortex-file feature "default" (*)
+|       `-- tessera-io vWORKSPACE (*)
 |   `-- tessera-io vWORKSPACE (*)
-|   `-- vortex-file feature "wasm-bindgen"
+|   `-- tessera-io vWORKSPACE (*)
+|   `-- vortex-file feature "zstd"
+|   `-- vortex-file feature "zstd" (*)
 |   |               `-- tessera-py feature "default" (command-line)
 |   |           `-- tessera-py vWORKSPACE
 |   |           |       `-- tessera-cli feature "static-hdf5" (command-line)
@@ -45,6 +47,9 @@ vortex-btrblocks v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac6
 |   |       |   `-- tessera-cli feature "cloud" (command-line)
 |   |       |-- tessera-io feature "cloud" (command-line)
 |   |   `-- tessera-io vWORKSPACE
+|   |   `-- vortex-file feature "default" (*)
 |   |-- vortex-file feature "default"
+|   |-- vortex-file feature "wasm-bindgen"
 |-- vortex-btrblocks feature "default"
+|-- vortex-btrblocks feature "pco"
 |-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)

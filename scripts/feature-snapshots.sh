@@ -41,6 +41,8 @@ fi
 #   blake3                            content_hash / manifest_hash
 #   zarrs pco zstd                    the array block backend + its codecs
 #   vortex-btrblocks vortex-file      the table block backend (compressor + writer)
+#   vortex-pco vortex-zstd            the codecs `tessera-table-v2` forces on numeric columns (#828),
+#                                     called directly, not through BtrBlocks
 #   vortex-array vortex-buffer        the table block in-memory representation
 #   arrow-array arrow-buffer arrow-schema
 #                                     the shared arrow tree the ADR-0056 table lane canonicalises
@@ -63,6 +65,8 @@ CRATES=(
   zstd
   vortex-btrblocks
   vortex-file
+  vortex-pco
+  vortex-zstd
   vortex-array
   vortex-buffer
   arrow-array

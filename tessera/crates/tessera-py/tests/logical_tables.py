@@ -17,7 +17,7 @@ import pyarrow as pa
 
 import tessera
 
-CONTENT_HASH = "blake3:61037cf5b48713d2d3bc6879ab7aafe5c38f7eedc7bcf1c38dc8021fce8b679a"
+CONTENT_HASH = "blake3:9437a1f6f1d17b18cc23f148bf07f42cebcb2e6c9f64c9a875e1352fa99e86be"
 LEAVES = ["pairs/0000", "pairs/0001", "pairs/0002"]
 WANT_I = np.arange(8, dtype="<u8")
 WANT_X = WANT_I / 4.0

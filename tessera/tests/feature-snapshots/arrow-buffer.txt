@@ -491,8 +491,8 @@ arrow-buffer v58.4.1
 ## arrow-buffer@59.3.2
             `-- tessera-io vWORKSPACE (*)
         `-- vortex-buffer feature "default"
-        `-- vortex-zigzag v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
-        |       `-- vortex-zigzag v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
+        `-- vortex-zstd v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
+        |       `-- vortex-zstd v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
         |       |-- vortex-alp v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
         |       |-- vortex-array v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
         |       |-- vortex-arrow v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
@@ -509,6 +509,7 @@ arrow-buffer v58.4.1
         |       |-- vortex-scan v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
         |       |-- vortex-sequence v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
         |       |-- vortex-sparse v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
+        |       |-- vortex-zigzag v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
         |   `-- vortex-mask v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
         |   `-- vortex-zigzag v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
         |   |-- vortex-array v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
@@ -536,17 +537,21 @@ arrow-buffer v58.4.1
         |-- vortex-scan v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
         |-- vortex-sequence v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
         |-- vortex-sparse v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
+        |-- vortex-zigzag v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     `-- vortex-buffer v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
+    |           `-- tessera-io vWORKSPACE (*)
     |       `-- arrow-array feature "ffi" (*)
     |       `-- tessera-io vWORKSPACE (*)
     |       `-- vortex-arrow v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |       `-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
+    |       `-- vortex-zstd feature "default"
     |       |-- vortex-btrblocks v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   `-- arrow-array feature "ffi"
     |   `-- arrow-data feature "ffi"
     |   `-- vortex-array feature "default"
-    |   `-- vortex-zigzag v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
+    |   `-- vortex-zstd v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
     |   |           `-- tessera-io vWORKSPACE (*)
+    |   |       `-- tessera-io vWORKSPACE (*)
     |   |       `-- tessera-io vWORKSPACE (*)
     |   |       `-- vortex-layout v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |       `-- vortex-scan feature "default"
@@ -562,10 +567,12 @@ arrow-buffer v58.4.1
     |   |   `-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   `-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   `-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
+    |   |   `-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   `-- vortex-io feature "default"
     |   |   `-- vortex-layout v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   `-- vortex-layout v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   `-- vortex-layout v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
+    |   |   `-- vortex-pco feature "default"
     |   |   `-- vortex-scan v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
     |   |   |                   `-- vortex-layout feature "default" (*)
     |   |   |                   |-- vortex-file feature "wasm-bindgen" (*)
@@ -574,8 +581,8 @@ arrow-buffer v58.4.1
     |   |   |               |   `-- tessera-io vWORKSPACE (*)
     |   |   |               |-- vortex-layout feature "default"
     |   |   |           `-- vortex-layout v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
-    |   |   |           |       `-- vortex-file feature "default" (*)
-    |   |   |           |   `-- vortex-file feature "wasm-bindgen"
+    |   |   |           |       `-- tessera-io vWORKSPACE (*)
+    |   |   |           |   `-- vortex-file feature "zstd"
     |   |   |           |   |               `-- tessera-py feature "default" (command-line)
     |   |   |           |   |           `-- tessera-py vWORKSPACE
     |   |   |           |   |           |       `-- tessera-cli feature "static-hdf5" (command-line)
@@ -610,20 +617,25 @@ arrow-buffer v58.4.1
     |   |   |           |   |       |   `-- tessera-cli feature "cloud" (command-line)
     |   |   |           |   |       |-- tessera-io feature "cloud" (command-line)
     |   |   |           |   |   `-- tessera-io vWORKSPACE
+    |   |   |           |   |   `-- vortex-file feature "default" (*)
     |   |   |           |   |-- vortex-file feature "default"
+    |   |   |           |   |-- vortex-file feature "wasm-bindgen"
     |   |   |           |-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
     |   |   |       `-- arrow-cast v59.3.2 (*)
     |   |   |       `-- arrow-ord v59.3.2 (*)
-    |   |   |       `-- tessera-io vWORKSPACE (*)
     |   |   |       `-- vortex-arrow v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
+    |   |   |       `-- vortex-file feature "zstd" (*)
     |   |   |       |-- arrow-cast v59.3.2 (*)
     |   |   |   `-- arrow-cast feature "default"
     |   |   |   `-- arrow-ord feature "default"
     |   |   |   `-- arrow-select feature "default"
-    |   |   |   `-- vortex-btrblocks feature "pco"
+    |   |   |   `-- vortex-btrblocks feature "zstd"
     |   |   |   `-- vortex-layout v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   |   |   `-- tessera-io vWORKSPACE (*)
+    |   |   |   |   `-- tessera-io vWORKSPACE (*)
+    |   |   |   |   `-- vortex-file feature "zstd" (*)
     |   |   |   |-- vortex-btrblocks feature "default"
+    |   |   |   |-- vortex-btrblocks feature "pco"
     |   |   |   |-- vortex-file v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   |-- arrow-array v59.3.2 (*)
     |   |   |-- arrow-cast v59.3.2
@@ -635,6 +647,7 @@ arrow-buffer v58.4.1
     |   |   |-- vortex-alp v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   |-- vortex-arrow v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   |-- vortex-btrblocks v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
+    |   |   |-- vortex-btrblocks v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   |-- vortex-btrblocks v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   |-- vortex-btrblocks v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |   |-- vortex-btrblocks v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
@@ -668,6 +681,7 @@ arrow-buffer v58.4.1
     |   |-- vortex-scan v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f) (*)
     |   |-- vortex-sequence v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
     |   |-- vortex-sparse v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
+    |   |-- vortex-zigzag v0.93.0 (https://github.com/gerchowl/vortex?rev=5c55cf7fa35bac652849cf1a0e76a1a97035f715#5c55cf7f)
     |-- arrow-array v59.3.2
     |-- arrow-cast v59.3.2 (*)
     |-- arrow-data v59.3.2

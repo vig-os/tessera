@@ -494,7 +494,7 @@ def recon_int16(c: Cases, obj: dict, raw: bytes, seal: str, other_seal: str) -> 
 
 def main() -> None:
     products = corpus()
-    assert len(products) == 8, [p[0] for p in products]
+    assert len(products) == 9, [p[0] for p in products]
     c = Cases()
     for name, obj, raw, seal in products:
         per_product(c, name, obj, raw, seal)

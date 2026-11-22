@@ -3,10 +3,10 @@
 //!
 //! Two claims, both on real products:
 //!
-//! - **The seal keeps its value** (ADR-0066 rule 2). All 13 tracked `.tsra` (12 distinct
+//! - **The seal keeps its value** (ADR-0066 rule 2). All 14 tracked `.tsra` (13 distinct
 //!   manifests: the two `study.tsra` fixtures are byte-identical) are stored in the A′ layout and
 //!   read through `from_stored_members`; `blake3(manifest.json)` is the `manifest.seal` they carry,
-//!   `to_stored` reproduces both, and for the 8 corpus files the seal is the `manifest_hash` golden
+//!   `to_stored` reproduces both, and for the 9 corpus files the seal is the `manifest_hash` golden
 //!   in `corpus/corpus.json`, unchanged from the alpha layout (the cutover's seal-preservation proof).
 //! - **One seal, one byte string** (rules 1 and 4). The spike's respelling attacks
 //!   (docs/spikes/897-seal-encoding/src/attacks.rs) replayed on each product's stored bytes: T4–T7
@@ -25,9 +25,9 @@ use tessera_core::collection::MemberKind;
 use tessera_core::hash::digest;
 use tessera_core::{canonical, Collection, CollectionMember, Error, Manifest, Role};
 
-/// Every tracked `.tsra`, relative to the workspace (`git ls-files '*.tsra'`): 8 corpus files and
+/// Every tracked `.tsra`, relative to the workspace (`git ls-files '*.tsra'`): 9 corpus files and
 /// 5 test fixtures. A product added to the tree must be added here.
-const PRODUCTS: [&str; 13] = [
+const PRODUCTS: [&str; 14] = [
     "corpus/files/blob_opaque.tsra",
     "corpus/files/empty_no_blocks.tsra",
     "corpus/files/listmode_events.tsra",
@@ -36,6 +36,7 @@ const PRODUCTS: [&str; 13] = [
     "corpus/files/recon_int16.tsra",
     "corpus/files/segmentation_uint8.tsra",
     "corpus/files/spectrum_lifetime.tsra",
+    "corpus/files/table_v2_dtypes.tsra",
     "crates/tessera-cli/tests/cmd/logical_tables.in/scan.tsra",
     "crates/tessera-cli/tests/cmd/persona_signing.in/study.tsra",
     "crates/tessera-cli/tests/cmd/versioning.in/study.tsra",
@@ -130,13 +131,13 @@ fn goldens() -> Vec<(String, String)> {
 #[test]
 fn the_stored_seal_of_every_tracked_product_is_its_recorded_seal() {
     let products = products();
-    assert_eq!(products.len(), 13);
+    assert_eq!(products.len(), 14);
     let mut distinct: Vec<&str> = products.iter().map(|p| p.text.as_str()).collect();
     distinct.sort_unstable();
     distinct.dedup();
     assert_eq!(
         distinct.len(),
-        12,
+        13,
         "the two study.tsra fixtures are one manifest"
     );
 
@@ -166,9 +167,9 @@ fn the_stored_seal_of_every_tracked_product_is_its_recorded_seal() {
         assert_eq!(back.to_stored().unwrap(), (bytes, seal), "{}", p.path);
     }
 
-    // The 8 corpus files against their committed goldens, each by name (no proxy count).
+    // The 9 corpus files against their committed goldens, each by name (no proxy count).
     let goldens = goldens();
-    assert_eq!(goldens.len(), 8);
+    assert_eq!(goldens.len(), 9);
     for (name, golden) in &goldens {
         let path = format!("corpus/files/{name}.tsra");
         let p = products

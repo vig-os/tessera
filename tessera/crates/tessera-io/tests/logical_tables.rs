@@ -33,9 +33,10 @@ const LEGACY_CONTENT_HASH: &str =
 const LEGACY_MANIFEST_HASH: &str =
     "blake3:498da59e89047908a03c79a49f155a90cfed3a7cacd9281f3f4472063d49aa31";
 /// What [`write_legacy_events`] seals today. It differs from [`LEGACY_CONTENT_HASH`] only because the
-/// table codec moved (vortex 0.75 → 0.93, #635), never because of the names.
+/// table codec moved (vortex 0.75 → 0.93, #635; then `tessera-table-v2`, #828), never because of the
+/// names.
 const WRITER_CONTENT_HASH: &str =
-    "blake3:37435470f4526600ea6dedc1fbbbc0a9fdd8c45f4994e56531cf110d8f85a532";
+    "blake3:6b0839b083bf773fc9083e3676648c3bf343d4799ae1e244899a744f64999722";
 /// Three blocks at `ROWS_PER_GROUP` rows each, the last one partial.
 const LEGACY_ROWS: usize = 2 * ROWS_PER_GROUP + 4242;
 
