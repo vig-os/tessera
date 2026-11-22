@@ -4,10 +4,13 @@
 //! - [`id`](Manifest::id) — *logical identity*: `blake3` over canonical-JSON of [`id_inputs`].
 //!   Rename- and re-encode-stable; survives re-ingest of the same logical product.
 //! - [`content_hash`](Manifest::content_hash) — *data fingerprint*: Merkle root over the ordered
-//!   block digests. Changes iff payload bytes change.
+//!   digests of the **primary** blocks. Changes iff primary payload bytes change; a derived block
+//!   ([`crate::block::BlockClass::Derived`]: a chunk index, a pyramid level above 0) is not part of
+//!   it (ADR-0028 §4).
 //! - [`manifest_hash`](Manifest::manifest_hash) — *the seal*: `blake3` over the **stored bytes** of
 //!   `manifest.json` (ADR-0066). Covers metadata + sources + block refs (which carry the block
-//!   digests), so it transitively commits to all payloads — tamper anything, it changes.
+//!   digests and classes), so it transitively commits to all payloads, derived ones included — tamper
+//!   anything, it changes.
 //!
 //! **What the seal covers (SPEC §4, ADR-0066).** `manifest.json` is stored as exactly its RFC 8785
 //! (JCS) bytes, with no `manifest_hash` key, and the seal is `blake3` over those bytes, kept beside
@@ -95,7 +98,8 @@ pub struct Manifest {
     /// conformance corpus keep its goldens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ingest_transform: Vec<crate::provenance::IngestTransform>,
-    /// Merkle root over block digests; `Some` once sealed, `None` while building.
+    /// Merkle root over the primary blocks' digests, in manifest order (derived blocks are not
+    /// part of it, ADR-0028 §4); `Some` once sealed, `None` while building.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
     /// The seal: `blake3` over this manifest's stored bytes ([`to_stored`](Self::to_stored)).
@@ -296,17 +300,11 @@ impl Manifest {
         crate::identity::compute_id(&self.id_inputs)
     }
 
-    /// Recompute the content Merkle root from the block digests. Errors if any block ref is
-    /// missing its digest.
+    /// Recompute `content_hash`: the Merkle root over the primary blocks' digests, in manifest
+    /// order ([`crate::block::content_root`]; derived blocks are not part of it, ADR-0028 §4).
+    /// Errors if any block ref, of either class, is missing its digest.
     pub fn recompute_content_hash(&self) -> crate::Result<String> {
-        let mut digests = Vec::with_capacity(self.blocks.len());
-        for b in &self.blocks {
-            match &b.digest {
-                Some(d) => digests.push(d.clone()),
-                None => return Err(crate::Error::MissingDigest(b.name.to_string())),
-            }
-        }
-        Ok(crate::hash::merkle_root(&digests))
+        crate::block::content_root(&self.blocks)
     }
 
     /// The seal (`manifest_hash`) this struct gets when written out: `blake3` over
@@ -346,9 +344,10 @@ impl Manifest {
     }
 
     /// The checks a reader runs on a received manifest's typed view before (or after) its seal:
-    /// unique block names, then `id`, then `content_hash`, which must be present.
+    /// unique block names and chunk indexes that resolve, then `id`, then `content_hash`, which must be
+    /// present.
     fn verify_received_id_and_content(&self) -> crate::Result<()> {
-        crate::block::check_unique_names(self.blocks.iter().map(|b| &b.name))?;
+        crate::block::check_block_refs(&self.blocks)?;
         check("id", &self.id, &self.recompute_id()?)?;
         check(
             "content_hash",
@@ -369,7 +368,8 @@ impl Manifest {
     /// 2. the bytes carry no top-level `manifest_hash` key;
     /// 3. `seal` equals `blake3` over the bytes: a byte-for-byte comparison of the two strings, so a
     ///    seal in any other spelling (upper-case hex, no `blake3:` prefix) does not match;
-    /// 4. the typed layer: declared form, version, unique block names, `id` and `content_hash`
+    /// 4. the typed layer: declared form, version, unique block names, chunk indexes that index a
+    ///    block of the product, `id` and `content_hash`
     ///    (which must be present).
     ///
     /// The returned view carries `seal` as its [`manifest_hash`](Self::manifest_hash), so it
@@ -393,6 +393,7 @@ impl Manifest {
     /// `what` = `manifest_hash`, `expected` = `seal` and `actual` = the stored bytes' digest; then
     /// everything [`from_json`](Self::from_json) refuses past the parse (declared form,
     /// [`crate::Error::UnsupportedVersion`]), [`crate::Error::DuplicateBlockName`],
+    /// [`crate::Error::DanglingChunkIndex`],
     /// [`crate::Error::Integrity`] for `id` or `content_hash` (`expected` reads `(absent)` for a
     /// missing `content_hash`), and [`crate::Error::MissingDigest`] for an undigested block.
     pub fn from_stored(bytes: &[u8], seal: &str) -> crate::Result<Self> {
@@ -431,7 +432,7 @@ impl Manifest {
     /// (ADR-0066 rule 2): moving the seal out of the document did not change it.
     ///
     /// The manifest must carry a `content_hash` (a stored manifest is a sealed product) and pass
-    /// [`verify`](Self::verify): `id` and `content_hash` hold, block names are unique, and a
+    /// [`verify`](Self::verify): `id` and `content_hash` hold, block names are unique, chunk indexes resolve, and a
     /// `manifest_hash` already set must equal `seal`. An unset `manifest_hash` is not required:
     /// `seal` is computed here.
     ///
@@ -471,7 +472,8 @@ impl Manifest {
     ///
     /// First, the block list must name each block once ([`crate::Error::DuplicateBlockName`],
     /// ADR-0063 §2a, SPEC §5): a reader resolves a name to one listed digest, so a second entry's
-    /// digest would cover no bytes, however well the list is sealed.
+    /// digest would cover no bytes, however well the list is sealed. Then every chunk index must
+    /// index another block of the product ([`crate::Error::DanglingChunkIndex`], #720).
     pub fn verify(&self) -> crate::Result<()> {
         self.verify_id_and_content()?;
         if let Some(mh) = &self.manifest_hash {
@@ -482,7 +484,7 @@ impl Manifest {
 
     fn verify_id_and_content(&self) -> crate::Result<()> {
         self.check_version()?;
-        crate::block::check_unique_names(self.blocks.iter().map(|b| &b.name))?;
+        crate::block::check_block_refs(&self.blocks)?;
         check("id", &self.id, &self.recompute_id()?)?;
         if let Some(ch) = &self.content_hash {
             check("content_hash", ch, &self.recompute_content_hash()?)?;
@@ -584,6 +586,8 @@ mod tests {
             name: BlockName::new("b").unwrap(),
             kind: BlockKind::Blob,
             digest: Some("blake3:00".into()),
+            // Derived, so the fully populated instance writes the `class` key.
+            class: crate::block::BlockClass::Derived,
             spec: json!({}),
         }];
         m.sources = vec![Source::new("r", "x").with_content_hash("blake3:00")];

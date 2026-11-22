@@ -1632,6 +1632,7 @@ mod tests {
             name: "data".parse().unwrap(),
             kind: crate::block::BlockKind::Blob,
             digest: Some("blake3:00".into()),
+            class: crate::block::BlockClass::Primary,
             spec: serde_json::json!({"filename": "x.l64", "size": 1}),
         });
         let m = b.seal().unwrap();

@@ -10,8 +10,8 @@ Every product carries three identifiers, each with a distinct job (ADR-0020):
 | Field | What it is | Changes when… |
 |---|---|---|
 | `id` | logical identity — `blake3(JCS(id_inputs))` | the *logical* thing changes (never on a byte re-encode or rename) |
-| `content_hash` | recursive MMR Merkle root over the ordered block digests (ADR-0028) | any block's bytes change |
-| `manifest_hash` | the seal — `blake3(JCS(manifest))` | *any* manifest byte changes (metadata, sources, a digest) |
+| `content_hash` | recursive MMR Merkle root over the ordered digests of the **primary** blocks only (ADR-0028 §4); a derived block (`"class": "derived"`: a `.cidx`, a pyramid level above 0) is not part of it | a primary block's bytes change |
+| `manifest_hash` | the seal — `blake3(JCS(manifest))` | *any* manifest byte changes (metadata, sources, any block's digest or class) |
 
 `id` is stable across a re-ingest with a better codec (same logical product → same `id`, new
 `content_hash`); `manifest_hash` is the tamper-evident seal a signature attests.

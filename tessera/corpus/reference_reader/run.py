@@ -14,9 +14,9 @@ import tempfile
 import zipfile
 
 from reader import (
+    content_root,
     digest,
     jcs_bytes,
-    merkle_root,
     schema_verdict,
     stored_verdict,
     verify_tsra,
@@ -98,7 +98,7 @@ def _resealed(src: str, dst: str, edit, encode) -> None:
     edit(manifest)
     digests = [b.get("digest") for b in manifest["blocks"]]
     if all(isinstance(d, str) for d in digests):
-        manifest["content_hash"] = merkle_root(digests)
+        manifest["content_hash"] = content_root(manifest["blocks"])
     stored = encode(jcs_bytes(manifest).decode("utf-8"))
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_STORED) as out:
         for name, data in members:
@@ -118,6 +118,24 @@ def _listed_twice(second_digest: str | None):
         if second_digest is not None:
             second["digest"] = second_digest
         manifest["blocks"].append(second)
+
+    return edit
+
+
+def _orphan_index(cls: str | None):
+    """#720 round 5: a chunk index of a block the product doesn't hold, of class `cls` (None =
+    primary). Its payload is the index's own bytes, so only the block list is wrong."""
+
+    def edit(manifest: dict) -> None:
+        block = {
+            "name": "absent.cidx",
+            "kind": "chunk_index",
+            "digest": digest(b"index"),
+            "spec": {"recipe": "chunk_index@1", "indexes": "absent"},
+        }
+        if cls is not None:
+            block["class"] = cls
+        manifest["blocks"].append(block)
 
     return edit
 
@@ -179,7 +197,8 @@ def _first_member_marked_encrypted(path: str) -> None:
 def check_refusals(goldens: list[dict]) -> int:
     """`verify_tsra` refuses each crafted archive for its reason, and returns a result rather than
     raising: a block listed twice (SPEC §5), whether the second entry's digest is foreign or the
-    block's own; a block name that is not a string; a block without a digest; a manifest.json in
+    block's own; a chunk index whose block the product doesn't hold (SPEC §5d, #720); a block name that is not a string; a block class other than "derived"; a block
+    without a digest; a manifest.json in
     UTF-16 or with a byte-order mark (SPEC §4: UTF-8 I-JSON); a manifest.json that is not its own
     JCS form (ADR-0066 rule 4); an archive without manifest.seal (the alpha layout, rule 10); an
     archive zipfile can't read (a member marked encrypted); and the committed fixtures outside
@@ -213,6 +232,20 @@ def check_refusals(goldens: list[dict]) -> int:
             "block name an object",
             _first_block("name", {}),
             "blocks[0].name is not a string",
+            utf8,
+            same,
+        ),
+        (
+            "block class spelled 'primary'",
+            _first_block("class", "primary"),
+            "blocks[0].class is 'primary'",
+            utf8,
+            same,
+        ),
+        (
+            "chunk index without its block (derived)",
+            _orphan_index("derived"),
+            "chunk indexes without their block",
             utf8,
             same,
         ),
@@ -281,6 +314,47 @@ def check_refusals(goldens: list[dict]) -> int:
     return misses
 
 
+def check_derived_block(goldens: list[dict]) -> int:
+    """ADR-0028 §4 (#720) on a whole archive: a corpus product with a derived chunk-index block
+    added (its payload a member like any block's, its ref `"class": "derived"`, the manifest
+    resealed) verifies with the golden content_hash unchanged and a new seal; the same archive with
+    the derived block's payload altered is refused, since every block's bytes are checked against
+    its digest whatever its class. Returns the number of misses."""
+    g = next(g for g in goldens if g["name"] == "recon_int16")
+    src = os.path.join(FILES_DIR, "recon_int16.tsra")
+    misses = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for case, stored, want_ok in [
+            ("derived block added", b"index", True),
+            ("derived block's payload altered", b"index, altered", False),
+        ]:
+            dst = os.path.join(tmp, "derived.tsra")
+
+            def edit(manifest: dict) -> None:
+                manifest["blocks"].append(
+                    {
+                        "name": "volume.cidx",
+                        "kind": "chunk_index",
+                        "digest": digest(b"index"),
+                        "class": "derived",
+                        "spec": {"recipe": "chunk_index@1", "indexes": "volume"},
+                    }
+                )
+
+            _resealed(src, dst, edit, utf8)
+            with zipfile.ZipFile(dst, "a", zipfile.ZIP_STORED) as zf:
+                zf.writestr("blocks/volume.cidx", stored)
+            res = verify_tsra(dst)
+            held = (
+                res.ok == want_ok
+                and res.computed_content_hash == g["content_hash"]
+                and res.computed_manifest_hash != g["manifest_hash"]
+            )
+            print(f"derived: {case}: {'held' if held else 'MISSED'}")
+            misses += 0 if held else 1
+    return misses
+
+
 def main() -> int:
     with open(GOLDEN_JSON) as f:
         goldens = json.load(f)
@@ -320,7 +394,7 @@ def main() -> int:
     print(f"{len(goldens) - fails}/{len(goldens)} fixtures passed")
     fails += check_seal_cases()
     fails += check_schema_cases(goldens)
-    misses = check_refusals(goldens)
+    misses = check_refusals(goldens) + check_derived_block(goldens)
     return 0 if fails == 0 and misses == 0 else 1
 
 

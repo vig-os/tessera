@@ -317,6 +317,28 @@ pub enum Error {
     )]
     DuplicateBlockName { name: String },
 
+    /// The chunk index `index` (a block of kind `chunk_index`, or whose spec has an `indexes` key,
+    /// SPEC §5d) does not index another block of its own product: `indexes` names a block the
+    /// manifest doesn't list, names the index itself, or is missing or not a string (`indexes` is
+    /// then `None`). A structural defect of the block list, in the class of a repeated name (#720):
+    /// an index whose block is absent would be inherited by the next block of that name, which it
+    /// was never computed from. Refused by every verification (`Manifest::verify` and the reader's
+    /// `from_stored`, so `Reader::open`, wasm and the deep verify) and by every writer
+    /// (`ProductBuilder::seal`, `pack`, `pack_streaming`, the repository's `put_manifest` and
+    /// `commit`), before any digest is looked up.
+    #[error(
+        "chunk index '{index}' {}; a chunk index indexes another block of its own product (SPEC \
+         §5d, #720)",
+        match .indexes {
+            Some(target) => format!("indexes '{target}', which is not another block of this product"),
+            None => "names no block it indexes ('indexes' is missing or not a string)".to_owned(),
+        }
+    )]
+    DanglingChunkIndex {
+        index: String,
+        indexes: Option<String>,
+    },
+
     /// `name` does not resolve to a logical table, or a partitioned node is invalid (ADR-0064 §2,
     /// §3): refused by every reader resolving the name and by the seal, never skipped or merged.
     /// Every block stays readable by its full name.

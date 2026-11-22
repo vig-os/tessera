@@ -13,13 +13,16 @@
 //! its seal in band (refused); plus, on `recon_int16`, the typed-layer and I-JSON cases (duplicate
 //! keys, NaN, lone surrogate, nesting, integers beyond ±(2^53−1) in any spelling, records as arrays,
 //! a declared field of another JSON type, an unsupported major version, a block listed twice, a block
-//! without a digest, a malformed seal member).
+//! without a digest, a malformed seal member), and the derived-block cases of ADR-0028 §4 (#720: a
+//! derived block added or regenerated verifies with `content_hash` unchanged, one counted in
+//! `content_hash` or a primary block marked derived under the old root is tampered, an all-derived
+//! product has the empty root, and a `class` other than `"derived"` is refused).
 
 use serde_json::Value;
 use tessera_core::{Error, Manifest};
 
 /// The number of cases the generator writes: a lost or gained case is a visible change here.
-const CASES: usize = 150;
+const CASES: usize = 171;
 
 fn cases() -> Vec<Value> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/seal-cases.json");
@@ -75,6 +78,8 @@ fn rust_verdict(c: &Value) -> (&'static str, Vec<String>) {
         Err(Error::UnsupportedVersion(_)) => ("refused", Vec::new()),
         // A block name listed twice (SPEC §5, #734), refused before any hash of the typed layer.
         Err(Error::DuplicateBlockName { .. }) => ("refused", Vec::new()),
+        // A chunk index whose block the manifest doesn't list (SPEC §5d, #720).
+        Err(Error::DanglingChunkIndex { .. }) => ("refused", Vec::new()),
         // A block without a digest (SPEC §5: a sealed product's blocks carry one).
         Err(Error::MissingDigest(_)) => ("refused", Vec::new()),
         Err(e) => panic!("unexpected error class: {e}"),

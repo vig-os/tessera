@@ -47,10 +47,15 @@ ABOUT = (
     "#886); not its own RFC 8785 JCS form (key order, whitespace, an escape or a number spelling JCS "
     "doesn't write, such as #901's sealed 64.0, a pretty layout); a 'manifest_hash' key in band; "
     "then, past the seal, a value in a form SPEC §5 doesn't declare (a record as an array, a block "
-    "kind as an object, metadata: [], study: 5, a block kind or name outside its grammar), an "
-    "unsupported major tessera_version, a block listed twice or without a digest. 'tampered' = the "
+    "kind as an object, metadata: [], study: 5, a block kind or name outside its grammar, a block "
+    "class other than 'derived'), an "
+    "unsupported major tessera_version, a block listed twice or without a digest, a chunk index "
+    "(kind chunk_index or a spec with 'indexes', whatever its name or class) whose 'indexes' is not "
+    "another listed block (SPEC §5d, #720). 'tampered' = the "
     "seal is not blake3 of the bytes, or id or content_hash doesn't match (a missing content_hash "
-    "too). 'ok' = verifies. Families per corpus product: as-stored, newer-field-resealed (verifies, "
+    "too, or one computed over a derived block: content_hash is over the primary blocks only, a block "
+    "ref's 'class' is absent or exactly 'derived', ADR-0028 §4, #720). 'ok' = verifies. Families per "
+    "corpus product: as-stored, newer-field-resealed (verifies, "
     "names the field), field-spliced (old seal), T4-T7 under the old seal and S7/S8 sealed by the "
     "attacker (the #897 spike's respellings), S5b (an exact double beyond 2^53, its own JCS form, "
     "refused by I-JSON), alpha-layout, seal-in-band-resealed. newer_fields = what the Rust view "
@@ -99,6 +104,11 @@ def merkle_root(digests: list[str]) -> str:
     for _, p in reversed(peaks[:-1]):
         acc = node(p, acc)
     return "blake3:" + acc.hex()
+
+
+def content_root(blocks: list[dict]) -> str:
+    """SPEC §4's content_hash: the MMR root over the primary blocks (no `class` key), in order."""
+    return merkle_root([b["digest"] for b in blocks if "class" not in b])
 
 
 def corpus() -> list[tuple[str, dict, bytes, str]]:
@@ -419,7 +429,7 @@ def recon_int16(c: Cases, obj: dict, raw: bytes, seal: str, other_seal: str) -> 
 
     def listed_twice(m: dict) -> None:
         m["blocks"].append(copy.deepcopy(m["blocks"][0]))
-        m["content_hash"] = merkle_root([b["digest"] for b in m["blocks"]])
+        m["content_hash"] = content_root(m["blocks"])
 
     resealed("block-listed-twice", "refused", listed_twice)
     resealed(
@@ -490,6 +500,113 @@ def recon_int16(c: Cases, obj: dict, raw: bytes, seal: str, other_seal: str) -> 
         "refused",
         lambda m: m["blocks"][0].pop("digest"),
     )
+
+    # Derived blocks (ADR-0028 §4, #720): `"class": "derived"` takes a block out of content_hash; the
+    # seal still covers it. Each case resealed, so only content_hash and the class decide.
+    def with_cidx(index: bytes, recount: bool = False) -> Callable[[dict], None]:
+        def edit(m: dict) -> None:
+            m["blocks"].append(
+                {
+                    "name": m["blocks"][0]["name"] + ".cidx",
+                    "kind": "chunk_index",
+                    "digest": digest(index),
+                    "class": "derived",
+                    "spec": {
+                        "recipe": "chunk_index@1",
+                        "indexes": m["blocks"][0]["name"],
+                    },
+                }
+            )
+            if recount:  # the pre-#720 rule: every block a leaf
+                m["content_hash"] = merkle_root([b["digest"] for b in m["blocks"]])
+
+        return edit
+
+    resealed("derived-block-added-resealed", "ok", with_cidx(b"index"))
+    resealed("derived-block-regenerated-resealed", "ok", with_cidx(b"index, rebuilt"))
+    resealed(
+        "derived-block-counted-in-content-hash-resealed",
+        "tampered",
+        with_cidx(b"index", recount=True),
+    )
+
+    def all_derived(m: dict) -> None:
+        m["blocks"][0]["class"] = "derived"
+        m["content_hash"] = content_root(m["blocks"])
+
+    resealed("all-blocks-derived-resealed", "ok", all_derived)
+
+    # A chunk index indexes another block of its own product (SPEC §5d, #720 round 5): one whose
+    # block the list doesn't hold is refused like a repeated name, whatever its class, name or kind
+    # (a spec with `indexes` is one). content_hash is recomputed, so only the block list is wrong.
+    def with_index(
+        name: str, kind: str, cls: str | None, spec: dict
+    ) -> Callable[[dict], None]:
+        def edit(m: dict) -> None:
+            block = {
+                "name": name,
+                "kind": kind,
+                "digest": digest(b"index"),
+                "spec": spec,
+            }
+            if cls is not None:
+                block["class"] = cls
+            m["blocks"].append(block)
+            m["content_hash"] = content_root(m["blocks"])
+
+        return edit
+
+    cidx = {"recipe": "chunk_index@1", "indexes": "absent"}
+    for case, edit in [
+        (
+            "chunk-index-dangling-derived",
+            with_index("absent.cidx", "chunk_index", "derived", cidx),
+        ),
+        (
+            "chunk-index-dangling-primary",
+            with_index("absent.cidx", "chunk_index", None, cidx),
+        ),
+        (
+            "chunk-index-dangling-renamed",
+            with_index("notes", "chunk_index", "derived", cidx),
+        ),
+        (
+            "chunk-index-look-alike-dangling",
+            with_index("notes", "blob", None, {"indexes": "absent"}),
+        ),
+        (
+            "chunk-index-of-itself",
+            with_index("x.cidx", "chunk_index", "derived", {"indexes": "x.cidx"}),
+        ),
+        (
+            "chunk-index-without-target",
+            with_index("x.cidx", "chunk_index", "derived", {"recipe": "chunk_index@1"}),
+        ),
+        (
+            "chunk-index-target-not-a-string",
+            with_index("x.cidx", "chunk_index", "derived", {"indexes": 5}),
+        ),
+    ]:
+        resealed(f"{case}-resealed", "refused", edit)
+    resealed(
+        "primary-block-marked-derived-resealed",
+        "tampered",
+        lambda m: m["blocks"][0].update({"class": "derived"}),
+    )
+    for case, value in [
+        ("block-class-primary-resealed", "primary"),
+        ("block-class-null-resealed", None),
+        ("block-class-capitalised-resealed", "Derived"),
+        ("block-class-unknown-resealed", "canonical"),
+        ("block-class-number-resealed", 1),
+        ("block-class-array-form-resealed", ["derived"]),
+        ("block-class-empty-string-resealed", ""),
+        ("block-class-boolean-resealed", True),
+        ("block-class-object-form-resealed", {}),
+    ]:
+        resealed(
+            case, "refused", lambda m, v=value: m["blocks"][0].update({"class": v})
+        )
 
 
 def main() -> None:

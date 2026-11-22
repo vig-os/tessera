@@ -4,7 +4,7 @@
 //! manifest (products are immutable; a new version is a new product with a `sources` edge
 //! to its parent — see `docs/rfc-tessera.md` §3, and fd5 audit-trail issues #167–170).
 
-use crate::block::{Block, BlockRef};
+use crate::block::{Block, BlockName, BlockRef};
 use crate::manifest::Manifest;
 use crate::provenance::Source;
 
@@ -89,6 +89,22 @@ impl ProductBuilder {
         let before = self.refs.len();
         self.refs.retain(|r| r.name != name);
         self.refs.len() != before
+    }
+
+    /// Remove the block `name` and its derived family ([`crate::block::derived_family`]: its derived
+    /// `.cidx` sidecar and, for pyramid level 0, its derived levels), as `commit --remove-block` does.
+    /// Returns the names removed, `name` first, or `None` if the version holds no block `name`
+    /// (nothing is removed then). A manifest edit only, like [`remove_block`](Self::remove_block).
+    pub fn remove_block_with_derived(&mut self, name: &str) -> Option<Vec<BlockName>> {
+        let target = self.refs.iter().find(|r| r.name == name)?.name.clone();
+        let mut gone = vec![target];
+        gone.extend(
+            crate::block::derived_family(name, &self.refs)
+                .into_iter()
+                .cloned(),
+        );
+        self.refs.retain(|r| !gone.contains(&r.name));
+        Some(gone)
     }
 
     /// Record a provenance edge to an upstream artifact.
@@ -182,6 +198,10 @@ impl ProductBuilder {
     /// Every partitioned table must be valid (ADR-0064 §2.4, [`crate::block::check_partitions`]),
     /// or the seal is refused with [`crate::Error::LogicalTable`].
     ///
+    /// Every chunk index must index another block of the product
+    /// ([`crate::block::check_chunk_indexes_resolve`]), or the seal is refused with
+    /// [`crate::Error::DanglingChunkIndex`] (#720).
+    ///
     /// The product's schema (the embedded one, else the built-in registry's for its product) must
     /// follow the number rules (#895): a field declaration that breaks them is refused with
     /// [`crate::Error::SchemaField`], and a metadata value outside its field's encoding or range with
@@ -192,15 +212,12 @@ impl ProductBuilder {
         crate::block::check_unique_names(self.refs.iter().map(|r| &r.name))?;
         crate::block::check_leaf_rule(self.refs.iter().map(|r| &r.name))?;
         crate::block::check_partitions(&self.refs)?;
-        let mut digests = Vec::with_capacity(self.refs.len());
-        for r in &self.refs {
-            match &r.digest {
-                Some(d) => digests.push(d.clone()),
-                None => return Err(crate::Error::MissingDigest(r.name.to_string())),
-            }
-        }
+        crate::block::check_chunk_indexes_resolve(&self.refs)?;
+        // ADR-0028 §4: `content_hash` is over the primary blocks only; `manifest_hash` (the seal over
+        // the stored manifest) covers every block ref, derived ones and their class included.
+        let content_hash = crate::block::content_root(&self.refs)?;
         self.manifest.blocks = self.refs;
-        self.manifest.content_hash = Some(crate::hash::merkle_root(&digests));
+        self.manifest.content_hash = Some(content_hash);
         // Self-describing (FAIR-Reusable): embed the resolved product schema so the sealed `.tsra`
         // carries its own contract and the seal commits to it. A caller-supplied schema
         // (`with_schema`) or an inherited one (`from_manifest`) wins; otherwise embed the built-in
@@ -251,6 +268,7 @@ mod tests {
             name: name.parse().unwrap(),
             kind: BlockKind::Array,
             digest: Some(digest.into()),
+            class: crate::block::BlockClass::Primary,
             spec: serde_json::json!({ "dtype": "int16", "shape": [2] }),
         }
     }

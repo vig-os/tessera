@@ -26,7 +26,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tessera_core::block::{check_unique_names, BlockName, BlockRef};
+use tessera_core::block::{check_block_refs, BlockName, BlockRef};
 use tessera_core::{Error, Manifest, Result};
 
 use crate::BlockPayload;
@@ -144,14 +144,15 @@ impl Repository {
     /// ([`crate::stored::manifest`]), so the address attests the whole product and `b3sum` of the
     /// object reproduces it. Returns the `manifest_hash`.
     ///
-    /// A manifest listing a block name twice is refused with [`Error::DuplicateBlockName`] before
-    /// anything is written (ADR-0063 §2a): [`get_manifest`](Self::get_manifest) would refuse it.
+    /// A manifest listing a block name twice ([`Error::DuplicateBlockName`], ADR-0063 §2a) or holding
+    /// a chunk index without its block ([`Error::DanglingChunkIndex`], #720) is refused before
+    /// anything is written: [`get_manifest`](Self::get_manifest) would refuse it.
     pub fn put_manifest(&self, m: &Manifest) -> Result<String> {
         let mh = m
             .manifest_hash
             .clone()
             .ok_or_else(|| Error::Invalid("put_manifest: manifest is not sealed".into()))?;
-        check_unique_names(m.blocks.iter().map(|b| &b.name))?;
+        check_block_refs(&m.blocks)?;
         let (bytes, seal) = crate::stored::manifest(m)?;
         self.write_raw(&seal, &bytes)?;
         Ok(mh)
@@ -246,9 +247,10 @@ impl Repository {
     /// A metadata-only version supplies no new payloads: every block is already stored from the
     /// parent, so only the manifest object is written.
     ///
-    /// A manifest listing a block name twice is refused with [`Error::DuplicateBlockName`] before
-    /// any object is stored or the ref moves (ADR-0063 §2a), so each payload resolves to exactly
-    /// one block reference.
+    /// A manifest listing a block name twice ([`Error::DuplicateBlockName`], ADR-0063 §2a) or holding
+    /// a chunk index without its block ([`Error::DanglingChunkIndex`], #720) is refused before any
+    /// object is stored or the ref moves, so each payload resolves to exactly one block reference and
+    /// no version holds an index a later block of that name would inherit.
     pub fn commit(
         &self,
         lineage: &str,
@@ -259,7 +261,7 @@ impl Repository {
             .manifest_hash
             .clone()
             .ok_or_else(|| Error::Invalid("commit: manifest is not sealed".into()))?;
-        check_unique_names(manifest.blocks.iter().map(|b| &b.name))?;
+        check_block_refs(&manifest.blocks)?;
         // Names are unique (just checked), so this map holds every block, one entry per name.
         let by_name: BTreeMap<&BlockName, &BlockRef> =
             manifest.blocks.iter().map(|b| (&b.name, b)).collect();

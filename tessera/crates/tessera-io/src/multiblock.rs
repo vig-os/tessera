@@ -225,7 +225,8 @@ impl LogicalTableView {
     /// skippable; the result is the set of blocks a ranged query MUST read.
     ///
     /// **Where the stats come from.**
-    /// - If a `<block>.cidx` sidecar (ADR-0028 §3) exists in the manifest AND the requested
+    /// - If the writer's `<block>.cidx` sidecar (ADR-0028 §3: derived, declaring this block,
+    ///   [`tessera_core::block::trusted_chunk_index`]) is in the manifest AND the requested
     ///   `column` matches that block's `TableSpec.row_index` (the conventional cidx stat column —
     ///   the sidecar payload itself records no column name today), the sidecar is read and its
     ///   rolled-up `aggregate()` supplies the `[min, max]`. **No data-block bytes are touched**
@@ -298,19 +299,14 @@ impl LogicalTableView {
         let sidecar = cidx_name(bname);
         let is_row_index = spec.row_index.as_deref() == Some(column);
         // Name alone is not enough to trust an index (#347 review). Additionally require that the
-        // sidecar DECLARES it indexes this block, that its entry count matches this block's row-group
-        // grid, and that the roll-up does not overflow. A mismatched or stale index would otherwise
-        // silently answer a pruning query with another block's min/max — which drops real rows,
-        // because pruning acts on the answer.
-        let declared_ok = reader
-            .manifest()
-            .blocks
-            .iter()
-            .find(|b| b.name == sidecar)
-            .and_then(|b| b.spec.get("indexes").and_then(|v| v.as_str()))
-            .map(|idx| idx == bname.as_str())
-            .unwrap_or(false);
-        if declared_ok && is_row_index {
+        // sidecar is the writer's (derived, a chunk index, #720), that it DECLARES it indexes this
+        // block, that its entry count matches this block's row-group grid, and that the roll-up does
+        // not overflow. A primary look-alike, or a mismatched or stale index, would otherwise
+        // silently answer a pruning query with min/max that are not this block's, which drops real
+        // rows, because pruning acts on the answer.
+        let trusted =
+            tessera_core::block::trusted_chunk_index(&reader.manifest().blocks, bname).is_some();
+        if trusted && is_row_index {
             let bytes = reader.read_block(&sidecar)?;
             let index = ChunkIndex::from_bytes(&bytes)?;
             let want_groups = spec
@@ -778,6 +774,52 @@ mod tests {
         assert!(view
             .select_blocks_overlapping(&mut rdr, "e", 0, 100)
             .is_err());
+    }
+
+    /// #720 round 4: pruning takes a block's stats from its index only when the index is the
+    /// writer's, derived. A forged index claiming `t` spans 1000..=1000 (the data is 10..=30) prunes
+    /// the block away from a query for `t` in 15..=25 when it is derived; marked primary, it is never
+    /// consulted, and the stats come from the data.
+    #[test]
+    fn pruning_never_trusts_a_primary_chunk_index() {
+        use tessera_core::block::{BlockClass, BlockRef};
+        use tessera_core::ProductBuilder;
+        let spec = TableSpec {
+            columns: vec![col("t", "u8")],
+            rows: 3,
+            row_index: Some("t".into()),
+            partition: None,
+            edition: None,
+            codec_profile: None,
+        };
+        let data: TableData = vec![("t".into(), ColumnData::U64(vec![10, 20, 30]))];
+        let (br, pl) = table::table_block("events", &spec, &data).unwrap();
+        let mut forged = ChunkIndex::new();
+        forged.push(tessera_core::hash::digest(b"forged"), &[1000]);
+        let (fref, fpl) = crate::chunk_index::chunk_index_block("events", &forged).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let selected = |class: BlockClass| -> Vec<usize> {
+            let mut b = ProductBuilder::new("listmode", "p", "d", TS);
+            b.add_block_ref(br.clone());
+            b.add_block_ref(BlockRef {
+                class,
+                ..fref.clone()
+            });
+            let path = dir.path().join(format!("{class:?}.tsra"));
+            let copy =
+                |p: &crate::BlockPayload| crate::BlockPayload::new(p.name.clone(), p.bytes.clone());
+            crate::pack(&b.seal().unwrap(), &[copy(&pl), copy(&fpl)], &path).unwrap();
+            let mut rdr = Reader::open(&path).unwrap();
+            let view = rdr.logical_table("events").unwrap();
+            view.select_blocks_overlapping(&mut rdr, "t", 15, 25)
+                .unwrap()
+        };
+        assert!(
+            selected(BlockClass::Derived).is_empty(),
+            "precondition: a derived forgery prunes"
+        );
+        assert_eq!(selected(BlockClass::Primary), [0]);
     }
 
     #[test]

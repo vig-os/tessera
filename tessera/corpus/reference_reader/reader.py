@@ -22,7 +22,10 @@ Spec notes used here (only):
   - All hashing inputs derived from JSON are RFC 8785 (JCS) canonical bytes.
   - JSON input is I-JSON (SPEC §1): a number whose value is an integer beyond ±(2^53−1) is refused.
   - id            = digest(JCS(id_inputs))
-  - content_hash  = merkle_root([block.digest for block in manifest.blocks])
+  - content_hash  = merkle_root([block.digest for block in manifest.blocks if block is primary]):
+    a block ref's optional "class" is absent (primary) or exactly "derived" (an accelerator such as
+    a chunk index, covered by manifest_hash but not by content_hash, ADR-0028 §4); any other value,
+    "primary" and null included, is refused as outside the declared shape.
   - Block names are unique within a product (SPEC §5, exact string equality):
     a manifest listing one name twice is refused before any digest lookup.
   - manifest_hash = digest(manifest.json bytes as stored) = the content of manifest.seal
@@ -92,6 +95,13 @@ def merkle_root(digest_strings: list[str]) -> str:
     return "blake3:" + acc.hex()
 
 
+def content_root(blocks: list[dict[str, Any]]) -> str:
+    """content_hash (SPEC §4, ADR-0028 §4): the Merkle root over the primary blocks' digests, in
+    manifest order. A derived block (`"class": "derived"`) is skipped; with no primary block the
+    root is that of the empty list. The caller has refused blocks without a digest."""
+    return merkle_root([b["digest"] for b in blocks if b.get("class") != DERIVED])
+
+
 def jcs_bytes(obj: Any) -> bytes:
     """RFC 8785 canonicalization (UTF-8 bytes)."""
     return jcs.canonicalize(obj)
@@ -107,6 +117,34 @@ def duplicate_block_names(blocks: list[dict[str, Any]]) -> list[str]:
             repeated.append(name)
         seen.add(name)
     return repeated
+
+
+def is_chunk_index(block: dict[str, Any]) -> bool:
+    """A chunk index by what it is, whatever its name or class (SPEC §5d): kind `chunk_index`, or a
+    spec with an `indexes` key."""
+    spec = block.get("spec")
+    return block.get("kind") == "chunk_index" or (
+        isinstance(spec, dict) and "indexes" in spec
+    )
+
+
+def dangling_chunk_indexes(blocks: list[dict[str, Any]]) -> list[str]:
+    """Every chunk index (`is_chunk_index`) that doesn't index another block of the list: its
+    `indexes` is not a string naming a listed block other than itself (SPEC §5d, #720), in manifest
+    order. A structural defect like a repeated name: the next block given that name would inherit
+    an index never computed from it."""
+    names = {b["name"] for b in blocks}
+    out: list[str] = []
+    for block in blocks:
+        if not is_chunk_index(block):
+            continue
+        spec = block.get("spec")
+        target = spec.get("indexes") if isinstance(spec, dict) else None
+        if not (
+            isinstance(target, str) and target != block["name"] and target in names
+        ):
+            out.append(block["name"])
+    return out
 
 
 class NotAManifest(ValueError):
@@ -281,6 +319,8 @@ def _rec(**fields: tuple) -> tuple:
 
 
 _REQ, _DEF = True, False
+# A block ref's `class` (SPEC §5): absent for a primary block, else exactly this.
+DERIVED = "derived"
 BLOCK_KINDS = ("array", "table", "chunk_index", "blob")
 PRODUCER = _rec(
     tool=(STR, _REQ),
@@ -310,6 +350,8 @@ MANIFEST = _rec(
                 name=(NAME, _REQ),
                 kind=(("enum", BLOCK_KINDS), _REQ),
                 digest=(_opt(STR), _DEF),
+                # ADR-0028 §4: absent = primary; present, the only spelling is "derived".
+                **{"class": (("enum", (DERIVED,)), _DEF)},
                 spec=(ANY, _DEF),
             ),
         ),
@@ -414,7 +456,8 @@ def stored_verdict(raw: bytes | str, seal: bytes | str | None) -> str:
     refused: no seal (the alpha layout), a seal not exactly "blake3:" + 64 lower-case hex, not
     I-JSON, not its own JCS form, a "manifest_hash" key in band; tampered: the seal is not the
     digest of the bytes; then the typed layer: refused outside the declared shape, for an
-    unsupported major tessera_version, a block name listed twice or a block without a digest;
+    unsupported major tessera_version, a block name listed twice, a chunk index whose block the
+    list doesn't hold, or a block without a digest;
     tampered for an `id` or `content_hash` (a missing one too) that doesn't match."""
     raw = raw.encode("utf-8") if isinstance(raw, str) else raw
     seal = seal.encode("utf-8") if isinstance(seal, str) else seal
@@ -436,11 +479,14 @@ def stored_verdict(raw: bytes | str, seal: bytes | str | None) -> str:
     blocks = m.get("blocks", [])
     if duplicate_block_names(blocks):
         return "refused"
+    # SPEC §5d: so is a chunk index whose block the list doesn't hold (#720).
+    if dangling_chunk_indexes(blocks):
+        return "refused"
     if digest(jcs_bytes(m["id_inputs"])) != m["id"]:
         return "tampered"
     if any(b.get("digest") is None for b in blocks):
         return "refused"
-    if merkle_root([b["digest"] for b in blocks]) != m.get("content_hash"):
+    if content_root(blocks) != m.get("content_hash"):
         return "tampered"
     return "ok"
 
@@ -535,8 +581,8 @@ def _verify_tsra(path: str) -> VerifyResult:
         # (f) recompute id
         computed_id = digest(jcs_bytes(manifest["id_inputs"]))
 
-        # (g) recompute content_hash from block digests in manifest order;
-        #     also verify each stored block's bytes against its digest.
+        # (g) recompute content_hash from the primary blocks' digests in manifest order;
+        #     also verify every stored block's bytes (derived ones too) against its digest.
         blocks = manifest.get("blocks", [])
         duplicates = duplicate_block_names(blocks)
         if duplicates:
@@ -546,11 +592,17 @@ def _verify_tsra(path: str) -> VerifyResult:
             notes.append(
                 f"block names listed more than once (SPEC §5 requires unique names): {duplicates}"
             )
+        dangling = dangling_chunk_indexes(blocks)
+        if dangling:
+            # SPEC §5d (#720): a chunk index indexes another block of its own product.
+            notes.append(
+                f"chunk indexes without their block (SPEC §5d requires one): {dangling}"
+            )
         undigested = [b["name"] for b in blocks if b.get("digest") is None]
         if undigested:
             notes.append(f"blocks without a digest (SPEC §5): {undigested}")
         block_digest_ok: list[tuple[str, bool]] = []
-        for block in [] if duplicates or undigested else blocks:
+        for block in [] if duplicates or dangling or undigested else blocks:
             name = block["name"]
             recorded = block["digest"]
             payload = zf.read(BLOCK_PREFIX + name)
@@ -561,9 +613,7 @@ def _verify_tsra(path: str) -> VerifyResult:
                     f"block {name!r}: payload digest {actual} != recorded {recorded}"
                 )
 
-        computed_content_hash = (
-            "" if undigested else merkle_root([b["digest"] for b in blocks])
-        )
+        computed_content_hash = "" if undigested else content_root(blocks)
 
         ok = (
             not notes

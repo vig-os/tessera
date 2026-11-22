@@ -342,3 +342,32 @@ by default would pay 2.25–3.2× on every seal for a value most users never rea
 5. `#526`/`#527` only if §9 is included.
 
 **One PR, one corpus regeneration, one changelog entry.**
+
+## Amendment (2026-11-20) — the `.cidx` leaves `content_hash` (#720, ADR-0028 §4, ADR-0066 rule 12)
+
+The as-built facts in "Why this is *one* event and not five" changed. ADR-0028 §4 (Accepted, not amended) already
+said a derived sidecar is not part of the canonical identity; the code folded every block ref into `content_hash`
+anyway, and that is what this ADR recorded. Since #720:
+
+- A block ref carries an optional `"class": "derived"` (SPEC §5). The `.cidx` writer
+  (`tessera_io::chunk_index::chunk_index_block`) sets it on the ref. It was a key of the sidecar's `spec` before,
+  where it changed nothing, and it is no longer written there: the class has one place, the ref. `recipe`,
+  `indexes`, `entries` and `root` stay in the spec.
+- `content_hash` is the Merkle root over the **primary** blocks only (SPEC §4). `manifest_hash` still covers every
+  block ref, so a `.cidx`, its digest and its class stay sealed.
+
+So the cost model above now reads: turning the sidecar on by default, and every change to `ChunkStats`'s fields,
+moves **`manifest_hash` only**. `content_hash` and `id` don't move. The goldens still move (each `manifest_hash`, and
+`corpus.json` records it), so the argument for landing everything in one event stands: fewer regenerations, and
+signatures and `Source` pins over `manifest_hash` are not invalidated twice. §11 step 4 still regenerates the corpus,
+and now its stated movement is `manifest_hash` alone.
+
+Terms: SPEC calls a block that is part of `content_hash` **primary** (ADR-0028 §4 and ADR-0066 step 5 say
+*canonical*), and the one spelling of the other class is `"derived"`. A reader refuses `"class": "canonical"`, like
+every value but `"derived"`: a primary block has no `class` key. ADR-0028 §4 says the chunk index *straddles*: its
+leaf hashes are canonical and its stat columns derived. The block is still derived as a whole, because a leaf hash
+is a hash of the indexed block's chunks, so it adds nothing to identity that the indexed block's own digest, a
+`content_hash` leaf, does not already pin.
+
+M1 (§7) is not affected. The `.cidx` is still bound to its block only by name, and `indexed_digest` is still the
+fix.
