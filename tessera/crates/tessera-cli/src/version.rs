@@ -86,7 +86,10 @@ pub fn commit(
     // `--add-block …:<name>`, and `tessera stats` would serve the OLD block's statistics for the NEW
     // one, labelled exact (#347 review); pyramid levels left behind without level 0 would be the
     // product's only blocks, real data under the empty set's `content_hash` (#720 review). A primary
-    // block of one of those names is data of its own and stays; no reader takes aggregates from it.
+    // block of one of those names is data of its own: the cascade never deletes supplied data. A
+    // chunk index of a removed block that the cascade doesn't take (a primary one, or one under
+    // another name, which only a hand-built product holds) would dangle, a defect every reader
+    // refuses (`Error::DanglingChunkIndex`), so the remove is refused, naming the index to remove too.
     let mut removed_derived = 0;
     for name in removes {
         let gone = b.remove_block_with_derived(name).ok_or_else(|| {
@@ -94,6 +97,7 @@ pub fn commit(
         })?;
         removed_derived += gone.len() - 1;
     }
+    refuse_orphaned_indexes(&parent.blocks, removes)?;
 
     // Adds — copy an already-encoded block from another .tsra (file i/o, no re-encode). A name the
     // version already holds (or that two adds share) is refused by the seal below, with
@@ -237,6 +241,45 @@ fn load_block(spec: &str) -> Result<AddedBlock> {
         payload: BlockPayload::new(newname, bytes),
         source_indexed,
     })
+}
+
+/// Refuse a `--remove-block` that would leave a chunk index without its block: a block of the
+/// parent that is a chunk index ([`tessera_core::block::BlockRef::is_chunk_index`]), indexes one of
+/// `removes`, and is not itself removed (by the derived cascade or its own `--remove-block`). The
+/// cascade takes only derived blocks, so this is a primary look-alike or an index under another
+/// name; the error names it and the flag that removes it.
+fn refuse_orphaned_indexes(
+    parent: &[tessera_core::block::BlockRef],
+    removes: &[String],
+) -> Result<()> {
+    let gone: Vec<&str> = removes
+        .iter()
+        .map(String::as_str)
+        .chain(
+            removes
+                .iter()
+                .flat_map(|name| tessera_core::block::derived_family(name, parent))
+                .map(|n| n.as_str()),
+        )
+        .collect();
+    for index in parent
+        .iter()
+        .filter(|b| b.is_chunk_index() && !gone.contains(&b.name.as_str()))
+    {
+        let Some(data) = index.spec.get("indexes").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if removes.iter().any(|r| r == data) {
+            return Err(Error::Invalid(format!(
+                "--remove-block {data}: '{index}' is a chunk index of '{data}' that the cascade \
+                 does not remove (it takes only the derived '{data}.cidx'; supplied data is never \
+                 deleted implicitly), and a chunk index without its block is refused everywhere \
+                 (#720): remove it too, with --remove-block {index}",
+                index = index.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The index of each copied block whose source carried one, **rebuilt from the copied bytes** and
@@ -1300,8 +1343,9 @@ mod tests {
     }
 
     /// #720 round 4 nit: `--remove-block volume` cascades only to DERIVED blocks. A primary
-    /// `volume.cidx` (only a hand-built product carries one) is data of its own: it stays, and the
-    /// summary counts no derived removal.
+    /// `volume.cidx` (only a hand-built product carries one) is data of its own, never deleted
+    /// implicitly; round 5: left behind it would be an index without its block, so the remove is
+    /// refused with a hint, and removing both by name works.
     #[test]
     fn removal_never_cascades_to_a_primary_index() {
         use tessera_core::block::BlockClass;
@@ -1309,14 +1353,151 @@ mod tests {
         let (src, repo) = (dir.path().join("p.tsra"), dir.path().join("repo"));
         write_lying(&src, "volume.cidx", BlockClass::Primary);
         let lineage = imported(&repo, &src);
+        let before = tip(&repo, &lineage).manifest_hash;
+        // #720 round 5: the primary `volume.cidx` stays, so removing `volume` alone would leave an
+        // index without its block. Refused, naming the index and the flag that removes it.
+        let err = commit(
+            &repo,
+            &lineage,
+            &[],
+            &[],
+            &["volume".into()],
+            &mut Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("'volume.cidx' is a chunk index of 'volume'")
+                && err.contains("--remove-block volume.cidx"),
+            "{err}"
+        );
+        assert_eq!(tip(&repo, &lineage).manifest_hash, before);
+        // Removing both, each by name, is two primary removals.
         let mut out = Vec::new();
-        commit(&repo, &lineage, &[], &[], &["volume".into()], &mut out).unwrap();
+        let both = ["volume".to_string(), "volume.cidx".to_string()];
+        commit(&repo, &lineage, &[], &[], &both, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("  blocks     +0 -1\n"), "{out}");
-        let m = tip(&repo, &lineage);
-        let names: Vec<&str> = m.blocks.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(names, ["volume.cidx"]);
-        assert!(m.blocks[0].is_primary());
+        assert!(out.contains("  blocks     +0 -2\n"), "{out}");
+        assert!(tip(&repo, &lineage).blocks.is_empty());
+    }
+
+    /// The forged chunk index of #720 round 5 for a block `ct` (min = max = 7, one chunk), derived,
+    /// in a product beside `base`. `with_ct` keeps the 16³ int16 block `ct` the index names; without
+    /// it the block list is resealed by hand, as a hostile producer would (every writer refuses a
+    /// dangling index), into the canonical archive tessera's writer emits. Returns the manifest.
+    fn write_orphan(path: &Path, with_ct: bool) -> tessera_core::Manifest {
+        use std::io::Write as _;
+        use tessera_core::block::array::ArraySpec;
+        use tessera_io::array::ArrayData;
+        let spec = ArraySpec::new(vec![16, 16, 16], "int16");
+        let data = ArrayData::I16((0..4096).map(|k| k as i16 - 1024).collect());
+        let (base, base_pl) = tessera_io::array::array_block("base", &spec, &data).unwrap();
+        let (ct, ct_pl) = tessera_io::array::array_block("ct", &spec, &data).unwrap();
+        let mut forged = tessera_core::chunk_index::ChunkIndex::new();
+        forged.push(tessera_core::hash::digest(b"forged"), &[7; 4096]);
+        let (cidx, cidx_pl) = tessera_io::chunk_index::chunk_index_block("ct", &forged).unwrap();
+        let mut b = PB::new("recon", "DP-orphan", "v", "2024-01-01T00:00:00Z");
+        b.add_block_ref(base);
+        b.add_block_ref(ct);
+        b.add_block_ref(cidx.derived());
+        let mut m = b.seal().unwrap();
+        if with_ct {
+            pack(&m, &[base_pl, ct_pl, cidx_pl], path).unwrap();
+            return m;
+        }
+        m.blocks.retain(|b| b.name != "ct");
+        m.content_hash = Some(m.recompute_content_hash().unwrap());
+        let json = m.canonical_bytes().unwrap();
+        let seal = tessera_core::hash::digest(&json);
+        m.manifest_hash = Some(seal.clone());
+        let o = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default())
+            .large_file(true)
+            .system(zip::System::Unix);
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in [
+            (
+                "mimetype".to_string(),
+                tessera_io::MIMETYPE.as_bytes().to_vec(),
+            ),
+            ("manifest.seal".into(), seal.into_bytes()),
+            ("manifest.json".into(), json),
+            ("blocks/base".into(), base_pl.bytes),
+            ("blocks/ct.cidx".into(), cidx_pl.bytes),
+        ] {
+            w.start_file(name, o).unwrap();
+            w.write_all(&bytes).unwrap();
+        }
+        std::fs::write(path, w.finish().unwrap().into_inner()).unwrap();
+        m
+    }
+
+    /// The refusal of a dangling index, matched by its message (#720 round 5).
+    fn is_dangling(e: &Error) -> bool {
+        e.to_string()
+            .contains("chunk index 'ct.cidx' indexes 'ct', which is not another block")
+    }
+
+    /// #720 round 5, the reviewer's attack: `orphan.tsra` holds `base` and a derived `ct.cidx` that
+    /// lies (min = max = 7) about a block `ct` the product doesn't hold. Imported, then given an
+    /// honest unindexed `ct`, the version inherited the lie: no copy, no rebuild, and `stats ct`
+    /// served it as exact. Now the sealed orphan is refused at open, so `verify` and `import`
+    /// refuse it and no lineage is written.
+    #[test]
+    fn an_orphan_chunk_index_is_refused_at_open_and_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let (orphan, repo) = (dir.path().join("orphan.tsra"), dir.path().join("repo"));
+        let m = write_orphan(&orphan, false);
+        let e = Reader::open(&orphan)
+            .err()
+            .expect("open refuses the orphan index");
+        assert!(is_dangling(&e), "{e}");
+        let e = tessera_io::verify_payloads_parallel(&orphan, "orphan", 2).unwrap_err();
+        assert!(is_dangling(&e), "{e}");
+
+        init(&repo, &mut Vec::new()).unwrap();
+        let e = import(&repo, &orphan, &mut Vec::new()).unwrap_err();
+        assert!(is_dangling(&e), "{e}");
+        let r = Repository::open(&repo).unwrap();
+        assert_eq!(r.read_ref(&m.id).unwrap(), None, "no version is written");
+    }
+
+    /// #720 round 5, the attack's commit half, for a repository that already holds an orphan
+    /// version (planted as raw objects, as a repository written before the refusal would hold
+    /// one): `commit --add-block ct=plain16.tsra:volume` is refused, because the parent no longer
+    /// reads, and the tip is unchanged.
+    #[test]
+    fn a_commit_on_an_orphan_index_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (honest, orphan, plain, repo) = (
+            dir.path().join("honest.tsra"),
+            dir.path().join("orphan.tsra"),
+            dir.path().join("plain16.tsra"),
+            dir.path().join("repo"),
+        );
+        write_orphan(&honest, true);
+        let m = write_orphan(&orphan, false);
+        write_volume(&plain, "volume", -1024, [16, 16, 16]);
+        // The honest product stores every block object; then the orphan manifest becomes the tip.
+        let lineage = imported(&repo, &honest);
+        assert_eq!(lineage, m.id, "precondition: one lineage");
+        let seal = m.manifest_hash.clone().unwrap();
+        let hex = seal.strip_prefix("blake3:").unwrap();
+        let object = repo.join("objects/blake3").join(&hex[..2]).join(&hex[2..]);
+        std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+        std::fs::write(&object, m.canonical_bytes().unwrap()).unwrap();
+        let ref_file = repo.join("refs").join(lineage.replace(':', "_"));
+        std::fs::write(ref_file, format!("{seal}\n")).unwrap();
+
+        let add = format!("ct={}:volume", plain.to_str().unwrap());
+        let e = commit(&repo, &lineage, &[], &[add], &[], &mut Vec::new()).unwrap_err();
+        assert!(is_dangling(&e), "{e}");
+        let r = Repository::open(&repo).unwrap();
+        assert_eq!(
+            r.read_ref(&lineage).unwrap().as_deref(),
+            Some(seal.as_str())
+        );
     }
 
     /// #720 round 4 nit: `--add-block` reads only from a source `tessera verify` accepts. A source

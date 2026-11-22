@@ -106,11 +106,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   index is bound to its block by name only, so its bytes are never trusted: `--add-block` refuses to copy any chunk
   index (kind `chunk_index`, or a spec with `indexes`), whatever its name or class, and reads only from a source
   `tessera verify` accepts. `tessera stats` and `LogicalTableView` pruning take aggregates only from a derived index
-  of the block (`block::trusted_chunk_index`); a primary look-alike is ignored and the data is read instead.
-  `tessera commit --remove-block` removes the block's derived family with it: its derived `.cidx` (a primary one
-  stays) and, for a pyramid's `<base>/0`, its derived levels and their sidecars
+  of the block (`block::trusted_chunk_index`: named `<name>.cidx`, kind `chunk_index`, derived, `indexes` =
+  `<name>`); a primary look-alike is ignored and the data is read instead. A chunk index (kind `chunk_index`, or a
+  spec with `indexes`) whose `indexes` names no other block of its product is a structural defect like a repeated
+  name: every reader refuses it (`Error::DanglingChunkIndex`, naming the index and the missing block; Rust open and
+  verify, `tessera-wasm`, the Python reference reader; new seal cases and a refusal case) and every writer refuses
+  to produce it (`ProductBuilder::seal`, `pack`, `pack_streaming`, `Repository::put_manifest` / `commit`; shared
+  check `block::check_block_refs`). So an orphan index can no longer be imported and inherited by a block added later.
+  `tessera commit --remove-block` removes the block's derived family with it: its derived `.cidx` and, for a pyramid's `<base>/0`, its derived levels and their sidecars
   (`ProductBuilder::remove_block_with_derived`, `block::derived_family`, with the writers' naming rules
   `block::cidx_name` / `block::pyramid_level_name`); the commit summary counts the cascade, `-1 (+2 derived)`. A
+  primary chunk index of the removed block is never removed implicitly: the remove is refused, naming the index and
+  `--remove-block` for it, since it would dangle. A
   derived block is still sealed: `manifest_hash` covers it, its digest and its class, and its payload is checked
   against its digest like any block's. Adding, regenerating or dropping one moves `manifest_hash` only; a product
   whose blocks are all derived has the `content_hash` of the empty set. The key is never written for a primary

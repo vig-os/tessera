@@ -22,7 +22,7 @@ use serde_json::Value;
 use tessera_core::{Error, Manifest};
 
 /// The number of cases the generator writes: a lost or gained case is a visible change here.
-const CASES: usize = 164;
+const CASES: usize = 171;
 
 fn cases() -> Vec<Value> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/seal-cases.json");
@@ -78,6 +78,8 @@ fn rust_verdict(c: &Value) -> (&'static str, Vec<String>) {
         Err(Error::UnsupportedVersion(_)) => ("refused", Vec::new()),
         // A block name listed twice (SPEC §5, #734), refused before any hash of the typed layer.
         Err(Error::DuplicateBlockName { .. }) => ("refused", Vec::new()),
+        // A chunk index whose block the manifest doesn't list (SPEC §5d, #720).
+        Err(Error::DanglingChunkIndex { .. }) => ("refused", Vec::new()),
         // A block without a digest (SPEC §5: a sealed product's blocks carry one).
         Err(Error::MissingDigest(_)) => ("refused", Vec::new()),
         Err(e) => panic!("unexpected error class: {e}"),

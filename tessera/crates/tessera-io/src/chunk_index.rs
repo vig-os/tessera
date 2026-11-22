@@ -203,8 +203,9 @@ mod tests {
     /// `empty_no_blocks` carries; the derived block is still in the manifest, under the seal.
     #[test]
     fn an_all_derived_product_has_the_empty_content_hash() {
-        let (br, _payload) = chunk_index_block("volume", &sample_index()).unwrap();
-        let (ch, mh) = hashes(&[br]);
+        // Not a chunk index: one without the block it indexes is refused (#720 round 5).
+        let (br, _payload) = crate::blob_block("thumb", "thumb.bin", None, b"T".to_vec()).unwrap();
+        let (ch, mh) = hashes(&[br.derived()]);
         let (empty_ch, empty_mh) = hashes(&[]);
         assert_eq!(ch, tessera_core::hash::merkle_root(&[]));
         assert_eq!(ch, empty_ch);

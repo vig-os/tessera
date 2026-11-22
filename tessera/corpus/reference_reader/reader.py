@@ -119,6 +119,34 @@ def duplicate_block_names(blocks: list[dict[str, Any]]) -> list[str]:
     return repeated
 
 
+def is_chunk_index(block: dict[str, Any]) -> bool:
+    """A chunk index by what it is, whatever its name or class (SPEC §5d): kind `chunk_index`, or a
+    spec with an `indexes` key."""
+    spec = block.get("spec")
+    return block.get("kind") == "chunk_index" or (
+        isinstance(spec, dict) and "indexes" in spec
+    )
+
+
+def dangling_chunk_indexes(blocks: list[dict[str, Any]]) -> list[str]:
+    """Every chunk index (`is_chunk_index`) that doesn't index another block of the list: its
+    `indexes` is not a string naming a listed block other than itself (SPEC §5d, #720), in manifest
+    order. A structural defect like a repeated name: the next block given that name would inherit
+    an index never computed from it."""
+    names = {b["name"] for b in blocks}
+    out: list[str] = []
+    for block in blocks:
+        if not is_chunk_index(block):
+            continue
+        spec = block.get("spec")
+        target = spec.get("indexes") if isinstance(spec, dict) else None
+        if not (
+            isinstance(target, str) and target != block["name"] and target in names
+        ):
+            out.append(block["name"])
+    return out
+
+
 class NotAManifest(ValueError):
     """manifest.json is not I-JSON (SPEC §4): a repeated key in one object (refused, never last- or
     first-wins), a NaN/Infinity constant, a lone surrogate (RFC 8259 / RFC 7493 §2.1), or a number
@@ -428,7 +456,8 @@ def stored_verdict(raw: bytes | str, seal: bytes | str | None) -> str:
     refused: no seal (the alpha layout), a seal not exactly "blake3:" + 64 lower-case hex, not
     I-JSON, not its own JCS form, a "manifest_hash" key in band; tampered: the seal is not the
     digest of the bytes; then the typed layer: refused outside the declared shape, for an
-    unsupported major tessera_version, a block name listed twice or a block without a digest;
+    unsupported major tessera_version, a block name listed twice, a chunk index whose block the
+    list doesn't hold, or a block without a digest;
     tampered for an `id` or `content_hash` (a missing one too) that doesn't match."""
     raw = raw.encode("utf-8") if isinstance(raw, str) else raw
     seal = seal.encode("utf-8") if isinstance(seal, str) else seal
@@ -449,6 +478,9 @@ def stored_verdict(raw: bytes | str, seal: bytes | str | None) -> str:
     # SPEC §5: a block name listed twice is refused before any digest is looked at.
     blocks = m.get("blocks", [])
     if duplicate_block_names(blocks):
+        return "refused"
+    # SPEC §5d: so is a chunk index whose block the list doesn't hold (#720).
+    if dangling_chunk_indexes(blocks):
         return "refused"
     if digest(jcs_bytes(m["id_inputs"])) != m["id"]:
         return "tampered"
@@ -560,11 +592,17 @@ def _verify_tsra(path: str) -> VerifyResult:
             notes.append(
                 f"block names listed more than once (SPEC §5 requires unique names): {duplicates}"
             )
+        dangling = dangling_chunk_indexes(blocks)
+        if dangling:
+            # SPEC §5d (#720): a chunk index indexes another block of its own product.
+            notes.append(
+                f"chunk indexes without their block (SPEC §5d requires one): {dangling}"
+            )
         undigested = [b["name"] for b in blocks if b.get("digest") is None]
         if undigested:
             notes.append(f"blocks without a digest (SPEC §5): {undigested}")
         block_digest_ok: list[tuple[str, bool]] = []
-        for block in [] if duplicates or undigested else blocks:
+        for block in [] if duplicates or dangling or undigested else blocks:
             name = block["name"]
             recorded = block["digest"]
             payload = zf.read(BLOCK_PREFIX + name)

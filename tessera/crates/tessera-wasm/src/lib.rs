@@ -46,7 +46,8 @@ pub fn verify_manifest(manifest_json: &[u8], manifest_seal: Option<Vec<u8>>) -> 
 /// `"tampered"` (an integrity failure: the seal, `id` or `content_hash` doesn't match, or
 /// `content_hash` is missing), or `"refused"` (not read at all: the alpha layout or a malformed
 /// seal, non-canonical bytes, not I-JSON, the seal in band, another declared form, an unsupported
-/// major version, a block `class` other than `"derived"`, a block listed twice or without a digest).
+/// major version, a block `class` other than `"derived"`, a block listed twice or without a digest, a
+/// chunk index whose block the manifest doesn't list).
 /// `content_hash` is over the primary blocks only (ADR-0028 §4). The verdict the native reader and the
 /// Python reference reader reach on the same pair.
 #[wasm_bindgen]

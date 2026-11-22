@@ -49,7 +49,9 @@ ABOUT = (
     "then, past the seal, a value in a form SPEC §5 doesn't declare (a record as an array, a block "
     "kind as an object, metadata: [], study: 5, a block kind or name outside its grammar, a block "
     "class other than 'derived'), an "
-    "unsupported major tessera_version, a block listed twice or without a digest. 'tampered' = the "
+    "unsupported major tessera_version, a block listed twice or without a digest, a chunk index "
+    "(kind chunk_index or a spec with 'indexes', whatever its name or class) whose 'indexes' is not "
+    "another listed block (SPEC §5d, #720). 'tampered' = the "
     "seal is not blake3 of the bytes, or id or content_hash doesn't match (a missing content_hash "
     "too, or one computed over a derived block: content_hash is over the primary blocks only, a block "
     "ref's 'class' is absent or exactly 'derived', ADR-0028 §4, #720). 'ok' = verifies. Families per "
@@ -533,6 +535,59 @@ def recon_int16(c: Cases, obj: dict, raw: bytes, seal: str, other_seal: str) -> 
         m["content_hash"] = content_root(m["blocks"])
 
     resealed("all-blocks-derived-resealed", "ok", all_derived)
+
+    # A chunk index indexes another block of its own product (SPEC §5d, #720 round 5): one whose
+    # block the list doesn't hold is refused like a repeated name, whatever its class, name or kind
+    # (a spec with `indexes` is one). content_hash is recomputed, so only the block list is wrong.
+    def with_index(
+        name: str, kind: str, cls: str | None, spec: dict
+    ) -> Callable[[dict], None]:
+        def edit(m: dict) -> None:
+            block = {
+                "name": name,
+                "kind": kind,
+                "digest": digest(b"index"),
+                "spec": spec,
+            }
+            if cls is not None:
+                block["class"] = cls
+            m["blocks"].append(block)
+            m["content_hash"] = content_root(m["blocks"])
+
+        return edit
+
+    cidx = {"recipe": "chunk_index@1", "indexes": "absent"}
+    for case, edit in [
+        (
+            "chunk-index-dangling-derived",
+            with_index("absent.cidx", "chunk_index", "derived", cidx),
+        ),
+        (
+            "chunk-index-dangling-primary",
+            with_index("absent.cidx", "chunk_index", None, cidx),
+        ),
+        (
+            "chunk-index-dangling-renamed",
+            with_index("notes", "chunk_index", "derived", cidx),
+        ),
+        (
+            "chunk-index-look-alike-dangling",
+            with_index("notes", "blob", None, {"indexes": "absent"}),
+        ),
+        (
+            "chunk-index-of-itself",
+            with_index("x.cidx", "chunk_index", "derived", {"indexes": "x.cidx"}),
+        ),
+        (
+            "chunk-index-without-target",
+            with_index("x.cidx", "chunk_index", "derived", {"recipe": "chunk_index@1"}),
+        ),
+        (
+            "chunk-index-target-not-a-string",
+            with_index("x.cidx", "chunk_index", "derived", {"indexes": 5}),
+        ),
+    ]:
+        resealed(f"{case}-resealed", "refused", edit)
     resealed(
         "primary-block-marked-derived-resealed",
         "tampered",

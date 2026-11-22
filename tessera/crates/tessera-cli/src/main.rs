@@ -546,7 +546,9 @@ enum Cmd {
         /// Remove a block by name (manifest edit; the object stays for other versions). Repeatable.
         ///
         /// Its derived blocks go with it: its derived `.cidx`, and for pyramid level 0 (`BASE/0`)
-        /// the derived levels above it and their indexes.
+        /// the derived levels above it and their indexes. Any other chunk index of it is never
+        /// removed implicitly: remove it too, or the commit is refused (an index without its block
+        /// is refused everywhere).
         #[arg(long = "remove-block")]
         remove_block: Vec<String>,
     },

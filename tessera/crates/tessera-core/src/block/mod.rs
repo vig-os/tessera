@@ -150,6 +150,35 @@ impl BlockRef {
     }
 }
 
+/// Enforce that every **chunk index** of one product ([`BlockRef::is_chunk_index`]) indexes another
+/// block of the same product: its spec's `indexes` is a string naming a listed block other than the
+/// index itself. The first index that doesn't is [`crate::Error::DanglingChunkIndex`], naming it and
+/// the block it names. Readers apply it too, like [`check_unique_names`] (#720).
+///
+/// A dangling index is a structural defect, whatever its class: nothing computed it from a block of
+/// this product, and the next block given that name would inherit it. Linear in the block count.
+pub fn check_chunk_indexes_resolve(blocks: &[BlockRef]) -> crate::Result<()> {
+    let names: std::collections::HashSet<&str> = blocks.iter().map(|b| b.name.as_str()).collect();
+    for b in blocks.iter().filter(|b| b.is_chunk_index()) {
+        let target = b.spec.get("indexes").and_then(|v| v.as_str());
+        if !target.is_some_and(|t| t != b.name.as_str() && names.contains(t)) {
+            return Err(crate::Error::DanglingChunkIndex {
+                index: b.name.to_string(),
+                indexes: target.map(str::to_owned),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The structural rules over one product's block list that every writer and every reader applies,
+/// before any digest is looked up: unique names ([`check_unique_names`]), then chunk indexes that
+/// resolve ([`check_chunk_indexes_resolve`]).
+pub fn check_block_refs(blocks: &[BlockRef]) -> crate::Result<()> {
+    check_unique_names(blocks.iter().map(|b| &b.name))?;
+    check_chunk_indexes_resolve(blocks)
+}
+
 /// The chunk index of the data block `data_name` that a reader may take aggregates from: the block
 /// named [`cidx_name`]`(data_name)`, of kind [`BlockKind::ChunkIndex`], **derived**, whose spec says
 /// it `indexes` `data_name`. `None` otherwise, and the reader computes from the data, as it does for

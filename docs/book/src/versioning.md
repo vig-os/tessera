@@ -18,12 +18,15 @@ The verbs are git-shaped:
     bytes, with the writers' own index functions, and lands it derived. An index is bound to its
     block by name only, so a copied one could claim any statistics; to get one, copy the data block
     from a source that indexes it, or re-write the product. SOURCE must pass `tessera verify`.
-  - `tessera stats` and table pruning use an index only when it is derived and indexes that block;
-    otherwise they read the data.
+  - `tessera stats` and table pruning use an index of `NAME` only when it is the block `NAME.cidx`,
+    of kind `chunk_index`, derived, and its `indexes` is `NAME`; otherwise they read the data.
+  - A chunk index must index a block of its own product. A product holding one whose block is
+    absent is refused by `verify`, by every reader and by `import`, and no writer produces one.
   - `--remove-block NAME` **cascades** to the block's derived family: its derived `NAME.cidx`, and,
     for pyramid level 0 (`BASE/0`), the derived levels `BASE/1…` and their indexes. No accelerator
-    outlives the data it was computed from; a primary block of one of those names stays. The
-    summary counts them: `-1 (+2 derived)`.
+    outlives the data it was computed from. The summary counts them: `-1 (+2 derived)`. A primary
+    chunk index of NAME is never removed implicitly: the remove is refused, naming it, until you
+    `--remove-block` it too.
 - `log` / `diff` — a lineage's history; what changed between two versions (blocks + metadata).
 - `seal` vs `publish` — `seal` exports a standalone `.tsra` *with* its history (a `git bundle`);
   `publish` exports a **history-free** standalone product for distribution (a `git archive`).

@@ -198,6 +198,10 @@ impl ProductBuilder {
     /// Every partitioned table must be valid (ADR-0064 §2.4, [`crate::block::check_partitions`]),
     /// or the seal is refused with [`crate::Error::LogicalTable`].
     ///
+    /// Every chunk index must index another block of the product
+    /// ([`crate::block::check_chunk_indexes_resolve`]), or the seal is refused with
+    /// [`crate::Error::DanglingChunkIndex`] (#720).
+    ///
     /// The product's schema (the embedded one, else the built-in registry's for its product) must
     /// follow the number rules (#895): a field declaration that breaks them is refused with
     /// [`crate::Error::SchemaField`], and a metadata value outside its field's encoding or range with
@@ -208,6 +212,7 @@ impl ProductBuilder {
         crate::block::check_unique_names(self.refs.iter().map(|r| &r.name))?;
         crate::block::check_leaf_rule(self.refs.iter().map(|r| &r.name))?;
         crate::block::check_partitions(&self.refs)?;
+        crate::block::check_chunk_indexes_resolve(&self.refs)?;
         // ADR-0028 §4: `content_hash` is over the primary blocks only; `manifest_hash` (the seal over
         // the stored manifest) covers every block ref, derived ones and their class included.
         let content_hash = crate::block::content_root(&self.refs)?;

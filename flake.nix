@@ -1409,9 +1409,10 @@
               fi
               # The crafted refusal archives (#734, #873; #914 adds the non-JCS manifest, the missing
               # `manifest.seal` and the four committed corpus/refusals fixtures outside SPEC §6's member
-              # set; #720 adds a block class spelled "primary"): a literal count, so losing a case fails too.
-              if ! grep -qx "14/14 refusal cases refused" out.txt; then
-                echo "reference-reader: expected '14/14 refusal cases refused'" >&2
+              # set; #720 adds a block class spelled "primary" and a chunk index without its block): a
+              # literal count, so losing a case fails too.
+              if ! grep -qx "15/15 refusal cases refused" out.txt; then
+                echo "reference-reader: expected '15/15 refusal cases refused'" >&2
                 exit 1
               fi
               # seal-cases.json is generated (ADR-0066): regenerating it from the corpus must give the

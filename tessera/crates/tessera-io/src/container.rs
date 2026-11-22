@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tessera_core::block::name::join_checked;
 use tessera_core::block::partition::is_legacy_flat_member;
 use tessera_core::block::{
-    check_leaf_rule, check_partitions, check_unique_names, BlockName, TableGroup,
+    check_block_refs, check_leaf_rule, check_partitions, BlockName, TableGroup,
 };
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
@@ -317,7 +317,7 @@ fn check_one_reading<A: Read + Seek, S: Read + Seek>(
 /// `aux/../manifest.json` lands outside the target directory in an extracting reader, and a name
 /// with a NUL reads as `aux/` in one reader and as the full name in another.
 fn check_members<A: Read + Seek>(archive: &ZipArchive<A>, manifest: &Manifest) -> Result<()> {
-    check_unique_names(manifest.blocks.iter().map(|b| &b.name))?;
+    check_block_refs(&manifest.blocks)?;
     let listed: HashSet<String> = manifest
         .blocks
         .iter()
@@ -800,16 +800,17 @@ fn check_central_directory<A: Read + Seek, S: Read + Seek>(
     want.require(&found, &format!("the end records at byte {cd_end}"))
 }
 
-/// What both packers require of the manifest, before they create any file: it is sealed, and it
-/// lists each block name once ([`Error::DuplicateBlockName`], ADR-0063 §2a). Readers refuse a repeated
-/// name, so no writer packs one, however a sealed manifest was made (its fields are public).
+/// What both packers require of the manifest, before they create any file: it is sealed, it lists
+/// each block name once ([`Error::DuplicateBlockName`], ADR-0063 §2a), and each chunk index indexes
+/// another of its blocks ([`Error::DanglingChunkIndex`], #720). Readers refuse either, so no writer
+/// packs one, however a sealed manifest was made (its fields are public).
 fn check_packable(manifest: &Manifest) -> Result<()> {
     if !manifest.is_sealed() {
         return Err(Error::Container(
             "refusing to pack an unsealed manifest".into(),
         ));
     }
-    check_unique_names(manifest.blocks.iter().map(|b| &b.name))
+    check_block_refs(&manifest.blocks)
 }
 
 /// Pack a **sealed** manifest + its block payloads into a `.tsra` at `path` (STORED zip64).
@@ -885,7 +886,8 @@ fn pack_manifest_json(
 /// refs). The output is **byte-identical** to `pack(manifest, &Vec<BlockPayload>::from(sources), out)`
 /// — proven by `pack_streaming_equals_pack` below — because both writers share [`tsra_entry_options`]
 /// and emit the mimetype/seal/manifest/blocks in the same order. Like [`pack`], it refuses an unsealed
-/// manifest, or one listing a block name twice ([`Error::DuplicateBlockName`]), before creating `out`.
+/// manifest, one listing a block name twice ([`Error::DuplicateBlockName`]) or one holding a chunk
+/// index without its block ([`Error::DanglingChunkIndex`]), before creating `out`.
 pub fn pack_streaming(
     manifest: &Manifest,
     sources: &[(BlockName, &Path)],

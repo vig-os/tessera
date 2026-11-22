@@ -187,14 +187,15 @@ one proves nothing about the block it claims to describe. A writer that copies b
 indexes the copied block it MAY rebuild the index from the copied block, which is then derived. A writer that
 **removes** a block removes its derived family with it: its derived `<name>.cidx`, and for a pyramid's `<base>/0`
 every derived level `<base>/<n>` and its derived `.cidx`, so no accelerator outlives its data. A primary block of
-one of those names is data of its own and stays. Every block, whatever its class, carries a digest
+one of those names is data of its own and is never removed implicitly; when it is a chunk index of the removed
+block, the removal is refused unless it is removed too, since a chunk index without its block is refused (§5d). Every block, whatever its class, carries a digest
 that is checked against its payload.
 `name` MUST follow the block-name grammar of [ADR-0063](../../docs/adr/0063-block-name-grammar.md): one or
 more `/`-separated segments of `[A-Za-z0-9._-]+`, no segment `.` or `..`, at most 255 bytes. A reader MUST
 refuse a name outside it. Block names are **unique** within a product: no two BlockRefs of one `blocks`
 array have the same `name`, compared as exact strings (byte for byte; `Data` and `data` are two names).
-A writer MUST NOT seal such a list, and a reader MUST refuse a manifest that lists a name twice, before it
-looks up any digest: a reader resolves a name to one listed digest, so a second entry's digest would cover
+A writer MUST NOT seal such a list, and a reader MUST refuse a manifest that lists a name twice (or holds a
+chunk index without its block, §5d), before it looks up any digest: a reader resolves a name to one listed digest, so a second entry's digest would cover
 no bytes. Two distinct names may share one digest: each name maps to its own `blocks/<name>` member, and each
 member is checked. A writer MUST also keep the **leaf rule**: no name in one product is a parent
 prefix of another (`volume` and `volume/1` can't both exist), so the zip members, an exploded directory
@@ -477,9 +478,16 @@ or table row-groups). It is **optional** — present only when a writer chooses 
   consumer MAY drop and rebuild it). Products sealed before the class moved to the BlockRef (#720) also carry
   `"class": "derived"` inside the spec, which is opaque and changes nothing. `root` is the sub-block MMR root over the
   per-entry digests (the §3 construction), i.e. the data block's per-chunk confirmable Merkle root.
-- **Trust.** A reader MUST NOT take statistics (aggregates, pruning bounds) from a chunk index unless its class is
-  derived and its `indexes` names the block; otherwise it computes them from the data, as for an unindexed block.
-  A primary block that looks like an index is a claim someone supplied, not the writer's index (#720).
+- **Trust.** A reader MUST NOT take statistics (aggregates, pruning bounds) from a chunk index of a data block
+  `<name>` unless all of these hold: the index is the block named exactly `<name>.cidx`, its `kind` is
+  `chunk_index`, its class is derived, and its spec's `indexes` is the string `<name>`. Otherwise it computes them
+  from the data, as for an unindexed block. A primary block that looks like an index, or an index under another
+  name or kind, is a claim someone supplied, not the writer's index (#720).
+- **Resolution.** A chunk index (a block of kind `chunk_index`, or whose spec carries `indexes`, whatever its name or
+  class) MUST index another block of its own product: its `indexes` is a string naming a block the same `blocks`
+  list holds, other than the index itself. A writer MUST NOT seal or pack a list that breaks this, and a reader
+  MUST refuse it like a name listed twice, before it looks up any digest: an index whose block is absent would be
+  inherited by the next block given that name, which it was never computed from (#720).
 - **Use.** A consumer reads the sidecar for **per-chunk inclusion proofs** and **predicate pruning**
   (skip a sub-block whose `[min,max]` cannot match a query) without re-reading the data; the rolled-up
   `stats` are the leaves of the multiscale aggregate pyramid (ADR-0028 §3). A consumer that doesn't need

@@ -122,6 +122,24 @@ def _listed_twice(second_digest: str | None):
     return edit
 
 
+def _orphan_index(cls: str | None):
+    """#720 round 5: a chunk index of a block the product doesn't hold, of class `cls` (None =
+    primary). Its payload is the index's own bytes, so only the block list is wrong."""
+
+    def edit(manifest: dict) -> None:
+        block = {
+            "name": "absent.cidx",
+            "kind": "chunk_index",
+            "digest": digest(b"index"),
+            "spec": {"recipe": "chunk_index@1", "indexes": "absent"},
+        }
+        if cls is not None:
+            block["class"] = cls
+        manifest["blocks"].append(block)
+
+    return edit
+
+
 def _first_block(key: str, value: object):
     """The first block's `key` set to `value`, or deleted when `value` is `_DELETE`."""
 
@@ -179,7 +197,7 @@ def _first_member_marked_encrypted(path: str) -> None:
 def check_refusals(goldens: list[dict]) -> int:
     """`verify_tsra` refuses each crafted archive for its reason, and returns a result rather than
     raising: a block listed twice (SPEC §5), whether the second entry's digest is foreign or the
-    block's own; a block name that is not a string; a block class other than "derived"; a block
+    block's own; a chunk index whose block the product doesn't hold (SPEC §5d, #720); a block name that is not a string; a block class other than "derived"; a block
     without a digest; a manifest.json in
     UTF-16 or with a byte-order mark (SPEC §4: UTF-8 I-JSON); a manifest.json that is not its own
     JCS form (ADR-0066 rule 4); an archive without manifest.seal (the alpha layout, rule 10); an
@@ -221,6 +239,13 @@ def check_refusals(goldens: list[dict]) -> int:
             "block class spelled 'primary'",
             _first_block("class", "primary"),
             "blocks[0].class is 'primary'",
+            utf8,
+            same,
+        ),
+        (
+            "chunk index without its block (derived)",
+            _orphan_index("derived"),
+            "chunk indexes without their block",
             utf8,
             same,
         ),
