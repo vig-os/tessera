@@ -1,0 +1,151 @@
+diff --git a/tessera/crates/tessera-io/examples/table_profile.rs b/tessera/crates/tessera-io/examples/table_profile.rs
+index 0d0089c3..63449044 100644
+--- a/tessera/crates/tessera-io/examples/table_profile.rs
++++ b/tessera/crates/tessera-io/examples/table_profile.rs
+@@ -12,6 +12,10 @@
+ //! cargo run --release -p tessera-io --example table_profile -- layout <in.tsra> [block]
+ //! ```
+ //!
++//! Every timed section also reports its CPU time (user + system, all threads; load-independent, the
++//! primary A3 evidence), and can be bracketed by `perf stat --control` for instruction counts
++//! (`T828_PERF_CTL` / `T828_PERF_ACK`; see [`section`]).
++//!
+ //! - `write` (A1, A3, M4): the real streaming writer (`StreamWriter::push_table`, partitioned at
+ //!   `BLOCK_ROWS`), fed one row-group at a time, with `workers` encode workers (default 1). Prints
+ //!   the summed table-block bytes per event and the whole-writer rate. Pin it to one core
+@@ -161,6 +165,52 @@ fn load(dir: &Path) -> (TableSpec, TableData) {
+     (spec, data)
+ }
+ 
++/// The CPU time (user + system, all threads) this process has used so far, in seconds, from
++/// `/proc/self/stat` (Linux; clock ticks of `_SC_CLK_TCK`, 100 on every supported target). Unlike
++/// wall time it does not grow when the host is loaded, which is why #828's A3 reports it first.
++fn cpu_seconds() -> f64 {
++    let stat = std::fs::read_to_string("/proc/self/stat").expect("/proc/self/stat");
++    // Fields after the parenthesised command name; utime and stime are the 12th and 13th of them.
++    let rest = &stat[stat.rfind(')').expect("comm") + 2..];
++    let f: Vec<&str> = rest.split_whitespace().collect();
++    let ticks: f64 = f[11].parse::<f64>().unwrap() + f[12].parse::<f64>().unwrap();
++    ticks / 100.0
++}
++
++/// Run `f` as one timed section: returns its result, wall seconds and CPU seconds. When
++/// `T828_PERF_CTL` and `T828_PERF_ACK` name the control and ack FIFOs of a
++/// `perf stat --delay=-1 --control fifo:CTL,ACK` that runs this process, the counters are
++/// enabled for exactly this section, so instruction counts exclude loading the input.
++fn section<R>(f: impl FnOnce() -> R) -> (R, f64, f64) {
++    let perf = match (
++        std::env::var_os("T828_PERF_CTL"),
++        std::env::var_os("T828_PERF_ACK"),
++    ) {
++        (Some(c), Some(a)) => Some((PathBuf::from(c), PathBuf::from(a))),
++        _ => None,
++    };
++    let control = |cmd: &str| {
++        if let Some((ctl, ack)) = &perf {
++            use std::io::{Read, Write};
++            std::fs::OpenOptions::new()
++                .write(true)
++                .open(ctl)
++                .and_then(|mut c| c.write_all(format!("{cmd}\n").as_bytes()))
++                .expect("perf control fifo");
++            let mut buf = [0u8; 5];
++            std::fs::File::open(ack)
++                .and_then(|mut a| a.read(&mut buf))
++                .expect("perf ack fifo");
++        }
++    };
++    control("enable");
++    let (c0, t) = (cpu_seconds(), Instant::now());
++    let r = f();
++    let (wall, cpu) = (t.elapsed().as_secs_f64(), cpu_seconds() - c0);
++    control("disable");
++    (r, wall, cpu)
++}
++
+ fn median(mut v: Vec<f64>) -> f64 {
+     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+     v[v.len() / 2]
+@@ -207,11 +257,11 @@ fn write(dir: &Path, out: &Path, workers: usize) {
+             .map(|(n, c)| (n.clone(), c.slice(lo, hi)))
+             .collect::<TableData>()
+     });
+-    let t = Instant::now();
+-    sw.push_table("events", spec.clone(), groups)
+-        .expect("push_table");
+-    sw.finish(out).expect("seal");
+-    let wall = t.elapsed().as_secs_f64();
++    let ((), wall, cpu) = section(|| {
++        sw.push_table("events", spec.clone(), groups)
++            .expect("push_table");
++        sw.finish(out).expect("seal");
++    });
+     let _ = std::fs::remove_dir_all(&stage);
+     let table_bytes: usize = table_blocks(out).iter().map(|(_, _, b)| b.len()).sum();
+     println!(
+@@ -227,6 +277,8 @@ fn write(dir: &Path, out: &Path, workers: usize) {
+             "bytes_per_event": table_bytes as f64 / rows as f64,
+             "wall_s": wall,
+             "mev_per_s": rows as f64 / wall / 1e6,
++            "cpu_s": cpu,
++            "cpu_ns_per_event": cpu / rows as f64 * 1e9,
+         })
+     );
+ }
+@@ -273,15 +325,17 @@ fn decode(tsra: &Path, reps: usize) {
+         })
+         .sum();
+     let rows: u64 = blocks.iter().map(|(_, s, _)| s.rows).sum();
+-    let times: Vec<f64> = (0..reps)
+-        .map(|_| {
+-            let t = Instant::now();
+-            for (_, spec, bytes) in &blocks {
+-                std::hint::black_box(table::decode(spec, bytes).expect("decode"));
+-            }
+-            t.elapsed().as_secs_f64()
+-        })
+-        .collect();
++    let (times, _, cpu) = section(|| {
++        (0..reps)
++            .map(|_| {
++                let t = Instant::now();
++                for (_, spec, bytes) in &blocks {
++                    std::hint::black_box(table::decode(spec, bytes).expect("decode"));
++                }
++                t.elapsed().as_secs_f64()
++            })
++            .collect::<Vec<f64>>()
++    });
+     let s = median(times.clone());
+     println!(
+         "{}",
+@@ -289,6 +343,8 @@ fn decode(tsra: &Path, reps: usize) {
+             "cmd": "decode", "profile": profile_of(&blocks), "events": rows,
+             "logical_bytes": logical, "times_s": times, "median_s": s,
+             "mib_per_s": logical as f64 / s / (1 << 20) as f64, "mev_per_s": rows as f64 / s / 1e6,
++            "cpu_s_per_rep": cpu / reps as f64,
++            "cpu_mib_per_s": logical as f64 * reps as f64 / cpu / (1 << 20) as f64,
+         })
+     );
+ }
+@@ -321,6 +377,7 @@ fn take(tsra: &Path, reps: usize) {
+     ];
+     let mut out = serde_json::Map::new();
+     for (case, rows) in &cases {
++        let c0 = cpu_seconds();
+         let times: Vec<f64> = (0..reps)
+             .map(|_| {
+                 let t = Instant::now();
+@@ -328,9 +385,11 @@ fn take(tsra: &Path, reps: usize) {
+                 t.elapsed().as_secs_f64() * 1e3
+             })
+             .collect();
++        let cpu_ms = (cpu_seconds() - c0) * 1e3 / reps as f64;
+         out.insert(
+             (*case).into(),
+-            serde_json::json!({"rows": rows.len(), "times_ms": times, "median_ms": median(times.clone())}),
++            serde_json::json!({"rows": rows.len(), "times_ms": times, "median_ms": median(times.clone()),
++                               "cpu_ms_per_rep": cpu_ms}),
+         );
+     }
+     println!(
