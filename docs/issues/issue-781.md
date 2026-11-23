@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-08T12:02:29Z
-updated: 2026-11-21T20:38:55Z
+updated: 2026-11-22T14:17:54Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/781
-comments: 6
+comments: 7
 labels: feature, effort:large, area:core, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-22T09:19:46.937Z
+synced: 2026-11-23T10:16:32.137Z
 ---
 
 # [Issue 781]: [feat(io): keyed delta products over a base — upserts, tombstones and redirects, a newest-row-wins logical read, and compaction into a new sealed base](https://github.com/vig-os/tessera/issues/781)
@@ -174,5 +174,16 @@ The owner's direction is that workspaces (branches) live in the kit, built as a 
 2. **A delta is sealed against one base.** A merge in the kit writes a new delta on the main lineage. If the main lineage has compacted since the fork, the workspace's deltas name the old base and the new delta must name the new one. That works as long as the rule is stated: **a delta is valid in a `current` collection only if its `base` is that collection's base** (checked at seal of the collection and at verify). A delta is never re-pointed; it is rewritten.
 
 One consequence for the read: with order taken from the member list, the logical read needs no per-delta metadata beyond the key statistics, which keeps the pruning in the second acceptance item unchanged.
+
+
+---
+
+# [Comment #7]() by [gerchowl]()
+
+_Posted on November 22, 2026 at 02:17 PM_
+
+Measured for the scitadel-hub size model (S-015, nerdmachines/scitadel-hub#89), on the one OpenAlex release that its bucket lists (2026-10-14; the previous release is not listable): the upstream snapshot is partitioned by `updated_date`, so the records new or changed since a release are the partitions dated on or after it. In bytes of the jsonl snapshot (756 GB): **67.7 % changed in the 21 days since the release of 2026-09-23, 90.8 % in the quarter since 2026-07-15**. Upstream moves `updated_date` for any field (a citation count is enough), so a stamp-based delta of a quarter dedupes about 9 % and the hub's raw accounting becomes one full generation plus three deltas of 0.69 TB instead of four full ones.
+
+What would dedupe more is a row-level test of change on the kept fields, not on the stamp. That needs the delta to be *derived* from two full generations (a base and the next upstream dump), which this issue's upsert path does not describe; I filed that separately, with this measurement, as a follow-up of this one.
 
 

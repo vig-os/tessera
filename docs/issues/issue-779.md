@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-08T12:02:26Z
-updated: 2026-11-08T12:03:41Z
+updated: 2026-11-22T14:17:53Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/779
-comments: 0
+comments: 1
 labels: feature, effort:medium, area:core, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-09T09:04:21.937Z
+synced: 2026-11-23T10:16:32.671Z
 ---
 
 # [Issue 779]: [feat(schema): declared media columns — typed binary (image/jxl, image/svg+xml, …) per row, without opening the opaque-bytes door](https://github.com/vig-os/tessera/issues/779)
@@ -60,5 +60,14 @@ There is no row-aligned home for typed binary media. The objection to opaque byt
 ## Related
 
 - Epic #778. ADR-0038 (Blob tier), ADR-0056 (normalise vs preserve), #768 (the declared-column precedent), #628 (string path), #654 (provider).
+
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 22, 2026 at 02:17 PM_
+
+Measured for the scitadel-hub size model (S-015, nerdmachines/scitadel-hub#89): the lossless figure bytes of 3,189 scholarly papers (PDF-embedded images through `pdfimages`, and the graphic files PMC holds for JATS articles), JPEG XL as in the issue (JPEGs transcoded, rasters at distance 0): **1.09 MB per paper with text** on average (median 167 KB, p90 1.66 MB; 15 % below the native bytes; the JATS route 2.04 MB per paper, the PDF route 0.64 MB). They are 89 % of the hub's sealed bytes at phase-1 scale, so the carrier matters for size only through its overhead: a Vortex file with one binary column holding 2,000 of these blobs (86,302,527 payload bytes) is 86,312,856 bytes, +0.012 %. The hub measured the blobs as a raw Vortex file because tessera has no binary column; a media column would add one product manifest (4,196 bytes for a one-row product against 2,264 for the Vortex file).
 
 

@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-06T14:41:55Z
-updated: 2026-11-09T15:33:14Z
+updated: 2026-11-22T14:18:11Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/768
-comments: 3
+comments: 4
 labels: feature, area:core, area:io, area:ingest
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-10T09:13:25.794Z
+synced: 2026-11-23T10:16:33.282Z
 ---
 
 # [Issue 768]: [feat(ingest): wide FixedSizeList (N > 8) has no carrier — store declared vector columns natively as a Vortex fixed_size_list](https://github.com/vig-os/tessera/issues/768)
@@ -109,5 +109,22 @@ _Posted on November 8, 2026 at 11:44 AM_
 _Posted on November 9, 2026 at 03:33 PM_
 
 Re-checked against vortex 0.93.0 (PR #788, #635), probe on x86_64: wide `fixed_size_list` columns round-trip **bit-exact**, and debug and release write identical bytes. f32 ×768 (pco, 0.816 of raw), f32 ×384 (pco, 0.817), f32 ×9 (pco, 0.849), f64 ×768 (pco, 0.861), i8 ×768 (primitive, 1.002), u8 ×32 (primitive, 1.044). **Cross-architecture agreement is untested** for these columns: the probe ran on x86_64 only, and no aarch64 digest was compared. That needs a fixture in the cross-arch corpus before this lands.
+
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 22, 2026 at 02:17 PM_
+
+Measured for the scitadel-hub size model (S-015, nerdmachines/scitadel-hub#89): 50,000 synthetic unit vectors, 512 dimensions (1,024 in brackets), bytes per vector.
+
+| encoding | fp16 (raw 1,024 B) | int8 + 4-byte scale (raw 516 B) |
+|---|---|---|
+| Vortex `fixed_size_list` (`vortex-data` 0.93.0, the version tessera links) | 1,024.3 (2,048.5) | 515.1 (1,027.2) |
+| tessera array block, `f2` / `i1`, pcodec (the only way to write a vector matrix today) | 885.1 (1,771.1) | 485.7 (958.3) |
+| Parquet zstd-3 | 966.0 | 482.8 |
+
+Two points for this issue: (1) the hub cannot put a vector next to its row's other columns in a tessera table today (tables have no list column and no f16 column; arrays have no row key), so it writes the vectors as a Vortex file beside the `.tsra`, and the model counts the Vortex shape as central; (2) the native Vortex shape is 16 % larger than the pcodec array block on fp16 (the exponent bits of an fp16 vector are the only entropy a codec can take; pcodec takes them, Vortex's default does not), so a native `fixed_size_list` carrier would want the float codec of the table path for its children. Values are synthetic: real embeddings are no more compressible than a few hundred random mantissas.
 
 

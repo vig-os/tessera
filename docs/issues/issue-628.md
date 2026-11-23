@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-18T22:23:57Z
-updated: 2026-11-18T14:58:07Z
+updated: 2026-11-22T14:18:10Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/628
-comments: 5
+comments: 6
 labels: feature, question, priority:medium, effort:large, area:core, area:io, area:integrity, adr
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: none
-synced: 2026-11-19T09:52:35.670Z
+synced: 2026-11-23T10:16:34.732Z
 ---
 
 # [Issue 628]: [perf(format): string-heavy tables are ~3x larger than Parquet — normalize forbids Vortex's zstd compact encoding](https://github.com/vig-os/tessera/issues/628)
@@ -102,5 +102,22 @@ _Posted on November 16, 2026 at 12:35 AM_
 The data point from this issue that those do not carry: a projected or filtered query over object storage fetched about 812 KiB per GET at about 2k rows, against 0–98 KiB for Parquet with row groups and page indexes. It is copied to #823.
 
 If the architect agrees with this mapping, this issue can be narrowed to the encoding decision alone (`vortex.zstd` or another string codec in the normalised set), which after #788 is tessera's own codec-set choice.
+
+
+---
+
+# [Comment #6]() by [gerchowl]()
+
+_Posted on November 22, 2026 at 02:17 PM_
+
+Measured on real text, for the scitadel-hub size model (S-015, nerdmachines/scitadel-hub#89; tessera-py 0.1.0a1 built from `dev` at `f390528`):
+
+| table (one block, whole sample) | rows | .tsra | Parquet zstd-3 | raw Arrow | tsra / Parquet |
+|---|---|---|---|---|---|
+| `elements` (paragraphs and PDF text blocks of 3,189 papers, 9 columns) | 683,030 | 90.8 MB | 52.2 MB | 159.9 MB | 1.74 |
+| its `text` column alone | 683,030 | 83.6 MB | 43.8 MB | 127.8 MB | 1.91 |
+| `citations` (two u8 columns) | 170,024 | 0.74 MB | 1.02 MB | 2.72 MB | 0.73 |
+
+So on prose the cost is about 1.9× Parquet zstd, not 3×, and numeric columns are smaller than Parquet. At the hub's phase-1 scale (17 million papers with text) that is 0.46 TB against about 0.24 TB for the text column alone. The hub's hot set keeps this column, so the ask is the same as above: allow `vortex.zstd` for string columns in the normalised set, or document the cost.
 
 

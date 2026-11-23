@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-11T03:36:30Z
-updated: 2026-11-19T11:51:22Z
+updated: 2026-11-22T20:45:42Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/828
-comments: 5
+comments: 8
 labels: feature, priority:high, area:core
 assignees: none
 milestone: none
 projects: none
 parent: 897
 children: none
-synced: 2026-11-20T09:39:14.750Z
+synced: 2026-11-23T10:16:31.014Z
 ---
 
 # [Issue 828]: [perf(format): per-column codec profiles — measured sweep: plain Pco per column is 19 % smaller than .tsra on GE list-mode; a fixed fast profile beats .tsra on size and per-core speed](https://github.com/vig-os/tessera/issues/828)
@@ -440,4 +440,54 @@ Before merge, the PR needs a green both-legs `workflow_dispatch` run of `nix-che
 _Posted on November 19, 2026 at 11:51 AM_
 
 Watch item from the review of #919: the Siemens size floor (A1, at most 7.10 B/event) has almost no margin. It starts from the sweep's 6.891 row, which kept `prompt` on Pco, then adds +2.9 % for zstd on the 8-bit columns and +0.85 %. That lands near 7.10–7.15 B/event, and v2 puts zstd on all nine `u1` columns. Measure M1/M6 early. If the floor breaks, it goes back to the owner, as the note says.
+
+---
+
+# [Comment #6]() by [gerchowl]()
+
+_Posted on November 22, 2026 at 11:45 AM_
+
+**Architect + owner decisions on round 1 (draft PR #949), 2026-11-22**
+1. **Split approved.** PR A = tooling, inspect and the fixture. PR B = the v2 profile. Both follow the split described in the #949 body.
+2. **A3 encode floor missed.** v2 runs at 0.51× v1 on GE (10.84 → 5.54 M ev/s) and 0.54× on Siemens (9.71 → 5.25). **Owner: measure, then decide.**
+   - Before anything merges, run an M4b sweep on both fixtures: Pco level (8 → 4/6) × values-per-page × row-group framing. Record size, encode, decode and take for each point.
+   - The owner then picks a point from the data, and the design note gets a dated amendment.
+   - The A3 floor is not loosened ahead of that.
+   - The profiler puts 66% of the CPU in pco's per-chunk bin optimisation. The note's codec figure came from 2^22-row chunks; v2 frames per 65,536-row group.
+3. **Python cannot read nullable columns.** This is #804, decided as numpy masked arrays. It lands first as its own PR, then #828 rebases onto it.
+
+Every other acceptance row passes: A1 size, A2, A4 take, A5 read, and the O4 dispatch run 44994587940, apart from the two Python import checks.
+
+---
+
+# [Comment #7]() by [gerchowl]()
+
+_Posted on November 22, 2026 at 11:45 AM_
+
+**Measurement protocol for A3/M4b (owner note, 2026-11-22: the seat has no reserved slices, so wall time there may just be load).** Round 1 measured on the seat at load 120–138 with IO pressure around 75%. A pinned core there is not reserved, so the 0.51×/0.54× wall-clock ratios do not count as evidence on their own. M4b and the A3 re-measure must instead:
+1. **Report load-independent cost first.** Give CPU time per event (user+sys from getrusage or `perf stat` task-clock) and **instructions retired** per event (`perf stat -e instructions`), v1 vs v2. Instruction counts barely move with load, so they are the primary A3 evidence. Wall-time M ev/s stays as a secondary number.
+2. **Run in a reserved slice.** Use `ksb run` with a fixed CPU request (e.g. 4 CPU) and the de-identified fixture shipped as job input; that is a friction item to fix rather than skip. If that's impossible, run on the seat only while load is under the core count, and record `uptime` and PSI (`/proc/pressure/{cpu,io}`) before and after every run.
+3. **Interleave the runs**, as v1,v2,v1,v2… × at least 5 on the same binary, so drift hits both arms equally. Report the median with the min–max spread.
+4. **Keep binaries and inputs on tmpfs or local disk**, never /mnt/HDD, because page faults skew the timings.
+If the instruction and CPU-time ratio still shows v2 at about 0.5× v1, the miss is real and the Pco-level and framing sweep decides it. If not, A3 may already pass, and the note records that the round-1 numbers came from a loaded seat.
+
+---
+
+# [Comment #8]() by [gerchowl]()
+
+_Posted on November 22, 2026 at 08:45 PM_
+
+**Owner decision (2026-11-22): re-open the design note. v1 stays the default.**
+
+The round-2 load-independent re-measure (ksb `tessera-828-m4b-r2-2`, exclusive 4-CPU slice, interleaved ×5, plus exact seat instruction counts) shows that the A3 miss is real and comes from the profile itself, not from a parameter:
+- **Encode:** v2 spends about 2× the CPU per event (instructions per event 557 → 1,702 on GE, 590 → 1,498 on Siemens).
+- **Decode and take:** decode is about 4× slower and take-500 about 18× slower, so A4 and A5 miss too.
+- **Size:** v2 buys −17.5% on GE and −7% on Siemens.
+- **Sweep:** no point of the 12-point sweep reaches more than 0.60×.
+
+Consequences:
+1. #828 leaves the ADR-0066 format-break release. #917 (alpha.7) ships A′ (#940) plus #720 (PR #942) without it.
+2. `docs/spikes/915-tessera-table-v2.md` gets a dated amendment with these numbers. It re-decides whether v2 is worth having as an **opt-in archival profile**, where size matters and decode and take don't, and how that would land additively (profile naming, reader behaviour on an unknown profile, no format break).
+3. PR A of the approved split (tooling, `inspect --encodings`, the fixture), which changes no product bytes by default, can still land once #804 merges.
+4. The v2 profile commit stays parked on its branch and is not merged.
 

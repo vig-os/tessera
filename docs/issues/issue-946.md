@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-21T11:09:22Z
-updated: 2026-11-21T11:09:22Z
+updated: 2026-11-22T22:57:10Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/946
-comments: 0
+comments: 1
 labels: bug, area:io, area:integrity
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-22T09:19:43.744Z
+synced: 2026-11-23T10:16:29.945Z
 ---
 
 # [Issue 946]: [fix(io): the repository's ref advance is not an atomic compare-and-set, refs and objects are written without rename or sync, and gc can race a commit (ADR-0036 §2)](https://github.com/vig-os/tessera/issues/946)
@@ -79,4 +79,12 @@ kit plans to advance a `current` collection once per flush (#781, #905), from se
 ## Related
 
 ADR-0036 §1, §2 and "Still open"; #288, #781, #905, #906, #591, #695, #686, #945. nerdmachines/kit#214 (what cx learned about the same path), nerdmachines/kit#97, nerdmachines/kit#219 (filesystem check when a store opens).
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 22, 2026 at 10:57 PM_
+
+Item 5 is now confirmed by a probe, not only by reading. The fresh review of PR #942 (merged as dde0517f) planted an orphan-index tip on a lineage with history. `gc` then reported `scanned 5 · kept 1 · reclaimed 4` and exited 0 with no warning, and it deleted the older versions and the data block. Since #942, a manifest holding a dangling chunk index is refused on read, which widens what reaches the `Err(_) => continue` at `repo.rs:393`. Filed separately as #955, now closed as a duplicate of this issue.
 
