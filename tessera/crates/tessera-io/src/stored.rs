@@ -87,8 +87,8 @@ pub fn seal_path(document: &Path) -> Result<PathBuf> {
 /// [`Error::Io`] for a write that fails; [`Error::Invalid`] as [`seal_path`].
 pub fn write_pair(document: &Path, bytes: &[u8], seal: &str) -> Result<()> {
     let seal_file = seal_path(document)?;
-    crate::write::write_durable(document, bytes)?;
-    crate::write::write_durable(&seal_file, seal.as_bytes())?;
+    crate::durable::write_durable(document, bytes)?;
+    crate::durable::write_durable(&seal_file, seal.as_bytes())?;
     Ok(())
 }
 
@@ -271,7 +271,7 @@ mod tests {
     /// alpha layout), and the old pair is intact while the document's own rename is pending.
     #[test]
     fn a_crash_inside_write_pair_never_leaves_a_pair_that_verifies() {
-        use crate::write::seam;
+        use crate::durable::seam;
         let dir = tempfile::tempdir().unwrap();
         let doc = dir.path().join("collection.json");
         let stored = |title: &str| {
