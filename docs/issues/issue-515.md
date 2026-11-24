@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-22T22:55:41Z
+updated: 2026-11-24T03:42:32Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-23T10:16:35.190Z
+synced: 2026-11-24T11:59:42.195Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -45,7 +45,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unlimit-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.54.1
  - [ ] <!-- unlimit-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
- - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.8.1
+ - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.8.2
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.28.0
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
@@ -57,7 +57,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-3.x -->ci(actions): update actions/create-github-app-token action to v3
  - [ ] <!-- unlimit-branch=renovate/ubuntu-26.x -->ci(actions): update dependency ubuntu to v26
  - [ ] <!-- unlimit-branch=renovate/major-arrow-rs-monorepo -->fix(deps): update arrow-rs monorepo to v60 (`arrow`, `arrow-array`, `arrow-buffer`, `arrow-ipc`, `arrow-schema`, `parquet`)
- - [ ] <!-- unlimit-branch=renovate/major-datafusion-monorepo -->fix(deps): update rust crate datafusion to v55
+ - [ ] <!-- unlimit-branch=renovate/major-datafusion-monorepo -->fix(deps): update rust crate datafusion to v56
  - [ ] <!-- unlimit-branch=renovate/lock-file-maintenance -->build(pip): lock file maintenance
  - [ ] <!-- create-all-rate-limited-prs -->🔐 **Create all rate-limited PRs at once** 🔐
 
@@ -68,7 +68,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - [ ] <!-- rebase-branch=renovate/dtolnay-rust-toolchain-digest -->[chore(deps): update dtolnay/rust-toolchain digest to 3900882](../pull/558)
  - [ ] <!-- rebase-branch=renovate/flate2-1.x-lockfile -->[chore(deps): update rust crate flate2 to v1.1.11](../pull/560)
  - [ ] <!-- rebase-branch=renovate/rust-futures-monorepo -->[chore(deps): update rust crate futures to v0.3.34](../pull/561)
- - [ ] <!-- rebase-branch=renovate/hdf5-metno-sys-0.x-lockfile -->[chore(deps): update rust crate hdf5-metno-sys to v0.12.5](../pull/640)
+ - [ ] <!-- rebase-branch=renovate/hdf5-metno-sys-0.x-lockfile -->[chore(deps): update rust crate hdf5-metno-sys to v0.12.6](../pull/640)
  - [ ] <!-- rebase-branch=renovate/libc-0.x-lockfile -->[chore(deps): update rust crate libc to v0.2.191](../pull/641)
  - [ ] <!-- rebase-branch=renovate/object_store-0.x-lockfile -->[chore(deps): update rust crate object_store to v0.14.2](../pull/643)
  - [ ] <!-- rebase-branch=renovate/serde-monorepo -->[chore(deps): update rust crate serde to v1.0.229](../pull/644)
@@ -88,7 +88,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `serde_json 1`
  - `serde_jcs 0.2.0` → [Updates: `0.4.0`]
  - `blake3 1`
- - `zip 9` → [Updates: `lock file @ 9.8.1`]
+ - `zip 9` → [Updates: `lock file @ 9.8.2`]
  - `minicbor 2.3.1`
  - `cbor4ii 1.2.5`
  - `serde 1`
@@ -109,7 +109,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `age 0.11` → [Updates: `0.12`]
  - `time 0.3` → [Updates: `lock file @ 0.3.55`]
  - `proptest 1` → [Updates: `lock file @ 1.12.0`]
- - `zip 9.0.5` → [Updates: `lock file @ 9.8.1`]
+ - `zip 9.0.5` → [Updates: `lock file @ 9.8.2`]
  - `zarrs 0.23` → [Updates: `lock file @ 0.23.14`]
  - `bytes 1` → [Updates: `lock file @ 1.12.2`]
  - `half 2`
@@ -128,7 +128,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `dicom 0.10` → [Updates: `lock file @ 0.10.1`]
  - `dicom-transfer-syntax-registry 0.10` → [Updates: `lock file @ 0.10.1`]
  - `hdf5-metno 0.12` → [Updates: `0.15`]
- - `hdf5-metno-sys 0.12` → [Updates: `lock file @ 0.12.5`]
+ - `hdf5-metno-sys 0.12` → [Updates: `lock file @ 0.12.6`]
  - `arrow-array =58.4.1` → [Updates: `=58.4.2`, `=60.2.0`]
  - `arrow-buffer =58.4.1` → [Updates: `=58.4.2`, `=60.2.0`]
  - `arrow-schema =58.4.1` → [Updates: `=58.4.2`, `=60.2.0`]
@@ -148,7 +148,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `ssh-key 0.6`
  - `tempfile 3`
  - `ndarray 0.17`
- - `datafusion 54` → [Updates: `lock file @ 54.2.0`, `55`]
+ - `datafusion 54` → [Updates: `lock file @ 54.2.0`, `56`]
  - `tokio 1` → [Updates: `lock file @ 1.54.1`]
  - `arrow 58` → [Updates: `lock file @ 58.4.2`, `60`]
  - `tempfile 3`

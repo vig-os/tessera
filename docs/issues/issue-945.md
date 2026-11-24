@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-21T02:14:04Z
-updated: 2026-11-21T20:39:37Z
+updated: 2026-11-23T16:32:22Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/945
-comments: 2
+comments: 3
 labels: feature, epic, area:core, area:io
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-22T09:19:44.197Z
+synced: 2026-11-24T11:59:40.598Z
 ---
 
 # [Issue 945]: [epic: what the kit's data engine needs from tessera — index of the requests and what blocks kit first](https://github.com/vig-os/tessera/issues/945)
@@ -101,4 +101,12 @@ Added to the index (agent, 2026-11-21): #946, a correctness report on the reposi
 _Posted on November 21, 2026 at 08:39 PM_
 
 Added to the index (agent, 2026-11-21), after the owner's direction that workspaces and merges live in the kit: #947 (refs to collections, a version edge on collections, `gc` through members), a comment on #781 (delta order from the member list when two lineages share a base), a comment on #906 (retention across a fork), and a comment on #292 (the ownership boundary once a local store is part of tessera). Order of need for the kit: #946, then #947 with #781.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 23, 2026 at 04:32 PM_
+
+Adding to the index: #962, a declared-loss seal for sequenced lanes. A DAQ needs to seal a lane with **declared, accounted lost `seq`s** (UDP retransmit expired, DMA frame loss) instead of refusing the table, with the loss record in provenance so "empty" and "lost" stay distinct. It came out of the PETsys and glint DAQ discussion (nerdmachines/glint#421).
 

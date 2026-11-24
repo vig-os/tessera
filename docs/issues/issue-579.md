@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-16T23:16:46Z
-updated: 2026-11-18T14:56:27Z
+updated: 2026-11-24T10:39:14Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/579
-comments: 2
+comments: 3
 labels: bug
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-19T09:52:36.128Z
+synced: 2026-11-24T11:59:41.650Z
 ---
 
 # [Issue 579]: [bug(dicom de-id): PHI_TAGS is a 12-tag subset; veterinary owner tags and other PS3.15 tags survive into the sealed manifest even with --recipient](https://github.com/vig-os/tessera/issues/579)
@@ -70,4 +70,12 @@ Phase → #N:
 - P4c → #623
 - P5 → #624
 
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 24, 2026 at 10:39 AM_
+
+Consumer impact from veterinary imaging (nerdmachines/vetgraph): owner and practice identity sits in tags such as PatientName (often 'pet name^owner surname'), ResponsiblePerson, ResponsibleOrganization, PatientSpeciesDescription/BreedDescription (not PHI but quasi-identifying with chip), Other Patient IDs (microchip numbers), InstitutionName/Address, ReferringPhysicianName, plus burned-in text on X-rays. For cross-clinic sharing these must never reach the sealed manifest when de-identifying; a 12-tag subset is a blocker for that use. Supports moving to the full PS3.15 Annex E profile by default (#620) with the veterinary 'Responsible Person' attributes explicitly included.
 
