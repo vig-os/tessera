@@ -7,24 +7,23 @@ no libpython linkage.
 ## Read + verify + decode
 
 ```python
-import tessera, numpy as np
+import tessera
 
 r = tessera.open("study.tsra")          # opens + verifies the manifest seal
 print(r.product, r.id)                   # "recon", "blake3:…"
 r.verify()                               # full pass: seal + every block digest
 
-# decode an array block straight to numpy (little-endian, C-order)
-buf, shape, code = r.read_array("volume")
-vol = np.frombuffer(buf, "<" + code).reshape(shape)
+vol = r.array("volume")                  # np.ndarray, native dtype, C-order
+roi = r.array_roi("volume", [0, 0, 0], [64, 64, 64])  # only the intersecting 64³ chunks are read
 
-# or a 3-D ROI sub-cube — only the intersecting 64³ chunks are read (7–26× faster)
-buf, shape, code = r.read_array_subset("volume", origin=[0, 0, 0], shape=[64, 64, 64])
-roi = np.frombuffer(buf, "<" + code).reshape(shape)
-
-# decode a table block, column by column
-cols = {name: np.frombuffer(buf, "<" + code)
-        for name, buf, code in r.read_table("events")}
+ms = r.column("events", "ms")            # one column, projected
+cols = r.table_dict("events")            # {column: np.ndarray}
+df = r.table("events")                   # polars.DataFrame (r.table_arrow → pyarrow.Table)
 ```
+
+A **nullable** column reads as an `np.ma.MaskedArray` (`mask=True` at each NULL) from `column` /
+`logical_column` / `table_dict`, an Arrow array with a validity bitmap from `table_arrow`, and native nulls in
+polars; a column that is not nullable is a plain `np.ndarray`. A present NaN is a value, not a NULL.
 
 Anything wrong — bad magic, broken seal, digest mismatch, unknown block — raises `tessera.TesseraError`.
 

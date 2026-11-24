@@ -11,7 +11,8 @@ either direction, with **zero duplicated source of truth**:
 
 If an implementation change adds or drops a code without touching the docstring (or
 vice versa), the sets diverge and this fails. Runs in the `tessera-py-import` /
-`tessera-wheel-import` flake checks right after smoke.py, against the same package.
+`tessera-wheel-import` flake checks right after smoke.py, against the same package, as
+``python3 api_drift.py <nullable_obs.tsra>`` (the nullable-column fixture, for the #804 return shapes).
 """
 
 import re
@@ -169,7 +170,97 @@ def logical_names() -> list[str]:
     return errors
 
 
+# --- nullable columns (#804) ----------------------------------------------------------------------
+# The return shape of every column read, probed on the live module: a nullable column is an
+# `np.ma.MaskedArray` from the ndarray reads, an Arrow array with nulls from `table_arrow`, native nulls
+# in polars; a non-nullable column is exactly `np.ndarray`. The native layer returns the values and the
+# validity as separate tuple members. The docstrings must say so on every read that returns it. The
+# nullable side reads the committed fixture (the Python Builder can't write a nullable column), given as
+# argv[1]; `nullable_columns.py` checks its values and masks against the Rust reader.
+NDARRAY_READS = {
+    "column": lambda r, t, c: r.column(t, c),
+    "logical_column": lambda r, t, c: r.logical_column(t, c),
+    "table_dict": lambda r, t, c: r.table_dict(t)[c],
+}
+
+
+def nullable_shapes(fixture: str) -> list[str]:
+    import pathlib
+    import tempfile
+
+    errors = []
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "plain.tsra"
+        b = tessera.Builder("t", "plain", "", "2026-01-01T00:00:00Z")
+        b.add_table("plain", [("c", "i4", np.array([1, 2, 3], "<i4").tobytes())])
+        b.pack(str(path))
+        plain = tessera.open(
+            path
+        )  # holds the file open: it stays readable after the cleanup
+    nullable = tessera.open(fixture)
+
+    for name, read in NDARRAY_READS.items():
+        got = type(read(plain, "plain", "c"))
+        if got is not np.ndarray:
+            errors.append(
+                f"{name}: a non-nullable column is {got.__name__}, must stay np.ndarray"
+            )
+        got = read(nullable, "obs", "a")
+        if not isinstance(got, np.ma.MaskedArray) or not np.ma.getmaskarray(got).any():
+            errors.append(
+                f"{name}: a nullable column is {type(got).__name__}, must be a masked MaskedArray"
+            )
+        if "MaskedArray" not in (getattr(tessera.Reader, name).__doc__ or ""):
+            errors.append(
+                f"{name}: returns a MaskedArray for a nullable column, its docstring doesn't say so"
+            )
+    arrow = nullable.table_arrow("obs").column("a")
+    if arrow.null_count == 0:
+        errors.append(
+            "table_arrow: a nullable column has null_count 0, must carry a validity bitmap"
+        )
+    if "validity bitmap" not in (tessera.Reader.table_arrow.__doc__ or ""):
+        errors.append(
+            "table_arrow: carries a validity bitmap, its docstring doesn't say so"
+        )
+    if nullable.table("obs")["a"].null_count() == 0:
+        errors.append("table: a nullable column has no polars nulls")
+    if "native polars nulls" not in (tessera.Reader.table.__doc__ or ""):
+        errors.append("table: carries polars nulls, its docstring doesn't say so")
+
+    # The native shape: values and validity apart, validity None exactly when not nullable.
+    native = {
+        "read_table": lambda r, t, c: next(
+            x[1:] for x in r._r.read_table(t) if x[0] == c
+        ),
+        "read_table_column": lambda r, t, c: r._r.read_table_column(t, c),
+        "read_logical_table_column": lambda r, t, c: r._r.read_logical_table_column(
+            t, c
+        ),
+    }
+    for name, read in native.items():
+        for r, t, c, is_nullable in (
+            (plain, "plain", "c", False),
+            (nullable, "obs", "a", True),
+        ):
+            got = read(r, t, c)
+            if not (
+                isinstance(got, tuple) and len(got) == 3 and isinstance(got[0], bytes)
+            ):
+                errors.append(
+                    f"_native {name}: {got!r:.80} is not (le_bytes, numpy_code, validity)"
+                )
+            elif (got[2] is not None) != is_nullable:
+                errors.append(
+                    f"_native {name}: validity {got[2]!r:.40} for nullable={is_nullable}"
+                )
+    return errors
+
+
 def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: api_drift.py <nullable_obs.tsra>", file=sys.stderr)
+        return 2
     table = probe(
         lambda code, data: tessera.Builder(
             "t", "x", "", "2026-01-01T00:00:00Z"
@@ -231,6 +322,7 @@ def main() -> int:
         )
 
     errors += logical_names()
+    errors += nullable_shapes(sys.argv[1])
 
     for e in errors:
         print(f"DRIFT: {e}", file=sys.stderr)

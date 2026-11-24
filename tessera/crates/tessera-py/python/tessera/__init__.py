@@ -11,6 +11,14 @@ gets **native objects** — a NumPy ``ndarray`` for arrays, and a polars ``DataF
     df  = r.table("events")                # -> polars.DataFrame
     ms  = r.column("events", "ms")         # -> np.ndarray (single column, projected)
 
+A **nullable** table column (one whose schema declares ``nullable``) reads as an
+``np.ma.MaskedArray`` with ``mask=True`` at each NULL, from ``column()``, ``logical_column()`` and
+``table_dict()``, whether or not the rows hold a NULL; a column that is not nullable is a plain
+``ndarray``. ``table_arrow()`` gives its arrays a real validity bitmap (``null_count`` counts the
+NULLs) and ``table()`` gives polars native nulls. A NULL is not a NaN: a present NaN stays a value.
+Under a NULL the masked array's ``.data`` holds the dtype default (``0``), never what the producer
+had there.
+
 NumPy is a hard dependency (arrays are ndarrays). polars and pyarrow are imported lazily, only when
 ``table()`` / ``table_arrow()`` are called — so the read+numpy path has no heavy deps.
 
@@ -38,6 +46,27 @@ __all__ = [
     "NotABlockError",
     "__version__",
 ]
+
+
+def _column(buf: bytes, code: str, validity) -> "_np.ndarray":
+    """Reconstruct one table column from the FFI ``(bytes, numpy_code, validity)`` (#804).
+
+    ``buf`` holds the values only, one element per row. ``validity`` is ``None`` for a column that is
+    not nullable, which returns a plain ``ndarray``; otherwise it is one byte per row (``1`` present,
+    ``0`` NULL) and the column is an ``np.ma.MaskedArray`` masked at each NULL.
+    """
+    values = _ndarray(buf, code)
+    if validity is None:
+        return values
+    return _np.ma.MaskedArray(values, mask=~_np.frombuffer(validity, _np.bool_))
+
+
+def _arrow_array(pa, column):
+    """``column`` (from ``_column``) as a pyarrow array: a masked column's mask becomes its validity
+    bitmap, so a NULL is an Arrow null and a present NaN stays a value."""
+    if isinstance(column, _np.ma.MaskedArray):
+        return pa.array(column.data, mask=_np.ma.getmaskarray(column))
+    return pa.array(column)
 
 
 def _ndarray(buf: bytes, code: str, shape=None) -> "_np.ndarray":
@@ -129,31 +158,40 @@ class Reader:
 
     def column(self, block: str, name: str) -> "_np.ndarray":
         """Decode one column of the logical table ``block`` via Vortex projection (reads only that
-        column's segments); a partitioned table's column spans every leaf, in leaf order."""
-        buf, code = self._r.read_table_column(block, name)
-        return _ndarray(buf, code)
+        column's segments); a partitioned table's column spans every leaf, in leaf order. A nullable
+        column is an ``np.ma.MaskedArray`` (``mask=True`` at each NULL), any other a plain
+        ``np.ndarray``."""
+        return _column(*self._r.read_table_column(block, name))
 
     def logical_column(self, prefix: str, name: str) -> "_np.ndarray":
         """The same read as ``column()``, kept for existing callers: ``column`` resolves logical table
         names too (a partitioned ``pairs`` over ``pairs/0000``, …, or a legacy ``events_NNNN``
-        group) and returns the column across every block, in logical order."""
-        buf, code = self._r.read_logical_table_column(prefix, name)
-        return _ndarray(buf, code)
+        group) and returns the column across every block, in logical order. A nullable column is an
+        ``np.ma.MaskedArray``, as from ``column()``."""
+        return _column(*self._r.read_logical_table_column(prefix, name))
 
     def table_dict(self, name: str) -> dict:
         """Decode the logical table ``name`` to a ``{column: np.ndarray}`` dict (no polars/pyarrow
-        needed); a partitioned table is every leaf's rows, in leaf order."""
-        return {n: _ndarray(buf, code) for n, buf, code in self._r.read_table(name)}
+        needed); a partitioned table is every leaf's rows, in leaf order. A nullable column's value
+        is an ``np.ma.MaskedArray`` (``mask=True`` at each NULL), as from ``column()``."""
+        return {
+            n: _column(buf, code, v) for n, buf, code, v in self._r.read_table(name)
+        }
 
     def table_arrow(self, name: str):
-        """Decode the logical table ``name`` to a pyarrow ``Table`` (see ``table_dict()``)."""
+        """Decode the logical table ``name`` to a pyarrow ``Table`` (see ``table_dict()``). A
+        nullable column's array carries a real validity bitmap: a NULL is an Arrow null
+        (``null_count`` counts them), a present NaN a value."""
         import pyarrow as pa
 
-        return pa.table(self.table_dict(name))
+        return pa.table(
+            {n: _arrow_array(pa, c) for n, c in self.table_dict(name).items()}
+        )
 
     def table(self, name: str):
         """Decode the logical table ``name`` to a polars ``DataFrame`` (via Arrow; see
-        ``table_dict()``)."""
+        ``table_dict()``). A nullable column carries native polars nulls (``table_arrow()``'s
+        validity bitmap), distinct from a present NaN."""
         import polars as pl
 
         return pl.from_arrow(self.table_arrow(name))
