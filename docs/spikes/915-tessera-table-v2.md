@@ -2,6 +2,9 @@
 
 > **Status:** Accepted (owner, 2026-11-19; decisions in §7). It gates #828 (ADR-0066 step 7) and sets that
 > step's acceptance criteria (§5, §8). No product code, SPEC, corpus or golden changes here.
+> **Amended 2026-11-22 (§10):** the implementation missed §5's A3, A4 and A5; the owner kept `tessera-table-v1` as
+> the default and re-opened the note. #828 left the ADR-0066 format-break release. §10's open question (an opt-in
+> archival profile) is the owner's to answer.
 >
 > **ADRs:** this note proposes no new ADR. It proposes one ADR amendment, to ADR-0024 (dated, naming
 > `tessera-table-v2`), plus SPEC §5b text: the rule table of §2.1, the two invariants and the refusal points of
@@ -414,3 +417,102 @@ regenerated.
 9. **Siemens never beat HDF5.** O1(b) left Siemens about 1 % above HDF5 shuffle+zstd, and the comparison table in
    `why-tessera.md` had to say so. *Guard:* A1 states the number up front; O1(a) is the path past it, and #796
    the dense one.
+
+## 10. Amendment (2026-11-22): the §5 floors failed; v1 stays the default
+
+Evidence: the implementation (draft PR #949, parked on branch `feature/828-tessera-table-v2-codec-profile`), its
+round-1 measurement (PR #949 body) and the round-2 load-independent re-measure in
+[`828-m4b-a3.md`](828-m4b-a3.md) (ksb job `tessera-828-m4b-r2-2`; its job files are on that branch, commit
+`cf616994`, under `tessera/bench/ksb/828-m4b/`). Owner decision on #828, 2026-11-22
+([comment](https://github.com/vig-os/tessera/issues/828#issuecomment-7085524452)).
+
+### 10.1 What failed
+
+Real writer, #822 fixtures, one core; v1 = `tessera-table-v1`, v2 = this note's profile as implemented. The
+instruction counts (exact, whole process) have no §5 floor; they show the encode cost without any load effect.
+
+| § 5 row | Floor | GE v1 → v2 | Siemens v1 → v2 |
+|---|---|---:|---:|
+| A1 size, B/event | ≤ 3.25 / ≤ 7.10 | 3.904 → 3.219 (−17.5 %) ✓ | 7.507 → 6.963 (−7.2 %) ✓ |
+| A3 encode, CPU ns/event (ksb) | v1/v2 ≥ 1.00× | 119.5 → 238.5 (**0.50×**) ✗ | 135.1 → 261.3 (**0.52×**) ✗ |
+| User instructions/event (seat) | none | 557 → 1,702 (+1,145) | 590 → 1,498 (+908) |
+| A4 take ×500, full block, ms (ksb) | ≤ 100 | 6.5 → **119.5** (18×) ✗ | 9.6 → 89.2 (9×) ✓ |
+| A5 full-scan decode, CPU-MiB/s (ksb) | ≥ 500 | 1,572 → **381** (4.1×) ✗ | 747 → 386 (1.9×) ✗ |
+
+On the round-1 seat A4 (79.4 ms) and A5 (610 MiB/s) passed for GE, but the floors leave the host unnamed, and on
+the reserved ksb core both miss; the CPU and instruction ratios do not depend on the host.
+
+**The cost is in the profile itself, not in a parameter.** The 12-point sweep (Pco level {4, 6, 8} × values per
+page {8,192, 65,536} × chunk framing {65,536, 262,144} rows) reaches at most 0.60× (GE) / 0.57× (Siemens) on A3,
+and only level 8 keeps GE's A1. What costs is what v2 is:
+
+- forced Pco on every ≥ 16-bit column: in the round-1 profile of the v2 writer on GE, 66 % of the CPU is in `pco`,
+  and 37 % in its three hottest symbols, histogram building, bin optimisation and the compression-table lookup
+  ([`828-m4b-a3.md`](828-m4b-a3.md) §6). Pco chooses its bins once per chunk, and v2 writes a chunk per 65,536-row
+  group, while the §2.4 codec figure was measured on one chunk per 2^22-row column, so it hid that per-chunk cost;
+- forced Zstd level 9 on the 8-bit columns: Siemens' CPU is flat across the Pco levels (235–266 ns/event);
+- the decode side of both: no take or compare kernel, so every take decodes whole chunks (§3), and a Pco decode
+  slower than v1's FoR, bit-packing and dictionary kernels.
+
+### 10.2 Decision (owner, 2026-11-22)
+
+- `tessera-table-v1` stays the default table profile. `TABLE_CODEC_PROFILE` is unchanged.
+- Issue #828 leaves the ADR-0066 format-break release; #917 ships A′ (#940) and #720 without it. ADR-0066 step 7 is
+  deferred.
+- The v2 implementation stays parked, unmerged, on its branch (PR #949, draft). The parts that change no product
+  bytes by default (`inspect --encodings`, the measurement tooling, the `table_v2_dtypes` fixture) may land on
+  their own once #804 merges (the approved split's PR A).
+- §§ 0–9 stay as the record of what was decided on 2026-11-19 and why; they no longer describe a planned default.
+
+### 10.3 Open question: v2 as an opt-in archival profile?
+
+This is the owner's to answer: is v2 worth having as an opt-in archival profile?
+
+An archival product is written once, kept long and read rarely: size matters, encode cost matters less, decode and
+take speed hardly. v2's trade (−17.5 % / −7.2 % size for 2× encode CPU, 2–4× slower decode, 9–18× slower take) fits
+that use better than a default. Whatever lands must be **additive**: no byte of a product written by the default
+writer may move, and no existing reader may be broken. The facts any option has to respect, as of `dev` 342bf645:
+
+- **Naming.** `tessera-table-v<N>` is the default writer's sequence (ADR-0024's 2026-11-16 amendment: a profile is
+  a fixed set of constants, bumped as a format event). An opt-in profile needs an id outside that sequence (for
+  example `tessera-table-archive-1`), so that `v2` keeps meaning "the next default" and no reader infers an order
+  between a default and an opt-in profile.
+- **A reader meeting an unknown profile today.** It never refuses the block (SPEC §5b: "A reader MUST NOT refuse a
+  table block because its profile is unknown or absent") and decodes it by Vortex wire IDs. `dev` prints nothing
+  for an unknown profile: `table::unknown_codec_profile_note`, `KNOWN_TABLE_CODEC_PROFILES` and
+  `inspect --encodings` exist only on the parked branch (they come with PR A). Verification needs no decode, so an
+  unknown profile never fails `verify`.
+- **Can existing readers decode it?** `vortex.pco` arrays: yes, every tessera reader since the vortex 0.93 change
+  (#635) registers Pco (`vortex-file`'s default registration). `vortex.zstd` arrays: **no** released or `dev`
+  reader can — `vortex-file`'s `zstd` feature is off, so the decode fails with `Unknown encoding: vortex.zstd`
+  (the product still verifies). A profile that writes Zstd needs reader support to ship at least one release
+  earlier, and readers before that release cannot decode its 8-bit columns.
+- **No format break, a trap found in #828.** A Vortex file serialises the sorted list of every encoding ID its
+  session registers and its edition allows, and each array names its encoding by an index into it. Registering
+  `vortex.zstd` in the session the default writer uses therefore moves the footer of **every** table block it
+  writes, v1 included (#949, `tests/table_v1_frozen.rs` on the parked branch). Reader support for Zstd must use a
+  session the default writer does not share, or adding it is itself a format break.
+- **A way to opt in.** Today no writer can choose a profile: `table::sealed_spec` records the one constant and
+  refuses any other. An opt-in profile needs a new public writer choice (an API and CLI promise), or a single door
+  that re-encodes on request — #796's offline archival re-encode is that door.
+
+Options (the owner answers; this note does not decide):
+
+- **A. No archival profile from #828.** Close v2; #796 starts afresh with this evidence. *Cost:* the size gain
+  stays unused until #796; no new API, no reader change.
+- **B. v2 as measured, opt-in, new id** (Pco on ≥ 16-bit, Zstd-9 on 8-bit, the BtrBlocks set for `b1`/`str`),
+  selectable by a new writer option. *Cost:* Zstd reader support first, in a session the default writer does not
+  use, shipped a release ahead; readers before it cannot decode the 8-bit columns; a new public writer option; the
+  §10.1 encode/decode/take costs on every product written with it.
+- **C. Pco-only archival, opt-in, new id:** Pco on ≥ 16-bit columns, `i1`/`u1`/`b1`/`str` on v1's codec set. No new
+  encoding, so every reader since #635 decodes it and the default writer's bytes cannot move. GE keeps −17.5 % (it
+  has no 8-bit column); Siemens gains about −0.4 % (estimate from the per-column bytes of M1: `tof` 1.126 → 1.097,
+  `ms` 0.002 → 0.005 B/event). *Cost:* a new public writer option; Siemens-like data gains almost nothing; the
+  encode/decode/take costs of §10.1 on the Pco columns.
+- **D. (Recommended) Fold the question into #796.** The archival profile is chosen there, where the opt-in door
+  (the re-encode verb) already belongs, with this note's evidence and these constraints as its requirements: an id
+  outside the default sequence; reachable only through the re-encode; no encoding that a released reader lacks
+  (start from C, add Zstd only once readers have carried it for a release); the default writer's session and
+  bytes untouched. *Cost:* no archival size gain until #796 is built, and one more design round there; in exchange
+  no public writer option is added for a single profile, and the archival trade-off (including denser settings,
+  §6 G) is decided once, in one place.
