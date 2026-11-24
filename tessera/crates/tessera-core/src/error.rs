@@ -369,6 +369,58 @@ pub enum Error {
         detail: String,
     },
 
+    /// A repository's lineage ref was not at the tip the caller built on (ADR-0036 §2, #946): a
+    /// `commit` or `set_ref` expected `expected` (`None`: a lineage with no commits yet) and found
+    /// `found`. Another writer advanced the ref first; nothing was stored and the ref is unchanged.
+    /// Re-read the tip, rebuild the version on it and commit again.
+    #[error(
+        "ref '{lineage}' moved: expected {}, found {} (another commit landed first; nothing was \
+         written — rebuild on the current tip and commit again)",
+        tip_or_none(.expected),
+        tip_or_none(.found)
+    )]
+    RefMoved {
+        lineage: String,
+        expected: Option<String>,
+        found: Option<String>,
+    },
+
+    /// A repository `commit` on parent `expected` of a manifest whose `supersedes` edges are not
+    /// exactly one edge to `expected` (ADR-0036 §2, #946): the edges `found` (their `content_hash`,
+    /// `(none)` for an edge without one). The ref would otherwise name a version whose history skips
+    /// the parent, and `gc` would reclaim what only that parent reaches.
+    #[error(
+        "commit to '{lineage}': the manifest's supersedes edges {found:?} must be exactly one edge \
+         to the parent it is committed on, {expected}"
+    )]
+    SupersedesMismatch {
+        lineage: String,
+        expected: String,
+        found: Vec<String>,
+    },
+
+    /// A repository ref file that is empty or holds no `blake3:<64 lower-case hex>` address (#946):
+    /// a torn or edited ref, never "no commits yet". Restore the file, or `forget` the lineage.
+    #[error(
+        "ref {} is corrupt: {reason}; restore it, or forget the lineage",
+        path.display()
+    )]
+    CorruptRef {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+
+    /// A repository `gc` stopped before deleting anything, because it could not read `what` (a ref,
+    /// or a manifest the walk reached, named with how it was reached) for the reason `source`
+    /// (ADR-0036 §2, #946). A walk that skipped it would not mark what only it reaches, and the sweep
+    /// would delete that.
+    #[error("gc aborted, nothing was deleted: cannot read {what}: {source}")]
+    GcAborted {
+        what: String,
+        #[source]
+        source: Box<Error>,
+    },
+
     /// An append to a write session whose block `name` is `quarantined`, or its parent or child (the
     /// leaf rule, ADR-0063), where `quarantined` is held in the recovery quarantine directory
     /// `quarantine`: a journal tail `WriteSession::recover` could not replay, kept for repair by
@@ -396,6 +448,12 @@ pub enum Error {
     /// recipe branch on "wrong build" versus "wrong invocation" (exit 2) without parsing stderr.
     #[error("backend '{0}' is not compiled into this build")]
     BackendNotCompiled(&'static str),
+}
+
+/// A lineage tip in an [`Error::RefMoved`] message: the address, or `no tip` for a lineage without
+/// commits.
+fn tip_or_none(tip: &Option<String>) -> &str {
+    tip.as_deref().unwrap_or("no tip")
 }
 
 /// The advice an [`Error::InexactInteger`] adds only for a free-form field.

@@ -2857,10 +2857,11 @@ mod tests {
     /// a test that panics before its seam fires can't leave it armed for the next test on its thread.
     #[test]
     fn a_panicking_test_leaves_every_seam_disarmed() {
-        let counters: [&'static seam::Counter; 3] = [
+        let counters: [&'static seam::Counter; 4] = [
             &seam::FAIL_NTH_DURABLE_RENAME,
             &seam::FAIL_NTH_SYNC_DIR,
             &seam::CROSS_DEVICE_NTH_STAGED_RENAME,
+            &seam::KILL_AFTER_NTH_STEP,
         ];
         let unwound = std::panic::catch_unwind(|| {
             let _armed = counters.map(|c| seam::arm(c, 5));

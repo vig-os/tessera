@@ -1,7 +1,7 @@
 //! The durable file-system steps (#695): create a directory, write, fsync and rename a file, fsync a
-//! directory, each a thin wrapper a test can record ([`seam::Event`]) and, for some, fail. Moved out
-//! of the streaming write engine ([`crate::write`], its crash-consistency contract) so that other
-//! writers can share them.
+//! directory, each a thin wrapper a test can record ([`seam::Event`]) and, for some, fail. Shared by
+//! the streaming write engine ([`crate::write`], its crash-consistency contract) and the
+//! content-addressed repository ([`crate::repo`], its fenced writer, ADR-0036 §2).
 //!
 //! A file is durable once its bytes are fsync'd and its directory entry is too: the entry by an
 //! fsync of the directory holding it, after the file was created or renamed there. Every directory
@@ -36,7 +36,32 @@ pub(crate) mod seam {
         pub static FAIL_NTH_SYNC_DIR: Cell<usize> = const { Cell::new(0) };
         /// Fail the rename of a staged file into `blocks/` as crossing filesystems (`EXDEV`).
         pub static CROSS_DEVICE_NTH_STAGED_RENAME: Cell<usize> = const { Cell::new(0) };
+        /// Kill the process (`abort`, so no destructor runs and nothing is cleaned up) right after
+        /// its `n`-th recorded file-system step: a real crash at that step, for a test that runs
+        /// the writer in a child process (the repository's kill points, #946).
+        pub static KILL_AFTER_NTH_STEP: Cell<usize> = const { Cell::new(0) };
         static LOG: RefCell<Option<Vec<Event>>> = const { RefCell::new(None) };
+        static WATCH: RefCell<Option<Watcher>> = const { RefCell::new(None) };
+    }
+
+    /// A test's check on every recorded step ([`watch`]).
+    type Watcher = Box<dyn FnMut(&Event)>;
+
+    /// Calls this thread's watcher on every recorded step while it lives.
+    #[must_use = "watching stops when the guard is dropped"]
+    pub struct Watching;
+
+    /// Call `watcher` with each file-system step this thread completes, until the guard drops: a
+    /// test checks a condition that must hold at every step (the repository's writer lock, #946).
+    pub fn watch(watcher: impl FnMut(&Event) + 'static) -> Watching {
+        WATCH.with(|w| *w.borrow_mut() = Some(Box::new(watcher)));
+        Watching
+    }
+
+    impl Drop for Watching {
+        fn drop(&mut self) {
+            WATCH.with(|w| *w.borrow_mut() = None);
+        }
     }
 
     /// Keeps a fault counter armed; dropping it disarms the counter.
@@ -73,6 +98,10 @@ pub(crate) mod seam {
         SyncDir(PathBuf),
         /// A journal line is about to be written, committing the fragment at this path.
         JournalLine(PathBuf),
+        /// The file at this path was deleted (durable once its directory is fsync'd).
+        RemoveFile(PathBuf),
+        /// A repository `gc` starts its walk, before it reads a ref.
+        GcWalk,
     }
 
     /// Records this thread's events while it lives.
@@ -103,13 +132,22 @@ pub(crate) mod seam {
         LOG.with(|l| l.borrow().is_some())
     }
 
-    /// Log `event`, if this thread is recording.
+    /// Show `event` to this thread's watcher, log it if this thread is recording; then abort the
+    /// process if this is the step [`KILL_AFTER_NTH_STEP`] is armed for.
     pub fn record(event: Event) {
+        WATCH.with(|w| {
+            if let Some(watcher) = w.borrow_mut().as_mut() {
+                watcher(&event);
+            }
+        });
         LOG.with(|l| {
             if let Some(log) = l.borrow_mut().as_mut() {
                 log.push(event);
             }
         });
+        if fires(&KILL_AFTER_NTH_STEP) {
+            std::process::abort();
+        }
     }
 
     /// What a power loss could still undo, replayed from a recorded event log (#695). An entry
@@ -150,7 +188,10 @@ pub(crate) mod seam {
                 SyncDir(d) => {
                     self.dir_synced.insert(d.clone(), self.step);
                 }
-                JournalLine(_) => {}
+                RemoveFile(p) => {
+                    self.touched.insert(p.clone(), self.step);
+                }
+                JournalLine(_) | GcWalk => {}
             }
         }
 
@@ -243,7 +284,8 @@ pub(crate) fn parent_dir(path: &Path) -> &Path {
 }
 
 // The file-system steps the durability contract is made of (see the module docs), each a thin
-// wrapper so that a test can record it (`seam::Event`) and, for the directory fsync, fail it.
+// wrapper so that a test can record it (`seam::Event`), kill the process after it, and, for the
+// directory fsync, fail it.
 
 /// Create (or truncate) the file `path` for writing.
 pub(crate) fn create_file(path: &Path) -> std::io::Result<File> {
@@ -282,6 +324,14 @@ pub(crate) fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Delete the file `path` (durable only once its directory is fsync'd).
+pub(crate) fn remove_file(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path)?;
+    #[cfg(test)]
+    seam::record(seam::Event::RemoveFile(path.to_path_buf()));
+    Ok(())
+}
+
 /// fsync the directory `dir`, so the entries created, renamed or removed in it survive a crash.
 pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(test)]
@@ -308,7 +358,15 @@ pub(crate) fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
         .expect("a durable write names a file")
         .to_os_string();
     tmp_name.push(".tmp");
-    let tmp = RemoveOnDrop::new(path.with_file_name(tmp_name));
+    write_durable_via(&path.with_file_name(tmp_name), path, bytes)
+}
+
+/// [`write_durable`] through the temp file `tmp`, which must be on the same filesystem as `path` (a
+/// rename never crosses one). Its directory is not fsync'd: a temp file a crash leaves behind is
+/// debris, never read. The repository keeps its temp files out of `objects/` and `refs/` this way,
+/// so no listing of either can see one ([`crate::repo`]).
+pub(crate) fn write_durable_via(tmp: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = RemoveOnDrop::new(tmp.to_path_buf());
     {
         let mut f = create_file(tmp.path())?;
         f.write_all(bytes)?;
