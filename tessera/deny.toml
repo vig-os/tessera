@@ -61,7 +61,7 @@ ignore = [
     # affected and there's no safe upgrade (chronotope/chrono#1768). tessera has no direct chrono
     # dependency and no `chrono::` calls in crates/, so there's no code of ours to move to `jiff`. Every
     # path is transitive (`cargo tree -i chrono -e normal,build,dev --workspace --all-features`):
-    #   - arrow-array 58.4.1 / parquet 58.4.1: the arrow-58 ingest pins (tessera-cli; tessera-ingest dev).
+    #   - arrow-array 58.4.2 / parquet 58.4.2: the arrow-58 ingest pins (tessera-cli; tessera-ingest dev).
     #   - arrow-array/-cast/-ord/-select 59.3.2 → vortex-arrow/-file/-layout 0.93 → tessera-io, so every
     #     binary, tessera-py included.
     #   - dicom-core 0.10 → dicom-* → tessera-ingest.

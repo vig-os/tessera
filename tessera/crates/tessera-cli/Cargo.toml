@@ -52,7 +52,7 @@ arrow-schema.workspace = true
 
 # `sql` feature (#251): `tessera sql <FILE> "<QUERY>"` runs DataFusion in-process over a table
 # block's Arrow projection. DataFusion 54 pins `arrow ^58` — the SAME major as the workspace's
-# `=`-pinned ingest decoders (arrow-array 58.4.1), so the arrow values this crate builds and hands to
+# `=`-pinned ingest decoders (arrow-array 58.4.2), so the arrow values this crate builds and hands to
 # DataFusion are one type. Two arrow majors on one boundary would fail to compile (`RecordBatch` has
 # the same name but incompatible reprs). Vortex 0.93 brings its own arrow 59, which never crosses
 # that boundary. Both deps are `optional`, so a default `cargo build -p tessera-cli` does NOT pull them.
