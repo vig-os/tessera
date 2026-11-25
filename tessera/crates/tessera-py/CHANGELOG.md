@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.7](https://github.com/vig-os/tessera/compare/tessera-py-v0.1.0-alpha.6...tessera-py-v0.1.0-alpha.7) - 2026-11-25
+
+### Added
+
+- [**breaking**] seal the stored canonical bytes (ADR-0066 A′ cutover)
+- *(schema)* product schemas declare 64-bit string encodings and value ranges
+- *(io)* writers emit the JCS form of every sealed JSON document
+
+### Fixed
+
+- *(py)* nullable table columns read as masked arrays
+
 ## [0.1.0-alpha.6](https://github.com/vig-os/tessera/compare/tessera-py-v0.1.0-alpha.5...tessera-py-v0.1.0-alpha.6) - 2026-11-19
 
 ### Added
