@@ -1,0 +1,59 @@
+Getting *your own* data into a `.tsra`. Every command below is run against the real binary on every
+build, so nothing here can drift from the tool. Digests and generated names are globbed with `[..]`; the
+structural lines are matched exactly.
+
+# === 1. The honest fallback: preserve any file bit-faithfully as a `blob`. ===
+# === Reach for this when nothing understands the format yet — you still get identity, integrity, ===
+# === and provenance, and you can decode it later without having lost anything in the meantime.   ===
+# === `--meta study=…` satisfies the blob schema's RECOMMENDED field; omit it and you get a WARN.  ===
+
+```
+$ tessera ingest blob notes.txt console.tsra --name console-export --timestamp 2024-01-01T00:00:00Z --meta study=DEMO-2024-01
+ingested [..] (blob) -> console.tsra
+
+```
+
+# === Always verify before trusting a byte — the seal plus every block digest. ===
+
+```
+$ tessera verify console.tsra
+OK  console.tsra verified (1 blocks)
+
+```
+
+# === The bytes come back verbatim, so preservation is a promise you can check, not a claim. ===
+# === `data` is the block name a blob product uses; `tessera ls <file>` lists them.            ===
+
+```
+$ tessera extract console.tsra data roundtrip.txt
+extracted data (117 bytes) -> roundtrip.txt
+
+```
+
+# === 2. A declarative spec — one file that produces a whole sealed collection, reproducibly. ===
+# === Re-running it on the same inputs yields byte-identical products; this is the smallest    ===
+# === spec that does something real, and `--spec` scales from here to a full study.            ===
+
+```
+$ tessera ingest --spec minimal-spec.toml --out ./study
+ingested collection blake3:2e49fbe123f6acd4e257b338c60c4763d383f83c4eb91282d3c3ef9e45a5c4c0 (1 members) -> ./study
+  - blake3:ae0d02568b647a1725f2fc7cb024265581a4f3c5d62c87f936a90a110140ae1a -> blake3_ae0d02568b647a1725f2fc7cb024265581a4f3c5d62c87f936a90a110140ae1a.tsra
+
+```
+
+# === Members are written under their CONTENT id, not their human name — identity, not filename. ===
+# === `collection ls` is how you get from a name to a file.                                      ===
+
+```
+$ tessera collection ls ./study/collection.json
+raw     blob       blake3:ae0d02568b647a1725f2fc7cb024265581a4f3c5d62c87f936a90a110140ae1a console-export           [blake3:9d45728fbedc…]
+
+```
+
+# === Verify the collection as a unit: its own seal, then every member present, intact and pinned. ===
+
+```
+$ tessera collection verify ./study/collection.json
+OK  ./study/collection.json verified (1 members, recursive)
+
+```

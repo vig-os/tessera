@@ -5,12 +5,16 @@
 //! block's stored bytes against its recorded digest.
 
 mod bench;
+mod bench_compare;
 mod collection;
 mod info;
 mod nav;
+mod provenance;
 mod resource;
 #[cfg(feature = "sql")]
 mod sql;
+#[cfg(test)]
+mod test_support;
 mod trust;
 mod version;
 
@@ -20,7 +24,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use tessera_core::collection::{member_filename, MemberKind};
 use tessera_core::SchemaRegistry;
-use tessera_ingest::{engine, spec as ingest_spec};
+use tessera_ingest::{column_meta as ingest_column_meta, engine, spec as ingest_spec};
 use tessera_io::{pack_dir, parse_byte_size, unpack, Reader};
 
 /// Cloud-URL prefixes the `cloud` feature recognises. Used to detect a URL-shaped argument and
@@ -92,6 +96,46 @@ impl<R: std::io::Read + std::io::Seek> TsraSource for Reader<R> {
     }
 }
 
+/// The `inspect --resolve-config` lines for `file` — the config a product's `generation.config_ref`
+/// actually points at (#452 part 1, ADR-0058 §2).
+///
+/// Lives here rather than in `nav` because resolving needs the [`TsraSource`] handle, while `nav`
+/// stays a pure renderer over bytes someone else read. The two "nothing to resolve" cases return
+/// `Ok` with a line saying so: nothing was promised, so nothing is broken. `Err` is reserved for a
+/// `config_ref` that IS set and names no carried block — a sealed reference that does not hold.
+fn resolved_config_lines(
+    r: &mut dyn TsraSource,
+    file: &std::path::Path,
+    full: bool,
+) -> tessera_core::Result<Vec<String>> {
+    let Some(g) = r.manifest().generation.clone() else {
+        return Ok(vec![
+            "generation    (none — this product carries no generation record to resolve)"
+                .to_string(),
+        ]);
+    };
+    let Some(digest) = g.config_ref else {
+        return Ok(vec![
+            "  config      (none — this generation record has no config_ref)".to_string(),
+        ]);
+    };
+    let label = file.display().to_string();
+    // Locate from the manifest alone, then drop that borrow before reading: the Blob spec's `size` is
+    // what makes the inline-or-extract decision answerable without fetching a byte of a multi-GB config.
+    let cb = nav::config_block(r.manifest(), &label, &digest)?;
+    let bytes = if nav::config_inlines(&cb) {
+        // Buffering IS what inlining means, and `config_inlines` has already capped this at the
+        // inline limit. `stream_block_to` verifies the digest after the last byte and works over a
+        // cloud URL too; on `Err` the `?` drops the unverified bytes instead of rendering them.
+        let mut buf = Vec::new();
+        r.stream_block_to(&cb.name, &mut buf)?;
+        Some(buf)
+    } else {
+        None
+    };
+    Ok(nav::config_lines(&cb, bytes.as_deref(), &label, full))
+}
+
 /// Grouped top-level help (#249) — clap 4 doesn't group subcommands natively, so we render a
 /// hand-authored command reference by command family via a custom `help_template`. Per-command
 /// detail (`tsra help <cmd>`) still comes from each variant's own `///` doc + positional
@@ -102,14 +146,15 @@ const HELP_TEMPLATE: &str = "\
 {usage-heading} {usage}
 
 Inspect & navigate:
-  inspect     Manifest summary (id, product, blocks, hashes)
+  inspect     Manifest summary (id, product, blocks, hashes; --resolve-config reads the recipe)
   verify      Verify integrity (magic, seal, every block digest)
+  provenance  Walk the derived_from DAG — producer + recipe + identity per hop
   schema      Validate against the embedded product schema (--json dumps it)
   tree        Render the .tsra as a navigable hierarchy
   ls          List one node's children (meta / a block / sources)
   read        Read table data as CSV/TSV/NDJSON (cross-block)
   stats       Numeric overview of an array block (shape, dtype, value range)
-  slice       Pull a plane/line/point of an array block as CSV (--index z,:,:)
+  slice       Pull a plane/line/point of an array block (--index z,:,: · --format csv|json|npy|png)
   project     Collapse an array along an axis → 2-D image (--mode max|mean|sum)
   pyramid     Build a multiscale pyramid of an array block → a new .tsra
   export      Emit a FAIR discovery record (JSON to stdout)
@@ -119,7 +164,7 @@ Query (needs --features sql):
 
 Ingest & pack:
   ingest      Ingest a vendor file (or a declarative --spec) into a sealed .tsra
-  pack        Pack an exploded dir (manifest.json + blocks/) into a sealed .tsra
+  pack        Pack an exploded dir (manifest.json + manifest.seal + blocks/) into a .tsra
   unpack      Explode a .tsra into a directory
   extract     Extract one block's raw bytes (digest-verified)
 
@@ -180,6 +225,33 @@ enum Cmd {
     ///
     /// With the `cloud` feature enabled, `file` also accepts `s3://<bucket>/<key>` or
     /// `http(s)://<host>/<key>` — the manifest is read via range-GET over the wire.
+    ///
+    /// `--json` emits the sealed manifest as a readable (pretty) object — the fields the seal
+    /// covers, not a CLI-shaped view of them. The seal itself is not a field: under ADR-0066 it is
+    /// `blake3` over the stored `manifest.json` bytes and lives in the `manifest.seal` member, so it
+    /// is printed by the summary's `manifest_hash` line, not by `--json`. Three things to know
+    /// before parsing it:
+    ///
+    /// * `producer` is polymorphic. It is a JSON OBJECT
+    ///   (`{tool, version, git_commit?, git_repo?, dirty?}`) on anything sealed since ADR-0058, and
+    ///   a bare STRING (`"tessera/0.0.0"`) on older products, which round-trip unchanged. It is
+    ///   an untagged enum, so consumers must accept both; it is absent entirely on pre-stamp files.
+    ///   `generation`, `study`, `schema` and the other optional fields are omitted when unset
+    ///   rather than emitted as null.
+    ///
+    /// * It is not the stored bytes: `manifest.json` is stored as one line in its JCS form (`unzip -p
+    ///   product.tsra manifest.json` gives those, and `b3sum` of them is the seal).
+    ///
+    /// * Its stability is the FORMAT's, tracked by the `tessera_version` field the dump itself
+    ///   carries — this is the spec version, not the CLI's. Fields are only ever added within a
+    ///   major version (that is how `producer`/`generation` arrived). An older reader reads a newer
+    ///   product as follows (SPEC §4): fields it doesn't know still verify as part of the seal, it
+    ///   warns `fields from a newer format revision are not interpreted: …`, and it refuses to
+    ///   re-seal such a product (`commit`, `publish`) or to validate it against an embedded schema
+    ///   rule it doesn't know, rather than drop or ignore them. Fields absent from an older product
+    ///   take their defaults. A rename or a removal is a major-version break, and a reader refuses
+    ///   a manifest whose major exceeds the one it understands. So pin behaviour to
+    ///   `tessera_version`, not to the tessera binary's version.
     Inspect {
         /// The `.tsra` to summarise (or an `s3://` / `http(s)://` URL with the `cloud` feature).
         file: PathBuf,
@@ -192,6 +264,53 @@ enum Cmd {
         /// reads all payloads; for a huge blob prefer the fast default (seal only) unless auditing.
         #[arg(long)]
         verify: bool,
+        /// Dump the whole sealed manifest as JSON instead of the human summary — everything the
+        /// seal covers (metadata, provenance, producer, generation), scriptable with `jq` and
+        /// without reaching into the container format.
+        #[arg(long)]
+        json: bool,
+        /// Dereference `generation.config_ref` to the config block it names, so the recipe reads end
+        /// to end instead of ending at a digest. A small text config is printed inline; a large or
+        /// binary one is named with the `extract` command that streams it. Errors if the digest names
+        /// no carried block — plain `inspect` never does.
+        #[arg(long)]
+        resolve_config: bool,
+    },
+    /// Walk a product's `derived_from` provenance DAG — producer + recipe + identity per hop.
+    ///
+    /// `inspect` answers "who made THIS product". This answers the chain question (ADR-0058 §5):
+    /// what identity did it inherit, from where, and what recipe made each hop?
+    ///
+    /// Parents are resolved **locally**: the product's own directory first, then an explicit
+    /// `--collection`, then each `--search` directory. There is no registry/OCI resolver — a read
+    /// verb should not reach the network, so a parent that only exists in a registry reads as
+    /// unresolved until you fetch it.
+    ///
+    /// A gap (a parent at a different version, or one that could not be found) is RENDERED and still
+    /// exits 0 — an unresolvable chain is the normal case and a gate should opt in with
+    /// `--require-complete`. A cycle is a malformed DAG and always exits nonzero.
+    Provenance {
+        /// The `.tsra` whose provenance to walk.
+        file: PathBuf,
+        /// Extra directory to resolve parents from. Repeatable. Indexed by (lineage id, version), so
+        /// a directory holding two commits of one parent still matches the pinned one.
+        #[arg(long)]
+        search: Vec<PathBuf>,
+        /// A `collection.json` whose members are candidate parents.
+        #[arg(long)]
+        collection: Option<PathBuf>,
+        /// Stop after N hops (edges at the cap are shown; their parents are not walked).
+        #[arg(long)]
+        depth: Option<usize>,
+        /// Machine-readable walk: `{root, complete, gaps, hops: [{depth, role, outcome, …}]}`.
+        #[arg(long)]
+        json: bool,
+        /// Print references and digests in full instead of collapsing them.
+        #[arg(long)]
+        full: bool,
+        /// Exit nonzero unless every hop is proven (or a legitimate external leaf) — the gate mode.
+        #[arg(long)]
+        require_complete: bool,
     },
     /// Verify a `.tsra`'s integrity (magic, seal, every block digest).
     ///
@@ -202,15 +321,22 @@ enum Cmd {
     Verify {
         /// The `.tsra` to verify (or an `s3://` / `http(s)://` URL with the `cloud` feature).
         file: PathBuf,
+        /// Worker threads for the parallel payload probe. Overrides `TESSERA_WORKERS` and
+        /// `.tessera/config.toml`; omitted, the resource-cap resolver picks the machine default.
+        /// Ignored for a URL, which verifies serially.
+        #[arg(long)]
+        workers: Option<usize>,
     },
     /// Render a `.tsra` as a navigable hierarchy tree.
     ///
     /// Renders the root status (product · schema · sealed · signed), `meta` fields, every block
-    /// with its columns / array spec, and `sources`.
+    /// with its columns / array spec, and `sources`. A partitioned table (leaves `pairs/NNNN`) is one
+    /// node `pairs/` with its columns; `--full` lists its leaves under it.
     Tree {
         /// The `.tsra` to render.
         file: PathBuf,
-        /// Print provenance references in full instead of collapsing a multi-file edge.
+        /// Print provenance references in full instead of collapsing a multi-file edge, and list a
+        /// partitioned table's leaves.
         #[arg(long)]
         full: bool,
         /// Deep-verify: re-hash every block payload (bounded memory) before rendering; the root
@@ -221,12 +347,13 @@ enum Cmd {
     },
     /// List one node's children (top level, `meta`, a block, or `sources`).
     ///
-    /// No PATH = top level (`meta`, blocks, `sources`); `PATH=meta` = metadata fields;
-    /// `PATH=<block>` = a table's columns or an array's spec; `PATH=sources` = edges.
+    /// No PATH = top level (`meta`, blocks, `sources`; a partitioned table's leaves `pairs/NNNN` are
+    /// one line `pairs/`); `PATH=meta` = metadata fields; `PATH=<block>` = a table's columns or an
+    /// array's spec; `PATH=<table>` = a partitioned table's columns and leaves; `PATH=sources` = edges.
     Ls {
         /// The `.tsra` to list.
         file: PathBuf,
-        /// Node to list (a block name, `meta`, or `sources`). Omit for the top level.
+        /// Node to list (a block or table name, `meta`, or `sources`). Omit for the top level.
         path: Option<String>,
         /// For `sources`: list every file in a multi-file edge instead of the first 8.
         #[arg(long)]
@@ -235,11 +362,12 @@ enum Cmd {
     /// Read table data as CSV/TSV/NDJSON over the logical cross-block view.
     ///
     /// Extracts table data over the **logical** (cross-block) view as CSV/TSV/NDJSON — a read of
-    /// `events` spans every `events_NNNN` block, projecting only the requested columns per block.
+    /// `pairs` spans every leaf `pairs/NNNN` of a partitioned table (and `events` every legacy
+    /// `events_NNNN` block), projecting only the requested columns per block.
     Read {
         /// The `.tsra` to read.
         file: PathBuf,
-        /// Table block, or a multi-block prefix like `events`.
+        /// Table name: a block, or a multi-block table like `pairs` (leaves `pairs/NNNN`).
         block: String,
         /// Columns to project (repeatable **or** comma-list: `-c ms -c en` or `-c ms,en`). Omit for
         /// all columns in schema order.
@@ -261,24 +389,33 @@ enum Cmd {
         /// Emit every row (overrides `--limit`).
         #[arg(long)]
         all: bool,
-        /// Default max rows when no `--rows`/`--head`/`--tail`/`--at`/`--all` is given.
-        #[arg(long, default_value_t = 20)]
-        limit: u64,
+        /// Max rows when no `--rows`/`--head`/`--tail`/`--at`/`--all` is given. Omitted, a **terminal**
+        /// gets a 20-row preview while a pipe or redirect gets every row.
+        #[arg(long)]
+        limit: Option<u64>,
         /// Output format: `csv` (default) | `tsv` | `ndjson`.
         #[arg(long, default_value = "csv")]
         format: String,
     },
     /// Numeric overview of an **array** block (shape, dtype, value range, spatial referencing).
     ///
-    /// Decodes the array once and reports shape · dtype · chunks · codec · min/max/mean/std (raw,
-    /// plus physical units when a rescale is present) · whether a world affine is carried.
+    /// Reports shape · dtype · chunks · codec · min/max/mean/std (raw, plus physical units when a
+    /// rescale is present) · whether a world affine is carried.
+    ///
+    /// When the block carries a `{hash, stats}` chunk-index sidecar the statistics are exact monoid
+    /// roll-ups and are read straight from it — **no block read, no decode**. Otherwise the array is
+    /// decoded once. The output names which path ran and whether the numbers are exact.
     Stats {
         /// The `.tsra` to read.
         file: PathBuf,
         /// The array block to summarise (e.g. `volume`).
         block: String,
+        /// Emit JSON, including `exact` and `method` — which path produced the numbers and whether
+        /// they can be trusted as exact (#347).
+        #[arg(long)]
+        json: bool,
     },
-    /// Pull a rectangular sub-region (2-D plane / 1-D line / point) of an **array** block as CSV.
+    /// Pull a rectangular sub-region (2-D plane / 1-D line / point) of an **array** block.
     ///
     /// `--index` is numpy-style, C-order, per axis: `N` (one index, negative from end), `:` (whole
     /// axis), or `A:B` (half-open). Only intersecting chunks are decoded. Axial CT plane example:
@@ -298,9 +435,21 @@ enum Cmd {
         /// Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples.
         #[arg(long)]
         physical: bool,
-        /// Output format: `csv` (default) | `tsv`.
-        #[arg(long, default_value = "csv")]
-        format: String,
+        /// Output format. `npy` is the lossless path for analysis; `png` is a **lossy** 8-bit preview.
+        #[arg(long, value_enum, default_value = "csv")]
+        format: nav::GridFormat,
+        /// Max rows for **text** output (csv/tsv/json). Omitted, a **terminal** gets a 20-row preview
+        /// while a pipe or redirect gets every row. Not valid with `npy`/`png`, which always write the
+        /// whole plane.
+        #[arg(long)]
+        limit: Option<u64>,
+        /// Write every row (text formats; `npy`/`png` always do).
+        #[arg(long)]
+        all: bool,
+        /// `png` only: explicit intensity window `lo,hi` mapped to black..white. Default: the plane's
+        /// own min/max.
+        #[arg(long, allow_hyphen_values = true)]
+        window: Option<String>,
     },
     /// Collapse an **array** block along one axis into a projection image (MIP / mean / sum).
     ///
@@ -320,14 +469,28 @@ enum Cmd {
         /// Apply the stored rescale (CT→HU, PET→Bq/mL) instead of raw stored samples.
         #[arg(long)]
         physical: bool,
-        /// Output format: `csv` (default) | `tsv`.
-        #[arg(long, default_value = "csv")]
-        format: String,
+        /// Output format. `npy` is the lossless path for analysis; `png` is a **lossy** 8-bit preview.
+        #[arg(long, value_enum, default_value = "csv")]
+        format: nav::GridFormat,
+        /// Max rows for **text** output (csv/tsv/json). Omitted, a **terminal** gets a 20-row preview
+        /// while a pipe or redirect gets every row. Not valid with `npy`/`png`, which always write the
+        /// whole plane.
+        #[arg(long)]
+        limit: Option<u64>,
+        /// Write every row (text formats; `npy`/`png` always do).
+        #[arg(long)]
+        all: bool,
+        /// `png` only: explicit intensity window `lo,hi` mapped to black..white. Default: the plane's
+        /// own min/max.
+        #[arg(long, allow_hyphen_values = true)]
+        window: Option<String>,
     },
     /// Build a multiscale pyramid of an array block (full-res + 2× downsampled levels) → a new `.tsra`.
     ///
-    /// Emits a `recon` product with `<block>`, `<block>/1`, `<block>/2`, … (each a 2× max-downsample
-    /// carrying its `at_level` affine), `derived_from` the source. Coarse levels give fast overviews.
+    /// Emits a `recon` product with `<block>/0` (full resolution), `<block>/1`, `<block>/2`, … (each a
+    /// 2× max-downsample carrying its `at_level` affine), `derived_from` the source. Coarse levels give
+    /// fast overviews. The levels above 0 are derived blocks (`class: "derived"`): the product's
+    /// `content_hash` is level 0's alone, whatever `--levels` is, and the seal covers every level.
     Pyramid {
         /// The source `.tsra`.
         file: PathBuf,
@@ -365,14 +528,27 @@ enum Cmd {
         repo: PathBuf,
         /// The lineage id (printed by `import` / `log`).
         lineage: String,
-        /// Metadata field to set, `key=value` (value parsed as JSON, else a bare string). Repeatable.
+        /// Metadata field to set, `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text). Repeatable.
         #[arg(long = "set")]
         set: Vec<String>,
         /// Attach an already-encoded block from another `.tsra`: `[NAME=]SOURCE.tsra:BLOCK`
         /// (composition, not encoding). Repeatable.
+        ///
+        /// SOURCE must pass `tessera verify`. The copy lands primary (part of `content_hash`),
+        /// whatever its class in SOURCE. A chunk index is never copied, whatever it is called:
+        /// when SOURCE indexes BLOCK, the index `NAME.cidx` is rebuilt from the copied bytes and
+        /// lands derived.
         #[arg(long = "add-block")]
         add_block: Vec<String>,
         /// Remove a block by name (manifest edit; the object stays for other versions). Repeatable.
+        ///
+        /// Its derived blocks go with it: its derived `.cidx`, and for pyramid level 0 (`BASE/0`)
+        /// the derived levels above it and their indexes. Any other chunk index of it is never
+        /// removed implicitly: remove it too, or the commit is refused (an index without its block
+        /// is refused everywhere).
         #[arg(long = "remove-block")]
         remove_block: Vec<String>,
     },
@@ -484,16 +660,17 @@ enum Cmd {
         /// Output path for the recovered bytes.
         out: PathBuf,
     },
-    /// Explode a `.tsra` into a directory (`manifest.json` + `blocks/<name>`).
+    /// Explode a `.tsra` into a directory (`manifest.json` + `manifest.seal` + `blocks/<name>`).
     Unpack {
         /// The `.tsra` to explode.
         file: PathBuf,
-        /// Output directory to write `manifest.json` + `blocks/<name>`.
+        /// Output directory to write `manifest.json` + `manifest.seal` + `blocks/<name>`.
         outdir: PathBuf,
     },
-    /// Pack an exploded directory (`manifest.json` + `blocks/`) into a sealed `.tsra`.
+    /// Pack an exploded directory (`manifest.json` + `manifest.seal` + `blocks/`) into a sealed
+    /// `.tsra`.
     Pack {
-        /// Exploded directory containing `manifest.json` + `blocks/`.
+        /// Exploded directory containing `manifest.json` + `manifest.seal` + `blocks/`.
         dir: PathBuf,
         /// Output `.tsra` path.
         out: PathBuf,
@@ -538,8 +715,12 @@ enum Cmd {
         /// streaming path. Default: 256 MiB.
         #[arg(long, requires = "spec")]
         stream_threshold: Option<String>,
+        /// Boxed so `Cmd` stays small: `IngestSrc::Table` carries a dozen CLI flags, and without the
+        /// indirection the whole `Cmd` enum pays that variant's size on every arm
+        /// (`clippy::large_enum_variant`). clap constructs it once per process, so the allocation is
+        /// free in practice and the enum stops being 400 bytes wide.
         #[command(subcommand)]
-        src: Option<IngestSrc>,
+        src: Option<Box<IngestSrc>>,
     },
     /// Emit a FAIR discovery record for a `.tsra` (prints JSON to stdout).
     Export {
@@ -587,13 +768,24 @@ enum Cmd {
     /// Verify a sealed `.tsra` against its signature (embedded first, `<file>.tsra.sig.json` fallback).
     ///
     /// Defaults to the **trust store** (the signature's `key_id` must be a key you trust);
-    /// `--pubkey` checks against an explicit key.
+    /// `--pubkey` checks against an explicit key. The trust stores consulted are every
+    /// `--trust-dir` (or, without one, every `TESSERA_TRUST_DIR` entry — absolute paths only), then
+    /// the user store
+    /// (`$XDG_CONFIG_HOME/tessera/trust` or `~/.config/tessera/trust`). A repo store such as
+    /// `./.tessera/trust` is never consulted unless named. On success, stderr names the accepting
+    /// `key_id` and the store (or `--pubkey`) it came from. Automated verifiers should pin
+    /// `--pubkey` together with `--require-signer`.
     VerifySig {
         /// The sealed `.tsra` to verify.
         file: PathBuf,
         /// Explicit hex ed25519 public-key file (skips the trust store).
         #[arg(long)]
         pubkey: Option<PathBuf>,
+        /// A trust store directory to consult before the user store (repeatable; may be relative).
+        /// Replaces `TESSERA_TRUST_DIR` (a `:`-separated list of absolute paths, `;` on Windows)
+        /// when given.
+        #[arg(long = "trust-dir", value_name = "DIR", conflicts_with = "pubkey")]
+        trust_dir: Vec<PathBuf>,
         /// Also require the signature's `signer` to equal this identity (e.g. an ORCID iD URL).
         #[arg(long)]
         require_signer: Option<String>,
@@ -626,7 +818,7 @@ enum Cmd {
     /// Run SQL (DataFusion) over a `.tsra` table block (needs `--features sql`).
     ///
     /// Registers the block's [`LogicalTableView`] as an Arrow `MemTable` under the block name
-    /// (so `FROM events` transparently spans every `events_NNNN` shard) and hands the query to
+    /// (so `FROM pairs` transparently spans every leaf `pairs/NNNN`) and hands the query to
     /// DataFusion. Result is CSV (default) / TSV.
     ///
     /// Spike phase (#251): the whole block is materialized in RAM before the query runs —
@@ -635,7 +827,7 @@ enum Cmd {
     Sql {
         /// The `.tsra` to query.
         file: PathBuf,
-        /// Table block (or multi-block prefix like `events`) to expose as the SQL table.
+        /// Table name (a block, or a multi-block table like `pairs`) to expose as the SQL table.
         block: String,
         /// The SQL query (`FROM <block>`; SELECT/WHERE/ORDER BY/LIMIT are the phase-1 target).
         query: String,
@@ -761,13 +953,48 @@ enum BenchAction {
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
+    /// Head-to-head size + latency against HDF5 and Parquet on the same logical data (#388).
+    ///
+    /// Writes one synthetic volume and TWO synthetic tables to `.tsra`, HDF5 and Parquet — each
+    /// format at its sensible DEFAULT and at a TUNED setting, all printed — then measures on-disk
+    /// size, write+seal, full read, projected/column read, ROI read and integrity cost. Reports the
+    /// median of N runs with spread; correctness is asserted before any timing counts. Rows where
+    /// Tessera loses are included on purpose.
+    ///
+    /// Both table fixtures are always reported: a PERIODIC one that is adversarial for
+    /// value-distribution codecs, and a CONTINUOUS one shaped after real listmode. Showing only one
+    /// of them would be choosing the answer (#493).
+    Compare {
+        /// Which dataset(s) to run: `volume`, `table`, or `both`.
+        #[arg(long, default_value = "both")]
+        dataset: String,
+        /// Timed runs per cell; the report prints the median and the [min..max] spread.
+        #[arg(long, default_value_t = 7)]
+        iters: usize,
+        /// `table` for the human report, `json` for CI.
+        #[arg(long, default_value = "table")]
+        format: String,
+        /// Also measure cold-cache reads, evicting each file with `posix_fadvise(DONTNEED)` first.
+        /// Best-effort: the kernel may keep pages, so the report says so and names the kernel.
+        /// Linux only: other OSes (macOS included) have no `posix_fadvise`, so `--cold` fails
+        /// there with an error instead of timing warm reads under a "cold" label.
+        #[arg(long)]
+        cold: bool,
+        /// Volume edge (N^3 int16). Default 256 = 32 MiB raw, matching the #143 harness.
+        #[arg(long, default_value_t = bench_compare::VOL_N)]
+        vol_n: usize,
+        /// Table row count (`u8 + 2xf4`) for each synthetic fixture.
+        #[arg(long, default_value_t = bench_compare::TABLE_ROWS)]
+        rows: usize,
+    },
 }
 
 #[derive(Subcommand)]
 enum TrustAction {
     /// Trust a public key under a handle.
     ///
-    /// Stores it in the user store, or `--repo` for `.tessera/trust/`.
+    /// Stores it in the user store, or `--repo` for `./.tessera/trust/` — which `verify-sig`
+    /// consults only when passed with `--trust-dir` (or by absolute path in `TESSERA_TRUST_DIR`).
     Add {
         /// Hex ed25519 public-key file (e.g. `key.pub` from `tessera keygen`).
         pubkey: PathBuf,
@@ -777,16 +1004,29 @@ enum TrustAction {
         /// The signer identity to record alongside it (e.g. an ORCID iD URL).
         #[arg(long)]
         signer: Option<String>,
-        /// Store in the repo-local `.tessera/trust/` instead of the user store.
+        /// Store in the repo-local `./.tessera/trust/` instead of the user store.
         #[arg(long)]
         repo: bool,
     },
-    /// List trusted keys.
-    List,
-    /// Remove a trusted key by handle or `key_id`.
+    /// List trusted keys, per store.
+    ///
+    /// Without `--repo`: the stores `verify-sig` would consult with the same `--trust-dir`
+    /// flags and environment, in lookup order.
+    List {
+        /// List the repo-local `./.tessera/trust/` instead.
+        #[arg(long, conflicts_with = "trust_dir")]
+        repo: bool,
+        /// A trust store directory to include, as for `verify-sig --trust-dir` (repeatable).
+        #[arg(long = "trust-dir", value_name = "DIR")]
+        trust_dir: Vec<PathBuf>,
+    },
+    /// Remove a trusted key by handle or `key_id` from the user store (or `--repo`).
     Remove {
         /// Handle or `key_id` of the key to remove.
         target: String,
+        /// Remove from the repo-local `./.tessera/trust/` instead of the user store.
+        #[arg(long)]
+        repo: bool,
     },
 }
 
@@ -820,7 +1060,10 @@ enum IngestSrc {
         /// sealed manifest (ADR-0040 PHI hygiene: an absolute path on clinical data is itself PHI).
         #[arg(long, value_name = "LABEL")]
         source_label: Option<String>,
-        /// Attach metadata `key=value` (value parsed as JSON, else string) — supplies/overrides schema
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text) — supplies/overrides schema
         /// fields. Repeatable: `--meta study=DUPLET-07 --meta modality=PT`.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
@@ -853,7 +1096,10 @@ enum IngestSrc {
         /// (an N-slice series would embed N PHI-bearing absolute paths). ADR-0040.
         #[arg(long, value_name = "LABEL")]
         source_label: Option<String>,
-        /// Attach metadata `key=value` (value parsed as JSON, else string). Repeatable.
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text). Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
         /// Per-slice-rescale handling (#300): `bit-exact` (default) rejects a series whose slices
@@ -883,7 +1129,10 @@ enum IngestSrc {
         /// sealed manifest (ADR-0040 PHI hygiene).
         #[arg(long, value_name = "LABEL")]
         source_label: Option<String>,
-        /// Attach metadata `key=value` (value parsed as JSON, else string). Repeatable.
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text). Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
         /// Opt-in GEDDF transform (#310): annotate columns (unit/description) + requantize the
@@ -891,6 +1140,108 @@ enum IngestSrc {
         /// (physical = raw × scale) — ~2× smaller, physically lossless. Default off → byte-identical.
         #[arg(long)]
         quantize: bool,
+    },
+    /// Any table-shaped file (Parquet · Arrow/Feather · CSV) → a flat `table` product.
+    ///
+    /// Normalises the source's *logical values* into Tessera's flat columns and re-encodes them under
+    /// Tessera's own deterministic codecs (ADR-0056). The source's compression, page layout and
+    /// dictionary ordering are all dropped by design: a snappy Parquet and a zstd Parquet of the same
+    /// logical table produce the same `content_hash`.
+    ///
+    /// The verb names the **primitive**, not the format — so `ingest table` is also how you override a
+    /// source that misrepresents its shape (ADR-0056 §1/§4). `--from` is sniffed from magic bytes when
+    /// unambiguous; CSV has none, so it must be named.
+    Table {
+        /// Source file: Parquet, Arrow IPC / Feather, or CSV/TSV.
+        input: PathBuf,
+        /// Output `.tsra`.
+        out: PathBuf,
+        /// Product name (the human handle in the manifest, and an identity input).
+        #[arg(long)]
+        name: String,
+        /// Acquisition timestamp (ISO-8601), recorded verbatim. Never defaulted from the clock — an
+        /// identity input must be reproducible.
+        #[arg(long)]
+        timestamp: String,
+        /// Source format. Sniffed from magic bytes (PAR1 / ARROW1) when omitted; required for CSV,
+        /// which has none.
+        #[arg(long, value_parser = ["parquet", "arrow", "csv"])]
+        from: Option<String>,
+        /// Drop a source column before mapping. Repeatable. The escape hatch every rejected-column
+        /// error names (opaque bytes, lists, over-wide decimals).
+        #[arg(long = "exclude", value_name = "COLUMN")]
+        exclude: Vec<String>,
+        /// CSV only: declare a column as `NAME:DTYPE`, in file order. Repeatable and **required** for
+        /// CSV — Tessera infers no dtypes, because an inferred schema depends on which rows were
+        /// sampled and the seal must be reproducible. Append `?` to allow NULLs (`age:i4?`).
+        /// Accepted dtypes: i1 i2 i4 i8 · u1 u2 u4 u8 · f4 f8 · b1 · str.
+        #[arg(long = "column", value_name = "NAME:DTYPE")]
+        column: Vec<String>,
+        /// CSV only: field delimiter (default `,`; pass a tab for TSV). Never sniffed.
+        #[arg(long, value_name = "CHAR")]
+        delimiter: Option<String>,
+        /// CSV only: the file has no header row. By default row 1 is treated as a header and
+        /// **cross-checked** against `--column` order, which is what catches a positional mismatch
+        /// before every value lands in the wrong column.
+        #[arg(long)]
+        no_header: bool,
+        /// CSV only: an extra field text to read as NULL (the empty field always is). Repeatable.
+        #[arg(long = "null-token", value_name = "TOKEN")]
+        null_token: Vec<String>,
+        /// Per-column semantics TOML — `short_name` / `description` / `unit` / `scale` /
+        /// `sensitivity` per column, landing INSIDE the seal (ADR-0056 §7). This is the door that
+        /// keeps a generically-ingested table from being "a Parquet file with a seal on it"; the other
+        /// door is `tessera commit --set …` after the fact.
+        #[arg(long, value_name = "FILE")]
+        column_meta: Option<PathBuf>,
+        /// Clean label for the `ingested_from` provenance edge — replaces the input PATH in the
+        /// sealed manifest (ADR-0040 PHI hygiene).
+        #[arg(long, value_name = "LABEL")]
+        source_label: Option<String>,
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text). Repeatable.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
+    },
+    /// Any dense numeric grid (NumPy `.npy`, or `.npz` → a collection) → an `array` product.
+    ///
+    /// The array twin of `ingest table`: the verb names the **primitive**, so this is also how you
+    /// override a source that misrepresents its shape (ADR-0056 §1/§4). `--from` is sniffed from magic
+    /// bytes (`\x93NUMPY` for `.npy`, `PK` for `.npz`), and the extension is never consulted.
+    ///
+    /// One wrinkle worth knowing, because it is the format's and not ours: a NumPy **structured**
+    /// (record) dtype is rows of typed fields, so it seals a `table` product rather than an `array`.
+    /// The shape of the data decides the primitive, and the tool does not make you predict your own
+    /// dtype.
+    Array {
+        /// Source file: NumPy `.npy`, or `.npz` (a zip of `.npy` members).
+        input: PathBuf,
+        /// Output. A `.tsra` for a single array; a **directory** for a `.npz`, which is a collection
+        /// (one array product per member — ADR-0056 §11).
+        out: PathBuf,
+        /// Product name. For a `.npz` this names the collection; each member's product is named after
+        /// the archive member (`np.savez(f, energy=…)` → `energy`).
+        #[arg(long)]
+        name: String,
+        /// Acquisition timestamp (ISO-8601). Never defaulted from the clock — an identity input must be
+        /// reproducible.
+        #[arg(long)]
+        timestamp: String,
+        /// Source format. Sniffed from magic bytes when omitted.
+        #[arg(long, value_parser = ["npy", "npz"])]
+        from: Option<String>,
+        /// Clean label for the `ingested_from` provenance edge — replaces the input PATH in the sealed
+        /// manifest (ADR-0040 PHI hygiene).
+        #[arg(long, value_name = "LABEL")]
+        source_label: Option<String>,
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text). Repeatable.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
     },
     /// Preserve an un-parsed file as an opaque `blob` product (the "junk" tier).
     ///
@@ -916,11 +1267,104 @@ enum IngestSrc {
         /// sealed manifest (ADR-0040 PHI hygiene; vendor `.l64` filenames often carry patient ids).
         #[arg(long, value_name = "LABEL")]
         source_label: Option<String>,
-        /// Attach metadata `key=value` (value parsed as JSON, else string) — e.g. `--meta study=DUPLET-07`
+        /// Attach metadata `key=value`
+        /// (value parsed as JSON, else a bare string. Text that reads as a number but
+        /// is not JSON's spelling (`+5`, `.5`, `01`, `inf`, `NaN`), or a number beyond ±(2^53−1), is
+        /// refused, never stored as a string; quote it, `k='"…"'`, to keep it as text) — e.g. `--meta study=DUPLET-07`
         /// to satisfy the blob schema's recommended `study`. Repeatable.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
     },
+}
+
+/// Build the grid options for `slice`/`project` from the parsed flags, refusing binary output to a
+/// terminal.
+///
+/// A `.npy`/`.png` written to a TTY is a screenful of garbage, which is the same class of foot-gun as a
+/// flag that silently does nothing — so it is an error naming the fix, rather than a surprise. Pipes and
+/// redirections are not terminals, so the useful cases are unaffected (#387).
+fn grid_opts(
+    format: nav::GridFormat,
+    limit: Option<u64>,
+    all: bool,
+    window: Option<&str>,
+) -> tessera_core::Result<nav::GridOpts> {
+    if !format.is_text() && stdout_is_terminal() {
+        return Err(tessera_core::Error::Invalid(format!(
+            "--format {format:?} writes binary data — redirect it to a file \
+             (e.g. `> plane.{}`) or pipe it onward",
+            format!("{format:?}").to_lowercase()
+        )));
+    }
+    let window = match window {
+        None => None,
+        Some(w) => {
+            let (lo, hi) = w.split_once(',').ok_or_else(|| {
+                tessera_core::Error::Invalid(
+                    "--window expects `lo,hi` (e.g. `--window -1000,2000`)".into(),
+                )
+            })?;
+            let parse = |s: &str, which: &str| {
+                s.trim().parse::<f64>().map_err(|_| {
+                    tessera_core::Error::Invalid(format!("--window {which} '{s}' is not a number"))
+                })
+            };
+            let (lo, hi) = (parse(lo, "lo")?, parse(hi, "hi")?);
+            // Written as positive comparisons, not `!(lo < hi)`: a negated partial-order compare reads
+            // badly AND silently accepts NaN, which `is_finite` has to rule out explicitly.
+            if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+                return Err(tessera_core::Error::Invalid(format!(
+                    "--window needs finite lo < hi (got lo {lo}, hi {hi})"
+                )));
+            }
+            Some((lo, hi))
+        }
+    };
+    Ok(nav::GridOpts {
+        format,
+        limit,
+        all,
+        interactive: stdout_is_terminal(),
+        window,
+    })
+}
+
+/// Name the manifest fields this build verified but does not interpret (ADR-0060 §2.2, RFC §13:
+/// an older reader warns and reads what it can).
+fn warn_newer_fields(m: &tessera_core::Manifest) {
+    warn_not_interpreted("fields", m.newer_fields());
+}
+
+/// The one stderr warning for keys from a newer format revision (#573, #873): `what` names them
+/// (`fields`, `collection 'x': fields`, `embedded schema rules`). Silent when `newer` is empty.
+pub(crate) fn warn_not_interpreted(what: &str, newer: &[String]) {
+    if !newer.is_empty() {
+        eprintln!(
+            "warning: {what} from a newer format revision are not interpreted: {}",
+            newer.join(", ")
+        );
+    }
+}
+
+/// Is stdout a terminal? The one place that asks, so the default-cap rule and the refuse-binary-to-a-TTY
+/// rule cannot disagree about what "interactive" means.
+fn stdout_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+}
+
+/// Print a grid write's advisories to stderr — the row-cap note (same wording as `read`'s) and the
+/// `png` lossy-preview line. stdout stays pure data so `| head` and `> file` keep working.
+fn grid_notes(res: &nav::GridResult) {
+    if res.truncated {
+        eprintln!(
+            "note: showed {} of {} rows — pass --all or --limit N for more",
+            res.shown, res.total
+        );
+    }
+    if let Some(n) = &res.note {
+        eprintln!("note: {n}");
+    }
 }
 
 fn main() -> ExitCode {
@@ -944,6 +1388,22 @@ fn main() -> ExitCode {
         .try_init();
     match run(Cli::parse().cmd) {
         Ok(()) => ExitCode::SUCCESS,
+        // ADR-0057 §7: **two distinct errors, two distinct exit codes**, so a cookbook recipe or a
+        // script can branch on "wrong build" versus "wrong invocation" without parsing stderr.
+        //
+        //   3 — the backend name is known, its handler is not in this build. Rebuilding or downloading
+        //       the release binary fixes it; nothing about the command is wrong.
+        //   2 — clap's own usage error, which an unknown `--from` value already produces (with its
+        //       "tip: a similar value exists" suggestion), so it needs no code here.
+        //   1 — everything else.
+        //
+        // The long guidance lives in `tessera_ingest::backends` rather than in the `Display` impl,
+        // because it needs the compiled/disabled lists and a library caller wants the one-liner.
+        Err(e @ tessera_core::Error::BackendNotCompiled(_)) => {
+            eprintln!("error: {e}.\n");
+            eprint!("{}", tessera_ingest::backends::missing_backend_help());
+            ExitCode::from(3)
+        }
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
@@ -953,20 +1413,63 @@ fn main() -> ExitCode {
 
 fn run(cmd: Cmd) -> tessera_core::Result<()> {
     match cmd {
-        Cmd::Inspect { file, full, verify } => {
+        Cmd::Inspect {
+            file,
+            full,
+            verify,
+            json,
+            resolve_config,
+        } => {
+            // `--json` promises *exactly* the serialized manifest (#417/#479 pinned that), and a
+            // resolved config is not in the manifest. Refuse the pair rather than silently dropping
+            // one flag or quietly widening the documented JSON shape.
+            if json && resolve_config {
+                return Err(tessera_core::Error::Invalid(
+                    "--resolve-config cannot be combined with --json: --json is exactly the sealed \
+                     manifest, and the resolved config is not part of it. Use one or the other."
+                        .into(),
+                ));
+            }
             let mut r = open_local_or_url(&file)?;
             // Deep-verify (opt-in): re-hash every payload before rendering, so a corrupt file
             // errors out here instead of printing a clean-looking summary (#268). Bounded RSS.
             if verify {
                 r.verify_payloads(&file.display().to_string())?;
             }
+            // `--json`: the sealed manifest's fields. #417's motivation was that reading a sealed
+            // `generation` meant a `zipfile` + `json` Python one-liner; this is that escape hatch,
+            // typed and supported, so provenance is scriptable without the container internals.
+            if json {
+                println!("{}", serde_json::to_string_pretty(r.manifest())?);
+                return Ok(());
+            }
+            // Resolve BEFORE printing anything: an unresolvable `config_ref` must fail cleanly, not
+            // half-render a summary and then error partway down it. Needs `&mut r`, so it also has to
+            // happen before `m` takes its immutable borrow for the rest of the render.
+            let resolved = resolve_config
+                .then(|| resolved_config_lines(r.as_mut(), &file, full))
+                .transpose()?;
             let m = r.manifest();
             println!("tessera {} · product={}", m.tessera_version, m.product);
             println!("id            {}", m.id);
             println!("name          {}", m.name);
             println!("timestamp     {}", m.timestamp);
+            // ADR-0058 §1/§2, the operator surface (#417): who/what made this, and with what recipe.
+            // Both are sealed into `manifest_hash`, so what is printed here is tamper-evident.
             if let Some(p) = &m.producer {
-                println!("producer      {}", p.display());
+                for line in nav::producer_lines(p) {
+                    println!("{line}");
+                }
+            }
+            if let Some(g) = &m.generation {
+                for line in nav::generation_lines(g, full) {
+                    println!("{line}");
+                }
+            }
+            // `generation_lines` printed the recipe; these are the dereferenced `config_ref` lines
+            // resolved above (#452 part 1).
+            for line in resolved.into_iter().flatten() {
+                println!("{line}");
             }
             if let Some(s) = &m.study {
                 println!("study         {s}");
@@ -984,12 +1487,17 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             }
             println!("blocks        {}", m.blocks.len());
             for b in &m.blocks {
+                // A derived block (ADR-0028 §4) is sealed but no leaf of `content_hash`: say so.
+                let class = if b.is_primary() { "" } else { "  derived" };
                 println!(
-                    "  - {:<20} {:<6?} {}",
+                    "  - {:<20} {:<6?} {}{class}",
                     b.name,
                     b.kind,
                     b.digest.as_deref().unwrap_or("-")
                 );
+                if let Some(line) = nav::table_codec_line(b) {
+                    println!("{line}");
+                }
             }
             if !m.sources.is_empty() {
                 println!("sources       {}", m.sources.len());
@@ -1010,14 +1518,48 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             }
             Ok(())
         }
-        Cmd::Verify { file } => {
+        Cmd::Provenance {
+            file,
+            search,
+            collection,
+            depth,
+            json,
+            full,
+            require_complete,
+        } => {
+            let opts = provenance::Opts {
+                collection,
+                search,
+                depth,
+                json,
+                full,
+            };
+            let mut out = std::io::stdout().lock();
+            let verdict = provenance::run(&file, &opts, &mut out)?;
+            // The chain is already rendered either way, so these only decide the exit code — the operator
+            // sees WHICH hops are unproven rather than just that something is. A parent the chain NEEDS
+            // being unverifiable is unconditional, never a state a gate opts into checking. An incomplete
+            // chain is opt-in, because resolving one from a single directory routinely fails and a verb
+            // that died on it would be useless in a pipeline. A corrupt file no edge needed is neither: it
+            // is warned about on stderr, because this verb answers where one product came from, not
+            // whether a whole store is healthy.
+            if verdict.corrupt_parents > 0 {
+                return Err(provenance::corruption_error(verdict.corrupt_parents));
+            }
+            if require_complete && !verdict.complete {
+                return Err(provenance::incomplete_error(&file));
+            }
+            Ok(())
+        }
+        Cmd::Verify { file, workers } => {
             let label = file.display().to_string();
             // Payload half of verification: re-derive every block's digest from its stored bytes at
             // bounded RSS + typed, located errors (#268 parts 3+4). `open` already checked the seal.
             // A local `.tsra` fans the probe across the worker pool — each block is independently
             // addressable in the STORED zip (#367); a URL verifies serially (no cheap multi-handle
-            // reopen). Worker count is the machine default for now; #368 will feed it from the
-            // resource-cap resolver.
+            // reopen). The worker count comes from the resource-cap resolver (#368/#373), so
+            // `--workers` > `TESSERA_WORKERS` > `.tessera/config.toml` > machine default applies
+            // here exactly as it does on ingest — one cap for the whole CLI, not a per-verb default.
             #[cfg(feature = "cloud")]
             let is_url = cloud_url(&file).is_some();
             #[cfg(not(feature = "cloud"))]
@@ -1026,11 +1568,14 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 let mut r = open_local_or_url(&file)?; // magic + manifest seal
                 let n = r.manifest().blocks.len();
                 r.verify_payloads(&label)?;
+                warn_newer_fields(r.manifest());
                 println!("OK  {label} verified ({n} blocks)");
             } else {
-                let workers = tessera_io::WriteConfig::for_system().worker_count();
+                let workers = resource::resolve_write_config(workers, None)?.worker_count();
                 // Returns the block count (verified with L1 seal + L2 payloads) — no extra reopen.
                 let n = tessera_io::verify_payloads_parallel(&file, &label, workers)?;
+                // The file just verified; this re-reads only its manifest, for the warning.
+                warn_newer_fields(&tessera_io::read_manifest_unverified(&file)?);
                 println!("OK  {label} verified ({n} blocks)");
             }
             Ok(())
@@ -1107,6 +1652,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                     rows,
                     all,
                     limit,
+                    interactive: stdout_is_terminal(),
                     format: fmt,
                 },
                 &mut out,
@@ -1119,9 +1665,9 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             }
             Ok(())
         }
-        Cmd::Stats { file, block } => {
+        Cmd::Stats { file, block, json } => {
             let mut out = std::io::stdout().lock();
-            nav::stats(&file, &block, &mut out)
+            nav::stats(&file, &block, json, &mut out)
         }
         Cmd::Slice {
             file,
@@ -1130,18 +1676,23 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             world,
             physical,
             format,
+            limit,
+            all,
+            window,
         } => {
-            let fmt = nav::Format::parse(&format)?;
+            let opts = grid_opts(format, limit, all, window.as_deref())?;
             let mut out = std::io::stdout().lock();
-            nav::slice(
+            let res = nav::slice(
                 &file,
                 &block,
                 index.as_deref(),
                 world.as_deref(),
                 physical,
-                fmt,
+                &opts,
                 &mut out,
-            )
+            )?;
+            grid_notes(&res);
+            Ok(())
         }
         Cmd::Project {
             file,
@@ -1150,10 +1701,15 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             mode,
             physical,
             format,
+            limit,
+            all,
+            window,
         } => {
-            let fmt = nav::Format::parse(&format)?;
+            let opts = grid_opts(format, limit, all, window.as_deref())?;
             let mut out = std::io::stdout().lock();
-            nav::project(&file, &block, &axis, &mode, physical, fmt, &mut out)
+            let res = nav::project(&file, &block, &axis, &mode, physical, &opts, &mut out)?;
+            grid_notes(&res);
+            Ok(())
         }
         Cmd::Pyramid {
             file,
@@ -1283,14 +1839,17 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
             // Prefer the schema **embedded in the file** (self-describing) over the binary's
             // registry — a sealed `.tsra` carries its own contract (obligatory since the
             // self-describing batch). `--json` dumps that embedded contract verbatim.
+            // A rule from a newer format revision is shown, warned about, and blocks the final
+            // validation below (#873); the typed view only displays what this build understands.
             let embedded = m
                 .schema
                 .as_ref()
-                .map(tessera_core::ProductSchema::from_value)
+                .map(|v| tessera_core::ProductSchema::view_of(v).map(|(s, _)| s))
                 .transpose()?;
+            warn_not_interpreted("embedded schema rules", &nav::schema_newer_rules(m));
             if json {
-                let schema = match &embedded {
-                    Some(s) => s.to_value()?,
+                let schema = match &m.schema {
+                    Some(v) => v.clone(),
                     None => SchemaRegistry::builtin()
                         .get(&m.product)
                         .ok_or_else(|| {
@@ -1391,7 +1950,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                             .into(),
                     )
                 })?;
-                run_ingest(src)
+                run_ingest(*src)
             }
         }
         Cmd::Export { file, format } => {
@@ -1461,43 +2020,74 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
         }
         Cmd::Trust { action } => {
             let mut w = std::io::stdout().lock();
-            let dirs = trust::trust_dirs();
+            // The store `add`/`remove` manage: the user store, or the repo store with `--repo`.
+            let managed = |repo: bool| -> tessera_core::Result<trust::TrustStore> {
+                if repo {
+                    Ok(trust::TrustStore::repo())
+                } else {
+                    trust::TrustStore::user().ok_or_else(|| {
+                        tessera_core::Error::Invalid(format!(
+                            "no user config dir ($HOME/$XDG_CONFIG_HOME unset) — pass --repo \
+                             to use {}",
+                            trust::REPO_TRUST_DIR
+                        ))
+                    })
+                }
+            };
+            let repo = matches!(
+                action,
+                TrustAction::Add { repo: true, .. }
+                    | TrustAction::List { repo: true, .. }
+                    | TrustAction::Remove { repo: true, .. }
+            );
             match action {
                 TrustAction::Add {
                     pubkey,
                     name,
                     signer,
                     repo,
-                } => {
-                    let dir = if repo {
-                        PathBuf::from(".tessera/trust")
+                } => trust::add(
+                    &managed(repo)?.path,
+                    &pubkey,
+                    &name,
+                    signer.as_deref(),
+                    &mut w,
+                ),
+                TrustAction::List { repo, trust_dir } => {
+                    let stores = if repo {
+                        vec![trust::TrustStore::repo()]
                     } else {
-                        trust::trust_dirs().into_iter().nth(1).ok_or_else(|| {
-                            tessera_core::Error::Invalid(
-                                "no user config dir ($HOME/$XDG_CONFIG_HOME unset) — pass --repo \
-                                 to store in .tessera/trust"
-                                    .into(),
-                            )
-                        })?
+                        trust::trust_stores(&trust_dir)?
                     };
-                    trust::add(&dir, &pubkey, &name, signer.as_deref(), &mut w)
+                    trust::list(&stores, &mut w)
                 }
-                TrustAction::List => trust::list(&dirs, &mut w),
-                TrustAction::Remove { target } => trust::remove(&dirs, &target, &mut w),
+                TrustAction::Remove { target, repo } => {
+                    trust::remove(&managed(repo)?, &target, &mut w)
+                }
+            }?;
+            if repo {
+                trust::repo_store_note(&mut std::io::stderr().lock())?;
             }
+            Ok(())
         }
         Cmd::VerifySig {
             file,
             pubkey,
+            trust_dir,
             require_signer,
         } => {
-            let mut w = std::io::stdout().lock();
+            // `--pubkey` skips the store, so resolve it (and its env/dir checks) only without one.
+            let stores = match pubkey {
+                Some(_) => Vec::new(),
+                None => trust::trust_stores(&trust_dir)?,
+            };
             trust::verify_sig(
                 &file,
                 pubkey.as_deref(),
                 require_signer.as_deref(),
-                &trust::trust_dirs(),
-                &mut w,
+                &stores,
+                &mut std::io::stdout().lock(),
+                &mut std::io::stderr().lock(),
             )
         }
         Cmd::Sql {
@@ -1569,23 +2159,50 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 dataset,
                 seed,
             }),
+            BenchAction::Compare {
+                dataset,
+                iters,
+                format,
+                cold,
+                vol_n,
+                rows,
+            } => bench_compare::run(bench_compare::CompareOpts {
+                dataset,
+                iters,
+                format,
+                cold,
+                vol_n,
+                rows,
+            }),
         },
     }
 }
 
 /// Parse repeatable `--meta key=value` into the product's metadata map (the config-side supply that
-/// satisfies a schema's required/recommended fields). Each `value` is parsed as JSON, falling back to a
-/// bare string — same convention as `commit --set`. Shared by every `tessera ingest` subcommand so
-/// metadata is supplied one generic way, not per-backend flags.
+/// satisfies a schema's required/recommended fields). Each `value` is read by
+/// [`tessera_core::canonical::parse_user_value`] — JSON, else a bare string; a JSON number a seal
+/// cannot hold is refused, never kept as a string — the same convention as `commit --set`. Shared by
+/// every `tessera ingest` subcommand so metadata is supplied one generic way, not per-backend flags.
+///
+/// Each value is then checked against the encoding and range its field declares in the built-in
+/// `schema` the subcommand writes (#895), and refused naming the flag (`--meta kvp`), before
+/// anything is read or written.
 fn parse_meta(
     items: &[String],
+    schema: &str,
 ) -> tessera_core::Result<std::collections::BTreeMap<String, serde_json::Value>> {
+    let registry = SchemaRegistry::builtin();
+    let schema = registry.get(schema);
     let mut out = std::collections::BTreeMap::new();
     for kv in items {
         let (k, v) = kv.split_once('=').ok_or_else(|| {
             tessera_core::Error::Invalid(format!("--meta expects key=value, got '{kv}'"))
         })?;
-        let value = serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.into()));
+        let flag = format!("--meta {k}");
+        let value = tessera_core::canonical::parse_user_value(&flag, v)?;
+        if let Some(schema) = schema {
+            schema.check_value(k, &value, &flag)?;
+        }
         out.insert(k.to_string(), value);
     }
     Ok(out)
@@ -1699,7 +2316,7 @@ fn do_sql(
 /// This is the "net code delete" the per-format paths now share with the spec-driven path —
 /// dispatch logic lives in one place (`engine::dispatch`), not duplicated here.
 fn run_ingest(src: IngestSrc) -> tessera_core::Result<()> {
-    let (spec, user_out) = ingest_src_to_spec(src)?;
+    let (spec, user_out, out_is_dir) = ingest_src_to_spec(src)?;
     let staging = tempfile::tempdir().map_err(|e| {
         tessera_core::Error::Invalid(format!("tessera ingest: create staging dir: {e}"))
     })?;
@@ -1713,6 +2330,43 @@ fn run_ingest(src: IngestSrc) -> tessera_core::Result<()> {
         &cfg,
         engine::DEFAULT_STREAM_THRESHOLD_BYTES,
     )?;
+    // A collection-shaped source (a `.npz` archive — ADR-0056 §11) puts the whole staging tree into
+    // `out` as a directory, exactly as `--spec` does. Keyed on the SOURCE KIND, not on the member count:
+    // a one-member archive is still a collection, and branching on the count would make the output shape
+    // depend on the data.
+    if out_is_dir {
+        std::fs::create_dir_all(&user_out).map_err(|e| {
+            tessera_core::Error::Invalid(format!(
+                "tessera ingest: create {}: {e}",
+                user_out.display()
+            ))
+        })?;
+        for entry in std::fs::read_dir(staging.path()).map_err(|e| {
+            tessera_core::Error::Invalid(format!("tessera ingest: read staging: {e}"))
+        })? {
+            let entry = entry.map_err(|e| {
+                tessera_core::Error::Invalid(format!("tessera ingest: read staging entry: {e}"))
+            })?;
+            let to = user_out.join(entry.file_name());
+            if std::fs::rename(entry.path(), &to).is_err() {
+                std::fs::copy(entry.path(), &to).map_err(|e| {
+                    tessera_core::Error::Invalid(format!(
+                        "tessera ingest: copy {} -> {}: {e}",
+                        entry.path().display(),
+                        to.display()
+                    ))
+                })?;
+            }
+        }
+        let n = coll.members.len();
+        println!(
+            "ingested {n} product{} -> {}/ (collection {})",
+            if n == 1 { "" } else { "s" },
+            user_out.display(),
+            coll.id
+        );
+        return Ok(());
+    }
     // Move the single produced `.tsra` to the user's `out` path. The engine names files by the
     // shared `member_filename` SSoT (`blake3_<hex>.tsra`); resolve that same name here (#323).
     let member = coll.members.first().ok_or_else(|| {
@@ -1742,17 +2396,31 @@ fn run_ingest(src: IngestSrc) -> tessera_core::Result<()> {
             ))
         })?;
     }
+    // Report the product the manifest ACTUALLY sealed rather than the schema the spec declared: a
+    // structured `.npy` is a table while its spec says `array` (ADR-0056 §1 — the file decides), and
+    // telling the operator "array" would be a small lie about what they now hold.
+    let sealed_product = Reader::open(&user_out)
+        .map(|r| r.manifest().product.clone())
+        .unwrap_or_else(|_| spec.products[0].schema.clone());
     println!(
         "ingested {} ({}) -> {}",
         member.reference,
-        spec.products[0].schema,
+        sealed_product,
         user_out.display()
     );
     Ok(())
 }
 
 /// Translate a per-format CLI subcommand into a 1-product spec + the caller's chosen output path.
-fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::IngestSpec, PathBuf)> {
+/// Translate a per-format CLI subcommand into a spec, its output path, and **whether that path is a
+/// directory**.
+///
+/// The third element exists because a `.npz` is a *collection* (ADR-0056 §11) however many members it
+/// happens to contain. Branching on the member count instead would make the same command write a file
+/// for a one-member archive and a directory for a two-member one — a shape that depends on the data.
+fn ingest_src_to_spec(
+    src: IngestSrc,
+) -> tessera_core::Result<(ingest_spec::IngestSpec, PathBuf, bool)> {
     use ingest_spec::{
         CollectionMeta, FormatOptions, IngestSpec, ProductSpec, SpecMeta, StreamingMode,
         DEFAULT_BLOCK_PREFIX, DEFAULT_ROW_INDEX, DEFAULT_SLAB_ROWS,
@@ -1784,7 +2452,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     description: None,
                     derived_from: Vec::new(),
                     source_label,
-                    metadata: parse_meta(&meta)?,
+                    metadata: parse_meta(&meta, "recon")?,
                     generation: None,
                     producer: None,
                     options: FormatOptions::Dicom {
@@ -1795,6 +2463,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                 }],
             },
             out,
+            false,
         ),
         IngestSrc::DicomSeries {
             inputs,
@@ -1822,7 +2491,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     description: None,
                     derived_from: Vec::new(),
                     source_label,
-                    metadata: parse_meta(&meta)?,
+                    metadata: parse_meta(&meta, "recon")?,
                     generation: None,
                     producer: None,
                     options: FormatOptions::DicomSeries {
@@ -1839,6 +2508,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                 }],
             },
             out,
+            false,
         ),
         IngestSrc::GeHdf5 {
             input,
@@ -1865,7 +2535,7 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     description: None,
                     derived_from: Vec::new(),
                     source_label,
-                    metadata: parse_meta(&meta)?,
+                    metadata: parse_meta(&meta, "listmode")?,
                     generation: None,
                     producer: None,
                     options: FormatOptions::HdfCompound {
@@ -1880,7 +2550,191 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                 }],
             },
             out,
+            false,
         ),
+        IngestSrc::Table {
+            input,
+            out,
+            name,
+            timestamp,
+            from,
+            exclude,
+            column,
+            delimiter,
+            no_header,
+            null_token,
+            column_meta,
+            source_label,
+            meta,
+        } => {
+            // ADR-0056 §4: magic bytes when unambiguous, explicit when not. Sniffing happens HERE, in
+            // the CLI, and never in the engine — the spec records the resolved backend, so a spec is
+            // never ambiguous about which decoder it meant and `spec_hash` stays a complete record.
+            let from = match from {
+                Some(f) => f,
+                None => ingest_spec::sniff_or_explain(&input)?,
+            };
+            // The `--column-meta` file is read here and INLINED into the spec, rather than referenced
+            // by path. ADR-0035 hashes the parsed spec into each member's `ingested_via_spec` edge, so
+            // a path would make that hash a promise about a file the spec does not contain.
+            let column_meta = match &column_meta {
+                Some(p) => ingest_column_meta::ColumnMeta::load(p)?,
+                None => ingest_column_meta::ColumnMeta::empty(),
+            };
+            let options = match from.as_str() {
+                "parquet" => FormatOptions::Parquet {
+                    input,
+                    exclude,
+                    column_meta,
+                },
+                "arrow" => FormatOptions::Arrow {
+                    input,
+                    exclude,
+                    column_meta,
+                },
+                "csv" => {
+                    if column.is_empty() {
+                        return Err(ingest_spec::csv_needs_declarations());
+                    }
+                    FormatOptions::Csv {
+                        input,
+                        columns: column,
+                        delimiter,
+                        header: !no_header,
+                        null_tokens: null_token,
+                        exclude,
+                        column_meta,
+                    }
+                }
+                // Unreachable via clap's value_parser, but the CLI is not the only caller of this
+                // function (the tests construct `IngestSrc` directly), so it stays total.
+                other => {
+                    return Err(tessera_core::Error::Invalid(format!(
+                        "tessera ingest table: unknown --from '{other}' (expected parquet | arrow | csv)"
+                    )))
+                }
+            };
+            (
+                IngestSpec {
+                    collection: CollectionMeta {
+                        name: name.clone(),
+                        description: None,
+                        timestamp: timestamp.clone(),
+                        study: None,
+                    },
+                    spec: SpecMeta::default(),
+                    products: vec![ProductSpec {
+                        name,
+                        role: Role::Raw,
+                        // The primitive schema, always. ADR-0056 §7's laundering rule makes any other
+                        // value a hard error for a generic backend, so there is nothing to choose.
+                        schema: "table".into(),
+                        description: None,
+                        derived_from: Vec::new(),
+                        source_label,
+                        metadata: parse_meta(&meta, "table")?,
+                        generation: None,
+                        producer: None,
+                        options,
+                    }],
+                },
+                out,
+                false,
+            )
+        }
+        IngestSrc::Array {
+            input,
+            out,
+            name,
+            timestamp,
+            from,
+            source_label,
+            meta,
+        } => {
+            let from = match from {
+                Some(f) => f,
+                None => ingest_spec::sniff_array_or_explain(&input)?,
+            };
+            let metadata = parse_meta(&meta, "array")?;
+            let products = match from.as_str() {
+                "npy" => vec![ProductSpec {
+                    name: name.clone(),
+                    role: Role::Raw,
+                    schema: "array".into(),
+                    description: None,
+                    derived_from: Vec::new(),
+                    source_label: source_label.clone(),
+                    metadata: metadata.clone(),
+                    generation: None,
+                    producer: None,
+                    options: FormatOptions::Npy { input },
+                }],
+                // A `.npz` expands into ONE PRODUCT PER MEMBER (ADR-0056 §11): the members are
+                // independent arrays, not slices of one grid. The expansion happens here, naming each
+                // member explicitly, so the resulting spec is an honest archival record — a spec saying
+                // "everything in this archive" would have a meaning that depended on the archive.
+                "npz" => {
+                    let members = tessera_ingest::npy::npz_members(&input)?;
+                    // §11's advisory, printed once: `arr_0` ingests fine and means nothing, so a
+                    // collection of them is findable by nothing. The operator passed positional
+                    // arguments to `np.savez` where keywords would have named the arrays.
+                    let auto: Vec<&str> = members
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|m| tessera_ingest::npy::is_auto_generated_member_name(m))
+                        .collect();
+                    if !auto.is_empty() {
+                        tracing::warn!(
+                            target: "tessera::ingest",
+                            members = %auto.join(", "),
+                            "archive member(s) '{}' carry auto-generated names — they ingest fine but \
+                             mean nothing, so the products will be findable by nothing. Re-save with \
+                             keyword arguments (np.savez(f, energy=…)) to name them, or annotate after \
+                             the fact with `tessera commit --set`.",
+                            auto.join("', '")
+                        );
+                    }
+                    members
+                        .into_iter()
+                        .map(|member| ProductSpec {
+                            name: tessera_ingest::npy::member_product_name(&member).to_string(),
+                            role: Role::Raw,
+                            schema: "array".into(),
+                            description: None,
+                            derived_from: Vec::new(),
+                            source_label: source_label.clone(),
+                            metadata: metadata.clone(),
+                            generation: None,
+                            producer: None,
+                            options: FormatOptions::NpzMember {
+                                input: input.clone(),
+                                member,
+                            },
+                        })
+                        .collect()
+                }
+                other => {
+                    return Err(tessera_core::Error::Invalid(format!(
+                        "tessera ingest array: unknown --from '{other}' (expected npy | npz)"
+                    )))
+                }
+            };
+            (
+                IngestSpec {
+                    collection: CollectionMeta {
+                        name: name.clone(),
+                        description: None,
+                        timestamp: timestamp.clone(),
+                        study: None,
+                    },
+                    spec: SpecMeta::default(),
+                    products,
+                },
+                out,
+                // A `.npz` is a collection whatever its member count.
+                from == "npz",
+            )
+        }
         IngestSrc::Blob {
             input,
             out,
@@ -1905,13 +2759,14 @@ fn ingest_src_to_spec(src: IngestSrc) -> tessera_core::Result<(ingest_spec::Inge
                     description: None,
                     derived_from: Vec::new(),
                     source_label,
-                    metadata: parse_meta(&meta)?,
+                    metadata: parse_meta(&meta, "blob")?,
                     generation: None,
                     producer: None,
                     options: FormatOptions::Blob { input, media_type },
                 }],
             },
             out,
+            false,
         ),
     })
 }
@@ -1992,14 +2847,512 @@ mod tests {
         }
     }
 
-    fn sample_tsra(path: &std::path::Path) {
+    /// A cycle below the root must fail the **verb**, not just the library (#452 review).
+    ///
+    /// `r → b → c → b`: the loop never revisits the root, which is exactly the shape the diamond
+    /// optimisation masked — the edge closing it looked like a shared parent's second arm, so the walk
+    /// returned a clean-looking chain. Rendering a malformed DAG as if it were fine is worse than any
+    /// gap, so this asserts the operator surface exits nonzero.
+    ///
+    /// The pins are deliberately stale: content hashes make a mutually-pinned cycle unsealable, and they
+    /// do not matter here. Resolution is by lineage `id`, so the descent — and therefore the cycle —
+    /// happens regardless of whether each edge pinned the right version.
+    #[test]
+    fn a_cycle_below_the_root_fails_the_provenance_verb() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        const TS: &str = "2024-01-01T00:00:00Z";
+        // Ids are hashed over the identity inputs, so each product's id is known before it is sealed —
+        // which is what lets `b` and `c` name each other.
+        let id_of = |name: &str| tessera_core::Manifest::new("recon", name, "d", TS).id;
+
+        let mut written = Vec::new();
+        for (name, parent) in [("r", "b"), ("b", "c"), ("c", "b")] {
+            let mut b = ProductBuilder::new("recon", name, "d", TS);
+            let vol = ArrayBlock::new("volume", ArraySpec::new(vec![2, 2, 2], "int16"));
+            b.add_block(&vol).unwrap();
+            b.add_source(
+                tessera_core::provenance::Source::new("derived_from", id_of(parent))
+                    .with_content_hash("blake3:staleonpurpose"),
+            );
+            let sealed = b.seal().unwrap();
+            let path = d.join(format!("{name}.tsra"));
+            pack(
+                &sealed,
+                &[BlockPayload::new(
+                    "volume".parse().unwrap(),
+                    serde_json::to_vec(&vol.spec).unwrap(),
+                )],
+                &path,
+            )
+            .unwrap();
+            written.push(path);
+        }
+
+        let opts = provenance::Opts {
+            collection: None,
+            search: vec![],
+            depth: None,
+            json: false,
+            full: false,
+        };
+        let err = provenance::run(&written[0], &opts, &mut Vec::new())
+            .expect_err("r -> b -> c -> b must not walk cleanly");
+        assert!(
+            matches!(&err, tessera_core::Error::Invalid(m) if m.contains("cycle")),
+            "expected a cycle error, got {err:?}"
+        );
+        assert!(
+            run(Cmd::Provenance {
+                file: written[0].clone(),
+                search: vec![],
+                collection: None,
+                depth: None,
+                json: false,
+                full: false,
+                require_complete: false,
+            })
+            .is_err(),
+            "the verb must exit nonzero on a malformed DAG, with or without --require-complete"
+        );
+    }
+
+    /// A parent an older writer sealed with an integer no seal pins (`9007199254740993`, SPEC §1, #886)
+    /// is refused, and a refused product found by the search is CORRUPT, never absent at exit 0.
+    #[test]
+    fn a_parent_refused_for_an_inexact_integer_is_corrupt_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let parent_path = d.join("parent.tsra");
+        sample_tsra(&parent_path);
+        let parent = Reader::open(&parent_path).unwrap().manifest().clone();
+        let mut cb = ProductBuilder::new("recon", "child", "d", "2024-01-01T00:00:00Z");
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![4, 4, 4], "int16"));
+        cb.add_block(&vol).unwrap();
+        cb.add_source(
+            tessera_core::provenance::Source::new("derived_from", &parent.id)
+                .with_content_hash(parent.manifest_hash.clone().unwrap()),
+        );
+        let payload = BlockPayload::new(
+            "volume".parse().unwrap(),
+            serde_json::to_vec(&vol.spec).unwrap(),
+        );
+        pack(&cb.seal().unwrap(), &[payload], &d.join("child.tsra")).unwrap();
+
+        edit_manifest_raw(&parent_path, |m| {
+            m["metadata"]["daq_start_ns"] = serde_json::json!(9_007_199_254_740_993_u64);
+        });
+        assert!(matches!(
+            Reader::open(&parent_path),
+            Err(tessera_core::Error::InexactInteger { .. })
+        ));
+        let opts = provenance::Opts {
+            collection: None,
+            search: vec![],
+            depth: None,
+            json: false,
+            full: false,
+        };
+        let mut out = Vec::new();
+        let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(v.corrupt_parents, 1, "{text}");
+        assert!(!v.complete, "{text}");
+    }
+
+    /// A pinned parent that is **corrupt** must not be reported as merely *missing* (#452 review).
+    ///
+    /// The two invite opposite responses. "I could not find it" sends an operator looking for another
+    /// copy; "what I found does not verify" is the end of the search and the start of an incident. The
+    /// discovery pass used to swallow every file `Reader::open` rejected, which collapsed the second into
+    /// the first — and at exit 0, so a pipeline sailed past a tampered parent.
+    #[test]
+    fn a_tampered_pinned_parent_is_reported_as_corrupt_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let parent_path = d.join("parent.tsra");
+        sample_tsra(&parent_path);
+        let parent = Reader::open(&parent_path).unwrap().manifest().clone();
+
+        let mut cb = ProductBuilder::new("recon", "child", "d", "2024-01-01T00:00:00Z");
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![4, 4, 4], "int16"));
+        cb.add_block(&vol).unwrap();
+        cb.add_source(
+            tessera_core::provenance::Source::new("derived_from", &parent.id)
+                .with_content_hash(parent.manifest_hash.clone().unwrap()),
+        );
+        let child = cb.seal().unwrap();
+        pack(
+            &child,
+            &[BlockPayload::new(
+                "volume".parse().unwrap(),
+                serde_json::to_vec(&vol.spec).unwrap(),
+            )],
+            &d.join("child.tsra"),
+        )
+        .unwrap();
+
+        let opts = provenance::Opts {
+            collection: None,
+            search: vec![],
+            depth: None,
+            json: false,
+            full: false,
+        };
+
+        // Baseline: intact sibling, chain proven, nothing corrupt.
+        let mut out = Vec::new();
+        let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
+        assert!(
+            v.complete && v.corrupt_parents == 0,
+            "{}",
+            String::from_utf8_lossy(&out)
+        );
+
+        // Tamper the parent's sealed manifest: still a valid `.tsra` container (right magic, manifest
+        // present), but the seal no longer covers its contents.
+        tamper_manifest_metadata(&parent_path);
+        assert!(
+            matches!(
+                Reader::open(&parent_path),
+                Err(tessera_core::Error::Integrity { .. })
+            ),
+            "the fixture must produce a seal failure, not a container failure"
+        );
+
+        let mut out = Vec::new();
+        let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(
+            v.corrupt_parents, 1,
+            "the tampered sibling IS the needed parent:\n{text}"
+        );
+        assert!(
+            !v.complete,
+            "a corrupt store is never a complete chain:\n{text}"
+        );
+        assert!(
+            text.contains("CORRUPT") && text.contains("parent.tsra"),
+            "the render must name the corrupt file:\n{text}"
+        );
+        // And it must say so ON THE EDGE that needed the parent, not only in a footnote: the hop reads
+        // CORRUPT rather than "unresolved", so nobody goes hunting for a copy that is already here.
+        assert!(
+            text.contains("[CORRUPT]"),
+            "the hop itself must be marked corrupt, not merely unresolved:\n{text}"
+        );
+        assert!(
+            !text.contains("no product with this lineage was found"),
+            "a corrupt parent must not also be described as missing:\n{text}"
+        );
+        // And the exit is nonzero WITHOUT --require-complete: corruption is not opt-in.
+        assert!(
+            run(Cmd::Provenance {
+                file: d.join("child.tsra"),
+                search: vec![],
+                collection: None,
+                depth: None,
+                json: false,
+                full: false,
+                require_complete: false,
+            })
+            .is_err(),
+            "a corrupt candidate must fail the verb on its own"
+        );
+
+        // A corrupt file NO edge needed must not fail the verb. `provenance` answers "where did THIS come
+        // from", not "is this store healthy" — failing here would make it unusable against a partly
+        // damaged store and punish a product for an unrelated neighbour. It is warned about on stderr and
+        // listed in `--json`; store-wide integrity is `verify`'s job.
+        let bystander = d.join("bystander.tsra");
+        sample_tsra(&bystander);
+        tamper_manifest_metadata(&bystander);
+        // Restore the real parent so the chain itself is whole again.
+        sample_tsra(&parent_path);
+        let mut out = Vec::new();
+        let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(
+            v.corrupt_candidates, 1,
+            "the bystander is still reported:\n{text}"
+        );
+        assert_eq!(
+            v.corrupt_parents, 0,
+            "no edge needed the bystander:\n{text}"
+        );
+        assert!(
+            v.complete,
+            "an unrelated corrupt file does not break this chain:\n{text}"
+        );
+        run(Cmd::Provenance {
+            file: d.join("child.tsra"),
+            search: vec![],
+            collection: None,
+            depth: None,
+            json: false,
+            full: false,
+            require_complete: true,
+        })
+        .expect("an off-chain corrupt file must not fail the verb, even under --require-complete");
+        std::fs::remove_file(&bystander).unwrap();
+
+        // A file that is not a Tessera product at all stays silently ignored — otherwise `--search` is
+        // unusable on any real directory.
+        std::fs::write(d.join("notes.tsra"), b"this is not a container").unwrap();
+        std::fs::remove_file(&parent_path).unwrap();
+        let mut out = Vec::new();
+        let v = provenance::run(&d.join("child.tsra"), &opts, &mut out).unwrap();
+        assert_eq!(
+            v.corrupt_candidates, 0,
+            "a file that is not a Tessera product must not be called corrupt"
+        );
+    }
+
+    /// Rewrite a sealed `.tsra`'s `manifest.json` so its recorded `manifest_hash` no longer matches its
+    /// contents, leaving the container itself well-formed. Repacks the zip STORED, as the format requires.
+    fn tamper_manifest_metadata(path: &std::path::Path) {
+        // Change sealed content while leaving `manifest_hash` as recorded.
+        edit_manifest(path, |m| {
+            m["description"] = serde_json::json!("edited after sealing");
+        });
+    }
+
+    /// Rewrite a `.tsra`'s `manifest.json` with `edit`, keeping the recorded hashes and the container
+    /// well-formed (repacked STORED). Stored as JCS again, so the edit, not a respelling, is what the
+    /// reader meets.
+    fn edit_manifest(path: &std::path::Path, edit: impl Fn(&mut serde_json::Value)) {
+        rewrite_manifest(path, edit, |m| {
+            tessera_core::canonical::to_bytes(m).unwrap()
+        });
+    }
+
+    /// [`edit_manifest`] for an edit JCS refuses to encode (an integer beyond ±(2^53−1)): stored as
+    /// compact `serde_json`, which writes the integer exactly. A reader refuses it at the strict parse,
+    /// before the canonical check (SPEC §7 step 3), so the error is the integer's, not the spelling's.
+    fn edit_manifest_raw(path: &std::path::Path, edit: impl Fn(&mut serde_json::Value)) {
+        rewrite_manifest(path, edit, |m| serde_json::to_vec(m).unwrap());
+    }
+
+    fn rewrite_manifest(
+        path: &std::path::Path,
+        edit: impl Fn(&mut serde_json::Value),
+        encode: impl Fn(&serde_json::Value) -> Vec<u8>,
+    ) {
+        let bytes = std::fs::read(path).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut entries = Vec::new();
+        for i in 0..zip.len() {
+            let mut f = zip.by_index(i).unwrap();
+            let name = f.name().unwrap().into_owned();
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut f, &mut buf).unwrap();
+            if name == "manifest.json" {
+                let mut m: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+                edit(&mut m);
+                buf = encode(&m);
+            }
+            entries.push((name, buf));
+        }
+        let f = std::fs::File::create(path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, buf) in entries {
+            zw.start_file(name, stored).unwrap();
+            std::io::Write::write_all(&mut zw, &buf).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
+    /// The `--require-complete` gate must tell **version skew** from **corruption** end to end, on two
+    /// versions of one parent made the way a user makes them: `tessera commit`.
+    ///
+    /// The sequence is the real one — seal a parent, seal a child that pins it, then correct the
+    /// parent's metadata in a repository and `publish` the corrected version next to the child. The
+    /// child now points at a version that is no longer what is on disk. That is routine (ADR-0036: `id`
+    /// is a lineage handle, `manifest_hash` the version), so `provenance` must render it as a different
+    /// version, keep walking, and exit 0 — while `--require-complete` still refuses it. Reporting it as
+    /// an integrity failure would cry corruption over a metadata edit.
+    #[test]
+    fn a_committed_second_version_of_a_parent_reads_as_skew_not_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+
+        // A parent, and a child that pins the parent's seal.
+        let parent_path = d.join("parent.tsra");
+        sample_tsra(&parent_path);
+        let parent = Reader::open(&parent_path).unwrap().manifest().clone();
+        let mut cb = ProductBuilder::new("recon", "child", "d", "2024-01-01T00:00:00Z");
+        let vol = ArrayBlock::new("volume", ArraySpec::new(vec![4, 4, 4], "int16"));
+        cb.add_block(&vol).unwrap();
+        cb.add_source(
+            tessera_core::provenance::Source::new("derived_from", &parent.id)
+                .with_content_hash(parent.manifest_hash.clone().unwrap()),
+        );
+        let child = cb.seal().unwrap();
+        let handover = d.join("handover");
+        std::fs::create_dir_all(&handover).unwrap();
+        pack(
+            &child,
+            &[BlockPayload::new(
+                "volume".parse().unwrap(),
+                serde_json::to_vec(&vol.spec).unwrap(),
+            )],
+            &handover.join("child.tsra"),
+        )
+        .unwrap();
+
+        // With the pinned parent beside it, the chain is proven.
+        std::fs::copy(&parent_path, handover.join("parent.tsra")).unwrap();
+        let opts = provenance::Opts {
+            collection: None,
+            search: vec![],
+            depth: None,
+            json: false,
+            full: false,
+        };
+        let mut out = Vec::new();
+        assert!(
+            provenance::run(&handover.join("child.tsra"), &opts, &mut out)
+                .unwrap()
+                .complete,
+            "the pinned parent is present: {}",
+            String::from_utf8_lossy(&out)
+        );
+
+        // Correct the parent's metadata through the real verbs, then publish the new version over it.
+        let repo = d.join("repo");
+        run(Cmd::Init { repo: repo.clone() }).unwrap();
+        run(Cmd::Import {
+            repo: repo.clone(),
+            file: parent_path.clone(),
+        })
+        .unwrap();
+        run(Cmd::Commit {
+            repo: repo.clone(),
+            lineage: parent.id.clone(),
+            set: vec!["tracer=FDG".to_string()],
+            add_block: vec![],
+            remove_block: vec![],
+        })
+        .unwrap();
+        let tip = tessera_io::repo::Repository::open(&repo)
+            .unwrap()
+            .read_ref(&parent.id)
+            .unwrap()
+            .expect("the lineage has a tip after commit");
+        assert_ne!(
+            Some(tip.as_str()),
+            parent.manifest_hash.as_deref(),
+            "commit must produce a NEW version of the same lineage"
+        );
+        run(Cmd::Publish {
+            repo,
+            version: tip,
+            out: handover.join("parent.tsra"),
+            anonymous: false,
+        })
+        .unwrap();
+
+        // Same lineage, different version: a rendered gap, exit-0-worthy, and NOT an integrity error.
+        let mut out = Vec::new();
+        let verdict = provenance::run(&handover.join("child.tsra"), &opts, &mut out).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            !verdict.complete,
+            "the pinned version is no longer on disk:\n{text}"
+        );
+        assert_eq!(
+            verdict.corrupt_parents, 0,
+            "a superseded parent is a version difference, never corruption:\n{text}"
+        );
+        assert!(
+            text.contains("different version"),
+            "skew must be named as a version difference:\n{text}"
+        );
+        for forbidden in ["corrupt", "tamper", "integrity"] {
+            assert!(
+                !text.to_lowercase().contains(forbidden),
+                "a metadata edit must not be reported as {forbidden}:\n{text}"
+            );
+        }
+        // The child still verifies: nothing about it is corrupt, which is the whole point.
+        run(Cmd::Verify {
+            file: handover.join("child.tsra"),
+            workers: None,
+        })
+        .unwrap();
+    }
+
+    /// A minimal sealed `recon` product. `pub(crate)` so sibling modules' test fixtures reuse it rather
+    /// than each hand-rolling a product (the `provenance` symlink test needs a real, openable `.tsra`).
+    pub(crate) fn sample_tsra(path: &std::path::Path) {
         let vol = ArrayBlock::new("volume", ArraySpec::new(vec![16, 16, 16], "int16"));
         let payload = serde_json::to_vec(&vol.spec).unwrap();
         let mut b = ProductBuilder::new("recon", "DP06", "d", "2024-01-01T00:00:00Z");
         b.add_block(&vol).unwrap();
         b.with_field("modality", serde_json::json!("CT"));
         let sealed = b.seal().unwrap();
-        pack(&sealed, &[BlockPayload::new("volume", payload)], path).unwrap();
+        pack(
+            &sealed,
+            &[BlockPayload::new("volume".parse().unwrap(), payload)],
+            path,
+        )
+        .unwrap();
+    }
+
+    /// #373: `tessera verify`'s parallel payload probe must take its worker count from the
+    /// resource-cap resolver (#368), not from a per-verb `WriteConfig::for_system()`, so one cap
+    /// governs the whole CLI. Asserts the flag tier the new `--workers` feeds, and that the verb
+    /// still verifies end to end through that path.
+    ///
+    /// The env tier is deliberately NOT exercised by mutating `TESSERA_WORKERS`: the process
+    /// environment is global, so it races every other test in this binary. `resource`'s own
+    /// `precedence_is_flag_over_env_over_conf_over_default_per_field` already covers env through
+    /// the pure `resolve()` seam, which is the right place for it.
+    #[test]
+    fn verify_worker_cap_comes_from_the_resource_resolver() {
+        // The flag tier — the same call `Cmd::Verify` now makes — wins over every lower tier.
+        let cfg = resource::resolve_write_config(Some(3), None).unwrap();
+        assert_eq!(cfg.worker_count(), 3, "--workers must reach the resolver");
+
+        // And with no flag it still resolves to something usable rather than panicking.
+        assert!(
+            resource::resolve_write_config(None, None)
+                .unwrap()
+                .worker_count()
+                >= 1
+        );
+
+        // End to end: the verb runs over that path and still verifies.
+        let dir = tempfile::tempdir().unwrap();
+        let tsra = dir.path().join("p.tsra");
+        sample_tsra(&tsra);
+        run(Cmd::Verify {
+            file: tsra.clone(),
+            workers: Some(2),
+        })
+        .unwrap();
+        run(Cmd::Verify {
+            file: tsra.clone(),
+            workers: None,
+        })
+        .unwrap();
+
+        // ...and the flag REACHES the resolver rather than being dropped on the floor. `0` is the
+        // observable probe: the resolver rejects it, while the old `WriteConfig::for_system()` path
+        // (and `WriteConfig::workers`, which clamps to >= 1) would have swallowed it and verified
+        // happily. So this failing is the proof of pass-through, not merely of validation.
+        let err = run(Cmd::Verify {
+            file: tsra,
+            workers: Some(0),
+        })
+        .expect_err("--workers 0 must be refused through the verb, not clamped");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--workers") && msg.contains(">= 1"),
+            "error must name the flag and the bound, got: {msg}"
+        );
     }
 
     #[test]
@@ -2008,11 +3361,17 @@ mod tests {
         let tsra = dir.path().join("p.tsra");
         sample_tsra(&tsra);
 
-        run(Cmd::Verify { file: tsra.clone() }).unwrap();
+        run(Cmd::Verify {
+            file: tsra.clone(),
+            workers: None,
+        })
+        .unwrap();
         run(Cmd::Inspect {
             file: tsra.clone(),
             full: false,
             verify: false,
+            json: false,
+            resolve_config: false,
         })
         .unwrap();
         run(Cmd::Schema {
@@ -2036,7 +3395,11 @@ mod tests {
             out: repacked.clone(),
         })
         .unwrap();
-        run(Cmd::Verify { file: repacked }).unwrap();
+        run(Cmd::Verify {
+            file: repacked,
+            workers: None,
+        })
+        .unwrap();
     }
 
     #[test]
@@ -2044,7 +3407,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("bad.tsra");
         std::fs::write(&bad, b"not a zip at all").unwrap();
-        assert!(run(Cmd::Verify { file: bad }).is_err());
+        assert!(run(Cmd::Verify {
+            file: bad,
+            workers: None
+        })
+        .is_err());
     }
 
     /// #268 parts 3+4: a corrupt block payload makes `verify` fail with a typed `BlockIntegrity`
@@ -2075,7 +3442,12 @@ mod tests {
         })
         .unwrap();
 
-        match run(Cmd::Verify { file: bad }).unwrap_err() {
+        match run(Cmd::Verify {
+            file: bad,
+            workers: None,
+        })
+        .unwrap_err()
+        {
             tessera_core::Error::BlockIntegrity {
                 file,
                 block,
@@ -2141,6 +3513,8 @@ mod tests {
                 file: bad,
                 full: false,
                 verify: true,
+                json: false,
+                resolve_config: false,
             }),
             Err(tessera_core::Error::BlockIntegrity { .. })
         ));
@@ -2187,7 +3561,7 @@ mod tests {
             ram_budget: None,
             auto: false,
             stream_threshold: None,
-            src: Some(IngestSrc::GeHdf5 {
+            src: Some(Box::new(IngestSrc::GeHdf5 {
                 input: h5,
                 out: out.clone(),
                 name: "DP06-lm".into(),
@@ -2196,18 +3570,24 @@ mod tests {
                 source_label: None,
                 meta: vec![],
                 quantize: false,
-            }),
+            })),
         })
         .unwrap();
 
         // the ingested product verifies (seal + block digest) and is schema-valid. The engine adds
         // an `ingested_via_spec` edge on every member it produces (including the synthesised
         // 1-product spec the per-format CLI builds), so the source count goes from 1 to 2.
-        run(Cmd::Verify { file: out.clone() }).unwrap();
+        run(Cmd::Verify {
+            file: out.clone(),
+            workers: None,
+        })
+        .unwrap();
         run(Cmd::Inspect {
             file: out.clone(),
             full: false,
             verify: false,
+            json: false,
+            resolve_config: false,
         })
         .unwrap();
         let r = Reader::open(&out).unwrap();
@@ -2292,9 +3672,8 @@ streaming = "batch"
         })
         .unwrap();
 
-        // 1. collection.json exists + verifies.
-        let coll_json = std::fs::read_to_string(out_dir.join("collection.json")).unwrap();
-        let coll = tessera_core::Collection::from_json_verified(&coll_json).unwrap();
+        // 1. collection.json exists + verifies against its collection.seal.
+        let coll = tessera_io::stored::read_collection(&out_dir.join("collection.json")).unwrap();
         assert_eq!(coll.members.len(), 2);
         assert_eq!(coll.study.as_deref(), Some("DP06-2024-01"));
 
@@ -2302,7 +3681,11 @@ streaming = "batch"
         for m in &coll.members {
             let p = out_dir.join(member_filename(&m.reference, MemberKind::Product));
             assert!(p.exists(), "missing {}", p.display());
-            run(Cmd::Verify { file: p.clone() }).unwrap();
+            run(Cmd::Verify {
+                file: p.clone(),
+                workers: None,
+            })
+            .unwrap();
             let r = Reader::open(&p).unwrap();
             assert!(r
                 .manifest()
@@ -2341,8 +3724,7 @@ streaming = "batch"
             src: None,
         })
         .unwrap();
-        let coll2_json = std::fs::read_to_string(out2.join("collection.json")).unwrap();
-        let coll2 = tessera_core::Collection::from_json_verified(&coll2_json).unwrap();
+        let coll2 = tessera_io::stored::read_collection(&out2.join("collection.json")).unwrap();
         assert_eq!(coll.id, coll2.id);
         assert_eq!(coll.content_hash, coll2.content_hash);
         assert_eq!(coll.manifest_hash, coll2.manifest_hash);
@@ -2365,7 +3747,7 @@ streaming = "batch"
             ram_budget: None,
             auto: false,
             stream_threshold: None,
-            src: Some(IngestSrc::Dicom {
+            src: Some(Box::new(IngestSrc::Dicom {
                 input: dir.path().join("nope.dcm"),
                 out: dir.path().join("nope.tsra"),
                 name: "x".into(),
@@ -2374,7 +3756,7 @@ streaming = "batch"
                 recipient: vec![],
                 source_label: None,
                 meta: vec![],
-            }),
+            })),
         })
         .unwrap_err();
         assert!(
@@ -2399,7 +3781,7 @@ streaming = "batch"
             ram_budget: None,
             auto: false,
             stream_threshold: None,
-            src: Some(IngestSrc::DicomSeries {
+            src: Some(Box::new(IngestSrc::DicomSeries {
                 inputs: vec![dir.path().join("a.dcm"), dir.path().join("b.dcm")],
                 out: dir.path().join("series.tsra"),
                 name: "DP06-ct".into(),
@@ -2409,7 +3791,7 @@ streaming = "batch"
                 source_label: None,
                 meta: vec![],
                 rescale_mode: "bit-exact".into(),
-            }),
+            })),
         })
         .unwrap_err();
         let msg = format!("{err}");
@@ -2492,7 +3874,7 @@ streaming = "batch"
             ram_budget: None,
             auto: false,
             stream_threshold: None,
-            src: Some(IngestSrc::DicomSeries {
+            src: Some(Box::new(IngestSrc::DicomSeries {
                 inputs: vec![p1.clone(), p2.clone()],
                 out: out.clone(),
                 name: "DP06-ct".into(),
@@ -2502,12 +3884,16 @@ streaming = "batch"
                 source_label: Some("DUPLET-07/CT".into()),
                 meta: vec![],
                 rescale_mode: "bit-exact".into(),
-            }),
+            })),
         })
         .unwrap();
 
         // The sealed product opens + verifies + carries the clean source label (NOT a slice path).
-        run(Cmd::Verify { file: out.clone() }).unwrap();
+        run(Cmd::Verify {
+            file: out.clone(),
+            workers: None,
+        })
+        .unwrap();
         let m = Reader::open(&out).unwrap().manifest().clone();
         let ingested_from = m
             .sources
@@ -2567,6 +3953,125 @@ streaming = "batch"
         obj.with_exact_meta(meta).write_to_file(path).unwrap();
     }
 
+    /// `ingest dicom` over a slice whose curated KVP or RescaleSlope is `1E16` (beyond what a sealed
+    /// JSON number holds) fails naming the tag and its text, and leaves no output file (#886 review).
+    #[test]
+    fn ingest_dicom_refuses_a_curated_number_a_seal_cannot_hold_and_writes_nothing() {
+        use dicom::core::{DataElement, PrimitiveValue, Tag, VR};
+        let dir = tempfile::tempdir().unwrap();
+        for (tag, keyword) in [
+            (Tag(0x0018, 0x0060), "KVP"),
+            (Tag(0x0028, 0x1053), "RescaleSlope"),
+        ] {
+            let dcm = dir.path().join(format!("{keyword}.dcm"));
+            write_phi_dcm(&dcm, "DOE^JOHN", "PID-1");
+            let mut obj = dicom::object::open_file(&dcm).unwrap();
+            obj.put(DataElement::new(tag, VR::DS, PrimitiveValue::from("1E16")));
+            obj.write_to_file(&dcm).unwrap();
+            let out = dir.path().join(format!("{keyword}.tsra"));
+            let err = run(Cmd::Ingest {
+                spec: None,
+                out: None,
+                workers: None,
+                ram_budget: None,
+                auto: false,
+                stream_threshold: None,
+                src: Some(Box::new(IngestSrc::Dicom {
+                    input: dcm,
+                    out: out.clone(),
+                    name: "ct".into(),
+                    timestamp: "2024-01-01T00:00:00Z".into(),
+                    deidentify: true,
+                    recipient: vec![],
+                    source_label: Some("STUDY-1/CT".into()),
+                    meta: vec![],
+                })),
+            })
+            .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "invalid product: dicom: {tag} {keyword} = \"1E16\" is outside the range a \
+                     sealed JSON number can hold (±(2^53−1), I-JSON RFC 7493 §2.2)"
+                )
+            );
+            assert!(
+                !out.exists(),
+                "a refused ingest leaves no {}",
+                out.display()
+            );
+        }
+    }
+
+    /// `ingest dicom` holds the source's numbers and the operator's `--meta` to the ranges the `recon`
+    /// schema declares (#895): a curated KVP of 5000 kV is refused naming the tag and its text, a
+    /// `--meta kvp=5000` naming the flag, both before any output exists; an in-range `--meta` seals.
+    #[test]
+    fn ingest_dicom_refuses_a_value_outside_its_schema_range_naming_its_source() {
+        use dicom::core::{DataElement, PrimitiveValue, Tag, VR};
+        let dir = tempfile::tempdir().unwrap();
+        let ingest = |dcm: &std::path::Path, out: &std::path::Path, meta: Vec<String>| {
+            run(Cmd::Ingest {
+                spec: None,
+                out: None,
+                workers: None,
+                ram_budget: None,
+                auto: false,
+                stream_threshold: None,
+                src: Some(Box::new(IngestSrc::Dicom {
+                    input: dcm.to_path_buf(),
+                    out: out.to_path_buf(),
+                    name: "ct".into(),
+                    timestamp: "2024-01-01T00:00:00Z".into(),
+                    deidentify: true,
+                    recipient: vec![],
+                    source_label: Some("STUDY-1/CT".into()),
+                    meta,
+                })),
+            })
+        };
+        let plain = dir.path().join("plain.dcm");
+        write_phi_dcm(&plain, "DOE^JOHN", "PID-1");
+        let high = dir.path().join("high.dcm");
+        write_phi_dcm(&high, "DOE^JOHN", "PID-1");
+        let mut obj = dicom::object::open_file(&high).unwrap();
+        obj.put(DataElement::new(
+            Tag(0x0018, 0x0060),
+            VR::DS,
+            PrimitiveValue::from("5000"),
+        ));
+        obj.write_to_file(&high).unwrap();
+
+        let out = dir.path().join("high.tsra");
+        assert_eq!(
+            ingest(&high, &out, vec![]).unwrap_err().to_string(),
+            "dicom: (0018,0060) KVP = \"5000\": field 'kvp' of schema 'recon': 5000 is above its \
+             maximum 1000"
+        );
+        assert!(
+            !out.exists(),
+            "a refused ingest leaves no {}",
+            out.display()
+        );
+
+        let out = dir.path().join("meta.tsra");
+        assert_eq!(
+            ingest(&plain, &out, vec!["kvp=5000".into()])
+                .unwrap_err()
+                .to_string(),
+            "--meta kvp: field 'kvp' of schema 'recon': 5000 is above its maximum 1000"
+        );
+        assert!(
+            !out.exists(),
+            "a refused ingest leaves no {}",
+            out.display()
+        );
+
+        ingest(&plain, &out, vec!["kvp=120".into()]).unwrap();
+        let m = tessera_io::Reader::open(&out).unwrap().manifest().clone();
+        assert_eq!(m.metadata["kvp"], serde_json::json!(120));
+    }
+
     /// Naive substring search over bytes (test-only; the `twoway` crate isn't a dep).
     fn twoway_contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
@@ -2611,7 +4116,7 @@ streaming = "batch"
             ram_budget: None,
             auto: false,
             stream_threshold: None,
-            src: Some(IngestSrc::Dicom {
+            src: Some(Box::new(IngestSrc::Dicom {
                 input: dcm.clone(),
                 out: shredded.clone(),
                 name: "cs".into(),
@@ -2620,7 +4125,7 @@ streaming = "batch"
                 recipient: vec![recipient_pub],
                 source_label: Some("STUDY-1/CT".into()),
                 meta: vec![],
-            }),
+            })),
         })
         .unwrap();
 
@@ -2628,6 +4133,7 @@ streaming = "batch"
         // patient name / id (they live only in the encrypted envelope).
         run(Cmd::Verify {
             file: shredded.clone(),
+            workers: None,
         })
         .unwrap();
         let raw = std::fs::read(&shredded).unwrap();
@@ -2685,6 +4191,7 @@ streaming = "batch"
         .unwrap();
         run(Cmd::Verify {
             file: shredded.clone(),
+            workers: None,
         })
         .unwrap();
         let r = Reader::open(&shredded).unwrap();
@@ -2732,7 +4239,7 @@ streaming = "batch"
                 ram_budget: None,
                 auto: false,
                 stream_threshold: None,
-                src: Some(IngestSrc::Dicom {
+                src: Some(Box::new(IngestSrc::Dicom {
                     input: dcm.clone(),
                     out: out.to_path_buf(),
                     name: "eq".into(),
@@ -2741,7 +4248,7 @@ streaming = "batch"
                     recipient,
                     source_label: Some("S/CT".into()),
                     meta: vec![],
-                }),
+                })),
             })
             .unwrap();
         };

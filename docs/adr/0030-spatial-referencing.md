@@ -35,6 +35,7 @@ storing redundant per-level geometry (SSoT with ADR-0028).
 
 ### 1. Canonical geometry = one voxel→world **affine** per spatially-referenced array
 A spatially-referenced array carries an optional **`world_frame`** on its `ArraySpec`:
+
 ```
 world_frame = {
   affine:     [12 × f64],          # 3×4 row-major: [R | t]; implicit last row [0,0,0,1]
@@ -43,6 +44,7 @@ world_frame = {
   space:      "patient",           # named target frame: patient | scanner | aligned | atlas:<id>
 }
 ```
+
 The affine maps the **index vector in declared-axis order** to world: for `axes = [z,y,x]` it acts on
 `[i_z, i_y, i_x, 1]ᵀ → [x, y, z, 1]ᵀ`. Tying the columns to `ArraySpec.axes` makes it self-describing and
 independent of C/F storage order. The affine is a **lossless superset** of all three source conventions
@@ -58,11 +60,13 @@ of truth that can drift. Anisotropy, oblique orientation, and flips are all *in 
 ### 3. Pyramid coherence — per-level transforms are **derived**, not stored (SSoT with ADR-0028)
 ADR-0028 builds level *L* by a 2× fold. Only the **base (level-0) affine** is stored. The level-*L*
 geometry is *computed*:
+
 ```
 spacing_L = 2^L · spacing_0
 origin_L  = origin_0 + R_0 · ( (2^L − 1)/2 · 1⃗ )      # block-centre half-voxel shift
 A_L       = A_0 ∘ scale(2^L)  with the origin shift above
 ```
+
 The `(2^L−1)/2` term is the centroid offset of a 2^L block (a downsampled voxel's centre sits at the
 centre of the base voxels it averages) — the classic OME-Zarr per-level `translation`. Storing per-level
 affines would duplicate this; instead the writer **emits** OME-Zarr `coordinateTransformations` per level
@@ -132,8 +136,8 @@ convention field are **implemented** (2026-06-26, `tessera_core::block::array`; 
 skip-if-none → existing corpus unchanged; tests `world_frame_spacing_is_derived_from_affine_columns`,
 `array_spec_world_frame_is_additive_and_optional`). §3 `at_level` per-level derivation + the **OME-Zarr
 `multiscales` export** (`ome_zarr_multiscales`, `ome_zarr_multiscales_export_derives_per_level_transforms`)
-+ §5 registration-as-`transform`-product (`registration_is_a_transform_product_with_new_frame_and_provenance`)
-+ the `deformation_field` schema + the **deformable warp apply** (`deformation_displacement`/`warp_world` +
+- §5 registration-as-`transform`-product (`registration_is_a_transform_product_with_new_frame_and_provenance`)
+- the `deformation_field` schema + the **deformable warp apply** (`deformation_displacement`/`warp_world` +
 `WorldFrame::voxel_to_world`; `deformable_warp_resolves_source_world_coordinate`) are now **as-built**.
 **No Pending items remain** — a fresh-context re-audit gates the Accepted flip.
 

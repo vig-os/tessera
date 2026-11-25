@@ -11,7 +11,8 @@ either direction, with **zero duplicated source of truth**:
 
 If an implementation change adds or drops a code without touching the docstring (or
 vice versa), the sets diverge and this fails. Runs in the `tessera-py-import` /
-`tessera-wheel-import` flake checks right after smoke.py, against the same package.
+`tessera-wheel-import` flake checks right after smoke.py, against the same package, as
+``python3 api_drift.py <nullable_obs.tsra>`` (the nullable-column fixture, for the #804 return shapes).
 """
 
 import re
@@ -94,7 +95,172 @@ def check(name: str, accepted: set[str], doc: str) -> list[str]:
     return errors
 
 
+# --- logical table names (ADR-0064 PR C2, #717) ---------------------------------------------------
+# A table read takes a logical name; a one-block read takes one block and raises NotABlockError on a
+# node. Probed on a legacy flat group (`events_0000` + `events_0001`, 2 + 1 rows): the Python Builder
+# can't write a partitioned table, and this form resolves through the same `table_group`, so a method
+# that reads one block only fails here exactly as it would on `pairs/0000`, … (logical_tables.py reads
+# the partitioned fixture). The docstrings must claim exactly what the probe finds.
+TABLE_READS = {
+    "column": lambda r: len(r.column("events", "c")),
+    "logical_column": lambda r: len(r.logical_column("events", "c")),
+    "table_dict": lambda r: len(r.table_dict("events")["c"]),
+    "table_arrow": lambda r: r.table_arrow("events").num_rows,
+    "table": lambda r: r.table("events").height,
+}
+BLOCK_READS = {
+    "read_block": lambda r: r.read_block("events"),
+    "array": lambda r: r.array("events"),
+    "array_roi": lambda r: r.array_roi("events", [0, 0, 0], [1, 1, 1]),
+}
+
+
+def logical_names() -> list[str]:
+    import pathlib
+    import tempfile
+
+    path = pathlib.Path(tempfile.mkdtemp()) / "flat.tsra"
+    b = tessera.Builder("t", "flat", "", "2026-01-01T00:00:00Z")
+    for name, values in (("events_0000", [1, 2]), ("events_0001", [3])):
+        b.add_table(name, [("c", "i4", np.array(values, "<i4").tobytes())])
+    b.pack(str(path))
+    r = tessera.open(path)
+
+    errors = []
+    reads = set()
+    for name, read in TABLE_READS.items():
+        try:
+            if read(r) == 3:
+                reads.add(name)
+        except tessera.TesseraError:
+            pass
+    claims = {
+        n
+        for n in TABLE_READS
+        if "logical table" in (getattr(tessera.Reader, n).__doc__ or "")
+    }
+    if reads != claims:
+        errors.append(
+            f"logical table names: resolved by {sorted(reads)}, documented on {sorted(claims)} — update both"
+        )
+    for name, read in BLOCK_READS.items():
+        documented = "NotABlockError" in (getattr(tessera.Reader, name).__doc__ or "")
+        try:
+            read(r)
+            raised = False
+        except tessera.NotABlockError:
+            raised = True
+        if raised != documented:
+            errors.append(
+                f"{name}: raises NotABlockError={raised}, documents it={documented}"
+            )
+
+    exported = {
+        n
+        for n in dir(tessera._native)
+        if isinstance(getattr(tessera._native, n), type)
+        and issubclass(getattr(tessera._native, n), BaseException)
+    }
+    if missing := exported - set(tessera.__all__):
+        errors.append(f"native exceptions not in tessera.__all__: {sorted(missing)}")
+    if not issubclass(tessera.NotABlockError, tessera.TesseraError):
+        errors.append(
+            "NotABlockError must subclass TesseraError, so `except TesseraError` still catches it"
+        )
+    return errors
+
+
+# --- nullable columns (#804) ----------------------------------------------------------------------
+# The return shape of every column read, probed on the live module: a nullable column is an
+# `np.ma.MaskedArray` from the ndarray reads, an Arrow array with nulls from `table_arrow`, native nulls
+# in polars; a non-nullable column is exactly `np.ndarray`. The native layer returns the values and the
+# validity as separate tuple members. The docstrings must say so on every read that returns it. The
+# nullable side reads the committed fixture (the Python Builder can't write a nullable column), given as
+# argv[1]; `nullable_columns.py` checks its values and masks against the Rust reader.
+NDARRAY_READS = {
+    "column": lambda r, t, c: r.column(t, c),
+    "logical_column": lambda r, t, c: r.logical_column(t, c),
+    "table_dict": lambda r, t, c: r.table_dict(t)[c],
+}
+
+
+def nullable_shapes(fixture: str) -> list[str]:
+    import pathlib
+    import tempfile
+
+    errors = []
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "plain.tsra"
+        b = tessera.Builder("t", "plain", "", "2026-01-01T00:00:00Z")
+        b.add_table("plain", [("c", "i4", np.array([1, 2, 3], "<i4").tobytes())])
+        b.pack(str(path))
+        plain = tessera.open(
+            path
+        )  # holds the file open: it stays readable after the cleanup
+    nullable = tessera.open(fixture)
+
+    for name, read in NDARRAY_READS.items():
+        got = type(read(plain, "plain", "c"))
+        if got is not np.ndarray:
+            errors.append(
+                f"{name}: a non-nullable column is {got.__name__}, must stay np.ndarray"
+            )
+        got = read(nullable, "obs", "a")
+        if not isinstance(got, np.ma.MaskedArray) or not np.ma.getmaskarray(got).any():
+            errors.append(
+                f"{name}: a nullable column is {type(got).__name__}, must be a masked MaskedArray"
+            )
+        if "MaskedArray" not in (getattr(tessera.Reader, name).__doc__ or ""):
+            errors.append(
+                f"{name}: returns a MaskedArray for a nullable column, its docstring doesn't say so"
+            )
+    arrow = nullable.table_arrow("obs").column("a")
+    if arrow.null_count == 0:
+        errors.append(
+            "table_arrow: a nullable column has null_count 0, must carry a validity bitmap"
+        )
+    if "validity bitmap" not in (tessera.Reader.table_arrow.__doc__ or ""):
+        errors.append(
+            "table_arrow: carries a validity bitmap, its docstring doesn't say so"
+        )
+    if nullable.table("obs")["a"].null_count() == 0:
+        errors.append("table: a nullable column has no polars nulls")
+    if "native polars nulls" not in (tessera.Reader.table.__doc__ or ""):
+        errors.append("table: carries polars nulls, its docstring doesn't say so")
+
+    # The native shape: values and validity apart, validity None exactly when not nullable.
+    native = {
+        "read_table": lambda r, t, c: next(
+            x[1:] for x in r._r.read_table(t) if x[0] == c
+        ),
+        "read_table_column": lambda r, t, c: r._r.read_table_column(t, c),
+        "read_logical_table_column": lambda r, t, c: r._r.read_logical_table_column(
+            t, c
+        ),
+    }
+    for name, read in native.items():
+        for r, t, c, is_nullable in (
+            (plain, "plain", "c", False),
+            (nullable, "obs", "a", True),
+        ):
+            got = read(r, t, c)
+            if not (
+                isinstance(got, tuple) and len(got) == 3 and isinstance(got[0], bytes)
+            ):
+                errors.append(
+                    f"_native {name}: {got!r:.80} is not (le_bytes, numpy_code, validity)"
+                )
+            elif (got[2] is not None) != is_nullable:
+                errors.append(
+                    f"_native {name}: validity {got[2]!r:.40} for nullable={is_nullable}"
+                )
+    return errors
+
+
 def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: api_drift.py <nullable_obs.tsra>", file=sys.stderr)
+        return 2
     table = probe(
         lambda code, data: tessera.Builder(
             "t", "x", "", "2026-01-01T00:00:00Z"
@@ -123,6 +289,40 @@ def main() -> int:
         errors.append(
             "add_array accepts str — the docstrings document it as table-only; update both"
         )
+
+    # --- array codec knob (#522) -------------------------------------------------------------
+    # The docstring advertises exactly pcodec / zstd / auto. Probe each against the live module so
+    # the advertised set cannot drift from what the binding accepts -- and assert the REJECTION
+    # too, since silently accepting an unknown codec would be worse than not exposing the knob.
+    import numpy as _np
+
+    _vol = _np.arange(64, dtype="<i2")
+    accepted = set()
+    for _c in ("pcodec", "zstd", "auto", "lz4", "", "PCODEC"):
+        _b = tessera.Builder("r", "b", "probe", "2024-01-01T00:00:00Z")
+        try:
+            _b.add_array("v", "i2", [64], _vol.tobytes(), _c)
+            accepted.add(_c)
+        except tessera.TesseraError:
+            # ONLY a TesseraError counts as a rejection. A TypeError from a signature regression
+            # (say, the `codec` parameter disappearing) must fail loudly here, not be tallied as
+            # "correctly rejected" and leave the advertised set looking right.
+            pass
+    if accepted != {"pcodec", "zstd", "auto"}:
+        errors.append(
+            f"add_array codec set is {sorted(accepted)}, docstrings advertise "
+            "['auto', 'pcodec', 'zstd'] — update both"
+        )
+    try:
+        _b = tessera.Builder("r", "b", "probe", "2024-01-01T00:00:00Z")
+        _b.add_array("v", "i2", [64], _vol.tobytes())
+    except (tessera.TesseraError, TypeError) as _e:
+        errors.append(
+            f"add_array is no longer callable without an explicit codec: {_e}"
+        )
+
+    errors += logical_names()
+    errors += nullable_shapes(sys.argv[1])
 
     for e in errors:
         print(f"DRIFT: {e}", file=sys.stderr)

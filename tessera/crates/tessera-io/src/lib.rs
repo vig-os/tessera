@@ -15,6 +15,7 @@ pub mod collection;
 pub mod config;
 pub mod conformance;
 pub mod container;
+mod durable;
 pub mod multiblock;
 pub mod oci;
 pub mod provenance;
@@ -23,8 +24,17 @@ pub mod range;
 pub mod registry;
 pub mod repo;
 pub mod sign;
+pub mod stored;
 pub mod stream;
 pub mod table;
+// Test-only tracing setup (#356). PRIVATE and `cfg(test)` — it installs a global tracing
+// subscriber, which must never be reachable from a release build or from a downstream crate. The
+// regression test in `tests/` compiles this same file directly via `#[path]` rather than going
+// through the public API; see that file for why.
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod test_trace;
 pub mod worm;
 pub mod write;
 
@@ -38,9 +48,9 @@ pub use collection::{
 };
 pub use config::{parse_byte_size, WriteConfig, DEFAULT_RAM_BUDGET};
 pub use container::{
-    add_aux_members, pack, pack_dir, pack_streaming, pack_streaming_verified, unpack,
-    verify_payloads_parallel, write_aux_members, AuxMember, BlockPayload, Reader, AUX_PREFIX,
-    AUX_PROVENANCE_ENTRY, AUX_SIGNATURES_PREFIX, MIMETYPE,
+    add_aux_members, pack, pack_dir, pack_streaming, pack_streaming_verified, read_claimed_id,
+    read_manifest_unverified, unpack, verify_payloads_parallel, write_aux_members, AuxMember,
+    BlockPayload, Reader, AUX_PREFIX, AUX_PROVENANCE_ENTRY, AUX_SIGNATURES_PREFIX, MIMETYPE,
 };
 pub use multiblock::{ColumnBlockIter, LogicalTableView};
 pub use provenance::{
@@ -52,6 +62,16 @@ pub use range::CountingReader;
 pub use registry::{pull as registry_pull, push as registry_push};
 pub use repo::{GcReport, LogEntry, Repository};
 pub use sign::{has_embedded_signature, sign_tsra, sign_tsra_sidecar, verify_tsra};
-pub use stream::{array_job, table_job, table_job_from_fragments, EncodeJob, StreamWriter};
-pub use table::{block_count, block_name, partition_blocks, ColumnData, TableData, BLOCK_ROWS};
-pub use write::WriteSession;
+// The deprecated job keeps its crate-root path until it is removed; its callers still get the
+// deprecation warning at their call sites.
+#[allow(deprecated)]
+pub use stream::table_job_streaming;
+pub use stream::{
+    array_job, table_job, table_job_from_fragments, EncodeJob, OpenTable, SequencedOptions,
+    SequencedStats, SequencedTable, StagedEncodeJob, StagedEncodedBlock, StreamStats, StreamWindow,
+    StreamWriter, MAX_STALL_TIMEOUT,
+};
+pub use table::{
+    block_count, block_name, block_partition, partition_blocks, ColumnData, TableData, BLOCK_ROWS,
+};
+pub use write::{BlockStaging, Lane, StagedBlock, WriteSession};

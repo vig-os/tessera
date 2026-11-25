@@ -15,6 +15,8 @@
 >   commit rule.
 > - The "single irreducible external — an ARM CI runner" conclusion is **stale**: `.github/workflows/ci.yml`
 >   has run a GitHub-hosted `ubuntu-24.04-arm` leg since the CI shim landed, and it is green on `dev`.
+>   (Since #725 that leg lives in `.github/workflows/nix-check.yml` and runs nightly on `dev`, on release
+>   tags and on demand, not per PR.)
 >
 > For current status use `FEATURE-MATRIX.md`, `docs/adr/README.md`, `ROADMAP.md`, and the live issue
 > list — not this file.
@@ -65,7 +67,7 @@ THE LOOP (repeat until DONE; this is "full circle"):
      own "done" as an UNVERIFIED claim until the reviewer re-derives it. If it finds drift, fabrication,
      or an overstatement: fix, then re-review before advancing. Never let a self-assessment stand alone.
   6. Commit (ONLY after a background `nix flake check` exits 0 — never commit+check in one command;
-     `git -c commit.gpgsign=false commit --no-verify`), push, update FEATURE-MATRIX (tick the row with
+     a SIGNED `git commit --no-verify`, never with `-c commit.gpgsign=false`), push, update FEATURE-MATRIX (tick the row with
      its proving test+gate — the adr-matrix gate enforces Accepted↔matrix), flip ADR status, close/
      comment the issue, update memory. Then loop to the next gap.
 
@@ -120,7 +122,7 @@ nix-CI-mockable. **Decisions:** signing = scheme-agnostic envelope over `manifes
 ssh-ed25519** backends + **ORCID** as `signer_identity` + **age/sops** key-at-rest (in-test keypairs;
 only a *production trust identity* is external). WASM = **`tessera-core`→wasm32** (zero C deps — spine/
 verify/proofs/referencing) + **Arrow-JS as the RS↔TS boundary** for columnar data. WORM/OCI = build the
-**mechanism + nix-CI service mocks** (MinIO object-lock · zot registry); only *production* bucket/registry
+**mechanism + nix-CI service mocks** (S3 object-lock · zot registry); only *production* bucket/registry
 external. ADR-0026 = **MC-synthetic listmode + shrink the ring below the file** (no PHI needed for
 bounded-memory + determinism); only *cross-arch x86==ARM CI* external. Plus: **structured `tracing`
 write-path observability** (guardrails logging/trace style — SSoT on `append_block`, then encoders).
@@ -132,7 +134,7 @@ Program tracked as tasks #26–30; first landing `52133c7` (write-path tracing).
 The hybrid program shipped. **7 FEATURE-MATRIX rows flipped ✓ this run** (signing · pyo3+WASM bindings ·
 WORM · OCI · metadata-first durable header · RO-Crate/DataCite · Ingest NIfTI+raw), each via
 verify-before-build + audit-before-flip (the nix-service-mock pattern — a real `distribution` registry on
-loopback — was established for OCI and is reusable for MinIO). **Precise residual, all five criteria:**
+loopback — was established for OCI and is reusable for S3). **Precise residual, all five criteria:**
 - **(1) ADRs:** of 0020–0032, **only ADR-0026 is non-terminal** (all others Accepted; 0027 Superseded;
   0021 doesn't exist). 0026's Accept gate is the determinism-critical external set: **cross-arch x86==ARM
   determinism re-validation + real >RAM listmode + golden regen**. Its §3 streaming-reader *mechanism* is

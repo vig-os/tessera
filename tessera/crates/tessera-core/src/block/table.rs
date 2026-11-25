@@ -42,6 +42,49 @@ pub struct Column {
     /// keep its `content_hash` without regeneration. Legacy manifests deserialize as `false`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub nullable: bool,
+    /// **Epoch/frame anchor** for the column's values (ADR-0056 §6.1, ADR-0032 descriptor).
+    ///
+    /// `unit` + `scale` say *how big a tick is*; they cannot say *what a tick is counted from*. So
+    /// an ingested Arrow `Timestamp(us, _)` would otherwise land as `i8 + unit="s" + scale=1e-6` —
+    /// arithmetically indistinguishable from a **duration**, and a live violation of ADR-0046 §2's
+    /// ticks-plus-epoch time model. A [`Referenced`](crate::referencing::Referenced) with
+    /// `frame = "epoch:unix"` carries the missing half, and the same slot serves any column whose
+    /// values are referenced rather than bare (a rescaled intensity, a log-spaced axis).
+    ///
+    /// Sealed, because it **changes what the values mean** (ADR-0056 §6): a reader who cannot see
+    /// the epoch cannot reconstruct the source's semantics, and FAIR-Reusable collapses.
+    /// `skip_serializing_if` keeps an unreferenced column's JSON byte-identical to a manifest
+    /// written before this field existed, so the committed conformance corpus needs no regeneration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referencing: Option<crate::referencing::Referenced>,
+    /// Per-column PHI classification (ADR-0056 §6.3) — the column-level twin of
+    /// [`FieldSpec::sensitivity`](crate::schema::FieldSpec::sensitivity).
+    ///
+    /// Schema `FieldSpec`s classify *metadata*; a table's PHI lives in its **columns**, and until
+    /// now there was nowhere to say so. Generic ingest stamps
+    /// [`Sensitivity::Unknown`](crate::schema::Sensitivity::Unknown) on every column an operator
+    /// did not classify, which is what lets a future `verify --require-classified` be a one-line
+    /// gate before share/push instead of a manual audit.
+    ///
+    /// Serialised only when it is not the default, so existing manifests are unchanged.
+    #[serde(default, skip_serializing_if = "is_public")]
+    pub sensitivity: crate::schema::Sensitivity,
+    /// Whether a block may **omit** this column altogether (ADR-0065 §8, #809). Distinct from
+    /// [`nullable`](Self::nullable), which is per-row NULL inside a present column.
+    ///
+    /// Meaningful only in a schema's [`TableContract`](crate::schema::TableContract): there it lets
+    /// [`ProductSchema::check_table`](crate::schema::ProductSchema::check_table) pass a block
+    /// without the column. A block's own [`TableSpec`] lists the columns it has, so the flag means
+    /// nothing there and nothing reads it. Skipped when `false`, so every existing manifest keeps
+    /// its bytes.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
+}
+
+/// `skip_serializing_if` predicate — omit the default tier so adding [`Column::sensitivity`] leaves
+/// every previously-sealed manifest's bytes (and therefore its `manifest_hash`) untouched.
+fn is_public(s: &crate::schema::Sensitivity) -> bool {
+    matches!(s, crate::schema::Sensitivity::Public)
 }
 
 /// `skip_serializing_if` predicate — `bool::not` is not usable here (it takes `self` by value,
@@ -51,6 +94,22 @@ fn is_false(b: &bool) -> bool {
 }
 
 impl Column {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &[
+        "name",
+        "dtype",
+        "codec",
+        "short_name",
+        "description",
+        "unit",
+        "scale",
+        "nullable",
+        "referencing",
+        "sensitivity",
+        "optional",
+    ];
+
     /// A bare column: storage `name` + `dtype`, no codec/annotation. Chain the `with_*` builders
     /// to attach the fd5 annotation triad (`short_name`/`description`/`unit`) and a `scale`.
     pub fn new(name: impl Into<String>, dtype: impl Into<String>) -> Self {
@@ -90,6 +149,21 @@ impl Column {
         self.nullable = true;
         self
     }
+    /// Builder: a contract column a block may omit (ADR-0065 §8) — see [`optional`](Column#structfield.optional).
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
+        self
+    }
+    /// Builder: anchor the column's values in a reference frame — the epoch slot (ADR-0056 §6.1).
+    pub fn with_referencing(mut self, referencing: crate::referencing::Referenced) -> Self {
+        self.referencing = Some(referencing);
+        self
+    }
+    /// Builder: classify the column's PHI tier (ADR-0056 §6.3).
+    pub fn with_sensitivity(mut self, sensitivity: crate::schema::Sensitivity) -> Self {
+        self.sensitivity = sensitivity;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +173,61 @@ pub struct TableSpec {
     /// Optional secondary index column enabling O(1)-ish random row `take`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_index: Option<String>,
+    /// Set on every leaf of a partitioned table (ADR-0064), never on a single block. Skipped when
+    /// `None`, so every single-block spec serializes byte for byte as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition: Option<super::Partition>,
+    /// The Vortex **edition** the block's payload was written under, e.g. `"core2026.08.3"`
+    /// (ADR-0024, 2026-11-15 amendment): the frozen set of encoding wire IDs the writer was allowed
+    /// to emit, as Vortex names it (`<family><year>.<month>.<version>`).
+    ///
+    /// Sealed, so a product states which Vortex codec contract its table bytes were written under.
+    /// It is a **necessary** condition for "same input → same bytes", not a sufficient one: two
+    /// blocks of the same rows under different editions may legitimately differ, but the same
+    /// edition alone does not make them equal, because the edition bounds which encodings the
+    /// writer may use, not which it picks. That choice is the writer's codec set (tessera excludes
+    /// ALP, ALPRD, integer Pco, Delta and OnPair, all inside `core2026.08.3`) and the pinned
+    /// Vortex's compressor, which tessera changes only as a format event (ADR-0024) and names in
+    /// [`TableSpec::codec_profile`].
+    ///
+    /// **Set by the writer, not the caller.** `tessera-io`'s table sealing paths (`table_block`,
+    /// the staged jobs, `push_table` / `open_table`) record the edition they write under
+    /// (`tessera_io::table::TABLE_EDITION`) on every table block and partition leaf, and refuse a
+    /// spec that names a different one: they can only write their own. Leave it `None` when
+    /// building a spec. A caller that encodes with `table::encode` and builds its own `BlockRef`
+    /// bypasses this and must set the field itself.
+    ///
+    /// **Absent** means the block was sealed before the field existed, by the vortex 0.75 writer
+    /// (before #635), which had no edition gate: which encodings it could emit is known only from
+    /// that writer build. Such a block still reads and verifies; its manifest bytes and hashes are
+    /// unchanged, because `None` is skipped on serialization, as for [`TableSpec::partition`].
+    ///
+    /// Reading never consults it: Vortex decodes by the wire IDs in the file, whatever edition
+    /// admitted them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition: Option<String>,
+    /// The tessera **codec profile** the block's payload was written with, e.g. `"tessera-table-v1"`
+    /// (ADR-0024, 2026-11-16 amendment, #869): the writer's codec set (which of the edition's
+    /// schemes the compressor may choose from) together with the pinned Vortex compressor that
+    /// chooses among them. Named `tessera-table-v<N>`; `N` moves on any change to the codec set or
+    /// on a Vortex bump that changes the compressor's choices, each a format event.
+    ///
+    /// Sealed, beside [`TableSpec::edition`], so that "same input + same edition + same profile →
+    /// same bytes" can be checked from the product alone: two blocks of the same rows that record
+    /// the same edition and the same profile must have the same payload bytes. It promises
+    /// determinism of bytes, **not** decodability: a reader decodes by the wire IDs in the file,
+    /// which the edition bounds.
+    ///
+    /// **Set by the writer, not the caller**, through the same path as `edition`
+    /// (`tessera_io::table::TABLE_CODEC_PROFILE`, on every table block and partition leaf). The
+    /// writer refuses a spec that names another profile. Leave it `None` when building a spec.
+    ///
+    /// **Readers never refuse on it.** An unknown profile (from a newer writer) and an absent one
+    /// (a block sealed before #869, including every `0.1.0-alpha.1`–`alpha.5` product) both decode
+    /// and verify normally. Absent is omitted on serialization, so such a block keeps its manifest
+    /// bytes and hashes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec_profile: Option<String>,
 }
 
 pub struct TableBlock {
@@ -123,7 +252,7 @@ impl Block for TableBlock {
         BlockKind::Table
     }
     fn spec_json(&self) -> crate::Result<serde_json::Value> {
-        Ok(serde_json::to_value(&self.spec)?)
+        crate::canonical::to_json_value(&self.spec)
     }
     fn digest(&self) -> crate::Result<String> {
         // Spike: digest the spec. Real impl digests the encoded column chunks.
@@ -145,6 +274,21 @@ impl TableBlock {
 mod tests {
     use super::Column;
 
+    /// The set of JSON keys a `Column` serialises to, sorted.
+    ///
+    /// Sorted deliberately: these assertions are about **which** keys are emitted (the
+    /// `skip_serializing_if` back-compat guarantee), never about their order. And order is not ours
+    /// to assert — `serde_json`'s `preserve_order` feature is enabled under workspace feature
+    /// unification (Vortex pulls it in) and disabled for a bare `cargo test -p tessera-core`, so an
+    /// order-sensitive assertion here passes in one invocation and fails in the other. The sealed
+    /// bytes are unaffected either way: the seal canonicalises through RFC 8785 JCS, which sorts.
+    fn json_keys(c: &Column) -> Vec<String> {
+        let v = serde_json::to_value(c).unwrap();
+        let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
     #[test]
     fn builders_attach_annotation_triad_and_scale() {
         let c = Column::new("en", "i2")
@@ -165,9 +309,7 @@ mod tests {
         // Back-compat: an unannotated column serializes to exactly the legacy shape (name+dtype),
         // so existing on-disk `.tsra` specs and content hashes are unaffected.
         let bare = Column::new("ms", "u4");
-        let v = serde_json::to_value(&bare).unwrap();
-        let obj = v.as_object().unwrap();
-        assert_eq!(obj.keys().collect::<Vec<_>>(), vec!["name", "dtype"]);
+        assert_eq!(json_keys(&bare), ["dtype", "name"]);
     }
 
     #[test]
@@ -186,13 +328,12 @@ mod tests {
     #[test]
     fn non_nullable_column_emits_no_nullable_key() {
         let c = Column::new("t", "u8");
-        let v = serde_json::to_value(&c).unwrap();
-        let obj = v.as_object().unwrap();
+        let keys = json_keys(&c);
         assert!(
-            !obj.contains_key("nullable"),
-            "non-nullable column must not emit the key: {obj:?}"
+            !keys.contains(&"nullable".to_string()),
+            "non-nullable column must not emit the key: {keys:?}"
         );
-        assert_eq!(obj.keys().collect::<Vec<_>>(), vec!["name", "dtype"]);
+        assert_eq!(keys, ["dtype", "name"]);
     }
 
     /// A nullable column round-trips, and the flag is explicit in the JSON when set.
@@ -221,5 +362,122 @@ mod tests {
         let c: Column = serde_json::from_str(r#"{"name":"t","dtype":"u8"}"#).unwrap();
         assert_eq!(c.name, "t");
         assert!(c.unit.is_none() && c.scale.is_none() && c.description.is_none());
+    }
+
+    /// ADR-0056 §6.1 — the epoch slot. `unit`+`scale` size a tick; only `referencing` says what it
+    /// is counted *from*, which is the difference between an absolute instant and a duration
+    /// (ADR-0046 §2). An ingested Arrow `Timestamp(us, tz)` lands here.
+    #[test]
+    fn referencing_carries_the_epoch_a_unit_and_scale_cannot() {
+        use crate::referencing::{Referenced, Transform};
+        let ts = Column::new("acq_time", "i8")
+            .with_unit("s")
+            .with_scale(1e-6)
+            .with_referencing(
+                Referenced {
+                    transform: Transform::Affine1d {
+                        slope: 1e-6,
+                        intercept: 0.0,
+                    },
+                    unit: Some("s".into()),
+                    vocabulary: None,
+                    frame: Some("epoch".into()),
+                }
+                .with_epoch("unix"),
+            );
+        let r = ts.referencing.as_ref().expect("epoch anchor present");
+        assert_eq!(r.frame.as_deref(), Some("epoch:unix"));
+        // The frame must be in ADR-0032's pinned vocabulary, not free text — `epoch:<instant>` is
+        // the refinement the existing validator already accepts, so no new frame vocabulary lands.
+        assert!(r.vocabularies_pinned());
+        // …and the whole column round-trips (the descriptor is sealed, so it must serialise).
+        let back: Column = serde_json::from_str(&serde_json::to_string(&ts).unwrap()).unwrap();
+        assert_eq!(back, ts);
+    }
+
+    /// ADR-0056 §6.3 — a column's PHI tier. Generic ingest stamps `Unknown` on anything the
+    /// operator did not classify, because `Public` there would seal a false safety claim.
+    #[test]
+    fn sensitivity_round_trips_and_unknown_is_expressible() {
+        use crate::schema::Sensitivity;
+        let c = Column::new("patient_id", "str").with_sensitivity(Sensitivity::Unknown);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains(r#""sensitivity":"unknown""#), "got {json}");
+        let back: Column = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sensitivity, Sensitivity::Unknown);
+    }
+
+    /// The corpus-stability guarantee for ADR-0056 §6, stated the same way #330 stated it for
+    /// `nullable`: both new fields are `skip_serializing_if`-guarded, so a column that uses neither
+    /// serialises to the **pre-ADR-0056 byte sequence**. Every committed fixture in `tessera/corpus/`
+    /// is such a column; if either field serialised unconditionally, every pinned `content_hash` and
+    /// `manifest_hash` in the corpus would move and the format would have silently revved.
+    ///
+    /// Note the two fields differ in *why* they are omitted: `referencing` is `Option::is_none`, but
+    /// `sensitivity` is not an `Option` — it is omitted by value, when it equals the `Public` default.
+    #[test]
+    fn unreferenced_unclassified_column_emits_neither_key() {
+        use crate::schema::Sensitivity;
+        let annotated = Column::new("en", "i2").with_unit("keV").with_scale(0.1);
+        assert_eq!(json_keys(&annotated), ["dtype", "name", "scale", "unit"]);
+        // The explicit-Public case is the one that would bite: it must also emit nothing.
+        let explicit = Column::new("ms", "u4").with_sensitivity(Sensitivity::Public);
+        assert_eq!(
+            json_keys(&explicit),
+            ["dtype", "name"],
+            "an explicitly-Public column must serialise like a pre-ADR-0056 one"
+        );
+    }
+
+    /// A spec sealed before `edition` existed (the vortex 0.75 writer, before #635), verbatim.
+    const PRE_EDITION_SPEC: &str = r#"{"columns":[{"name":"t","dtype":"u8"}],"rows":3}"#;
+
+    /// ADR-0024's 2026-11-15 amendment: a pre-edition spec still parses, reads as "no edition
+    /// recorded", and re-serialises to exactly its old bytes, so the manifest and its hashes stay
+    /// put.
+    #[test]
+    fn pre_edition_spec_parses_without_edition_and_reserialises_byte_identically() {
+        let spec: super::TableSpec = serde_json::from_str(PRE_EDITION_SPEC).unwrap();
+        assert_eq!(spec.edition, None);
+        assert_eq!(serde_json::to_string(&spec).unwrap(), PRE_EDITION_SPEC);
+    }
+
+    /// A recorded edition is serialised under the `edition` key and survives the round trip.
+    #[test]
+    fn edition_round_trips_through_json() {
+        let mut spec: super::TableSpec = serde_json::from_str(PRE_EDITION_SPEC).unwrap();
+        spec.edition = Some("core2026.08.3".into());
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(json["edition"], "core2026.08.3");
+        let back: super::TableSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(back.edition.as_deref(), Some("core2026.08.3"));
+    }
+
+    /// A spec sealed with an edition but before `codec_profile` existed (#635 to #869), verbatim.
+    const PRE_PROFILE_SPEC: &str =
+        r#"{"columns":[{"name":"t","dtype":"u8"}],"rows":3,"edition":"core2026.08.3"}"#;
+
+    /// ADR-0024's 2026-11-16 amendment: a spec without a profile parses as "no profile recorded"
+    /// and re-serialises to exactly its old bytes, so its manifest and hashes stay put.
+    #[test]
+    fn pre_profile_spec_parses_without_profile_and_reserialises_byte_identically() {
+        let spec: super::TableSpec = serde_json::from_str(PRE_PROFILE_SPEC).unwrap();
+        assert_eq!(spec.codec_profile, None);
+        assert_eq!(serde_json::to_string(&spec).unwrap(), PRE_PROFILE_SPEC);
+    }
+
+    /// A recorded profile is serialised under `codec_profile`, after `edition`, and a profile this
+    /// build has never heard of parses as data, not as an error (readers never refuse on it).
+    #[test]
+    fn codec_profile_round_trips_and_an_unknown_one_parses() {
+        let mut spec: super::TableSpec = serde_json::from_str(PRE_PROFILE_SPEC).unwrap();
+        spec.codec_profile = Some("tessera-table-v99".into());
+        let text = serde_json::to_string(&spec).unwrap();
+        assert!(
+            text.ends_with(r#","edition":"core2026.08.3","codec_profile":"tessera-table-v99"}"#),
+            "{text}"
+        );
+        let back: super::TableSpec = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.codec_profile.as_deref(), Some("tessera-table-v99"));
     }
 }

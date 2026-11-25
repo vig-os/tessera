@@ -8,15 +8,74 @@ tables — plus the typed-error path and a numpy write→read roundtrip. Driven 
 flake check (the assembled `tessera/` package — pure-Python `__init__.py` + `_native.so` — on PYTHONPATH).
 """
 
+import io
+import json
+import math
 import pathlib
+import struct
 import sys
 import tempfile
+import zipfile
 
 import numpy as np
 import polars as pl
 import pyarrow as pa
 
 import tessera
+
+
+def jcs(value) -> bytes:
+    """RFC 8785 JCS bytes of a parsed JSON value: a stdlib-only oracle for the stored-form checks below
+    (the check environment has no JCS library). Keys sort by UTF-16 code unit; strings use `json`'s
+    escapes, which are RFC 8785's (`\\b \\f \\n \\r \\t`, other controls as lowercase `\\u00xx`,
+    nothing else escaped). A number is written in ECMAScript form only where `repr` already is
+    (an integral value below 1e21, or a fraction with |x| >= 1e-4, which `repr` writes as plain
+    decimals); anything else is refused rather than guessed at."""
+
+    def num(x) -> str:
+        if isinstance(x, bool):
+            return "true" if x else "false"
+        if isinstance(x, int):
+            return str(x)
+        assert math.isfinite(x), x
+        if x == int(x) and abs(x) < 1e21:
+            return str(int(x))
+        assert abs(x) >= 1e-4, f"jcs oracle: no ECMAScript form for {x!r} here"
+        return repr(x)
+
+    def enc(v) -> str:
+        if v is None or isinstance(v, (bool, int, float)):
+            return "null" if v is None else num(v)
+        if isinstance(v, str):
+            return json.dumps(v, ensure_ascii=False)
+        if isinstance(v, list):
+            return "[" + ",".join(enc(x) for x in v) + "]"
+        keys = sorted(v, key=lambda k: k.encode("utf-16-be"))
+        return "{" + ",".join(enc(k) + ":" + enc(v[k]) for k in keys) + "}"
+
+    return enc(value).encode("utf-8")
+
+
+def assert_stored_form(tsra, what: str) -> None:
+    """`tsra` stores the ADR-0066 pair: entries 1–3 are `mimetype`, `manifest.seal`, `manifest.json`;
+    `manifest.json` is exactly its own JCS form with no `manifest_hash` key; `manifest.seal` is the
+    `blake3:<64 hex>` seal the reader verified it against on open (blake3 itself is the Rust reader's
+    check: the check environment has no blake3 library)."""
+    with zipfile.ZipFile(tsra) as z:
+        names = z.namelist()
+        stored = z.read("manifest.json")
+        seal = z.read("manifest.seal").decode("ascii")
+    assert names[:3] == ["mimetype", "manifest.seal", "manifest.json"], (
+        what,
+        names[:3],
+    )
+    assert stored == jcs(json.loads(stored)), (
+        f"{what}: manifest.json is not its own JCS form: {stored[:120]!r}"
+    )
+    assert "manifest_hash" not in json.loads(stored), f"{what}: the seal is in band"
+    assert len(seal) == 71 and seal.startswith("blake3:"), (what, seal)
+    assert tessera.open(tsra).manifest_hash == seal, f"{what}: Reader.manifest_hash"
+
 
 corpus = pathlib.Path(sys.argv[1])
 files = sorted(corpus.glob("*.tsra"))
@@ -36,6 +95,7 @@ for f in files:
     assert r.block_names() == [b["name"] for b in m["blocks"]]
     r.verify()
     tessera.verify(f)
+    assert_stored_form(f, f.name)
 
     for b in m["blocks"]:
         if b["kind"] == "array":
@@ -70,6 +130,60 @@ for f in files:
             assert df.height == proj.shape[0]
     verified += 1
 
+
+def hide_member_before_central_directory(tsra: bytes) -> bytes:
+    """`tsra` with a complete local entry (`manifest.json`, forged) hidden in front of the central
+    directory, and every end-record pointer moved past it. No central-directory record mentions it, so
+    `zipfile` reads the archive unchanged; a streaming reader walking the local headers lists it as one
+    more member (GHSA-m665-v7pm-7grj, SPEC §6)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("manifest.json", b'{"forged": true}')
+    tiny = buf.getvalue()
+    tiny_eocd = tiny.rindex(b"PK\x05\x06")
+    hidden = tiny[
+        : struct.unpack_from("<I", tiny, tiny_eocd + 16)[0]
+    ]  # local header + bytes only
+
+    out = bytearray(tsra)
+    eocd = out.rindex(b"PK\x05\x06")
+    zip64 = eocd >= 20 and out[eocd - 20 : eocd - 16] == b"PK\x06\x07"
+    if zip64:
+        record = struct.unpack_from("<Q", out, eocd - 20 + 8)[0]
+        cd_start = struct.unpack_from("<Q", out, record + 48)[0]
+    else:
+        cd_start = struct.unpack_from("<I", out, eocd + 16)[0]
+    k = len(hidden)
+    out[cd_start:cd_start] = hidden
+    eocd += k
+    if struct.unpack_from("<I", out, eocd + 16)[0] != 0xFFFFFFFF:
+        struct.pack_into("<I", out, eocd + 16, cd_start + k)
+    if zip64:
+        struct.pack_into("<Q", out, eocd - 20 + 8, record + k)
+        struct.pack_into("<Q", out, record + k + 48, cd_start + k)
+    return bytes(out)
+
+
+# `verify` is the full `tessera verify` pass, container rule included: a member hidden where only a
+# streaming reader looks is refused, though every block digest checks and `zipfile` sees nothing amiss.
+with tempfile.TemporaryDirectory() as td:
+    honest = files[0]
+    cloaked = pathlib.Path(td) / "cloaked.tsra"
+    cloaked.write_bytes(hide_member_before_central_directory(honest.read_bytes()))
+    with zipfile.ZipFile(honest) as a, zipfile.ZipFile(cloaked) as b:
+        assert a.namelist() == b.namelist(), "the central-directory view is unchanged"
+    r = tessera.open(
+        cloaked
+    )  # a cheap open reads only the tail: it does not walk local headers
+    for refuse in (r.verify, lambda: tessera.verify(cloaked)):
+        try:
+            refuse()
+            raise AssertionError(
+                "verified an archive a streaming zip reader reads differently"
+            )
+        except tessera.TesseraError as e:
+            assert "not a canonical .tsra" in str(e), e
+
 # typed-error path: a missing file raises TesseraError, not a bare exception
 try:
     tessera.open(corpus / "does_not_exist.tsra")
@@ -92,6 +206,7 @@ with tempfile.TemporaryDirectory() as td:
     b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "PT"}')
     cid = b.pack(str(out))
     assert cid.startswith("blake3:")
+    assert_stored_form(out, "Builder.pack")  # the Python write door stores the JCS form
 
     rr = tessera.open(out)
     rr.verify()
@@ -102,20 +217,114 @@ with tempfile.TemporaryDirectory() as td:
     assert rr.table("events")["idx"].to_list() == idx.tolist()
     assert rr.table_arrow("events").column("en").to_pylist() == en.tolist()
 
+# #734: block names are unique within a product, so packing two blocks of one name is refused
+# with the typed reason, and nothing is written.
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "dup.tsra"
+    b = tessera.Builder("recon", "dup", "duplicate block name", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    try:
+        b.pack(str(out))
+        raise AssertionError("packed a product listing block 'volume' twice")
+    except tessera.TesseraError as e:
+        assert "listed more than once" in str(e), f"refused for the wrong reason: {e}"
+    assert not out.exists(), "a refused pack must write nothing"
+
+# #886: a sealed JSON number is a double (I-JSON, RFC 7493 §2.2), so an integer beyond ±(2^53−1)
+# can't be sealed exactly. Metadata refuses it with the fix to apply (write it as a string), naming
+# the value; nothing is written and nothing is converted. (`with_generation` refuses such an int
+# when it is passed: tests/provenance.py.)
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "big.tsra"
+    b = tessera.Builder("recon", "big", "integer beyond 2^53", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "CT"}')
+    b.set_field("daq_start_ns", "1730000000000000000")
+    try:
+        b.pack(str(out))
+        raise AssertionError("sealed an integer beyond 2^53")
+    except tessera.TesseraError as e:
+        want = (
+            "metadata.daq_start_ns = 1730000000000000000 is outside the range a sealed JSON number "
+            "can hold (±(2^53−1), I-JSON RFC 7493 §2.2)"
+        )
+        assert want in str(e) and "write it as a string" in str(e), str(e)
+    assert not out.exists(), "a refused pack must write nothing"
+# Written as a string, the same value seals and reads back exactly.
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "big-str.tsra"
+    b = tessera.Builder("recon", "big", "integer as a string", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "CT"}')
+    b.set_field("daq_start_ns", '"1730000000000000000"')
+    b.pack(str(out))
+    assert (
+        tessera.open(out).manifest()["metadata"]["daq_start_ns"]
+        == "1730000000000000000"
+    )
+
+# #895: the Builder is held to the number rules its product schema declares. `recon` ranges `kvp`
+# to 0–1000 kV: an out-of-range value is refused naming the field (at seal, so as `metadata.kvp`),
+# nothing is written, and an in-range value seals unchanged.
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "kvp.tsra"
+    b = tessera.Builder("recon", "kvp", "out-of-range kvp", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "CT"}')
+    b.set_field("kvp", "5000")
+    try:
+        b.pack(str(out))
+        raise AssertionError("sealed kvp = 5000 against recon's 0–1000 kV range")
+    except tessera.TesseraError as e:
+        want = "metadata.kvp: field 'kvp' of schema 'recon': 5000 is above its maximum 1000"
+        assert want in str(e), str(e)
+    assert not out.exists(), "a refused pack must write nothing"
+    b = tessera.Builder("recon", "kvp", "in-range kvp", "2024-01-01T00:00:00Z")
+    b.add_array("volume", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("modality", '{"_vocabulary": "DICOM", "_code": "CT"}')
+    b.set_field("kvp", "120.5")
+    b.pack(str(out))
+    assert tessera.open(out).manifest()["metadata"]["kvp"] == 120.5
+# …and `sim` declares `seed` a string-encoded int64, so the seed is a decimal string by type: a
+# number is refused however small, the string seals.
+with tempfile.TemporaryDirectory() as td:
+    out = pathlib.Path(td) / "seed.tsra"
+    b = tessera.Builder("sim", "seed", "seed as a number", "2024-01-01T00:00:00Z")
+    b.add_array("output", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("seed", "42")
+    try:
+        b.pack(str(out))
+        raise AssertionError("sealed a numeric seed against sim's string-encoded int64")
+    except tessera.TesseraError as e:
+        assert (
+            "metadata.seed: field 'seed' of schema 'sim': 42 is not a decimal string of int64"
+            in str(e)
+        ), str(e)
+    b = tessera.Builder("sim", "seed", "seed as a string", "2024-01-01T00:00:00Z")
+    b.add_array("output", "i2", list(vol.shape), vol.tobytes())
+    b.set_field("seed", '"42"')
+    b.pack(str(out))
+    assert tessera.open(out).manifest()["metadata"]["seed"] == "42"
+
 # str + b1 columns through the ergonomic reads (#421): str crashed _ndarray
 # ("<str" is not a dtype) and b1 silently decoded as int8 instead of bool_.
-import struct
-
 els = ["He", "Li", "", "Beryllium"]  # empty string is the edge worth pinning
 framed = b"".join(struct.pack("<I", len(s.encode())) + s.encode() for s in els)
 flags = np.array([1, 0, 1, 1], dtype="<u1")
 
 with tempfile.TemporaryDirectory() as td:
     out = pathlib.Path(td) / "strcols.tsra"
-    b = tessera.Builder("recon", "sc", "str/b1 column roundtrip", "2024-01-01T00:00:00Z")
+    b = tessera.Builder(
+        "recon", "sc", "str/b1 column roundtrip", "2024-01-01T00:00:00Z"
+    )
     b.add_table(
         "props",
-        [("el", "str", framed), ("stable", "b1", flags.tobytes()), ("z", "u1", bytes([2, 3, 4, 4]))],
+        [
+            ("el", "str", framed),
+            ("stable", "b1", flags.tobytes()),
+            ("z", "u1", bytes([2, 3, 4, 4])),
+        ],
         None,
     )
     b.pack(str(out))
@@ -124,7 +333,9 @@ with tempfile.TemporaryDirectory() as td:
     rr.verify()
     cols = rr.table_dict("props")
     assert cols["el"].tolist() == els, f"str column mangled: {cols['el']!r}"
-    assert cols["stable"].dtype == np.bool_, f"b1 must decode as bool_, got {cols['stable'].dtype}"
+    assert cols["stable"].dtype == np.bool_, (
+        f"b1 must decode as bool_, got {cols['stable'].dtype}"
+    )
     assert cols["stable"].tolist() == [True, False, True, True]
     assert rr.table_arrow("props").column("el").to_pylist() == els
 

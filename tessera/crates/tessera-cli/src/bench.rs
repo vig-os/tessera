@@ -232,6 +232,9 @@ fn run_listmode_synthetic(
         columns: listmode_columns(),
         rows: rows as u64,
         row_index: Some("ms".into()),
+        partition: None,
+        edition: None,
+        codec_profile: None,
     };
     // Bound the producer's in-memory batch slab to one ring-depth equivalent of rows. Conservative
     // (the row-group accumulator stages durable fragments anyway), but it keeps the producer side
@@ -292,9 +295,7 @@ fn run_listmode_real(
         "ms",
         None,
         &[],
-        &std::collections::BTreeMap::new(),
-        None,
-        &std::collections::BTreeMap::new(),
+        &ge_hdf5::StreamProvenance::default(),
     )?;
     let wall_s = t.elapsed().as_secs_f64();
     // Total rows = sum over all event blocks (multi-block products split at BLOCK_ROWS).
@@ -430,9 +431,15 @@ fn warmup_read_synthetic(n_rows: usize, seed: u64) -> (TableData, f64) {
 }
 
 /// Measure the **real** read+transpose rate from a `.h5` (`--input` mode). Pulls one warmup slab
-/// (up to `n_rows`) through the production [`ge_hdf5::stream_compound`] reader and times it. We
-/// stop after one slab via a sentinel error from the sink — bubbling Err out of `stream_compound`
-/// short-circuits the loop instead of reading the whole file, so the warmup cost is bounded.
+/// through the production [`ge_hdf5::stream_compound`] reader and times it. We stop after one slab
+/// via a sentinel error from the sink — bubbling Err out of `stream_compound` short-circuits the
+/// loop instead of reading the whole file.
+///
+/// `n_rows` is a request, not a bound: since #325 the reader rounds the slab up to whole dataset
+/// chunks, so on a CHUNKED dataset the warmup reads at least one full chunk even when `n_rows` is
+/// smaller. The measured rate stays correct either way — `sample_rows` below is taken from the slab
+/// actually returned, never from `n_rows` — but the warmup's cost is bounded by the dataset's chunk
+/// size rather than by `n_rows`.
 fn warmup_read_real(
     input: &std::path::Path,
     dataset: &str,
@@ -485,6 +492,9 @@ fn warmup_encode_per_core(columns: &[Column], data: &TableData) -> tessera_core:
         columns: columns.to_vec(),
         rows: u64::try_from(n_rows).unwrap_or(u64::MAX),
         row_index: None,
+        partition: None,
+        edition: None,
+        codec_profile: None,
     };
     let row_bytes: usize = columns
         .iter()

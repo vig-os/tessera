@@ -43,9 +43,11 @@ asserted.
 
 ### 2. Scatter form = a COO table (no new primitive)
 A scatter-sparse grid is a **Vortex table block** with columns:
+
 ```
 i0, i1, …, i_{n-1},  value[ , value1, value2, … ]
 ```
+
 plus, on the block's `ArraySpec`-style metadata: the **dense `shape`**, **`dtype`**, and **`fill_value`**
 (the implied value at absent cells — usually 0, but explicit so "absent" is unambiguous). A reader can
 densify on demand from `(shape, fill_value, rows)`. Multi-component cells (a `[3,z,y,x]` deformation

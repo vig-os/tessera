@@ -5,19 +5,26 @@
 ```
 $ tessera info
 tessera [..]
-backends:   blob · blob-series · dicom [..] · dicom-series [..] · hdf-compound [..] · nifti · raw
+backends:   arrow 58.4.2 · blob · blob-series · csv 1.4.0 · dicom 0.10.0 · dicom-series 0.10.0 · hdf-compound 1.14.6 · nifti · npy · npz-member 9.0.5 · parquet 58.4.2 · raw
 disabled:   (none)
 build:      static-hdf5=[..] · cloud=[..] · sql=[..]
 
 ```
 
-Nothing is disabled today: no decoder feature gate exists yet, so every known backend is compiled
-in. Phase 1's feature graph (ADR-0057 §5) is what starts moving names onto the `disabled:` line —
-and the missing-backend error will point here.
+Nothing is disabled in a default build: `arrow`, `parquet` and `csv` are feature-gated (ADR-0057 §5)
+but default-ON, because the gates exist for embedders and CI, not for end users — a downloaded
+`tessera` that cannot read Parquet is a bad binary. Build with `--no-default-features` and those three
+names move to the `disabled:` line instead of vanishing, which is what lets an ingest naming one fail
+with "not compiled into this build" (exit 3) rather than "unknown backend" (exit 2).
 
 `--json` emits the same facts in a shape meant for `aux/provenance.json`. The binary flavor is
-deliberately NOT sealed: ADR-0056 §6.2 seals `ingest_decoder`, which is what actually determined the
-bytes. ADR-0042's line holds — sealed = what changed the bytes; `aux/` = who was in the room.
+deliberately NOT sealed: ADR-0056 §6a seals the `ingest_decoder` triple, which is what actually
+determined the bytes. ADR-0042's line holds — sealed = what changed the bytes; `aux/` = who was in the
+room.
+
+It also carries, **per ingest lane**, the sealed feature digest and the **pre-image** it is taken over — one entry per lane since #477, because a global digest made a parquet product commit to the crate list of every other lane. The pre-image is `v2;`-prefixed: the derivation is versioned, so a future change to it reads as a declared difference rather than as a decoder that moved. Alongside the
+digest itself, so the third component of that triple is checkable rather than merely observable: a
+reader holding a `.tsra` and this output from the same version can confirm the correspondence.
 
 ```
 $ tessera info --json
@@ -26,10 +33,18 @@ $ tessera info --json
   "format_version": "[..]",
   "backends": [
     {
+      "name": "arrow",
+      "version": "[..]"
+    },
+    {
       "name": "blob"
     },
     {
       "name": "blob-series"
+    },
+    {
+      "name": "csv",
+      "version": "[..]"
     },
     {
       "name": "dicom",
@@ -47,14 +62,46 @@ $ tessera info --json
       "name": "nifti"
     },
     {
+      "name": "npy"
+    },
+    {
+      "name": "npz-member",
+      "version": "9.0.5"
+    },
+    {
+      "name": "parquet",
+      "version": "58.4.2"
+    },
+    {
       "name": "raw"
     }
   ],
   "backends_disabled": [],
   "build": {
-    "cloud": [..],
-    "sql": [..],
-    "static-hdf5": [..]
+    "cloud": false,
+    "sql": false,
+    "static-hdf5": false
+  },
+  "ingest_decode": {
+    "arrow-rs/arrow-ipc": {
+      "digest": "blake3:[..]",
+      "features": "v2;pins=[..]"
+    },
+    "arrow-rs/parquet": {
+      "digest": "blake3:[..]",
+      "features": "v2;pins=[..]"
+    },
+    "rust-csv": {
+      "digest": "blake3:[..]",
+      "features": "v2;pins=[..]"
+    },
+    "tessera/npy": {
+      "in_tree": true
+    },
+    "tessera/npz": {
+      "digest": "blake3:[..]",
+      "features": "v2;pins=[..]"
+    }
   }
 }
 

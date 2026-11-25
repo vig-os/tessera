@@ -7,24 +7,23 @@ no libpython linkage.
 ## Read + verify + decode
 
 ```python
-import tessera, numpy as np
+import tessera
 
 r = tessera.open("study.tsra")          # opens + verifies the manifest seal
 print(r.product, r.id)                   # "recon", "blake3:…"
 r.verify()                               # full pass: seal + every block digest
 
-# decode an array block straight to numpy (little-endian, C-order)
-buf, shape, code = r.read_array("volume")
-vol = np.frombuffer(buf, "<" + code).reshape(shape)
+vol = r.array("volume")                  # np.ndarray, native dtype, C-order
+roi = r.array_roi("volume", [0, 0, 0], [64, 64, 64])  # only the intersecting 64³ chunks are read
 
-# or a 3-D ROI sub-cube — only the intersecting 64³ chunks are read (7–26× faster)
-buf, shape, code = r.read_array_subset("volume", origin=[0, 0, 0], shape=[64, 64, 64])
-roi = np.frombuffer(buf, "<" + code).reshape(shape)
-
-# decode a table block, column by column
-cols = {name: np.frombuffer(buf, "<" + code)
-        for name, buf, code in r.read_table("events")}
+ms = r.column("events", "ms")            # one column, projected
+cols = r.table_dict("events")            # {column: np.ndarray}
+df = r.table("events")                   # polars.DataFrame (r.table_arrow → pyarrow.Table)
 ```
+
+A **nullable** column reads as an `np.ma.MaskedArray` (`mask=True` at each NULL) from `column` /
+`logical_column` / `table_dict`, an Arrow array with a validity bitmap from `table_arrow`, and native nulls in
+polars; a column that is not nullable is a plain `np.ndarray`. A present NaN is a value, not a NULL.
 
 Anything wrong — bad magic, broken seal, digest mismatch, unknown block — raises `tessera.TesseraError`.
 
@@ -48,6 +47,17 @@ content_id = b.pack("out.tsra")          # seals (3 hashes) + writes; returns th
 Dtype codes are the fd5 numpy codes without a byte-order prefix: `i2/i4/i8`, `u2/u4/u8`, `f4/f8`
 (tables also allow `i1/u1`). Buffers are little-endian, C-order — pass
 `arr.astype(arr.dtype.newbyteorder("<")).tobytes()` if your array isn't already `<`.
+
+`add_array` takes an optional **`codec`**: `"pcodec"` (the default — best on acquisitions with
+detector noise), `"zstd"` (best on synthetic or highly repetitive data such as masks), or `"auto"`
+(encode with both, keep the smaller). Neither codec dominates — on a 256³ volume pcodec was 18%
+smaller on acquisition-shaped data and zstd 12% smaller on a synthetic ramp. The manifest always
+records the concrete codec; see the book's *Arrays* chapter for the measurements.
+
+```python
+b.add_array("mask", "u1", list(mask.shape), mask.tobytes(), codec="zstd")
+b.add_array("volume", "i2", list(vol.shape), vol.tobytes(), codec="auto")
+```
 
 ## Building
 

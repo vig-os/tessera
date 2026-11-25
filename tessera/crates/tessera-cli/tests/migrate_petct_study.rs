@@ -138,9 +138,8 @@ modality = {{ _vocabulary = "DICOM", _code = "CT" }}
     );
 
     // ── Both .tsra members + the collection descriptor exist ────────────────────────
-    let coll_json =
-        std::fs::read_to_string(out.join("collection.json")).expect("collection.json missing");
-    let coll = tessera_core::Collection::from_json_verified(&coll_json).unwrap();
+    let coll = tessera_io::stored::read_collection(&out.join("collection.json"))
+        .expect("collection.json + collection.seal verify");
     assert_eq!(coll.members.len(), 2, "collection has 2 members");
     assert_eq!(
         coll.study.as_deref(),
@@ -231,7 +230,7 @@ modality = {{ _vocabulary = "DICOM", _code = "CT" }}
 
     // ── Cohort-pruneable smoke: in-process filter on study= produces both members ──
     // (The wire-level `cohort_prune_before_fetch_skips_non_matching_product` capstone in
-    // tessera-io/src/cloud.rs proves the SAME metadata drives byte-saving over MinIO.
+    // tessera-io/src/cloud.rs proves the SAME metadata drives byte-saving over S3.
     // Here we just prove the metadata exists at the right place to be filtered.)
     let matching: Vec<_> = by_product
         .values()
@@ -256,10 +255,7 @@ modality = {{ _vocabulary = "DICOM", _code = "CT" }}
         "--out",
         out2.to_str().unwrap(),
     ]));
-    let coll2 = tessera_core::Collection::from_json_verified(
-        &std::fs::read_to_string(out2.join("collection.json")).unwrap(),
-    )
-    .unwrap();
+    let coll2 = tessera_io::stored::read_collection(&out2.join("collection.json")).unwrap();
     assert_eq!(
         coll.id, coll2.id,
         "collection id is deterministic across re-runs"

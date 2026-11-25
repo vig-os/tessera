@@ -1,0 +1,43 @@
+Generic ingest — YOUR own data, no vendor decoder. Run against the real binary on every build,
+so the cookbook cannot claim a flag the tool does not have. Digests are globbed with `[..]`;
+the structural lines are matched exactly.
+
+# === No vendor decoder involved — these take the file you already have and normalise it.        ===
+# === The verb names the PRIMITIVE, not the file format, because the primitive is what the       ===
+# === product IS: rows of typed fields -> `table`, a dense numeric grid -> `array`.              ===
+
+# === CSV carries no schema, and Tessera will not invent one: an inferred schema depends on      ===
+# === which rows got sampled, so the same file could seal two ways. Declare the columns instead. ===
+# === `?` allows NULLs — an empty numeric field is absent, not zero.                             ===
+
+```
+$ tessera ingest table readings.csv readings.tsra --from csv --name readings --timestamp 2024-01-01T00:00:00Z --column run_id:u4 --column detector:str --column energy_kev:f8? --meta study=DEMO-2024-01
+ingested blake3:[..] (table) -> readings.tsra
+
+```
+
+# === Parquet and Arrow need no declarations — they carry their own dtypes, so `--from` is       ===
+# === detected from the magic bytes and the whole invocation is the verb, the file and a name.   ===
+# === A snappy Parquet and a zstd Parquet of the same logical table seal the SAME content_hash:  ===
+# === ingest is a logical re-encode, so the source's compression never reaches your identity.    ===
+
+```
+$ tessera ingest array signal.npy signal.tsra --name signal --timestamp 2024-01-01T00:00:00Z --meta study=DEMO-2024-01
+ingested blake3:[..] (array) -> signal.tsra
+
+```
+
+# === Both verify like anything else, and both carry an `ingested_from` edge back to the source  ===
+# === bytes plus a sealed record of every transformation applied at the door.                    ===
+
+```
+$ tessera verify readings.tsra
+OK  readings.tsra verified (1 blocks)
+
+```
+
+```
+$ tessera verify signal.tsra
+OK  signal.tsra verified (1 blocks)
+
+```
