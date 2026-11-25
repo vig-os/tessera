@@ -1,0 +1,14 @@
+rust strict decoder  int5_non_shortest            refused: byte 0: argument 5 not in its shortest form (additional information 24)
+rust strict decoder  int64_non_shortest           refused: byte 0: argument 64 not in its shortest form (additional information 25)
+rust strict decoder  text_indefinite              refused: byte 0: indefinite-length item (RFC 8949 §4.2.1 forbids it)
+rust strict decoder  map_unsorted                 refused: byte 4: map key "a" out of canonical order
+rust strict decoder  map_duplicate_key            refused: byte 4: map key "a" appears twice
+rust strict decoder  float_1_5_as_f32             refused: byte 0: float 1.5 not in preferred serialization (ai 26, shortest is 25)
+rust strict decoder  float_nan                    refused: byte 0: NaN/±infinity is not in the profile
+rust strict decoder  bignum_tag2                  refused: byte 0: tags are not in the profile
+rust strict decoder  undefined                    refused: byte 0: `undefined` is not in the profile
+rust strict decoder  text_lone_surrogate_cesu8    refused: byte 0: text string is not valid UTF-8 (invalid utf-8 sequence of 1 bytes from index 0)
+rust strict decoder  trailing_byte                refused: byte 1: 1 trailing bytes
+rust A parse_strict  ints.json                    refused: epoch_ns = 1730000000123456789 exceeds ±(2^53−1) (I-JSON, RFC 7493 §2.2): a sealed JSON number is an IEEE-754 double (RFC 8785 §3.2.2.3), which can't hold this integer exactly; write it as a string
+rust B decode_strict ints.cbor                    {"small":42,"i64_min":-9223372036854775808,"u64_max":18446744073709551615,"epoch_ns":1730000000123456789,"p53_plus_1":9007199254740993}
+wrote vectors to out/vectors

@@ -14,7 +14,10 @@
 
 - [Arrays: stats, slice, project, pyramid](./arrays.md)
 - [Tables & SQL](./tables-sql.md)
+- [Ingesting your own data](./ingest-your-own-data.md)
 - [Ingesting vendor data](./ingest.md)
+- [Ingest cookbook: writing your own data](./ingest-cookbook.md)
+- [Product-schema reference](./schemas.md)
 
 # Trust
 
@@ -31,6 +34,10 @@
 
 - [Conformance & the SPEC](./conformance.md)
 - [Bindings: Python & WASM](./bindings.md)
+
+# Upgrading
+
+- [Migrating a streamed table to `push_table` (alpha.5)](./migrating-to-push-table.md)
 
 ---
 

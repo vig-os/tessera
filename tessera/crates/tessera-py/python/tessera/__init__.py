@@ -11,8 +11,21 @@ gets **native objects** — a NumPy ``ndarray`` for arrays, and a polars ``DataF
     df  = r.table("events")                # -> polars.DataFrame
     ms  = r.column("events", "ms")         # -> np.ndarray (single column, projected)
 
+A **nullable** table column (one whose schema declares ``nullable``) reads as an
+``np.ma.MaskedArray`` with ``mask=True`` at each NULL, from ``column()``, ``logical_column()`` and
+``table_dict()``, whether or not the rows hold a NULL; a column that is not nullable is a plain
+``ndarray``. ``table_arrow()`` gives its arrays a real validity bitmap (``null_count`` counts the
+NULLs) and ``table()`` gives polars native nulls. A NULL is not a NaN: a present NaN stays a value.
+Under a NULL the masked array's ``.data`` holds the dtype default (``0``), never what the producer
+had there.
+
 NumPy is a hard dependency (arrays are ndarrays). polars and pyarrow are imported lazily, only when
 ``table()`` / ``table_arrow()`` are called — so the read+numpy path has no heavy deps.
+
+Table reads take a **logical table name** (ADR-0064): ``events`` is one block, or a partitioned table
+whose leaves ``events/0000``, ``events/0001``, … are read and concatenated in leaf order, or a legacy
+``events_NNNN`` group. One leaf still reads by its full name. ``read_block`` / ``array`` take one block;
+a node such as ``events`` raises ``NotABlockError`` (a ``TesseraError``).
 """
 
 from __future__ import annotations
@@ -22,9 +35,38 @@ import json as _json
 import numpy as _np
 
 from . import _native
-from ._native import TesseraError, __version__
+from ._native import NotABlockError, TesseraError, __version__
 
-__all__ = ["Reader", "Builder", "open", "verify", "TesseraError", "__version__"]
+__all__ = [
+    "Reader",
+    "Builder",
+    "open",
+    "verify",
+    "TesseraError",
+    "NotABlockError",
+    "__version__",
+]
+
+
+def _column(buf: bytes, code: str, validity) -> "_np.ndarray":
+    """Reconstruct one table column from the FFI ``(bytes, numpy_code, validity)`` (#804).
+
+    ``buf`` holds the values only, one element per row. ``validity`` is ``None`` for a column that is
+    not nullable, which returns a plain ``ndarray``; otherwise it is one byte per row (``1`` present,
+    ``0`` NULL) and the column is an ``np.ma.MaskedArray`` masked at each NULL.
+    """
+    values = _ndarray(buf, code)
+    if validity is None:
+        return values
+    return _np.ma.MaskedArray(values, mask=~_np.frombuffer(validity, _np.bool_))
+
+
+def _arrow_array(pa, column):
+    """``column`` (from ``_column``) as a pyarrow array: a masked column's mask becomes its validity
+    bitmap, so a NULL is an Arrow null and a present NaN stays a value."""
+    if isinstance(column, _np.ma.MaskedArray):
+        return pa.array(column.data, mask=_np.ma.getmaskarray(column))
+    return pa.array(column)
 
 
 def _ndarray(buf: bytes, code: str, shape=None) -> "_np.ndarray":
@@ -71,8 +113,15 @@ class Reader:
     def product(self) -> str:
         return self._r.product
 
+    @property
+    def manifest_hash(self) -> str:
+        """The product's seal (``"blake3:<hex>"``): blake3 over the stored ``manifest.json`` bytes,
+        read from the ``manifest.seal`` member and verified on open (ADR-0066). Not a key of
+        ``manifest()``: the seal lives outside the bytes it seals."""
+        return self._r.manifest_hash
+
     def manifest(self) -> dict:
-        """The manifest as a Python dict (parsed from the canonical JSON)."""
+        """The manifest as a Python dict. Its seal is ``manifest_hash``, not a key (ADR-0066)."""
         return _json.loads(self._r.manifest_json())
 
     def manifest_json(self) -> str:
@@ -86,7 +135,9 @@ class Reader:
         return self._r.verify()
 
     def read_block(self, name: str) -> bytes:
-        """The raw, digest-verified encoded bytes of a block (escape hatch)."""
+        """The raw, digest-verified encoded bytes of one block (escape hatch). A name that is not a
+        block, such as a partitioned table ``pairs`` over its leaves ``pairs/0000``, …, raises
+        ``NotABlockError``."""
         return self._r.read_block(name)
 
     def __repr__(self) -> str:
@@ -94,38 +145,53 @@ class Reader:
 
     # --- ergonomic reads ---
     def array(self, name: str) -> "_np.ndarray":
-        """Decode an array block to a NumPy ``ndarray`` (C-order, native dtype)."""
+        """Decode one array block to a NumPy ``ndarray`` (C-order, native dtype). A name that is not
+        a block raises ``NotABlockError``."""
         buf, shape, code = self._r.read_array(name)
         return _ndarray(buf, code, shape)
 
     def array_roi(self, name: str, origin, shape) -> "_np.ndarray":
-        """Decode a 3-D ROI sub-cube — only the intersecting chunks are read + decoded."""
+        """Decode a 3-D ROI sub-cube of one array block — only the intersecting chunks are read +
+        decoded. A name that is not a block raises ``NotABlockError``."""
         buf, sshape, code = self._r.read_array_subset(name, list(origin), list(shape))
         return _ndarray(buf, code, sshape)
 
     def column(self, block: str, name: str) -> "_np.ndarray":
-        """Decode one table column via Vortex projection (reads only that column's segments)."""
-        buf, code = self._r.read_table_column(block, name)
-        return _ndarray(buf, code)
+        """Decode one column of the logical table ``block`` via Vortex projection (reads only that
+        column's segments); a partitioned table's column spans every leaf, in leaf order. A nullable
+        column is an ``np.ma.MaskedArray`` (``mask=True`` at each NULL), any other a plain
+        ``np.ndarray``."""
+        return _column(*self._r.read_table_column(block, name))
 
     def logical_column(self, prefix: str, name: str) -> "_np.ndarray":
-        """Decode one column of the *logical* multi-block table (`events`/`events_NNNN`), spanning
-        every block in manifest order — the cross-block query, as a single ``ndarray``."""
-        buf, code = self._r.read_logical_table_column(prefix, name)
-        return _ndarray(buf, code)
+        """The same read as ``column()``, kept for existing callers: ``column`` resolves logical table
+        names too (a partitioned ``pairs`` over ``pairs/0000``, …, or a legacy ``events_NNNN``
+        group) and returns the column across every block, in logical order. A nullable column is an
+        ``np.ma.MaskedArray``, as from ``column()``."""
+        return _column(*self._r.read_logical_table_column(prefix, name))
 
     def table_dict(self, name: str) -> dict:
-        """Decode a table block to a ``{column: np.ndarray}`` dict (no polars/pyarrow needed)."""
-        return {n: _ndarray(buf, code) for n, buf, code in self._r.read_table(name)}
+        """Decode the logical table ``name`` to a ``{column: np.ndarray}`` dict (no polars/pyarrow
+        needed); a partitioned table is every leaf's rows, in leaf order. A nullable column's value
+        is an ``np.ma.MaskedArray`` (``mask=True`` at each NULL), as from ``column()``."""
+        return {
+            n: _column(buf, code, v) for n, buf, code, v in self._r.read_table(name)
+        }
 
     def table_arrow(self, name: str):
-        """Decode a table block to a pyarrow ``Table``."""
+        """Decode the logical table ``name`` to a pyarrow ``Table`` (see ``table_dict()``). A
+        nullable column's array carries a real validity bitmap: a NULL is an Arrow null
+        (``null_count`` counts them), a present NaN a value."""
         import pyarrow as pa
 
-        return pa.table(self.table_dict(name))
+        return pa.table(
+            {n: _arrow_array(pa, c) for n, c in self.table_dict(name).items()}
+        )
 
     def table(self, name: str):
-        """Decode a table block to a polars ``DataFrame`` (via Arrow)."""
+        """Decode the logical table ``name`` to a polars ``DataFrame`` (via Arrow; see
+        ``table_dict()``). A nullable column carries native polars nulls (``table_arrow()``'s
+        validity bitmap), distinct from a present NaN."""
         import polars as pl
 
         return pl.from_arrow(self.table_arrow(name))

@@ -1,0 +1,10 @@
+# Operator-declared column semantics (ADR-0056 §7). Everything here lands INSIDE the seal, so the
+# sealed `.tsra` is self-describing without an external data dictionary.
+[energy_kev]
+short_name  = "Photon energy"
+description = "Calibrated single-photon energy at the detector face"
+unit        = "keV"
+
+[detector]
+description = "Detector module identifier (site-local vocabulary)"
+sensitivity = "coded"

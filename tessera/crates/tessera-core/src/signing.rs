@@ -100,6 +100,20 @@ pub struct Signature {
     pub sig: String,
 }
 
+impl Signature {
+    /// Parse an envelope's JSON as every sealed document is parsed (SPEC §1):
+    /// [`crate::canonical::parse_strict`] refuses text that is not I-JSON (a duplicate key, a lone
+    /// surrogate, an integer beyond ±(2^53−1)) before the envelope is read, so no reader takes the
+    /// first or last of two `sig` values.
+    ///
+    /// # Errors
+    /// [`crate::Error::Serde`] for malformed JSON, a duplicate key, a lone surrogate or a field of
+    /// the wrong type; [`crate::Error::InexactInteger`] for an integer beyond ±(2^53−1).
+    pub fn from_json(s: &str) -> crate::Result<Self> {
+        Ok(serde_json::from_value(crate::canonical::parse_strict(s)?)?)
+    }
+}
+
 /// Lowercase-hex encode (matches the `blake3:<hex>` digest convention; no extra dep).
 fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);

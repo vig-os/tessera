@@ -64,7 +64,8 @@ log/<lineage>.jsonl                # append-only audit log: one line per commit 
 `objects/` → never rewritten), records the `supersedes` edge pinning the parent's `manifest_hash`,
 appends a `log` line, and advances `refs/<lineage>` (compare-and-set on the prior value, so concurrent
 commits to one lineage are rejected, not silently lost). A metadata-only commit writes exactly one new
-object: the manifest.
+object: the manifest. *(How: one fenced writer per repository and a fixed durability order, see the
+[2026-11-24 amendment](#amendment-2026-11-24--one-fenced-writer-per-repository-durability-order-946).)*
 
 ### 3. The verb set — git muscle memory, Tessera semantics
 
@@ -172,3 +173,51 @@ manifests, operating on *real* identity with *structural* diffs. Not worth a git
   canonical (the manifests hold the DAG).
 - **Still open:** garbage collection / retention for unreachable objects — a `tessera gc` that walks
   `refs` for liveness and honors WORM holds before reclaiming.
+
+## Amendment (2026-11-24) — one fenced writer per repository; durability order (#946)
+
+§2 promised that the ref advances by compare-and-set, so concurrent commits are rejected, not lost. As built it was not:
+the check of the tip and the write of the new one were two steps with no lock between them, `commit` compared the tip
+against itself (the caller's parent never reached the check), refs and objects were written in place without a rename
+or an fsync, `gc` and `commit` did not exclude each other, and `gc` read a manifest it could not load as "nothing to
+keep". Each of these loses committed versions (#946; item 5 confirmed by probe in the #942 review). The owner decided
+the writer model on 2026-11-22.
+
+- **A fenced single writer per repository.** Every write (`commit`, `set_ref`, `write_object`, `put_manifest`,
+  `forget`, `gc`) holds one exclusive lock for the whole repository, from its first check to its last write;
+  concurrent writers, threads or processes, queue on it. One lock per repository, not per lineage: `gc` spans every
+  lineage, and a writer's cost is dominated by its objects, not by the wait.
+- **The lock is an OS advisory lock** (`flock`, through `std::fs::File::lock`; no new dependency) on the file `lock`
+  in the repository root. It is **advisory**: it binds tessera writers, not other programs that edit the files. It
+  is **local-filesystem only**: it is not valid on NFS or on any network filesystem without working lock support,
+  where two hosts can both hold it. Readers take no lock.
+- **`commit` takes the caller's parent** (`expected: Option<&str>`, the tip the caller read and built on) and refuses
+  with the typed `Error::RefMoved { lineage, expected, found }` when the ref is elsewhere, before anything is stored.
+  With a parent, the manifest must carry exactly one `supersedes` edge, to that parent (`Error::SupersedesMismatch`),
+  so the ref always reaches every earlier version. A lineage's first version (`expected = None`) may supersede a
+  version held elsewhere. `import` into a lineage whose tip is another version is therefore refused; importing the
+  tip's own version again moves no ref and rewrites its missing or torn objects.
+- **Durability order:** each object is written to a temp file in `tmp/`, fsync'd, renamed to its address, and its
+  directory fsync'd (a missing shard directory is created and fsync'd into its parent first); then the ref the same
+  way (temp, fsync, rename, directory fsync). A crash at any step leaves the ref at the old version or the new one,
+  with every object it reaches complete. That is one sync batch per commit; the cost of many small commits belongs to
+  the commit log of #905. The `log` cache is appended after the ref and not synced: after a crash it can lack the
+  last commit, which a walk from the ref still finds, or end in a torn line; rebuilding it from the DAG is #971.
+- **A torn object is repaired:** a write checks an object present at its address by hash before it skips it, and
+  replaces one whose bytes don't hash to it. A block that a commit references but does not supply is checked for
+  existence only: reading every unchanged block back would make a one-field edit cost the dataset.
+- **A ref holds exactly one `blake3:<64 lower-case hex>` address** (trailing whitespace is allowed), of a stored
+  object (`set_ref` checks it). An empty or unparsable ref is
+  `Error::CorruptRef` when it is read, never "no commits yet". `forget` removes it.
+- **`gc` holds the writer lock for its whole run, and never sweeps on a partial walk.** A ref it cannot read, a tip
+  that is not a readable manifest, or an object an edge reaches that cannot be read, does not hash to its address, or
+  is manifest-shaped (a JSON object with `tessera_version`) and refused, aborts the run with `Error::GcAborted`,
+  naming the object and how it was reached, before anything is deleted. An intact object an edge pins that is not
+  manifest-shaped (a stored source file) is kept and has no edges to follow. An edge whose target is not stored
+  is not followed: it names a version or source held elsewhere.
+- **The object-store form** of a repository maps the lock to a conditional put on the ref (the mechanism #288
+  studies). It is **not built** here: there is no object-store repository yet.
+
+This closes the "compare-and-set" half of §2 and the liveness half of "Still open" (`gc` walks refs for liveness and
+is fenced against commits). WORM holds before reclaiming remain open, as do refs to collections and marking through
+collection members (#947, #781).
