@@ -126,7 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tessera_version`, the missing `manifest.seal`, an in-band `manifest_hash`, a non-JCS `manifest.json`) and the
   layout required; there is no migration verb: re-ingest them. The A′ cutover on its own keeps every seal's value
   (the 13 tracked products re-pack with every `corpus.json` golden unchanged); across this release, seals moved
-  where #895, #972 or a derived block changed the manifest (see Format break). `TESSERA_VERSION` stays `"0.0.0"`. Repository manifest objects hold the stored bytes,
+  where #895, #972 or a derived block changed the manifest (see Format break). `TESSERA_VERSION` stays `"0.0.0"`.
+  Repository manifest objects hold the stored bytes,
   so `objects/<manifest_hash>` hashes to its own name.
 - **Breaking, `tessera-core`:** `Manifest::manifest_hash` and `Collection::manifest_hash` are no longer serialised
   (the seal is not a field). Readers verify through `Manifest::from_stored_members` / `Collection::from_stored_members`
