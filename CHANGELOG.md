@@ -100,9 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   block, so products without derived blocks are byte-identical (all 18 tracked `.tsra` files and every
   `corpus.json` golden are unchanged). **What breaks:** a product written with a `.cidx` or by `tessera pyramid` now has a
   different `content_hash` (and `manifest_hash`) than the same input gave before, and a reader from before this
-  change can't verify it: it reports `blocks[n].class` as a newer field and finds `content_hash` tampered. A product
-  sealed before this change still verifies, unchanged: its refs carry no `class`, so its sidecars and levels read as
-  primary; re-build it to take them out of `content_hash`. Every reader
+  change can't verify it: it reports `blocks[n].class` as a newer field and finds `content_hash` tampered. Products
+  from v0.1.0-alpha.6 or earlier are refused by the A′ layout check anyway (see Format break). Every reader
   (Rust, `tessera-py`, `tessera-wasm`, the Python reference reader) refuses a `class` other than `"derived"`
   (`"primary"` and `null` included). `tessera-core`: `BlockRef` gains the public field `class: BlockClass`
   (so struct literals must set it), with `BlockRef::derived()`, `BlockRef::is_primary()` and the shared fold
@@ -125,9 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   respelling the attacker seals (#901's `64.0` for an integer `64`, a pretty layout) no longer verifies or splits
   readers. **Products written before this change are refused**, with an error naming the layout found (the declared
   `tessera_version`, the missing `manifest.seal`, an in-band `manifest_hash`, a non-JCS `manifest.json`) and the
-  layout required; there is no migration verb: re-ingest them. Every seal keeps its value (the 13 tracked products
-  are re-packed with every `corpus.json` golden unchanged), so `Source` pins, collection pins and signatures over a
-  re-packed product still hold. `TESSERA_VERSION` stays `"0.0.0"`. Repository manifest objects hold the stored bytes,
+  layout required; there is no migration verb: re-ingest them. The A′ cutover on its own keeps every seal's value
+  (the 13 tracked products re-pack with every `corpus.json` golden unchanged); across this release, seals moved
+  where #895, #972 or a derived block changed the manifest (see Format break). `TESSERA_VERSION` stays `"0.0.0"`. Repository manifest objects hold the stored bytes,
   so `objects/<manifest_hash>` hashes to its own name.
 - **Breaking, `tessera-core`:** `Manifest::manifest_hash` and `Collection::manifest_hash` are no longer serialised
   (the seal is not a field). Readers verify through `Manifest::from_stored_members` / `Collection::from_stored_members`
