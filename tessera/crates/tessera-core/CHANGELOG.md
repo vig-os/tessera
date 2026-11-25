@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.7](https://github.com/vig-os/tessera/compare/tessera-core-v0.1.0-alpha.6...tessera-core-v0.1.0-alpha.7) - 2026-11-25
+
+### Added
+
+- [**breaking**] derived blocks leave content_hash (ADR-0028 §4)
+- [**breaking**] seal the stored canonical bytes (ADR-0066 A′ cutover)
+- *(core)* stored-bytes seal groundwork (ADR-0066 A′, part 1 of 2)
+- *(schema)* product schemas declare 64-bit string encodings and value ranges
+- *(core)* stored-bytes API and canonical-bytes check
+
+### Fixed
+
+- *(io)* [**breaking**] a fenced single writer per repository (ADR-0036 §2)
+- refuse a chunk index without its block, in every reader and writer
+- *(cli)* never copy a chunk index; trust only derived ones
+- *(cli)* copied blocks land primary; removal cascades to derived blocks
+- *(wasm)* verify the stored member bytes, not strings decoded from them
+- *(core)* name a lost seal member exactly and make write_pair crash-consistent
+- *(schema)* drop the recon slice_thickness maximum a CT localizer exceeds
+
+### Other
+
+- *(corpus)* hold both readers to one set of schema number-rule verdicts
+- *(core)* expect the in-band JCS layout of the re-packed products
+
 ## [0.1.0-alpha.6](https://github.com/vig-os/tessera/compare/tessera-core-v0.1.0-alpha.5...tessera-core-v0.1.0-alpha.6) - 2026-11-19
 
 ### Added
