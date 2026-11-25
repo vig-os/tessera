@@ -29,8 +29,8 @@ pub mod csv_table;
 /// The decode-path classification behind the per-lane decoder digest (ADR-0056 §6a, #477): which crates
 /// each ingest lane's digest covers, and — with a reason each — which candidates it deliberately does not.
 ///
-/// Shared verbatim with `build.rs` (which `include!`s it) and with the gate test, so the digest and the
-/// gate cannot disagree about what the decode path is. The file's own header comment carries the
+/// One implementation, shared by the sealed digest (through `linked`) and the gate test, so the digest
+/// and the gate cannot disagree about what the decode path is. The file's own header comment carries the
 /// measurements behind "derive the candidates, declare the membership".
 pub mod decode_path;
 pub mod decoder;
@@ -38,6 +38,8 @@ pub mod dicom;
 pub mod engine;
 pub mod ge_hdf5;
 pub mod identity;
+// The resolution this crate was compiled against: every sealed decoder version and pin (#979).
+mod linked;
 pub mod nifti;
 /// NumPy `.npy` → `array` (and a structured dtype → `table`); `.npz` → a collection.
 /// ADR-0056 §11's P1 array rows. Feature `npy` — an in-tree header parse, no decoder dependency.

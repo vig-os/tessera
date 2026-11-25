@@ -1,9 +1,10 @@
 // The **decode-path classification** behind the ADR-0056 §6a per-lane decoder digest (#477).
 //
-// Three consumers share this one implementation — `build.rs` (`include!`s it, so it must stay
-// dependency-free and reference nothing from the crate), the library, and the gate test. A second
+// Two consumers share this one implementation — the library (`linked`, which runs it over the lockfile
+// compiled into this crate, #979) and the gate test (which runs it over the lockfile on disk). A second
 // implementation would be a second chance for the digest and the gate to disagree about what the decode
-// path *is*, which is the whole defect this fixes.
+// path *is*, which is the whole defect this fixes. Until #979 `build.rs` `include!`d it as well; see
+// `linked` for why the build script was the wrong place to read the lockfile.
 //
 // # What the digest answers, and the four ways it has got it wrong
 //
@@ -55,9 +56,10 @@
 // here on the narrower ground that it runs at compile time, which is a decision someone made).
 //
 // The candidate set is taken from `Cargo.lock` rather than `cargo metadata` on purpose: the lockfile is
-// already read here, needs no subprocess, and works in the hermetic flake check and in a `build.rs`
-// alike. It cannot distinguish dependency kinds, so the candidate net is wider than strictly necessary —
-// which only makes the gate stricter, and every extra candidate is classified once and forgotten.
+// already compiled into this crate, needs no subprocess, and works in the hermetic flake check exactly as
+// it does locally. It cannot distinguish dependency kinds, so the candidate net is wider than strictly
+// necessary — which only makes the gate stricter, and every extra candidate is classified once and
+// forgotten.
 
 /// The pre-image's **derivation version**. Bumped whenever the composition changes, so a reader comparing
 /// digests across a change sees a declared difference rather than inferring "the decoder changed".
@@ -351,8 +353,8 @@ impl Pkg {
 
 /// Parse every `[[package]]` out of a `Cargo.lock`.
 ///
-/// Hand-scanned to keep `build.rs` dependency-free: a `[build-dependencies]` entry would move the resolved
-/// feature graph, which is an ADR-0057 §5 Gate B event — a disproportionate price for reading a lockfile.
+/// Hand-scanned rather than parsed with a TOML crate: a new dependency moves the resolved feature graph,
+/// which is an ADR-0057 §5 Gate B event — a disproportionate price for reading a lockfile.
 /// The shape is fixed by cargo (one key per line, no nested tables).
 pub fn parse_lock(lock: &str) -> Vec<Pkg> {
     let mut out: Vec<Pkg> = Vec::new();
@@ -536,9 +538,28 @@ fn split_entries(s: &str) -> Vec<String> {
 /// The `v2` pre-image for one lane: every in-digest package on its decode path, with version and — unless
 /// it is a plain crates.io release — its source. **One pin per resolved version**, so a crate present at
 /// two versions is named twice.
+///
+/// # What is deliberately NOT in here, and why
+///
+/// Two things were in earlier versions of this digest and were removed, because each made `manifest_hash`
+/// move for a reason that is not a difference in how the file was interpreted:
+///
+/// - **This crate's resolved `CARGO_FEATURE_*` set.** Whether the *CSV* lane was compiled in has nothing
+///   to do with how a *Parquet* file was read — a lane that is off did not touch the bytes. Including it
+///   made the format's own version identity a function of how the reader's binary was compiled.
+/// - **This crate's own `CARGO_PKG_VERSION`.** The workspace version moves on every release, so sealing
+///   it would make every release a conformance-corpus regeneration — re-introducing exactly the churn
+///   ADR-0052 §1 / #336 removed by stamping the *format* version rather than the software version.
+///
+/// Both remain out. What is now *in*, and was wrongly out, is the rest of each lane's decode path: the
+/// Thrift and FlatBuffers readers that parse Parquet's and Arrow IPC's own metadata, and every page codec.
 pub fn lane_preimage(lock: &str, roots: &[String]) -> Option<String> {
-    let pkgs = parse_lock(lock);
-    let pins: Vec<String> = closure(&pkgs, roots)
+    lane_preimage_in(&parse_lock(lock), roots)
+}
+
+/// [`lane_preimage`] over an already-parsed lockfile, so several lanes share one parse.
+pub fn lane_preimage_in(pkgs: &[Pkg], roots: &[String]) -> Option<String> {
+    let pins: Vec<String> = closure(pkgs, roots)
         .into_iter()
         .filter(|p| IN_DIGEST.contains(&p.name.as_str()))
         .map(Pkg::pin)

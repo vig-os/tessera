@@ -99,8 +99,8 @@ pub fn backends_disabled() -> Vec<&'static str> {
 ///
 /// ADR-0056 §6a seals the `ingest_decoder` triple in the provenance recipe bag. This is the **read**
 /// side of the same fact — what a support round-trip needs when someone asks "why did my hash change?"
-/// — and it reads the same `build.rs`-emitted pins [`crate::decoder`] seals, so `tessera info` and a
-/// product's recipe cannot disagree.
+/// — and it reads the same resolution [`crate::decoder`] seals from, the one this crate was compiled
+/// against (#979), so `tessera info` and a product's recipe cannot disagree.
 ///
 /// (Note the correction §6a made to the older framing here: `content_hash` is *not* a function of the
 /// decoder. It is a function of the extracted logical values and Tessera's own encoder, so a decoder
@@ -111,25 +111,29 @@ pub fn backends_disabled() -> Vec<&'static str> {
 /// - `hdf-compound` reports the **libhdf5 actually linked**, queried at runtime. That is the number
 ///   that differs between a nix build (system libhdf5 from the closure) and a released binary
 ///   (`static-hdf5`, vendored HDF5 built from source) — a compile-time pin could not tell them apart.
-/// - `dicom` / `dicom-series` report the `dicom` crate pin captured from `Cargo.lock` by `build.rs`.
-///   Absent (→ `None`) when the crate is built without the workspace lockfile, e.g. as a
-///   crates.io dependency.
-/// - `parquet` / `arrow` / `csv` report the `=`-pinned crate versions captured from `Cargo.lock` by
-///   `build.rs` — the same pins that go into the sealed triple.
+/// - `dicom` / `dicom-series` report the resolved `dicom` crate version. Absent (→ `None`) when the
+///   crate is built without the workspace lockfile, e.g. as a crates.io dependency.
+/// - `parquet` / `arrow` / `csv` report the `=`-pinned crate versions — the same values that go into
+///   the sealed triple.
 /// - the in-tree parsers (`nifti`, `raw`, `blob`) have no third-party decoder to name. Their version
 ///   *is* the tessera version already on the first line.
 pub fn backend_version(name: &str) -> Option<String> {
+    let linked = |krate: &str| crate::linked::version_of(krate).map(str::to_owned);
     match name {
-        "dicom" | "dicom-series" => option_env!("TESSERA_DEP_DICOM").map(str::to_owned),
+        "dicom" | "dicom-series" => linked("dicom"),
         // The generic-ingest lanes (ADR-0056 §6a). These are the same pins the sealed
         // `ingest_decoder` triple carries, so `tessera info` and a product's recipe agree by
         // construction rather than by two lists staying in sync.
-        "parquet" => option_env!("TESSERA_DEP_PARQUET").map(str::to_owned),
-        "arrow" => option_env!("TESSERA_DEP_ARROW_IPC").map(str::to_owned),
-        "csv" => option_env!("TESSERA_DEP_CSV").map(str::to_owned),
+        "parquet" => crate::decoder::Decoder::PARQUET
+            .version()
+            .map(str::to_owned),
+        "arrow" => crate::decoder::Decoder::ARROW_IPC
+            .version()
+            .map(str::to_owned),
+        "csv" => crate::decoder::Decoder::CSV.version().map(str::to_owned),
         // `npy` is an in-tree header parse; only the `.npz` archive reader has a third-party
         // component worth naming, and it is a container rather than a decoder of values.
-        "npz-member" => option_env!("TESSERA_DEP_ZIP").map(str::to_owned),
+        "npz-member" => linked("zip"),
         "hdf-compound" => {
             let (major, minor, patch) = hdf5_metno::library_version();
             Some(format!("{major}.{minor}.{patch}"))

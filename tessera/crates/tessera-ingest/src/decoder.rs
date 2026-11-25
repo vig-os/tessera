@@ -36,10 +36,12 @@
 //! `arrow-array/chrono-tz`, which is hazard H1's exact mechanism arriving through a feature rather
 //! than a host. Recording only the version would be a false claim of sameness.
 //!
-//! **Nobody types any of it.** The name is a constant per backend; the version comes out of the
-//! workspace `Cargo.lock` via `build.rs`; the features digest is blake3 over a build-emitted
-//! pre-image. A hand-written `ingest_decoder` in an ingest spec is a hard error (see
-//! [`crate::engine`]) — a maintainer-typed claim inside an immutable record is the thing §6a rejected
+//! **Nobody types any of it.** The name is a constant per backend; the version and the features
+//! digest's pre-image come out of the resolution this crate was **compiled** against (`linked`): the
+//! workspace `Cargo.lock`, taken by the compiler in the library unit, which cargo keys on every linked
+//! crate. Until #979 they came from `build.rs`, whose output a target dir shared between two checkouts
+//! reused across them, so a binary could link one parquet and seal another. A hand-written
+//! `ingest_decoder` in an ingest spec is a hard error (see [`crate::engine`]) — a maintainer-typed claim inside an immutable record is the thing §6a rejected
 //! a profile id for.
 //!
 //! # The residual, stated plainly
@@ -68,46 +70,50 @@ use tessera_core::provenance::Generation;
 pub const RECIPE_KEY: &str = "ingest_decoder";
 
 /// One decoder's build-honest identity.
+///
+/// The fields name *which* crate and *which* lane; the values are looked up in the resolution this crate
+/// was compiled against, through [`Decoder::version`] and [`Decoder::feature_preimage`]. They are not
+/// stored here as strings because no build-time step can produce them truthfully (#979): see `linked`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decoder {
     /// The decoder's name. A constant per backend, never a profile id.
     pub name: &'static str,
-    /// The `=`-pinned version read from the workspace lockfile at build time, or `None` when this
-    /// crate was built without one (as a crates.io dependency). Absent rather than guessed.
-    pub version: Option<&'static str>,
-    /// **This lane's** decode-path pre-image, emitted by `build.rs` (#477).
+    /// The crate whose resolved version is [`Decoder::version`], or `None` for an in-tree decoder.
+    version_of: Option<&'static str>,
+    /// The Cargo feature that is this decoder's ingest lane, whose decode path
+    /// [`Decoder::feature_preimage`] pins (#477), or `None` for a lane with no third-party decode path.
     ///
     /// Per lane, not global. The digest answers "which decoder interpreted *these* bytes", so a parquet
     /// product must not commit to the zip library the `.npz` lane gained — which, while it was one global
     /// list, it did: adding that dependency moved the `manifest_hash` of every parquet and csv product.
-    pub pins: Option<&'static str>,
+    lane: Option<&'static str>,
 }
 
 impl Decoder {
     /// arrow-rs's Parquet reader — the table lane's Parquet decoder.
     pub const PARQUET: Decoder = Decoder {
         name: "arrow-rs/parquet",
-        version: option_env!("TESSERA_DEP_PARQUET"),
+        version_of: Some("parquet"),
         // The `parquet` feature's closure: the Parquet reader, the arrow tree it decodes through, the
         // Thrift metadata reader, and every page codec.
-        pins: option_env!("TESSERA_DECODE_PINS_PARQUET"),
+        lane: Some("parquet"),
     };
     /// arrow-rs's IPC reader — Arrow IPC / Feather source files.
     pub const ARROW_IPC: Decoder = Decoder {
         name: "arrow-rs/arrow-ipc",
-        version: option_env!("TESSERA_DEP_ARROW_IPC"),
+        version_of: Some("arrow-ipc"),
         // The `arrow` feature's closure — no `parquet`, and no Thrift.
-        pins: option_env!("TESSERA_DECODE_PINS_ARROW"),
+        lane: Some("arrow"),
     };
     /// The CSV lane. The `csv` crate tokenises RFC-4180 records; every *value* is parsed by Rust
     /// std's `str::parse`, so the tokenizer is the only third-party component there is to name.
     pub const CSV: Decoder = Decoder {
         name: "rust-csv",
-        version: option_env!("TESSERA_DEP_CSV"),
+        version_of: Some("csv"),
         // The `csv` feature's closure: three crates. ADR-0057 §5 sketched `csv = ["arrow", …]` and it
         // turned out not to need arrow at all, so this lane's digest is genuinely tiny — and until #477
         // it carried the whole arrow tree and `parquet` besides.
-        pins: option_env!("TESSERA_DECODE_PINS_CSV"),
+        lane: Some("csv"),
     };
 
     /// The NumPy `.npy` lane — **an in-tree decoder**, and the only lane with no third-party code on
@@ -116,23 +122,23 @@ impl Decoder {
     ///
     /// All three optional components are absent, each for a stated reason rather than by omission:
     ///
-    /// - `version` is `None` because the only version available would be **ours**, and `build.rs`
-    ///   removed our version from the pre-image precisely because "our software version moves on every
+    /// - `version` is `None` because the only version available would be **ours**, and the #477
+    ///   pre-image excludes our version precisely because "our software version moves on every
     ///   release, which would re-introduce the corpus churn ADR-0052 §1 removed". Putting it in the
     ///   triple instead would recreate that churn one field over: every release would move the
     ///   `manifest_hash` of every `.npy` product without anything having changed about how the bytes
     ///   were read. Pinning *which* in-tree parser ran is worth having, but it needs an identity that
     ///   does not move per release (a digest of the parser's own sources) — #508.
-    /// - `pins` is `None` because `npy = []` enables no dependency, so `lane_roots` correctly declines
-    ///   to treat it as a third-party lane and `build.rs` emits no pre-image for it. A digest over an
+    /// - `lane` is `None` because `npy = []` enables no dependency, so `lane_roots` correctly declines
+    ///   to treat it as a third-party lane and there is no pre-image for it. A digest over an
     ///   empty pre-image would be *identical for every build*, which is a false claim of sameness —
     ///   the same reasoning `to_value` gives for omitting rather than defaulting.
     ///
     /// The record is therefore `{"name": "tessera/npy"}`: short, and true.
     pub const NPY: Decoder = Decoder {
         name: "tessera/npy",
-        version: None,
-        pins: None,
+        version_of: None,
+        lane: None,
     };
 
     /// The NumPy `.npz` lane — the same in-tree member parser, reached **through a zip archive**.
@@ -145,15 +151,15 @@ impl Decoder {
     /// in the name.
     pub const NPZ: Decoder = Decoder {
         name: "tessera/npz",
-        version: None,
-        pins: option_env!("TESSERA_DECODE_PINS_NPZ"),
+        version_of: None,
+        lane: Some("npz"),
     };
 
     /// The sealed JSON form of the triple.
     pub fn to_value(&self) -> serde_json::Value {
         let mut m = serde_json::Map::new();
         m.insert("name".into(), self.name.into());
-        if let Some(v) = self.version {
+        if let Some(v) = self.version() {
             // `=`-prefixed to record that this is a pin, not merely the version that happened to
             // resolve — ADR-0056 §5 requires `=` pins for exactly this reason.
             m.insert("version".into(), format!("={v}").into());
@@ -180,7 +186,17 @@ impl Decoder {
 }
 
 impl Decoder {
-    /// The pre-image this lane's digest is taken over — emitted verbatim by `build.rs`.
+    /// The version of the decoder crate this build links, or `None` for an in-tree decoder or a build
+    /// without a workspace lockfile (a packaged crates.io build). Absent rather than guessed.
+    ///
+    /// Read from the resolution compiled into the library unit, which cargo keys on the linked crates —
+    /// so it cannot be a version some other checkout resolved into a shared target dir (#979).
+    pub fn version(&self) -> Option<&'static str> {
+        self.version_of.and_then(crate::linked::version_of)
+    }
+
+    /// The pre-image this lane's digest is taken over, derived from the resolution this crate was
+    /// compiled against (`linked`).
     ///
     /// Shape: `v2;pins=<crate>=<version>[@<source>],…` over the crates on **this lane's** decode path.
     /// Kept human-readable on purpose: a digest with no recoverable pre-image is an unfalsifiable label,
@@ -191,21 +207,21 @@ impl Decoder {
     /// across one could not tell "the decoder changed" from "the digest is computed differently". It costs
     /// three bytes to end that.
     ///
-    /// **It contains no feature list and no version of ours** — see `build.rs` for why both were tried and
-    /// removed: a lane that was not compiled in did not read the file, and our software version moves on
-    /// every release, which would re-introduce the corpus churn ADR-0052 §1 removed.
+    /// **It contains no feature list and no version of ours** — see `decode_path::lane_preimage` for why
+    /// both were tried and removed: a lane that was not compiled in did not read the file, and our
+    /// software version moves on every release, which would re-introduce the corpus churn ADR-0052 §1
+    /// removed.
     pub fn feature_preimage(&self) -> Option<&'static str> {
-        self.pins
+        self.lane.and_then(crate::linked::preimage_of)
     }
 
     /// `blake3:` digest over [`Decoder::feature_preimage`] — the third component of the triple.
     ///
-    /// Computed at runtime from a build-emitted string rather than in `build.rs`, because hashing there
-    /// would need a `[build-dependencies]` entry, and adding one moves the resolved feature graph — itself
-    /// an ADR-0057 Gate B event. A disproportionate price for hashing one short string with a crate we
-    /// already depend on.
+    /// Computed at runtime with the hash this crate already depends on, so the pre-image needs no
+    /// dependency beyond the ones it describes.
     pub fn feature_digest(&self) -> Option<String> {
-        self.pins.map(|p| tessera_core::hash::digest(p.as_bytes()))
+        self.feature_preimage()
+            .map(|p| tessera_core::hash::digest(p.as_bytes()))
     }
 }
 
@@ -409,7 +425,8 @@ source = "git+https://github.com/example/csv?rev=deadbeef#deadbeef"
 
     /// The pre-image must **not** name this build's feature selection or this crate's software version.
     ///
-    /// Both were in an earlier derivation and both were wrong, for different reasons (see `build.rs`).
+    /// Both were in an earlier derivation and both were wrong, for different reasons (see
+    /// `decode_path::lane_preimage`).
     /// This is a regression test rather than a style check: either one makes `manifest_hash` move when
     /// the *interpretation of the file* did not, and `manifest_hash` is the format's version identity.
     #[test]
