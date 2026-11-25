@@ -1812,6 +1812,18 @@
             touch $out
           '';
 
+          # The root CHANGELOG holds one section per release (#982): `check` holds it to the structure
+          # `scripts/changelog.py` documents, including a section for the workspace version, so the
+          # release PR (which bumps that version) fails here until its `Unreleased` is renamed
+          # (docs/RELEASING.md, step 1). The self-test proves split, release and every check rule on a
+          # throwaway repository.
+          changelog-sections = pkgs.runCommand "changelog-sections"
+            { nativeBuildInputs = [ pkgs.git pkgs.python3 ]; } ''
+            HOME=$TMPDIR python3 -I ${./scripts/changelog.py} --self-test
+            python3 -I ${./scripts/changelog.py} check ${./CHANGELOG.md} ${./tessera/Cargo.toml}
+            touch $out
+          '';
+
           # Files or updates the issue for a failed nightly or release-tag run (#725). Its self-test
           # stubs `gh`: an exact-title open issue gets a comment, a merely similar title does not,
           # and a failed lookup writes nothing.

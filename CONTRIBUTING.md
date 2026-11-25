@@ -9,6 +9,15 @@ The merge gate is `nix flake check -L --keep-going` at the repository root, whic
 A single check runs locally with `nix build -L .#checks.x86_64-linux.<attr>` (`workspace-test`,
 `workspace-clippy`, `sql-tests`, ...).
 
+## The changelog
+
+A user-facing change adds its entry to the root `CHANGELOG.md`, under the right subhead of `## Unreleased`
+(`Added`, `Changed`, `Removed`, `Fixed`, `Security`; `Format break` for an on-disk format break). Never edit a
+released `## [<version>]` section: it is that release's notes. The `changelog-sections` check
+(`scripts/changelog.py check`) holds the file's structure. The release-time step that turns `Unreleased` into the
+version's section is in [`docs/RELEASING.md`](docs/RELEASING.md), with how the GitHub Release notes are taken from
+the file.
+
 ## Testing one crate on ksb (maintainers and agents)
 
 With access to the ksb batch cluster, the way to build and test one crate without compiling on your own machine

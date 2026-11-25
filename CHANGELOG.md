@@ -7,78 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Format break
+
+- **This release breaks the on-disk format (ADR-0066 option A′, #914, PR #940).** The seal (`manifest_hash`) is
+  `blake3` over the stored bytes of `manifest.json`, which is stored as exactly its RFC 8785 JCS form, with no
+  `manifest_hash` key. The seal is its own member, `manifest.seal`, the second zip entry of a `.tsra` (after
+  `mimetype`, before `manifest.json`; SPEC §6). The details are under Changed.
+- **Products written by v0.1.0-alpha.6 or earlier are refused, and there is no migration verb (ADR-0066 rule 10).**
+  The error names the layout it found and the layout it requires. Re-seal from source: ingest or write the product
+  again with this release.
+- **Which hashes moved, and why:**
+  [`docs/spikes/916-format-break-crosscheck.md`](https://github.com/vig-os/tessera/blob/dev/docs/spikes/916-format-break-crosscheck.md)
+  (#916, PR #980) traces every move across the 22 corpus products. The A′ cutover itself keeps the value of every
+  seal (PR #940). Derived blocks leave `content_hash` (#720, PR #942), so `content_hash` moves for a product that
+  carries a derived block (a `<name>.cidx` chunk index, a `tessera pyramid` level above 0); no corpus product
+  carries one. `manifest_hash` moved on 10 of the 22: through #895 (PR #934) on the 3 that embed the built-in
+  `recon` schema, now version 1.1 with number ranges, and through PR #972 on the 7 Arrow-backed ingest fixtures,
+  whose sealed decoder version moved with the parquet/arrow 58.4.2 bump (RUSTSEC-2026-0595, recorded per ADR-0056
+  §6a). No `id` and no block digest moved.
+- **Signatures made before the break no longer verify where the seal moved (ADR-0066, Consequences), and the
+  alpha-layout product a signature was made over is refused.** A signature over a seal that did not move (12 of the
+  22 corpus products) still verifies against the re-sealed product: the signature envelope (`ed25519-env-v1`) is
+  unchanged (ADR-0066 rule 8). Sign again every product whose seal moved.
+- **Not in this release: #828,** the `tessera-table-v2` per-column codec profile (ADR-0066 step 7, deferred by the
+  owner on 2026-11-22). `tessera-table-v1` stays the table codec profile, so table block digests do not move.
+
 ### Added
 
-- `tessera-core`: one manifest-only resolver for a table name, `block::table_group`, with the typed
-  `Error::LogicalTable` and its `LogicalTableError` reasons, and the seal-time check `block::check_partitions`, which
-  `ProductBuilder::seal` now runs (ADR-0064 PR A, #709).
-- `tessera-io`: `Reader::table_group` resolves a table name through that resolver, and `Reader::logical_table`
-  (`LogicalTableView`) is built on it, so it reads a partitioned table (`pairs/0000`, `pairs/0001`, …) as one table
-  as well as a single block or a legacy `events_NNNN` group (ADR-0064 PR B, #710). `tessera-core` adds
-  `block::group_specs`, the one schema check for a resolved group, and `TableGroup::blocks`.
-- `tessera-py`: `Reader.table`, `table_arrow`, `table_dict` and `column` (and the native `read_table` /
-  `read_table_column`) take a logical table name, so a partitioned table (`pairs/0000`, `pairs/0001`, …) reads as
-  one table, every leaf's rows in leaf order, as a legacy `events_NNNN` group does (ADR-0064 PR C2, #717). A name
-  that is not a block passed to `read_block`, `array` or `array_roi` raises the new `tessera.NotABlockError`, a
-  subclass of `TesseraError`.
-- `tessera-cli`: `ls` and `tree` show a partitioned table as one node, `pairs/  table, 3 blocks, 8 rows`, where they
-  listed each leaf; `ls FILE pairs` lists its columns and leaves, and `tree --full` lists the leaves under the node.
-  An invalid partitioned table shows its typed error instead. `read` and `sql` answer `pairs` as one table, and
-  `read` on a node that holds no table says so and points to its blocks (ADR-0064 PR C1, #711). Legacy
-  `events_NNNN` blocks are listed one per line, as before.
-- `tessera-io`: `StreamWriter::push_table(name, spec, groups)` writes a streamed table of any size as one logical
-  table, partitioned at `BLOCK_ROWS` into the marked leaves `name/0000`, `name/0001`, …, byte for byte the leaves
-  `TableMultiBlockSink` writes for the same rows (ADR-0064 PR E, #713); at most `BLOCK_ROWS` rows it is the one block
-  `name`. Each block's input is staged on disk in the session's `staging/` directory and handed to a free encode
-  worker once complete, so at most `W + 1` blocks of input are staged for `W` workers, counted by the new
-  `StreamStats::peak_staged_input_blocks` and `peak_staged_input_bytes`. A row count that disagrees with
-  `spec.rows`, or a row-group above `ROWS_PER_GROUP` rows, is `Error::StreamedTable` with a typed
-  `StreamedTableError` reason (`tessera-core`).
-- `tessera-io`: `StreamWriter::push_table` documents its heap bound, `min(W, n) · p_block + s + c_leaf · n` for `W`
-  encode workers and `n` leaves, with `p_block` one leaf's measured write peak, `s = 2 · ROWS_PER_GROUP · r_mem + 4 MiB`
-  (7 MiB for 24-byte rows) and `c_leaf = 2 · (e_leaf + b_leaf)` for the manifest entry each committed leaf keeps until
-  the seal (`e_leaf` the entry's canonical JSON length, `b_leaf = 1 KiB`; ADR-0064's #760 amendment, holding once
-  #759 lands). Beyond that per-leaf term the bound doesn't grow with the row count. The rustdoc also says that staged
-  input is page cache, which counts toward a cgroup's memory and is RAM on tmpfs (ADR-0064 PR F, #714).
-  `tests/staged_job_memory.rs` checks the bound on the heap (without the per-leaf term, at most 25.3 KB at its 8
-  leaves), and that neither the reader filling a block nor a worker reading it back holds the block in RAM.
-- **Breaking for `TableSpec` struct literals, `tessera-core` / `tessera-io`:** `TableSpec` gains
-  `edition: Option<String>`, the Vortex edition a table block's payload was written under (ADR-0024's 2026-11-15
-  amendment, #635). `tessera-io`'s writer sets it to `table::TABLE_EDITION` (`"core2026.08.3"`) on every table block
-  and partition leaf it seals, and refuses a spec that names another edition with `Error::Codec`. Build specs with
-  `edition: None`. It is in the manifest, not the payload, so it moves `manifest_hash` and leaves `content_hash` and
-  the block digests as they are; the corpus goldens are regenerated with it, in the same format event as the vortex
-  0.93 bump below. A spec without the key (every product sealed before this change) still parses, reads and
-  verifies, and keeps its manifest bytes: `None` is omitted, never written as `null`. The key itself doesn't stop an
-  older reader, because `BlockRef.spec` is kept as raw JSON. But the table bytes it marks do: an older reader can't
-  decode them (the forward-read limit under **Changed** below). `TableSpec` has no `Default`
-  and isn't `#[non_exhaustive]`, so a struct literal outside tessera stops compiling until it names the field.
-- **Breaking for `TableSpec` struct literals, `tessera-core` / `tessera-io` / `tessera-cli`:** `TableSpec` gains
-  `codec_profile: Option<String>`, the tessera codec profile a table block was written with (ADR-0024's 2026-11-16
-  amendment, #869): the codec set (which of the edition's schemes the compressor may choose from) and the pinned
-  Vortex compressor, named `tessera-table-v<N>`. `tessera-io`'s writer records `table::TABLE_CODEC_PROFILE`
-  (`"tessera-table-v1"`) beside the edition on every table block, partition leaf and sequenced-table leaf, and refuses
-  a spec that names another profile with `Error::Codec`. Build specs with `codec_profile: None`. With the edition it
-  makes "same input + same edition + same profile → same bytes" checkable from the product alone; it says nothing
-  about decodability, and readers never refuse a block whose profile is unknown or absent (every product before
-  this change). It is in the manifest, not the payload, so it moves `manifest_hash` of every table-bearing product
-  and leaves `content_hash` and the block digests as they are; the goldens (`corpus/corpus.json`, `corpus/files`,
-  `corpus/ingest-corpus.json`, the `logical_tables` walkthrough's `scan.tsra`, tessera-py's `partitioned_pairs.tsra`)
-  are regenerated. `tessera inspect` prints `edition <id>  codec_profile <id>` under each table block, `-` for an
-  absent key. A test pins the table compressor's configuration against the profile, so a codec-set change that
-  doesn't bump the profile fails CI.
-- `tessera-io`: `StreamWriter::open_sequenced_table_on` opens a `SequencedTable`, a table lane that any number of
-  threads push numbered batches into (`push(&self, writer, seq, batch)`, `mark_done`, `close(expected_count)`), sealed
-  byte for byte as the batches in `seq` order whatever order they arrive in (ADR-0065 §7.2–§7.3, #812). Its gate is a
-  second credit window of the writer: the due `seq` is never held, others wait while `seq >= next + window` or the
-  shared byte credit (the writer's `max_in_flight_bytes`, the encode window's budget, so a caller holding a RAM budget
-  sets it to half) is held, or are refused in `refuse_instead_of_block` mode. A `seq` below `first_seq`, a
-  duplicate, a `seq` past `max_ahead`, a gap or count mismatch at close, `abort`, the finite stall deadline (default
-  10 minutes, at most `MAX_STALL_TIMEOUT` = 24 hours) and a dead pipeline each wake every waiting push with an error.
-  Every refusal poisons the writer: its other pushes return it, and `finish` returns it and seals nothing, as it does
-  for a sequenced table still open or dropped unclosed (`NotClosed`). `SequencedOptions` and `SequencedStats`
-  configure and observe it. `tessera-core` adds the `StreamedTableError` reasons `Duplicate`, `BeforeFirst`,
-  `TooFarAhead`, `WouldBlock`, `Missing`, `CountMismatch`, `Aborted`, `Stalled`, `Failed` and `NotClosed`.
 - **Breaking for `FieldSpec` struct literals, `tessera-core`:** a product schema's metadata field declares
   `encoding` (`Some(Encoding::String)`, a 64-bit integer sealed as a decimal string) and an inclusive `minimum` /
   `maximum` (`Option<f64>`, within ±(2^53−1)), with the builders `string_encoded`, `minimum`, `maximum` and `range`
@@ -197,11 +152,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking, `tessera-ingest`:** a curated DICOM numeric tag (`KVP`, `SliceThickness`, `PixelSpacing`) whose
   non-empty text is not a number is refused when the file is read, naming the tag and its text, where it was
   dropped without a word; an empty tag is still left out (#895).
+
+### Removed
+
+- `tessera-core`: `Manifest::from_json_verified`, `Manifest::to_sealed_json`, `manifest::seal_of`,
+  `Collection::from_json_verified`, `Collection::to_sealed_json`, `Collection::from_json_with_seal`,
+  `canonical::hash_without` and `canonical::bytes_without`: each verified or sealed a re-serialisation of a parsed
+  object, the path ADR-0066 removes (one verify path, `from_stored`; #931 item 1). `tessera-io`:
+  `stored::canonical_form` (re-spelling a document a door copies; doors now copy the stored bytes verbatim).
+
+### Fixed
+
+- `tessera-py`: a nullable table column no longer reads back with its bit-packed validity mask appended to its
+  values (#804). The native layer handed Python `ColumnData::to_le_bytes`, which for a nullable column is the
+  staging form `values ‖ ceil(rows/8)` mask bytes, so `np.frombuffer` either raised (an `i4`/`f8` column whose
+  length the trailer broke) or silently returned extra elements made of mask bits (a `u2` column of 11 rows read as
+  12), and every NULL read as `0` with no mask. The values and the mask now cross the boundary separately. The
+  other consumers of `to_le_bytes` were not affected: the CLI `read`/export renders a nullable column from its
+  `ColumnData` (NULL as JSON `null`, CSV `nan`), `tessera sql` builds an Arrow validity bitmap, the streaming
+  staging fragments invert the trailer with `from_column_bytes` given the row count, and the chunk-index digest
+  hashes the staging form by design; the WASM binding reads no table payloads.
+- `tessera-io`: a repository is a fenced single writer (#946, ADR-0036 §2 amendment). Every write (`commit`,
+  `set_ref`, `write_object`, `put_manifest`, `forget`, `gc`) holds one exclusive OS advisory lock (`flock`) on
+  `<repo>/lock` from its check to its last write, so two overlapping commits can no longer both return Ok with one
+  of them unreachable, and `gc` can no longer sweep a commit's objects before its ref advance. Objects and refs are
+  written to `<repo>/tmp/`, fsync'd, renamed into place and their directory fsync'd, objects before the ref, so a
+  crash leaves the old version or the new one. An object torn at its address is detected by hash and replaced by
+  the next write of its bytes. An empty or unparsable ref is the new `Error::CorruptRef`, never "no commits yet".
+  `gc` aborts with the new `Error::GcAborted`, naming what it could not read and deleting nothing, on a ref or
+  manifest it cannot read (it treated an unreadable manifest as having nothing to keep, and deleted the history
+  behind a refused tip), and walks a tip whose address another version stores as a block. The lock is valid on a
+  local filesystem only, not on NFS. Cost: a write now reads back and hashes an object already at its address
+  before it skips it, so re-importing a stored product reads its blocks once more; each commit adds the fsyncs of
+  its new objects and its ref.
+
+### Security
+
+## [0.1.0-alpha.6] - 2026-11-19
+
+### Added
+
+- **Breaking for `TableSpec` struct literals, `tessera-core` / `tessera-io`:** `TableSpec` gains
+  `edition: Option<String>`, the Vortex edition a table block's payload was written under (ADR-0024's 2026-11-15
+  amendment, #635). `tessera-io`'s writer sets it to `table::TABLE_EDITION` (`"core2026.08.3"`) on every table block
+  and partition leaf it seals, and refuses a spec that names another edition with `Error::Codec`. Build specs with
+  `edition: None`. It is in the manifest, not the payload, so it moves `manifest_hash` and leaves `content_hash` and
+  the block digests as they are; the corpus goldens are regenerated with it, in the same format event as the vortex
+  0.93 bump below. A spec without the key (every product sealed before this change) still parses, reads and
+  verifies, and keeps its manifest bytes: `None` is omitted, never written as `null`. The key itself doesn't stop an
+  older reader, because `BlockRef.spec` is kept as raw JSON. But the table bytes it marks do: an older reader can't
+  decode them (the forward-read limit under **Changed** below). `TableSpec` has no `Default`
+  and isn't `#[non_exhaustive]`, so a struct literal outside tessera stops compiling until it names the field.
+- **Breaking for `TableSpec` struct literals, `tessera-core` / `tessera-io` / `tessera-cli`:** `TableSpec` gains
+  `codec_profile: Option<String>`, the tessera codec profile a table block was written with (ADR-0024's 2026-11-16
+  amendment, #869): the codec set (which of the edition's schemes the compressor may choose from) and the pinned
+  Vortex compressor, named `tessera-table-v<N>`. `tessera-io`'s writer records `table::TABLE_CODEC_PROFILE`
+  (`"tessera-table-v1"`) beside the edition on every table block, partition leaf and sequenced-table leaf, and refuses
+  a spec that names another profile with `Error::Codec`. Build specs with `codec_profile: None`. With the edition it
+  makes "same input + same edition + same profile → same bytes" checkable from the product alone; it says nothing
+  about decodability, and readers never refuse a block whose profile is unknown or absent (every product before
+  this change). It is in the manifest, not the payload, so it moves `manifest_hash` of every table-bearing product
+  and leaves `content_hash` and the block digests as they are; the goldens (`corpus/corpus.json`, `corpus/files`,
+  `corpus/ingest-corpus.json`, the `logical_tables` walkthrough's `scan.tsra`, tessera-py's `partitioned_pairs.tsra`)
+  are regenerated. `tessera inspect` prints `edition <id>  codec_profile <id>` under each table block, `-` for an
+  absent key. A test pins the table compressor's configuration against the profile, so a codec-set change that
+  doesn't bump the profile fails CI.
+- `tessera-io`: `StreamWriter::open_sequenced_table_on` opens a `SequencedTable`, a table lane that any number of
+  threads push numbered batches into (`push(&self, writer, seq, batch)`, `mark_done`, `close(expected_count)`), sealed
+  byte for byte as the batches in `seq` order whatever order they arrive in (ADR-0065 §7.2–§7.3, #812). Its gate is a
+  second credit window of the writer: the due `seq` is never held, others wait while `seq >= next + window` or the
+  shared byte credit (the writer's `max_in_flight_bytes`, the encode window's budget, so a caller holding a RAM budget
+  sets it to half) is held, or are refused in `refuse_instead_of_block` mode. A `seq` below `first_seq`, a
+  duplicate, a `seq` past `max_ahead`, a gap or count mismatch at close, `abort`, the finite stall deadline (default
+  10 minutes, at most `MAX_STALL_TIMEOUT` = 24 hours) and a dead pipeline each wake every waiting push with an error.
+  Every refusal poisons the writer: its other pushes return it, and `finish` returns it and seals nothing, as it does
+  for a sequenced table still open or dropped unclosed (`NotClosed`). `SequencedOptions` and `SequencedStats`
+  configure and observe it. `tessera-core` adds the `StreamedTableError` reasons `Duplicate`, `BeforeFirst`,
+  `TooFarAhead`, `WouldBlock`, `Missing`, `CountMismatch`, `Aborted`, `Stalled`, `Failed` and `NotClosed`.
+
+### Changed
+
 - `tessera-core`: newer-field paths (`Manifest::newer_fields`, `Collection::newer_fields`, `ProductSchema::view_of`,
   `Error::NewerFormatFields`) quote a key that isn't a plain identifier, `["producer.agents"]`, so no two paths read
   the same (SPEC §4); code that parses these strings sees the new form. Plain paths are unchanged (#873, see
   Security).
-
 - **Breaking, `tessera-core`:** `ProductBuilder::from_manifest` returns `Result` and refuses a parsed manifest with
   `Manifest::newer_fields()` (keys from a newer format revision, verified but not carried by the struct) with the
   new `Error::NewerFormatFields`, as do `Manifest::compute_manifest_hash`, `canonical_bytes` and `verify` on such a
@@ -238,75 +272,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ADR-0024 records the event. The sink of `table::encode_streaming_to` and `TableStreamWriter::finish_to` must now
   be `Send`, because vortex's writer requires it (#635).
 
-- **Breaking for writer output, `tessera-io` / `tessera-ingest`:** a table above `BLOCK_ROWS` rows is written as the
-  leaves `<table>/0000`, `<table>/0001`, … (`events/0000` for GE listmode), each carrying the partition marker
-  `{"index": i, "last": b}`, where it was `<table>_0000`, … without one (ADR-0064 PR D, #712). This covers GE
-  whole-file and streaming ingest and `tessera bench --input` (`TableMultiBlockSink`). The payloads, block digests
-  and so `content_hash` are unchanged for the same rows; the names and markers move `manifest_hash`. A table of at
-  most `BLOCK_ROWS` rows stays one bare-named block, byte-identical. Products written before still read unchanged.
-  `table::block_name` now returns `Result<String>` (the leaf name is checked against the block-name grammar), and
-  the new `table::block_partition` gives each block's marker.
-- **Breaking for struct literals (pre-1.0), `tessera-core`:** `TableSpec` has a new public field,
-  `partition: Option<Partition>` (ADR-0064, #728). A `TableSpec { .. }` literal outside this workspace no longer
-  compiles until it adds `partition: None`; downstream crates such as visionx-rs need that one-line change.
-  Serialized specs are unchanged, because `None` is skipped.
-- `tessera-io`: `Reader::logical_table` reports a name it can't resolve, or blocks that disagree on their schema, as
-  `Error::LogicalTable` with a typed `LogicalTableError` reason, where it returned `Error::Container` messages; a
-  caller matching `Error::Container` for "no blocks for prefix" must match `LogicalTableError::NotFound`. A single
-  non-table block (an array) is now `NotATable`, and a legacy `events_NNNN` block whose spec doesn't parse as a
-  `TableSpec` is `SchemaMismatch` (it was `Error::Serde`). `Reader::block_group` is deprecated in favour of
-  `table_group`; its behaviour (the legacy flat rule only) is unchanged.
-- `tessera-io`: `LogicalTableView::prefix` is deprecated in favour of `LogicalTableView::name`. The view is resolved
-  from a table name, which is no longer always a block-name prefix; both return the same string.
-- `tessera-io`: `unpack` and `pack_dir` refuse a product with an invalid partitioned table (`Error::LogicalTable`,
-  ADR-0064 §2.4) before writing anything, as `ProductBuilder::seal` and so `WriteSession::seal` already do.
-- **Breaking for `table_job_streaming` above `BLOCK_ROWS` rows, `tessera-io`:** the job fails with
-  `Error::StreamedTable` (`StreamedTableError::NeedsPartition`, naming `StreamWriter::push_table`) where it wrote one
-  block of any size; the alpha.4 "any size" contract is withdrawn (ADR-0064 §5.4). At or below `BLOCK_ROWS` it is
-  unchanged. It is deprecated in favour of `push_table`.
-
-### Removed
-
-- `tessera-core`: `Manifest::from_json_verified`, `Manifest::to_sealed_json`, `manifest::seal_of`,
-  `Collection::from_json_verified`, `Collection::to_sealed_json`, `Collection::from_json_with_seal`,
-  `canonical::hash_without` and `canonical::bytes_without`: each verified or sealed a re-serialisation of a parsed
-  object, the path ADR-0066 removes (one verify path, `from_stored`; #931 item 1). `tessera-io`:
-  `stored::canonical_form` (re-spelling a document a door copies; doors now copy the stored bytes verbatim).
-
 ### Fixed
 
-- `tessera-py`: a nullable table column no longer reads back with its bit-packed validity mask appended to its
-  values (#804). The native layer handed Python `ColumnData::to_le_bytes`, which for a nullable column is the
-  staging form `values ‖ ceil(rows/8)` mask bytes, so `np.frombuffer` either raised (an `i4`/`f8` column whose
-  length the trailer broke) or silently returned extra elements made of mask bits (a `u2` column of 11 rows read as
-  12), and every NULL read as `0` with no mask. The values and the mask now cross the boundary separately. The
-  other consumers of `to_le_bytes` were not affected: the CLI `read`/export renders a nullable column from its
-  `ColumnData` (NULL as JSON `null`, CSV `nan`), `tessera sql` builds an Arrow validity bitmap, the streaming
-  staging fragments invert the trailer with `from_column_bytes` given the row count, and the chunk-index digest
-  hashes the staging form by design; the WASM binding reads no table payloads.
-- `tessera-io`: a repository is a fenced single writer (#946, ADR-0036 §2 amendment). Every write (`commit`,
-  `set_ref`, `write_object`, `put_manifest`, `forget`, `gc`) holds one exclusive OS advisory lock (`flock`) on
-  `<repo>/lock` from its check to its last write, so two overlapping commits can no longer both return Ok with one
-  of them unreachable, and `gc` can no longer sweep a commit's objects before its ref advance. Objects and refs are
-  written to `<repo>/tmp/`, fsync'd, renamed into place and their directory fsync'd, objects before the ref, so a
-  crash leaves the old version or the new one. An object torn at its address is detected by hash and replaced by
-  the next write of its bytes. An empty or unparsable ref is the new `Error::CorruptRef`, never "no commits yet".
-  `gc` aborts with the new `Error::GcAborted`, naming what it could not read and deleting nothing, on a ref or
-  manifest it cannot read (it treated an unreadable manifest as having nothing to keep, and deleted the history
-  behind a refused tip), and walks a tip whose address another version stores as a block. The lock is valid on a
-  local filesystem only, not on NFS. Cost: a write now reads back and hashes an object already at its address
-  before it skips it, so re-importing a stored product reads its blocks once more; each commit adds the fsyncs of
-  its new objects and its ref.
-- `tessera-core`: a partition marker whose forged index makes the canonical leaf name longer than 255 bytes is
-  refused as `LogicalTableError::NonCanonicalLeaf`, not a bare `Error::InvalidBlockName` (#733).
-- `tessera-core`: `table_group` refuses a marked legacy-named block under a node (`a/pairs_0001`) with the error the
-  seal gives for its parent node, instead of resolving a legacy flat group around it (#733, ADR-0064 §3 rule 4
-  clarified).
-- `tessera-io`: a `WriteSession` holds each committed block until the seal as its journal line, the compact JSON of
-  its manifest entry, instead of a cloned `BlockRef` whose spec is a `serde_json::Value` tree. Per leaf of a
-  12-column table the session held 13.5 KB of heap in small allocations for a 2.4 KB entry (12.8 KB live for the
-  #715 consumer's 3.1 KB entry); it now holds the entry's bytes in one allocation, plus the leaf's name.
-  `tests/session_leaf_memory.rs` checks the bound. Sealed bytes are unchanged; no public API changes (#759).
 - CI: the flake checks that run tessera's tests through cargo (`workspace-test`, `workspace-doctest`, `sql-tests`,
   `s3-range-read`, `seal-profile-determinism`, `ingest-gate-a*`) put `TMPDIR` on a RAM fs (`/dev/shm`) on Linux. Each
   `WriteSession` commit fsyncs three times (#695), and on a ksb pod's shared `/nix` volume two tessera-io tests (0.97 s
@@ -448,3 +415,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Rust reader refused them, `id_inputs: []` was `tampered`, and `blocks[0].name: {}` or a missing `digest` raised
   instead of giving a verdict. Every input now gets a verdict, an archive `zipfile` can't read included.
   `corpus/seal-cases.json` gains 19 cases for both readers, and `run.py` five crafted archives (#873).
+
+## [0.1.0-alpha.5] - 2026-11-11
+
+### Added
+
+- `tessera-core`: one manifest-only resolver for a table name, `block::table_group`, with the typed
+  `Error::LogicalTable` and its `LogicalTableError` reasons, and the seal-time check `block::check_partitions`, which
+  `ProductBuilder::seal` now runs (ADR-0064 PR A, #709).
+- `tessera-io`: `Reader::table_group` resolves a table name through that resolver, and `Reader::logical_table`
+  (`LogicalTableView`) is built on it, so it reads a partitioned table (`pairs/0000`, `pairs/0001`, …) as one table
+  as well as a single block or a legacy `events_NNNN` group (ADR-0064 PR B, #710). `tessera-core` adds
+  `block::group_specs`, the one schema check for a resolved group, and `TableGroup::blocks`.
+- `tessera-py`: `Reader.table`, `table_arrow`, `table_dict` and `column` (and the native `read_table` /
+  `read_table_column`) take a logical table name, so a partitioned table (`pairs/0000`, `pairs/0001`, …) reads as
+  one table, every leaf's rows in leaf order, as a legacy `events_NNNN` group does (ADR-0064 PR C2, #717). A name
+  that is not a block passed to `read_block`, `array` or `array_roi` raises the new `tessera.NotABlockError`, a
+  subclass of `TesseraError`.
+- `tessera-cli`: `ls` and `tree` show a partitioned table as one node, `pairs/  table, 3 blocks, 8 rows`, where they
+  listed each leaf; `ls FILE pairs` lists its columns and leaves, and `tree --full` lists the leaves under the node.
+  An invalid partitioned table shows its typed error instead. `read` and `sql` answer `pairs` as one table, and
+  `read` on a node that holds no table says so and points to its blocks (ADR-0064 PR C1, #711). Legacy
+  `events_NNNN` blocks are listed one per line, as before.
+- `tessera-io`: `StreamWriter::push_table(name, spec, groups)` writes a streamed table of any size as one logical
+  table, partitioned at `BLOCK_ROWS` into the marked leaves `name/0000`, `name/0001`, …, byte for byte the leaves
+  `TableMultiBlockSink` writes for the same rows (ADR-0064 PR E, #713); at most `BLOCK_ROWS` rows it is the one block
+  `name`. Each block's input is staged on disk in the session's `staging/` directory and handed to a free encode
+  worker once complete, so at most `W + 1` blocks of input are staged for `W` workers, counted by the new
+  `StreamStats::peak_staged_input_blocks` and `peak_staged_input_bytes`. A row count that disagrees with
+  `spec.rows`, or a row-group above `ROWS_PER_GROUP` rows, is `Error::StreamedTable` with a typed
+  `StreamedTableError` reason (`tessera-core`).
+- `tessera-io`: `StreamWriter::push_table` documents its heap bound, `min(W, n) · p_block + s + c_leaf · n` for `W`
+  encode workers and `n` leaves, with `p_block` one leaf's measured write peak, `s = 2 · ROWS_PER_GROUP · r_mem + 4 MiB`
+  (7 MiB for 24-byte rows) and `c_leaf = 2 · (e_leaf + b_leaf)` for the manifest entry each committed leaf keeps until
+  the seal (`e_leaf` the entry's canonical JSON length, `b_leaf = 1 KiB`; ADR-0064's #760 amendment, holding once
+  #759 lands). Beyond that per-leaf term the bound doesn't grow with the row count. The rustdoc also says that staged
+  input is page cache, which counts toward a cgroup's memory and is RAM on tmpfs (ADR-0064 PR F, #714).
+  `tests/staged_job_memory.rs` checks the bound on the heap (without the per-leaf term, at most 25.3 KB at its 8
+  leaves), and that neither the reader filling a block nor a worker reading it back holds the block in RAM.
+
+### Changed
+
+- **Breaking for writer output, `tessera-io` / `tessera-ingest`:** a table above `BLOCK_ROWS` rows is written as the
+  leaves `<table>/0000`, `<table>/0001`, … (`events/0000` for GE listmode), each carrying the partition marker
+  `{"index": i, "last": b}`, where it was `<table>_0000`, … without one (ADR-0064 PR D, #712). This covers GE
+  whole-file and streaming ingest and `tessera bench --input` (`TableMultiBlockSink`). The payloads, block digests
+  and so `content_hash` are unchanged for the same rows; the names and markers move `manifest_hash`. A table of at
+  most `BLOCK_ROWS` rows stays one bare-named block, byte-identical. Products written before still read unchanged.
+  `table::block_name` now returns `Result<String>` (the leaf name is checked against the block-name grammar), and
+  the new `table::block_partition` gives each block's marker.
+- **Breaking for struct literals (pre-1.0), `tessera-core`:** `TableSpec` has a new public field,
+  `partition: Option<Partition>` (ADR-0064, #728). A `TableSpec { .. }` literal outside this workspace no longer
+  compiles until it adds `partition: None`; downstream crates such as visionx-rs need that one-line change.
+  Serialized specs are unchanged, because `None` is skipped.
+- `tessera-io`: `Reader::logical_table` reports a name it can't resolve, or blocks that disagree on their schema, as
+  `Error::LogicalTable` with a typed `LogicalTableError` reason, where it returned `Error::Container` messages; a
+  caller matching `Error::Container` for "no blocks for prefix" must match `LogicalTableError::NotFound`. A single
+  non-table block (an array) is now `NotATable`, and a legacy `events_NNNN` block whose spec doesn't parse as a
+  `TableSpec` is `SchemaMismatch` (it was `Error::Serde`). `Reader::block_group` is deprecated in favour of
+  `table_group`; its behaviour (the legacy flat rule only) is unchanged.
+- `tessera-io`: `LogicalTableView::prefix` is deprecated in favour of `LogicalTableView::name`. The view is resolved
+  from a table name, which is no longer always a block-name prefix; both return the same string.
+- `tessera-io`: `unpack` and `pack_dir` refuse a product with an invalid partitioned table (`Error::LogicalTable`,
+  ADR-0064 §2.4) before writing anything, as `ProductBuilder::seal` and so `WriteSession::seal` already do.
+- **Breaking for `table_job_streaming` above `BLOCK_ROWS` rows, `tessera-io`:** the job fails with
+  `Error::StreamedTable` (`StreamedTableError::NeedsPartition`, naming `StreamWriter::push_table`) where it wrote one
+  block of any size; the alpha.4 "any size" contract is withdrawn (ADR-0064 §5.4). At or below `BLOCK_ROWS` it is
+  unchanged. It is deprecated in favour of `push_table`.
+
+### Fixed
+
+- `tessera-core`: a partition marker whose forged index makes the canonical leaf name longer than 255 bytes is
+  refused as `LogicalTableError::NonCanonicalLeaf`, not a bare `Error::InvalidBlockName` (#733).
+- `tessera-core`: `table_group` refuses a marked legacy-named block under a node (`a/pairs_0001`) with the error the
+  seal gives for its parent node, instead of resolving a legacy flat group around it (#733, ADR-0064 §3 rule 4
+  clarified).
+- `tessera-io`: a `WriteSession` holds each committed block until the seal as its journal line, the compact JSON of
+  its manifest entry, instead of a cloned `BlockRef` whose spec is a `serde_json::Value` tree. Per leaf of a
+  12-column table the session held 13.5 KB of heap in small allocations for a 2.4 KB entry (12.8 KB live for the
+  #715 consumer's 3.1 KB entry); it now holds the entry's bytes in one allocation, plus the leaf's name.
+  `tests/session_leaf_memory.rs` checks the bound. Sealed bytes are unchanged; no public API changes (#759).
+
+## [0.1.0-alpha.4] - 2026-10-29
+
+This file recorded no entries for this release. Its changes are listed per crate, in
+`tessera/crates/<crate>/CHANGELOG.md`.
+
+## [0.1.0-alpha.3] - 2026-10-19
+
+This file recorded no entries for this release. Its changes are listed per crate, in
+`tessera/crates/<crate>/CHANGELOG.md`.
+
+## [0.1.0-alpha.2] - 2026-10-19
+
+This file recorded no entries for this release. Its changes are listed per crate, in
+`tessera/crates/<crate>/CHANGELOG.md`. The tag's macOS builds failed (#647), so no GitHub Release was published
+for it; `v0.1.0-alpha.3` superseded it the same day.
+
+## [0.1.0-alpha.1] - 2026-09-24
+
+This file recorded no entries for this release. Its changes are listed per crate, in
+`tessera/crates/<crate>/CHANGELOG.md`.
+
+[0.1.0-alpha.6]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.5...v0.1.0-alpha.6
+[0.1.0-alpha.5]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.4...v0.1.0-alpha.5
+[0.1.0-alpha.4]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
+[0.1.0-alpha.3]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
+[0.1.0-alpha.2]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
+[0.1.0-alpha.1]: https://github.com/vig-os/tessera/releases/tag/v0.1.0-alpha.1

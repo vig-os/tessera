@@ -36,7 +36,9 @@ semver_check = false
 pr_branch_prefix = "chore/release-plz-"
 #
 # HANDOFF → cargo-dist (the broad binary channel; see /dist-workspace.toml + /.github/workflows/
-# release.yml). release-plz owns the version bump and CHANGELOG; the operator pushes the tag. That tag
+# release.yml). release-plz owns the version bump and the crate CHANGELOGs; the root CHANGELOG.md, which
+# cargo-dist turns into the GitHub Release notes, gets its version section on the release PR by hand
+# (`scripts/changelog.py release`, docs/RELEASING.md step 1, #982). The operator pushes the tag. That tag
 # is the single cut trigger: cargo-dist's release.yml fires on any tag matching
 # `**[0-9]+.[0-9]+.[0-9]+*` and attaches the prebuilt `tessera` binaries + `curl | sh` installer to the
 # GitHub Release; release-nix.yml attaches the reproducible nix/crane musl binary + maturin wheel to the

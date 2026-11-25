@@ -14,10 +14,27 @@ generated `.github/workflows/release.yml` (cargo-dist binaries), and `.github/wo
 
 ## Checklist
 
-1. **Merge the release PR.** release-plz keeps one PR (`chore: release v<version>`, branch
-   `chore/release-plz-<timestamp>`) up to date with the next version and its CHANGELOG. Review it and
-   merge it into `dev`. Merging alone tags and publishes nothing.
-2. **Tag the merge commit.** On that merge commit, create a signed, annotated tag and push it from the dev
+1. **Version the root CHANGELOG on the release PR.** release-plz keeps one PR (`chore: release v<version>`,
+   branch `chore/release-plz-<timestamp>`) up to date with the next version and the crate changelogs
+   (`tessera/crates/<crate>/CHANGELOG.md`). It does not touch the root `CHANGELOG.md`, which is the release
+   notes (see [Release notes](#release-notes)). Its `nix flake check` fails at `changelog-sections` until
+   the root file has a section for the new version. On the PR's branch, from the dev shell:
+
+   ```bash
+   # <version> without the leading v, <YYYY-MM-DD> today's date
+   scripts/changelog.py release CHANGELOG.md <version> <YYYY-MM-DD>
+   scripts/changelog.py check CHANGELOG.md tessera/Cargo.toml
+   git commit -S -am "docs(changelog): release <version>" \
+     -m "Refs: #<release issue>"
+   git push origin HEAD:chore/release-plz-<timestamp>
+   ```
+
+   `release` turns `## Unreleased` into `## [<version>] - <date>` (dropping its empty subheads), opens a
+   new, empty `## Unreleased` above it, and adds the release's compare link. Do this last, just before
+   merging: when `dev` moves, release-plz closes a release PR that has a commit not made by a bot and
+   opens a new one, without this commit. Then do it again on the new PR.
+2. **Merge the release PR.** Review it and merge it into `dev`. Merging alone tags and publishes nothing.
+3. **Tag the merge commit.** On that merge commit, create a signed, annotated tag and push it from the dev
    shell, so the repo's pre-push hooks run:
 
    ```bash
@@ -27,17 +44,53 @@ generated `.github/workflows/release.yml` (cargo-dist binaries), and `.github/wo
    ```
 
    The tag is the single trigger for everything below.
-3. **Watch the Release run.** cargo-dist's `Release` workflow builds the `tessera` binaries and the
-   `curl | sh` installer and publishes the GitHub Release (a pre-release for `-alpha.N`). Both
+4. **Watch the Release run.** cargo-dist's `Release` workflow builds the `tessera` binaries and the
+   `curl | sh` installer and publishes the GitHub Release (a pre-release for `-alpha.N`), whose notes are
+   the version's section of the root `CHANGELOG.md`; check that they are only this release's entries. Both
    `nix flake check` legs run on the tag too. A failed Release run publishes nothing and promotes nothing:
    fix the cause and cut the next version. Never move a pushed tag.
-4. **Approve and merge the promotion PR.** When the Release run succeeds, `promote-main.yml` opens
+5. **Approve and merge the promotion PR.** When the Release run succeeds, `promote-main.yml` opens
    `release/promote-v<version>` → `main` (see below). Check that its body names the new tag and that
    `nix flake check` is green, approve it, and merge it **with a merge commit**. `main` now equals the
    release.
 
 The nix-built Python wheel is not attached to the Release automatically yet: `release-nix.yml` never fires
 on its own (#438), and an immutable release rejects uploads after it is published (#440).
+
+## Release notes
+
+The root `CHANGELOG.md` holds one section per release, newest first, under a `## Unreleased` section that
+collects what has landed since the last release (#982). Every pull request with a user-facing change adds its
+entry under `## Unreleased`, never under a released version.
+
+cargo-dist builds the GitHub Release body from that file, at the tagged commit. It picks the section in this
+order (axoproject's `changelog_for_version`, cargo-dist 0.32.0, which parses with `parse-changelog` 0.6.16):
+
+1. the section titled with the exact version, `## [0.1.0-alpha.7] - <date>`; the release is titled after it,
+   without the brackets (`0.1.0-alpha.7 - <date>`);
+2. otherwise, the section of the version without its prerelease suffix (`## [0.1.0] - …`), retitled with the
+   full version;
+3. otherwise, for a prerelease only, `## Unreleased`, titled `Version <version>`.
+
+So a release takes exactly its own section once step 1 of the checklist has run. Until #982, step 1 did not
+exist and the file had only `## Unreleased` at every tag, so each release fell through to case 3 and its notes
+listed every entry since the first alpha.
+
+`scripts/changelog.py` keeps the file in that shape, and the `changelog-sections` flake check runs its
+`check` mode on every pull request and its `--self-test`. `check` requires `## Unreleased` first, every other
+section `## [<semver>] - <YYYY-MM-DD>` and newest first, a section for the workspace version in
+`tessera/Cargo.toml` (which is why the release PR fails until step 1), every entry in exactly one section, and
+exactly the compare links at the end. The sections for `v0.1.0-alpha.1` to `v0.1.0-alpha.6` were rebuilt
+from the file at each tag with its `split` mode:
+
+```bash
+scripts/changelog.py split CHANGELOG.md \
+  v0.1.0-alpha.1 v0.1.0-alpha.2 v0.1.0-alpha.3 \
+  v0.1.0-alpha.4 v0.1.0-alpha.5 v0.1.0-alpha.6
+```
+
+A release's entries are the bullets in the file at its tag that are absent at the previous tag. `split`
+refuses, instead of guessing, when a bullet at a tag is no longer in the file word for word.
 
 ## The promotion PR
 
