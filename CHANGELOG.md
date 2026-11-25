@@ -97,8 +97,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derived block is still sealed: `manifest_hash` covers it, its digest and its class, and its payload is checked
   against its digest like any block's. Adding, regenerating or dropping one moves `manifest_hash` only; a product
   whose blocks are all derived has the `content_hash` of the empty set. The key is never written for a primary
-  block, so products without derived blocks are byte-identical (all 18 tracked `.tsra` files and every
-  `corpus.json` golden are unchanged). **What breaks:** a product written with a `.cidx` or by `tessera pyramid` now has a
+  block, so this change leaves products without derived blocks byte-identical (all 18 tracked `.tsra` files and
+  every `corpus.json` golden are unchanged by it). **What breaks:** a product written with a `.cidx` or by
+  `tessera pyramid` now has a
   different `content_hash` (and `manifest_hash`) than the same input gave before, and a reader from before this
   change can't verify it: it reports `blocks[n].class` as a newer field and finds `content_hash` tampered. Products
   from v0.1.0-alpha.6 or earlier are refused by the A′ layout check anyway (see Format break). Every reader
@@ -127,8 +128,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layout required; there is no migration verb: re-ingest them. The A′ cutover on its own keeps every seal's value
   (the 13 tracked products re-pack with every `corpus.json` golden unchanged); across this release, seals moved
   where #895, #972 or a derived block changed the manifest (see Format break). `TESSERA_VERSION` stays `"0.0.0"`.
-  Repository manifest objects hold the stored bytes,
-  so `objects/<manifest_hash>` hashes to its own name.
+  Repository manifest objects hold the stored bytes, so `objects/<manifest_hash>` hashes to its own name.
 - **Breaking, `tessera-core`:** `Manifest::manifest_hash` and `Collection::manifest_hash` are no longer serialised
   (the seal is not a field). Readers verify through `Manifest::from_stored_members` / `Collection::from_stored_members`
   (`from_stored` with the seal checked); writers store `to_stored()`. New errors `Error::UnsupportedLayout` (the alpha
