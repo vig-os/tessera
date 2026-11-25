@@ -178,32 +178,66 @@ member that is deliberately external is a new `MemberKind` (`ExternalRef`, which
 enum `#[non_exhaustive]`), not a relaxed rule. Not needed by kit; not built here.
 
 **D3.2 — cycles and depth.** A sealed object cannot pin its own seal, or an ancestor's, without a BLAKE3 preimage,
-so the member and edge graph is acyclic by construction (ADR-0049 §3). The walk keeps its `walked` set anyway:
-it is what makes a shared member (a base pinned by thirty `current` versions) cost one visit, and it terminates on any
-graph a hand-edited store could hold. The walk is an explicit stack, not recursion, so depth costs heap, not call
+so the member and edge graph is acyclic by construction (ADR-0049 §3). Hand-editing cannot add a cycle either: the walk
+reads every object through its address (a version through its seal check, any other object through `check_digest`),
+so an edited object is refused before its edges are followed, and a cycle of intact objects would need a preimage.
+The walk keeps its `walked` set because it is what makes a shared member (a base pinned by thirty `current`
+versions) cost one visit. The walk is an explicit stack, not recursion, so depth costs heap, not call
 stack; there is **no depth limit**, because any limit would be a silent "stop marking" and so a sweep of what lies
 below it. The cost of a `gc` is the number of distinct version objects reachable plus the object listing (D7).
 
 ### D4 — Durable pins
 
-- **A. A typed ref record `pin <address>` in `refs/<name>` (Recommended).** A pin is a ref file whose content is
-  `pin blake3:<hex>`. `gc` treats it as a root. Lineage verbs (`commit`, `log`, `import`, `forget`) refuse it
-  (`Error::NotALineage`) and pin verbs refuse a lineage (`Error::NotAPin`). It is set (`set_pin`, which refuses an
-  address that is not stored, as `set_ref` does) and removed (`remove_pin`) only explicitly, under the writer lock,
-  durably.
-  *Costs:* the ref grammar of ADR-0036's 2026-11-24 amendment grows by one record form. Pins and lineages share one
-  name space (one file per name), so a pin cannot shadow a lineage.
-- **B. A separate `pins/` directory.** A clean namespace.
-  *Costs:* **silent data loss with alpha.7**, as in D1 option C: its `gc` does not read `pins/`. Rejected.
-- **C. No pins; kit fakes one with a lineage it never advances.** Nothing to build.
-  *Costs:* a fake pin can be advanced or imported into by accident, nothing says it is a pin, and `log` shows a
-  lineage that isn't one. kit's comment asked for exactly this not to be needed.
+A pin is a root of `gc` that is not a lineage tip: it names one stored version (either kind), it never advances, and
+it is set (`set_pin`, which refuses an address that is not stored, as `set_ref` does) and removed (`remove_pin`) only
+explicitly, under the writer lock, durably. Lineage verbs (`commit`, `log`, `import`, `forget`) never act on a pin,
+and pin verbs never act on a lineage. What has to be chosen is where a pin lives, and that is decided by what an
+alpha.7 binary does with each layout. Two alpha.7 facts govern it: its `gc` reads only plain files directly under
+`refs/` (`all_ref_tips`), and its `forget` **deletes `refs/<ref_file_name(name)>` without parsing it**
+(`repo.rs:451-466`, CLI `version.rs:363`), then exits 0.
 
-Old binaries under A: alpha.7 reads `pin blake3:…` as `Error::CorruptRef`, so its `gc` aborts and its lineage verbs
-refuse the name. A pin can name either kind (a product version or a collection version). The record grammar is
-closed: a ref file holds `blake3:<hex>` (a lineage tip) or `pin blake3:<hex>` (a pin), each with optional trailing
-whitespace, and anything else is `CorruptRef`. A later record form gets the same fail-closed treatment from this
-build, so no repository format marker is needed for refs.
+- **A. A reserved flat file name, `refs/pin:<name>`, holding a plain address (Recommended).** The file holds
+  `blake3:<hex>`, exactly as a lineage ref does, so the ref grammar does not grow. What makes it a pin is the `pin:`
+  prefix of the file name, and every tessera build, alpha.7 included, maps `:` (and `/`, `\`) to `_` when it turns
+  a lineage name into a file name (`ref_file_name`). So **no lineage verb of any build can name a pin file**: alpha.7
+  `forget pin:x` removes `refs/pin_x`, never `refs/pin:x`. A new build reads a `refs/` entry whose file name starts
+  with `pin:` as a pin and every other entry as a lineage, so pins and lineages cannot collide either. A new build
+  refuses a lineage name that starts with `pin:` (`Error::Invalid`), so `tessera forget pin:x` is an error instead
+  of quietly acting on a lineage `pin_x`.
+  Under alpha.7 the pin is simply one more root: its `gc` reads the address and **keeps** everything the pin reaches
+  (it aborts only if that is a collection, by D1), and its `commit`, `import`, `read_ref` and `forget` cannot reach
+  the file.
+  *Costs:* `:` is not a legal file-name character on Windows (NTFS). Windows is not a release target today (deferred
+  in `dist-workspace.toml`), but before it ships the reserved prefix needs an on-disk spelling that is legal there
+  and still unreachable by `ref_file_name`; that is a layout decision owed then, and an object-store repository has
+  no such limit. A human `rm` still removes a pin, as it removes any ref.
+- **B. A typed record `pin blake3:<hex>` in a flat `refs/<name>`** (this ADR's first draft).
+  An alpha.7 `gc` reads the record as `Error::CorruptRef` and aborts, which fails closed.
+  *Costs:* a **mixed-version hazard**. An alpha.7 `tessera forget <name>` deletes the pin file without reading it and
+  exits 0, and the next `gc` of any build may then delete the fork point or merge base the pin protected. Each way
+  to close that hole has a real cost:
+  - *A repository version gate* (a `format` file a new build writes on the first pin, and later builds check):
+    alpha.7 never reads it, so it does not stop the binary that causes the hazard. It only guards later skew.
+  - *A refusal on the new side* (an append-only pin journal, with `gc` refusing to run when a journalled pin is gone
+    without a `remove_pin` entry): it notices only after the fact, and only if a new build runs `gc` before an
+    alpha.7 `gc` does. It also adds a second piece of state that must stay durable beside the refs.
+  - *Documentation only* ("do not run alpha.7 on a repository with pins"): leaves the hazard to the operator.
+- **C. A sub-directory: kit's request `refs/pins/<name>`, or a top-level `pins/`.** A visibly separate namespace,
+  which is what kit asked for (#947, second comment, item 1).
+  *Costs:* **silent data loss with alpha.7**, for both spellings. `all_ref_tips` skips every directory, `refs/pins/`
+  included, so an alpha.7 `gc` treats every pinned version as unreachable, sweeps it, and exits 0. Rejected. kit's
+  spelling can survive as the pin's *name*: `set_pin("pins/x", …)` gives the file `refs/pin:pins_x` under A.
+- **D. No pins; kit fakes one with a lineage it never advances.** Nothing to build.
+  *Costs:* a fake pin can be advanced, imported into or forgotten by accident, nothing says it is a pin, and `log`
+  shows a lineage that isn't one. kit's comment asked for exactly this not to be needed.
+
+**What the recommendation does about the mixed-version `forget` hazard.** A removes it by construction: no build's
+`forget` can produce a path that contains `:`, so there is nothing to gate and nothing to detect. If the owner prefers
+B, it needs one of the three mitigations listed under B, and none of them stops an alpha.7 `forget` on its own. That
+choice is the owner's (see "Open for the owner").
+
+Under every option, a later ref layout this build does not know (a file under `refs/` that is neither a lineage
+address nor a pin) is `Error::CorruptRef` and aborts `gc`, so a newer layout fails closed against this build.
 
 **When a pin matters.** `gc` follows every stored edge, `supersedes` included, and a ref reaches every earlier
 version of its lineage (ADR-0036, 2026-11-24). So today an old version of a **live** lineage is never reclaimed, pin
@@ -352,15 +386,20 @@ Each line: the fault, what happens, and the decision that settles it.
   `MissingMember`; `gc` aborts, names the member path and deletes nothing (D3.1).
 - **An edge to a version held elsewhere.** Not followed, nothing aborted, as today (D3.1).
 - **An object that matches both or neither side of the discriminator.** `AmbiguousObjectKind`; `gc` aborts (D1.1).
-- **A hand-edited store with a cycle.** The `walked` set ends the walk; nothing is skipped (D3.2).
 - **A very deep or very wide member graph.** A heap-bounded walk, one visit per distinct object, no depth cut-off
   (D3.2).
 - **An alpha.7 binary on a repository with collection lineages.** Its `gc` aborts and its `commit` fails; nothing is
   deleted (D1).
-- **An alpha.7 binary on a repository with pins.** `CorruptRef` on the pin; its `gc` aborts and deletes nothing (D4).
+- **An alpha.7 binary on a repository with pins.** Under D4 A, its `gc` reads each pin as one more root and keeps
+  what it reaches. Under D4 B, it reads the pin as `CorruptRef` and aborts, deleting nothing (D4).
+- **Mixed versions: an alpha.7 `tessera forget <pin name>`.** alpha.7's `forget` deletes `refs/<name>` without
+  parsing it and exits 0. Under D4 A it cannot name a pin file, since its `ref_file_name` maps the `:` of `pin:` to
+  `_`, so the pin stays. Under D4 B it deletes the pin, and the next `gc` of any build may reclaim the fork point or
+  merge base the pin protected. That is the hazard D4 B's mitigations address, none of them completely (D4).
 - **An alpha.7 reader on a collection with `sources`.** It verifies the seal, warns "not interpreted" and refuses any
   re-seal (D2).
-- **A lineage command given a pin's name, or a pin command given a lineage's.** `NotALineage` / `NotAPin` (D4).
+- **A new-build lineage command given a `pin:` name.** Refused (`Error::Invalid`); pin verbs address only
+  `refs/pin:<name>` files, never a lineage (D4).
 - **Two workspaces forked offline with the same `fork` token.** The same `id`, so the same lineage name: the second
   first commit is `RefMoved` locally, and across nodes kit's sync sees the collision (D5).
 - **A workspace keeps an old base past main's retention.** Kept while the workspace lives, by design (D8).
@@ -378,11 +417,15 @@ step, with the #947 acceptance item each one proves.
     one gives the golden bytes (the version edge is sealed and corpus-neutral).
   - Seal-case vectors for a collection with `sources`: it verifies with `sources` as a newer field under a reader
     that does not model it, and is tampered when the key is spliced in under the old seal (old readers).
+  - `a_forked_version_without_a_fork_token_is_refused`: a collection with a `forked_from` edge and no `fork` key in
+    `id_inputs` is `Error::Invalid` at seal.
 - **Step 2.**
   - `object_kind_discriminates_a_zero_block_manifest`: a zero-block manifest is a product, not a collection; both
     keys and neither key are refused.
   - `member_diff_reports_added_removed_repinned_and_order`, plus a property test that applying the diff to `old`
     gives `new`'s members (#947: "`diff` of two collection versions lists exactly the members that differ").
+  - `member_diff_refuses_a_duplicate_reference`: a collection listing one `reference` twice, on either side, gives
+    `Error::DuplicateMemberReference`.
 - **Step 3.**
   - `gc_marks_through_collection_members`: a base and deltas pinned only by a `current` collection survive `gc` and
     read back by hash. Today this aborts with `GcAborted`, the collection read as a manifest (#947 item 2).
@@ -392,6 +435,12 @@ step, with the #947 acceptance item each one proves.
 - **Step 4.**
   - `commit_collection_advances_by_cas_and_reads_back`, `commit_collection_built_on_a_moved_tip_is_refused`, and the
     N-process race test of #946 run on a collection lineage (#947 item 1).
+  - `commit_collection_refuses_a_product_lineage` and `commit_refuses_a_collection_lineage`: each is
+    `Error::LineageKindMismatch` and stores nothing (both directions of D1 step 2).
+  - `commit_collection_refuses_a_version_with_another_id`: a parent of the lineage and a new version whose `id`
+    differs is `Error::LineageIdMismatch`.
+  - `commit_collection_refuses_a_wrong_supersedes_edge`: no edge, two edges, or one to another version is
+    `Error::SupersedesMismatch` on a collection, as on a product.
   - `commit_collection_stores_new_members_in_the_same_critical_section`: the durable-seam recorder of #946 shows no
     `GcWalk` between storing the delta and advancing the ref.
   - `two_lineages_share_a_base_until_both_are_forgotten`: forget one and `gc`, the base stays; forget both and `gc`,
@@ -402,10 +451,15 @@ step, with the #947 acceptance item each one proves.
     version and everything it reaches read back; remove the pin and `gc`: they are reclaimed (kit's added
     acceptance item; the "after compaction" half of that item becomes testable with #906, whose tests must include
     a pinned generation outside the class).
-  - `forget_refuses_a_pin_and_set_pin_refuses_an_unstored_address`.
-  - `lineage_verbs_refuse_a_pin_and_pin_verbs_refuse_a_lineage`.
-- **Step 7.** The alpha.7 cross-check job: a repository with a collection lineage, a pin and a collection with
-  `sources`; the released alpha.7 `gc` exits non-zero and every object remains.
+  - `set_pin_refuses_an_unstored_address`.
+  - `lineage_verbs_refuse_a_pin_name`: `commit`, `import`, `log` and `forget` given `pin:x` return `Error::Invalid`
+    and leave `refs/pin:x` in place.
+  - `remove_pin_never_touches_a_lineage`: a lineage `x` and a pin `x` coexist; removing the pin leaves the lineage.
+- **Step 7.** The alpha.7 cross-check job, run against the released alpha.7 binary on two repositories:
+  - one with a collection lineage and a collection with `sources`: alpha.7 `gc` exits non-zero and every object
+    remains;
+  - one with a product lineage and a pin on its first version: alpha.7 `forget pin:x` leaves `refs/pin:x`; after
+    alpha.7 `forget` of the lineage itself and alpha.7 `gc`, the pinned version and its blocks remain.
 - **#987.** The discard probe (kit's second added acceptance item).
 
 ## Implementation plan
@@ -421,8 +475,9 @@ Ordered, one PR each, each under 1500 changed lines.
    `get_collection`, `walk_read` dispatch by kind, closed members, member-path errors. About 900 lines.
 4. **Io: `commit_collection`, `log` and `history`** (T4, T5). CAS, lineage-kind checks both ways, member closure,
    new members in the same call, the walk over `supersedes`/`forked_from`. About 1100 lines.
-5. **Io: pins** (T6). The ref record grammar, `set_pin` / `remove_pin` / `read_pin` / `pins`, `gc` roots, the
-   mutual refusals. About 600 lines.
+5. **Io: pins** (T6). The `refs/pin:<name>` layout (or D4 B's record and mitigation, if the owner picks it),
+   `set_pin` / `remove_pin` / `read_pin` / `pins`, `gc` roots, lineage verbs refusing `pin:` names. About 600
+   lines.
 6. **CLI** (T8). `tessera collection commit|log|diff`, `tessera pin set|rm|ls`, trycmd walkthroughs as docs (a
    fork, a merge written as one delta, a drop), the book chapter on repositories. About 1000 lines.
 7. **Cross-check and amendments.** The alpha.7 fail-closed job; ADR-0036 and ADR-0049 "Amended by ADR-0067"
@@ -438,7 +493,8 @@ Each has a recommendation above; these are the ones whose answer changes the bui
 1. D1: the object decides the kind (A) over a typed ref record (B).
 2. D3.1: members are closed in a repository (A), so a catalog over external members stays a file until an
    `ExternalRef` kind exists.
-3. D4: pins as a typed record in `refs/` (A).
+3. D4: pins as a reserved flat file name `refs/pin:<name>` (A), which removes the mixed-version `forget` hazard by
+   construction at the cost of a Windows spelling owed later; or a typed record (B) plus one of its mitigations.
 4. D5: the new role `forked_from` (A) over reusing `derived_from`, and a caller-supplied `fork` token in `id_inputs`.
 5. D7: correctness now, discard cost after the #987 measurement.
 
