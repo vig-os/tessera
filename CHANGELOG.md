@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+### Changed
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.1.0-alpha.7] - 2026-11-25
+
 ### Format break
 
 - **This release breaks the on-disk format (ADR-0066 option A′, #914, PR #940).** The seal (`manifest_hash`) is
@@ -19,9 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Which hashes moved, and why:**
   [`docs/spikes/916-format-break-crosscheck.md`](https://github.com/vig-os/tessera/blob/dev/docs/spikes/916-format-break-crosscheck.md)
   (#916, PR #980) traces every move across the 22 corpus products. The A′ cutover itself keeps the value of every
-  seal (PR #940). Derived blocks leave `content_hash` (#720, PR #942), so `content_hash` moves for a product that
-  carries a derived block (a `<name>.cidx` chunk index, a `tessera pyramid` level above 0); no corpus product
-  carries one. `manifest_hash` moved on 10 of the 22: through #895 (PR #934) on the 3 that embed the built-in
+  seal (PR #940). Derived blocks leave `content_hash` (#720, PR #942), so `content_hash`, and with it
+  `manifest_hash` and every signature over it, moves for a product that carries a derived block (a `<name>.cidx`
+  chunk index, a `tessera pyramid` level above 0); no corpus product carries one. `manifest_hash` moved on 10 of
+  the 22: through #895 (PR #934) on the 3 that embed the built-in
   `recon` schema, now version 1.1 with number ranges, and through PR #972 on the 7 Arrow-backed ingest fixtures,
   whose sealed decoder version moved with the parquet/arrow 58.4.2 bump (RUSTSEC-2026-0595, recorded per ADR-0056
   §6a). No `id` and no block digest moved.
@@ -187,6 +200,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its new objects and its ref.
 
 ### Security
+
+- Dependencies: `url` 2.5.8 → 2.5.9 for RUSTSEC-2026-0592 (`Url::origin` / `quirks::origin`; #953, PR #954).
+  `Cargo.lock` only, plus `form_urlencoded` 1.2.3, which `url` 2.5.9 requires.
+- Dependencies: `parquet` and the `arrow-*` crates 58.4.1 → 58.4.2 for RUSTSEC-2026-0595 (bloom filters written as
+  plaintext into encrypted Parquet; #970, PR #972). tessera writes no encrypted Parquet and sets no bloom filters,
+  so it cannot reach the new refusal. The sealed ingest decoder version moves with the bump, so the `manifest_hash`
+  of the 7 Arrow-backed ingest fixtures moves (ADR-0056 §6a).
 
 ## [0.1.0-alpha.6] - 2026-11-19
 
@@ -517,6 +537,7 @@ for it; `v0.1.0-alpha.3` superseded it the same day.
 This file recorded no entries for this release. Its changes are listed per crate, in
 `tessera/crates/<crate>/CHANGELOG.md`.
 
+[0.1.0-alpha.7]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.6...v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.5...v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.4...v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
