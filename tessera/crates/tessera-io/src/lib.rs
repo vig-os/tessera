@@ -15,6 +15,7 @@ pub mod collection;
 pub mod config;
 pub mod conformance;
 pub mod container;
+mod durable;
 pub mod multiblock;
 pub mod oci;
 pub mod provenance;

@@ -172,7 +172,7 @@ fn no_writer_produces_an_orphan_chunk_index() {
     let repo = Repository::init(&dir.path().join("repo")).unwrap();
     let e = repo.put_manifest(&m).unwrap_err();
     assert!(want(&e), "{e}");
-    let e = repo.commit(&m.id, &m, &payloads).unwrap_err();
+    let e = repo.commit(&m.id, None, &m, &payloads).unwrap_err();
     assert!(want(&e), "{e}");
     assert_eq!(repo.read_ref(&m.id).unwrap(), None);
     let objects = walk(&dir.path().join("repo/objects"));

@@ -32,6 +32,29 @@ The verbs are git-shaped:
   `publish` exports a **history-free** standalone product for distribution (a `git archive`).
 - `forget` / `gc` — drop a lineage; reclaim objects unreachable from any ref.
 
+## Concurrent writers and crashes
+
+A repository has **one writer at a time**: every command that changes it (`import`, `commit`, `forget`, `gc`)
+holds an exclusive lock on the file `repo/lock` for its whole run, and others wait for it. Readers (`log`, `diff`,
+`publish`, `seal`) never wait.
+
+- `commit` builds the new version on the tip it read. If another commit landed on the lineage in between, it is
+  refused with `ref '…' moved: expected …, found …` and nothing is written: run it again, on the new tip. No commit
+  that reported success is ever dropped from the lineage's history.
+- `import` starts a lineage. Importing into a lineage whose tip is another version is refused the same way; use
+  `commit` to change it, or `forget` it first. Importing the tip's own version again changes nothing, and rewrites
+  any of its objects that are missing or torn.
+- Objects are written to `repo/tmp/`, synced and renamed into place before the ref names them, and the ref is
+  replaced the same way, so a crash or power loss leaves each lineage at its old version or its new one, never at a
+  version with missing data. An object a crash left torn is detected by its hash and rewritten by the next write of
+  the same bytes.
+- `gc` refuses to delete anything if it cannot read a ref or a manifest it reaches, and names it: a walk that
+  skipped it would delete what only it keeps alive. An empty or garbled ref is an error, never "no commits yet";
+  restore it, or `forget` the lineage.
+- The lock is an advisory `flock`, valid on a **local filesystem only**: do not share one repository between hosts
+  over NFS or another network filesystem without lock support. (A repository on an object store would fence with a
+  conditional put; it is not built yet, #288.)
+
 The append-only guarantee is cryptographic, not conventional: a later version's `content_hash` carries a
 **consistency proof** that it is an append-only prefix extension of the earlier one (see
 [Integrity](./integrity.md)) — you can prove a revision only *added*, never rewrote history.

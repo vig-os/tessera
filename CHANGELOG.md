@@ -95,6 +95,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking API (`tessera-io`, #946, ADR-0036 §2):** `Repository::commit(lineage, expected, manifest, payloads)`
+  takes `expected: Option<&str>`, the tip the caller built the version on (`None` for a lineage's first version). A
+  ref elsewhere is refused with the new typed `Error::RefMoved { lineage, expected, found }` (`tessera-core`) before
+  anything is stored; with a parent, the manifest must carry exactly one `supersedes` edge, to it
+  (`Error::SupersedesMismatch`). `set_ref` returns `Error::RefMoved` (was `Error::Invalid`) and refuses a new tip
+  that is not a `blake3:<64 hex>` address. `tessera commit` passes the tip it read; `tessera import` into a lineage
+  whose tip is another version is refused instead of replacing its tip (importing the tip's own version again
+  moves nothing and rewrites its missing or torn objects).
 - **Breaking format change (#720, ADR-0028 §4, ADR-0066 rule 12):** `content_hash` is the Merkle root over the
   **primary** blocks only. A block ref gains an optional `"class": "derived"`, set by the writers of accelerator
   blocks: the chunk-index sidecar `<name>.cidx` (`tessera_io::chunk_index::chunk_index_block`, so every `*_indexed`
@@ -276,6 +284,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ColumnData` (NULL as JSON `null`, CSV `nan`), `tessera sql` builds an Arrow validity bitmap, the streaming
   staging fragments invert the trailer with `from_column_bytes` given the row count, and the chunk-index digest
   hashes the staging form by design; the WASM binding reads no table payloads.
+- `tessera-io`: a repository is a fenced single writer (#946, ADR-0036 §2 amendment). Every write (`commit`,
+  `set_ref`, `write_object`, `put_manifest`, `forget`, `gc`) holds one exclusive OS advisory lock (`flock`) on
+  `<repo>/lock` from its check to its last write, so two overlapping commits can no longer both return Ok with one
+  of them unreachable, and `gc` can no longer sweep a commit's objects before its ref advance. Objects and refs are
+  written to `<repo>/tmp/`, fsync'd, renamed into place and their directory fsync'd, objects before the ref, so a
+  crash leaves the old version or the new one. An object torn at its address is detected by hash and replaced by
+  the next write of its bytes. An empty or unparsable ref is the new `Error::CorruptRef`, never "no commits yet".
+  `gc` aborts with the new `Error::GcAborted`, naming what it could not read and deleting nothing, on a ref or
+  manifest it cannot read (it treated an unreadable manifest as having nothing to keep, and deleted the history
+  behind a refused tip), and walks a tip whose address another version stores as a block. The lock is valid on a
+  local filesystem only, not on NFS. Cost: a write now reads back and hashes an object already at its address
+  before it skips it, so re-importing a stored product reads its blocks once more; each commit adds the fsyncs of
+  its new objects and its ref.
 - `tessera-core`: a partition marker whose forged index makes the canonical leaf name longer than 255 bytes is
   refused as `LogicalTableError::NonCanonicalLeaf`, not a bare `Error::InvalidBlockName` (#733).
 - `tessera-core`: `table_group` refuses a marked legacy-named block under a node (`a/pairs_0001`) with the error the

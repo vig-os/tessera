@@ -23,6 +23,10 @@ pub fn init(repo: &Path, out: &mut dyn Write) -> Result<()> {
 }
 
 /// `tessera import REPO FILE` — store a sealed `.tsra` as the first version of its lineage (its `id`).
+/// A lineage whose tip is another version is refused ([`Error::RefMoved`]): importing over it would
+/// replace its tip with a version whose history does not reach the old one. Use `commit` to change
+/// it, or `forget` it first. Importing the version that is already the tip changes no ref and
+/// succeeds; its objects are written again where one is missing or torn (#946).
 pub fn import(repo: &Path, tsra: &Path, out: &mut dyn Write) -> Result<()> {
     let repo = Repository::open(repo)?;
     let mut r = Reader::open(tsra)?;
@@ -32,7 +36,23 @@ pub fn import(repo: &Path, tsra: &Path, out: &mut dyn Write) -> Result<()> {
         let bytes = r.read_block(&b.name)?;
         payloads.push(BlockPayload::new(b.name.clone(), bytes));
     }
-    let mh = repo.commit(&manifest.id, &manifest, &payloads)?;
+    let mh = match repo.commit(&manifest.id, None, &manifest, &payloads) {
+        Err(Error::RefMoved {
+            found: Some(tip), ..
+        }) if manifest.manifest_hash.as_deref() == Some(tip.as_str()) => {
+            for p in &payloads {
+                let digest = manifest
+                    .blocks
+                    .iter()
+                    .find(|b| b.name == p.name)
+                    .and_then(|b| b.digest.as_deref())
+                    .ok_or_else(|| Error::MissingDigest(p.name.to_string()))?;
+                repo.write_object(digest, &p.bytes)?;
+            }
+            repo.put_manifest(&manifest)?
+        }
+        other => other?,
+    };
     writeln!(out, "imported lineage {}", manifest.id).map_err(Error::from)?;
     writeln!(out, "  version {mh}").map_err(Error::from)?;
     Ok(())
@@ -136,8 +156,10 @@ pub fn commit(
 
     b.add_source(Source::new("supersedes", &tip).with_content_hash(&tip));
     let new_manifest = b.seal()?;
-    // commit stores the new block payloads content-addressed (dedup if already present) + the manifest.
-    let mh = repo.commit(lineage, &new_manifest, &payloads)?;
+    // commit stores the new block payloads content-addressed (dedup if already present) + the
+    // manifest, and advances the ref only if it is still at `tip`, the version this one was built on
+    // (ADR-0036 §2): a commit that landed since is never overwritten, the new version is refused.
+    let mh = repo.commit(lineage, Some(&tip), &new_manifest, &payloads)?;
 
     writeln!(out, "committed {lineage}").map_err(Error::from)?;
     writeln!(out, "  version    {mh}").map_err(Error::from)?;
@@ -613,6 +635,51 @@ mod tests {
             n
         }
         rec(&root.join("objects"))
+    }
+
+    /// #946: `import` starts a lineage. Importing the tip's own version again is a no-op that
+    /// repairs its objects; importing into a lineage whose tip is another version is refused with
+    /// `RefMoved` (it replaced the tip with a version whose history skips the old one, which `gc`
+    /// then reclaimed), and the tip stays.
+    #[test]
+    fn import_into_a_lineage_with_a_version_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let tsra = dir.path().join("p.tsra");
+        write_tsra(&tsra);
+        let lineage = imported(&repo, &tsra);
+        // The same version again: no ref moves, and a torn block object is written again.
+        let r = Repository::open(&repo).unwrap();
+        let v0 = r.read_ref(&lineage).unwrap().unwrap();
+        let block = r.get_manifest(&v0).unwrap().blocks[0]
+            .digest
+            .clone()
+            .unwrap();
+        let hex = block.strip_prefix("blake3:").unwrap();
+        let object = repo.join("objects/blake3").join(&hex[..2]).join(&hex[2..]);
+        std::fs::write(&object, b"torn").unwrap();
+        import(&repo, &tsra, &mut Vec::new()).unwrap();
+        assert_eq!(r.read_ref(&lineage).unwrap().as_deref(), Some(v0.as_str()));
+        r.read_object(&block)
+            .expect("re-import repairs the torn block");
+
+        commit(
+            &repo,
+            &lineage,
+            &["tracer=FLT".into()],
+            &[],
+            &[],
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let tip = r.read_ref(&lineage).unwrap();
+
+        let e = import(&repo, &tsra, &mut Vec::new()).unwrap_err();
+        assert!(
+            matches!(&e, Error::RefMoved { expected: None, found, .. } if *found == tip),
+            "{e}"
+        );
+        assert_eq!(r.read_ref(&lineage).unwrap(), tip, "the tip is unchanged");
     }
 
     #[test]
