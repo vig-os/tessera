@@ -199,6 +199,18 @@ repos:
         files: ^scripts/(check-ksb-fork-guard\.sh|tests/ksb-fork-guard/)
         pass_filenames: false
 
+  # The per-crate ksb test job's wrapper (#957): its self-test runs the lock parsing, the generated job flake and
+  # the exit code and output for each job outcome against a stub `ksb`, so the part that decides what an agent
+  # sees cannot regress unseen. The flake side (`legacyPackages.ksbTest`) is proven by real ksb runs.
+  - repo: local
+    hooks:
+      - id: ksb-test-self-test
+        name: ksb-test self-test (scripts/ksb-test.sh --self-test)
+        entry: scripts/ksb-test.sh --self-test
+        language: script
+        files: ^scripts/ksb-test\.sh$
+        pass_filenames: false
+
   # Skill directory naming convention
   - repo: local
     hooks:

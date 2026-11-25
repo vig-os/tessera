@@ -439,6 +439,186 @@
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
+        # The test runners' thread budget, as shell: nextest's test processes, libtest's threads and rayon's pool.
+        # The checks pass "$NIX_BUILD_CORES" (`withCpuBudget`, below, says why); the ksb test job a fixed count.
+        cpuBudget = budget: ''
+          export NEXTEST_TEST_THREADS=${budget} RUST_TEST_THREADS=${budget}
+          export RAYON_NUM_THREADS=${budget}
+          echo "test CPU budget: ${budget} (available to the build: $(nproc))"
+        '';
+        # Vacuous-pass guard for the nextest checks (#726): a run that selects ZERO tests must fail,
+        # or a test filter that stops matching (a renamed test, a feature not enabled) leaves the
+        # check green while it runs nothing. nextest 0.9.137 already fails such a run by default
+        # (`--no-tests=auto` resolves to `fail` outside `--rerun`, exit code 4), but a default is
+        # not a guarantee: it can change upstream, and `NEXTEST_NO_TESTS=pass` in the environment
+        # turns it off. The explicit flag is the guarantee, and on the command line it overrides
+        # that variable. It does NOT catch a filter that matches FEWER tests than intended.
+        nextestFailOnNoTests = "--no-tests=fail";
+
+        # ── The per-crate ksb test job (#957): one crate's tests at one commit, built and run off the seat. ──
+        # Called by the job flake `scripts/ksb-test.sh` generates (the user-facing side: its header and
+        # CONTRIBUTING.md); not a check, and `nix flake check` never evaluates it.
+        #
+        #   ksbTest { crate; cargoArgs ? [ ]; filter ? null; testThreads ? 4; timeoutMinutes ? 15; rerun ? null;
+        #             gitSources; }  →  a derivation with bin/tessera-ksb-test (the job's app)
+        #
+        # Two crane derivations, so nothing compiles in the job pod (a pod cargo build is SIGTERMed, exit 143):
+        #   build  `cargo nextest list` of the crate, on a dependency build of its own: it compiles exactly the
+        #          binaries `nextest run` will run, with the same flags, and installs the target dir. It depends on
+        #          the commit and the cargo flags only, so every filter, thread count and --rerun on that commit
+        #          shares it, and the dependency build is shared by every commit with the same Cargo.lock.
+        #   run    `cargo nextest run` on that target dir, which is fresh, so it compiles nothing (a test that runs
+        #          cargo itself, like tessera-core's schema-reference drift test, compiles what it asks for, as in
+        #          CI). It RECORDS the outcome instead of failing on it: $out holds exit-code, summary.txt,
+        #          failures.txt (each failed test's output from the JUnit report), junit.xml and nextest.log. A
+        #          derivation that failed would leave none of them where the job could read them.
+        # The app copies $out to $KSB_JOB_OUT, prints the summary (and the failures) and exits with the recorded
+        # code, so the job's exit code is the test run's.
+        #
+        # WHY a dependency build of its own: ksb evaluates the job offline, so the Cargo.lock git dependencies (the
+        # vortex fork) cannot be fetched with `builtins.fetchGit` as `cargoArtifacts`' vendoring does. `gitSources`
+        # maps each lock `source` string to a store path that ksb snapshotted on the submit side (a flake input of
+        # the job flake), and the vendoring uses those checkouts. A lock source with no entry fails evaluation.
+        #
+        # SAME AS workspace-test: toolchain, `commonArgs` (src filter, native deps), release profile, the RAM-backed
+        # TMPDIR (`withRamTmpdir`), `--no-tests=fail`. DIFFERENT, deliberately: one crate (`-p`), a fixed thread
+        # budget (`testThreads`; the ksb builder reports 84 CPUs, and a 4-thread run is what a laptop does),
+        # `fail-fast = false` (an agent wants every failure from one run), a `timeoutMinutes` cap on the test run
+        # (recorded as exit 124, so a hung test cannot hold the job forever), and the JUnit report.
+        # LIMITS: the run derivation executes on the ksb builder, not in the pod, so `--mem`/`--cpu` of the job do
+        # not bound it: the threads are bounded, the memory is not (#961). A recorded failure is a cached result: the
+        # same request returns it without running the tests again until `rerun` (any new string) changes.
+        ksbTest =
+          { crate
+          , cargoArgs ? [ ]
+          , filter ? null
+          , testThreads ? 4
+          , timeoutMinutes ? 15
+          , rerun ? null
+          , gitSources
+          }:
+          let
+            inherit (pkgs) lib;
+            vendor = craneLib.vendorCargoDeps {
+              inherit src;
+              overrideVendorGitCheckout = packages: checkout:
+                let source = (builtins.head packages).source; in
+                checkout.overrideAttrs (_: {
+                  src = gitSources.${source} or (throw ''
+                    ksbTest: the Cargo.lock git dependency ${source} has no snapshot in `gitSources`.
+                    scripts/ksb-test.sh adds one flake input per lock git source; pass every one.
+                  '');
+                });
+            };
+            # The dependency build has ONE name for every crate, so it is one derivation per Cargo.lock and every
+            # crate after the first finds it built; only the crate's own derivations carry its name.
+            depsArgs = commonArgs // {
+              pname = "tessera-ksb";
+              cargoVendorDir = vendor;
+            };
+            args = depsArgs // { pname = "tessera-ksb-${crate}"; };
+            cargoFlags = lib.escapeShellArgs ([ "--locked" "--cargo-profile" "release" "-p" crate ] ++ cargoArgs);
+            nextestConfig = pkgs.writeText "ksb-test-nextest.toml" ''
+              [profile.ksb-test]
+              fail-fast = false
+              failure-output = "immediate-final"
+
+              [profile.ksb-test.junit]
+              path = "junit.xml"
+            '';
+            # Each failed test case of a nextest JUnit report with its message and the last 200 lines of its
+            # stdout and stderr; junit.xml keeps the whole output.
+            junitFailures = pkgs.writeText "junit-failures.py" ''
+              import sys
+              import xml.etree.ElementTree as ET
+
+              KEEP = 200
+              failed = 0
+              for suite in ET.parse(sys.argv[1]).getroot().iter("testsuite"):
+                  for case in suite.iter("testcase"):
+                      bad = [e for e in case if e.tag in ("failure", "error")]
+                      if not bad:
+                          continue
+                      failed += 1
+                      for e in bad:
+                          message = e.get("message") or ""
+                          print(f"=== {e.tag.upper()} {suite.get('name')} {case.get('name')}: {message}")
+                      for tag in ("system-out", "system-err"):
+                          text = (case.findtext(tag) or "").splitlines()
+                          if not text:
+                              continue
+                          cut = len(text) - KEEP
+                          print(f"--- {tag}" + (f" (last {KEEP} of {len(text)} lines; all in junit.xml)" if cut > 0 else ""))
+                          print("\n".join(text[max(cut, 0):]))
+              print(f"{failed} failed test case(s) in the JUnit report")
+            '';
+            build = craneLib.mkCargoDerivation (args // {
+              pnameSuffix = "-build";
+              cargoArtifacts = craneLib.buildDepsOnly depsArgs;
+              nativeBuildInputs = args.nativeBuildInputs ++ [ pkgs.cargo-nextest ];
+              buildPhaseCargoCommand = ''
+                cargo nextest list --list-type binaries-only ${cargoFlags}
+              '';
+              doCheck = false;
+            });
+            run = craneLib.mkCargoDerivation (withRamTmpdir (args // {
+              pnameSuffix = "-test";
+              cargoArtifacts = build;
+              doInstallCargoArtifacts = false;
+              nativeBuildInputs = args.nativeBuildInputs ++ [ pkgs.cargo-nextest pkgs.python3 ];
+              env = { NEXTEST_SHOW_PROGRESS = "counter"; } // lib.optionalAttrs (rerun != null) {
+                KSB_TEST_RERUN = rerun;
+              };
+              buildPhaseCargoCommand = ''
+                ${cpuBudget (toString testThreads)}
+                mkdir -p "$out"
+                # The exit code goes through a file: the left side of the pipe is a subshell, and the log is
+                # streamed to the build log as well as kept.
+                {
+                  timeout --kill-after=60 ${toString timeoutMinutes}m \
+                    cargo nextest run ${cargoFlags} ${nextestFailOnNoTests} \
+                    --tool-config-file ksb-test:${nextestConfig} --profile ksb-test \
+                    ${lib.optionalString (filter != null) "-E ${lib.escapeShellArg filter}"} \
+                    2>&1 && rc=0 || rc=$?
+                  echo "$rc" > "$out/exit-code"
+                } | tee "$out/nextest.log"
+                rc=$(cat "$out/exit-code")
+                {
+                  printf '%s\n' "crate ${crate}, cargo flags "${lib.escapeShellArg cargoFlags}", filterset "${lib.escapeShellArg (if filter == null then "(none)" else filter)}
+                  echo "test threads ${toString testThreads}, timeout ${toString timeoutMinutes} min"
+                  summary=$(grep -E '^ *Summary \[' "$out/nextest.log" | tail -n 1) || true
+                  echo "''${summary:-no nextest summary line (see nextest.log)}"
+                  if (( rc == 124 || rc == 137 )); then
+                    echo "124: the ${toString timeoutMinutes} min timeout expired; 137: killed, by that timeout's SIGKILL 60 s after its SIGTERM or by the OOM killer"
+                  fi
+                  echo "nextest exit code: $rc"
+                } > "$out/summary.txt"
+                junit=target/nextest/ksb-test/junit.xml
+                if [[ -f $junit ]]; then
+                  cp "$junit" "$out/junit.xml"
+                  python3 ${junitFailures} "$out/junit.xml" > "$out/failures.txt"
+                else
+                  echo "nextest exited $rc without a JUnit report; the end of nextest.log:" > "$out/failures.txt"
+                  tail -n 200 "$out/nextest.log" >> "$out/failures.txt"
+                fi
+              '';
+              installPhaseCommand = "";
+            }));
+          in
+          pkgs.writeShellApplication {
+            name = "tessera-ksb-test";
+            runtimeInputs = [ pkgs.coreutils ];
+            text = ''
+              out=''${KSB_JOB_OUT:?the job app runs under ksb, which sets KSB_JOB_OUT}
+              cp -r --no-preserve=mode ${run}/. "$out/"
+              cat "$out/summary.txt"
+              rc=$(cat "$out/exit-code")
+              if (( rc != 0 )); then cat "$out/failures.txt"; fi
+              exit "$rc"
+            '';
+            passthru = { inherit build run; };
+          };
+
         # The committed partitioned-table fixture the Python checks read (ADR-0064, #717).
         pairsFixture = ./tessera/crates/tessera-py/tests/fixtures/partitioned_pairs.tsra;
         # The committed nullable-column fixture and the Rust reader's decode of it (#804).
@@ -733,20 +913,8 @@
           # nproc (4), so nothing changes there. Applies to the libtest/nextest checks; tessera's own
           # worker sizing still reads `available_parallelism()`: #703.
           withCpuBudget = args: args // {
-            preCheck = ''
-              export NEXTEST_TEST_THREADS=$NIX_BUILD_CORES RUST_TEST_THREADS=$NIX_BUILD_CORES
-              export RAYON_NUM_THREADS=$NIX_BUILD_CORES
-              echo "test CPU budget: $NIX_BUILD_CORES (available to the build: $(nproc))"
-            '' + (args.preCheck or "");
+            preCheck = cpuBudget "$NIX_BUILD_CORES" + (args.preCheck or "");
           };
-          # Vacuous-pass guard for the nextest checks (#726): a run that selects ZERO tests must fail,
-          # or a test filter that stops matching (a renamed test, a feature not enabled) leaves the
-          # check green while it runs nothing. nextest 0.9.137 already fails such a run by default
-          # (`--no-tests=auto` resolves to `fail` outside `--rerun`, exit code 4), but a default is
-          # not a guarantee: it can change upstream, and `NEXTEST_NO_TESTS=pass` in the environment
-          # turns it off. The explicit flag is the guarantee, and on the command line it overrides
-          # that variable. It does NOT catch a filter that matches FEWER tests than intended.
-          nextestFailOnNoTests = "--no-tests=fail";
           allChecks = {
           # Hermetic Rust gates over the tessera workspace.
           #
@@ -1737,7 +1905,8 @@
 
         # The shared dependency build (crane `buildDepsOnly`), exposed so CI can key and restore it
         # (#507). `legacyPackages` is not built by `nix flake check`, so this costs nothing there.
-        legacyPackages = { inherit cargoArtifacts; };
+        # `ksbTest` is the per-crate ksb test job's entry point (a function, #957; called by scripts/ksb-test.sh).
+        legacyPackages = { inherit cargoArtifacts ksbTest; };
 
         formatter = pkgs.nixpkgs-fmt;
       });
