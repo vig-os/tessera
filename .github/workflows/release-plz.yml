@@ -1,8 +1,8 @@
-# Opens/updates the HELD release PR (workspace version bump + CHANGELOG) — ADR-0052. It never tags
-# or publishes.
+# Opens/updates the HELD release PR (workspace version bump + crate CHANGELOGs) — ADR-0052. It never
+# tags or publishes. The root CHANGELOG.md is versioned on that PR by hand (docs/RELEASING.md step 1).
 #
 # FLOW: every push to `dev` (+ manual dispatch) runs `release-plz release-pr`, which keeps ONE release
-# PR up to date with the next version and its CHANGELOG. Merging that PR is the deliberate 'cut'; the
+# PR up to date with the next version and the crate CHANGELOGs. Merging that PR is the deliberate 'cut'; the
 # operator then pushes the unified `v<version>` tag on the merge commit, and the tag alone triggers
 # cargo-dist's release.yml + release-nix.yml, which build and attach the artifacts (#337). First
 # tagged release: v0.1.0-alpha.1 (2026-09-24). A successful Release run then triggers promote-main.yml,

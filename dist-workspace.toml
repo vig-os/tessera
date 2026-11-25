@@ -2,9 +2,10 @@
 # binaries + a `curl | sh` installer, published to the GitHub Release. Complements the nix/crane
 # channel (reproducible musl binary + maturin wheel — the deterministic/FAIR-grade channel).
 #
-# Handoff with release-plz: release-plz owns the version bump + CHANGELOG + the git TAG (the single
-# "cut" trigger); the generated `.github/workflows/release.yml` fires on that tag and attaches these
-# artifacts to the same Release. See release-plz.toml.
+# Handoff with release-plz: release-plz owns the version bump + the crate CHANGELOGs; the operator pushes
+# the git TAG (the single "cut" trigger); the generated `.github/workflows/release.yml` fires on that tag
+# and attaches these artifacts to the same Release. Its notes are the version's section of the root
+# CHANGELOG.md (docs/RELEASING.md, "Release notes"). See release-plz.toml.
 #
 # The nested cargo workspace lives under `tessera/`; `cargo:tessera` points dist at it (this file sits
 # at the repo/git root so CI, which runs `dist` from the root, resolves the workspace).
