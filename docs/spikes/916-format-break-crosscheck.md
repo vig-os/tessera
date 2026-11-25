@@ -1,0 +1,265 @@
+# #916 — format-break cross-check for alpha.7 (ADR-0066 step 8)
+
+**Verdict: dev is self-consistent and every moved hash is traced.** Every generator, re-run at dev
+`ca751291`, reproduces the committed corpus and conformance files byte for byte (0 files changed). Between
+`v0.1.0-alpha.6` and dev, across the 22 corpus products, no `id`, no `content_hash` and no block digest moved.
+`manifest_hash` moved on 10 products: 3 through #895 and 7 through #972. A re-seal proof traces each one: alpha.6's
+manifest value, minus its in-band `manifest_hash`, with only the named fields taken from dev, serialised with JCS,
+is byte-identical to dev's stored `manifest.json` and hashes to dev's `manifest.seal`. Rust, the reference reader
+and `tessera-wasm` agree on all 22 products and all 171 seal cases.
+
+The check first ran at dev `dccc60ab` and was repeated in full after the rebase onto `ca751291` (#973, the
+repository's single writer), with identical results.
+
+Scope per the owner's decision of 2026-11-22: the alpha ships ADR-0066 A′ plus #720. #828 (step 7, the table codec
+profile) is not in this release, so step 8 checks against the causes #895, #912/#913/#940, #942 and #972. Helpers,
+the full-hash table and the commands are in [`916-format-break-crosscheck/`](916-format-break-crosscheck/).
+
+## 1. Regeneration at dev: no drift
+
+Each artifact was regenerated at dev `ca751291` with its own generator, in a clean slot
+(`cargo clean -p tessera-core -p tessera-io -p tessera-ingest -p tessera-cli` first). Afterwards,
+`git status --short` lists nothing.
+
+| Artifact | Generator | Result |
+|---|---|---|
+| `corpus/files/*.tsra` (8) | G1 | byte-identical |
+| `corpus/corpus.json` | G2 | byte-identical |
+| `corpus/ingest-corpus.json` (14 fixtures) | G3 | byte-identical |
+| `corpus/seal-cases.json` (171 cases) | G4 | byte-identical |
+| `corpus/refusals/*.tsra` (4) | G5 | byte-identical |
+| `tessera-cli` trycmd snapshots (97 cases) | G6 | 0 files rewritten, 97 ok |
+| `tessera-wasm` vectors | none of its own | it reads `corpus/seal-cases.json` (G4) |
+
+Run from `tessera/`, the reference-reader scripts from `corpus/reference_reader/` with
+`uv run --no-project --with-requirements requirements.txt`:
+
+- G1: `cargo run -p tessera-io --example gen_corpus_files`
+- G2: `cargo run -p tessera-io --example gen_corpus > corpus/corpus.json`
+- G3: `cargo run -p tessera-ingest --example gen_ingest_corpus > corpus/ingest-corpus.json`
+- G4: `python -B make_seal_cases.py`
+- G5: `python -B make_refusal_fixtures.py`
+- G6: `TRYCMD=overwrite cargo test -p tessera-cli --test cli`
+
+The `tessera-wasm` native test and the `wasm-bindgen-smoke` check both read `corpus/seal-cases.json`.
+`corpus/schema-cases.json` (49 cases) has no generator: it is maintained by hand (#895; commits `33bca695`,
+`613a11be`) and both readers are held to it (`tessera-core/tests/schema_cases.rs`, `reference_reader/run.py`). It was
+checked, not regenerated.
+
+No stale generated file was found, so this PR regenerates nothing.
+
+## 2. Release to release: `v0.1.0-alpha.6` → dev
+
+**Pairing.** Products are paired by corpus name. Byte for byte, no alpha.6 product exists at dev: A′ (#940)
+stores `manifest.json` as its JCS bytes without the `manifest_hash` key and adds the `manifest.seal` member, so
+every `.tsra` changed bytes. For alpha.6 the table reads `manifest_hash` from the in-band key; for dev, from
+`manifest.seal`. The 8 `corpus/files` products are the committed files at each tag. The ingest corpus commits
+goldens only, so both sides were packed with
+[`dump_ingest_products.rs`](916-format-break-crosscheck/dump_ingest_products.rs), which seals exactly as
+`corpus::golden` does. Its alpha.6 run reproduces alpha.6's committed `ingest-corpus.json` byte for byte, and its
+dev run reproduces dev's.
+
+Hashes are shown as their first 12 hex digits; `a` → `b` marks a move, a single value means unchanged. Full hashes:
+[`table.json`](916-format-break-crosscheck/table.json).
+
+| Product | `id` | `content_hash` | `manifest_hash` | Moved by |
+|---|---|---|---|---|
+| `blob_opaque` | `1d503e926fc5` | `c5b98765e1b8` | `feaceed4b3da` | — |
+| `empty_no_blocks` | `682ff1f8841d` | `af1349b9f5f9` | `bf18db403ce1` | — |
+| `listmode_events` | `55b8eac168d6` | `b8c5176eed20` | `c9a56e24e28b` | — |
+| `multiblock_study` | `216739168370` | `377a60687d37` | `8291b21d8069` → `4d0e99d14b2a` | #895 |
+| `recon_float32_mumap` | `529bb3fc4cb0` | `ea3843267ea4` | `40e078b115d7` → `0cbbdb53855a` | #895 |
+| `recon_int16` | `12643649d5f6` | `e9fe4244ee24` | `4fd0b90d0aa3` → `892cf508f41b` | #895 |
+| `segmentation_uint8` | `70900b373daa` | `8e2d917e6f41` | `458165b6587b` | — |
+| `spectrum_lifetime` | `765aa27dcf87` | `0ea11b7ec858` | `d52e7189b7b4` | — |
+| `ingest_arrow_ipc_scalars` | `27bf5606aea0` | `6a0ce584eebb` | `0a667d4e0b79` → `868114eecccc` | #972 |
+| `ingest_csv_declared` | `9b1bea915525` | `27025c88c987` | `3e849d63414e` | — |
+| `ingest_csv_nulls` | `9cef6f0858b4` | `c9df3abd8944` | `295dee6f9660` | — |
+| `ingest_npy_endianness_be` | `896c78936fb7` | `4c0a43d0a74a` | `10982f926fdd` | — |
+| `ingest_npy_endianness_le` | `1614b7a8399e` | `4c0a43d0a74a` | `87466a9b2fe7` | — |
+| `ingest_npy_fortran` | `c7aeeed5a722` | `4197bce3d3ff` | `a411ef2daa44` | — |
+| `ingest_npy_structured` | `9e86cc719308` | `886bf3e3255c` | `6f440d485336` | — |
+| `ingest_npz_member` | `130378530be6` | `27d36426f6dc` | `6f71b1270261` | — |
+| `ingest_parquet_dictionary` | `4ff4ec847994` | `6a0ce584eebb` | `59b0155fb540` → `040472770ce5` | #972 |
+| `ingest_parquet_floats` | `c39298c514ae` | `af95d10a7528` | `bdb407ba27c8` → `bc542dc047d7` | #972 |
+| `ingest_parquet_nulls` | `ba441f393dcd` | `05ebe03c0562` | `fc74340ba6b3` → `181c9ed1c495` | #972 |
+| `ingest_parquet_plain_strings` | `573329727757` | `6a0ce584eebb` | `eb858d4cd5ee` → `4c1c96b72ee6` | #972 |
+| `ingest_parquet_scalars` | `330301c04c9a` | `c1289b3cc533` | `b1b1de14e8a9` → `45dbbe743b5a` | #972 |
+| `ingest_parquet_tiny_row_groups` | `b013dc4f302e` | `6a0ce584eebb` | `a264fe2c70d6` → `04450810a369` | #972 |
+
+Block digests, all unchanged (alpha.6 = dev). No block carries `class` at either tag, and every ingest product
+has the one block `data`:
+
+| Product | Blocks |
+|---|---|
+| `blob_opaque` | data `106ef4b2f37c` |
+| `empty_no_blocks` | (no blocks) |
+| `listmode_events` | events `8e510d9e0778` |
+| `multiblock_study` | roi `b6a6a8cb8f2f`, volume `6620c9be2959` |
+| `recon_float32_mumap` | volume `36fe0f9b615c` |
+| `recon_int16` | volume `dcbc6f3b0a19` |
+| `segmentation_uint8` | labels `49a89f4df480`, mask `721e2205721c`, probability `ace7cf738204` |
+| `spectrum_lifetime` | spectrum `82f96244e4dc` |
+| `ingest_arrow_ipc_scalars` | `4f5a3f2cbd93` |
+| `ingest_csv_declared` | `b8c8ea73cfb1` |
+| `ingest_csv_nulls` | `5dddca9dc417` |
+| `ingest_npy_endianness_be` | `ea2bcaaf0dca` |
+| `ingest_npy_endianness_le` | `ea2bcaaf0dca` |
+| `ingest_npy_fortran` | `729fa8d0c89d` |
+| `ingest_npy_structured` | `c13dc141bbf9` |
+| `ingest_npz_member` | `6868b1f7cbc5` |
+| `ingest_parquet_dictionary` | `4f5a3f2cbd93` |
+| `ingest_parquet_floats` | `70a4897e8060` |
+| `ingest_parquet_nulls` | `42fd4bcf3a61` |
+| `ingest_parquet_plain_strings` | `4f5a3f2cbd93` |
+| `ingest_parquet_scalars` | `52e4213e9064` |
+| `ingest_parquet_tiny_row_groups` | `4f5a3f2cbd93` |
+
+Totals: `id` 0/22 moved, `content_hash` 0/22, block digests 0/24, `manifest_hash` 10/22.
+
+### Trace of each move
+
+[`manifest_diff.py`](916-format-break-crosscheck/manifest_diff.py) diffs the parsed manifests path by path
+(alpha.6 → dev). Besides the removed in-band `manifest_hash` key (#940), it finds only the paths named below.
+[`reseal_trace.py`](916-format-break-crosscheck/reseal_trace.py) then proves the trace. It takes alpha.6's manifest
+value, drops `manifest_hash`, copies **only** the named top-level fields from dev, and serialises with JCS. The
+result equals dev's stored `manifest.json` byte for byte, and its `blake3` equals dev's `manifest.seal`, for all 22
+products (`MATCH` 22/22). For the 12 unmoved products the named set is empty: alpha.6's value alone re-seals to
+dev's bytes and seal.
+
+- **#895 (PR #934): built-in schema number rules.** `multiblock_study`, `recon_float32_mumap` and `recon_int16`
+  embed the built-in `recon` schema, which goes from `version` `"1.0"` to `"1.1"`. In 1.1, `kvp` (field 10) gains
+  `minimum` 0 and `maximum` 1000, and `slice_thickness` (field 11) gains `minimum` 0. Commit `69994729` later
+  dropped the 1000 mm cap on `slice_thickness` that `25575e82` had added (a CT localizer exceeds it). Named field:
+  `schema`. `id` doesn't move: #895 touched no field in `id_inputs` (`name`, `product`, `timestamp`), which hold
+  the same values at both tags. `content_hash` doesn't move either: the payloads are unchanged.
+- **#972: parquet/arrow 58.4.1 → 58.4.2 (RUSTSEC-2026-0595), recorded per ADR-0056 §6a.** In all 7 Arrow-backed
+  ingest fixtures, `generation.config.ingest_decoder` moves (`version` `=58.4.1` → `=58.4.2`, and its `features`
+  digest). In the 6 Parquet fixtures, `sources[0].content_hash` moves too: arrow-rs writes its version into the
+  Parquet footer of the generated source. The Arrow IPC source is unchanged. Named fields: `generation` (all 7)
+  and `sources` (the 6 Parquet). The decoded values are the same: `content_hash` and the block digests are
+  unchanged, so `manifest_hash` alone moves, as ADR-0056 §6a requires of a decoder bump.
+
+### Causes that moved no value in the corpus
+
+- **#912 (PR #929), JCS stored form**: it changes `manifest.json`'s bytes (no whitespace, JCS order), not its
+  value. The `corpus/files` products were re-packed and kept all three hashes. **#913 (PR #930), the stored-bytes
+  API and canonical-bytes check**: no writer change, so no corpus byte moved.
+- **#940 (#914, with the #938 groundwork), A′ cutover (seal over the stored bytes, `manifest.seal`)**: it moves
+  where the seal lives, not its value. Every product without a #895 or #972 change keeps its alpha.6
+  `manifest_hash` as its dev seal (12/12). This is the seal-preservation property that ADR-0066 step 4 proved on
+  its own head, now holding release to release.
+- **#942 (#720), derived blocks leave `content_hash`; the dangling-index refusal**: no corpus product carries a
+  derived block (no `class` key at either tag) or a chunk index, so no `content_hash` moves. The change is covered
+  by seal cases and refusal cases instead (below).
+
+### Conformance files, alpha.6 → dev
+
+| File | alpha.6 | dev |
+|---|---|---|
+| `corpus/seal-cases.json` | 76 cases (25 ok, 12 tampered, 39 refused) | 171 (29 ok, 13 tampered, 129 refused) |
+| `corpus/schema-cases.json` | absent | 49 cases |
+| `corpus/refusals/*.tsra` | absent | 4 archives |
+
+- `seal-cases.json`: #940 takes it from 76 to 150 cases (stored-bytes and alpha-layout cases), and #942 from 150
+  to 171 (derived block, `class` values, dangling chunk index).
+- `schema-cases.json`: added by #934 (#895).
+- `refusals/`: added by #940 (`5717655d`): a repeated or DEFLATED `manifest.json` or `manifest.seal`.
+
+## 3. Readers agree at dev
+
+All counts are at this branch's head on dev `ca751291` (the branch adds no code). The wasm build is the real one:
+`tessera-wasm` built for `wasm32-unknown-unknown` (release), glued with `wasm-bindgen` 0.2.121 (the version the
+lockfile pins and the flake's `wasm-bindgen-smoke` check uses), and run in Node.
+
+| Input | Rust | Reference reader | `tessera-wasm` |
+|---|---|---|---|
+| 8 `corpus/files` products, against `corpus.json` | 8/8 | 8/8 | 8/8 |
+| 14 ingest products, against `ingest-corpus.json` | 14/14 | 14/14 | 14/14 |
+| 171 seal cases (`seal-cases.json`) | 171/171 | 171/171 | 171/171 |
+| 4 refusal archives (`corpus/refusals`) | 4/4 | 4/4 | n/a (1) |
+| 15 whole-archive refusal cases of `run.py` | `tessera-io` tests | 15/15 | n/a (1) |
+| 49 schema cases (`schema-cases.json`) | 49/49 | 49/49 | n/a (2) |
+| 6 products with an embedded schema pass it | not counted | 6/6 | n/a (2) |
+
+(1) wasm takes the two members, not the container. (2) wasm has no schema surface. A product counts when it
+verifies and its `id`, `content_hash` and `manifest_hash` equal its golden. The 14 ingest products were packed by
+the dump helper. The 15 whole-archive cases are the 4 archives plus 11 that `run.py` builds in memory.
+
+How each count was taken:
+
+- **Rust.** `tessera verify` on each of the 22 products exits 0, and `tessera inspect` prints the golden triple
+  (22/22). `tessera verify` on each refusal archive exits 1 (4/4). Two print "is Deflated, but a .tsra must be
+  STORED"; two print "duplicate file names in central directory". The seal-case, schema-case, conformance,
+  canonical-member and unique-block-name tests ran as the crates' whole suites on ksb
+  (`scripts/ksb-test.sh <head> <crate>`):
+  - `tessera-core` 279/279;
+  - `tessera-io` 341/341, with 1 skipped: #973's `child_process` helper, `#[ignore]` by design;
+  - `tessera-ingest` 232/232;
+  - `tessera-wasm` 3/3, its native seal-case test included;
+  - `tessera-cli` 158/158.
+
+  All exit 0.
+- **Reference reader.** `run.py` (exit 0): 8/8 fixtures, 171/171 seal cases, 49/49 schema cases, 6/6 own-schema
+  products, 15/15 refusal cases, 2/2 derived-block checks.
+  [`py_products.py`](916-format-break-crosscheck/py_products.py) over all 22 products: 22/22 verify and match
+  their goldens.
+- **wasm.** `smoke.cjs` with the corpus seal cases: `171/171 seal cases agreed (wasm)`.
+  [`wasm_products.cjs`](916-format-break-crosscheck/wasm_products.cjs) over the members of all 22 products
+  ([`extract_members.py`](916-format-break-crosscheck/extract_members.py)): `22/22 products agreed (wasm)`, exit 0.
+  A product agrees when `seal_verdict` is `ok`, which includes `id` and `content_hash`
+  (`Manifest::from_stored_members`), and `product_id` and the seal member equal its goldens.
+
+The 7 other tracked `.tsra` test fixtures were run through all three readers too, and they agree on all 7. Six
+verify with the same seal. Each reader refuses `tessera-io/tests/fixtures/alpha_layout.tsra` (no `manifest.seal`).
+
+## 4. Findings
+
+- **No defect in dev's corpus or conformance data.** Nothing was stale, nothing moved untraced, and no `id` moved.
+- **#979 (filed): the sealed `ingest_decoder.version` can come from another checkout's `Cargo.lock`.**
+  `tessera-ingest/build.rs` reads the pin from the lockfile text. Cargo re-runs it based on a lockfile mtime, and
+  the build-script unit is shared between checkouts with one target dir. In this cross-check's first alpha.6 run
+  (same slot as the dev run), the binary decoded with parquet 58.4.1 and sealed `=58.4.2`: 21 golden lines
+  differed from alpha.6's committed corpus. After `cargo clean -p tessera-ingest` they matched exactly. No tracked
+  golden is affected; real products built from a reused target dir could be.
+- **Wording nit in #972 (no action):** the regeneration commit `0877da1e` says "the 7 parquet fixtures". They are
+  6 Parquet fixtures and 1 Arrow IPC fixture, and the Arrow IPC source bytes don't change. Only its decoder version
+  and feature digest move, as the table shows.
+
+## Reproduce
+
+In `nix develop` at the repo root, with this slot's `CARGO_TARGET_DIR` and `CARGO_BUILD_JOBS=4` exported. `H` is
+`docs/spikes/916-format-break-crosscheck`, `<wt>` a detached worktree of `v0.1.0-alpha.6`.
+
+1. Regenerate at dev with G1–G6 (section 1). `git status --short` must stay empty.
+2. Pack the ingest products on each side. Copy `$H/dump_ingest_products.rs` into
+   `tessera/crates/tessera-ingest/examples/` of `<wt>` and of dev. In each `tessera/`, run
+   `cargo clean -p tessera-ingest` (#979), then `cargo run -p tessera-ingest --example dump_ingest_products -- <out>`.
+3. Collect each side's triples, then build the table:
+
+   ```sh
+   python3 -I $H/triple.py c-a6.json <wt>/tessera/corpus/files/*.tsra
+   python3 -I $H/triple.py c-dev.json tessera/corpus/files/*.tsra
+   python3 -I $H/triple.py i-a6.json <out-a6>/*.tsra
+   python3 -I $H/triple.py i-dev.json <out-dev>/*.tsra
+   python3 -I $H/build_table.py table.json "<about>" \
+     "corpus/files=c-a6.json,c-dev.json" "ingest corpus=i-a6.json,i-dev.json"
+   ```
+
+4. Diff and re-seal each pair. The key sets are `schema` for the 3 recon products, `generation,sources` for the 6
+   Parquet fixtures, `generation` for `ingest_arrow_ipc_scalars`, and `""` for the rest:
+
+   ```sh
+   python3 -I $H/manifest_diff.py <a6.tsra> <dev.tsra>
+   uv run --no-project --with blake3 --with jcs==0.2.1 \
+     python -I $H/reseal_trace.py <a6.tsra> <dev.tsra> <keys>
+   ```
+
+5. Run the readers. For wasm, build `tessera-wasm` for `wasm32-unknown-unknown` and run `wasm-bindgen --target
+   nodejs`, then:
+
+   ```sh
+   python3 -I $H/extract_members.py members.json <the 22 .tsra>
+   node $H/wasm_products.cjs <glue>/tessera_wasm.js members.json \
+     tessera/corpus/corpus.json tessera/corpus/ingest-corpus.json
+   ```
