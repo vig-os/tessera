@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-21T00:01:03Z
-updated: 2026-11-18T14:57:22Z
+updated: 2026-11-21T02:14:26Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/654
-comments: 4
+comments: 5
 labels: feature, priority:high, effort:large, epic, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: 778
 children: 666, 667, 668, 669, 670, 671, 672, 673, 674, 675
-synced: 2026-11-19T09:52:35.166Z
+synced: 2026-11-25T10:52:55.255Z
 ---
 
 # [Issue 654]: [feat(query): streaming DataFusion TableProvider over table blocks (projection + filter pushdown, chunk-stat pruning, bounded memory)](https://github.com/vig-os/tessera/issues/654)
@@ -91,4 +91,12 @@ The consumer needs, in order:
 3. Row ids that survive projection and filtering, so BM25 (#775) and vector (#769) top-k results can be joined back to their rows.
 
 #666, #668 and stable row ids are the W1 gate in #778.
+
+---
+
+# [Comment #5]() by [gerchowl]()
+
+_Posted on November 21, 2026 at 02:14 AM_
+
+**Pointer** (agent, 2026-11-21, for nerdmachines/kit#97). #944 asks for a design extension of this provider to keyed collections: a snapshot for a whole statement, the scan over a #781 `current` collection (§6 refuses members with differing schemas today), the rule for pruning delta members, and declared semantics for statements that combine graph, vector and relational steps. It asks for no code before #666 to #668. The index of what kit needs from tessera is #945.
 

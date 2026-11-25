@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-24T03:42:32Z
+updated: 2026-11-25T05:23:07Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-24T11:59:42.195Z
+synced: 2026-11-25T10:53:04.074Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -25,16 +25,16 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 The following updates are currently rate-limited. To force their creation now, click on a checkbox below.
 
  - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-digest -->chore(deps): update actions/create-github-app-token digest to f418cff
- - [ ] <!-- unlimit-branch=renovate/tessera-core-digest -->fix(deps): update tessera-core digest to dde0517
+ - [ ] <!-- unlimit-branch=renovate/tessera-core-digest -->fix(deps): update tessera-core digest to 911ec86
  - [ ] <!-- unlimit-branch=renovate/bytes-1.x-lockfile -->chore(deps): update rust crate bytes to v1.12.2
- - [ ] <!-- unlimit-branch=renovate/clap-4.x-lockfile -->chore(deps): update rust crate clap to v4.6.9
+ - [ ] <!-- unlimit-branch=renovate/clap-4.x-lockfile -->chore(deps): update rust crate clap to v4.6.10
  - [ ] <!-- unlimit-branch=renovate/dicom-0.x-lockfile -->chore(deps): update rust crate dicom to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/dicom-transfer-syntax-registry-0.x-lockfile -->chore(deps): update rust crate dicom-transfer-syntax-registry to v0.10.1
  - [ ] <!-- unlimit-branch=renovate/zarrs-0.x-lockfile -->chore(deps): update rust crate zarrs to v0.23.14
  - [ ] <!-- unlimit-branch=renovate/rust-wasm-bindgen-monorepo -->fix(deps): update rust crate wasm-bindgen to v0.2.130
  - [ ] <!-- unlimit-branch=renovate/python-(minor-and-patch) -->build(pip): update python (minor and patch) (`nibabel`, `numcodecs`, `numpy`, `uproot`, `zarr`)
- - [ ] <!-- unlimit-branch=renovate/arrow-rs-monorepo -->chore(deps): update arrow-rs monorepo to v58.4.2 (`arrow`, `arrow-array`, `arrow-buffer`, `arrow-ipc`, `arrow-schema`, `parquet`)
  - [ ] <!-- unlimit-branch=renovate/age-0.x -->chore(deps): update rust crate age to 0.12
+ - [ ] <!-- unlimit-branch=renovate/arrow-rs-monorepo -->chore(deps): update rust crate arrow to v58.4.2
  - [ ] <!-- unlimit-branch=renovate/criterion-0.x -->chore(deps): update rust crate criterion to 0.8
  - [ ] <!-- unlimit-branch=renovate/datafusion-monorepo -->chore(deps): update rust crate datafusion to v54.2.0
  - [ ] <!-- unlimit-branch=renovate/hdf5-metno-0.x -->chore(deps): update rust crate hdf5-metno to 0.15
@@ -45,6 +45,15 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unlimit-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.54.1
  - [ ] <!-- unlimit-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
+ - [ ] <!-- unlimit-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.94
+ - [ ] <!-- unlimit-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.94
+ - [ ] <!-- unlimit-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.94
+ - [ ] <!-- unlimit-branch=renovate/vortex-edition-0.x -->chore(deps): update rust crate vortex-edition to 0.94
+ - [ ] <!-- unlimit-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.94
+ - [ ] <!-- unlimit-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.94
+ - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.94
+ - [ ] <!-- unlimit-branch=renovate/vortex-scan-0.x -->chore(deps): update rust crate vortex-scan to 0.94
+ - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.94
  - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.8.2
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.28.0
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
@@ -68,7 +77,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - [ ] <!-- rebase-branch=renovate/dtolnay-rust-toolchain-digest -->[chore(deps): update dtolnay/rust-toolchain digest to 3900882](../pull/558)
  - [ ] <!-- rebase-branch=renovate/flate2-1.x-lockfile -->[chore(deps): update rust crate flate2 to v1.1.11](../pull/560)
  - [ ] <!-- rebase-branch=renovate/rust-futures-monorepo -->[chore(deps): update rust crate futures to v0.3.34](../pull/561)
- - [ ] <!-- rebase-branch=renovate/hdf5-metno-sys-0.x-lockfile -->[chore(deps): update rust crate hdf5-metno-sys to v0.12.6](../pull/640)
+ - [ ] <!-- rebase-branch=renovate/hdf5-metno-sys-0.x-lockfile -->[chore(deps): update rust crate hdf5-metno-sys to v0.12.7](../pull/640)
  - [ ] <!-- rebase-branch=renovate/libc-0.x-lockfile -->[chore(deps): update rust crate libc to v0.2.191](../pull/641)
  - [ ] <!-- rebase-branch=renovate/object_store-0.x-lockfile -->[chore(deps): update rust crate object_store to v0.14.2](../pull/643)
  - [ ] <!-- rebase-branch=renovate/serde-monorepo -->[chore(deps): update rust crate serde to v1.0.229](../pull/644)
@@ -113,27 +122,27 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `zarrs 0.23` → [Updates: `lock file @ 0.23.14`]
  - `bytes 1` → [Updates: `lock file @ 1.12.2`]
  - `half 2`
- - `vortex-file 0.93`
- - `vortex-array 0.93`
- - `vortex-btrblocks 0.93`
- - `vortex-buffer 0.93`
- - `vortex-edition 0.93`
- - `vortex-io 0.93`
- - `vortex-layout 0.93`
- - `vortex-scan 0.93`
- - `vortex-session 0.93`
+ - `vortex-file 0.93` → [Updates: `0.94`]
+ - `vortex-array 0.93` → [Updates: `0.94`]
+ - `vortex-btrblocks 0.93` → [Updates: `0.94`]
+ - `vortex-buffer 0.93` → [Updates: `0.94`]
+ - `vortex-edition 0.93` → [Updates: `0.94`]
+ - `vortex-io 0.93` → [Updates: `0.94`]
+ - `vortex-layout 0.93` → [Updates: `0.94`]
+ - `vortex-scan 0.93` → [Updates: `0.94`]
+ - `vortex-session 0.93` → [Updates: `0.94`]
  - `futures 0.3` → [Updates: `lock file @ 0.3.34`]
- - `clap 4` → [Updates: `lock file @ 4.6.9`]
+ - `clap 4` → [Updates: `lock file @ 4.6.10`]
  - `png 0.17` → [Updates: `0.18`]
  - `dicom 0.10` → [Updates: `lock file @ 0.10.1`]
  - `dicom-transfer-syntax-registry 0.10` → [Updates: `lock file @ 0.10.1`]
  - `hdf5-metno 0.12` → [Updates: `0.15`]
- - `hdf5-metno-sys 0.12` → [Updates: `lock file @ 0.12.6`]
- - `arrow-array =58.4.1` → [Updates: `=58.4.2`, `=60.2.0`]
- - `arrow-buffer =58.4.1` → [Updates: `=58.4.2`, `=60.2.0`]
- - `arrow-schema =58.4.1` → [Updates: `=58.4.2`, `=60.2.0`]
- - `arrow-ipc =58.4.1` → [Updates: `=58.4.2`, `=60.2.0`]
- - `parquet =58.4.1` → [Updates: `=58.4.2`, `=60.2.0`]
+ - `hdf5-metno-sys 0.12` → [Updates: `lock file @ 0.12.7`]
+ - `arrow-array =58.4.2` → [Updates: `=60.2.0`]
+ - `arrow-buffer =58.4.2` → [Updates: `=60.2.0`]
+ - `arrow-schema =58.4.2` → [Updates: `=60.2.0`]
+ - `arrow-ipc =58.4.2` → [Updates: `=60.2.0`]
+ - `parquet =58.4.2` → [Updates: `=60.2.0`]
  - `csv =1.4.0`
  - `pyo3 0.29` → [Updates: `0.30`]
  - `pyo3-build-config 0.29` → [Updates: `0.30`]
@@ -264,7 +273,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `nibabel ==5.4.2` → [Updates: `==5.5.0`]
  - `pydicom ==3.0.2`
  - `pyarrow ==24.0.0` → [Updates: `==26.0.1`]
- - `uproot ==5.7.4` → [Updates: `==5.7.7`]
+ - `uproot ==5.7.4` → [Updates: `==5.7.8`]
 
 </details>
 
