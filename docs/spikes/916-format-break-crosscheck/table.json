@@ -1,0 +1,591 @@
+{
+ "about": "#916: every corpus product at v0.1.0-alpha.6 and at dev ca751291 (byte-identical at dccc60ab), paired by corpus name. blocks: name -> [digest, class]. alpha.6 manifest_hash is the in-band key, dev the manifest.seal member.",
+ "products": [
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:106ef4b2f37c3e0b9dcf17eab3fc7b6bb799671cefcc4561ca808f8fba1faefe",
+      null
+     ]
+    },
+    "content_hash": "blake3:c5b98765e1b869385c89abe64b8e56b2473f868810621bc7b9d6dbe1bc451575",
+    "id": "blake3:1d503e926fc5545579056e075f840777eef545fbb11acc1e59850c55bbed6f58",
+    "manifest_hash": "blake3:feaceed4b3daea96363957c0858036bd46be5954390e6e266c33b4fbbed4559c"
+   },
+   "corpus": "corpus/files",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:106ef4b2f37c3e0b9dcf17eab3fc7b6bb799671cefcc4561ca808f8fba1faefe",
+      null
+     ]
+    },
+    "content_hash": "blake3:c5b98765e1b869385c89abe64b8e56b2473f868810621bc7b9d6dbe1bc451575",
+    "id": "blake3:1d503e926fc5545579056e075f840777eef545fbb11acc1e59850c55bbed6f58",
+    "manifest_hash": "blake3:feaceed4b3daea96363957c0858036bd46be5954390e6e266c33b4fbbed4559c"
+   },
+   "name": "blob_opaque"
+  },
+  {
+   "alpha6": {
+    "blocks": {},
+    "content_hash": "blake3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+    "id": "blake3:682ff1f8841db94254ae9cc8f912824d2b31f51584cba5f43f65375840a3701b",
+    "manifest_hash": "blake3:bf18db403ce129a1a4e06ac0f435909986f6e9ecc4a8aaf8d3a0c023037594ff"
+   },
+   "corpus": "corpus/files",
+   "dev": {
+    "blocks": {},
+    "content_hash": "blake3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+    "id": "blake3:682ff1f8841db94254ae9cc8f912824d2b31f51584cba5f43f65375840a3701b",
+    "manifest_hash": "blake3:bf18db403ce129a1a4e06ac0f435909986f6e9ecc4a8aaf8d3a0c023037594ff"
+   },
+   "name": "empty_no_blocks"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "events": [
+      "blake3:8e510d9e0778c6a4cc109ea09ab10a5982a0856453befdad55c3f73aa84a6781",
+      null
+     ]
+    },
+    "content_hash": "blake3:b8c5176eed20a216f9fcd1dd768fb786b073c99bd99f1b498f99442c691620e2",
+    "id": "blake3:55b8eac168d668c6e15ab3bdd1d78c0494384dbc6941ad48f9ee7237cf6e9457",
+    "manifest_hash": "blake3:c9a56e24e28b2b7b8192d992b40f8f99dc328b5c73ffdaea32d374be16c9ebd7"
+   },
+   "corpus": "corpus/files",
+   "dev": {
+    "blocks": {
+     "events": [
+      "blake3:8e510d9e0778c6a4cc109ea09ab10a5982a0856453befdad55c3f73aa84a6781",
+      null
+     ]
+    },
+    "content_hash": "blake3:b8c5176eed20a216f9fcd1dd768fb786b073c99bd99f1b498f99442c691620e2",
+    "id": "blake3:55b8eac168d668c6e15ab3bdd1d78c0494384dbc6941ad48f9ee7237cf6e9457",
+    "manifest_hash": "blake3:c9a56e24e28b2b7b8192d992b40f8f99dc328b5c73ffdaea32d374be16c9ebd7"
+   },
+   "name": "listmode_events"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "roi": [
+      "blake3:b6a6a8cb8f2f21055cf4c805d6b10f1169962a483d80611c60f782b1a63d4be0",
+      null
+     ],
+     "volume": [
+      "blake3:6620c9be29593a0c4ac3439e420af4bf80866e761b664f1010a549dd70f0e2c9",
+      null
+     ]
+    },
+    "content_hash": "blake3:377a60687d37d395aa4504a24114f4d389f2348b52c9165e048f83f2371ff80c",
+    "id": "blake3:216739168370b68f066c955f6c613839f5a8f2c62c4aad5af656c23909f55a2a",
+    "manifest_hash": "blake3:8291b21d80699851d40dbf19cd281f67fe0c7c5a9b8684befeb2ba2439ccaeea"
+   },
+   "corpus": "corpus/files",
+   "dev": {
+    "blocks": {
+     "roi": [
+      "blake3:b6a6a8cb8f2f21055cf4c805d6b10f1169962a483d80611c60f782b1a63d4be0",
+      null
+     ],
+     "volume": [
+      "blake3:6620c9be29593a0c4ac3439e420af4bf80866e761b664f1010a549dd70f0e2c9",
+      null
+     ]
+    },
+    "content_hash": "blake3:377a60687d37d395aa4504a24114f4d389f2348b52c9165e048f83f2371ff80c",
+    "id": "blake3:216739168370b68f066c955f6c613839f5a8f2c62c4aad5af656c23909f55a2a",
+    "manifest_hash": "blake3:4d0e99d14b2a6b01037fd06efee7c5effceb623c7bcbe2489de2f849b0192dc6"
+   },
+   "name": "multiblock_study"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "volume": [
+      "blake3:36fe0f9b615c61152ce8f4a30b74fbfd9e5a1f5541624c5a1895e19017c09c90",
+      null
+     ]
+    },
+    "content_hash": "blake3:ea3843267ea4bc54cb38d1090918da34ab9f37dffff2ce1e61e3ec478e479d9d",
+    "id": "blake3:529bb3fc4cb032cbb45917558b52fb6b81448a1cb574b3282336ce9a39b84149",
+    "manifest_hash": "blake3:40e078b115d7c541f0522e09eab782773ba95864b8f6da1e119082fe6b9305fe"
+   },
+   "corpus": "corpus/files",
+   "dev": {
+    "blocks": {
+     "volume": [
+      "blake3:36fe0f9b615c61152ce8f4a30b74fbfd9e5a1f5541624c5a1895e19017c09c90",
+      null
+     ]
+    },
+    "content_hash": "blake3:ea3843267ea4bc54cb38d1090918da34ab9f37dffff2ce1e61e3ec478e479d9d",
+    "id": "blake3:529bb3fc4cb032cbb45917558b52fb6b81448a1cb574b3282336ce9a39b84149",
+    "manifest_hash": "blake3:0cbbdb53855a0567ac71d6999641fd01437a387aed2007a2f9333d7507788dff"
+   },
+   "name": "recon_float32_mumap"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "volume": [
+      "blake3:dcbc6f3b0a1922d0f7ecc3197fc45d383f7e47b1cb5373597d0b4a61eab7a26e",
+      null
+     ]
+    },
+    "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
+    "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
+    "manifest_hash": "blake3:4fd0b90d0aa3c2bddbaefec7e244b16dc444e08b3730b5747a0a970a549e3b91"
+   },
+   "corpus": "corpus/files",
+   "dev": {
+    "blocks": {
+     "volume": [
+      "blake3:dcbc6f3b0a1922d0f7ecc3197fc45d383f7e47b1cb5373597d0b4a61eab7a26e",
+      null
+     ]
+    },
+    "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
+    "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
+    "manifest_hash": "blake3:892cf508f41b47934eeb59f8aca163211a4e0d7739cf0d1810e69c50f5f4c3d3"
+   },
+   "name": "recon_int16"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "labels": [
+      "blake3:49a89f4df480c27a164d660e712827d4a86738faf0ae462b6e9fc2aaee91a92e",
+      null
+     ],
+     "mask": [
+      "blake3:721e2205721c317c16a277408ea6e5f208586bac0cdae7945a1fcd660797de89",
+      null
+     ],
+     "probability": [
+      "blake3:ace7cf738204b7a9cf87babedaf5eac6e5319fa06c60e4c4fdb9f0a6e1e77186",
+      null
+     ]
+    },
+    "content_hash": "blake3:8e2d917e6f414710c4d845a9a09922fc782314b1d547c8c63b1ca5e39277986a",
+    "id": "blake3:70900b373daacb02d47855efbb1d01134881bab74603b3c34b47710d467974b6",
+    "manifest_hash": "blake3:458165b6587b7e7fd3e616e45df122264567f4b6fc76201cfa159c4a3f69d76a"
+   },
+   "corpus": "corpus/files",
+   "dev": {
+    "blocks": {
+     "labels": [
+      "blake3:49a89f4df480c27a164d660e712827d4a86738faf0ae462b6e9fc2aaee91a92e",
+      null
+     ],
+     "mask": [
+      "blake3:721e2205721c317c16a277408ea6e5f208586bac0cdae7945a1fcd660797de89",
+      null
+     ],
+     "probability": [
+      "blake3:ace7cf738204b7a9cf87babedaf5eac6e5319fa06c60e4c4fdb9f0a6e1e77186",
+      null
+     ]
+    },
+    "content_hash": "blake3:8e2d917e6f414710c4d845a9a09922fc782314b1d547c8c63b1ca5e39277986a",
+    "id": "blake3:70900b373daacb02d47855efbb1d01134881bab74603b3c34b47710d467974b6",
+    "manifest_hash": "blake3:458165b6587b7e7fd3e616e45df122264567f4b6fc76201cfa159c4a3f69d76a"
+   },
+   "name": "segmentation_uint8"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "spectrum": [
+      "blake3:82f96244e4dc77e235d82fbcd123324cfae2c1a2b028663d35818bf911c70977",
+      null
+     ]
+    },
+    "content_hash": "blake3:0ea11b7ec858fb44aa4a111b4bc5c466f45ff7def961aad07901a21dfba4a60a",
+    "id": "blake3:765aa27dcf8732157230f947de95866cc88f720691a30ca8dba03ccd81964f0e",
+    "manifest_hash": "blake3:d52e7189b7b4e1b9961d758ca1346a4a486878cc020af37791e054c2fa20e824"
+   },
+   "corpus": "corpus/files",
+   "dev": {
+    "blocks": {
+     "spectrum": [
+      "blake3:82f96244e4dc77e235d82fbcd123324cfae2c1a2b028663d35818bf911c70977",
+      null
+     ]
+    },
+    "content_hash": "blake3:0ea11b7ec858fb44aa4a111b4bc5c466f45ff7def961aad07901a21dfba4a60a",
+    "id": "blake3:765aa27dcf8732157230f947de95866cc88f720691a30ca8dba03ccd81964f0e",
+    "manifest_hash": "blake3:d52e7189b7b4e1b9961d758ca1346a4a486878cc020af37791e054c2fa20e824"
+   },
+   "name": "spectrum_lifetime"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:4f5a3f2cbd936ebf420a9cbdb1ff5fe928117a84ee2f5044c421bb3c29108e70",
+      null
+     ]
+    },
+    "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+    "id": "blake3:27bf5606aea01b68d666efbb052da69bd22e0b5af659be9a275ec6d13785064d",
+    "manifest_hash": "blake3:0a667d4e0b793015416825a8417bbabc179bbff6903901df96f3c7435ace9961"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:4f5a3f2cbd936ebf420a9cbdb1ff5fe928117a84ee2f5044c421bb3c29108e70",
+      null
+     ]
+    },
+    "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+    "id": "blake3:27bf5606aea01b68d666efbb052da69bd22e0b5af659be9a275ec6d13785064d",
+    "manifest_hash": "blake3:868114eecccc0974fb54a692890c71c32d7df8dbd66d38c82b5829fd0854d4b5"
+   },
+   "name": "ingest_arrow_ipc_scalars"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:b8c8ea73cfb145ae667918438c47f805ce1c61de01f6a25ee8c713bcea285de2",
+      null
+     ]
+    },
+    "content_hash": "blake3:27025c88c9871c3e87a2ed354fc521074fb795e94d2fd4c918dd724978da4966",
+    "id": "blake3:9b1bea9155255a3b5ad46ad56ba3feba34ceb7c010ef08657e4840c9e8cacc3d",
+    "manifest_hash": "blake3:3e849d63414e568c6485e72c3c6bb69b0f99cf14f176fc18379b720162848746"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:b8c8ea73cfb145ae667918438c47f805ce1c61de01f6a25ee8c713bcea285de2",
+      null
+     ]
+    },
+    "content_hash": "blake3:27025c88c9871c3e87a2ed354fc521074fb795e94d2fd4c918dd724978da4966",
+    "id": "blake3:9b1bea9155255a3b5ad46ad56ba3feba34ceb7c010ef08657e4840c9e8cacc3d",
+    "manifest_hash": "blake3:3e849d63414e568c6485e72c3c6bb69b0f99cf14f176fc18379b720162848746"
+   },
+   "name": "ingest_csv_declared"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:5dddca9dc417b2798b390adaaf3f5fb46d9516daef3688824bff4cb3e1b32335",
+      null
+     ]
+    },
+    "content_hash": "blake3:c9df3abd89444f2e88563c94b60bc187529a6c7f647e42c7231fe3ffc164db83",
+    "id": "blake3:9cef6f0858b412bdf80d2722dabe48084e32e6e9336289705f4571e315bd860e",
+    "manifest_hash": "blake3:295dee6f96608b6dda64f0d04540582f77597a2104b2b1fa53b626f157933e21"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:5dddca9dc417b2798b390adaaf3f5fb46d9516daef3688824bff4cb3e1b32335",
+      null
+     ]
+    },
+    "content_hash": "blake3:c9df3abd89444f2e88563c94b60bc187529a6c7f647e42c7231fe3ffc164db83",
+    "id": "blake3:9cef6f0858b412bdf80d2722dabe48084e32e6e9336289705f4571e315bd860e",
+    "manifest_hash": "blake3:295dee6f96608b6dda64f0d04540582f77597a2104b2b1fa53b626f157933e21"
+   },
+   "name": "ingest_csv_nulls"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:ea2bcaaf0dca2a91623f949527a3b08d51f8515c3e4f271fdc01bba48f8afd80",
+      null
+     ]
+    },
+    "content_hash": "blake3:4c0a43d0a74ad15d5a75c8a6118f8dd6e07891dd079aed03c307c0f637200ded",
+    "id": "blake3:896c78936fb7b801f1bc372306726d538c4170a914b90d147530b7337fa6e0e3",
+    "manifest_hash": "blake3:10982f926fdddaf0e4f86a25e040ea22d48d7fa7b32cb8cb017212f589d31fe2"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:ea2bcaaf0dca2a91623f949527a3b08d51f8515c3e4f271fdc01bba48f8afd80",
+      null
+     ]
+    },
+    "content_hash": "blake3:4c0a43d0a74ad15d5a75c8a6118f8dd6e07891dd079aed03c307c0f637200ded",
+    "id": "blake3:896c78936fb7b801f1bc372306726d538c4170a914b90d147530b7337fa6e0e3",
+    "manifest_hash": "blake3:10982f926fdddaf0e4f86a25e040ea22d48d7fa7b32cb8cb017212f589d31fe2"
+   },
+   "name": "ingest_npy_endianness_be"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:ea2bcaaf0dca2a91623f949527a3b08d51f8515c3e4f271fdc01bba48f8afd80",
+      null
+     ]
+    },
+    "content_hash": "blake3:4c0a43d0a74ad15d5a75c8a6118f8dd6e07891dd079aed03c307c0f637200ded",
+    "id": "blake3:1614b7a8399e0c6327d2a35a49b8a59f77df5389ceb4705b6a9e2aa775abdd97",
+    "manifest_hash": "blake3:87466a9b2fe72134489d976189aa5758a017ea3991f7de6cae39fe946e4be14a"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:ea2bcaaf0dca2a91623f949527a3b08d51f8515c3e4f271fdc01bba48f8afd80",
+      null
+     ]
+    },
+    "content_hash": "blake3:4c0a43d0a74ad15d5a75c8a6118f8dd6e07891dd079aed03c307c0f637200ded",
+    "id": "blake3:1614b7a8399e0c6327d2a35a49b8a59f77df5389ceb4705b6a9e2aa775abdd97",
+    "manifest_hash": "blake3:87466a9b2fe72134489d976189aa5758a017ea3991f7de6cae39fe946e4be14a"
+   },
+   "name": "ingest_npy_endianness_le"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:729fa8d0c89d8a0c397632e1113e27635e225c25dc67daaa657b24243b452587",
+      null
+     ]
+    },
+    "content_hash": "blake3:4197bce3d3ffe9bcea14664069e0fed8623d3bf19e0e6b485af77fb91e1fbe01",
+    "id": "blake3:c7aeeed5a72278097e8526d9dcdd1de46101258c80785fa2b5ebcbd2f63c872d",
+    "manifest_hash": "blake3:a411ef2daa4421915d338f9165443ca3c332036cbe2cf547e469bc465851bee5"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:729fa8d0c89d8a0c397632e1113e27635e225c25dc67daaa657b24243b452587",
+      null
+     ]
+    },
+    "content_hash": "blake3:4197bce3d3ffe9bcea14664069e0fed8623d3bf19e0e6b485af77fb91e1fbe01",
+    "id": "blake3:c7aeeed5a72278097e8526d9dcdd1de46101258c80785fa2b5ebcbd2f63c872d",
+    "manifest_hash": "blake3:a411ef2daa4421915d338f9165443ca3c332036cbe2cf547e469bc465851bee5"
+   },
+   "name": "ingest_npy_fortran"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:c13dc141bbf901fa66a624e5278a5cf7f3ebc55ac7ad92f3fa6c486299b39df5",
+      null
+     ]
+    },
+    "content_hash": "blake3:886bf3e3255c0d78cf19f4f1ca21e29d0884bf60f865a9b0287a73192dbd67da",
+    "id": "blake3:9e86cc719308581ef9a3066db1d9ca30ee0edecac62b1ffe7ed8c8295b64b4c0",
+    "manifest_hash": "blake3:6f440d48533662f80863c1456cf1bc9aec4b49db9782814f26e2d6f5c1a948b0"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:c13dc141bbf901fa66a624e5278a5cf7f3ebc55ac7ad92f3fa6c486299b39df5",
+      null
+     ]
+    },
+    "content_hash": "blake3:886bf3e3255c0d78cf19f4f1ca21e29d0884bf60f865a9b0287a73192dbd67da",
+    "id": "blake3:9e86cc719308581ef9a3066db1d9ca30ee0edecac62b1ffe7ed8c8295b64b4c0",
+    "manifest_hash": "blake3:6f440d48533662f80863c1456cf1bc9aec4b49db9782814f26e2d6f5c1a948b0"
+   },
+   "name": "ingest_npy_structured"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:6868b1f7cbc5debd060a9343420c3bc962a460866b9f9dfb957cf2539c1c6561",
+      null
+     ]
+    },
+    "content_hash": "blake3:27d36426f6dc2970ec2691ba0f25a39e644192d35aedc07c920d7adcea952bff",
+    "id": "blake3:130378530be6153a668972e4f48e666d7aa09345300ff44cf840594b585d35e2",
+    "manifest_hash": "blake3:6f71b1270261786e493ea2edfa7011bf6aceccd9c42d13d1ba124e51c0ed8f0c"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:6868b1f7cbc5debd060a9343420c3bc962a460866b9f9dfb957cf2539c1c6561",
+      null
+     ]
+    },
+    "content_hash": "blake3:27d36426f6dc2970ec2691ba0f25a39e644192d35aedc07c920d7adcea952bff",
+    "id": "blake3:130378530be6153a668972e4f48e666d7aa09345300ff44cf840594b585d35e2",
+    "manifest_hash": "blake3:6f71b1270261786e493ea2edfa7011bf6aceccd9c42d13d1ba124e51c0ed8f0c"
+   },
+   "name": "ingest_npz_member"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:4f5a3f2cbd936ebf420a9cbdb1ff5fe928117a84ee2f5044c421bb3c29108e70",
+      null
+     ]
+    },
+    "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+    "id": "blake3:4ff4ec8479944f7950add265f86237a240235bdd9865b06cd5d97b019b5b301a",
+    "manifest_hash": "blake3:59b0155fb5403669afe191cf4e2b99c67a163df6924d3611665a1d6f33b4e824"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:4f5a3f2cbd936ebf420a9cbdb1ff5fe928117a84ee2f5044c421bb3c29108e70",
+      null
+     ]
+    },
+    "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+    "id": "blake3:4ff4ec8479944f7950add265f86237a240235bdd9865b06cd5d97b019b5b301a",
+    "manifest_hash": "blake3:040472770ce584f5bb83e5dd7967efa6ecc86d4b8498b390e4b7b276cf8be7dc"
+   },
+   "name": "ingest_parquet_dictionary"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:70a4897e8060e917bf56c83d1985bcbc43e466ba0338c16caa6585db2436ca77",
+      null
+     ]
+    },
+    "content_hash": "blake3:af95d10a752822bda74df4a17ecda30d03a10db167c09e92b3340262791885df",
+    "id": "blake3:c39298c514aefd0fd55bc60baf9a214ff4aebbcd7f7ef2108128d51323462619",
+    "manifest_hash": "blake3:bdb407ba27c8ab369639aceeeb5c9982551625986663540be5bac2ac6210b984"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:70a4897e8060e917bf56c83d1985bcbc43e466ba0338c16caa6585db2436ca77",
+      null
+     ]
+    },
+    "content_hash": "blake3:af95d10a752822bda74df4a17ecda30d03a10db167c09e92b3340262791885df",
+    "id": "blake3:c39298c514aefd0fd55bc60baf9a214ff4aebbcd7f7ef2108128d51323462619",
+    "manifest_hash": "blake3:bc542dc047d7278adbe60f096fb6b16b80cb5fdd920314b834cd11fb3e37cd3e"
+   },
+   "name": "ingest_parquet_floats"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:42fd4bcf3a61c0cca8917a631503bf2ba297ead4529d25012fc178c03f88e452",
+      null
+     ]
+    },
+    "content_hash": "blake3:05ebe03c05627e11bec9f9c34af199c6ba736e2afdda7ed53cbe1c21cb9e6bc1",
+    "id": "blake3:ba441f393dcdcb0c1bdcb05f33da5bcc6391573085e405e805b7890659993793",
+    "manifest_hash": "blake3:fc74340ba6b3856e15c60852df65d22fe6c9d4ae2e40410035dee57caf275397"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:42fd4bcf3a61c0cca8917a631503bf2ba297ead4529d25012fc178c03f88e452",
+      null
+     ]
+    },
+    "content_hash": "blake3:05ebe03c05627e11bec9f9c34af199c6ba736e2afdda7ed53cbe1c21cb9e6bc1",
+    "id": "blake3:ba441f393dcdcb0c1bdcb05f33da5bcc6391573085e405e805b7890659993793",
+    "manifest_hash": "blake3:181c9ed1c49536901a41a3afa9c99b306ffe87ec69a698c467c2472edb258b5d"
+   },
+   "name": "ingest_parquet_nulls"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:4f5a3f2cbd936ebf420a9cbdb1ff5fe928117a84ee2f5044c421bb3c29108e70",
+      null
+     ]
+    },
+    "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+    "id": "blake3:573329727757b9457e69e544f045718fd9282c186f0123499d73bc029499d66b",
+    "manifest_hash": "blake3:eb858d4cd5eefdaf01290a2f138f124827f7e9b7e6de88ee4e17640c5a0e15b0"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:4f5a3f2cbd936ebf420a9cbdb1ff5fe928117a84ee2f5044c421bb3c29108e70",
+      null
+     ]
+    },
+    "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+    "id": "blake3:573329727757b9457e69e544f045718fd9282c186f0123499d73bc029499d66b",
+    "manifest_hash": "blake3:4c1c96b72ee6abcfae187771c396343a99a6c16ad70bfb702ed5b68f36a72368"
+   },
+   "name": "ingest_parquet_plain_strings"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:52e4213e906439eda36fba572a732033f08bc72f53f9503aa6b06cd0d2b78dc4",
+      null
+     ]
+    },
+    "content_hash": "blake3:c1289b3cc5334157bb8ee8d14d6f11b949e515e48c7c4ed0d18824625280083a",
+    "id": "blake3:330301c04c9a5aa6b15cd2182eeb345d2fa6fbdb98bec83d6920886c5b4bebd8",
+    "manifest_hash": "blake3:b1b1de14e8a97c56dbf924ef0b94349ba33e68b39158d5751bcb238ddd88497b"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:52e4213e906439eda36fba572a732033f08bc72f53f9503aa6b06cd0d2b78dc4",
+      null
+     ]
+    },
+    "content_hash": "blake3:c1289b3cc5334157bb8ee8d14d6f11b949e515e48c7c4ed0d18824625280083a",
+    "id": "blake3:330301c04c9a5aa6b15cd2182eeb345d2fa6fbdb98bec83d6920886c5b4bebd8",
+    "manifest_hash": "blake3:45dbbe743b5a4f7fa24b82f62c29b4e7f7522959a74234148f1839c957aaf7f5"
+   },
+   "name": "ingest_parquet_scalars"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "data": [
+      "blake3:4f5a3f2cbd936ebf420a9cbdb1ff5fe928117a84ee2f5044c421bb3c29108e70",
+      null
+     ]
+    },
+    "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+    "id": "blake3:b013dc4f302e78ad8ab37b64f4c9e703e055de21a03f7f566b3859d61dadd878",
+    "manifest_hash": "blake3:a264fe2c70d6fadca4ec8845b1d27a5f0168199d9e99d59fd2b82166d6f87c2f"
+   },
+   "corpus": "ingest corpus",
+   "dev": {
+    "blocks": {
+     "data": [
+      "blake3:4f5a3f2cbd936ebf420a9cbdb1ff5fe928117a84ee2f5044c421bb3c29108e70",
+      null
+     ]
+    },
+    "content_hash": "blake3:6a0ce584eebb9e9958f69c7f0080a8a62ef7dabdb8cedfbf885a467e2208ef40",
+    "id": "blake3:b013dc4f302e78ad8ab37b64f4c9e703e055de21a03f7f566b3859d61dadd878",
+    "manifest_hash": "blake3:04450810a36942bba38101bb5558c88d7d65a36227fe920c69ab5bf0c894daee"
+   },
+   "name": "ingest_parquet_tiny_row_groups"
+  }
+ ]
+}

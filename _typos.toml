@@ -20,6 +20,9 @@ extend-ignore-re = [
   # blake3 digests in CLI golden output are hex; any 3+ char run that spells an
   # English-ish word (e.g. "afe" inside `blake3:827e49afe82b…`) gets flagged.
   "blake3:[0-9a-f]+",
+  # A digest shortened to its first 12 hex digits, in backticks (e.g. the tables of
+  # docs/spikes/916-format-break-crosscheck.md).
+  "`[0-9a-f]{12}`",
   # The `--exclude` typo test (tessera-ingest `arrow_table.rs`) has to *contain* misspellings: it proves
   # that `--exclude patient.nmae` is rejected rather than silently sealing the column the operator
   # believed they had dropped. Scoped to these exact strings instead of allowlisting `nmae`/`paitent` as
