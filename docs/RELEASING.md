@@ -24,10 +24,17 @@ generated `.github/workflows/release.yml` (cargo-dist binaries), and `.github/wo
    # <version> without the leading v, <YYYY-MM-DD> today's date
    scripts/changelog.py release CHANGELOG.md <version> <YYYY-MM-DD>
    scripts/changelog.py check CHANGELOG.md tessera/Cargo.toml
-   git commit -S -am "docs(changelog): release <version>" \
+   # pymarkdown runs in fix mode and exits 0 on MD013 (#959), so check the added lines yourself:
+   # this must print nothing (120 columns, plus the diff's leading `+`)
+   git diff -U0 | grep '^+' | awk 'length>121'
+   SKIP=branch-name git commit -S -am "docs(changelog): release <version>" \
      -m "Refs: #<release issue>"
-   git push origin HEAD:chore/release-plz-<timestamp>
+   SKIP=branch-name git push origin HEAD:chore/release-plz-<timestamp>
    ```
+
+   `SKIP=branch-name` skips that one local hook and no other (never `--no-verify`). The hook refuses the
+   branch name `chore/release-plz-<timestamp>`. CI exempts that PR by its bot author (the #629 patch in
+   `ci.yml`), and a local hook cannot see the PR author, so it cannot make the same exemption.
 
    `release` turns `## Unreleased` into `## [<version>] - <date>` (dropping its empty subheads), opens a
    new, empty `## Unreleased` above it, and adds the release's compare link. Do this last, just before
@@ -35,7 +42,8 @@ generated `.github/workflows/release.yml` (cargo-dist binaries), and `.github/wo
    opens a new one, without this commit. Then do it again on the new PR.
 2. **Merge the release PR.** Review it and merge it into `dev`. Merging alone tags and publishes nothing.
 3. **Tag the merge commit.** On that merge commit, create a signed, annotated tag and push it from the dev
-   shell, so the repo's pre-push hooks run:
+   shell, so the repo's pre-push hooks run. Do this in a worktree of `dev` that has `flake.nix`: a checkout
+   of another branch (for example an old release branch) cannot run `nix develop`:
 
    ```bash
    git fetch origin
