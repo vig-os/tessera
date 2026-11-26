@@ -884,18 +884,13 @@ impl Drop for CloseOnDrop {
 }
 
 /// The rows of `group` after checking its columns against `spec` (names, order, equal lengths).
-fn group_rows(spec: &TableSpec, group: &TableData) -> Result<usize> {
+fn group_rows(table_name: &str, leaf: &str, spec: &TableSpec, group: &TableData) -> Result<usize> {
     if group.len() != spec.columns.len() {
         return Err(Error::Codec("push_table: column count mismatch".into()));
     }
     let rows = rows_of(group);
     for ((name, data), col) in group.iter().zip(&spec.columns) {
-        if name != &col.name {
-            return Err(Error::Codec(format!(
-                "push_table: column '{name}' != spec '{}'",
-                col.name
-            )));
-        }
+        crate::table::check_column_contract(table_name, leaf, col, name, data)?;
         if data.len() != rows {
             return Err(Error::Codec("push_table: ragged group columns".into()));
         }
@@ -1198,7 +1193,13 @@ impl OpenTable {
     }
 
     fn push_group(&mut self, writer: &StreamWriter, group: TableData) -> Result<()> {
-        let rows = group_rows(&self.spec, &group)?;
+        let index = self.seen / self.block_rows;
+        let total = self
+            .declared
+            .map(|rows| partition_blocks(rows, self.block_rows))
+            .unwrap_or(2);
+        let leaf = block_name(&self.name, index, total)?;
+        let rows = group_rows(&self.name, &leaf, &self.spec, &group)?;
         if rows > ROWS_PER_GROUP {
             return Err(self.refuse(StreamedTableError::OversizedGroup {
                 rows: rows as u64,

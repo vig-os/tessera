@@ -527,6 +527,16 @@ impl<'a> TableMultiBlockSink<'a> {
         if batch.len() != self.columns.len() {
             return Err(Error::Codec("push: column count mismatch".into()));
         }
+        // The final block count is unknown until finish; this prospective leaf is diagnostic
+        // only. Validate actual names at finish, preserving maximum-length single-block names.
+        let leaf = format!(
+            "{}/{:04}",
+            self.name_prefix,
+            self.total_rows / self.block_rows
+        );
+        for ((name, data), col) in batch.iter().zip(&self.columns) {
+            crate::table::check_column_contract(&self.name_prefix, &leaf, col, name, data)?;
+        }
         let n = batch.first().map(|(_, c)| c.len()).unwrap_or(0);
         for ((bn, bc), buf) in batch.iter().zip(self.buf.iter_mut()) {
             if bn != &buf.0 {

@@ -8,6 +8,19 @@ use serde::{Deserialize, Serialize};
 
 use super::{Block, BlockKind};
 
+/// Whether two column value contracts can be concatenated without conversion or inventing
+/// validity. Shared by logical-table schema validation and the decoded column `extend` check.
+/// Names and column order are checked by the table group; codecs and descriptive metadata do
+/// not change the decoded value representation.
+pub fn same_value_contract(
+    dtype: &str,
+    nullable: bool,
+    other_dtype: &str,
+    other_nullable: bool,
+) -> bool {
+    dtype == other_dtype && nullable == other_nullable
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Column {
     pub name: String,

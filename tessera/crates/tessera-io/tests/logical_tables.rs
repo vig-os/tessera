@@ -368,3 +368,180 @@ fn streaming_refuses_nullable_contract_mix() {
 fn streaming_refuses_dtype_contract_mix() {
     streaming_contract_refusal(true);
 }
+
+fn sealed_contract_manifest(leaves: &[(BlockRef, BlockPayload)]) -> Manifest {
+    // Model a product sealed before #978, bypassing the builder's new refusal.
+    let mut m = Manifest::new("test", "contracts", "d", TS);
+    m.blocks = leaves.iter().map(|(b, _)| b.clone()).collect();
+    m.content_hash = Some(m.recompute_content_hash().unwrap());
+    m.manifest_hash = Some(m.compute_manifest_hash().unwrap());
+    m
+}
+
+#[test]
+fn packers_refuse_previously_sealed_contract_mixes_before_writing() {
+    for dtype_mix in [false, true] {
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let leaves = contract_leaves(dtype_mix, legacy);
+            let manifest = sealed_contract_manifest(&leaves);
+            let payloads = leaves.into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+            let out = dir.path().join("invalid.tsra");
+            assert_contract_error(pack(&manifest, &payloads, &out).unwrap_err());
+            assert!(!out.exists());
+            // No fragment is opened: the contract is refused before any output is created.
+            let sources = payloads
+                .iter()
+                .map(|p| (p.name.clone(), Path::new("absent")))
+                .collect::<Vec<_>>();
+            assert_contract_error(
+                tessera_io::pack_streaming(&manifest, &sources, &out).unwrap_err(),
+            );
+            assert!(!out.exists());
+        }
+    }
+}
+
+#[test]
+fn readers_still_refuse_previously_sealed_contract_mixes() {
+    use std::io::Write;
+    for dtype_mix in [false, true] {
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let leaves = contract_leaves(dtype_mix, legacy);
+            let m = sealed_contract_manifest(&leaves);
+            let (json, seal) = tessera_io::stored::manifest(&m).unwrap();
+            let path = dir.path().join("old.tsra");
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .last_modified_time(zip::DateTime::default())
+                .large_file(true)
+                .system(zip::System::Unix);
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            for (name, bytes) in [
+                ("mimetype", tessera_io::MIMETYPE.as_bytes()),
+                ("manifest.seal", seal.as_bytes()),
+                ("manifest.json", json.as_slice()),
+            ] {
+                zip.start_file(name, options).unwrap();
+                zip.write_all(bytes).unwrap();
+            }
+            for (_, p) in leaves {
+                zip.start_file(format!("blocks/{}", p.name), options)
+                    .unwrap();
+                zip.write_all(&p.bytes).unwrap();
+            }
+            zip.finish().unwrap();
+            let mut reader = Reader::open(&path).unwrap();
+            assert_contract_error(reader.logical_table("events").err().unwrap());
+        }
+    }
+}
+
+#[test]
+fn push_table_and_open_table_refuse_incompatible_group_contracts() {
+    for dtype_mix in [false, true] {
+        for open in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let ws =
+                WriteSession::create(&dir.path().join("ws"), "test", "contracts", "d", TS).unwrap();
+            let mut writer = StreamWriter::new(ws, 2, 2);
+            let spec = TableSpec {
+                columns: vec![col("value", "i4")],
+                rows: 0,
+                row_index: None,
+                partition: None,
+                edition: None,
+                codec_profile: None,
+            };
+            let values = if dtype_mix {
+                ColumnData::I64(vec![7; ROWS_PER_GROUP])
+            } else {
+                ColumnData::Nullable {
+                    values: Box::new(ColumnData::I32(vec![7; ROWS_PER_GROUP])),
+                    validity: vec![true; ROWS_PER_GROUP],
+                }
+            };
+            let good = vec![("value".into(), ColumnData::I32(vec![7; ROWS_PER_GROUP]))];
+            let bad = vec![("value".into(), values)];
+            let error = if open {
+                let mut table = writer
+                    .open_table_with_block_rows("events", spec, ROWS_PER_GROUP as u64)
+                    .unwrap();
+                table.push(&mut writer, good).unwrap();
+                table.push(&mut writer, bad).unwrap_err()
+            } else {
+                writer
+                    .push_table_with_block_rows(
+                        "events",
+                        TableSpec {
+                            rows: (2 * ROWS_PER_GROUP) as u64,
+                            ..spec
+                        },
+                        vec![good, bad],
+                        ROWS_PER_GROUP as u64,
+                    )
+                    .unwrap_err()
+            };
+            assert_contract_error(error);
+        }
+    }
+}
+
+#[test]
+fn single_block_push_table_keeps_maximum_length_bare_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = WriteSession::create(&dir.path().join("ws"), "test", "long-name", "d", TS).unwrap();
+    let mut writer = StreamWriter::new(ws, 1, 1);
+    let name = "v".repeat(255);
+    let spec = TableSpec {
+        columns: vec![col("value", "i4")],
+        rows: 1,
+        row_index: None,
+        partition: None,
+        edition: None,
+        codec_profile: None,
+    };
+    writer
+        .push_table(
+            &name,
+            spec,
+            vec![vec![("value".into(), ColumnData::I32(vec![7]))]],
+        )
+        .unwrap();
+    let out = dir.path().join("long.tsra");
+    writer.finish(&out).unwrap();
+    Reader::open(&out).unwrap().logical_table(&name).unwrap();
+}
+
+#[test]
+fn ingest_multi_block_sink_refuses_incompatible_group_contracts() {
+    for dtype_mix in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let ws =
+            WriteSession::create(&dir.path().join("ws"), "test", "contracts", "d", TS).unwrap();
+        let mut writer = StreamWriter::new(ws, 2, 2);
+        let mut sink = TableMultiBlockSink::with_block_rows(
+            vec![col("value", "i4")],
+            "events",
+            &dir.path().join("sink"),
+            &mut writer,
+            ROWS_PER_GROUP as u64,
+        )
+        .unwrap();
+        sink.push(vec![(
+            "value".into(),
+            ColumnData::I32(vec![7; ROWS_PER_GROUP]),
+        )])
+        .unwrap();
+        let values = if dtype_mix {
+            ColumnData::I64(vec![7])
+        } else {
+            ColumnData::Nullable {
+                values: Box::new(ColumnData::I32(vec![7])),
+                validity: vec![true],
+            }
+        };
+        assert_contract_error(sink.push(vec![("value".into(), values)]).unwrap_err());
+    }
+}

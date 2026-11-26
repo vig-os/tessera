@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::table::TableSpec;
+use super::table::{same_value_contract, TableSpec};
 use super::{BlockKind, BlockName, BlockRef};
 use crate::{Error, Result};
 
@@ -173,7 +173,7 @@ pub enum LogicalTableError {
         /// The leaf listed before it.
         after: String,
     },
-    /// A leaf whose columns differ from the first leaf's in count, name or dtype.
+    /// A leaf whose columns differ from the first leaf's in count, name, dtype or nullability.
     #[error("leaf '{leaf}' does not match the first leaf's schema: {detail}")]
     SchemaMismatch {
         /// The mismatching leaf.
@@ -378,6 +378,7 @@ pub fn table_group(blocks: &[BlockRef], name: &str) -> Result<TableGroup> {
 
 /// The seal-time check (ADR-0064 §2.4): every node holding a marked leaf is a valid partitioned
 /// table that no legacy flat block also answers to, and no block without a parent node is marked.
+/// Legacy flat groups must also share names, dtypes and nullability, in order.
 /// Run wherever a set of names is finalised, before anything is written.
 pub fn check_partitions(blocks: &[BlockRef]) -> Result<()> {
     let mut nodes: Vec<&str> = Vec::new();
@@ -389,6 +390,40 @@ pub fn check_partitions(blocks: &[BlockRef]) -> Result<()> {
         if node.is_none_or(|n| !nodes.contains(&n)) {
             check_marked(blocks, b)?;
             nodes.extend(node);
+        }
+    }
+    check_table_contracts(blocks)
+}
+
+/// Refuse incompatible column contracts in marked and legacy flat table groups, before packing
+/// even a manifest sealed outside `ProductBuilder`. This checks contracts only; partition
+/// topology is checked by [`check_partitions`]. Rows, codecs and descriptive metadata may differ.
+pub fn check_table_contracts(blocks: &[BlockRef]) -> Result<()> {
+    let mut names = std::collections::BTreeSet::new();
+    for b in blocks {
+        if marker(b)?.is_some() {
+            if let Some((parent, _)) = b.name.rsplit_once('/') {
+                names.insert(parent);
+            }
+        }
+        if b.kind == BlockKind::Table {
+            if let Some((base, suffix)) = b.name.rsplit_once('_') {
+                if suffix.len() == 4 && suffix.bytes().all(|c| c.is_ascii_digit()) {
+                    names.insert(base);
+                }
+            }
+        }
+    }
+    for name in names {
+        let refs = blocks
+            .iter()
+            .filter(|b| {
+                is_legacy_flat_member(&b.name, name)
+                    || (is_child_of(&b.name, name) && b.spec.get("partition").is_some())
+            })
+            .collect::<Vec<_>>();
+        if refs.len() > 1 {
+            specs_of(name, &refs)?;
         }
     }
     Ok(())
@@ -508,7 +543,7 @@ fn validate_node(blocks: &[BlockRef], node: &str) -> Result<Vec<BlockName>> {
 
 /// The [`TableSpec`] of every block of a resolved group, in the group's order (ADR-0064 §2.1's
 /// schema rule): each block's spec must parse, and every block must have the first one's column
-/// names and dtypes, in order, or the name is refused with [`LogicalTableError::SchemaMismatch`].
+/// names, dtypes and nullability, in order, or the name is refused with [`LogicalTableError::SchemaMismatch`].
 /// The validation of a partitioned node already applies it; readers apply it to every group, the
 /// legacy flat form included, through this one function. Reads the manifest only.
 ///
@@ -545,23 +580,36 @@ fn specs_of(name: &str, refs: &[&BlockRef]) -> Result<Vec<TableSpec>> {
             detail,
         },
     };
-    let columns = |s: &TableSpec| {
-        s.columns
-            .iter()
-            .map(|c| (c.name.clone(), c.dtype.clone()))
-            .collect::<Vec<_>>()
-    };
     let mut specs: Vec<TableSpec> = Vec::with_capacity(refs.len());
     for b in refs {
         let spec: TableSpec =
             serde_json::from_value(b.spec.clone()).map_err(|e| mismatch(b, e.to_string()))?;
-        if let Some(head) = specs.first().map(columns) {
-            let cols = columns(&spec);
-            if cols != head {
+        if let Some(head) = specs.first() {
+            if spec.columns.len() != head.columns.len() {
                 return Err(mismatch(
                     b,
-                    format!("columns {cols:?}, first leaf {head:?}"),
+                    format!(
+                        "column count {}, first leaf {}",
+                        spec.columns.len(),
+                        head.columns.len()
+                    ),
                 ));
+            }
+            for (column, first) in spec.columns.iter().zip(&head.columns) {
+                if column.name != first.name
+                    || !same_value_contract(
+                        &column.dtype,
+                        column.nullable,
+                        &first.dtype,
+                        first.nullable,
+                    )
+                {
+                    return Err(mismatch(b, format!(
+                        "column '{}': (name={:?}, dtype={}, nullable={}), first leaf (name={:?}, dtype={}, nullable={})",
+                        column.name, column.name, column.dtype, column.nullable,
+                        first.name, first.dtype, first.nullable
+                    )));
+                }
             }
         }
         specs.push(spec);

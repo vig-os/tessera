@@ -252,7 +252,7 @@ impl SequencedTable {
     /// another writer; the pipeline's errors.
     pub fn push(&self, writer: &StreamWriter, seq: u64, batch: TableData) -> Result<()> {
         self.check(writer)?;
-        group_rows(&self.spec, &batch)?;
+        group_rows(&self.name, &self.name, &self.spec, &batch)?;
         let bytes = batch.iter().map(|(_, c)| column_bytes(c)).sum();
         self.enter(writer, seq, bytes, Some(batch))
     }

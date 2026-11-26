@@ -803,14 +803,16 @@ fn check_central_directory<A: Read + Seek, S: Read + Seek>(
 /// What both packers require of the manifest, before they create any file: it is sealed, it lists
 /// each block name once ([`Error::DuplicateBlockName`], ADR-0063 §2a), and each chunk index indexes
 /// another of its blocks ([`Error::DanglingChunkIndex`], #720). Readers refuse either, so no writer
-/// packs one, however a sealed manifest was made (its fields are public).
+/// packs one, however a sealed manifest was made (its fields are public). Table groups must
+/// also share column names, dtypes and nullability ([`Error::LogicalTable`], #978).
 fn check_packable(manifest: &Manifest) -> Result<()> {
     if !manifest.is_sealed() {
         return Err(Error::Container(
             "refusing to pack an unsealed manifest".into(),
         ));
     }
-    check_block_refs(&manifest.blocks)
+    check_block_refs(&manifest.blocks)?;
+    tessera_core::block::partition::check_table_contracts(&manifest.blocks)
 }
 
 /// Pack a **sealed** manifest + its block payloads into a `.tsra` at `path` (STORED zip64).
@@ -887,7 +889,8 @@ fn pack_manifest_json(
 /// — proven by `pack_streaming_equals_pack` below — because both writers share [`tsra_entry_options`]
 /// and emit the mimetype/seal/manifest/blocks in the same order. Like [`pack`], it refuses an unsealed
 /// manifest, one listing a block name twice ([`Error::DuplicateBlockName`]) or one holding a chunk
-/// index without its block ([`Error::DanglingChunkIndex`]), before creating `out`.
+/// index without its block ([`Error::DanglingChunkIndex`]), or a table group's mismatched column
+/// contracts ([`Error::LogicalTable`]), before creating `out`.
 pub fn pack_streaming(
     manifest: &Manifest,
     sources: &[(BlockName, &Path)],

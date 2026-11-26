@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refuse partitioned and legacy flat tables whose leaves disagree on column names, dtypes or
+  nullability before sealing or packing (#978). Readers continue to refuse incompatible sealed tables.
+
 - **The sealed `ingest_decoder` names the decoder the binary links (#979).** Its `version` and its `features`
   pre-image were read from `Cargo.lock` by `tessera-ingest`'s build script, whose output cargo reuses across two
   checkouts that share a target dir. A binary could link parquet 58.4.1 and seal `=58.4.2`. The library now takes
