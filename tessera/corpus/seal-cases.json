@@ -1222,6 +1222,80 @@
       "newer_fields": [],
       "manifest": "{\"blocks\":[{\"class\":{},\"digest\":\"blake3:dcbc6f3b0a1922d0f7ecc3197fc45d383f7e47b1cb5373597d0b4a61eab7a26e\",\"kind\":\"array\",\"name\":\"volume\",\"spec\":{\"axes\":[\"z\",\"y\",\"x\"],\"chunks\":[64,64,64],\"codec\":\"pcodec\",\"dtype\":\"int16\",\"rescale_intercept\":-1024,\"rescale_slope\":1,\"shape\":[64,64,64],\"unit\":\"HU\"}}],\"content_hash\":\"blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9\",\"description\":\"int16 CT volume\",\"id\":\"blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187\",\"id_inputs\":{\"name\":\"recon-int16\",\"product\":\"recon\",\"timestamp\":\"2024-01-01T00:00:00Z\"},\"metadata\":{\"modality\":{\"_code\":\"CT\",\"_vocabulary\":\"DICOM\"}},\"name\":\"recon-int16\",\"producer\":{\"tool\":\"tessera\",\"version\":\"0.0.0\"},\"product\":\"recon\",\"schema\":{\"blocks\":[{\"description\":\"Reconstructed image volume (z,y,x), native dtype\",\"kind\":\"array\",\"min_count\":1,\"role\":\"volume\"}],\"description\":\"A reconstructed image volume (CT/PET/μ-map).\",\"fields\":[{\"description\":\"Imaging modality\",\"dtype\":\"coded\",\"id\":\"modality\",\"inherit\":true,\"recommended\":false,\"required\":true,\"sensitivity\":\"coded\",\"vocabulary\":\"DICOM\"},{\"description\":\"Native→physical slope\",\"dtype\":\"float64\",\"id\":\"rescale_slope\",\"recommended\":false,\"required\":false,\"sensitivity\":\"public\"},{\"description\":\"Native→physical intercept\",\"dtype\":\"float64\",\"id\":\"rescale_intercept\",\"recommended\":false,\"required\":false,\"sensitivity\":\"public\"},{\"description\":\"Pseudonymised patient handle (DICOM PS3.15 Patient Name / Patient ID family — direct PHI; supply a site-issued pseudonym, never the raw MRN)\",\"dtype\":\"string\",\"id\":\"patient_pseudonym\",\"inherit\":true,\"recommended\":false,\"required\":false,\"sensitivity\":\"identifying\"},{\"description\":\"Acquisition UID (DICOM PS3.15 UID family — Study/Series/SOPInstance UID; linking PHI under the confidentiality profile)\",\"dtype\":\"string\",\"id\":\"acquisition_uid\",\"inherit\":true,\"recommended\":false,\"required\":false,\"sensitivity\":\"identifying\"},{\"description\":\"DICOM StudyInstanceUID (0020,000D) — PS3.15 UID family, links back to the patient/study\",\"dtype\":\"string\",\"id\":\"study_instance_uid\",\"inherit\":true,\"recommended\":true,\"required\":false,\"sensitivity\":\"identifying\"},{\"description\":\"DICOM SeriesInstanceUID (0020,000E) — PS3.15 UID family, links back to the series\",\"dtype\":\"string\",\"id\":\"series_instance_uid\",\"inherit\":true,\"recommended\":true,\"required\":false,\"sensitivity\":\"identifying\"},{\"description\":\"DICOM StudyDate (0008,0020), YYYYMMDD — scan context, access-controlled\",\"dtype\":\"string\",\"id\":\"study_date\",\"inherit\":true,\"recommended\":true,\"required\":false,\"sensitivity\":\"sensitive\"},{\"description\":\"DICOM Manufacturer (0008,0070) — device vendor\",\"dtype\":\"string\",\"id\":\"manufacturer\",\"inherit\":true,\"recommended\":true,\"required\":false,\"sensitivity\":\"public\"},{\"description\":\"DICOM ManufacturerModelName (0008,1090) — device model\",\"dtype\":\"string\",\"id\":\"model_name\",\"inherit\":true,\"recommended\":true,\"required\":false,\"sensitivity\":\"public\"},{\"description\":\"DICOM KVP (0018,0060), CT peak kilovoltage\",\"dtype\":\"float64\",\"id\":\"kvp\",\"maximum\":1000,\"minimum\":0,\"recommended\":true,\"required\":false,\"sensitivity\":\"public\",\"unit\":\"kV\"},{\"description\":\"DICOM SliceThickness (0018,0050), nominal slice thickness\",\"dtype\":\"float64\",\"id\":\"slice_thickness\",\"minimum\":0,\"recommended\":true,\"required\":false,\"sensitivity\":\"public\",\"unit\":\"mm\"},{\"description\":\"DICOM PixelSpacing (0028,0030), [row_spacing, col_spacing] in mm\",\"dtype\":\"json\",\"id\":\"pixel_spacing\",\"recommended\":true,\"required\":false,\"sensitivity\":\"public\",\"unit\":\"mm\"}],\"product\":\"recon\",\"version\":\"1.1\"},\"sources\":[],\"tessera_version\":\"0.0.0\",\"timestamp\":\"2024-01-01T00:00:00Z\"}",
       "seal": "blake3:dd0b7871cf994ffc4adad0d8d86795a6f1179d8ddc62355166f6375352521c78"
+    },
+    {
+      "name": "collection/as-stored",
+      "verdict": "ok",
+      "newer_fields": [],
+      "manifest": "{\"collection_schema\":\"collection\",\"content_hash\":\"blake3:b506cd8f697ee11da0b01b756d8cbd45037d697af106d67ccdf44de534577f52\",\"description\":\"collection version vectors\",\"id\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"id_inputs\":{\"name\":\"versions\",\"product\":\"collection\",\"timestamp\":\"2026-11-26T00:00:00Z\"},\"members\":[{\"manifest_hash\":\"blake3:892cf508f41b47934eeb59f8aca163211a4e0d7739cf0d1810e69c50f5f4c3d3\",\"reference\":\"blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187\",\"role\":\"raw\"}],\"name\":\"versions\",\"tessera_version\":\"0.0.0\",\"timestamp\":\"2026-11-26T00:00:00Z\"}",
+      "seal": "blake3:17f81256e029a7786bb2274ec6de8513e471c197ba2328eb81ced3cba5b30247",
+      "kind": "collection"
+    },
+    {
+      "name": "collection/supersedes",
+      "verdict": "ok",
+      "newer_fields": [],
+      "manifest": "{\"collection_schema\":\"collection\",\"content_hash\":\"blake3:b506cd8f697ee11da0b01b756d8cbd45037d697af106d67ccdf44de534577f52\",\"description\":\"collection version vectors\",\"id\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"id_inputs\":{\"name\":\"versions\",\"product\":\"collection\",\"timestamp\":\"2026-11-26T00:00:00Z\"},\"members\":[{\"manifest_hash\":\"blake3:892cf508f41b47934eeb59f8aca163211a4e0d7739cf0d1810e69c50f5f4c3d3\",\"reference\":\"blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187\",\"role\":\"raw\"}],\"name\":\"versions\",\"sources\":[{\"content_hash\":\"blake3:17f81256e029a7786bb2274ec6de8513e471c197ba2328eb81ced3cba5b30247\",\"reference\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"role\":\"supersedes\"}],\"tessera_version\":\"0.0.0\",\"timestamp\":\"2026-11-26T00:00:00Z\"}",
+      "seal": "blake3:3e5331971abd9ab637620e62ae383ce698659910320518ff588d97f7d06b7ce7",
+      "kind": "collection"
+    },
+    {
+      "name": "collection/sources-spliced",
+      "verdict": "tampered",
+      "newer_fields": [],
+      "manifest": "{\"collection_schema\":\"collection\",\"content_hash\":\"blake3:b506cd8f697ee11da0b01b756d8cbd45037d697af106d67ccdf44de534577f52\",\"description\":\"collection version vectors\",\"id\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"id_inputs\":{\"name\":\"versions\",\"product\":\"collection\",\"timestamp\":\"2026-11-26T00:00:00Z\"},\"members\":[{\"manifest_hash\":\"blake3:892cf508f41b47934eeb59f8aca163211a4e0d7739cf0d1810e69c50f5f4c3d3\",\"reference\":\"blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187\",\"role\":\"raw\"}],\"name\":\"versions\",\"sources\":[{\"content_hash\":\"blake3:17f81256e029a7786bb2274ec6de8513e471c197ba2328eb81ced3cba5b30247\",\"reference\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"role\":\"supersedes\"}],\"tessera_version\":\"0.0.0\",\"timestamp\":\"2026-11-26T00:00:00Z\"}",
+      "seal": "blake3:17f81256e029a7786bb2274ec6de8513e471c197ba2328eb81ced3cba5b30247",
+      "kind": "collection"
+    },
+    {
+      "name": "collection/metadata-parent-pin",
+      "verdict": "ok",
+      "newer_fields": [],
+      "manifest": "{\"collection_schema\":\"collection\",\"content_hash\":\"blake3:b506cd8f697ee11da0b01b756d8cbd45037d697af106d67ccdf44de534577f52\",\"description\":\"collection version vectors\",\"id\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"id_inputs\":{\"name\":\"versions\",\"product\":\"collection\",\"timestamp\":\"2026-11-26T00:00:00Z\"},\"members\":[{\"manifest_hash\":\"blake3:892cf508f41b47934eeb59f8aca163211a4e0d7739cf0d1810e69c50f5f4c3d3\",\"reference\":\"blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187\",\"role\":\"raw\"}],\"name\":\"versions\",\"sources\":[{\"content_hash\":\"blake3:66869d50fbcfccb6915872b2c569142ba6e9a2dc8df6d8d937a74a57ac79c2f8\",\"reference\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"role\":\"supersedes\"}],\"tessera_version\":\"0.0.0\",\"timestamp\":\"2026-11-26T00:00:00Z\"}",
+      "seal": "blake3:d7bce6b44c564e42907c1d2af4558654dfbc1e8b31341fa8dd54b2cbf8b5a0c7",
+      "kind": "collection"
+    },
+    {
+      "name": "collection/source-pin-edited",
+      "verdict": "tampered",
+      "newer_fields": [],
+      "manifest": "{\"collection_schema\":\"collection\",\"content_hash\":\"blake3:b506cd8f697ee11da0b01b756d8cbd45037d697af106d67ccdf44de534577f52\",\"description\":\"collection version vectors\",\"id\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"id_inputs\":{\"name\":\"versions\",\"product\":\"collection\",\"timestamp\":\"2026-11-26T00:00:00Z\"},\"members\":[{\"manifest_hash\":\"blake3:892cf508f41b47934eeb59f8aca163211a4e0d7739cf0d1810e69c50f5f4c3d3\",\"reference\":\"blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187\",\"role\":\"raw\"}],\"name\":\"versions\",\"sources\":[{\"content_hash\":\"blake3:66869d50fbcfccb6915872b2c569142ba6e9a2dc8df6d8d937a74a57ac79c2f8\",\"reference\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"role\":\"supersedes\"}],\"tessera_version\":\"0.0.0\",\"timestamp\":\"2026-11-26T00:00:00Z\"}",
+      "seal": "blake3:3e5331971abd9ab637620e62ae383ce698659910320518ff588d97f7d06b7ce7",
+      "kind": "collection"
+    },
+    {
+      "name": "collection/forked-from",
+      "verdict": "ok",
+      "newer_fields": [],
+      "manifest": "{\"collection_schema\":\"collection\",\"content_hash\":\"blake3:b506cd8f697ee11da0b01b756d8cbd45037d697af106d67ccdf44de534577f52\",\"description\":\"collection version vectors\",\"id\":\"blake3:f2f943b9a403a33399c26443ce63689d3281b5b89680c8974a18d5b3376ad0a8\",\"id_inputs\":{\"fork\":\"node-a:1\",\"name\":\"versions\",\"product\":\"collection\",\"timestamp\":\"2026-11-26T00:00:00Z\"},\"members\":[{\"manifest_hash\":\"blake3:892cf508f41b47934eeb59f8aca163211a4e0d7739cf0d1810e69c50f5f4c3d3\",\"reference\":\"blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187\",\"role\":\"raw\"}],\"name\":\"versions\",\"sources\":[{\"content_hash\":\"blake3:17f81256e029a7786bb2274ec6de8513e471c197ba2328eb81ced3cba5b30247\",\"reference\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"role\":\"forked_from\"}],\"tessera_version\":\"0.0.0\",\"timestamp\":\"2026-11-26T00:00:00Z\"}",
+      "seal": "blake3:0058066adbaae73a27e2d6139efab7c377c4b2fa91055edcedb1642f5760cace",
+      "kind": "collection"
+    },
+    {
+      "name": "collection/newer-source-field",
+      "verdict": "ok",
+      "newer_fields": [
+        "sources[0].future"
+      ],
+      "manifest": "{\"collection_schema\":\"collection\",\"content_hash\":\"blake3:b506cd8f697ee11da0b01b756d8cbd45037d697af106d67ccdf44de534577f52\",\"description\":\"collection version vectors\",\"id\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"id_inputs\":{\"name\":\"versions\",\"product\":\"collection\",\"timestamp\":\"2026-11-26T00:00:00Z\"},\"members\":[{\"manifest_hash\":\"blake3:892cf508f41b47934eeb59f8aca163211a4e0d7739cf0d1810e69c50f5f4c3d3\",\"reference\":\"blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187\",\"role\":\"raw\"}],\"name\":\"versions\",\"sources\":[{\"content_hash\":\"blake3:17f81256e029a7786bb2274ec6de8513e471c197ba2328eb81ced3cba5b30247\",\"future\":true,\"reference\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"role\":\"supersedes\"}],\"tessera_version\":\"0.0.0\",\"timestamp\":\"2026-11-26T00:00:00Z\"}",
+      "seal": "blake3:59cd91acfe0c01b40bef1b4c8a39a56c3f8b6a32c246c4c6273784610d28d504",
+      "kind": "collection"
+    },
+    {
+      "name": "collection/source-array",
+      "verdict": "refused",
+      "newer_fields": [],
+      "manifest": "{\"collection_schema\":\"collection\",\"content_hash\":\"blake3:b506cd8f697ee11da0b01b756d8cbd45037d697af106d67ccdf44de534577f52\",\"description\":\"collection version vectors\",\"id\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"id_inputs\":{\"name\":\"versions\",\"product\":\"collection\",\"timestamp\":\"2026-11-26T00:00:00Z\"},\"members\":[{\"manifest_hash\":\"blake3:892cf508f41b47934eeb59f8aca163211a4e0d7739cf0d1810e69c50f5f4c3d3\",\"reference\":\"blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187\",\"role\":\"raw\"}],\"name\":\"versions\",\"sources\":[[\"supersedes\",\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"blake3:17f81256e029a7786bb2274ec6de8513e471c197ba2328eb81ced3cba5b30247\"]],\"tessera_version\":\"0.0.0\",\"timestamp\":\"2026-11-26T00:00:00Z\"}",
+      "seal": "blake3:03c01f71ec55b2f139b170ffb7e4d4dfba153154ceeb8b7dc771d3db2a8b7a9f",
+      "kind": "collection"
+    },
+    {
+      "name": "collection/source-role-object",
+      "verdict": "refused",
+      "newer_fields": [],
+      "manifest": "{\"collection_schema\":\"collection\",\"content_hash\":\"blake3:b506cd8f697ee11da0b01b756d8cbd45037d697af106d67ccdf44de534577f52\",\"description\":\"collection version vectors\",\"id\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"id_inputs\":{\"name\":\"versions\",\"product\":\"collection\",\"timestamp\":\"2026-11-26T00:00:00Z\"},\"members\":[{\"manifest_hash\":\"blake3:892cf508f41b47934eeb59f8aca163211a4e0d7739cf0d1810e69c50f5f4c3d3\",\"reference\":\"blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187\",\"role\":\"raw\"}],\"name\":\"versions\",\"sources\":[{\"reference\":\"blake3:23fe5a03d286be4470f1e1cf097b2332dd91d54dbf2f3a5cd2e59fad0dc0f335\",\"role\":{\"supersedes\":null}}],\"tessera_version\":\"0.0.0\",\"timestamp\":\"2026-11-26T00:00:00Z\"}",
+      "seal": "blake3:41fe119d7ae90e4191e3b4304d0c39e76d92e40e51c64bb4d8cd632f08ff132b",
+      "kind": "collection"
     }
   ]
 }

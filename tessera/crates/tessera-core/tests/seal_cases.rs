@@ -22,7 +22,7 @@ use serde_json::Value;
 use tessera_core::{Error, Manifest};
 
 /// The number of cases the generator writes: a lost or gained case is a visible change here.
-const CASES: usize = 171;
+const CASES: usize = 180;
 
 fn cases() -> Vec<Value> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/seal-cases.json");
@@ -59,8 +59,15 @@ fn read(c: &Value) -> tessera_core::Result<Manifest> {
 /// `tampered` is an integrity failure (the seal, `id` or `content_hash` doesn't match); `refused`
 /// is everything a reader does not read at all.
 fn rust_verdict(c: &Value) -> (&'static str, Vec<String>) {
-    match read(c) {
-        Ok(m) => ("ok", m.newer_fields().to_vec()),
+    let result = if c["kind"] == "collection" {
+        let (bytes, seal) = members(c);
+        tessera_core::Collection::from_stored_members(&bytes, seal.as_deref())
+            .map(|c| c.newer_fields().to_vec())
+    } else {
+        read(c).map(|m| m.newer_fields().to_vec())
+    };
+    match result {
+        Ok(newer) => ("ok", newer),
         Err(Error::Integrity { .. }) => ("tampered", Vec::new()),
         // The layout: no seal member (the alpha layout, rule 10), a malformed one, or the seal in
         // band (rule 3).
@@ -114,6 +121,7 @@ fn every_corpus_product_has_every_case_family() {
     let names: Vec<&str> = cases.iter().map(|c| c["name"].as_str().unwrap()).collect();
     let corpus: Vec<&str> = names
         .iter()
+        .filter(|n| !n.starts_with("collection/"))
         .filter_map(|n| n.strip_suffix("/as-stored"))
         .collect();
     assert_eq!(corpus.len(), 8, "one as-stored case per corpus file");
@@ -266,7 +274,7 @@ fn a_normalised_view_is_not_reemitted_under_its_seal() {
 fn the_writer_stores_the_bytes_its_seal_is_over() {
     for c in cases() {
         let name = c["name"].as_str().unwrap();
-        if !name.ends_with("/as-stored") {
+        if !name.ends_with("/as-stored") || c["kind"] == "collection" {
             continue;
         }
         let m = read(&c).unwrap();
@@ -366,4 +374,20 @@ fn bytes_a_text_decoder_would_change_are_refused_by_the_strict_parse() {
         assert!(matches!(err, Error::Serde(_)), "{name}: {err}");
     }
     assert!(read(&case("recon_int16/replacement-character-resealed")).is_ok());
+}
+
+/// The no-sources vector is the pre-edge collection record, including a product member.
+#[test]
+fn existing_collection_bytes_and_seal_are_unchanged() {
+    let c = case("collection/as-stored");
+    let (bytes, seal) = members(&c);
+    let parsed = tessera_core::Collection::from_stored_members(&bytes, seal.as_deref()).unwrap();
+    let (written, hash) = parsed.to_stored().unwrap();
+    assert_eq!(written, bytes);
+    assert_eq!(Some(hash.as_bytes()), seal.as_deref());
+    assert!(!serde_json::from_slice::<Value>(&written)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("sources"));
 }

@@ -609,6 +609,72 @@ def recon_int16(c: Cases, obj: dict, raw: bytes, seal: str, other_seal: str) -> 
         )
 
 
+def collection_cases(c: Cases, product: dict, product_seal: str) -> None:
+    """ADR-0067 D2: edges affect only the seal; absent edges preserve the old collection bytes."""
+    inputs = {
+        "product": "collection",
+        "name": "versions",
+        "timestamp": "2026-11-26T00:00:00Z",
+    }
+    leaf = digest(b"tessera-collection-member-v1" + b"\x00" + product_seal.encode())
+    parent = {
+        "tessera_version": "0.0.0",
+        "id_inputs": inputs,
+        "id": digest(canon(inputs)),
+        "name": inputs["name"],
+        "description": "collection version vectors",
+        "timestamp": inputs["timestamp"],
+        "collection_schema": "collection",
+        "members": [
+            {"reference": product["id"], "manifest_hash": product_seal, "role": "raw"}
+        ],
+        "content_hash": merkle_root([leaf]),
+    }
+    raw = canon(parent)
+    seal = digest(raw)
+    start = len(c.cases)
+    c.add("collection/as-stored", "ok", raw, seal)
+    edge = {"role": "supersedes", "reference": parent["id"], "content_hash": seal}
+    version = edited(parent, set_key("sources", [edge]))
+    c.resealed("collection/supersedes", "ok", canon(version))
+    c.add("collection/sources-spliced", "tampered", canon(version), seal)
+    # A description-only predecessor has the same member MMR but a different seal.
+    metadata_parent = edited(parent, set_key("description", "metadata-only version"))
+    repinned = copy.deepcopy(version)
+    repinned["sources"][0]["content_hash"] = digest(canon(metadata_parent))
+    c.resealed("collection/metadata-parent-pin", "ok", canon(repinned))
+    c.add(
+        "collection/source-pin-edited",
+        "tampered",
+        canon(repinned),
+        digest(canon(version)),
+    )
+    fork = copy.deepcopy(version)
+    fork["sources"][0]["role"] = "forked_from"
+    fork["id_inputs"]["fork"] = "node-a:1"
+    fork["id"] = digest(canon(fork["id_inputs"]))
+    c.resealed("collection/forked-from", "ok", canon(fork))
+    newer = copy.deepcopy(version)
+    newer["sources"][0]["future"] = True
+    c.resealed(
+        "collection/newer-source-field", "ok", canon(newer), ["sources[0].future"]
+    )
+    for name, source in [
+        ("source-array", ["supersedes", parent["id"], seal]),
+        (
+            "source-role-object",
+            {"role": {"supersedes": None}, "reference": parent["id"]},
+        ),
+    ]:
+        c.resealed(
+            f"collection/{name}",
+            "refused",
+            canon(edited(parent, set_key("sources", [source]))),
+        )
+    for case in c.cases[start:]:
+        case["kind"] = "collection"
+
+
 def main() -> None:
     products = corpus()
     assert len(products) == 8, [p[0] for p in products]
@@ -618,6 +684,7 @@ def main() -> None:
     by_name = {p[0]: p for p in products}
     _, obj, raw, seal = by_name["recon_int16"]
     recon_int16(c, obj, raw, seal, by_name["recon_float32_mumap"][3])
+    collection_cases(c, obj, seal)
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump({"about": ABOUT, "cases": c.cases}, f, indent=2, ensure_ascii=False)
         f.write("\n")
