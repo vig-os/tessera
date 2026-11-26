@@ -8,9 +8,9 @@ from where, and what recipe made each hop. Tracked inputs: `spec.toml` + `daq.cf
 ```
 $ tessera ingest --spec spec.toml --out out
 ingested collection blake3:abdeaaa09e729e2d4d5062d52581d6b56a2befbd620c2ddaeb471d54160909b6 (3 members) -> out
-  - blake3:cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c -> blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
-  - blake3:ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81 -> blake3_ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
-  - blake3:db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def -> blake3_db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
+  - blake3:cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c -> blake3%3acce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+  - blake3:ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81 -> blake3%3aec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
+  - blake3:db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def -> blake3%3adb68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
 
 ```
 
@@ -18,7 +18,7 @@ ingested collection blake3:abdeaaa09e729e2d4d5062d52581d6b56a2befbd620c2ddaeb471
 #     product already carries. Plain `inspect` prints the digest and stops there. ===
 
 ```
-$ tessera inspect out/blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+$ tessera inspect out/blake3%3acce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
 tessera [..] · product=blob
 id            blake3:cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c
 name          daq-config
@@ -44,7 +44,7 @@ sources       2
 #     which — the Blob spec records its own size). ===
 
 ```
-$ tessera inspect --resolve-config out/blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+$ tessera inspect --resolve-config out/blake3%3acce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
 tessera [..] · product=blob
 id            blake3:cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c
 name          daq-config
@@ -76,7 +76,7 @@ sources       2
 #     is refused rather than silently dropping one flag. ===
 
 ```
-$ tessera inspect --json --resolve-config out/blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+$ tessera inspect --json --resolve-config out/blake3%3acce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
 ? 1
 error: invalid product: --resolve-config cannot be combined with --json: --json is exactly the sealed manifest, and the resolved config is not part of it. Use one or the other.
 
@@ -88,18 +88,18 @@ error: invalid product: --resolve-config cannot be combined with --json: --json 
 #     Tessera product — so those are not gaps. ===
 
 ```
-$ tessera provenance out/blake3_db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
+$ tessera provenance out/blake3%3adb68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
 blob · recon-01  [blake3:28d22d3bd83c…]
   ↳ ingested_from vol.bin  [external leaf]
       source    blake3:629eccf35341…
   ↳ derived_from blob · daq-raw  [pinned]
-      file      out/blake3_ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
+      file      out/blake3%3aec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
       producer  ge-listmode-daq/3.2 (0855f5f)
       recipe    2 config keys
     ↳ ingested_from raw.l64  [external leaf]
         source    blake3:3258a47581e9…
     ↳ derived_from blob · daq-config  [pinned]
-        file      out/blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+        file      out/blake3%3acce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
         producer  ge-listmode-daq/3.2 (0855f5f)
         recipe    config_ref blake3:b1ab9e2dd874…
       ↳ ingested_from daq.cfg  [external leaf]
@@ -127,7 +127,7 @@ initialized tessera repository at repo
 ```
 
 ```
-$ tessera import repo out/blake3_db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
+$ tessera import repo out/blake3%3adb68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
 imported lineage blake3:db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def
   version blake3:28d22d3bd83cac04982d70eabdadd04f97ad24bd0eced6590d90d97245e73ad1
 
@@ -187,13 +187,13 @@ blob · recon-01  [blake3:56fed17d0571…]
   ↳ ingested_from vol.bin  [external leaf]
       source    blake3:629eccf35341…
   ↳ derived_from blob · daq-raw  [pinned]
-      file      out/blake3_ec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
+      file      out/blake3%3aec73a94b678c7606ef782686054b595a9e17e892383ef8d54892eca0d17f1a81.tsra
       producer  ge-listmode-daq/3.2 (0855f5f)
       recipe    2 config keys
     ↳ ingested_from raw.l64  [external leaf]
         source    blake3:3258a47581e9…
     ↳ derived_from blob · daq-config  [pinned]
-        file      out/blake3_cce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
+        file      out/blake3%3acce0dc5eb3dbddfa564a6480bfccdc03f021db403b27381b78a88cce1d11747c.tsra
         producer  ge-listmode-daq/3.2 (0855f5f)
         recipe    config_ref blake3:b1ab9e2dd874…
       ↳ ingested_from daq.cfg  [external leaf]
@@ -205,7 +205,7 @@ blob · recon-01  [blake3:56fed17d0571…]
   ↳ ingested_via_spec spec.toml  [external leaf]
       source    blake3:6b12472b3bd2…
   ↳ snapshot_of blob · recon-01  [pinned]
-      file      out/blake3_db68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
+      file      out/blake3%3adb68ac428f07c6868dd21cd8e9e533746926a9e6e8100c8b94a3714648c11def.tsra
       producer  vig-recon/1.4 (beac041)
       recipe    3 config keys
 

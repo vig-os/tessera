@@ -55,9 +55,9 @@ fn load(file: &Path) -> Result<Collection> {
 
 /// The on-disk path of a member next to the `collection.json` — resolved by `kind` (ADR-0049 §4) via
 /// the shared [`member_filename`] SSoT (so the resolved name matches what every writer emits, #323).
-fn member_path(collection_file: &Path, reference: &str, kind: MemberKind) -> PathBuf {
+fn member_path(collection_file: &Path, reference: &str, kind: MemberKind) -> Result<PathBuf> {
     let dir = collection_file.parent().unwrap_or_else(|| Path::new("."));
-    dir.join(member_filename(reference, kind))
+    tessera_io::collection::member_path(dir, reference, kind)
 }
 
 fn w(out: &mut dyn Write, args: std::fmt::Arguments<'_>) -> Result<()> {
@@ -122,12 +122,12 @@ pub fn inspect(file: &Path, out: &mut dyn Write) -> Result<()> {
 }
 
 /// `tessera collection ls FILE` — one line per member with its **human** name + product, resolved by
-/// opening each member `.tsra` (falls back to `?` if a member file is absent). `--full` also prints
+/// opening each member `.tsra` (refuses absent encoded members, including legacy layouts). `--full` also prints
 /// the full pinned `manifest_hash` and any in-collection `derived_from` edges.
 pub fn ls(file: &Path, full: bool, out: &mut dyn Write) -> Result<()> {
     let c = load(file)?;
     for m in &c.members {
-        let path = member_path(file, &m.reference, m.kind);
+        let path = member_path(file, &m.reference, m.kind)?;
         // A product member's name/product comes from its `.tsra`; a sub-collection member's from its
         // child `collection.json` (product shown as `collection`).
         let (product, name) = if m.kind == MemberKind::Collection {
@@ -227,7 +227,7 @@ fn verify_collection(
 
     let mut count = 0usize;
     for m in &c.members {
-        let path = member_path(file, &m.reference, m.kind);
+        let path = member_path(file, &m.reference, m.kind)?;
         match m.kind {
             MemberKind::Collection => {
                 // Descend: the child's own seal + pinned version + its whole subtree.
@@ -439,6 +439,33 @@ mod tests {
     }
 
     #[test]
+    fn legacy_underscore_members_are_refused_by_consumers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, ids) = build_collection(dir.path());
+        let descriptor = dir.path().join("collection.json");
+        verify(&descriptor, &mut Vec::new()).unwrap();
+        for id in ids {
+            let encoded = dir.path().join(member_filename(&id, MemberKind::Product));
+            let old = dir.path().join(format!(
+                "blake3_{}.tsra",
+                id.strip_prefix("blake3:").unwrap()
+            ));
+            std::fs::rename(encoded, old).unwrap();
+        }
+        for error in [
+            verify(&descriptor, &mut Vec::new()).unwrap_err(),
+            ls(&descriptor, false, &mut Vec::new()).unwrap_err(),
+        ] {
+            let message = error.to_string();
+            assert!(
+                message.contains("Legacy underscore/raw-id layouts are unsupported"),
+                "{message}"
+            );
+            assert!(message.contains("blake3%3a"), "{message}");
+        }
+    }
+
+    #[test]
     fn inspect_ls_verify_a_collection_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let (c, _ids) = build_collection(dir.path());
@@ -614,7 +641,7 @@ mod tests {
             &std::fs::read(&cf).unwrap(),
             &std::fs::read(out.join("collection.seal")).unwrap(),
         );
-        // #323: each member lands under the sanitized stem (`blake3_….tsra`), NOT the raw
+        // #323: each member lands under the sanitized stem (`blake3%3a….tsra`), NOT the raw
         // colon-bearing reference — and that is exactly the name `verify` resolves.
         let c = load(&cf).unwrap();
         for m in &c.members {

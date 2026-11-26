@@ -1796,9 +1796,9 @@ git_commit = "0855f5f"
         // threshold = 1 so the explicit `streaming = "stream"` product really streams.
         let coll = run(&parsed, &PathBuf::from("inline-spec"), &out, &cfg, 1).unwrap();
         let mani = |i: usize| {
-            let path = out.join(format!(
-                "{}.tsra",
-                coll.members[i].reference.replace([':', '/'], "_")
+            let path = out.join(member_filename(
+                &coll.members[i].reference,
+                MemberKind::Product,
             ));
             tessera_io::Reader::open(&path).unwrap().manifest().clone()
         };

@@ -184,16 +184,12 @@ impl MemberKind {
     }
 }
 
-/// Filesystem-safe stem for a member's content-addressed `reference` (a `blake3:<hex>` id): the
-/// single `:` — and any `/` or `\` — becomes `_`. Lossless because the prefix is the fixed
-/// `blake3:`, so `blake3_<hex>` round-trips unambiguously.
-///
-/// This is the **single source of truth** for the on-disk member stem, so every writer (the ingest
-/// engine, `collection new`) and every reader (`collection verify` / `ls`) derive the same name.
-/// Before this existed the ingest engine sanitized (`blake3_…`) while the consumer verbs resolved the
-/// raw reference (`blake3:…`), so `verify`/`ls` could never find an ingested member (#323).
+/// Filesystem-safe member stem, encoded by [`crate::names::file_name`].
+/// Retained as the public collection spelling; there is only one byte encoder.
+/// Legacy colon/separator-to-underscore filenames are unsupported: recreate the collection
+/// from its source products. Readers resolve only the encoded name, never a legacy alias.
 pub fn sanitize_reference(reference: &str) -> String {
-    reference.replace([':', '/', '\\'], "_")
+    crate::names::file_name(reference)
 }
 
 /// The on-disk filename of a member beside its `collection.json`, resolved by `kind` (ADR-0049 §4): a
@@ -1518,22 +1514,21 @@ mod tests {
         assert_eq!(m.kind, MemberKind::Product);
     }
 
-    /// The member-filename SSoT (#323): a `blake3:<hex>` reference sanitizes its single `:` to `_`
-    /// (lossless) and the extension follows the kind — the one name writers and readers must agree on.
+    /// The shared encoder escapes the reference and the extension follows the member kind.
     #[test]
     fn member_filename_sanitizes_the_reference_and_picks_the_extension() {
         let r = "blake3:e4b561abc";
-        assert_eq!(sanitize_reference(r), "blake3_e4b561abc");
+        assert_eq!(sanitize_reference(r), "blake3%3ae4b561abc");
         assert_eq!(
             member_filename(r, MemberKind::Product),
-            "blake3_e4b561abc.tsra"
+            "blake3%3ae4b561abc.tsra"
         );
         assert_eq!(
             member_filename(r, MemberKind::Collection),
-            "blake3_e4b561abc.collection.json"
+            "blake3%3ae4b561abc.collection.json"
         );
         // Path-separators are neutralised too, so a reference can never escape the collection dir.
-        assert_eq!(sanitize_reference("a/b\\c"), "a_b_c");
+        assert_eq!(sanitize_reference("a/b\\c"), "a%2fb%5cc");
     }
 
     /// A malformed (empty) level tag is refused at seal — structural well-formedness (round-2 review).

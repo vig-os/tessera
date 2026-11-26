@@ -17,6 +17,8 @@ pub mod conformance;
 pub mod container;
 mod durable;
 pub mod multiblock;
+/// Shared injective filesystem-name encoding, also used by core collection layouts.
+pub use tessera_core::names;
 pub mod oci;
 pub mod provenance;
 pub mod range;

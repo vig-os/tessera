@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Collection member filenames are injective (#994).** Members and repository refs share the percent encoder
+  from #975 (`a:b` → `a%3ab`, `a_b` → `a_b`, `Ab` → `%41b`). Ref filenames are unchanged. Local collections,
+  ingest output and S3 prefix exports use the same encoded stems, including nested descriptors and seals.
+  Older local underscore layouts and raw-id prefix exports must be recreated from source products; readers
+  refuse missing encoded members with the required path and a layout error, without trying legacy aliases.
+  OCI artifacts remain digest-addressed and need no filename migration.
+
 - Refuse partitioned and legacy flat tables whose leaves disagree on column names, dtypes or
   nullability before sealing or packing (#978). Readers continue to refuse incompatible sealed tables.
 

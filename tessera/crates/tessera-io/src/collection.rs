@@ -30,13 +30,35 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use tessera_core::collection::{Collection, MemberKind, Role};
+use tessera_core::collection::{member_filename, sanitize_reference, Collection, MemberKind, Role};
 use tessera_core::export::{dataset_entity, ro_crate_descriptor};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
 
 use crate::oci::{ARTIFACT_TYPE, MANIFEST_MEDIA_TYPE};
 use crate::worm::RetentionMode;
+
+/// Resolve an existing member using the shared encoded layout; never try a legacy alias.
+///
+/// Underscore-named local collections and raw-id S3 prefix exports written before #994 must
+/// be recreated from source products. A missing member reports the required encoded path and
+/// this format boundary, including for nested collections. Other I/O errors are preserved.
+pub fn member_path(
+    dir: &std::path::Path,
+    reference: &str,
+    kind: MemberKind,
+) -> Result<std::path::PathBuf> {
+    let path = dir.join(member_filename(reference, kind));
+    match std::fs::metadata(&path) {
+        Ok(_) => Ok(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::Invalid(format!(
+            "collection member '{reference}' unavailable at {}; required percent-encoded member layout (#994). \
+             Legacy underscore/raw-id layouts are unsupported; recreate the collection from source products",
+            path.display()
+        ))),
+        Err(e) => Err(e.into()),
+    }
+}
 
 /// OCI 1.1 image-index media type — the manifest-of-manifests wrapper that registries already
 /// understand. A Tessera collection projects naturally onto this.
@@ -227,15 +249,8 @@ pub fn prefix_layout(c: &Collection, prefix: &str) -> Vec<(String, String)> {
         .members
         .iter()
         .map(|m| {
-            // `MemberKind` is `#[non_exhaustive]`, so resolve the known nested case and default the
-            // rest to a product object (a future kind must revisit this suffix rule).
-            let ext = if m.kind == MemberKind::Collection {
-                "collection.json"
-            } else {
-                "tsra"
-            };
             (
-                format!("{prefix}/{}.{ext}", m.reference),
+                format!("{prefix}/{}", member_filename(&m.reference, m.kind)),
                 m.reference.clone(),
             )
         })
@@ -246,7 +261,10 @@ pub fn prefix_layout(c: &Collection, prefix: &str) -> Vec<(String, String)> {
         .filter(|m| m.kind == MemberKind::Collection)
     {
         out.push((
-            format!("{prefix}/{}.collection.seal", m.reference),
+            format!(
+                "{prefix}/{}.collection.seal",
+                sanitize_reference(&m.reference)
+            ),
             m.reference.clone(),
         ));
     }
@@ -298,6 +316,67 @@ mod tests {
         );
         let coll = cb.seal().unwrap();
         (raw, recon, coll)
+    }
+
+    #[test]
+    fn legacy_member_layout_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for (reference, old) in [("a:b", "a_b.tsra"), ("blake3:abc", "blake3:abc.tsra")] {
+            std::fs::write(dir.path().join(old), b"legacy").unwrap();
+            let error = member_path(dir.path(), reference, MemberKind::Product)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("Legacy underscore/raw-id layouts are unsupported"),
+                "{error}"
+            );
+            assert!(
+                error.contains(&member_filename(reference, MemberKind::Product)),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_member_keys_match_local_names() {
+        let (_, _, mut collection) = build_collection();
+        collection.members[0].reference = "a:b".into();
+        collection.members[1].reference = "a_b".into();
+        let keys = prefix_layout(&collection, "s3://bucket");
+        assert_eq!(keys[0].0, "s3://bucket/a%3ab.tsra");
+        assert_eq!(keys[1].0, "s3://bucket/a_b.tsra");
+    }
+
+    #[test]
+    fn member_files_roundtrip_without_collisions() {
+        use tessera_core::collection::member_filename;
+        let dir = tempfile::tempdir().unwrap();
+        let references = [
+            "a:b",
+            "a_b",
+            "Ab",
+            "ab",
+            "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "a/b",
+            "a\\b",
+            "a%3ab",
+        ];
+        for kind in [MemberKind::Product, MemberKind::Collection] {
+            for reference in references {
+                std::fs::write(dir.path().join(member_filename(reference, kind)), reference)
+                    .unwrap();
+            }
+            for reference in references {
+                let bytes =
+                    std::fs::read(member_path(dir.path(), reference, kind).unwrap()).unwrap();
+                assert_eq!(bytes, reference.as_bytes(), "{reference}");
+            }
+            let folded: std::collections::HashSet<_> = references
+                .iter()
+                .map(|r| member_filename(r, kind).to_ascii_lowercase())
+                .collect();
+            assert_eq!(folded.len(), references.len());
+        }
     }
 
     #[test]
@@ -456,16 +535,14 @@ mod tests {
 
         // prefix_layout: the sub-collection resolves to `<id>.collection.json`, the product to `.tsra`.
         let layout = prefix_layout(&cohort, "s3://b/cohort");
-        assert!(layout
-            .iter()
-            .any(|(k, r)| r == &exam.id && k.ends_with(&format!("{}.collection.json", exam.id))));
+        assert!(layout.iter().any(|(k, r)| r == &exam.id
+            && k.ends_with(&member_filename(&exam.id, MemberKind::Collection))));
         assert!(layout
             .iter()
             .any(|(k, r)| r == &recon.id && k.ends_with(".tsra")));
         // Every descriptor travels with its seal object (ADR-0066 rule 5).
-        assert!(layout
-            .iter()
-            .any(|(k, r)| r == &exam.id && k.ends_with(&format!("{}.collection.seal", exam.id))));
+        assert!(layout.iter().any(|(k, r)| r == &exam.id
+            && k.ends_with(&format!("{}.collection.seal", sanitize_reference(&exam.id)))));
         assert_eq!(layout[layout.len() - 2].0, "s3://b/cohort/collection.seal");
 
         // to_oci_index: refuses the nested member loudly (recursive index-of-indexes = #294).
