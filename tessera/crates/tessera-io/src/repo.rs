@@ -4,8 +4,10 @@
 //!
 //! ```text
 //! objects/<alg>/<aa>/<rest-of-hex>   write-once content-addressed objects (blocks AND manifests)
-//! refs/<lineage>                     the latest version's manifest_hash for a lineage (mutable, CAS)
-//! log/<lineage>.jsonl                rebuildable cache: one line per commit (NOT canonical)
+//! layout                             tessera-repository 2
+//! refs/lineages/<enc>                 product <address> LF (mutable, CAS)
+//! refs/pins/<enc>                     product <address> LF (gc roots; pin verbs are #947 step 6)
+//! log/lineages/<enc>.jsonl            rebuildable cache: one line per commit (NOT canonical)
 //! lock                               the writer lock (empty; see below)
 //! tmp/                               a writer's temp files; whatever is here is crash debris
 //! ```
@@ -16,7 +18,7 @@
 //! address. Identical bytes share one path, so a new version
 //! that only changes metadata re-stores exactly one object (its manifest): the copy is proportional to
 //! the *delta*, not the dataset. The version DAG is the `supersedes`/`derived_from` edges already inside
-//! each manifest (ADR-0022); `refs/<lineage>` is the only mutable state, and the `log` is a pure cache
+//! each manifest (ADR-0022); `refs/lineages/<enc>` is the only mutable state, and the `log` is a pure cache
 //! that can be rebuilt by walking the DAG from the ref.
 //!
 //! # One fenced writer per repository (ADR-0036 §2, #946)
@@ -70,20 +72,35 @@ const LOCK: &str = "lock";
 const TMP: &str = "tmp";
 /// The role of the edge a new version carries to the version it replaces (ADR-0022).
 const SUPERSEDES: &str = "supersedes";
-/// The file naming the repository's layout, under the root (#975). A repository without it was
-/// written before #975 (or is empty and gets it on its first write).
+/// The layout marker under the repository root (ADR-0067 D1).
 const LAYOUT: &str = "layout";
-/// The contents of [`LAYOUT`] for the one layout this build reads and writes: refs and `log`
-/// caches named by [`lineage_file_name`].
-const LAYOUT_V1: &str = "tessera-repository 1\n";
-/// The longest file name [`lineage_file_name`] returns: 255 (the name limit of ext4, APFS, XFS,
-/// NTFS) less the 6 bytes of the log cache's `.jsonl`.
-pub const MAX_LINEAGE_FILE_NAME: usize = 249;
-/// What [`LAYOUT_V1`] is, for [`Error::UnsupportedRepositoryLayout`].
-const LAYOUT_V1_DESCRIBED: &str =
-    "`tessera-repository 1` (ref files named by the percent-encoded lineage, #975)";
+/// The only layout this build reads or writes. No migration is provided.
+const LAYOUT_V2: &str = "tessera-repository 2\n";
+/// The longest encoded ref name: 255 less the log cache's `.jsonl` suffix.
+pub const MAX_REF_FILE_NAME: usize = 249;
+/// The longest encoded lineage name, shared with pins.
+pub const MAX_LINEAGE_FILE_NAME: usize = MAX_REF_FILE_NAME;
+/// The two independent ref roles in repository layout 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefNamespace {
+    /// Mutable lineage tips, advanced by compare-and-set.
+    Lineages,
+    /// Durable gc roots, independent of lineage operations.
+    Pins,
+}
 
-/// The file name of `lineage`'s ref under `refs/` (and, with `.jsonl`, of its `log` cache): its
+impl RefNamespace {
+    /// The directory name of this role under `refs/`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lineages => "lineages",
+            Self::Pins => "pins",
+        }
+    }
+}
+
+/// The file name of `lineage`'s ref under `refs/lineages/` (and, with `.jsonl`, of its
+/// `log/lineages/` cache): its
 /// UTF-8 bytes, each byte outside `a-z`, `0-9`, `-` and `_` written as `%` and two lower-case hex
 /// digits (#975). So `blake3:3f…` names `blake3%3a3f…`, `a_b` names `a_b`, and `a:b` names `a%3ab`.
 ///
@@ -96,11 +113,19 @@ const LAYOUT_V1_DESCRIBED: &str =
 /// deferred, see `dist-workspace.toml`).
 ///
 /// An empty lineage, or one whose file name would be longer than [`MAX_LINEAGE_FILE_NAME`]
-/// bytes, is [`Error::InvalidLineage`]: a ref names a file, and a longer name cannot be created.
+/// bytes, is [`Error::InvalidRefName`]: a ref names a file, and a longer name cannot be created.
 /// A product `id` (`blake3:` and 64 hex digits) names 73 bytes.
 pub fn lineage_file_name(lineage: &str) -> Result<String> {
-    let invalid = |reason: String| Error::InvalidLineage {
-        lineage: lineage.to_string(),
+    ref_file_name(RefNamespace::Lineages, lineage)
+}
+
+/// Encode a ref name injectively in either namespace, with the same 249-byte bound.
+/// Empty or overlong names return [`Error::InvalidRefName`] before any lock is taken.
+/// The encoding is the one documented by [`lineage_file_name`]; no name is reserved.
+pub fn ref_file_name(namespace: RefNamespace, lineage: &str) -> Result<String> {
+    let invalid = |reason: String| Error::InvalidRefName {
+        namespace: namespace.as_str().to_string(),
+        name: lineage.to_string(),
         reason,
     };
     if lineage.is_empty() {
@@ -154,92 +179,106 @@ struct Reached {
 }
 
 impl Repository {
-    /// Create a repository under `root` (idempotent — existing dirs are fine). Its directories are
-    /// created durably, and its writer lock file and [layout](lineage_file_name) marker too.
-    ///
-    /// A repository there in another layout (one written before #975) is
-    /// [`Error::UnsupportedRepositoryLayout`].
+    /// Create a layout-2 repository, or open an existing layout-2 repository.
+    /// An unmarked directory may hold no ref, log or object entries. Every other layout
+    /// is [`Error::UnsupportedRepositoryLayout`]; no conversion is attempted.
+    /// Initialization and all subsequent writes use the same repository writer lock.
     pub fn init(root: &Path) -> Result<Repository> {
-        for d in ["objects", "refs", "log", TMP] {
-            create_dirs_durable(&root.join(d), &mut Vec::new())?;
-        }
         let repo = Repository {
             root: root.to_path_buf(),
         };
-        drop(repo.lock()?);
-        sync_dir(root)?;
+        // A marker is replaced atomically and never advanced by a supported writer.
+        // Reject an incompatible marked repository without creating coordination files.
+        // Entry scans belong under the lock: another init may be creating its directories.
+        match std::fs::symlink_metadata(root.join(LAYOUT)) {
+            Ok(_) => repo.layout()?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        create_dirs_durable(root, &mut Vec::new())?;
+        drop(repo.lock_inner(true)?);
         Ok(repo)
     }
 
-    /// Open an existing repository (errors if `root` has no `objects/`). Reads only its layout
-    /// marker otherwise: a corrupt ref is reported when it is read ([`read_ref`](Self::read_ref),
-    /// [`gc`](Self::gc)), so the lineages beside it stay usable and the corrupt one can be
-    /// `forget`-ed.
-    ///
-    /// A repository written before #975 (no layout marker, and a ref or `log` cache present) named
-    /// its refs with a mapping that sent distinct lineages to one file, so reading it with the
-    /// current naming could hand one lineage another's tip. It is refused with
-    /// [`Error::UnsupportedRepositoryLayout`], as is a marker of any other layout. There is no
-    /// migration (an alpha carries none, as ADR-0066 rule 10 for products): create a new
-    /// repository and import the source products again. An empty repository without a marker
-    /// opens, and gets the marker on its first write.
+    /// Open an existing layout-2 repository without writing anything.
+    /// Every other marker, including a missing marker in an empty directory, is refused.
+    /// Ref corruption is reported when a ref is read or by `gc`, so a corrupt lineage
+    /// can still be removed with [`forget`](Self::forget).
     pub fn open(root: &Path) -> Result<Repository> {
+        let repo = Repository {
+            root: root.to_path_buf(),
+        };
+        repo.layout()?;
         if !root.join("objects").is_dir() {
             return Err(Error::Invalid(format!(
                 "{} is not a tessera repository (no objects/ — run `tessera init`)",
                 root.display()
             )));
         }
-        let repo = Repository {
-            root: root.to_path_buf(),
-        };
-        repo.layout()?;
         Ok(repo)
     }
 
-    /// Whether the repository is laid out the way this build reads it: `Ok(true)` with the current
-    /// layout marker, `Ok(false)` without one and without any ref or `log` cache (an empty
-    /// repository, possibly made before #975), else [`Error::UnsupportedRepositoryLayout`]: refs
-    /// named the pre-#975 way, or a marker of another layout.
-    fn layout(&self) -> Result<bool> {
-        let unsupported = |found: String| Error::UnsupportedRepositoryLayout {
+    fn unsupported_layout(&self, found: String) -> Error {
+        Error::UnsupportedRepositoryLayout {
             root: self.root.clone(),
             found,
-            required: LAYOUT_V1_DESCRIBED.to_string(),
-        };
+            required: "`tessera-repository 2` (typed, namespaced refs, ADR-0067)".into(),
+        }
+    }
+
+    /// Read the marker exactly; an unmarked directory is never opened as a repository.
+    fn layout(&self) -> Result<()> {
         match std::fs::read(self.root.join(LAYOUT)) {
-            Ok(bytes) if bytes == LAYOUT_V1.as_bytes() => Ok(true),
-            Ok(bytes) => Err(unsupported(format!(
+            Ok(bytes) if bytes == LAYOUT_V2.as_bytes() => Ok(()),
+            Ok(bytes) => Err(self.unsupported_layout(format!(
                 "{:?} (its `{LAYOUT}` file)",
-                String::from_utf8_lossy(&bytes).trim_end()
+                String::from_utf8_lossy(&bytes)
             ))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(self.unsupported_layout(
+                "no marker (possibly before #975; unmarked repositories are refused)".into(),
+            )),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Only `init` may write the first marker, and only with no repository entries.
+    fn check_initial_layout(&self) -> Result<()> {
+        #[cfg(test)]
+        crate::durable::seam::record(crate::durable::seam::Event::InitLayoutCheck);
+        match std::fs::symlink_metadata(self.root.join(LAYOUT)) {
+            Ok(_) => self.layout(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                if has_entries(&self.root.join("refs"))? || has_entries(&self.root.join("log"))? {
-                    return Err(unsupported(
-                        "the one from before #975 (no `layout` file; ref files named with `:`, `/` \
-                         and `\\` replaced by `_`, which sent distinct lineages to one file)"
-                            .to_string(),
-                    ));
+                for directory in ["refs", "log", "objects"] {
+                    if has_entries(&self.root.join(directory))? {
+                        return Err(self.unsupported_layout(format!(
+                            "no marker, entries in {directory}/ (possibly before #975)"
+                        )));
+                    }
                 }
-                Ok(false)
+                Ok(())
             }
             Err(e) => Err(e.into()),
         }
     }
 
-    /// Take the writer lock, waiting while another writer holds it, and clear `tmp/` of the debris
-    /// a crashed writer left (no writer is running, so nothing there is in use). The layout is
-    /// checked under the lock, and an empty repository without a layout marker gets one, durably,
-    /// before anything else is written.
+    /// Take the one writer lock, validate the layout, then clear crashed-writer debris.
     fn lock(&self) -> Result<WriterLock> {
+        self.lock_inner(false)
+    }
+
+    fn lock_inner(&self, initialize: bool) -> Result<WriterLock> {
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(self.root.join(LOCK))?;
         file.lock()?;
+        if initialize {
+            self.check_initial_layout()?;
+        } else {
+            self.layout()?;
+        }
         let tmp = self.root.join(TMP);
-        // A repository made before #946 has no `tmp/`.
         create_dirs_durable(&tmp, &mut Vec::new())?;
         for entry in std::fs::read_dir(&tmp)? {
             let path = entry?.path();
@@ -249,12 +288,18 @@ impl Repository {
                 std::fs::remove_file(&path)?;
             }
         }
-        if !self.layout()? {
-            write_durable_via(
-                &tmp.join(LAYOUT),
-                &self.root.join(LAYOUT),
-                LAYOUT_V1.as_bytes(),
-            )?;
+        if initialize {
+            for directory in ["objects", "refs/lineages", "refs/pins", "log/lineages"] {
+                create_dirs_durable(&self.root.join(directory), &mut Vec::new())?;
+            }
+            if !self.root.join(LAYOUT).exists() {
+                write_durable_via(
+                    &tmp.join(LAYOUT),
+                    &self.root.join(LAYOUT),
+                    LAYOUT_V2.as_bytes(),
+                )?;
+            }
+            sync_dir(&self.root)?;
         }
         Ok(WriterLock { _file: file })
     }
@@ -326,6 +371,7 @@ impl Repository {
     /// Read a **block** object, verifying its bytes still hash to `address` (catches on-disk
     /// corruption / tampering on access).
     pub fn read_object(&self, address: &str) -> Result<Vec<u8>> {
+        self.layout()?;
         let bytes = self.read_raw(address)?;
         check_digest(address, &bytes)?;
         Ok(bytes)
@@ -357,21 +403,37 @@ impl Repository {
     /// [`Error::UnsupportedLayout`]; both messages say the stored bytes must be their own JCS form
     /// without the key. Re-ingest and re-commit such a product.
     pub fn get_manifest(&self, manifest_hash: &str) -> Result<Manifest> {
+        self.layout()?;
         let bytes = self.read_raw(manifest_hash)?;
         Manifest::from_stored(&bytes, manifest_hash)
     }
 
     fn ref_path(&self, lineage: &str) -> Result<PathBuf> {
-        Ok(self.root.join("refs").join(lineage_file_name(lineage)?))
+        Ok(self
+            .root
+            .join("refs/lineages")
+            .join(lineage_file_name(lineage)?))
     }
 
     /// The current tip (`manifest_hash`) of a lineage, or `None` if it has no commits yet (no ref
-    /// file). A ref file that is empty or holds anything but one `blake3:<64 lower-case hex>`
-    /// address (and trailing whitespace) is [`Error::CorruptRef`]: tessera never writes one (a ref
+    /// file). A ref file that does not hold exactly `product blake3:<64 lower-case hex> LF`
+    /// is [`Error::CorruptRef`]: tessera never writes one (a ref
     /// is replaced by a rename), so it was torn or edited, and reading it as "no commits yet" would
     /// let a commit start the lineage over and `gc` reclaim its history.
     pub fn read_ref(&self, lineage: &str) -> Result<Option<String>> {
         let path = self.ref_path(lineage)?;
+        self.layout()?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(Error::CorruptRef {
+                    path,
+                    reason: "expected a regular ref file".into(),
+                })
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
         match std::fs::read(&path) {
             Ok(bytes) => parse_ref(&path, &bytes).map(Some),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -410,13 +472,17 @@ impl Repository {
             )));
         }
         self.check_ref(lineage, expected)?;
-        let refs = self.root.join("refs");
+        let refs = self.root.join("refs/lineages");
         create_dirs_durable(&refs, &mut Vec::new())?;
         let tmp = self
             .root
             .join(TMP)
             .join(format!("ref-{}", lineage_file_name(lineage)?));
-        write_durable_via(&tmp, &self.ref_path(lineage)?, new.as_bytes())
+        write_durable_via(
+            &tmp,
+            &self.ref_path(lineage)?,
+            format!("product {new}\n").as_bytes(),
+        )
     }
 
     /// [`Error::RefMoved`] unless `lineage`'s tip is `expected`. The caller holds the writer lock.
@@ -435,7 +501,7 @@ impl Repository {
     fn log_path(&self, lineage: &str) -> Result<PathBuf> {
         Ok(self
             .root
-            .join("log")
+            .join("log/lineages")
             .join(format!("{}.jsonl", lineage_file_name(lineage)?)))
     }
 
@@ -457,7 +523,9 @@ impl Repository {
 
     /// Read a lineage's `log` cache, oldest commit first (empty if the lineage has no commits).
     pub fn log(&self, lineage: &str) -> Result<Vec<LogEntry>> {
-        match std::fs::read_to_string(self.log_path(lineage)?) {
+        let path = self.log_path(lineage)?;
+        self.layout()?;
+        match std::fs::read_to_string(path) {
             Ok(s) => s
                 .lines()
                 .filter(|l| !l.trim().is_empty())
@@ -561,7 +629,7 @@ impl Repository {
         match remove_file(&self.ref_path(lineage)?) {
             Ok(()) => {
                 existed = true;
-                sync_dir(&self.root.join("refs"))?;
+                sync_dir(&self.root.join("refs/lineages"))?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
@@ -573,22 +641,32 @@ impl Repository {
         Ok(existed)
     }
 
-    /// The current tip of every lineage (`refs/*` contents), each with its ref file. A ref that
-    /// cannot be read or is corrupt is an error.
+    /// All roots, from both namespaces. Reject stray entries before any gc sweep.
     fn all_ref_tips(&self) -> Result<Vec<(PathBuf, String)>> {
         let mut tips = Vec::new();
-        match std::fs::read_dir(self.root.join("refs")) {
-            Ok(rd) => {
-                for e in rd {
-                    let path = e?.path();
-                    if path.is_file() {
-                        let bytes = std::fs::read(&path)?;
-                        tips.push((path.clone(), parse_ref(&path, &bytes)?));
-                    }
-                }
+        for entry in std::fs::read_dir(self.root.join("refs"))? {
+            let entry = entry?;
+            let path = entry.path();
+            if !entry.file_type()?.is_dir()
+                || !matches!(entry.file_name().to_str(), Some("lineages" | "pins"))
+            {
+                return Err(Error::CorruptRef {
+                    path,
+                    reason: "expected only the lineages/ and pins/ namespace directories".into(),
+                });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+            for record in std::fs::read_dir(&path)? {
+                let record = record?;
+                let path = record.path();
+                if !record.file_type()?.is_file() {
+                    return Err(Error::CorruptRef {
+                        path,
+                        reason: "expected a regular ref file".into(),
+                    });
+                }
+                let bytes = std::fs::read(&path)?;
+                tips.push((path.clone(), parse_ref(&path, &bytes)?));
+            }
         }
         Ok(tips)
     }
@@ -770,25 +848,24 @@ fn check_supersedes(lineage: &str, parent: &str, m: &Manifest) -> Result<()> {
     Ok(())
 }
 
-/// The tip a ref file at `path` holds: exactly one `blake3:<64 lower-case hex>` address, with
-/// trailing whitespace allowed (a ref written by hand, `echo … > refs/<lineage>`), else
-/// [`Error::CorruptRef`].
+/// Parse the layout-2 grammar, exactly `product SP blake3:<64 lower-case hex> LF`.
+/// Collection records arrive with collection storage in ADR-0067 step 4; no other kind
+/// is readable here. Both namespaces use this parser and the same canonical spelling.
 fn parse_ref(path: &Path, bytes: &[u8]) -> Result<String> {
-    let corrupt = |reason: String| Error::CorruptRef {
+    let corrupt = || Error::CorruptRef {
         path: path.to_path_buf(),
-        reason,
+        reason: format!(
+            "expected exactly `product blake3:<64 lower-case hex>\\n`, holds {:?}",
+            String::from_utf8_lossy(bytes)
+        ),
     };
-    let bytes = bytes.trim_ascii_end();
-    if bytes.is_empty() {
-        return Err(corrupt("it is empty (or only whitespace)".into()));
-    }
-    match tessera_core::stored::parse_seal(bytes, "ref") {
-        Ok(tip) => Ok(tip.to_string()),
-        Err(Error::MalformedSeal { found, .. }) => Err(corrupt(format!(
-            "it must hold exactly `blake3:<64 lower-case hex>`, and holds `{found}`"
-        ))),
-        Err(e) => Err(e),
-    }
+    let address = bytes
+        .strip_prefix(b"product ")
+        .and_then(|b| b.strip_suffix(b"\n"))
+        .ok_or_else(corrupt)?;
+    tessera_core::stored::parse_seal(address, "ref")
+        .map(str::to_string)
+        .map_err(|_| corrupt())
 }
 
 /// Whether `bytes` are a JSON object with a `tessera_version` member: a manifest, readable or not,
@@ -942,7 +1019,11 @@ mod tests {
         let p = repo.object_path(address).unwrap();
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, bytes).unwrap();
-        std::fs::write(repo.ref_path(lineage).unwrap(), address).unwrap();
+        std::fs::write(
+            repo.ref_path(lineage).unwrap(),
+            format!("product {address}\n"),
+        )
+        .unwrap();
     }
 
     // ── Child processes ──────────────────────────────────────────────────────────────────────────
@@ -1426,7 +1507,7 @@ mod tests {
         // A ref written by hand with a trailing newline is still the address it holds.
         let dir = tempfile::tempdir().unwrap();
         let (repo, v0) = with_first_version(dir.path());
-        std::fs::write(repo.ref_path(L).unwrap(), format!("{v0}\n")).unwrap();
+        std::fs::write(repo.ref_path(L).unwrap(), format!("product {v0}\n")).unwrap();
         assert_eq!(repo.read_ref(L).unwrap(), Some(v0));
         repo.gc().unwrap();
 
@@ -1775,7 +1856,9 @@ mod tests {
             assert_eq!(repo.log(lineage).unwrap().len(), 2, "{lineage}");
         }
         assert_eq!(
-            std::fs::read_dir(dir.path().join("refs")).unwrap().count(),
+            std::fs::read_dir(dir.path().join("refs/lineages"))
+                .unwrap()
+                .count(),
             names.len()
         );
         assert!(repo.forget("a:b").unwrap());
@@ -1801,23 +1884,23 @@ mod tests {
         );
         assert!(matches!(
             long(MAX_LINEAGE_FILE_NAME + 1),
-            Err(Error::InvalidLineage { .. })
+            Err(Error::InvalidRefName { .. })
         ));
         // Encoding counts: 84 `:` are 252 bytes.
         assert!(matches!(
             lineage_file_name(&":".repeat(84)),
-            Err(Error::InvalidLineage { .. })
+            Err(Error::InvalidRefName { .. })
         ));
         assert!(matches!(
             lineage_file_name(""),
-            Err(Error::InvalidLineage { .. })
+            Err(Error::InvalidRefName { .. })
         ));
 
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
         let (m, p) = sealed_on(0, None);
         for bad in ["", &"x".repeat(MAX_LINEAGE_FILE_NAME + 1)] {
-            let invalid = |e: Error| matches!(e, Error::InvalidLineage { .. });
+            let invalid = |e: Error| matches!(e, Error::InvalidRefName { .. });
             assert!(invalid(repo.read_ref(bad).unwrap_err()));
             assert!(invalid(repo.commit(bad, None, &m, &p).unwrap_err()));
             assert!(invalid(repo.log(bad).unwrap_err()));
@@ -1830,58 +1913,41 @@ mod tests {
         );
     }
 
-    /// ADR-0067 (#947) reserves the ref file names `refs/pin:<name>` for collection pins, which is
-    /// sound only while no lineage maps to a file name holding `:`. The encoding's output alphabet
-    /// is `a-z`, `0-9`, `-`, `_` and `%` (whose escapes are lower-case hex): `:` is always escaped,
-    /// so no lineage name can produce `:` or a `pin:` prefix.
+    /// The same injective encoding and bound apply independently in each namespace.
     #[test]
-    fn no_lineage_maps_to_a_file_name_holding_a_colon() {
-        let mut lineages: Vec<String> = [
-            "pin:x",
-            "pin:",
-            "a:b",
-            ":",
-            "::",
-            "%3A",
-            "%3a",
-            "pin%3ax",
-            "..",
-            ".",
-            "é:ü",
-            "日本:語",
-            "a/b",
-            "a\\b",
-            "PIN:X",
-            "blake3:00ff",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        // Every one-character name, ASCII and a range of non-ASCII.
-        lineages.extend((1u32..0x800).filter_map(char::from_u32).map(String::from));
-        for l in &lineages {
-            let name = lineage_file_name(l).unwrap();
-            assert!(
-                !name.contains(':') && !name.starts_with("pin:"),
-                "{l:?} -> {name}"
-            );
-            assert!(
-                name.bytes().all(|b| b.is_ascii_lowercase()
-                    || b.is_ascii_digit()
-                    || matches!(b, b'-' | b'_' | b'%')),
-                "{l:?} -> {name}"
-            );
+    fn ref_names_encode_injectively_in_both_namespaces() {
+        let names = [
+            "a:b", "a_b", "A_b", "a.b", "a/b", "a\\b", "a%3ab", "é", "pin:x",
+        ];
+        for namespace in [RefNamespace::Lineages, RefNamespace::Pins] {
+            let encoded: BTreeSet<_> = names
+                .iter()
+                .map(|name| ref_file_name(namespace, name).unwrap())
+                .collect();
+            assert_eq!(encoded.len(), names.len());
+            for name in names {
+                assert_eq!(
+                    ref_file_name(namespace, name).unwrap(),
+                    lineage_file_name(name).unwrap()
+                );
+            }
+            for name in [String::new(), ":".repeat(84), "a".repeat(250)] {
+                assert!(matches!(ref_file_name(namespace, &name),
+                    Err(Error::InvalidRefName { namespace: found, name: bad, .. })
+                    if found == namespace.as_str() && bad == name));
+            }
         }
-        assert_eq!(lineage_file_name("pin:x").unwrap(), "pin%3ax");
     }
 
     /// The files under `root`'s `refs/` and `log/` and its layout marker, with their bytes.
     fn ref_state(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut out = BTreeMap::new();
-        for d in ["refs", "log"] {
-            for e in std::fs::read_dir(root.join(d)).unwrap() {
+        for d in ["refs", "refs/lineages", "refs/pins", "log", "log/lineages"] {
+            for e in std::fs::read_dir(root.join(d)).into_iter().flatten() {
                 let path = e.unwrap().path();
-                out.insert(path.clone(), std::fs::read(&path).unwrap());
+                if path.is_file() {
+                    out.insert(path.clone(), std::fs::read(&path).unwrap());
+                }
             }
         }
         if let Ok(b) = std::fs::read(root.join(LAYOUT)) {
@@ -1913,8 +1979,12 @@ mod tests {
                 l.replace([':', '/', '\\'], "_"),
             );
             let at = |d: &str, n: &str, ext: &str| dir.path().join(d).join(format!("{n}{ext}"));
-            std::fs::rename(at("refs", &new, ""), at("refs", &old, "")).unwrap();
-            std::fs::rename(at("log", &new, ".jsonl"), at("log", &old, ".jsonl")).unwrap();
+            std::fs::rename(at("refs/lineages", &new, ""), at("refs", &old, "")).unwrap();
+            std::fs::rename(
+                at("log/lineages", &new, ".jsonl"),
+                at("log", &old, ".jsonl"),
+            )
+            .unwrap();
         }
         let before = ref_state(dir.path());
 
@@ -1922,7 +1992,7 @@ mod tests {
             let text = e.to_string();
             assert!(
                 matches!(&e, Error::UnsupportedRepositoryLayout { found, required, .. }
-                    if found.contains("before #975") && required.contains("tessera-repository 1")),
+                    if found.contains("before #975") && required.contains("tessera-repository 2")),
                 "{e}"
             );
             assert!(text.contains("import the source products again"), "{text}");
@@ -1941,31 +2011,168 @@ mod tests {
         refused(Repository::open(dir.path()).err().unwrap());
     }
 
-    /// An empty repository made before #975 (no marker, no refs) opens, and its first write marks
-    /// it; a marker of an unknown layout is refused.
+    /// Only init creates a marker, and only in a directory without repository entries.
     #[test]
-    fn an_unmarked_empty_repository_is_marked_on_its_first_write() {
+    fn unmarked_directories_are_only_initialized_when_empty() {
         let dir = tempfile::tempdir().unwrap();
-        Repository::init(dir.path()).unwrap();
-        std::fs::remove_file(dir.path().join(LAYOUT)).unwrap();
-        let repo = Repository::open(dir.path()).unwrap();
-        assert!(!dir.path().join(LAYOUT).exists(), "a reader writes nothing");
-        let (m, p) = sealed_on(0, None);
-        repo.commit(L, None, &m, &p).unwrap();
+        assert!(matches!(
+            Repository::open(dir.path()),
+            Err(Error::UnsupportedRepositoryLayout { .. })
+        ));
+        let repo = Repository::init(dir.path()).unwrap();
         assert_eq!(
             std::fs::read(dir.path().join(LAYOUT)).unwrap(),
-            LAYOUT_V1.as_bytes()
+            LAYOUT_V2.as_bytes()
         );
-        std::fs::write(dir.path().join(LAYOUT), b"tessera-repository 2\n").unwrap();
-        let e = Repository::open(dir.path()).err().unwrap();
-        assert!(
-            matches!(&e, Error::UnsupportedRepositoryLayout { found, .. }
-                if found.contains("tessera-repository 2")),
-            "{e}"
-        );
+        std::fs::remove_file(dir.path().join(LAYOUT)).unwrap();
+        assert!(matches!(
+            Repository::open(dir.path()),
+            Err(Error::UnsupportedRepositoryLayout { .. })
+        ));
+        assert!(matches!(
+            Repository::init(dir.path()),
+            Err(Error::UnsupportedRepositoryLayout { .. })
+        ));
+        let (m, p) = sealed_on(0, None);
         assert!(matches!(
             repo.commit(L, None, &m, &p),
             Err(Error::UnsupportedRepositoryLayout { .. })
         ));
+    }
+    #[test]
+    fn gc_marks_product_pins_independently_of_lineages() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let (m, payloads) = sealed_on(0, None);
+        let tip = repo.commit("x", None, &m, &payloads).unwrap();
+        let pin = dir.path().join("refs/pins/x");
+        let record = format!("product {tip}\n");
+        std::fs::write(&pin, &record).unwrap();
+        repo.forget("x").unwrap();
+        assert_eq!(repo.log("x").unwrap(), Vec::<LogEntry>::new());
+        let report = repo.gc().unwrap();
+        assert_eq!((report.kept, report.reclaimed), (2, 0));
+        repo.get_manifest(&tip).unwrap();
+        repo.commit("x", None, &m, &payloads).unwrap();
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), record);
+        std::fs::remove_file(&pin).unwrap();
+        assert_eq!(repo.read_ref("x").unwrap(), Some(tip));
+        assert_eq!(repo.gc().unwrap().reclaimed, 0);
+        repo.forget("x").unwrap();
+        assert_eq!(repo.gc().unwrap().reclaimed, 2);
+    }
+
+    #[test]
+    fn stray_entries_in_either_ref_namespace_abort_gc() {
+        for (entry, directory) in [
+            ("refs/stray", false),
+            ("refs/stray", true),
+            ("refs/lineages/stray", true),
+            ("refs/pins/stray", true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = Repository::init(dir.path()).unwrap();
+            let (m, _) = sealed_on(0, None);
+            repo.put_manifest(&m).unwrap();
+            let path = dir.path().join(entry);
+            if directory {
+                std::fs::create_dir(&path).unwrap();
+            } else {
+                std::fs::write(&path, b"stray").unwrap();
+            }
+            let before = objects(dir.path());
+            assert!(matches!(repo.gc(), Err(Error::GcAborted { source, .. })
+                if matches!(source.as_ref(), Error::CorruptRef { path: found, .. } if *found == path)));
+            assert_eq!(objects(dir.path()), before);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_not_regular_ref_files() {
+        use std::os::unix::fs::symlink;
+        for entry in ["refs/lineages/x", "refs/pins/x", "refs/other"] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = Repository::init(dir.path()).unwrap();
+            let (m, _) = sealed_on(0, None);
+            repo.put_manifest(&m).unwrap();
+            let external = dir.path().join("external");
+            std::fs::write(&external, format!("product {}\n", m.manifest_hash.unwrap())).unwrap();
+            symlink(&external, dir.path().join(entry)).unwrap();
+            let before = objects(dir.path());
+            assert!(matches!(repo.gc(), Err(Error::GcAborted { .. })));
+            assert_eq!(objects(dir.path()), before);
+            if entry == "refs/lineages/x" {
+                assert!(matches!(repo.read_ref("x"), Err(Error::CorruptRef { .. })));
+            }
+        }
+    }
+
+    #[test]
+    fn every_writer_refuses_other_layouts_before_touching_objects_or_tmp() {
+        for marker in [
+            Some("tessera-repository 1\n"),
+            Some("tessera-repository 3\n"),
+            Some("tessera-repository 2"),
+            None,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (repo, tip) = with_first_version(dir.path());
+            let (m, payloads) = sealed_on(1, Some(&tip));
+            if let Some(marker) = marker {
+                std::fs::write(dir.path().join(LAYOUT), marker).unwrap();
+            } else {
+                std::fs::remove_file(dir.path().join(LAYOUT)).unwrap();
+            }
+            let debris = dir.path().join("tmp/debris");
+            std::fs::write(&debris, b"untouched").unwrap();
+            let before = objects(dir.path());
+            let refs_before = ref_state(dir.path());
+            let refused = |e| {
+                assert!(
+                    matches!(e, Error::UnsupportedRepositoryLayout { required, .. }
+                if required.contains("tessera-repository 2"))
+                )
+            };
+            refused(Repository::open(dir.path()).err().unwrap());
+            refused(Repository::init(dir.path()).err().unwrap());
+            refused(repo.commit(L, Some(&tip), &m, &payloads).unwrap_err());
+            refused(repo.set_ref(L, Some(&tip), &tip).unwrap_err());
+            refused(
+                repo.write_object(&tessera_core::hash::digest(b"new"), b"new")
+                    .unwrap_err(),
+            );
+            refused(repo.put_manifest(&m).unwrap_err());
+            refused(repo.forget(L).unwrap_err());
+            refused(repo.gc().unwrap_err());
+            refused(repo.read_ref(L).unwrap_err());
+            refused(repo.log(L).unwrap_err());
+            assert_eq!(objects(dir.path()), before);
+            assert_eq!(ref_state(dir.path()), refs_before);
+            assert_eq!(std::fs::read(debris).unwrap(), b"untouched");
+        }
+    }
+    /// An initializer must not inspect a competing initializer's partial namespace tree
+    /// until that initializer has released the writer lock after publishing its marker.
+    #[test]
+    fn init_checks_entries_under_the_writer_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join(LOCK);
+        let checks = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = checks.clone();
+        let watching = seam::watch(move |event| {
+            if matches!(event, seam::Event::InitLayoutCheck) {
+                let other = File::open(&lock).unwrap();
+                assert!(
+                    matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+                    "initialization inspected repository entries without the writer lock"
+                );
+                seen.set(seen.get() + 1);
+            }
+        });
+        Repository::init(dir.path()).unwrap();
+        Repository::init(dir.path()).unwrap();
+        drop(watching);
+        assert_eq!(checks.get(), 2);
     }
 }
