@@ -102,6 +102,8 @@ pub(crate) mod seam {
         RemoveFile(PathBuf),
         /// A repository `gc` starts its walk, before it reads a ref.
         GcWalk,
+        /// Initialization validates repository entries, which must be fenced too.
+        InitLayoutCheck,
     }
 
     /// Records this thread's events while it lives.
@@ -191,7 +193,7 @@ pub(crate) mod seam {
                 RemoveFile(p) => {
                     self.touched.insert(p.clone(), self.step);
                 }
-                JournalLine(_) | GcWalk => {}
+                JournalLine(_) | GcWalk | InitLayoutCheck => {}
             }
         }
 

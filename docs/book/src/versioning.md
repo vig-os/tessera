@@ -68,7 +68,7 @@ system too (macOS by default). An empty lineage, or one whose encoded name is lo
 The root file `repo/layout` holds exactly `tessera-repository 2` followed by a line feed. Each ref holds exactly
 `product SP blake3:<64 lower-case hex> LF`: one space, one final line feed, no other whitespace or trailing bytes.
 A missing line feed, upper-case hex or an unknown kind is a corrupt ref. Collection records are planned in
-[ADR-0067 step 4](../../adr/0067-collection-refs-version-edge-and-gc-through-members.md).
+[ADR-0067 step 4](https://github.com/vig-os/tessera/blob/dev/docs/adr/0067-collection-refs-version-edge-and-gc-through-members.md).
 
 Pins have their own directory, `repo/refs/pins/<name>`, and use the same encoding, bound and typed record grammar.
 A lineage and a pin may share a name: lineage commands only touch `refs/lineages/` and `log/lineages/`.

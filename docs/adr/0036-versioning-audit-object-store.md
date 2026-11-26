@@ -40,10 +40,10 @@ A Tessera **repository** is a directory or object-store prefix holding:
 
 ```
 objects/<alg>/<aa>/<rest-of-hex>   # write-once content-addressed objects (blocks AND manifests)
-layout                            # tessera-repository 2\n
+layout                           # tessera-repository 2 LF
 refs/lineages/<enc>               # typed lineage tip: product <address> LF
 refs/pins/<enc>                   # typed pin: product <address> LF
-log/lineages/<enc>.jsonl                # append-only audit log: one line per commit (manifest_hash, ts, op)
+log/lineages/<enc>.jsonl           # append-only audit log: one line per commit (manifest_hash, ts, op)
 ```
 
 - **Objects are addressed by their existing blake3 digest** — the *same* digest already recorded in

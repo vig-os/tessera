@@ -187,7 +187,14 @@ impl Repository {
         let repo = Repository {
             root: root.to_path_buf(),
         };
-        repo.check_initial_layout()?;
+        // A marker is replaced atomically and never advanced by a supported writer.
+        // Reject an incompatible marked repository without creating coordination files.
+        // Entry scans belong under the lock: another init may be creating its directories.
+        match std::fs::symlink_metadata(root.join(LAYOUT)) {
+            Ok(_) => repo.layout()?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         create_dirs_durable(root, &mut Vec::new())?;
         drop(repo.lock_inner(true)?);
         Ok(repo)
@@ -236,6 +243,8 @@ impl Repository {
 
     /// Only `init` may write the first marker, and only with no repository entries.
     fn check_initial_layout(&self) -> Result<()> {
+        #[cfg(test)]
+        crate::durable::seam::record(crate::durable::seam::Event::InitLayoutCheck);
         match std::fs::symlink_metadata(self.root.join(LAYOUT)) {
             Ok(_) => self.layout(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -2142,5 +2151,28 @@ mod tests {
             assert_eq!(ref_state(dir.path()), refs_before);
             assert_eq!(std::fs::read(debris).unwrap(), b"untouched");
         }
+    }
+    /// An initializer must not inspect a competing initializer's partial namespace tree
+    /// until that initializer has released the writer lock after publishing its marker.
+    #[test]
+    fn init_checks_entries_under_the_writer_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join(LOCK);
+        let checks = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = checks.clone();
+        let watching = seam::watch(move |event| {
+            if matches!(event, seam::Event::InitLayoutCheck) {
+                let other = File::open(&lock).unwrap();
+                assert!(
+                    matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+                    "initialization inspected repository entries without the writer lock"
+                );
+                seen.set(seen.get() + 1);
+            }
+        });
+        Repository::init(dir.path()).unwrap();
+        Repository::init(dir.path()).unwrap();
+        drop(watching);
+        assert_eq!(checks.get(), 2);
     }
 }
