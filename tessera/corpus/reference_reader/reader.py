@@ -377,6 +377,51 @@ MANIFEST = _rec(
 )
 
 
+COLLECTION = _rec(
+    tessera_version=(STR, _REQ),
+    id=(STR, _REQ),
+    id_inputs=(("map", STR), _REQ),
+    name=(STR, _REQ),
+    description=(STR, _REQ),
+    timestamp=(STR, _REQ),
+    collection_schema=(STR, _DEF),
+    study=(_opt(STR), _DEF),
+    level=(
+        _opt(_rec(_vocabulary=(STR, _REQ), _code=(STR, _REQ), label=(_opt(STR), _DEF))),
+        _DEF,
+    ),
+    members=(
+        (
+            "list",
+            _rec(
+                reference=(STR, _REQ),
+                manifest_hash=(STR, _REQ),
+                role=(("enum", ("raw", "derived")), _REQ),
+                kind=(("enum", ("product", "collection")), _DEF),
+                derived_from=(("list", STR), _DEF),
+            ),
+        ),
+        _DEF,
+    ),
+    sources=MANIFEST[1]["sources"],
+    content_hash=(_opt(STR), _DEF),
+)
+
+
+def collection_root(members: list[dict]) -> str:
+    """ADR-0049: kind-tagged member pins, in member order; provenance edges are excluded."""
+    return merkle_root(
+        [
+            digest(
+                b"tessera-collection-member-v1"
+                + bytes([int(m.get("kind") == "collection")])
+                + m["manifest_hash"].encode("utf-8")
+            )
+            for m in members
+        ]
+    )
+
+
 def block_name_error(name: str) -> str | None:
     """Why `name` is outside the block-name grammar (ADR-0063, SPEC §5), or None."""
     if not name:
@@ -447,11 +492,15 @@ def version_supported(version: str) -> bool:
     return int(major) <= SUPPORTED_MAJOR
 
 
-def stored_verdict(raw: bytes | str, seal: bytes | str | None) -> str:
+def stored_verdict(
+    raw: bytes | str, seal: bytes | str | None, kind: str = "product"
+) -> str:
     """A stored manifest's verdict over its two members, `manifest.json` (`raw`) and `manifest.seal`
     (`seal`, None when the container has none), without block payloads: "ok", "tampered" or
     "refused". In ADR-0066 rule 4's order, so a manifest with two faults gets the verdict of the
     first:
+
+    `kind` selects the product or collection record explicitly (default: product).
 
     refused: no seal (the alpha layout), a seal not exactly "blake3:" + 64 lower-case hex, not
     I-JSON, not its own JCS form, a "manifest_hash" key in band; tampered: the seal is not the
@@ -471,10 +520,23 @@ def stored_verdict(raw: bytes | str, seal: bytes | str | None) -> str:
         return "refused"
     if digest(raw).encode("ascii") != seal:
         return "tampered"
-    if shape_error(m, MANIFEST, ""):
+    if shape_error(m, COLLECTION if kind == "collection" else MANIFEST, ""):
         return "refused"
     if not version_supported(m["tessera_version"]):
         return "refused"
+    if kind == "collection":
+        if digest(jcs_bytes(m["id_inputs"])) != m["id"]:
+            return "tampered"
+        members = m.get("members", [])
+        if collection_root(members) != m.get("content_hash"):
+            return "tampered"
+        schema = m.get("collection_schema", "collection")
+        allowed = {"dataset": "product", "project": "collection"}.get(schema)
+        if allowed and any(
+            member.get("kind", "product") != allowed for member in members
+        ):
+            return "refused"
+        return "ok"
     # SPEC §5: a block name listed twice is refused before any digest is looked at.
     blocks = m.get("blocks", [])
     if duplicate_block_names(blocks):

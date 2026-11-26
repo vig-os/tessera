@@ -33,6 +33,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::provenance::{Source, FORKED_FROM_ROLE};
+
 use crate::field_path::FieldPath;
 use crate::manifest::{
     check, recorded, refuse_newer, stored_object, unknown_keys, unknown_keys_each, SUPPORTED_MAJOR,
@@ -196,6 +198,13 @@ pub struct Collection {
     /// Member products, in declared order — order is significant (folded into `content_hash`).
     #[serde(default)]
     pub members: Vec<CollectionMember>,
+    /// Sealed provenance edges (ADR-0067 D2). A version edge references the predecessor's `id`
+    /// and pins its `manifest_hash` in [`Source::content_hash`], including metadata-only changes.
+    /// Edges do not enter `id_inputs` or the member MMR. Empty edges are omitted, preserving
+    /// every pre-edge collection's stored bytes. A `forked_from` edge requires a caller-supplied
+    /// `fork` key in `id_inputs` at seal; the caller supplies uniqueness across nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<Source>,
     /// MMR root over the members' `manifest_hash`es; `Some` once sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
@@ -211,7 +220,7 @@ pub struct Collection {
 }
 
 /// The paths of every key in a collection object that this build's types don't declare: the top
-/// level, `level` and each `members[i]`. `id_inputs` is an opaque map and is not walked.
+/// level, `level` and each `members[i]` and `sources[i]`. `id_inputs` is an opaque map and is not walked.
 fn newer_fields_of(object: &Value) -> Vec<FieldPath> {
     let mut out = Vec::new();
     let root = FieldPath::root();
@@ -227,6 +236,12 @@ fn newer_fields_of(object: &Value) -> Vec<FieldPath> {
         get("members"),
         CollectionMember::FIELDS,
         &root.key("members"),
+        &mut out,
+    );
+    unknown_keys_each(
+        get("sources"),
+        Source::FIELDS,
+        &root.key("sources"),
         &mut out,
     );
     out
@@ -274,6 +289,7 @@ impl Collection {
             study: None,
             level: None,
             members: Vec::new(),
+            sources: Vec::new(),
             content_hash: None,
             manifest_hash: None,
             newer_fields: Vec::new(),
@@ -292,6 +308,7 @@ impl Collection {
         "study",
         "level",
         "members",
+        "sources",
         "content_hash",
     ];
 
@@ -771,6 +788,24 @@ impl CollectionBuilder {
         self
     }
 
+    /// Set the complete declared identity inputs, retained across versions of a lineage.
+    /// `seal` computes `id` from this map. For a fork, include a caller-chosen `fork` token;
+    /// distinct tokens distinguish workspaces even with identical names and timestamps.
+    /// Start with [`default_collection_id_inputs`] to retain the default identity fields.
+    pub fn with_id_inputs(&mut self, id_inputs: BTreeMap<String, String>) -> &mut Self {
+        self.collection.id_inputs = id_inputs;
+        self
+    }
+
+    /// Append a sealed provenance edge, in order. For [`crate::provenance::SUPERSEDES_ROLE`] or
+    /// [`FORKED_FROM_ROLE`], reference the predecessor's `id` and pin its `manifest_hash` with
+    /// [`Source::with_content_hash`]. Edges change the seal, independently of the member MMR.
+    /// A `forked_from` edge without a `fork` key in `id_inputs` is [`crate::Error::Invalid`] at seal.
+    pub fn add_source(&mut self, source: Source) -> &mut Self {
+        self.collection.sources.push(source);
+        self
+    }
+
     /// Append a **product** member from its resolved handle (ADR-0049 §4) — the type-safe front for
     /// [`add_member`](Self::add_member) that can't mismatch reference/hash.
     pub fn add_product(
@@ -824,7 +859,22 @@ impl CollectionBuilder {
 
     /// Seal: compute the MMR root over the members, then the canonical-JSON seal. Mirrors
     /// [`crate::ProductBuilder::seal`] — the same input always yields byte-identical bytes.
+    /// Recomputes `id` from the declared inputs. A fork without a caller-supplied `fork` key
+    /// is [`crate::Error::Invalid`]; callers own token uniqueness (ADR-0067 D5).
     pub fn seal(mut self) -> crate::Result<Collection> {
+        if self
+            .collection
+            .sources
+            .iter()
+            .any(|s| s.role == FORKED_FROM_ROLE)
+            && !self.collection.id_inputs.contains_key("fork")
+        {
+            return Err(crate::Error::Invalid(
+                "a forked_from collection requires a caller-supplied fork token in id_inputs"
+                    .into(),
+            ));
+        }
+        self.collection.id = self.collection.recompute_id()?;
         // Structural well-formedness of the open `level` tag (the engine still never *interprets* it,
         // ADR-0049 §5): an empty vocabulary or code is malformed, same class as an empty `name`.
         if let Some(level) = &self.collection.level {
@@ -852,7 +902,6 @@ impl CollectionBuilder {
 mod tests {
     use super::*;
     use crate::manifest::Manifest;
-    use crate::provenance::Source;
     use crate::ProductBuilder;
 
     const TS: &str = "2024-01-01T00:00:00Z";
@@ -888,6 +937,41 @@ mod tests {
             vec![raw.id.clone()],
         );
         cb.seal().unwrap()
+    }
+
+    #[test]
+    fn builder_sources_pin_the_predecessor_seal_and_keep_identity() {
+        use crate::provenance::{FORKED_FROM_ROLE, SUPERSEDES_ROLE};
+        let parent = CollectionBuilder::new("version", "d", TS).seal().unwrap();
+        let metadata_parent = CollectionBuilder::new("version", "new metadata", TS)
+            .seal()
+            .unwrap();
+        assert_eq!(parent.id, metadata_parent.id);
+        assert_eq!(parent.content_hash, metadata_parent.content_hash);
+        assert_ne!(parent.manifest_hash, metadata_parent.manifest_hash);
+        let mut builder = CollectionBuilder::new("version", "d", TS);
+        builder.add_source(
+            Source::new(SUPERSEDES_ROLE, &parent.id)
+                .with_content_hash(parent.manifest_hash.as_ref().unwrap()),
+        );
+        let version = builder.seal().unwrap();
+        assert_eq!(version.id, parent.id);
+        assert_eq!(version.content_hash, parent.content_hash);
+        assert_eq!(version.sources[0].reference, parent.id);
+        assert_eq!(version.sources[0].content_hash, parent.manifest_hash);
+        let mut fork = CollectionBuilder::new("version", "d", TS);
+        let mut inputs = parent.id_inputs.clone();
+        inputs.insert("fork".into(), "node-a:1".into());
+        fork.with_id_inputs(inputs.clone()).add_source(
+            Source::new(FORKED_FROM_ROLE, &parent.id)
+                .with_content_hash(parent.manifest_hash.as_ref().unwrap()),
+        );
+        let fork = fork.seal().unwrap();
+        assert_eq!(fork.id_inputs, inputs);
+        assert_ne!(fork.id, parent.id);
+        assert_eq!(fork.id, fork.recompute_id().unwrap());
+        assert_eq!(fork.sources[0].role, FORKED_FROM_ROLE);
+        fork.verify().unwrap();
     }
 
     // Deserialize directly to exercise the new field against the pre-change model too.
@@ -1093,6 +1177,8 @@ mod tests {
                 kind: MemberKind::Collection,
                 derived_from: vec!["p".into()],
             }],
+            sources: vec![Source::new(crate::provenance::SUPERSEDES_ROLE, "parent")
+                .with_content_hash("blake3:parent-seal")],
             content_hash: Some("blake3:c".into()),
             manifest_hash: Some("blake3:m".into()),
             newer_fields: Vec::new(),

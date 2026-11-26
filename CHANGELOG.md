@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Collections carry sealed `sources` edges with `supersedes` and `forked_from` roles (ADR-0067 step 2, #997).
+  Version edges reference a predecessor's id and pin its manifest seal, independently of the member MMR.
+  `CollectionBuilder::add_source` records edges; `with_id_inputs` accepts caller-declared identity, including
+  the required `fork` token for a forked lineage. Missing tokens are `Error::Invalid` at seal. Empty sources
+  are omitted, preserving existing collection bytes. Native, reference and wasm readers share seal vectors.
+
 ### Changed
 
 - **A repository written by v0.1.0-alpha.7 or earlier is refused** (`Error::UnsupportedRepositoryLayout`) by every

@@ -11,6 +11,15 @@ use serde::{Deserialize, Serialize};
 use crate::manifest::Manifest;
 use crate::{Error, Result};
 
+/// A version edge to the version replaced on the same lineage (SPEC §8, ADR-0067 D2).
+/// `reference` is the predecessor's `id`; `content_hash` pins its `manifest_hash`.
+pub const SUPERSEDES_ROLE: &str = "supersedes";
+
+/// An origin edge to the version a new lineage forked from (ADR-0067 D5).
+/// Collections carrying this role require a caller-supplied `fork` key in `id_inputs` at seal.
+/// The edge references the origin's `id` and pins its `manifest_hash`.
+pub const FORKED_FROM_ROLE: &str = "forked_from";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Source {
     /// Typed role of this edge, e.g. "ingested_from", "emission_data", "calibration".
@@ -18,7 +27,7 @@ pub struct Source {
     /// Identifier or path of the upstream artifact.
     pub reference: String,
     /// Content hash of the upstream artifact, when known (closes the integrity chain). Per SPEC §8
-    /// this is the parent product's `manifest_hash` — the seal the edge commits to.
+    /// this is the parent product's or collection's `manifest_hash` — the seal the edge commits to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
 }
