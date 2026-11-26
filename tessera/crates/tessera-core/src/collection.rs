@@ -890,6 +890,90 @@ mod tests {
         cb.seal().unwrap()
     }
 
+    // Deserialize directly to exercise the new field against the pre-change model too.
+    fn version_builder(role: &str, fork: Option<&str>) -> CollectionBuilder {
+        let parent = CollectionBuilder::new("parent", "d", TS).seal().unwrap();
+        let mut value = serde_json::to_value(Collection::new("version", "d", TS)).unwrap();
+        value["sources"] = serde_json::json!([{
+            "role": role, "reference": parent.id, "content_hash": parent.manifest_hash
+        }]);
+        if let Some(token) = fork {
+            value["id_inputs"]["fork"] = token.into();
+        }
+        let collection = serde_json::from_value(value).unwrap();
+        CollectionBuilder { collection }
+    }
+
+    #[test]
+    fn collection_sources_are_sealed_and_skipped_when_empty() {
+        let plain = CollectionBuilder::new("version", "d", TS).seal().unwrap();
+        let edged = version_builder("supersedes", None).seal().unwrap();
+        assert_eq!(plain.id, edged.id);
+        assert_eq!(plain.content_hash, edged.content_hash);
+        assert_ne!(plain.manifest_hash, edged.manifest_hash);
+        let (bytes, seal) = edged.to_stored().unwrap();
+        let parsed = Collection::from_stored(&bytes, &seal).unwrap();
+        assert!(parsed.newer_fields().is_empty());
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["sources"][0]["role"], "supersedes");
+        let mut tampered = value;
+        tampered["sources"][0]["content_hash"] = "blake3:changed".into();
+        assert!(matches!(
+            Collection::from_stored(&crate::canonical::to_bytes(&tampered).unwrap(), &seal),
+            Err(crate::Error::Integrity { .. })
+        ));
+        let (bytes, seal) = plain.to_stored().unwrap();
+        let mut legacy: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(legacy.get("sources").is_none());
+        legacy.as_object_mut().unwrap().remove("sources");
+        assert_eq!(bytes, crate::canonical::to_bytes(&legacy).unwrap());
+        assert_eq!(seal, crate::hash::digest(&bytes));
+    }
+
+    #[test]
+    fn a_forked_version_without_a_fork_token_is_refused() {
+        assert!(matches!(
+            version_builder("forked_from", None).seal(),
+            Err(crate::Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn fork_tokens_define_deterministic_distinct_lineages() {
+        let a = version_builder("forked_from", Some("node-a:1"))
+            .seal()
+            .unwrap();
+        let again = version_builder("forked_from", Some("node-a:1"))
+            .seal()
+            .unwrap();
+        let b = version_builder("forked_from", Some("node-b:1"))
+            .seal()
+            .unwrap();
+        assert_eq!(a.id, a.recompute_id().unwrap());
+        assert_eq!(
+            a.canonical_bytes().unwrap(),
+            again.canonical_bytes().unwrap()
+        );
+        assert_ne!(a.id, b.id);
+        assert_eq!(a.content_hash, b.content_hash);
+    }
+
+    #[test]
+    fn collection_source_newer_fields_are_not_dropped() {
+        let mut value = serde_json::to_value(Collection::new("c", "d", TS)).unwrap();
+        value["content_hash"] = crate::hash::merkle_root(&[]).into();
+        value["sources"] = serde_json::json!([{
+            "role": "supersedes", "reference": "parent", "future": true
+        }]);
+        let bytes = crate::canonical::to_bytes(&value).unwrap();
+        let c = Collection::from_stored(&bytes, &crate::hash::digest(&bytes)).unwrap();
+        assert_eq!(c.newer_fields(), &["sources[0].future"]);
+        assert!(matches!(
+            c.to_stored(),
+            Err(crate::Error::NewerFormatFields { .. })
+        ));
+    }
+
     #[test]
     fn collection_is_deterministic_and_content_addressed() {
         let raw = raw_listmode();
