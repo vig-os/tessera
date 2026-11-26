@@ -259,3 +259,112 @@ fn an_invalid_node_is_refused_with_its_variant_by_every_entry_point() {
     assert_gap(ws.seal(&sealed).unwrap_err());
     assert!(!sealed.exists(), "WriteSession::seal wrote before refusing");
 }
+
+// #978: use the legacy form for dtype too: its seal previously skipped schema validation.
+fn contract_leaves(dtype_mix: bool, legacy: bool) -> Vec<(BlockRef, BlockPayload)> {
+    (0..2)
+        .map(|index| {
+            let dtype = if dtype_mix && index == 1 { "i8" } else { "i4" };
+            let nullable = !dtype_mix && index == 1;
+            let mut column = col("value", dtype);
+            column.nullable = nullable;
+            let spec = TableSpec {
+                columns: vec![column],
+                rows: 1,
+                row_index: None,
+                partition: (!legacy).then_some(Partition {
+                    index,
+                    last: index == 1,
+                }),
+                edition: None,
+                codec_profile: None,
+            };
+            let values = if dtype == "i8" {
+                ColumnData::I64(vec![7])
+            } else {
+                ColumnData::I32(vec![7])
+            };
+            let values = if nullable {
+                ColumnData::Nullable {
+                    values: Box::new(values),
+                    validity: vec![true],
+                }
+            } else {
+                values
+            };
+            let name = if legacy {
+                format!("events_{index:04}")
+            } else {
+                format!("events/{index:04}")
+            };
+            table_block(&name, &spec, &vec![("value".into(), values)]).unwrap()
+        })
+        .collect()
+}
+
+fn assert_contract_error(error: Error) {
+    match error {
+        Error::LogicalTable {
+            name,
+            reason: LogicalTableError::SchemaMismatch { leaf, detail },
+        } => {
+            assert_eq!(name, "events");
+            assert!(leaf.ends_with("0001"), "{leaf}");
+            assert!(detail.contains("value"), "{detail}");
+            assert!(detail.contains("i4"), "{detail}");
+        }
+        error => panic!("expected column contract refusal, got {error:?}"),
+    }
+}
+
+fn builder_contract_refusal(dtype_mix: bool) {
+    for legacy in [true, false] {
+        let mut builder = tessera_core::ProductBuilder::new("test", "contracts", "d", TS);
+        for (block, _) in contract_leaves(dtype_mix, legacy) {
+            builder.add_block_ref(block);
+        }
+        assert_contract_error(
+            builder
+                .seal()
+                .expect_err("a mismatched contract was sealed"),
+        );
+    }
+}
+
+fn streaming_contract_refusal(dtype_mix: bool) {
+    for legacy in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let ws =
+            WriteSession::create(&dir.path().join("ws"), "test", "contracts", "d", TS).unwrap();
+        let mut writer = StreamWriter::new(ws, 2, 2);
+        for (block, payload) in contract_leaves(dtype_mix, legacy) {
+            writer
+                .push(Box::new(move || Ok(((block, payload), Vec::new()))))
+                .unwrap();
+        }
+        let out = dir.path().join("invalid.tsra");
+        assert_contract_error(
+            writer
+                .finish(&out)
+                .expect_err("a mismatched contract was sealed"),
+        );
+        assert!(!out.exists());
+    }
+}
+
+#[test]
+fn builder_refuses_nullable_contract_mix() {
+    builder_contract_refusal(false);
+}
+#[test]
+fn builder_refuses_dtype_contract_mix() {
+    builder_contract_refusal(true);
+}
+#[test]
+fn streaming_refuses_nullable_contract_mix() {
+    streaming_contract_refusal(false);
+}
+#[test]
+fn streaming_refuses_dtype_contract_mix() {
+    streaming_contract_refusal(true);
+}
