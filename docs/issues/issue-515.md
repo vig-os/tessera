@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-25T05:23:07Z
+updated: 2026-11-26T01:27:41Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-25T10:53:04.074Z
+synced: 2026-11-26T10:26:36.357Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -45,15 +45,15 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unlimit-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.54.1
  - [ ] <!-- unlimit-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
- - [ ] <!-- unlimit-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.94
- - [ ] <!-- unlimit-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.94
- - [ ] <!-- unlimit-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.94
- - [ ] <!-- unlimit-branch=renovate/vortex-edition-0.x -->chore(deps): update rust crate vortex-edition to 0.94
- - [ ] <!-- unlimit-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.94
- - [ ] <!-- unlimit-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.94
- - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.94
- - [ ] <!-- unlimit-branch=renovate/vortex-scan-0.x -->chore(deps): update rust crate vortex-scan to 0.94
- - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.94
+ - [ ] <!-- unlimit-branch=renovate/vortex-array-0.x -->chore(deps): update rust crate vortex-array to 0.95
+ - [ ] <!-- unlimit-branch=renovate/vortex-btrblocks-0.x -->chore(deps): update rust crate vortex-btrblocks to 0.95
+ - [ ] <!-- unlimit-branch=renovate/vortex-buffer-0.x -->chore(deps): update rust crate vortex-buffer to 0.95
+ - [ ] <!-- unlimit-branch=renovate/vortex-edition-0.x -->chore(deps): update rust crate vortex-edition to 0.95
+ - [ ] <!-- unlimit-branch=renovate/vortex-file-0.x -->chore(deps): update rust crate vortex-file to 0.95
+ - [ ] <!-- unlimit-branch=renovate/vortex-io-0.x -->chore(deps): update rust crate vortex-io to 0.95
+ - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.95
+ - [ ] <!-- unlimit-branch=renovate/vortex-scan-0.x -->chore(deps): update rust crate vortex-scan to 0.95
+ - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.95
  - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.8.2
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.28.0
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
@@ -122,15 +122,15 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `zarrs 0.23` → [Updates: `lock file @ 0.23.14`]
  - `bytes 1` → [Updates: `lock file @ 1.12.2`]
  - `half 2`
- - `vortex-file 0.93` → [Updates: `0.94`]
- - `vortex-array 0.93` → [Updates: `0.94`]
- - `vortex-btrblocks 0.93` → [Updates: `0.94`]
- - `vortex-buffer 0.93` → [Updates: `0.94`]
- - `vortex-edition 0.93` → [Updates: `0.94`]
- - `vortex-io 0.93` → [Updates: `0.94`]
- - `vortex-layout 0.93` → [Updates: `0.94`]
- - `vortex-scan 0.93` → [Updates: `0.94`]
- - `vortex-session 0.93` → [Updates: `0.94`]
+ - `vortex-file 0.93` → [Updates: `0.95`]
+ - `vortex-array 0.93` → [Updates: `0.95`]
+ - `vortex-btrblocks 0.93` → [Updates: `0.95`]
+ - `vortex-buffer 0.93` → [Updates: `0.95`]
+ - `vortex-edition 0.93` → [Updates: `0.95`]
+ - `vortex-io 0.93` → [Updates: `0.95`]
+ - `vortex-layout 0.93` → [Updates: `0.95`]
+ - `vortex-scan 0.93` → [Updates: `0.95`]
+ - `vortex-session 0.93` → [Updates: `0.95`]
  - `futures 0.3` → [Updates: `lock file @ 0.3.34`]
  - `clap 4` → [Updates: `lock file @ 4.6.10`]
  - `png 0.17` → [Updates: `0.18`]
