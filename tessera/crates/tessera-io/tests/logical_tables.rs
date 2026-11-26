@@ -545,3 +545,31 @@ fn ingest_multi_block_sink_refuses_incompatible_group_contracts() {
         assert_contract_error(sink.push(vec![("value".into(), values)]).unwrap_err());
     }
 }
+
+#[test]
+fn array_bare_name_next_to_numbered_table_seals_and_reads() {
+    use tessera_core::block::array::ArraySpec;
+    use tessera_io::array::{array_block, ArrayData};
+    let (array, array_payload) = array_block(
+        "img",
+        &ArraySpec::new(vec![1], "int16"),
+        &ArrayData::I16(vec![3]),
+    )
+    .unwrap();
+    let (mut table, table_payload) = contract_leaves(true, true).remove(0);
+    table.name = "img_0001".parse().unwrap();
+    let table_payload = BlockPayload::new(table.name.clone(), table_payload.bytes);
+    let mut builder = tessera_core::ProductBuilder::new("test", "mixed-kinds", "d", TS);
+    builder.add_block_ref(array).add_block_ref(table);
+    let manifest = builder.seal().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("mixed.tsra");
+    pack(&manifest, &[array_payload, table_payload], &out).unwrap();
+    let mut reader = Reader::open(&out).unwrap();
+    assert_eq!(
+        reader.table_group("img_0001").unwrap(),
+        TableGroup::Single("img_0001".parse().unwrap())
+    );
+    reader.logical_table("img_0001").unwrap();
+    reader.read_block("img").unwrap();
+}
