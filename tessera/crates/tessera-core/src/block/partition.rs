@@ -396,8 +396,9 @@ pub fn check_partitions(blocks: &[BlockRef]) -> Result<()> {
 }
 
 /// Refuse incompatible column contracts in marked and legacy flat table groups, before packing
-/// even a manifest sealed outside `ProductBuilder`. This checks contracts only; partition
-/// topology is checked by [`check_partitions`]. Rows, codecs and descriptive metadata may differ.
+/// even a manifest sealed outside `ProductBuilder`. Membership and marked partition topology
+/// come from [`table_group`]; only table members declare column contracts. Rows, codecs and
+/// descriptive metadata may differ.
 pub fn check_table_contracts(blocks: &[BlockRef]) -> Result<()> {
     let mut names = std::collections::BTreeSet::new();
     for b in blocks {
@@ -415,16 +416,18 @@ pub fn check_table_contracts(blocks: &[BlockRef]) -> Result<()> {
         }
     }
     for name in names {
-        let refs = blocks
+        let group = table_group(blocks, name)?;
+        // Legacy resolution also retains non-table names for compatibility. Only table blocks
+        // declare column contracts; an array `img` does not constrain a table `img_0001`.
+        let by_name: std::collections::HashMap<_, _> =
+            blocks.iter().map(|b| (&b.name, b)).collect();
+        let refs = group
+            .blocks()
             .iter()
-            .filter(|b| {
-                is_legacy_flat_member(&b.name, name)
-                    || (is_child_of(&b.name, name) && b.spec.get("partition").is_some())
-            })
+            .filter_map(|n| by_name.get(n).copied())
+            .filter(|b| b.kind == BlockKind::Table)
             .collect::<Vec<_>>();
-        if refs.len() > 1 {
-            specs_of(name, &refs)?;
-        }
+        specs_of(name, &refs)?;
     }
     Ok(())
 }
@@ -604,11 +607,20 @@ fn specs_of(name: &str, refs: &[&BlockRef]) -> Result<Vec<TableSpec>> {
                         first.nullable,
                     )
                 {
-                    return Err(mismatch(b, format!(
-                        "column '{}': (name={:?}, dtype={}, nullable={}), first leaf (name={:?}, dtype={}, nullable={})",
-                        column.name, column.name, column.dtype, column.nullable,
-                        first.name, first.dtype, first.nullable
-                    )));
+                    return Err(mismatch(
+                        b,
+                        format!(
+                            "column '{}': (name={:?}, dtype={}, nullable={}), \
+                             first leaf (name={:?}, dtype={}, nullable={})",
+                            column.name,
+                            column.name,
+                            column.dtype,
+                            column.nullable,
+                            first.name,
+                            first.dtype,
+                            first.nullable
+                        ),
+                    ));
                 }
             }
         }

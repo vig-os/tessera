@@ -405,8 +405,8 @@ A reader MAY project a subset of columns or random-`take` rows; the format suppo
     at any depth, belongs to a child class ADR-0064 §2.1 registers (today only the `chunk_index` sidecar
     `T/<leaf>.cidx` of an existing leaf); the indices are unique and form `0..=k` with `k ≥ 1`; exactly the leaf
     `k` has `last: true`; the leaves appear in the manifest in increasing index order; and every leaf has the same
-    column names, dtypes and nullability in the same order. Its blocks, in **index order** (which is their manifest order), are the logical
-    table.
+    column names, dtypes and nullability in the same order. Its blocks, in **index order** (which is
+    their manifest order), are the logical table.
     A reader MUST refuse an invalid partitioned table with an error, never skip or merge around a block.
     Per-leaf row counts are taken from each `TableSpec.rows` and are not otherwise checked.
   - **Legacy flat** (products written before ADR-0064). Otherwise, the blocks named `T` or `T_` followed by

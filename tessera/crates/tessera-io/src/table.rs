@@ -940,15 +940,19 @@ pub(crate) fn check_column_contract(
         )
     {
         return Err(Error::LogicalTable {
-                name: table_name.to_owned(),
-                reason: tessera_core::block::LogicalTableError::SchemaMismatch {
-                    leaf: leaf.to_owned(),
-                    detail: format!(
-                        "column '{name}': (name={name:?}, dtype={}, nullable={nullable}), first leaf contract (name={:?}, dtype={}, nullable={})",
-                        data.numpy_code(), col.name, col.dtype, col.nullable
-                    ),
-                },
-            });
+            name: table_name.to_owned(),
+            reason: tessera_core::block::LogicalTableError::SchemaMismatch {
+                leaf: leaf.to_owned(),
+                detail: format!(
+                    "column '{name}': (name={name:?}, dtype={}, nullable={nullable}), \
+                     declared contract (name={:?}, dtype={}, nullable={})",
+                    data.numpy_code(),
+                    col.name,
+                    col.dtype,
+                    col.nullable
+                ),
+            },
+        });
     }
     Ok(())
 }

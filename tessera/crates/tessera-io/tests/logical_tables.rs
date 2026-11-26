@@ -226,7 +226,8 @@ fn an_invalid_node_is_refused_with_its_variant_by_every_entry_point() {
         .iter()
         .map(|(_, p)| BlockPayload::new(p.name.clone(), p.bytes.clone()))
         .collect();
-    pack(&m, &payloads, &tsra).unwrap();
+    assert_gap(pack(&m, &payloads, &tsra).unwrap_err());
+    write_old_archive(&m, &payloads, &tsra);
 
     let mut r = Reader::open(&tsra).unwrap();
     assert_gap(r.table_group("pairs").unwrap_err());
@@ -404,34 +405,14 @@ fn packers_refuse_previously_sealed_contract_mixes_before_writing() {
 
 #[test]
 fn readers_still_refuse_previously_sealed_contract_mixes() {
-    use std::io::Write;
     for dtype_mix in [false, true] {
         for legacy in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let leaves = contract_leaves(dtype_mix, legacy);
             let m = sealed_contract_manifest(&leaves);
-            let (json, seal) = tessera_io::stored::manifest(&m).unwrap();
             let path = dir.path().join("old.tsra");
-            let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored)
-                .last_modified_time(zip::DateTime::default())
-                .large_file(true)
-                .system(zip::System::Unix);
-            let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
-            for (name, bytes) in [
-                ("mimetype", tessera_io::MIMETYPE.as_bytes()),
-                ("manifest.seal", seal.as_bytes()),
-                ("manifest.json", json.as_slice()),
-            ] {
-                zip.start_file(name, options).unwrap();
-                zip.write_all(bytes).unwrap();
-            }
-            for (_, p) in leaves {
-                zip.start_file(format!("blocks/{}", p.name), options)
-                    .unwrap();
-                zip.write_all(&p.bytes).unwrap();
-            }
-            zip.finish().unwrap();
+            let payloads = leaves.into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+            write_old_archive(&m, &payloads, &path);
             let mut reader = Reader::open(&path).unwrap();
             assert_contract_error(reader.logical_table("events").err().unwrap());
         }
@@ -572,4 +553,137 @@ fn array_bare_name_next_to_numbered_table_seals_and_reads() {
     );
     reader.logical_table("img_0001").unwrap();
     reader.read_block("img").unwrap();
+}
+
+fn shaped_contract_leaves(legacy: bool, change: &str) -> Vec<(BlockRef, BlockPayload)> {
+    (0..2)
+        .map(|index| {
+            let mut columns = vec![col("value", "i4"), col("energy", "i4")];
+            if index == 1 {
+                match change {
+                    "order" => columns.swap(0, 1),
+                    "extra" => columns.push(col("time", "i4")),
+                    "metadata" => {
+                        columns[0].description = Some("Second leaf description".into());
+                        columns[0].short_name = Some("Measured value".into());
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let data = columns
+                .iter()
+                .map(|c| (c.name.clone(), ColumnData::I32(vec![7])))
+                .collect();
+            let spec = TableSpec {
+                columns,
+                rows: 1,
+                row_index: None,
+                partition: (!legacy).then_some(Partition {
+                    index,
+                    last: index == 1,
+                }),
+                edition: None,
+                codec_profile: None,
+            };
+            let name = if legacy {
+                format!("events_{index:04}")
+            } else {
+                format!("events/{index:04}")
+            };
+            table_block(&name, &spec, &data).unwrap()
+        })
+        .collect()
+}
+
+fn assert_shape_contract_refused(change: &str) {
+    for legacy in [false, true] {
+        let leaves = shaped_contract_leaves(legacy, change);
+        let mut builder = tessera_core::ProductBuilder::new("test", "shape", "d", TS);
+        for (block, _) in &leaves {
+            builder.add_block_ref(block.clone());
+        }
+        assert!(matches!(
+            builder.seal(),
+            Err(Error::LogicalTable {
+                reason: LogicalTableError::SchemaMismatch { .. },
+                ..
+            })
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let ws = WriteSession::create(&dir.path().join("ws"), "test", "shape", "d", TS).unwrap();
+        let mut writer = StreamWriter::new(ws, 2, 2);
+        for block in leaves {
+            writer.push(Box::new(move || Ok((block, vec![])))).unwrap();
+        }
+        assert!(matches!(
+            writer.finish(&dir.path().join("out.tsra")),
+            Err(Error::LogicalTable {
+                reason: LogicalTableError::SchemaMismatch { .. },
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn reordered_columns_are_refused() {
+    assert_shape_contract_refused("order");
+}
+
+#[test]
+fn extra_columns_are_refused() {
+    assert_shape_contract_refused("extra");
+}
+
+#[test]
+fn descriptive_metadata_may_differ_between_leaves() {
+    for legacy in [false, true] {
+        let leaves = shaped_contract_leaves(legacy, "metadata");
+        let mut builder = tessera_core::ProductBuilder::new("test", "metadata", "d", TS);
+        for (block, _) in &leaves {
+            builder.add_block_ref(block.clone());
+        }
+        let manifest = builder.seal().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("metadata.tsra");
+        pack(
+            &manifest,
+            &leaves.into_iter().map(|(_, p)| p).collect::<Vec<_>>(),
+            &out,
+        )
+        .unwrap();
+        let mut reader = Reader::open(&out).unwrap();
+        let table = reader.logical_table("events").unwrap();
+        assert_eq!(
+            table.column(&mut reader, "value").unwrap(),
+            ColumnData::I32(vec![7, 7])
+        );
+    }
+}
+
+// Deliberately model an old malformed product without using a writer that must refuse it.
+fn write_old_archive(m: &Manifest, payloads: &[BlockPayload], path: &Path) {
+    use std::io::Write;
+    let (json, seal) = tessera_io::stored::manifest(m).unwrap();
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default())
+        .large_file(true)
+        .system(zip::System::Unix);
+    let mut archive = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    for (name, bytes) in [
+        ("mimetype", tessera_io::MIMETYPE.as_bytes()),
+        ("manifest.seal", seal.as_bytes()),
+        ("manifest.json", json.as_slice()),
+    ] {
+        archive.start_file(name, options).unwrap();
+        archive.write_all(bytes).unwrap();
+    }
+    for p in payloads {
+        archive
+            .start_file(format!("blocks/{}", p.name), options)
+            .unwrap();
+        archive.write_all(&p.bytes).unwrap();
+    }
+    archive.finish().unwrap();
 }
