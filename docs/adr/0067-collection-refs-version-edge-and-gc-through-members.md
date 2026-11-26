@@ -102,11 +102,10 @@ lock, tmp/                       the writer lock and temp files (ADR-0036, 2026-
   travel inside the sealed versions; the old repository stays as it was.
 - **Ordering with #975.** PR #990 lands first: it is the encoding this layout uses, and it is ready. Step 1 below then
   moves refs into the namespaces, makes the records typed, moves the log cache, and bumps the marker from 1 to 2.
-  #990 also ships `tessera migrate-refs`, which converts a pre-#975 repository to layout 1. Under the no-migration
-  policy that verb has no place: layout 2 refuses layout 1 too, so its output is a repository no later build opens.
-  It should be dropped from #990 before it lands, together with #990's text and test that point at the dropped
-  `refs/pin:` reservation (its ADR-0036 amendment and `no_lineage_maps_to_a_file_name_holding_a_colon`); whatever
-  of these lands, step 1 removes.
+  #990 has no migration verb (it refuses a pre-#975 repository with `Error::UnsupportedRepositoryLayout`, never
+  converts it), so nothing of it has to be retired. Two of its parts point at the `refs/pin:` reservation an earlier
+  draft of this ADR made: the text of its ADR-0036 amendment and the test
+  `no_lineage_maps_to_a_file_name_holding_a_colon`. Step 1 removes or retargets both under namespaced refs.
 - **Old tools: no coexistence.** Builds from #990 on refuse layout 2 (they read only `tessera-repository 1`). Builds
   before #990 check no marker and are **not** refused: their `gc` finds no files directly under `refs/`, so it sees no
   roots and would empty the store. They must never be run against a layout-2 repository.
@@ -468,11 +467,11 @@ step, with the #947 acceptance item each one proves.
 Ordered, one PR each, each under 1500 changed lines. Step 1 starts after PR #990 (#975) has merged.
 
 1. **Io: repository layout 2** (T0). The marker bump to `tessera-repository 2` and the refusal of every other layout
-   (`UnsupportedRepositoryLayout`), `refs/lineages/` and `refs/pins/` with the typed record grammar (product records
-   only at this step), `log/lineages/`, `InvalidRefName`. It retires #990's `Error::LegacyRefLayout`, its
-   unknown-marker `Error::Invalid` and its `InvalidLineage` (all replaced by `UnsupportedRepositoryLayout` and
-   `InvalidRefName`), and removes `migrate-refs` and the `refs/pin:` text and test if #990 shipped them. ADR-0036 and
-   the book's repository chapter describe the layout. About 900 lines.
+   (#990's `Error::UnsupportedRepositoryLayout { found, required }`, reused, with `required` bumped to layout 2),
+   `refs/lineages/` and `refs/pins/` with the typed record grammar (product records only at this step),
+   `log/lineages/`, and `InvalidRefName` generalising #990's `InvalidLineage`. It removes or retargets #990's
+   `refs/pin:` text in the ADR-0036 amendment and its `no_lineage_maps_to_a_file_name_holding_a_colon` test. ADR-0036
+   and the book's repository chapter describe the layout. About 900 lines.
 2. **Core: `sources` on `Collection`** (T1). The field, `FIELDS`, a builder method, role constants `supersedes` and
    `forked_from`, the `fork`-token check for a forked version, SPEC §4 (collection record) and §8 (versioning covers
    collections), seal-case vectors. Corpus-neutral by test. About 500 lines.
