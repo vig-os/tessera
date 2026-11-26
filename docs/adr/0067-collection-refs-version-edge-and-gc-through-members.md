@@ -43,8 +43,8 @@ What blocks that today (read at `d24c1f9a`, which contains #946's fix as `ca7512
 4. **No durable pin.** A three-way merge in kit needs the common ancestor; for long-lived variants that is an old
    version of either lineage, which must stay readable (#947, second comment, item 1).
 5. **Refs are untyped files in one flat directory.** `refs/<name>` holds a bare address, so a ref cannot say what it
-   is (a lineage tip or a pin) or what it names (a product or a collection). #975 (PR #990, in flight) makes the
-   name-to-file mapping injective by percent-encoding and adds a `layout` marker (`tessera-repository 1`).
+   is (a lineage tip or a pin) or what it names (a product or a collection). #975 (PR #990, merged as `93fc6716`)
+   made the name-to-file mapping injective by percent-encoding and added a `layout` marker (`tessera-repository 1`).
 
 ## Decisions
 
@@ -100,7 +100,7 @@ lock, tmp/                       the writer lock and temp files (ADR-0036, 2026-
   converted in place. Its data moves the way every other format break moved: with the build that wrote it, `tessera
   seal` each lineage tip into a self-contained `.tsra`, then `import` those into a new repository. History edges
   travel inside the sealed versions; the old repository stays as it was.
-- **Ordering with #975.** PR #990 lands first: it is the encoding this layout uses, and it is ready. Step 1 below then
+- **Ordering with #975.** PR #990 landed first (`93fc6716`): it is the encoding this layout uses. Step 1 below then
   moves refs into the namespaces, makes the records typed, moves the log cache, and bumps the marker from 1 to 2.
   #990 has no migration verb (it refuses a pre-#975 repository with `Error::UnsupportedRepositoryLayout`, never
   converts it), so nothing of it has to be retired. Two of its parts point at the `refs/pin:` reservation an earlier
@@ -464,7 +464,7 @@ step, with the #947 acceptance item each one proves.
 
 ## Implementation plan
 
-Ordered, one PR each, each under 1500 changed lines. Step 1 starts after PR #990 (#975) has merged.
+Ordered, one PR each, each under 1500 changed lines. Step 1 builds on PR #990 (#975), merged as `93fc6716`.
 
 1. **Io: repository layout 2** (T0). The marker bump to `tessera-repository 2` and the refusal of every other layout
    (#990's `Error::UnsupportedRepositoryLayout { found, required }`, reused, with `required` bumped to layout 2),
