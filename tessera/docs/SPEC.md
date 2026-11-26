@@ -122,7 +122,13 @@ serializer, for the hashed form. Non-ASCII strings follow RFC 8785's escaping ru
     JCS bytes with no top-level `manifest_hash` key (a member's `manifest_hash` pin stays: it is data), its
     seal is `digest(<those bytes>)` in a `collection.seal` file beside it (`<stem>.collection.seal` beside a
     sub-collection's `<stem>.collection.json`), `content_hash` is required, it MUST be I-JSON, and a key the
-    reader doesn't model (top level, `level`, `members[]`) verifies, is warned about and blocks a re-seal.
+    reader doesn't model (top level, `level`, `members[]`, `sources[]`) verifies, is warned about and blocks a re-seal.
+    A collection record contains `tessera_version`, `id`, `id_inputs`, `name`, `description`,
+    `timestamp`, `collection_schema` (default `"collection"`), optional `study` and `level`, ordered
+    `members` (default empty), optional `sources: array<Source>` (default empty), and `content_hash`.
+    `Source` is the same edge record as in §5. A writer MUST omit empty collection `sources`, preserving
+    existing collection bytes; a non-empty list is sealed but does not enter `id_inputs` or the member MMR.
+    Version edges pin the predecessor's `manifest_hash`, including when only its metadata changed (§8).
   - An **embedded schema** (`schema`, §5) is different: it is a rule set, not data. A reader that finds a
     key it doesn't model anywhere in it (top level, `fields[]`, `blocks[]`, `tables.<role>` and its
     `columns[]`/`references[]`, `arrays.<role>`; a field's `default` is opaque) MUST NOT report the product
@@ -637,9 +643,25 @@ On reading a block, the reader MUST verify the bytes against the BlockRef `diges
 set (§6, "One reading"), so a `.tsra` that verifies reads the same under every zip reader, byte for byte.
 
 ## 8. Versioning
-Products are immutable. A new version is a new product (new `id`) with a `Source`
-`{ role: "supersedes" | "derived_from", reference: <parent id>, content_hash: <parent manifest_hash> }`,
-forming a tamper-evident Merkle DAG.
+Products and collections are immutable versions. `id` is the stable lineage handle, computed from
+`id_inputs`; `manifest_hash` identifies one version. A new version on the same lineage retains its
+`id_inputs` and carries a sealed `Source`
+`{ role: "supersedes", reference: <parent id>, content_hash: <parent manifest_hash> }`.
+The pin is the predecessor's seal, never its `content_hash`: a metadata-only change leaves the content
+root unchanged but changes the seal. `sources` is excluded from identity inputs and from the content MMR.
+
+Collection writers MUST refuse a `supersedes` or `forked_from` edge without a non-empty
+`content_hash` pin to the predecessor's `manifest_hash`. Other roles may remain reference-only.
+These writer rules apply to building a seal, recomputing one, and emitting canonical or stored bytes,
+including after public-field mutations. Readers still verify received bytes under §4; writer-rule
+validation is not an additional reader refusal.
+
+A collection fork starts a distinct lineage with a `forked_from` edge to the origin's `id` and
+`manifest_hash`. A writer MUST refuse to seal a collection carrying a `forked_from` edge without a
+non-empty, caller-supplied `fork` token in `id_inputs` (`Error::Invalid`). The caller supplies token uniqueness across
+nodes; tessera never generates randomness. Later versions retain the same identity inputs, including
+`fork`. Repeating the same inputs is deterministic; different tokens yield different lineage ids.
+`derived_from` continues to record derivation. These edges form a tamper-evident Merkle DAG (ADR-0067 D2/D5).
 
 ## 9. Conformance
 `tessera/corpus/corpus.json` lists golden `{name, product, id, content_hash, manifest_hash}` for the

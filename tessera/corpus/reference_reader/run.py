@@ -52,7 +52,7 @@ def check_seal_cases() -> int:
             if "manifest_hex" in c
             else c["manifest"].encode("utf-8")
         )
-        got = stored_verdict(raw, c["seal"])
+        got = stored_verdict(raw, c["seal"], c.get("kind", "product"))
         if got != c["verdict"]:
             fails += 1
             print(f"seal case {c['name']}: expected {c['verdict']}, got {got}")

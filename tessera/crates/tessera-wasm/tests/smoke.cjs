@@ -27,7 +27,9 @@ assert.ok(cases.length > 0, "seal-cases.json has cases");
 const bytes = (c) =>
   c.manifest_hex !== undefined ? Uint8Array.from(Buffer.from(c.manifest_hex, "hex")) : utf8(c.manifest);
 const disagreements = cases.filter(
-  (c) => t.seal_verdict(bytes(c), c.seal === null ? undefined : utf8(c.seal)) !== c.verdict,
+  (c) => (c.kind === "collection" ? t.collection_seal_verdict : t.seal_verdict)(
+    bytes(c), c.seal === null ? undefined : utf8(c.seal),
+  ) !== c.verdict,
 );
 assert.deepStrictEqual(
   disagreements.map((c) => c.name),

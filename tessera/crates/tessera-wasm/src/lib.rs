@@ -60,6 +60,21 @@ pub fn seal_verdict(manifest_json: &[u8], manifest_seal: Option<Vec<u8>>) -> Str
     .to_owned()
 }
 
+/// A collection's stored-byte verdict, with the vocabulary of [`seal_verdict`].
+/// Takes `collection.json` and optional `collection.seal` bytes. Checks the seal, declared form,
+/// identity and kind-tagged member MMR through the native collection reader, including sealed
+/// `sources` and newer fields (SPEC §4, ADR-0067). Does not resolve members or edge targets.
+#[wasm_bindgen]
+pub fn collection_seal_verdict(collection_json: &[u8], collection_seal: Option<Vec<u8>>) -> String {
+    match tessera_core::Collection::from_stored_members(collection_json, collection_seal.as_deref())
+    {
+        Ok(_) => "ok",
+        Err(Error::Integrity { .. }) => "tampered",
+        Err(_) => "refused",
+    }
+    .to_owned()
+}
+
 /// Verify an **ed25519 signature** over a product: checks the [`Signature`] envelope (JSON) against the
 /// manifest's seal and the signer's hex public key. `true` iff the signature is valid and the product
 /// is unaltered since signing: the stored manifest is verified against its seal first
@@ -179,7 +194,12 @@ mod tests {
         let disagreements: Vec<String> = cases
             .iter()
             .filter_map(|c| {
-                let got = seal_verdict(
+                let verdict = if c["kind"] == "collection" {
+                    collection_seal_verdict
+                } else {
+                    seal_verdict
+                };
+                let got = verdict(
                     &manifest_bytes(c),
                     c["seal"].as_str().map(|s| s.as_bytes().to_vec()),
                 );

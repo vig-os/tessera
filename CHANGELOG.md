@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Collections carry sealed `sources` edges with `supersedes` and `forked_from` roles (ADR-0067 step 2, #997).
+  Version edges reference a predecessor's id and pin its manifest seal, independently of the member MMR.
+  `CollectionBuilder::add_source` records edges; `with_id_inputs` accepts caller-declared identity, including
+  the required non-empty `fork` token for a forked lineage. Both version roles require a predecessor seal
+  pin. One writer validation rule refuses missing/empty tokens or pins with `Error::Invalid` when sealing,
+  recomputing a seal or emitting canonical/stored bytes, including after public-field mutations. Readers
+  still verify received bytes. Empty sources are omitted, preserving existing collection bytes. Native, reference and wasm readers share seal vectors.
+
 ### Changed
 
 - **breaking**: repositories now require layout 2 (`tessera-repository 2`), with typed product ref records

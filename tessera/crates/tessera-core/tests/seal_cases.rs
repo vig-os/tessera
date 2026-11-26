@@ -22,7 +22,7 @@ use serde_json::Value;
 use tessera_core::{Error, Manifest};
 
 /// The number of cases the generator writes: a lost or gained case is a visible change here.
-const CASES: usize = 171;
+const CASES: usize = 184;
 
 fn cases() -> Vec<Value> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/seal-cases.json");
@@ -59,8 +59,15 @@ fn read(c: &Value) -> tessera_core::Result<Manifest> {
 /// `tampered` is an integrity failure (the seal, `id` or `content_hash` doesn't match); `refused`
 /// is everything a reader does not read at all.
 fn rust_verdict(c: &Value) -> (&'static str, Vec<String>) {
-    match read(c) {
-        Ok(m) => ("ok", m.newer_fields().to_vec()),
+    let result = if c["kind"] == "collection" {
+        let (bytes, seal) = members(c);
+        tessera_core::Collection::from_stored_members(&bytes, seal.as_deref())
+            .map(|c| c.newer_fields().to_vec())
+    } else {
+        read(c).map(|m| m.newer_fields().to_vec())
+    };
+    match result {
+        Ok(newer) => ("ok", newer),
         Err(Error::Integrity { .. }) => ("tampered", Vec::new()),
         // The layout: no seal member (the alpha layout, rule 10), a malformed one, or the seal in
         // band (rule 3).
@@ -114,6 +121,7 @@ fn every_corpus_product_has_every_case_family() {
     let names: Vec<&str> = cases.iter().map(|c| c["name"].as_str().unwrap()).collect();
     let corpus: Vec<&str> = names
         .iter()
+        .filter(|n| !n.starts_with("collection/"))
         .filter_map(|n| n.strip_suffix("/as-stored"))
         .collect();
     assert_eq!(corpus.len(), 8, "one as-stored case per corpus file");
@@ -266,7 +274,7 @@ fn a_normalised_view_is_not_reemitted_under_its_seal() {
 fn the_writer_stores_the_bytes_its_seal_is_over() {
     for c in cases() {
         let name = c["name"].as_str().unwrap();
-        if !name.ends_with("/as-stored") {
+        if !name.ends_with("/as-stored") || c["kind"] == "collection" {
             continue;
         }
         let m = read(&c).unwrap();
@@ -366,4 +374,36 @@ fn bytes_a_text_decoder_would_change_are_refused_by_the_strict_parse() {
         assert!(matches!(err, Error::Serde(_)), "{name}: {err}");
     }
     assert!(read(&case("recon_int16/replacement-character-resealed")).is_ok());
+}
+
+/// Freeze the existing `stored_bytes.rs::sealed_collection` fixture from pre-PR revision
+/// 4f569cf8b1d27964d9fe9b14a14a0958e5ce42f6. These bytes and seal were emitted by that revision's
+/// actual CollectionBuilder + to_stored, in an isolated checkout, not by the sources model or
+/// the new seal-case generator. Keep the historical pair fixed when regenerating seal vectors.
+#[test]
+fn existing_collection_bytes_and_seal_are_unchanged() {
+    const BEFORE: &[u8] = br#"{"collection_schema":"collection","content_hash":"blake3:9d5b560d0e1eed963089e835601e9f9b37e8c6179dc06fd78104582e2b67ec7c","description":"a study","id":"blake3:74fadefbe3b97ea6a1d426e7d08bcc94566c0db0858dd9a2e3d7a1c8cd918ade","id_inputs":{"name":"DP06","product":"collection","timestamp":"2024-01-01T00:00:00Z"},"members":[{"manifest_hash":"blake3:1111111111111111111111111111111111111111111111111111111111111111","reference":"raw","role":"raw"},{"derived_from":["raw"],"manifest_hash":"blake3:2222222222222222222222222222222222222222222222222222222222222222","reference":"recon","role":"derived"}],"name":"DP06","tessera_version":"0.0.0","timestamp":"2024-01-01T00:00:00Z"}"#;
+    const SEAL: &str = "blake3:e04a7aa13c50ac5ebb4b8ce4f060ec094116717eed53112c99c8cef214301deb";
+    let mut builder =
+        tessera_core::CollectionBuilder::new("DP06", "a study", "2024-01-01T00:00:00Z");
+    builder.add_member(
+        "raw",
+        format!("blake3:{}", "1".repeat(64)),
+        tessera_core::collection::Role::Raw,
+        Vec::new(),
+    );
+    builder.add_member(
+        "recon",
+        format!("blake3:{}", "2".repeat(64)),
+        tessera_core::collection::Role::Derived,
+        vec!["raw".into()],
+    );
+    let (written, seal) = builder.seal().unwrap().to_stored().unwrap();
+    assert_eq!(written, BEFORE);
+    assert_eq!(seal, SEAL);
+    let old = tessera_core::Collection::from_stored(BEFORE, SEAL).unwrap();
+    assert_eq!(
+        old.to_stored().unwrap(),
+        (BEFORE.to_vec(), SEAL.to_string())
+    );
 }

@@ -33,6 +33,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::provenance::{Source, FORKED_FROM_ROLE, SUPERSEDES_ROLE};
+
 use crate::field_path::FieldPath;
 use crate::manifest::{
     check, recorded, refuse_newer, stored_object, unknown_keys, unknown_keys_each, SUPPORTED_MAJOR,
@@ -196,6 +198,14 @@ pub struct Collection {
     /// Member products, in declared order — order is significant (folded into `content_hash`).
     #[serde(default)]
     pub members: Vec<CollectionMember>,
+    /// Sealed provenance edges (ADR-0067 D2). A version edge references the predecessor's `id`
+    /// and pins its `manifest_hash` in [`Source::content_hash`], including metadata-only changes.
+    /// Edges do not enter `id_inputs` or the member MMR. Empty edges are omitted, preserving
+    /// every pre-edge collection's stored bytes. A `forked_from` edge requires a caller-supplied
+    /// non-empty `fork` key in `id_inputs` at every writer door; the caller supplies uniqueness
+    /// across nodes. Both version roles require a non-empty predecessor seal pin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<Source>,
     /// MMR root over the members' `manifest_hash`es; `Some` once sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
@@ -211,7 +221,7 @@ pub struct Collection {
 }
 
 /// The paths of every key in a collection object that this build's types don't declare: the top
-/// level, `level` and each `members[i]`. `id_inputs` is an opaque map and is not walked.
+/// level, `level` and each `members[i]` and `sources[i]`. `id_inputs` is an opaque map and is not walked.
 fn newer_fields_of(object: &Value) -> Vec<FieldPath> {
     let mut out = Vec::new();
     let root = FieldPath::root();
@@ -227,6 +237,12 @@ fn newer_fields_of(object: &Value) -> Vec<FieldPath> {
         get("members"),
         CollectionMember::FIELDS,
         &root.key("members"),
+        &mut out,
+    );
+    unknown_keys_each(
+        get("sources"),
+        Source::FIELDS,
+        &root.key("sources"),
         &mut out,
     );
     out
@@ -274,6 +290,7 @@ impl Collection {
             study: None,
             level: None,
             members: Vec::new(),
+            sources: Vec::new(),
             content_hash: None,
             manifest_hash: None,
             newer_fields: Vec::new(),
@@ -292,6 +309,7 @@ impl Collection {
         "study",
         "level",
         "members",
+        "sources",
         "content_hash",
     ];
 
@@ -317,6 +335,8 @@ impl Collection {
     }
 
     /// Pretty JSON, for humans / display. NOT the stored form — see [`to_stored`](Self::to_stored).
+    /// Does not enforce writer rules: a received collection can be displayed even if this build
+    /// would refuse to write it. Raw serde serialisation likewise does not create a stored seal.
     pub fn to_json(&self) -> crate::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
     }
@@ -327,9 +347,40 @@ impl Collection {
     /// # Errors
     /// [`crate::Error::NewerFormatFields`] for a parsed collection with
     /// [`newer_fields`](Self::newer_fields): bytes of this view would leave them out.
+    /// [`crate::Error::Invalid`] for a `forked_from` edge without a non-empty `fork` token, or
+    /// a `forked_from`/`supersedes` edge without a non-empty predecessor seal pin (`content_hash`).
     pub fn canonical_bytes(&self) -> crate::Result<Vec<u8>> {
         refuse_newer(&self.newer_fields)?;
+        self.validate_sources_for_write()?;
         crate::canonical::to_bytes(&crate::canonical::to_json_value(self)?)
+    }
+
+    /// Writer-only rules for collection version edges (ADR-0067 D2/D5). Keep this separate
+    /// from received-byte verification: an older or external writer's sealed bytes remain readable.
+    fn validate_sources_for_write(&self) -> crate::Result<()> {
+        for source in &self.sources {
+            if source.role != SUPERSEDES_ROLE && source.role != FORKED_FROM_ROLE {
+                continue;
+            }
+            if source.role == FORKED_FROM_ROLE
+                && self
+                    .id_inputs
+                    .get("fork")
+                    .is_none_or(|token| token.is_empty())
+            {
+                return Err(crate::Error::Invalid(
+                    "a forked_from collection requires a non-empty caller-supplied fork token in id_inputs"
+                        .into(),
+                ));
+            }
+            if source.content_hash.as_deref().is_none_or(str::is_empty) {
+                return Err(crate::Error::Invalid(format!(
+                    "a collection {} source requires a predecessor manifest_hash pin in content_hash",
+                    source.role,
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Recompute the logical `id` from `id_inputs`.
@@ -368,6 +419,7 @@ impl Collection {
     /// # Errors
     /// As [`canonical_bytes`](Self::canonical_bytes): a re-seal of a view with
     /// [`newer_fields`](Self::newer_fields) is refused, since it would drop sealed content.
+    /// Missing/empty fork tokens or version pins are [`crate::Error::Invalid`].
     pub fn compute_manifest_hash(&self) -> crate::Result<String> {
         Ok(crate::hash::digest(&self.canonical_bytes()?))
     }
@@ -481,12 +533,14 @@ impl Collection {
     ///
     /// # Errors
     /// [`crate::Error::NewerFormatFields`] for a parsed collection with
-    /// [`newer_fields`](Self::newer_fields); [`crate::Error::Invalid`] without a `content_hash`;
+    /// [`newer_fields`](Self::newer_fields); [`crate::Error::Invalid`] without a `content_hash`,
+    /// a fork token or version-edge pin required by [`canonical_bytes`](Self::canonical_bytes);
     /// everything [`verify`](Self::verify) raises, including [`crate::Error::Integrity`] for a
     /// `manifest_hash` that is not `seal`; [`crate::Error::InexactInteger`] or
     /// [`crate::Error::NonFiniteNumber`] for a value no seal can hold.
     pub fn to_stored(&self) -> crate::Result<(Vec<u8>, String)> {
         refuse_newer(&self.newer_fields)?;
+        self.validate_sources_for_write()?;
         if self.content_hash.is_none() {
             return Err(crate::Error::Invalid(
                 "refusing to store a collection without content_hash: a stored collection is \
@@ -771,6 +825,27 @@ impl CollectionBuilder {
         self
     }
 
+    /// Set the complete declared identity inputs, retained across versions of a lineage.
+    /// `seal` computes `id` from this map. For a fork, include a caller-chosen `fork` token;
+    /// The token must be non-empty; distinct tokens distinguish workspaces even with identical
+    /// names and timestamps.
+    /// Start with [`default_collection_id_inputs`] to retain the default identity fields.
+    pub fn with_id_inputs(&mut self, id_inputs: BTreeMap<String, String>) -> &mut Self {
+        self.collection.id_inputs = id_inputs;
+        self
+    }
+
+    /// Append a sealed provenance edge, in order. For [`crate::provenance::SUPERSEDES_ROLE`] or
+    /// [`FORKED_FROM_ROLE`], reference the predecessor's `id` and pin its `manifest_hash` with
+    /// [`Source::with_content_hash`]. Edges change the seal, independently of the member MMR.
+    /// Both version roles require a non-empty predecessor seal pin. A `forked_from` edge also
+    /// requires a non-empty `fork` token in `id_inputs`. Missing values are [`crate::Error::Invalid`]
+    /// at seal and when emitting canonical or stored bytes.
+    pub fn add_source(&mut self, source: Source) -> &mut Self {
+        self.collection.sources.push(source);
+        self
+    }
+
     /// Append a **product** member from its resolved handle (ADR-0049 §4) — the type-safe front for
     /// [`add_member`](Self::add_member) that can't mismatch reference/hash.
     pub fn add_product(
@@ -824,7 +899,12 @@ impl CollectionBuilder {
 
     /// Seal: compute the MMR root over the members, then the canonical-JSON seal. Mirrors
     /// [`crate::ProductBuilder::seal`] — the same input always yields byte-identical bytes.
+    /// Recomputes `id` from the declared inputs. A fork without a non-empty caller-supplied `fork`
+    /// token, or either version role without a predecessor seal pin, is [`crate::Error::Invalid`].
+    /// Callers own token uniqueness (ADR-0067 D2/D5).
     pub fn seal(mut self) -> crate::Result<Collection> {
+        self.collection.validate_sources_for_write()?;
+        self.collection.id = self.collection.recompute_id()?;
         // Structural well-formedness of the open `level` tag (the engine still never *interprets* it,
         // ADR-0049 §5): an empty vocabulary or code is malformed, same class as an empty `name`.
         if let Some(level) = &self.collection.level {
@@ -852,7 +932,6 @@ impl CollectionBuilder {
 mod tests {
     use super::*;
     use crate::manifest::Manifest;
-    use crate::provenance::Source;
     use crate::ProductBuilder;
 
     const TS: &str = "2024-01-01T00:00:00Z";
@@ -888,6 +967,125 @@ mod tests {
             vec![raw.id.clone()],
         );
         cb.seal().unwrap()
+    }
+
+    #[test]
+    fn builder_sources_pin_the_predecessor_seal_and_keep_identity() {
+        use crate::provenance::{FORKED_FROM_ROLE, SUPERSEDES_ROLE};
+        let parent = CollectionBuilder::new("version", "d", TS).seal().unwrap();
+        let metadata_parent = CollectionBuilder::new("version", "new metadata", TS)
+            .seal()
+            .unwrap();
+        assert_eq!(parent.id, metadata_parent.id);
+        assert_eq!(parent.content_hash, metadata_parent.content_hash);
+        assert_ne!(parent.manifest_hash, metadata_parent.manifest_hash);
+        let mut builder = CollectionBuilder::new("version", "d", TS);
+        builder.add_source(
+            Source::new(SUPERSEDES_ROLE, &parent.id)
+                .with_content_hash(parent.manifest_hash.as_ref().unwrap()),
+        );
+        let version = builder.seal().unwrap();
+        assert_eq!(version.id, parent.id);
+        assert_eq!(version.content_hash, parent.content_hash);
+        assert_eq!(version.sources[0].reference, parent.id);
+        assert_eq!(version.sources[0].content_hash, parent.manifest_hash);
+        let mut fork = CollectionBuilder::new("version", "d", TS);
+        let mut inputs = parent.id_inputs.clone();
+        inputs.insert("fork".into(), "node-a:1".into());
+        fork.with_id_inputs(inputs.clone()).add_source(
+            Source::new(FORKED_FROM_ROLE, &parent.id)
+                .with_content_hash(parent.manifest_hash.as_ref().unwrap()),
+        );
+        let fork = fork.seal().unwrap();
+        assert_eq!(fork.id_inputs, inputs);
+        assert_ne!(fork.id, parent.id);
+        assert_eq!(fork.id, fork.recompute_id().unwrap());
+        assert_eq!(fork.sources[0].role, FORKED_FROM_ROLE);
+        fork.verify().unwrap();
+    }
+
+    // Deserialize directly to exercise the new field against the pre-change model too.
+    fn version_builder(role: &str, fork: Option<&str>) -> CollectionBuilder {
+        let parent = CollectionBuilder::new("parent", "d", TS).seal().unwrap();
+        let mut value = serde_json::to_value(Collection::new("version", "d", TS)).unwrap();
+        value["sources"] = serde_json::json!([{
+            "role": role, "reference": parent.id, "content_hash": parent.manifest_hash
+        }]);
+        if let Some(token) = fork {
+            value["id_inputs"]["fork"] = token.into();
+        }
+        let collection = serde_json::from_value(value).unwrap();
+        CollectionBuilder { collection }
+    }
+
+    #[test]
+    fn collection_sources_are_sealed_and_skipped_when_empty() {
+        let plain = CollectionBuilder::new("version", "d", TS).seal().unwrap();
+        let edged = version_builder("supersedes", None).seal().unwrap();
+        assert_eq!(plain.id, edged.id);
+        assert_eq!(plain.content_hash, edged.content_hash);
+        assert_ne!(plain.manifest_hash, edged.manifest_hash);
+        let (bytes, seal) = edged.to_stored().unwrap();
+        let parsed = Collection::from_stored(&bytes, &seal).unwrap();
+        assert!(parsed.newer_fields().is_empty());
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["sources"][0]["role"], "supersedes");
+        let mut tampered = value;
+        tampered["sources"][0]["content_hash"] = "blake3:changed".into();
+        assert!(matches!(
+            Collection::from_stored(&crate::canonical::to_bytes(&tampered).unwrap(), &seal),
+            Err(crate::Error::Integrity { .. })
+        ));
+        let (bytes, seal) = plain.to_stored().unwrap();
+        let mut legacy: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(legacy.get("sources").is_none());
+        legacy.as_object_mut().unwrap().remove("sources");
+        assert_eq!(bytes, crate::canonical::to_bytes(&legacy).unwrap());
+        assert_eq!(seal, crate::hash::digest(&bytes));
+    }
+
+    #[test]
+    fn a_forked_version_without_a_fork_token_is_refused() {
+        assert!(matches!(
+            version_builder("forked_from", None).seal(),
+            Err(crate::Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn fork_tokens_define_deterministic_distinct_lineages() {
+        let a = version_builder("forked_from", Some("node-a:1"))
+            .seal()
+            .unwrap();
+        let again = version_builder("forked_from", Some("node-a:1"))
+            .seal()
+            .unwrap();
+        let b = version_builder("forked_from", Some("node-b:1"))
+            .seal()
+            .unwrap();
+        assert_eq!(a.id, a.recompute_id().unwrap());
+        assert_eq!(
+            a.canonical_bytes().unwrap(),
+            again.canonical_bytes().unwrap()
+        );
+        assert_ne!(a.id, b.id);
+        assert_eq!(a.content_hash, b.content_hash);
+    }
+
+    #[test]
+    fn collection_source_newer_fields_are_not_dropped() {
+        let mut value = serde_json::to_value(Collection::new("c", "d", TS)).unwrap();
+        value["content_hash"] = crate::hash::merkle_root(&[]).into();
+        value["sources"] = serde_json::json!([{
+            "role": "supersedes", "reference": "parent", "future": true
+        }]);
+        let bytes = crate::canonical::to_bytes(&value).unwrap();
+        let c = Collection::from_stored(&bytes, &crate::hash::digest(&bytes)).unwrap();
+        assert_eq!(c.newer_fields(), &["sources[0].future"]);
+        assert!(matches!(
+            c.to_stored(),
+            Err(crate::Error::NewerFormatFields { .. })
+        ));
     }
 
     #[test]
@@ -1009,6 +1207,8 @@ mod tests {
                 kind: MemberKind::Collection,
                 derived_from: vec!["p".into()],
             }],
+            sources: vec![Source::new(crate::provenance::SUPERSEDES_ROLE, "parent")
+                .with_content_hash("blake3:parent-seal")],
             content_hash: Some("blake3:c".into()),
             manifest_hash: Some("blake3:m".into()),
             newer_fields: Vec::new(),
