@@ -70,6 +70,59 @@ const LOCK: &str = "lock";
 const TMP: &str = "tmp";
 /// The role of the edge a new version carries to the version it replaces (ADR-0022).
 const SUPERSEDES: &str = "supersedes";
+/// The file naming the repository's layout, under the root (#975). A repository without it was
+/// written before #975 (or is empty and gets it on its first write).
+const LAYOUT: &str = "layout";
+/// The contents of [`LAYOUT`] for the one layout this build reads and writes: refs and `log`
+/// caches named by [`lineage_file_name`].
+const LAYOUT_V1: &str = "tessera-repository 1\n";
+/// The longest file name [`lineage_file_name`] returns: 255 (the name limit of ext4, APFS, XFS,
+/// NTFS) less the 6 bytes of the log cache's `.jsonl`.
+pub const MAX_LINEAGE_FILE_NAME: usize = 249;
+/// What [`LAYOUT_V1`] is, for [`Error::UnsupportedRepositoryLayout`].
+const LAYOUT_V1_DESCRIBED: &str =
+    "`tessera-repository 1` (ref files named by the percent-encoded lineage, #975)";
+
+/// The file name of `lineage`'s ref under `refs/` (and, with `.jsonl`, of its `log` cache): its
+/// UTF-8 bytes, each byte outside `a-z`, `0-9`, `-` and `_` written as `%` and two lower-case hex
+/// digits (#975). So `blake3:3f…` names `blake3%3a3f…`, `a_b` names `a_b`, and `a:b` names `a%3ab`.
+///
+/// The mapping is **injective**: `%` is itself encoded, so a name decodes back to exactly one
+/// lineage, and distinct lineages never share a file. It stays injective on a case-insensitive
+/// file system (APFS and NTFS by default), because upper-case letters are encoded (`Ab` names
+/// `%41b`, `ab` names `ab`), and on one that normalizes Unicode, because every non-ASCII byte is
+/// encoded. `.` is encoded too, so no name is `.`, `..` or hidden. Windows' reserved device
+/// names (`con`, `nul`, …) are not encoded: Windows is not a supported target (its builds are
+/// deferred, see `dist-workspace.toml`).
+///
+/// An empty lineage, or one whose file name would be longer than [`MAX_LINEAGE_FILE_NAME`]
+/// bytes, is [`Error::InvalidLineage`]: a ref names a file, and a longer name cannot be created.
+/// A product `id` (`blake3:` and 64 hex digits) names 73 bytes.
+pub fn lineage_file_name(lineage: &str) -> Result<String> {
+    let invalid = |reason: String| Error::InvalidLineage {
+        lineage: lineage.to_string(),
+        reason,
+    };
+    if lineage.is_empty() {
+        return Err(invalid("it is empty".into()));
+    }
+    let mut name = String::with_capacity(lineage.len());
+    for &b in lineage.as_bytes() {
+        if b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_' {
+            name.push(char::from(b));
+        } else {
+            name.push_str(&format!("%{b:02x}"));
+        }
+    }
+    if name.len() > MAX_LINEAGE_FILE_NAME {
+        return Err(invalid(format!(
+            "its ref file name is {} bytes, more than the {MAX_LINEAGE_FILE_NAME} a ref and its \
+             log can be named with",
+            name.len()
+        )));
+    }
+    Ok(name)
+}
 
 /// A content-addressed repository rooted at a directory.
 pub struct Repository {
@@ -102,7 +155,10 @@ struct Reached {
 
 impl Repository {
     /// Create a repository under `root` (idempotent — existing dirs are fine). Its directories are
-    /// created durably, and its writer lock file too.
+    /// created durably, and its writer lock file and [layout](lineage_file_name) marker too.
+    ///
+    /// A repository there in another layout (one written before #975) is
+    /// [`Error::UnsupportedRepositoryLayout`].
     pub fn init(root: &Path) -> Result<Repository> {
         for d in ["objects", "refs", "log", TMP] {
             create_dirs_durable(&root.join(d), &mut Vec::new())?;
@@ -115,9 +171,18 @@ impl Repository {
         Ok(repo)
     }
 
-    /// Open an existing repository (errors if `root` has no `objects/`). Reads nothing else: a
-    /// corrupt ref is reported when it is read ([`read_ref`](Self::read_ref), [`gc`](Self::gc)), so
-    /// the lineages beside it stay usable and the corrupt one can be `forget`-ed.
+    /// Open an existing repository (errors if `root` has no `objects/`). Reads only its layout
+    /// marker otherwise: a corrupt ref is reported when it is read ([`read_ref`](Self::read_ref),
+    /// [`gc`](Self::gc)), so the lineages beside it stay usable and the corrupt one can be
+    /// `forget`-ed.
+    ///
+    /// A repository written before #975 (no layout marker, and a ref or `log` cache present) named
+    /// its refs with a mapping that sent distinct lineages to one file, so reading it with the
+    /// current naming could hand one lineage another's tip. It is refused with
+    /// [`Error::UnsupportedRepositoryLayout`], as is a marker of any other layout. There is no
+    /// migration (an alpha carries none, as ADR-0066 rule 10 for products): create a new
+    /// repository and import the source products again. An empty repository without a marker
+    /// opens, and gets the marker on its first write.
     pub fn open(root: &Path) -> Result<Repository> {
         if !root.join("objects").is_dir() {
             return Err(Error::Invalid(format!(
@@ -125,13 +190,47 @@ impl Repository {
                 root.display()
             )));
         }
-        Ok(Repository {
+        let repo = Repository {
             root: root.to_path_buf(),
-        })
+        };
+        repo.layout()?;
+        Ok(repo)
+    }
+
+    /// Whether the repository is laid out the way this build reads it: `Ok(true)` with the current
+    /// layout marker, `Ok(false)` without one and without any ref or `log` cache (an empty
+    /// repository, possibly made before #975), else [`Error::UnsupportedRepositoryLayout`]: refs
+    /// named the pre-#975 way, or a marker of another layout.
+    fn layout(&self) -> Result<bool> {
+        let unsupported = |found: String| Error::UnsupportedRepositoryLayout {
+            root: self.root.clone(),
+            found,
+            required: LAYOUT_V1_DESCRIBED.to_string(),
+        };
+        match std::fs::read(self.root.join(LAYOUT)) {
+            Ok(bytes) if bytes == LAYOUT_V1.as_bytes() => Ok(true),
+            Ok(bytes) => Err(unsupported(format!(
+                "{:?} (its `{LAYOUT}` file)",
+                String::from_utf8_lossy(&bytes).trim_end()
+            ))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if has_entries(&self.root.join("refs"))? || has_entries(&self.root.join("log"))? {
+                    return Err(unsupported(
+                        "the one from before #975 (no `layout` file; ref files named with `:`, `/` \
+                         and `\\` replaced by `_`, which sent distinct lineages to one file)"
+                            .to_string(),
+                    ));
+                }
+                Ok(false)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Take the writer lock, waiting while another writer holds it, and clear `tmp/` of the debris
-    /// a crashed writer left (no writer is running, so nothing there is in use).
+    /// a crashed writer left (no writer is running, so nothing there is in use). The layout is
+    /// checked under the lock, and an empty repository without a layout marker gets one, durably,
+    /// before anything else is written.
     fn lock(&self) -> Result<WriterLock> {
         let file = OpenOptions::new()
             .create(true)
@@ -149,6 +248,13 @@ impl Repository {
             } else {
                 std::fs::remove_file(&path)?;
             }
+        }
+        if !self.layout()? {
+            write_durable_via(
+                &tmp.join(LAYOUT),
+                &self.root.join(LAYOUT),
+                LAYOUT_V1.as_bytes(),
+            )?;
         }
         Ok(WriterLock { _file: file })
     }
@@ -255,12 +361,8 @@ impl Repository {
         Manifest::from_stored(&bytes, manifest_hash)
     }
 
-    fn ref_file_name(lineage: &str) -> String {
-        lineage.replace([':', '/', '\\'], "_")
-    }
-
-    fn ref_path(&self, lineage: &str) -> PathBuf {
-        self.root.join("refs").join(Self::ref_file_name(lineage))
+    fn ref_path(&self, lineage: &str) -> Result<PathBuf> {
+        Ok(self.root.join("refs").join(lineage_file_name(lineage)?))
     }
 
     /// The current tip (`manifest_hash`) of a lineage, or `None` if it has no commits yet (no ref
@@ -269,7 +371,7 @@ impl Repository {
     /// is replaced by a rename), so it was torn or edited, and reading it as "no commits yet" would
     /// let a commit start the lineage over and `gc` reclaim its history.
     pub fn read_ref(&self, lineage: &str) -> Result<Option<String>> {
-        let path = self.ref_path(lineage);
+        let path = self.ref_path(lineage)?;
         match std::fs::read(&path) {
             Ok(bytes) => parse_ref(&path, &bytes).map(Some),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -288,6 +390,7 @@ impl Repository {
     /// unreachable until this call lands, so a `gc` that runs in between reclaims it, and this call
     /// then refuses `new` as not stored.
     pub fn set_ref(&self, lineage: &str, expected: Option<&str>, new: &str) -> Result<()> {
+        lineage_file_name(lineage)?;
         let writer = self.lock()?;
         self.advance_ref(&writer, lineage, expected, new)
     }
@@ -312,8 +415,8 @@ impl Repository {
         let tmp = self
             .root
             .join(TMP)
-            .join(format!("ref-{}", Self::ref_file_name(lineage)));
-        write_durable_via(&tmp, &self.ref_path(lineage), new.as_bytes())
+            .join(format!("ref-{}", lineage_file_name(lineage)?));
+        write_durable_via(&tmp, &self.ref_path(lineage)?, new.as_bytes())
     }
 
     /// [`Error::RefMoved`] unless `lineage`'s tip is `expected`. The caller holds the writer lock.
@@ -329,14 +432,15 @@ impl Repository {
         Ok(())
     }
 
-    fn log_path(&self, lineage: &str) -> PathBuf {
-        self.root
+    fn log_path(&self, lineage: &str) -> Result<PathBuf> {
+        Ok(self
+            .root
             .join("log")
-            .join(format!("{}.jsonl", Self::ref_file_name(lineage)))
+            .join(format!("{}.jsonl", lineage_file_name(lineage)?)))
     }
 
     fn append_log(&self, lineage: &str, manifest_hash: &str, parent: Option<&str>) -> Result<()> {
-        let p = self.log_path(lineage);
+        let p = self.log_path(lineage)?;
         if let Some(parent_dir) = p.parent() {
             std::fs::create_dir_all(parent_dir)?;
         }
@@ -353,7 +457,7 @@ impl Repository {
 
     /// Read a lineage's `log` cache, oldest commit first (empty if the lineage has no commits).
     pub fn log(&self, lineage: &str) -> Result<Vec<LogEntry>> {
-        match std::fs::read_to_string(self.log_path(lineage)) {
+        match std::fs::read_to_string(self.log_path(lineage)?) {
             Ok(s) => s
                 .lines()
                 .filter(|l| !l.trim().is_empty())
@@ -397,6 +501,7 @@ impl Repository {
         manifest: &Manifest,
         payloads: &[BlockPayload],
     ) -> Result<String> {
+        lineage_file_name(lineage)?;
         let (mh, manifest_bytes) = stored_manifest(manifest)?;
         if let Some(parent) = expected {
             check_supersedes(lineage, parent, manifest)?;
@@ -450,9 +555,10 @@ impl Repository {
     /// [`gc`](Self::gc) to reclaim whatever is now unreachable. A corrupt ref is deleted like any
     /// other: this is the way past an [`Error::CorruptRef`] that cannot be restored.
     pub fn forget(&self, lineage: &str) -> Result<bool> {
+        lineage_file_name(lineage)?;
         let _writer = self.lock()?;
         let mut existed = false;
-        match remove_file(&self.ref_path(lineage)) {
+        match remove_file(&self.ref_path(lineage)?) {
             Ok(()) => {
                 existed = true;
                 sync_dir(&self.root.join("refs"))?;
@@ -460,7 +566,7 @@ impl Repository {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        let lp = self.log_path(lineage);
+        let lp = self.log_path(lineage)?;
         if lp.exists() {
             std::fs::remove_file(&lp)?;
         }
@@ -699,6 +805,15 @@ fn gc_aborted(what: impl Into<String>, source: Error) -> Error {
     }
 }
 
+/// Whether the directory `dir` holds any entry (`false` if it does not exist).
+fn has_entries(dir: &Path) -> Result<bool> {
+    match std::fs::read_dir(dir) {
+        Ok(mut rd) => Ok(rd.next().transpose()?.is_some()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Counts from a [`Repository::gc`] sweep.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GcReport {
@@ -827,7 +942,7 @@ mod tests {
         let p = repo.object_path(address).unwrap();
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, bytes).unwrap();
-        std::fs::write(repo.ref_path(lineage), address).unwrap();
+        std::fs::write(repo.ref_path(lineage).unwrap(), address).unwrap();
     }
 
     // ── Child processes ──────────────────────────────────────────────────────────────────────────
@@ -1129,7 +1244,7 @@ mod tests {
         let v1 = repo.commit(L, Some(&v0), &m, &p).unwrap();
         let events = recording.events();
 
-        let ref_path = repo.ref_path(L);
+        let ref_path = repo.ref_path(L).unwrap();
         let mut replay = seam::Replay::default();
         let mut advances = Vec::new();
         for event in &events {
@@ -1311,16 +1426,16 @@ mod tests {
         // A ref written by hand with a trailing newline is still the address it holds.
         let dir = tempfile::tempdir().unwrap();
         let (repo, v0) = with_first_version(dir.path());
-        std::fs::write(repo.ref_path(L), format!("{v0}\n")).unwrap();
+        std::fs::write(repo.ref_path(L).unwrap(), format!("{v0}\n")).unwrap();
         assert_eq!(repo.read_ref(L).unwrap(), Some(v0));
         repo.gc().unwrap();
 
         for content in [&b""[..], b"blake3:", b"blake3:0123\n", b"not a ref"] {
             let dir = tempfile::tempdir().unwrap();
             let (repo, _) = with_first_version(dir.path());
-            std::fs::write(repo.ref_path(L), content).unwrap();
+            std::fs::write(repo.ref_path(L).unwrap(), content).unwrap();
             let before = objects(dir.path());
-            let corrupt = |e: &Error| matches!(e, Error::CorruptRef { path, .. } if *path == repo.ref_path(L));
+            let corrupt = |e: &Error| matches!(e, Error::CorruptRef { path, .. } if *path == repo.ref_path(L).unwrap());
 
             let e = repo.read_ref(L).unwrap_err();
             assert!(corrupt(&e), "{content:?}: {e}");
@@ -1634,6 +1749,223 @@ mod tests {
         assert!(matches!(
             repo.read_object(&digest),
             Err(Error::Integrity { .. })
+        ));
+    }
+
+    /// #975: lineages whose names differ only in a character the old mapping replaced (`a:b`,
+    /// `a_b`, `a/b`, `a\b`), or only in case (`Ab`, `ab`, which a case-insensitive filesystem
+    /// folds), each keep their own tip and their own log.
+    #[test]
+    fn distinct_lineages_keep_independent_tips() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let names = ["a:b", "a_b", "a/b", "a\\b", "Ab", "ab", "a%3ab", "a.b"];
+        let mut tips = Vec::new();
+        for (rev, lineage) in names.iter().enumerate() {
+            let (m, p) = sealed_on(rev as i64, None);
+            tips.push(repo.commit(lineage, None, &m, &p).unwrap());
+        }
+        // A second commit on each, built on its own tip.
+        for (i, lineage) in names.iter().enumerate() {
+            let (m, p) = version(100 + i as i64, Some(&tips[i]), &[1, 2, 3]);
+            tips[i] = repo.commit(lineage, Some(&tips[i]), &m, &p).unwrap();
+        }
+        for (i, lineage) in names.iter().enumerate() {
+            assert_eq!(repo.read_ref(lineage).unwrap().as_ref(), Some(&tips[i]));
+            assert_eq!(repo.log(lineage).unwrap().len(), 2, "{lineage}");
+        }
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("refs")).unwrap().count(),
+            names.len()
+        );
+        assert!(repo.forget("a:b").unwrap());
+        assert_eq!(repo.read_ref("a:b").unwrap(), None);
+        assert_eq!(repo.read_ref("a_b").unwrap().as_ref(), Some(&tips[1]));
+    }
+
+    #[test]
+    fn lineage_file_names_are_percent_encoded_and_bounded() {
+        let name = |l: &str| lineage_file_name(l).unwrap();
+        assert_eq!(name("a_b"), "a_b");
+        assert_eq!(name("a:b"), "a%3ab");
+        assert_eq!(name("a%3ab"), "a%253ab");
+        assert_eq!(name("Ab"), "%41b");
+        assert_eq!(name(".."), "%2e%2e");
+        assert_eq!(name("é"), "%c3%a9");
+        let id = format!("blake3:{}", "0".repeat(64));
+        assert_eq!(name(&id), format!("blake3%3a{}", "0".repeat(64)));
+        let long = |n: usize| lineage_file_name(&"a".repeat(n));
+        assert_eq!(
+            long(MAX_LINEAGE_FILE_NAME).unwrap().len(),
+            MAX_LINEAGE_FILE_NAME
+        );
+        assert!(matches!(
+            long(MAX_LINEAGE_FILE_NAME + 1),
+            Err(Error::InvalidLineage { .. })
+        ));
+        // Encoding counts: 84 `:` are 252 bytes.
+        assert!(matches!(
+            lineage_file_name(&":".repeat(84)),
+            Err(Error::InvalidLineage { .. })
+        ));
+        assert!(matches!(
+            lineage_file_name(""),
+            Err(Error::InvalidLineage { .. })
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let (m, p) = sealed_on(0, None);
+        for bad in ["", &"x".repeat(MAX_LINEAGE_FILE_NAME + 1)] {
+            let invalid = |e: Error| matches!(e, Error::InvalidLineage { .. });
+            assert!(invalid(repo.read_ref(bad).unwrap_err()));
+            assert!(invalid(repo.commit(bad, None, &m, &p).unwrap_err()));
+            assert!(invalid(repo.log(bad).unwrap_err()));
+            assert!(invalid(repo.forget(bad).unwrap_err()));
+        }
+        assert_eq!(
+            count_objects(dir.path()),
+            0,
+            "a refused commit stores nothing"
+        );
+    }
+
+    /// ADR-0067 (#947) reserves the ref file names `refs/pin:<name>` for collection pins, which is
+    /// sound only while no lineage maps to a file name holding `:`. The encoding's output alphabet
+    /// is `a-z`, `0-9`, `-`, `_` and `%` (whose escapes are lower-case hex): `:` is always escaped,
+    /// so no lineage name can produce `:` or a `pin:` prefix.
+    #[test]
+    fn no_lineage_maps_to_a_file_name_holding_a_colon() {
+        let mut lineages: Vec<String> = [
+            "pin:x",
+            "pin:",
+            "a:b",
+            ":",
+            "::",
+            "%3A",
+            "%3a",
+            "pin%3ax",
+            "..",
+            ".",
+            "é:ü",
+            "日本:語",
+            "a/b",
+            "a\\b",
+            "PIN:X",
+            "blake3:00ff",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        // Every one-character name, ASCII and a range of non-ASCII.
+        lineages.extend((1u32..0x800).filter_map(char::from_u32).map(String::from));
+        for l in &lineages {
+            let name = lineage_file_name(l).unwrap();
+            assert!(
+                !name.contains(':') && !name.starts_with("pin:"),
+                "{l:?} -> {name}"
+            );
+            assert!(
+                name.bytes().all(|b| b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || matches!(b, b'-' | b'_' | b'%')),
+                "{l:?} -> {name}"
+            );
+        }
+        assert_eq!(lineage_file_name("pin:x").unwrap(), "pin%3ax");
+    }
+
+    /// The files under `root`'s `refs/` and `log/` and its layout marker, with their bytes.
+    fn ref_state(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        for d in ["refs", "log"] {
+            for e in std::fs::read_dir(root.join(d)).unwrap() {
+                let path = e.unwrap().path();
+                out.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+        if let Ok(b) = std::fs::read(root.join(LAYOUT)) {
+            out.insert(root.join(LAYOUT), b);
+        }
+        out
+    }
+
+    /// #975: a repository laid out the way tessera wrote it before #975 (no layout marker; each
+    /// ref and log cache named with `:`, `/` and `\` replaced by `_`) is refused by every entry
+    /// point, reader and writer, never read with the new naming. The error names the layout it
+    /// found and the one it needs, and says to import the source products again; nothing is
+    /// written.
+    #[test]
+    fn a_repository_laid_out_before_975_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let (m, p) = sealed_on(0, None);
+        let id = m.id.clone();
+        assert!(id.starts_with("blake3:"), "{id}");
+        for l in [id.as_str(), "plain"] {
+            repo.commit(l, None, &m, &p).unwrap();
+        }
+        // The old layout: no marker, and the old mapping's names.
+        std::fs::remove_file(dir.path().join(LAYOUT)).unwrap();
+        for l in [id.as_str(), "plain"] {
+            let (new, old) = (
+                lineage_file_name(l).unwrap(),
+                l.replace([':', '/', '\\'], "_"),
+            );
+            let at = |d: &str, n: &str, ext: &str| dir.path().join(d).join(format!("{n}{ext}"));
+            std::fs::rename(at("refs", &new, ""), at("refs", &old, "")).unwrap();
+            std::fs::rename(at("log", &new, ".jsonl"), at("log", &old, ".jsonl")).unwrap();
+        }
+        let before = ref_state(dir.path());
+
+        let refused = |e: Error| {
+            let text = e.to_string();
+            assert!(
+                matches!(&e, Error::UnsupportedRepositoryLayout { found, required, .. }
+                    if found.contains("before #975") && required.contains("tessera-repository 1")),
+                "{e}"
+            );
+            assert!(text.contains("import the source products again"), "{text}");
+        };
+        refused(Repository::open(dir.path()).err().unwrap());
+        refused(Repository::init(dir.path()).err().unwrap());
+        // A handle opened before the layout changed: its writes check the layout under the lock.
+        let (m1, p1) = sealed_on(1, None);
+        refused(repo.commit("other", None, &m1, &p1).unwrap_err());
+        refused(repo.forget("plain").unwrap_err());
+        refused(repo.gc().unwrap_err());
+        assert_eq!(ref_state(dir.path()), before, "a refusal writes nothing");
+        // A log cache alone is enough to tell.
+        std::fs::remove_dir_all(dir.path().join("refs")).unwrap();
+        std::fs::create_dir(dir.path().join("refs")).unwrap();
+        refused(Repository::open(dir.path()).err().unwrap());
+    }
+
+    /// An empty repository made before #975 (no marker, no refs) opens, and its first write marks
+    /// it; a marker of an unknown layout is refused.
+    #[test]
+    fn an_unmarked_empty_repository_is_marked_on_its_first_write() {
+        let dir = tempfile::tempdir().unwrap();
+        Repository::init(dir.path()).unwrap();
+        std::fs::remove_file(dir.path().join(LAYOUT)).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        assert!(!dir.path().join(LAYOUT).exists(), "a reader writes nothing");
+        let (m, p) = sealed_on(0, None);
+        repo.commit(L, None, &m, &p).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join(LAYOUT)).unwrap(),
+            LAYOUT_V1.as_bytes()
+        );
+        std::fs::write(dir.path().join(LAYOUT), b"tessera-repository 2\n").unwrap();
+        let e = Repository::open(dir.path()).err().unwrap();
+        assert!(
+            matches!(&e, Error::UnsupportedRepositoryLayout { found, .. }
+                if found.contains("tessera-repository 2")),
+            "{e}"
+        );
+        assert!(matches!(
+            repo.commit(L, None, &m, &p),
+            Err(Error::UnsupportedRepositoryLayout { .. })
         ));
     }
 }

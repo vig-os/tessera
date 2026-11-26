@@ -1024,6 +1024,55 @@ mod tests {
         );
     }
 
+    /// #975: a repository `import` laid out before #975 (ref `refs/blake3_<hex>`, no layout marker)
+    /// is refused by every verb, never read as a lineage without commits; the error names the
+    /// layout it found and the one it needs, and says to import the source products again.
+    #[test]
+    fn a_pre_975_repository_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let tsra = dir.path().join("p.tsra");
+        write_tsra(&tsra);
+        let lineage = imported(&repo, &tsra);
+        // The old layout: the ref and log under the old names, no marker.
+        let new = tessera_io::lineage_file_name(&lineage).unwrap();
+        let old = lineage.replace([':', '/', '\\'], "_");
+        std::fs::rename(repo.join("refs").join(&new), repo.join("refs").join(&old)).unwrap();
+        std::fs::rename(
+            repo.join("log").join(format!("{new}.jsonl")),
+            repo.join("log").join(format!("{old}.jsonl")),
+        )
+        .unwrap();
+        std::fs::remove_file(repo.join("layout")).unwrap();
+
+        let refused = |r: Result<()>| {
+            let e = r.unwrap_err();
+            let text = e.to_string();
+            assert!(
+                matches!(e, Error::UnsupportedRepositoryLayout { .. })
+                    && text.contains("before #975")
+                    && text.contains("tessera-repository 1")
+                    && text.contains("import the source products again"),
+                "{text}"
+            );
+        };
+        refused(log(&repo, &lineage, &mut Vec::new()));
+        refused(commit(
+            &repo,
+            &lineage,
+            &["k=1".into()],
+            &[],
+            &[],
+            &mut Vec::new(),
+        ));
+        refused(import(&repo, &tsra, &mut Vec::new()));
+        refused(init(&repo, &mut Vec::new()));
+        refused(forget(&repo, &lineage, &mut Vec::new()));
+        refused(gc(&repo, &mut Vec::new()));
+        assert!(repo.join("refs").join(&old).exists(), "nothing was removed");
+        assert!(!repo.join("layout").exists(), "nothing was marked");
+    }
+
     /// Import `tsra` into a fresh repository at `repo`; its lineage.
     fn imported(repo: &Path, tsra: &Path) -> String {
         init(repo, &mut Vec::new()).unwrap();
@@ -1554,7 +1603,9 @@ mod tests {
         let object = repo.join("objects/blake3").join(&hex[..2]).join(&hex[2..]);
         std::fs::create_dir_all(object.parent().unwrap()).unwrap();
         std::fs::write(&object, m.canonical_bytes().unwrap()).unwrap();
-        let ref_file = repo.join("refs").join(lineage.replace(':', "_"));
+        let ref_file = repo
+            .join("refs")
+            .join(tessera_io::lineage_file_name(&lineage).unwrap());
         std::fs::write(ref_file, format!("{seal}\n")).unwrap();
 
         let add = format!("ct={}:volume", plain.to_str().unwrap());

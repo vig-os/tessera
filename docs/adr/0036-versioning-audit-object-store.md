@@ -221,3 +221,37 @@ the writer model on 2026-11-22.
 This closes the "compare-and-set" half of §2 and the liveness half of "Still open" (`gc` walks refs for liveness and
 is fenced against commits). WORM holds before reclaiming remain open, as do refs to collections and marking through
 collection members (#947, #781).
+
+## Amendment (2026-11-25) — lineage names map to ref files injectively (#975)
+
+§1 names a ref `refs/<lineage>` and its cache `log/<lineage>.jsonl`, but a lineage is not a file name. As built, the
+name was made one by replacing `:`, `/` and `\` with `_`, so `a:b`, `a_b` and `a/b` shared one ref: before #946 each
+commit replaced the other lineages' tip, and since #946 a commit to one is refused with `RefMoved` against another's.
+
+- **Encode, not restrict.** A lineage is a product `id` (model A, §4), and every id tessera writes is
+  `blake3:<64 hex>`: a lineage alphabet without `:` would refuse every real lineage. So the name is
+  **percent-encoded**: each UTF-8 byte outside `a-z`, `0-9`, `-` and `_` is written `%` plus two lower-case hex
+  digits (`blake3:3f…` → `blake3%3a3f…`, `a:b` → `a%3ab`, `a_b` → `a_b`). `%` is itself encoded, so the mapping is
+  injective and reversible. Upper-case letters and `.` are encoded too, so it stays injective on a case-insensitive
+  file system (APFS, NTFS) and no name is `.`, `..` or hidden; every non-ASCII byte is encoded, so Unicode
+  normalization cannot merge two names.
+- **No `:` in a ref file name.** The encoded name's alphabet is `a-z`, `0-9`, `-`, `_` and `%`, and `%` escapes
+  (lower-case hex) are the only escape: `:` is always written `%3a`. So no lineage, `pin:x` included, maps to a file
+  name holding `:` or starting with `pin:`. ADR-0067 (#947, PR #988) relies on this when it reserves
+  `refs/pin:<name>` for collection pins. A test pins it (`no_lineage_maps_to_a_file_name_holding_a_colon`).
+- **Bounded.** A ref's file name is at most 249 bytes (255 less `.jsonl`). An empty lineage, or one whose encoded name
+  is longer, is refused with the typed `Error::InvalidLineage` by every verb that takes a lineage, before anything is
+  read or written. A product id is 73 bytes.
+- **A layout marker: the first layout version.** The repository root holds `layout`, containing
+  `tessera-repository 1`. `init` writes it, and an empty repository without one gets it on its first write. This is
+  the first repository layout version. ADR-0067 (#947, PR #988) moves refs into typed, namespaced records and bumps
+  it. A marker of any version this build does not read is refused like the pre-#975 layout below.
+- **Old repositories are refused, never remapped, never migrated.** A repository with refs or log caches and no
+  marker was named the old way. Reading it with the new naming would give one lineage another's tip, or none. So every
+  entry point (`open`, `init`, and through them every verb) refuses it with `Error::UnsupportedRepositoryLayout`,
+  which names the layout found and the layout required, and says to create a new repository and import the source
+  products again. There is no migration verb: the owner ruled on 2026-11-26 that the alpha carries no backwards
+  compatibility baggage, as ADR-0066 rule 10 already does for products.
+- **Trade-off.** Windows' reserved device names (`con`, `nul`) are not encoded, since Windows builds are deferred. An
+  older tessera binary does not know the marker, so it can still write old-style refs into a marked repository; do not
+  mix tessera versions on one repository.
