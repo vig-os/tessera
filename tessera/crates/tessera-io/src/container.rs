@@ -2957,7 +2957,7 @@ mod tests {
                 kind: tessera_core::block::BlockKind::Table,
                 digest: Some(digest),
                 class: tessera_core::block::BlockClass::Primary,
-                spec: serde_json::json!({}),
+                spec: serde_json::json!({"columns": [], "rows": 0}),
             });
         }
         let sealed = b.seal().unwrap();
