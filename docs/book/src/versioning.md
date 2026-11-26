@@ -58,23 +58,33 @@ holds an exclusive lock on the file `repo/lock` for its whole run, and others wa
 ## Lineage names and ref files
 
 A lineage is named by its product `id` (`blake3:<hex>`, printed by `import`), and its tip lives in the file
-`repo/refs/<name>`, with its history cache at `repo/log/<name>.jsonl`. The file name is the lineage **percent-encoded**:
+`repo/refs/lineages/<name>`, with its history cache at `repo/log/lineages/<name>.jsonl`. The file name is the lineage
+**percent-encoded**:
 every byte outside `a-z`, `0-9`, `-` and `_` is written `%` plus two lower-case hex digits, so `blake3:3f…` is stored as
 `blake3%3a3f…`, `a:b` as `a%3ab` and `Ab` as `%41b`. Distinct lineages never share a file, on a case-insensitive file
 system too (macOS by default). An empty lineage, or one whose encoded name is longer than 249 bytes, is refused with
-`lineage '…' cannot name a ref`; a product id needs 73.
+`lineages ref '…' cannot name a file`; a product id needs 73.
 
-The root file `repo/layout` records this naming (layout version 1). A repository made before it (tessera
-0.1.0-alpha.7 and earlier) named `a:b` and `a_b` both `a_b`, so a commit on one moved or blocked the other (#975).
-Every verb refuses such a repository and never reads it with the new naming:
+The root file `repo/layout` holds exactly `tessera-repository 2` followed by a line feed. Each ref holds exactly
+`product SP blake3:<64 lower-case hex> LF`: one space, one final line feed, no other whitespace or trailing bytes.
+A missing line feed, upper-case hex or an unknown kind is a corrupt ref. Collection records are planned in
+[ADR-0067 step 4](../../adr/0067-collection-refs-version-edge-and-gc-through-members.md).
 
-```text
-repository repo has the layout the one from before #975 (…), and this build reads only `tessera-repository 1` (…);
-there is no migration: create a new repository (`tessera init`) and import the source products again
-```
+Pins have their own directory, `repo/refs/pins/<name>`, and use the same encoding, bound and typed record grammar.
+A lineage and a pin may share a name: lineage commands only touch `refs/lineages/` and `log/lineages/`.
+`gc` reads roots from both namespaces. Pin management commands are planned in ADR-0067 step 6.
+A stray entry under `refs/`, a non-regular file inside either namespace or a malformed record aborts `gc` before
+anything is deleted.
 
-There is no migration verb: an alpha carries no backwards-compatibility baggage, as for products (ADR-0066). Create a
-new repository with `tessera init` and `import` the sealed source products into it again.
+Every verb refuses repositories at layout 1, without a marker or at any other layout. The error names the layout
+found and the required layout, 2. `open` refuses even an empty unmarked directory; only `init` creates the marker,
+in a directory without ref, log or object entries. `init` also refuses existing repositories at other layouts.
+
+There is no migration verb. Use the build that wrote the old repository to `seal` each lineage tip into a
+self-contained `.tsra`, then `init` a new repository with the current build and `import` those products into it.
+History edges travel with the sealed versions; the old repository stays unchanged. Builds from #990 onward
+refuse layout 2. Earlier builds do not check the marker and their `gc` can empty a layout-2 store: never run them
+against it.
 
 The append-only guarantee is cryptographic, not conventional: a later version's `content_hash` carries a
 **consistency proof** that it is an append-only prefix extension of the earlier one (see

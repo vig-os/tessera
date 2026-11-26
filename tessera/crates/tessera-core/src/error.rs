@@ -421,12 +421,16 @@ pub enum Error {
         source: Box<Error>,
     },
 
-    /// A lineage name a repository cannot name a ref file for (ADR-0036 §1, #975): empty, or
+    /// A ref name a repository cannot name a file for (ADR-0036 §1, #975, ADR-0067): empty, or
     /// longer than its percent-encoded file name allows (249 bytes, so that the ref, its temp file
     /// and its `log` cache stay within a file system's 255-byte name limit). It is refused before
     /// the writer lock is taken, so nothing was read or written.
-    #[error("lineage '{lineage}' cannot name a ref: {reason}")]
-    InvalidLineage { lineage: String, reason: String },
+    #[error("{namespace} ref '{name}' cannot name a file: {reason}")]
+    InvalidRefName {
+        namespace: String,
+        name: String,
+        reason: String,
+    },
 
     /// A repository whose layout this build does not read (ADR-0036, #975): `found` describes the
     /// layout it has, `required` the one this build reads. A repository written before #975 has

@@ -1037,9 +1037,13 @@ mod tests {
         // The old layout: the ref and log under the old names, no marker.
         let new = tessera_io::lineage_file_name(&lineage).unwrap();
         let old = lineage.replace([':', '/', '\\'], "_");
-        std::fs::rename(repo.join("refs").join(&new), repo.join("refs").join(&old)).unwrap();
         std::fs::rename(
-            repo.join("log").join(format!("{new}.jsonl")),
+            repo.join("refs/lineages").join(&new),
+            repo.join("refs").join(&old),
+        )
+        .unwrap();
+        std::fs::rename(
+            repo.join("log/lineages").join(format!("{new}.jsonl")),
             repo.join("log").join(format!("{old}.jsonl")),
         )
         .unwrap();
@@ -1051,7 +1055,7 @@ mod tests {
             assert!(
                 matches!(e, Error::UnsupportedRepositoryLayout { .. })
                     && text.contains("before #975")
-                    && text.contains("tessera-repository 1")
+                    && text.contains("tessera-repository 2")
                     && text.contains("import the source products again"),
                 "{text}"
             );
@@ -1604,9 +1608,9 @@ mod tests {
         std::fs::create_dir_all(object.parent().unwrap()).unwrap();
         std::fs::write(&object, m.canonical_bytes().unwrap()).unwrap();
         let ref_file = repo
-            .join("refs")
+            .join("refs/lineages")
             .join(tessera_io::lineage_file_name(&lineage).unwrap());
-        std::fs::write(ref_file, format!("{seal}\n")).unwrap();
+        std::fs::write(ref_file, format!("product {seal}\n")).unwrap();
 
         let add = format!("ct={}:volume", plain.to_str().unwrap());
         let e = commit(&repo, &lineage, &[], &[add], &[], &mut Vec::new()).unwrap_err();

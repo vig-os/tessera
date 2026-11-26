@@ -11,13 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **A repository written by v0.1.0-alpha.7 or earlier is refused** (`Error::UnsupportedRepositoryLayout`) by every
-  repository verb, and there is no migration (#975). It is never read with the new naming, which could give one
-  lineage another's tip. The error names the layout it found and the one it needs: create a new repository and import
-  the source products again. A repository now holds a `layout` marker (layout version 1), which `init` writes. An
-  empty unmarked repository is marked on its first write.
-- **A lineage name that is empty, or whose encoded ref file name is longer than 249 bytes, is refused**
-  (`Error::InvalidLineage`) by `import`, `commit`, `log` and `forget` (#975). A product id needs 73.
+- **breaking**: repositories now require layout 2 (`tessera-repository 2`), with typed product ref records
+  in `refs/lineages/` and `refs/pins/` and lineage caches in `log/lineages/` (ADR-0067 step 1, #996).
+  Every other layout, including an unmarked empty directory, is refused. There is no migration verb: seal tips
+  with the build that wrote the old repository, then import into a new one. Both namespaces share injective
+  percent-encoding and a 249-byte name bound; `InvalidRefName` replaces `InvalidLineage`. Garbage collection
+  roots include both namespaces and corrupt records or stray entries abort it before any deletion.
 
 ### Removed
 
@@ -32,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Decoder::version()` method and the existing `Decoder::feature_preimage()`.
 - **Distinct lineages no longer share a ref file (#975).** Ref and log cache names were made by replacing `:`, `/`
   and `\` with `_`, so `a:b` and `a_b` shared one tip: a commit on one replaced the other's tip, or since #946 was
-  refused with `RefMoved`. Names are now percent-encoded (`blake3:3f…` → `refs/blake3%3a3f…`), injective on
+  refused with `RefMoved`. Names are now percent-encoded (`blake3:3f…` → `refs/lineages/blake3%3a3f…`), injective on
   case-insensitive file systems too (ADR-0036, 2026-11-25 amendment).
 
 ### Security
