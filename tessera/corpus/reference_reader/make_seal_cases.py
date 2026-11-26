@@ -654,6 +654,20 @@ def collection_cases(c: Cases, product: dict, product_seal: str) -> None:
     fork["id_inputs"]["fork"] = "node-a:1"
     fork["id"] = digest(canon(fork["id_inputs"]))
     c.resealed("collection/forked-from", "ok", canon(fork))
+    # D2/D5 are writer rules, not additional reader refusals. All readers still verify
+    # independently sealed bytes from an external writer with missing tokens or version pins.
+    missing_token = copy.deepcopy(fork)
+    missing_token["id_inputs"].pop("fork")
+    missing_token["id"] = digest(canon(missing_token["id_inputs"]))
+    c.resealed("collection/fork-token-missing-reader", "ok", canon(missing_token))
+    empty_token = copy.deepcopy(fork)
+    empty_token["id_inputs"]["fork"] = ""
+    empty_token["id"] = digest(canon(empty_token["id_inputs"]))
+    c.resealed("collection/fork-token-empty-reader", "ok", canon(empty_token))
+    for name, obj in [("supersedes", version), ("forked-from", fork)]:
+        unpinned = copy.deepcopy(obj)
+        unpinned["sources"][0].pop("content_hash")
+        c.resealed(f"collection/{name}-unpinned-reader", "ok", canon(unpinned))
     newer = copy.deepcopy(version)
     newer["sources"][0]["future"] = True
     c.resealed(

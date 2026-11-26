@@ -16,7 +16,7 @@ use crate::{Error, Result};
 pub const SUPERSEDES_ROLE: &str = "supersedes";
 
 /// An origin edge to the version a new lineage forked from (ADR-0067 D5).
-/// Collections carrying this role require a caller-supplied `fork` key in `id_inputs` at seal.
+/// Collection writers require a non-empty caller-supplied `fork` token in `id_inputs` for this role.
 /// The edge references the origin's `id` and pins its `manifest_hash`.
 pub const FORKED_FROM_ROLE: &str = "forked_from";
 

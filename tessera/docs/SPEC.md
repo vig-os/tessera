@@ -650,9 +650,15 @@ Products and collections are immutable versions. `id` is the stable lineage hand
 The pin is the predecessor's seal, never its `content_hash`: a metadata-only change leaves the content
 root unchanged but changes the seal. `sources` is excluded from identity inputs and from the content MMR.
 
+Collection writers MUST refuse a `supersedes` or `forked_from` edge without a non-empty
+`content_hash` pin to the predecessor's `manifest_hash`. Other roles may remain reference-only.
+These writer rules apply to building a seal, recomputing one, and emitting canonical or stored bytes,
+including after public-field mutations. Readers still verify received bytes under §4; writer-rule
+validation is not an additional reader refusal.
+
 A collection fork starts a distinct lineage with a `forked_from` edge to the origin's `id` and
 `manifest_hash`. A writer MUST refuse to seal a collection carrying a `forked_from` edge without a
-caller-supplied `fork` key in `id_inputs` (`Error::Invalid`). The caller supplies token uniqueness across
+non-empty, caller-supplied `fork` token in `id_inputs` (`Error::Invalid`). The caller supplies token uniqueness across
 nodes; tessera never generates randomness. Later versions retain the same identity inputs, including
 `fork`. Repeating the same inputs is deterministic; different tokens yield different lineage ids.
 `derived_from` continues to record derivation. These edges form a tamper-evident Merkle DAG (ADR-0067 D2/D5).

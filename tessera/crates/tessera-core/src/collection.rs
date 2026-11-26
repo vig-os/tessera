@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::provenance::{Source, FORKED_FROM_ROLE};
+use crate::provenance::{Source, FORKED_FROM_ROLE, SUPERSEDES_ROLE};
 
 use crate::field_path::FieldPath;
 use crate::manifest::{
@@ -202,7 +202,8 @@ pub struct Collection {
     /// and pins its `manifest_hash` in [`Source::content_hash`], including metadata-only changes.
     /// Edges do not enter `id_inputs` or the member MMR. Empty edges are omitted, preserving
     /// every pre-edge collection's stored bytes. A `forked_from` edge requires a caller-supplied
-    /// `fork` key in `id_inputs` at seal; the caller supplies uniqueness across nodes.
+    /// non-empty `fork` key in `id_inputs` at every writer door; the caller supplies uniqueness
+    /// across nodes. Both version roles require a non-empty predecessor seal pin.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<Source>,
     /// MMR root over the members' `manifest_hash`es; `Some` once sealed.
@@ -334,6 +335,8 @@ impl Collection {
     }
 
     /// Pretty JSON, for humans / display. NOT the stored form — see [`to_stored`](Self::to_stored).
+    /// Does not enforce writer rules: a received collection can be displayed even if this build
+    /// would refuse to write it. Raw serde serialisation likewise does not create a stored seal.
     pub fn to_json(&self) -> crate::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
     }
@@ -344,9 +347,40 @@ impl Collection {
     /// # Errors
     /// [`crate::Error::NewerFormatFields`] for a parsed collection with
     /// [`newer_fields`](Self::newer_fields): bytes of this view would leave them out.
+    /// [`crate::Error::Invalid`] for a `forked_from` edge without a non-empty `fork` token, or
+    /// a `forked_from`/`supersedes` edge without a non-empty predecessor seal pin (`content_hash`).
     pub fn canonical_bytes(&self) -> crate::Result<Vec<u8>> {
         refuse_newer(&self.newer_fields)?;
+        self.validate_sources_for_write()?;
         crate::canonical::to_bytes(&crate::canonical::to_json_value(self)?)
+    }
+
+    /// Writer-only rules for collection version edges (ADR-0067 D2/D5). Keep this separate
+    /// from received-byte verification: an older or external writer's sealed bytes remain readable.
+    fn validate_sources_for_write(&self) -> crate::Result<()> {
+        for source in &self.sources {
+            if source.role != SUPERSEDES_ROLE && source.role != FORKED_FROM_ROLE {
+                continue;
+            }
+            if source.role == FORKED_FROM_ROLE
+                && self
+                    .id_inputs
+                    .get("fork")
+                    .is_none_or(|token| token.is_empty())
+            {
+                return Err(crate::Error::Invalid(
+                    "a forked_from collection requires a non-empty caller-supplied fork token in id_inputs"
+                        .into(),
+                ));
+            }
+            if source.content_hash.as_deref().is_none_or(str::is_empty) {
+                return Err(crate::Error::Invalid(format!(
+                    "a collection {} source requires a predecessor manifest_hash pin in content_hash",
+                    source.role,
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Recompute the logical `id` from `id_inputs`.
@@ -385,6 +419,7 @@ impl Collection {
     /// # Errors
     /// As [`canonical_bytes`](Self::canonical_bytes): a re-seal of a view with
     /// [`newer_fields`](Self::newer_fields) is refused, since it would drop sealed content.
+    /// Missing/empty fork tokens or version pins are [`crate::Error::Invalid`].
     pub fn compute_manifest_hash(&self) -> crate::Result<String> {
         Ok(crate::hash::digest(&self.canonical_bytes()?))
     }
@@ -498,12 +533,14 @@ impl Collection {
     ///
     /// # Errors
     /// [`crate::Error::NewerFormatFields`] for a parsed collection with
-    /// [`newer_fields`](Self::newer_fields); [`crate::Error::Invalid`] without a `content_hash`;
+    /// [`newer_fields`](Self::newer_fields); [`crate::Error::Invalid`] without a `content_hash`,
+    /// a fork token or version-edge pin required by [`canonical_bytes`](Self::canonical_bytes);
     /// everything [`verify`](Self::verify) raises, including [`crate::Error::Integrity`] for a
     /// `manifest_hash` that is not `seal`; [`crate::Error::InexactInteger`] or
     /// [`crate::Error::NonFiniteNumber`] for a value no seal can hold.
     pub fn to_stored(&self) -> crate::Result<(Vec<u8>, String)> {
         refuse_newer(&self.newer_fields)?;
+        self.validate_sources_for_write()?;
         if self.content_hash.is_none() {
             return Err(crate::Error::Invalid(
                 "refusing to store a collection without content_hash: a stored collection is \
@@ -790,7 +827,8 @@ impl CollectionBuilder {
 
     /// Set the complete declared identity inputs, retained across versions of a lineage.
     /// `seal` computes `id` from this map. For a fork, include a caller-chosen `fork` token;
-    /// distinct tokens distinguish workspaces even with identical names and timestamps.
+    /// The token must be non-empty; distinct tokens distinguish workspaces even with identical
+    /// names and timestamps.
     /// Start with [`default_collection_id_inputs`] to retain the default identity fields.
     pub fn with_id_inputs(&mut self, id_inputs: BTreeMap<String, String>) -> &mut Self {
         self.collection.id_inputs = id_inputs;
@@ -800,7 +838,9 @@ impl CollectionBuilder {
     /// Append a sealed provenance edge, in order. For [`crate::provenance::SUPERSEDES_ROLE`] or
     /// [`FORKED_FROM_ROLE`], reference the predecessor's `id` and pin its `manifest_hash` with
     /// [`Source::with_content_hash`]. Edges change the seal, independently of the member MMR.
-    /// A `forked_from` edge without a `fork` key in `id_inputs` is [`crate::Error::Invalid`] at seal.
+    /// Both version roles require a non-empty predecessor seal pin. A `forked_from` edge also
+    /// requires a non-empty `fork` token in `id_inputs`. Missing values are [`crate::Error::Invalid`]
+    /// at seal and when emitting canonical or stored bytes.
     pub fn add_source(&mut self, source: Source) -> &mut Self {
         self.collection.sources.push(source);
         self
@@ -859,21 +899,11 @@ impl CollectionBuilder {
 
     /// Seal: compute the MMR root over the members, then the canonical-JSON seal. Mirrors
     /// [`crate::ProductBuilder::seal`] — the same input always yields byte-identical bytes.
-    /// Recomputes `id` from the declared inputs. A fork without a caller-supplied `fork` key
-    /// is [`crate::Error::Invalid`]; callers own token uniqueness (ADR-0067 D5).
+    /// Recomputes `id` from the declared inputs. A fork without a non-empty caller-supplied `fork`
+    /// token, or either version role without a predecessor seal pin, is [`crate::Error::Invalid`].
+    /// Callers own token uniqueness (ADR-0067 D2/D5).
     pub fn seal(mut self) -> crate::Result<Collection> {
-        if self
-            .collection
-            .sources
-            .iter()
-            .any(|s| s.role == FORKED_FROM_ROLE)
-            && !self.collection.id_inputs.contains_key("fork")
-        {
-            return Err(crate::Error::Invalid(
-                "a forked_from collection requires a caller-supplied fork token in id_inputs"
-                    .into(),
-            ));
-        }
+        self.collection.validate_sources_for_write()?;
         self.collection.id = self.collection.recompute_id()?;
         // Structural well-formedness of the open `level` tag (the engine still never *interprets* it,
         // ADR-0049 §5): an empty vocabulary or code is malformed, same class as an empty `name`.
