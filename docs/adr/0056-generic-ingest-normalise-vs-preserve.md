@@ -452,6 +452,44 @@ empty the record says so by being short.** The gate that enforces per-lane disti
 tolerates exactly one digest-less lane and fails on a second, because two of them would be
 indistinguishable in the seal — which is the property #477's amendment exists to protect.
 
+### Amendment (#979, 2026-11-25) — the triple is read where cargo keys what is linked
+
+**The defect.** The `version` and the `features` pre-image were read out of `Cargo.lock` by
+`tessera-ingest/build.rs` and handed to the library as `rustc-env` values. Cargo never keys a build-script
+*run* on the package's normal dependencies (only on its build-dependencies and on `links` dependencies), and
+it leaves a workspace member's path out of the unit hash. Two checkouts sharing one `CARGO_TARGET_DIR`
+therefore shared one run: the second reused the first's values, and a binary that linked parquet `58.4.1`
+sealed `"version": "=58.4.2"` and the 58.4.2 digest. The recorded decoder was not the decoder that ran,
+which is the one thing §6a's triple exists to say. A wider `rerun-if-changed` cannot repair it, because
+cargo's freshness check for a build-script input is an mtime and cannot tell two checkouts apart.
+
+**The fix.** The lockfile is taken by the **compiler**, with `include_str!` in the library unit
+(`tessera-ingest/src/linked.rs`), from this compile's own `CARGO_MANIFEST_DIR`. The library unit's hash
+covers the version, source and resolved features of every crate it links, so a different decoder is a
+different unit and is compiled afresh from the checkout being built. `build.rs` now only reports whether a
+workspace lockfile exists, a layout fact that is the same for every checkout.
+
+**Options considered.** A `const` exported by the decoder itself is the strongest source and exists for
+exactly one lane root: parquet's `DEFAULT_CREATED_BY`. `arrow-ipc`, `csv`, `zip` and `dicom` export
+nothing, and neither do the 40-odd pinned crates of the pre-image. None of them declares `links`, so
+`DEP_*` metadata does not exist for them. A wrapper crate's `CARGO_PKG_VERSION` is its own version, not
+the decoder's. Any build-script step, `cargo metadata` included, runs in the unit cargo does not key.
+Reading the resolution in the library unit is the only option that covers every component and that cargo's
+own fingerprint keeps fresh. Parquet's `const` is kept as an independent check: the
+`linked_decoder_identity` test requires the sealed parquet version to equal the linked parquet's own.
+
+**Nothing sealed moved.** On a clean build the derivation is the same code over the same lockfile, so
+every `version`, pre-image and digest is byte-identical and the ingest corpus goldens are unchanged. The
+`v2` pre-image version is therefore not bumped: the *composition* did not change, only where it is read.
+
+**Limits.** A lane's candidate set is the lockfile closure and can name a crate this build does not link
+(another target's, or one behind a feature nothing in this build enables). Such a pin can go stale only
+between two checkouts that link identical graphs and differ in that unlinked crate alone. Built as a git or
+path dependency of another workspace, the lockfile read is tessera's own, not the consumer's; that predates
+#979 and is tracked in #989. The lockfile
+(~210 KiB) is embedded in every binary linking `tessera-ingest`. A packaged build has no workspace lockfile
+and records the decoder's name only, as before.
+
 
 ### Findings that survive from the earlier passes
 

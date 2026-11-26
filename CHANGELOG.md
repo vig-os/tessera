@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The sealed `ingest_decoder` names the decoder the binary links (#979).** Its `version` and its `features`
+  pre-image were read from `Cargo.lock` by `tessera-ingest`'s build script, whose output cargo reuses across two
+  checkouts that share a target dir. A binary could link parquet 58.4.1 and seal `=58.4.2`. The library now takes
+  the resolution with `include_str!` in its own compile unit, which cargo rebuilds whenever a linked crate
+  changes. `tessera info` reads the same values. No sealed value moves on a clean build, so the ingest corpus is
+  unchanged (ADR-0056 §6a, amendment #979). `Decoder`'s `version` and `pins` fields are replaced by the
+  `Decoder::version()` method and the existing `Decoder::feature_preimage()`.
+
 ### Security
 
 ## [0.1.0-alpha.7] - 2026-11-25
