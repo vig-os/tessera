@@ -376,18 +376,34 @@ fn bytes_a_text_decoder_would_change_are_refused_by_the_strict_parse() {
     assert!(read(&case("recon_int16/replacement-character-resealed")).is_ok());
 }
 
-/// The no-sources vector is the pre-edge collection record, including a product member.
+/// Freeze the existing `stored_bytes.rs::sealed_collection` fixture from pre-PR revision
+/// 4f569cf8b1d27964d9fe9b14a14a0958e5ce42f6. These bytes and seal were emitted by that revision's
+/// actual CollectionBuilder + to_stored, in an isolated checkout, not by the sources model or
+/// the new seal-case generator. Keep the historical pair fixed when regenerating seal vectors.
 #[test]
 fn existing_collection_bytes_and_seal_are_unchanged() {
-    let c = case("collection/as-stored");
-    let (bytes, seal) = members(&c);
-    let parsed = tessera_core::Collection::from_stored_members(&bytes, seal.as_deref()).unwrap();
-    let (written, hash) = parsed.to_stored().unwrap();
-    assert_eq!(written, bytes);
-    assert_eq!(Some(hash.as_bytes()), seal.as_deref());
-    assert!(!serde_json::from_slice::<Value>(&written)
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .contains_key("sources"));
+    const BEFORE: &[u8] = br#"{"collection_schema":"collection","content_hash":"blake3:9d5b560d0e1eed963089e835601e9f9b37e8c6179dc06fd78104582e2b67ec7c","description":"a study","id":"blake3:74fadefbe3b97ea6a1d426e7d08bcc94566c0db0858dd9a2e3d7a1c8cd918ade","id_inputs":{"name":"DP06","product":"collection","timestamp":"2024-01-01T00:00:00Z"},"members":[{"manifest_hash":"blake3:1111111111111111111111111111111111111111111111111111111111111111","reference":"raw","role":"raw"},{"derived_from":["raw"],"manifest_hash":"blake3:2222222222222222222222222222222222222222222222222222222222222222","reference":"recon","role":"derived"}],"name":"DP06","tessera_version":"0.0.0","timestamp":"2024-01-01T00:00:00Z"}"#;
+    const SEAL: &str = "blake3:e04a7aa13c50ac5ebb4b8ce4f060ec094116717eed53112c99c8cef214301deb";
+    let mut builder =
+        tessera_core::CollectionBuilder::new("DP06", "a study", "2024-01-01T00:00:00Z");
+    builder.add_member(
+        "raw",
+        format!("blake3:{}", "1".repeat(64)),
+        tessera_core::collection::Role::Raw,
+        Vec::new(),
+    );
+    builder.add_member(
+        "recon",
+        format!("blake3:{}", "2".repeat(64)),
+        tessera_core::collection::Role::Derived,
+        vec!["raw".into()],
+    );
+    let (written, seal) = builder.seal().unwrap().to_stored().unwrap();
+    assert_eq!(written, BEFORE);
+    assert_eq!(seal, SEAL);
+    let old = tessera_core::Collection::from_stored(BEFORE, SEAL).unwrap();
+    assert_eq!(
+        old.to_stored().unwrap(),
+        (BEFORE.to_vec(), SEAL.to_string())
+    );
 }
