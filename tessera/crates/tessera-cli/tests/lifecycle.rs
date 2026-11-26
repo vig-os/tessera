@@ -131,9 +131,10 @@ fn persona_lifecycle_e2e() {
         .to_string();
 
     assert!(ok(&["commit", "repo", &lineage, "--set", "tracer=FLT"]).contains("supersedes"));
-    let tip = std::fs::read_to_string(format!("repo/refs/{}", lineage.replace([':', '/'], "_")))
-        .unwrap()
-        .trim()
+    let tip = ok(&["log", "repo", &lineage])
+        .lines()
+        .find_map(|l| l.strip_suffix("  (tip)"))
+        .expect("log marks the tip")
         .to_string();
 
     let diff = ok(&["diff", "repo", &tip]);

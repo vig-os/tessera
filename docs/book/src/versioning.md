@@ -55,6 +55,27 @@ holds an exclusive lock on the file `repo/lock` for its whole run, and others wa
   over NFS or another network filesystem without lock support. (A repository on an object store would fence with a
   conditional put; it is not built yet, #288.)
 
+## Lineage names and ref files
+
+A lineage is named by its product `id` (`blake3:<hex>`, printed by `import`), and its tip lives in the file
+`repo/refs/<name>`, with its history cache at `repo/log/<name>.jsonl`. The file name is the lineage **percent-encoded**:
+every byte outside `a-z`, `0-9`, `-` and `_` is written `%` plus two lower-case hex digits, so `blake3:3f…` is stored as
+`blake3%3a3f…`, `a:b` as `a%3ab` and `Ab` as `%41b`. Distinct lineages never share a file, on a case-insensitive file
+system too (macOS by default). An empty lineage, or one whose encoded name is longer than 249 bytes, is refused with
+`lineage '…' cannot name a ref`; a product id needs 73.
+
+The root file `repo/layout` records this naming (layout version 1). A repository made before it (tessera
+0.1.0-alpha.7 and earlier) named `a:b` and `a_b` both `a_b`, so a commit on one moved or blocked the other (#975).
+Every verb refuses such a repository and never reads it with the new naming:
+
+```text
+repository repo has the layout the one from before #975 (…), and this build reads only `tessera-repository 1` (…);
+there is no migration: create a new repository (`tessera init`) and import the source products again
+```
+
+There is no migration verb: an alpha carries no backwards-compatibility baggage, as for products (ADR-0066). Create a
+new repository with `tessera init` and `import` the sealed source products into it again.
+
 The append-only guarantee is cryptographic, not conventional: a later version's `content_hash` carries a
 **consistency proof** that it is an append-only prefix extension of the earlier one (see
 [Integrity](./integrity.md)) — you can prove a revision only *added*, never rewrote history.

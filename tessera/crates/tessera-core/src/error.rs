@@ -421,6 +421,31 @@ pub enum Error {
         source: Box<Error>,
     },
 
+    /// A lineage name a repository cannot name a ref file for (ADR-0036 §1, #975): empty, or
+    /// longer than its percent-encoded file name allows (249 bytes, so that the ref, its temp file
+    /// and its `log` cache stay within a file system's 255-byte name limit). It is refused before
+    /// the writer lock is taken, so nothing was read or written.
+    #[error("lineage '{lineage}' cannot name a ref: {reason}")]
+    InvalidLineage { lineage: String, reason: String },
+
+    /// A repository whose layout this build does not read (ADR-0036, #975): `found` describes the
+    /// layout it has, `required` the one this build reads. A repository written before #975 has
+    /// no `layout` file and names its refs by a mapping that sent distinct lineages to one file
+    /// (`a:b` and `a_b` both to `a_b`); reading it with the current naming could give one lineage
+    /// another's tip, so it is refused, never read. There is no migration in the alpha (as
+    /// ADR-0066 rule 10 for products): create a new repository and import the source products
+    /// again. Nothing was read or written.
+    #[error(
+        "repository {} has the layout {found}, and this build reads only {required}; there is no \
+         migration: create a new repository (`tessera init`) and import the source products again",
+        root.display()
+    )]
+    UnsupportedRepositoryLayout {
+        root: std::path::PathBuf,
+        found: String,
+        required: String,
+    },
+
     /// An append to a write session whose block `name` is `quarantined`, or its parent or child (the
     /// leaf rule, ADR-0063), where `quarantined` is held in the recovery quarantine directory
     /// `quarantine`: a journal tail `WriteSession::recover` could not replay, kept for repair by
