@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Repository collection storage and typed collection refs (ADR-0067 step 4, #999). `put_collection` and
+  `get_collection` address canonical collection bytes by their seal. `set_ref` infers and verifies the object
+  kind, refusing bare blocks; reads refuse record/object kind mismatches. Garbage collection recursively marks
+  collection members and version edges, aborting before deletion on missing, unreadable or wrong-kind members
+  with the full path from the root ref. Shared versions are read once with no depth cutoff.
+
 - `ObjectKind::of` classifies version-object bytes without guessing (ADR-0067 step 3, #998).
   Ambiguous shapes are refused. `collection::diff` reports added, removed and repinned members in
   collection order, detects relative order changes, and refuses duplicate member references.
