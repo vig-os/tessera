@@ -546,7 +546,8 @@ fn validate_node(blocks: &[BlockRef], node: &str) -> Result<Vec<BlockName>> {
 
 /// The [`TableSpec`] of every block of a resolved group, in the group's order (ADR-0064 §2.1's
 /// schema rule): each block's spec must parse, and every block must have the first one's column
-/// names, dtypes and nullability, in order, or the name is refused with [`LogicalTableError::SchemaMismatch`].
+/// names, dtypes, nullability, units, scales and referencing, in order, or the name is refused
+/// with [`LogicalTableError::SchemaMismatch`].
 /// The validation of a partitioned node already applies it; readers apply it to every group, the
 /// legacy flat form included, through this one function. Reads the manifest only.
 ///
@@ -599,26 +600,25 @@ fn specs_of(name: &str, refs: &[&BlockRef]) -> Result<Vec<TableSpec>> {
                 ));
             }
             for (column, first) in spec.columns.iter().zip(&head.columns) {
-                if column.name != first.name
-                    || !same_value_contract(
-                        &column.dtype,
-                        column.nullable,
-                        &first.dtype,
-                        first.nullable,
-                    )
-                {
+                if column.name != first.name || !same_value_contract(column.into(), first.into()) {
                     return Err(mismatch(
                         b,
                         format!(
-                            "column '{}': (name={:?}, dtype={}, nullable={}), \
-                             first leaf (name={:?}, dtype={}, nullable={})",
+                            "column '{}': (name={:?}, dtype={}, nullable={}, unit={:?}, scale={:?}, referencing={:?}), \
+                             first leaf (name={:?}, dtype={}, nullable={}, unit={:?}, scale={:?}, referencing={:?})",
                             column.name,
                             column.name,
                             column.dtype,
                             column.nullable,
+                            column.unit,
+                            column.scale,
+                            column.referencing,
                             first.name,
                             first.dtype,
-                            first.nullable
+                            first.nullable,
+                            first.unit,
+                            first.scale,
+                            first.referencing
                         ),
                     ));
                 }

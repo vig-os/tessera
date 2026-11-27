@@ -563,6 +563,13 @@ fn shaped_contract_leaves(legacy: bool, change: &str) -> Vec<(BlockRef, BlockPay
                 match change {
                     "order" => columns.swap(0, 1),
                     "extra" => columns.push(col("time", "i4")),
+                    "unit" => columns[0].unit = Some("ms".into()),
+                    "scale" => columns[0].scale = Some(0.001),
+                    "referencing" => {
+                        columns[0].referencing = Some(
+                            tessera_core::referencing::Referenced::identity(Some("ns".into())),
+                        );
+                    }
                     "metadata" => {
                         columns[0].description = Some("Second leaf description".into());
                         columns[0].short_name = Some("Measured value".into());
@@ -622,6 +629,108 @@ fn assert_shape_contract_refused(change: &str) {
                 ..
             })
         ));
+    }
+}
+
+fn assert_interpreting_metadata_refused(field: &str, read: bool) {
+    for legacy in [false, true] {
+        for populated in [false, true] {
+            let mut leaves = shaped_contract_leaves(legacy, field);
+            if populated {
+                leaves[0].0.spec["columns"][0][field] = match field {
+                    "unit" => serde_json::json!("ns"),
+                    "scale" => serde_json::json!(1.0),
+                    "referencing" => serde_json::json!({
+                        "transform": {"kind": "affine_1d", "slope": 1.0, "intercept": 7.0},
+                        "frame": "epoch:unix"
+                    }),
+                    _ => unreachable!(),
+                };
+            }
+            let error = if read {
+                let manifest = sealed_contract_manifest(&leaves);
+                let dir = tempfile::tempdir().unwrap();
+                let out = dir.path().join("old.tsra");
+                let payloads = leaves.into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+                write_old_archive(&manifest, &payloads, &out);
+                let mut reader = Reader::open(&out).unwrap();
+                reader
+                    .logical_table("events")
+                    .err()
+                    .expect("mixed metadata read")
+            } else {
+                let mut builder = tessera_core::ProductBuilder::new("test", "metadata", "d", TS);
+                for (block, _) in &leaves {
+                    builder.add_block_ref(block.clone());
+                }
+                builder.seal().expect_err("mixed metadata sealed")
+            };
+            match error {
+                Error::LogicalTable {
+                    name,
+                    reason: LogicalTableError::SchemaMismatch { leaf, detail },
+                } => {
+                    assert_eq!(name, "events");
+                    assert_eq!(leaf, if legacy { "events_0001" } else { "events/0001" });
+                    assert!(detail.contains("value"), "{detail}");
+                    assert!(detail.contains(field), "{detail}");
+                    assert!(detail.contains("first leaf"), "{detail}");
+                    if !populated {
+                        assert!(detail.contains("None"), "{detail}");
+                    }
+                    let expected = match field {
+                        "unit" => "ms",
+                        "scale" => "0.001",
+                        "referencing" => "Identity",
+                        _ => unreachable!(),
+                    };
+                    assert!(detail.contains(expected), "{detail}");
+                    if populated {
+                        let expected = match field {
+                            "unit" => "ns",
+                            "scale" => "1.0",
+                            "referencing" => "epoch:unix",
+                            _ => unreachable!(),
+                        };
+                        assert!(detail.contains(expected), "{detail}");
+                    }
+                    assert!(detail.contains("Some"), "{detail}");
+                }
+                error => panic!("expected metadata contract refusal: {error:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn unit_mismatch_refused_at_seal() {
+    assert_interpreting_metadata_refused("unit", false);
+}
+#[test]
+fn unit_mismatch_refused_at_read() {
+    assert_interpreting_metadata_refused("unit", true);
+}
+#[test]
+fn scale_mismatch_refused_at_seal() {
+    assert_interpreting_metadata_refused("scale", false);
+}
+#[test]
+fn scale_mismatch_refused_at_read() {
+    assert_interpreting_metadata_refused("scale", true);
+}
+#[test]
+fn referencing_mismatch_refused_at_seal() {
+    assert_interpreting_metadata_refused("referencing", false);
+}
+#[test]
+fn referencing_mismatch_refused_at_read() {
+    assert_interpreting_metadata_refused("referencing", true);
+}
+
+#[test]
+fn streaming_seal_refuses_interpreting_metadata() {
+    for field in ["unit", "scale", "referencing"] {
+        assert_shape_contract_refused(field);
     }
 }
 

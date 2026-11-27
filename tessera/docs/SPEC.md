@@ -419,8 +419,12 @@ A reader MAY project a subset of columns or random-`take` rows; the format suppo
     array pyramid, `volume/0` …) is not a table.
 
   Every writer and seal MUST refuse a marked or legacy flat group whose leaves disagree on this
-  column contract. Readers MUST also refuse previously sealed incompatible groups. Per-leaf codecs
-  and descriptive column metadata do not affect concatenation and need not agree.
+  column contract. Readers MUST also refuse previously sealed incompatible groups. Value-interpreting
+  metadata MUST agree exactly: `unit`, `scale`, and the complete `referencing` descriptor (transform,
+  including offsets, frame/epoch, output unit and vocabulary). Absence differs from an explicit value;
+  no conversion or semantic normalization is performed. `Column` has no separate offset or epoch field.
+  Per-leaf codecs, descriptive text (`description`, `short_name`), sensitivity classification and
+  schema-only `optional` flags do not change value interpretation and need not agree.
 
   The logical column is the ordered concatenation of the per-block columns; a
   global row maps to a `(block, local_row)` pair via the cumulative per-block row counts (drawn

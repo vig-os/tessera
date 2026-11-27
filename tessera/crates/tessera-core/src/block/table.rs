@@ -8,17 +8,52 @@ use serde::{Deserialize, Serialize};
 
 use super::{Block, BlockKind};
 
-/// Whether two column value contracts can be concatenated without conversion or inventing
-/// validity. Shared by logical-table schema validation and the decoded column `extend` check.
-/// Names and column order are checked by the table group; codecs and descriptive metadata do
-/// not change the decoded value representation.
-pub fn same_value_contract(
-    dtype: &str,
-    nullable: bool,
-    other_dtype: &str,
-    other_nullable: bool,
-) -> bool {
-    dtype == other_dtype && nullable == other_nullable
+/// Borrowed value contract for a column, independent of encoding and descriptive annotations.
+/// A decoded column has no metadata; use [`ValueContract::decoded`] for representation checks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ValueContract<'a> {
+    /// Stored scalar dtype.
+    pub dtype: &'a str,
+    /// Whether values carry a validity mask.
+    pub nullable: bool,
+    /// Physical unit after scaling.
+    pub unit: Option<&'a str>,
+    /// Physical value multiplier; absence differs from an explicit multiplier.
+    pub scale: Option<f64>,
+    /// Complete transform, output unit, vocabulary and reference frame/epoch.
+    pub referencing: Option<&'a crate::referencing::Referenced>,
+}
+
+impl<'a> ValueContract<'a> {
+    /// Representation contract for decoded values without column metadata.
+    pub fn decoded(dtype: &'a str, nullable: bool) -> Self {
+        Self {
+            dtype,
+            nullable,
+            unit: None,
+            scale: None,
+            referencing: None,
+        }
+    }
+}
+
+impl<'a> From<&'a Column> for ValueContract<'a> {
+    fn from(column: &'a Column) -> Self {
+        Self {
+            dtype: &column.dtype,
+            nullable: column.nullable,
+            unit: column.unit.as_deref(),
+            scale: column.scale,
+            referencing: column.referencing.as_ref(),
+        }
+    }
+}
+
+/// Whether two column value contracts can concatenate without conversion or invented validity.
+/// Shared by seal/group validation and decoded column `extend`. Names and order are checked by
+/// the table group; codecs and descriptive annotations are excluded. Metadata compares exactly.
+pub fn same_value_contract(contract: ValueContract<'_>, other: ValueContract<'_>) -> bool {
+    contract == other
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
