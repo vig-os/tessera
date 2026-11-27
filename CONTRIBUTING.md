@@ -30,11 +30,16 @@ scripts/ksb-test.sh my-branch tessera-io 'test(roundtrip)'  # a nextest filterse
 scripts/ksb-test.sh --help                                # every option, the exit codes, the cache rules
 ```
 
-It takes any commit in your clone, pushed or not, and exits with the test run's own exit code (0 pass, 100 a test
+It takes a commit in your clone, pushed or not, whose flake exports `legacyPackages.ksbTest` (#960 or later).
+Older commits exit 3 (`attribute 'ksbTest' missing`). It exits with the test run's own exit code (0 pass, 100 a test
 failed, 4 nothing matched the filterset, 124 the `--timeout` expired), or 3 when the job produced no test result
 (an evaluation or compile error, whose log it prints). It prints nextest's summary line and, when a test fails,
 each failing test's output. `junit.xml`, `nextest.log`, `summary.txt` and `failures.txt` stay in the job's
 output (`ksb out <job> --path junit.xml --dest FILE`).
+
+ksb labels any exit 124 as `reason: deadline`, including the test `--timeout`. Inspect `summary.txt` and
+`nextest.log` to identify a test timeout. An infrastructure deadline during preparation produces no test result
+and the wrapper exits 3, printing ksb's reason and log.
 
 **How.** The script writes a small job flake that pins the commit and the Cargo.lock git dependencies and calls
 `legacyPackages.ksbTest` of this repository's `flake.nix`. That builds the crate's test binaries in one crane
