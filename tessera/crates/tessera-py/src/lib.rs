@@ -34,8 +34,54 @@ create_exception!(
      subclass of `TesseraError`."
 );
 
-fn err<E: std::fmt::Display>(e: E) -> PyErr {
-    TesseraError::new_err(e.to_string())
+fn err<E: std::fmt::Display + std::any::Any>(e: E) -> PyErr {
+    let error = TesseraError::new_err(e.to_string());
+    if let Some(tessera_core::Error::LogicalTable {
+        reason: tessera_core::block::partition::LogicalTableError::SchemaMismatch { kind, .. },
+        ..
+    }) = (&e as &dyn std::any::Any).downcast_ref::<tessera_core::Error>()
+    {
+        use tessera_core::block::table::SchemaMismatchKind;
+        Python::attach(|py| -> PyResult<()> {
+            let value = error.value(py);
+            value.setattr("column", py.None())?;
+            value.setattr("field", py.None())?;
+            match kind {
+                SchemaMismatchKind::ColumnCount { expected, found } => {
+                    value.setattr("kind", "column_count")?;
+                    value.setattr("expected", expected)?;
+                    value.setattr("found", found)?;
+                }
+                SchemaMismatchKind::ColumnName {
+                    index,
+                    expected,
+                    found,
+                } => {
+                    value.setattr("kind", "column_name")?;
+                    value.setattr("column", index)?;
+                    value.setattr("expected", expected)?;
+                    value.setattr("found", found)?;
+                }
+                SchemaMismatchKind::Field {
+                    column,
+                    field,
+                    expected,
+                    found,
+                } => {
+                    value.setattr("kind", "field")?;
+                    value.setattr("column", column)?;
+                    value.setattr("field", field.to_string())?;
+                    value.setattr("expected", expected.to_string())?;
+                    value.setattr("found", found.to_string())?;
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+        .map_or_else(|error| error, |()| error)
+    } else {
+        error
+    }
 }
 
 /// One decoded table column as the native layer hands it to Python: `(le_bytes, numpy_code,

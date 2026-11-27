@@ -10,6 +10,8 @@ in leaf order, and ``read_block("pairs")`` must raise ``NotABlockError``.
 """
 
 import sys
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -91,5 +93,32 @@ try:
     raise AssertionError("table('nope') must raise TesseraError")
 except tessera.TesseraError as e:
     assert "logical table 'nope'" in str(e), e
+
+# Legacy groups are validated on sealing, before any invalid archive is written.
+for columns, expected in (
+    (
+        [("i", "u8", b"\x00" * 8), ("x", "u8", b"\x00" * 8)],
+        ("column_count", None, None, 1, 2),
+    ),
+    ([("x", "u8", b"\x00" * 8)], ("column_name", 0, None, "i", "x")),
+    ([("i", "f8", b"\x00" * 8)], ("field", "i", "dtype", '"u8"', '"f8"')),
+):
+    builder = tessera.Builder(
+        "listmode", "mismatch", "schema mismatch", "2024-01-01T00:00:00Z"
+    )
+    builder.add_table("events_0001", [("i", "u8", b"\x00" * 8)])
+    builder.add_table("events_0002", columns)
+    with tempfile.TemporaryDirectory() as directory:
+        try:
+            builder.pack(str(Path(directory) / "mismatch.tsra"))
+            raise AssertionError("incompatible legacy leaves must fail to seal")
+        except tessera.TesseraError as error:
+            assert (
+                error.kind,
+                error.column,
+                error.field,
+                error.expected,
+                error.found,
+            ) == expected
 
 print("logical_tables: ok")

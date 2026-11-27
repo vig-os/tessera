@@ -271,9 +271,15 @@ pub enum LogicalTableError {
     NoTerminal { max_index: u64 },
     AfterTerminal { leaf: String },
     OutOfOrder { leaf: String, after: String },
-    SchemaMismatch { leaf: String, detail: String },
+    SchemaMismatch { leaf: String, kind: SchemaMismatchKind },
 }
 ```
+
+`SchemaMismatchKind` distinguishes `ColumnCount { expected, found }`,
+`ColumnName { index, expected, found }`, and
+`Field { column, field: ContractField, expected: Box<ContractValue>, found: Box<ContractValue> }`.
+The table name comes from the outer `Error::LogicalTable.name`, rather than the nested mismatch.
+An undecodable leaf spec raises `Error::MalformedTableSpec { table, leaf, reason }` before comparison.
 
 `LogicalTableView` construction (`multiblock.rs:376`) moves from today's `Error::Container(String)` messages to
 these variants (`Error` is `#[non_exhaustive]`, `tessera-core/src/error.rs:13`). The single function is shared by
