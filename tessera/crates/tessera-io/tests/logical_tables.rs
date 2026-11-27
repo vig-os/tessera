@@ -226,7 +226,8 @@ fn an_invalid_node_is_refused_with_its_variant_by_every_entry_point() {
         .iter()
         .map(|(_, p)| BlockPayload::new(p.name.clone(), p.bytes.clone()))
         .collect();
-    pack(&m, &payloads, &tsra).unwrap();
+    assert_gap(pack(&m, &payloads, &tsra).unwrap_err());
+    write_old_archive(&m, &payloads, &tsra);
 
     let mut r = Reader::open(&tsra).unwrap();
     assert_gap(r.table_group("pairs").unwrap_err());
@@ -258,4 +259,431 @@ fn an_invalid_node_is_refused_with_its_variant_by_every_entry_point() {
     let sealed = root.path().join("ws.tsra");
     assert_gap(ws.seal(&sealed).unwrap_err());
     assert!(!sealed.exists(), "WriteSession::seal wrote before refusing");
+}
+
+// #978: use the legacy form for dtype too: its seal previously skipped schema validation.
+fn contract_leaves(dtype_mix: bool, legacy: bool) -> Vec<(BlockRef, BlockPayload)> {
+    (0..2)
+        .map(|index| {
+            let dtype = if dtype_mix && index == 1 { "i8" } else { "i4" };
+            let nullable = !dtype_mix && index == 1;
+            let mut column = col("value", dtype);
+            column.nullable = nullable;
+            let spec = TableSpec {
+                columns: vec![column],
+                rows: 1,
+                row_index: None,
+                partition: (!legacy).then_some(Partition {
+                    index,
+                    last: index == 1,
+                }),
+                edition: None,
+                codec_profile: None,
+            };
+            let values = if dtype == "i8" {
+                ColumnData::I64(vec![7])
+            } else {
+                ColumnData::I32(vec![7])
+            };
+            let values = if nullable {
+                ColumnData::Nullable {
+                    values: Box::new(values),
+                    validity: vec![true],
+                }
+            } else {
+                values
+            };
+            let name = if legacy {
+                format!("events_{index:04}")
+            } else {
+                format!("events/{index:04}")
+            };
+            table_block(&name, &spec, &vec![("value".into(), values)]).unwrap()
+        })
+        .collect()
+}
+
+fn assert_contract_error(error: Error) {
+    match error {
+        Error::LogicalTable {
+            name,
+            reason: LogicalTableError::SchemaMismatch { leaf, detail },
+        } => {
+            assert_eq!(name, "events");
+            assert!(leaf.ends_with("0001"), "{leaf}");
+            assert!(detail.contains("value"), "{detail}");
+            assert!(detail.contains("i4"), "{detail}");
+        }
+        error => panic!("expected column contract refusal, got {error:?}"),
+    }
+}
+
+fn builder_contract_refusal(dtype_mix: bool) {
+    for legacy in [true, false] {
+        let mut builder = tessera_core::ProductBuilder::new("test", "contracts", "d", TS);
+        for (block, _) in contract_leaves(dtype_mix, legacy) {
+            builder.add_block_ref(block);
+        }
+        assert_contract_error(
+            builder
+                .seal()
+                .expect_err("a mismatched contract was sealed"),
+        );
+    }
+}
+
+fn streaming_contract_refusal(dtype_mix: bool) {
+    for legacy in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let ws =
+            WriteSession::create(&dir.path().join("ws"), "test", "contracts", "d", TS).unwrap();
+        let mut writer = StreamWriter::new(ws, 2, 2);
+        for (block, payload) in contract_leaves(dtype_mix, legacy) {
+            writer
+                .push(Box::new(move || Ok(((block, payload), Vec::new()))))
+                .unwrap();
+        }
+        let out = dir.path().join("invalid.tsra");
+        assert_contract_error(
+            writer
+                .finish(&out)
+                .expect_err("a mismatched contract was sealed"),
+        );
+        assert!(!out.exists());
+    }
+}
+
+#[test]
+fn builder_refuses_nullable_contract_mix() {
+    builder_contract_refusal(false);
+}
+#[test]
+fn builder_refuses_dtype_contract_mix() {
+    builder_contract_refusal(true);
+}
+#[test]
+fn streaming_refuses_nullable_contract_mix() {
+    streaming_contract_refusal(false);
+}
+#[test]
+fn streaming_refuses_dtype_contract_mix() {
+    streaming_contract_refusal(true);
+}
+
+fn sealed_contract_manifest(leaves: &[(BlockRef, BlockPayload)]) -> Manifest {
+    // Model a product sealed before #978, bypassing the builder's new refusal.
+    let mut m = Manifest::new("test", "contracts", "d", TS);
+    m.blocks = leaves.iter().map(|(b, _)| b.clone()).collect();
+    m.content_hash = Some(m.recompute_content_hash().unwrap());
+    m.manifest_hash = Some(m.compute_manifest_hash().unwrap());
+    m
+}
+
+#[test]
+fn packers_refuse_previously_sealed_contract_mixes_before_writing() {
+    for dtype_mix in [false, true] {
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let leaves = contract_leaves(dtype_mix, legacy);
+            let manifest = sealed_contract_manifest(&leaves);
+            let payloads = leaves.into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+            let out = dir.path().join("invalid.tsra");
+            assert_contract_error(pack(&manifest, &payloads, &out).unwrap_err());
+            assert!(!out.exists());
+            // No fragment is opened: the contract is refused before any output is created.
+            let sources = payloads
+                .iter()
+                .map(|p| (p.name.clone(), Path::new("absent")))
+                .collect::<Vec<_>>();
+            assert_contract_error(
+                tessera_io::pack_streaming(&manifest, &sources, &out).unwrap_err(),
+            );
+            assert!(!out.exists());
+        }
+    }
+}
+
+#[test]
+fn readers_still_refuse_previously_sealed_contract_mixes() {
+    for dtype_mix in [false, true] {
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let leaves = contract_leaves(dtype_mix, legacy);
+            let m = sealed_contract_manifest(&leaves);
+            let path = dir.path().join("old.tsra");
+            let payloads = leaves.into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+            write_old_archive(&m, &payloads, &path);
+            let mut reader = Reader::open(&path).unwrap();
+            assert_contract_error(reader.logical_table("events").err().unwrap());
+        }
+    }
+}
+
+#[test]
+fn push_table_and_open_table_refuse_incompatible_group_contracts() {
+    for dtype_mix in [false, true] {
+        for open in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let ws =
+                WriteSession::create(&dir.path().join("ws"), "test", "contracts", "d", TS).unwrap();
+            let mut writer = StreamWriter::new(ws, 2, 2);
+            let spec = TableSpec {
+                columns: vec![col("value", "i4")],
+                rows: 0,
+                row_index: None,
+                partition: None,
+                edition: None,
+                codec_profile: None,
+            };
+            let values = if dtype_mix {
+                ColumnData::I64(vec![7; ROWS_PER_GROUP])
+            } else {
+                ColumnData::Nullable {
+                    values: Box::new(ColumnData::I32(vec![7; ROWS_PER_GROUP])),
+                    validity: vec![true; ROWS_PER_GROUP],
+                }
+            };
+            let good = vec![("value".into(), ColumnData::I32(vec![7; ROWS_PER_GROUP]))];
+            let bad = vec![("value".into(), values)];
+            let error = if open {
+                let mut table = writer
+                    .open_table_with_block_rows("events", spec, ROWS_PER_GROUP as u64)
+                    .unwrap();
+                table.push(&mut writer, good).unwrap();
+                table.push(&mut writer, bad).unwrap_err()
+            } else {
+                writer
+                    .push_table_with_block_rows(
+                        "events",
+                        TableSpec {
+                            rows: (2 * ROWS_PER_GROUP) as u64,
+                            ..spec
+                        },
+                        vec![good, bad],
+                        ROWS_PER_GROUP as u64,
+                    )
+                    .unwrap_err()
+            };
+            assert_contract_error(error);
+        }
+    }
+}
+
+#[test]
+fn single_block_push_table_keeps_maximum_length_bare_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = WriteSession::create(&dir.path().join("ws"), "test", "long-name", "d", TS).unwrap();
+    let mut writer = StreamWriter::new(ws, 1, 1);
+    let name = "v".repeat(255);
+    let spec = TableSpec {
+        columns: vec![col("value", "i4")],
+        rows: 1,
+        row_index: None,
+        partition: None,
+        edition: None,
+        codec_profile: None,
+    };
+    writer
+        .push_table(
+            &name,
+            spec,
+            vec![vec![("value".into(), ColumnData::I32(vec![7]))]],
+        )
+        .unwrap();
+    let out = dir.path().join("long.tsra");
+    writer.finish(&out).unwrap();
+    Reader::open(&out).unwrap().logical_table(&name).unwrap();
+}
+
+#[test]
+fn ingest_multi_block_sink_refuses_incompatible_group_contracts() {
+    for dtype_mix in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let ws =
+            WriteSession::create(&dir.path().join("ws"), "test", "contracts", "d", TS).unwrap();
+        let mut writer = StreamWriter::new(ws, 2, 2);
+        let mut sink = TableMultiBlockSink::with_block_rows(
+            vec![col("value", "i4")],
+            "events",
+            &dir.path().join("sink"),
+            &mut writer,
+            ROWS_PER_GROUP as u64,
+        )
+        .unwrap();
+        sink.push(vec![(
+            "value".into(),
+            ColumnData::I32(vec![7; ROWS_PER_GROUP]),
+        )])
+        .unwrap();
+        let values = if dtype_mix {
+            ColumnData::I64(vec![7])
+        } else {
+            ColumnData::Nullable {
+                values: Box::new(ColumnData::I32(vec![7])),
+                validity: vec![true],
+            }
+        };
+        assert_contract_error(sink.push(vec![("value".into(), values)]).unwrap_err());
+    }
+}
+
+#[test]
+fn array_bare_name_next_to_numbered_table_seals_and_reads() {
+    use tessera_core::block::array::ArraySpec;
+    use tessera_io::array::{array_block, ArrayData};
+    let (array, array_payload) = array_block(
+        "img",
+        &ArraySpec::new(vec![1], "int16"),
+        &ArrayData::I16(vec![3]),
+    )
+    .unwrap();
+    let (mut table, table_payload) = contract_leaves(true, true).remove(0);
+    table.name = "img_0001".parse().unwrap();
+    let table_payload = BlockPayload::new(table.name.clone(), table_payload.bytes);
+    let mut builder = tessera_core::ProductBuilder::new("test", "mixed-kinds", "d", TS);
+    builder.add_block_ref(array).add_block_ref(table);
+    let manifest = builder.seal().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("mixed.tsra");
+    pack(&manifest, &[array_payload, table_payload], &out).unwrap();
+    let mut reader = Reader::open(&out).unwrap();
+    assert_eq!(
+        reader.table_group("img_0001").unwrap(),
+        TableGroup::Single("img_0001".parse().unwrap())
+    );
+    reader.logical_table("img_0001").unwrap();
+    reader.read_block("img").unwrap();
+}
+
+fn shaped_contract_leaves(legacy: bool, change: &str) -> Vec<(BlockRef, BlockPayload)> {
+    (0..2)
+        .map(|index| {
+            let mut columns = vec![col("value", "i4"), col("energy", "i4")];
+            if index == 1 {
+                match change {
+                    "order" => columns.swap(0, 1),
+                    "extra" => columns.push(col("time", "i4")),
+                    "metadata" => {
+                        columns[0].description = Some("Second leaf description".into());
+                        columns[0].short_name = Some("Measured value".into());
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let data = columns
+                .iter()
+                .map(|c| (c.name.clone(), ColumnData::I32(vec![7])))
+                .collect();
+            let spec = TableSpec {
+                columns,
+                rows: 1,
+                row_index: None,
+                partition: (!legacy).then_some(Partition {
+                    index,
+                    last: index == 1,
+                }),
+                edition: None,
+                codec_profile: None,
+            };
+            let name = if legacy {
+                format!("events_{index:04}")
+            } else {
+                format!("events/{index:04}")
+            };
+            table_block(&name, &spec, &data).unwrap()
+        })
+        .collect()
+}
+
+fn assert_shape_contract_refused(change: &str) {
+    for legacy in [false, true] {
+        let leaves = shaped_contract_leaves(legacy, change);
+        let mut builder = tessera_core::ProductBuilder::new("test", "shape", "d", TS);
+        for (block, _) in &leaves {
+            builder.add_block_ref(block.clone());
+        }
+        assert!(matches!(
+            builder.seal(),
+            Err(Error::LogicalTable {
+                reason: LogicalTableError::SchemaMismatch { .. },
+                ..
+            })
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let ws = WriteSession::create(&dir.path().join("ws"), "test", "shape", "d", TS).unwrap();
+        let mut writer = StreamWriter::new(ws, 2, 2);
+        for block in leaves {
+            writer.push(Box::new(move || Ok((block, vec![])))).unwrap();
+        }
+        assert!(matches!(
+            writer.finish(&dir.path().join("out.tsra")),
+            Err(Error::LogicalTable {
+                reason: LogicalTableError::SchemaMismatch { .. },
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn reordered_columns_are_refused() {
+    assert_shape_contract_refused("order");
+}
+
+#[test]
+fn extra_columns_are_refused() {
+    assert_shape_contract_refused("extra");
+}
+
+#[test]
+fn descriptive_metadata_may_differ_between_leaves() {
+    for legacy in [false, true] {
+        let leaves = shaped_contract_leaves(legacy, "metadata");
+        let mut builder = tessera_core::ProductBuilder::new("test", "metadata", "d", TS);
+        for (block, _) in &leaves {
+            builder.add_block_ref(block.clone());
+        }
+        let manifest = builder.seal().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("metadata.tsra");
+        pack(
+            &manifest,
+            &leaves.into_iter().map(|(_, p)| p).collect::<Vec<_>>(),
+            &out,
+        )
+        .unwrap();
+        let mut reader = Reader::open(&out).unwrap();
+        let table = reader.logical_table("events").unwrap();
+        assert_eq!(
+            table.column(&mut reader, "value").unwrap(),
+            ColumnData::I32(vec![7, 7])
+        );
+    }
+}
+
+// Deliberately model an old malformed product without using a writer that must refuse it.
+fn write_old_archive(m: &Manifest, payloads: &[BlockPayload], path: &Path) {
+    use std::io::Write;
+    let (json, seal) = tessera_io::stored::manifest(m).unwrap();
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default())
+        .large_file(true)
+        .system(zip::System::Unix);
+    let mut archive = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    for (name, bytes) in [
+        ("mimetype", tessera_io::MIMETYPE.as_bytes()),
+        ("manifest.seal", seal.as_bytes()),
+        ("manifest.json", json.as_slice()),
+    ] {
+        archive.start_file(name, options).unwrap();
+        archive.write_all(bytes).unwrap();
+    }
+    for p in payloads {
+        archive
+            .start_file(format!("blocks/{}", p.name), options)
+            .unwrap();
+        archive.write_all(&p.bytes).unwrap();
+    }
+    archive.finish().unwrap();
 }

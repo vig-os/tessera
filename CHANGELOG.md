@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **breaking (writers)**: independent tables sharing a legacy numbered prefix, such as `run_0001`
+  and `run_0002`, must agree on column count, names, order, dtypes and nullability to seal (#978).
+  Rename independent tables without a shared `_NNNN` prefix, for example `run_first` and `run_second`.
+  Existing products retain the legacy read rule; incompatible group reads remain refused.
+
 - **breaking**: repositories now require layout 2 (`tessera-repository 2`), with typed product ref records
   in `refs/lineages/` and `refs/pins/` and lineage caches in `log/lineages/` (ADR-0067 step 1, #996).
   Every other layout, including an unmarked empty directory, is refused. There is no migration verb: seal tips
@@ -33,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 ### Fixed
+
+- Refuse partitioned and legacy flat tables whose leaves disagree on column names, dtypes or
+  nullability before sealing or packing (#978). Readers continue to refuse incompatible sealed tables.
 
 - **The sealed `ingest_decoder` names the decoder the binary links (#979).** Its `version` and its `features`
   pre-image were read from `Cargo.lock` by `tessera-ingest`'s build script, whose output cargo reuses across two

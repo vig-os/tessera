@@ -281,6 +281,14 @@ every reader below and by the seal (§2.4), so a product the seal accepts is one
 
 ### §4 — The legacy flat form `_NNNN`: read forever in v0, never written again
 
+**Amendment (2026-11-27, #978).** Writers now refuse to seal a legacy-shaped group whose table leaves
+have different column counts, names, order, dtypes or nullability. This also applies to independent tables
+named `run_0001` and `run_0002`: the legacy reader resolves them as the group `run`, so that group must be
+readable. Rename independent tables to names without a shared `_NNNN` prefix, for example `run_first` and
+`run_second`. Non-table blocks do not declare column contracts: an array `img` may coexist with a table
+`img_0001`, which remains readable by its full name. The legacy grouping rule remains read-forever in v0;
+this writer restriction does not rewrite existing products or relax incompatible group reads.
+
 - **Existing products keep reading.** Every product with `prefix_NNNN` blocks (GE ingest's `events_NNNN` and
   `TableMultiBlockSink`'s output, alpha.1 to alpha.4 and dev up to the writer switch) resolves through rule 4
   of §3, which is today's `block_group` verbatim: the bare `prefix` plus every `prefix_` + exactly four ASCII

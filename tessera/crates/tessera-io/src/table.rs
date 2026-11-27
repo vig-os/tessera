@@ -508,6 +508,22 @@ impl ColumnData {
 
     /// Append another column's values onto this one (dtypes must match).
     pub fn extend(&mut self, other: &ColumnData) -> Result<()> {
+        let nullable = matches!(self, ColumnData::Nullable { .. });
+        let other_nullable = matches!(other, ColumnData::Nullable { .. });
+        if !tessera_core::block::table::same_value_contract(
+            self.numpy_code(),
+            nullable,
+            other.numpy_code(),
+            other_nullable,
+        ) {
+            return Err(Error::Codec(format!(
+                "extend: dtype {} (nullable={}) != {} (nullable={})",
+                other.numpy_code(),
+                other_nullable,
+                self.numpy_code(),
+                nullable
+            )));
+        }
         macro_rules! ext {
             ($v:expr, $variant:ident) => {
                 match other {
@@ -904,6 +920,41 @@ fn runtime_session() -> (CurrentThreadRuntime, VortexSession) {
 /// Run `f` with the per-thread pooled read runtime+session (see [`READ_RT`]).
 fn with_read_session<R>(f: impl FnOnce(&CurrentThreadRuntime, &VortexSession) -> R) -> R {
     READ_RT.with(|(rt, _pool, s)| f(rt, s))
+}
+
+/// Validate a streamed column against its table's declared contract before staging untyped bytes.
+pub(crate) fn check_column_contract(
+    table_name: &str,
+    leaf: &str,
+    col: &tessera_core::block::table::Column,
+    name: &str,
+    data: &ColumnData,
+) -> Result<()> {
+    let nullable = matches!(data, ColumnData::Nullable { .. });
+    if name != col.name
+        || !tessera_core::block::table::same_value_contract(
+            &col.dtype,
+            col.nullable,
+            data.numpy_code(),
+            nullable,
+        )
+    {
+        return Err(Error::LogicalTable {
+            name: table_name.to_owned(),
+            reason: tessera_core::block::LogicalTableError::SchemaMismatch {
+                leaf: leaf.to_owned(),
+                detail: format!(
+                    "column '{name}': (name={name:?}, dtype={}, nullable={nullable}), \
+                     declared contract (name={:?}, dtype={}, nullable={})",
+                    data.numpy_code(),
+                    col.name,
+                    col.dtype,
+                    col.nullable
+                ),
+            },
+        });
+    }
+    Ok(())
 }
 
 /// Validate that `data` is encodable under `spec`: same column count, names, dtypes, and every
