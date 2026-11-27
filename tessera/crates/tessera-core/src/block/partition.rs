@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::table::{same_value_contract, TableSpec};
+use super::table::{column_contract_difference, SchemaMismatchKind, TableSpec};
 use super::{BlockKind, BlockName, BlockRef};
 use crate::{Error, Result};
 
@@ -93,7 +93,7 @@ impl TableGroup {
 
 /// Why a table name does not resolve to a logical table (ADR-0064 §3), carried by
 /// [`Error::LogicalTable`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum LogicalTableError {
     /// No block and no node has the name.
@@ -173,13 +173,13 @@ pub enum LogicalTableError {
         /// The leaf listed before it.
         after: String,
     },
-    /// A leaf whose columns differ from the first leaf's in count, name, dtype or nullability.
-    #[error("leaf '{leaf}' does not match the first leaf's schema: {detail}")]
+    /// A leaf differing in column count, names, order, dtype, nullability, unit, scale or referencing.
+    #[error("leaf '{leaf}' schema mismatch: {kind}")]
     SchemaMismatch {
         /// The mismatching leaf.
         leaf: String,
-        /// What differs.
-        detail: String,
+        /// First difference from the declaration or first leaf.
+        kind: SchemaMismatchKind,
     },
 }
 
@@ -550,6 +550,7 @@ fn validate_node(blocks: &[BlockRef], node: &str) -> Result<Vec<BlockName>> {
 /// with [`LogicalTableError::SchemaMismatch`].
 /// The validation of a partitioned node already applies it; readers apply it to every group, the
 /// legacy flat form included, through this one function. Reads the manifest only.
+/// Specs that cannot be decoded report [`Error::MalformedTableSpec`] before comparison.
 ///
 /// `group` must come from [`table_group`] over the same `blocks`. A group naming a block that
 /// `blocks` lacks (resolved over another manifest) is [`LogicalTableError::NotFound`].
@@ -577,50 +578,40 @@ pub fn group_specs(blocks: &[BlockRef], name: &str, group: &TableGroup) -> Resul
 
 /// Parse each block's [`TableSpec`] and check the shared schema (see [`group_specs`]).
 fn specs_of(name: &str, refs: &[&BlockRef]) -> Result<Vec<TableSpec>> {
-    let mismatch = |b: &BlockRef, detail: String| Error::LogicalTable {
+    let mismatch = |b: &BlockRef, kind| Error::LogicalTable {
         name: name.to_string(),
         reason: LogicalTableError::SchemaMismatch {
             leaf: b.name.to_string(),
-            detail,
+            kind,
         },
     };
     let mut specs: Vec<TableSpec> = Vec::with_capacity(refs.len());
     for b in refs {
         let spec: TableSpec =
-            serde_json::from_value(b.spec.clone()).map_err(|e| mismatch(b, e.to_string()))?;
+            serde_json::from_value(b.spec.clone()).map_err(|e| Error::MalformedTableSpec {
+                table: name.to_owned(),
+                leaf: b.name.to_string(),
+                reason: e.to_string(),
+            })?;
         if let Some(head) = specs.first() {
             if spec.columns.len() != head.columns.len() {
                 return Err(mismatch(
                     b,
-                    format!(
-                        "column count {}, first leaf {}",
-                        spec.columns.len(),
-                        head.columns.len()
-                    ),
+                    SchemaMismatchKind::ColumnCount {
+                        expected: head.columns.len(),
+                        found: spec.columns.len(),
+                    },
                 ));
             }
-            for (column, first) in spec.columns.iter().zip(&head.columns) {
-                if column.name != first.name || !same_value_contract(column.into(), first.into()) {
-                    return Err(mismatch(
-                        b,
-                        format!(
-                            "column '{}': (name={:?}, dtype={}, nullable={}, unit={:?}, scale={:?}, referencing={:?}), \
-                             first leaf (name={:?}, dtype={}, nullable={}, unit={:?}, scale={:?}, referencing={:?})",
-                            column.name,
-                            column.name,
-                            column.dtype,
-                            column.nullable,
-                            column.unit,
-                            column.scale,
-                            column.referencing,
-                            first.name,
-                            first.dtype,
-                            first.nullable,
-                            first.unit,
-                            first.scale,
-                            first.referencing
-                        ),
-                    ));
+            for (index, (first, column)) in head.columns.iter().zip(&spec.columns).enumerate() {
+                if let Some(kind) = column_contract_difference(
+                    index,
+                    &first.name,
+                    first.into(),
+                    &column.name,
+                    column.into(),
+                ) {
+                    return Err(mismatch(b, kind));
                 }
             }
         }
@@ -1176,19 +1167,96 @@ mod tests {
         seal(alpha).unwrap();
     }
 
-    /// `group_specs` applies the schema rule to a legacy flat group too: a block whose spec isn't a
-    /// `TableSpec` is `SchemaMismatch`, named by the block, not a bare `Error::Serde`.
     #[test]
-    fn a_legacy_block_with_an_unparsable_spec_is_a_schema_mismatch() {
+    fn schema_mismatch_reports_only_the_first_typed_difference() {
+        use super::super::table::{ContractField, ContractValue, SchemaMismatchKind};
+        let mut blocks = leaves(2);
+        blocks[1].spec["columns"][0]["dtype"] = json!("f8");
+        blocks[1].spec["columns"][0]["nullable"] = json!(true);
+        let error = table_group(&blocks, "pairs").unwrap_err();
+        match &error {
+            Error::LogicalTable {
+                name,
+                reason: LogicalTableError::SchemaMismatch { leaf, kind },
+            } => {
+                assert_eq!(name, "pairs");
+                assert_eq!(leaf, "pairs/0001");
+                let first: TableSpec = serde_json::from_value(blocks[0].spec.clone()).unwrap();
+                assert_eq!(
+                    kind,
+                    &SchemaMismatchKind::Field {
+                        column: first.columns[0].name.clone(),
+                        field: ContractField::Dtype,
+                        expected: Box::new(ContractValue::Dtype(first.columns[0].dtype.clone())),
+                        found: Box::new(ContractValue::Dtype("f8".into())),
+                    }
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        let message = error.to_string();
+        assert!(message.contains("pairs/0001"));
+        assert!(message.contains("dtype"));
+        assert!(!message.contains("nullable"));
+    }
+
+    #[test]
+    fn column_count_precedes_names_and_fields() {
+        let mut blocks = leaves(2);
+        blocks[1].spec["columns"][0]["name"] = json!("renamed");
+        blocks[1].spec["columns"][0]["dtype"] = json!("f8");
+        blocks[1].spec["columns"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "energy", "dtype": "u8"}));
+        assert!(matches!(
+            reason(&blocks, "pairs"),
+            LogicalTableError::SchemaMismatch {
+                kind: SchemaMismatchKind::ColumnCount {
+                    expected: 1,
+                    found: 2
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_earlier_column_difference_precedes_a_later_name_difference() {
+        let mut blocks = leaves(2);
+        let first: TableSpec = serde_json::from_value(blocks[0].spec.clone()).unwrap();
+        for block in &mut blocks {
+            block.spec["columns"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"name": "energy", "dtype": "u8"}));
+        }
+        blocks[1].spec["columns"][0]["nullable"] = json!(true);
+        blocks[1].spec["columns"][1]["name"] = json!("renamed");
+        assert!(
+            matches!(reason(&blocks, "pairs"), LogicalTableError::SchemaMismatch {
+            kind: SchemaMismatchKind::Field { column, field: super::super::table::ContractField::Nullable, .. }, ..
+        } if column == first.columns[0].name)
+        );
+    }
+
+    /// `group_specs` applies the schema rule to a legacy flat group too: a block whose spec isn't a
+    /// `TableSpec` is `MalformedTableSpec`, named by the block, not a bare `Error::Serde`.
+    #[test]
+    fn a_legacy_block_with_an_unparsable_spec_is_malformed() {
         let mut blocks = vec![table("events_0000", None), table("events_0001", None)];
         blocks[1].spec = json!({"rows": "many"});
         let group = table_group(&blocks, "events").unwrap();
         match group_specs(&blocks, "events", &group) {
-            Err(Error::LogicalTable {
-                name,
-                reason: LogicalTableError::SchemaMismatch { leaf, .. },
-            }) => assert_eq!((name.as_str(), leaf.as_str()), ("events", "events_0001")),
-            other => panic!("expected SchemaMismatch, got {other:?}"),
+            Err(Error::MalformedTableSpec {
+                table,
+                leaf,
+                reason,
+            }) => {
+                assert_eq!((table.as_str(), leaf.as_str()), ("events", "events_0001"));
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected MalformedTableSpec, got {other:?}"),
         }
     }
 

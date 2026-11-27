@@ -924,29 +924,25 @@ fn with_read_session<R>(f: impl FnOnce(&CurrentThreadRuntime, &VortexSession) ->
 pub(crate) fn check_column_contract(
     table_name: &str,
     leaf: &str,
+    index: usize,
     col: &tessera_core::block::table::Column,
     name: &str,
     data: &ColumnData,
 ) -> Result<()> {
     let nullable = matches!(data, ColumnData::Nullable { .. });
-    if name != col.name
-        || !tessera_core::block::table::same_value_contract(
-            tessera_core::block::table::ValueContract::decoded(&col.dtype, col.nullable),
-            tessera_core::block::table::ValueContract::decoded(data.numpy_code(), nullable),
-        )
-    {
+    use tessera_core::block::table::{column_contract_difference, ValueContract};
+    if let Some(kind) = column_contract_difference(
+        index,
+        &col.name,
+        ValueContract::decoded(&col.dtype, col.nullable),
+        name,
+        ValueContract::decoded(data.numpy_code(), nullable),
+    ) {
         return Err(Error::LogicalTable {
             name: table_name.to_owned(),
             reason: tessera_core::block::LogicalTableError::SchemaMismatch {
                 leaf: leaf.to_owned(),
-                detail: format!(
-                    "column '{name}': (name={name:?}, dtype={}, nullable={nullable}), \
-                     declared contract (name={:?}, dtype={}, nullable={})",
-                    data.numpy_code(),
-                    col.name,
-                    col.dtype,
-                    col.nullable
-                ),
+                kind,
             },
         });
     }

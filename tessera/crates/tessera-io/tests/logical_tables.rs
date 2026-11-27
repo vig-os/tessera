@@ -6,7 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use tessera_core::block::partition::{marker, Partition};
-use tessera_core::block::table::{Column, TableSpec};
+use tessera_core::block::table::{
+    Column, ContractField, ContractValue, SchemaMismatchKind, TableSpec,
+};
 use tessera_core::block::{BlockRef, LogicalTableError, TableGroup};
 use tessera_core::manifest::Manifest;
 use tessera_core::Error;
@@ -307,12 +309,32 @@ fn assert_contract_error(error: Error) {
     match error {
         Error::LogicalTable {
             name,
-            reason: LogicalTableError::SchemaMismatch { leaf, detail },
+            reason: LogicalTableError::SchemaMismatch { leaf, kind },
         } => {
             assert_eq!(name, "events");
             assert!(leaf.ends_with("0001"), "{leaf}");
-            assert!(detail.contains("value"), "{detail}");
-            assert!(detail.contains("i4"), "{detail}");
+            match kind {
+                SchemaMismatchKind::Field {
+                    column,
+                    field,
+                    expected,
+                    found,
+                } => {
+                    assert_eq!(column, "value");
+                    match field {
+                        ContractField::Dtype => {
+                            assert_eq!(*expected, ContractValue::Dtype("i4".into()));
+                            assert_eq!(*found, ContractValue::Dtype("i8".into()));
+                        }
+                        ContractField::Nullable => {
+                            assert_eq!(*expected, ContractValue::Nullable(false));
+                            assert_eq!(*found, ContractValue::Nullable(true));
+                        }
+                        other => panic!("unexpected field: {other:?}"),
+                    }
+                }
+                other => panic!("unexpected difference: {other:?}"),
+            }
         }
         error => panic!("expected column contract refusal, got {error:?}"),
     }
@@ -610,81 +632,83 @@ fn assert_shape_contract_refused(change: &str) {
         for (block, _) in &leaves {
             builder.add_block_ref(block.clone());
         }
-        assert!(matches!(
-            builder.seal(),
-            Err(Error::LogicalTable {
-                reason: LogicalTableError::SchemaMismatch { .. },
-                ..
-            })
-        ));
+        let expected = if change == "order" {
+            SchemaMismatchKind::ColumnName {
+                index: 0,
+                expected: "value".into(),
+                found: "energy".into(),
+            }
+        } else {
+            SchemaMismatchKind::ColumnCount {
+                expected: 2,
+                found: 3,
+            }
+        };
+        assert_metadata_contract_error(builder.seal().unwrap_err(), legacy, expected.clone());
         let dir = tempfile::tempdir().unwrap();
         let ws = WriteSession::create(&dir.path().join("ws"), "test", "shape", "d", TS).unwrap();
         let mut writer = StreamWriter::new(ws, 2, 2);
         for block in leaves {
             writer.push(Box::new(move || Ok((block, vec![])))).unwrap();
         }
-        assert!(matches!(
-            writer.finish(&dir.path().join("out.tsra")),
-            Err(Error::LogicalTable {
-                reason: LogicalTableError::SchemaMismatch { .. },
-                ..
-            })
-        ));
+        assert_metadata_contract_error(
+            writer.finish(&dir.path().join("out.tsra")).unwrap_err(),
+            legacy,
+            expected,
+        );
     }
 }
 
-fn assert_metadata_contract_error(error: Error, legacy: bool, first: &str, later: &str) {
+fn assert_metadata_contract_error(error: Error, legacy: bool, expected_kind: SchemaMismatchKind) {
     match error {
         Error::LogicalTable {
             name,
-            reason: LogicalTableError::SchemaMismatch { leaf, detail },
+            reason: LogicalTableError::SchemaMismatch { leaf, kind },
         } => {
             assert_eq!(name, "events");
             assert_eq!(leaf, if legacy { "events_0001" } else { "events/0001" });
-            assert!(detail.starts_with("column 'value': "), "{detail}");
-            let (leaf_detail, first_detail) = detail.split_once("first leaf ").expect(&detail);
-            assert!(
-                leaf_detail.contains(later),
-                "expected {later} in {leaf_detail}"
-            );
-            assert!(
-                first_detail.contains(first),
-                "expected {first} in {first_detail}"
-            );
+            assert_eq!(kind, expected_kind);
         }
         error => panic!("expected metadata contract refusal: {error:?}"),
     }
 }
 
-fn expected_metadata_values(change: &str, populated: bool) -> (&'static str, &'static str) {
-    let field = if change == "empty_unit" {
-        "unit"
-    } else {
-        change
-    };
-    let later = match change {
-        "unit" => r#"unit=Some("ms")"#,
-        "empty_unit" => r#"unit=Some("")"#,
-        "scale" => "scale=Some(0.001)",
-        "referencing" => concat!(
-            "referencing=Some(Referenced { transform: Identity, ",
-            "unit: Some(\"ns\"), vocabulary: None, frame: None })"
+fn expected_metadata_values(change: &str, populated: bool) -> SchemaMismatchKind {
+    let (field, expected, found) = match change {
+        "unit" | "empty_unit" => (
+            ContractField::Unit,
+            ContractValue::Unit(populated.then(|| "ns".into())),
+            ContractValue::Unit(Some(if change == "unit" { "ms" } else { "" }.into())),
+        ),
+        "scale" => (
+            ContractField::Scale,
+            ContractValue::Scale(populated.then_some(1.0)),
+            ContractValue::Scale(Some(0.001)),
+        ),
+        "referencing" => (
+            ContractField::Referencing,
+            ContractValue::Referencing(populated.then(|| {
+                serde_json::from_value(serde_json::json!({
+                    "transform": {"kind": "affine_1d", "slope": 1.0, "intercept": 7.0},
+                    "frame": "epoch:unix"
+                }))
+                .unwrap()
+            })),
+            ContractValue::Referencing(Some(
+                serde_json::from_value(serde_json::json!({
+                    "transform": {"kind": "identity"}, "unit": "ns"
+                }))
+                .unwrap(),
+            )),
         ),
         _ => unreachable!(),
     };
-    let first = match (field, populated) {
-        ("unit", false) => "unit=None",
-        ("unit", true) => r#"unit=Some("ns")"#,
-        ("scale", false) => "scale=None",
-        ("scale", true) => "scale=Some(1.0)",
-        ("referencing", false) => "referencing=None",
-        ("referencing", true) => concat!(
-            "referencing=Some(Referenced { transform: Affine1d { slope: 1.0, intercept: 7.0 }, ",
-            "unit: None, vocabulary: None, frame: Some(\"epoch:unix\") })"
-        ),
-        _ => unreachable!(),
-    };
-    (first, later)
+    SchemaMismatchKind::Field {
+        column: "value".into(),
+        field,
+        expected: Box::new(expected),
+        found: Box::new(found),
+    }
 }
 
 fn assert_interpreting_metadata_refused(field: &str, read: bool) {
@@ -726,8 +750,8 @@ fn assert_interpreting_metadata_refused(field: &str, read: bool) {
                 }
                 builder.seal().expect_err("mixed metadata sealed")
             };
-            let (first, later) = expected_metadata_values(change, populated);
-            assert_metadata_contract_error(error, legacy, first, later);
+            let expected = expected_metadata_values(change, populated);
+            assert_metadata_contract_error(error, legacy, expected);
         }
     }
 }
@@ -783,7 +807,7 @@ fn push_table_refuses_explicit_empty_unit_against_absent_unit() {
             .unwrap();
     }
     let error = writer.finish(&dir.path().join("out.tsra")).unwrap_err();
-    assert_metadata_contract_error(error, true, "unit=None", r#"unit=Some("")"#);
+    assert_metadata_contract_error(error, true, expected_metadata_values("empty_unit", false));
 }
 
 #[test]
@@ -798,8 +822,8 @@ fn streaming_seal_refuses_interpreting_metadata() {
                 writer.push(Box::new(move || Ok((block, vec![])))).unwrap();
             }
             let error = writer.finish(&dir.path().join("out.tsra")).unwrap_err();
-            let (first, later) = expected_metadata_values(field, false);
-            assert_metadata_contract_error(error, legacy, first, later);
+            let expected = expected_metadata_values(field, false);
+            assert_metadata_contract_error(error, legacy, expected);
         }
     }
 }

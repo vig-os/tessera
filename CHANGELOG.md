@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **breaking**: `SchemaMismatch` now carries a typed `SchemaMismatchKind` instead of `detail` (#1021).
+  Callers matching this error must handle column counts, names and typed contract-field values.
+  Only the first difference is displayed. Malformed table specs now report `Error::MalformedTableSpec`.
+  `LogicalTableError` retains `PartialEq` but no longer implements `Eq`, since diagnostics retain floats.
+
 - **breaking**: table leaves must agree exactly on `unit`, `scale` and the complete `referencing`
   descriptor, as well as names, order, dtypes and nullability (#1011). Sealing and group reads refuse
   mismatches with `SchemaMismatch`, including group reads of already-sealed products. Descriptions

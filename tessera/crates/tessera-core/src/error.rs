@@ -363,6 +363,18 @@ pub enum Error {
         reason: crate::block::partition::LogicalTableError,
     },
 
+    /// A table leaf's JSON cannot be decoded as a `TableSpec`; no schema comparison is possible.
+    #[error("logical table '{table}', leaf '{leaf}': malformed table spec: {reason}")]
+    #[non_exhaustive]
+    MalformedTableSpec {
+        /// Logical table being resolved.
+        table: String,
+        /// Block whose spec could not be decoded.
+        leaf: String,
+        /// Decoder's explanation.
+        reason: String,
+    },
+
     /// A streaming table writer refused its input or its call (ADR-0064 §5.3, §5.4): the rows
     /// disagree with the declared `spec.rows`, a row-group is too large, or a single-block writer
     /// was given a table that must be partitioned.
