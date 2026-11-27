@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Durable repository pins: `set_pin`, `remove_pin`, `read_pin` and `pins()` with typed product or
+  collection targets, fenced CAS and durable publication/removal (ADR-0067 step 6, #1001).
+  Pins remain independent of same-named lineages and retain nested members after `forget`;
+  removal permits GC only when no other root reaches the objects. Pins override retention classes.
+
 - Atomic `Repository::commit_collection` validates CAS, lineage kind and identity, supersedes pins and
   recursive member closure before storage; new products, payloads and sub-collections can be supplied in
   the same fenced call. Collection commits use the existing log cache. `Repository::history` returns

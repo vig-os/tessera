@@ -6,7 +6,7 @@
 //! objects/<alg>/<aa>/<rest-of-hex>   write-once content-addressed objects (blocks AND manifests)
 //! layout                             tessera-repository 2
 //! refs/lineages/<enc>                 <kind> <address> LF (mutable, CAS)
-//! refs/pins/<enc>                     <kind> <address> LF (gc roots; pin verbs are #947 step 6)
+//! refs/pins/<enc>                     <kind> <address> LF (durable gc roots, CAS)
 //! log/lineages/<enc>.jsonl            rebuildable cache: one line per commit (NOT canonical)
 //! lock                               the writer lock (empty; see below)
 //! tmp/                               a writer's temp files; whatever is here is crash debris
@@ -26,6 +26,7 @@
 //! Every write ([`commit`](Repository::commit), [`set_ref`](Repository::set_ref),
 //! [`write_object`](Repository::write_object), [`put_manifest`](Repository::put_manifest),
 //! [`put_collection`](Repository::put_collection), [`commit_collection`](Repository::commit_collection),
+//! [`set_pin`](Repository::set_pin), [`remove_pin`](Repository::remove_pin),
 //! [`forget`](Repository::forget), [`gc`](Repository::gc)) holds one exclusive lock for the whole
 //! repository, an OS advisory lock (`flock`) on the file `lock`, from its first check to its last
 //! write. Concurrent writers, threads or processes, queue on it. So a ref advance is a real
@@ -67,7 +68,9 @@ use crate::durable::{create_dirs_durable, remove_file, sync_dir, write_durable_v
 use crate::BlockPayload;
 
 mod collection_commit;
+mod pins;
 pub use collection_commit::{HistoryEdge, HistoryEntry, NewMember};
+pub use pins::PinTarget;
 
 /// The writer lock file, under the repository root.
 const LOCK: &str = "lock";
@@ -136,7 +139,7 @@ pub fn ref_file_name(namespace: RefNamespace, lineage: &str) -> Result<String> {
     if lineage.is_empty() {
         return Err(invalid("it is empty".into()));
     }
-    let name = crate::names::file_name(lineage);
+    let name = tessera_core::names::file_name(lineage);
     if name.len() > MAX_LINEAGE_FILE_NAME {
         return Err(invalid(format!(
             "its ref file name is {} bytes, more than the {MAX_LINEAGE_FILE_NAME} a ref and its \
@@ -546,10 +549,16 @@ impl Repository {
     pub fn read_ref(&self, lineage: &str) -> Result<Option<String>> {
         let path = self.ref_path(lineage)?;
         self.layout()?;
-        match std::fs::symlink_metadata(&path) {
+        self.read_typed_ref(&path)
+            .map(|record| record.map(|(_, address)| address))
+    }
+
+    /// Read and validate either namespace with the same grammar and object checks.
+    fn read_typed_ref(&self, path: &Path) -> Result<Option<(ObjectKind, String)>> {
+        match std::fs::symlink_metadata(path) {
             Ok(metadata) if !metadata.file_type().is_file() => {
                 return Err(Error::CorruptRef {
-                    path,
+                    path: path.to_path_buf(),
                     reason: "expected a regular ref file".into(),
                 })
             }
@@ -557,20 +566,20 @@ impl Repository {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         }
-        match std::fs::read(&path) {
+        match std::fs::read(path) {
             Ok(bytes) => {
-                let (kind, address) = parse_ref(&path, &bytes)?;
+                let (kind, address) = parse_ref(path, &bytes)?;
                 let target = self.read_raw(&address)?;
                 let object = ObjectKind::of(&target)?;
                 if kind != object {
                     return Err(Error::RefKindMismatch {
-                        path,
+                        path: path.to_path_buf(),
                         record: kind,
                         object,
                     });
                 }
                 read_version(&target, &address)?;
-                Ok(Some(address))
+                Ok(Some((kind, address)))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
@@ -1177,6 +1186,10 @@ mod tests {
     use tessera_core::block::table::{Column, TableSpec};
     use tessera_core::provenance::Source;
     use tessera_core::ProductBuilder;
+
+    mod pins_tests {
+        include!("repo/pins_tests.rs");
+    }
 
     mod collections_tests {
         include!("repo/collections_tests.rs");

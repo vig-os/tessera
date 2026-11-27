@@ -110,7 +110,24 @@ error message. The cost is the reachable version graph plus the listing of all o
 
 Pins have their own directory, `repo/refs/pins/<name>`, and use the same encoding, bound and typed record grammar.
 A lineage and a pin may share a name: lineage commands only touch `refs/lineages/` and `log/lineages/`.
-`gc` reads roots from both namespaces. Pin management commands are planned in ADR-0067 step 6.
+`gc` reads roots from both namespaces. Rust callers manage pins with `set_pin(name, expected, &target)`,
+`remove_pin(name, expected)`, `read_pin(name)` and `pins()`. CLI pin commands are ADR-0067 step 7.
+`PinTarget { kind: ObjectKind::Product, address: seal }` (or `ObjectKind::Collection`) declares the target;
+`read_pin` returns `Option<PinTarget>` and `pins()` returns a name-sorted `BTreeMap<String, PinTarget>`.
+Both verify record spelling, object kind and seal; listing decodes and validates canonical filenames.
+
+Set and removal hold the same fenced writer as GC. `expected: None` matches an absent pin; `Some(seal)`
+matches its current target. A stale expectation returns `RefMoved` (the `lineage` field names the pin).
+Set refuses an unstored, unreadable or wrong-kind target before publication. Explicit CAS replacement may
+change kind; pins have no lineage identity or log. Removal returns whether the pin existed and fsyncs its
+directory. A corrupt pin must be restored before removal can validate CAS. Reads take no lock, and listing
+is not a snapshot of concurrent writers.
+
+A pin keeps its target, blocks, nested members and stored source versions alive after `forget` removes the
+lineage. Removing the last root makes them reclaimable by GC. A pin overrides every retention class (#906):
+retention decides which edges pin, never which roots count. An old version on a live lineage is already
+reachable through `supersedes`. If storing an unrooted version and setting its pin are separate calls, GC
+may reclaim it between calls; set then refuses it. Keep an existing root until the pin lands.
 A stray entry under `refs/`, a non-regular file inside either namespace or a malformed record aborts `gc` before
 anything is deleted.
 

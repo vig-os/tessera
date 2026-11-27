@@ -642,6 +642,27 @@ mod tests {
     /// `RefMoved` (it replaced the tip with a version whose history skips the old one, which `gc`
     /// then reclaimed), and the tip stays.
     #[test]
+    fn import_and_forget_preserve_a_same_named_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let tsra = dir.path().join("p.tsra");
+        write_tsra(&tsra);
+        let lineage = imported(&repo, &tsra);
+        let r = Repository::open(&repo).unwrap();
+        let hash = r.read_ref(&lineage).unwrap().unwrap();
+        let pin = tessera_io::repo::PinTarget {
+            kind: tessera_core::ObjectKind::Product,
+            address: hash.clone(),
+        };
+        r.set_pin(&lineage, None, &pin).unwrap();
+        forget(&repo, &lineage, &mut Vec::new()).unwrap();
+        import(&repo, &tsra, &mut Vec::new()).unwrap();
+        assert_eq!(r.read_pin(&lineage).unwrap(), Some(pin));
+        r.remove_pin(&lineage, Some(&hash)).unwrap();
+        assert_eq!(r.read_ref(&lineage).unwrap(), Some(hash));
+    }
+
+    #[test]
     fn import_into_a_lineage_with_a_version_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
