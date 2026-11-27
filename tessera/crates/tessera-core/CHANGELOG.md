@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ObjectKind::of` classifies version-object bytes without guessing (ADR-0067 step 3, #998).
+  Ambiguous shapes are refused. `collection::diff` reports added, removed and repinned members in
+  collection order, detects relative order changes, and refuses duplicate member references.
+
 ## [0.1.0-alpha.7](https://github.com/vig-os/tessera/compare/tessera-core-v0.1.0-alpha.6...tessera-core-v0.1.0-alpha.7) - 2026-11-25
 
 ### Added

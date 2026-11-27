@@ -20,6 +20,7 @@ pub(crate) mod field_path;
 pub mod hash;
 pub mod identity;
 pub mod manifest;
+pub mod object_kind;
 pub mod product;
 pub mod provenance;
 pub mod referencing;
@@ -30,6 +31,7 @@ pub mod stored;
 pub use collection::{Collection, CollectionBuilder, CollectionMember, Role};
 pub use error::{Error, Result};
 pub use manifest::Manifest;
+pub use object_kind::ObjectKind;
 pub use product::ProductBuilder;
 pub use provenance::{
     inherit_identity, Generation, IngestTransform, Producer, ProducerRef, Source,

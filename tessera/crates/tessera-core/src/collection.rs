@@ -41,6 +41,103 @@ use crate::manifest::{
     TESSERA_VERSION,
 };
 
+/// A member whose pinned seal or declared kind changed (ADR-0067 D6).
+///
+/// Kind changes are reported even if the supplied seals are equal. The full member
+/// records, including kinds, remain available in the two input collections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepinnedMember {
+    /// The logical member reference shared by both versions.
+    pub reference: String,
+    /// The seal pinned by the old collection.
+    pub old_manifest_hash: String,
+    /// The seal pinned by the new collection.
+    pub new_manifest_hash: String,
+}
+
+/// Differences between the immediate members of two collections (ADR-0067 D6).
+///
+/// No member objects are read and sub-collections are not recursively diffed.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MemberDiff {
+    /// Members present only in the new collection, in its member order.
+    pub added: Vec<CollectionMember>,
+    /// Members present only in the old collection, in its member order.
+    pub removed: Vec<CollectionMember>,
+    /// Shared references with a changed seal or kind, in the new collection's order.
+    pub repinned: Vec<RepinnedMember>,
+    /// Whether shared references have a different relative order. Adding or removing
+    /// members alone does not set this flag; zero or one shared reference cannot reorder.
+    pub order_changed: bool,
+}
+
+/// Compare immediate collection members keyed by their logical `reference`.
+///
+/// Added members and repins follow the new collection's order; removals follow the
+/// old collection's order. Repinning means a different `manifest_hash` or `kind`.
+/// Member `role` and `derived_from`, collection metadata and version edges are outside
+/// this pin diff. An empty diff does not imply equal collection seals.
+///
+/// This pure function accepts unsealed collections and does not verify hashes or
+/// resolve members. It uses O(n + m) auxiliary space and O((n + m) log(n + m)) time.
+/// `order_changed` reports a difference, not a permutation: callers reconstructing
+/// the ordered member list must retain the new collection's order and member metadata.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::DuplicateMemberReference`] if either collection repeats a
+/// reference, including identical entries. The old side is checked first, then the
+/// new side; the first repeated reference in member order is reported.
+pub fn diff(old: &Collection, new: &Collection) -> crate::Result<MemberDiff> {
+    fn index(collection: &Collection) -> crate::Result<BTreeMap<&str, &CollectionMember>> {
+        let mut indexed = BTreeMap::new();
+        for member in &collection.members {
+            if indexed.insert(member.reference.as_str(), member).is_some() {
+                return Err(crate::Error::DuplicateMemberReference {
+                    reference: member.reference.clone(),
+                });
+            }
+        }
+        Ok(indexed)
+    }
+
+    let old_index = index(old)?;
+    let new_index = index(new)?;
+    let mut result = MemberDiff::default();
+    for member in &old.members {
+        if !new_index.contains_key(member.reference.as_str()) {
+            result.removed.push(member.clone());
+        }
+    }
+    for member in &new.members {
+        match old_index.get(member.reference.as_str()) {
+            None => result.added.push(member.clone()),
+            Some(before)
+                if before.manifest_hash != member.manifest_hash || before.kind != member.kind =>
+            {
+                result.repinned.push(RepinnedMember {
+                    reference: member.reference.clone(),
+                    old_manifest_hash: before.manifest_hash.clone(),
+                    new_manifest_hash: member.manifest_hash.clone(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    let old_shared = old
+        .members
+        .iter()
+        .filter(|m| new_index.contains_key(m.reference.as_str()))
+        .map(|m| &m.reference);
+    let new_shared = new
+        .members
+        .iter()
+        .filter(|m| old_index.contains_key(m.reference.as_str()))
+        .map(|m| &m.reference);
+    result.order_changed = !old_shared.eq(new_shared);
+    Ok(result)
+}
+
 /// Raw acquisition data vs derived/regenerable product. Drives storage's WORM retention mapping
 /// (raw → Compliance, derived → Governance) — see `tessera_io::collection::retention_mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -12,6 +12,21 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Bytes do not identify exactly one version-object kind (ADR-0067 D1.1).
+    /// A version object needs a top-level `tessera_version` and exactly one of
+    /// `product` or `members`. Non-object JSON is also refused by this discriminator.
+    #[error(
+        "ambiguous object kind: expected tessera_version and exactly one of product or members"
+    )]
+    AmbiguousObjectKind,
+
+    /// A collection repeats a logical member reference, so its member diff is undefined.
+    #[error("duplicate collection member reference: {reference}")]
+    DuplicateMemberReference {
+        /// The first repeated reference in member order (old collection checked first).
+        reference: String,
+    },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 

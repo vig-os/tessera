@@ -673,7 +673,7 @@ pub fn parse_strict(s: &str) -> crate::Result<Value> {
 
 /// [`parse_strict`] over bytes: the one strict parser. `serde_json`'s slice reader also refuses
 /// bytes that are not UTF-8 (in a string, or anywhere else), which a `&str` can't hold.
-fn parse_strict_bytes(bytes: &[u8]) -> crate::Result<Value> {
+pub(crate) fn parse_strict_bytes(bytes: &[u8]) -> crate::Result<Value> {
     let mut de = serde_json::Deserializer::from_slice(bytes);
     let StrictValue(v) = StrictValue::deserialize(&mut de)?;
     de.end()?;
