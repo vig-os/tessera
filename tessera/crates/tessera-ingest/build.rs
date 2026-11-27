@@ -20,7 +20,7 @@
 //! build (crates.io, `cargo package`) has no such file; the cfg stays off and the sealed triple carries
 //! the decoder's name only — absent rather than guessed. Before #979 this script walked up from the
 //! manifest and found the packaged crate's bundled `Cargo.lock`, so packaged builds sealed versions too.
-//! The crate is not published; supporting that layout is tracked in #989.
+//! The crate is not published.
 //!
 //! ## 2. The `static-hdf5` lib64 fallback
 //!

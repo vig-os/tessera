@@ -45,8 +45,7 @@
 //!   workspace lockfile next to the manifest; `build.rs` then leaves the `tessera_workspace_lock` cfg off,
 //!   every lookup here is `None`, and the sealed triple carries only the decoder's name — absent rather
 //!   than guessed. Before #979 the build script also found a packaged crate's bundled `Cargo.lock`
-//!   by walking up from its manifest, so packaged builds did seal versions. The crate is not published;
-//!   supporting the packaged layout is tracked in #989.
+//!   by walking up from its manifest, so packaged builds did seal versions. The crate is not published.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
