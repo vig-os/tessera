@@ -122,12 +122,15 @@ pub fn inspect(file: &Path, out: &mut dyn Write) -> Result<()> {
 }
 
 /// `tessera collection ls FILE` — one line per member with its **human** name + product, resolved by
-/// opening each member `.tsra` (refuses absent encoded members, including legacy layouts). `--full` also prints
+/// opening each member `.tsra` (marks absent members and continues listing). `--full` also prints
 /// the full pinned `manifest_hash` and any in-collection `derived_from` edges.
 pub fn ls(file: &Path, full: bool, out: &mut dyn Write) -> Result<()> {
     let c = load(file)?;
     for m in &c.members {
-        let path = member_path(file, &m.reference, m.kind)?;
+        // Listing remains useful for incomplete collections. Open only the encoded name and
+        // render failures per member; verification uses the strict resolver below.
+        let dir = file.parent().unwrap_or_else(|| Path::new("."));
+        let path = dir.join(member_filename(&m.reference, m.kind));
         // A product member's name/product comes from its `.tsra`; a sub-collection member's from its
         // child `collection.json` (product shown as `collection`).
         let (product, name) = if m.kind == MemberKind::Collection {
@@ -439,6 +442,29 @@ mod tests {
     }
 
     #[test]
+    fn ls_marks_absent_members_and_continues_while_verify_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let (collection, _) = build_collection(dir.path());
+        let descriptor = dir.path().join("collection.json");
+        std::fs::remove_file(dir.path().join(member_filename(
+            &collection.members[0].reference,
+            MemberKind::Product,
+        )))
+        .unwrap();
+        let mut out = Vec::new();
+        ls(&descriptor, false, &mut out).unwrap();
+        let listing = String::from_utf8(out).unwrap();
+        assert_eq!(listing.lines().count(), collection.members.len());
+        assert!(listing.contains("<member file not found>"), "{listing}");
+        assert!(listing.contains("pt"), "{listing}");
+        let error = verify(&descriptor, &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("member file not found:"), "{error}");
+        assert!(!error.contains("Legacy"), "{error}");
+    }
+
+    #[test]
     fn legacy_underscore_members_are_refused_by_consumers() {
         let dir = tempfile::tempdir().unwrap();
         let (_, ids) = build_collection(dir.path());
@@ -452,17 +478,18 @@ mod tests {
             ));
             std::fs::rename(encoded, old).unwrap();
         }
-        for error in [
-            verify(&descriptor, &mut Vec::new()).unwrap_err(),
-            ls(&descriptor, false, &mut Vec::new()).unwrap_err(),
-        ] {
-            let message = error.to_string();
-            assert!(
-                message.contains("Legacy underscore/raw-id layouts are unsupported"),
-                "{message}"
-            );
-            assert!(message.contains("blake3%3a"), "{message}");
-        }
+        let message = verify(&descriptor, &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("Legacy underscore/raw-id layouts are unsupported"),
+            "{message}"
+        );
+        assert!(message.contains("blake3%3a"), "{message}");
+        let mut out = Vec::new();
+        ls(&descriptor, false, &mut out).unwrap();
+        let listing = String::from_utf8(out).unwrap();
+        assert_eq!(listing.matches("<member file not found>").count(), 2);
     }
 
     #[test]
@@ -534,6 +561,40 @@ mod tests {
         )
         .unwrap();
         c
+    }
+
+    #[test]
+    fn ls_marks_absent_subcollections_and_continues() {
+        use tessera_core::collection::CollectionHandle;
+        let dir = tempfile::tempdir().unwrap();
+        let absent = build_child_collection(dir.path(), "dataset-A");
+        let present = build_child_collection(dir.path(), "dataset-B");
+        let mut builder = CollectionBuilder::new("project", "two datasets", "2024-01-01T00:00:00Z");
+        for child in [&absent, &present] {
+            builder.add_subcollection(
+                &CollectionHandle::of(child).unwrap(),
+                Role::Derived,
+                Vec::new(),
+            );
+        }
+        let descriptor = dir.path().join("collection.json");
+        tessera_io::stored::write_collection(&descriptor, &builder.seal().unwrap()).unwrap();
+        std::fs::remove_file(
+            dir.path()
+                .join(member_filename(&absent.id, MemberKind::Collection)),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        ls(&descriptor, false, &mut out).unwrap();
+        let listing = String::from_utf8(out).unwrap();
+        assert_eq!(listing.lines().count(), 2);
+        assert!(listing.contains("<sub-collection not found>"), "{listing}");
+        assert!(listing.contains("dataset-B"), "{listing}");
+        let error = verify(&descriptor, &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("member file not found:"), "{error}");
+        assert!(!error.contains("Legacy"), "{error}");
     }
 
     /// Part 2 (ADR-0049 §3): `verify` recurses into a sub-collection member (a `project` over a

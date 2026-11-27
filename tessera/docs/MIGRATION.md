@@ -118,7 +118,7 @@ You get:
   blake3%3a<id3>.tsra          # recon-pt (hot tier)
 ```
 
-Member stems use the shared injective percent encoder: `blake3:<id>` becomes `blake3%3a<id>`.
+Member stems use the shared `tessera_core::names::file_name` encoder: `blake3:<id>` becomes `blake3%3a<id>`.
 Older underscore-named collection directories are unsupported; recreate them from source products.
 
 Verify + inspect:
@@ -161,9 +161,9 @@ cluster / cloud read path can scan it cohort-aware:
 cargo build -p tessera-cli --release --features cloud
 ./target/release/tessera push <out>/blake3%3a<id>.tsra <registry>/<repo>:<tag>
 
-# Reading is symmetric (any feature-built tessera, on any host):
-./target/release/tessera inspect s3://<bucket>/<study>/<id>.tsra
-./target/release/tessera verify  https://<host>/<bucket>/<study>/<id>.tsra
+# Reading uses the same tessera_core::names::file_name stem (any feature-built tessera):
+./target/release/tessera inspect s3://<bucket>/<study>/blake3%3a<id>.tsra
+./target/release/tessera verify  https://<host>/<bucket>/<study>/blake3%3a<id>.tsra
 ```
 
 The cohort prune-before-fetch path lives in `tessera_io::cloud::ObjectStoreReader`

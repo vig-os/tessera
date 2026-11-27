@@ -41,21 +41,37 @@ use crate::worm::RetentionMode;
 /// Resolve an existing member using the shared encoded layout; never try a legacy alias.
 ///
 /// Underscore-named local collections and raw-id S3 prefix exports written before #994 must
-/// be recreated from source products. A missing member reports the required encoded path and
-/// this format boundary, including for nested collections. Other I/O errors are preserved.
+/// be recreated from source products. Legacy names are probed only to diagnose an existing
+/// unsupported artifact; they are never returned or read as member content. An absent member
+/// with no legacy file reports `member file not found: <encoded name>`. Other I/O errors are preserved.
 pub fn member_path(
     dir: &std::path::Path,
     reference: &str,
     kind: MemberKind,
 ) -> Result<std::path::PathBuf> {
-    let path = dir.join(member_filename(reference, kind));
+    let name = member_filename(reference, kind);
+    let path = dir.join(&name);
     match std::fs::metadata(&path) {
         Ok(_) => Ok(path),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::Invalid(format!(
-            "collection member '{reference}' unavailable at {}; required percent-encoded member layout (#994). \
-             Legacy underscore/raw-id layouts are unsupported; recreate the collection from source products",
-            path.display()
-        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Diagnostic-only spellings of the two pre-#994 layouts. Writers and readers still
+            // resolve content exclusively with member_filename and its shared injective encoder.
+            let suffix = member_filename("", kind);
+            let old_stem = reference.replace([':', '/', '\\'], "_");
+            for legacy in [
+                format!("{old_stem}{suffix}"),
+                format!("{reference}{suffix}"),
+            ] {
+                if legacy != name && dir.join(&legacy).try_exists()? {
+                    return Err(Error::Invalid(format!(
+                        "collection member '{reference}' unavailable at {}; legacy file exists at {}. \
+                         Legacy underscore/raw-id layouts are unsupported; recreate the collection from source products",
+                        path.display(), dir.join(legacy).display()
+                    )));
+                }
+            }
+            Err(Error::Invalid(format!("member file not found: {name}")))
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -319,21 +335,47 @@ mod tests {
     }
 
     #[test]
-    fn legacy_member_layout_is_refused() {
+    fn missing_member_reports_only_the_encoded_name() {
         let dir = tempfile::tempdir().unwrap();
-        for (reference, old) in [("a:b", "a_b.tsra"), ("blake3:abc", "blake3:abc.tsra")] {
-            std::fs::write(dir.path().join(old), b"legacy").unwrap();
-            let error = member_path(dir.path(), reference, MemberKind::Product)
+        for kind in [MemberKind::Product, MemberKind::Collection] {
+            let error = member_path(dir.path(), "a:b", kind)
                 .unwrap_err()
                 .to_string();
             assert!(
-                error.contains("Legacy underscore/raw-id layouts are unsupported"),
+                error.contains(&format!(
+                    "member file not found: {}",
+                    member_filename("a:b", kind)
+                )),
                 "{error}"
             );
-            assert!(
-                error.contains(&member_filename(reference, MemberKind::Product)),
-                "{error}"
-            );
+            assert!(!error.contains("Legacy"), "{error}");
+        }
+    }
+
+    #[test]
+    fn legacy_member_layout_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for kind in [MemberKind::Product, MemberKind::Collection] {
+            for (reference, old_stem) in [("a:b", "a_b"), ("blake3:abc", "blake3:abc")] {
+                let old = dir
+                    .path()
+                    .join(format!("{old_stem}{}", member_filename("", kind)));
+                std::fs::write(&old, b"legacy").unwrap();
+                let error = member_path(dir.path(), reference, kind)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("Legacy underscore/raw-id layouts are unsupported"),
+                    "{error}"
+                );
+                assert!(error.contains(&member_filename(reference, kind)), "{error}");
+                std::fs::remove_file(old).unwrap();
+                let error = member_path(dir.path(), reference, kind)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("member file not found:"), "{error}");
+                assert!(!error.contains("Legacy"), "{error}");
+            }
         }
     }
 

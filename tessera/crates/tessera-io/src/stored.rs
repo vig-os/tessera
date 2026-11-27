@@ -170,8 +170,8 @@ mod tests {
             Path::new("out/collection.seal")
         );
         assert_eq!(
-            seal_path(Path::new("out/blake3_ab.collection.json")).unwrap(),
-            Path::new("out/blake3_ab.collection.seal")
+            seal_path(Path::new("out/blake3%3aab.collection.json")).unwrap(),
+            Path::new("out/blake3%3aab.collection.seal")
         );
         assert_eq!(
             seal_path(Path::new("dir/manifest.json")).unwrap(),
@@ -320,7 +320,7 @@ mod tests {
     fn an_oversized_seal_file_is_read_bounded_and_refused() {
         use tessera_core::stored::SEAL_LEN;
         let dir = tempfile::tempdir().unwrap();
-        let doc = dir.path().join("blake3_ab.collection.json");
+        let doc = dir.path().join("blake3%3aab.collection.json");
         let (bytes, seal) = CollectionBuilder::new("c", "d", "2024-01-01T00:00:00Z")
             .seal()
             .unwrap()
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(got.as_deref().map(<[u8]>::len), Some(SEAL_LEN + 1));
         assert!(matches!(
             read_collection(&doc),
-            Err(Error::MalformedSeal { member, .. }) if member == "blake3_ab.collection.seal"
+            Err(Error::MalformedSeal { member, .. }) if member == "blake3%3aab.collection.seal"
         ));
     }
 
