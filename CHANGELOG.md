@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Atomic `Repository::commit_collection` validates CAS, lineage kind and identity, supersedes pins and
+  recursive member closure before storage; new products, payloads and sub-collections can be supplied in
+  the same fenced call. Collection commits use the existing log cache. `Repository::history` returns
+  distinct sealed versions in depth-first preorder, supersedes before forked_from, and reports unreadable
+  predecessors with typed errors and bounded provenance paths (ADR-0067 step 5, #1000).
+
 - Repository collection storage and typed collection refs (ADR-0067 step 4, #999). `put_collection` and
   `get_collection` address canonical collection bytes by their seal. `set_ref` infers and verifies the object
   kind, refusing bare blocks; reads refuse record/object kind mismatches. Garbage collection recursively marks

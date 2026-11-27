@@ -445,6 +445,32 @@ pub enum Error {
         tip_kind: crate::ObjectKind,
     },
 
+    /// A collection version must keep its parent's lineage identity (ADR-0067 D1).
+    #[error("lineage '{lineage}': expected id {expected}, found {found}")]
+    LineageIdMismatch {
+        lineage: String,
+        expected: String,
+        found: String,
+    },
+
+    /// Collection commit cannot publish a missing, unreadable or wrong-kind member or a
+    /// member product with an absent block. Carries the member path and underlying cause.
+    #[error("collection member closure failed at {path}: {source}")]
+    MissingMember {
+        path: String,
+        #[source]
+        source: Box<Error>,
+    },
+
+    /// History cannot silently truncate a missing or unreadable predecessor. The address and
+    /// incoming edge are included in `what`; consecutive edges have bounded path rendering.
+    #[error("history aborted: cannot read {what}: {source}")]
+    HistoryAborted {
+        what: String,
+        #[source]
+        source: Box<Error>,
+    },
+
     /// A typed object read or write requests a different kind from the stored bytes.
     #[error("object kind mismatch at {}: expected {expected:?}, object {object:?}", path.display())]
     ObjectKindMismatch {

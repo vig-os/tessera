@@ -77,7 +77,27 @@ The Rust repository API stores sealed collections with `put_collection` and read
 `commit` and `set_ref` refuse a change with `LineageKindMismatch` under the writer lock, before storing anything.
 Typed object accessors use `ObjectKindMismatch` when the requested kind disagrees with the object; ref-record
 mismatches remain `RefKindMismatch`. These are separate low-level calls: until a live ref or
-collection reaches a newly stored object, `gc` can reclaim it. Atomic collection commits are ADR-0067 step 5.
+collection reaches a newly stored object, `gc` can reclaim it. Use `commit_collection` for an atomic collection commit.
+
+`Repository::commit_collection(lineage, expected, &collection, &members)` validates member closure and
+stores supplied `NewMember::Product { manifest, payloads }` and `NewMember::Collection(&child)` values
+under the same writer lock that advances the ref. Supply members in any order. Every nested member must be
+stored or supplied, readable as its declared kind, with each product block stored or supplied as a verified
+payload. Unchanged blocks are checked for existence only. `MissingMember` names the failing member path.
+CAS failure (`RefMoved`), lineage kind changes (`LineageKindMismatch`), a wrong supersedes pin
+(`SupersedesMismatch`) and a changed lineage id (`LineageIdMismatch`) all refuse before storing objects.
+Later versions keep their parent's `id_inputs`; forks add a unique non-empty `fork` token and a
+`forked_from` edge pinning the origin version's seal. These rules reuse core sealing validation.
+
+`log(lineage)` reads the same oldest-first `{manifest_hash, parent}` cache for either kind. The cache can
+be incomplete or torn after a crash; repair is tracked in #971. `history(address)` reads sealed ancestry
+from any product or collection version and includes the starting version. Each record carries `address`,
+`kind`, `id` and `predecessors` (role and target seal). It visits supersedes before forked_from in depth-first
+preorder, preserving source order within each role and returning shared ancestors once. Members and other
+source roles are excluded. A missing or unreadable predecessor returns `HistoryAborted` naming its address
+and incoming edge; long chains use bounded error paths. This is stricter than GC's open-edge rule: a local
+history answer must be complete. Readers take no lock, so concurrent forget/GC may cause a read error.
+A log append failure can be reported after a successful ref advance; inspect the tip before retrying.
 
 `gc` marks through nested collection members and both kinds' `sources` edges. Members are closed: a missing,
 unreadable, torn or wrong-kind member aborts before any deletion, naming the full path from the ref through each
