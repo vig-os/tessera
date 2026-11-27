@@ -24,7 +24,10 @@ FORBIDDEN = re.compile(
     r"|\.\s*exec\s*\("
 )
 # Mask comments and literals so explanatory docs and fixture strings are safe.
-LEXEMES = re.compile(r'//[^\n]*|/\*|r(\#*)"|"(?:\\.|[^"\\])*"', re.DOTALL)
+LEXEMES = re.compile(
+    r'''//[^\n]*|/\*|'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'|r(\#*)"|"(?:\\.|[^"\\])*"''',
+    re.DOTALL,
+)
 
 
 def code_only(source):

@@ -29,6 +29,9 @@ class GuardTests(unittest.TestCase):
                     path = root / "tessera/crates" / crate / "src/helper.rs"
                     for source in (
                         'std::process::Command::new("true").spawn();',
+                        'let quote = \'"\'; std::process::Command::new("true").spawn();',
+                        "use std::process::*; use Command as Launcher;",
+                        "use libc::{fork as launch};",
                         "use std::process::{Command as Launcher};",
                         'tokio::process::Command::new("true").output();',
                         "unsafe { libc::fork(); }",
