@@ -21,26 +21,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Format break
 
-- **Repositories must be re-created (no migration verb).** This release adds ADR-0067 in full: repository
-  layout 2 (`tessera-repository 2`), with typed refs in `refs/lineages/` and `refs/pins/` (#1005), collections
-  stored as repository objects with `sources` version edges (#1004, #1012, #1022), atomic `commit_collection`
-  with `log` and `history` (#1028), pins (#1033) and the CLI (#1038). A repository from an earlier alpha is
-  refused with `UnsupportedRepositoryLayout`, which names the layout found and the one required. Re-import from
-  the source products, as the owner ruled (2026-11-26): there is no migration verb. Product files (`.tsra`) are
-  unaffected.
-- **CLI exit codes are a contract.** `4` means the ref moved, so reread and retry. `5` means refused by the rules: kind
-  mismatch, missing member, missing fork token, invalid name. `6` means the store is damaged. `1` is any other failure
-  (#1038). Scripts can now tell retryable conflicts from permanent refusals.
-- **Breaking Rust API:**
-  - `SchemaMismatch` carries a typed `SchemaMismatchKind`, and malformed specs are `MalformedTableSpec` (#1021);
-  - the new error variants are `#[non_exhaustive]`.
-- **Writers refuse what readers could never read.** Table leaves must agree on column names, dtypes, nullability,
-  `unit`, `scale` and `referencing` (#978, #1011). Independent tables sharing a numbered prefix (`run_0001`, `run_0002`)
-  are refused at seal: rename them.
+- **Repositories must be re-created; there is no migration verb.** This release completes ADR-0067. It adds
+  repository layout 2 (`tessera-repository 2`), with typed refs in `refs/lineages/` and `refs/pins/` (#1005), and
+  collections stored as repository objects with `sources` version edges (#1004, #1012, #1022). It also adds atomic
+  `commit_collection` with `log` and `history` (#1028), pins (#1033) and the CLI (#1038). A repository from an
+  earlier alpha is refused with `UnsupportedRepositoryLayout`, which names the layout found and the one required.
+  Re-import from the source products, as the owner ruled on 2026-11-26.
+- **Collection member file names are encoded (#1006).** Local collection directories and S3 prefix exports written by
+  an earlier alpha must be re-created. Members found under the old underscore or raw-id names are refused, not read.
+- **Some sealed products no longer read as one table.** Readers now refuse a table group whose leaves disagree
+  on `unit`, `scale` or `referencing`, as well as on names, dtypes or nullability (#978, #1011). A product sealed by
+  alpha.7 with such a mix still verifies, but its group read fails with a typed `SchemaMismatch`. Every other `.tsra`
+  reads as before.
+- **CLI exit codes are a contract (#1038).**
+  - `4`: the ref moved; reread and retry.
+  - `5`: refused by the rules, such as a kind mismatch, a missing member, a missing fork token or an invalid name.
+  - `6`: the store is damaged, or the repository has an unsupported layout. Every alpha.7 repository exits 6.
+  - `3`: the backend was not compiled in.
+  - `1`: any other failure.
+- **Breaking Rust API.**
+  - `SchemaMismatch` carries a typed `SchemaMismatchKind`, and malformed specs are a separate `MalformedTableSpec`
+    (#1021). Both are `#[non_exhaustive]`.
+  - `same_value_contract` takes `ValueContract` views, and `LogicalTableError` no longer implements `Eq` (#1021).
+  - `InvalidLineage` became `InvalidRefName` (#1005).
+  - `Decoder`'s `version` and `pins` fields are now methods (#979).
+- **Writers refuse what readers would refuse.** Sealing a table whose leaves disagree on that column contract fails
+  (#978, #1011). That includes independent tables sharing a numbered prefix (`run_0001`, `run_0002`) whose columns
+  differ: give them distinct names.
 - **Thread budget.** Worker pools honour `TESSERA_MAX_THREADS`, clamped to the CPU count (#703).
 
 ### Added
 
+- `tessera-py`: a schema mismatch raised as `TesseraError` exposes `kind`, `column`, `field`, `expected` and `found`
+  (#1024, #1029). A future kind reports `kind="unknown"`.
 - Repository CLI failures use stable exit codes: 4 for moved refs (reread before retrying), 5 for
   rule refusals, and 6 for damaged or unsupported stores. Existing codes 0–3 retain their meanings.
   Read-time ref/target damage is distinct from write-time kind, unstored pin and missing block refusals.
