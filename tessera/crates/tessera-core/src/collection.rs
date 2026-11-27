@@ -462,8 +462,11 @@ impl Collection {
                     .is_none_or(|token| token.trim().is_empty())
             {
                 return Err(crate::Error::Invalid(
-                    "a forked_from collection requires a caller-supplied fork token in id_inputs; missing, empty, or whitespace-only tokens are invalid"
-                        .into(),
+                    concat!(
+                        "a forked_from collection requires a caller-supplied fork token in id_inputs; ",
+                        "missing, empty, or whitespace-only tokens are invalid"
+                    )
+                    .into(),
                 ));
             }
             if source.content_hash.as_deref().is_none_or(str::is_empty) {
