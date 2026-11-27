@@ -14,6 +14,12 @@ for an ROI / `table` → polars / `table_arrow` / `table_dict` / `column` / `ver
 (`add_array` / `add_table` / `set_field` / `add_source`, whose `content_hash=` pins the parent's seal /
 `with_producer` / `with_generation` / `pack`), with a typed `TesseraError`.
 
+When using HDF5-backed reads (including through other Python HDF5 libraries), close all HDF5
+handles before forking or starting a subprocess. Vendored libhdf5 opens file descriptors without
+`O_CLOEXEC`: a child can inherit an open file and keep its exclusive lock after the parent closes it,
+until the child closes the descriptor or exits. This is a general libhdf5 property, not a Tessera
+reader guarantee; an inherited lock can make another HDF5 open fail with “unable to lock file”.
+
 Tables are read by their **logical name** (ADR-0064). `table`, `table_arrow`, `table_dict` and `column` take a
 name that is one block, a partitioned table (`pairs` over the leaves `pairs/0000`, `pairs/0001`, …, joined in
 leaf order) or a legacy `events_NNNN` group, the same name `tessera read` takes; one leaf still reads by its full

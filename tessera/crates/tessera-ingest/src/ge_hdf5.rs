@@ -1,3 +1,9 @@
+//! HDF5 file-lock hazard: vendored libhdf5 opens descriptors without O_CLOEXEC.
+//! A subprocess inherits any open HDF5 file and retains its exclusive lock even
+//! after the parent closes it. Never launch a child in tests sharing this process.
+//! The `hdf5-no-spawn` flake check (`scripts/check-hdf5-no-spawn.py`) enforces
+//! this for tessera-ingest and CLI unit tests; see #1041 and #1043.
+//!
 //! GE-HDF5 vendor-raw ingest (#208) — read GE Discovery MI Gen2 listmode coincidence events
 //! (an HDF5 **compound** dataset, row-major) into a Tessera `listmode` product, **transposing to
 //! columnar** on the way in (the fd5 #193 fix: a single-column projection on a row-major compound
