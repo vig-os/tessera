@@ -146,6 +146,32 @@ mod tests {
     }
 
     #[test]
+    fn primary_root_uses_primary_digests_and_ignores_recorded_hash() {
+        let (json, _) = stored();
+        let original = primary_content_root(&json);
+        assert!(!original.is_empty());
+        let mut manifest: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(manifest["content_hash"], original);
+        manifest["content_hash"] = serde_json::json!(format!("blake3:{}", "0".repeat(64)));
+        let mut derived = manifest["blocks"][0].clone();
+        derived["name"] = serde_json::json!("cache");
+        derived["class"] = serde_json::json!("derived");
+        derived["digest"] = serde_json::json!(format!("blake3:{}", "1".repeat(64)));
+        manifest["blocks"].as_array_mut().unwrap().push(derived);
+        let encode = |m: &serde_json::Value| serde_json::to_vec(m).unwrap();
+        assert_eq!(primary_content_root(&encode(&manifest)), original);
+        manifest["blocks"][0]["digest"] = serde_json::json!(format!("blake3:{}", "2".repeat(64)));
+        assert_ne!(primary_content_root(&encode(&manifest)), original);
+        manifest["blocks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("digest");
+        assert_eq!(primary_content_root(&encode(&manifest)), "");
+        assert_eq!(primary_content_root(b"not json"), "");
+        assert_eq!(primary_content_root(&[0xff]), "");
+    }
+
+    #[test]
     fn verify_manifest_accepts_sealed_rejects_tampered() {
         let (json, seal) = stored();
         assert!(verify_manifest(&json, Some(seal.clone())));
