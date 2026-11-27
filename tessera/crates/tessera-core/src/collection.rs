@@ -295,7 +295,7 @@ pub struct Collection {
     /// and pins its `manifest_hash` in [`Source::content_hash`], including metadata-only changes.
     /// Edges do not enter `id_inputs` or the member MMR. Empty edges are omitted, preserving
     /// every pre-edge collection's stored bytes. A `forked_from` edge requires a caller-supplied
-    /// non-empty `fork` key in `id_inputs` at every writer door; the caller supplies uniqueness
+    /// non-whitespace `fork` key in `id_inputs` at every writer door; the caller supplies uniqueness
     /// across nodes. Both version roles require a non-empty predecessor seal pin.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<Source>,
@@ -459,7 +459,7 @@ impl Collection {
                 && self
                     .id_inputs
                     .get("fork")
-                    .is_none_or(|token| token.is_empty())
+                    .is_none_or(|token| token.trim().is_empty())
             {
                 return Err(crate::Error::Invalid(
                     "a forked_from collection requires a non-empty caller-supplied fork token in id_inputs"
@@ -651,6 +651,9 @@ impl Collection {
     /// the writer's check on a collection it built. Any mismatch is a typed
     /// [`crate::Error::Integrity`] naming the field. An unsealed collection verifies its `id` only; a
     /// sealed one verifies all three. Mirrors [`crate::manifest::Manifest::verify`].
+    /// Writer rules also apply: a missing or whitespace-only fork token or missing version pin
+    /// raises [`crate::Error::Invalid`]. Reader paths must use [`from_stored`](Self::from_stored),
+    /// which checks received bytes without applying these writer rules.
     ///
     /// The seal is recomputed over this struct's JSON. For a collection read from bytes, verify the
     /// bytes with [`from_stored`](Self::from_stored) instead: a view with

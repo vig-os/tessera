@@ -666,7 +666,9 @@ validation is not an additional reader refusal.
 
 A collection fork starts a distinct lineage with a `forked_from` edge to the origin's `id` and
 `manifest_hash`. A writer MUST refuse to seal a collection carrying a `forked_from` edge without a
-non-empty, caller-supplied `fork` token in `id_inputs` (`Error::Invalid`). The caller supplies token uniqueness across
+caller-supplied `fork` token in `id_inputs` that is non-empty after Rust `str::trim` removes
+leading and trailing Unicode whitespace (`Error::Invalid` otherwise). The token is stored and hashed
+unchanged; trimming only determines emptiness. The caller supplies token uniqueness across
 nodes; tessera never generates randomness. Later versions retain the same identity inputs, including
 `fork`. Repeating the same inputs is deterministic; different tokens yield different lineage ids.
 `derived_from` continues to record derivation. These edges form a tamper-evident Merkle DAG (ADR-0067 D2/D5).
