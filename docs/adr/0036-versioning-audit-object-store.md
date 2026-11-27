@@ -280,5 +280,6 @@ are retained. A heap stack has no depth cutoff; shared versions are read once wh
 is checked. Traversal provenance uses parent indices, with one local label per traversed edge; full member paths
 are rendered only on failure, and consecutive source edges are summarized by their version/object count. This
 avoids quadratic path copying in long histories. Sealed hash pins prevent cycles; edits invalidate the seal.
-Product payloads are marked without reading them, as before. Atomic collection commit and closure validation are ADR-0067 step 5; separate low-level
-storage and ref calls leave the object reclaimable until it becomes reachable.
+Product payloads are marked without reading them, as before. Atomic collection commit and closure validation
+are ADR-0067 step 5; separate low-level storage and ref calls leave the object reclaimable until it becomes
+reachable.

@@ -68,12 +68,27 @@ fn gc_marks_through_nested_collections() {
 fn gc_aborts_on_a_missing_nested_member_and_names_its_path() {
     let dir = tempfile::tempdir().unwrap();
     let repo = Repository::init(dir.path()).unwrap();
-    let (tip, mh, _) = nested(&repo);
+    let (shared_tip, mh, _) = nested(&repo);
+    let shared_top = repo.get_collection(&shared_tip).unwrap();
+    let middle_hash = &shared_top.members[0].manifest_hash;
+    let middle = repo.get_collection(middle_hash).unwrap();
+    // Reach the leaf through the middle, without the shared fixture's direct shortcut.
+    let tip = repo
+        .put_collection(&subcollection("path-top", &middle))
+        .unwrap();
+    repo.set_ref("current", Some(&shared_tip), &tip).unwrap();
     std::fs::remove_file(repo.object_path(&mh).unwrap()).unwrap();
     let before = objects(dir.path());
-    let err = repo.gc().unwrap_err().to_string();
-    assert!(err.contains(&tip) && err.contains(&mh), "{err}");
-    assert!(err.contains("members[") && err.contains("current"), "{err}");
+    let err = repo.gc().unwrap_err();
+    let Error::GcAborted { what, .. } = &err else {
+        panic!("{err}")
+    };
+    assert!(what.contains(middle_hash), "{err}");
+    assert!(what.contains(&tip) && what.contains(&mh), "{err}");
+    assert!(
+        what.contains("members[") && what.contains("current"),
+        "{err}"
+    );
     assert_eq!(objects(dir.path()), before);
 }
 
