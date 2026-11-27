@@ -35,7 +35,9 @@ impl Repository {
     /// `expected` is the current target seal, or `None` to create an absent pin. A
     /// disagreement returns [`Error::RefMoved`] (its `lineage` field contains the pin name).
     /// The target must already be stored, readable and of the declared kind; a disagreement
-    /// returns [`Error::RefKindMismatch`]. Nothing is published on validation failure.
+    /// returns [`Error::ObjectKindMismatch`]. An absent new target is [`Error::UnstoredPinTarget`].
+    /// Reading a damaged existing pin remains [`Error::RefKindMismatch`] or [`Error::RefTargetUnreadable`],
+    /// so callers can distinguish store damage from a bad new request. Nothing is published on validation failure.
     /// An explicit replacement may change the kind: pins have no lineage identity or log.
     ///
     /// Storing an object separately leaves a gc window: if gc reclaims it before this call
@@ -48,17 +50,17 @@ impl Repository {
         self.check_pin(name, expected)?;
         tessera_core::stored::parse_seal(target.address.as_bytes(), "the pin target")?;
         if !self.has_object(&target.address) {
-            return Err(Error::Invalid(format!(
-                "pin '{name}': {} is not stored in this repository",
-                target.address
-            )));
+            return Err(Error::UnstoredPinTarget {
+                name: name.into(),
+                address: target.address.clone(),
+            });
         }
         let bytes = self.read_raw(&target.address)?;
         let object = ObjectKind::of(&bytes)?;
         if target.kind != object {
-            return Err(Error::RefKindMismatch {
+            return Err(Error::ObjectKindMismatch {
                 path,
-                record: target.kind,
+                expected: target.kind,
                 object,
             });
         }

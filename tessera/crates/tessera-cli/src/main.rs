@@ -7,9 +7,11 @@
 mod bench;
 mod bench_compare;
 mod collection;
+mod exit;
 mod info;
 mod nav;
 mod provenance;
+mod repository;
 mod resource;
 #[cfg(feature = "sql")]
 mod sql;
@@ -180,7 +182,8 @@ Versioning (content-addressed repo):
   gc          Reclaim objects unreachable from any ref
 
 Collections (catalog of products):
-  collection  Inspect / ls / verify a collection.json + its members
+  collection  New / inspect / ls / verify catalogs; commit / log / diff repository versions
+  pin         Set / rm / ls durable repository pins (compare-and-set)
 
 Distribution (needs --features cloud):
   push        Push a sealed .tsra to an OCI registry
@@ -199,6 +202,11 @@ Confidentiality (crypto-shred):
 Diagnostics:
   info        What this build is (version, backends, build modes) — --json for machines
   bench       Bench the write engine on this host (throughput + peak RSS)
+
+Exit codes:
+  0 success; 1 other failure; 2 usage; 3 backend unavailable
+  4 conflict (reread, rebuild, retry); 5 rule refusal (correct the request)
+  6 store damaged or unsupported (repair or use a supported repository)
 
 Run `tsra help <command>` for details, flags, and what to pass.
 
@@ -835,7 +843,7 @@ enum Cmd {
         #[arg(long, default_value = "csv")]
         format: String,
     },
-    /// Inspect / list / verify a `collection.json` catalog and its members (ADR-0033).
+    /// Build and inspect catalogs; commit, log and diff collection versions (ADR-0067).
     ///
     /// The consumer verbs over the catalog the declarative ingest engine writes: `inspect` (header +
     /// seal + members), `ls` (human name + product per member), `verify` (collection seal + every
@@ -843,6 +851,11 @@ enum Cmd {
     Collection {
         #[command(subcommand)]
         action: CollectionAction,
+    },
+    /// Manage durable repository GC roots with compare-and-set (ADR-0067).
+    Pin {
+        #[command(subcommand)]
+        action: PinAction,
     },
     /// What this build is: version, compiled-in backends, build modes (ADR-0057 §7).
     ///
@@ -867,6 +880,42 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum CollectionAction {
+    /// Commit a sealed collection, atomically supplying any new members (ADR-0067).
+    /// Exit 4: moved ref; 5: rule refusal; 6: damaged or unsupported store. Other failures: 1.
+    Commit {
+        /// Repository directory.
+        repo: PathBuf,
+        /// Sealed collection.json; its id names the lineage.
+        file: PathBuf,
+        /// Observed tip seal. Omit only to create an absent lineage; never inferred.
+        #[arg(long)]
+        expected: Option<String>,
+        /// New product .tsra supplied in the same locked call; repeatable.
+        #[arg(long = "member")]
+        members: Vec<PathBuf>,
+        /// New sealed sub-collection.json supplied in the same call; repeatable.
+        #[arg(long = "subcollection")]
+        collections: Vec<PathBuf>,
+    },
+    /// Show a collection lineage log oldest first, or ancestry from a version.
+    Log {
+        /// Repository directory.
+        repo: PathBuf,
+        /// Collection lineage id, or version seal with --history.
+        reference: String,
+        /// Walk distinct versions in depth-first preorder: supersedes before forked_from.
+        #[arg(long)]
+        history: bool,
+    },
+    /// Diff immediate members of two stored collection versions, including order changes.
+    Diff {
+        /// Repository directory.
+        repo: PathBuf,
+        /// Old collection seal.
+        old: String,
+        /// New collection seal.
+        new: String,
+    },
     /// Assemble a collection.json from pre-sealed .tsra products (decouples membership from ingest).
     New {
         /// A pre-sealed `.tsra` product member (repeatable).
@@ -913,6 +962,33 @@ enum CollectionAction {
         /// The `collection.json` descriptor.
         file: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum PinAction {
+    /// Set a pin to a stored version. Omitted --expected requires an absent pin.
+    Set {
+        repo: PathBuf,
+        name: String,
+        /// Stored version seal.
+        address: String,
+        /// Declared target kind, verified against the object.
+        #[arg(long, value_enum)]
+        kind: repository::Kind,
+        /// Previously observed pin seal; never inferred.
+        #[arg(long)]
+        expected: Option<String>,
+    },
+    /// Remove a pin by CAS; objects remain until GC finds them unreachable.
+    Rm {
+        repo: PathBuf,
+        name: String,
+        /// Observed pin seal. Omission only matches an absent pin.
+        #[arg(long)]
+        expected: Option<String>,
+    },
+    /// List verified pins in name order: JSON-quoted name, kind, full seal.
+    Ls { repo: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -1387,32 +1463,29 @@ fn main() -> ExitCode {
         .with_target(false)
         .with_writer(std::io::stderr)
         .try_init();
-    match run(Cli::parse().cmd) {
+    let mut target = None;
+    match run_with_target(Cli::parse().cmd, &mut target) {
         Ok(()) => ExitCode::SUCCESS,
-        // ADR-0057 §7: **two distinct errors, two distinct exit codes**, so a cookbook recipe or a
-        // script can branch on "wrong build" versus "wrong invocation" without parsing stderr.
-        //
-        //   3 — the backend name is known, its handler is not in this build. Rebuilding or downloading
-        //       the release binary fixes it; nothing about the command is wrong.
-        //   2 — clap's own usage error, which an unknown `--from` value already produces (with its
-        //       "tip: a similar value exists" suggestion), so it needs no code here.
-        //   1 — everything else.
-        //
-        // The long guidance lives in `tessera_ingest::backends` rather than in the `Display` impl,
-        // because it needs the compiled/disabled lists and a library caller wants the one-liner.
+        // Backend help adds compiled/disabled lists; classification still uses the single map.
         Err(e @ tessera_core::Error::BackendNotCompiled(_)) => {
             eprintln!("error: {e}.\n");
             eprint!("{}", tessera_ingest::backends::missing_backend_help());
-            ExitCode::from(3)
+            ExitCode::from(exit::code(&e))
         }
         Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
+            eprintln!("error: {}", exit::message(&e, target.as_ref()));
+            ExitCode::from(exit::code(&e))
         }
     }
 }
 
+#[cfg(test)]
 fn run(cmd: Cmd) -> tessera_core::Result<()> {
+    run_with_target(cmd, &mut None)
+}
+
+fn run_with_target(cmd: Cmd, target: &mut Option<exit::Target>) -> tessera_core::Result<()> {
+    *target = exit::target(&cmd);
     match cmd {
         Cmd::Inspect {
             file,
@@ -1728,7 +1801,7 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
         }
         Cmd::Import { repo, file } => {
             let mut out = std::io::stdout().lock();
-            version::import(&repo, &file, &mut out)
+            version::import_with_target(&repo, &file, &mut out, target)
         }
         Cmd::Commit {
             repo,
@@ -2100,6 +2173,29 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
         Cmd::Collection { action } => {
             let mut out = std::io::stdout().lock();
             match action {
+                CollectionAction::Commit {
+                    repo,
+                    file,
+                    expected,
+                    members,
+                    collections,
+                } => repository::commit(
+                    &repo,
+                    &file,
+                    expected.as_deref(),
+                    &members,
+                    &collections,
+                    &mut out,
+                    target,
+                ),
+                CollectionAction::Log {
+                    repo,
+                    reference,
+                    history,
+                } => repository::log(&repo, &reference, history, &mut out),
+                CollectionAction::Diff { repo, old, new } => {
+                    repository::diff(&repo, &old, &new, &mut out)
+                }
                 CollectionAction::New {
                     members,
                     out: dir,
@@ -2135,6 +2231,26 @@ fn run(cmd: Cmd) -> tessera_core::Result<()> {
                 CollectionAction::Inspect { file } => collection::inspect(&file, &mut out),
                 CollectionAction::Ls { file, full } => collection::ls(&file, full, &mut out),
                 CollectionAction::Verify { file } => collection::verify(&file, &mut out),
+            }
+        }
+        Cmd::Pin { action } => {
+            let mut out = std::io::stdout().lock();
+            match action {
+                PinAction::Set {
+                    repo,
+                    name,
+                    address,
+                    kind,
+                    expected,
+                } => {
+                    repository::set_pin(&repo, &name, &address, kind, expected.as_deref(), &mut out)
+                }
+                PinAction::Rm {
+                    repo,
+                    name,
+                    expected,
+                } => repository::remove_pin(&repo, &name, expected.as_deref(), &mut out),
+                PinAction::Ls { repo } => repository::pins(&repo, &mut out),
             }
         }
         Cmd::Info { json } => info::info(json, &mut std::io::stdout().lock()),

@@ -27,10 +27,22 @@ pub fn init(repo: &Path, out: &mut dyn Write) -> Result<()> {
 /// replace its tip with a version whose history does not reach the old one. Use `commit` to change
 /// it, or `forget` it first. Importing the version that is already the tip changes no ref and
 /// succeeds; its objects are written again where one is missing or torn (#946).
+#[cfg(test)]
 pub fn import(repo: &Path, tsra: &Path, out: &mut dyn Write) -> Result<()> {
+    import_with_target(repo, tsra, out, &mut None)
+}
+
+/// Import a product while retaining its logical lineage id for CLI diagnostics.
+pub fn import_with_target(
+    repo: &Path,
+    tsra: &Path,
+    out: &mut dyn Write,
+    target: &mut Option<crate::exit::Target>,
+) -> Result<()> {
     let repo = Repository::open(repo)?;
     let mut r = Reader::open(tsra)?;
     let manifest = r.manifest().clone();
+    *target = Some(crate::exit::Target::Lineage(manifest.id.clone()));
     let mut payloads = Vec::with_capacity(manifest.blocks.len());
     for b in &manifest.blocks {
         let bytes = r.read_block(&b.name)?;

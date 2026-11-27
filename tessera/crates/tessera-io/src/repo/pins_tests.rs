@@ -48,9 +48,10 @@ fn set_pin_refuses_an_unstored_address_and_a_wrong_kind() {
     let dir = tempfile::tempdir().unwrap();
     let (repo, hash) = with_first_version(dir.path());
     let absent = tessera_core::hash::digest(b"absent");
-    assert!(repo.set_pin("x", None, &target(ObjectKind::Product, &absent)).is_err());
+    assert!(matches!(repo.set_pin("x", None, &target(ObjectKind::Product, &absent)),
+        Err(Error::UnstoredPinTarget { .. })));
     assert!(matches!(repo.set_pin("x", None, &target(ObjectKind::Collection, &hash)),
-        Err(Error::RefKindMismatch { record: ObjectKind::Collection, object: ObjectKind::Product, .. })));
+        Err(Error::ObjectKindMismatch { expected: ObjectKind::Collection, object: ObjectKind::Product, .. })));
     assert!(repo.pins().unwrap().is_empty());
     let block = repo.get_manifest(&hash).unwrap().blocks[0].digest.clone().unwrap();
     assert!(repo.set_pin("x", None, &target(ObjectKind::Product, &block)).is_err());

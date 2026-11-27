@@ -111,7 +111,8 @@ error message. The cost is the reachable version graph plus the listing of all o
 Pins have their own directory, `repo/refs/pins/<name>`, and use the same encoding, bound and typed record grammar.
 A lineage and a pin may share a name: lineage commands only touch `refs/lineages/` and `log/lineages/`.
 `gc` reads roots from both namespaces. Rust callers manage pins with `set_pin(name, expected, &target)`,
-`remove_pin(name, expected)`, `read_pin(name)` and `pins()`. CLI pin commands are ADR-0067 step 7.
+`remove_pin(name, expected)`, `read_pin(name)` and `pins()`. Use `tessera pin set|rm|ls` for the CLI;
+see [Repositories](./repositories.md) for collection commands and transcripts.
 `PinTarget { kind: ObjectKind::Product, address: seal }` (or `ObjectKind::Collection`) declares the target;
 `read_pin` returns `Option<PinTarget>` and `pins()` returns a name-sorted `BTreeMap<String, PinTarget>`.
 Both verify record spelling, object kind and seal; listing decodes and validates canonical filenames.

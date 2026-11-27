@@ -39,7 +39,8 @@ Versioning (content-addressed repo):
   gc          Reclaim objects unreachable from any ref
 
 Collections (catalog of products):
-  collection  Inspect / ls / verify a collection.json + its members
+  collection  New / inspect / ls / verify catalogs; commit / log / diff repository versions
+  pin         Set / rm / ls durable repository pins (compare-and-set)
 
 Distribution (needs --features cloud):
   push        Push a sealed .tsra to an OCI registry
@@ -58,6 +59,11 @@ Confidentiality (crypto-shred):
 Diagnostics:
   info        What this build is (version, backends, build modes) — --json for machines
   bench       Bench the write engine on this host (throughput + peak RSS)
+
+Exit codes:
+  0 success; 1 other failure; 2 usage; 3 backend unavailable
+  4 conflict (reread, rebuild, retry); 5 rule refusal (correct the request)
+  6 store damaged or unsupported (repair or use a supported repository)
 
 Run `tsra help <command>` for details, flags, and what to pass.
 

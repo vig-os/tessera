@@ -559,7 +559,8 @@ impl Repository {
     /// is replaced by a rename), so it was torn or edited, and reading it as "no commits yet" would
     /// let a commit start the lineage over and `gc` reclaim its history.
     /// Kind is `product` or `collection`; a disagreement with the target object is
-    /// [`Error::RefKindMismatch`]. Target bytes and seal are verified on every read.
+    /// [`Error::RefKindMismatch`]. Missing or torn targets are [`Error::RefTargetUnreadable`].
+    /// Target bytes and seal are verified on every read.
     pub fn read_ref(&self, lineage: &str) -> Result<Option<String>> {
         let path = self.ref_path(lineage)?;
         self.layout()?;
@@ -583,8 +584,13 @@ impl Repository {
         match std::fs::read(path) {
             Ok(bytes) => {
                 let (kind, address) = parse_ref(path, &bytes)?;
-                let target = self.read_raw(&address)?;
-                let object = ObjectKind::of(&target)?;
+                let unreadable = |source| Error::RefTargetUnreadable {
+                    path: path.to_path_buf(),
+                    address: address.clone(),
+                    source: Box::new(source),
+                };
+                let target = self.read_raw(&address).map_err(unreadable)?;
+                let object = ObjectKind::of(&target).map_err(unreadable)?;
                 if kind != object {
                     return Err(Error::RefKindMismatch {
                         path: path.to_path_buf(),
@@ -592,7 +598,7 @@ impl Repository {
                         object,
                     });
                 }
-                read_version(&target, &address)?;
+                read_version(&target, &address).map_err(unreadable)?;
                 Ok(Some((kind, address)))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -790,10 +796,10 @@ impl Repository {
         for b in &manifest.blocks {
             let digest = block_digest(b)?;
             if !self.has_object(digest) {
-                return Err(Error::Invalid(format!(
-                    "commit: block '{}' ({digest}) is neither supplied nor already in the store",
-                    b.name
-                )));
+                return Err(Error::MissingProductBlock {
+                    name: b.name.to_string(),
+                    digest: digest.to_string(),
+                });
             }
         }
 
@@ -2072,7 +2078,7 @@ mod tests {
         let repo = Repository::init(dir.path()).unwrap();
         let (m, _payloads) = sealed_on(1, None);
         let err = repo.commit(L, None, &m, &[]).unwrap_err();
-        assert!(format!("{err}").contains("neither supplied nor already in the store"));
+        assert!(matches!(err, Error::MissingProductBlock { .. }));
         assert_eq!(repo.read_ref(L).unwrap(), None);
     }
 

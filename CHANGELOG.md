@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Repository CLI failures use stable exit codes: 4 for moved refs (reread before retrying), 5 for
+  rule refusals, and 6 for damaged or unsupported stores. Existing codes 0–3 retain their meanings.
+  Read-time ref/target damage is distinct from write-time kind, unstored pin and missing block refusals.
+  Pin diagnostics name logical refs, and `pin ls` emits JSON-quoted names (#1002).
+
 - Durable repository pins: `set_pin`, `remove_pin`, `read_pin` and `pins()` with typed product or
   collection targets, fenced CAS and durable publication/removal (ADR-0067 step 6, #1001).
   Pins remain independent of same-named lineages and retain nested members after `forget`;
