@@ -1,0 +1,81 @@
+CAS expectations are caller observations; omission asserts absence.
+Exit 4 means conflict, 5 rule refusal, and 6 damaged or unsupported store.
+
+```console
+$ tessera pin ls unmarked
+? 6
+error: repository unmarked has the layout no marker (possibly before #975; unmarked repositories are refused), and this build reads only `tessera-repository 2` (typed, namespaced refs, ADR-0067); there is no migration: create a new repository (`tessera init`) and import the source products again
+
+$ tessera init repo
+initialized tessera repository at repo
+
+$ tessera pin ls kind-only
+? 6
+error: pin "kind": object kind mismatch: record Collection, object Product
+
+$ tessera pin set kind-only kind @B@ --kind product --expected @B@
+? 6
+error: pin "kind": object kind mismatch: record Collection, object Product
+
+$ tessera pin rm damaged missing --expected @ABSENT@
+? 6
+error: pin "missing": target @ABSENT@ is unreadable: [..]
+
+$ tessera pin rm damaged torn --expected @D@
+? 6
+error: pin "torn": target @D@ is unreadable: [..]
+
+$ tessera commit missing-block @BASE@ --set note=changed
+? 5
+error: commit: block 'data' (@BLOCK@) is neither supplied nor already in the store
+
+$ tessera pin set repo absent @ABSENT@ --kind product
+? 5
+error: pin 'absent': @ABSENT@ is not stored in this repository
+
+$ tessera collection commit repo main/collection.json
+? 5
+error: collection member closure failed at @B@ (version @M@ → @M@ → members[0] (@BASE@)): [..]
+
+$ tessera import repo base.tsra
+imported lineage @BASE@
+  version @B@
+
+$ tessera collection commit repo no-token/collection.json
+? 5
+error: [..]a forked_from collection requires a caller-supplied fork token in id_inputs; [..]
+
+$ tessera collection commit repo main/collection.json
+committed collection @MAIN@
+  version @M@
+
+$ tessera collection commit repo main/collection.json
+? 4
+error: ref '@MAIN@' moved: expected no tip, found @M@ (another commit landed first; nothing was written — rebuild on the current tip and commit again)
+
+$ tessera collection commit repo wrong/collection.json --expected @B@
+? 5
+error: lineage '@BASE@' has kind Product; a write cannot change its kind
+
+$ tessera pin set repo base @B@ --kind collection
+? 5
+error: pin "base": object kind mismatch: expected Collection, object Product
+
+$ tessera pin set repo base @B@ --kind product
+pinned "base" product @B@
+
+$ tessera pin set repo base @B@ --kind product
+? 4
+error: pin "base" moved: expected no target, found @B@; no pin was changed — reread the pin before setting or removing it again
+
+$ tessera pin rm repo base
+? 4
+error: pin "base" moved: expected no target, found @B@; no pin was changed — reread the pin before setting or removing it again
+
+$ tessera pin rm repo base --expected @B@
+removed pin "base"
+
+$ tessera pin rm repo base
+no pin "base"
+
+```

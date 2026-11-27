@@ -41,3 +41,8 @@ there, which is the point of keeping one copy rather than two.
 ### Logical tables: one name for many blocks
 
 {{#include ../../../tessera/crates/tessera-cli/tests/cmd/logical_tables.trycmd}}
+
+### Repository collections and durable pins
+
+See [Repositories](./repositories.md) for `collection commit|log|diff`, ancestry order,
+`pin set|rm|ls`, CAS expectations, fork tokens, and tested lifecycle and refusal transcripts.

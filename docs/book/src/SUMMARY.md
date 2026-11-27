@@ -27,6 +27,7 @@
 # Lifecycle & scale
 
 - [Versioning](./versioning.md)
+- [Repositories: collections, lineages and pins](./repositories.md)
 - [Distribution: OCI & cloud](./distribution.md)
 - [Performance & the write engine](./performance.md)
 

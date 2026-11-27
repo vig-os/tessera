@@ -396,6 +396,24 @@ pub enum Error {
         detail: String,
     },
 
+    /// A ref promises a readable, sealed version but its target is absent, torn or unreadable.
+    /// The ref and address retain the read context even when this happens during a write's CAS check.
+    #[error("ref {} target {address} is unreadable: {source}", path.display())]
+    RefTargetUnreadable {
+        path: std::path::PathBuf,
+        address: String,
+        #[source]
+        source: Box<Error>,
+    },
+
+    /// A requested pin target is not stored. This is a write refusal, not a damaged existing ref.
+    #[error("pin '{name}': {address} is not stored in this repository")]
+    UnstoredPinTarget { name: String, address: String },
+
+    /// A product commit references a block neither supplied nor already stored.
+    #[error("commit: block '{name}' ({digest}) is neither supplied nor already in the store")]
+    MissingProductBlock { name: String, digest: String },
+
     /// A repository's lineage ref was not at the tip the caller built on (ADR-0036 §2, #946): a
     /// `commit` or `set_ref` expected `expected` (`None`: a lineage with no commits yet) and found
     /// `found`. Another writer advanced the ref first; nothing was stored and the ref is unchanged.
@@ -564,6 +582,94 @@ pub enum Error {
     /// recipe branch on "wrong build" versus "wrong invocation" (exit 2) without parsing stderr.
     #[error("backend '{0}' is not compiled into this build")]
     BackendNotCompiled(&'static str),
+}
+
+/// Failure categories for frontends; numeric process exit codes remain a CLI policy.
+/// This set is closed so a new category also requires each frontend to choose its handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    /// Other input, I/O or processing failures.
+    Other,
+    /// The requested backend is not compiled into this build.
+    BackendUnavailable,
+    /// The observed ref moved; reread before rebuilding or reconsidering the operation.
+    Conflict,
+    /// The requested write or object access violates a rule.
+    RuleRefusal,
+    /// A stored ref, its target or a store walk is damaged, unreadable or unsupported.
+    StoreDamaged,
+}
+
+impl Error {
+    /// Classify the outer failure, retaining the distinction between write validation and reading
+    /// existing refs. This match is exhaustive in the enum's own crate: adding any error variant
+    /// requires a conscious classification, even if the decision is `Other`.
+    pub fn failure_class(&self) -> FailureClass {
+        use FailureClass::*;
+        match self {
+            Self::BackendNotCompiled(_) => BackendUnavailable,
+            Self::RefMoved { .. } => Conflict,
+            Self::LineageKindMismatch { .. }
+            | Self::ObjectKindMismatch { .. }
+            | Self::MemberKindMismatch { .. }
+            | Self::MissingMember { .. }
+            | Self::LineageIdMismatch { .. }
+            | Self::SupersedesMismatch { .. }
+            | Self::InvalidRefName { .. }
+            | Self::UnstoredPinTarget { .. }
+            | Self::MissingProductBlock { .. } => RuleRefusal,
+            Self::Invalid(detail)
+                if detail
+                    == concat!(
+                    "a forked_from collection requires a caller-supplied fork token in id_inputs; ",
+                    "missing, empty, or whitespace-only tokens are invalid"
+                ) =>
+            {
+                RuleRefusal
+            }
+            Self::CorruptRef { .. }
+            | Self::GcAborted { .. }
+            | Self::HistoryAborted { .. }
+            | Self::UnsupportedRepositoryLayout { .. }
+            | Self::RefKindMismatch { .. }
+            | Self::RefTargetUnreadable { .. } => StoreDamaged,
+            Self::AmbiguousObjectKind
+            | Self::DuplicateMemberReference { .. }
+            | Self::Io(_)
+            | Self::Serde(_)
+            | Self::Canonicalization(_)
+            | Self::InexactInteger { .. }
+            | Self::NonFiniteNumber { .. }
+            | Self::NonCanonical { .. }
+            | Self::InBandSeal { .. }
+            | Self::UnsupportedLayout { .. }
+            | Self::MalformedSeal { .. }
+            | Self::Integrity { .. }
+            | Self::BlockIntegrity { .. }
+            | Self::NewerFormatFields { .. }
+            | Self::UnsupportedVersion(_)
+            | Self::MissingDigest(_)
+            | Self::Container(_)
+            | Self::ProvenanceVersionSkew { .. }
+            | Self::UnresolvedConfigRef { .. }
+            | Self::Codec(_)
+            | Self::Unimplemented(_)
+            | Self::Sealed
+            | Self::Invalid(_)
+            | Self::Contract { .. }
+            | Self::SchemaField { .. }
+            | Self::FieldValue { .. }
+            | Self::InvalidBlockName { .. }
+            | Self::BlockNameConflict { .. }
+            | Self::DuplicateBlockName { .. }
+            | Self::DanglingChunkIndex { .. }
+            | Self::LogicalTable { .. }
+            | Self::MalformedTableSpec { .. }
+            | Self::StreamedTable { .. }
+            | Self::CorruptJournal { .. }
+            | Self::QuarantinedBlockName { .. } => Other,
+        }
+    }
 }
 
 /// A lineage tip in an [`Error::RefMoved`] message: the address, or `no tip` for a lineage without
