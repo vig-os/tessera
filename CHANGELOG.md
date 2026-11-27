@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **breaking**: table leaves must agree exactly on `unit`, `scale` and the complete `referencing`
+  descriptor, as well as names, order, dtypes and nullability (#1011). Sealing and group reads refuse
+  mismatches with `SchemaMismatch`, including group reads of already-sealed products. Descriptions
+  and labels may still differ. `same_value_contract` now accepts two borrowed `ValueContract` views.
+  Rename independent tables or convert their values and metadata before sealing.
+
 - **breaking (writers)**: independent tables sharing a legacy numbered prefix, such as `run_0001`
   and `run_0002`, must agree on column count, names, order, dtypes and nullability to seal (#978).
   Rename independent tables without a shared `_NNNN` prefix, for example `run_first` and `run_second`.

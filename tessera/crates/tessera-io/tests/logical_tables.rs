@@ -563,6 +563,14 @@ fn shaped_contract_leaves(legacy: bool, change: &str) -> Vec<(BlockRef, BlockPay
                 match change {
                     "order" => columns.swap(0, 1),
                     "extra" => columns.push(col("time", "i4")),
+                    "empty_unit" => columns[0].unit = Some(String::new()),
+                    "unit" => columns[0].unit = Some("ms".into()),
+                    "scale" => columns[0].scale = Some(0.001),
+                    "referencing" => {
+                        columns[0].referencing = Some(
+                            tessera_core::referencing::Referenced::identity(Some("ns".into())),
+                        );
+                    }
                     "metadata" => {
                         columns[0].description = Some("Second leaf description".into());
                         columns[0].short_name = Some("Measured value".into());
@@ -622,6 +630,177 @@ fn assert_shape_contract_refused(change: &str) {
                 ..
             })
         ));
+    }
+}
+
+fn assert_metadata_contract_error(error: Error, legacy: bool, first: &str, later: &str) {
+    match error {
+        Error::LogicalTable {
+            name,
+            reason: LogicalTableError::SchemaMismatch { leaf, detail },
+        } => {
+            assert_eq!(name, "events");
+            assert_eq!(leaf, if legacy { "events_0001" } else { "events/0001" });
+            assert!(detail.starts_with("column 'value': "), "{detail}");
+            let (leaf_detail, first_detail) = detail.split_once("first leaf ").expect(&detail);
+            assert!(
+                leaf_detail.contains(later),
+                "expected {later} in {leaf_detail}"
+            );
+            assert!(
+                first_detail.contains(first),
+                "expected {first} in {first_detail}"
+            );
+        }
+        error => panic!("expected metadata contract refusal: {error:?}"),
+    }
+}
+
+fn expected_metadata_values(change: &str, populated: bool) -> (&'static str, &'static str) {
+    let field = if change == "empty_unit" {
+        "unit"
+    } else {
+        change
+    };
+    let later = match change {
+        "unit" => r#"unit=Some("ms")"#,
+        "empty_unit" => r#"unit=Some("")"#,
+        "scale" => "scale=Some(0.001)",
+        "referencing" => concat!(
+            "referencing=Some(Referenced { transform: Identity, ",
+            "unit: Some(\"ns\"), vocabulary: None, frame: None })"
+        ),
+        _ => unreachable!(),
+    };
+    let first = match (field, populated) {
+        ("unit", false) => "unit=None",
+        ("unit", true) => r#"unit=Some("ns")"#,
+        ("scale", false) => "scale=None",
+        ("scale", true) => "scale=Some(1.0)",
+        ("referencing", false) => "referencing=None",
+        ("referencing", true) => concat!(
+            "referencing=Some(Referenced { transform: Affine1d { slope: 1.0, intercept: 7.0 }, ",
+            "unit: None, vocabulary: None, frame: Some(\"epoch:unix\") })"
+        ),
+        _ => unreachable!(),
+    };
+    (first, later)
+}
+
+fn assert_interpreting_metadata_refused(field: &str, read: bool) {
+    let change = field;
+    let field = if change == "empty_unit" {
+        "unit"
+    } else {
+        field
+    };
+    for legacy in [false, true] {
+        for populated in [false, true] {
+            let mut leaves = shaped_contract_leaves(legacy, change);
+            if populated {
+                leaves[0].0.spec["columns"][0][field] = match field {
+                    "unit" => serde_json::json!("ns"),
+                    "scale" => serde_json::json!(1.0),
+                    "referencing" => serde_json::json!({
+                        "transform": {"kind": "affine_1d", "slope": 1.0, "intercept": 7.0},
+                        "frame": "epoch:unix"
+                    }),
+                    _ => unreachable!(),
+                };
+            }
+            let error = if read {
+                let manifest = sealed_contract_manifest(&leaves);
+                let dir = tempfile::tempdir().unwrap();
+                let out = dir.path().join("old.tsra");
+                let payloads = leaves.into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+                write_old_archive(&manifest, &payloads, &out);
+                let mut reader = Reader::open(&out).unwrap();
+                reader
+                    .logical_table("events")
+                    .err()
+                    .expect("mixed metadata read")
+            } else {
+                let mut builder = tessera_core::ProductBuilder::new("test", "metadata", "d", TS);
+                for (block, _) in &leaves {
+                    builder.add_block_ref(block.clone());
+                }
+                builder.seal().expect_err("mixed metadata sealed")
+            };
+            let (first, later) = expected_metadata_values(change, populated);
+            assert_metadata_contract_error(error, legacy, first, later);
+        }
+    }
+}
+
+#[test]
+fn unit_mismatch_refused_at_seal() {
+    assert_interpreting_metadata_refused("unit", false);
+}
+#[test]
+fn unit_mismatch_refused_at_read() {
+    assert_interpreting_metadata_refused("unit", true);
+}
+#[test]
+fn scale_mismatch_refused_at_seal() {
+    assert_interpreting_metadata_refused("scale", false);
+}
+#[test]
+fn scale_mismatch_refused_at_read() {
+    assert_interpreting_metadata_refused("scale", true);
+}
+#[test]
+fn referencing_mismatch_refused_at_seal() {
+    assert_interpreting_metadata_refused("referencing", false);
+}
+#[test]
+fn referencing_mismatch_refused_at_read() {
+    assert_interpreting_metadata_refused("referencing", true);
+}
+
+#[test]
+fn explicit_empty_unit_differs_from_absent_unit_at_seal_and_read() {
+    for read in [false, true] {
+        assert_interpreting_metadata_refused("empty_unit", read);
+    }
+}
+
+#[test]
+fn push_table_refuses_explicit_empty_unit_against_absent_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = WriteSession::create(&dir.path().join("ws"), "test", "metadata", "d", TS).unwrap();
+    let mut writer = StreamWriter::new(ws, 2, 2);
+    for (block, _) in shaped_contract_leaves(true, "empty_unit") {
+        let spec: TableSpec = serde_json::from_value(block.spec).unwrap();
+        writer
+            .push_table(
+                block.name.to_string(),
+                spec,
+                vec![vec![
+                    ("value".into(), ColumnData::I32(vec![7])),
+                    ("energy".into(), ColumnData::I32(vec![7])),
+                ]],
+            )
+            .unwrap();
+    }
+    let error = writer.finish(&dir.path().join("out.tsra")).unwrap_err();
+    assert_metadata_contract_error(error, true, "unit=None", r#"unit=Some("")"#);
+}
+
+#[test]
+fn streaming_seal_refuses_interpreting_metadata() {
+    for field in ["unit", "scale", "referencing"] {
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let ws =
+                WriteSession::create(&dir.path().join("ws"), "test", "metadata", "d", TS).unwrap();
+            let mut writer = StreamWriter::new(ws, 2, 2);
+            for block in shaped_contract_leaves(legacy, field) {
+                writer.push(Box::new(move || Ok((block, vec![])))).unwrap();
+            }
+            let error = writer.finish(&dir.path().join("out.tsra")).unwrap_err();
+            let (first, later) = expected_metadata_values(field, false);
+            assert_metadata_contract_error(error, legacy, first, later);
+        }
     }
 }
 

@@ -511,10 +511,8 @@ impl ColumnData {
         let nullable = matches!(self, ColumnData::Nullable { .. });
         let other_nullable = matches!(other, ColumnData::Nullable { .. });
         if !tessera_core::block::table::same_value_contract(
-            self.numpy_code(),
-            nullable,
-            other.numpy_code(),
-            other_nullable,
+            tessera_core::block::table::ValueContract::decoded(self.numpy_code(), nullable),
+            tessera_core::block::table::ValueContract::decoded(other.numpy_code(), other_nullable),
         ) {
             return Err(Error::Codec(format!(
                 "extend: dtype {} (nullable={}) != {} (nullable={})",
@@ -933,10 +931,8 @@ pub(crate) fn check_column_contract(
     let nullable = matches!(data, ColumnData::Nullable { .. });
     if name != col.name
         || !tessera_core::block::table::same_value_contract(
-            &col.dtype,
-            col.nullable,
-            data.numpy_code(),
-            nullable,
+            tessera_core::block::table::ValueContract::decoded(&col.dtype, col.nullable),
+            tessera_core::block::table::ValueContract::decoded(data.numpy_code(), nullable),
         )
     {
         return Err(Error::LogicalTable {
