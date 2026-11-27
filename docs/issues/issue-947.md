@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-21T20:38:54Z
-updated: 2026-11-21T21:23:31Z
+updated: 2026-11-26T20:41:18Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/947
-comments: 1
+comments: 2
 labels: feature, area:core, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-22T09:19:43.204Z
+synced: 2026-11-27T10:31:09.564Z
 ---
 
 # [Issue 947]: [feat(repo): refs to collections, a version edge on collections, and gc that marks through members — so a current collection pins its base and a second lineage can share it](https://github.com/vig-os/tessera/issues/947)
@@ -89,4 +89,22 @@ Acceptance to add:
 - [ ] A pinned version reads back after its lineage has compacted and `gc` has run; after the pin is removed and `gc` runs, it is reclaimed.
 - [ ] Creating and dropping 1,000 workspaces of about 200 rows each in a repository of 10⁷ rows: the time and bytes of discard are reported and do not grow with the repository.
 
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 26, 2026 at 08:41 PM_
+
+ADR-0067 is Accepted (owner, 2026-11-26; PR #988 merged as 4f569cf8). Each implementation step has its own issue:
+- #996: layout 2 with typed refs
+- #997: `sources` on Collection
+- #998: kind discriminator and member diff
+- #999: collections in the repo, with gc through members
+- #1000: `commit_collection`, log and history
+- #1001: pins
+- #1002: CLI
+- #1003: ADR amendments
+
+Steps 1–3 can land in any order, 4 needs all of them, 5 and 6 need 4, 7 needs 5 and 6, and 8 comes last. #994 (collection member file names are not injective) should land before step 4. #947 stays open until step 8 lands.
 

@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-29T14:17:28Z
-updated: 2026-11-22T17:36:17Z
+updated: 2026-11-27T10:03:34Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/703
-comments: 1
+comments: 3
 labels: none
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-23T10:16:34.227Z
+synced: 2026-11-27T10:31:10.379Z
 ---
 
 # [Issue 703]: [Worker sizing and the perf ratchet's gate read available_parallelism(), which reports the node's 84 CPUs on [batch-host]](https://github.com/vig-os/tessera/issues/703)
@@ -65,4 +65,25 @@ Recent history: none of the 12 failed `nix-check` runs on other branches between
 So this is rare and depends on the environment, as the 1.14× case this issue records already showed. Options 1 and 2 above
 would fix it. PR #951 leaves the test as it is.
 
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 27, 2026 at 05:46 AM_
+
+Another occurrence on 2026-11-27, on PR #1020 (head 031b6f9e). That PR changes only `check_table.py`, the wasm smoke test and a README, so it cannot reach the grid-decode path. `table::tests::grid_decode_perf_ratchet_narrow_table` panicked at `tessera-io/src/table.rs:4006` in run 45933431909. I re-ran only the failed jobs. This ratchet is wall-clock-based on shared runners, and it now regularly fails PRs that can't affect it (here, and #951 on 2026-11-24). It needs a root fix: measure load-independently (instructions or CPU time) or compare against a same-run serial baseline. Raising the threshold or retrying is not a fix.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 27, 2026 at 09:55 AM_
+
+**Architect decision (2026-11-27): options 1 AND 2. Option 3 is rejected.**
+- **(1) Honour a thread budget everywhere.** One function, e.g. `tessera_core::threads::budget()`, reads `TESSERA_MAX_THREADS` and falls back to `available_parallelism()`. Every pool sizes from it: WriteConfig/balanced, the read runtime, grid-decode `cores`, ge_hdf5, and the bench commands. The flake's `withCpuBudget` exports `TESSERA_MAX_THREADS=$NIX_BUILD_CORES`. Software should respect the budget it is given, not the node it happens to run on.
+- **(2) The wall-clock ratchet becomes an explicit opt-in** (`TESSERA_PERF_RATCHET=1`), run in a reserved slice (a ksb job with a fixed CPU request), never in shared-runner CI. It no longer depends on the reported core count. This matches the owner's ruling that perf evidence must be load-independent. Timing assertions on a shared node prove nothing, and this one has failed unrelated PRs three times (#951, #1020, #1024's io run).
+- **(3) A CPU limit on runner pods** would reverse exo-fleet#987, so it stays out.
+
+The CI change will be visible in the flake check: the ratchet is reported as skipped (opt-in), not silently absent.
 

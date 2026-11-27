@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-26T01:27:41Z
+updated: 2026-11-27T09:55:15Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-26T10:26:36.357Z
+synced: 2026-11-27T10:31:10.991Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -25,7 +25,8 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 The following updates are currently rate-limited. To force their creation now, click on a checkbox below.
 
  - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-digest -->chore(deps): update actions/create-github-app-token digest to f418cff
- - [ ] <!-- unlimit-branch=renovate/tessera-core-digest -->fix(deps): update tessera-core digest to 911ec86
+ - [ ] <!-- unlimit-branch=renovate/tessera-core-digest -->fix(deps): update tessera-core digest to b49d6c0
+ - [ ] <!-- unlimit-branch=renovate/blake3-1.x-lockfile -->chore(deps): update rust crate blake3 to v1.8.8
  - [ ] <!-- unlimit-branch=renovate/bytes-1.x-lockfile -->chore(deps): update rust crate bytes to v1.12.2
  - [ ] <!-- unlimit-branch=renovate/clap-4.x-lockfile -->chore(deps): update rust crate clap to v4.6.10
  - [ ] <!-- unlimit-branch=renovate/dicom-0.x-lockfile -->chore(deps): update rust crate dicom to v0.10.1
@@ -96,7 +97,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `tessera-core ea2e47aeafe4a509ef3206e0e6f6d90882031945` → [Updates: ``]
  - `serde_json 1`
  - `serde_jcs 0.2.0` → [Updates: `0.4.0`]
- - `blake3 1`
+ - `blake3 1` → [Updates: `lock file @ 1.8.8`]
  - `zip 9` → [Updates: `lock file @ 9.8.2`]
  - `minicbor 2.3.1`
  - `cbor4ii 1.2.5`
@@ -109,7 +110,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `serde 1` → [Updates: `lock file @ 1.0.229`]
  - `serde_json 1` → [Updates: `lock file @ 1.0.154`]
  - `serde_jcs 0.2` → [Updates: `0.4`]
- - `blake3 1`
+ - `blake3 1` → [Updates: `lock file @ 1.8.8`]
  - `thiserror 2` → [Updates: `lock file @ 2.0.21`]
  - `tracing 0.1`
  - `tracing-subscriber 0.3`
