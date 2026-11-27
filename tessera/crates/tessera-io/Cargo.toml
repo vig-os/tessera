@@ -23,6 +23,7 @@ serde_json.workspace = true
 blake3 = { workspace = true, features = ["rayon", "mmap"] }
 zip.workspace = true
 zarrs.workspace = true
+rayon = "1" # Dedicated budgeted pool for zarrs and blake3; never owns the host global pool.
 bytes.workspace = true
 half.workspace = true
 vortex-file.workspace = true

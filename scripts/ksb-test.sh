@@ -104,7 +104,8 @@ write_job() {
     --arg filter "$filter" --argjson testThreads "$threads" --argjson timeoutMinutes "$timeout" \
     --argjson perfRatchet "${perf_ratchet:-false}" --arg rerun "$rerun" --argjson gitSources "$sources_json" \
     '{crate: $crate, cargoArgs: $cargoArgs, filter: (if $filter == "" then null else $filter end),
-      testThreads: $testThreads, perfRatchet: $perfRatchet, timeoutMinutes: $timeoutMinutes, rerun: (if $rerun == "" then null else $rerun end),
+      testThreads: $testThreads, perfRatchet: $perfRatchet, timeoutMinutes: $timeoutMinutes,
+      rerun: (if $rerun == "" then null else $rerun end),
       gitSources: $gitSources}' > "$dir/params.json"
   # ksb copies EVERY locked input to the compute VM before it evaluates, and the dev-shell inputs (vigos: devkit's
   # vig-utils and its uv/gh/claude-code from a second nixpkgs, with home-manager twice; guardrails: the gate

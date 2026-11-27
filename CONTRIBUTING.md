@@ -24,8 +24,13 @@ the file.
 including write defaults, balanced recommendations, read runtimes, grid decode and benchmark sweeps.
 Without it, Tessera uses system parallelism (one worker if querying the system fails).
 Zero, negative, non-decimal, overflowing and non-Unicode values are logged to stderr and ignored.
-Set it before startup; existing pools retain their initial size. This is a per-pool budget, so concurrent
+Set it before startup; the first use caches the budget for the process. Values above system parallelism
+are clamped to it, with one stderr note. This is a per-pool budget, so concurrent
 pools can use more threads in total. Explicit worker settings remain caller-controlled.
+Array codecs and parallel blob hashing share a private Rayon pool capped by this budget. This library
+never reconfigures the application's global Rayon pool; zarrs also receives the codec concurrency target
+per operation. Failure to create the private pool returns an I/O error. Read runtimes retain a
+`max(budget - 1, 1)` worker pool to leave room for the calling thread when possible.
 Nix test checks export it from `NIX_BUILD_CORES`; the ksb wrapper uses `--threads` (default 4).
 
 Wall-clock ratchets run only with exactly `TESSERA_PERF_RATCHET=1`. Otherwise each prints `SKIPPED`
@@ -37,7 +42,8 @@ The wrapper forwards the opt-in into the sanitised Nix builder environment:
 
 ```bash
 TESSERA_PERF_RATCHET=1 scripts/ksb-test.sh --threads 8 HEAD tessera-io 'test(grid_decode_perf_ratchet)'
-TESSERA_PERF_RATCHET=1 scripts/ksb-test.sh --threads 8 HEAD tessera-ingest 'test(chunked_stream_read_does_not_reinflate)'
+TESSERA_PERF_RATCHET=1 scripts/ksb-test.sh --threads 8 HEAD tessera-ingest \
+  'test(chunked_stream_read_does_not_reinflate)'
 ```
 
 **Reservation gap:** these commands bound worker counts but currently do not reserve test CPUs.

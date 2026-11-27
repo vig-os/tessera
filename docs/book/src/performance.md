@@ -5,8 +5,12 @@
 Set `TESSERA_MAX_THREADS` before startup to a positive decimal integer to size automatic worker pools.
 It covers write defaults, balanced recommendations, read runtimes, grid decode and benchmark sweeps.
 Without it, system parallelism is used (one worker if unavailable). Invalid values, including zero,
-negative, overflowing and non-Unicode values, are logged to stderr and ignored. Existing pools keep their
-initial size. Each pool gets the budget independently; explicit worker settings remain caller-controlled.
+negative, overflowing and non-Unicode values, are logged to stderr and ignored. The first use caches the budget for the process; values above system parallelism are clamped
+to it with one stderr note. Each pool gets the budget independently; explicit worker settings remain caller-controlled.
+Array codecs and parallel blob hashing share a private Rayon pool capped by this budget. This library
+never reconfigures the application's global Rayon pool; zarrs also receives the codec concurrency target
+per operation. Failure to create the private pool returns an I/O error. Read runtimes retain a
+`max(budget - 1, 1)` worker pool to leave room for the calling thread when possible.
 Nix checks use `NIX_BUILD_CORES`; `scripts/ksb-test.sh` uses its `--threads` count.
 
 Both wall-clock ratchets (grid decode and chunked HDF5 reads) require exactly `TESSERA_PERF_RATCHET=1`.

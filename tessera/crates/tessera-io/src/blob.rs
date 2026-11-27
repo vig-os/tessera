@@ -82,7 +82,7 @@ pub fn blob_ref_streaming(
 ///
 /// Uses blake3's native [`blake3::Hasher::update_mmap_rayon`] — it memory-maps the **whole file** and
 /// hands the entire mapping to the tree-parallel hasher in one call, so blake3 splits the full Merkle
-/// tree across **all** cores at once (no per-chunk serialization, no read/hash alternation, no manual
+/// tree across the budgeted private pool (no per-chunk serialization, no read/hash alternation, no manual
 /// buffering). The mapping is **demand-paged**, so peak RSS stays bounded — the OS pages the file in as
 /// blake3 walks it; we never `malloc` the file. blake3 reads small files normally instead of mmapping.
 /// Throughput on a CPU-bound multi-GB hash scales near-linearly with cores until the disk read rate is
@@ -94,7 +94,10 @@ pub fn blob_ref_streaming(
 /// [`blob_ref_streaming_parallel`]. Identical digest, just faster.
 pub fn digest_file_parallel(path: &Path) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
-    hasher.update_mmap_rayon(path).map_err(Error::from)?;
+    crate::parallel::install(|| {
+        hasher.update_mmap_rayon(path).map_err(Error::from)?;
+        Ok(())
+    })?;
     Ok(format!("blake3:{}", hasher.finalize().to_hex()))
 }
 

@@ -1,30 +1,43 @@
 //! Shared budget for automatically sized Tessera worker pools.
 
-/// Return the positive `TESSERA_MAX_THREADS` budget, or the system parallelism.
+/// Return the cached thread upper bound, capped at system parallelism.
 ///
 /// Values must contain only ASCII decimal digits and fit in a nonzero `usize`.
 /// Invalid values (including non-Unicode values) are logged to stderr and ignored.
 /// If the system cannot report its parallelism, use one worker. Set the environment
-/// before starting Tessera: existing pools retain the budget used at construction.
+/// before starting Tessera: the first call caches the budget for the process. A value
+/// above system parallelism is clamped with one stderr note, including across repeated calls.
 /// This sizes each automatic pool, not the total threads across concurrent pools.
 /// Explicit caller-supplied worker counts remain caller-controlled.
 pub fn budget() -> usize {
-    const INVALID: &str = "invalid TESSERA_MAX_THREADS; ignoring (expected a positive integer)";
-    match std::env::var("TESSERA_MAX_THREADS") {
-        Ok(value) => match parse_budget(&value) {
-            Some(n) => return n,
-            None => {
-                eprintln!("{INVALID}: {value:?}"); // guardrails-ok: public configuration diagnostic.
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let available = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        const INVALID: &str = "invalid TESSERA_MAX_THREADS; ignoring (expected a positive integer)";
+        match std::env::var("TESSERA_MAX_THREADS") {
+            Ok(value) => match parse_budget(&value) {
+                Some(n) => {
+                    if n > available {
+                        let note = format!(
+                            "TESSERA_MAX_THREADS={n} clamped to system parallelism {available}"
+                        );
+                        eprintln!("{note}"); // guardrails-ok: one startup configuration diagnostic.
+                    }
+                    return n.min(available);
+                }
+                None => {
+                    eprintln!("{INVALID}: {value:?}"); // guardrails-ok: public configuration diagnostic.
+                }
+            },
+            Err(std::env::VarError::NotUnicode(_)) => {
+                eprintln!("{INVALID}: non-Unicode value"); // guardrails-ok: public diagnostic.
             }
-        },
-        Err(std::env::VarError::NotUnicode(_)) => {
-            eprintln!("{INVALID}: non-Unicode value"); // guardrails-ok: public diagnostic.
+            Err(std::env::VarError::NotPresent) => {}
         }
-        Err(std::env::VarError::NotPresent) => {}
-    }
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+        available
+    })
 }
 
 fn parse_budget(value: &str) -> Option<usize> {
@@ -46,12 +59,14 @@ mod tests {
             if expected == "fallback" {
                 assert!(n > 0);
             } else {
-                assert_eq!(n, expected.parse::<usize>().unwrap());
+                assert!(n > 0 && n <= expected.parse::<usize>().unwrap());
+                assert_eq!(n, budget());
             }
             return;
         }
         for (value, expected) in [
             (Some("2"), "2"),
+            (Some("100000"), "100000"),
             (Some("0"), "fallback"),
             (None, "fallback"),
         ] {
@@ -73,6 +88,14 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            if value == Some("100000") {
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .matches("clamped to system parallelism")
+                        .count(),
+                    1
+                );
+            }
             assert_eq!(
                 String::from_utf8_lossy(&output.stderr).contains("invalid TESSERA_MAX_THREADS"),
                 value == Some("0")

@@ -898,7 +898,7 @@ thread_local! {
     static READ_RT: (CurrentThreadRuntime, CurrentThreadWorkerPool, VortexSession) = {
         let rt = CurrentThreadRuntime::new();
         let pool = rt.new_pool();
-        pool.set_workers(tessera_core::threads::budget());
+        pool.set_workers(tessera_core::threads::budget().saturating_sub(1).max(1));
         let s = new_session(&rt);
         (rt, pool, s)
     };
@@ -3964,12 +3964,18 @@ CascadingCompressor {
             );
             return;
         }
-        assert_eq!(crate::config::WriteConfig::for_system().worker_count(), 2);
+        let budget = tessera_core::threads::budget();
+        assert!(budget <= 2);
+        assert_eq!(
+            crate::config::WriteConfig::for_system().worker_count(),
+            budget
+        );
         assert_eq!(
             crate::config::WriteConfig::balanced(1e12, 1.0).worker_count(),
-            2
+            budget
         );
-        READ_RT.with(|(_, pool, _)| assert_eq!(pool.worker_count(), 2));
+        READ_RT
+            .with(|(_, pool, _)| assert_eq!(pool.worker_count(), budget.saturating_sub(1).max(1)));
     }
 
     #[test]

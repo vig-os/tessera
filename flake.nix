@@ -443,6 +443,14 @@
 
         # The test runners' thread budget, as shell: nextest's test processes, libtest's threads and rayon's pool.
         # The checks pass "$NIX_BUILD_CORES" (`withCpuBudget`, below, says why); the ksb test job a fixed count.
+        # Only the two wall-clock tests expose successful output (their explicit skip line).
+        ratchetOutput = profile: ''
+          [[profile.${profile}.overrides]]
+          filter = 'test(=table::tests::grid_decode_perf_ratchet_narrow_table) | test(=ge_hdf5::tests::chunked_stream_read_does_not_reinflate_each_chunk)'
+          success-output = "final"
+        '';
+        budgetedRunCommand = name: attrs: command:
+          pkgs.runCommand name attrs (cpuBudget "$NIX_BUILD_CORES" + command);
         cpuBudget = budget: ''
           export NEXTEST_TEST_THREADS=${budget} RUST_TEST_THREADS=${budget}
           export RAYON_NUM_THREADS=${budget} TESSERA_MAX_THREADS=${budget}
@@ -525,10 +533,10 @@
               [profile.ksb-test]
               fail-fast = false
               failure-output = "immediate-final"
-              success-output = "final"
 
               [profile.ksb-test.junit]
               path = "junit.xml"
+              ${ratchetOutput "ksb-test"}
             '';
             # Each failed test case of a nextest JUnit report with its message and the last 200 lines of its
             # stdout and stderr; junit.xml keeps the whole output.
@@ -945,7 +953,7 @@
             inherit cargoArtifacts;
             partitions = 1;
             partitionType = "count";
-            cargoNextestExtraArgs = nextestFailOnNoTests + " --success-output final";
+            cargoNextestExtraArgs = nextestFailOnNoTests + " --config-file ${pkgs.writeText "ratchet-output.toml" (ratchetOutput "default")}";
           })));
           # nextest does NOT run doctests, so gate them separately — the "docs-as-tests" layer: every
           # `///` example compiles + runs, so public-API docs can never drift from behaviour.
@@ -1201,7 +1209,7 @@
           # It also asserts the three source files differ in size, so the comparison cannot pass
           # vacuously, and that `manifest_hash` DOES differ (the `ingested_from` edge pins the source
           # bytes) — so a bug that made every hash constant would fail rather than look perfect.
-          ingest-producer-equality = pkgs.runCommand "ingest-producer-equality"
+          ingest-producer-equality = budgetedRunCommand "ingest-producer-equality"
             {
               nativeBuildInputs = [
                 (pkgs.python312.withPackages (ps: [ ps.pyarrow ps.polars ps.duckdb ]))
@@ -1258,7 +1266,7 @@
               '';
             });
           in
-          pkgs.runCommand "wasm-bindgen-smoke"
+          budgetedRunCommand "wasm-bindgen-smoke"
             { nativeBuildInputs = [ pkgs.wasm-bindgen-cli pkgs.nodejs pkgs.python3 ]; } ''
             set -o pipefail
             wasm-bindgen --target nodejs --out-dir "$PWD/glue" ${wasmLib}/wasm/tessera_wasm.wasm
@@ -1285,7 +1293,7 @@
           # type · the OCI empty-config digest), then pull it back byte-for-byte. Spins up a local
           # `distribution` registry on loopback (the nix-CI service mock — only a *production* registry is
           # external), so the OCI push/pull capability is gated, not just the manifest-construction unit.
-          oci-roundtrip = pkgs.runCommand "oci-roundtrip"
+          oci-roundtrip = budgetedRunCommand "oci-roundtrip"
             { nativeBuildInputs = [ pkgs.oras ]; } ''
             export HOME=$TMPDIR
             source ${loopbackRegistry}
@@ -1310,7 +1318,7 @@
           # pulls it back (manifest GET → sha256-verified blob GET) byte-for-byte and verifies the
           # seal. Complements `oci-roundtrip` (which proves the manifest *shape* via oras) by proving
           # our actual transport client end to end.
-          registry-roundtrip = pkgs.runCommand "registry-roundtrip"
+          registry-roundtrip = budgetedRunCommand "registry-roundtrip"
             {
               # reqwest's client builder loads the system CA store even for a plain-http loopback
               # target (same as `s3-range-read`); point it at the nixpkgs bundle.
@@ -1693,7 +1701,7 @@
           # then runs the smoke test, which exercises the ERGONOMIC surface — numpy ndarrays, polars
           # DataFrames, pyarrow Tables — proving the abi3 extension loads on CPython AND the wrapper
           # returns native objects end-to-end.
-          tessera-py-import = pkgs.runCommand "tessera-py-import"
+          tessera-py-import = budgetedRunCommand "tessera-py-import"
             {
               nativeBuildInputs =
                 [ (pkgs.python312.withPackages (ps: [ ps.numpy ps.polars ps.pyarrow ])) ];
@@ -1725,7 +1733,7 @@
           # dir, then runs the same smoke test through it. Proves the assembled wheel's layout + RECORD
           # + metadata are valid and importable. `LD_LIBRARY_PATH` supplies libstdc++ (the nix-built
           # extension needs it — the same reason the wheel isn't manylinux-portable until auditwheel'd).
-          tessera-wheel-import = pkgs.runCommand "tessera-wheel-import"
+          tessera-wheel-import = budgetedRunCommand "tessera-wheel-import"
             {
               nativeBuildInputs =
                 [ (pkgs.python312.withPackages (ps: [ ps.numpy ps.polars ps.pyarrow ps.pip ])) ];
@@ -1897,6 +1905,21 @@
           runsCode = d:
             fieldsRun d [ "buildPhase" "preBuild" "postBuild" "installPhase" "preInstall" "postInstall" "buildCommand" ]
             || ((d.doCheck or false) && fieldsRun d [ "checkPhase" "preCheck" "postCheck" ]);
+          # Named coverage plus command inspection: shell checks can execute the CLI,
+          # Python extension or wasm without mentioning cargo. Check the actual export,
+          # not a count or a passthru marker that can outlive the shell protection.
+          shellFields = [ "buildPhase" "preBuild" "postBuild" "buildCommand"
+            "installPhase" "preInstall" "postInstall" "checkPhase" "preCheck" "postCheck" ];
+          shellText = d: builtins.concatStringsSep "\n" (map (f: d.${f} or "") shellFields);
+          namedCodeChecks = [ "tessera-py-import" "tessera-wheel-import" "ingest-producer-equality"
+            "oci-roundtrip" "registry-roundtrip" "wasm-bindgen-smoke" ];
+          unbudgeted = builtins.filter (name:
+            let d = allChecks.${name}; text = shellText d; in
+            (builtins.elem name namedCodeChecks || runsCode d
+              || builtins.any (needle: pkgs.lib.hasInfix needle text)
+                [ "/bin/tessera" "_native.so" "tessera_wasm" "tessera-wheel-" ])
+            && !(pkgs.lib.hasInfix "export RAYON_NUM_THREADS=$NIX_BUILD_CORES TESSERA_MAX_THREADS=$NIX_BUILD_CORES" text))
+            (builtins.attrNames allChecks);
           onDiskTmpdir = builtins.filter
             (c: isLinux && runsCode allChecks.${c} && !(allChecks.${c}.ramTmpdir or false))
             (builtins.attrNames allChecks);
@@ -1922,6 +1945,11 @@
             listed but not defined: ${builtins.concatStringsSep ", " undefined}
             CI's summary fails a leg whose checks differ from that list. Edit the list (names and
             `count:`) together with the check.
+          ''
+          else if unbudgeted != [ ] then throw ''
+            these checks execute tessera code without the CPU budget: ${builtins.concatStringsSep ", " unbudgeted}
+            Use withCpuBudget for cargo checks, budgetedRunCommand for shell checks,
+            or cpuBudget in the build phase that runs the code.
           ''
           else if onDiskTmpdir != [ ] then throw ''
             these checks run tessera's tests with TMPDIR on disk: ${builtins.concatStringsSep ", " onDiskTmpdir}
