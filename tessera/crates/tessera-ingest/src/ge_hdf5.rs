@@ -1473,22 +1473,88 @@ mod tests {
         );
     }
 
+    // Keep the opt-in decision in-process. Spawning this test binary from a libtest worker
+    // inherits other workers' live HDF5 descriptors: the sec2 driver does not use O_CLOEXEC.
+    // A child can then retain an exclusive writer lock after the fixture helper has returned
+    // and closed every HDF5 object (#1041). Testing the decision directly avoids that leak.
+    fn wall_clock_ratchet_skip(value: Option<&std::ffi::OsStr>) -> Option<&'static str> {
+        (value != Some(std::ffi::OsStr::new("1"))).then_some(
+            "SKIPPED: wall-clock ratchet requires TESSERA_PERF_RATCHET=1 and reserved CPUs",
+        )
+    }
+
     #[test]
     fn wall_clock_ratchet_reports_skip_without_explicit_opt_in() {
         for value in [None, Some("0"), Some("true"), Some("01")] {
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-            command.args([
-                "--exact",
-                "ge_hdf5::tests::chunked_stream_read_does_not_reinflate_each_chunk",
-                "--nocapture",
-            ]);
-            command.env_remove("TESSERA_PERF_RATCHET");
-            if let Some(value) = value {
-                command.env("TESSERA_PERF_RATCHET", value);
+            assert_eq!(
+                wall_clock_ratchet_skip(value.map(std::ffi::OsStr::new)),
+                Some(
+                    "SKIPPED: wall-clock ratchet requires TESSERA_PERF_RATCHET=1 and reserved CPUs"
+                )
+            );
+        }
+        assert_eq!(
+            wall_clock_ratchet_skip(Some(std::ffi::OsStr::new("1"))),
+            None
+        );
+    }
+
+    #[test]
+    fn fixture_writers_and_readers_release_handles_before_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reused.h5");
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            // Exercise the former subprocess-spawning test alongside live fixture writers.
+            // This also runs under nextest, whose usual process isolation would hide #1041.
+            scope.spawn(|| {
+                start.wait();
+                for _ in 0..32 {
+                    wall_clock_ratchet_reports_skip_without_explicit_opt_in();
+                }
+            });
+            start.wait();
+            for _ in 0..32 {
+                // Reusing the path also checks that neither reader retains an HDF5 object that
+                // would prevent the next writer from truncating the file.
+                for (write, dataset) in [
+                    (write_synth_2p as fn(&std::path::Path, usize), "events_2p"),
+                    (write_synth_3p, "events_3p"),
+                    (|p, n| write_synth_3p_chunked(p, n, 8, 1), "events_3p"),
+                ] {
+                    write(&path, 17);
+                    let bulk = read_compound(&path, dataset).unwrap();
+                    assert_eq!(compound_columns(&path, dataset).unwrap().len(), bulk.len());
+                    let mut rows = 0;
+                    stream_compound(&path, dataset, 5, |slab| {
+                        rows += slab[0].1.len();
+                        Ok(())
+                    })
+                    .unwrap();
+                    assert_eq!(rows, 17);
+                }
             }
-            let output = command.output().unwrap();
-            assert!(output.status.success());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("SKIPPED: wall-clock ratchet"));
+        });
+    }
+
+    #[test]
+    fn concurrent_readers_release_handles_before_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.h5");
+        for _ in 0..16 {
+            write_synth_2p(&path, 17);
+            std::thread::scope(|scope| {
+                for _ in 0..2 {
+                    scope.spawn(|| {
+                        let bulk = read_compound(&path, "events_2p").unwrap();
+                        stream_compound(&path, "events_2p", 17, |slab| {
+                            assert_eq!(slab, bulk);
+                            Ok(())
+                        })
+                        .unwrap();
+                    });
+                }
+            });
         }
     }
 
@@ -1504,9 +1570,9 @@ mod tests {
     /// `chunk_aligned_slab_rounds_up_to_whole_chunks` and correctness tests run everywhere.
     #[test]
     fn chunked_stream_read_does_not_reinflate_each_chunk() {
-        if std::env::var("TESSERA_PERF_RATCHET").as_deref() != Ok("1") {
-            let skip =
-                "SKIPPED: wall-clock ratchet requires TESSERA_PERF_RATCHET=1 and reserved CPUs";
+        if let Some(skip) =
+            wall_clock_ratchet_skip(std::env::var_os("TESSERA_PERF_RATCHET").as_deref())
+        {
             eprintln!("{skip}"); // guardrails-ok: visible skip is part of the opt-in contract.
             return;
         }
