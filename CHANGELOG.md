@@ -31,7 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the required non-empty `fork` token for a forked lineage. Both version roles require a predecessor seal
   pin. One writer validation rule refuses missing/empty tokens or pins with `Error::Invalid` when sealing,
   recomputing a seal or emitting canonical/stored bytes, including after public-field mutations. Readers
-  still verify received bytes. Empty sources are omitted, preserving existing collection bytes. Native, reference and wasm readers share seal vectors.
+  still verify received bytes. Empty sources are omitted, preserving existing collection bytes.
+  Native, reference and wasm readers share seal vectors.
 
 ### Changed
 

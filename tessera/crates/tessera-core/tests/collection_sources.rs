@@ -15,13 +15,9 @@ fn probe_to_stored_bypasses_fork_rule() {
     c.sources.push(
         Source::new(FORKED_FROM_ROLE, &c.id).with_content_hash(c.manifest_hash.as_ref().unwrap()),
     );
-    // The exact review probe: seal, mutate, recompute the seal, store. Refusal at either
-    // writer door is correct; a valid hash alone must never authorise this new version.
-    match c.compute_manifest_hash() {
-        Err(Error::Invalid(_)) => return,
-        Ok(seal) => c.manifest_hash = Some(seal),
-        other => panic!("expected a writer-rule refusal, got {other:?}"),
-    }
+    // Forge a matching seal directly, without invoking a writer door before to_stored.
+    let bytes = tessera_core::canonical::to_bytes(&serde_json::to_value(&c).unwrap()).unwrap();
+    c.manifest_hash = Some(tessera_core::hash::digest(&bytes));
     invalid(c.to_stored());
 }
 
@@ -70,6 +66,14 @@ fn writer_doors_require_a_fork_token_after_mutation() {
 fn writer_doors_refuse_an_empty_fork_token() {
     let pin = tessera_core::hash::digest(b"predecessor");
     all_writer_doors_refuse(source_collection(FORKED_FROM_ROLE, Some(""), Some(&pin)));
+}
+
+#[test]
+fn writer_doors_refuse_a_whitespace_only_fork_token() {
+    let pin = tessera_core::hash::digest(b"predecessor");
+    for token in [" ", "\t\r\n", "\u{2003}"] {
+        all_writer_doors_refuse(source_collection(FORKED_FROM_ROLE, Some(token), Some(&pin)));
+    }
 }
 
 #[test]
