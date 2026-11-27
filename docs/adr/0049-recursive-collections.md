@@ -4,7 +4,11 @@
 
 ## Context
 
-ADR-0033 §2 promised "logical collections nest by reference — and **sub-collections, recursively**," but the model is flat: `CollectionMember` is a "flat physical product," there is no member-kind discriminator, and `verify` opens `<file_name(reference)>.tsra` (a product), never a child `collection.json`. So a patient-exam collection (products) is expressible; a cohort (a collection of collections) is not. This ADR decides the **mechanism** so recursion is build-ready. The *semantics* of levels are domain data, split to #294.
+ADR-0033 §2 promised "logical collections nest by reference — and **sub-collections, recursively**," but the model
+is flat: `CollectionMember` is a "flat physical product," there is no member-kind discriminator, and `verify` opens
+`<file_name(reference)>.tsra` (a product), never a child `collection.json`. So a patient-exam collection (products)
+is expressible; a cohort (a collection of collections) is not. This ADR decides the **mechanism** so recursion is
+build-ready. The *semantics* of levels are domain data, split to #294.
 
 ## Decision
 
@@ -42,12 +46,14 @@ The parent `content_hash` MMR leaf preimage becomes **`BLAKE3(LEAF_DOMAIN ‖ ki
 Member stems use the shared `tessera_core::names::file_name` encoder (#994), e.g. `blake3:ab` → `blake3%3aab`.
 
 - `Product` → open `<file_name(reference)>.tsra`, check `manifest_hash` == pinned.
-- `Collection` → open child `<file_name(reference)>.collection.json`, verify **its** seal, then **recurse** into its members.
+- `Collection` → open child `<file_name(reference)>.collection.json`, verify **its** seal, then **recurse** into
+  its members.
 - **Cycle guard** = a `seen`-set of `manifest_hash`es — kept as **defense-in-depth against malformed/hand-edited catalogs, not a security property** (content-addressing is acyclic *by construction*: a member cannot pin an ancestor hash that does not exist yet without breaking BLAKE3 preimage resistance).
 - **Offline-verify must hold** — recursion touches no network; every child descriptor must be locally reachable/co-located. When a child is absent, `verify` reports *"cannot fully verify (child unreachable)"* — never a silent pass.
 
 ### 4. Resolution & builder ergonomics
-- **`kind` is authoritative; the resolver derives the on-disk suffix** (`<file_name(ref)>.tsra` vs `<file_name(ref)>.collection.json`) — the filename suffix is **never** a second source of truth for type.
+- **`kind` is authoritative; the resolver derives the on-disk suffix** (`<file_name(ref)>.tsra` vs
+  `<file_name(ref)>.collection.json`) — the filename suffix is **never** a second source of truth for type.
 - **Typed builder handles** carry `(reference, manifest_hash)` as one unit (kills the wrong-ref/wrong-hash bug class):
   `add_product(&ProductHandle, derived_from)` · `add_subcollection(&CollectionHandle)`; raw `add_member` stays `pub(crate)`.
 - **`derived_from` is peers-only** — a cross-nesting-boundary dependency must be materialized as a member of the enclosing collection, not a dangling reference.

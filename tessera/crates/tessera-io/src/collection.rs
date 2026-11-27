@@ -65,7 +65,8 @@ pub fn member_path(
                 if legacy != name && dir.join(&legacy).try_exists()? {
                     return Err(Error::Invalid(format!(
                         "collection member '{reference}' unavailable at {}; legacy file exists at {}. \
-                         Legacy underscore/raw-id layouts are unsupported; recreate the collection from source products",
+                         Legacy underscore/raw-id layouts are unsupported; \
+                         recreate the collection from source products",
                         path.display(), dir.join(legacy).display()
                     )));
                 }
