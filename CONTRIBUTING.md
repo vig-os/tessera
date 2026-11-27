@@ -18,6 +18,34 @@ released `## [<version>]` section: it is that release's notes. The `changelog-se
 version's section is in [`docs/RELEASING.md`](docs/RELEASING.md), with how the GitHub Release notes are taken from
 the file.
 
+## Thread budgets and wall-clock tests
+
+`TESSERA_MAX_THREADS` sets the positive decimal worker count for automatically sized Tessera pools,
+including write defaults, balanced recommendations, read runtimes, grid decode and benchmark sweeps.
+Without it, Tessera uses system parallelism (one worker if querying the system fails).
+Zero, negative, non-decimal, overflowing and non-Unicode values are logged to stderr and ignored.
+Set it before startup; existing pools retain their initial size. This is a per-pool budget, so concurrent
+pools can use more threads in total. Explicit worker settings remain caller-controlled.
+Nix test checks export it from `NIX_BUILD_CORES`; the ksb wrapper uses `--threads` (default 4).
+
+Wall-clock ratchets run only with exactly `TESSERA_PERF_RATCHET=1`. Otherwise each prints `SKIPPED`
+(the early return is a passing test; nextest success output includes the skip message).
+The grid-decode and chunked-HDF5 ratchets require a reserved CPU slice; deterministic correctness and
+routing checks continue to run in ordinary CI.
+
+The wrapper forwards the opt-in into the sanitised Nix builder environment:
+
+```bash
+TESSERA_PERF_RATCHET=1 scripts/ksb-test.sh --threads 8 HEAD tessera-io 'test(grid_decode_perf_ratchet)'
+TESSERA_PERF_RATCHET=1 scripts/ksb-test.sh --threads 8 HEAD tessera-ingest 'test(chunked_stream_read_does_not_reinflate)'
+```
+
+**Reservation gap:** these commands bound worker counts but currently do not reserve test CPUs.
+Tests execute in the Nix builder during preparation, outside the reporting pod's fixed `--cpu 1` request.
+Even `ksb run --exclusive-cpus` reserves only the pod's CPUs, not the builder's. Use the opt-in only
+when the builder itself has a reserved slice; the wrapper cannot arrange that yet
+([#1030](https://github.com/vig-os/tessera/issues/1030)). Do not treat shared-builder timings as perf evidence.
+
 ## Testing one crate on ksb (maintainers and agents)
 
 With access to the ksb batch cluster, the way to build and test one crate without compiling on your own machine

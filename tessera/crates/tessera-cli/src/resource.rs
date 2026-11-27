@@ -9,7 +9,7 @@
 //! 2. **env** — `TESSERA_WORKERS` / `TESSERA_RAM_BUDGET` (the latter takes a human size, e.g. `512MiB`).
 //! 3. **conf** — `[resources]` in a config file: repo-local `.tessera/config.toml` first, then the
 //!    user file (`$XDG_CONFIG_HOME/tessera/config.toml` or `~/.config/tessera/config.toml`).
-//! 4. **default** — [`WriteConfig::for_system`] (machine-derived `available_parallelism` + 1 GiB).
+//! 4. **default** — [`WriteConfig::for_system`] (machine-derived the thread budget + 1 GiB).
 //!
 //! Determinism note: these are *runtime* knobs (thread count, RAM ceiling) — they never change the
 //! output bytes (`content_hash` is independent of `workers`/`ram_budget`), so the writer-determinism

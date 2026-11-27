@@ -930,10 +930,10 @@ enum BenchAction {
         #[arg(long)]
         ram_budget: Option<String>,
         /// Encode-thread pool (single run). Mutually advisory with `--sweep`/`--auto`; without
-        /// any of them, defaults to `available_parallelism()`.
+        /// any of them, defaults to the thread budget.
         #[arg(long, conflicts_with_all = ["sweep", "auto"])]
         workers: Option<usize>,
-        /// Sweep workers 1,2,4,8,… up to `available_parallelism` and print a table — the
+        /// Sweep workers 1,2,4,8,… up to the thread budget and print a table — the
         /// "size your system" mode.
         #[arg(long, conflicts_with_all = ["workers", "auto"])]
         sweep: bool,

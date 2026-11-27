@@ -20,6 +20,7 @@
 #   --rerun      run the tests again although this exact request already has a result (a new job)
 #   --name NAME  ksb job name; default tsra-test-<crate>-<sha8>-<digest of the generated job>. A name ksb already
 #                knows is reported (or waited on), never resubmitted
+#   TESSERA_PERF_RATCHET=1 propagates the wall-clock opt-in to the test builder (CPUs are NOT reserved; #1030).
 #   --dry-run    write the job flake and print the `ksb run` command, submit nothing
 #
 # HOW IT WORKS. The tests run in crane derivations of the repo's own flake (`legacyPackages.ksbTest`, flake.nix),
@@ -101,9 +102,9 @@ write_job() {
   done <<< "$git_sources"
   jq -n --arg crate "$crate" --argjson cargoArgs "$(printf '%s\n' "${cargo_args[@]}" | jq -R . | jq -sc 'map(select(. != ""))')" \
     --arg filter "$filter" --argjson testThreads "$threads" --argjson timeoutMinutes "$timeout" \
-    --arg rerun "$rerun" --argjson gitSources "$sources_json" \
+    --argjson perfRatchet "${perf_ratchet:-false}" --arg rerun "$rerun" --argjson gitSources "$sources_json" \
     '{crate: $crate, cargoArgs: $cargoArgs, filter: (if $filter == "" then null else $filter end),
-      testThreads: $testThreads, timeoutMinutes: $timeoutMinutes, rerun: (if $rerun == "" then null else $rerun end),
+      testThreads: $testThreads, perfRatchet: $perfRatchet, timeoutMinutes: $timeoutMinutes, rerun: (if $rerun == "" then null else $rerun end),
       gitSources: $gitSources}' > "$dir/params.json"
   # ksb copies EVERY locked input to the compute VM before it evaluates, and the dev-shell inputs (vigos: devkit's
   # vig-utils and its uv/gh/claude-code from a second nixpkgs, with home-manager twice; guardrails: the gate
@@ -181,6 +182,8 @@ report() {
 
 main() {
   local rev="" positional=() name="" dry_run=0 t0
+  perf_ratchet=false
+  [[ ${TESSERA_PERF_RATCHET:-} == 1 ]] && perf_ratchet=true
   crate="" filter="" threads=4 timeout=15 rerun="" cargo_args=()
   while (($#)); do
     case $1 in
@@ -255,6 +258,7 @@ self_test() {
   new_tmp
   t=${tmp_dirs[-1]}
   KSB_TEST_HOME=$t/home
+  perf_ratchet=false
   fail() { echo "self-test: $*" >&2; status=1; }
 
   # 1. lock parsing: only git sources, deduplicated, verbatim.
@@ -285,6 +289,12 @@ self_test() {
   grep -qF 'tessera.inputs.guardrails.follows = "devshell-stub";' "$t/job/flake.nix" || fail "guardrails is not stubbed"
   grep -qF "devshell-stub.url = \"path:$KSB_TEST_HOME/devshell-stub\";" "$t/job/flake.nix" || fail "stub is not absolute"
   grep -qF 'overlays.default = _final: _prev: { };' "$KSB_TEST_HOME/devshell-stub/flake.nix" || fail "no identity-overlay stub"
+  # The explicit wall-clock opt-in survives Nix environment sanitisation and changes the request.
+  perf_ratchet=true
+  write_job "$t/perf-job"
+  [[ $(jq -r '.perfRatchet' "$t/perf-job/params.json") == true ]] || fail "perf opt-in not forwarded"
+  [[ $(jq -r '.perfRatchet' "$t/job/params.json") == false ]] || fail "perf ratchet enabled by default"
+  perf_ratchet=false
   # 4. the request digest: stable for the same request, new for --rerun.
   local d1 d2
   d1=$(job_digest "$t/job"); write_job "$t/job"; d2=$(job_digest "$t/job")

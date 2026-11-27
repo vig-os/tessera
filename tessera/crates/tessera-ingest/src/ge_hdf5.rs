@@ -1473,24 +1473,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wall_clock_ratchet_reports_skip_without_explicit_opt_in() {
+        for value in [None, Some("0"), Some("true"), Some("01")] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                "ge_hdf5::tests::chunked_stream_read_does_not_reinflate_each_chunk",
+                "--nocapture",
+            ]);
+            command.env_remove("TESSERA_PERF_RATCHET");
+            if let Some(value) = value {
+                command.env("TESSERA_PERF_RATCHET", value);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("SKIPPED: wall-clock ratchet"));
+        }
+    }
+
     /// #325 perf ratchet: the streaming slab reader must not re-inflate each chunk once per slab.
     ///
-    /// Relative + machine-independent, like the table grid ratchet: compare the streaming read of a
+    /// Relative wall-clock comparison: compare the streaming read of a
     /// COMPRESSED CHUNKED dataset against one bulk `read_compound` of the same file, best-of-N. Both
     /// sides decompress the same bytes exactly once if the slab is chunk-aligned, so the ratio is
     /// ~1×; with a sub-chunk slab libhdf5 re-inflates every chunk once per slab, which is the 8×
     /// (here) / 4× (measured end-to-end on a 1 M-row chunk) regression this guards.
     ///
-    /// Gated at >= 8 cores on purpose — it runs on dev machines with headroom and is SKIPPED on the
-    /// small, build-saturated CI runners where any timing assertion is flaky. The non-flaky gate
-    /// that runs everywhere is `chunk_aligned_slab_rounds_up_to_whole_chunks` (+ the correctness
-    /// test above); absolute throughput belongs in a perf job, not a unit gate.
+    /// Opt-in only (`TESSERA_PERF_RATCHET=1`) on reserved CPUs. The deterministic
+    /// `chunk_aligned_slab_rounds_up_to_whole_chunks` and correctness tests run everywhere.
     #[test]
     fn chunked_stream_read_does_not_reinflate_each_chunk() {
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        if cores < 8 {
+        if std::env::var("TESSERA_PERF_RATCHET").as_deref() != Ok("1") {
+            let skip =
+                "SKIPPED: wall-clock ratchet requires TESSERA_PERF_RATCHET=1 and reserved CPUs";
+            eprintln!("{skip}"); // guardrails-ok: visible skip is part of the opt-in contract.
             return;
         }
         let dir = tempfile::tempdir().unwrap();

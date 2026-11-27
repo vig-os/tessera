@@ -401,6 +401,7 @@
             doInstallCargoArtifacts = false;
             pnameSuffix = "-ingest-gate-a-${tag}";
             buildPhaseCargoCommand = ''
+              ${cpuBudget "$NIX_BUILD_CORES"}
               set -euo pipefail
               echo "[gate A/${tag}] cargo run --example gen_ingest_corpus ${features}" >&2
               cargo run -q --example gen_ingest_corpus ${features} > "$TMPDIR/corpus.json"
@@ -444,7 +445,7 @@
         # The checks pass "$NIX_BUILD_CORES" (`withCpuBudget`, below, says why); the ksb test job a fixed count.
         cpuBudget = budget: ''
           export NEXTEST_TEST_THREADS=${budget} RUST_TEST_THREADS=${budget}
-          export RAYON_NUM_THREADS=${budget}
+          export RAYON_NUM_THREADS=${budget} TESSERA_MAX_THREADS=${budget}
           echo "test CPU budget: ${budget} (available to the build: $(nproc))"
         '';
         # Vacuous-pass guard for the nextest checks (#726): a run that selects ZERO tests must fail,
@@ -494,6 +495,7 @@
           , cargoArgs ? [ ]
           , filter ? null
           , testThreads ? 4
+          , perfRatchet ? false
           , timeoutMinutes ? 15
           , rerun ? null
           , gitSources
@@ -523,6 +525,7 @@
               [profile.ksb-test]
               fail-fast = false
               failure-output = "immediate-final"
+              success-output = "final"
 
               [profile.ksb-test.junit]
               path = "junit.xml"
@@ -567,7 +570,10 @@
               cargoArtifacts = build;
               doInstallCargoArtifacts = false;
               nativeBuildInputs = args.nativeBuildInputs ++ [ pkgs.cargo-nextest pkgs.python3 ];
-              env = { NEXTEST_SHOW_PROGRESS = "counter"; } // lib.optionalAttrs (rerun != null) {
+              env = {
+                NEXTEST_SHOW_PROGRESS = "counter";
+                TESSERA_PERF_RATCHET = if perfRatchet then "1" else "0";
+              } // lib.optionalAttrs (rerun != null) {
                 KSB_TEST_RERUN = rerun;
               };
               buildPhaseCargoCommand = ''
@@ -905,14 +911,13 @@
           '';
           # Size the test runners from the build's CPU budget, $NIX_BUILD_CORES (`--cores`), not from
           # what the machine reports (#688). A ksb pod has no CPU limit, so
-          # `available_parallelism()` there returns the node's 84 CPUs. Nix clears the builder's
+          # System parallelism there returns the node's 84 CPUs. Nix clears the builder's
           # environment, so the runner's own pins (RAYON_NUM_THREADS etc., exo-pet/exo-fleet#1014)
           # never reach a check. Unbudgeted, nextest ran up to 84 test processes, each starting
           # 84-thread rayon and vortex pools, against the kubelet's 4096-PID cap per pod: thread
           # creation failed with EAGAIN in two tests at once, and the narrow-table perf ratchet
           # measured 1.14x against its own neighbours. On a GitHub-hosted runner the budget equals
-          # nproc (4), so nothing changes there. Applies to the libtest/nextest checks; tessera's own
-          # worker sizing still reads `available_parallelism()`: #703.
+          # nproc (4), so nothing changes there. Applies to Tessera pools and libtest/nextest checks.
           withCpuBudget = args: args // {
             preCheck = cpuBudget "$NIX_BUILD_CORES" + (args.preCheck or "");
           };
@@ -940,7 +945,7 @@
             inherit cargoArtifacts;
             partitions = 1;
             partitionType = "count";
-            cargoNextestExtraArgs = nextestFailOnNoTests;
+            cargoNextestExtraArgs = nextestFailOnNoTests + " --success-output final";
           })));
           # nextest does NOT run doctests, so gate them separately — the "docs-as-tests" layer: every
           # `///` example compiles + runs, so public-API docs can never drift from behaviour.
@@ -980,6 +985,7 @@
             doInstallCargoArtifacts = false;
             pnameSuffix = "-seal-profile-determinism";
             buildPhaseCargoCommand = ''
+              ${cpuBudget "$NIX_BUILD_CORES"}
               echo "[#468] conformance corpus under the dev and release profiles" >&2
               cargo run -q -p tessera-io --example gen_corpus > "$TMPDIR/corpus.dev.json"
               cargo run -q --release -p tessera-io --example gen_corpus > "$TMPDIR/corpus.release.json"
@@ -1147,6 +1153,7 @@
             doInstallCargoArtifacts = false;
             pnameSuffix = "-ingest-gate-a-reduced";
             buildPhaseCargoCommand = ''
+              ${cpuBudget "$NIX_BUILD_CORES"}
               # (1) The columnar lane without the text one — the leg described above.
               cargo test -p tessera-ingest --no-default-features --features parquet \
                 --test ingest_corpus
@@ -1375,7 +1382,7 @@
           # requests (`http://127.0.0.1:<port>/<bucket>/<key>`), which versitygw serves by default
           # (virtual-hosted style would need `--virtual-domain`). Range GETs, ETags and the error
           # codes the tests rely on behave the same as before; no assertion changed.
-          s3-range-read = craneLib.cargoNextest (withRamTmpdir (commonArgs // {
+          s3-range-read = craneLib.cargoNextest (withRamTmpdir (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             # Distinct from `workspace-test` so CI logs attribute its lines (#535). Via `pname`, not
             # `pnameSuffix`: crane's cargoNextest hard-sets `pnameSuffix = "-nextest${extraSuffix}"`
@@ -1492,7 +1499,7 @@
             '';
             nativeBuildInputs = commonArgs.nativeBuildInputs
               ++ [ pkgs.versitygw pkgs.curl pkgs.python3 pkgs.cacert ];
-          }));
+          })));
 
           # **DataFusion SQL surface** (#251 spike): the `sql` feature adds `tessera sql <FILE>
           # "<QUERY>"` — Vortex → Arrow → DataFusion in-process. The unit tests under `sql::tests`

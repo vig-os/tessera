@@ -1500,7 +1500,7 @@ impl StreamWriter {
     ///
     /// which, beyond the per-leaf term, doesn't grow with the table's row count (ADR-0064 §8, as
     /// amended by #760). `p_block` is the peak heap of a one-leaf write of the same schema in the
-    /// same binary: measured, not a constant, since `available_parallelism` sets the encoder's
+    /// same binary: measured, not a constant, since the thread budget sets the encoder's
     /// queue depths, and it still holds the encoder's per-column terms, so it grows with the
     /// table's width. `r_mem` is the input's in-memory bytes per row (the column widths, plus one
     /// byte per nullable column). `s` is two row-groups of input (the one being staged and the one

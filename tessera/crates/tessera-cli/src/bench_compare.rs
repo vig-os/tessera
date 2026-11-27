@@ -1531,9 +1531,7 @@ fn machine_info(dir: &Path) -> MachineInfo {
         .unwrap_or_else(|| "unknown".into());
     MachineInfo {
         cpu: first_field("/proc/cpuinfo", "model name").unwrap_or_else(|| "unknown".into()),
-        cores: std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(0),
+        cores: tessera_core::threads::budget(),
         ram,
         fs: fs_type(dir),
         kernel: kernel(),
