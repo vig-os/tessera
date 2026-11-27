@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Atomic `Repository::commit_collection` validates CAS, lineage kind and identity, supersedes pins and
+  recursive member closure before storage; new products, payloads and sub-collections can be supplied in
+  the same fenced call. Collection commits use the existing log cache. `Repository::history` returns
+  distinct sealed versions in depth-first preorder, supersedes before forked_from, and reports unreadable
+  predecessors with typed errors and bounded provenance paths (ADR-0067 step 5, #1000).
+
 ## [0.1.0-alpha.7](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.6...tessera-io-v0.1.0-alpha.7) - 2026-11-25
 
 ### Added

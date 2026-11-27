@@ -283,3 +283,20 @@ avoids quadratic path copying in long histories. Sealed hash pins prevent cycles
 Product payloads are marked without reading them, as before. Atomic collection commit and closure validation
 are ADR-0067 step 5; separate low-level storage and ref calls leave the object reclaimable until it becomes
 reachable.
+
+## Amendment (2026-11-27) — atomic collection commits and ancestry (#1000)
+
+ADR-0067 step 5 adds `commit_collection(lineage, expected, collection, members)`. Under the same writer fence,
+it checks CAS, the lineage kind, the supersedes pin and stable lineage id, then validates recursive member
+closure before storing anything. Supplied products and sub-collections may be in any order. Supplied product
+payloads are matched by block name and checked by digest; unchanged blocks are checked for existence only.
+Blocks, products and sub-collections in dependency order become durable before the collection ref advances.
+Missing, corrupt and wrong-kind members are `MissingMember` with the member path and underlying cause.
+Low-level `put_collection` deliberately does not guarantee closure or reachability.
+
+Collection commits append the same oldest-first `{manifest_hash, parent}` log cache as product commits.
+`history(address)` returns distinct product/collection version records with address, kind, lineage id and
+labelled predecessor edges, in depth-first preorder with supersedes before forked_from. Members and other
+source roles are excluded. Unlike GC's open external-edge rule, missing or unreadable predecessors abort with
+`HistoryAborted`, naming the address and incoming edge with bounded path rendering. Readers take no lock;
+concurrent forget/GC can therefore make a history read fail. Log cache repair remains #971.

@@ -63,8 +63,8 @@ pub use range::CountingReader;
 #[cfg(feature = "cloud")]
 pub use registry::{pull as registry_pull, push as registry_push};
 pub use repo::{
-    lineage_file_name, ref_file_name, GcReport, LogEntry, RefNamespace, Repository,
-    MAX_LINEAGE_FILE_NAME, MAX_REF_FILE_NAME,
+    lineage_file_name, ref_file_name, GcReport, HistoryEdge, HistoryEntry, LogEntry, NewMember,
+    RefNamespace, Repository, MAX_LINEAGE_FILE_NAME, MAX_REF_FILE_NAME,
 };
 pub use sign::{has_embedded_signature, sign_tsra, sign_tsra_sidecar, verify_tsra};
 // The deprecated job keeps its crate-root path until it is removed; its callers still get the

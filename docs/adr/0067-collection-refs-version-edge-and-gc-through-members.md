@@ -321,6 +321,16 @@ Rejected, one line each:
 | T7 | The member diff, a pure function in `tessera-core` | D6 | 3 |
 | T8 | CLI: `tessera collection commit/log/diff`, `tessera pin set/rm/ls` | all | 7 |
 
+**T5 clarification (2026-11-27, architect, #1000).** `Repository::history(address)` returns distinct reachable
+version records, each carrying its address, object kind, lineage id and labelled predecessor edges (role and target
+seal). The walk includes the requested version and uses depth-first preorder, visiting `supersedes` before
+`forked_from` (source order within each role); shared versions appear once. Members and other source roles are not
+followed. A missing or unreadable predecessor is a typed `HistoryAborted` error naming its address and the edge
+that reached it, never a silently truncated chain. Parent-index provenance and bounded rendering of consecutive
+edge hops follow step 4's GC error paths. This history contract is stricter than D3.1's open-edge rule for GC and
+commit: a predecessor held elsewhere prevents a complete local ancestry answer. `log` retains its existing
+oldest-first `{manifest_hash, parent}` cache shape for either lineage kind; cache repair remains #971.
+
 Not tessera's: the merge base computation (a walk over T5 output), the conflict rule, the merged delta's rows,
 workspace naming and the choice of `fork` token, when to pin, and every policy about who may merge.
 

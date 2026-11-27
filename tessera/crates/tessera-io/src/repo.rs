@@ -25,7 +25,7 @@
 //!
 //! Every write ([`commit`](Repository::commit), [`set_ref`](Repository::set_ref),
 //! [`write_object`](Repository::write_object), [`put_manifest`](Repository::put_manifest),
-//! [`put_collection`](Repository::put_collection),
+//! [`put_collection`](Repository::put_collection), [`commit_collection`](Repository::commit_collection),
 //! [`forget`](Repository::forget), [`gc`](Repository::gc)) holds one exclusive lock for the whole
 //! repository, an OS advisory lock (`flock`) on the file `lock`, from its first check to its last
 //! write. Concurrent writers, threads or processes, queue on it. So a ref advance is a real
@@ -65,6 +65,9 @@ use tessera_core::{Collection, Error, Manifest, ObjectKind, Result};
 
 use crate::durable::{create_dirs_durable, remove_file, sync_dir, write_durable_via};
 use crate::BlockPayload;
+
+mod collection_commit;
+pub use collection_commit::{HistoryEdge, HistoryEntry, NewMember};
 
 /// The writer lock file, under the repository root.
 const LOCK: &str = "lock";
@@ -185,6 +188,7 @@ struct PathStep {
 }
 
 enum PathLabel {
+    Version(String),
     Root(PathBuf),
     Member {
         collection: String,
@@ -211,6 +215,7 @@ impl WalkPaths {
             let step = &self.0[index];
             current = step.parent;
             match &step.label {
+                PathLabel::Version(address) => parts.push(format!("version {address}")),
                 PathLabel::Root(path) => parts.push(format!("the tip of ref {}", path.display())),
                 PathLabel::Member {
                     collection,
@@ -499,9 +504,9 @@ impl Repository {
 
     /// Store a sealed collection at its `manifest_hash`, under the fenced writer.
     /// Uses the canonical stored bytes (ADR-0066); unsealed or edited values are refused.
-    /// Member closure is checked by `gc`, not by this low-level storage primitive.
+    /// Member closure is checked by `commit_collection` and `gc`, not by this low-level storage primitive.
     /// The object is unreachable until a ref or another live collection pins it; a `gc`
-    /// between this call and `set_ref` may reclaim it. Atomic collection commit is #947 step 5.
+    /// between this call and `set_ref` may reclaim it. Use [`commit_collection`](Self::commit_collection) to store members and advance a ref atomically.
     pub fn put_collection(&self, collection: &Collection) -> Result<String> {
         let (bytes, seal) = crate::stored::collection(collection)?;
         require_object_kind(&self.object_path(&seal)?, ObjectKind::Collection, &bytes)?;
@@ -1042,20 +1047,7 @@ fn check_digest(address: &str, bytes: &[u8]) -> Result<()> {
 
 /// [`Error::SupersedesMismatch`] unless `m` carries exactly one `supersedes` edge, to `parent`.
 fn check_supersedes(lineage: &str, parent: &str, m: &Manifest) -> Result<()> {
-    let found: Vec<String> = m
-        .sources
-        .iter()
-        .filter(|s| s.role == SUPERSEDES)
-        .map(|s| s.content_hash.clone().unwrap_or_else(|| "(none)".into()))
-        .collect();
-    if found != [parent] {
-        return Err(Error::SupersedesMismatch {
-            lineage: lineage.to_string(),
-            expected: parent.to_string(),
-            found,
-        });
-    }
-    Ok(())
+    collection_commit::check_source_supersedes(lineage, parent, &m.sources)
 }
 
 /// Parse the one canonical spelling shared by both ref namespaces.
@@ -1188,6 +1180,10 @@ mod tests {
 
     mod collections_tests {
         include!("repo/collections_tests.rs");
+    }
+
+    mod commit_collection_tests {
+        include!("repo/commit_collection_tests.rs");
     }
 
     const L: &str = "study";
@@ -1387,6 +1383,13 @@ mod tests {
             std::io::stdin().read_line(&mut String::new()).unwrap();
         };
         match words[0] {
+            "collection-writer" => {
+                let tip = repo.read_ref(L).unwrap().unwrap();
+                let parent = repo.get_collection(&tip).unwrap();
+                let c = commit_collection_tests::racing_version(&parent, words[2].parse().unwrap());
+                go();
+                say(&outcome(repo.commit_collection(L, Some(&tip), &c, &[])));
+            }
             // Build a version on the tip of `L`, wait for the go, commit it on that tip.
             "writer" => {
                 let rev: i64 = words[2].parse().unwrap();
