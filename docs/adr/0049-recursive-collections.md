@@ -1,6 +1,7 @@
 # ADR-0049 — Recursive collections: the nesting mechanism (amends ADR-0033 §2)
 
 **Status:** Proposed (2026-07-02) — mechanism decided via spike #293 (4 fresh-context reviews: crypto/Merkle · schema-evolution · FAIR/RDM · clinical-workflow); implementation pending. **Amends** ADR-0033 §2. Relates ADR-0028 (MMR identity), ADR-0036 (versioning DAG/refs), ADR-0042 (non-sealed `aux/`), RFC §12 (domain-agnostic engine). Level *semantics* (what a nesting level means, living/frozen cohorts, FAIR mapping) are deliberately **out of scope** → #294.
+**Amended by ADR-0067 (2026-11-27)** — repository objects, version edges and closed members; see below.
 
 ## Context
 
@@ -81,3 +82,27 @@ Any fixed level vocabulary is opinionated — "Study" *and* "exam/cohort/site/tr
 ## References
 
 Spike #293 (issue + 4-review consolidation comment) · #294 (level semantics) · ADR-0033 (collections) · ADR-0028 (MMR identity + proofs) · ADR-0036 (versioning DAG/refs) · ADR-0042 (`aux/`) · RFC §12 · `tessera-core/src/collection.rs` · `tessera-io/src/collection.rs`
+
+## Amended by ADR-0067 (2026-11-27)
+
+[ADR-0067](0067-collection-refs-version-edge-and-gc-through-members.md) extends recursive collections into
+repository version objects without changing the kind-bound member MMR:
+
+- **Version edges** (PR [#1004](https://github.com/vig-os/tessera/pull/1004), D2): `Collection::sources` is sealed,
+  omitted when empty, and outside `id_inputs` and the member MMR. `supersedes` and `forked_from` pin predecessor
+  seals; a fork requires a caller-supplied `fork` identity token.
+- **Repository objects** (PR [#1005](https://github.com/vig-os/tessera/pull/1005), D1;
+  PR [#1012](https://github.com/vig-os/tessera/pull/1012), D1.1;
+  PR [#1022](https://github.com/vig-os/tessera/pull/1022), D3): layout 2 refs declare their target kind,
+  `ObjectKind::of` checks that kind against the bytes, and `put_collection` / `get_collection` use collection seals.
+- **Closed repository members** (PR [#1022](https://github.com/vig-os/tessera/pull/1022), D3.1;
+  PR [#1028](https://github.com/vig-os/tessera/pull/1028), D1): `commit_collection` validates recursive closure
+  before storing anything, including members supplied in the same call. GC follows members recursively and aborts
+  before sweeping on a missing, corrupt or wrong-kind member. Source edges remain open to versions held elsewhere.
+  Low-level `put_collection` alone guarantees neither closure nor reachability; an external-member catalog stays a file.
+- **Lineages and pins** (PR [#1028](https://github.com/vig-os/tessera/pull/1028), D5;
+  PR [#1033](https://github.com/vig-os/tessera/pull/1033), D4): collection commits advance a lineage by CAS;
+  `history` follows version predecessors, while pins keep stored collection versions and their members reachable
+  independently of a lineage. Neither adds branches or content merge (D9).
+
+The CLI integration remains pending PR [#1038](https://github.com/vig-os/tessera/pull/1038), ADR-0067 step 7.
