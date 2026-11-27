@@ -29,6 +29,7 @@ Schema mismatches also expose `kind`, `column`, `field`, `expected` and `found` 
 | `column_count` | `None` | `None` | Integer column counts |
 | `column_name` | Zero-based index | `None` | Column name strings |
 | `field` | Column name | `dtype`, `nullable`, `unit`, `scale` or `referencing` | Display strings |
+| `unknown` (future mismatch kinds) | `None` | `None` | `None` |
 
 Field values use quoted strings, plain numbers/booleans, `absent` for missing optional values and JSON
 for complete referencing descriptors. These attributes apply to schema mismatches during reads and

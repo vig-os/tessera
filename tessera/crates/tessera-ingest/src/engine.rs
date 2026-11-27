@@ -1100,10 +1100,9 @@ fn hdf_compound_rows(input: &Path, dataset: &str) -> Result<u64> {
 
 /// Pack a built (batch-path) product to `<out_dir>/<file_name(id)>.tsra`, using
 /// [`tessera_core::names::file_name`] to encode the stem. Idempotent: the same manifest → same path.
-/// Apply the spec's
-/// `[product.metadata]` overrides first so they ride the sealed `manifest_hash`. Returns the
-/// manifest actually written (re-sealed if metadata was applied) so the engine validates + records the
-/// SAME manifest it wrote. `id` is unchanged by the override (from_manifest keeps product/name/
+/// Apply the spec's `[product.metadata]` overrides first so they ride the sealed `manifest_hash`.
+/// Returns the manifest actually written (re-sealed if metadata was applied), so the engine validates
+/// and records the same manifest it wrote. `id` is unchanged by the override (from_manifest keeps product/name/
 /// timestamp), so the filename is stable; only the metadata + `manifest_hash` change.
 fn seal_to_tsra(
     m: Manifest,

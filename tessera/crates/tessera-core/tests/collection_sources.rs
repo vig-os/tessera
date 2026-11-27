@@ -72,7 +72,10 @@ fn writer_doors_refuse_an_empty_fork_token() {
 fn writer_doors_refuse_a_whitespace_only_fork_token() {
     let pin = tessera_core::hash::digest(b"predecessor");
     for token in [" ", "\t\r\n", "\u{2003}"] {
-        all_writer_doors_refuse(source_collection(FORKED_FROM_ROLE, Some(token), Some(&pin)));
+        let collection = source_collection(FORKED_FROM_ROLE, Some(token), Some(&pin));
+        let error = collection.canonical_bytes().unwrap_err();
+        assert!(error.to_string().contains("whitespace-only"), "{error}");
+        all_writer_doors_refuse(collection);
     }
 }
 

@@ -1704,7 +1704,7 @@
           tessera-py-import = budgetedRunCommand "tessera-py-import"
             {
               nativeBuildInputs =
-                [ (pkgs.python312.withPackages (ps: [ ps.numpy ps.polars ps.pyarrow ])) ];
+                [ (pkgs.python312.withPackages (ps: [ ps.blake3 ps.numpy ps.polars ps.pyarrow ])) ];
             } ''
             mkdir -p tessera
             cp -r ${./tessera/crates/tessera-py/python/tessera}/. tessera/
@@ -1736,7 +1736,7 @@
           tessera-wheel-import = budgetedRunCommand "tessera-wheel-import"
             {
               nativeBuildInputs =
-                [ (pkgs.python312.withPackages (ps: [ ps.numpy ps.polars ps.pyarrow ps.pip ])) ];
+                [ (pkgs.python312.withPackages (ps: [ ps.blake3 ps.numpy ps.polars ps.pyarrow ps.pip ])) ];
             } ''
             export HOME=$TMPDIR
             python3 -m pip install --no-index --no-deps --target=$TMPDIR/site \
