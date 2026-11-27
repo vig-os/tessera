@@ -105,4 +105,9 @@ repository version objects without changing the kind-bound member MMR:
   `history` follows version predecessors, while pins keep stored collection versions and their members reachable
   independently of a lineage. Neither adds branches or content merge (D9).
 
-The CLI integration remains pending PR [#1038](https://github.com/vig-os/tessera/pull/1038), ADR-0067 step 7.
+**CLI integration** (PR [#1038](https://github.com/vig-os/tessera/pull/1038), step 7):
+`tessera collection commit|log|diff` operates on repository collection versions; `tessera pin set|rm|ls` manages
+pins for stored versions. The exit-code contract is 4 for a retryable conflict (reread the ref), 5 for an operation
+refused by the rules, 6 for a damaged or unsupported store, and 1 for other failures. Existing codes 2 (CLI usage)
+and 3 (backend unavailable) remain. The CLI maps categories from tessera-core's exhaustive `Error::failure_class`
+classifier to those numeric codes.

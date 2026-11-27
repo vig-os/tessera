@@ -346,5 +346,10 @@ until pin publication. Corrupt pins must be restored before CAS removal can vali
   `remove_pin`, `read_pin` and `pins` manage independent typed GC roots. Pins survive lineage removal;
   explicit CAS replacement is allowed, but pins do not advance through commits or carry version history.
 
-Step 7's CLI surface is pending PR [#1038](https://github.com/vig-os/tessera/pull/1038); the merged changes above
-are repository/core APIs. Workspaces and content merges remain kit's responsibility (D9).
+**CLI integration** (PR [#1038](https://github.com/vig-os/tessera/pull/1038), step 7):
+`tessera collection commit|log|diff` exposes collection commits, logs/ancestry and member diffs;
+`tessera pin set|rm|ls` manages durable pins. The exit-code contract is 4 for a retryable conflict (reread the ref),
+5 for an operation refused by the rules, 6 for a damaged or unsupported store, and 1 for other failures.
+The existing codes 2 (CLI usage) and 3 (backend unavailable) remain. The exhaustive `Error::failure_class`
+classifier in tessera-core supplies failure categories; the CLI assigns their numeric exit codes.
+Workspaces and content merges remain kit's responsibility (D9).
