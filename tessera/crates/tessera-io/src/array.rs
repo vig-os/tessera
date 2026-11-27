@@ -414,9 +414,8 @@ fn build_filled<T: Element + Sync, F: Into<ArrayBuilderFillValue>>(
     Ok(())
 }
 
-fn codec_options() -> zarrs::array::codec::CodecOptions {
-    zarrs::array::codec::CodecOptions::default()
-        .with_concurrent_target(tessera_core::threads::budget())
+fn codec_options() -> zarrs::array::CodecOptions {
+    zarrs::array::CodecOptions::default().with_concurrent_target(tessera_core::threads::budget())
 }
 
 fn retrieve_all<T: ElementOwned + Send>(store: ReadableWritableListableStorage) -> Result<Vec<T>> {
