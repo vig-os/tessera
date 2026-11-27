@@ -534,8 +534,8 @@ impl<'a> TableMultiBlockSink<'a> {
             self.name_prefix,
             self.total_rows / self.block_rows
         );
-        for ((name, data), col) in batch.iter().zip(&self.columns) {
-            crate::table::check_column_contract(&self.name_prefix, &leaf, col, name, data)?;
+        for (index, ((name, data), col)) in batch.iter().zip(&self.columns).enumerate() {
+            crate::table::check_column_contract(&self.name_prefix, &leaf, index, col, name, data)?;
         }
         let n = batch.first().map(|(_, c)| c.len()).unwrap_or(0);
         for ((bn, bc), buf) in batch.iter().zip(self.buf.iter_mut()) {

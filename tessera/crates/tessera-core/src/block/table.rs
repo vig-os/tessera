@@ -8,6 +8,86 @@ use serde::{Deserialize, Serialize};
 
 use super::{Block, BlockKind};
 
+/// First schema difference, in column order (count is checked before columns).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SchemaMismatchKind {
+    /// Different numbers of columns.
+    #[error("column count: expected {expected}, found {found}")]
+    ColumnCount {
+        /// Declared or first-leaf count.
+        expected: usize,
+        /// Incoming or later-leaf count.
+        found: usize,
+    },
+    /// A column name differs at a zero-based position, including reordered columns.
+    #[error("column {index} name: expected {expected:?}, found {found:?}")]
+    ColumnName {
+        /// Zero-based column position.
+        index: usize,
+        /// Declared or first-leaf name.
+        expected: String,
+        /// Incoming or later-leaf name.
+        found: String,
+    },
+    /// A value-contract field differs on the named column.
+    #[error("column '{column}' {field}: expected {expected}, found {found}")]
+    Field {
+        /// Declared or first-leaf column name.
+        column: String,
+        /// First differing field, in dtype, nullable, unit, scale, referencing order.
+        field: ContractField,
+        /// Declared or first-leaf value, with the variant corresponding to `field`.
+        /// Boxed to keep the core error small on every `Result` path.
+        expected: Box<ContractValue>,
+        /// Incoming or later-leaf value, with the variant corresponding to `field`.
+        found: Box<ContractValue>,
+    },
+}
+
+/// A column value-contract field; names and positions belong to [`SchemaMismatchKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ContractField {
+    /// Stored scalar dtype.
+    #[error("dtype")]
+    Dtype,
+    /// Whether values carry a validity mask.
+    #[error("nullable")]
+    Nullable,
+    /// Physical unit after scaling.
+    #[error("unit")]
+    Unit,
+    /// Physical value multiplier.
+    #[error("scale")]
+    Scale,
+    /// Complete referencing descriptor.
+    #[error("referencing")]
+    Referencing,
+}
+
+/// Owned diagnostic value, retaining the field's Rust type and optionality.
+/// Floating-point values use ordinary `PartialEq`, just like [`ValueContract`].
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ContractValue {
+    /// Stored scalar dtype.
+    #[error("{0:?}")]
+    Dtype(String),
+    /// Whether values carry a validity mask.
+    #[error("{0}")]
+    Nullable(bool),
+    /// Physical unit, preserving absent versus explicitly empty.
+    #[error("{0:?}")]
+    Unit(Option<String>),
+    /// Physical value multiplier, preserving absent versus explicit.
+    #[error("{0:?}")]
+    Scale(Option<f64>),
+    /// Complete structured referencing descriptor.
+    #[error("{0:?}")]
+    Referencing(Option<crate::referencing::Referenced>),
+}
+
 /// Borrowed value contract for a column, independent of encoding and descriptive annotations.
 /// A decoded column has no metadata; use [`ValueContract::decoded`] for representation checks.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,6 +105,50 @@ pub struct ValueContract<'a> {
 }
 
 impl<'a> ValueContract<'a> {
+    /// First differing field in dtype, nullable, unit, scale, referencing order.
+    /// Uses exactly the equality semantics of [`ValueContract`], including floating-point values.
+    pub fn first_difference(
+        self,
+        other: Self,
+    ) -> Option<(ContractField, ContractValue, ContractValue)> {
+        if self.dtype != other.dtype {
+            return Some((
+                ContractField::Dtype,
+                ContractValue::Dtype(self.dtype.into()),
+                ContractValue::Dtype(other.dtype.into()),
+            ));
+        }
+        if self.nullable != other.nullable {
+            return Some((
+                ContractField::Nullable,
+                ContractValue::Nullable(self.nullable),
+                ContractValue::Nullable(other.nullable),
+            ));
+        }
+        if self.unit != other.unit {
+            return Some((
+                ContractField::Unit,
+                ContractValue::Unit(self.unit.map(str::to_owned)),
+                ContractValue::Unit(other.unit.map(str::to_owned)),
+            ));
+        }
+        if self.scale != other.scale {
+            return Some((
+                ContractField::Scale,
+                ContractValue::Scale(self.scale),
+                ContractValue::Scale(other.scale),
+            ));
+        }
+        if self.referencing != other.referencing {
+            return Some((
+                ContractField::Referencing,
+                ContractValue::Referencing(self.referencing.cloned()),
+                ContractValue::Referencing(other.referencing.cloned()),
+            ));
+        }
+        None
+    }
+
     /// Representation contract for decoded values without column metadata.
     pub fn decoded(dtype: &'a str, nullable: bool) -> Self {
         Self {
@@ -53,7 +177,34 @@ impl<'a> From<&'a Column> for ValueContract<'a> {
 /// Shared by seal/group validation and decoded column `extend`. Names and order are checked by
 /// the table group; codecs and descriptive annotations are excluded. Metadata compares exactly.
 pub fn same_value_contract(contract: ValueContract<'_>, other: ValueContract<'_>) -> bool {
-    contract == other
+    contract.first_difference(other).is_none()
+}
+
+/// Compare one column's name and value contract, reporting its first difference.
+/// `expected` is the declaration or first leaf; `found` is the incoming data or later leaf.
+/// Decoded values use [`ValueContract::decoded`] so absent metadata is not invented.
+pub fn column_contract_difference(
+    index: usize,
+    expected_name: &str,
+    expected: ValueContract<'_>,
+    found_name: &str,
+    found: ValueContract<'_>,
+) -> Option<SchemaMismatchKind> {
+    if expected_name != found_name {
+        return Some(SchemaMismatchKind::ColumnName {
+            index,
+            expected: expected_name.into(),
+            found: found_name.into(),
+        });
+    }
+    expected
+        .first_difference(found)
+        .map(|(field, expected, found)| SchemaMismatchKind::Field {
+            column: expected_name.into(),
+            field,
+            expected: Box::new(expected),
+            found: Box::new(found),
+        })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -527,5 +678,105 @@ mod tests {
         );
         let back: super::TableSpec = serde_json::from_str(&text).unwrap();
         assert_eq!(back.codec_profile.as_deref(), Some("tessera-table-v99"));
+    }
+}
+
+#[cfg(test)]
+mod contract_difference_tests {
+    use super::*;
+
+    #[test]
+    fn typed_fields_follow_contract_order_and_full_equality() {
+        let expected = Column {
+            name: "value".into(),
+            dtype: "i4".into(),
+            ..Column::default()
+        };
+        let mut found = Column {
+            dtype: "f8".into(),
+            nullable: true,
+            unit: Some("".into()),
+            scale: Some(0.001),
+            referencing: Some(crate::referencing::Referenced::identity(Some("ns".into()))),
+            ..expected.clone()
+        };
+        let cases = [
+            (
+                ContractField::Dtype,
+                ContractValue::Dtype("i4".into()),
+                ContractValue::Dtype("f8".into()),
+            ),
+            (
+                ContractField::Nullable,
+                ContractValue::Nullable(false),
+                ContractValue::Nullable(true),
+            ),
+            (
+                ContractField::Unit,
+                ContractValue::Unit(None),
+                ContractValue::Unit(Some("".into())),
+            ),
+            (
+                ContractField::Scale,
+                ContractValue::Scale(None),
+                ContractValue::Scale(Some(0.001)),
+            ),
+            (
+                ContractField::Referencing,
+                ContractValue::Referencing(None),
+                ContractValue::Referencing(found.referencing.clone()),
+            ),
+        ];
+        for (field, want_expected, want_found) in cases {
+            let left = ValueContract::from(&expected);
+            let right = ValueContract::from(&found);
+            assert_eq!(same_value_contract(left, right), left == right);
+            assert_eq!(
+                left.first_difference(right),
+                Some((field, want_expected, want_found))
+            );
+            match field {
+                ContractField::Dtype => found.dtype = expected.dtype.clone(),
+                ContractField::Nullable => found.nullable = expected.nullable,
+                ContractField::Unit => found.unit = expected.unit.clone(),
+                ContractField::Scale => found.scale = expected.scale,
+                ContractField::Referencing => found.referencing = expected.referencing.clone(),
+            }
+        }
+        assert!(same_value_contract((&expected).into(), (&found).into()));
+        found.description = Some("annotation".into());
+        assert!(same_value_contract((&expected).into(), (&found).into()));
+        found.scale = Some(f64::NAN);
+        let contract = ValueContract::from(&found);
+        assert!(!same_value_contract(contract, contract));
+        assert!(matches!(
+            contract.first_difference(contract),
+            Some((ContractField::Scale, _, _))
+        ));
+        found.scale = Some(-0.0);
+        let mut positive_zero = found.clone();
+        positive_zero.scale = Some(0.0);
+        assert!(same_value_contract(
+            (&found).into(),
+            (&positive_zero).into()
+        ));
+    }
+
+    #[test]
+    fn name_precedes_contract_fields_at_the_given_position() {
+        assert_eq!(
+            column_contract_difference(
+                2,
+                "energy",
+                ValueContract::decoded("i4", false),
+                "time",
+                ValueContract::decoded("f8", true)
+            ),
+            Some(SchemaMismatchKind::ColumnName {
+                index: 2,
+                expected: "energy".into(),
+                found: "time".into(),
+            })
+        );
     }
 }

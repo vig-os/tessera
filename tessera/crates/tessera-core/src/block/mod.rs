@@ -21,6 +21,8 @@ pub use partition::{
     TableGroup,
 };
 
+pub use table::{ContractField, ContractValue, SchemaMismatchKind};
+
 use serde::{Deserialize, Serialize};
 
 /// Which engine/shape a block uses.

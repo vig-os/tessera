@@ -889,8 +889,8 @@ fn group_rows(table_name: &str, leaf: &str, spec: &TableSpec, group: &TableData)
         return Err(Error::Codec("push_table: column count mismatch".into()));
     }
     let rows = rows_of(group);
-    for ((name, data), col) in group.iter().zip(&spec.columns) {
-        crate::table::check_column_contract(table_name, leaf, col, name, data)?;
+    for (index, ((name, data), col)) in group.iter().zip(&spec.columns).enumerate() {
+        crate::table::check_column_contract(table_name, leaf, index, col, name, data)?;
         if data.len() != rows {
             return Err(Error::Codec("push_table: ragged group columns".into()));
         }
