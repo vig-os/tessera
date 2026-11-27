@@ -79,6 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Repository initialization writes the `tessera-repository 2` marker first and atomically, so a crashed
+  `init` can be re-run to finish a partial skeleton. `open` refuses marked but incomplete repositories
+  and names `tessera init` as the recovery command. `init` writes nothing into a directory it refuses (#1007).
+
 - **Collection member filenames are injective (#994).** Members and repository refs share the percent encoder
   from #975 (`a:b` → `a%3ab`, `a_b` → `a_b`, `Ab` → `%41b`). Ref filenames are unchanged. Local collections,
   ingest output and S3 prefix exports use the same encoded stems, including nested descriptors and seals.

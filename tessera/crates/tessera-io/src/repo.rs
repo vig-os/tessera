@@ -275,17 +275,20 @@ impl Repository {
     /// An unmarked directory may hold no ref, log or object entries. Every other layout
     /// is [`Error::UnsupportedRepositoryLayout`]; no conversion is attempted.
     /// Initialization and all subsequent writes use the same repository writer lock.
+    /// Refusal is checked before creating that lock file, then validated again under it.
+    /// The marker is atomically published and fsync'd before the namespace skeleton;
+    /// after a crash, call `init` again to finish any missing directories. Before marker
+    /// publication only lock and temporary files can remain; neither prevents retry.
+    /// `open` may refuse an incomplete skeleton; it never finishes initialization.
     pub fn init(root: &Path) -> Result<Repository> {
         let repo = Repository {
             root: root.to_path_buf(),
         };
-        // A marker is replaced atomically and never advanced by a supported writer.
-        // Reject an incompatible marked repository without creating coordination files.
-        // Entry scans belong under the lock: another init may be creating its directories.
-        match std::fs::symlink_metadata(root.join(LAYOUT)) {
-            Ok(_) => repo.layout()?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+        // Refuse before creating even the coordination file. A concurrent initializer
+        // publishes its durable marker before any namespace entries, so rechecking the
+        // marker on an apparent refusal distinguishes its completed publication.
+        if let Err(error) = repo.check_initial_layout() {
+            repo.layout().map_err(|_| error)?;
         }
         create_dirs_durable(root, &mut Vec::new())?;
         drop(repo.lock_inner(true)?);
@@ -294,6 +297,8 @@ impl Repository {
 
     /// Open an existing layout-2 repository without writing anything.
     /// Every other marker, including a missing marker in an empty directory, is refused.
+    /// A layout-2 marker with a missing skeleton directory is an incomplete initialization:
+    /// [`init`](Self::init) can finish it; `open` refuses it with an actionable error.
     /// Ref corruption is reported when a ref is read or by `gc`, so a corrupt lineage
     /// can still be removed with [`forget`](Self::forget).
     pub fn open(root: &Path) -> Result<Repository> {
@@ -301,11 +306,13 @@ impl Repository {
             root: root.to_path_buf(),
         };
         repo.layout()?;
-        if !root.join("objects").is_dir() {
-            return Err(Error::Invalid(format!(
-                "{} is not a tessera repository (no objects/ — run `tessera init`)",
-                root.display()
-            )));
+        for directory in ["objects", "refs/lineages", "refs/pins", "log/lineages"] {
+            if !root.join(directory).is_dir() {
+                return Err(Error::Invalid(format!(
+                    "{} is not a complete tessera repository (no {directory}/ — run `tessera init`)",
+                    root.display()
+                )));
+            }
         }
         Ok(repo)
     }
@@ -335,8 +342,6 @@ impl Repository {
 
     /// Only `init` may write the first marker, and only with no repository entries.
     fn check_initial_layout(&self) -> Result<()> {
-        #[cfg(test)]
-        crate::durable::seam::record(crate::durable::seam::Event::InitLayoutCheck);
         match std::fs::symlink_metadata(self.root.join(LAYOUT)) {
             Ok(_) => self.layout(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -366,6 +371,8 @@ impl Repository {
             .open(self.root.join(LOCK))?;
         file.lock()?;
         if initialize {
+            #[cfg(test)]
+            crate::durable::seam::record(crate::durable::seam::Event::InitLayoutCheck);
             self.check_initial_layout()?;
         } else {
             self.layout()?;
@@ -381,15 +388,22 @@ impl Repository {
             }
         }
         if initialize {
-            for directory in ["objects", "refs/lineages", "refs/pins", "log/lineages"] {
-                create_dirs_durable(&self.root.join(directory), &mut Vec::new())?;
-            }
             if !self.root.join(LAYOUT).exists() {
                 write_durable_via(
                     &tmp.join(LAYOUT),
                     &self.root.join(LAYOUT),
                     LAYOUT_V2.as_bytes(),
                 )?;
+            }
+            // A previous initializer may have died just after the marker rename.
+            // Fence that entry even when this initializer did not publish it.
+            sync_dir(&self.root)?;
+            // No namespace entry may become durable before the layout marker.
+            for directory in ["objects", "refs/lineages", "refs/pins", "log/lineages"] {
+                let path = self.root.join(directory);
+                create_dirs_durable(&path, &mut Vec::new())?;
+                // Also finish a directory created just before a prior init crashed.
+                sync_dir(path.parent().expect("a skeleton directory has a parent"))?;
             }
             sync_dir(&self.root)?;
         }
@@ -1390,6 +1404,21 @@ mod tests {
             return;
         };
         let words: Vec<&str> = scenario.split('\t').collect();
+        if words[0] == "init-refuse" {
+            let _kill = seam::arm(&seam::KILL_AFTER_NTH_STEP, 1);
+            assert!(matches!(
+                Repository::init(Path::new(words[1])),
+                Err(Error::UnsupportedRepositoryLayout { .. })
+            ));
+            say("REFUSED");
+            return;
+        }
+        if words[0] == "init-kill" {
+            let _kill = seam::arm(&seam::KILL_AFTER_NTH_STEP, words[2].parse().unwrap());
+            Repository::init(Path::new(words[1])).unwrap();
+            say("DONE");
+            return;
+        }
         let repo = Repository::open(Path::new(words[1])).unwrap();
         let go = || {
             say("READY");
@@ -2455,8 +2484,113 @@ mod tests {
             assert_eq!(std::fs::read(debris).unwrap(), b"untouched");
         }
     }
-    /// An initializer must not inspect a competing initializer's partial namespace tree
-    /// until that initializer has released the writer lock after publishing its marker.
+    #[test]
+    fn init_refusal_creates_no_lock_or_other_entries() {
+        for directory in ["refs", "log", "objects"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join(directory)).unwrap();
+            let entry = dir.path().join(directory).join("existing");
+            std::fs::write(&entry, b"untouched").unwrap();
+            // Even a crash at the first durable seam must never leave a lock in
+            // a directory initialization refuses. Correct preflight reaches no seam.
+            let mut child = spawn_child(&["init-refuse", dir.path().to_str().unwrap()]);
+            let printed = results(&mut BufReader::new(child.stdout.take().unwrap()));
+            let status = child.wait().unwrap();
+            assert!(!dir.path().join(LOCK).exists());
+            assert!(
+                status.success() && printed == ["REFUSED"],
+                "{status} {printed:?}"
+            );
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+            assert_eq!(std::fs::read(entry).unwrap(), b"untouched");
+        }
+    }
+
+    #[test]
+    fn a_crash_at_every_step_of_init_can_be_retried() {
+        for nested in [false, true] {
+            let steps = {
+                let dir = tempfile::tempdir().unwrap();
+                let root = if nested {
+                    dir.path().join("nested/repo")
+                } else {
+                    dir.path().to_path_buf()
+                };
+                let recording = seam::record_fs();
+                Repository::init(&root).unwrap();
+                let events = recording.events();
+                let mut replay = seam::Replay::default();
+                let mut published = false;
+                for event in &events {
+                    if let seam::Event::Rename { to, .. } = event {
+                        published |= *to == root.join(LAYOUT);
+                    }
+                    if let seam::Event::CreateDir(path) = event {
+                        if ["objects", "refs", "log"]
+                            .iter()
+                            .any(|directory| path.starts_with(root.join(directory)))
+                        {
+                            assert!(published, "the marker must precede the namespace skeleton");
+                            assert!(
+                                replay.undoable(dir.path(), &root.join(LAYOUT)).is_empty(),
+                                "the marker must survive power loss before creating {}",
+                                path.display()
+                            );
+                        }
+                    }
+                    replay.apply(event);
+                }
+                events.len()
+            };
+            for n in 1..=steps + 1 {
+                let dir = tempfile::tempdir().unwrap();
+                let root = if nested {
+                    dir.path().join("nested/repo")
+                } else {
+                    dir.path().to_path_buf()
+                };
+                let mut child = spawn_child(&["init-kill", root.to_str().unwrap(), &n.to_string()]);
+                let printed = results(&mut BufReader::new(child.stdout.take().unwrap()));
+                let status = child.wait().unwrap();
+                if n <= steps {
+                    assert!(
+                        status.code().is_none() && printed.is_empty(),
+                        "step {n}: {status} {printed:?}"
+                    );
+                } else {
+                    assert!(
+                        status.success() && printed == ["DONE"],
+                        "{status} {printed:?}"
+                    );
+                }
+                match Repository::open(&root) {
+                    Ok(repo) => {
+                        assert!(repo.pins().unwrap().is_empty());
+                        repo.gc().unwrap();
+                    }
+                    Err(Error::UnsupportedRepositoryLayout { .. }) => {}
+                    Err(Error::Invalid(message)) => assert!(message.contains("run `tessera init`")),
+                    Err(error) => panic!("step {n}: unexpected refusal: {error}"),
+                }
+                let repo = Repository::init(&root).unwrap_or_else(|e| panic!("step {n}: {e}"));
+                Repository::open(&root).unwrap();
+                for directory in ["objects", "refs/lineages", "refs/pins", "log/lineages", TMP] {
+                    assert!(root.join(directory).is_dir(), "step {n}: {directory}");
+                }
+                let (m, _) = sealed_on(0, None);
+                repo.put_manifest(&m).unwrap();
+                assert_eq!(
+                    repo.get_manifest(m.manifest_hash.as_deref().unwrap())
+                        .unwrap(),
+                    m
+                );
+                repo.gc().unwrap();
+            }
+        }
+    }
+
+    /// The authoritative initialization check remains fenced by the writer lock;
+    /// the read-only preflight must not replace that check.
     #[test]
     fn init_checks_entries_under_the_writer_lock() {
         let dir = tempfile::tempdir().unwrap();
