@@ -17,10 +17,15 @@
 //!
 //! `--json` emits the same facts in a shape meant to be embedded in `aux/provenance.json`.
 //!
-//! **The flavor is deliberately NOT sealed.** ADR-0056 §6.2 seals `ingest_decoder` — the decoder
-//! name + version, the thing that actually determined the bytes. A compile-time bundle label did
-//! not, and sealing it would invite the false inference "same flavor ⇒ same bytes". ADR-0042's line
-//! holds: sealed = what changed the bytes; `aux/` = who was in the room.
+//! **The flavor is deliberately NOT sealed.** ADR-0056 §6a seals the `ingest_decoder` triple — the
+//! decoder name, its `=`-pinned version, and a digest over the resolved decode-relevant features: the
+//! things that actually determined the bytes. A compile-time bundle label did not, and sealing it
+//! would invite the false inference "same flavor ⇒ same bytes". ADR-0042's line holds: sealed = what
+//! changed the bytes; `aux/` = who was in the room.
+//!
+//! What the `--json` form *does* add is the **pre-image** of that sealed feature digest. Without it
+//! the digest would be a label nobody could check; with it, anyone holding a `.tsra` and a matching
+//! `tessera info --json` can verify the correspondence.
 
 use std::io::Write;
 
@@ -57,10 +62,51 @@ struct Info {
     /// The format/spec version this build *writes* into a manifest's `tessera_version` field.
     format_version: &'static str,
     backends: Vec<BackendInfo>,
-    /// Known backend names whose handler is not in this build. Empty until Phase 1's feature graph.
+    /// Known backend names whose handler is not in this build. Non-empty as soon as a generic-ingest
+    /// lane is switched off (ADR-0057 §5) — which is what makes the two error classes (exit 3 "not
+    /// compiled in" vs exit 2 "unknown name") distinguishable to a script.
     backends_disabled: Vec<&'static str>,
     /// Build modes, by the same names their Cargo features carry.
     build: std::collections::BTreeMap<&'static str, bool>,
+    /// The **pre-image** of the `ingest_decoder` feature digest that this build seals into every
+    /// generic-ingest product's recipe (ADR-0056 §6a).
+    ///
+    /// The sealed triple carries `blake3(<this string>)`. Printing the pre-image here is what keeps
+    /// that digest from being a one-way function with no inverse anywhere: a reader holding a `.tsra`
+    /// and a `tessera info --json` from the same version can confirm the digest rather than merely
+    /// observe it. Unsealed by design — it is a diagnostic about the build, and ADR-0042's line is
+    /// that `aux/` holds who was in the room.
+    /// Absent on a build with no workspace lockfile (see `tessera_ingest::decoder`): a digest over an
+    /// empty pre-image would be identical for every such build, so absence is the honest record.
+    ///
+    /// **One entry per ingest lane** (#477). It was a single string until the digest went per-lane, and
+    /// that was the defect: a parquet product committed to the crate list of every other lane, so adding
+    /// `zip` for `.npz` moved the `manifest_hash` of every parquet and csv product in the corpus.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    ingest_decode: std::collections::BTreeMap<&'static str, DecodeLaneInfo>,
+}
+
+/// One lane's decoder digest and the pre-image it is taken over.
+#[derive(Debug, serde::Serialize)]
+struct DecodeLaneInfo {
+    /// The sealed `blake3:…` third component of that lane's `ingest_decoder` triple.
+    ///
+    /// Absent for an **in-tree** lane (see `in_tree`), which has no third-party decode path to digest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digest: Option<String>,
+    /// The exact string it is a digest of, so the correspondence is checkable rather than asserted. This
+    /// is what keeps the sealed digest from being a one-way label with no inverse anywhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    features: Option<&'static str>,
+    /// This lane's decoder is **our own code**, with no third-party crate on its path — so there is
+    /// nothing to pin and no digest to take (`.npy`: ADR-0056 §12 declined `ndarray-npy` because "NPY is
+    /// a header parse plus a memcpy").
+    ///
+    /// Reported rather than omitted. Dropping the lane would be the more convenient shape, but it would
+    /// make a build that *has* the lane indistinguishable from one compiled without it — the seal says
+    /// `tessera/npy` read the bytes, and `info` has to be able to corroborate that.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    in_tree: bool,
 }
 
 fn collect() -> Info {
@@ -76,6 +122,32 @@ fn collect() -> Info {
             .collect(),
         backends_disabled: backends_disabled(),
         build: BUILD_FLAGS.iter().copied().collect(),
+        ingest_decode: tessera_ingest::decoder::ALL
+            .iter()
+            .map(|d| {
+                // Both or neither: a digest whose pre-image we cannot print would be exactly the
+                // unfalsifiable label §6a rejected. Neither is the honest record for an in-tree lane,
+                // which is reported with `in_tree` instead of being dropped.
+                match (d.feature_preimage(), d.feature_digest()) {
+                    (Some(p), Some(dg)) => (
+                        d.name,
+                        DecodeLaneInfo {
+                            digest: Some(dg),
+                            features: Some(p),
+                            in_tree: false,
+                        },
+                    ),
+                    _ => (
+                        d.name,
+                        DecodeLaneInfo {
+                            digest: None,
+                            features: None,
+                            in_tree: true,
+                        },
+                    ),
+                }
+            })
+            .collect(),
     }
 }
 
@@ -157,11 +229,17 @@ mod tests {
             );
         }
 
-        assert_eq!(
-            lines.next().unwrap(),
-            "disabled:   (none)",
-            "no decoder feature gate exists yet, so nothing is disabled (Phase 1 changes this)"
-        );
+        // A default build has every generic lane on, so nothing is disabled. Under
+        // `--no-default-features` the same line must name them instead of the ingest failing with a
+        // parse error — that is the whole point of the total-enum/gated-handler split (ADR-0057 §6).
+        let disabled = lines.next().unwrap();
+        if backends_disabled().is_empty() {
+            assert_eq!(disabled, "disabled:   (none)");
+        } else {
+            for name in backends_disabled() {
+                assert!(disabled.contains(name), "'{name}' missing from: {disabled}");
+            }
+        }
 
         let build = lines.next().unwrap();
         for (flag, _) in BUILD_FLAGS {
@@ -188,6 +266,88 @@ mod tests {
         expect("sql", cfg!(feature = "sql"));
     }
 
+    /// ADR-0056 §6a: the sealed feature digest must be *checkable*, not merely observable. So the
+    /// JSON form carries both the digest and its pre-image, and they must correspond — otherwise the
+    /// sealed third component of the triple would be a label with no inverse anywhere.
+    #[test]
+    fn the_sealed_feature_digest_is_invertible_from_this_output() {
+        let mut buf = Vec::new();
+        info(true, &mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let lanes = v["ingest_decode"]
+            .as_object()
+            .expect("a workspace build emits one entry per lane");
+        assert_eq!(
+            lanes.len(),
+            tessera_ingest::decoder::ALL.len(),
+            "one entry per lane: {lanes:?}"
+        );
+        let mut in_tree = Vec::new();
+        for (lane, e) in lanes {
+            // An in-tree lane has no third-party decode path, so it carries neither a pre-image nor a
+            // digest — and says which it is, rather than being absent. Asserted as an exclusive-or so
+            // a lane cannot quietly report both, or a digest with no pre-image to check it against.
+            if e.get("in_tree").and_then(|v| v.as_bool()) == Some(true) {
+                assert!(
+                    e.get("features").is_none() && e.get("digest").is_none(),
+                    "lane {lane}: an in-tree lane must carry no pre-image and no digest: {e:?}"
+                );
+                in_tree.push(lane.as_str());
+                continue;
+            }
+            let preimage = e["features"].as_str().expect("the pre-image");
+            let digest = e["digest"].as_str().expect("…and its digest");
+            assert_eq!(
+                digest,
+                tessera_core::hash::digest(preimage.as_bytes()),
+                "lane {lane}: the printed digest must be blake3 of the printed pre-image"
+            );
+        }
+        // Bounded, not blanket: exactly the NumPy `.npy` lane is in-tree. A second digest-less lane
+        // would be indistinguishable from the first in the seal, so it has to fail here.
+        assert_eq!(
+            in_tree,
+            vec!["tessera/npy"],
+            "exactly one lane is in-tree: {lanes:?}"
+        );
+        // Distinct per lane — before #477 every lane printed, and sealed, the same digest.
+        let digests: std::collections::BTreeSet<&str> = lanes
+            .values()
+            .filter_map(|e| e["digest"].as_str())
+            .collect();
+        assert_eq!(
+            digests.len(),
+            lanes.len() - in_tree.len(),
+            "each lane with a decode path has its own digest"
+        );
+
+        let preimage = lanes["arrow-rs/parquet"]["features"].as_str().unwrap();
+        let digest = lanes["arrow-rs/parquet"]["digest"].as_str().unwrap();
+        let sealed = tessera_ingest::decoder::Decoder::PARQUET.to_value();
+        assert_eq!(sealed["features"].as_str().unwrap(), digest);
+        // The pre-image names the DECODER PINS and nothing else. An earlier derivation also named this
+        // build's feature selection and this crate's version; both were removed because both made
+        // `manifest_hash` move when the interpretation of the file did not (see
+        // `tessera-ingest/build.rs`). Asserting the absence here keeps `tessera info` honest about what
+        // the sealed digest actually covers.
+        assert!(
+            preimage.starts_with("v2;pins="),
+            "the pre-image declares its derivation version, then the decoder pins: {preimage}"
+        );
+        // And it names this lane's whole decode path, not just the reader: the Thrift metadata parser and
+        // the page codecs were absent until #477, so a swapped decompressor moved nothing.
+        for want in ["thrift=", "snap=", "flatbuffers=", "crc32fast="] {
+            assert!(
+                preimage.contains(want),
+                "the parquet lane pins {want}: {preimage}"
+            );
+        }
+        assert!(
+            !preimage.contains("features="),
+            "a lane that was not compiled in did not read the file: {preimage}"
+        );
+    }
+
     #[test]
     fn json_form_is_parseable_and_carries_the_same_facts() {
         let mut buf = Vec::new();
@@ -200,7 +360,10 @@ mod tests {
             v["backends"].as_array().unwrap().len(),
             BACKENDS_ENABLED.len()
         );
-        assert!(v["backends_disabled"].as_array().unwrap().is_empty());
+        assert_eq!(
+            v["backends_disabled"].as_array().unwrap().len(),
+            backends_disabled().len()
+        );
         assert_eq!(v["build"]["cloud"], cfg!(feature = "cloud"));
 
         // hdf-compound reports the libhdf5 actually linked; the in-tree parsers report no decoder.

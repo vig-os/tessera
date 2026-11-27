@@ -45,6 +45,14 @@ study.tsra  (one zip)
                             ─┘
 ```
 
+> **Refined (GHSA-m665-v7pm-7grj, SPEC §6 "One reading").** Only members under the reserved `aux/` prefix
+> are aux. A member that is neither `mimetype`, `manifest.json`, a listed `blocks/<name>` nor under `aux/`
+> (an unlisted `blocks/` member included) makes the archive non-canonical, and full verification refuses it.
+> An aux member's name below `aux/` obeys the block-name grammar (ADR-0063), and the member is encoded exactly
+> as the reference writer encodes every member (SPEC §6 "Canonical encoding"). So "any zip member" above means
+> any member a tessera writer adds: one appended by a generic zip tool (another made-by, flags or extra field)
+> makes the archive non-canonical too.
+
 ## The load-bearing invariant
 
 **Adding or removing any `aux/` member MUST leave `content_hash` AND `manifest_hash`

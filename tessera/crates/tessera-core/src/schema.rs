@@ -16,12 +16,23 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::block::array::ArraySpec;
+use crate::block::table::TableSpec;
 use crate::block::BlockKind;
+use crate::field_path::FieldPath;
 use crate::manifest::Manifest;
 
+pub mod contract;
+pub mod rules;
+pub use contract::{
+    ArrayContract, ColumnReference, ContractViolation, ReferenceScope, ReferenceTarget,
+    TableContract, TableOrder,
+};
+pub use rules::{Encoding, FieldDefinitionViolation, FieldValueViolation};
+
 /// Schema-driven **sensitivity tier** for a metadata field (ADR-0040 §1 — the spike that
-/// teaches the engine to *reason* about PHI without yet redacting/encrypting). One of four,
-/// in increasing identifiability:
+/// teaches the engine to *reason* about PHI without yet redacting/encrypting). Four tiers on an
+/// increasing-identifiability ladder, plus one off-ladder tier for *unclassified*:
 /// - [`Public`](Sensitivity::Public) — safe in clear (e.g. modality vocab, calibration
 ///   coefficients, scan geometry); ships unchanged.
 /// - [`Coded`](Sensitivity::Coded) — a controlled-vocab code, intrinsically non-identifying but
@@ -33,6 +44,13 @@ use crate::manifest::Manifest;
 ///   PS3.15's confidentiality profile — Patient Name, Patient ID, MRN, Birth Date, …,
 ///   plus UIDs that bind to the patient/study). The redactor / field-encryption phases
 ///   (deferred) operate on the fields the schema marks at this tier.
+/// - [`Unknown`](Sensitivity::Unknown) — **not on the ladder: nobody has classified this yet.**
+///   Added for generic ingest (ADR-0056 §7). A Parquet/CSV a scientist hands us carries column
+///   names and dtypes but no tiers, and the vendor paths' two defences are both absent: GE
+///   listmode never sees PHI (scan events), and DICOM classifies at the door (PS3.15). Stamping
+///   [`Public`](Sensitivity::Public) there would seal the assertion "safe in clear" over a
+///   column that might be a patient identifier — and a seal is forever. `Unknown` says the true
+///   thing instead, and gives `verify --require-classified` something to gate on.
 ///
 /// Pure data (`Copy` + serde) — the wasm-targeted `tessera-core` stays host-free; no PHI logic
 /// lives in this enum, only the classification.
@@ -49,6 +67,13 @@ pub enum Sensitivity {
     /// Direct PHI — DICOM PS3.15 confidentiality-profile fields (Patient Name/ID/MRN, DOB,
     /// linking UIDs). The redact / field-encryption phases (deferred) operate on this tier.
     Identifying,
+    /// **Unclassified** — no classification pass has run on this field/column (ADR-0056 §7).
+    /// Off the ladder rather than at the bottom of it: it is not a claim of safety, it is the
+    /// absence of a claim. What generic ingest stamps on every column no `--column-meta`
+    /// classified. Deliberately NOT the serde default (that stays
+    /// [`Public`](Sensitivity::Public)), so every schema written before this variant existed
+    /// deserialises byte-identically — a producer opts into honesty explicitly.
+    Unknown,
 }
 
 /// A field's self-description — carried once, in the schema, so values stay lean and a reader
@@ -61,7 +86,24 @@ pub struct FieldSpec {
     /// Human + AI-readable description.
     pub description: String,
     /// Value dtype: a [`crate::dtype::DType`] name, or `"string"` / `"coded"` / `"json"` for metadata.
+    /// Any other name is refused by [`ProductSchema::check_definition`]. `int64` and `uint64` can
+    /// hold integers beyond ±(2^53−1), so a field of either declares
+    /// [`encoding`](Self::encoding) `"string"` ([`rules`], #895).
     pub dtype: String,
+    /// How the values are spelled when not as JSON numbers: `"string"` makes each value the
+    /// canonical decimal string of an integer of [`dtype`](Self::dtype). Required on `int64` /
+    /// `uint64` and refused on any other dtype ([`rules`]). `skip_serializing_if` keeps an absent
+    /// encoding out of the embedded schema, so a field without one keeps its bytes (ADR-0060).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<Encoding>,
+    /// Inclusive lower bound on every value (a number, or each element of an array of numbers),
+    /// within ±(2^53−1). Numeric dtypes only; refused where a value enters, naming the field and the
+    /// value's source ([`ProductSchema::check_value`]). Absent ⇒ no bound and no key in the bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<f64>,
+    /// Inclusive upper bound, as [`minimum`](Self::minimum).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<f64>,
     /// UCUM physical unit, if any (e.g. "HU", "Bq/mL", "ps", "keV", "mm").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
@@ -103,6 +145,24 @@ fn is_false(b: &bool) -> bool {
 }
 
 impl FieldSpec {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &[
+        "id",
+        "description",
+        "dtype",
+        "encoding",
+        "minimum",
+        "maximum",
+        "unit",
+        "vocabulary",
+        "default",
+        "required",
+        "recommended",
+        "sensitivity",
+        "inherit",
+    ];
+
     /// A required, undimensioned metadata field (absent ⇒ ingest **blocks**). Defaults to
     /// [`Sensitivity::Public`]; chain [`Self::with_sensitivity`] to classify PHI.
     pub fn required(id: &str, description: &str, dtype: &str) -> Self {
@@ -110,6 +170,9 @@ impl FieldSpec {
             id: id.into(),
             description: description.into(),
             dtype: dtype.into(),
+            encoding: None,
+            minimum: None,
+            maximum: None,
             unit: None,
             vocabulary: None,
             default: None,
@@ -150,6 +213,30 @@ impl FieldSpec {
         self
     }
 
+    /// Builder: carry the values as canonical decimal strings ([`Encoding::String`]), as an
+    /// `int64` / `uint64` field must.
+    pub fn string_encoded(mut self) -> Self {
+        self.encoding = Some(Encoding::String);
+        self
+    }
+
+    /// Builder: an inclusive lower bound on the values.
+    pub fn minimum(mut self, minimum: f64) -> Self {
+        self.minimum = Some(minimum);
+        self
+    }
+
+    /// Builder: an inclusive upper bound on the values.
+    pub fn maximum(mut self, maximum: f64) -> Self {
+        self.maximum = Some(maximum);
+        self
+    }
+
+    /// Builder: an inclusive range `[minimum, maximum]` on the values.
+    pub fn range(self, minimum: f64, maximum: f64) -> Self {
+        self.minimum(minimum).maximum(maximum)
+    }
+
     /// Builder: classify the field's PHI **sensitivity tier** (ADR-0040 §1). Defaults to
     /// [`Sensitivity::Public`]; mark direct PHI as [`Sensitivity::Identifying`] so the engine's
     /// schema-driven PHI reasoning (today: ingest warn; future: redact / field encryption) picks
@@ -180,6 +267,10 @@ pub struct Coded {
 }
 
 impl Coded {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &["_vocabulary", "_code", "label"];
+
     pub fn new(vocabulary: &str, code: &str) -> Self {
         Coded {
             vocabulary: vocabulary.into(),
@@ -203,6 +294,11 @@ pub struct BlockRequirement {
 }
 
 impl BlockRequirement {
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] =
+        &["role", "kind", "min_count", "description"];
+
     fn matches(&self, b: &crate::block::BlockRef) -> bool {
         self.kind.is_none_or(|k| k == b.kind)
     }
@@ -226,13 +322,44 @@ pub struct ProductSchema {
     /// the policy lives in the schema, not the engine (a domain opts in per product kind).
     #[serde(default, skip_serializing_if = "is_false")]
     pub requires_generation: bool,
+    /// The **column contract** per table role (ADR-0065 §8, #809): ordered columns, sequence key,
+    /// row order, keys and references. A caller checks a block against it with
+    /// [`Self::check_table`]; nothing in validate or seal calls that yet. Skipped when empty, so
+    /// every schema sealed before it existed keeps its bytes. A binary older than this field drops
+    /// it on parse without an error (#830 makes that a refusal).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tables: BTreeMap<String, TableContract>,
+    /// The contract per array role (dtype, rank, axes, unit; ADR-0065 §8), checked by a caller with
+    /// [`Self::check_array`]. Skipped when empty, as [`Self::tables`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arrays: BTreeMap<String, ArrayContract>,
 }
 
 impl ProductSchema {
-    /// Validate a manifest against this schema: every required block role must have enough
-    /// matching blocks, and every required field must be present in `metadata` (or carry a
-    /// default). Returns a typed [`crate::Error::Invalid`] naming the first violation.
+    /// The JSON keys this type models (ADR-0060 §2.2 newer-field walk); kept equal to a fully
+    /// populated instance's keys by a test.
+    pub(crate) const FIELDS: &'static [&'static str] = &[
+        "product",
+        "version",
+        "description",
+        "fields",
+        "blocks",
+        "requires_generation",
+        "tables",
+        "arrays",
+    ];
+
+    /// Validate a manifest against this schema: the schema's own field declarations must follow the
+    /// number rules ([`Self::check_definition`]), every metadata value must meet its field's encoding
+    /// and range ([`Self::check_metadata`]), every required block role must have enough matching
+    /// blocks, and every required field must be present in `metadata` (or carry a default).
+    ///
+    /// # Errors
+    /// [`crate::Error::SchemaField`] or [`crate::Error::FieldValue`] from the two checks, else a
+    /// typed [`crate::Error::Invalid`] naming the first violation.
     pub fn validate(&self, m: &Manifest) -> crate::Result<()> {
+        self.check_definition()?;
+        self.check_metadata(&m.metadata)?;
         for req in &self.blocks {
             if req.min_count == 0 {
                 continue;
@@ -269,6 +396,78 @@ impl ProductSchema {
         Ok(())
     }
 
+    /// The field declared with stable id `id`, if any.
+    pub fn field(&self, id: &str) -> Option<&FieldSpec> {
+        self.fields.iter().find(|f| f.id == id)
+    }
+
+    /// Check every field declaration against the number rules (#895, [`rules`]): each `id` declared
+    /// once; a known dtype; a string encoding exactly on `int64` / `uint64`; a range only on a numeric
+    /// dtype, within ±(2^53−1) and not empty; a `default` its own rules accept.
+    ///
+    /// # Errors
+    /// [`crate::Error::SchemaField`] naming the schema, the first offending field (declaration
+    /// order) and the rule.
+    pub fn check_definition(&self) -> crate::Result<()> {
+        let mut seen = std::collections::BTreeSet::new();
+        for f in &self.fields {
+            let duplicate = !seen.insert(f.id.as_str());
+            let checked = if duplicate {
+                Err(FieldDefinitionViolation::DuplicateId)
+            } else {
+                f.check_definition()
+            };
+            checked.map_err(|violation| crate::Error::SchemaField {
+                product: self.product.clone(),
+                field: f.id.clone(),
+                violation: Box::new(violation),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Check one metadata value against the encoding and range its field declares
+    /// ([`FieldSpec::check_value`]). `origin` says where the value came from, in the words of the
+    /// door that read it: a DICOM tag with its source text (`dicom: (0018,0060) KVP = "5000"`), an
+    /// ingest-spec key (`product[0].metadata.kvp`), a CLI flag (`--set kvp`), or `metadata.kvp` at
+    /// seal. A key the schema does not declare passes (metadata is open-world).
+    ///
+    /// # Errors
+    /// [`crate::Error::FieldValue`] naming `origin`, the field, the schema and the rule.
+    pub fn check_value(
+        &self,
+        id: &str,
+        value: &serde_json::Value,
+        origin: &str,
+    ) -> crate::Result<()> {
+        let Some(f) = self.field(id) else {
+            return Ok(());
+        };
+        f.check_value(value)
+            .map_err(|violation| crate::Error::FieldValue {
+                origin: origin.to_owned(),
+                product: self.product.clone(),
+                field: f.id.clone(),
+                violation: Box::new(violation),
+            })
+    }
+
+    /// [`Self::check_value`] for every entry of a manifest's `metadata`, each named
+    /// `metadata.<id>`, in key order. Run at seal by [`crate::ProductBuilder::seal`], so every writer
+    /// door (Rust, the CLI, Python's `Builder`, ingest) is held to it.
+    ///
+    /// # Errors
+    /// [`crate::Error::FieldValue`] for the first offending entry.
+    pub fn check_metadata(
+        &self,
+        metadata: &BTreeMap<String, serde_json::Value>,
+    ) -> crate::Result<()> {
+        for (id, value) in metadata {
+            self.check_value(id, value, &format!("metadata.{id}"))?;
+        }
+        Ok(())
+    }
+
     /// The fields this schema marks **inheritable identity** (ADR-0058 §5) — the allowlist
     /// [`crate::provenance::inherit_identity`] copies from a `derived_from` parent. Pure schema data;
     /// the engine holds no field list. Order matches schema declaration.
@@ -297,29 +496,232 @@ impl ProductSchema {
             .collect()
     }
 
+    /// Check a table block's spec against the contract declared for table `role`.
+    ///
+    /// Passes when every column of `spec` is declared, appears once, and the columns follow the
+    /// contract's order, where a column marked
+    /// [`optional`](crate::block::table::Column#structfield.optional) may be absent; each present
+    /// column's `dtype` and `nullable` must equal the declared ones. No other column attribute
+    /// (`unit`, `scale`, `sensitivity`, …) and none of `sequence_key`, `keys` or `references` is
+    /// compared, and rows are not looked at: [`contract`] lists what is carried but not checked.
+    ///
+    /// # Errors
+    /// [`crate::Error::Contract`] carrying the first [`ContractViolation`] found, in three passes:
+    /// `UnknownRole` when no table contract is declared for `role`; then, over the block's columns
+    /// in order, `UnknownColumn` or `DuplicateColumn`; then, walking the contract's columns in
+    /// order, the first of `ColumnOrder`, `MissingColumn`, `ColumnDtype` or `ColumnNullability`
+    /// (so a dtype mismatch on an early column is reported before a missing later one).
+    pub fn check_table(&self, role: &str, spec: &TableSpec) -> crate::Result<()> {
+        let contract = self
+            .tables
+            .get(role)
+            .ok_or_else(|| ContractViolation::UnknownRole {
+                kind: BlockKind::Table,
+                role: role.to_owned(),
+            });
+        contract
+            .and_then(|c| c.check(role, spec))
+            .map_err(|violation| self.contract_error(violation))
+    }
+
+    /// Check an array block's spec against the contract declared for array `role`: the dtype must
+    /// equal the declared one verbatim, the rank must match, and so must the axis names when the
+    /// contract declares any. The unit is not compared.
+    ///
+    /// # Errors
+    /// [`crate::Error::Contract`] carrying `UnknownRole` when no array contract is declared for
+    /// `role`, else the first of `ArrayDtype`, `ArrayRank` or `ArrayAxes`.
+    pub fn check_array(&self, role: &str, spec: &ArraySpec) -> crate::Result<()> {
+        let contract = self
+            .arrays
+            .get(role)
+            .ok_or_else(|| ContractViolation::UnknownRole {
+                kind: BlockKind::Array,
+                role: role.to_owned(),
+            });
+        contract
+            .and_then(|c| c.check(role, spec))
+            .map_err(|violation| self.contract_error(violation))
+    }
+
+    fn contract_error(&self, violation: ContractViolation) -> crate::Error {
+        crate::Error::Contract {
+            product: self.product.clone(),
+            violation,
+        }
+    }
+
     /// Serialize to the JSON value **embedded in a sealed manifest** (`Manifest.schema`), so the
     /// `.tsra` carries its own contract (FAIR-Reusable) and the seal commits to it.
     pub fn to_value(&self) -> crate::Result<serde_json::Value> {
-        serde_json::to_value(self)
-            .map_err(|e| crate::Error::Invalid(format!("schema does not serialize: {e}")))
-    }
-
-    /// Parse an embedded schema JSON (from `Manifest.schema`) back into a typed `ProductSchema`.
-    pub fn from_value(v: &serde_json::Value) -> crate::Result<Self> {
-        serde_json::from_value(v.clone()).map_err(|e| {
-            crate::Error::Invalid(format!("embedded schema is not a ProductSchema: {e}"))
+        crate::canonical::to_json_value(self).map_err(|e| match e {
+            crate::Error::NonFiniteNumber { .. } => e,
+            e => crate::Error::Invalid(format!("schema does not serialize: {e}")),
         })
     }
+
+    /// Parse an embedded schema JSON (from `Manifest.schema`) back into a typed `ProductSchema`,
+    /// **refusing a rule this build doesn't model** (ADR-0060 §2.2, #873).
+    ///
+    /// The schema is walked against the declared field names of every type it is made of: the top
+    /// level, each `fields[i]` and `blocks[i]`, each `tables.<role>` with its `columns[i]` (and their
+    /// `referencing`, `transform` included), `references[i]` and `references[i].to`, and each
+    /// `arrays.<role>`. A key none of them declares is a rule from a newer format revision. The typed
+    /// schema would drop it, so validating against it, inheriting through it or re-emitting it would
+    /// silently ignore a rule the file declares: it is refused instead. Only keys count, never values:
+    /// a known key holding its default (`inherit: false`, `requires_generation: false`, `unit: null`)
+    /// is fine. `fields[i].default` is an opaque value and is never walked.
+    ///
+    /// # Errors
+    /// - [`crate::Error::Invalid`] if `v` is not a `ProductSchema`: a known key of the wrong type, or
+    ///   the schema or any record in it in array form instead of an object, or a name (`kind`,
+    ///   `order`, `sensitivity`) spelled as an object instead of a string (SPEC §4, one spelling per
+    ///   value: a positional array would hide its keys from the walk above; the message names its
+    ///   path).
+    /// - [`crate::Error::NewerFormatFields`] naming every unknown key by its path within the schema
+    ///   (`fields[0].pattern`, `tables.events.row_count_min`; rendered as
+    ///   [`crate::Manifest::newer_fields`] renders them).
+    pub fn from_value(v: &serde_json::Value) -> crate::Result<Self> {
+        Self::checked(v, &FieldPath::root())
+    }
+
+    /// [`from_value`](Self::from_value) for a schema found at `at`, which prefixes the paths of
+    /// its unknown keys structurally (`schema` + `fields[0].pattern`).
+    fn checked(v: &serde_json::Value, at: &FieldPath) -> crate::Result<Self> {
+        let (schema, newer) = Self::parse_view(v)?;
+        let newer: Vec<FieldPath> = newer.iter().map(|p| at.join(p)).collect();
+        crate::manifest::refuse_newer(&crate::field_path::render(&newer))?;
+        Ok(schema)
+    }
+
+    /// The typed **view** of an embedded schema plus the paths of every key it doesn't model
+    /// (the walk [`from_value`](Self::from_value) refuses on), for callers that only **display** the
+    /// schema: they show what this build understands and warn about the rest. Anything that acts on
+    /// the rules (validate, inherit, re-emit) uses [`from_value`](Self::from_value) instead; the view
+    /// silently lacks the newer rules.
+    ///
+    /// The paths are rendered as [`crate::Manifest::newer_fields`] renders them: a top-level key
+    /// named `tables.events.order` is `["tables.events.order"]`, never the declared `order`.
+    ///
+    /// # Errors
+    /// [`crate::Error::Invalid`] if `v` is not a `ProductSchema`, as in [`from_value`](Self::from_value)
+    /// (a known key of the wrong type, or a record in array form).
+    pub fn view_of(v: &serde_json::Value) -> crate::Result<(Self, Vec<String>)> {
+        let (schema, newer) = Self::parse_view(v)?;
+        Ok((schema, crate::field_path::render(&newer)))
+    }
+
+    /// [`view_of`](Self::view_of) with the newer-field paths still structured.
+    fn parse_view(v: &serde_json::Value) -> crate::Result<(Self, Vec<FieldPath>)> {
+        let newer = newer_fields_of(v);
+        let schema = crate::canonical::from_declared_form(v, &newer).map_err(|e| {
+            crate::Error::Invalid(format!("embedded schema is not a ProductSchema: {e}"))
+        })?;
+        Ok((schema, newer))
+    }
+}
+
+/// `object[key]`, or `null` when `object` has no such key (or is not an object).
+fn field<'a>(object: &'a serde_json::Value, key: &str) -> &'a serde_json::Value {
+    object.get(key).unwrap_or(&serde_json::Value::Null)
+}
+
+/// The paths of every key in a product-schema object that this build's types don't declare
+/// (see [`ProductSchema::from_value`]).
+fn newer_fields_of(v: &serde_json::Value) -> Vec<FieldPath> {
+    use crate::block::table::Column;
+    use crate::manifest::{unknown_keys, unknown_keys_each};
+    use crate::referencing::{Referenced, Transform};
+    let mut out = Vec::new();
+    let root = FieldPath::root();
+    unknown_keys(v, ProductSchema::FIELDS, &root, &mut out);
+    unknown_keys_each(
+        field(v, "fields"),
+        FieldSpec::FIELDS,
+        &root.key("fields"),
+        &mut out,
+    );
+    unknown_keys_each(
+        field(v, "blocks"),
+        BlockRequirement::FIELDS,
+        &root.key("blocks"),
+        &mut out,
+    );
+    if let Some(tables) = field(v, "tables").as_object() {
+        for (role, t) in tables {
+            let at = root.key("tables").key(role);
+            unknown_keys(t, TableContract::FIELDS, &at, &mut out);
+            let columns = at.key("columns");
+            unknown_keys_each(field(t, "columns"), Column::FIELDS, &columns, &mut out);
+            for (i, c) in field(t, "columns")
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let r = field(c, "referencing");
+                let at = columns.index(i).key("referencing");
+                unknown_keys(r, Referenced::FIELDS, &at, &mut out);
+                let tr = field(r, "transform");
+                let kind = field(tr, "kind").as_str().unwrap_or_default();
+                unknown_keys(tr, Transform::fields(kind), &at.key("transform"), &mut out);
+            }
+            let refs = at.key("references");
+            unknown_keys_each(
+                field(t, "references"),
+                ColumnReference::FIELDS,
+                &refs,
+                &mut out,
+            );
+            for (i, r) in field(t, "references")
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let to = refs.index(i).key("to");
+                unknown_keys(field(r, "to"), ReferenceTarget::FIELDS, &to, &mut out);
+            }
+        }
+    }
+    if let Some(arrays) = field(v, "arrays").as_object() {
+        for (role, a) in arrays {
+            let at = root.key("arrays").key(role);
+            unknown_keys(a, ArrayContract::FIELDS, &at, &mut out);
+        }
+    }
+    out
 }
 
 /// Validate a manifest against its **embedded** schema (self-describing) when present, else the
 /// built-in registry (legacy / open-world files). The embedded copy is authoritative — a sealed
 /// `.tsra` carries its own contract, so a reader validates what the file *declares*, not whatever
 /// schema version happens to be compiled into this binary.
+///
+/// # Errors
+/// [`crate::Error::Invalid`] naming the first violation, or an embedded schema that doesn't parse;
+/// [`crate::Error::NewerFormatFields`] when the embedded schema carries a rule this build doesn't
+/// model, named by its path in the manifest (`schema.fields[0].pattern`): a gate that can't
+/// evaluate a rule never reports "valid" ([`ProductSchema::from_value`]).
 pub fn validate_manifest(m: &Manifest) -> crate::Result<()> {
+    match declared_schema(m)? {
+        Some(schema) => schema.validate(m),
+        None => Ok(()),
+    }
+}
+
+/// The schema `m` answers to: its **embedded** one when present, else the built-in registry's for
+/// its product, else `None` (open-world). The embedded copy is parsed by
+/// [`ProductSchema::from_value`], so a rule this build doesn't model is refused rather than ignored.
+///
+/// # Errors
+/// [`crate::Error::Invalid`] for an embedded schema that isn't a `ProductSchema`;
+/// [`crate::Error::NewerFormatFields`] for one with a rule this build doesn't model, named by its
+/// path in the manifest (`schema.fields[0].pattern`).
+pub fn declared_schema(m: &Manifest) -> crate::Result<Option<ProductSchema>> {
     match &m.schema {
-        Some(v) => ProductSchema::from_value(v)?.validate(m),
-        None => SchemaRegistry::builtin().validate(m),
+        Some(v) => ProductSchema::checked(v, &FieldPath::root().key("schema")).map(Some),
+        None => Ok(SchemaRegistry::builtin().get(&m.product).cloned()),
     }
 }
 
@@ -399,6 +801,8 @@ fn schema(product: &str, version: &str, description: &str) -> ProductSchema {
         fields: Vec::new(),
         blocks: Vec::new(),
         requires_generation: false,
+        tables: BTreeMap::new(),
+        arrays: BTreeMap::new(),
     }
 }
 
@@ -440,6 +844,69 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                 "blob",
                 "1.0",
                 "Opaque preserved file — bytes stored bit-faithfully, not engine-parsed (the \"junk\" tier).",
+            )
+        },
+        // ── The two **generic-ingest** schemas (ADR-0056 §7). Named by *primitive*, not by source
+        //    format, because the primitive is what the product IS: the same `table` schema serves a
+        //    Parquet, an Arrow IPC file and a CSV, and nothing downstream needs to care which.
+        //
+        //    Permissive by the same argument that makes `blob` permissive: every field is
+        //    `recommended`, never `required`, so the door stays frictionless (normalise now, label
+        //    later) and the warn tier does the FAIR nudging. A generic ingest that *blocked* on
+        //    missing semantics would push users back onto `ingest blob`, which is the outcome
+        //    ADR-0056 exists to prevent.
+        //
+        //    These two are also the **laundering rule's** allowlist (ADR-0056 §7): a generic backend
+        //    may only produce a product in {table, array, blob}, enforced by the ingest engine, which
+        //    knows which backend it dispatched to. Without that, `ingest table events.csv --schema
+        //    listmode` would mint a `.tsra` byte-indistinguishable from a real vendor listmode
+        //    ingest, carrying PS3.15 `Identifying` tiers no classification pass ever validated.
+        ProductSchema {
+            fields: vec![
+                FieldSpec::recommended(
+                    "study",
+                    "Study / cohort / experiment this table belongs to (FAIR grouping)",
+                    "string",
+                ),
+                FieldSpec::recommended(
+                    "source_format",
+                    "Source format normalised at ingest (\"parquet\" | \"arrow\" | \"csv\" | …)",
+                    "string",
+                ),
+            ],
+            blocks: vec![one(
+                "data",
+                Some(Table),
+                "Normalised flat columnar table (Vortex-encoded at seal)",
+            )],
+            ..schema(
+                "table",
+                "1.0",
+                "A generically-ingested flat table — structural preservation, semantics still to be attached.",
+            )
+        },
+        ProductSchema {
+            fields: vec![
+                FieldSpec::recommended(
+                    "study",
+                    "Study / cohort / experiment this array belongs to (FAIR grouping)",
+                    "string",
+                ),
+                FieldSpec::recommended(
+                    "source_format",
+                    "Source format normalised at ingest (\"npy\" | \"npz\" | \"nifti\" | …)",
+                    "string",
+                ),
+            ],
+            blocks: vec![one(
+                "data",
+                Some(Array),
+                "Normalised dense N-D numeric grid (Zarr v3 + pcodec at seal)",
+            )],
+            ..schema(
+                "array",
+                "1.0",
+                "A generically-ingested dense N-D array — structural preservation, semantics still to be attached.",
             )
         },
         ProductSchema {
@@ -508,14 +975,21 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                     "string",
                 )
                 .inheritable(),
+                // Domain ranges (#895): only a physically impossible value is refused, naming the
+                // DICOM tag; never an unusual but real one. `kvp` is wide enough for every medical
+                // scanner (a negative or a megavolt tube is refused). `slice_thickness` has no
+                // maximum: DICOM sets none, and a CT localizer records its scan length there (GE
+                // Discovery MI scouts read 1000.6 and 1300.8 mm), so only a negative one is refused.
                 FieldSpec::recommended("kvp", "DICOM KVP (0018,0060), CT peak kilovoltage", "float64")
-                    .unit("kV"),
+                    .unit("kV")
+                    .range(0.0, 1000.0),
                 FieldSpec::recommended(
                     "slice_thickness",
                     "DICOM SliceThickness (0018,0050), nominal slice thickness",
                     "float64",
                 )
-                .unit("mm"),
+                .unit("mm")
+                .minimum(0.0),
                 FieldSpec::recommended(
                     "pixel_spacing",
                     "DICOM PixelSpacing (0028,0030), [row_spacing, col_spacing] in mm",
@@ -530,7 +1004,7 @@ fn builtin_schemas() -> Vec<ProductSchema> {
             )],
             ..schema(
                 "recon",
-                "1.0",
+                "1.1",
                 "A reconstructed image volume (CT/PET/μ-map).",
             )
         },
@@ -656,14 +1130,16 @@ fn builtin_schemas() -> Vec<ProductSchema> {
                     "Simulation toolkit (e.g. GATE/Geant4)",
                     "string",
                 ),
-                FieldSpec::optional("seed", "RNG seed for reproducibility", "int64"),
+                // A seed is a full 64-bit integer, beyond what a sealed JSON number holds exactly, so
+                // it is a decimal string by type (#895): `"seed": "42"`.
+                FieldSpec::optional("seed", "RNG seed for reproducibility", "int64").string_encoded(),
             ],
             blocks: vec![one(
                 "output",
                 None,
                 "Simulation output (hits table or scored volume)",
             )],
-            ..schema("sim", "1.0", "Monte-Carlo simulation output.")
+            ..schema("sim", "1.1", "Monte-Carlo simulation output.")
         },
         ProductSchema {
             fields: vec![
@@ -763,6 +1239,153 @@ mod tests {
     use crate::block::array::{ArrayBlock, ArraySpec};
     use crate::ProductBuilder;
 
+    /// A fixed acquisition timestamp — identity is content-derived, so every test that seals needs
+    /// one that never comes from the clock.
+    const TS: &str = "2024-01-01T00:00:00Z";
+
+    /// Every declared-field list of the schema walk equals the keys a fully populated instance
+    /// writes. The struct literals name every field (no `..`), so adding a field to any of these
+    /// types fails to compile here until the walk learns it (ADR-0060 §2.2, #873).
+    #[test]
+    fn schema_declared_fields_match_fully_populated_instances() {
+        use crate::block::table::Column;
+        use crate::referencing::{Referenced, Transform};
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let sorted = |f: &[&str]| {
+            let mut k: Vec<String> = f.iter().map(|s| s.to_string()).collect();
+            k.sort();
+            k
+        };
+        let s = |x: &str| Some(x.to_string());
+        let column = Column {
+            name: "t".into(),
+            dtype: "u8".into(),
+            codec: s("pco"),
+            short_name: s("t"),
+            description: s("time"),
+            unit: s("ps"),
+            scale: Some(2.0),
+            nullable: true,
+            referencing: Some(Referenced {
+                transform: Transform::Identity,
+                unit: s("s"),
+                vocabulary: s("UCUM"),
+                frame: s("epoch"),
+            }),
+            sensitivity: Sensitivity::Coded,
+            optional: true,
+        };
+        let reference = ColumnReference {
+            columns: vec!["t".into()],
+            to: ReferenceTarget {
+                scope: ReferenceScope::Block,
+                block: "b".into(),
+                columns: vec!["t".into()],
+            },
+            note: s("n"),
+        };
+        let table = TableContract {
+            columns: vec![column],
+            sequence_key: vec!["t".into()],
+            order: TableOrder::Producer,
+            keys: vec![vec!["t".into()]],
+            references: vec![reference],
+        };
+        let array = ArrayContract {
+            dtype: "float32".into(),
+            rank: 2,
+            axes: vec!["y".into(), "x".into()],
+            unit: s("1"),
+        };
+        let schema = ProductSchema {
+            product: "p".into(),
+            version: "1".into(),
+            description: "d".into(),
+            fields: vec![FieldSpec {
+                id: "f".into(),
+                description: "d".into(),
+                dtype: "string".into(),
+                encoding: Some(Encoding::String),
+                minimum: Some(0.0),
+                maximum: Some(1.0),
+                unit: s("mm"),
+                vocabulary: s("DICOM"),
+                default: Some(serde_json::json!("x")),
+                required: true,
+                recommended: true,
+                sensitivity: Sensitivity::Identifying,
+                inherit: true,
+            }],
+            blocks: vec![BlockRequirement {
+                role: "r".into(),
+                kind: Some(BlockKind::Table),
+                min_count: 1,
+                description: "d".into(),
+            }],
+            requires_generation: true,
+            tables: BTreeMap::from([("events".to_string(), table)]),
+            arrays: BTreeMap::from([("map".to_string(), array)]),
+        };
+        let v = schema.to_value().unwrap();
+        let t = &v["tables"]["events"];
+        let c = &t["columns"][0];
+        assert_eq!(keys(&v), sorted(ProductSchema::FIELDS));
+        assert_eq!(keys(&v["fields"][0]), sorted(FieldSpec::FIELDS));
+        assert_eq!(keys(&v["blocks"][0]), sorted(BlockRequirement::FIELDS));
+        assert_eq!(keys(t), sorted(TableContract::FIELDS));
+        assert_eq!(keys(c), sorted(Column::FIELDS));
+        assert_eq!(keys(&c["referencing"]), sorted(Referenced::FIELDS));
+        assert_eq!(keys(&t["references"][0]), sorted(ColumnReference::FIELDS));
+        assert_eq!(
+            keys(&t["references"][0]["to"]),
+            sorted(ReferenceTarget::FIELDS)
+        );
+        assert_eq!(keys(&v["arrays"]["map"]), sorted(ArrayContract::FIELDS));
+        let coded = serde_json::to_value(Coded {
+            vocabulary: "v".into(),
+            code: "c".into(),
+            label: s("l"),
+        })
+        .unwrap();
+        assert_eq!(keys(&coded), sorted(Coded::FIELDS));
+        // Each transform variant (an exhaustive match, so a new variant must be listed).
+        for tr in [
+            Transform::Identity,
+            Transform::Affine1d {
+                slope: 1.0,
+                intercept: 0.0,
+            },
+            Transform::Log {
+                ln_lo: 0.0,
+                ln_step: 1.0,
+            },
+            Transform::AffineNd {
+                dims: 1,
+                matrix: vec![1.0, 0.0],
+            },
+            Transform::Lookup { values: vec![1.0] },
+        ] {
+            match tr {
+                Transform::Identity
+                | Transform::Affine1d { .. }
+                | Transform::Log { .. }
+                | Transform::AffineNd { .. }
+                | Transform::Lookup { .. } => {}
+            }
+            let tv = serde_json::to_value(&tr).unwrap();
+            assert_eq!(
+                keys(&tv),
+                sorted(Transform::fields(tv["kind"].as_str().unwrap()))
+            );
+        }
+        assert!(newer_fields_of(&v).is_empty());
+        assert_eq!(ProductSchema::from_value(&v).unwrap(), schema);
+    }
+
     #[test]
     fn registry_has_all_builtins() {
         let r = SchemaRegistry::builtin();
@@ -782,10 +1405,12 @@ mod tests {
             "multicontrast_mri",
             "deformation_field", // ADR-0030 §5 deformable registration carrier
             "blob",              // ADR-0038 opaque preservation tier
+            "table",             // ADR-0056 §7 generic ingest — the table primitive
+            "array",             // ADR-0056 §7 generic ingest — the array primitive
         ] {
             assert!(r.get(p).is_some(), "missing built-in schema '{p}'");
         }
-        assert_eq!(r.products().count(), 14);
+        assert_eq!(r.products().count(), 16);
     }
 
     #[test]
@@ -812,6 +1437,9 @@ mod tests {
                 }],
                 rows: 1,
                 row_index: None,
+                partition: None,
+                edition: None,
+                codec_profile: None,
             },
         );
         let mut b = ProductBuilder::new("roi", "roi-b", "sphere ROI", "2024-01-01T00:00:00Z");
@@ -883,6 +1511,9 @@ mod tests {
                 }],
                 rows: 4,
                 row_index: None,
+                partition: None,
+                edition: None,
+                codec_profile: None,
             },
         );
         // volume alone → rejected (frame_timing table required)
@@ -935,6 +1566,9 @@ mod tests {
                 }],
                 rows: 4,
                 row_index: None,
+                partition: None,
+                edition: None,
+                codec_profile: None,
             },
         );
         let mut b = ProductBuilder::new("dynamic_pet", "DP", "d", "2024-01-01T00:00:00Z");
@@ -995,9 +1629,10 @@ mod tests {
         // not required), yet surfaced as a recommendation (the warn tier).
         let mut b = ProductBuilder::new("blob", "junk", "d", "2024-01-01T00:00:00Z");
         b.add_block_ref(crate::block::BlockRef {
-            name: "data".into(),
+            name: "data".parse().unwrap(),
             kind: crate::block::BlockKind::Blob,
             digest: Some("blake3:00".into()),
+            class: crate::block::BlockClass::Primary,
             spec: serde_json::json!({"filename": "x.l64", "size": 1}),
         });
         let m = b.seal().unwrap();
@@ -1007,7 +1642,7 @@ mod tests {
         assert_eq!(missing[0].id, "study");
 
         // supplying it (what `--meta study=…` does) clears the recommendation.
-        let mut b2 = ProductBuilder::from_manifest(&m);
+        let mut b2 = ProductBuilder::from_manifest(&m).unwrap();
         b2.with_field("study", serde_json::json!("DUPLET-07"));
         let m2 = b2.seal().unwrap();
         assert!(r.missing_recommended(&m2).is_empty());
@@ -1183,6 +1818,49 @@ mod tests {
             .is_empty());
     }
 
+    /// The book's product-schema reference (#389) is GENERATED from this registry, so it cannot be
+    /// allowed to drift: a schema gaining a required field must show up on the published page in the same
+    /// commit. This asserts the committed copy still matches what the generator emits.
+    ///
+    /// Regenerate with
+    /// `cd tessera && cargo run -q -p tessera-core --example schema_reference > tests/derived-docs/schema-reference.md`.
+    ///
+    /// The comparison lives in a *test* rather than in the `derived-docs` gate because that gate runs in a
+    /// nix sandbox with no cargo on PATH — a cargo-backed marker command cannot work there.
+    #[test]
+    fn schema_reference_matches_the_committed_copy() {
+        // The example is the single renderer; re-running it here would duplicate the format, so the test
+        // shells out to it exactly as the regenerate command does.
+        let out = std::process::Command::new(env!("CARGO"))
+            .args([
+                "run",
+                "-q",
+                "-p",
+                "tessera-core",
+                "--example",
+                "schema_reference",
+            ])
+            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .output()
+            .expect("run the schema_reference example");
+        assert!(
+            out.status.success(),
+            "generator failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let generated = String::from_utf8(out.stdout).expect("utf-8");
+        let committed = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/derived-docs/schema-reference.md"
+        ))
+        .expect("the committed reference must exist");
+        assert_eq!(
+            generated.trim_end(),
+            committed.trim_end(),
+            "the committed product-schema reference is out of date — regenerate it (see this test's docs)"
+        );
+    }
+
     /// ADR-0058 §3: the "needs a recipe" rule is schema data — a schema with `requires_generation`
     /// blocks a product carrying no (or an empty) generation record, and accepts one with a config.
     /// A schema that does not opt in never blocks (the permissive back-compat default).
@@ -1209,5 +1887,95 @@ mod tests {
         let permissive = schema("daq", "1", "a DAQ product");
         let bare = Manifest::new("daq", "y", "d", ts);
         assert!(permissive.validate(&bare).is_ok(), "default is permissive");
+    }
+
+    /// ADR-0056 §7: the two generic-ingest schemas are **permissive** — a product carrying nothing
+    /// but its one block validates. That is the load-bearing property: a generic ingest that blocked
+    /// on absent semantics would push users back onto `ingest blob`, which is the outcome ADR-0056
+    /// exists to prevent. The FAIR nudge is the warn tier instead.
+    #[test]
+    fn generic_ingest_schemas_are_permissive_and_nudge_rather_than_block() {
+        use crate::block::table::{Column, TableBlock, TableSpec};
+        let r = SchemaRegistry::builtin();
+
+        let t = TableBlock::new(
+            "data",
+            TableSpec {
+                columns: vec![Column::new("x", "f8")],
+                rows: 3,
+                row_index: None,
+                partition: None,
+                edition: None,
+                codec_profile: None,
+            },
+        );
+        let mut b = ProductBuilder::new("table", "t-01", "a parquet someone handed us", TS);
+        b.add_block(&t).unwrap();
+        let m = b.seal().unwrap();
+        r.validate(&m).expect("a bare generic table validates");
+
+        let a = ArrayBlock::new("data", ArraySpec::new(vec![4, 4], "float32"));
+        let mut b = ProductBuilder::new("array", "a-01", "an npy someone handed us", TS);
+        b.add_block(&a).unwrap();
+        let ma = b.seal().unwrap();
+        r.validate(&ma).expect("a bare generic array validates");
+
+        // …but both nudge: `study` and `source_format` are recommended, so the warn tier fires.
+        for m in [&m, &ma] {
+            let missing: Vec<&str> = r
+                .missing_recommended(m)
+                .iter()
+                .map(|f| f.id.as_str())
+                .collect();
+            assert_eq!(missing, vec!["study", "source_format"]);
+        }
+
+        // Neither requires a recipe — `ingest_decoder` is recorded because the engine derives it,
+        // not because a schema compels it (ADR-0056 §6a: "require the key" is a separate, unbuilt
+        // mechanism; until it exists a generic product must not be blocked for lacking one).
+        assert!(!r.get("table").unwrap().requires_generation);
+        assert!(!r.get("array").unwrap().requires_generation);
+    }
+
+    /// The block *kind* is what the generic schemas pin: a `table` product whose only block is an
+    /// array is not a `table` product. This is what stops `--from`/verb confusion producing a
+    /// mislabelled artifact.
+    #[test]
+    fn generic_schemas_pin_the_block_kind() {
+        let r = SchemaRegistry::builtin();
+        let a = ArrayBlock::new("data", ArraySpec::new(vec![2, 2], "int16"));
+        let mut b = ProductBuilder::new("table", "wrong", "an array claiming to be a table", TS);
+        b.add_block(&a).unwrap();
+        let err = r.validate(&b.seal().unwrap()).unwrap_err().to_string();
+        assert!(err.contains("table") && err.contains("Table"), "got {err}");
+    }
+
+    /// ADR-0056 §6.3 / §7: `Unknown` is reachable, serialises as `"unknown"`, and — the part that
+    /// matters for the corpus — is **not** the serde default, so every schema written before it
+    /// existed still deserialises to `Public`.
+    #[test]
+    fn unknown_sensitivity_is_opt_in_and_public_stays_the_default() {
+        assert_eq!(Sensitivity::default(), Sensitivity::Public);
+        assert_eq!(
+            serde_json::to_string(&Sensitivity::Unknown).unwrap(),
+            r#""unknown""#
+        );
+        // A FieldSpec written before the variant existed (no `sensitivity` key) is still Public.
+        let f: FieldSpec =
+            serde_json::from_str(r#"{"id":"x","description":"d","dtype":"string"}"#).unwrap();
+        assert_eq!(f.sensitivity, Sensitivity::Public);
+        // And the tier query finds it, so `verify --require-classified` has something to select on.
+        let s = ProductSchema {
+            fields: vec![FieldSpec::optional("c", "an unclassified column", "string")
+                .with_sensitivity(Sensitivity::Unknown)],
+            ..schema("g", "1", "generic")
+        };
+        assert_eq!(
+            s.fields_by_sensitivity(Sensitivity::Unknown)
+                .iter()
+                .map(|f| f.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
     }
 }

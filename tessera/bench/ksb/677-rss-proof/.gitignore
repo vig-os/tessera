@@ -1,0 +1,2 @@
+# run.py --out DIR evaluate, run locally, leaves its bytecode here.
+__pycache__/

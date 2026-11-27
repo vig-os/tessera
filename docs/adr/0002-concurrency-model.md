@@ -32,7 +32,7 @@ actually built (P1–P6), a simpler model proved sufficient and was adopted.
    serves an S3 / HTTP object as-is; `open_url` is the convenience entry. A 64 KiB **tail
    prefetch** strips the EOCD/central-directory GETs from open (verified by `get_count`), and a
    `LogicalTableView::select_blocks_overlapping` query that misses a product's stat range never
-   fetches that product's data block — proven by the cohort test against MinIO. Originally
+   fetches that product's data block — proven by the cohort test against a real S3 server (versitygw). Originally
    "deferred", as predicted: an additive async **variant** behind the unchanged sync public API,
    not a rewrite.
 
@@ -53,7 +53,7 @@ actually built (P1–P6), a simpler model proved sufficient and was adopted.
   encode — deferred to the ADR-0026 fork and the runtime/parallel/wasm definition in **ADR-0034** (#224).
 - Cloud/object-store range-reads landed as the additive `cloud` feature (`tessera_io::cloud`),
   per the revision note above. The local `range::CountingReader` proof carried over to the wire
-  via the `minio-range-read` flake check; the cohort prune-before-fetch extension is the vision
+  via the `s3-range-read` flake check; the cohort prune-before-fetch extension is the vision
   capstone (cross-product prune over S3).
 - Rayon-based parallel encode (a perf optimization) can be added inside the codecs later without
   affecting the API.

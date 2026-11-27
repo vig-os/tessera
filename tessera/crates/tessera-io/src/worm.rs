@@ -5,7 +5,7 @@
 //!
 //! This module is the **format-side contract**: a [`RetentionPolicy`] (retain-until + mode) plus a
 //! [`guard_mutation`] check the storage layer calls before any overwrite/delete. The *enforcement
-//! substrate* is the backend: object-lock on S3/MinIO (the canonical WORM store) honours the same policy
+//! substrate* is the backend: object-lock on S3 (the canonical WORM store) honours the same policy
 //! at the bucket; a local filesystem store uses this guard directly. The policy is **store-don't-compute
 //! metadata** — recorded beside the product, not hashed into identity (retention is a storage attribute,
 //! not part of *what the product is*).
@@ -102,7 +102,7 @@ pub fn retention_path(product: &Path) -> PathBuf {
 }
 
 /// Place a WORM **hold** on a product: persist its [`RetentionPolicy`] beside it (`<file>.retention.json`).
-/// The local-filesystem WORM backend; on S3/MinIO the same policy is written as Object-Lock retention,
+/// The local-filesystem WORM backend; on S3 the same policy is written as Object-Lock retention,
 /// which the bucket enforces natively. Additive — the product bytes are untouched.
 pub fn write_retention(product: &Path, policy: &RetentionPolicy) -> Result<()> {
     let json = serde_json::to_vec_pretty(policy).map_err(|e| Error::Container(e.to_string()))?;

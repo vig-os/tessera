@@ -21,6 +21,11 @@ Supported readers (all lossless, native dtype):
 - **blob** — any file stored **verbatim** for bit-faithful preservation (see [Anatomy](./format-anatomy.md));
   `tessera extract` returns the exact bytes back, digest-verified.
 
+Holding a Parquet, Arrow, CSV or NumPy file rather than a vendor acquisition? Those reach the *same*
+primitives through `ingest table` / `ingest array` — see
+[Ingesting your own data](./ingest-your-own-data.md). `blob` is the fallback for what cannot be
+normalised, not the answer for everything non-vendor.
+
 A **declarative spec** (`ingest --spec <toml>`) drives a multi-dataset ingest (raw + derived products +
 a study collection) through one format-tagged engine (ADR-0035), rather than bespoke code per dataset.
 

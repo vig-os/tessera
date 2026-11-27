@@ -1,0 +1,17 @@
+## A′: does json.dumps(sort_keys, compact) equal JCS?
+13 corpus manifests: 13/13 identical
+  1e-07                        json.dumps '1e-07'                  JCS '1e-7'
+  1.0                          json.dumps '1.0'                    JCS '1'
+  -0.0                         json.dumps '-0.0'                   JCS '0'
+
+## B: does cbor2.dumps (default, not canonical=True) equal the profile bytes?
+13 corpus manifests, default cbor2.dumps: 13/13 identical
+13 corpus manifests, cbor2.dumps(canonical=True): 13/13 identical
+  1.5                default fb3ff8000000000000   canonical f93e00
+  1.0                default fb3ff0000000000000   canonical f93c00
+  100000.0           default fb40f86a0000000000   canonical fa47c35000
+  0.1                default fb3fb999999999999a   canonical fb3fb999999999999a
+  {'bb': 1, 'c': 2}  default a262626201616302     canonical a261630262626201
+
+## B: smuggling past a library-only Python reader (trailing bytes after the item)
+cbor2.loads(manifest + extra item) → accepted, 16 sealed bytes never seen; name = 'recon-int16'

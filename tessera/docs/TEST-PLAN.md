@@ -22,7 +22,7 @@ The benchmarks (fd5 #192/#193/#194 + this spike) are the *performance* guard; th
 | `merkle_root_order_sensitive` | reordering block digests changes the root | hash |
 | `id_stable_and_distinct` | same identity inputs → same id; different → different | identity |
 | `id_timestamp_normalised` | `…T00:00:00`, `…+00:00`, `…+01:00`(same instant) → ONE id (RFC3339/UTC) | identity |
-| `manifest_json_roundtrip_proptest` | `from_json(to_json(m)) == m` over arbitrary manifests | manifest |
+| `manifest_json_roundtrip_proptest` | `from_stored(to_stored(m)) == m` over arbitrary manifests | manifest |
 | `seal_idempotent` | two identical builds → byte-equal id + content_hash + JSON | product |
 | `seal_immutability_invariants` | post-seal: content_hash set, blocks==refs, no `None` digest | product |
 | `seal_rejects_missing_block_digest` | a block with no digest fails `seal()` (no silent drop) | product |
@@ -86,6 +86,27 @@ The benchmarks (fd5 #192/#193/#194 + this spike) are the *performance* guard; th
 13. **Fill-value polymorphism** — `0` ≠ `null` ≠ dtype-default; for CT, `0` HU ≠ air `-1024`.
 14. **Empty-digest collapse in `seal()`** — a `None` digest silently dropped from the Merkle root; require it.
 15. **LZ4 has 3 framings** — if ever offered, name the framing explicitly in the codec field.
+
+## Where the tests run
+
+The flake checks that run tessera's tests through cargo (`workspace-test`, `workspace-doctest`, `sql-tests`,
+`s3-range-read`, `seal-profile-determinism` and the `ingest-gate-a*` gates) put `TMPDIR` on a RAM fs, `/dev/shm`, on
+Linux (`withRamTmpdir` in `flake.nix`, #793). A `WriteSession` fsyncs the fragment, its directory and the journal on
+every commit (#695), so a test that commits hundreds of blocks issues more than a thousand fsyncs. On a disk shared with
+other builds (a ksb CI pod's `/nix` volume) each one waits behind other writers, and two tessera-io tests that take
+0.97 s and 0.07 s on tmpfs ran for more than 3,240 s and 840 s. The tests check logic and the order of those fsyncs, not
+disk speed. Batching commits under one journal fsync is a product change, #798.
+
+Each protected check fails before its tests run if its `TMPDIR` isn't on tmpfs or ramfs or has less than 256 MiB free
+(twice `workspace-test`'s measured 106.5 MiB peak, rounded up), and removes the directory when it ends, passed or failed
+(a build Nix kills, on a timeout or a cancelled job, runs no hooks, so its directory stays until the CI pod, which lives
+for one job, ends). The flake fails evaluation for a check that runs cargo test, nextest run, cargo run, cargo bench or
+llvm-cov without the helper. The `ram-tmpdir-guard` check proves that the assertion rejects `/proc` (procfs), that the
+space check rejects a filesystem below its floor, and that the removal stays after the exit and failure hooks a check
+adds through `ram_tmpdir_add_hooks`, even when the check fails right after adding them; a protected check that appends
+to those arrays directly fails evaluation. Checks that run tessera through Python or the CLI binary rather than cargo
+keep the build's `TMPDIR`; their fsync counts aren't measured yet (#865). Darwin has no `/dev/shm`, so there the checks
+keep the build's own `TMPDIR`.
 
 ## Tooling
 - `proptest` (roundtrip + stats properties) · `cargo-fuzz` + `arbitrary` (parser) · golden fixtures under

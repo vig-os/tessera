@@ -1,0 +1,59 @@
+{
+  "product": "gpet-sim:crystal-map",
+  "version": "2.0",
+  "description": "Scanner crystal map: centre, orientation and GDML volume per crystal_id.",
+  "fields": [
+    {
+      "id": "crystal_size_axial_mm",
+      "description": "Crystal size along the axial axis",
+      "dtype": "float64",
+      "unit": "mm",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "crystal_size_tangential_mm",
+      "description": "Crystal size along the tangential axis",
+      "dtype": "float64",
+      "unit": "mm",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "crystal_size_radial_mm",
+      "description": "Crystal size along the radial axis",
+      "dtype": "float64",
+      "unit": "mm",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "scanner_axial_axis",
+      "description": "Scanner axial axis in the world frame: x | y | z",
+      "dtype": "string",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    },
+    {
+      "id": "n_crystals",
+      "description": "Number of crystals",
+      "dtype": "int64",
+      "required": true,
+      "recommended": false,
+      "sensitivity": "public"
+    }
+  ],
+  "blocks": [
+    {
+      "role": "crystals",
+      "kind": "table",
+      "min_count": 1,
+      "description": "One row per crystal"
+    }
+  ],
+  "requires_generation": false
+}

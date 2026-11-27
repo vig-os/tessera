@@ -1,0 +1,21 @@
+# Spike #897 prototypes: NOT product code and NOT a member of the tessera workspace.
+# The empty [workspace] table keeps cargo from attaching this crate to any parent workspace.
+[package]
+name = "seal-encoding-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# Option A = tessera-core exactly as PR #894 (I-JSON integers, alpha.6) ships it, pinned by commit.
+tessera-core = { git = "https://github.com/vig-os/tessera", rev = "ea2e47aeafe4a509ef3206e0e6f6d90882031945" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_jcs = "0.2.0"
+blake3 = "1"
+zip = { version = "9", default-features = false }
+# Option B library probes: does the library's own decoder refuse non-deterministic CBOR?
+minicbor = { version = "2.3.1", features = ["std", "half"] }
+cbor4ii = { version = "1.2.5", features = ["use_std", "serde1"] }
+serde = "1"

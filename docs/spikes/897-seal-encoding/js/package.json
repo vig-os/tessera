@@ -1,0 +1,11 @@
+{
+  "name": "seal-encoding-spike-js",
+  "private": true,
+  "type": "module",
+  "description": "Spike #897 reader agreement, JavaScript side",
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "canonicalize": "5.1.0",
+    "cbor-x": "1.6.9"
+  }
+}

@@ -1,0 +1,82 @@
+# A three-hop chain in one file: the DAQ config that drove the acquisition, the listmode it produced,
+# and the reconstruction derived from that. Each hop records WHO made it and HOW (ADR-0058 §1/§2), and
+# `derived_from` pins the parent's seal — so `tessera provenance` can walk it and say what it proved.
+[collection]
+name = "provenance-walk"
+description = "config -> listmode -> recon, each hop pinned"
+timestamp = "2024-01-01T00:00:00Z"
+study = "DEMO-2024-01"
+
+# Hop 1: the vendor config, preserved bit-faithfully as a Blob (ADR-0038). `config_ref` below points
+# at THIS product's carried block, which is what `inspect --resolve-config` dereferences.
+[[product]]
+name = "daq-config"
+role = "raw"
+schema = "blob"
+format = "blob"
+input = "daq.cfg"
+# ADR-0040: a clean label keeps the (often PHI-bearing) input path out of the sealed manifest.
+source_label = "daq.cfg"
+media_type = "text/plain"
+
+[product.metadata]
+study = "DEMO-2024-01"
+
+[product.producer]
+tool = "ge-listmode-daq"
+version = "3.2"
+git_repo = "vig-os/ge-daq"
+git_commit = "0855f5f"
+dirty = false
+
+# ADR-0058 §2: instead of copying the settings inline, point at the config block this product already
+# carries. The digest is the Blob's own `blake3(bytes)`, so a producer can compute it from the file
+# before sealing. `inspect --resolve-config` dereferences it back to the text.
+[product.generation]
+config_ref = "blake3:b1ab9e2dd8744279805a000f73ca5a213f306a336cfbcf4ceb43c9338a764046"
+
+# Hop 2: the acquisition itself, derived from the config that configured it.
+[[product]]
+name = "daq-raw"
+role = "raw"
+schema = "blob"
+format = "blob"
+input = "raw.l64"
+source_label = "raw.l64"
+derived_from = ["daq-config"]
+
+[product.metadata]
+study = "DEMO-2024-01"
+
+[product.producer]
+tool = "ge-listmode-daq"
+version = "3.2"
+git_commit = "0855f5f"
+
+[product.generation.config]
+coincidence_window_ns = 4.5
+energy_window_keV = "425-650"
+
+# Hop 3: the reconstruction. This is the product an analyst is handed, and the one whose provenance
+# they need to walk back to the acquisition.
+[[product]]
+name = "recon-01"
+role = "derived"
+schema = "blob"
+format = "blob"
+input = "vol.bin"
+source_label = "vol.bin"
+derived_from = ["daq-raw"]
+
+[product.metadata]
+study = "DEMO-2024-01"
+
+[product.producer]
+tool = "vig-recon"
+version = "1.4"
+git_commit = "beac041"
+
+[product.generation.config]
+algorithm = "OSEM"
+iterations = 4
+subsets = 16

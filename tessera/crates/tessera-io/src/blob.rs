@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use tessera_core::block::blob::BlobSpec;
-use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::block::{BlockKind, BlockName, BlockRef};
 use tessera_core::{Error, Result};
 
 use crate::BlockPayload;
@@ -22,6 +22,7 @@ pub fn blob_block(
     media_type: Option<&str>,
     bytes: Vec<u8>,
 ) -> Result<(BlockRef, BlockPayload)> {
+    let name = BlockName::new(name)?;
     let size =
         u64::try_from(bytes.len()).map_err(|_| Error::Invalid("blob: size exceeds u64".into()))?;
     let mut spec = BlobSpec::new(filename, size);
@@ -30,10 +31,11 @@ pub fn blob_block(
     }
     let digest = tessera_core::hash::digest(&bytes);
     let block_ref = BlockRef {
-        name: name.to_string(),
+        name: name.clone(),
         kind: BlockKind::Blob,
         digest: Some(digest),
-        spec: serde_json::to_value(&spec)?,
+        class: tessera_core::block::BlockClass::Primary,
+        spec: tessera_core::canonical::to_json_value(&spec)?,
     };
     Ok((block_ref, BlockPayload::new(name, bytes)))
 }
@@ -56,6 +58,7 @@ pub fn blob_ref_streaming(
     media_type: Option<&str>,
     path: &std::path::Path,
 ) -> Result<BlockRef> {
+    let name = BlockName::new(name)?;
     let file = std::fs::File::open(path).map_err(Error::from)?;
     let size = file.metadata().map_err(Error::from)?.len();
     let digest =
@@ -65,10 +68,11 @@ pub fn blob_ref_streaming(
         spec = spec.with_media_type(mt);
     }
     Ok(BlockRef {
-        name: name.to_string(),
+        name,
         kind: BlockKind::Blob,
         digest: Some(digest),
-        spec: serde_json::to_value(&spec)?,
+        class: tessera_core::block::BlockClass::Primary,
+        spec: tessera_core::canonical::to_json_value(&spec)?,
     })
 }
 
@@ -78,7 +82,7 @@ pub fn blob_ref_streaming(
 ///
 /// Uses blake3's native [`blake3::Hasher::update_mmap_rayon`] — it memory-maps the **whole file** and
 /// hands the entire mapping to the tree-parallel hasher in one call, so blake3 splits the full Merkle
-/// tree across **all** cores at once (no per-chunk serialization, no read/hash alternation, no manual
+/// tree across the budgeted private pool (no per-chunk serialization, no read/hash alternation, no manual
 /// buffering). The mapping is **demand-paged**, so peak RSS stays bounded — the OS pages the file in as
 /// blake3 walks it; we never `malloc` the file. blake3 reads small files normally instead of mmapping.
 /// Throughput on a CPU-bound multi-GB hash scales near-linearly with cores until the disk read rate is
@@ -90,7 +94,10 @@ pub fn blob_ref_streaming(
 /// [`blob_ref_streaming_parallel`]. Identical digest, just faster.
 pub fn digest_file_parallel(path: &Path) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
-    hasher.update_mmap_rayon(path).map_err(Error::from)?;
+    crate::parallel::install(|| {
+        hasher.update_mmap_rayon(path).map_err(Error::from)?;
+        Ok(())
+    })?;
     Ok(format!("blake3:{}", hasher.finalize().to_hex()))
 }
 
@@ -112,6 +119,7 @@ pub fn blob_ref_streaming_parallel(
     media_type: Option<&str>,
     path: &Path,
 ) -> Result<BlockRef> {
+    let name = BlockName::new(name)?;
     let size = std::fs::metadata(path).map_err(Error::from)?.len();
     let digest = digest_file_parallel(path)?;
     let mut spec = BlobSpec::new(filename, size);
@@ -119,10 +127,11 @@ pub fn blob_ref_streaming_parallel(
         spec = spec.with_media_type(mt);
     }
     Ok(BlockRef {
-        name: name.to_string(),
+        name,
         kind: BlockKind::Blob,
         digest: Some(digest),
-        spec: serde_json::to_value(&spec)?,
+        class: tessera_core::block::BlockClass::Primary,
+        spec: tessera_core::canonical::to_json_value(&spec)?,
     })
 }
 

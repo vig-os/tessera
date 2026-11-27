@@ -15,7 +15,7 @@ OK  ../../corpus/files/multiblock_study.tsra verified (2 blocks)
 
 ```
 $ tessera schema ../../corpus/files/multiblock_study.tsra
-product 'recon' — embedded schema v1.0 (A reconstructed image volume (CT/PET/μ-map).)
+product 'recon' — embedded schema v1.1 (A reconstructed image volume (CT/PET/μ-map).)
 fields (13 declared):
   ● modality               required     coded       = "CT"
   · rescale_slope          optional     public      —
@@ -41,7 +41,7 @@ $ tessera tree ../../corpus/files/multiblock_study.tsra
 multiblock_study.tsra  ·  product=recon · schema=recon✓ · sealed
 ├── meta
 │   └── modality = "CT"
-├── schema  (recon v1.0)
+├── schema  (recon v1.1)
 │   ├── modality               required · coded
 │   ├── rescale_slope          optional · public
 │   ├── rescale_intercept      optional · public
@@ -57,7 +57,7 @@ multiblock_study.tsra  ·  product=recon · schema=recon✓ · sealed
 │   └── pixel_spacing          recommended · public
 ├── volume             array  int16  [16, 16, 16]  pcodec   blake3:6620c9be2959…
 │   └── chunks [64, 64, 64]
-├── roi                table  2 cols × 8 rows   blake3:827e49afe82b…
+├── roi                table  2 cols × 8 rows   blake3:b6a6a8cb8f2f…
 │   ├── label      u4
 │   └── volume_ml  f4
 ├── sources

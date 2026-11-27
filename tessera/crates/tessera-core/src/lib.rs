@@ -16,20 +16,28 @@ pub mod collection;
 pub mod dtype;
 pub mod error;
 pub mod export;
+pub(crate) mod field_path;
 pub mod hash;
 pub mod identity;
 pub mod manifest;
+pub mod names;
+pub mod object_kind;
 pub mod product;
 pub mod provenance;
 pub mod referencing;
 pub mod schema;
 pub mod signing;
+pub mod stored;
+pub mod threads;
 
 pub use collection::{Collection, CollectionBuilder, CollectionMember, Role};
 pub use error::{Error, Result};
 pub use manifest::Manifest;
+pub use object_kind::ObjectKind;
 pub use product::ProductBuilder;
-pub use provenance::{inherit_identity, Generation, Producer, ProducerRef, Source};
+pub use provenance::{
+    inherit_identity, Generation, IngestTransform, Producer, ProducerRef, Source,
+};
 pub use schema::{validate_manifest, ProductSchema, SchemaRegistry};
 
 #[cfg(test)]
@@ -75,8 +83,10 @@ mod tests {
         let mut b = ProductBuilder::new("recon", "rt", "round-trip", "2024-01-01T00:00:00Z");
         b.add_block(&vol).unwrap();
         let m = b.seal().unwrap();
-        // Persisted as JSON, re-read, the seal must reproduce byte-for-byte and verify.
-        let parsed = Manifest::from_json_verified(&m.to_json().unwrap()).unwrap();
+        // Stored, re-read, the seal must reproduce byte-for-byte and verify.
+        let (bytes, seal) = m.to_stored().unwrap();
+        assert_eq!(Some(&seal), m.manifest_hash.as_ref());
+        let parsed = Manifest::from_stored(&bytes, &seal).unwrap();
         assert_eq!(parsed.manifest_hash, m.manifest_hash);
         assert_eq!(
             parsed.compute_manifest_hash().unwrap(),
@@ -176,6 +186,9 @@ mod tests {
             ],
             rows: 2_696_935,
             row_index: Some("ms".into()),
+            partition: None,
+            edition: None,
+            codec_profile: None,
         };
         let events = TableBlock::new("events_3p", spec);
         let mut b = ProductBuilder::new(

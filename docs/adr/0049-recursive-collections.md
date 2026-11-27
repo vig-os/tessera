@@ -1,10 +1,15 @@
 # ADR-0049 — Recursive collections: the nesting mechanism (amends ADR-0033 §2)
 
 **Status:** Proposed (2026-07-02) — mechanism decided via spike #293 (4 fresh-context reviews: crypto/Merkle · schema-evolution · FAIR/RDM · clinical-workflow); implementation pending. **Amends** ADR-0033 §2. Relates ADR-0028 (MMR identity), ADR-0036 (versioning DAG/refs), ADR-0042 (non-sealed `aux/`), RFC §12 (domain-agnostic engine). Level *semantics* (what a nesting level means, living/frozen cohorts, FAIR mapping) are deliberately **out of scope** → #294.
+**Amended by ADR-0067 (2026-11-27)** — repository objects, version edges and closed members; see below.
 
 ## Context
 
-ADR-0033 §2 promised "logical collections nest by reference — and **sub-collections, recursively**," but the model is flat: `CollectionMember` is a "flat physical product," there is no member-kind discriminator, and `verify` opens `<reference>.tsra` (a product), never a child `collection.json`. So a patient-exam collection (products) is expressible; a cohort (a collection of collections) is not. This ADR decides the **mechanism** so recursion is build-ready. The *semantics* of levels are domain data, split to #294.
+ADR-0033 §2 promised "logical collections nest by reference — and **sub-collections, recursively**," but the model
+is flat: `CollectionMember` is a "flat physical product," there is no member-kind discriminator, and `verify` opens
+`<file_name(reference)>.tsra` (a product), never a child `collection.json`. So a patient-exam collection (products)
+is expressible; a cohort (a collection of collections) is not. This ADR decides the **mechanism** so recursion is
+build-ready. The *semantics* of levels are domain data, split to #294.
 
 ## Decision
 
@@ -38,13 +43,18 @@ The parent `content_hash` MMR leaf preimage becomes **`BLAKE3(LEAF_DOMAIN ‖ ki
 - `manifest_hash` (the JSON seal) is unaffected by this — only the MMR `content_hash` construction changes.
 
 ### 3. Recursive `verify` (offline; dispatch on `kind`)
-- `Product` → open `<reference>.tsra`, check `manifest_hash` == pinned.
-- `Collection` → open child `<reference>.collection.json`, verify **its** seal, then **recurse** into its members.
+
+Member stems use the shared `tessera_core::names::file_name` encoder (#994), e.g. `blake3:ab` → `blake3%3aab`.
+
+- `Product` → open `<file_name(reference)>.tsra`, check `manifest_hash` == pinned.
+- `Collection` → open child `<file_name(reference)>.collection.json`, verify **its** seal, then **recurse** into
+  its members.
 - **Cycle guard** = a `seen`-set of `manifest_hash`es — kept as **defense-in-depth against malformed/hand-edited catalogs, not a security property** (content-addressing is acyclic *by construction*: a member cannot pin an ancestor hash that does not exist yet without breaking BLAKE3 preimage resistance).
 - **Offline-verify must hold** — recursion touches no network; every child descriptor must be locally reachable/co-located. When a child is absent, `verify` reports *"cannot fully verify (child unreachable)"* — never a silent pass.
 
 ### 4. Resolution & builder ergonomics
-- **`kind` is authoritative; the resolver derives the on-disk suffix** (`<ref>.tsra` vs `<ref>.collection.json`) — the filename suffix is **never** a second source of truth for type.
+- **`kind` is authoritative; the resolver derives the on-disk suffix** (`<file_name(ref)>.tsra` vs
+  `<file_name(ref)>.collection.json`) — the filename suffix is **never** a second source of truth for type.
 - **Typed builder handles** carry `(reference, manifest_hash)` as one unit (kills the wrong-ref/wrong-hash bug class):
   `add_product(&ProductHandle, derived_from)` · `add_subcollection(&CollectionHandle)`; raw `add_member` stays `pub(crate)`.
 - **`derived_from` is peers-only** — a cross-nesting-boundary dependency must be materialized as a member of the enclosing collection, not a dangling reference.
@@ -72,3 +82,32 @@ Any fixed level vocabulary is opinionated — "Study" *and* "exam/cohort/site/tr
 ## References
 
 Spike #293 (issue + 4-review consolidation comment) · #294 (level semantics) · ADR-0033 (collections) · ADR-0028 (MMR identity + proofs) · ADR-0036 (versioning DAG/refs) · ADR-0042 (`aux/`) · RFC §12 · `tessera-core/src/collection.rs` · `tessera-io/src/collection.rs`
+
+## Amended by ADR-0067 (2026-11-27)
+
+[ADR-0067](0067-collection-refs-version-edge-and-gc-through-members.md) extends recursive collections into
+repository version objects without changing the kind-bound member MMR:
+
+- **Version edges** (PR [#1004](https://github.com/vig-os/tessera/pull/1004), D2): `Collection::sources` is sealed,
+  omitted when empty, and outside `id_inputs` and the member MMR. `supersedes` and `forked_from` pin predecessor
+  seals; a fork requires a caller-supplied `fork` identity token.
+- **Repository objects** (PR [#1005](https://github.com/vig-os/tessera/pull/1005), D1;
+  PR [#1012](https://github.com/vig-os/tessera/pull/1012), D1.1;
+  PR [#1022](https://github.com/vig-os/tessera/pull/1022), D3): layout 2 refs declare their target kind,
+  `ObjectKind::of` checks that kind against the bytes, and `put_collection` / `get_collection` use collection seals.
+- **Closed repository members** (PR [#1022](https://github.com/vig-os/tessera/pull/1022), D3.1;
+  PR [#1028](https://github.com/vig-os/tessera/pull/1028), D1): `commit_collection` validates recursive closure
+  before storing anything, including members supplied in the same call. GC follows members recursively and aborts
+  before sweeping on a missing, corrupt or wrong-kind member. Source edges remain open to versions held elsewhere.
+  Low-level `put_collection` alone guarantees neither closure nor reachability; an external-member catalog stays a file.
+- **Lineages and pins** (PR [#1028](https://github.com/vig-os/tessera/pull/1028), D5;
+  PR [#1033](https://github.com/vig-os/tessera/pull/1033), D4): collection commits advance a lineage by CAS;
+  `history` follows version predecessors, while pins keep stored collection versions and their members reachable
+  independently of a lineage. Neither adds branches or content merge (D9).
+
+**CLI integration** (PR [#1038](https://github.com/vig-os/tessera/pull/1038), step 7):
+`tessera collection commit|log|diff` operates on repository collection versions; `tessera pin set|rm|ls` manages
+pins for stored versions. The exit-code contract is 4 for a retryable conflict (reread the ref), 5 for an operation
+refused by the rules, 6 for a damaged or unsupported store, and 1 for other failures. Existing codes 2 (CLI usage)
+and 3 (backend unavailable) remain. The CLI maps categories from tessera-core's exhaustive `Error::failure_class`
+classifier to those numeric codes.

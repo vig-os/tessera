@@ -28,36 +28,60 @@ OK  signed study.tsra
 ```
 $ tessera verify-sig study.tsra
 ? failed
-error: [..]untrusted: key_id [..]is not in the trust store[..]
+error: [..]untrusted: key_id [..]is not in any consulted trust store[..]
 
 ```
 
-# === Data custodian — vets + trusts the instrument's key (repo-local store); now it verifies. ===
+# === Data custodian — vets + trusts the instrument's key in the repo-local store. ===
 
 ```
 $ tessera trust add instrument.key.pub --name instrument-lab --signer https://orcid.org/0000-0002-1825-0097 --repo
 trusted 'instrument-lab'  key_id [..]  signer https://orcid.org/0000-0002-1825-0097
+note: .tessera/trust is not consulted implicitly — pass `verify-sig --trust-dir .tessera/trust`, or set TESSERA_TRUST_DIR=$PWD/.tessera/trust (absolute) if you mean it, for it to take effect
 
 ```
 
 ```
-$ tessera trust list
-instrument-lab   [..]  https://orcid.org/0000-0002-1825-0097
+$ tessera trust list --repo
+.tessera/trust (repo store)
+  instrument-lab   [..]  https://orcid.org/0000-0002-1825-0097
+note: .tessera/trust is not consulted implicitly — pass `verify-sig --trust-dir .tessera/trust`, or set TESSERA_TRUST_DIR=$PWD/.tessera/trust (absolute) if you mean it, for it to take effect
 
 ```
+
+# A store in the current directory is never trusted on its own — whoever can write to the directory a
+# verifier runs in could plant a key there. Name it with `--trust-dir` (or `TESSERA_TRUST_DIR`):
 
 ```
 $ tessera verify-sig study.tsra
+? failed
+error: [..]untrusted: key_id [..]is not in any consulted trust store[..]
+
+```
+
+```
+$ tessera verify-sig study.tsra --trust-dir .tessera/trust
 OK  study.tsra — trusted as 'instrument-lab' + 1 blocks intact
   signer https://orcid.org/0000-0002-1825-0097 (attribution; not a trust anchor)
+accepted key_id [..] via trust store [..]/.tessera/trust (--trust-dir)
 
 ```
 
 # === Researcher / auditor — a signer-policy mismatch is rejected (attribution is checked too). ===
 
 ```
-$ tessera verify-sig study.tsra --require-signer https://orcid.org/9999-9999-9999-9999
+$ tessera verify-sig study.tsra --trust-dir .tessera/trust --require-signer https://orcid.org/9999-9999-9999-9999
 ? failed
 error: invalid product: signer policy: required 'https://orcid.org/9999-9999-9999-9999', sidecar attributes to Some("https://orcid.org/0000-0002-1825-0097")
+
+```
+
+# === Automated verifier — pins the key AND the signer, consulting no store at all. ===
+
+```
+$ tessera verify-sig study.tsra --pubkey instrument.key.pub --require-signer https://orcid.org/0000-0002-1825-0097
+OK  study.tsra — explicit --pubkey + 1 blocks intact
+  signer https://orcid.org/0000-0002-1825-0097 (attribution; not a trust anchor)
+accepted key_id [..] via --pubkey instrument.key.pub
 
 ```

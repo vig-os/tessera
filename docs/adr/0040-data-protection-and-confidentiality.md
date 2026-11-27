@@ -81,7 +81,7 @@ already floated `--age-recipient` for the *private key at rest*; this extends `a
 ## Phasing
 1. **§1 sensitivity tier** — cheap, unblocks engine reasoning + a PHI warn; PS3.15-seeded. *(spike first.)*
 2. **PHI hygiene now** (separate, immediate): `--source-label` (drop the patient-name path from `ingested_from`)
-   + wire `dicom-series --deidentify` (PS3.15 per-file; single `dicom` already has it).
+   - wire `dicom-series --deidentify` (PS3.15 per-file; single `dicom` already has it).
 3. **§2.1 `redact`** — formalise forget/gc into a consent-withdrawal verb.
 4. **§3/§4 field encryption** — the big one: `age` integration + the sidecar/determinism design. §2.2 crypto-shred
    falls out of it.

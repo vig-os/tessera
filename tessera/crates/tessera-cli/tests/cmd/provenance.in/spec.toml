@@ -1,0 +1,37 @@
+# ADR-0058 in one file: a raw product that records WHO made it (`[product.producer]`) and HOW
+# (`[product.generation.config]`). Both are sealed into `manifest_hash`, so neither can be edited
+# without changing the product's identity — that is what makes the recipe worth trusting.
+[collection]
+name = "provenance-demo"
+description = "one raw product carrying its DAQ recipe"
+timestamp = "2024-01-01T00:00:00Z"
+study = "DEMO-2024-01"
+
+[[product]]
+name = "daq-raw"
+role = "raw"
+schema = "blob"
+format = "blob"
+input = "acq.cfg"
+# ADR-0040: a clean label keeps the (often PHI-bearing) input path out of the sealed manifest.
+source_label = "acq.cfg"
+media_type = "text/plain"
+
+[product.metadata]
+study = "DEMO-2024-01"
+
+# Who/what generated this product (ADR-0058 §1) — the DAQ, not the packager.
+[product.producer]
+tool = "ge-listmode-daq"
+version = "3.2"
+git_repo = "vig-os/ge-daq"
+git_commit = "0855f5f"
+dirty = false
+
+# How it was made (ADR-0058 §2) — a deliberately non-opinionated bag; these keys are the
+# generator's business, and tessera never interprets or validates them.
+[product.generation.config]
+coincidence_window_ns = 4.5
+detector_ring = "LYSO4x9"
+energy_window_keV = "425-650"
+tof_cal_ref = "cal-2024-01"

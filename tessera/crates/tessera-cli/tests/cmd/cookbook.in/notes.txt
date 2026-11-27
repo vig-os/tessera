@@ -1,0 +1,2 @@
+Scanner console export, 2024-01-01.
+Nothing here is parseable by any tool we control — which is exactly the point.

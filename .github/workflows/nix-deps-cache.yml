@@ -1,0 +1,85 @@
+# Repo-owned (NOT devkit-managed). Warms the nix dependency cache for every PR (#507).
+#
+# GitHub Actions caches are scoped: a pull_request run can restore caches from ITS OWN ref and from
+# its BASE branch. nix-check runs on pull_request and push-to-main only — never on push-to-dev — so
+# without this workflow no cache would ever exist at the `dev` scope, every PR's FIRST nix-check run
+# would be cold, and only re-runs of the same PR would benefit.
+#
+# On every push to dev (and main): look the key up WITHOUT downloading. Unchanged deps — the common
+# case — cost one flake eval and a lookup. Only when the key is missing is `tessera-deps` built
+# (8.8–14.7 min, measured; provenance in the nix-deps-cache action) and saved, once per change of
+# the dependency derivation.
+name: nix-deps-cache
+
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: nix-deps-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    name: warm nix deps cache (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The same runners as nix-check.yml's legs (#688): a miss builds tessera-deps, a heavy
+          # build, so x86_64 takes ksb's large pool. The Actions cache it saves is keyed by the deps
+          # derivation, not the runner, so a hosted fork-PR leg restores the same entry.
+          # This workflow never runs on a pull request, so the fork predicate is always false here;
+          # it stays so every ksb label in the repo has the one checked shape
+          # (scripts/check-ksb-fork-guard.sh).
+          - arch: x86_64-linux
+            runner: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'ksb-vig-os-large' }}
+          - arch: aarch64-linux
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Nothing here pushes, and on a self-hosted pod a token left in .git/config outlives the step.
+          persist-credentials: false
+
+      # As in nix-check.yml: a ksb pod ships its own Nix and cannot run the installer.
+      - name: Install Nix
+        if: runner.environment == 'github-hosted'
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
+
+      - name: Check the runner's own Nix
+        if: runner.environment != 'github-hosted'
+        run: nix --version
+
+      - name: Look up the dependency cache
+        id: deps
+        uses: ./.github/actions/nix-deps-cache
+        with:
+          lookup-only: "true"
+
+      - name: Build tessera-deps
+        if: steps.deps.outputs.hit != 'true'
+        env:
+          DEPS_OUT: ${{ steps.deps.outputs.out }}
+        run: |
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          nix build -L --no-link --cores 4 ".#legacyPackages.${sys}.cargoArtifacts"
+          nix path-info "${DEPS_OUT}"
+
+      - name: Save the dependency cache
+        if: steps.deps.outputs.hit != 'true'
+        uses: ./.github/actions/nix-deps-cache
+        with:
+          mode: save
+          key: ${{ steps.deps.outputs.key }}
+          out: ${{ steps.deps.outputs.out }}
+          dir: ${{ steps.deps.outputs.dir }}

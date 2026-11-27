@@ -4,7 +4,7 @@
 //! manifest (products are immutable; a new version is a new product with a `sources` edge
 //! to its parent — see `docs/rfc-tessera.md` §3, and fd5 audit-trail issues #167–170).
 
-use crate::block::{Block, BlockRef};
+use crate::block::{Block, BlockName, BlockRef};
 use crate::manifest::Manifest;
 use crate::provenance::Source;
 
@@ -35,7 +35,14 @@ impl ProductBuilder {
     /// Apply the delta (`with_field` / `add_block` / `add_source`), then [`seal`](Self::seal) — which
     /// recomputes `content_hash` + `manifest_hash` while `id` stays put. Unchanged blocks keep their
     /// digests, so a metadata-only version re-stores only the new manifest object.
-    pub fn from_manifest(parent: &Manifest) -> Self {
+    ///
+    /// # Errors
+    /// [`crate::Error::NewerFormatFields`] if `parent` carries [`Manifest::newer_fields`]: this build
+    /// can't carry them into the new version, and a seal without them would silently drop sealed
+    /// content, while one carrying them blindly could break a rule the newer format attaches to them
+    /// (ADR-0060 §2.2).
+    pub fn from_manifest(parent: &Manifest) -> crate::Result<Self> {
+        parent.refuse_newer_fields()?;
         let mut manifest = Manifest::new(
             &parent.product,
             &parent.name,
@@ -56,10 +63,10 @@ impl ProductBuilder {
             .filter(|s| s.role != "supersedes")
             .cloned()
             .collect();
-        ProductBuilder {
+        Ok(ProductBuilder {
             manifest,
             refs: parent.blocks.clone(),
-        }
+        })
     }
 
     /// Add a storage block (array or table); records its manifest reference.
@@ -82,6 +89,22 @@ impl ProductBuilder {
         let before = self.refs.len();
         self.refs.retain(|r| r.name != name);
         self.refs.len() != before
+    }
+
+    /// Remove the block `name` and its derived family ([`crate::block::derived_family`]: its derived
+    /// `.cidx` sidecar and, for pyramid level 0, its derived levels), as `commit --remove-block` does.
+    /// Returns the names removed, `name` first, or `None` if the version holds no block `name`
+    /// (nothing is removed then). A manifest edit only, like [`remove_block`](Self::remove_block).
+    pub fn remove_block_with_derived(&mut self, name: &str) -> Option<Vec<BlockName>> {
+        let target = self.refs.iter().find(|r| r.name == name)?.name.clone();
+        let mut gone = vec![target];
+        gone.extend(
+            crate::block::derived_family(name, &self.refs)
+                .into_iter()
+                .cloned(),
+        );
+        self.refs.retain(|r| !gone.contains(&r.name));
+        Some(gone)
     }
 
     /// Record a provenance edge to an upstream artifact.
@@ -130,6 +153,22 @@ impl ProductBuilder {
         self
     }
 
+    /// Record the **transforms applied at the door** (ADR-0056 §6.2) — the receipt for the
+    /// normalise-vs-preserve ladder's middle lane.
+    ///
+    /// Only generic ingest has any business calling this: a vendor backend that preserves its
+    /// source's values bit-faithfully records nothing, and an empty list serialises to nothing, which
+    /// is what keeps every pre-ADR-0056 product's bytes unchanged. Call before `seal` so the receipt
+    /// is covered by the seal — a transform list outside the seal would be a warning with extra
+    /// steps, which is the thing ADR-0056 §2 rejected.
+    pub fn with_ingest_transform(
+        &mut self,
+        transforms: Vec<crate::provenance::IngestTransform>,
+    ) -> &mut Self {
+        self.manifest.ingest_transform = transforms;
+        self
+    }
+
     /// Inherit **schema-flagged identity** fields from a resolved `derived_from` parent (ADR-0058
     /// §5) — the DAG-walk caller (the ingest engine) supplies the parent manifest + this product's
     /// schema; only fields the schema marks `inherit` flow, and an explicit child value always wins.
@@ -149,16 +188,36 @@ impl ProductBuilder {
     /// Every block MUST carry a digest — a missing digest is a hard error, never silently
     /// dropped (otherwise a block would be invisible to the content hash yet present in the
     /// manifest, so two different products could hash identically).
+    ///
+    /// The block names must be **unique** (ADR-0063 §2a, exact byte equality), or the seal is
+    /// refused with [`crate::Error::DuplicateBlockName`], and must obey the **leaf rule** (ADR-0063):
+    /// no name may be a parent prefix of another, or the seal is refused with
+    /// [`crate::Error::BlockNameConflict`]. (Each name is already valid by its type,
+    /// [`crate::block::BlockName`].)
+    ///
+    /// Every partitioned table must be valid (ADR-0064 §2.4, [`crate::block::check_partitions`]),
+    /// or the seal is refused with [`crate::Error::LogicalTable`].
+    ///
+    /// Every chunk index must index another block of the product
+    /// ([`crate::block::check_chunk_indexes_resolve`]), or the seal is refused with
+    /// [`crate::Error::DanglingChunkIndex`] (#720).
+    ///
+    /// The product's schema (the embedded one, else the built-in registry's for its product) must
+    /// follow the number rules (#895): a field declaration that breaks them is refused with
+    /// [`crate::Error::SchemaField`], and a metadata value outside its field's encoding or range with
+    /// [`crate::Error::FieldValue`] named `metadata.<id>`. An embedded schema this build cannot read
+    /// is refused with [`crate::Error::Invalid`], or [`crate::Error::NewerFormatFields`] for a rule
+    /// it doesn't model (ADR-0060 §2.2).
     pub fn seal(mut self) -> crate::Result<Manifest> {
-        let mut digests = Vec::with_capacity(self.refs.len());
-        for r in &self.refs {
-            match &r.digest {
-                Some(d) => digests.push(d.clone()),
-                None => return Err(crate::Error::MissingDigest(r.name.clone())),
-            }
-        }
+        crate::block::check_unique_names(self.refs.iter().map(|r| &r.name))?;
+        crate::block::check_leaf_rule(self.refs.iter().map(|r| &r.name))?;
+        crate::block::check_partitions(&self.refs)?;
+        crate::block::check_chunk_indexes_resolve(&self.refs)?;
+        // ADR-0028 §4: `content_hash` is over the primary blocks only; `manifest_hash` (the seal over
+        // the stored manifest) covers every block ref, derived ones and their class included.
+        let content_hash = crate::block::content_root(&self.refs)?;
         self.manifest.blocks = self.refs;
-        self.manifest.content_hash = Some(crate::hash::merkle_root(&digests));
+        self.manifest.content_hash = Some(content_hash);
         // Self-describing (FAIR-Reusable): embed the resolved product schema so the sealed `.tsra`
         // carries its own contract and the seal commits to it. A caller-supplied schema
         // (`with_schema`) or an inherited one (`from_manifest`) wins; otherwise embed the built-in
@@ -168,6 +227,14 @@ impl ProductBuilder {
             if let Some(s) = crate::schema::SchemaRegistry::builtin().get(&self.manifest.product) {
                 self.manifest.schema = Some(s.to_value()?);
             }
+        }
+        // The number rules (#895): the embedded schema's field declarations, then every metadata
+        // value against the encoding and range its field declares. Every writer seals here, so no
+        // door can seal a value its own schema refuses. A schema this build can't read, or one with
+        // a rule it doesn't model, is refused (ADR-0060 §2.2): sealing against it would ignore a rule.
+        if let Some(schema) = crate::schema::declared_schema(&self.manifest)? {
+            schema.check_definition()?;
+            schema.check_metadata(&self.manifest.metadata)?;
         }
         // Sealed provenance: stamp the producing tool/build so a reader knows what wrote the file
         // (ADR-0058 §1 — structured [`ProducerRef::tessera()`], tool + `TESSERA_VERSION` +
@@ -198,11 +265,33 @@ mod tests {
 
     fn block(name: &str, digest: &str) -> BlockRef {
         BlockRef {
-            name: name.into(),
+            name: name.parse().unwrap(),
             kind: BlockKind::Array,
             digest: Some(digest.into()),
+            class: crate::block::BlockClass::Primary,
             spec: serde_json::json!({ "dtype": "int16", "shape": [2] }),
         }
+    }
+
+    /// #734: a name listed twice is refused at seal with the typed error, whether or not the two
+    /// entries agree. Names compare byte for byte: `Data` and `data` seal as two blocks (#690
+    /// covers case folding).
+    #[test]
+    fn seal_refuses_a_block_name_listed_twice() {
+        for second in ["blake3:aa", "blake3:bb"] {
+            let mut b = ProductBuilder::new("recon", "p", "d", "2024-01-01T00:00:00Z");
+            b.add_block_ref(block("v", "blake3:aa"));
+            b.add_block_ref(block("w", "blake3:cc"));
+            b.add_block_ref(block("v", second));
+            match b.seal() {
+                Err(crate::Error::DuplicateBlockName { name }) => assert_eq!(name, "v"),
+                other => panic!("sealed a repeated name ({second}): {other:?}"),
+            }
+        }
+        let mut b = ProductBuilder::new("recon", "p", "d", "2024-01-01T00:00:00Z");
+        b.add_block_ref(block("Data", "blake3:aa"));
+        b.add_block_ref(block("data", "blake3:bb"));
+        assert_eq!(b.seal().unwrap().blocks.len(), 2);
     }
 
     #[test]
@@ -216,7 +305,7 @@ mod tests {
         let v1mh = v1.manifest_hash.clone().unwrap();
 
         // Evolve: change one metadata field, stamp the supersedes edge to the immediate parent.
-        let mut e = ProductBuilder::from_manifest(&v1);
+        let mut e = ProductBuilder::from_manifest(&v1).unwrap();
         e.with_field("tracer", serde_json::json!("FLT"));
         e.add_source(Source::new("supersedes", &v1mh).with_content_hash(&v1mh));
         let v2 = e.seal().unwrap();
