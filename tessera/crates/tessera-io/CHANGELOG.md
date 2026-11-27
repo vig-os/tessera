@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.7...tessera-io-v0.1.0-alpha.8) - 2026-11-27
+
+### Added
+
+- *(cli)* collection commit/log/diff and pin commands
+- *(io)* pins (ADR-0067 step 6) ([#1033](https://github.com/vig-os/tessera/pull/1033))
+- *(io)* commit_collection, log and history (ADR-0067 step 5) ([#1028](https://github.com/vig-os/tessera/pull/1028))
+- *(io)* commit_collection, log and history (ADR-0067 step 5)
+- *(io)* collections in the repository; gc marks through members (ADR-0067 step 4) ([#1022](https://github.com/vig-os/tessera/pull/1022))
+- *(io)* store collections and mark through members
+- *(io)* [**breaking**] repository layout 2 with typed, namespaced refs
+
+### Fixed
+
+- *(io)* a crashed init can be retried; init never writes into a refused directory ([#1037](https://github.com/vig-os/tessera/pull/1037))
+- honour TESSERA_MAX_THREADS everywhere; the wall-clock perf ratchet is opt-in ([#1031](https://github.com/vig-os/tessera/pull/1031))
+- *(io)* preserve lineage kinds and bound gc history paths
+- *(io)* table leaves must agree on unit, scale and referencing ([#1014](https://github.com/vig-os/tessera/pull/1014))
+- *(io)* enforce interpreting metadata in table leaf contracts
+- *(io)* fence repository initialization entry checks
+- *(io)* lineage names map to ref files injectively
+
+### Other
+
+- encoded member names everywhere; wording; Python mismatch fallback
+- *(io)* require the middle collection in gc error paths
+- *(io)* tighten metadata mismatch diagnostics and streaming coverage
+- *(corpus)* a whole-archive golden with a derived block; exhaustive #916 table ([#1013](https://github.com/vig-os/tessera/pull/1013))
+- *(corpus)* add derived archive golden and exhaustive cross-check
+
 ### Added
 
 - Atomic `Repository::commit_collection` validates CAS, lineage kind and identity, supersedes pins and

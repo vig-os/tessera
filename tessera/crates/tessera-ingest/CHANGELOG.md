@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8](https://github.com/vig-os/tessera/compare/tessera-ingest-v0.1.0-alpha.7...tessera-ingest-v0.1.0-alpha.8) - 2026-11-27
+
+### Fixed
+
+- *(ingest)* avoid inheriting HDF5 writer handles in tests
+- honour TESSERA_MAX_THREADS everywhere; the wall-clock perf ratchet is opt-in ([#1031](https://github.com/vig-os/tessera/pull/1031))
+- honour thread budgets and opt in to wall-clock ratchets
+- *(io)* collection member file names are injective ([#1006](https://github.com/vig-os/tessera/pull/1006))
+- *(ingest)* seal the linked decoder's version, not lockfile text
+
+### Other
+
+- encoded member names everywhere; wording; Python mismatch fallback
+- *(ingest)* correct packaged decoder seal history and wrapping ([#1019](https://github.com/vig-os/tessera/pull/1019))
+- *(ingest)* refresh the parquet decoder version example
+
 ## [0.1.0-alpha.7](https://github.com/vig-os/tessera/compare/tessera-ingest-v0.1.0-alpha.6...tessera-ingest-v0.1.0-alpha.7) - 2026-11-25
 
 ### Added

@@ -9,32 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.1.0-alpha.8] - 2026-11-27
+
+### Format break
+
+- **Repositories must be re-created; there is no migration verb.** This release completes ADR-0067. It adds
+  repository layout 2 (`tessera-repository 2`), with typed refs in `refs/lineages/` and `refs/pins/` (#1005), and
+  collections stored as repository objects with `sources` version edges (#1004, #1012, #1022). It also adds atomic
+  `commit_collection` with `log` and `history` (#1028), pins (#1033) and the CLI (#1038). A repository from an
+  earlier alpha is refused with `UnsupportedRepositoryLayout`, which names the layout found and the one required.
+  Re-import from the source products, as the owner ruled on 2026-11-26.
+- **Collection member file names are encoded (#1006).** Local collection directories and S3 prefix exports written by
+  an earlier alpha must be re-created. Members found under the old underscore or raw-id names are refused, not read.
+- **Some sealed products no longer read as one table.** Readers now refuse a table group whose leaves disagree
+  on `unit`, `scale` or `referencing`, as well as on names, dtypes or nullability (#978, #1011). A product sealed by
+  alpha.7 with such a mix still verifies, but its group read fails with a typed `SchemaMismatch`. Every other `.tsra`
+  reads as before.
+- **CLI exit codes are a contract (#1038).**
+  - `4`: the ref moved; reread and retry.
+  - `5`: refused by the rules, such as a kind mismatch, a missing member, a missing fork token or an invalid name.
+  - `6`: the store is damaged, or the repository has an unsupported layout. Every alpha.7 repository exits 6.
+  - `3`: the backend was not compiled in.
+  - `1`: any other failure.
+- **Breaking Rust API.**
+  - `SchemaMismatch` carries a typed `SchemaMismatchKind`, and malformed specs are a separate `MalformedTableSpec`
+    (#1021). Both are `#[non_exhaustive]`.
+  - `same_value_contract` takes `ValueContract` views, and `LogicalTableError` no longer implements `Eq` (#1021).
+  - `InvalidLineage` became `InvalidRefName` (#1005).
+  - `Decoder`'s `version` and `pins` fields are now methods (#979).
+- **Writers refuse what readers would refuse.** Sealing a table whose leaves disagree on that column contract fails
+  (#978, #1011). That includes independent tables sharing a numbered prefix (`run_0001`, `run_0002`) whose columns
+  differ: give them distinct names.
+- **Thread budget.** Worker pools honour `TESSERA_MAX_THREADS`, clamped to the CPU count (#703).
+
+### Added
+
+- `tessera-py`: a schema mismatch raised as `TesseraError` exposes `kind`, `column`, `field`, `expected` and `found`
+  (#1024, #1029). A future kind reports `kind="unknown"`.
 - Repository CLI failures use stable exit codes: 4 for moved refs (reread before retrying), 5 for
   rule refusals, and 6 for damaged or unsupported stores. Existing codes 0–3 retain their meanings.
   Read-time ref/target damage is distinct from write-time kind, unstored pin and missing block refusals.
   Pin diagnostics name logical refs, and `pin ls` emits JSON-quoted names (#1002).
-
 - Durable repository pins: `set_pin`, `remove_pin`, `read_pin` and `pins()` with typed product or
   collection targets, fenced CAS and durable publication/removal (ADR-0067 step 6, #1001).
   Pins remain independent of same-named lineages and retain nested members after `forget`;
   removal permits GC only when no other root reaches the objects. Pins override retention classes.
-
 - Atomic `Repository::commit_collection` validates CAS, lineage kind and identity, supersedes pins and
   recursive member closure before storage; new products, payloads and sub-collections can be supplied in
   the same fenced call. Collection commits use the existing log cache. `Repository::history` returns
   distinct sealed versions in depth-first preorder, supersedes before forked_from, and reports unreadable
   predecessors with typed errors and bounded provenance paths (ADR-0067 step 5, #1000).
-
 - Repository collection storage and typed collection refs (ADR-0067 step 4, #999). `put_collection` and
   `get_collection` address canonical collection bytes by their seal. `set_ref` infers and verifies the object
   kind, refusing bare blocks; reads refuse record/object kind mismatches. Garbage collection recursively marks
   collection members and version edges, aborting before deletion on missing, unreadable or wrong-kind members
   with the full path from the root ref. Shared versions are read once with no depth cutoff.
-
 - `ObjectKind::of` classifies version-object bytes without guessing (ADR-0067 step 3, #998).
   Ambiguous shapes are refused. `collection::diff` reports added, removed and repinned members in
   collection order, detects relative order changes, and refuses duplicate member references.
-
 - Collections carry sealed `sources` edges with `supersedes` and `forked_from` roles (ADR-0067 step 2, #997).
   Version edges reference a predecessor's id and pin its manifest seal, independently of the member MMR.
   `CollectionBuilder::add_source` records edges; `with_id_inputs` accepts caller-declared identity, including
@@ -51,28 +91,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget through to Tessera. Budgets are cached and capped at system parallelism with one clamp note;
   invalid budgets are logged and ignored. Wall-clock grid-decode and HDF5
   ratchets require `TESSERA_PERF_RATCHET=1` on reserved CPUs instead of gating on reported core counts (#703).
-
 - **breaking**: `SchemaMismatch` now carries a typed `SchemaMismatchKind` instead of `detail` (#1021).
   Callers matching this error must handle column counts, names and typed contract-field values.
   Only the first difference is displayed. Malformed table specs now report `Error::MalformedTableSpec`.
   `LogicalTableError` retains `PartialEq` but no longer implements `Eq`, since diagnostics retain floats.
-
 - **breaking**: table leaves must agree exactly on `unit`, `scale` and the complete `referencing`
   descriptor, as well as names, order, dtypes and nullability (#1011). Sealing and group reads refuse
   mismatches with `SchemaMismatch`, including group reads of already-sealed products. Descriptions
   and labels may still differ. `same_value_contract` now accepts two borrowed `ValueContract` views.
   Rename independent tables or convert their values and metadata before sealing.
-
 - Repository lineage kinds are fixed until forgotten: `commit` and `set_ref` reject kind changes with
   `LineageKindMismatch` before writing. Typed object reads name `ObjectKindMismatch` separately from ref-record
   mismatches. GC stores traversal paths by parent index and renders them only on error; long source chains
   report a version/object count while retaining the full member path (#999).
-
 - **breaking (writers)**: independent tables sharing a legacy numbered prefix, such as `run_0001`
   and `run_0002`, must agree on column count, names, order, dtypes and nullability to seal (#978).
   Rename independent tables without a shared `_NNNN` prefix, for example `run_first` and `run_second`.
   Existing products retain the legacy read rule; incompatible group reads remain refused.
-
 - **breaking**: repositories now require layout 2 (`tessera-repository 2`), with typed product ref records
   in `refs/lineages/` and `refs/pins/` and lineage caches in `log/lineages/` (ADR-0067 step 1, #996).
   Every other layout, including an unmarked empty directory, is refused. There is no migration verb: seal tips
@@ -80,14 +115,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   percent-encoding and a 249-byte name bound; `InvalidRefName` replaces `InvalidLineage`. Garbage collection
   roots include both namespaces and corrupt records or stray entries abort it before any deletion.
 
-### Removed
-
 ### Fixed
 
 - Repository initialization writes the `tessera-repository 2` marker first and atomically, so a crashed
   `init` can be re-run to finish a partial skeleton. `open` refuses marked but incomplete repositories
   and names `tessera init` as the recovery command. `init` writes nothing into a directory it refuses (#1007).
-
 - **Collection member filenames are injective (#994).** Members and repository refs share the percent encoder
   from #975 (`a:b` → `a%3ab`, `a_b` → `a_b`, `Ab` → `%41b`). Ref filenames are unchanged. Local collections,
   ingest output and S3 prefix exports use the same encoded stems, including nested descriptors and seals.
@@ -95,10 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diagnoses a legacy layout only when an old-named file exists, without reading legacy aliases. Missing-member errors
   report the encoded filename; `collection ls` marks absent members and continues listing.
   OCI artifacts remain digest-addressed and need no filename migration.
-
 - Refuse partitioned and legacy flat tables whose leaves disagree on column names, dtypes or
   nullability before sealing or packing (#978). Readers continue to refuse incompatible sealed tables.
-
 - **The sealed `ingest_decoder` names the decoder the binary links (#979).** Its `version` and its `features`
   pre-image were read from `Cargo.lock` by `tessera-ingest`'s build script, whose output cargo reuses across two
   checkouts that share a target dir. A binary could link parquet 58.4.1 and seal `=58.4.2`. The library now takes
@@ -110,8 +140,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `\` with `_`, so `a:b` and `a_b` shared one tip: a commit on one replaced the other's tip, or since #946 was
   refused with `RefMoved`. Names are now percent-encoded (`blake3:3f…` → `refs/lineages/blake3%3a3f…`), injective on
   case-insensitive file systems too (ADR-0036, 2026-11-25 amendment).
-
-### Security
 
 ## [0.1.0-alpha.7] - 2026-11-25
 
@@ -633,6 +661,7 @@ for it; `v0.1.0-alpha.3` superseded it the same day.
 This file recorded no entries for this release. Its changes are listed per crate, in
 `tessera/crates/<crate>/CHANGELOG.md`.
 
+[0.1.0-alpha.8]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.7...v0.1.0-alpha.8
 [0.1.0-alpha.7]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.6...v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.5...v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/vig-os/tessera/compare/v0.1.0-alpha.4...v0.1.0-alpha.5

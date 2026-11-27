@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8](https://github.com/vig-os/tessera/compare/tessera-core-v0.1.0-alpha.7...tessera-core-v0.1.0-alpha.8) - 2026-11-27
+
+### Added
+
+- *(cli)* collection commit/log/diff and pin commands
+- *(io)* commit_collection, log and history (ADR-0067 step 5) ([#1028](https://github.com/vig-os/tessera/pull/1028))
+- *(io)* collections in the repository; gc marks through members (ADR-0067 step 4) ([#1022](https://github.com/vig-os/tessera/pull/1022))
+- *(io)* store collections and mark through members
+- *(core)* object-kind discriminator and collection member diff
+- *(core)* sources on Collection with supersedes/forked_from roles (ADR-0067 step 2) ([#1004](https://github.com/vig-os/tessera/pull/1004))
+- *(core)* seal collection version sources and require fork identity
+
+### Fixed
+
+- *(core)* reject whitespace-only collection fork tokens ([#1027](https://github.com/vig-os/tessera/pull/1027))
+- honour TESSERA_MAX_THREADS everywhere; the wall-clock perf ratchet is opt-in ([#1031](https://github.com/vig-os/tessera/pull/1031))
+- *(io)* preserve lineage kinds and bound gc history paths
+- *(io)* table leaves must agree on unit, scale and referencing ([#1014](https://github.com/vig-os/tessera/pull/1014))
+- *(io)* enforce interpreting metadata in table leaf contracts
+- *(core)* validate collection sources at every writer door
+- *(io)* lineage names map to ref files injectively
+
+### Other
+
+- wrap member-name follow-up lines
+- encoded member names everywhere; wording; Python mismatch fallback
+- *(core)* SchemaMismatch follow-ups (drift guard, display, ADR, Python) ([#1025](https://github.com/vig-os/tessera/pull/1025))
+- *(corpus)* a whole-archive golden with a derived block; exhaustive #916 table ([#1013](https://github.com/vig-os/tessera/pull/1013))
+- *(core)* extend stored-product and seal-case corpus coverage
+- *(core)* reproduce collection source writer bypasses
+- *(core)* add collection source seal vectors
+- *(core)* specify collection version sources
+
 ### Added
 
 - `ObjectKind::of` classifies version-object bytes without guessing (ADR-0067 step 3, #998).
