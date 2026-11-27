@@ -74,7 +74,11 @@ fn err<E: std::fmt::Display + std::any::Any>(e: E) -> PyErr {
                     value.setattr("expected", expected.to_string())?;
                     value.setattr("found", found.to_string())?;
                 }
-                _ => {}
+                _ => {
+                    value.setattr("kind", "unknown")?;
+                    value.setattr("expected", py.None())?;
+                    value.setattr("found", py.None())?;
+                }
             }
             Ok(())
         })

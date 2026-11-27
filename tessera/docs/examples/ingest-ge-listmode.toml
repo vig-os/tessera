@@ -5,7 +5,7 @@
 #                  --out /tmp/dp06 --workers 8 --ram-budget 2G
 #
 # Produces:
-#   /tmp/dp06/<id>.tsra   for each `[[product]]` below
+#   /tmp/dp06/<file_name(id)>.tsra (stem encoded by tessera_core::names::file_name)   for each `[[product]]` below
 #   /tmp/dp06/collection.json   (the sealed catalog over those members)
 #
 # The engine adds two provenance edges to every member:

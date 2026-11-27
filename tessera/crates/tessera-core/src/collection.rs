@@ -440,7 +440,7 @@ impl Collection {
     /// # Errors
     /// [`crate::Error::NewerFormatFields`] for a parsed collection with
     /// [`newer_fields`](Self::newer_fields): bytes of this view would leave them out.
-    /// [`crate::Error::Invalid`] for a `forked_from` edge without a non-empty `fork` token, or
+    /// [`crate::Error::Invalid`] for a `forked_from` edge without a non-whitespace `fork` token, or
     /// a `forked_from`/`supersedes` edge without a non-empty predecessor seal pin (`content_hash`).
     pub fn canonical_bytes(&self) -> crate::Result<Vec<u8>> {
         refuse_newer(&self.newer_fields)?;
@@ -462,8 +462,11 @@ impl Collection {
                     .is_none_or(|token| token.trim().is_empty())
             {
                 return Err(crate::Error::Invalid(
-                    "a forked_from collection requires a non-empty caller-supplied fork token in id_inputs"
-                        .into(),
+                    concat!(
+                        "a forked_from collection requires a caller-supplied fork token in id_inputs; ",
+                        "missing, empty, or whitespace-only tokens are invalid"
+                    )
+                    .into(),
                 ));
             }
             if source.content_hash.as_deref().is_none_or(str::is_empty) {
@@ -923,8 +926,8 @@ impl CollectionBuilder {
 
     /// Set the complete declared identity inputs, retained across versions of a lineage.
     /// `seal` computes `id` from this map. For a fork, include a caller-chosen `fork` token;
-    /// The token must be non-empty; distinct tokens distinguish workspaces even with identical
-    /// names and timestamps.
+    /// The token must contain a non-whitespace character; distinct tokens distinguish workspaces
+    /// even with identical names and timestamps.
     /// Start with [`default_collection_id_inputs`] to retain the default identity fields.
     pub fn with_id_inputs(&mut self, id_inputs: BTreeMap<String, String>) -> &mut Self {
         self.collection.id_inputs = id_inputs;
@@ -935,7 +938,7 @@ impl CollectionBuilder {
     /// [`FORKED_FROM_ROLE`], reference the predecessor's `id` and pin its `manifest_hash` with
     /// [`Source::with_content_hash`]. Edges change the seal, independently of the member MMR.
     /// Both version roles require a non-empty predecessor seal pin. A `forked_from` edge also
-    /// requires a non-empty `fork` token in `id_inputs`. Missing values are [`crate::Error::Invalid`]
+    /// requires a non-whitespace `fork` token in `id_inputs`. Missing values are [`crate::Error::Invalid`]
     /// at seal and when emitting canonical or stored bytes.
     pub fn add_source(&mut self, source: Source) -> &mut Self {
         self.collection.sources.push(source);
@@ -995,7 +998,7 @@ impl CollectionBuilder {
 
     /// Seal: compute the MMR root over the members, then the canonical-JSON seal. Mirrors
     /// [`crate::ProductBuilder::seal`] — the same input always yields byte-identical bytes.
-    /// Recomputes `id` from the declared inputs. A fork without a non-empty caller-supplied `fork`
+    /// Recomputes `id` from the declared inputs. A fork without a non-whitespace caller-supplied `fork`
     /// token, or either version role without a predecessor seal pin, is [`crate::Error::Invalid`].
     /// Callers own token uniqueness (ADR-0067 D2/D5).
     pub fn seal(mut self) -> crate::Result<Collection> {

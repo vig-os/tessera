@@ -9,10 +9,13 @@ and ``pairs/0002`` (2); column ``i`` is the global row index 0..8 and ``x`` is `
 in leaf order, and ``read_block("pairs")`` must raise ``NotABlockError``.
 """
 
+import json
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
+import blake3
 import numpy as np
 import polars as pl
 import pyarrow as pa
@@ -112,6 +115,49 @@ for columns, expected in (
         try:
             builder.pack(str(Path(directory) / "mismatch.tsra"))
             raise AssertionError("incompatible legacy leaves must fail to seal")
+        except tessera.TesseraError as error:
+            assert (
+                error.kind,
+                error.column,
+                error.field,
+                error.expected,
+                error.found,
+            ) == expected
+
+# Model an older writer: valid stored seals, but incompatible leaf contracts. Current
+# writers refuse these manifests, so rewrite only the stored manifest and its seal.
+for change, expected in (
+    ("count", ("column_count", None, None, 2, 1)),
+    ("name", ("column_name", 0, None, "i", "other")),
+    ("dtype", ("field", "i", "dtype", '"u8"', '"i8"')),
+):
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "old-mismatch.tsra"
+        with zipfile.ZipFile(sys.argv[1]) as source:
+            manifest = json.loads(source.read("manifest.json"))
+            columns = manifest["blocks"][1]["spec"]["columns"]
+            if change == "count":
+                columns.pop()
+            elif change == "name":
+                columns[0]["name"] = "other"
+            else:
+                columns[0]["dtype"] = "i8"
+            stored = json.dumps(
+                manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+            seal = "blake3:" + blake3.blake3(stored).hexdigest()
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as target:
+                for entry in source.infolist():
+                    data = source.read(entry.filename)
+                    if entry.filename == "manifest.json":
+                        data = stored
+                    elif entry.filename == "manifest.seal":
+                        data = seal.encode()
+                    target.writestr(entry, data)
+        reader = tessera.open(path)
+        try:
+            reader.table("pairs")  # native read_table calls Reader::logical_table
+            raise AssertionError("incompatible leaves must fail on read")
         except tessera.TesseraError as error:
             assert (
                 error.kind,

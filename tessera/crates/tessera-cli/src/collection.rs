@@ -667,9 +667,9 @@ mod tests {
     }
 
     /// `collection new` (#304 Part 1): assemble a `dataset` from two pre-sealed `.tsra` products →
-    /// a self-contained dir (`collection.json` + `<file_name(id)>.tsra` members) that `verify` passes, and
-    /// member stems use [`tessera_core::names::file_name`];
-    /// `inspect` shows the declared schema.
+    /// a self-contained directory (`collection.json` + `<file_name(id)>.tsra` members).
+    /// Member stems use [`tessera_core::names::file_name`]. `verify` validates the directory,
+    /// and `inspect` shows the declared schema.
     #[test]
     fn collection_new_assembles_from_presealed_tsra() {
         let dir = tempfile::tempdir().unwrap();

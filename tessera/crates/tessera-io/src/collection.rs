@@ -13,7 +13,7 @@
 //!    references a member's pre-pushed OCI artifact manifest by sha256 digest, carrying the member
 //!    Tessera identity in annotations. Reuses the media-type constants from [`crate::oci`].
 //! 3. **S3 prefix layout** ([`prefix_layout`]) — a pure layout helper returning
-//!    `(object_key, member_reference)` pairs (`<prefix>/<id>.tsra` + `<prefix>/collection.json`).
+//!    `(object_key, member_reference)` pairs (`<prefix>/<file_name(id)>.tsra` + `<prefix>/collection.json`).
 //!    The prefix of N independently range-readable `.tsra` objects IS the collection on S3.
 //!
 //! All three enumerate the same member set in the same declared order — a single source of truth
@@ -252,14 +252,14 @@ pub enum LayoutKind {
 
 /// Project the collection onto an S3 key prefix — pure layout, no I/O. Returns
 /// `(object_key, member_reference)` pairs: one per member in declared member order, then the seal
-/// object of each sub-collection member (`<prefix>/<id>.collection.seal`, ADR-0066 rule 5), then
+/// object of each sub-collection member (`<prefix>/<file_name(id)>.collection.seal`, ADR-0066 rule 5), then
 /// `("<prefix>/collection.seal", <collection_id>)` and, last, `("<prefix>/collection.json",
-/// <collection_id>)` for the catalog descriptor. A product member is a `<prefix>/<id>.tsra` object
-/// (its seal travels inside it); a **sub-collection** member is a `<prefix>/<id>.collection.json`
+/// <collection_id>)` for the catalog descriptor. A product member is a `<prefix>/<file_name(id)>.tsra` object
+/// (its seal travels inside it); a **sub-collection** member is a `<prefix>/<file_name(id)>.collection.json`
 /// descriptor (ADR-0049 §4 — `kind` is authoritative, the suffix is *derived* from it). The prefix
 /// of independently range-readable objects under this layout IS the collection on S3 (the third
 /// projection): a reader reads `collection.json` and `collection.seal` once, then each member it
-/// actually needs.
+/// actually needs. Member stems are encoded with [`tessera_core::names::file_name`].
 pub fn prefix_layout(c: &Collection, prefix: &str) -> Vec<(String, String)> {
     let prefix = prefix.trim_end_matches('/');
     let mut out: Vec<(String, String)> = c
@@ -576,7 +576,7 @@ mod tests {
         );
         let cohort = cb.seal().unwrap();
 
-        // prefix_layout: the sub-collection resolves to `<id>.collection.json`, the product to `.tsra`.
+        // prefix_layout: the sub-collection resolves to `<file_name(id)>.collection.json`, the product to `.tsra`.
         let layout = prefix_layout(&cohort, "s3://b/cohort");
         assert!(layout.iter().any(|(k, r)| r == &exam.id
             && k.ends_with(&member_filename(&exam.id, MemberKind::Collection))));
