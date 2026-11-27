@@ -3,6 +3,7 @@
 Status: **Proposed** (2026-06-29) · Realizes the copy-on-write half of **ADR-0022** that was specified
 but not built. Relates ADR-0020 (identity / JCS), ADR-0028 (recursive MMR Merkle), ADR-0033
 (collections, raw/derived WORM roles), ADR-0034 (object-store range reads).
+**Amended by ADR-0067 (2026-11-27)** — see the amendment below for the merged repository changes.
 
 ## Context
 
@@ -164,9 +165,11 @@ manifests, operating on *real* identity with *structural* diffs. Not worth a git
   of the same version yields byte-identical `.tsra` (S15 determinism extends to the round-trip).
 - **`publish` changes identity** (new root id) — intended; record the trade in operator docs so a
   history-free publication is never mistaken for the same product as its source.
-- **Branch / merge are explicitly out of scope.** Tessera versioning is linear supersession + the
-  derivation DAG (collections); there is no content merge. `refs` are single-lineage pointers, not
-  branches. Revisit only if a real divergence workflow appears.
+- **Tessera has no branches and no content merge** (ADR-0067 D9). Workspaces and merges belong to kit.
+  A ref is a single-lineage pointer or a pin, never a branch. Tessera provides second lineages, `forked_from`
+  origin edges and pins. Two lineages may share objects; an origin edge records where a lineage began and
+  keeps shared objects alive, without merge semantics. Kit combines their work and writes an ordinary commit
+  on one lineage.
 - **No staging (decided).** The working flow is edit → `commit` directly; there is no `add`/`status`
   working-tree + index. Keeps the surface lean; revisit only if a real batched-edit workflow demands it.
 - **Decided (2026-06-29):** (1) `publish` default = history-free *identity* **with** a single
@@ -318,3 +321,35 @@ stored source edges. Removing a pin only permits reclamation when no other root 
 outlast forgotten lineages and override every retention class (#906): retention changes edges, never roots.
 Storing an unrooted object separately can race GC before `set_pin`; missing targets are refused. Keep a root
 until pin publication. Corrupt pins must be restored before CAS removal can validate their target.
+
+## Amended by ADR-0067 (2026-11-27)
+
+[ADR-0067](0067-collection-refs-version-edge-and-gc-through-members.md) extends this repository design:
+
+- **Layout 2 and typed, namespaced refs** (PR [#1005](https://github.com/vig-os/tessera/pull/1005), D1):
+  `refs/lineages/` and `refs/pins/` hold `product` or `collection` records; logs live in `log/lineages/`.
+  Other repository layouts are refused; there is no in-place migration.
+- **Collection lineages** (PR [#1004](https://github.com/vig-os/tessera/pull/1004), D2/D5): sealed `sources`
+  pin predecessors through `supersedes` and `forked_from`. A fork uses a caller-supplied `fork` identity token;
+  later versions retain their lineage identity. This supplies kit's workspace substrate, with no branch or merge verb.
+- **Object kinds and member diff** (PR [#1012](https://github.com/vig-os/tessera/pull/1012), D1.1/D6):
+  `ObjectKind::of` distinguishes product manifests from collections; `collection::diff` compares collection members.
+- **Collection objects and GC through members** (PR [#1022](https://github.com/vig-os/tessera/pull/1022), D3):
+  `Repository::put_collection` / `get_collection` store and read sealed collections. GC follows recursive members
+  and stored source edges; missing or unreadable members abort before any sweep. Missing edge targets stay open.
+- **Atomic commits and ancestry** (PR [#1028](https://github.com/vig-os/tessera/pull/1028), D1/D5):
+  `Repository::commit_collection(lineage, expected, collection, members)` validates CAS, kind, identity and member
+  closure under the writer fence, then stores supplied members and advances the ref in that same call.
+  `log` also covers collections; `history(address)` walks `supersedes` / `forked_from`, excluding members and
+  other source roles, and errors on missing predecessors.
+- **Durable pins** (PR [#1033](https://github.com/vig-os/tessera/pull/1033), D4): `Repository::set_pin`,
+  `remove_pin`, `read_pin` and `pins` manage independent typed GC roots. Pins survive lineage removal;
+  explicit CAS replacement is allowed, but pins do not advance through commits or carry version history.
+
+**CLI integration** (PR [#1038](https://github.com/vig-os/tessera/pull/1038), step 7):
+`tessera collection commit|log|diff` exposes collection commits, logs/ancestry and member diffs;
+`tessera pin set|rm|ls` manages durable pins. The exit-code contract is 4 for a retryable conflict (reread the ref),
+5 for an operation refused by the rules, 6 for a damaged or unsupported store, and 1 for other failures.
+The existing codes 2 (CLI usage) and 3 (backend unavailable) remain. The exhaustive `Error::failure_class`
+classifier in tessera-core supplies failure categories; the CLI assigns their numeric exit codes.
+Workspaces and content merges remain kit's responsibility (D9).
