@@ -1836,6 +1836,14 @@
             touch $out
           '';
 
+          # Unit-test processes share HDF5 descriptors without close-on-exec (#1043).
+          hdf5-no-spawn = pkgs.runCommand "hdf5-no-spawn"
+            { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            python3 ${self}/scripts/tests/test_hdf5_no_spawn.py
+            python3 ${./scripts/check-hdf5-no-spawn.py} ${self}
+            touch $out
+          '';
+
           # The root CHANGELOG holds one section per release (#982): `check` holds it to the structure
           # `scripts/changelog.py` documents, including a section for the workspace version, so the
           # release PR (which bumps that version) fails here until its `Unreleased` is renamed
