@@ -90,8 +90,9 @@ build is ~link time.
   (gerchowl/g-fleet#1676), the default way to build and test one crate is
   `scripts/ksb-test.sh <rev> <crate> [FILTERSET]` (e.g. `scripts/ksb-test.sh HEAD tessera-cli --bins`, or
   `scripts/ksb-test.sh HEAD tessera-io 'test(roundtrip)'`). It runs that crate's nextest suite at that commit
-  (pushed or not) as a ksb job, built in crane derivations of this flake (`legacyPackages.ksbTest`), and prints
-  the summary, every failing test's output and the run's real exit code. The same request on the same commit is
+  (pushed or not, with `legacyPackages.ksbTest` from #960 or later; older commits exit 3) as a ksb job, built in
+  crane derivations of this flake (`legacyPackages.ksbTest`), and prints the summary, every failing test's output
+  and the run's real exit code. The same request on the same commit is
   cached (a failure stays failed; `--rerun` runs it again). It does not cover the private DUPLET data or
   hardware counters; `--help` and CONTRIBUTING.md say what else differs from `workspace-test`.
 - **Commits:** commit inside `nix develop` so the `prek` gates fire. If a hook fails to *install*,

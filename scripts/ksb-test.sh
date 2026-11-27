@@ -4,7 +4,8 @@
 #   scripts/ksb-test.sh [OPTIONS] <rev> <crate> [FILTERSET]
 #   scripts/ksb-test.sh --self-test
 #
-#   <rev>        any commit in this clone, pushed or not (a branch, a tag, a SHA; resolved to the SHA here)
+#   <rev>        a commit in this clone with legacyPackages.ksbTest (#960 or later), pushed or not
+#                (a branch, a tag, a SHA; resolved to the SHA here); older commits exit 3
 #   <crate>      a workspace member, e.g. tessera-io (tessera/crates/<crate>/Cargo.toml at <rev>)
 #   [FILTERSET]  a nextest filterset, passed as `-E`, e.g. 'test(roundtrip)' or 'binary(cli) & test(=sign)'
 #
@@ -13,7 +14,9 @@
 #   --threads N  test threads (NEXTEST_TEST_THREADS, RUST_TEST_THREADS, RAYON_NUM_THREADS); default 4
 #   --timeout M  minutes the test run may take before it is killed (recorded as exit 124); default 15. The run
 #                happens inside ksb's preparation, which ksb bounds itself (its input copy timed out at 1800 s), so
-#                build + run beyond that ends as exit 3 instead of 124
+#                build + run beyond that ends as exit 3 instead of 124. ksb labels any exit 124 as
+#                reason: deadline, including this test timeout; summary.txt/nextest.log identify the test
+#                timeout, while an infrastructure deadline has no test result and the wrapper exits 3
 #   --rerun      run the tests again although this exact request already has a result (a new job)
 #   --name NAME  ksb job name; default tsra-test-<crate>-<sha8>-<digest of the generated job>. A name ksb already
 #                knows is reported (or waited on), never resubmitted
@@ -158,6 +161,7 @@ report() {
     jq -r '.next_action // empty' <<< "$status" | cut -c1-2000 >&2
     echo "ksb-test: the end of the job log:" >&2
     "$KSB" logs "$name" | tail -n 80 >&2
+    printf '\n' >&2
     echo "ksb-test: a new commit gets a new job; for an infrastructure failure on this one, --rerun submits again" >&2
     return 3
   fi
@@ -298,7 +302,7 @@ cmd=$1 name=$2; shift 2
 case $name in pass) code=0 reason=succeeded ;; fail) code=100 reason=failed ;; prep) code=null reason=preparation_failed ;; esac
 case $cmd in
   status) echo "{\"reason\": \"$reason\", \"exit_code\": $code, \"output\": \"/data/hdd/batch/$name/out\"$([[ $name == prep ]] && echo ', "next_action": "nix copy timed out after 1800 seconds"')}" ;;
-  logs) echo "error: could not compile \`tessera-io\` (lib) due to 1 previous error" ;;
+  logs) printf "%s" "error: could not compile \`tessera-io\` (lib) due to 1 previous error" ;;
   out)
     while (($#)); do case $1 in --path) path=$2; shift 2 ;; --dest) dest=$2; shift 2 ;; *) shift ;; esac; done
     case $path in
@@ -322,6 +326,7 @@ STUB
   grep -q '3 passed' "$t/pass.stdout" || fail "report did not print the summary of a passing run"
   grep -q 'deliberately_fails' "$t/pass.stdout" && fail "report printed failures for a pass"
   grep -q 'could not compile' "$t/prep.stderr" || fail "report did not print the build log"
+  grep -q '^ksb-test: a new commit' "$t/prep.stderr" || fail "hint is not on its own line"
   grep -q 'nix copy timed out' "$t/prep.stderr" || fail "report did not print ksb's own failure reason"
   KSB=$saved
   ((status == 0)) && echo "self-test: lock parsing, job flake, digest and 3 report outcomes OK"
