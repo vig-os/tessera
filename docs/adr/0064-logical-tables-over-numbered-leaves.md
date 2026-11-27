@@ -289,6 +289,14 @@ readable. Rename independent tables to names without a shared `_NNNN` prefix, fo
 `img_0001`, which remains readable by its full name. The legacy grouping rule remains read-forever in v0;
 this writer restriction does not rewrite existing products or relax incompatible group reads.
 
+**Amendment (2026-11-27, #1011).** The shared column contract also includes `unit`, `scale` and the
+complete `referencing` descriptor (transform, including offsets, output unit, vocabulary and frame/epoch).
+These value-interpreting fields must agree exactly, including absence versus an explicit default value.
+Both sealing and group reads refuse a mismatch with `SchemaMismatch`, including group reads of existing
+products whose leaves mix these fields. The read-forever promise below preserves legacy grouping, not
+acceptance of incompatible value contracts. Descriptions and labels may still differ. This supersedes
+any implication below that every existing product remains group-readable.
+
 - **Existing products keep reading.** Every product with `prefix_NNNN` blocks (GE ingest's `events_NNNN` and
   `TableMultiBlockSink`'s output, alpha.1 to alpha.4 and dev up to the writer switch) resolves through rule 4
   of §3, which is today's `block_group` verbatim: the bare `prefix` plus every `prefix_` + exactly four ASCII
