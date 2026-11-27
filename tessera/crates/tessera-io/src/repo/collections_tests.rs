@@ -193,12 +193,12 @@ fn collection_storage_round_trips_and_replaces_torn_bytes() {
     assert_eq!(repo.gc().unwrap().kept, 1);
     assert!(matches!(
         repo.get_manifest(&seal),
-        Err(Error::RefKindMismatch { .. })
+        Err(Error::ObjectKindMismatch { .. })
     ));
     let product = repo.put_manifest(&sealed_on(0, None).0).unwrap();
     assert!(matches!(
         repo.get_collection(&product),
-        Err(Error::RefKindMismatch { .. })
+        Err(Error::ObjectKindMismatch { .. })
     ));
     std::fs::write(repo.object_path(&seal).unwrap(), b"torn").unwrap();
     assert!(repo.get_collection(&seal).is_err());
@@ -340,5 +340,91 @@ fn every_collection_writer_refuses_an_incompatible_layout() {
         repo.get_collection(&seal),
         Err(Error::UnsupportedRepositoryLayout { .. })
     ));
+    assert_eq!(objects(dir.path()), before);
+}
+
+#[test]
+fn product_commit_cannot_change_a_collection_lineages_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let tip = repo.put_collection(&collection("c", vec![])).unwrap();
+    repo.set_ref("current", None, &tip).unwrap();
+    let (product, payloads) = sealed_on(40, Some(&tip));
+    let before = objects(dir.path());
+    assert!(matches!(
+        repo.commit("current", Some(&tip), &product, &payloads),
+        Err(Error::LineageKindMismatch { .. })
+    ));
+    assert_eq!(repo.read_ref("current").unwrap(), Some(tip));
+    assert_eq!(objects(dir.path()), before);
+}
+
+fn refuse_kind_change(collection_first: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let collection = repo.put_collection(&collection("c", vec![])).unwrap();
+    let product = repo.put_manifest(&sealed_on(0, None).0).unwrap();
+    let (old, new) = if collection_first {
+        (&collection, &product)
+    } else {
+        (&product, &collection)
+    };
+    repo.set_ref("current", None, old).unwrap();
+    let before = objects(dir.path());
+    assert!(matches!(
+        repo.set_ref("current", Some(old), new),
+        Err(Error::LineageKindMismatch { .. })
+    ));
+    assert_eq!(repo.read_ref("current").unwrap().as_ref(), Some(old));
+    assert_eq!(objects(dir.path()), before);
+}
+
+#[test]
+fn set_ref_cannot_change_collection_to_product() {
+    refuse_kind_change(true);
+}
+
+#[test]
+fn set_ref_cannot_change_product_to_collection() {
+    refuse_kind_change(false);
+}
+
+#[test]
+fn typed_object_reads_name_an_object_kind_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let seal = repo.put_collection(&collection("c", vec![])).unwrap();
+    let error = repo.get_manifest(&seal).unwrap_err().to_string();
+    assert!(
+        error.contains("object kind mismatch") && !error.contains("record"),
+        "{error}"
+    );
+}
+
+#[test]
+fn gc_history_errors_are_bounded_for_two_thousand_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let (first, payloads) = sealed_on(0, None);
+    let oldest = repo.commit("history", None, &first, &payloads).unwrap();
+    let mut tip = oldest.clone();
+    for revision in 1..2000 {
+        tip = repo
+            .commit(
+                "history",
+                Some(&tip),
+                &sealed_on(revision, Some(&tip)).0,
+                &[],
+            )
+            .unwrap();
+    }
+    std::fs::write(repo.object_path(&oldest).unwrap(), b"torn").unwrap();
+    let before = objects(dir.path());
+    let error = repo.gc().unwrap_err().to_string();
+    assert!(error.len() < 2048, "error has {} bytes", error.len());
+    assert!(
+        error.contains(&oldest) && error.contains("history") && error.contains("2000"),
+        "{error}"
+    );
     assert_eq!(objects(dir.path()), before);
 }

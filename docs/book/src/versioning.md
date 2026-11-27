@@ -73,14 +73,20 @@ and verifies the target's stored bytes and seal. Bare blocks cannot be ref targe
 
 The Rust repository API stores sealed collections with `put_collection` and reads them by seal with
 `get_collection`. Both products and collections use the same content-addressed object store and fenced writer.
-`set_ref` infers the record kind from the stored target. These are separate low-level calls: until a live ref or
+`set_ref` infers the record kind from the stored target. An existing lineage keeps its recorded kind:
+`commit` and `set_ref` refuse a change with `LineageKindMismatch` under the writer lock, before storing anything.
+Typed object accessors use `ObjectKindMismatch` when the requested kind disagrees with the object; ref-record
+mismatches remain `RefKindMismatch`. These are separate low-level calls: until a live ref or
 collection reaches a newly stored object, `gc` can reclaim it. Atomic collection commits are ADR-0067 step 5.
 
 `gc` marks through nested collection members and both kinds' `sources` edges. Members are closed: a missing,
 unreadable, torn or wrong-kind member aborts before any deletion, naming the full path from the ref through each
 `members[index]`. Missing edge targets stay open (held elsewhere). Shared versions are read once, every incoming
 kind claim is checked, and traversal uses a heap stack with no depth limit. Product blocks are marked without
-reading their payloads. The cost is the reachable version graph plus the listing of all objects.
+reading their payloads. Traversal provenance stores parent indices instead of copying path prefixes, so its
+bookkeeping grows with the reachable graph. Paths are rendered only on failure: all member steps remain visible,
+while consecutive source edges are summarized by a version/object count. A long history therefore has a small
+error message. The cost is the reachable version graph plus the listing of all objects.
 
 Pins have their own directory, `repo/refs/pins/<name>`, and use the same encoding, bound and typed record grammar.
 A lineage and a pin may share a name: lineage commands only touch `refs/lineages/` and `log/lineages/`.

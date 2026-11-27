@@ -425,7 +425,23 @@ pub enum Error {
         reason: String,
     },
 
-    /// A typed repository ref (or a typed object read) disagrees with the stored bytes
+    /// A lineage's recorded kind is fixed until the lineage is forgotten (ADR-0067 D1).
+    /// Rejected under the writer lock before storing any objects or changing the ref.
+    #[error("lineage '{lineage}' has kind {tip_kind:?}; a write cannot change its kind")]
+    LineageKindMismatch {
+        lineage: String,
+        tip_kind: crate::ObjectKind,
+    },
+
+    /// A typed object read or write requests a different kind from the stored bytes.
+    #[error("object kind mismatch at {}: expected {expected:?}, object {object:?}", path.display())]
+    ObjectKindMismatch {
+        path: std::path::PathBuf,
+        expected: crate::ObjectKind,
+        object: crate::ObjectKind,
+    },
+
+    /// A typed repository ref disagrees with the stored bytes
     /// classified by ADR-0067 D1.1. The object remains the authority on its kind.
     #[error("object kind mismatch at {}: record {record:?}, object {object:?}", path.display())]
     RefKindMismatch {

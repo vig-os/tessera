@@ -168,10 +168,83 @@ pub struct LogEntry {
 /// that names it).
 struct Reached {
     address: String,
-    via: String,
+    via: usize,
     /// Ref and member claims must be checked even for an already visited target.
     expect: Option<ObjectKind>,
     ref_path: Option<PathBuf>,
+}
+
+/// Append-only traversal provenance: each step owns only its local label and a parent
+/// index. Building a long history never copies its prefix. Paths are rendered only on error.
+#[derive(Default)]
+struct WalkPaths(Vec<PathStep>);
+
+struct PathStep {
+    parent: Option<usize>,
+    label: PathLabel,
+}
+
+enum PathLabel {
+    Root(PathBuf),
+    Member {
+        collection: String,
+        index: usize,
+        reference: String,
+    },
+    Edge {
+        object: String,
+        role: String,
+    },
+}
+
+impl WalkPaths {
+    fn push(&mut self, parent: Option<usize>, label: PathLabel) -> usize {
+        let index = self.0.len();
+        self.0.push(PathStep { parent, label });
+        index
+    }
+
+    fn render(&self, index: usize) -> String {
+        let mut current = Some(index);
+        let mut parts = Vec::new();
+        while let Some(index) = current {
+            let step = &self.0[index];
+            current = step.parent;
+            match &step.label {
+                PathLabel::Root(path) => parts.push(format!("the tip of ref {}", path.display())),
+                PathLabel::Member {
+                    collection,
+                    index,
+                    reference,
+                } => {
+                    parts.push(format!("{collection} → members[{index}] ({reference})"));
+                }
+                PathLabel::Edge { object, role } => {
+                    let mut hops = 1usize;
+                    while let Some(parent) = current {
+                        let previous = &self.0[parent];
+                        if !matches!(previous.label, PathLabel::Edge { .. }) {
+                            break;
+                        }
+                        hops += 1;
+                        current = previous.parent;
+                    }
+                    let mut edge = format!("the '{role}' edge of {object}");
+                    if hops > 1 {
+                        // An edge may also reach a source file, so the count includes
+                        // both version objects and non-version objects.
+                        edge.push_str(&format!(
+                            " ({} versions/objects across {hops} source edges)",
+                            hops + 1
+                        ));
+                    }
+                    parts.push(edge);
+                }
+            }
+        }
+        parts.reverse();
+        parts.join(" → ")
+    }
 }
 
 /// A checked version object. Non-version edge targets have no outgoing edges.
@@ -416,7 +489,7 @@ impl Repository {
     pub fn get_manifest(&self, manifest_hash: &str) -> Result<Manifest> {
         self.layout()?;
         let bytes = self.read_raw(manifest_hash)?;
-        require_kind(
+        require_object_kind(
             &self.object_path(manifest_hash)?,
             ObjectKind::Product,
             &bytes,
@@ -431,19 +504,19 @@ impl Repository {
     /// between this call and `set_ref` may reclaim it. Atomic collection commit is #947 step 5.
     pub fn put_collection(&self, collection: &Collection) -> Result<String> {
         let (bytes, seal) = crate::stored::collection(collection)?;
-        require_kind(&self.object_path(&seal)?, ObjectKind::Collection, &bytes)?;
+        require_object_kind(&self.object_path(&seal)?, ObjectKind::Collection, &bytes)?;
         let writer = self.lock()?;
         self.store(&writer, &seal, &bytes)?;
         Ok(seal)
     }
 
     /// Read and verify a collection by its seal, including canonical bytes, identity and
-    /// member MMR. A product is refused with `RefKindMismatch` rather than parsed as an
+    /// member MMR. A product is refused with `ObjectKindMismatch` rather than parsed as an
     /// empty collection. Resolving members belongs to the repository walk.
     pub fn get_collection(&self, manifest_hash: &str) -> Result<Collection> {
         self.layout()?;
         let bytes = self.read_raw(manifest_hash)?;
-        require_kind(
+        require_object_kind(
             &self.object_path(manifest_hash)?,
             ObjectKind::Collection,
             &bytes,
@@ -483,7 +556,14 @@ impl Repository {
             Ok(bytes) => {
                 let (kind, address) = parse_ref(&path, &bytes)?;
                 let target = self.read_raw(&address)?;
-                require_kind(&path, kind, &target)?;
+                let object = ObjectKind::of(&target)?;
+                if kind != object {
+                    return Err(Error::RefKindMismatch {
+                        path,
+                        record: kind,
+                        object,
+                    });
+                }
                 read_version(&target, &address)?;
                 Ok(Some(address))
             }
@@ -498,6 +578,7 @@ impl Repository {
     /// a concurrent commit is never silently lost. `new` must be a `blake3:<64 lower-case hex>`
     /// address of a stored, readable product or collection. The kind is inferred from the
     /// object bytes; bare blocks and ambiguous objects are refused before the ref is written.
+    /// An existing lineage keeps its recorded kind: a change is [`Error::LineageKindMismatch`].
     /// The ref is written durably (see the module docs).
     ///
     /// A low-level primitive: [`commit`](Self::commit) is the one atomic path from a manifest to a
@@ -528,6 +609,7 @@ impl Repository {
         let bytes = self.read_raw(new)?;
         let kind = ObjectKind::of(&bytes)?;
         read_version(&bytes, new)?;
+        self.check_lineage_kind(lineage, kind)?;
         let refs = self.root.join("refs/lineages");
         create_dirs_durable(&refs, &mut Vec::new())?;
         let tmp = self
@@ -552,6 +634,26 @@ impl Repository {
             });
         }
         Ok(())
+    }
+
+    /// The caller holds the writer lock and has checked CAS. Check the recorded kind,
+    /// not the new object's inferred kind alone, before any storage or ref publication.
+    fn check_lineage_kind(&self, lineage: &str, kind: ObjectKind) -> Result<()> {
+        let path = self.ref_path(lineage)?;
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let (tip_kind, _) = parse_ref(&path, &bytes)?;
+                if tip_kind != kind {
+                    return Err(Error::LineageKindMismatch {
+                        lineage: lineage.into(),
+                        tip_kind,
+                    });
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     fn log_path(&self, lineage: &str) -> Result<PathBuf> {
@@ -649,6 +751,7 @@ impl Repository {
 
         let writer = self.lock()?;
         self.check_ref(lineage, expected)?;
+        self.check_lineage_kind(lineage, ObjectKind::Product)?;
 
         // 1. Store supplied payloads, content-addressed (skip any already intact = the dedup win).
         for (digest, bytes) in supplied {
@@ -780,6 +883,9 @@ impl Repository {
     /// The walk uses a heap stack with no depth cutoff. Each distinct version is read once;
     /// every incoming kind claim is checked, including claims about shared targets. Sealed
     /// hash pins cannot form cycles without a hash preimage; editing bytes breaks the seal.
+    /// Traversal provenance uses parent indices, with constant-size bookkeeping per edge.
+    /// Paths are rendered only on error; consecutive source edges are summarized by the
+    /// number of reached versions/objects, while every member step remains visible.
     /// Product block payloads are marked without reading them, as before. Cost grows with
     /// the reachable versions plus the listing of all stored objects (ADR-0067 D7).
     pub fn gc(&self) -> Result<GcReport> {
@@ -792,10 +898,11 @@ impl Repository {
         let mut reachable: BTreeSet<String> = BTreeSet::new();
         let mut walked: BTreeMap<String, Option<ObjectKind>> = BTreeMap::new();
         let mut stack: Vec<Reached> = Vec::new();
+        let mut paths = WalkPaths::default();
         for (path, kind, address) in self.all_ref_tips().map_err(|e| gc_aborted("a ref", e))? {
             stack.push(Reached {
                 address,
-                via: format!("the tip of ref {}", path.display()),
+                via: paths.push(None, PathLabel::Root(path.clone())),
                 expect: Some(kind),
                 ref_path: Some(path),
             });
@@ -804,11 +911,12 @@ impl Repository {
             if let Some(kind) = walked.get(&reached.address) {
                 // A shared target can be reached first through an edge or a differently
                 // typed member. Deduplication must never hide a conflicting claim.
-                check_reached_kind(&reached, *kind).map_err(|e| gc_aborted(&reached.via, e))?;
+                check_reached_kind(&reached, *kind, &paths)
+                    .map_err(|e| gc_aborted(paths.render(reached.via), e))?;
                 continue;
             }
             reachable.insert(reached.address.clone());
-            let version = self.walk_read(&reached)?;
+            let version = self.walk_read(&reached, &paths)?;
             walked.insert(reached.address.clone(), version.as_ref().map(Version::kind));
             let sources = match version {
                 None => continue,
@@ -827,16 +935,20 @@ impl Repository {
                             MemberKind::Collection => ObjectKind::Collection,
                             _ => {
                                 return Err(gc_aborted(
-                                    &reached.via,
+                                    paths.render(reached.via),
                                     Error::Invalid("unsupported member kind".into()),
                                 ))
                             }
                         };
                         stack.push(Reached {
                             address: member.manifest_hash.clone(),
-                            via: format!(
-                                "{} → {} → members[{index}] ({})",
-                                reached.via, reached.address, member.reference
+                            via: paths.push(
+                                Some(reached.via),
+                                PathLabel::Member {
+                                    collection: reached.address.clone(),
+                                    index,
+                                    reference: member.reference.clone(),
+                                },
                             ),
                             expect: Some(kind),
                             ref_path: None,
@@ -850,9 +962,12 @@ impl Repository {
                     if self.has_object(&address) {
                         stack.push(Reached {
                             address,
-                            via: format!(
-                                "{} → the '{}' edge of {}",
-                                reached.via, source.role, reached.address
+                            via: paths.push(
+                                Some(reached.via),
+                                PathLabel::Edge {
+                                    object: reached.address.clone(),
+                                    role: source.role,
+                                },
                             ),
                             expect: None,
                             ref_path: None,
@@ -876,13 +991,13 @@ impl Repository {
     }
 
     /// Read a reached product or collection, or an intact non-version edge target.
-    fn walk_read(&self, reached: &Reached) -> Result<Option<Version>> {
-        let what = || format!("{} ({})", reached.address, reached.via);
+    fn walk_read(&self, reached: &Reached, paths: &WalkPaths) -> Result<Option<Version>> {
+        let what = || format!("{} ({})", reached.address, paths.render(reached.via));
         let read = || {
             let bytes = self.read_raw(&reached.address)?;
             if reached.expect.is_some() || manifest_shaped(&bytes) {
                 let kind = ObjectKind::of(&bytes)?;
-                check_reached_kind(reached, Some(kind))?;
+                check_reached_kind(reached, Some(kind), paths)?;
                 return read_version(&bytes, &reached.address).map(Some);
             }
             check_digest(&reached.address, &bytes)?;
@@ -901,7 +1016,7 @@ fn stored_manifest(m: &Manifest) -> Result<(String, Vec<u8>)> {
     }
     check_block_refs(&m.blocks)?;
     let (bytes, seal) = crate::stored::manifest(m)?;
-    require_kind(Path::new(&seal), ObjectKind::Product, &bytes)?;
+    require_object_kind(Path::new(&seal), ObjectKind::Product, &bytes)?;
     Ok((seal, bytes))
 }
 
@@ -972,19 +1087,23 @@ fn kind_name(kind: ObjectKind) -> &'static str {
     }
 }
 
-fn require_kind(path: &Path, record: ObjectKind, bytes: &[u8]) -> Result<()> {
+fn require_object_kind(path: &Path, expected: ObjectKind, bytes: &[u8]) -> Result<()> {
     let object = ObjectKind::of(bytes)?;
-    if record != object {
-        return Err(Error::RefKindMismatch {
+    if expected != object {
+        return Err(Error::ObjectKindMismatch {
             path: path.to_path_buf(),
-            record,
+            expected,
             object,
         });
     }
     Ok(())
 }
 
-fn check_reached_kind(reached: &Reached, object: Option<ObjectKind>) -> Result<()> {
+fn check_reached_kind(
+    reached: &Reached,
+    object: Option<ObjectKind>,
+    paths: &WalkPaths,
+) -> Result<()> {
     let Some(expected) = reached.expect else {
         return Ok(());
     };
@@ -998,7 +1117,7 @@ fn check_reached_kind(reached: &Reached, object: Option<ObjectKind>) -> Result<(
             });
         }
         return Err(Error::MemberKindMismatch {
-            path: reached.via.clone(),
+            path: paths.render(reached.via),
             expected,
             object,
         });

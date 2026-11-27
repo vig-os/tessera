@@ -431,10 +431,10 @@ step, with the #947 acceptance item each one proves.
   - `gc_marks_through_collection_members`: a base and deltas pinned only by a `current` collection survive `gc` and
     read back by hash. Today this aborts with `GcAborted`, the collection read as a manifest (#947 item 2).
   - `gc_marks_through_nested_collections`: three levels, a shared member visited once.
-  - `gc_aborts_on_a_missing_member_and_names_its_path`, and the same for a torn and a wrong-kind member: nothing is
-    deleted.
-  - `a_ref_whose_kind_disagrees_with_its_object_is_refused`: a `collection` record naming a product, and the
-    reverse, are `RefKindMismatch` on read and abort `gc`.
+  - `gc_aborts_on_a_missing_nested_member_and_names_its_path`, and the same for a torn and a wrong-kind member:
+    nothing is deleted.
+  - `a_collection_ref_pointing_at_a_product_is_refused` and
+    `a_product_ref_pointing_at_a_collection_is_refused`: both are `RefKindMismatch` on read and abort `gc`.
 - **Step 5.**
   - `commit_collection_advances_by_cas_and_reads_back`, `commit_collection_built_on_a_moved_tip_is_refused`, and the
     N-process race test of #946 run on a collection lineage (#947 item 1).

@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and labels may still differ. `same_value_contract` now accepts two borrowed `ValueContract` views.
   Rename independent tables or convert their values and metadata before sealing.
 
+- Repository lineage kinds are fixed until forgotten: `commit` and `set_ref` reject kind changes with
+  `LineageKindMismatch` before writing. Typed object reads name `ObjectKindMismatch` separately from ref-record
+  mismatches. GC stores traversal paths by parent index and renders them only on error; long source chains
+  report a version/object count while retaining the full member path (#999).
+
 - **breaking (writers)**: independent tables sharing a legacy numbered prefix, such as `run_0001`
   and `run_0002`, must agree on column count, names, order, dtypes and nullability to seal (#978).
   Rename independent tables without a shared `_NNNN` prefix, for example `run_first` and `run_second`.
