@@ -22,6 +22,17 @@ materialised whole by `table*`; `column` reads only that column's segments of ea
 and `array_roi` take one block, and a name that is not one (a node such as `pairs`, or a name nothing answers
 to) raises `NotABlockError`, a subclass of `TesseraError`. A name that is not a table, or a partitioned table
 that is invalid (a gap, a foreign child, leaves out of order, ...), raises `TesseraError` naming the reason.
+Schema mismatches also expose `kind`, `column`, `field`, `expected` and `found` attributes:
+
+| `kind` | `column` | `field` | `expected` / `found` |
+| --- | --- | --- | --- |
+| `column_count` | `None` | `None` | Integer column counts |
+| `column_name` | Zero-based index | `None` | Column name strings |
+| `field` | Column name | `dtype`, `nullable`, `unit`, `scale` or `referencing` | Display strings |
+
+Field values use quoted strings, plain numbers/booleans, `absent` for missing optional values and JSON
+for complete referencing descriptors. These attributes apply to schema mismatches during reads and
+`Builder.pack`; other errors retain their message-only interface.
 
 ```python
 {{#include ../../../tessera/crates/tessera-py/tests/write_example.py:logical}}

@@ -46,46 +46,66 @@ pub enum SchemaMismatchKind {
 }
 
 /// A column value-contract field; names and positions belong to [`SchemaMismatchKind`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ContractField {
     /// Stored scalar dtype.
-    #[error("dtype")]
     Dtype,
     /// Whether values carry a validity mask.
-    #[error("nullable")]
     Nullable,
     /// Physical unit after scaling.
-    #[error("unit")]
     Unit,
     /// Physical value multiplier.
-    #[error("scale")]
     Scale,
     /// Complete referencing descriptor.
-    #[error("referencing")]
     Referencing,
 }
 
 /// Owned diagnostic value, retaining the field's Rust type and optionality.
+/// Display uses `absent` for missing values, quoted strings, plain scalars and JSON descriptors.
 /// Floating-point values use ordinary `PartialEq`, just like [`ValueContract`].
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ContractValue {
     /// Stored scalar dtype.
-    #[error("{0:?}")]
     Dtype(String),
     /// Whether values carry a validity mask.
-    #[error("{0}")]
     Nullable(bool),
     /// Physical unit, preserving absent versus explicitly empty.
-    #[error("{0:?}")]
     Unit(Option<String>),
     /// Physical value multiplier, preserving absent versus explicit.
-    #[error("{0:?}")]
     Scale(Option<f64>),
     /// Complete structured referencing descriptor.
-    #[error("{0:?}")]
     Referencing(Option<crate::referencing::Referenced>),
+}
+
+impl std::fmt::Display for ContractField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Dtype => "dtype",
+            Self::Nullable => "nullable",
+            Self::Unit => "unit",
+            Self::Scale => "scale",
+            Self::Referencing => "referencing",
+        })
+    }
+}
+
+impl std::fmt::Display for ContractValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dtype(value) => write!(f, "{value:?}"),
+            Self::Nullable(value) => write!(f, "{value}"),
+            Self::Unit(Some(value)) => write!(f, "{value:?}"),
+            Self::Scale(Some(value)) => write!(f, "{value}"),
+            Self::Referencing(Some(value)) => {
+                // JSON preserves every descriptor member with its public wire name.
+                let json = serde_json::to_string(value).map_err(|_| std::fmt::Error)?;
+                f.write_str(&json)
+            }
+            Self::Unit(None) | Self::Scale(None) | Self::Referencing(None) => f.write_str("absent"),
+        }
+    }
 }
 
 /// Borrowed value contract for a column, independent of encoding and descriptive annotations.
@@ -106,44 +126,59 @@ pub struct ValueContract<'a> {
 
 impl<'a> ValueContract<'a> {
     /// First differing field in dtype, nullable, unit, scale, referencing order.
+    /// Exhaustive destructuring makes new fields a compile error until comparison is updated.
     /// Uses exactly the equality semantics of [`ValueContract`], including floating-point values.
     pub fn first_difference(
         self,
         other: Self,
     ) -> Option<(ContractField, ContractValue, ContractValue)> {
-        if self.dtype != other.dtype {
+        let Self {
+            dtype,
+            nullable,
+            unit,
+            scale,
+            referencing,
+        } = self;
+        let Self {
+            dtype: other_dtype,
+            nullable: other_nullable,
+            unit: other_unit,
+            scale: other_scale,
+            referencing: other_referencing,
+        } = other;
+        if dtype != other_dtype {
             return Some((
                 ContractField::Dtype,
-                ContractValue::Dtype(self.dtype.into()),
-                ContractValue::Dtype(other.dtype.into()),
+                ContractValue::Dtype(dtype.into()),
+                ContractValue::Dtype(other_dtype.into()),
             ));
         }
-        if self.nullable != other.nullable {
+        if nullable != other_nullable {
             return Some((
                 ContractField::Nullable,
-                ContractValue::Nullable(self.nullable),
-                ContractValue::Nullable(other.nullable),
+                ContractValue::Nullable(nullable),
+                ContractValue::Nullable(other_nullable),
             ));
         }
-        if self.unit != other.unit {
+        if unit != other_unit {
             return Some((
                 ContractField::Unit,
-                ContractValue::Unit(self.unit.map(str::to_owned)),
-                ContractValue::Unit(other.unit.map(str::to_owned)),
+                ContractValue::Unit(unit.map(str::to_owned)),
+                ContractValue::Unit(other_unit.map(str::to_owned)),
             ));
         }
-        if self.scale != other.scale {
+        if scale != other_scale {
             return Some((
                 ContractField::Scale,
-                ContractValue::Scale(self.scale),
-                ContractValue::Scale(other.scale),
+                ContractValue::Scale(scale),
+                ContractValue::Scale(other_scale),
             ));
         }
-        if self.referencing != other.referencing {
+        if referencing != other_referencing {
             return Some((
                 ContractField::Referencing,
-                ContractValue::Referencing(self.referencing.cloned()),
-                ContractValue::Referencing(other.referencing.cloned()),
+                ContractValue::Referencing(referencing.cloned()),
+                ContractValue::Referencing(other_referencing.cloned()),
             ));
         }
         None
@@ -684,6 +719,55 @@ mod tests {
 #[cfg(test)]
 mod contract_difference_tests {
     use super::*;
+
+    #[test]
+    fn first_difference_agrees_with_equality_for_all_pairs() {
+        let reference = crate::referencing::Referenced::identity(Some("ns".into()));
+        let mut contracts = Vec::new();
+        for dtype in ["i4", "f8"] {
+            for nullable in [false, true] {
+                for unit in [None, Some(""), Some("ns")] {
+                    for scale in [None, Some(0.0), Some(-0.0), Some(0.001), Some(f64::NAN)] {
+                        for referencing in [None, Some(&reference)] {
+                            contracts.push(ValueContract {
+                                dtype,
+                                nullable,
+                                unit,
+                                scale,
+                                referencing,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for &left in &contracts {
+            for &right in &contracts {
+                assert_eq!(left.first_difference(right).is_none(), left == right);
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostic_values_render_readably() {
+        assert_eq!(
+            format!(
+                "{}={}",
+                ContractField::Scale,
+                ContractValue::Scale(Some(0.001))
+            ),
+            "scale=0.001"
+        );
+        assert_eq!(ContractValue::Scale(None).to_string(), "absent");
+        let referenced = crate::referencing::Referenced::identity(Some("ns".into()));
+        assert_eq!(
+            ContractValue::Referencing(Some(referenced)).to_string(),
+            r#"{"transform":{"kind":"identity"},"unit":"ns"}"#
+        );
+        assert_eq!(ContractValue::Referencing(None).to_string(), "absent");
+        assert_eq!(ContractValue::Unit(Some(String::new())).to_string(), "\"\"");
+        assert_eq!(ContractValue::Unit(None).to_string(), "absent");
+    }
 
     #[test]
     fn typed_fields_follow_contract_order_and_full_equality() {
