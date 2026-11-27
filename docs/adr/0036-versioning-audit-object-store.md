@@ -247,7 +247,7 @@ commit replaced the other lineages' tip, and since #946 a commit to one is refus
   Each ref holds exactly `product SP blake3:<64 lower-case hex> LF`: no other whitespace, upper-case hex, missing
   LF or trailing bytes. Unknown kinds are `Error::CorruptRef`, naming the file and its contents. Collection records
   arrive with collection storage in ADR-0067 step 4. Product records in either namespace are roots of `gc`;
-  pin management verbs arrive in step 6. Lineage operations never touch pins.
+  pin management is specified below. Lineage operations never touch pins.
 - **Every other layout is refused.** `open` refuses any other marker, including a missing marker in an empty
   directory. Only `init` creates a marker, in a directory with no ref, log or object entries. `init` on an existing
   repository checks its marker too. Every writer checks the layout under the one repository lock before writing.
@@ -300,3 +300,21 @@ labelled predecessor edges, in depth-first preorder with supersedes before forke
 source roles are excluded. Unlike GC's open external-edge rule, missing or unreadable predecessors abort with
 `HistoryAborted`, naming the address and incoming edge with bounded path rendering. Readers take no lock;
 concurrent forget/GC can therefore make a history read fail. Log cache repair remains #971.
+
+
+### Amendment — durable pins (ADR-0067 step 6, #1001)
+
+`Repository::set_pin(name, expected, &PinTarget { kind, address })` and
+`remove_pin(name, expected)` use the repository's one fenced writer and durable ref publication/removal.
+`expected` is the current seal (`None` for absence); a mismatch is `RefMoved`, whose `lineage` field names
+this pin. Set validates the stored version's kind and seal before writing the shared typed record grammar.
+An explicit CAS replacement may change kind; pins have no lineage identity, version edges or log cache.
+`read_pin` returns the typed target or absence; `pins()` returns decoded names and typed targets in name order.
+Both validate records and targets; reads are lock-free and listings are not concurrent snapshots.
+
+Pins and lineages share the injective encoder and 249-byte filename bound, with independent namespace paths.
+`forget`, commit and import never touch pins. GC marks each pin through products, collection members and
+stored source edges. Removing a pin only permits reclamation when no other root reaches the target. Pins
+outlast forgotten lineages and override every retention class (#906): retention changes edges, never roots.
+Storing an unrooted object separately can race GC before `set_pin`; missing targets are refused. Keep a root
+until pin publication. Corrupt pins must be restored before CAS removal can validate their target.
