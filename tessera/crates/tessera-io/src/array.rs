@@ -69,7 +69,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tessera_core::block::array::{ArraySpec, WorldFrame};
 use tessera_core::block::table::{Column, TableSpec};
-use tessera_core::block::{BlockKind, BlockRef};
+use tessera_core::block::{BlockKind, BlockName, BlockRef};
 use tessera_core::chunk_index::{ChunkIndex, ChunkStats};
 use tessera_core::hash::digest;
 use tessera_core::{Error, Result};
@@ -385,7 +385,7 @@ fn deserialize_store(blob: &[u8]) -> Result<ReadableWritableListableStorage> {
 /// Build a Zarr array in `store` with the chosen codec and write `data` into it (the whole array).
 /// `pcodec` is plugged as the `array_to_bytes` codec (it produces bytes directly); `zstd` rides on
 /// top of zarrs' default `bytes` array_to_bytes codec as a `bytes_to_bytes` step.
-fn build_filled<T: Element, F: Into<ArrayBuilderFillValue>>(
+fn build_filled<T: Element + Sync, F: Into<ArrayBuilderFillValue>>(
     store: &ReadableWritableListableStorage,
     spec: &ArraySpec,
     dt: DataType,
@@ -406,20 +406,28 @@ fn build_filled<T: Element, F: Into<ArrayBuilderFillValue>>(
     }
     let array = builder.build(store.clone(), ARRAY_PATH).map_err(ze)?;
     array.store_metadata().map_err(ze)?;
-    array
-        .store_array_subset(&array.subset_all(), data)
-        .map_err(ze)?;
+    crate::parallel::install(|| {
+        array
+            .store_array_subset_opt(&array.subset_all(), data, &codec_options())
+            .map_err(ze)
+    })?;
     Ok(())
 }
 
-fn retrieve_all<T: ElementOwned>(store: ReadableWritableListableStorage) -> Result<Vec<T>> {
-    let array = Array::open(store, ARRAY_PATH).map_err(ze)?;
-    array
-        .retrieve_array_subset::<Vec<T>>(&array.subset_all())
-        .map_err(ze)
+fn codec_options() -> zarrs::array::CodecOptions {
+    zarrs::array::CodecOptions::default().with_concurrent_target(tessera_core::threads::budget())
 }
 
-fn retrieve_region<T: ElementOwned>(
+fn retrieve_all<T: ElementOwned + Send>(store: ReadableWritableListableStorage) -> Result<Vec<T>> {
+    let array = Array::open(store, ARRAY_PATH).map_err(ze)?;
+    crate::parallel::install(|| {
+        array
+            .retrieve_array_subset_opt::<Vec<T>>(&array.subset_all(), &codec_options())
+            .map_err(ze)
+    })
+}
+
+fn retrieve_region<T: ElementOwned + Send>(
     store: ReadableWritableListableStorage,
     start: &[u64],
     shape: &[u64],
@@ -430,9 +438,11 @@ fn retrieve_region<T: ElementOwned>(
         .zip(shape)
         .map(|(s, n)| *s..(*s + *n))
         .collect();
-    array
-        .retrieve_array_subset::<Vec<T>>(&ranges.as_slice())
-        .map_err(ze)
+    crate::parallel::install(|| {
+        array
+            .retrieve_array_subset_opt::<Vec<T>>(&ranges.as_slice(), &codec_options())
+            .map_err(ze)
+    })
 }
 
 /// Validate that `data` is encodable under `spec` (codec, dtype, and element count all agree).
@@ -689,16 +699,18 @@ pub fn array_block(
     spec: &ArraySpec,
     data: &ArrayData,
 ) -> Result<(BlockRef, BlockPayload)> {
+    let name = BlockName::new(name)?;
     let (resolved, payload) = encode_resolved(spec, data)?;
     let digest = tessera_core::hash::digest(&payload);
     // Record the concrete codec in the manifest's BlockRef.spec — readers never see "auto".
     let mut stored_spec = spec.clone();
     stored_spec.codec = resolved.to_string();
     let block_ref = BlockRef {
-        name: name.to_string(),
+        name: name.clone(),
         kind: BlockKind::Array,
         digest: Some(digest),
-        spec: serde_json::to_value(&stored_spec)?,
+        class: tessera_core::block::BlockClass::Primary,
+        spec: tessera_core::canonical::to_json_value(&stored_spec)?,
     };
     Ok((block_ref, BlockPayload::new(name, payload)))
 }
@@ -708,7 +720,8 @@ type EncodedBlock = (BlockRef, BlockPayload);
 
 /// Fused block emit (ADR-0028 §5): encode the array block **and** build its `{hash, stats}` chunk-index
 /// sidecar in one call — the per-block primitive the streaming committer emits (the data block plus its
-/// additive companion `<name>.cidx`, whose digest rolls into `content_hash`). Integer arrays get a
+/// additive companion `<name>.cidx`, a derived block: the seal covers it, `content_hash` does not,
+/// ADR-0028 §4). Integer arrays get a
 /// sidecar; float arrays (no integer chunk stats yet — ADR-0024 canonicalisation pending) return `None`
 /// for it. Real encode/index errors propagate; only the "not an integer array" case yields `None`.
 ///
@@ -870,6 +883,9 @@ pub fn to_coo(data: &ArrayData, fill: i64) -> Option<(TableSpec, TableData)> {
         columns: vec![col("idx", "u8"), col("v", "i8")],
         rows: v.len() as u64,
         row_index: Some("idx".into()),
+        partition: None,
+        edition: None,
+        codec_profile: None,
     };
     let tdata: TableData = vec![
         ("idx".into(), ColumnData::U64(idx)),
@@ -1125,6 +1141,67 @@ pub fn warp_world(
 mod tests {
     use super::*;
 
+    #[test]
+    fn array_and_blob_work_respects_budget_with_host_global_pool() {
+        const CHILD: &str = "TESSERA_ARRAY_BUDGET_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "array::tests::array_and_blob_work_respects_budget_with_host_global_pool",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("TESSERA_MAX_THREADS", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // The embedding application owns a larger global pool. Tessera must neither
+        // use nor replace it, even if it was initialised before the library is called.
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build_global()
+            .unwrap();
+        assert_eq!(rayon::current_num_threads(), 4);
+        assert_eq!(codec_options().concurrent_target(), 1);
+        fn observed<T>(work: impl FnOnce() -> T) -> T {
+            use std::sync::atomic::Ordering;
+            crate::parallel::OBSERVED_POOL_SIZE.store(0, Ordering::SeqCst);
+            let result = work();
+            assert_eq!(
+                crate::parallel::OBSERVED_POOL_SIZE.load(Ordering::SeqCst),
+                1
+            );
+            result
+        }
+        let data = ArrayData::I16((0..4096).map(|n| n as i16).collect());
+        for codec in ["pcodec", "zstd"] {
+            let mut spec = spec_with(vec![16, 16, 16], "int16", codec);
+            spec.chunks = vec![4, 4, 4];
+            let blob = observed(|| encode(&spec, &data)).unwrap();
+            assert_eq!(observed(|| decode(&spec, &blob)).unwrap(), data);
+            let subset = observed(|| decode_subset(&spec, &blob, &[0, 0, 0], &[4, 4, 4])).unwrap();
+            assert_eq!(subset.len(), 64);
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![7u8; 1 << 20]).unwrap();
+        assert_eq!(
+            observed(|| crate::blob::digest_file_parallel(file.path())).unwrap(),
+            tessera_core::hash::digest(&vec![7u8; 1 << 20])
+        );
+        assert_eq!(
+            crate::parallel::OBSERVED_POOL_SIZE.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(rayon::current_num_threads(), 4);
+    }
+
     fn pcodec_spec(shape: Vec<u64>, dtype: &str) -> ArraySpec {
         // `ArraySpec::new` already defaults `codec` to "pcodec" (the volume-codec winner); spell
         // it out here so the test's intent is explicit independent of the core default.
@@ -1146,39 +1223,13 @@ mod tests {
         assert_eq!(ArrayData::U64(vec![0; 3]).byte_len(), 24);
     }
 
-    /// A `MakeWriter` over a shared buffer — captures tracing fmt output for assertions.
-    #[derive(Clone)]
-    struct CapWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-    impl std::io::Write for CapWriter {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapWriter {
-        type Writer = CapWriter;
-        fn make_writer(&'a self) -> CapWriter {
-            self.clone()
-        }
-    }
-
     #[test]
     fn encode_emits_a_structured_compression_trace() {
-        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(CapWriter(buf.clone()))
-            .with_max_level(tracing::Level::DEBUG)
-            .with_ansi(false)
-            .finish();
         let spec = pcodec_spec(vec![8, 8, 8], "int16");
         let data = ArrayData::I16((0..512).map(|k| (k % 97) as i16).collect());
-        tracing::subscriber::with_default(sub, || {
+        let log = crate::test_trace::capture(tracing::Level::DEBUG, || {
             encode(&spec, &data).unwrap();
         });
-        let log = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         // the encode event fired with the codec + raw/encoded sizes (full I/O info on write).
         assert!(
             log.contains("encoded array block"),

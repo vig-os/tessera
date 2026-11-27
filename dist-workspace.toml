@@ -2,9 +2,10 @@
 # binaries + a `curl | sh` installer, published to the GitHub Release. Complements the nix/crane
 # channel (reproducible musl binary + maturin wheel — the deterministic/FAIR-grade channel).
 #
-# Handoff with release-plz: release-plz owns the version bump + CHANGELOG + the git TAG (the single
-# "cut" trigger); the generated `.github/workflows/release.yml` fires on that tag and attaches these
-# artifacts to the same Release. See release-plz.toml.
+# Handoff with release-plz: release-plz owns the version bump + the crate CHANGELOGs; the operator pushes
+# the git TAG (the single "cut" trigger); the generated `.github/workflows/release.yml` fires on that tag
+# and attaches these artifacts to the same Release. Its notes are the version's section of the root
+# CHANGELOG.md (docs/RELEASING.md, "Release notes"). See release-plz.toml.
 #
 # The nested cargo workspace lives under `tessera/`; `cargo:tessera` points dist at it (this file sits
 # at the repo/git root so CI, which runs `dist` from the root, resolves the workspace).
@@ -25,6 +26,13 @@ installers = ["shell"]
 # HDF5 2.2.0 from source). SAFE for determinism: HDF5 is read-only *input* (we encode to
 # Vortex/pcodec), never in the sealed byte-path, so the bundled libhdf5 can't move a content_hash.
 features = ["static-hdf5"]
+# Build ONLY the package that ships a binary (`cargo build --package tessera-cli`), not the whole
+# workspace (#647). The default `--workspace` build also compiled the `tessera-py` cdylib and
+# `tessera-wasm`, which this channel never ships (the wheel comes from the nix channel). Worse,
+# dist 0.32 never checks cargo's exit status, only that the expected binaries appeared, so the
+# `tessera-py` macOS link failure was silently ignored on the v0.1.0-alpha.1 run. A precise build
+# compiles exactly what ships, with the features `cargo install --features static-hdf5` would use.
+precise-builds = true
 # Linux + macOS, both arches. Windows-msvc is deferred for the alpha: building libhdf5 from source
 # under MSVC is the riskiest leg and is not worth blocking the first installable release on.
 targets = [
@@ -34,8 +42,20 @@ targets = [
     "x86_64-unknown-linux-gnu",
 ]
 
+# Pin the aarch64-apple-darwin build host (#790). cargo-dist 0.32.0's built-in default for this target
+# is `macos-14`, an image GitHub retired for arm64 on 2026-11-02
+# (https://github.blog/changelog/2026-10-01-github-actions-macos-14-runner-image-retirement/,
+# actions/runner-images#13518). Since then every job on that label fails to start with "The
+# configuration 'macos-14-arm64-us-default' is not supported". `macos-15` (arm64) is one of the
+# changelog's recommended replacements, and the default cargo-dist 0.34.0 itself moved to
+# (axodotdev/cargo-dist#2555). It is a named version, not `macos-latest`, so an image change stays
+# a reviewed edit here. x86_64-apple-darwin keeps dist 0.32's default, `macos-15-intel`.
+# Regenerate `release.yml` with `dist generate --ci github` after any change here.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+
 # The vendored HDF5 build needs CMake (+ a C compiler & make, already present on GitHub runners) on
-# every build host. Linux gets cmake via apt; macOS runners (`macos-14`) ship cmake preinstalled and
+# every build host. Linux gets cmake via apt; macOS runners (`macos-15`) ship cmake preinstalled and
 # we deliberately do NOT declare a Homebrew dependency, because that makes cargo-dist wrap the build
 # in `brew bundle exec`, which failed silently (exit 1) on the v0.1.0-alpha.1 release run.
 [dist.dependencies.apt]

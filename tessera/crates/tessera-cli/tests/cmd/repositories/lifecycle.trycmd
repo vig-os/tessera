@@ -1,0 +1,92 @@
+A repository lifecycle. The test expands @...@ to the fixtures' exact sealed identities.
+Collections supplied to commit are already sealed: fork identity and merge policy belong to the caller.
+
+```console
+$ tessera init repo
+initialized tessera repository at repo
+
+$ tessera import repo base.tsra
+imported lineage @BASE@
+  version @B@
+
+$ tessera collection commit repo main/collection.json
+committed collection @MAIN@
+  version @M@
+
+$ tessera collection log repo @MAIN@
+@M@  (tip)
+
+$ tessera collection commit repo fork/collection.json
+committed collection @FORK@
+  version @F@
+
+$ tessera collection commit repo next/collection.json --expected @F@ --member delta.tsra
+committed collection @FORK@
+  version @N@
+
+$ tessera collection log repo @FORK@
+@F@
+@N@  (tip)
+
+$ tessera collection log repo @N@ --history
+@N@ collection @FORK@
+  supersedes @F@
+  forked_from @M@
+@F@ collection @FORK@
+  forked_from @M@
+@M@ collection @MAIN@
+
+$ tessera collection diff repo @F@ @N@
++ @DELTA@ product [..]
+order_changed: false
+
+$ tessera collection diff repo @N@ @F@
+- @DELTA@ [..]
+order_changed: false
+
+$ tessera collection commit repo merged/collection.json --expected @M@
+committed collection @MAIN@
+  version @MERGED@
+
+$ tessera pin set repo merge-base @M@ --kind collection
+pinned "merge-base" collection @M@
+
+$ tessera pin set repo merge-base @MERGED@ --kind collection --expected @M@
+pinned "merge-base" collection @MERGED@
+
+$ tessera pin set repo merge-base @M@ --kind collection --expected @MERGED@
+pinned "merge-base" collection @M@
+
+$ tessera pin ls repo
+"merge-base" collection @M@
+
+$ tessera forget repo @FORK@
+forgot lineage @FORK@
+  run `tessera gc` to reclaim now-unreachable objects
+
+$ tessera gc repo
+gc: scanned 8 · kept 6 · reclaimed 2 ([..] bytes)
+
+$ tessera forget repo @MAIN@
+forgot lineage @MAIN@
+  run `tessera gc` to reclaim now-unreachable objects
+
+$ tessera forget repo @BASE@
+forgot lineage @BASE@
+  run `tessera gc` to reclaim now-unreachable objects
+
+$ tessera gc repo
+gc: scanned 6 · kept 3 · reclaimed 3 ([..] bytes)
+
+$ tessera collection log repo @M@ --history
+@M@ collection @MAIN@
+
+$ tessera pin rm repo merge-base --expected @M@
+removed pin "merge-base"
+
+$ tessera pin ls repo
+
+$ tessera gc repo
+gc: scanned 3 · kept 0 · reclaimed 3 ([..] bytes)
+
+```

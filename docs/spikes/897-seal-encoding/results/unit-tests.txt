@@ -1,0 +1,5 @@
+test cbor::tests::floats_take_the_shortest_exact_width ... ok
+test cbor::tests::integers_round_trip_exactly_at_the_64_bit_edges ... ok
+test cbor::tests::numeric_reduction_writes_integral_floats_as_integers_and_refuses_them_as_floats ... ok
+test cbor::tests::the_strict_decoder_refuses_every_alternative_form ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out

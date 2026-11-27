@@ -7,6 +7,165 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.7...tessera-io-v0.1.0-alpha.8) - 2026-11-27
+
+### Added
+
+- *(cli)* collection commit/log/diff and pin commands
+- *(io)* pins (ADR-0067 step 6) ([#1033](https://github.com/vig-os/tessera/pull/1033))
+- *(io)* commit_collection, log and history (ADR-0067 step 5) ([#1028](https://github.com/vig-os/tessera/pull/1028))
+- *(io)* commit_collection, log and history (ADR-0067 step 5)
+- *(io)* collections in the repository; gc marks through members (ADR-0067 step 4) ([#1022](https://github.com/vig-os/tessera/pull/1022))
+- *(io)* store collections and mark through members
+- *(io)* [**breaking**] repository layout 2 with typed, namespaced refs
+
+### Fixed
+
+- *(io)* a crashed init can be retried; init never writes into a refused directory ([#1037](https://github.com/vig-os/tessera/pull/1037))
+- honour TESSERA_MAX_THREADS everywhere; the wall-clock perf ratchet is opt-in ([#1031](https://github.com/vig-os/tessera/pull/1031))
+- *(io)* preserve lineage kinds and bound gc history paths
+- *(io)* table leaves must agree on unit, scale and referencing ([#1014](https://github.com/vig-os/tessera/pull/1014))
+- *(io)* enforce interpreting metadata in table leaf contracts
+- *(io)* fence repository initialization entry checks
+- *(io)* lineage names map to ref files injectively
+
+### Other
+
+- encoded member names everywhere; wording; Python mismatch fallback
+- *(io)* require the middle collection in gc error paths
+- *(io)* tighten metadata mismatch diagnostics and streaming coverage
+- *(corpus)* a whole-archive golden with a derived block; exhaustive #916 table ([#1013](https://github.com/vig-os/tessera/pull/1013))
+- *(corpus)* add derived archive golden and exhaustive cross-check
+
+### Added
+
+- Atomic `Repository::commit_collection` validates CAS, lineage kind and identity, supersedes pins and
+  recursive member closure before storage; new products, payloads and sub-collections can be supplied in
+  the same fenced call. Collection commits use the existing log cache. `Repository::history` returns
+  distinct sealed versions in depth-first preorder, supersedes before forked_from, and reports unreadable
+  predecessors with typed errors and bounded provenance paths (ADR-0067 step 5, #1000).
+
+## [0.1.0-alpha.7](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.6...tessera-io-v0.1.0-alpha.7) - 2026-11-25
+
+### Added
+
+- [**breaking**] derived blocks leave content_hash (ADR-0028 §4)
+- [**breaking**] seal the stored canonical bytes (ADR-0066 A′ cutover)
+- *(core)* stored-bytes seal groundwork (ADR-0066 A′, part 1 of 2)
+- *(io)* writers emit the JCS form of every sealed JSON document
+
+### Fixed
+
+- *(io)* [**breaking**] a fenced single writer per repository (ADR-0036 §2)
+- *(py)* nullable table columns read as masked arrays
+- refuse a chunk index without its block, in every reader and writer
+- *(cli)* never copy a chunk index; trust only derived ones
+- *(cli)* rebuild a copied block's index instead of copying it
+- *(cli)* copied blocks land primary; removal cascades to derived blocks
+- *(corpus)* refuse a repeated or compressed member in the reference reader
+- *(core)* name a lost seal member exactly and make write_pair crash-consistent
+
+### Other
+
+- *(io)* move the durable file-system steps into a shared module
+
+## [0.1.0-alpha.6](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.5...tessera-io-v0.1.0-alpha.6) - 2026-11-19
+
+### Added
+
+- *(io)* [**breaking**] record the codec profile in every sealed table spec
+- *(io)* sequenced table input on StreamWriter, seq-ordered from any thread
+- *(io)* [**breaking**] record the vortex edition in every sealed table spec
+- *(io)* stream a partitioned table whose row count is known only at close
+
+### Fixed
+
+- *(core)* refuse NaN, infinity and loosely spelt numbers at every entry point
+- *(cli)* report a parent refused for an inexact integer as corrupt
+- *(core)* seal only integers a double holds exactly (I-JSON)
+- *(io)* a sequenced table's refusal poisons its writer, so finish seals nothing
+- *(io)* refuse a block name listed twice in the repository's commit
+- *(core,io)* refuse a block name listed twice in one product
+- *(core)* verify a manifest's seal over the object it parsed
+- *(io,py,deps)* read a .tsra the one way every zip reader does (GHSA-m665-v7pm-7grj) ([#862](https://github.com/vig-os/tessera/pull/862))
+- *(io)* hold every .tsra record to the bytes the writer emits
+- *(io)* verify every byte of a .tsra, not only its entries
+- *(io)* serve a local header's small cloud reads from one GET
+- *(io,py,deps)* read a .tsra the one way every zip reader does (GHSA-m665-v7pm-7grj)
+- *(ci)* put the cargo test checks' TMPDIR on a RAM fs
+
+### Other
+
+- *(io)* every leaf of a sequenced table carries the writer's edition
+- *(io)* make the #472 guard's messages match what it asserts
+- *(nix)* fail the #468 and #472 guards unless exactly one test ran
+- *(adr)* state the table forward-read limit of the vortex 0.93 event
+- *(corpus)* regenerate the table goldens for the vortex 0.93 format event
+- *(deps)* [**breaking**] move vortex from the 0.75 fork to 0.93.0 on a rebased fork pin
+- mark logical tables done in the feature matrix
+
+## [0.1.0-alpha.5](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.4...tessera-io-v0.1.0-alpha.5) - 2026-11-11
+
+### Added
+
+- *(io)* [**breaking**] deprecate table_job_streaming, refusing tables above BLOCK_ROWS
+- *(io)* hold push_table's workers before they read, and test the W + 1 bound
+- *(io)* add StreamWriter::push_table, a disk-staged streaming partition
+- *(io)* [**breaking**] write multi-block tables as marked <table>/NNNN leaves
+- *(io)* name LogicalTableView's table name `name`, deprecate `prefix`
+- *(io)* run the shared partition check in unpack and pack_dir
+- *(io)* resolve table names through table_group in every reader
+- *(core)* add the ADR-0064 partition marker to TableSpec ([#728](https://github.com/vig-os/tessera/pull/728))
+- *(core)* add the ADR-0064 partition marker to TableSpec
+
+### Fixed
+
+- *(io)* hold each committed block as its journal line, not a BlockRef
+- *(io)* make every directory entry a journal line names durable before it
+- *(io)* make WriteSession::recover crash-safe and idempotent
+- *(core,io,ingest,cli)* [**breaking**] validate block names into one type and join them by plain components only
+
+### Other
+
+- *(adr)* amend ADR-0064 §8/§8.1 with c_leaf · n and a tmpfs parallelism run
+- *(io)* check push_table's per-block heap model and document its bound
+- *(io)* commit a legacy events_NNNN fixture with a pinned content_hash
+- *(io)* prove .cidx pruning over a partitioned table reads no leaf
+- *(io)* fail the S3 tests when the s3-range-read check loses its endpoint
+- *(io)* run the S3 range-read check against versitygw, sandbox-independent
+
+## [0.1.0-alpha.4](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.3...tessera-io-v0.1.0-alpha.4) - 2026-10-29
+
+### Fixed
+
+- *(io)* poison a write session on a failed journal write and commit staged blocks by a verified rename
+- *(io)* [**breaking**] stream one canonical table block to a staged file and commit it by a hashing streamed append
+- *(io)* bound every StreamWriter job with a credit window released on in-order commit
+- *(io)* keep values under a NULL out of the chunk-index digest
+- *(io)* honour Column::nullable in encode_streaming
+- *(io)* decode the dtype default under a NULL, not the codec fill
+
+## [0.1.0-alpha.2](https://github.com/vig-os/tessera/compare/tessera-io-v0.1.0-alpha.1...tessera-io-v0.1.0-alpha.2) - 2026-10-19
+
+### Added
+
+- *(cli)* serve array stats from the chunk-index with no decode, and add stats --json
+- *(ingest)* generic array ingest — NumPy .npy and .npz (ADR-0056 P1)
+- *(cli,core)* tessera provenance walk and inspect --resolve-config ([#490](https://github.com/vig-os/tessera/pull/490))
+
+### Fixed
+
+- *(io)* chunk statistics on nullable columns with nulls
+- *(deps)* upgrade rustls and zip past RUSTSEC-2026-0346..0349/0367..0369
+- *(cli,io)* pin inspect --json, guard stage-dir downgrade resume, route verify through the resource cap, 5.5x single-column reads ([#479](https://github.com/vig-os/tessera/pull/479))
+- *(io)* gate seal determinism across build profiles and pin the #468 vortex limitation ([#474](https://github.com/vig-os/tessera/pull/474))
+- *(io)* close the encode-trace callsite race under CPU contention ([#465](https://github.com/vig-os/tessera/pull/465))
+- *(ingest)* seal the ADR-0058 recipe on the streaming path and surface it in inspect ([#453](https://github.com/vig-os/tessera/pull/453))
+
+### Other
+
+- *(deps)* pin vortex to a patched fork for #468/#472 ([#481](https://github.com/vig-os/tessera/pull/481))
+
 ## [0.1.0-alpha.1](https://github.com/vig-os/tessera/releases/tag/tessera-io-v0.1.0-alpha.1) - 2026-09-23
 
 ### Added

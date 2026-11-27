@@ -59,6 +59,47 @@ fn corpus_packs_deterministically_and_verifies() {
     }
 }
 
+/// A fresh `pack` of every fixture is **byte-identical** to its committed `corpus/files/<name>.tsra`.
+///
+/// The golden triple pins the manifest, and `corpus_packs_deterministically_and_verifies` pins
+/// same-build determinism, but neither sees the container framing: the local headers, the central
+/// directory and the zip64 records that the `zip` crate writes around the sealed bytes. A `zip`
+/// upgrade or an entry-option change that reframes the archive keeps every hash and still verifies,
+/// yet changes the file an independent reader consumes. This is the gate that catches it (#588, the
+/// zip 2 → 9 upgrade, passed it unchanged). The other writers are pinned to `pack` byte-for-byte by
+/// the `pack_streaming_*` tests in `container.rs`, so they inherit it.
+///
+/// If this fails after an intended format change, regenerate with
+/// `cargo run -p tessera-io --example gen_corpus_files` and treat it as a corpus event (ADR-0022).
+#[test]
+fn committed_corpus_files_are_byte_identical_to_a_fresh_pack() {
+    let dir = tempfile::tempdir().unwrap();
+    let committed = concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/files");
+    let all = fixtures();
+    assert!(
+        !all.is_empty(),
+        "no conformance fixtures: the loop below would prove nothing"
+    );
+    for f in all {
+        let fresh = dir.path().join(format!("{}.tsra", f.name));
+        tessera_io::pack(&f.manifest, &f.payloads, &fresh).unwrap();
+        let want_path = std::path::Path::new(committed).join(format!("{}.tsra", f.name));
+        let want = std::fs::read(&want_path)
+            .unwrap_or_else(|e| panic!("read committed corpus file '{}': {e}", f.name));
+        let got = std::fs::read(&fresh).unwrap();
+        assert!(
+            got == want,
+            "fixture '{}': a fresh pack ({} bytes) differs from the committed {} ({} bytes), first \
+             difference at byte {:?} — the container framing moved",
+            f.name,
+            got.len(),
+            want_path.display(),
+            want.len(),
+            got.iter().zip(&want).position(|(a, b)| a != b)
+        );
+    }
+}
+
 /// The committed `corpus/files/<name>.tsra` test vectors (what an independent v1.0 reader consumes)
 /// must reproduce the golden triple and verify on open. Regenerate after an intended format change:
 /// `cargo run -p tessera-io --example gen_corpus_files`.
@@ -91,4 +132,63 @@ fn committed_corpus_files_reproduce_goldens() {
             r.read_block(&n).unwrap(); // each stored block verifies against its digest
         }
     }
+}
+
+/// A real indexed archive pins the primary-only root, including after removing its sidecar.
+#[test]
+fn indexed_corpus_content_hash_covers_only_primary_blocks() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../corpus/files/recon_int16_indexed.tsra"
+    );
+    let mut reader = tessera_io::Reader::open(std::path::Path::new(path))
+        .expect("indexed corpus archive exists");
+    let mut manifest = reader.manifest().clone();
+    assert_eq!(manifest.blocks.len(), 2);
+    let index = manifest
+        .blocks
+        .iter()
+        .find(|b| !b.is_primary())
+        .expect("derived index");
+    assert_eq!(index.name, "volume.cidx");
+    reader.read_block(&index.name).unwrap();
+    let primary: Vec<_> = manifest
+        .blocks
+        .iter()
+        .filter(|b| b.is_primary())
+        .map(|b| b.digest.clone().unwrap())
+        .collect();
+    assert_eq!(primary.len(), 1);
+    let root = tessera_core::hash::merkle_root(&primary);
+    assert_eq!(manifest.content_hash.as_deref(), Some(root.as_str()));
+    assert_eq!(root, golden_index()["recon_int16"].content_hash);
+    let all: Vec<_> = manifest
+        .blocks
+        .iter()
+        .map(|b| b.digest.clone().unwrap())
+        .collect();
+    assert_ne!(root, tessera_core::hash::merkle_root(&all));
+    let original_seal = manifest.manifest_hash.clone();
+    manifest.blocks.retain(|b| b.is_primary());
+    assert_eq!(manifest.recompute_content_hash().unwrap(), root);
+    manifest.manifest_hash = Some(manifest.compute_manifest_hash().unwrap());
+    assert_ne!(manifest.manifest_hash, original_seal);
+    let fixture = fixtures()
+        .into_iter()
+        .find(|f| f.name == "recon_int16_indexed")
+        .unwrap();
+    let payloads: Vec<_> = fixture
+        .payloads
+        .into_iter()
+        .filter(|p| p.name == "volume")
+        .collect();
+    let dir = tempfile::tempdir().unwrap();
+    let without = dir.path().join("without-index.tsra");
+    tessera_io::pack(&manifest, &payloads, &without).unwrap();
+    let mut plain = tessera_io::Reader::open(&without).unwrap();
+    plain.read_block("volume").unwrap();
+    assert_eq!(
+        plain.manifest().content_hash.as_deref(),
+        Some(root.as_str())
+    );
 }

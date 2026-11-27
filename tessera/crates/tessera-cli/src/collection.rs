@@ -1,12 +1,15 @@
 //! `tessera collection inspect | ls | verify` — consumer verbs over a `collection.json` descriptor
 //! (ADR-0033 / #272). A collection is the content-addressed catalog the declarative ingest engine
-//! writes at `<out_dir>/collection.json`, pinning each member `.tsra` by its `manifest_hash`. These
+//! writes at `<out_dir>/collection.json`, with its seal beside it in `collection.seal` (ADR-0066
+//! rule 5), pinning each member `.tsra` by its `manifest_hash`. These
 //! verbs let a downstream consumer read + integrity-check the catalog and its members without
 //! re-running the ingest — the collection-level analogue of `tessera inspect` / `verify`.
 //!
 //! Members are referenced by their content-addressed `id`; on disk a **product** member is
-//! `<dir>/<reference>.tsra` and a **sub-collection** member is `<dir>/<reference>.collection.json`
-//! (resolved by `kind`, ADR-0049 §4). `ls` opens each member to show its human `name` (the child
+//! `<dir>/<file_name(reference)>.tsra` and a **sub-collection** member is
+//! `<dir>/<file_name(reference)>.collection.json` with `<dir>/<file_name(reference)>.collection.seal`.
+//! The stem is encoded by [`tessera_core::names::file_name`] (resolved by `kind`, ADR-0049 §4).
+//! `ls` opens each member to show its human `name` (the child
 //! collection's name for a sub-collection); `verify` **recurses** into sub-collection members,
 //! checking each descendant's seal + pinned version transitively (ADR-0049 §3).
 
@@ -20,17 +23,24 @@ use tessera_core::collection::{
 use tessera_core::{Error, Result};
 use tessera_io::Reader;
 
-/// The collection seal badge (mirrors `nav::seal_status` for products, #268): `sealed✓` when
-/// `manifest_hash` is present AND re-verifies over the canonical bytes, `sealed✗` on a mismatch,
-/// `unsealed` when the collection carries no seal.
-fn seal_status(c: &Collection) -> &'static str {
-    match &c.manifest_hash {
-        None => "unsealed",
-        Some(mh) => match c.compute_manifest_hash() {
-            Ok(got) if &got == mh => "sealed✓",
-            _ => "sealed✗",
-        },
+/// The collection seal badge (#268), from the full stored-bytes read
+/// ([`Collection::from_stored_members`], ADR-0066): `sealed✓` when it verifies, `unsealed` when
+/// there is no `collection.seal` (the alpha layout, which `verify` refuses), `sealed✗` for any other
+/// refusal (a seal mismatch, non-canonical bytes, a member rule).
+fn seal_status(file: &Path, bytes: &[u8], seal: Option<&[u8]>) -> &'static str {
+    match tessera_io::stored::collection_from_pair(file, bytes, seal) {
+        Ok(_) => "sealed✓",
+        Err(Error::UnsupportedLayout { .. }) => "unsealed",
+        Err(_) => "sealed✗",
     }
+}
+
+/// Warn on stderr that `c` carries fields from a newer format revision (verified, not interpreted).
+fn warn_newer_fields(c: &Collection) {
+    crate::warn_not_interpreted(
+        &format!("collection '{}': fields", c.name),
+        c.newer_fields(),
+    );
 }
 
 fn role_str(r: &Role) -> &'static str {
@@ -42,14 +52,14 @@ fn role_str(r: &Role) -> &'static str {
 
 /// Load a `collection.json` **without** verifying (so `inspect` can honestly render a tampered one).
 fn load(file: &Path) -> Result<Collection> {
-    Collection::from_json(&std::fs::read_to_string(file)?)
+    Collection::from_json(&String::from_utf8_lossy(&std::fs::read(file)?))
 }
 
 /// The on-disk path of a member next to the `collection.json` — resolved by `kind` (ADR-0049 §4) via
 /// the shared [`member_filename`] SSoT (so the resolved name matches what every writer emits, #323).
-fn member_path(collection_file: &Path, reference: &str, kind: MemberKind) -> PathBuf {
+fn member_path(collection_file: &Path, reference: &str, kind: MemberKind) -> Result<PathBuf> {
     let dir = collection_file.parent().unwrap_or_else(|| Path::new("."));
-    dir.join(member_filename(reference, kind))
+    tessera_io::collection::member_path(dir, reference, kind)
 }
 
 fn w(out: &mut dyn Write, args: std::fmt::Arguments<'_>) -> Result<()> {
@@ -59,7 +69,14 @@ fn w(out: &mut dyn Write, args: std::fmt::Arguments<'_>) -> Result<()> {
 /// `tessera collection inspect FILE` — the catalog header: identity, seal badge, and each member's
 /// role + reference + pinned `manifest_hash` (short). Payload-cheap — reads only the descriptor.
 pub fn inspect(file: &Path, out: &mut dyn Write) -> Result<()> {
-    let c = load(file)?;
+    let (bytes, seal) = tessera_io::stored::read_pair(file)?;
+    let c = Collection::from_json(&String::from_utf8_lossy(&bytes))?;
+    let recorded = seal.as_deref().map(String::from_utf8_lossy);
+    // Without a seal file this is the alpha layout (badge `unsealed`), whose in-band
+    // `manifest_hash` is not a newer-format field: only a document in the ADR-0066 layout has any.
+    if seal.is_some() {
+        warn_newer_fields(&c);
+    }
     w(out, format_args!("collection {}\n", c.name))?;
     w(out, format_args!("id            {}\n", c.id))?;
     w(out, format_args!("schema        {}\n", c.collection_schema))?;
@@ -76,12 +93,15 @@ pub fn inspect(file: &Path, out: &mut dyn Write) -> Result<()> {
     )?;
     w(
         out,
+        format_args!("manifest_hash {}\n", recorded.as_deref().unwrap_or("-")),
+    )?;
+    w(
+        out,
         format_args!(
-            "manifest_hash {}\n",
-            c.manifest_hash.as_deref().unwrap_or("-")
+            "seal          {}\n",
+            seal_status(file, &bytes, seal.as_deref())
         ),
     )?;
-    w(out, format_args!("seal          {}\n", seal_status(&c)))?;
     w(out, format_args!("members       {}\n", c.members.len()))?;
     for m in &c.members {
         let kind = if m.kind == MemberKind::Collection {
@@ -104,19 +124,19 @@ pub fn inspect(file: &Path, out: &mut dyn Write) -> Result<()> {
 }
 
 /// `tessera collection ls FILE` — one line per member with its **human** name + product, resolved by
-/// opening each member `.tsra` (falls back to `?` if a member file is absent). `--full` also prints
+/// opening each member `.tsra` (marks absent members and continues listing). `--full` also prints
 /// the full pinned `manifest_hash` and any in-collection `derived_from` edges.
 pub fn ls(file: &Path, full: bool, out: &mut dyn Write) -> Result<()> {
     let c = load(file)?;
     for m in &c.members {
-        let path = member_path(file, &m.reference, m.kind);
+        // Listing remains useful for incomplete collections. Open only the encoded name and
+        // render failures per member; verification uses the strict resolver below.
+        let dir = file.parent().unwrap_or_else(|| Path::new("."));
+        let path = dir.join(member_filename(&m.reference, m.kind));
         // A product member's name/product comes from its `.tsra`; a sub-collection member's from its
         // child `collection.json` (product shown as `collection`).
         let (product, name) = if m.kind == MemberKind::Collection {
-            match std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| Collection::from_json(&s).ok())
-            {
+            match load(&path).ok() {
                 Some(child) => ("collection".to_string(), child.name),
                 None => (
                     "collection".to_string(),
@@ -179,14 +199,16 @@ fn verify_collection(
     expected_mh: Option<&str>,
     seen: &mut HashSet<String>,
 ) -> Result<usize> {
-    let bytes = std::fs::read_to_string(file).map_err(|e| {
+    let (bytes, seal) = tessera_io::stored::read_pair(file).map_err(|e| {
         Error::Invalid(format!(
             "sub-collection unreachable at {} — cannot fully verify offline: {e}",
             file.display()
         ))
     })?;
-    // Seal check (id + content_hash over pinned member hashes + manifest_hash).
-    let c = Collection::from_json_verified(&bytes)?;
+    // Seal check (the stored bytes against `collection.seal`, then id + content_hash over the
+    // pinned member hashes and the level schema).
+    let c = tessera_io::stored::collection_from_pair(file, &bytes, seal.as_deref())?;
+    warn_newer_fields(&c);
     // Confirm this collection is the exact version its parent pinned (swapped-but-valid = failure).
     if let Some(exp) = expected_mh {
         let got = c.manifest_hash.as_deref().unwrap_or_default();
@@ -210,7 +232,7 @@ fn verify_collection(
 
     let mut count = 0usize;
     for m in &c.members {
-        let path = member_path(file, &m.reference, m.kind);
+        let path = member_path(file, &m.reference, m.kind)?;
         match m.kind {
             MemberKind::Collection => {
                 // Descend: the child's own seal + pinned version + its whole subtree.
@@ -244,8 +266,10 @@ fn verify_collection(
 /// (#304 Part 1), decoupling "which members belong together" from ingest time. Opens each member
 /// (which verifies its seal), pins it by `(id, manifest_hash)` via the typed [`ProductHandle`], seals
 /// the catalog under the declared `--schema` (validating its `member_rule`), and writes a
-/// self-contained collection directory: `<out>/collection.json` + each member hard-linked (or copied)
-/// as `<out>/<id>.tsra`, so `collection verify` resolves + checks it in place. The collection's
+/// self-contained collection directory: `<out>/collection.json` + `<out>/collection.seal` + each
+/// member hard-linked (or copied)
+/// as `<out>/<file_name(id)>.tsra` (encoded by [`tessera_core::names::file_name`]), so
+/// `collection verify` resolves + checks it in place. The collection's
 /// timestamp defaults to the latest member's (deterministic) unless `--timestamp` is given.
 #[allow(clippy::too_many_arguments)]
 pub fn new(
@@ -294,10 +318,11 @@ pub fn new(
     // `project` would reject them — fail-fast before writing anything).
     let sealed = cb.seal()?;
 
-    // Write the self-contained collection dir: collection.json + each member under the shared
-    // `member_filename` (sanitized `<stem>.tsra`), the same name `verify`/`ls` resolve (#323).
+    // Write the self-contained collection dir: collection.json + collection.seal + each member
+    // under the shared `member_filename` (sanitized `<stem>.tsra`), the same name `verify`/`ls`
+    // resolve (#323).
     std::fs::create_dir_all(out)?;
-    std::fs::write(out.join("collection.json"), sealed.to_json()?)?;
+    tessera_io::stored::write_collection(&out.join("collection.json"), &sealed)?;
     for (h, src) in &handles {
         let dst = out.join(member_filename(h.reference(), MemberKind::Product));
         if src.canonicalize().ok() == dst.canonicalize().ok() {
@@ -329,7 +354,8 @@ mod tests {
     use tessera_core::ProductBuilder;
     use tessera_io::{array::ArrayData, pack};
 
-    /// Build a 2-member collection on disk (`collection.json` + two `<id>.tsra`) and return its dir.
+    /// Build a 2-member collection on disk (`collection.json` + two encoded member files) and return its dir.
+    /// Member paths use `<file_name(id)>.tsra` via [`tessera_core::names::file_name`].
     fn build_collection(dir: &Path) -> (Collection, Vec<String>) {
         let mut ids = Vec::new();
         let mut cb = CollectionBuilder::new("study", "a CT+PET study", "2024-01-01T00:00:00Z");
@@ -356,8 +382,118 @@ mod tests {
             ids.push(sealed.id.clone());
         }
         let c = cb.seal().unwrap();
-        std::fs::write(dir.join("collection.json"), c.to_json().unwrap()).unwrap();
+        tessera_io::stored::write_collection(&dir.join("collection.json"), &c).unwrap();
         (c, ids)
+    }
+
+    /// A collection a newer writer sealed with a field this build doesn't model: `inspect` shows the
+    /// seal as holding (it is computed over the object as parsed, #873) and `verify` passes; the same
+    /// field spliced in under the old seal shows `sealed✗` and fails `verify`.
+    #[test]
+    fn a_newer_collection_field_verifies_and_a_spliced_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        build_collection(dir.path());
+        let cf = dir.path().join("collection.json");
+        let sf = dir.path().join("collection.seal");
+        let old_seal = std::fs::read_to_string(&sf).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&cf).unwrap()).unwrap();
+        v["annotations"] = serde_json::json!({ "curator": "site-a" });
+        let bytes = tessera_core::canonical::to_bytes(&v).unwrap();
+        let new_seal = tessera_core::hash::digest(&bytes);
+        let inspect_seal = |seal: &str| {
+            std::fs::write(&cf, &bytes).unwrap();
+            std::fs::write(&sf, seal).unwrap();
+            let mut buf = Vec::new();
+            inspect(&cf, &mut buf).unwrap();
+            let s = String::from_utf8(buf).unwrap();
+            s.lines()
+                .find(|l| l.starts_with("seal"))
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(inspect_seal(&new_seal), "seal          sealed✓");
+        verify(&cf, &mut Vec::new()).expect("a sealed newer field verifies");
+        assert_eq!(inspect_seal(&old_seal), "seal          sealed✗");
+        assert!(matches!(
+            verify(&cf, &mut Vec::new()),
+            Err(Error::Integrity {
+                what: "manifest_hash",
+                ..
+            })
+        ));
+    }
+
+    /// A crafted top-level key spelling a member field's path (`"members[0].kind"`) is a newer field
+    /// of its own, never an exemption for the member's `kind`: that `kind` spelled as an object is
+    /// refused under a fresh seal, where `verify` once passed it with a warning (#873).
+    #[test]
+    fn a_crafted_key_cannot_exempt_a_member_field() {
+        let dir = tempfile::tempdir().unwrap();
+        build_collection(dir.path());
+        let cf = dir.path().join("collection.json");
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&cf).unwrap()).unwrap();
+        v["members[0].kind"] = serde_json::json!(1);
+        v["members"][0]["kind"] = serde_json::json!({ "product": null });
+        let bytes = tessera_core::canonical::to_bytes(&v).unwrap();
+        tessera_io::stored::write_pair(&cf, &bytes, &tessera_core::hash::digest(&bytes)).unwrap();
+        let err = verify(&cf, &mut Vec::new()).expect_err("a second spelling must not verify");
+        assert!(
+            err.to_string().contains("`members[0].kind` is an object"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn ls_marks_absent_members_and_continues_while_verify_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let (collection, _) = build_collection(dir.path());
+        let descriptor = dir.path().join("collection.json");
+        std::fs::remove_file(dir.path().join(member_filename(
+            &collection.members[0].reference,
+            MemberKind::Product,
+        )))
+        .unwrap();
+        let mut out = Vec::new();
+        ls(&descriptor, false, &mut out).unwrap();
+        let listing = String::from_utf8(out).unwrap();
+        assert_eq!(listing.lines().count(), collection.members.len());
+        assert!(listing.contains("<member file not found>"), "{listing}");
+        assert!(listing.contains("pt"), "{listing}");
+        let error = verify(&descriptor, &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("member file not found:"), "{error}");
+        assert!(!error.contains("Legacy"), "{error}");
+    }
+
+    #[test]
+    fn legacy_underscore_members_are_refused_by_consumers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, ids) = build_collection(dir.path());
+        let descriptor = dir.path().join("collection.json");
+        verify(&descriptor, &mut Vec::new()).unwrap();
+        for id in ids {
+            let encoded = dir.path().join(member_filename(&id, MemberKind::Product));
+            let old = dir.path().join(format!(
+                "blake3_{}.tsra",
+                id.strip_prefix("blake3:").unwrap()
+            ));
+            std::fs::rename(encoded, old).unwrap();
+        }
+        let message = verify(&descriptor, &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("Legacy underscore/raw-id layouts are unsupported"),
+            "{message}"
+        );
+        assert!(message.contains("blake3%3a"), "{message}");
+        let mut out = Vec::new();
+        ls(&descriptor, false, &mut out).unwrap();
+        let listing = String::from_utf8(out).unwrap();
+        assert_eq!(listing.matches("<member file not found>").count(), 2);
     }
 
     #[test]
@@ -398,7 +534,8 @@ mod tests {
         assert!(verify(&cf, &mut Vec::new()).is_err());
     }
 
-    /// Build a child collection on disk written as `<id>.collection.json` (+ its member `.tsra`s).
+    /// Build a child collection on disk written as `<file_name(id)>.collection.json` (+ its member `.tsra`s).
+    /// The stem is encoded by [`tessera_core::names::file_name`].
     fn build_child_collection(dir: &Path, name: &str) -> Collection {
         let mut cb = CollectionBuilder::new(name, "a child dataset", "2024-01-01T00:00:00Z");
         for pname in ["ct", "pt"] {
@@ -423,12 +560,46 @@ mod tests {
             );
         }
         let c = cb.seal().unwrap();
-        std::fs::write(
-            dir.join(member_filename(&c.id, MemberKind::Collection)),
-            c.to_json().unwrap(),
+        tessera_io::stored::write_collection(
+            &dir.join(member_filename(&c.id, MemberKind::Collection)),
+            &c,
         )
         .unwrap();
         c
+    }
+
+    #[test]
+    fn ls_marks_absent_subcollections_and_continues() {
+        use tessera_core::collection::CollectionHandle;
+        let dir = tempfile::tempdir().unwrap();
+        let absent = build_child_collection(dir.path(), "dataset-A");
+        let present = build_child_collection(dir.path(), "dataset-B");
+        let mut builder = CollectionBuilder::new("project", "two datasets", "2024-01-01T00:00:00Z");
+        for child in [&absent, &present] {
+            builder.add_subcollection(
+                &CollectionHandle::of(child).unwrap(),
+                Role::Derived,
+                Vec::new(),
+            );
+        }
+        let descriptor = dir.path().join("collection.json");
+        tessera_io::stored::write_collection(&descriptor, &builder.seal().unwrap()).unwrap();
+        std::fs::remove_file(
+            dir.path()
+                .join(member_filename(&absent.id, MemberKind::Collection)),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        ls(&descriptor, false, &mut out).unwrap();
+        let listing = String::from_utf8(out).unwrap();
+        assert_eq!(listing.lines().count(), 2);
+        assert!(listing.contains("<sub-collection not found>"), "{listing}");
+        assert!(listing.contains("dataset-B"), "{listing}");
+        let error = verify(&descriptor, &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("member file not found:"), "{error}");
+        assert!(!error.contains("Legacy"), "{error}");
     }
 
     /// Part 2 (ADR-0049 §3): `verify` recurses into a sub-collection member (a `project` over a
@@ -449,7 +620,7 @@ mod tests {
         );
         let parent = cb.seal().unwrap();
         let pf = dir.path().join("collection.json");
-        std::fs::write(&pf, parent.to_json().unwrap()).unwrap();
+        tessera_io::stored::write_collection(&pf, &parent).unwrap();
 
         // inspect: the member line shows `collection` kind for the sub-collection.
         let mut buf = Vec::new();
@@ -472,6 +643,20 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("recursive") && s.contains("3 members"), "{s}");
 
+        // A sub-collection without its seal file is the alpha layout, refused transitively.
+        let child_seal = dir.path().join(format!(
+            "{}.collection.seal",
+            tessera_core::collection::sanitize_reference(&child.id)
+        ));
+        let kept = std::fs::read(&child_seal).unwrap();
+        std::fs::remove_file(&child_seal).unwrap();
+        assert!(matches!(
+            verify(&pf, &mut Vec::new()),
+            Err(Error::UnsupportedLayout { .. })
+        ));
+        std::fs::write(&child_seal, kept).unwrap();
+        verify(&pf, &mut Vec::new()).unwrap();
+
         // Tamper a grandchild product `.tsra` → the recursive verify catches it transitively.
         std::fs::remove_file(dir.path().join(member_filename(
             &child.members[0].reference,
@@ -482,8 +667,9 @@ mod tests {
     }
 
     /// `collection new` (#304 Part 1): assemble a `dataset` from two pre-sealed `.tsra` products →
-    /// a self-contained dir (`collection.json` + `<id>.tsra` members) that `verify` passes, and
-    /// `inspect` shows the declared schema.
+    /// a self-contained directory (`collection.json` + `<file_name(id)>.tsra` members).
+    /// Member stems use [`tessera_core::names::file_name`]. `verify` validates the directory,
+    /// and `inspect` shows the declared schema.
     #[test]
     fn collection_new_assembles_from_presealed_tsra() {
         let dir = tempfile::tempdir().unwrap();
@@ -516,7 +702,13 @@ mod tests {
 
         let cf = out.join("collection.json");
         assert!(cf.exists(), "collection.json written");
-        // #323: each member lands under the sanitized stem (`blake3_….tsra`), NOT the raw
+        // The collection writer stores `collection.json` in its JCS form with its seal beside it.
+        crate::test_support::assert_stored_pair(
+            "collection new",
+            &std::fs::read(&cf).unwrap(),
+            &std::fs::read(out.join("collection.seal")).unwrap(),
+        );
+        // #323: each member lands under the sanitized stem (`blake3%3a….tsra`), NOT the raw
         // colon-bearing reference — and that is exactly the name `verify` resolves.
         let c = load(&cf).unwrap();
         for m in &c.members {

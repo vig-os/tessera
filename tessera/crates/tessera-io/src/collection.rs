@@ -12,8 +12,8 @@
 //! 2. **OCI image index** ([`to_oci_index`]) — a registry-native manifest-of-manifests. Each entry
 //!    references a member's pre-pushed OCI artifact manifest by sha256 digest, carrying the member
 //!    Tessera identity in annotations. Reuses the media-type constants from [`crate::oci`].
-//! 3. **S3/MinIO prefix layout** ([`prefix_layout`]) — a pure layout helper returning
-//!    `(object_key, member_reference)` pairs (`<prefix>/<id>.tsra` + `<prefix>/collection.json`).
+//! 3. **S3 prefix layout** ([`prefix_layout`]) — a pure layout helper returning
+//!    `(object_key, member_reference)` pairs (`<prefix>/<file_name(id)>.tsra` + `<prefix>/collection.json`).
 //!    The prefix of N independently range-readable `.tsra` objects IS the collection on S3.
 //!
 //! All three enumerate the same member set in the same declared order — a single source of truth
@@ -30,13 +30,52 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use tessera_core::collection::{Collection, MemberKind, Role};
+use tessera_core::collection::{member_filename, sanitize_reference, Collection, MemberKind, Role};
 use tessera_core::export::{dataset_entity, ro_crate_descriptor};
 use tessera_core::manifest::Manifest;
 use tessera_core::{Error, Result};
 
 use crate::oci::{ARTIFACT_TYPE, MANIFEST_MEDIA_TYPE};
 use crate::worm::RetentionMode;
+
+/// Resolve an existing member using the shared encoded layout; never try a legacy alias.
+///
+/// Underscore-named local collections and raw-id S3 prefix exports written before #994 must
+/// be recreated from source products. Legacy names are probed only to diagnose an existing
+/// unsupported artifact; they are never returned or read as member content. An absent member
+/// with no legacy file reports `member file not found: <encoded name>`. Other I/O errors are preserved.
+pub fn member_path(
+    dir: &std::path::Path,
+    reference: &str,
+    kind: MemberKind,
+) -> Result<std::path::PathBuf> {
+    let name = member_filename(reference, kind);
+    let path = dir.join(&name);
+    match std::fs::metadata(&path) {
+        Ok(_) => Ok(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Diagnostic-only spellings of the two pre-#994 layouts. Writers and readers still
+            // resolve content exclusively with member_filename and its shared injective encoder.
+            let suffix = member_filename("", kind);
+            let old_stem = reference.replace([':', '/', '\\'], "_");
+            for legacy in [
+                format!("{old_stem}{suffix}"),
+                format!("{reference}{suffix}"),
+            ] {
+                if legacy != name && dir.join(&legacy).try_exists()? {
+                    return Err(Error::Invalid(format!(
+                        "collection member '{reference}' unavailable at {}; legacy file exists at {}. \
+                         Legacy underscore/raw-id layouts are unsupported; \
+                         recreate the collection from source products",
+                        path.display(), dir.join(legacy).display()
+                    )));
+                }
+            }
+            Err(Error::Invalid(format!("member file not found: {name}")))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
 
 /// OCI 1.1 image-index media type — the manifest-of-manifests wrapper that registries already
 /// understand. A Tessera collection projects naturally onto this.
@@ -211,32 +250,42 @@ pub enum LayoutKind {
     Catalog,
 }
 
-/// Project the collection onto an S3/MinIO key prefix — pure layout, no I/O. Returns
-/// `(object_key, member_reference)` pairs in declared member order, then a final
-/// `("<prefix>/collection.json", <collection_id>)` for the catalog descriptor. A product member is a
-/// `<prefix>/<id>.tsra` object; a **sub-collection** member is a `<prefix>/<id>.collection.json`
+/// Project the collection onto an S3 key prefix — pure layout, no I/O. Returns
+/// `(object_key, member_reference)` pairs: one per member in declared member order, then the seal
+/// object of each sub-collection member (`<prefix>/<file_name(id)>.collection.seal`, ADR-0066 rule 5), then
+/// `("<prefix>/collection.seal", <collection_id>)` and, last, `("<prefix>/collection.json",
+/// <collection_id>)` for the catalog descriptor. A product member is a `<prefix>/<file_name(id)>.tsra` object
+/// (its seal travels inside it); a **sub-collection** member is a `<prefix>/<file_name(id)>.collection.json`
 /// descriptor (ADR-0049 §4 — `kind` is authoritative, the suffix is *derived* from it). The prefix
-/// of N independently range-readable objects under this layout IS the collection on S3 (the third
-/// projection): a reader range-reads `collection.json` once, then each member it actually needs.
+/// of independently range-readable objects under this layout IS the collection on S3 (the third
+/// projection): a reader reads `collection.json` and `collection.seal` once, then each member it
+/// actually needs. Member stems are encoded with [`tessera_core::names::file_name`].
 pub fn prefix_layout(c: &Collection, prefix: &str) -> Vec<(String, String)> {
     let prefix = prefix.trim_end_matches('/');
     let mut out: Vec<(String, String)> = c
         .members
         .iter()
         .map(|m| {
-            // `MemberKind` is `#[non_exhaustive]`, so resolve the known nested case and default the
-            // rest to a product object (a future kind must revisit this suffix rule).
-            let ext = if m.kind == MemberKind::Collection {
-                "collection.json"
-            } else {
-                "tsra"
-            };
             (
-                format!("{prefix}/{}.{ext}", m.reference),
+                format!("{prefix}/{}", member_filename(&m.reference, m.kind)),
                 m.reference.clone(),
             )
         })
         .collect();
+    for m in c
+        .members
+        .iter()
+        .filter(|m| m.kind == MemberKind::Collection)
+    {
+        out.push((
+            format!(
+                "{prefix}/{}.collection.seal",
+                sanitize_reference(&m.reference)
+            ),
+            m.reference.clone(),
+        ));
+    }
+    out.push((format!("{prefix}/collection.seal"), c.id.clone()));
     out.push((format!("{prefix}/collection.json"), c.id.clone()));
     out
 }
@@ -284,6 +333,93 @@ mod tests {
         );
         let coll = cb.seal().unwrap();
         (raw, recon, coll)
+    }
+
+    #[test]
+    fn missing_member_reports_only_the_encoded_name() {
+        let dir = tempfile::tempdir().unwrap();
+        for kind in [MemberKind::Product, MemberKind::Collection] {
+            let error = member_path(dir.path(), "a:b", kind)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "member file not found: {}",
+                    member_filename("a:b", kind)
+                )),
+                "{error}"
+            );
+            assert!(!error.contains("Legacy"), "{error}");
+        }
+    }
+
+    #[test]
+    fn legacy_member_layout_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for kind in [MemberKind::Product, MemberKind::Collection] {
+            for (reference, old_stem) in [("a:b", "a_b"), ("blake3:abc", "blake3:abc")] {
+                let old = dir
+                    .path()
+                    .join(format!("{old_stem}{}", member_filename("", kind)));
+                std::fs::write(&old, b"legacy").unwrap();
+                let error = member_path(dir.path(), reference, kind)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("Legacy underscore/raw-id layouts are unsupported"),
+                    "{error}"
+                );
+                assert!(error.contains(&member_filename(reference, kind)), "{error}");
+                std::fs::remove_file(old).unwrap();
+                let error = member_path(dir.path(), reference, kind)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("member file not found:"), "{error}");
+                assert!(!error.contains("Legacy"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn prefix_member_keys_match_local_names() {
+        let (_, _, mut collection) = build_collection();
+        collection.members[0].reference = "a:b".into();
+        collection.members[1].reference = "a_b".into();
+        let keys = prefix_layout(&collection, "s3://bucket");
+        assert_eq!(keys[0].0, "s3://bucket/a%3ab.tsra");
+        assert_eq!(keys[1].0, "s3://bucket/a_b.tsra");
+    }
+
+    #[test]
+    fn member_files_roundtrip_without_collisions() {
+        use tessera_core::collection::member_filename;
+        let dir = tempfile::tempdir().unwrap();
+        let references = [
+            "a:b",
+            "a_b",
+            "Ab",
+            "ab",
+            "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "a/b",
+            "a\\b",
+            "a%3ab",
+        ];
+        for kind in [MemberKind::Product, MemberKind::Collection] {
+            for reference in references {
+                std::fs::write(dir.path().join(member_filename(reference, kind)), reference)
+                    .unwrap();
+            }
+            for reference in references {
+                let bytes =
+                    std::fs::read(member_path(dir.path(), reference, kind).unwrap()).unwrap();
+                assert_eq!(bytes, reference.as_bytes(), "{reference}");
+            }
+            let folded: std::collections::HashSet<_> = references
+                .iter()
+                .map(|r| member_filename(r, kind).to_ascii_lowercase())
+                .collect();
+            assert_eq!(folded.len(), references.len());
+        }
     }
 
     #[test]
@@ -440,14 +576,17 @@ mod tests {
         );
         let cohort = cb.seal().unwrap();
 
-        // prefix_layout: the sub-collection resolves to `<id>.collection.json`, the product to `.tsra`.
+        // prefix_layout: the sub-collection resolves to `<file_name(id)>.collection.json`, the product to `.tsra`.
         let layout = prefix_layout(&cohort, "s3://b/cohort");
-        assert!(layout
-            .iter()
-            .any(|(k, r)| r == &exam.id && k.ends_with(&format!("{}.collection.json", exam.id))));
+        assert!(layout.iter().any(|(k, r)| r == &exam.id
+            && k.ends_with(&member_filename(&exam.id, MemberKind::Collection))));
         assert!(layout
             .iter()
             .any(|(k, r)| r == &recon.id && k.ends_with(".tsra")));
+        // Every descriptor travels with its seal object (ADR-0066 rule 5).
+        assert!(layout.iter().any(|(k, r)| r == &exam.id
+            && k.ends_with(&format!("{}.collection.seal", sanitize_reference(&exam.id)))));
+        assert_eq!(layout[layout.len() - 2].0, "s3://b/cohort/collection.seal");
 
         // to_oci_index: refuses the nested member loudly (recursive index-of-indexes = #294).
         assert!(to_oci_index(

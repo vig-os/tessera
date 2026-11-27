@@ -1,22 +1,26 @@
 //! Build script — two unrelated jobs, both purely about the *build*, neither in the sealed
-//! byte-path: (1) capture the resolved decoder-crate pins for `tessera info`, and (2) the
+//! byte-path: (1) say whether a workspace lockfile sits next to this crate, and (2) the
 //! `static-hdf5` lib64 link-search fallback.
 //!
-//! ## 1. Decoder pins for `tessera info` (ADR-0057 §7)
+//! ## 1. `tessera_workspace_lock` — and why this script no longer reads the lockfile (#979)
 //!
-//! Cargo gives a crate its *own* version as `CARGO_PKG_VERSION` but exposes nothing about its
-//! dependencies' resolved versions, so the pins are read out of the workspace `Cargo.lock` — the
-//! same file `--locked` builds resolve against — and re-emitted as `rustc-env` vars that
-//! `option_env!` picks up in `backends::backend_version`. This is the read side of the fact
-//! ADR-0056 §6.2 seals as `ingest_decoder`.
+//! The decoder versions and decode-path pins that ADR-0056 §6a seals as `ingest_decoder` used to be
+//! read out of `Cargo.lock` here and re-emitted as `rustc-env` values. That was wrong in a way no
+//! `rerun-if-changed` trigger can repair: cargo never keys a build-script **run** on the package's
+//! normal dependencies, and it leaves a workspace member's path out of the unit hash, so two checkouts
+//! sharing one `CARGO_TARGET_DIR` share this script's output. The second reused the first's pins, and
+//! a binary linking parquet `58.4.1` sealed `=58.4.2`. Freshness triggers are mtime-based and cannot
+//! tell two checkouts apart.
 //!
-//! Failure is silent **by design**: built as a crates.io dependency there is no workspace lockfile,
-//! `option_env!` yields `None`, and `tessera info` prints the backend name without a version. A
-//! missing diagnostic must never fail a build.
-//!
-//! Decoders whose version is better answered at runtime are deliberately not here: `hdf-compound`
-//! reports the libhdf5 actually linked, which differs between a system libhdf5 and the `static-hdf5`
-//! vendored build — a compile-time pin could not tell them apart.
+//! So the lockfile is now read by the **compiler**, in the library unit (`src/linked.rs`), whose unit
+//! hash cargo does key on every linked crate's version, source and features. All this script decides is
+//! whether there is a workspace lockfile to read: `CARGO_MANIFEST_DIR/../../Cargo.lock`, the workspace
+//! root this crate is a member of. That is a fact about the repository layout, the same for every
+//! checkout of it, so sharing this script's output between checkouts cannot make it wrong. A packaged
+//! build (crates.io, `cargo package`) has no such file; the cfg stays off and the sealed triple carries
+//! the decoder's name only — absent rather than guessed. Before #979 this script walked up from the
+//! manifest and found the packaged crate's bundled `Cargo.lock`, so packaged builds sealed versions too.
+//! The crate is not published.
 //!
 //! ## 2. The `static-hdf5` lib64 fallback
 //!
@@ -39,18 +43,20 @@
 //! read-only input (Tessera encodes to Vortex/pcodec), never in the sealed byte-path, so nothing here
 //! can move a content_hash.
 
-use std::path::{Path, PathBuf};
-
-/// `(Cargo.lock package name, env var `backends::backend_version` reads via `option_env!`)`.
-///
-/// Phase 1's `parquet` / `arrow` decoders are one line each.
-const DECODERS: &[(&str, &str)] = &[("dicom", "TESSERA_DEP_DICOM")];
+use std::path::Path;
 
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-env-changed=DEP_HDF5_ROOT");
+    println!("cargo::rustc-check-cfg=cfg(tessera_workspace_lock)");
 
-    emit_decoder_pins();
+    // The path `src/linked.rs` `include_str!`s, relative to this crate's manifest. Deliberately not
+    // `rerun-if-changed` on it: the lockfile's *content* is tracked by the compiler through
+    // `include_str!`, in the unit cargo keys correctly; this script only answers whether it exists.
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default();
+    if Path::new(&manifest_dir).join("../../Cargo.lock").is_file() {
+        println!("cargo::rustc-cfg=tessera_workspace_lock");
+    }
 
     // Only relevant for the vendored-static build; a no-op for the default pkg-config path (where
     // hdf5-metno-sys does not emit `root`, so DEP_HDF5_ROOT is unset).
@@ -61,59 +67,4 @@ fn main() {
         // Additive fallback next to hdf5-metno-sys's own `{root}/lib`; covers the lib64 install layout.
         println!("cargo::rustc-link-search=native={root}/lib64");
     }
-}
-
-/// Re-emit each [`DECODERS`] pin from the workspace lockfile as a `rustc-env` var. Silent no-op when
-/// there is no lockfile to read (see the module docs).
-fn emit_decoder_pins() {
-    let Some(lock_path) = find_lockfile() else {
-        return;
-    };
-    println!("cargo::rerun-if-changed={}", lock_path.display());
-    let Ok(lock) = std::fs::read_to_string(&lock_path) else {
-        return;
-    };
-    for (package, var) in DECODERS {
-        if let Some(version) = lock_version(&lock, package) {
-            println!("cargo::rustc-env={var}={version}");
-        }
-    }
-}
-
-/// Walk up from this crate's manifest to the nearest `Cargo.lock` (the workspace root).
-fn find_lockfile() -> Option<PathBuf> {
-    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")?;
-    let mut dir: Option<&Path> = Some(Path::new(&manifest_dir));
-    while let Some(d) = dir {
-        let candidate = d.join("Cargo.lock");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        dir = d.parent();
-    }
-    None
-}
-
-/// The `version` of one `[[package]]` entry in a `Cargo.lock`.
-///
-/// Hand-scanned rather than parsed with `toml`, to keep this build script dependency-free: adding a
-/// `[build-dependencies]` entry would move the resolved feature graph, which is a Gate B event
-/// (ADR-0057 §5) — a disproportionate price for reading one string. The lockfile's shape is fixed by
-/// cargo (`[[package]]`, then `name = "…"`, then `version = "…"`, one key per line, in that order)
-/// and contains no nested tables, so a scanner cannot mis-parse it.
-fn lock_version(lock: &str, package: &str) -> Option<String> {
-    let mut in_wanted_package = false;
-    for line in lock.lines() {
-        let line = line.trim();
-        if line == "[[package]]" {
-            in_wanted_package = false;
-        } else if let Some(name) = line.strip_prefix("name = ") {
-            in_wanted_package = name.trim_matches('"') == package;
-        } else if in_wanted_package {
-            if let Some(version) = line.strip_prefix("version = ") {
-                return Some(version.trim_matches('"').to_owned());
-            }
-        }
-    }
-    None
 }

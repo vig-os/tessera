@@ -4,21 +4,21 @@
     "product": "recon",
     "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
     "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
-    "manifest_hash": "blake3:4fd0b90d0aa3c2bddbaefec7e244b16dc444e08b3730b5747a0a970a549e3b91"
+    "manifest_hash": "blake3:892cf508f41b47934eeb59f8aca163211a4e0d7739cf0d1810e69c50f5f4c3d3"
   },
   {
     "name": "recon_float32_mumap",
     "product": "recon",
     "id": "blake3:529bb3fc4cb032cbb45917558b52fb6b81448a1cb574b3282336ce9a39b84149",
     "content_hash": "blake3:ea3843267ea4bc54cb38d1090918da34ab9f37dffff2ce1e61e3ec478e479d9d",
-    "manifest_hash": "blake3:40e078b115d7c541f0522e09eab782773ba95864b8f6da1e119082fe6b9305fe"
+    "manifest_hash": "blake3:0cbbdb53855a0567ac71d6999641fd01437a387aed2007a2f9333d7507788dff"
   },
   {
     "name": "listmode_events",
     "product": "listmode",
     "id": "blake3:55b8eac168d668c6e15ab3bdd1d78c0494384dbc6941ad48f9ee7237cf6e9457",
-    "content_hash": "blake3:207025b1bb4d2b647d1647a860c456513478cf46b2fee4da9eb2ba910e95c33e",
-    "manifest_hash": "blake3:b6570c78cd9ddde3839aadbefbc0068244d86e90c15e93a9fcf96bcc961c4ac9"
+    "content_hash": "blake3:b8c5176eed20a216f9fcd1dd768fb786b073c99bd99f1b498f99442c691620e2",
+    "manifest_hash": "blake3:c9a56e24e28b2b7b8192d992b40f8f99dc328b5c73ffdaea32d374be16c9ebd7"
   },
   {
     "name": "spectrum_lifetime",
@@ -31,8 +31,8 @@
     "name": "multiblock_study",
     "product": "recon",
     "id": "blake3:216739168370b68f066c955f6c613839f5a8f2c62c4aad5af656c23909f55a2a",
-    "content_hash": "blake3:3b5d271b91ed2793445b561a709e38a469c7a73bdcd8ef8331e41ad7639498b8",
-    "manifest_hash": "blake3:b725e8bb6e852401978dc2a701706cb0926cb00f036331c1cb25eeb7fbfdf2b0"
+    "content_hash": "blake3:377a60687d37d395aa4504a24114f4d389f2348b52c9165e048f83f2371ff80c",
+    "manifest_hash": "blake3:4d0e99d14b2a6b01037fd06efee7c5effceb623c7bcbe2489de2f849b0192dc6"
   },
   {
     "name": "empty_no_blocks",
@@ -54,5 +54,12 @@
     "id": "blake3:70900b373daacb02d47855efbb1d01134881bab74603b3c34b47710d467974b6",
     "content_hash": "blake3:8e2d917e6f414710c4d845a9a09922fc782314b1d547c8c63b1ca5e39277986a",
     "manifest_hash": "blake3:458165b6587b7e7fd3e616e45df122264567f4b6fc76201cfa159c4a3f69d76a"
+  },
+  {
+    "name": "recon_int16_indexed",
+    "product": "recon",
+    "id": "blake3:165a756ec6c79f24e7b7fe5e2323d72494800f760ab0aa3b38e2582d7f90e17d",
+    "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
+    "manifest_hash": "blake3:523a5d99ca2454fed6d44bb7d5181dac4a241164dbd9df99c9106f14eeb10d42"
   }
 ]

@@ -32,6 +32,52 @@ ignore = [
     # object_store release (track upstream apache/arrow-rs object_store quick-xml bump).
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # basic-toml v0.1.10 — UNMAINTAINED (not a vulnerability; advisory dated 2026-09-26, ignored
+    # 2026-10-25). There's no safe upgrade. It's a compile-time-only dep: i18n-config 0.4.8 (the latest
+    # release) uses it, and i18n-config is reached only through the i18n-embed-fl / i18n-embed-impl
+    # proc-macros of age 0.11 (the ADR-0047 crypto-shred encryption dep, via tessera-ingest).
+    # Those macros parse age's own bundled i18n.toml at build time. basic-toml isn't linked into any
+    # tessera binary and never sees runtime or user input. age 0.12 doesn't help (same
+    # i18n-config ^0.4.7). Upstream swapped it back to `toml` in kellpossible/cargo-i18n#176
+    # (merged, unreleased). Remove this ignore when that ships: vig-os/tessera#665.
+    "RUSTSEC-2026-0374",
+    # zstd 0.13.3 / zstd-safe 7.2.4 / zstd-sys 2.0.16: four advisories (ignored 2026-10-26, #683).
+    # NO UPGRADE PATH. zarrs 0.23.14 (latest) and zarrs main require zstd 0.13.3. The first parquet on
+    # zstd 0.14 is 60.0, and it needs arrow 60, which the arrow-58 ingest pins, the vortex 0.93 fork
+    # (arrow 59.2) and datafusion 55 (arrow 59) can't take. tessera has no direct zstd calls. Its dependencies reach zstd only
+    # through the bulk codecs of parquet, zarrs and arrow-ipc (`sql` feature), plus zarrs'
+    # `decode_all`. clippy.toml bans the affected APIs in our code, and the
+    # [[bans.features]] entry below bans `seekable`. Reachability evidence and exit criteria are in
+    # vig-os/tessera#684. Re-verify it on every parquet or zarrs bump.
+    # 0391: `stream::*::with_context` reuses a context unreset. No dependency calls it.
+    "RUSTSEC-2026-0391",
+    # 0398: `Seekable::decompress` set_len past capacity. Unreachable: `seekable` feature is off.
+    "RUSTSEC-2026-0398",
+    # 0403: `DCtx::decompress_stream` exposes uninit memory via `stream::write::Decoder`. Unreachable: no dependency uses it.
+    "RUSTSEC-2026-0403",
+    # 0410: wasm32 allocator shim. Unreachable: zstd-sys isn't in the tessera-wasm wasm32 graph.
+    "RUSTSEC-2026-0410",
+    # chrono 0.4.45 — UNMAINTAINED (not a vulnerability; ignored 2026-11-17, #898). All versions are
+    # affected and there's no safe upgrade (chronotope/chrono#1768). tessera has no direct chrono
+    # dependency and no `chrono::` calls in crates/, so there's no code of ours to move to `jiff`. Every
+    # path is transitive (`cargo tree -i chrono -e normal,build,dev --workspace --all-features`):
+    #   - arrow-array 58.4.2 / parquet 58.4.2: the arrow-58 ingest pins (tessera-cli; tessera-ingest dev).
+    #   - arrow-array/-cast/-ord/-select 59.3.2 → vortex-arrow/-file/-layout 0.93 → tessera-io, so every
+    #     binary, tessera-py included.
+    #   - dicom-core 0.10 → dicom-* → tessera-ingest.
+    #   - object_store 0.14: tessera-io `cloud` feature and a tessera-cli dev-dependency.
+    #   - datafusion 54, arrow-* 58.3, object_store 0.13.2, chrono-tz: tessera-cli `sql` feature only.
+    # Remove when that cargo tree comes back empty (arrow-rs, dicom-rs, object_store and datafusion all
+    # off chrono) or the advisory is withdrawn: vig-os/tessera#899.
+    "RUSTSEC-2026-0543",
+    # humantime 2.3.0 — UNMAINTAINED (not a vulnerability; ignored 2026-11-17, #898). It wraps chrono, so
+    # it inherits RUSTSEC-2026-0543: all versions affected, no safe upgrade. No tessera crate uses it
+    # directly. Every path (`cargo tree -i humantime -e normal,build,dev --workspace --all-features`):
+    #   - object_store 0.14: tessera-io `cloud` feature and a tessera-cli dev-dependency.
+    #   - object_store 0.13.2 → datafusion 54: tessera-cli `sql` feature only.
+    #   - trycmd 0.15 (directly and via humantime-serde): tessera-cli dev-dependency, tests only.
+    # Remove when that cargo tree comes back empty or the advisory is withdrawn: vig-os/tessera#899.
+    "RUSTSEC-2026-0542",
 ]
 
 [licenses]
@@ -60,6 +106,20 @@ allow = [
 multiple-versions = "allow"
 wildcards = "allow"
 
+# RUSTSEC-2026-0398 (ignored above) lives in zstd's `seekable` code. It's unreachable only because no
+# crate in the graph enables that feature. Ban it so nothing can turn it on (vig-os/tessera#684).
+[[bans.features]]
+crate = "zstd-safe"
+deny = ["seekable"]
+
+[[bans.features]]
+crate = "zstd-sys"
+deny = ["seekable"]
+
 [sources]
 unknown-registry = "deny"
-unknown-git = "allow"
+# Tightened from `unknown-git = "allow"` alongside the vortex fork pin (#480). A blanket allow would
+# have let ANY git dependency in unnoticed, which is exactly the review signal a fork pin should
+# raise. Deny by default and allow precisely the one repository we pin.
+unknown-git = "deny"
+allow-git = ["https://github.com/gerchowl/vortex"]

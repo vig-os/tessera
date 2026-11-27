@@ -1,7 +1,8 @@
 # ADR-0026 — Streaming, chunked table writes for >RAM ingest
 
 Status: **Proposed** (2026-06-26) · Extends ADR-0024 (table payload), ADR-0025 (ingest), relates to
-S17 (`WriteSession`). Blocks the >RAM half of `#208` (GE listmode `events_2p` ≈ 10⁸ rows ≈ 5–7 GB).
+S17 (`WriteSession`). Blocks the >RAM half of `#208` (GE listmode `events_2p` ≈ 10⁸ rows ≈ 5–7 GB). Amended by
+ADR-0064 (2026-10-30): tables above `BLOCK_ROWS` are numbered leaves of one logical table.
 
 ## Context
 `tessera_io::table::encode` builds **one** Vortex `StructArray` from full in-memory column `Vec`s and
@@ -82,7 +83,7 @@ into fixed `ROWS_PER_GROUP = 2¹⁶` row-groups (`table.rs`), so the batch and s
 code producing the *same* bytes (`encode_streaming_matches_batch_encode`, `accumulator_equals_batch_over_
 odd_batches`). §2 deterministic strategy (ALP excluded, fixed knobs) + §4 `row_index` are in that encoder.
 The bounded-memory streaming engine + journal/recover/seal (`WriteSession`, `TableStreamWriter`) is built
-+ tested, incl. the ADR-0028 §5 live fold (`with_live_index`).
+- tested, incl. the ADR-0028 §5 live fold (`with_live_index`).
 
 **§3 streaming HDF5 ingest reader — DONE (2026-06-27):** `ge_hdf5::stream_events_2p` reads the compound
 dataset in HDF5 row-slabs (hyperslab `read_slice_1d(start..end)`) → `transpose_2p` → `TableStreamWriter`
@@ -114,3 +115,260 @@ bounded by workers not dataset; throughput 4.9 M→14.9 M events/s (~3×), satur
 **Remaining before an Accepted flip:** **cross-env / cross-arch determinism re-validation**
 (dev==release==hermetic, x86==ARM — the ADR-0024 caveat; the x86+aarch64-linux CI matrix is wired, needs a
 green ARM run). The functional + memory + parallelism gates are now met.
+
+## Amendment (#677, 2026-10-25) — StreamWriter memory contract
+
+**Defect.** The `StreamWriter` bounded its *input* channel, but its committer drained the output channel
+into an unbounded `BTreeMap` reorder buffer. So the channel capacity did not bound the encoded payloads it
+held: if job 0 was slow while jobs 1..N finished, the committer kept all N payloads while the producer kept
+pushing. The memory bound this ADR depends on did not hold under reordering. The fix doesn't change any
+bytes or hashes, so it is not a format change and needs no new ADR.
+
+**Contract: a credit window** (`tessera_io::StreamWindow`). A job takes a credit when it is **pushed** and
+gives it back only when it is **committed in order**. So one window covers every job the pipeline holds:
+queued, encoding, and finished but waiting in the reorder buffer. `push` blocks while the window is full.
+
+The knobs:
+
+- `max_in_flight` (`J`): jobs pushed but not yet committed. Defaults: `StreamWriter::new(_, W, capacity)`
+  uses `capacity + W`; `StreamWriter::with_config` uses `ring_depth(unit_bytes) + W`.
+- `max_in_flight_bytes` (`B`): encoded payload bytes (data + companions) held in RAM. Defaults: `new` uses
+  `DEFAULT_RAM_BUDGET` (1 GiB); `with_config` uses the config's `ram_budget`.
+
+With `W` encode workers and `P` the largest single job's encoded payload:
+
+- jobs in flight `≤ J`, always;
+- encoded bytes held `< B + min(W, J) × P` (and trivially `≤ J × P`).
+
+Through `with_config`, `ram_budget` is spent on both sides: the job window holds about `ram_budget +
+W × unit_bytes` of raw input and the byte budget about `ram_budget + W × P` of encoded payloads, so the
+worst case is about `2 × ram_budget + W × (unit_bytes + P)` plus the encoders' working sets.
+
+The `+ W` in the default job window is the queue capacity plus one job per worker. A window of only the
+queue capacity would leave workers idle whenever `W > capacity`, which loses today's throughput.
+
+**Enforcement.** Two gates share one mutex and condvar. (1) *Submit*: a job is admitted while fewer than
+`J` jobs are in flight **and** fewer than `B` bytes are held. (2) *Encode start*: a worker starts a job only
+while fewer than `B` bytes are held, **except** for the job the committer waits on, which always runs. Gate
+2 is what makes `B` bind: once `B` is reached, only the encodes already in progress can add bytes.
+
+**Deadlock rule.** The window must never block the job the committer waits on (`next`). `next` has been
+pushed, the queue is FIFO so it is dequeued first, and gate 2 exempts it. A job whose payload alone
+exceeds `B` is admitted into an empty window (no bytes are held then) and runs alone once it is `next`. A
+failed encode, a failed commit or a panicking worker *closes* the window: `push` returns an error and the
+workers waiting at gate 2 exit (idle workers exit when `finish` closes the job queue), so nothing hangs.
+The committer also errors if any pushed job is missing at the end, instead of sealing a truncated product.
+
+**Determinism.** Commit order is still `seq`. Bytes and `content_hash` are identical across worker counts
+and window sizes (`stream::tests::content_hash_is_identical_across_workers_and_windows`).
+
+**Instrumentation.** `StreamWriter::stats()` (live) and `StreamWriter::finish_with_stats()` (final) return
+`StreamStats` with `peak_in_flight_jobs`, `peak_in_flight_bytes`, `max_job_bytes` (`P`), `jobs_pushed`,
+`jobs_committed` and `producer_stalls`, so a consumer can assert the bound.
+
+**Scope.** `P` is one job's encoded payload in RAM. The second half of #677 (below) moves a table
+block's encoded output to disk, so a single block larger than RAM is bounded too.
+
+## Amendment (#677, 2026-10-26) — single-table output sink
+
+**Defect.** `table::encode_streaming` pulled its input lazily but wrote the encoded table into a
+`ByteBufferMut` and returned `freeze().to_vec()`, so the encoded output grew with the table (2 GiB of
+input → 4.76 GB anonymous RSS at `9424f90`, the consumer reproducer on #677). `TableStreamWriter::finish`
+and `table_job_from_fragments` reached that path, so neither the DAQ writer nor the multi-block sink could
+produce one canonical block larger than RAM. The fix doesn't change any bytes or hashes: not a format
+change, no new ADR.
+
+**Contract.**
+
+1. **File-backed encode.** `table::encode_streaming_to(spec, groups, sink)` writes the Vortex file to any
+   `std::io::Write`. At the pinned Vortex (0.75, rev `608d8a1`) that is
+   `VortexWriteOptions::blocking(&runtime).write<W: std::io::Write + Unpin>(sink, array_iterator)`
+   (`vortex-file/src/writer.rs`), which writes each segment buffer as soon as it is available and has no
+   buffering of its own. `encode_streaming` keeps its signature as `encode_streaming_to` into a `Vec`.
+2. **Staged jobs.** A `StagedEncodeJob` (`StreamWriter::push_staged`) receives the session's
+   `BlockStaging` and writes its data block into a `StagedBlock`, a file in the session's `staging/`
+   directory. `table_job_streaming(name, spec, groups)` (a lazy row-group iterator) and
+   `table_job_from_fragments` (staged fragments; used by `TableMultiBlockSink`) are staged jobs, and so is
+   `TableStreamWriter::into_job`. One logical block stays **one canonical block**: no suffixed physical
+   blocks. *(Retired for tables above `BLOCK_ROWS` by ADR-0064, 2026-10-30: see the amendment at the end.)*
+3. **Commit by rename, verified.** A `StagedBlock` hashes its bytes as the encoder writes them, so the
+   block's digest is born with the bytes (ADR-0002 first-moment integrity). `WriteSession::append_staged`
+   takes that digest (a set `block_ref.digest` must match it, a `None` one is filled in), fsyncs the file,
+   **renames** it into `blocks/` (no copy: `staging/` is inside the session directory, so on the same
+   filesystem; if it is on another one anyway, the rename fails with `CrossesDevices` and the file is
+   copied instead), fsyncs the directory, then **re-reads the fragment and checks it against the born
+   digest** before the same journal line + Merkle leaf as `append_block`. Scratch corruption between the
+   encode and the commit, or a bad copy, is refused (`Error::Integrity`, `what = "staged_block"`)
+   instead of being sealed under the digest of the corrupted bytes. `append_block_from(block_ref,
+   reader)` copies a reader into a `StagedBlock` and commits it the same way.
+4. **RAII.** A staged file is deleted on a failed commit and on drop (an encode error, a panic, a
+   pipeline shut down early); a committed one has become the fragment. Any append that fails before its
+   journal write leaves no staged file, no fragment, no journal line and no Merkle leaf.
+   `WriteSession::create` and `recover` clear `staging/`, since nothing in it was committed.
+   `StreamWriter::finish` joins every thread before it reports an error, so no staged encode is still
+   running when it returns (#680 item 3).
+5. **A failed journal write poisons the session** (every append, through the one commit they share).
+   Once the journal write has begun, a failure (the write, or its fsync) leaves the journal's state
+   unknown: a torn line, or a complete line that may or may not be durable. The failed block's fragment
+   is deleted, so `recover` stops at such a line, and any block appended behind it would be dropped. So
+   the session refuses every later append and the seal, with an error that says to `recover`; `recover`
+   rereads the journal and keeps exactly the blocks committed before the failure. Truncating the journal
+   back instead was rejected: it would rest on the fsync that just failed (after an fsync error the kernel
+   may drop the dirty pages and clear the error, so a later fsync can succeed with the data lost). A
+   block name already committed is refused too, so a failed append can't delete a committed fragment.
+
+**The rule: table streaming jobs are always staged.** The encoded size isn't known until the encode ends,
+so a threshold would need a sink that starts in RAM and spills to disk; always staging keeps the RAM a
+table job holds independent of its size, for one sequential read of the encoded block on local disk (the
+commit's verify pass; the write is the fragment's own, since the staged file becomes the fragment).
+`table_job` (in-memory input) and `EncodeJob`s stay in RAM, as before.
+
+**The bound, extended.** With the window's `J`, `B`, `W` and `P` as above, `P` now counts only what a job
+holds **in RAM**: a staged job's companions, i.e. `0` for the table jobs. So for a product written with
+staged table jobs, the encoded bytes held in RAM are `< B` (`StreamStats::peak_in_flight_bytes`; test
+`stream::tests::single_table_block_many_times_the_budget_stays_within_the_window`). What the window does
+**not** count, per encode worker: one row-group of input, the compressor's buffers, a `BufWriter` (8 KiB),
+and the encoded segments the Vortex writer holds before it writes them (below). The committer's verify
+pass reads through a fixed 64 KiB buffer. That a staged job holds nothing beyond the encoder's own working
+set is checked on the real heap, not only the window's accounting: `tests/staged_job_memory.rs` (a counting
+allocator; each staged table job's peak heap is that of the same encode into `io::sink()`, within 1 MiB).
+
+**Disk is not bounded by the RAM budget.** Scratch needed in the session directory, with `S` the largest
+staged block (`StreamStats::max_staged_job_bytes`) and `T` the product's total size:
+
+- staged files of finished-but-uncommitted jobs `≤ J × S` (`StreamStats::peak_staged_bytes`), plus the
+  files of the up to `min(W, J)` encodes in progress;
+- committed fragments (`blocks/`, up to `T`): a commit renames the staged file into place, so a block is
+  never on disk twice;
+- at seal, the output `.tsra` (another `T`, written to a sibling `.part` and renamed).
+
+So plan for about `2 × T + J × S` of scratch when the output `.tsra` is on the same filesystem (`T + J × S`
+until the seal). For a product that is one large block (`S ≈ T`) that is `T` while it encodes and commits,
+and `2 × T` during the seal (the fragment and the output). A copying commit would add one `S` while a
+block commits (the staged file and its copy), `2 × T` already during the commit of one large block.
+
+**Determinism.** A staged block is byte-identical to the in-memory encode of the same table, so the
+sealed bytes, `content_hash` and `manifest_hash` don't depend on the job kind, the worker count or the
+window (`stream::tests::staged_table_jobs_seal_the_in_memory_product_for_every_worker_count_and_window`).
+The conformance corpus is unchanged.
+
+**Measured (consumer reproducer, ksb job, 2026-10-26).** MorePET/visionx-rs `chore/39-tessera-677-repro`
+(exact nullable decoder shape, its single encode job switched to `table_job_streaming`), built against this
+change (at `37fe9d7`, which committed by a 256 KiB-buffered copy instead of the rename: the encode, which
+sets the peak, is the same), `ksb run --cpu 4 --exclusive-cpus --mem 12Gi`, `--workers $KSB_CPUS`, peak
+`RssAnon` sampled every 10 ms (anonymous memory, not page cache):
+
+| rows | packet-equivalent input | peak RssAnon | output | at `9424f90` |
+|---:|---:|---:|---:|---:|
+| 268,435,456 | 2.15 GB | 0.91 GB | 2.05 GB | 4.76 GB |
+| 1,600,000,000 | 12.8 GB | 5.15 GB | 12.21 GB | — |
+
+**Known limit: the Vortex writer's own buffering (#681).** *Superseded for `push_table` by ADR-0064 §8
+(2026-11-03, #714); the original text stays on the record:*
+
+> ~~The output Vec is gone, but RSS still grows
+> during the encode (~3.2 bytes/row, about 0.4 × the encoded size at the peak) and drops when the footer is
+> written. Root cause, measured with a counting allocator and a patched copy of the pinned Vortex: its
+> `ChunkedLayoutStrategy` spawns one write task per chunk and polls them with `buffered(usize::MAX)`, and the
+> segment sink writes segments in one global sequence order across all columns, so compressed chunks pile up
+> in pending tasks ahead of the sink with nothing applying backpressure. A fixed cap is not a drop-in fix:
+> `buffered(64)` bounds the heap, `buffered(2)` and `buffered(8)` deadlock on the cross-column order. So the
+> bound this amendment gives is the tessera side (the window and the staged block); the encode's RAM is
+> `≈ 0.4 × S` on top until #681 lands a deadlock-free bound inside Vortex. Projected for the consumer's full
+> 2.4 G-row (19.2 GB) acquisition: ≈ 7.7 GB peak RssAnon, under its 8 GiB budget but not independent of the
+> input size, so #677 stays open on #681.~~
+
+One canonical block's encode heap still grows with its rows, so no size-independent bound holds for a single
+block: this is what `table::table_block` and the Python `Builder.add_table` write at any size (ADR-0064 §5.6),
+and what `table_job_streaming` writes up to `BLOCK_ROWS` rows. `StreamWriter::push_table` writes a streamed
+table above `BLOCK_ROWS` as leaves of at most `BLOCK_ROWS` rows, with ADR-0064 §8's bound
+`min(W, n) · p_block + s` (item 3 of the amendment below), stated in `push_table`'s rustdoc and checked on the
+heap by `tessera-io/tests/staged_job_memory.rs`. *(ADR-0064's #760 amendment, 2026-11-04: the bound is
+`min(W, n) · p_block + s + c_leaf · n`, item 3 below.)*
+
+## Amended by ADR-0064 (2026-10-30) — streamed tables are partitioned into numbered leaves
+
+[ADR-0064](0064-logical-tables-over-numbered-leaves.md) (Accepted 2026-11-02) records the owner's
+decision on #677 (2026-10-29, option P-logical of the #681 design note). It changes three things in this ADR:
+
+1. **"One logical block stays one canonical block" is retired for tables above `BLOCK_ROWS`.** Rule 2 of the
+   #677 amendment above ("no suffixed physical blocks") no longer holds for them. A table of more than
+   `BLOCK_ROWS` rows that an engine writer (ingest, streaming writer, multi-block sink) writes, streamed or not, is
+   **one logical table over bounded physical blocks** from ADR-0064's writer switch (its PR D) on;
+   the low-level single-block constructors (`table::table_block`, the Python `Builder.add_table`) still write one
+   block at any size (ADR-0064 §5.6). Those tables are the leaves
+   `<table>/0000`, `<table>/0001`, … (ADR-0064 §1), each carrying a sealed partition marker (§2), which every
+   logical reader presents as one table (§3, §7). A table of at most `BLOCK_ROWS` rows stays one canonical block
+   with the bare name, byte-identical to before.
+2. **`table_job_streaming`'s "any size" contract (alpha.4) is withdrawn.** Above `BLOCK_ROWS` it fails with a
+   typed error naming `StreamWriter::push_table`, which partitions, stages each block's input on disk and
+   dispatches each block as it fills (ADR-0064 §5). At or below `BLOCK_ROWS` it is unchanged.
+3. **The *Known limit* paragraph of the #677 amendment is superseded by ADR-0064 §8's bound** for `push_table`
+   with `W` encode workers and `n` blocks:
+
+   ```text
+   peak heap     ≤  min(W, n) · p_block + s,   s = 2 · ROWS_PER_GROUP · r_mem + 4 MiB
+   staged input  ≤  W + 1 blocks, the partial one included
+   ```
+
+   *(Amended by ADR-0064's #760 amendment, 2026-11-04: the bound is
+   `min(W, n) · p_block + s + c_leaf · n`, with `c_leaf = 2 · (e_leaf + b_leaf)`, `e_leaf` the leaf's canonical
+   manifest entry and `b_leaf = 1 KiB`, for the entry each committed leaf keeps until the seal. It holds once #759
+   lands. Size independence is the plateau beyond `c_leaf · (n₂ − n₁)`.)*
+   *(ADR-0064's #770 amendment, 2026-11-08: the plateau is a slope test, so the 5% tolerance below is retired.
+   Over every run of the RSS proof from `16 W` leaves on, the OLS slope of peak `RssAnon` against `n` must be at
+   most `c_leaf` plus its one-sided 95 % confidence margin, and that margin must be able to resolve the 0.029 B/row
+   zone-statistics regression at `W = 4` and a growth of `c_leaf` beyond `c_leaf` at `W = 1`, which runs 6 times per
+   size for it.)*
+   *(ADR-0064's #797 amendment, 2026-11-11: that slope is fitted within runs, by fixed effects over the tenths of
+   each run's input, with a standard error clustered by run; the across-run slope is reported as context, confounded
+   by ksb's shared disk.)*
+
+   `p_block` is one block's measured encode peak (46.1 MB for the consumer shape at 8 CPUs, #681 note §4.7);
+   it still holds the Vortex writer's width terms `D(width)` and `K(width)`, but no longer a term that grows with
+   the table's rows. Size independence is asserted with a 5% plateau tolerance from `16 W` blocks on (§8). The
+   staged input is page cache, which counts toward the cgroup's `memory.current` and is RAM on tmpfs, so the
+   session directory SHOULD be on a disk-backed filesystem; the ksb RSS proof samples `RssAnon`, `memory.current`
+   and `memory.stat` and refuses a tmpfs staging directory (ADR-0064 §8.1). Its results will be recorded here.
+   *(Recorded below, 2026-11-11: all six criteria pass.)*
+   The bound is stated in `push_table`'s rustdoc and checked in-tree on the heap (2026-11-03, #714):
+   `tessera-io/tests/staged_job_memory.rs` holds the workers and asserts the staged input is not held in
+   RAM (`≤ s`), and asserts the ceiling against a `p_block` calibrated in the same binary.
+
+The rest of this ADR (the encoder, the window, the staged commit, the RAII and journal rules, the disk paragraph)
+is unchanged; each leaf is one staged job under the window.
+
+**Measured (ADR-0064 §8.1 RSS proof, #715 G r4, 2026-11-11).** The consumer reproducer (MorePET/visionx-rs
+`c4aff94`, `stream_memory.rs` switched to `push_table`, exact nullable schema) built against tessera `26159de` (the
+post-#759 writer), `ksb run --cpu 4 --exclusive-cpus`, evaluated by `tessera/bench/ksb/677-rss-proof/run.py` (PR #767)
+against §8.1 as amended by #760, #770 and #797. Criteria 1–5 ran with staging on disk-backed `--scratch` under
+`--mem 4Gi`, as shards merged by `run.py evaluate`; criterion 6 ran on `/dev/shm` under `--mem 6Gi`.
+
+| Job | Runs | Exit |
+| --- | --- | ---: |
+| `tessera-715-r4-sweep-w4-2` | `W = 4`, every point, 8 of its 9 repeats | 124 (480 min limit) |
+| `tessera-715-r4-sweep-w4-k2` | `W = 4`, 2.4 G rows, repeat 3 | 0 |
+| `tessera-715-r4-sweep-w1-k0` … `-k5` | `W = 1`, repeat 1 … 6 (repeat 1 with the 0- and 1-block points) | 0 each |
+| `tessera-715-r4-par-1` | criterion 6, `W = 1` and `W = 4` at 268 M rows on `/dev/shm` | 0 |
+
+`run.py evaluate` over the eight criteria 1–5 shards: 83 checks, all pass, exit 0; over `tessera-715-r4-par-1`: exit
+0. (`tessera-715-r4-sweep-w4`, which passed `job` twice, was cancelled and isn't graded.)
+
+| Criterion | Result |
+| --- | --- |
+| 1. Ceiling, every run | Pass. Highest `RssAnon` 218.6 MiB against 305.5 MiB (`W = 4`, 573 leaves); at `W = 1` 64.3 MiB against 114.9 MiB |
+| 2. Plateau, `W = 4` (within-run slope) | Pass. `b̂` −5,082 B/leaf ≤ bound 28,174 (`c_leaf` 7,980 + `t₀.₉₅,5` 2.015 · SE 10,022); `G` 6 runs, `N` 51 tenths; floor 40,389 ≤ `δ_z` 121,635 |
+| 2. Plateau, `W = 1` (within-run slope) | Pass. `b̂` 3,899 B/leaf ≤ bound 9,032 (7,980 + `t₀.₉₅,17` 1.740 · SE 605); `G` 18, `N` 168; floor 2,103 ≤ `c_leaf` and ≤ `δ_z` |
+| 3. Page cache reclaimable, 2.4 G rows | Pass, all 9 runs: complete under `--mem 4Gi`, peak `shmem` 0.0 MiB, `anon` within 1.0 MiB of `RssAnon` |
+| 4. The consumer's budget, 2.4 G rows | Pass. Highest `RssAnon` 218.6 MiB < 8 GiB |
+| 5. Bytes and names, 268 M rows | Pass. All 9 runs (6 at `W = 1`, 3 at `W = 4`) have the canonical manifest and `content_hash` (`blake3:4ad6e224…`) of `W = 1`'s first |
+| 6. Parallelism, `/dev/shm` | Pass. `W = 1` 42.9 s, `W = 4` 15.3 s: 2.80× ≥ 1.5× |
+
+**Context, not graded** (ADR-0064 A.4, C.3). The across-run slope of every run's peak against `n` is 40,437 B/leaf at
+`W = 4`, outside B.3's rule (bound 31,109), and 5,072 B/leaf at `W = 1`, within it (bound 10,121): across runs the
+peak tracks the shared disk's load, which was 99–100 % busy on every run from 16 leaves on (ADR-0064 C.1). On that
+disk, at 268 M rows, the `W = 4` runs took 848–1,451 s and the `W = 1` runs 906–1,275 s.
+
+**Stated limits** (ADR-0064 B.5, now the within-run fit's): the smallest growth beyond `c_leaf` that criterion 2
+catches with probability ≥ 95 % was 40,389 B/leaf (0.0096 B/row) at `W = 4` and 2,103 B/leaf (0.0005 B/row) at
+`W = 1` in this run.

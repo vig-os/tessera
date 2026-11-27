@@ -17,14 +17,23 @@
     guardrails.url = "github:gerchowl/guardrails";
     guardrails.inputs.nixpkgs.follows = "nixpkgs";
     guardrails.inputs.flake-utils.follows = "flake-utils";
+
+    # vigOS devkit toolchain, pinned to the release this repo adopts in
+    # `.vig-os` (#364). Its overlay supplies `vig-utils`, the console scripts
+    # the devkit-managed `ci.yml` calls: in `direnv` mode the commit-checks job
+    # runs `uv run validate-commit-range` and resolves it off THIS dev-shell's
+    # PATH, so without the input that job fails with "Failed to spawn". Keep the
+    # pin in step with DEVKIT_VERSION.
+    vigos.url = "github:vig-os/devkit/1.17.0";
+    vigos.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, guardrails }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, guardrails, vigos }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ (import rust-overlay) ];
+          overlays = [ (import rust-overlay) vigos.overlays.default ];
         };
         # One source of truth for the compiler + components — see tessera/rust-toolchain.toml.
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./tessera/rust-toolchain.toml;
@@ -38,24 +47,200 @@
         # fixtures) + Gate B's committed feature snapshots (`tests/feature-snapshots/*.txt`, ADR-0057
         # §5) — cleanCargoSource would otherwise strip these non-Rust files, so the trycmd
         # docs-as-tests would silently run ZERO cases in the hermetic gate.
-        src = pkgs.lib.cleanSourceWith {
-          src = ./tessera;
-          filter = path: type:
+        # Named so `test-coverage` (below) asks the SAME predicate the build uses, rather than a copy.
+        srcFilter = path: type:
             (craneLib.filterCargoSources path type)
             || (pkgs.lib.hasInfix "/corpus/" path)
             || (pkgs.lib.hasInfix "/docs/examples/" path)
             || (pkgs.lib.hasInfix "/docs/dictionaries/" path)
             || (pkgs.lib.hasInfix "/tests/cmd/" path)
-            || (pkgs.lib.hasInfix "/tests/feature-snapshots/" path);
+            || (pkgs.lib.hasInfix "/tests/feature-snapshots/" path)
+            # Committed binary test products, e.g. tessera-io's legacy `events_NNNN` fixture (#710) and
+            # tessera-py's partitioned `pairs` fixture (#717).
+            || (pkgs.lib.hasInfix "/tests/fixtures/" path)
+            # The GENERATED product-schema reference the book includes (#389). Its drift test compares
+            # this committed copy against `SchemaRegistry::builtin()`, so the file has to reach the
+            # sandbox — the `derived-docs` gate cannot do the job here because it runs without cargo.
+            || (pkgs.lib.hasInfix "/tests/derived-docs/" path);
+        src = pkgs.lib.cleanSourceWith {
+          src = ./tessera;
+          filter = srcFilter;
           name = "source";
         };
+
+        isLinux = pkgs.stdenv.hostPlatform.isLinux;
+
+        # ── Every SCRIPT under ./tessera, and what happens to it (#520). ──────────────────────────
+        #
+        # A test the build sandbox cannot see passes locally and gates nothing, silently. That has
+        # happened twice: ef240cb (trycmd cases ran ZERO in CI — `/tests/cmd/` was not in the filter)
+        # and #520 (the ecosystem bench's tests were referenced by nothing).
+        #
+        # The first version of this guard matched "test-like" NAMES (test_*.py, tests/…). Names are a
+        # proxy: `corpus/reference_reader/run.py` — an independent conformance reader — matched no
+        # pattern and ran nowhere. So the rule is now about FILE TYPE, not name: every tracked
+        # script (.py .js .cjs .mjs .sh) must appear in EXACTLY ONE map below, and being admitted by
+        # `srcFilter` does NOT count for a script (the filter admits whole directories such as
+        # /corpus/ and /tests/cmd/, so a script there would pass unrun). Exact FILES, never dirs.
+        # Check names are asserted to exist (see the `checks` wrapper), so a rename cannot leave a
+        # file "run by" a check that is gone.
+        scriptsRunByChecks = {
+          "/crates/tessera-py/tests/smoke.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/api_drift.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/codec_roundtrip.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/write_example.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/provenance.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/logical_tables.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-py/tests/nullable_columns.py" = [ "tessera-py-import" "tessera-wheel-import" ];
+          "/crates/tessera-ingest/tests/producer_equality.py" = [ "ingest-producer-equality" ];
+          "/crates/tessera-wasm/tests/smoke.cjs" = [ "wasm-bindgen-smoke" ];
+          "/crates/tessera-wasm/tests/corpus_members.py" = [ "wasm-bindgen-smoke" ];
+          "/corpus/reference_reader/run.py" = [ "reference-reader" ];
+          "/corpus/reference_reader/make_seal_cases.py" = [ "reference-reader" ];
+          "/corpus/reference_reader/make_refusal_fixtures.py" = [ "reference-reader" ];
+          "/bench/ksb/677-rss-proof/test_run.py" = [ "rss-proof-evaluator" ];
+        } // pkgs.lib.optionalAttrs isLinux {
+          "/bench/ecosystems/test_common.py" = [ "bench-ecosystems" ];
+        };
+        # Deliberately NOT run in CI — each with its reason. A declared decision, not a silent gap.
+        scriptsNotRunInCi = {
+          "/bench/ecosystems/test_adapters.py" =
+            "needs h5py, zarr, pyarrow, nibabel, pydicom, uproot AND a built tessera-py — a heavy new "
+            + "derivation, deferred until the CI memory work lands (#495, #520)";
+          "/bench/ecosystems/run.py" =
+            "the benchmark DRIVER, not a test: it produces timings for humans and is run by hand "
+            + "(bench/ecosystems/README.md). Numbers from a shared CI runner would not be meaningful";
+          "/bench/ksb/677-rss-proof/run.py" =
+            "the ADR-0064 §8.1 RSS proof, a ksb batch job (its own flake): it needs a 4-CPU exclusive "
+            + "job with its own cgroup and --mem, disk-backed scratch and /dev/shm, and hours of runs. "
+            + "Its criterion-2 arithmetic is run by rss-proof-evaluator, through test_run.py";
+          # The #793 ksb job (bench/ksb/793-io-hang/flake.nix): a measurement submitted with `ksb run`.
+          "/bench/ksb/793-io-hang/run.sh" =
+            "the #793 stall reproducer, a ksb job: it needs a disk-backed scratch volume under write "
+            + "load and runs for up to 2 h, which no flake check can give it";
+          "/bench/ksb/793-io-hang/fsync_probe.py" =
+            "the #793 reproducer's fsync-latency probe, run by run.sh on the ksb job's scratch disk";
+          "/bench/ksb/793-io-hang/footprint.py" =
+            "the #793 tmp-footprint sampler, run inside the rebuilt checks of the ksb footprint job; "
+            + "the protected checks themselves are what CI runs";
+        } // pkgs.lib.optionalAttrs (!isLinux) {
+          "/bench/ecosystems/test_common.py" =
+            "Linux-only: common.py uses CDLL('libc.so.6'), mincore(2) and posix_fadvise";
+        };
+        # Imported by an entry point above, never run directly. Each value is the list of ENTRY
+        # POINTS that import it, and every one must be a key of scriptsRunByChecks or
+        # scriptsNotRunInCi (asserted in the `checks` wrapper) — so "a library" cannot become a
+        # third way of declaring a script without saying what runs it.
+        scriptLibraries =
+          let
+            bench = [ "/bench/ecosystems/run.py" "/bench/ecosystems/test_adapters.py" ];
+            py = [
+              "/crates/tessera-py/tests/smoke.py"
+              "/crates/tessera-py/tests/api_drift.py"
+              "/crates/tessera-py/tests/codec_roundtrip.py"
+              "/crates/tessera-py/tests/write_example.py"
+              "/crates/tessera-py/tests/provenance.py"
+              "/crates/tessera-py/tests/logical_tables.py"
+              "/crates/tessera-py/tests/nullable_columns.py"
+            ];
+          in
+          {
+            "/bench/ecosystems/common.py" = bench ++ [ "/bench/ecosystems/test_common.py" ];
+            "/bench/ecosystems/adapters/__init__.py" = bench;
+            "/bench/ecosystems/adapters/dicom.py" = bench;
+            "/bench/ecosystems/adapters/hdf5.py" = bench;
+            "/bench/ecosystems/adapters/nexus.py" = bench;
+            "/bench/ecosystems/adapters/nifti.py" = bench;
+            "/bench/ecosystems/adapters/parquet.py" = bench;
+            "/bench/ecosystems/adapters/root.py" = bench;
+            "/bench/ecosystems/adapters/tessera.py" = bench;
+            "/bench/ecosystems/adapters/zarr_.py" = bench;
+            "/corpus/reference_reader/reader.py" = [ "/corpus/reference_reader/run.py" ];
+            "/crates/tessera-py/python/tessera/__init__.py" = py;
+          };
+
+        # The ecosystem bench's method tests (#485/#520): median+spread, MEASURED cold-cache
+        # eviction, and both table/volume fixtures. Pure Python + numpy — no ecosystem libraries,
+        # no tessera-py — so it is cheap. Its source is ONLY common.py + test_common.py, so editing
+        # an adapter or the driver neither rebuilds this nor touches the crane `src` hash.
+        # LINUX ONLY: common.py uses CDLL('libc.so.6'), mincore(2) and posix_fadvise, none of which
+        # exist on Darwin, and `eachDefaultSystem` evaluates the darwin systems too.
+        # The set is defined on every system so its NAMES are known everywhere (the check list
+        # assertion in the `checks` wrapper needs them on Darwin); `linuxOnlyChecks` gates it.
+        linuxOnlyCheckSet = {
+          bench-ecosystems =
+            let
+              benchSrc = builtins.path {
+                name = "bench-ecosystems-src";
+                path = ./tessera/bench/ecosystems;
+                filter = path: _type:
+                  builtins.elem (baseNameOf path) [ "common.py" "test_common.py" ];
+              };
+            in
+            pkgs.runCommand "bench-ecosystems"
+              {
+                nativeBuildInputs =
+                  [ (pkgs.python312.withPackages (ps: [ ps.numpy ps.pytest ])) ];
+              } ''
+              cp ${benchSrc}/common.py ${benchSrc}/test_common.py .
+              # The eviction tests need a page cache to evict FROM: on a tmpfs the pages ARE the
+              # storage and DONTNEED is a no-op, so they would fail for the wrong reason. Report the
+              # filesystem so a failure here is diagnosable rather than mysterious.
+              echo "bench-ecosystems: tests run on $(stat -f -c %T .)" >&2
+              python3 -m pytest -q -p no:cacheprovider test_common.py
+              touch $out
+            '';
+
+          # The RAM-TMPDIR guard's own test (#793): `use_ram_tmpdir` must land on tmpfs or ramfs and
+          # `assert_ram_tmpdir` must REJECT a directory that is not, so the assertion every protected
+          # check runs cannot pass vacuously. The negative case is /proc, which is procfs on every
+          # Linux host (the build dir itself may well be tmpfs somewhere). The free-space floor must
+          # reject a filesystem smaller than it (an impossible floor stands in for a small /dev/shm),
+          # the removal must sit LAST in both `exitHooks` and `failureHooks` straight after a check adds
+          # its own hooks through `ram_tmpdir_add_hooks` (s3-range-read's log dump reads the RAM dir,
+          # and its server must stop first), and it must delete the dir. It
+          # also logs the runner's /dev/shm size and free space.
+          ram-tmpdir-guard = pkgs.runCommand "ram-tmpdir-guard" { } ''
+            fail() { echo "ram-tmpdir-guard: $*" >&2; exit 1; }
+            source ${ramTmpdir}
+            use_ram_tmpdir
+            case $TMPDIR in /dev/shm/tessera-check.*) ;; *) fail "TMPDIR=$TMPDIR not the helper's";; esac
+            if (TMPDIR=/proc; assert_ram_tmpdir); then
+              fail "assert_ram_tmpdir accepted /proc ($(stat -f -c %T /proc)): the guard is vacuous"
+            fi
+            if (ram_tmpdir_min_free_mib=$((1 << 40)); assert_ram_tmpdir_space); then
+              fail "assert_ram_tmpdir_space accepted a 1 EiB floor: the space check is vacuous"
+            fi
+            # A check that adds its hooks and then fails at once (s3-range-read when versitygw does not
+            # start): nothing runs `ram_tmpdir_cleanup_last` after the add, so the add itself must
+            # leave the removal last.
+            dump_check_log() { :; }
+            stop_check_server() { :; }
+            ram_tmpdir_add_hooks exitHooks stop_check_server
+            ram_tmpdir_add_hooks failureHooks dump_check_log stop_check_server
+            [[ "''${exitHooks[*]: -2}" == "stop_check_server remove_ram_tmpdir" ]] \
+              || fail "exitHooks are (''${exitHooks[*]}), the removal must run last"
+            [[ "''${failureHooks[*]: -3}" == "dump_check_log stop_check_server remove_ram_tmpdir" ]] \
+              || fail "failureHooks are (''${failureHooks[*]}), the removal must run last"
+            n=0; for h in "''${failureHooks[@]}"; do [[ $h == remove_ram_tmpdir ]] && n=$((n + 1)); done
+            (( n == 1 )) || fail "remove_ram_tmpdir registered $n times in failureHooks"
+            d=$ram_tmpdir; touch "$d/x"; remove_ram_tmpdir
+            [[ ! -e $d ]] || fail "remove_ram_tmpdir left $d"
+            echo "ram-tmpdir-guard: accepts $(stat -f -c %T /dev/shm), rejects $(stat -f -c %T /proc)," \
+              "enforces the ''${ram_tmpdir_min_free_mib} MiB floor, removes the dir last on success and failure"
+            touch $out
+          '';
+        };
+        linuxOnlyChecks = pkgs.lib.optionalAttrs isLinux linuxOnlyCheckSet;
+
         # Every feature declared anywhere in the workspace **except `static-hdf5`** (ADR-0057 §4), in
         # cargo's `package/feature` form so one invocation from the virtual-manifest root covers all
         # members. This is what the PR clippy gate builds instead of `--all-features`.
         #   tessera-core   array-zarr, table-arrow   (= `full`)
         #   tessera-io     cloud
         #   tessera-cli    cloud (→ tessera-io/cloud), sql
-        #   tessera-ingest static-hdf5 only          → deliberately absent
+        #   tessera-ingest arrow, parquet, csv       → in `default`, so already on; `static-hdf5`
+        #                  static-hdf5                    → deliberately absent (ADR-0057 §4)
         #   tessera-py / tessera-wasm                → no features
         workspaceFeatures = builtins.concatStringsSep "," [
           "tessera-core/full"
@@ -63,6 +248,179 @@
           "tessera-cli/cloud"
           "tessera-cli/sql"
         ];
+
+        # A RAM-backed TMPDIR for every check that runs tessera's tests through cargo (#793). The tests measure
+        # logic and the ORDER of fsyncs, never the disk's speed, so their temp files belong on a
+        # filesystem where an fsync costs nothing: a WriteSession commit fsyncs the fragment, its
+        # directory and the journal (#695), so `content_hash_is_identical_across_workers_and_windows`
+        # issues 1,536 fsyncs and `session_leaf_memory` 999. On a ksb pod $TMPDIR is `build-dir` on
+        # the pod's one /nix volume, written by every concurrent build (as in #688), and there the
+        # two took > 3,240 s and > 840 s against 0.97 s and 0.07 s on tmpfs, timing out the x86_64
+        # leg at its 2 h cap. One fsync per batch is a product change, #798, not this.
+        #
+        # /dev/shm is the RAM fs every build can reach. Under the Nix sandbox it is a tmpfs private
+        # to the build (`sandbox-dev-shm-size`, 50 % of RAM by default); with `sandbox = false` (the
+        # ksb pods) it is the pod's own /dev/shm, shared with the other builds in the pod, so the
+        # helper works in a `mktemp -d` dir and removes it from both stdenv's `exitHooks` and its
+        # `failureHooks`, last, whether the check passes or fails (no sandbox teardown would). A build
+        # Nix kills (a timeout, a cancelled job) runs neither, so its dir stays in /dev/shm until the
+        # pod ends; ARC runner pods live for one job. It
+        # refuses to run if that dir is not on tmpfs or ramfs or has less than
+        # `ram_tmpdir_min_free_mib` free, then exports TMPDIR and its aliases from `preBuild` (crane
+        # runs cargo in both buildPhase and checkPhase, and the shell carries the export across), and
+        # re-asserts it last in `preBuild` and `preCheck`, after the check's own hook code, so a TMPDIR
+        # reassignment in a hook fails the check instead of silently moving the tests back to disk. A
+        # reassignment inside the cargo command itself runs after the last assertion and is not caught.
+        # `passthru.ramTmpdir` marks a protected check: the `checks` wrapper fails evaluation for any
+        # check that runs cargo test, nextest run, cargo run, cargo bench or llvm-cov without it, so a
+        # new or edited check cannot drop the protection unnoticed.
+        #
+        # NOT COVERED: checks that run tessera through Python or the CLI binary rather than cargo
+        # (tessera-py-import, tessera-wheel-import, ingest-producer-equality, oci-roundtrip,
+        # registry-roundtrip) keep the build's TMPDIR, and the guard does not look for them. The stall
+        # #793 measured was in the cargo tests; these checks' fsync counts are not measured yet (#865).
+        #
+        # LINUX ONLY. Darwin has no /dev/shm, and its build sandbox cannot mount a RAM disk, so there
+        # the checks keep $TMPDIR (a developer's local SSD, not a volume shared with other builds) and
+        # the guard does not apply. No CI leg builds the Darwin checks (macos-build.yml builds the
+        # release binaries with cargo, outside Nix).
+        ramTmpdir = pkgs.writeText "ram-tmpdir.sh" ''
+          assert_ram_tmpdir() {
+            local fs
+            fs=$(stat -f -c %T "$TMPDIR")
+            case $fs in
+              tmpfs | ramfs) ;;
+              *)
+                echo "TMPDIR=$TMPDIR is on '$fs', not on a RAM fs (#793)" >&2
+                return 1
+                ;;
+            esac
+          }
+          # Fail before the tests run, not with ENOSPC halfway through them.
+          assert_ram_tmpdir_space() {
+            local avail_mib
+            avail_mib=$(( $(stat -f -c '%a * %S' "$TMPDIR") / 1048576 ))
+            if (( avail_mib < ram_tmpdir_min_free_mib )); then
+              echo "TMPDIR=$TMPDIR has $avail_mib MiB free, below the $ram_tmpdir_min_free_mib MiB a" \
+                "protected check needs (#793); this runner's /dev/shm is too small" >&2
+              return 1
+            fi
+          }
+          remove_ram_tmpdir() {
+            rm -rf "$ram_tmpdir"
+            return 0
+          }
+          # stdenv runs `exitHooks` when the build succeeds and `failureHooks` when it fails, each in
+          # array order. The removal goes LAST in both, so a check's own failure hooks (s3-range-read's
+          # `dump_versitygw_log` reads `$TMPDIR/versitygw.log`) still see their files, and a server a
+          # hook stops is stopped before its directory goes.
+          ram_tmpdir_cleanup_last() {
+            local h f kept
+            for h in exitHooks failureHooks; do
+              local -n hooks=$h
+              kept=()
+              for f in "''${hooks[@]}"; do [[ $f == remove_ram_tmpdir ]] || kept+=("$f"); done
+              hooks=("''${kept[@]}" remove_ram_tmpdir)
+              unset -n hooks
+            done
+          }
+          # The one way a protected check adds an exit or failure hook: `ram_tmpdir_add_hooks
+          # failureHooks dump_log stop_server`. It appends and moves the removal back to the end at
+          # once, so the order holds even if the check fails on its next line. `withRamTmpdir` fails
+          # evaluation for a bare `exitHooks+=`/`failureHooks+=` in a protected check's code. Without a
+          # RAM TMPDIR (Darwin) it only appends.
+          ram_tmpdir_add_hooks() {
+            local -n hooks=$1
+            shift
+            hooks+=("$@")
+            unset -n hooks
+            if [[ -n ''${ram_tmpdir:-} ]]; then ram_tmpdir_cleanup_last; fi
+          }
+          use_ram_tmpdir() {
+            ram_tmpdir=$(mktemp -d /dev/shm/tessera-check.XXXXXX) || return 1
+            ram_tmpdir_cleanup_last
+            export TMPDIR=$ram_tmpdir TMP=$ram_tmpdir TEMP=$ram_tmpdir TEMPDIR=$ram_tmpdir
+            assert_ram_tmpdir || return 1
+            echo "check TMPDIR: $TMPDIR, $(stat -f -c %T "$TMPDIR"), $(df -h --output=size,avail /dev/shm | tail -n1) (#793)"
+            assert_ram_tmpdir_space
+          }
+          # workspace-test's measured peak is 106.5 MiB (bench/ksb/793-io-hang, `#footprint`), the
+          # largest of the protected checks; twice that, rounded up, is the floor.
+          ram_tmpdir_min_free_mib=256
+        '';
+        # The helper is sourced on every platform (a protected check's hook code calls
+        # `ram_tmpdir_add_hooks`); only Linux moves TMPDIR.
+        withRamTmpdir = args:
+          let
+            hookFields = [ "preBuild" "postBuild" "preCheck" "postCheck" "buildPhase" "checkPhase"
+              "buildPhaseCargoCommand" "checkPhaseCargoCommand" "installPhaseCommand"
+              "preInstall" "postInstall" "installPhase" ];
+            code = builtins.concatStringsSep "\n" (map (f: toString (args.${f} or "")) hookFields);
+            bareHookAppend =
+              builtins.match "(.*[^_[:alnum:]])?(exitHooks|failureHooks)[[:space:]]*[+]?=.*" ("\n" + code) != null;
+            onLinux = pkgs.lib.optionalString isLinux;
+          in
+          if bareHookAppend then throw ''
+            a withRamTmpdir check adds to exitHooks/failureHooks directly. Use
+            `ram_tmpdir_add_hooks exitHooks|failureHooks <hook>...`: a bare `+=` lands after the RAM
+            TMPDIR's removal, so a failure before the end of the hook deletes the files the new hook
+            needs (#793).
+          ''
+          else args // {
+            preBuild = ''
+              source ${ramTmpdir}
+            '' + onLinux ''
+              use_ram_tmpdir
+            '' + (args.preBuild or "") + onLinux ''
+
+              assert_ram_tmpdir
+              ram_tmpdir_cleanup_last
+            '';
+            preCheck = (args.preCheck or "") + onLinux ''
+
+              assert_ram_tmpdir
+              ram_tmpdir_cleanup_last
+            '';
+            passthru = (args.passthru or { }) // { ramTmpdir = isLinux; };
+          };
+        # One Gate A derivation per feature configuration (see `checks.ingest-gate-a*` for the why).
+        # Regenerates the ingest conformance corpus under `features` and requires byte-equality with the
+        # committed goldens.
+        #
+        # No `-p`: cargo only accepts the cross-package `--features pkg/feat` form from the workspace
+        # root, and cross-package unification is the entire point — `tessera-cli/sql` has to be able to
+        # reach the shared arrow tree for the H1 door to be under test at all. The example is unambiguous
+        # (only tessera-ingest declares it), so no `-p` is needed.
+        ingestGateA = tag: features:
+          craneLib.mkCargoDerivation (withRamTmpdir (commonArgs // {
+            inherit cargoArtifacts;
+            # The prebuilt dependency artifacts are needed, but must not be re-installed into `$out` —
+            # this derivation's output is a pass/fail marker, not a build cache, and inheriting the
+            # install hook without disabling it fails the check on
+            # `doCompressAndInstallFullArchive: unbound variable` *after* the gate has passed.
+            doInstallCargoArtifacts = false;
+            pnameSuffix = "-ingest-gate-a-${tag}";
+            buildPhaseCargoCommand = ''
+              ${cpuBudget "$NIX_BUILD_CORES"}
+              set -euo pipefail
+              echo "[gate A/${tag}] cargo run --example gen_ingest_corpus ${features}" >&2
+              cargo run -q --example gen_ingest_corpus ${features} > "$TMPDIR/corpus.json"
+              if ! cmp -s "$TMPDIR/corpus.json" corpus/ingest-corpus.json; then
+                echo "" >&2
+                echo "Gate A (ADR-0057 §5): the ingest corpus under the '${tag}' feature" >&2
+                echo "configuration does NOT match the committed corpus/ingest-corpus.json." >&2
+                diff -u corpus/ingest-corpus.json "$TMPDIR/corpus.json" >&2 || true
+                echo "" >&2
+                echo "A content_hash that moved means a decoder extracted DIFFERENT VALUES — say which" >&2
+                echo "ADR-0056 §5 H-rule changed behaviour and why the new values are correct." >&2
+                echo "A manifest_hash that moved is routine ONLY alongside a moved ingest_decoder." >&2
+                echo "Regenerate deliberately with:" >&2
+                echo "    cargo run -p tessera-ingest --example gen_ingest_corpus > corpus/ingest-corpus.json" >&2
+                exit 1
+              fi
+              echo "[gate A/${tag}] agrees with the committed corpus" >&2
+            '';
+          }));
 
         commonArgs = {
           inherit src;
@@ -83,6 +441,218 @@
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
+        # The test runners' thread budget, as shell: nextest's test processes, libtest's threads and rayon's pool.
+        # The checks pass "$NIX_BUILD_CORES" (`withCpuBudget`, below, says why); the ksb test job a fixed count.
+        # Only the two wall-clock tests expose successful output (their explicit skip line).
+        ratchetOutput = profile: ''
+          [[profile.${profile}.overrides]]
+          filter = 'test(=table::tests::grid_decode_perf_ratchet_narrow_table) | test(=ge_hdf5::tests::chunked_stream_read_does_not_reinflate_each_chunk)'
+          success-output = "final"
+        '';
+        budgetedRunCommand = name: attrs: command:
+          pkgs.runCommand name attrs (cpuBudget "$NIX_BUILD_CORES" + command);
+        cpuBudget = budget: ''
+          export NEXTEST_TEST_THREADS=${budget} RUST_TEST_THREADS=${budget}
+          export RAYON_NUM_THREADS=${budget} TESSERA_MAX_THREADS=${budget}
+          echo "test CPU budget: ${budget} (available to the build: $(nproc))"
+        '';
+        # Vacuous-pass guard for the nextest checks (#726): a run that selects ZERO tests must fail,
+        # or a test filter that stops matching (a renamed test, a feature not enabled) leaves the
+        # check green while it runs nothing. nextest 0.9.137 already fails such a run by default
+        # (`--no-tests=auto` resolves to `fail` outside `--rerun`, exit code 4), but a default is
+        # not a guarantee: it can change upstream, and `NEXTEST_NO_TESTS=pass` in the environment
+        # turns it off. The explicit flag is the guarantee, and on the command line it overrides
+        # that variable. It does NOT catch a filter that matches FEWER tests than intended.
+        nextestFailOnNoTests = "--no-tests=fail";
+
+        # ── The per-crate ksb test job (#957): one crate's tests at one commit, built and run off the seat. ──
+        # Called by the job flake `scripts/ksb-test.sh` generates (the user-facing side: its header and
+        # CONTRIBUTING.md); not a check, and `nix flake check` never evaluates it.
+        #
+        #   ksbTest { crate; cargoArgs ? [ ]; filter ? null; testThreads ? 4; timeoutMinutes ? 15; rerun ? null;
+        #             gitSources; }  →  a derivation with bin/tessera-ksb-test (the job's app)
+        #
+        # Two crane derivations, so nothing compiles in the job pod (a pod cargo build is SIGTERMed, exit 143):
+        #   build  `cargo nextest list` of the crate, on a dependency build of its own: it compiles exactly the
+        #          binaries `nextest run` will run, with the same flags, and installs the target dir. It depends on
+        #          the commit and the cargo flags only, so every filter, thread count and --rerun on that commit
+        #          shares it, and the dependency build is shared by every commit with the same Cargo.lock.
+        #   run    `cargo nextest run` on that target dir, which is fresh, so it compiles nothing (a test that runs
+        #          cargo itself, like tessera-core's schema-reference drift test, compiles what it asks for, as in
+        #          CI). It RECORDS the outcome instead of failing on it: $out holds exit-code, summary.txt,
+        #          failures.txt (each failed test's output from the JUnit report), junit.xml and nextest.log. A
+        #          derivation that failed would leave none of them where the job could read them.
+        # The app copies $out to $KSB_JOB_OUT, prints the summary (and the failures) and exits with the recorded
+        # code, so the job's exit code is the test run's.
+        #
+        # WHY a dependency build of its own: ksb evaluates the job offline, so the Cargo.lock git dependencies (the
+        # vortex fork) cannot be fetched with `builtins.fetchGit` as `cargoArtifacts`' vendoring does. `gitSources`
+        # maps each lock `source` string to a store path that ksb snapshotted on the submit side (a flake input of
+        # the job flake), and the vendoring uses those checkouts. A lock source with no entry fails evaluation.
+        #
+        # SAME AS workspace-test: toolchain, `commonArgs` (src filter, native deps), release profile, the RAM-backed
+        # TMPDIR (`withRamTmpdir`), `--no-tests=fail`. DIFFERENT, deliberately: one crate (`-p`), a fixed thread
+        # budget (`testThreads`; the ksb builder reports 84 CPUs, and a 4-thread run is what a laptop does),
+        # `fail-fast = false` (an agent wants every failure from one run), a `timeoutMinutes` cap on the test run
+        # (recorded as exit 124, so a hung test cannot hold the job forever), and the JUnit report.
+        # LIMITS: the run derivation executes on the ksb builder, not in the pod, so `--mem`/`--cpu` of the job do
+        # not bound it: the threads are bounded, the memory is not (#961). A recorded failure is a cached result: the
+        # same request returns it without running the tests again until `rerun` (any new string) changes.
+        ksbTest =
+          { crate
+          , cargoArgs ? [ ]
+          , filter ? null
+          , testThreads ? 4
+          , perfRatchet ? false
+          , timeoutMinutes ? 15
+          , rerun ? null
+          , gitSources
+          }:
+          let
+            inherit (pkgs) lib;
+            vendor = craneLib.vendorCargoDeps {
+              inherit src;
+              overrideVendorGitCheckout = packages: checkout:
+                let source = (builtins.head packages).source; in
+                checkout.overrideAttrs (_: {
+                  src = gitSources.${source} or (throw ''
+                    ksbTest: the Cargo.lock git dependency ${source} has no snapshot in `gitSources`.
+                    scripts/ksb-test.sh adds one flake input per lock git source; pass every one.
+                  '');
+                });
+            };
+            # The dependency build has ONE name for every crate, so it is one derivation per Cargo.lock and every
+            # crate after the first finds it built; only the crate's own derivations carry its name.
+            depsArgs = commonArgs // {
+              pname = "tessera-ksb";
+              cargoVendorDir = vendor;
+            };
+            args = depsArgs // { pname = "tessera-ksb-${crate}"; };
+            cargoFlags = lib.escapeShellArgs ([ "--locked" "--cargo-profile" "release" "-p" crate ] ++ cargoArgs);
+            nextestConfig = pkgs.writeText "ksb-test-nextest.toml" ''
+              [profile.ksb-test]
+              fail-fast = false
+              failure-output = "immediate-final"
+
+              [profile.ksb-test.junit]
+              path = "junit.xml"
+              ${ratchetOutput "ksb-test"}
+            '';
+            # Each failed test case of a nextest JUnit report with its message and the last 200 lines of its
+            # stdout and stderr; junit.xml keeps the whole output.
+            junitFailures = pkgs.writeText "junit-failures.py" ''
+              import sys
+              import xml.etree.ElementTree as ET
+
+              KEEP = 200
+              failed = 0
+              for suite in ET.parse(sys.argv[1]).getroot().iter("testsuite"):
+                  for case in suite.iter("testcase"):
+                      bad = [e for e in case if e.tag in ("failure", "error")]
+                      if not bad:
+                          continue
+                      failed += 1
+                      for e in bad:
+                          message = e.get("message") or ""
+                          print(f"=== {e.tag.upper()} {suite.get('name')} {case.get('name')}: {message}")
+                      for tag in ("system-out", "system-err"):
+                          text = (case.findtext(tag) or "").splitlines()
+                          if not text:
+                              continue
+                          cut = len(text) - KEEP
+                          print(f"--- {tag}" + (f" (last {KEEP} of {len(text)} lines; all in junit.xml)" if cut > 0 else ""))
+                          print("\n".join(text[max(cut, 0):]))
+              print(f"{failed} failed test case(s) in the JUnit report")
+            '';
+            build = craneLib.mkCargoDerivation (args // {
+              pnameSuffix = "-build";
+              cargoArtifacts = craneLib.buildDepsOnly depsArgs;
+              nativeBuildInputs = args.nativeBuildInputs ++ [ pkgs.cargo-nextest ];
+              buildPhaseCargoCommand = ''
+                cargo nextest list --list-type binaries-only ${cargoFlags}
+              '';
+              doCheck = false;
+            });
+            run = craneLib.mkCargoDerivation (withRamTmpdir (args // {
+              pnameSuffix = "-test";
+              cargoArtifacts = build;
+              doInstallCargoArtifacts = false;
+              nativeBuildInputs = args.nativeBuildInputs ++ [ pkgs.cargo-nextest pkgs.python3 ];
+              env = {
+                NEXTEST_SHOW_PROGRESS = "counter";
+                TESSERA_PERF_RATCHET = if perfRatchet then "1" else "0";
+              } // lib.optionalAttrs (rerun != null) {
+                KSB_TEST_RERUN = rerun;
+              };
+              buildPhaseCargoCommand = ''
+                ${cpuBudget (toString testThreads)}
+                mkdir -p "$out"
+                # The exit code goes through a file: the left side of the pipe is a subshell, and the log is
+                # streamed to the build log as well as kept.
+                {
+                  timeout --kill-after=60 ${toString timeoutMinutes}m \
+                    cargo nextest run ${cargoFlags} ${nextestFailOnNoTests} \
+                    --tool-config-file ksb-test:${nextestConfig} --profile ksb-test \
+                    ${lib.optionalString (filter != null) "-E ${lib.escapeShellArg filter}"} \
+                    2>&1 && rc=0 || rc=$?
+                  echo "$rc" > "$out/exit-code"
+                } | tee "$out/nextest.log"
+                rc=$(cat "$out/exit-code")
+                {
+                  printf '%s\n' "crate ${crate}, cargo flags "${lib.escapeShellArg cargoFlags}", filterset "${lib.escapeShellArg (if filter == null then "(none)" else filter)}
+                  echo "test threads ${toString testThreads}, timeout ${toString timeoutMinutes} min"
+                  summary=$(grep -E '^ *Summary \[' "$out/nextest.log" | tail -n 1) || true
+                  echo "''${summary:-no nextest summary line (see nextest.log)}"
+                  if (( rc == 124 || rc == 137 )); then
+                    echo "124: the ${toString timeoutMinutes} min timeout expired; 137: killed, by that timeout's SIGKILL 60 s after its SIGTERM or by the OOM killer"
+                  fi
+                  echo "nextest exit code: $rc"
+                } > "$out/summary.txt"
+                junit=target/nextest/ksb-test/junit.xml
+                if [[ -f $junit ]]; then
+                  cp "$junit" "$out/junit.xml"
+                  python3 ${junitFailures} "$out/junit.xml" > "$out/failures.txt"
+                else
+                  echo "nextest exited $rc without a JUnit report; the end of nextest.log:" > "$out/failures.txt"
+                  tail -n 200 "$out/nextest.log" >> "$out/failures.txt"
+                fi
+              '';
+              installPhaseCommand = "";
+            }));
+          in
+          pkgs.writeShellApplication {
+            name = "tessera-ksb-test";
+            runtimeInputs = [ pkgs.coreutils ];
+            text = ''
+              out=''${KSB_JOB_OUT:?the job app runs under ksb, which sets KSB_JOB_OUT}
+              cp -r --no-preserve=mode ${run}/. "$out/"
+              cat "$out/summary.txt"
+              rc=$(cat "$out/exit-code")
+              if (( rc != 0 )); then cat "$out/failures.txt"; fi
+              exit "$rc"
+            '';
+            passthru = { inherit build run; };
+          };
+
+        # The committed partitioned-table fixture the Python checks read (ADR-0064, #717).
+        pairsFixture = ./tessera/crates/tessera-py/tests/fixtures/partitioned_pairs.tsra;
+        # The committed nullable-column fixture and the Rust reader's decode of it (#804).
+        nullableFixture = ./tessera/crates/tessera-py/tests/fixtures/nullable_obs.tsra;
+        nullableExpected = ./tessera/crates/tessera-py/tests/fixtures/nullable_obs.expected.json;
+
+        # The release scripts with the library they source (scripts/lib/semver.sh), laid out as in the
+        # repo so each finds `lib/` next to itself. Only these files: an edit elsewhere in scripts/
+        # does not rebuild the release checks.
+        releaseScripts = pkgs.lib.fileset.toSource {
+          root = ./scripts;
+          fileset = pkgs.lib.fileset.unions [
+            ./scripts/last-release-tag.sh
+            ./scripts/promotion-plan.sh
+            ./scripts/promotion-head.sh
+            ./scripts/lib/semver.sh
+          ];
+        };
+
         # The Python extension module (#210). crane doesn't install cdylibs by default, so copy the
         # built `lib_native.so` → `_native.so` into $out/lib — the `tessera._native` extension that the
         # pure-Python `tessera/__init__.py` wraps. pyo3's abi3 feature builds without a runtime
@@ -100,7 +670,7 @@
 
         # Cloud-featured `tessera` binary for the registry round-trip check (pulls reqwest — the
         # in-Rust OCI distribution client). Shares cargoArtifacts; the cloud-only crates build on top
-        # (same pattern as `minio-range-read`).
+        # (same pattern as `s3-range-read`).
         tessera-cli-cloud = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tessera-cli-cloud";
@@ -204,6 +774,12 @@
             # it in .pre-commit-config.yaml.
             typos
             shellcheck
+            ruff
+
+            # devkit CI toolchain (vigos overlay): the managed ci.yml's
+            # commit-checks job resolves `validate-commit-range` and
+            # `check-pr-agent-fingerprints` off this dev-shell in direnv mode.
+            vig-utils
 
             # Native build deps the storage/ingest crates link once implemented
             # (object_store→openssl, hdf5-sys→hdf5+libclang, zarrs/codec FFI). Present now so a
@@ -215,7 +791,13 @@
             zstd
             lz4
             hdf5
-          ]);
+          ]) ++ [
+            # pymarkdown CLI, packaged by devkit (nix/pymarkdown.nix) rather than
+            # exported on the overlay: the managed `.pre-commit-config.yaml` runs
+            # the `pymarkdown` hook as a system command, and prek's own installer
+            # cannot build it on NixOS.
+            (import "${vigos}/nix/pymarkdown.nix" pkgs)
+          ];
           env = {
             # bindgen (dicom-rs) needs libclang.
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
@@ -259,7 +841,95 @@
 
         # ── CI = a shim over `nix flake check`. The logic lives HERE so the exact same command
         #    runs on a dev's machine and in CI — no "passes locally / fails in CI" drift. ──
-        checks = {
+        # Every check must have a DISTINCT derivation name (#535). `nix flake check -L` prefixes each
+        # log line with the derivation *name*, so two checks that share one are indistinguishable in
+        # CI logs — nothing errors, the logs just interleave. That happened: `workspace-test`,
+        # `sql-tests` and the S3 range-read check were all `tessera-nextest-0.0.0` (crane's default
+        # `-nextest` suffix), and a whole diagnosis (#517/#518/#519) was built on counting three
+        # builds as one. This fails EVALUATION, so it runs on every `nix flake check`, locally too.
+        checks = let
+          # A loopback `distribution` registry for one check, safe WITHOUT the Nix sandbox (#688).
+          # On the ksb runners `sandbox = false`, so a check shares the pod's network namespace, disk
+          # and CPUs with every other build running there.
+          #
+          # ROOT CAUSE of `registry-roundtrip` failing on ksb ("error sending request for url
+          # …/blobs/uploads/"): the registry's FILESYSTEM storage stalls under disk write load. Its
+          # data lived in $TMPDIR, which on a ksb pod is `build-dir` on the pod's one /nix volume,
+          # written by every concurrent build (crane's multi-GiB `target.tar.zst`). Reproduced on a
+          # ksb-vig-os-large pod with 4 streaming writers on /nix: the filesystem registry's upload
+          # POST hit the 60 s curl cap three times in a row while `GET /v2/` took 1 ms, so the
+          # readiness probe passed and reqwest then timed out on the POST, as in the failed leg. Under
+          # the same load the `inmemory` driver answered every request in at most 8 ms, and CPU load
+          # alone stayed under 1 s (#688). Not a proxy (none in the pod, and Nix clears a builder's
+          # environment), not IPv6 (both sides use 127.0.0.1), and not a port clash (each pod has its
+          # own network namespace and nothing listened on the old ports). So:
+          #   - `inmemory` storage: these checks prove the OCI transport (push, pull, byte identity),
+          #     not disk durability, and a few KiB of blobs need no disk. This removes the stall;
+          #   - port 0: the kernel picks a free port at bind time and the registry logs the one it
+          #     got, so two registries can never race for a fixed port;
+          #   - a private `mktemp -d` dir under $TMPDIR for the config and the log;
+          #   - a bounded readiness wait that checks the registry is still ALIVE and answers on ITS
+          #     port, and on timeout fails loudly with the registry's log;
+          #   - stdenv's `exitHooks`/`failureHooks` (both run from the builder's EXIT trap, as in
+          #     `s3-range-read`) stop the registry, and on a failure print its log first. A bare
+          #     `trap … EXIT` here would REPLACE stdenv's `exitHandler` trap, and every hook with it
+          #     (#722); without the sandbox's process-tree teardown a leaked registry would outlive
+          #     the build.
+          # Source it, call `start_registry`, then use "$REGISTRY" (host:port).
+          loopbackRegistry = pkgs.writeText "loopback-registry.sh" ''
+            start_registry() {
+              reg_dir=$(mktemp -d "$TMPDIR/registry.XXXXXX")
+              cat > "$reg_dir/config.yml" <<EOF
+            version: 0.1
+            storage:
+              inmemory: {}
+            http:
+              addr: 127.0.0.1:0
+            EOF
+              ${pkgs.distribution}/bin/registry serve "$reg_dir/config.yml" > "$reg_dir/reg.log" 2>&1 &
+              reg_pid=$!
+              # `wait` on the killed registry returns 143. stdenv's exitHandler runs the hooks under
+              # `set +e` and then exits with the check's own status, and `return 0` keeps a hook's
+              # status out of it regardless.
+              stop_registry() {
+                kill "$reg_pid" 2>/dev/null
+                wait "$reg_pid" 2>/dev/null
+                return 0
+              }
+              dump_registry_log() {
+                echo "----- registry log -----"
+                cat "$reg_dir/reg.log"
+              }
+              exitHooks+=(stop_registry)
+              failureHooks+=(dump_registry_log stop_registry)
+              REGISTRY=
+              for _ in $(seq 1 300); do  # 300 x 0.1 s = 30 s, then fail
+                kill -0 "$reg_pid" 2>/dev/null || { echo "registry exited during startup"; return 1; }
+                port=$(sed -nE 's/.*listening on 127\.0\.0\.1:([0-9]+).*/\1/p' "$reg_dir/reg.log" | head -n1)
+                if [ -n "$port" ] && ${pkgs.curl}/bin/curl -sf --max-time 2 "http://127.0.0.1:$port/v2/" > /dev/null; then
+                  REGISTRY=127.0.0.1:$port
+                  echo "registry ready on $REGISTRY"
+                  return 0
+                fi
+                sleep 0.1
+              done
+              echo "registry not ready after 30 s"
+              return 1
+            }
+          '';
+          # Size the test runners from the build's CPU budget, $NIX_BUILD_CORES (`--cores`), not from
+          # what the machine reports (#688). A ksb pod has no CPU limit, so
+          # System parallelism there returns the node's 84 CPUs. Nix clears the builder's
+          # environment, so the runner's own pins (RAYON_NUM_THREADS etc., exo-pet/exo-fleet#1014)
+          # never reach a check. Unbudgeted, nextest ran up to 84 test processes, each starting
+          # 84-thread rayon and vortex pools, against the kubelet's 4096-PID cap per pod: thread
+          # creation failed with EAGAIN in two tests at once, and the narrow-table perf ratchet
+          # measured 1.14x against its own neighbours. On a GitHub-hosted runner the budget equals
+          # nproc (4), so nothing changes there. Applies to Tessera pools and libtest/nextest checks.
+          withCpuBudget = args: args // {
+            preCheck = cpuBudget "$NIX_BUILD_CORES" + (args.preCheck or "");
+          };
+          allChecks = {
           # Hermetic Rust gates over the tessera workspace.
           #
           # NOT `--all-features` (ADR-0057 §4): that pulls `static-hdf5`, which builds libhdf5 2.2.0
@@ -279,18 +949,115 @@
             cargoClippyExtraArgs =
               "--all-targets --features ${workspaceFeatures} -- -D warnings";
           });
-          workspace-test = craneLib.cargoNextest (commonArgs // {
+          workspace-test = craneLib.cargoNextest (withRamTmpdir (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             partitions = 1;
             partitionType = "count";
-          });
+            cargoNextestExtraArgs = nextestFailOnNoTests + " --config-file ${pkgs.writeText "ratchet-output.toml" (ratchetOutput "default")}";
+          })));
           # nextest does NOT run doctests, so gate them separately — the "docs-as-tests" layer: every
           # `///` example compiles + runs, so public-API docs can never drift from behaviour.
-          workspace-doctest = craneLib.cargoTest (commonArgs // {
+          workspace-doctest = craneLib.cargoTest (withRamTmpdir (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
             cargoTestExtraArgs = "--doc";
-          });
+          })));
           workspace-fmt = craneLib.cargoFmt { inherit src; };
+
+          # **The third determinism axis — the build configuration** (ADR-0057 §5, #468).
+          #
+          # Gate A varies the *feature configuration*; Gate B varies the *dependency graph*. Neither
+          # varies the compiler's own cfg flags, and that is where #468 hid: vortex 0.75.0 writes
+          # different container bytes for an integer column whose encoding produces patches, depending
+          # on whether `debug_assertions` is enabled (an assertion with a side effect —
+          # `vortex-array/src/patches.rs` evaluates `is_sorted` on the patch indices, which annotates
+          # that array, and the written file reflects it).
+          #
+          # This gate closes the axis for the sealed corpus: the goldens are regenerated under BOTH the
+          # dev and the release profile and must agree with each other and with the committed file. Note
+          # that the committed `corpus/corpus.json` was historically produced by a bare `cargo run`
+          # (dev profile) while `workspace-test` runs the same code release-built — so before #468 the
+          # two halves of our own CI were checking different builds and neither compared them.
+          #
+          # Scoped to `-p tessera-io` on purpose: the point is the seal path, and a second full-workspace
+          # profile would roughly double this leg's build time for no extra coverage.
+          #
+          # COST, stated rather than discovered later: `cargoArtifacts` (`buildDepsOnly`) pre-builds the
+          # **release** dependency graph, so the release half of this check is warm while the dev half
+          # compiles vortex and friends from source on every run. That is the bulk of this leg's time.
+          # The fix would be a second `buildDepsOnly` pinned to the dev profile, which crane does not
+          # make convenient (a derivation inherits one `cargoArtifacts`), so it is left as a known cost
+          # rather than a speculative nix refactor. If this leg becomes the critical path, the cheaper
+          # move is to run it release-only on PRs and keep both profiles for `main`.
+          seal-profile-determinism = craneLib.mkCargoDerivation (withRamTmpdir (commonArgs // {
+            inherit cargoArtifacts;
+            doInstallCargoArtifacts = false;
+            pnameSuffix = "-seal-profile-determinism";
+            buildPhaseCargoCommand = ''
+              ${cpuBudget "$NIX_BUILD_CORES"}
+              echo "[#468] conformance corpus under the dev and release profiles" >&2
+              cargo run -q -p tessera-io --example gen_corpus > "$TMPDIR/corpus.dev.json"
+              cargo run -q --release -p tessera-io --example gen_corpus > "$TMPDIR/corpus.release.json"
+
+              if ! diff -u "$TMPDIR/corpus.dev.json" "$TMPDIR/corpus.release.json"; then
+                echo "" >&2
+                echo "The sealed corpus DEPENDS ON THE BUILD PROFILE (ADR-0057 §5, #468)." >&2
+                echo "A content_hash must be a function of the data alone. Two builds of one commit" >&2
+                echo "disagreeing means the format's identity is a function of how it was compiled." >&2
+                echo "This is not a golden to regenerate — find what made the bytes configuration-" >&2
+                echo "dependent. #468 is the worked example: an assertion with a side effect." >&2
+                exit 1
+              fi
+              if ! cmp -s "$TMPDIR/corpus.dev.json" corpus/corpus.json; then
+                echo "" >&2
+                echo "Both profiles agree with each other but NOT with corpus/corpus.json." >&2
+                echo "That is an ordinary moved golden — regenerate deliberately with:" >&2
+                echo "    cargo run -p tessera-io --example gen_corpus > corpus/corpus.json" >&2
+                exit 1
+              fi
+
+              # #468 is FIXED (carried by the vortex fork pin, #480). The guard asserts the cause: no
+              # written patch-indices array persists a sortedness statistic. A release build never
+              # caches one, so the debug run is the one that bites; both run so the pair is explicit.
+              # (Since vortex 0.93 the defect keeps the byte COUNT and changes the bytes, which is why
+              # the guard no longer compares lengths, #635.)
+              #
+              # A name filter that matches nothing passes: `cargo test … <name>` after a rename runs
+              # 0 tests and exits 0, so the gate would be green and check nothing. Each guard is
+              # therefore run by its full path with `--exact`, and the run must report exactly one
+              # test-result line, `1 passed; 0 failed; 0 ignored`. A rename, a move to another module
+              # or an `#[ignore]` fails the gate instead of emptying it.
+              run_one_guard() {
+                local test_path="$1"
+                shift
+                local log="$TMPDIR/guard.log"
+                if ! cargo test -q "$@" -p tessera-io --lib -- --exact "$test_path" > "$log" 2>&1; then
+                  cat "$log" >&2
+                  exit 1
+                fi
+                cat "$log" >&2
+                if [ "$(grep -c '^test result: ' "$log")" -ne 1 ] \
+                  || ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"; then
+                  echo "" >&2
+                  echo "The guard $test_path did not run as exactly one passing test:" >&2
+                  echo "    cargo test -q $* -p tessera-io --lib -- --exact $test_path" >&2
+                  echo "A renamed, moved or ignored guard empties the gate; update this check with it." >&2
+                  exit 1
+                fi
+              }
+
+              echo "[#468] the build-config independence guard under both profiles" >&2
+              run_one_guard table::tests::patch_indices_persist_no_sortedness_statistic
+              run_one_guard table::tests::patch_indices_persist_no_sortedness_statistic --release
+
+              # #472's guard (the arch-dependent half): no NaN-valued float statistic may reach the
+              # bytes of a [+inf, -inf] column (either default NaN, sign set or clear), and no zone map
+              # may carry a sum. Run in both profiles for symmetry with the above, though this one's
+              # axis is the architecture; the aarch64 leg of this matrix is what pairs with it.
+              echo "[#472] the float-statistic NaN guard under both profiles" >&2
+              run_one_guard table::tests::float_stats_persist_no_nan_for_inf_and_neg_inf
+              run_one_guard table::tests::float_stats_persist_no_nan_for_inf_and_neg_inf --release
+            '';
+          }));
 
           # **Gate B — the feature-snapshot determinism gate** (ADR-0057 §5). Regenerates the resolved
           # feature graph of every crate on the seal path and diffs it against the committed baseline
@@ -329,6 +1096,128 @@
               fi
             '';
           });
+
+          # **Gate A — the ingest determinism gate** (ADR-0057 §5, ADR-0056 §5). Where Gate B above
+          # catches the *risk* on the PR that introduces it, Gate A catches a golden that actually moved.
+          #
+          # The guarantee under test, stated so it can be cited (ADR-0057 §7):
+          #
+          #   For any input F and any tessera version V, `tessera ingest F` produces the same
+          #   content_hash under every distributed build of V. Feature selection may change which
+          #   formats are READABLE; it must never change the BYTES produced for a readable one.
+          #
+          # So the ingest corpus is regenerated under several feature configurations and every output
+          # must be byte-identical to the committed `corpus/ingest-corpus.json`.
+          #
+          # **One derivation per configuration, not one derivation running all of them.** Each
+          # configuration recompiles the crates its features touch, and doing four in a single sandbox
+          # exhausted the disk on a host whose `/` was near full (`No space left on device`, after the
+          # gate logic itself had passed). Splitting them lets nix schedule and reclaim between builds,
+          # and a failure names the offending configuration in the derivation name instead of in a log.
+          #
+          # The `sql` configuration is the one that earns this gate. ADR-0057 §5's probe found that the
+          # optional `sql` feature turns on `arrow-array/chrono-tz` — inside the shared arrow tree the
+          # ingest table lane decodes through — which is ADR-0056 hazard **H1** (tzdb: compiled-in vs.
+          # host `/usr/share/zoneinfo`) arriving through a *feature* rather than a host. The
+          # `ingest_parquet_scalars` fixture carries a `timestamp(us, "America/New_York")` column
+          # precisely so that door is watched. It is closed by construction as well (the type map reads
+          # the raw i64 ticks and never calls a zone-aware arrow function) but "by construction" is a
+          # claim, and this is the test of it.
+          ingest-gate-a = ingestGateA "default" "";
+          ingest-gate-a-sql = ingestGateA "sql" "--features tessera-cli/sql";
+          ingest-gate-a-workspace = ingestGateA "workspace-features" "--features ${workspaceFeatures}";
+
+          # The REDUCED configuration cannot be byte-compared (it produces fewer fixtures), so it is
+          # checked by the corpus test itself, which compares field-wise over the fixtures it can run
+          # AND asserts the declared count for that configuration (ADR-0057 §5's anti-vacuity guard).
+          #
+          # This is the leg that catches a `manifest_hash` depending on which lanes were compiled in.
+          # An earlier derivation of the sealed `ingest_decoder` digest did exactly that — it hashed this
+          # crate's own resolved feature set, so a build without the CSV lane sealed a different
+          # `manifest_hash` for the same Parquet — and this configuration is what surfaced it. Keeping it
+          # in CI is what stops that class of bug coming back.
+          #
+          # **All the reduced configurations share ONE derivation, deliberately** (#495). `nix flake check`
+          # schedules derivations concurrently under a `max-jobs` cap, so an extra check does not raise
+          # concurrency past that cap — but it does change *which* checks can be co-scheduled, and a new
+          # one can create a heavier overlap than the previous mix allowed. Measured: splitting the
+          # `npy`-without-`npz` configuration into its own derivation coincided with aarch64 peak memory
+          # rising 11536M -> 15095M and free memory falling 4410M -> 852M, against runners that evict at
+          # ~15.6G.
+          #
+          # **Those figures were measured under `--max-jobs 4`, before #514 halved it to 2, so the effect
+          # they show is larger than what folding buys today.** With a co-scheduling window of two, there
+          # are far fewer permutations for a new derivation to land a bad pairing in, and #514 is the
+          # actual bound — adding derivations now costs wall-clock rather than peak memory. What remains
+          # is one fewer permutation inside that smaller window, which is worth having and is not worth
+          # overstating: this is tidiness with a measured origin, not the fix for #495.
+          #
+          # The trade accepted in exchange: these run sequentially, so a failure in an earlier
+          # configuration hides the later ones until it is fixed. Cheap, because each is seconds of
+          # `cargo test` against an already-built dependency graph, and the configurations are
+          # independent enough that one failing rarely predicts another.
+          ingest-gate-a-reduced = craneLib.mkCargoDerivation (withRamTmpdir (commonArgs // {
+            inherit cargoArtifacts;
+            doInstallCargoArtifacts = false;
+            pnameSuffix = "-ingest-gate-a-reduced";
+            buildPhaseCargoCommand = ''
+              ${cpuBudget "$NIX_BUILD_CORES"}
+              # (1) The columnar lane without the text one — the leg described above.
+              cargo test -p tessera-ingest --no-default-features --features parquet \
+                --test ingest_corpus
+
+              # (1b) **The ARROW lane on its own** (#509). Until this was gated it had never been built:
+              # the Arrow IPC reader lived in `parquet_table`, which is `cfg(feature = "parquet")`, so
+              # `--features arrow` did not compile. That made the lane un-selectable, and therefore made
+              # the sealed `arrow-rs/arrow-ipc` decoder digest describe a configuration that could not
+              # exist — ADR-0057 §5 wants *which decoders could have produced this artifact* to be a
+              # build-time fact, and a fact about an unbuildable build is not one. The reader now lives in
+              # `arrow_table` beside `read_arrow_ipc`, where it never needed Parquet in the first place.
+              cargo test -p tessera-ingest --no-default-features --features arrow --lib
+
+              # (2)+(3) **The array lane with NO archive reader** (#386) — `npy` compiled without `npz`.
+              #
+              # `.npy` is parsed in-tree and `.npz` is that same parser behind `dep:zip`, so they are two
+              # lanes rather than one feature (ADR-0056's #386 amendment): while they shared a feature,
+              # every plain `.npy` seal committed to a zip library that never read its bytes — #477's
+              # defect one scale down. Two lanes only mean something if the split is *exercised*, and
+              # these are the only configurations where `zip` is genuinely absent from the graph.
+              #
+              # Two of them, because they fail differently. `npy` alone proves the parser needs no
+              # archive reader; it caught `generic_column_meta` and
+              # `warn_unclassified_identifying_columns` being gated on `any(parquet, arrow, csv)` while
+              # the array arm calls both, plus three targets that hard-require a Parquet reader and now
+              # declare `required-features`. `parquet,npy` is the one that reaches the CORPUS without
+              # `npz` — the corpus module is gated on `parquet`, so `npy` alone never compiles it — and
+              # it caught the `ingest_npz_member` fixture being declared `requires: ["npy"]` while its
+              # builder calls `zip`. Neither configuration had ever been built before it was gated.
+              cargo test -p tessera-ingest --no-default-features --features npy --lib
+              cargo test -p tessera-ingest --no-default-features --features parquet,npy \
+                --lib --test ingest_corpus
+            '';
+          }));
+
+          # **ADR-0056 §5's `ingest_parquet_producers` fixture** — the same logical table written by
+          # **pyarrow**, **polars** and **DuckDB** must ingest to ONE `content_hash`.
+          #
+          # This is the check that catches what the in-Rust corpus can only approximate. The three
+          # writers disagree about dictionary ordering (pandas' `Categorical` order is insertion-time)
+          # and about whether a null-free column is *declared* nullable — the two leaks ADR-0056 §2
+          # materialises dictionaries and decides nullability-by-data to prevent. arrow-rs's own writer
+          # cannot test that the fix generalises beyond arrow-rs.
+          #
+          # It also asserts the three source files differ in size, so the comparison cannot pass
+          # vacuously, and that `manifest_hash` DOES differ (the `ingested_from` edge pins the source
+          # bytes) — so a bug that made every hash constant would fail rather than look perfect.
+          ingest-producer-equality = budgetedRunCommand "ingest-producer-equality"
+            {
+              nativeBuildInputs = [
+                (pkgs.python312.withPackages (ps: [ ps.pyarrow ps.polars ps.duckdb ]))
+              ];
+            } ''
+            python3 ${./tessera/crates/tessera-ingest/tests/producer_equality.py}               ${tessera-cli}/bin/tessera
+            touch $out
+          '';
 
           # `tessera-core` must stay **wasm32-compatible** (#210): the pure-Rust spine — manifest /
           # identity / hash / inclusion+consistency proofs / referencing / ed25519 *verify* — has zero
@@ -377,10 +1266,24 @@
               '';
             });
           in
-          pkgs.runCommand "wasm-bindgen-smoke"
-            { nativeBuildInputs = [ pkgs.wasm-bindgen-cli pkgs.nodejs ]; } ''
+          budgetedRunCommand "wasm-bindgen-smoke"
+            { nativeBuildInputs = [ pkgs.wasm-bindgen-cli pkgs.nodejs pkgs.python3 ]; } ''
+            set -o pipefail
             wasm-bindgen --target nodejs --out-dir "$PWD/glue" ${wasmLib}/wasm/tessera_wasm.wasm
-            node ${./tessera/crates/tessera-wasm/tests/smoke.cjs} "$PWD/glue/tessera_wasm.js"
+            python3 ${./tessera/crates/tessera-wasm/tests/corpus_members.py} ${./tessera/corpus} corpus-members.json
+            node ${./tessera/crates/tessera-wasm/tests/smoke.cjs} "$PWD/glue/tessera_wasm.js" \
+              ${./tessera/corpus/seal-cases.json} corpus-members.json | tee out.txt
+            # The same vacuous-pass guard as `reference-reader`: N/N with N the file's case count.
+            cases=$(node -e 'console.log(require(process.argv[1]).cases.length)' ${./tessera/corpus/seal-cases.json})
+            if [ "$cases" -lt 1 ] || ! grep -qx "$cases/$cases seal cases agreed (wasm)" out.txt; then
+              echo "wasm-bindgen-smoke: expected '$cases/$cases seal cases agreed (wasm)'" >&2
+              exit 1
+            fi
+            products=$(node -e 'console.log(require(process.argv[1]).length)' ${./tessera/corpus/corpus.json})
+            if [ "$products" -lt 1 ] || ! grep -qx "$products/$products corpus products agreed (wasm)" out.txt; then
+              echo "wasm-bindgen-smoke: expected '$products/$products corpus products agreed (wasm)'" >&2
+              exit 1
+            fi
             touch $out
           '';
 
@@ -390,29 +1293,21 @@
           # type · the OCI empty-config digest), then pull it back byte-for-byte. Spins up a local
           # `distribution` registry on loopback (the nix-CI service mock — only a *production* registry is
           # external), so the OCI push/pull capability is gated, not just the manifest-construction unit.
-          oci-roundtrip = pkgs.runCommand "oci-roundtrip"
-            { nativeBuildInputs = [ pkgs.distribution pkgs.oras pkgs.curl ]; } ''
+          oci-roundtrip = budgetedRunCommand "oci-roundtrip"
+            { nativeBuildInputs = [ pkgs.oras ]; } ''
             export HOME=$TMPDIR
-            cat > $TMPDIR/config.yml <<EOF
-            version: 0.1
-            storage:
-              filesystem:
-                rootdirectory: $TMPDIR/data
-            http:
-              addr: 127.0.0.1:5050
-            EOF
-            registry serve $TMPDIR/config.yml > $TMPDIR/reg.log 2>&1 &
-            for i in $(seq 1 80); do curl -sf http://127.0.0.1:5050/v2/ > /dev/null && break; sleep 0.25; done
+            source ${loopbackRegistry}
+            start_registry
             cp ${./tessera/corpus/files}/recon_int16.tsra $TMPDIR/p.tsra
             cd $TMPDIR
-            oras push --plain-http 127.0.0.1:5050/tessera/recon:v1 \
+            oras push --plain-http $REGISTRY/tessera/recon:v1 \
               --artifact-type application/vnd.tessera.product.v1+json \
               p.tsra:application/vnd.tessera.tsra.v1
-            M=$(oras manifest fetch --plain-http 127.0.0.1:5050/tessera/recon:v1)
+            M=$(oras manifest fetch --plain-http $REGISTRY/tessera/recon:v1)
             echo "$M" | grep -q 'application/vnd.tessera.product.v1+json'   # ARTIFACT_TYPE
             echo "$M" | grep -q 'application/vnd.tessera.tsra.v1'           # TSRA_MEDIA_TYPE
             echo "$M" | grep -q 'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'  # OCI empty config
-            mkdir out && oras pull --plain-http 127.0.0.1:5050/tessera/recon:v1 -o out
+            mkdir out && oras pull --plain-http $REGISTRY/tessera/recon:v1 -o out
             cmp p.tsra out/p.tsra
             touch $out
           '';
@@ -423,24 +1318,15 @@
           # pulls it back (manifest GET → sha256-verified blob GET) byte-for-byte and verifies the
           # seal. Complements `oci-roundtrip` (which proves the manifest *shape* via oras) by proving
           # our actual transport client end to end.
-          registry-roundtrip = pkgs.runCommand "registry-roundtrip"
+          registry-roundtrip = budgetedRunCommand "registry-roundtrip"
             {
-              nativeBuildInputs = [ pkgs.distribution pkgs.curl ];
               # reqwest's client builder loads the system CA store even for a plain-http loopback
-              # target (same as `minio-range-read`); point it at the nixpkgs bundle.
+              # target (same as `s3-range-read`); point it at the nixpkgs bundle.
               SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             } ''
             export HOME=$TMPDIR
-            cat > $TMPDIR/config.yml <<EOF
-            version: 0.1
-            storage:
-              filesystem:
-                rootdirectory: $TMPDIR/data
-            http:
-              addr: 127.0.0.1:5055
-            EOF
-            registry serve $TMPDIR/config.yml > $TMPDIR/reg.log 2>&1 &
-            for i in $(seq 1 80); do curl -sf http://127.0.0.1:5055/v2/ > /dev/null && break; sleep 0.25; done
+            source ${loopbackRegistry}
+            start_registry
             cp ${./tessera/corpus/files}/recon_int16.tsra $TMPDIR/p.tsra
             cd $TMPDIR
             # Sign with the LEGACY detached form (`--sidecar`), so push must carry `p.tsra.sig.json`
@@ -450,8 +1336,8 @@
             printf '0101010101010101010101010101010101010101010101010101010101010101' > key.hex
             ${tessera-cli-cloud}/bin/tessera sign p.tsra --key key.hex --sidecar --signer https://orcid.org/0000-0002-1825-0097
             test -f p.tsra.sig.json
-            ${tessera-cli-cloud}/bin/tessera push p.tsra 127.0.0.1:5055/tessera/recon:v1 --plain-http
-            ${tessera-cli-cloud}/bin/tessera pull 127.0.0.1:5055/tessera/recon:v1 out.tsra --plain-http
+            ${tessera-cli-cloud}/bin/tessera push p.tsra $REGISTRY/tessera/recon:v1 --plain-http
+            ${tessera-cli-cloud}/bin/tessera pull $REGISTRY/tessera/recon:v1 out.tsra --plain-http
             ${tessera-cli-cloud}/bin/tessera verify out.tsra
             cmp p.tsra out.tsra
             # The signature sidecar survived the registry hop, byte-identical (bug #2 fixed).
@@ -460,15 +1346,15 @@
             touch $out
           '';
 
-          # **Cloud range-read** (#225, landed): a sealed `.tsra` is range-readable directly from
-          # object storage — prune-before-fetch over the wire, not a full download — AND a query
+          # **S3 range-read** (#225, landed; server #702): a sealed `.tsra` is range-readable directly
+          # from object storage — prune-before-fetch over the wire, not a full download — AND a query
           # that does not overlap a product's stat range never fetches that product's data block
           # (the cohort prune-before-fetch capstone, proven across two products in the same
-          # bucket). Spins up a local MinIO on loopback (S3-compatible; same "real service mock"
-          # pattern as `oci-roundtrip` above), creates a bucket, then runs every test in the
-          # `cloud` module of `tessera-io` PLUS the `tessera-cli` integration test that drives
-          # `tessera verify <s3://...>` against the real binary. Mirrors the `oci-roundtrip`
-          # idle-wait loop verbatim.
+          # bucket). Starts a versitygw (the S3 gateway the fleet deploys) with its posix backend on
+          # loopback, creates a bucket, then runs every test in the `cloud` module of `tessera-io`
+          # PLUS the `tessera-cli` integration test that drives `tessera verify <s3://...>` against
+          # the real binary.
+          # History: until #702 this was `minio-range-read`, run against MinIO (unmaintained upstream).
           #
           # The tests cover:
           #   - `cloud::tests::s3_range_read_does_not_fetch_whole_archive`  (single-product range)
@@ -476,81 +1362,325 @@
           #   - `cloud::tests::tail_prefetch_*` (in-memory; runs always under the cloud feature)
           #   - `tessera-cli::tests/cloud.rs::cli_inspect_and_verify_over_s3_url` (CLI end-to-end)
           #
-          # NB: nixpkgs marks `minio` insecure (abandoned upstream); we whitelist *just here* by
-          # stripping `knownVulnerabilities`. The test mock isn't network-reachable — it binds
-          # 127.0.0.1 inside the nix sandbox — so the upstream-CVE exposure surface is nil.
-          minio-range-read = let
-            minio = pkgs.minio.overrideAttrs (old: {
-              meta = (old.meta or { }) // { knownVulnerabilities = [ ]; };
-            });
-          in
-          craneLib.cargoNextest (commonArgs // {
+          # SANDBOX-INDEPENDENT (#688, #702). ksb's ARC pods run Nix with `sandbox = false`, so the
+          # build shares the pod's network namespace and filesystem with whatever else runs there.
+          # The fixture therefore assumes nothing the sandbox would have given it:
+          #   - no fixed port: a free ephemeral loopback port is picked at runtime and handed to both
+          #     the server and `TESSERA_S3_ENDPOINT`, so concurrent builds on one host can't collide
+          #     (a fixed port is how a loopback check ends up talking to someone else's server, or to
+          #     nothing). The pick-then-bind window is closed by an ownership check: if another
+          #     process takes the port first, versitygw exits on the bind error, and the bucket we
+          #     create must then appear as a directory in OUR data dir, which no other server (not
+          #     even a concurrent copy of this check, holding the same credentials) can produce;
+          #   - readiness = a SIGNED `ListBuckets` answering 200, polled until a 30 s wall-clock
+          #     deadline (`$SECONDS`); timeout or the server exiting fails with the server log;
+          #   - data and metadata live under the build's private `$TMPDIR`. Metadata goes to a
+          #     `--sidecar` directory instead of extended attributes, so the check does not depend on
+          #     the build filesystem supporting user xattrs (tmpfs < 6.6, some overlayfs uppers);
+          #   - a fresh, random bucket per run;
+          #   - the server is stopped through stdenv's `exitHooks`/`failureHooks` (both run from the
+          #     builder's EXIT trap). A bare `trap … EXIT` would REPLACE stdenv's own `exitHandler`
+          #     trap; without the sandbox's process-tree teardown a leaked server would outlive the
+          #     build.
+          # versitygw's posix backend writes straight to the filesystem, with no drive-health or
+          # write-throttle layer of its own, so the 503 `SlowDownWrite` the previous server returned
+          # on ksb has no counterpart here: a write that cannot land fails with the concrete error.
+          #
+          # Addressing: object_store's `AmazonS3Builder` with an explicit endpoint uses path-style
+          # requests (`http://127.0.0.1:<port>/<bucket>/<key>`), which versitygw serves by default
+          # (virtual-hosted style would need `--virtual-domain`). Range GETs, ETags and the error
+          # codes the tests rely on behave the same as before; no assertion changed.
+          s3-range-read = craneLib.cargoNextest (withRamTmpdir (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
-            # Run both crates' cloud tests in one MinIO session (shared bucket): the `cloud::`
+            # Distinct from `workspace-test` so CI logs attribute its lines (#535). Via `pname`, not
+            # `pnameSuffix`: crane's cargoNextest hard-sets `pnameSuffix = "-nextest${extraSuffix}"`
+            # and silently discards a caller's value -> derivation name `tessera-cloud-nextest-0.0.0`.
+            pname = "tessera-cloud";
+            # Run both crates' cloud tests in one server session (shared bucket): the `cloud::`
             # module in tessera-io for unit-level range/cohort/tail-prefetch coverage, AND the
             # `cloud_cli_inspect_and_verify_over_s3_url` test in tessera-cli for the binary
-            # end-to-end. Single `cloud` positional filter catches both — every test name with
-            # cloud coverage starts with `cloud` (module or function), nothing unrelated does.
+            # end-to-end, plus the 5 tests of the shared S3 required/skip contract, which run in
+            # both crates (`cloud::s3_contract::tests` / `cloud_s3_contract::tests`, #726). Single
+            # `cloud` positional filter catches all of them — every test name with cloud coverage
+            # starts with `cloud` (module or function), nothing unrelated does. A filter that
+            # matches nothing fails the check (`nextestFailOnNoTests`).
             # `tessera-cli/cloud` transitively enables `tessera-io/cloud` (the CLI feature
             # depends on the IO feature), so a single `--features` flag covers both crates.
             cargoExtraArgs = "-p tessera-io -p tessera-cli --features tessera-cli/cloud cloud";
+            cargoNextestExtraArgs = nextestFailOnNoTests;
             # Top-level env vars become derivation env vars (Nixpkgs stdenv default) — propagate to
-            # `cargo nextest run`, which the test reads via `std::env::var`.
-            TESSERA_S3_ENDPOINT = "http://127.0.0.1:9101";
-            TESSERA_S3_BUCKET = "tessera-test";
-            AWS_ACCESS_KEY_ID = "minioadmin";
-            AWS_SECRET_ACCESS_KEY = "minioadmin";
+            # `cargo nextest run`, which the test reads via `std::env::var`. Throwaway credentials:
+            # the server is started with the same pair (versitygw's root account) and dies with the
+            # build. `TESSERA_S3_ENDPOINT` / `TESSERA_S3_BUCKET` are exported by `preCheck` because
+            # the port and the bucket are only known at runtime.
+            AWS_ACCESS_KEY_ID = "tessera-test-access";
+            AWS_SECRET_ACCESS_KEY = "tessera-test-secret";
             AWS_REGION = "us-east-1";
+            # Vacuous-pass guard (#707): every S3 test skips (and nextest reports PASS) when
+            # `TESSERA_S3_ENDPOINT` is unset, which is right for a plain `cargo test` without a
+            # server and wrong here. This marker tells the tests a server was promised, so a lost
+            # endpoint export panics them instead (contract: tessera-io's `cloud::s3_contract`, the
+            # one source both crates' tests compile, #726). It is a static attribute, not a
+            # `preCheck` export, so the same edit that breaks the endpoint export cannot take the
+            # marker down with it.
+            TESSERA_S3_REQUIRED = "1";
             # object_store/aws is reqwest-backed; reqwest's client builder loads the system CA trust
             # store even for a plain-http (allow_http) loopback target, and the hermetic sandbox has
             # none → "No CA certificates were loaded". Point it at the nixpkgs CA bundle.
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-            # Start MinIO right before `cargo nextest run` (build doesn't need it). Same loopback +
-            # idle-wait pattern as `oci-roundtrip` above. Bucket creation via awscli2's `s3 mb` —
-            # MinIO requires the bucket to exist before `PutObject`.
+            # Start versitygw right before `cargo nextest run` (the build doesn't need it).
             preCheck = ''
               export HOME=$TMPDIR
-              export MINIO_ROOT_USER=minioadmin
-              export MINIO_ROOT_PASSWORD=minioadmin
-              mkdir -p $TMPDIR/miniodata
-              ${minio}/bin/minio server $TMPDIR/miniodata --address 127.0.0.1:9101 \
-                > $TMPDIR/minio.log 2>&1 &
-              for i in $(seq 1 160); do
-                ${pkgs.curl}/bin/curl -sf http://127.0.0.1:9101/minio/health/ready && break
+              vgw_log=$TMPDIR/versitygw.log
+              mkdir -p $TMPDIR/s3/data $TMPDIR/s3/meta
+
+              # python3 is here only for this kernel-assigned free port. versitygw cannot replace
+              # it: bound on `127.0.0.1:0` it reports "port 0" rather than the port it got
+              # (v1.3.1), so reading the port back means matching its socket inode in
+              # `/proc/net/tcp`, which is Linux-only, and this check is evaluated on Darwin too.
+              # A port drawn at random in shell would collide with a port in use, where this one
+              # was free when picked. The remaining pick-then-bind window is caught below.
+              vgw_port=$(${pkgs.python3}/bin/python3 -c \
+                'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+              export TESSERA_S3_ENDPOINT=http://127.0.0.1:$vgw_port
+              export TESSERA_S3_BUCKET=tessera-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+
+              ROOT_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID ROOT_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+                ${pkgs.versitygw}/bin/versitygw --port 127.0.0.1:$vgw_port --region $AWS_REGION \
+                posix --sidecar $TMPDIR/s3/meta $TMPDIR/s3/data > $vgw_log 2>&1 &
+              vgw_pid=$!
+              stop_versitygw() {
+                kill $vgw_pid 2>/dev/null
+                wait $vgw_pid 2>/dev/null
+                return 0
+              }
+              dump_versitygw_log() {
+                echo "---- versitygw log ($vgw_log) ----"
+                cat $vgw_log
+              }
+              # Through the helper, not `+=`: the RAM TMPDIR's removal must stay after the log dump
+              # even when this preCheck fails below (withRamTmpdir rejects a bare `+=`, #793).
+              ram_tmpdir_add_hooks exitHooks stop_versitygw
+              ram_tmpdir_add_hooks failureHooks dump_versitygw_log stop_versitygw
+
+              s3() {
+                ${pkgs.curl}/bin/curl -sS --max-time 5 -o $TMPDIR/s3-response -w '%{http_code}' \
+                  --aws-sigv4 "aws:amz:$AWS_REGION:s3" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+                  "$@"
+              }
+
+              # Readiness: 30 s wall-clock deadline, 0.25 s poll. Fails on the deadline or on the
+              # server exiting.
+              ready=
+              deadline=$((SECONDS + 30))
+              while [ $SECONDS -lt $deadline ]; do
+                if ! kill -0 $vgw_pid 2>/dev/null; then
+                  echo "s3-range-read: versitygw exited before becoming ready" >&2
+                  exit 1
+                fi
+                if [ "$(s3 --max-time 1 "$TESSERA_S3_ENDPOINT/" 2>/dev/null)" = 200 ]; then
+                  ready=1
+                  break
+                fi
                 sleep 0.25
               done
-              # `health/ready` can go green before the S3 API actually accepts `CreateBucket`
-              # (notably on the slower aarch64 runner — `XMinioServerNotInitialized`), so retry the
-              # bucket op itself until it lands rather than firing it once and racing.
-              for i in $(seq 1 120); do
-                ${pkgs.awscli2}/bin/aws --endpoint-url http://127.0.0.1:9101 \
-                  s3 mb s3://tessera-test 2>/dev/null && break
-                sleep 0.5
-              done
-              # Fail the check clearly if the bucket never materialised (vs a confusing later error).
-              ${pkgs.awscli2}/bin/aws --endpoint-url http://127.0.0.1:9101 \
-                s3 ls s3://tessera-test > /dev/null
+              if [ -z "$ready" ]; then
+                echo "s3-range-read: versitygw not ready on $TESSERA_S3_ENDPOINT after 30 s" >&2
+                exit 1
+              fi
+
+              # `|| :` only keeps errexit from aborting before the report: curl's own failure shows
+              # up as code `000`, which the test below rejects with the response body.
+              code=$(s3 -X PUT "$TESSERA_S3_ENDPOINT/$TESSERA_S3_BUCKET") || :
+              if [ "$code" != 200 ]; then
+                echo "s3-range-read: CreateBucket $TESSERA_S3_BUCKET answered HTTP $code" >&2
+                if [ -f $TMPDIR/s3-response ]; then cat $TMPDIR/s3-response >&2; fi
+                exit 1
+              fi
+              # Ownership: the bucket must exist in OUR posix root, so the server that answered is
+              # the one this build started, not whatever else holds the port.
+              if [ ! -d $TMPDIR/s3/data/$TESSERA_S3_BUCKET ] || ! kill -0 $vgw_pid 2>/dev/null; then
+                echo "s3-range-read: the server on $TESSERA_S3_ENDPOINT is not this build's versitygw" >&2
+                exit 1
+              fi
+              echo "s3-range-read: versitygw on $TESSERA_S3_ENDPOINT, bucket $TESSERA_S3_BUCKET"
             '';
             nativeBuildInputs = commonArgs.nativeBuildInputs
-              ++ [ minio pkgs.awscli2 pkgs.curl pkgs.cacert ];
-          });
+              ++ [ pkgs.versitygw pkgs.curl pkgs.python3 pkgs.cacert ];
+          })));
 
           # **DataFusion SQL surface** (#251 spike): the `sql` feature adds `tessera sql <FILE>
           # "<QUERY>"` — Vortex → Arrow → DataFusion in-process. The unit tests under `sql::tests`
           # are `#[cfg(feature = "sql")]`, so the default `workspace-test` gate does NOT run them
           # (default features exclude the ~200-crate DataFusion tree). This dedicated check runs
-          # the CLI's sql-feature tests only — same pattern as `minio-range-read` for the cloud
+          # the CLI's sql-feature tests only — same pattern as `s3-range-read` for the cloud
           # feature. Clippy already covers `--all-features` at compile-time, so this test is what
           # proves the query actually EXECUTES (WHERE + ORDER BY + LIMIT round-trip).
-          sql-tests = craneLib.cargoNextest (commonArgs // {
+          sql-tests = craneLib.cargoNextest (withRamTmpdir (withCpuBudget (commonArgs // {
             inherit cargoArtifacts;
+            # Distinct from `workspace-test` so CI logs attribute its lines (#535). Via `pname`, not
+            # `pnameSuffix`: crane's cargoNextest hard-sets `pnameSuffix = "-nextest${extraSuffix}"`
+            # and silently discards a caller's value -> derivation name `tessera-sql-nextest-0.0.0`.
+            pname = "tessera-sql";
             # `sql::tests::*` runs the DataFusion SessionContext path end-to-end (register table,
             # execute query, collect batches). The positional `sql` filter matches every test
             # name in the `sql` module — DataFusion 54 pins arrow-58, so cargo unifies with the
-            # arrow-58 the workspace already has (via Vortex 0.75); a version mismatch would
-            # fail to link, not to test.
+            # arrow-58 the workspace's ingest decoders pin; a version mismatch on that boundary
+            # would fail to compile, not to test.
             cargoExtraArgs = "-p tessera-cli --features sql sql::";
-          });
+            cargoNextestExtraArgs = nextestFailOnNoTests;
+          })));
+
+          # The independent conformance reader (corpus/reference_reader): a SECOND implementation of
+          # the `.tsra` verification, in pure Python, checked against corpus.json's goldens. It was
+          # run by nothing until #520's review found it. ~0.4 s. `jcs` (RFC 8785 canonical JSON) is
+          # not in nixpkgs, so it is packaged here from its PyPI wheel (pure Python, py3-none-any,
+          # Apache-2.0) at the version PINNED in corpus/reference_reader/requirements.txt — and
+          # evaluation fails if the two ever disagree, so CI cannot drift from what a human
+          # running the reader by hand installs.
+          #
+          # Vacuous-pass guard: an empty corpus.json would print "0/0 fixtures passed" and exit 0.
+          # So the pass line must read N/N with N == the number of .tsra files actually on disk.
+          reference-reader =
+            let
+              jcs = pkgs.python312Packages.buildPythonPackage rec {
+                pname = "jcs";
+                version = "0.2.1";
+                format = "wheel";
+                src = pkgs.python312Packages.fetchPypi {
+                  inherit pname version;
+                  format = "wheel";
+                  dist = "py3";
+                  python = "py3";
+                  hash = "sha256-4jo+HeYPgy0zzYEbucOzvnkhnN+V9juI8JcnMsP6hHY=";
+                };
+              };
+              reqs = builtins.readFile ./tessera/corpus/reference_reader/requirements.txt;
+              py =
+                if builtins.match "(.*\n)?jcs==${jcs.version}(\n.*)?" reqs != null
+                then pkgs.python312.withPackages (ps: [ ps.blake3 jcs ])
+                else throw ''
+                  reference-reader packages jcs ${jcs.version}, but
+                  tessera/corpus/reference_reader/requirements.txt does not pin jcs==${jcs.version}.
+                  Keep them in step so CI runs the reader against the version a human installs.
+                '';
+            in
+            pkgs.runCommand "reference-reader" { nativeBuildInputs = [ py ]; } ''
+              set -o pipefail
+              cp -r ${./tessera/corpus} corpus
+              chmod -R u+w corpus
+              want=$(find corpus/files -name '*.tsra' | wc -l)
+              ( cd corpus/reference_reader && python3 run.py ) | tee out.txt
+              if [ "$want" -lt 1 ] || ! grep -qx "$want/$want fixtures passed" out.txt; then
+                echo "reference-reader: expected '$want/$want fixtures passed' over $want .tsra files" >&2
+                # Say WHICH fixtures the goldens do not cover, rather than only that the count is off.
+                python3 - <<'EOF' >&2
+              import json, os
+              names = {e["name"] for e in json.load(open("corpus/corpus.json"))}
+              files = sorted(f[:-5] for f in os.listdir("corpus/files") if f.endswith(".tsra"))
+              for f in files:
+                  if f not in names:
+                      print(f"  NO corpus.json ENTRY for files/{f}.tsra")
+              for n in sorted(names - set(files)):
+                  print(f"  corpus.json entry {n!r} has NO files/{n}.tsra")
+              EOF
+                exit 1
+              fi
+              # The seal cases (#573) have the same vacuous-pass guard: N/N with N the file's count.
+              cases=$(python3 -c 'import json; print(len(json.load(open("corpus/seal-cases.json"))["cases"]))')
+              if [ "$cases" -lt 1 ] || ! grep -qx "$cases/$cases seal cases agreed" out.txt; then
+                echo "reference-reader: expected '$cases/$cases seal cases agreed'" >&2
+                exit 1
+              fi
+              # The schema number-rule cases (#895), with the same guard; and every corpus product that
+              # embeds a schema passes it (at least one does, or the loop proved nothing).
+              cases=$(python3 -c 'import json; print(len(json.load(open("corpus/schema-cases.json"))["cases"]))')
+              if [ "$cases" -lt 1 ] || ! grep -qx "$cases/$cases schema cases agreed" out.txt; then
+                echo "reference-reader: expected '$cases/$cases schema cases agreed'" >&2
+                exit 1
+              fi
+              own=$(python3 -c 'import glob, json, zipfile; print(sum(json.loads(zipfile.ZipFile(p).read("manifest.json")).get("schema") is not None for p in glob.glob("corpus/files/*.tsra")))')
+              if [ "$own" -lt 1 ] || ! grep -qx "$own/$own corpus products pass their own schema" out.txt; then
+                echo "reference-reader: expected '$own/$own corpus products pass their own schema'" >&2
+                exit 1
+              fi
+              # The crafted refusal archives (#734, #873; #914 adds the non-JCS manifest, the missing
+              # `manifest.seal` and the four committed corpus/refusals fixtures outside SPEC §6's member
+              # set; #720 adds a block class spelled "primary" and a chunk index without its block): a
+              # literal count, so losing a case fails too.
+              if ! grep -qx "15/15 refusal cases refused" out.txt; then
+                echo "reference-reader: expected '15/15 refusal cases refused'" >&2
+                exit 1
+              fi
+              # seal-cases.json is generated (ADR-0066): regenerating it from the corpus must give the
+              # committed bytes, so a corpus change without a regenerated file, or a hand edit, fails.
+              ( cd corpus/reference_reader && python3 make_seal_cases.py )
+              if ! cmp -s corpus/seal-cases.json ${./tessera/corpus/seal-cases.json}; then
+                echo "reference-reader: corpus/seal-cases.json is not what make_seal_cases.py generates;" >&2
+                echo "  run it (corpus/reference_reader/README.md) and commit the result" >&2
+                exit 1
+              fi
+              # So are the refusal fixtures the Rust reader opens too (tessera-io tests/canonical_members.rs).
+              rm -r corpus/refusals
+              ( cd corpus/reference_reader && python3 make_refusal_fixtures.py )
+              if ! diff -r corpus/refusals ${./tessera/corpus/refusals}; then
+                echo "reference-reader: corpus/refusals is not what make_refusal_fixtures.py generates;" >&2
+                echo "  run it (corpus/reference_reader/README.md) and commit the result" >&2
+                exit 1
+              fi
+              touch $out
+            '';
+
+          # Every tracked SCRIPT must be in exactly one of scriptsRunByChecks / scriptsNotRunInCi /
+          # scriptLibraries (#520). Every other test-like file (under `tests/`, or `*.trycmd`) must be
+          # admitted by `srcFilter`, so the crane checks see it — for Rust, trycmd, toml and fixture
+          # data, admission is what "run" means. Entries that name no existing file fail too, so the
+          # maps cannot rot into false reassurance. (Check NAMES are validated in the `checks`
+          # wrapper, where the full set of checks is known.)
+          test-coverage =
+            let
+              lib = pkgs.lib;
+              root = toString ./tessera;
+              walk = dir: lib.concatLists (lib.mapAttrsToList
+                (n: t: if t == "directory" then walk (dir + "/${n}") else [ (toString (dir + "/${n}")) ])
+                (builtins.readDir dir));
+              files = walk ./tessera;
+              rel = f: lib.removePrefix root f;
+              isScript = f: builtins.match ".*[.](py|js|cjs|mjs|sh)" (baseNameOf f) != null;
+              isTestData = f: lib.hasInfix "/tests/" (rel f) || lib.hasSuffix ".trycmd" (baseNameOf f);
+              maps = [ scriptsRunByChecks scriptsNotRunInCi scriptLibraries ];
+              hits = f: builtins.length (builtins.filter (m: m ? ${rel f}) maps);
+              orphanScripts = builtins.filter (f: isScript f && hits f == 0) files;
+              doubleListed = builtins.filter (f: isScript f && hits f > 1) files;
+              unseenData = builtins.filter
+                (f: !(isScript f) && isTestData f && !(srcFilter f "regular")) files;
+              relFiles = map rel files;
+              stale = builtins.filter (k: !(builtins.elem k relFiles))
+                (lib.concatMap builtins.attrNames maps);
+              # Every path and reason reaches the shell through escapeShellArg: reasons contain
+              # quotes (CDLL('libc.so.6')), and a path is attacker-shaped input to a build script.
+              notRun = lib.concatStrings (lib.mapAttrsToList (k: v: ''
+                echo ${lib.escapeShellArg "  NOT RUN IN CI ${k}: ${v}"} >&2
+              '') scriptsNotRunInCi);
+              say = tag: why: xs: lib.concatMapStrings (x: ''
+                echo ${lib.escapeShellArg "  ${tag} ${x}: ${why}"} >&2
+              '') xs;
+              bad = orphanScripts ++ doubleListed ++ unseenData ++ stale;
+            in
+            pkgs.runCommand "test-coverage" { } (
+              if bad == [ ] then ''
+                echo "test-coverage: every script is declared and every test file is visible" >&2
+                ${notRun}
+                touch $out
+              '' else ''
+                echo "test-coverage FAILED (#520)" >&2
+                ${say "ORPHAN" "a script in none of scriptsRunByChecks/scriptsNotRunInCi/scriptLibraries" (map rel orphanScripts)}
+                ${say "DOUBLE" "a script listed in more than one map" (map rel doubleListed)}
+                ${say "UNSEEN" "a test file srcFilter does not admit, so no crane check sees it" (map rel unseenData)}
+                ${say "STALE " "listed in flake.nix but no such file" stale}
+                exit 1
+              ''
+            );
 
           # guardrails agent-drift gates over the Rust source (code gates) + repo-wide structural
           # gates. cargo-deny stays a pre-commit gate (needs network for the advisory DB).
@@ -571,10 +1701,10 @@
           # then runs the smoke test, which exercises the ERGONOMIC surface — numpy ndarrays, polars
           # DataFrames, pyarrow Tables — proving the abi3 extension loads on CPython AND the wrapper
           # returns native objects end-to-end.
-          tessera-py-import = pkgs.runCommand "tessera-py-import"
+          tessera-py-import = budgetedRunCommand "tessera-py-import"
             {
               nativeBuildInputs =
-                [ (pkgs.python312.withPackages (ps: [ ps.numpy ps.polars ps.pyarrow ])) ];
+                [ (pkgs.python312.withPackages (ps: [ ps.blake3 ps.numpy ps.polars ps.pyarrow ])) ];
             } ''
             mkdir -p tessera
             cp -r ${./tessera/crates/tessera-py/python/tessera}/. tessera/
@@ -583,7 +1713,18 @@
             python3 ${./tessera/crates/tessera-py/tests/smoke.py} ${./tessera/corpus/files}
             # Docstring-vs-behaviour drift gate (#412): probes every dtype code against the live
             # module and asserts the accepted sets exactly match what the docstrings advertise.
-            python3 ${./tessera/crates/tessera-py/tests/api_drift.py}
+            python3 ${./tessera/crates/tessera-py/tests/api_drift.py} ${nullableFixture}
+            # Array-codec round-trip + pinned default content_hash (#533).
+            python3 ${./tessera/crates/tessera-py/tests/codec_roundtrip.py}
+            # The WRITE path as documentation (#389): the book `{{#include}}`s anchored regions of this
+            # script, so running it here means a snippet that stopped working cannot reach the docs.
+            python3 ${./tessera/crates/tessera-py/tests/write_example.py} ${pairsFixture}
+            # Python provenance surface (#562, #563): pinned edges, producer, generation, read back sealed.
+            python3 ${./tessera/crates/tessera-py/tests/provenance.py}
+            # Table reads on logical names over a partitioned table, and the typed NotABlockError (#717).
+            python3 ${./tessera/crates/tessera-py/tests/logical_tables.py} ${pairsFixture}
+            # Nullable columns read as masked arrays / Arrow nulls, equal to the Rust reader (#804).
+            python3 ${./tessera/crates/tessera-py/tests/nullable_columns.py} ${nullableFixture} ${nullableExpected}
             touch $out
           '';
 
@@ -592,10 +1733,10 @@
           # dir, then runs the same smoke test through it. Proves the assembled wheel's layout + RECORD
           # + metadata are valid and importable. `LD_LIBRARY_PATH` supplies libstdc++ (the nix-built
           # extension needs it — the same reason the wheel isn't manylinux-portable until auditwheel'd).
-          tessera-wheel-import = pkgs.runCommand "tessera-wheel-import"
+          tessera-wheel-import = budgetedRunCommand "tessera-wheel-import"
             {
               nativeBuildInputs =
-                [ (pkgs.python312.withPackages (ps: [ ps.numpy ps.polars ps.pyarrow ps.pip ])) ];
+                [ (pkgs.python312.withPackages (ps: [ ps.blake3 ps.numpy ps.polars ps.pyarrow ps.pip ])) ];
             } ''
             export HOME=$TMPDIR
             python3 -m pip install --no-index --no-deps --target=$TMPDIR/site \
@@ -604,7 +1745,17 @@
             export LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib
             python3 ${./tessera/crates/tessera-py/tests/smoke.py} ${./tessera/corpus/files}
             # Same drift gate as tessera-py-import, proven through the installed wheel.
-            python3 ${./tessera/crates/tessera-py/tests/api_drift.py}
+            python3 ${./tessera/crates/tessera-py/tests/api_drift.py} ${nullableFixture}
+            # Array-codec round-trip + pinned default content_hash (#533).
+            python3 ${./tessera/crates/tessera-py/tests/codec_roundtrip.py}
+            # …and the documented write path, so the book's example works through the real wheel too.
+            python3 ${./tessera/crates/tessera-py/tests/write_example.py} ${pairsFixture}
+            # Python provenance surface (#562, #563): pinned edges, producer, generation, read back sealed.
+            python3 ${./tessera/crates/tessera-py/tests/provenance.py}
+            # Table reads on logical names over a partitioned table, and the typed NotABlockError (#717).
+            python3 ${./tessera/crates/tessera-py/tests/logical_tables.py} ${pairsFixture}
+            # Nullable columns read as masked arrays / Arrow nulls, equal to the Rust reader (#804).
+            python3 ${./tessera/crates/tessera-py/tests/nullable_columns.py} ${nullableFixture} ${nullableExpected}
             touch $out
           '';
 
@@ -615,9 +1766,203 @@
             mdbook build ${./.}/docs/book -d $out
           '';
 
+          # The release-plz baseline: which tag is "the last release" (#606). SemVer order with
+          # pre-releases, capped at the workspace version (the former v0.1.0 / v1.0.0-rc1 tags were
+          # format milestones), reachable from HEAD, and a loud failure when there is none — proven on
+          # throwaway repos, since the workflow itself only ever sees the real tag set.
+          release-tag-resolution = pkgs.runCommand "release-tag-resolution"
+            { nativeBuildInputs = [ pkgs.git ]; } ''
+            HOME=$TMPDIR bash ${releaseScripts}/last-release-tag.sh --self-test
+            touch $out
+          '';
+
+          # The promotion PR that keeps `main` equal to the latest release (#854): which head and
+          # branch promote-main.yml builds from a tag, a no-op when main already has the release, and
+          # a loud failure for a moved tag, an older release, a conflict, or a merge whose tree is not
+          # the tag's (promotion-plan.sh); then how the head is built (#925, promotion-head.sh): a
+          # GitHub-signed commit with the tag's tree and the parents [main, tag], and no branch for a
+          # head whose stored tree, parents or signature is wrong — against a fake `gh` over a
+          # throwaway repo, since the workflow only ever sees the real repo.
+          release-promotion = pkgs.runCommand "release-promotion"
+            { nativeBuildInputs = [ pkgs.git pkgs.jq ]; } ''
+            HOME=$TMPDIR bash ${releaseScripts}/promotion-plan.sh --self-test
+            HOME=$TMPDIR bash ${releaseScripts}/promotion-head.sh --self-test
+            touch $out
+          '';
+
+          # The ADR-0064 §8.1 RSS proof's evaluator (#715): criterion 2's slope test (ADR-0064 B.2-B.5)
+          # checked against the recorded ksb numbers ADR-0064 B.4 tabulates, the pre-#759 writer's
+          # failure included. The proof itself is a ksb job (tessera/bench/ksb/677-rss-proof, its own
+          # flake); this runs only its offline arithmetic. Its source is ONLY run.py + test_run.py and
+          # the r1 log extracts under fixtures/r1-logs (ADR-0064 C.4's fail-before).
+          rss-proof-evaluator =
+            let
+              dir = ./tessera/bench/ksb/677-rss-proof;
+              src = builtins.path {
+                name = "rss-proof-evaluator-src";
+                path = dir;
+                filter =
+                  path: _type:
+                  let
+                    rel = pkgs.lib.removePrefix (toString dir + "/") (toString path);
+                  in
+                  builtins.elem rel [ "run.py" "test_run.py" "fixtures" "fixtures/r1-logs" ]
+                  || pkgs.lib.hasPrefix "fixtures/r1-logs/" rel;
+              };
+            in
+            pkgs.runCommand "rss-proof-evaluator"
+              { nativeBuildInputs = [ (pkgs.python312.withPackages (ps: [ ps.pytest ])) ]; } ''
+              cp -r ${src}/run.py ${src}/test_run.py ${src}/fixtures .
+              python3 -m pytest -q -p no:cacheprovider test_run.py
+              touch $out
+            '';
+
+          # The CI summary of a `nix flake check` leg (nix-check.yml) counts per-check verdicts and
+          # holds the evaluated set of checks to .github/nix-flake-checks.txt by name (#722). Its
+          # self-test stubs `nix`, so an empty, short, extra or substring-named set, a failed
+          # evaluation and a summary that disagrees with nix are each proven to fail the leg.
+          nix-check-summary = pkgs.runCommand "nix-check-summary"
+            { nativeBuildInputs = [ pkgs.jq ]; } ''
+            bash ${./scripts/nix-check-summary.sh} --self-test
+            touch $out
+          '';
+
+          # Which `nix flake check` legs run per event (aarch64 only nightly, on release tags and by
+          # hand) and the required gate's by-name assertion that exactly those legs passed (#725).
+          # Its self-test proves every plan rule, and that an empty plan, a skipped planned leg, an
+          # unplanned leg that ran or a missing result each fail the gate.
+          nix-check-legs = pkgs.runCommand "nix-check-legs" { } ''
+            bash ${./scripts/nix-check-legs.sh} --self-test
+            touch $out
+          '';
+
+          # The root CHANGELOG holds one section per release (#982): `check` holds it to the structure
+          # `scripts/changelog.py` documents, including a section for the workspace version, so the
+          # release PR (which bumps that version) fails here until its `Unreleased` is renamed
+          # (docs/RELEASING.md, step 1). The self-test proves split, release and every check rule on a
+          # throwaway repository.
+          changelog-sections = pkgs.runCommand "changelog-sections"
+            { nativeBuildInputs = [ pkgs.git pkgs.python3 ]; } ''
+            HOME=$TMPDIR python3 -I ${./scripts/changelog.py} --self-test
+            python3 -I ${./scripts/changelog.py} check ${./CHANGELOG.md} ${./tessera/Cargo.toml}
+            touch $out
+          '';
+
+          # Files or updates the issue for a failed nightly or release-tag run (#725). Its self-test
+          # stubs `gh`: an exact-title open issue gets a comment, a merely similar title does not,
+          # and a failed lookup writes nothing.
+          ci-failure-issue = pkgs.runCommand "ci-failure-issue"
+            { nativeBuildInputs = [ pkgs.jq ]; } ''
+            bash ${./scripts/ci-failure-issue.sh} --self-test
+            touch $out
+          '';
+
           # The dev shell itself must build (toolbelt + toolchain resolve).
           dev-shell = self.devShells.${system}.default;
-        };
+        } // linuxOnlyChecks;
+          names = map (c: c.name) (builtins.attrValues allChecks);
+          dupes = pkgs.lib.unique (builtins.filter (n: pkgs.lib.count (m: m == n) names > 1) names);
+          # Every check that `scriptsRunByChecks` claims runs a script must EXIST (#520). Attribute
+          # NAMES only — no derivation is forced — so this costs nothing and catches a renamed or
+          # removed check leaving a script "run by" something that is gone.
+          claimed = pkgs.lib.unique (pkgs.lib.concatLists (builtins.attrValues scriptsRunByChecks));
+          missing = builtins.filter (c: !(allChecks ? ${c})) claimed;
+          entryPoints = builtins.attrNames scriptsRunByChecks ++ builtins.attrNames scriptsNotRunInCi;
+          danglingLibs = pkgs.lib.concatLists (pkgs.lib.mapAttrsToList
+            (lib: users: map (u: "${lib} -> ${u}") (builtins.filter (u: !(builtins.elem u entryPoints)) users))
+            scriptLibraries);
+          # The checks must be exactly the ones listed in .github/nix-flake-checks.txt (#722), the
+          # list CI's summary holds the evaluated set to. That list is of the Linux CI systems, so
+          # elsewhere the Linux-only checks are dropped from it. Names only: no derivation is forced.
+          # Its `count:` line is checked by scripts/nix-check-summary.sh, the list's parser in CI.
+          listedChecks = builtins.filter
+            (l: l != "" && !(pkgs.lib.hasPrefix "#" l) && !(pkgs.lib.hasPrefix "count:" l))
+            (pkgs.lib.splitString "\n" (builtins.readFile ./.github/nix-flake-checks.txt));
+          expectedChecks = builtins.filter (c: isLinux || !(linuxOnlyCheckSet ? ${c})) listedChecks;
+          unlisted = builtins.filter (c: !(builtins.elem c expectedChecks)) (builtins.attrNames allChecks);
+          undefined = builtins.filter (c: !(allChecks ? ${c})) expectedChecks;
+          # Every check that runs cargo test, nextest run, cargo run, cargo bench or llvm-cov must have its TMPDIR on a RAM fs
+          # (`withRamTmpdir`, #793). Read from every shell field a build runs: crane folds
+          # `buildPhaseCargoCommand`/`checkPhaseCargoCommand` into `buildPhase`/`checkPhase`, the
+          # hooks around them can run cargo too, a `runCommand` has only `buildCommand`, and the check
+          # fields only run with `doCheck`. Matched as tokens: `cargo`, then any `-flag`/`+toolchain`
+          # words, then the subcommand (cargo's `t`/`r` aliases and `bench` included), across any
+          # whitespace and `\`-newline continuations.
+          # crane's nextest `buildPhase` runs `cargo nextest --version` only, hence `nextest run`.
+          # A flag that takes a separate value (`cargo --config x test`) is not seen. Strings only: no
+          # derivation is forced.
+          cargoRunsTests =
+            let
+              sp = "[[:space:]]+";
+              flags = "(${sp}[-+][^[:space:]]*)*";
+            in
+            "(cargo${flags}${sp}(test|t|run|r|bench|nextest${sp}run|llvm-cov)|cargoWithProfile${flags}${sp}(test|run|bench))"
+            + "[^-_[:alnum:]]";
+          runsCargo = s:
+            builtins.match ".*${cargoRunsTests}.*"
+              (builtins.replaceStrings [ "\\\n" ] [ " " ] s + "\n") != null;
+          fieldsRun = d: fields: builtins.any (f: runsCargo (d.${f} or "")) fields;
+          runsCode = d:
+            fieldsRun d [ "buildPhase" "preBuild" "postBuild" "installPhase" "preInstall" "postInstall" "buildCommand" ]
+            || ((d.doCheck or false) && fieldsRun d [ "checkPhase" "preCheck" "postCheck" ]);
+          # Named coverage plus command inspection: shell checks can execute the CLI,
+          # Python extension or wasm without mentioning cargo. Check the actual export,
+          # not a count or a passthru marker that can outlive the shell protection.
+          shellFields = [ "buildPhase" "preBuild" "postBuild" "buildCommand"
+            "installPhase" "preInstall" "postInstall" "checkPhase" "preCheck" "postCheck" ];
+          shellText = d: builtins.concatStringsSep "\n" (map (f: d.${f} or "") shellFields);
+          namedCodeChecks = [ "tessera-py-import" "tessera-wheel-import" "ingest-producer-equality"
+            "oci-roundtrip" "registry-roundtrip" "wasm-bindgen-smoke" ];
+          unbudgeted = builtins.filter (name:
+            let d = allChecks.${name}; text = shellText d; in
+            (builtins.elem name namedCodeChecks || runsCode d
+              || builtins.any (needle: pkgs.lib.hasInfix needle text)
+                [ "/bin/tessera" "_native.so" "tessera_wasm" "tessera-wheel-" ])
+            && !(pkgs.lib.hasInfix "export RAYON_NUM_THREADS=$NIX_BUILD_CORES TESSERA_MAX_THREADS=$NIX_BUILD_CORES" text))
+            (builtins.attrNames allChecks);
+          onDiskTmpdir = builtins.filter
+            (c: isLinux && runsCode allChecks.${c} && !(allChecks.${c}.ramTmpdir or false))
+            (builtins.attrNames allChecks);
+        in
+          if dupes != [ ] then throw ''
+            flake checks share derivation names: ${builtins.concatStringsSep ", " dupes}
+            `nix flake check -L` labels log lines by derivation name, so these checks would be
+            indistinguishable in CI logs. Give each a distinct `pname`/`pnameSuffix` (#535).
+          ''
+          else if missing != [ ] then throw ''
+            scriptsRunByChecks names checks that do not exist: ${builtins.concatStringsSep ", " missing}
+            A script listed as run by a missing check runs nowhere (#520). Fix the name, or move the
+            script to scriptsNotRunInCi with a reason.
+          ''
+          else if danglingLibs != [ ] then throw ''
+            scriptLibraries names entry points that are in neither scriptsRunByChecks nor
+            scriptsNotRunInCi: ${builtins.concatStringsSep ", " danglingLibs}
+            A library is only accounted for if what imports it is (#520).
+          ''
+          else if unlisted != [ ] || undefined != [ ] then throw ''
+            the flake's checks differ from .github/nix-flake-checks.txt (#722):
+            not listed: ${builtins.concatStringsSep ", " unlisted}
+            listed but not defined: ${builtins.concatStringsSep ", " undefined}
+            CI's summary fails a leg whose checks differ from that list. Edit the list (names and
+            `count:`) together with the check.
+          ''
+          else if unbudgeted != [ ] then throw ''
+            these checks execute tessera code without the CPU budget: ${builtins.concatStringsSep ", " unbudgeted}
+            Use withCpuBudget for cargo checks, budgetedRunCommand for shell checks,
+            or cpuBudget in the build phase that runs the code.
+          ''
+          else if onDiskTmpdir != [ ] then throw ''
+            these checks run tessera's tests with TMPDIR on disk: ${builtins.concatStringsSep ", " onDiskTmpdir}
+            Every fsync of a WriteSession commit then waits on the build volume, and on a write-loaded
+            runner a sub-second test runs for an hour (#793). Wrap the check's arguments in
+            `withRamTmpdir`.
+          ''
+          else allChecks;
+
+        # The shared dependency build (crane `buildDepsOnly`), exposed so CI can key and restore it
+        # (#507). `legacyPackages` is not built by `nix flake check`, so this costs nothing there.
+        # `ksbTest` is the per-crate ksb test job's entry point (a function, #957; called by scripts/ksb-test.sh).
+        legacyPackages = { inherit cargoArtifacts ksbTest; };
 
         formatter = pkgs.nixpkgs-fmt;
       });

@@ -110,13 +110,17 @@ tessera ls   corpus/files/listmode_events.tsra events
 
 # Read a table column → CSV: a preview, or the whole column, or a row range
 tessera read corpus/files/listmode_events.tsra events -c e0 --limit 5    # preview
-tessera read corpus/files/listmode_events.tsra events -c e0 --all > e0.csv
+tessera read corpus/files/listmode_events.tsra events -c e0 > e0.csv     # redirected = every row
 tessera read corpus/files/listmode_events.tsra events -c e0 --rows 0:100 # a slice
 
 # Look at an array without decoding the whole volume
 tessera stats   corpus/files/recon_int16.tsra volume              # shape · dtype · codec · min/max/mean
 tessera slice   corpus/files/recon_int16.tsra volume --index "32,:,:"   # one plane → CSV
 tessera project corpus/files/recon_int16.tsra volume --axis z --mode max  # MIP → CSV
+tessera slice   corpus/files/recon_int16.tsra volume --index "32,:,:" --format npy > plane.npy
+tessera project corpus/files/recon_int16.tsra volume --axis z --format png > mip.png  # preview
+# At a terminal these print a 20-row preview; redirected or piped they emit everything.
+# `--format json` adds shape/dtype; `npy` is lossless, `png` a lossy 8-bit preview.
 # (Prefer NumPy/DataFrames? the `tessera` Python package returns np.ndarray / polars / pyarrow.)
 
 # Ingest a vendor acquisition (normalise at the door), or a declarative multi-product spec

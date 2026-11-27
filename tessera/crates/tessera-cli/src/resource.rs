@@ -8,9 +8,8 @@
 //! 1. **flag** — the per-invocation `--workers` / `--ram-budget` (explicit intent wins).
 //! 2. **env** — `TESSERA_WORKERS` / `TESSERA_RAM_BUDGET` (the latter takes a human size, e.g. `512MiB`).
 //! 3. **conf** — `[resources]` in a config file: repo-local `.tessera/config.toml` first, then the
-//!    user file (`$XDG_CONFIG_HOME/tessera/config.toml` or `~/.config/tessera/config.toml`) — the
-//!    same repo-then-user layering the trust store uses.
-//! 4. **default** — [`WriteConfig::for_system`] (machine-derived `available_parallelism` + 1 GiB).
+//!    user file (`$XDG_CONFIG_HOME/tessera/config.toml` or `~/.config/tessera/config.toml`).
+//! 4. **default** — [`WriteConfig::for_system`] (machine-derived the thread budget + 1 GiB).
 //!
 //! Determinism note: these are *runtime* knobs (thread count, RAM ceiling) — they never change the
 //! output bytes (`content_hash` is independent of `workers`/`ram_budget`), so the writer-determinism
@@ -48,9 +47,10 @@ struct ConfigFile {
 /// Config file search order (repo before user; first file to set a field wins it): repo-local
 /// `.tessera/config.toml`, then `$XDG_CONFIG_HOME/tessera/config.toml` or `~/.config/tessera/config.toml`.
 ///
-/// The repo-local file is resolved **relative to the current directory** — the same cwd-relative
-/// convention as the trust store's `.tessera/trust` — so it applies when tessera is run from the repo
-/// root; it is not discovered by walking up from a subdirectory.
+/// The repo-local file is resolved **relative to the current directory**, so it applies when tessera
+/// is run from the repo root; it is not discovered by walking up from a subdirectory. That is tolerable
+/// here only because `[resources]` tunes runtime knobs that never change output bytes or what is
+/// trusted — the trust store, by contrast, never reads a cwd-relative directory implicitly (#576).
 fn config_files() -> Vec<PathBuf> {
     let mut files = vec![PathBuf::from(".tessera/config.toml")];
     if let Some(base) = std::env::var_os("XDG_CONFIG_HOME")
@@ -100,20 +100,31 @@ fn config_resources() -> Result<ResourcesTable> {
     Ok(merge_resources(tables))
 }
 
-/// Parse a worker-count string (from a flag, env, or config); a present-but-garbage value — or an
-/// explicit `0`, which would silently clamp to 1 — is an error, so a typo'd or nonsensical cap is
-/// loud rather than silently ignored. `source` names where the value came from.
-fn parse_workers(s: &str, source: &str) -> Result<usize> {
-    let n = s
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| Error::Invalid(format!("{source}: expected a positive integer, got {s:?}")))?;
+/// Reject a non-positive worker count, naming where it came from.
+///
+/// Shared by the **string** tiers ([`parse_workers`], for env + config) and the already-typed
+/// **flag** tier, which clap hands over as a `usize` and so never passes through a parser. Without
+/// this the two disagreed: `TESSERA_WORKERS=0` was a hard error while `--workers 0` was silently
+/// clamped to 1 by `WriteConfig::workers`, so the stricter tier was the one the user did not type.
+fn validate_workers(n: usize, source: &str) -> Result<usize> {
     if n == 0 {
         return Err(Error::Invalid(format!(
             "{source}: worker count must be >= 1, got 0"
         )));
     }
     Ok(n)
+}
+
+/// Parse a worker-count string from the **env or config** tiers; a present-but-garbage value — or
+/// an explicit `0`, which would silently clamp to 1 — is an error, so a typo'd or nonsensical cap
+/// is loud rather than silently ignored. `source` names where the value came from. The flag tier
+/// arrives already typed and is checked with [`validate_workers`] directly.
+fn parse_workers(s: &str, source: &str) -> Result<usize> {
+    let n = s
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| Error::Invalid(format!("{source}: expected a positive integer, got {s:?}")))?;
+    validate_workers(n, source)
 }
 
 /// Parse a RAM-budget size string (from a flag, env, or config), labeling the parse error with its
@@ -153,6 +164,13 @@ pub fn resolve_write_config(
     flag_ram: Option<&str>,
 ) -> Result<WriteConfig> {
     let conf = config_resources()?;
+
+    // The flag tier skips the string parsers, so validate it here or `--workers 0` slips past the
+    // check every other tier gets and is quietly clamped to 1.
+    let flag_workers = match flag_workers {
+        Some(n) => Some(validate_workers(n, "--workers")?),
+        None => None,
+    };
 
     let env_workers = match std::env::var(ENV_WORKERS) {
         Ok(s) => Some(parse_workers(&s, ENV_WORKERS)?),

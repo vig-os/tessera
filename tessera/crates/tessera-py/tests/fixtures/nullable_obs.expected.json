@@ -1,0 +1,84 @@
+{
+  "table": "obs",
+  "rows": 11,
+  "columns": [
+    {
+      "name": "i",
+      "dtype": "u4",
+      "values_le_hex": "000000000100000002000000030000000400000005000000060000000700000008000000090000000a000000",
+      "validity": null
+    },
+    {
+      "name": "a",
+      "dtype": "i4",
+      "values_le_hex": "f9ffffff00000000ffffffff0200000000000000080000000b00000000000000110000001400000000000000",
+      "validity": [
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "name": "e",
+      "dtype": "f8",
+      "values_le_hex": "0000000000000000000000000000e03f000000000000f87f000000000000f83f0000000000000040000000000000044000000000000008400000000000000c40000000000000104000000000000000000000000000000000",
+      "validity": [
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        false
+      ]
+    },
+    {
+      "name": "t",
+      "dtype": "u2",
+      "values_le_hex": "e803e903ea03eb03ec03ed03ee03ef03f003f103f203",
+      "validity": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "name": "z",
+      "dtype": "f4",
+      "values_le_hex": "00000000000000000000000000000000000000000000f0400000104100002841000040410000584100007041",
+      "validity": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    }
+  ]
+}

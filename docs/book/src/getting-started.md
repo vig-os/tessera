@@ -10,7 +10,8 @@ The first two things you'll ever do with a product you received are **verify it*
 
 `verify` walks the seal *and* re-hashes every block against its recorded digest — an `OK` means the
 bytes on disk are exactly what the manifest commits to. `inspect` then shows the identity triple
-(`id` / `content_hash` / `manifest_hash`) and the per-block digests that roll up into `content_hash`.
+(`id` / `content_hash` / `manifest_hash`) and the per-block digests that roll up into `content_hash` (a derived
+block, such as a chunk index, is sealed but not part of it).
 
 From here: [Reading & navigating](./reading.md) for the full read surface, or
 [Anatomy of a `.tsra`](./format-anatomy.md) for what those fields mean.

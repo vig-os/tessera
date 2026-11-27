@@ -232,6 +232,9 @@ fn run_listmode_synthetic(
         columns: listmode_columns(),
         rows: rows as u64,
         row_index: Some("ms".into()),
+        partition: None,
+        edition: None,
+        codec_profile: None,
     };
     // Bound the producer's in-memory batch slab to one ring-depth equivalent of rows. Conservative
     // (the row-group accumulator stages durable fragments anyway), but it keeps the producer side
@@ -292,9 +295,7 @@ fn run_listmode_real(
         "ms",
         None,
         &[],
-        &std::collections::BTreeMap::new(),
-        None,
-        &std::collections::BTreeMap::new(),
+        &ge_hdf5::StreamProvenance::default(),
     )?;
     let wall_s = t.elapsed().as_secs_f64();
     // Total rows = sum over all event blocks (multi-block products split at BLOCK_ROWS).
@@ -430,9 +431,15 @@ fn warmup_read_synthetic(n_rows: usize, seed: u64) -> (TableData, f64) {
 }
 
 /// Measure the **real** read+transpose rate from a `.h5` (`--input` mode). Pulls one warmup slab
-/// (up to `n_rows`) through the production [`ge_hdf5::stream_compound`] reader and times it. We
-/// stop after one slab via a sentinel error from the sink — bubbling Err out of `stream_compound`
-/// short-circuits the loop instead of reading the whole file, so the warmup cost is bounded.
+/// through the production [`ge_hdf5::stream_compound`] reader and times it. We stop after one slab
+/// via a sentinel error from the sink — bubbling Err out of `stream_compound` short-circuits the
+/// loop instead of reading the whole file.
+///
+/// `n_rows` is a request, not a bound: since #325 the reader rounds the slab up to whole dataset
+/// chunks, so on a CHUNKED dataset the warmup reads at least one full chunk even when `n_rows` is
+/// smaller. The measured rate stays correct either way — `sample_rows` below is taken from the slab
+/// actually returned, never from `n_rows` — but the warmup's cost is bounded by the dataset's chunk
+/// size rather than by `n_rows`.
 fn warmup_read_real(
     input: &std::path::Path,
     dataset: &str,
@@ -485,6 +492,9 @@ fn warmup_encode_per_core(columns: &[Column], data: &TableData) -> tessera_core:
         columns: columns.to_vec(),
         rows: u64::try_from(n_rows).unwrap_or(u64::MAX),
         row_index: None,
+        partition: None,
+        edition: None,
+        codec_profile: None,
     };
     let row_bytes: usize = columns
         .iter()
@@ -563,23 +573,11 @@ pub fn run(opts: BenchOpts) -> tessera_core::Result<()> {
         return run_auto(&opts, ram_budget);
     }
 
-    // Pick the worker plan: explicit --workers, --sweep (1,2,4,… up to available_parallelism), or
+    // Pick the worker plan: explicit --workers, --sweep (1,2,4,… up to thread budget), or
     // single run at WriteConfig::for_system() defaults.
-    let max_parallel = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let max_parallel = tessera_core::threads::budget();
     let workers_plan: Vec<usize> = if opts.sweep {
-        let mut v = Vec::new();
-        let mut w = 1usize;
-        while w <= max_parallel {
-            v.push(w);
-            w = w.saturating_mul(2);
-        }
-        // ensure the actual max is included (e.g. 12 on a 12-core box rather than just 1,2,4,8)
-        if *v.last().unwrap_or(&1) < max_parallel {
-            v.push(max_parallel);
-        }
-        v
+        sweep_workers(max_parallel)
     } else {
         vec![opts.workers.unwrap_or(max_parallel)]
     };
@@ -662,10 +660,8 @@ fn run_auto(opts: &BenchOpts, ram_budget: u64) -> tessera_core::Result<()> {
     let workers = cfg.worker_count();
     // "read-bound" = the recommendation matched ceil(read/per_core), so adding workers won't help
     // (the encode pipeline already meets the read floor). "encode-bound" = the recommendation
-    // clamped at available_parallelism — read could feed more, but we're out of cores.
-    let max_parallel = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    // clamped at thread budget — read could feed more, but we're out of cores.
+    let max_parallel = tessera_core::threads::budget();
     let storage_label = if workers >= max_parallel {
         "encode-bound"
     } else {
@@ -712,9 +708,34 @@ fn run_auto(opts: &BenchOpts, ram_budget: u64) -> tessera_core::Result<()> {
     Ok(())
 }
 
+/// Powers of two followed by the exact budget, without overflowing at usize::MAX.
+fn sweep_workers(max: usize) -> Vec<usize> {
+    let mut workers = Vec::new();
+    let mut n = 1usize;
+    while n <= max {
+        workers.push(n);
+        let Some(next) = n.checked_mul(2) else { break };
+        n = next;
+    }
+    if workers.last().copied().unwrap_or(0) < max {
+        workers.push(max);
+    }
+    workers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sweep_includes_budget_and_terminates_at_usize_max() {
+        assert_eq!(sweep_workers(1), vec![1]);
+        assert_eq!(sweep_workers(12), vec![1, 2, 4, 8, 12]);
+        let workers = sweep_workers(usize::MAX);
+        assert_eq!(workers.len(), usize::BITS as usize + 1);
+        assert_eq!(workers.last(), Some(&usize::MAX));
+        assert!(workers.windows(2).all(|w| w[0] < w[1]));
+    }
 
     #[test]
     fn synthetic_listmode_batch_is_deterministic() {
@@ -764,7 +785,7 @@ mod tests {
     fn auto_synthetic_recommends_and_runs_end_to_end() {
         // The `--auto` driver, end-to-end: warmup → balanced → run. Uses a small synthetic
         // workload so the test stays fast + hermetic (no real .h5 needed). Verifies the path
-        // returns Ok and the recommendation lands inside [1, available_parallelism].
+        // returns Ok and the recommendation lands inside [1, thread budget].
         let opts = BenchOpts {
             schema: "listmode".into(),
             rows: 200_000,

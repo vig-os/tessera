@@ -6,9 +6,10 @@
 //! extension module: one `tessera.so` works on any CPython ≥ 3.9, with no libpython link.
 
 use pyo3::create_exception;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{PyException, PyTypeError, PyUnicodeEncodeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use tessera_core::block::array::ArraySpec;
 use tessera_core::block::table::{Column, TableSpec};
@@ -23,8 +24,104 @@ create_exception!(
     "Raised on any Tessera format / integrity error (bad magic, broken seal, digest mismatch)."
 );
 
-fn err<E: std::fmt::Display>(e: E) -> PyErr {
-    TesseraError::new_err(e.to_string())
+create_exception!(
+    tessera,
+    NotABlockError,
+    TesseraError,
+    "Raised when a name passed where one block is expected (`read_block`, `array`, `array_roi`) is \
+     not a block of the archive: a node such as a partitioned table `pairs` (ADR-0064), whose \
+     leaves `pairs/0000`, `pairs/0001`, ... are the blocks, or a name nothing answers to. A \
+     subclass of `TesseraError`."
+);
+
+fn err<E: std::fmt::Display + std::any::Any>(e: E) -> PyErr {
+    let error = TesseraError::new_err(e.to_string());
+    if let Some(tessera_core::Error::LogicalTable {
+        reason: tessera_core::block::partition::LogicalTableError::SchemaMismatch { kind, .. },
+        ..
+    }) = (&e as &dyn std::any::Any).downcast_ref::<tessera_core::Error>()
+    {
+        use tessera_core::block::table::SchemaMismatchKind;
+        Python::attach(|py| -> PyResult<()> {
+            let value = error.value(py);
+            value.setattr("column", py.None())?;
+            value.setattr("field", py.None())?;
+            match kind {
+                SchemaMismatchKind::ColumnCount { expected, found } => {
+                    value.setattr("kind", "column_count")?;
+                    value.setattr("expected", expected)?;
+                    value.setattr("found", found)?;
+                }
+                SchemaMismatchKind::ColumnName {
+                    index,
+                    expected,
+                    found,
+                } => {
+                    value.setattr("kind", "column_name")?;
+                    value.setattr("column", index)?;
+                    value.setattr("expected", expected)?;
+                    value.setattr("found", found)?;
+                }
+                SchemaMismatchKind::Field {
+                    column,
+                    field,
+                    expected,
+                    found,
+                } => {
+                    value.setattr("kind", "field")?;
+                    value.setattr("column", column)?;
+                    value.setattr("field", field.to_string())?;
+                    value.setattr("expected", expected.to_string())?;
+                    value.setattr("found", found.to_string())?;
+                }
+                _ => {
+                    value.setattr("kind", "unknown")?;
+                    value.setattr("expected", py.None())?;
+                    value.setattr("found", py.None())?;
+                }
+            }
+            Ok(())
+        })
+        .map_or_else(|error| error, |()| error)
+    } else {
+        error
+    }
+}
+
+/// One decoded table column as the native layer hands it to Python: `(le_bytes, numpy_code,
+/// validity)`.
+///
+/// - `le_bytes` holds the column's values only, little-endian: exactly one element per row, so
+///   `numpy.frombuffer(le_bytes, "<" + numpy_code)` reconstructs it (`str` and `b1` decode as
+///   `tessera._ndarray` documents).
+/// - `validity` is `None` for a column that is not nullable. For a nullable one it is `bytes` of
+///   one byte per row, `1` where the row holds a value and `0` at a NULL
+///   (`numpy.frombuffer(validity, numpy.bool_)`); `le_bytes` holds the dtype default under a NULL.
+///
+/// The values and the mask are separate on purpose (#804): a nullable column used to arrive as one
+/// buffer with its bit-packed mask appended, which numpy read as extra elements.
+type NativeColumn<'py> = (Bound<'py, PyBytes>, String, Option<Bound<'py, PyBytes>>);
+
+/// A [`NativeColumn`] with its name in front, flat: `(column_name, le_bytes, numpy_code, validity)`.
+type NamedColumn<'py> = (
+    String,
+    Bound<'py, PyBytes>,
+    String,
+    Option<Bound<'py, PyBytes>>,
+);
+
+/// Take `column` apart into a [`NativeColumn`].
+fn native_column<'py>(py: Python<'py>, column: &ColumnData) -> NativeColumn<'py> {
+    let (values, validity) = column.values_and_validity();
+    let validity = validity.map(|v| {
+        let bytes: Vec<u8> = v.iter().map(|&present| u8::from(present)).collect();
+        PyBytes::new(py, &bytes)
+    });
+    (
+        PyBytes::new(py, &values.to_le_bytes()),
+        values.numpy_code().to_string(),
+        validity,
+    )
 }
 
 /// A handle to a sealed `.tsra` archive. Opening verifies the magic + manifest seal; reading a block
@@ -32,6 +129,8 @@ fn err<E: std::fmt::Display>(e: E) -> PyErr {
 #[pyclass(module = "tessera")]
 struct Reader {
     inner: tessera_io::Reader<std::fs::File>,
+    /// The path it was opened from, so a `verify` failure names the file.
+    path: PathBuf,
 }
 
 #[pymethods]
@@ -41,6 +140,7 @@ impl Reader {
     fn new(path: PathBuf) -> PyResult<Self> {
         Ok(Self {
             inner: tessera_io::Reader::open(&path).map_err(err)?,
+            path,
         })
     }
 
@@ -56,7 +156,21 @@ impl Reader {
         self.inner.manifest().id.clone()
     }
 
-    /// The canonical manifest as a JSON string (parse with `json.loads`).
+    /// The product's seal, `manifest_hash` (`"blake3:<hex>"`): `blake3` over the stored
+    /// `manifest.json` bytes, read from the `manifest.seal` member and verified on open (ADR-0066).
+    /// It is not a key of [`manifest_json`](Self::manifest_json): the seal lives outside the bytes
+    /// it seals.
+    #[getter]
+    fn manifest_hash(&self) -> String {
+        self.inner
+            .manifest()
+            .manifest_hash
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// The manifest as a JSON string (parse with `json.loads`). Its seal is
+    /// [`manifest_hash`](Self::manifest_hash), not a key of it (ADR-0066).
     fn manifest_json(&self) -> PyResult<String> {
         serde_json::to_string(self.inner.manifest()).map_err(err)
     }
@@ -66,8 +180,11 @@ impl Reader {
         self.inner.block_names()
     }
 
-    /// The raw encoded bytes of block `name` (digest-verified on read).
+    /// The raw encoded bytes of block `name` (digest-verified on read). `name` is one block: a
+    /// partitioned table's node (`pairs`) raises `NotABlockError`; its leaves (`pairs/0000`, …) are
+    /// the blocks.
     fn read_block<'py>(&mut self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyBytes>> {
+        self.blockref(name)?;
         let bytes = self.inner.read_block(name).map_err(err)?;
         Ok(PyBytes::new(py, &bytes))
     }
@@ -110,73 +227,95 @@ impl Reader {
         ))
     }
 
-    /// Decode a **table** block to an ordered list of `(column_name, le_bytes, numpy_code)`.
-    /// Reconstruct each column with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
-    fn read_table<'py>(
-        &mut self,
-        py: Python<'py>,
-        name: &str,
-    ) -> PyResult<Vec<(String, Bound<'py, PyBytes>, String)>> {
-        let spec = self.table_spec(name)?;
-        let blob = self.inner.read_block(name).map_err(err)?;
-        let data = tessera_io::table::decode(&spec, &blob).map_err(err)?;
+    /// Decode the **table** `name` to an ordered list of `(column_name, le_bytes, numpy_code,
+    /// validity)`, one entry per column. `le_bytes` holds the values only, one element per row
+    /// (`numpy.frombuffer(le_bytes, "<" + numpy_code)`); `validity` is `None` for a column that is
+    /// not nullable, else `bytes` of one byte per row, `1` present and `0` at a NULL (#804).
+    ///
+    /// `name` is a logical table name, resolved as every reader resolves it (ADR-0064): one block, a
+    /// partitioned table (`pairs` over `pairs/0000`, `pairs/0001`, …, concatenated in leaf order), or
+    /// a legacy `events_NNNN` group. One leaf can still be read by its full name. A name that is not
+    /// a table, or a partitioned table that is invalid, raises `TesseraError`. The whole table is
+    /// materialised: each block is decoded once and appended.
+    fn read_table<'py>(&mut self, py: Python<'py>, name: &str) -> PyResult<Vec<NamedColumn<'py>>> {
+        let view = self.inner.logical_table(name).map_err(err)?;
+        let mut data: Option<TableData> = None;
+        for block in view.block_names() {
+            let spec = self.table_spec(block)?;
+            let blob = self.inner.read_block(block).map_err(err)?;
+            let part = tessera_io::table::decode(&spec, &blob).map_err(err)?;
+            match data.as_mut() {
+                None => data = Some(part),
+                Some(acc) => {
+                    for ((_, col), (_, more)) in acc.iter_mut().zip(&part) {
+                        col.extend(more).map_err(err)?;
+                    }
+                }
+            }
+        }
         Ok(data
+            .unwrap_or_default()
             .iter()
             .map(|(n, c)| {
-                (
-                    n.clone(),
-                    PyBytes::new(py, &c.to_le_bytes()),
-                    c.numpy_code().to_string(),
-                )
+                let (values, code, validity) = native_column(py, c);
+                (n.clone(), values, code, validity)
             })
             .collect())
     }
 
-    /// Decode a **single column** `column` of table block `name` via Vortex projection — reads only
-    /// that column's segments, not the whole table. Returns `(le_bytes, numpy_code)`; reconstruct
-    /// with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
+    /// Decode a **single column** `column` of the table `name` via Vortex projection — reads only
+    /// that column's segments, not the whole table. `name` resolves as in [`Self::read_table`]: a
+    /// partitioned table's column is every leaf's, concatenated in leaf order. Returns
+    /// `(le_bytes, numpy_code, validity)`, as one entry of [`Self::read_table`]: the values only,
+    /// and `validity` `None` unless the column is nullable.
     fn read_table_column<'py>(
         &mut self,
         py: Python<'py>,
         name: &str,
         column: &str,
-    ) -> PyResult<(Bound<'py, PyBytes>, String)> {
-        let spec = self.table_spec(name)?;
-        let blob = self.inner.read_block(name).map_err(err)?;
-        let c = tessera_io::table::decode_column(&spec, &blob, column).map_err(err)?;
-        Ok((
-            PyBytes::new(py, &c.to_le_bytes()),
-            c.numpy_code().to_string(),
-        ))
+    ) -> PyResult<NativeColumn<'py>> {
+        let view = self.inner.logical_table(name).map_err(err)?;
+        let c = view.column(&mut self.inner, column).map_err(err)?;
+        Ok(native_column(py, &c))
     }
 
-    /// Decode a **single column** of the *logical* multi-block table named by `prefix`
-    /// (`events` / `events_NNNN`) — the same surface as [`Self::read_table_column`] but spanning
-    /// every block in manifest order. Each per-block read uses Vortex column projection (only the
-    /// requested column's segments), then the per-block columns are concatenated. Returns
-    /// `(le_bytes, numpy_code)`; reconstruct with `numpy.frombuffer(le_bytes, "<" + numpy_code)`.
+    /// The same read as [`Self::read_table_column`], which resolves logical table names too (a
+    /// partitioned `pairs` over `pairs/0000`, …, or a legacy `events` over `events_NNNN`); kept so
+    /// existing callers keep working. Returns `(le_bytes, numpy_code, validity)`, as
+    /// [`Self::read_table_column`] does.
     fn read_logical_table_column<'py>(
         &mut self,
         py: Python<'py>,
         prefix: &str,
         column: &str,
-    ) -> PyResult<(Bound<'py, PyBytes>, String)> {
+    ) -> PyResult<NativeColumn<'py>> {
         let view = self.inner.logical_table(prefix).map_err(err)?;
         let c = view.column(&mut self.inner, column).map_err(err)?;
-        Ok((
-            PyBytes::new(py, &c.to_le_bytes()),
-            c.numpy_code().to_string(),
-        ))
+        Ok(native_column(py, &c))
     }
 
-    /// Full integrity pass: recompute the three-hash seal and every block digest. Raises
-    /// `TesseraError` on any mismatch. Mirrors `tessera verify`.
+    /// Full integrity pass: recompute the three-hash seal, check the container's canonical layout
+    /// (SPEC §6 "One reading": the entries tile the archive from byte 0, every local header and
+    /// central-directory record is byte for byte the one tessera's writer emits, the end records are
+    /// exactly the writer's with nothing after them, the directory lists the entries in file order, and
+    /// the members are `mimetype`, `manifest.json`, the listed blocks and safely named `aux/` members,
+    /// distinct up to letter case, none below another, each matching its CRC-32; so every zip reader
+    /// sees the same members with the same bytes), and stream every block against its digest in
+    /// bounded memory. Raises
+    /// `TesseraError` on any failure. The same pass as `tessera verify`.
     fn verify(&mut self) -> PyResult<()> {
-        self.inner.manifest().verify().map_err(err)?;
-        for name in self.inner.block_names() {
-            self.inner.read_block(&name).map_err(err)?;
-        }
-        Ok(())
+        // Over the stored manifest bytes and their seal, as on open (SPEC §4, ADR-0066): the typed
+        // view may not reproduce them.
+        let seal = self
+            .inner
+            .manifest()
+            .manifest_hash
+            .clone()
+            .unwrap_or_default();
+        tessera_core::Manifest::from_stored(self.inner.manifest_json().as_bytes(), &seal)
+            .map_err(err)?;
+        let label = self.path.display().to_string();
+        self.inner.verify_payloads(&label).map_err(err)
     }
 
     fn __repr__(&self) -> String {
@@ -197,7 +336,29 @@ impl Reader {
             .blocks
             .iter()
             .find(|b| b.name == name)
-            .ok_or_else(|| TesseraError::new_err(format!("no block named '{name}'")))
+            .ok_or_else(|| self.not_a_block(name))
+    }
+
+    /// The `NotABlockError` for a `name` that is not a block: a node (a proper `/`-prefix of a
+    /// block name, such as a partitioned table) or a name nothing answers to.
+    fn not_a_block(&self, name: &str) -> PyErr {
+        let node = format!("{name}/");
+        let under = self
+            .inner
+            .manifest()
+            .blocks
+            .iter()
+            .filter(|b| b.name.as_str().starts_with(&node))
+            .count();
+        NotABlockError::new_err(if under > 0 {
+            format!(
+                "'{name}' is not a block: it is a node over {under} block(s) under '{node}' (a \
+                 partitioned table reads by its name through table() / column(), one block by its \
+                 full name)"
+            )
+        } else {
+            format!("'{name}' is not a block: no block named '{name}'")
+        })
     }
 
     fn array_spec(&self, name: &str) -> PyResult<ArraySpec> {
@@ -247,7 +408,27 @@ impl Builder {
     /// ladder plus bool. Sub-16-bit codes (`i1/u1/b1/f2`) are stored **widened** to a
     /// pcodec-native width (free in output size) and read back at their original dtype —
     /// transparent to callers. For string data use a **table** block ([`add_table`]).
-    fn add_array(&mut self, name: &str, code: &str, shape: Vec<u64>, data: &[u8]) -> PyResult<()> {
+    ///
+    /// `codec` selects the array codec, matching the Rust API (`tessera_io::array`):
+    ///
+    /// - `"pcodec"` (default) — the settled imaging-volume codec. On real CT/PET it compresses
+    ///   ~3.8x vs zstd's ~3.3x, and it is what an acquisition-shaped volume wants.
+    /// - `"zstd"` — Zarr v3 `bytes` + `zstd`. Wins on data with long byte-level repeats rather
+    ///   than a numeric distribution: synthetic ramps, masks, packed bitfields.
+    /// - `"auto"` — encode with both and keep the smaller, recording the winner in the manifest.
+    ///   Readers never see `"auto"`; it costs a double encode at write time.
+    ///
+    /// All three are per-chunk codecs, so partial reads ([`Reader::read_array_subset`]) work
+    /// identically whichever was used, and the manifest always records the concrete codec.
+    #[pyo3(signature = (name, code, shape, data, codec="pcodec"))]
+    fn add_array(
+        &mut self,
+        name: &str,
+        code: &str,
+        shape: Vec<u64>,
+        data: &[u8],
+        codec: &str,
+    ) -> PyResult<()> {
         let arr = ArrayData::from_le_bytes(code, data).map_err(err)?;
         let n: u64 = shape.iter().product();
         if arr.len() as u64 != n {
@@ -257,7 +438,9 @@ impl Builder {
             )));
         }
         let mut spec = ArraySpec::new(shape, arr.dtype());
-        spec.codec = "pcodec".into(); // the array backend speaks pcodec (ArraySpec defaults to zstd)
+        // `ArraySpec` defaults to zstd; the array backend's own default is pcodec, and
+        // `array_block` validates the value and rejects anything other than pcodec/zstd/auto.
+        spec.codec = codec.into();
         let (block_ref, payload) =
             tessera_io::array::array_block(name, &spec, &arr).map_err(err)?;
         self.builder()?.add_block_ref(block_ref);
@@ -306,6 +489,9 @@ impl Builder {
             columns: cols,
             rows,
             row_index,
+            partition: None,
+            edition: None,
+            codec_profile: None,
         };
         let (block_ref, payload) =
             tessera_io::table::table_block(name, &spec, &data).map_err(err)?;
@@ -315,21 +501,123 @@ impl Builder {
     }
 
     /// Set a schema metadata field; `value_json` is parsed as JSON.
+    ///
+    /// The value must meet the number rules its field declares in the product's schema (#895),
+    /// checked at `pack`: a field of dtype `int64`/`uint64` takes the integer as a decimal string
+    /// (`set_field("seed", '"42"')`, never `'42'`), and a field with a `minimum`/`maximum` takes a
+    /// number within it (`recon`'s `kvp` is 0–1000). Otherwise `pack` raises `TesseraError` naming
+    /// `metadata.<key>`, the field and the rule, and writes nothing.
     fn set_field(&mut self, key: &str, value_json: &str) -> PyResult<()> {
         let value: serde_json::Value = serde_json::from_str(value_json).map_err(err)?;
         self.builder()?.with_field(key, value);
         Ok(())
     }
 
-    /// Record a provenance edge (`relation`, e.g. `"ingested_from"`, → `reference`).
-    fn add_source(&mut self, relation: &str, reference: &str) -> PyResult<()> {
-        self.builder()?
-            .add_source(tessera_core::provenance::Source::new(relation, reference));
+    /// Record a provenance edge (`relation`, e.g. `"ingested_from"` or `"derived_from"`, →
+    /// `reference`).
+    ///
+    /// `reference` is the parent's lineage handle (a path, a URL, a product `id`). `content_hash`
+    /// **pins the parent's seal** on the edge (SPEC §8) and must be the parent's `manifest_hash`:
+    /// `tessera.open(parent).manifest_hash`. It is what closes the integrity chain, so
+    /// `tessera provenance --require-complete` reports an edge without it as a gap. It is not
+    /// format-checked at write time (neither is the Rust `Source::with_content_hash`); a wrong value
+    /// surfaces when the chain is walked. Omitted, the key is absent from the manifest, so a product
+    /// written without it seals exactly as before.
+    #[pyo3(signature = (relation, reference, content_hash=None))]
+    fn add_source(
+        &mut self,
+        relation: &str,
+        reference: &str,
+        content_hash: Option<&str>,
+    ) -> PyResult<()> {
+        let mut source = tessera_core::provenance::Source::new(relation, reference);
+        if let Some(hash) = content_hash {
+            source = source.with_content_hash(hash);
+        }
+        self.builder()?.add_source(source);
+        Ok(())
+    }
+
+    /// Declare the tool that **generated** this product (ADR-0058 §1): your DAQ, simulation, recon
+    /// or pipeline, not the packager. Sealed into `manifest_hash`, so it is tamper-evident and part
+    /// of the product's identity. Read it back as `manifest()["producer"]`, a dict with `tool` and
+    /// `version` plus whichever of `git_commit` / `git_repo` / `dirty` were given (an omitted one is
+    /// absent, not `None`).
+    ///
+    /// Without this call the product is stamped `{"tool": "tessera", "version": <format version>}`,
+    /// which names the packager. Calling it again replaces the earlier producer.
+    #[pyo3(signature = (tool, version, git_commit=None, git_repo=None, dirty=None))]
+    fn with_producer(
+        &mut self,
+        tool: &str,
+        version: &str,
+        git_commit: Option<&str>,
+        git_repo: Option<&str>,
+        dirty: Option<bool>,
+    ) -> PyResult<()> {
+        let builder = self.builder()?;
+        let mut producer = tessera_core::provenance::Producer::new(tool, version);
+        producer.git_commit = git_commit.map(str::to_string);
+        producer.git_repo = git_repo.map(str::to_string);
+        producer.dirty = dirty;
+        builder.with_producer(producer);
+        Ok(())
+    }
+
+    /// Record **how** this product was made (ADR-0058 §2): the generator's recipe, sealed into
+    /// `manifest_hash`. Read it back as `manifest()["generation"]`.
+    ///
+    /// - `config` is a dict of settings (`{"energy_window_keV": [425, 650], "agent": {...}}`). Its keys
+    ///   are yours: tessera never interprets them. Keys must be `str` at every level, and values must
+    ///   be JSON: `str`, `int` (64-bit), finite `float`, `bool`, `None`, `list`/`tuple` and `dict`.
+    ///   Anything else raises `TypeError` naming the offending key, rather than being coerced
+    ///   (`json.dumps` would turn `{1: ...}` into `{"1": ...}` without telling you). That includes a
+    ///   `str` holding a lone surrogate (`"\ud800"`), which has no UTF-8 form. A container that
+    ///   contains itself raises `ValueError`, as `json.dumps` does.
+    /// - `config` may nest at most **125 levels** (dicts and lists alike, counting `config` itself),
+    ///   the most the manifest reader parses back. Deeper raises `TesseraError` naming the limit
+    ///   instead of sealing a product that can't be opened. The limit is fixed, so raising
+    ///   `sys.getrecursionlimit()` doesn't move it.
+    /// - Read back through `manifest()`, every level of `config` is key-sorted (the canonical order
+    ///   the seal hashes), whatever order you wrote it in.
+    /// - `config_ref` is a `blake3:` digest of a config block carried in the same `.tsra`. It is not
+    ///   checked at seal; `tessera inspect --resolve-config` reports a reference that names no carried
+    ///   block. The Python `Builder` cannot yet carry the Blob block such a reference points at
+    ///   (#575), so from Python prefer `config`.
+    ///
+    /// Pass either or both. With neither, or with an empty `config` and no `config_ref`, this raises
+    /// `TesseraError`: an empty recipe counts as *absent* (`Generation::is_empty`), so sealing one
+    /// would let you believe a recipe was recorded when none was, and a schema with
+    /// `requires_generation` would still reject the product. Calling it again replaces the earlier
+    /// recipe.
+    #[pyo3(signature = (config=None, config_ref=None))]
+    fn with_generation(
+        &mut self,
+        config: Option<&Bound<'_, PyDict>>,
+        config_ref: Option<&str>,
+    ) -> PyResult<()> {
+        let builder = self.builder()?;
+        let mut generation = tessera_core::provenance::Generation::default();
+        if let Some(config) = config {
+            generation.config = config_to_json(config)?;
+        }
+        if let Some(digest) = config_ref {
+            generation = generation.with_config_ref(digest);
+        }
+        if generation.is_empty() {
+            return Err(TesseraError::new_err(
+                "with_generation needs a recipe: a non-empty `config` and/or a `config_ref` \
+                 (an empty generation record counts as absent, ADR-0058 §2)",
+            ));
+        }
+        builder.with_generation(generation);
         Ok(())
     }
 
     /// Seal (compute the three hashes) and write the sealed `.tsra` to `path`. Returns the content
-    /// `id`. Consumes the builder — a second call raises `TesseraError`.
+    /// `id`. Consumes the builder — a second call raises `TesseraError`. So does a product whose
+    /// blocks don't have unique names (two `add_array("volume", …)`: block names are unique within
+    /// a product, ADR-0063), before anything is written.
     fn pack(&mut self, path: PathBuf) -> PyResult<String> {
         let builder = self
             .inner
@@ -346,6 +634,301 @@ impl Builder {
         self.inner
             .as_mut()
             .ok_or_else(|| TesseraError::new_err("builder already packed"))
+    }
+}
+
+/// Why a number can't go into a sealed JSON document (SPEC §1, #886), and what to do instead: the
+/// same rule and advice as [`tessera_core::Error::InexactInteger`], for a value not yet in JSON.
+fn inexact(kind: &str, repr: &str) -> String {
+    format!(
+        "{kind} {repr} exceeds ±(2^53−1) (I-JSON, RFC 7493 §2.2): a sealed JSON number is an \
+         IEEE-754 double, which can't hold this integer exactly; write it as a string"
+    )
+}
+
+/// `"an"` before a vowel, for error messages that name a Python type (`an int`, `a set`).
+fn article(word: &str) -> &'static str {
+    if word.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    }
+}
+
+/// A `str` key or value at `path`, as UTF-8. A Python `str` can hold a lone surrogate
+/// (`"\ud800"`), which has no UTF-8 and so no JSON form; that is the caller's bad input, raised as
+/// the same `TypeError` as every other non-JSON value instead of a `UnicodeEncodeError`.
+fn json_str(s: &Bound<'_, PyAny>, path: &str, what: &str) -> PyResult<String> {
+    s.extract::<String>().map_err(|e| {
+        if e.is_instance_of::<PyUnicodeEncodeError>(s.py()) {
+            let repr = s.repr().map(|r| r.to_string()).unwrap_or_default();
+            PyTypeError::new_err(format!(
+                "generation {}: {what} {repr} contains a lone surrogate, which has no UTF-8 \
+                 (so no JSON) form",
+                shown(path)
+            ))
+        } else {
+            e
+        }
+    })
+}
+
+/// A dict key inside the generation `config` at `path`, which must be a `str`: JSON object keys are
+/// strings, and coercing `1` to `"1"` would seal a different key than the caller wrote.
+fn json_key(key: &Bound<'_, PyAny>, path: &str) -> PyResult<String> {
+    if !key.is_instance_of::<PyString>() {
+        let ty = key.get_type().name()?.to_string();
+        return Err(PyTypeError::new_err(format!(
+            "generation {}: key {} is {} {ty}, not a str",
+            shown(path),
+            key.repr()?,
+            article(&ty),
+        )));
+    }
+    json_str(key, path, "key")
+}
+
+/// The deepest JSON nesting the manifest reader parses back: serde_json's deserializer stops at its
+/// recursion limit of 128, which admits 127 nested levels.
+const READER_MAX_JSON_DEPTH: usize = 127;
+
+/// The deepest `generation.config` accepted, counting the config dict itself as 1. The config sits
+/// two levels below the manifest root (`manifest` → `generation`), so this is exactly what the
+/// reader can open: `tests/provenance.py` pins it by sealing and reopening a config at this depth
+/// and refusing one level more.
+const MAX_CONFIG_DEPTH: usize = READER_MAX_JSON_DEPTH - 2;
+
+/// Convert a generation `config` dict to JSON. Strict: only types with an exact JSON equivalent
+/// are accepted, so what is sealed is what the caller wrote. Dict keys are emitted sorted at every
+/// level, so a reader sees the canonical (JCS) order the seal hashes, not the caller's insertion
+/// order.
+///
+/// Nesting is capped at [`MAX_CONFIG_DEPTH`], a fixed bound rather than `sys.getrecursionlimit()`:
+/// past it the product would seal but not open, and the converted value is later dropped and
+/// serialised recursively in Rust, so an unbounded depth would overflow the native stack there.
+/// The walk itself is iterative, with an explicit stack on the heap, and a container that contains
+/// itself raises `ValueError`, as `json.dumps` does.
+fn config_to_json(config: &Bound<'_, PyDict>) -> PyResult<BTreeMap<String, serde_json::Value>> {
+    let mut walk = JsonWalk {
+        // The config dict itself is depth 1 and an ancestor of everything in it.
+        ancestors: HashSet::from([config.as_ptr() as usize]),
+    };
+    let mut out = BTreeMap::new();
+    for (key, value) in config.iter() {
+        let key = json_key(&key, "config")?;
+        let path = format!("config[{key:?}]");
+        out.insert(key, walk.convert(&value, path)?);
+    }
+    Ok(out)
+}
+
+/// `path` as shown in an error message: past 160 bytes the middle is elided, so a deep nesting
+/// can't produce a message the size of the config itself.
+fn shown(path: &str) -> std::borrow::Cow<'_, str> {
+    const HEAD: usize = 48;
+    const TAIL: usize = 96;
+    if path.len() <= 160 {
+        return std::borrow::Cow::Borrowed(path);
+    }
+    let head = (0..=HEAD)
+        .rev()
+        .find(|&i| path.is_char_boundary(i))
+        .unwrap_or(0);
+    let tail = (path.len() - TAIL..path.len())
+        .find(|&i| path.is_char_boundary(i))
+        .unwrap_or(path.len());
+    std::borrow::Cow::Owned(format!("{}…{}", &path[..head], &path[tail..]))
+}
+
+/// The state of one [`config_to_json`] walk.
+struct JsonWalk {
+    /// The containers open on the current path (by object identity). Meeting one again is a cycle.
+    /// Only ancestors count, so one object referenced twice (a DAG) converts twice, like
+    /// `json.dumps`.
+    ancestors: HashSet<usize>,
+}
+
+/// A converted value, or a container whose children still have to be converted.
+enum Step<'py> {
+    Leaf(serde_json::Value),
+    Open(OpenContainer<'py>),
+}
+
+/// A dict or list being converted: the explicit stack frame of [`JsonWalk::convert`].
+struct OpenContainer<'py> {
+    id: usize,
+    path: String,
+    /// The children still to convert: `(Some(key), value)` for a dict, `(None, item)` for a list.
+    children: std::vec::IntoIter<(Option<String>, Bound<'py, PyAny>)>,
+    /// The next list index (for error paths).
+    index: usize,
+    /// The key of the dict child being converted.
+    key: String,
+    out: Collected,
+}
+
+enum Collected {
+    Object(serde_json::Map<String, serde_json::Value>),
+    Array(Vec<serde_json::Value>),
+}
+
+impl<'py> OpenContainer<'py> {
+    /// The next child and its path, remembering its key for [`Self::attach`].
+    fn next_child(&mut self) -> Option<(Bound<'py, PyAny>, String)> {
+        let (key, child) = self.children.next()?;
+        let path = match key {
+            Some(key) => {
+                let path = format!("{}[{key:?}]", self.path);
+                self.key = key;
+                path
+            }
+            None => {
+                self.index += 1;
+                format!("{}[{}]", self.path, self.index - 1)
+            }
+        };
+        Some((child, path))
+    }
+
+    /// Store the converted value of the child [`Self::next_child`] last returned.
+    fn attach(&mut self, value: serde_json::Value) {
+        match &mut self.out {
+            Collected::Object(map) => {
+                map.insert(std::mem::take(&mut self.key), value);
+            }
+            Collected::Array(items) => items.push(value),
+        }
+    }
+
+    fn finish(self) -> serde_json::Value {
+        match self.out {
+            Collected::Object(map) => serde_json::Value::Object(map),
+            Collected::Array(items) => serde_json::Value::Array(items),
+        }
+    }
+}
+
+impl JsonWalk {
+    /// Convert `root` (at `path`, depth 2: a value inside the config dict) without recursing.
+    fn convert(&mut self, root: &Bound<'_, PyAny>, path: String) -> PyResult<serde_json::Value> {
+        let mut top = match self.step(root, path, 2)? {
+            Step::Leaf(value) => return Ok(value),
+            Step::Open(open) => open,
+        };
+        // `top` is the container being filled; `stack` holds its open ancestors.
+        let mut stack: Vec<OpenContainer<'_>> = Vec::new();
+        loop {
+            match top.next_child() {
+                Some((child, path)) => match self.step(&child, path, stack.len() + 3)? {
+                    Step::Leaf(value) => top.attach(value),
+                    Step::Open(open) => stack.push(std::mem::replace(&mut top, open)),
+                },
+                None => {
+                    self.ancestors.remove(&top.id);
+                    let value = top.finish();
+                    match stack.pop() {
+                        Some(parent) => {
+                            top = parent;
+                            top.attach(value);
+                        }
+                        None => return Ok(value),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Convert a scalar at `path`, or open a container at nesting `depth`.
+    fn step<'py>(
+        &mut self,
+        value: &Bound<'py, PyAny>,
+        path: String,
+        depth: usize,
+    ) -> PyResult<Step<'py>> {
+        use serde_json::Value;
+        let bad = |why: String| PyTypeError::new_err(format!("generation {}: {why}", shown(&path)));
+        // `bool` first: in Python it is a subclass of `int`.
+        let leaf = if value.is_none() {
+            Value::Null
+        } else if value.is_instance_of::<PyBool>() {
+            Value::Bool(value.extract()?)
+        } else if value.is_instance_of::<PyInt>() {
+            // An int beyond 64 bits is beyond ±(2^53−1) too: one refusal, with the same fix.
+            let n = (value.extract::<i64>().map(Value::from))
+                .or_else(|_| value.extract::<u64>().map(Value::from));
+            match n {
+                Ok(n) if tessera_core::canonical::check_i_json(&n).is_ok() => n,
+                _ => return Err(bad(inexact("int", &value.repr()?.to_string()))),
+            }
+        } else if value.is_instance_of::<PyFloat>() {
+            let f: f64 = value.extract()?;
+            let n = serde_json::Number::from_f64(f);
+            let n =
+                Value::Number(n.ok_or_else(|| {
+                    bad(format!("float {f} is not finite, and JSON has no NaN/inf"))
+                })?);
+            if tessera_core::canonical::check_i_json(&n).is_err() {
+                return Err(bad(inexact("float", &value.repr()?.to_string())));
+            }
+            n
+        } else if value.is_instance_of::<PyString>() {
+            Value::String(json_str(value, &path, "str")?)
+        } else if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {
+            let items = value.try_iter()?.map(|item| item.map(|item| (None, item)));
+            let children = items.collect::<PyResult<Vec<_>>>()?;
+            return self.open(value, path, depth, children, Collected::Array(Vec::new()));
+        } else if let Ok(dict) = value.cast::<PyDict>() {
+            let mut children = Vec::with_capacity(dict.len());
+            for (key, item) in dict.iter() {
+                children.push((Some(json_key(&key, &path)?), item));
+            }
+            // Canonical order at every level, as the top-level `BTreeMap` already is.
+            children.sort_by(|(a, _), (b, _)| a.cmp(b));
+            let out = Collected::Object(serde_json::Map::new());
+            return self.open(value, path, depth, children, out);
+        } else {
+            let ty = value.get_type().name()?.to_string();
+            return Err(bad(format!(
+                "{} {ty} is not a JSON value (use str, int, float, bool, None, list or dict)",
+                article(&ty),
+            )));
+        };
+        Ok(Step::Leaf(leaf))
+    }
+
+    /// Open the container `value` at `path` and nesting `depth`, refusing a cycle or a nesting
+    /// past the limit.
+    fn open<'py>(
+        &mut self,
+        value: &Bound<'py, PyAny>,
+        path: String,
+        depth: usize,
+        children: Vec<(Option<String>, Bound<'py, PyAny>)>,
+        out: Collected,
+    ) -> PyResult<Step<'py>> {
+        if depth > MAX_CONFIG_DEPTH {
+            return Err(TesseraError::new_err(format!(
+                "generation {}: config nests deeper than {MAX_CONFIG_DEPTH} levels, the most a \
+                 tessera reader can parse back; a deeper one would seal into a product that can't \
+                 be opened",
+                shown(&path)
+            )));
+        }
+        let id = value.as_ptr() as usize;
+        if !self.ancestors.insert(id) {
+            return Err(PyValueError::new_err(format!(
+                "generation {}: circular reference (a container that contains itself)",
+                shown(&path)
+            )));
+        }
+        Ok(Step::Open(OpenContainer {
+            id,
+            path,
+            children: children.into_iter(),
+            index: 0,
+            key: String::new(),
+            out,
+        }))
     }
 }
 
@@ -367,6 +950,7 @@ fn verify(path: PathBuf) -> PyResult<()> {
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("TesseraError", m.py().get_type::<TesseraError>())?;
+    m.add("NotABlockError", m.py().get_type::<NotABlockError>())?;
     m.add_class::<Reader>()?;
     m.add_class::<Builder>()?;
     m.add_function(wrap_pyfunction!(open, m)?)?;

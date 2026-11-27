@@ -1,0 +1,67 @@
+{
+  "product": "gpet-sim:crystal-map",
+  "status": "proposed (#801)",
+  "tables": {
+    "crystals": {
+      "sequence_key": [
+        "crystal_id"
+      ],
+      "keys": [
+        [
+          "crystal_id"
+        ]
+      ],
+      "references": [],
+      "columns": [
+        {
+          "name": "crystal_id",
+          "dtype": "u4",
+          "description": "GDML copy number",
+          "unit": "1"
+        },
+        {
+          "name": "center_x",
+          "dtype": "f8",
+          "description": "Crystal centre, world frame (x)",
+          "unit": "mm"
+        },
+        {
+          "name": "center_y",
+          "dtype": "f8",
+          "description": "Crystal centre, world frame (y)",
+          "unit": "mm"
+        },
+        {
+          "name": "center_z",
+          "dtype": "f8",
+          "description": "Crystal centre, world frame (z)",
+          "unit": "mm"
+        },
+        {
+          "name": "dir_x",
+          "dtype": "f8",
+          "description": "Crystal radial direction (unit vector) (x)",
+          "unit": "1"
+        },
+        {
+          "name": "dir_y",
+          "dtype": "f8",
+          "description": "Crystal radial direction (unit vector) (y)",
+          "unit": "1"
+        },
+        {
+          "name": "dir_z",
+          "dtype": "f8",
+          "description": "Crystal radial direction (unit vector) (z)",
+          "unit": "1"
+        },
+        {
+          "name": "volume_name",
+          "dtype": "str",
+          "description": "GDML physical-volume name",
+          "unit": "1"
+        }
+      ]
+    }
+  }
+}
