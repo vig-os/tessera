@@ -6,8 +6,10 @@
 //! re-running the ingest — the collection-level analogue of `tessera inspect` / `verify`.
 //!
 //! Members are referenced by their content-addressed `id`; on disk a **product** member is
-//! `<dir>/<reference>.tsra` and a **sub-collection** member is `<dir>/<reference>.collection.json`
-//! with `<dir>/<reference>.collection.seal` (resolved by `kind`, ADR-0049 §4). `ls` opens each member to show its human `name` (the child
+//! `<dir>/<file_name(reference)>.tsra` and a **sub-collection** member is
+//! `<dir>/<file_name(reference)>.collection.json` with `<dir>/<file_name(reference)>.collection.seal`.
+//! The stem is encoded by [`tessera_core::names::file_name`] (resolved by `kind`, ADR-0049 §4).
+//! `ls` opens each member to show its human `name` (the child
 //! collection's name for a sub-collection); `verify` **recurses** into sub-collection members,
 //! checking each descendant's seal + pinned version transitively (ADR-0049 §3).
 
@@ -266,7 +268,8 @@ fn verify_collection(
 /// the catalog under the declared `--schema` (validating its `member_rule`), and writes a
 /// self-contained collection directory: `<out>/collection.json` + `<out>/collection.seal` + each
 /// member hard-linked (or copied)
-/// as `<out>/<id>.tsra`, so `collection verify` resolves + checks it in place. The collection's
+/// as `<out>/<file_name(id)>.tsra` (encoded by [`tessera_core::names::file_name`]), so
+/// `collection verify` resolves + checks it in place. The collection's
 /// timestamp defaults to the latest member's (deterministic) unless `--timestamp` is given.
 #[allow(clippy::too_many_arguments)]
 pub fn new(
@@ -351,7 +354,8 @@ mod tests {
     use tessera_core::ProductBuilder;
     use tessera_io::{array::ArrayData, pack};
 
-    /// Build a 2-member collection on disk (`collection.json` + two `<id>.tsra`) and return its dir.
+    /// Build a 2-member collection on disk (`collection.json` + two encoded member files) and return its dir.
+    /// Member paths use `<file_name(id)>.tsra` via [`tessera_core::names::file_name`].
     fn build_collection(dir: &Path) -> (Collection, Vec<String>) {
         let mut ids = Vec::new();
         let mut cb = CollectionBuilder::new("study", "a CT+PET study", "2024-01-01T00:00:00Z");
@@ -530,7 +534,8 @@ mod tests {
         assert!(verify(&cf, &mut Vec::new()).is_err());
     }
 
-    /// Build a child collection on disk written as `<id>.collection.json` (+ its member `.tsra`s).
+    /// Build a child collection on disk written as `<file_name(id)>.collection.json` (+ its member `.tsra`s).
+    /// The stem is encoded by [`tessera_core::names::file_name`].
     fn build_child_collection(dir: &Path, name: &str) -> Collection {
         let mut cb = CollectionBuilder::new(name, "a child dataset", "2024-01-01T00:00:00Z");
         for pname in ["ct", "pt"] {
@@ -662,7 +667,8 @@ mod tests {
     }
 
     /// `collection new` (#304 Part 1): assemble a `dataset` from two pre-sealed `.tsra` products →
-    /// a self-contained dir (`collection.json` + `<id>.tsra` members) that `verify` passes, and
+    /// a self-contained dir (`collection.json` + `<file_name(id)>.tsra` members) that `verify` passes, and
+    /// member stems use [`tessera_core::names::file_name`];
     /// `inspect` shows the declared schema.
     #[test]
     fn collection_new_assembles_from_presealed_tsra() {

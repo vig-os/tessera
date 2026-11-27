@@ -872,7 +872,8 @@ enum CollectionAction {
         /// A pre-sealed `.tsra` product member (repeatable).
         #[arg(long = "member", required = true)]
         members: Vec<PathBuf>,
-        /// Output directory: writes `collection.json` + each member as `<id>.tsra`.
+        /// Output directory: writes `collection.json` + each member as `<file_name(id)>.tsra`.
+        /// Member stems are encoded by [`tessera_core::names::file_name`].
         #[arg(short, long)]
         out: PathBuf,
         /// Collection name.
@@ -2311,7 +2312,8 @@ fn do_sql(
 }
 
 /// Build a 1-product [`ingest_spec::IngestSpec`] from a per-format CLI subcommand + run it through
-/// the engine. The engine writes the sealed `.tsra` to `<spec_out>/<id>.tsra`; we then rename it
+/// the engine. The engine writes the sealed `.tsra` to `<spec_out>/<file_name(id)>.tsra`,
+/// using [`tessera_core::names::file_name`] to encode the stem; we then rename it
 /// to the user-supplied `out` path (single-product subcommands speak in file paths, not directories).
 /// This is the "net code delete" the per-format paths now share with the spec-driven path —
 /// dispatch logic lives in one place (`engine::dispatch`), not duplicated here.
