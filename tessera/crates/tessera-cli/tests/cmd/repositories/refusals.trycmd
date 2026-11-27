@@ -45,6 +45,10 @@ $ tessera collection commit repo no-token/collection.json
 ? 5
 error: [..]a forked_from collection requires a caller-supplied fork token in id_inputs; [..]
 
+$ tessera collection commit repo blank-token/collection.json
+? 5
+error: [..]a forked_from collection requires a caller-supplied fork token in id_inputs; [..]
+
 $ tessera collection commit repo main/collection.json
 committed collection @MAIN@
   version @M@

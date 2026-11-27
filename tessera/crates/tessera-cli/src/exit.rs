@@ -140,10 +140,6 @@ mod tests {
     fn stable_error_code_table() {
         let path = || std::path::PathBuf::from("repo/refs/pins/a%3ab");
         let source = || Box::new(Error::Invalid("unreadable".into()));
-        const FORK_TOKEN: &str = concat!(
-            "a forked_from collection requires a caller-supplied fork token in id_inputs; ",
-            "missing, empty, or whitespace-only tokens are invalid"
-        );
         macro_rules! cases {
             ($($expected:literal => $error:expr),+ $(,)?) => { $( {
                 let error = $error;
@@ -166,7 +162,8 @@ mod tests {
             5 => Error::MissingMember { path: "members[0]".into(), source: source() },
             5 => Error::MissingMember { path: "members[1]".into(),
                 source: Box::new(Error::Integrity { what: "seal", expected: "a".into(), actual: "b".into() }) },
-            5 => Error::Invalid(FORK_TOKEN.into()),
+            5 => Error::MissingForkToken,
+            5 => Error::UnstoredLineageTarget { name: "lineage".into(), address: "a".into() },
             5 => Error::LineageIdMismatch { lineage: "x".into(), expected: "a".into(), found: "b".into() },
             5 => Error::SupersedesMismatch { lineage: "x".into(), expected: "a".into(), found: vec![] },
             5 => Error::InvalidRefName { namespace: "pins".into(), name: "".into(), reason: "empty".into() },
@@ -193,7 +190,9 @@ mod tests {
                 Source::new("forked_from", "parent")
                     .with_content_hash(tessera_core::hash::digest(b"external predecessor")),
             );
-            assert_eq!(code(&builder.seal().unwrap_err()), 5);
+            let error = builder.seal().unwrap_err();
+            assert!(matches!(error, Error::MissingForkToken));
+            assert_eq!(code(&error), 5);
         }
         assert_eq!(code(&Error::Invalid("other invalid input".into())), 1);
     }

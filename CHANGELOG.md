@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking Rust API:** unstored lineage targets now return `UnstoredLineageTarget`, and missing,
+  empty or whitespace-only collection fork tokens return `MissingForkToken`, instead of `Invalid` (#1040).
+  Both are rule refusals (CLI exit 5); callers matching these errors must use the typed variants.
+
 ### Removed
 
 ### Fixed

@@ -178,6 +178,20 @@ fn repository_walkthroughs() {
             tessera_core::hash::digest(&bytes),
         )
         .unwrap();
+        // Whitespace-only tokens have the same typed refusal as an absent token.
+        v["id_inputs"]["fork"] = " \t".into();
+        let mut blank = fork.clone();
+        blank.id_inputs.insert("fork".into(), " \t".into());
+        v["id"] = blank.recompute_id().unwrap().into();
+        let bytes = tessera_core::canonical::to_bytes(&v).unwrap();
+        let bad = input.join("blank-token");
+        std::fs::create_dir(&bad).unwrap();
+        std::fs::write(bad.join("collection.json"), &bytes).unwrap();
+        std::fs::write(
+            bad.join("collection.seal"),
+            tessera_core::hash::digest(&bytes),
+        )
+        .unwrap();
         let mut text =
             std::fs::read_to_string(format!("tests/cmd/repositories/{name}.trycmd")).unwrap();
         for (key, value) in &vars {

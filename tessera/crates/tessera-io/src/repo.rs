@@ -613,6 +613,7 @@ impl Repository {
     /// address of a stored, readable product or collection. The kind is inferred from the
     /// object bytes; bare blocks and ambiguous objects are refused before the ref is written.
     /// An existing lineage keeps its recorded kind: a change is [`Error::LineageKindMismatch`].
+    /// An unstored target is [`Error::UnstoredLineageTarget`].
     /// The ref is written durably (see the module docs).
     ///
     /// A low-level primitive: [`commit`](Self::commit) is the one atomic path from a manifest to a
@@ -635,9 +636,10 @@ impl Repository {
     ) -> Result<()> {
         tessera_core::stored::parse_seal(new.as_bytes(), "the new ref")?;
         if !self.has_object(new) {
-            return Err(Error::Invalid(format!(
-                "ref '{lineage}': {new} is not stored in this repository"
-            )));
+            return Err(Error::UnstoredLineageTarget {
+                name: lineage.into(),
+                address: new.into(),
+            });
         }
         self.check_ref(lineage, expected)?;
         let bytes = self.read_raw(new)?;
@@ -2080,6 +2082,23 @@ mod tests {
         let err = repo.commit(L, None, &m, &[]).unwrap_err();
         assert!(matches!(err, Error::MissingProductBlock { .. }));
         assert_eq!(repo.read_ref(L).unwrap(), None);
+    }
+
+    #[test]
+    fn unstored_lineage_target_is_a_rule_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let absent = tessera_core::hash::digest(b"never stored");
+        let error = repo.set_ref("missing", None, &absent).unwrap_err();
+        assert_eq!(
+            error.failure_class(),
+            tessera_core::error::FailureClass::RuleRefusal
+        );
+        assert!(
+            matches!(error, Error::UnstoredLineageTarget { name, address }
+            if name == "missing" && address == absent)
+        );
+        assert_eq!(repo.read_ref("missing").unwrap(), None);
     }
 
     #[test]
