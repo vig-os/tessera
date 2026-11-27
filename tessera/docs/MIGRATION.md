@@ -19,7 +19,7 @@ cold tier, all joined by `derived_from` provenance edges.
 
 ## The shape (the WHY)
 
-```
+```text
                         ┌──────────────────────────────────────────┐
                         │ collection.json                          │
                         │   study = "STUDY-EXAMPLE-2024-01"        │
@@ -110,21 +110,24 @@ HDF5_DIR=/tmp/hdf5root cargo build -p tessera-cli --release
 
 You get:
 
-```
+```text
 /home/larsgerchow/Data/HDD/tsra/<STUDY-ID>/
   collection.json            # sealed MMR catalog (cohort root)
-  blake3_<id1>.tsra          # vendor-raw (cold tier blob)
-  blake3_<id2>.tsra          # recon-ct (hot tier)
-  blake3_<id3>.tsra          # recon-pt (hot tier)
+  blake3%3a<id1>.tsra          # vendor-raw (cold tier blob)
+  blake3%3a<id2>.tsra          # recon-ct (hot tier)
+  blake3%3a<id3>.tsra          # recon-pt (hot tier)
 ```
+
+Member stems use the shared `tessera_core::names::file_name` encoder: `blake3:<id>` becomes `blake3%3a<id>`.
+Older underscore-named collection directories are unsupported; recreate them from source products.
 
 Verify + inspect:
 
 ```bash
-tessera verify <out>/blake3_<id>.tsra      # re-hashes every block
-tessera schema <out>/blake3_<id>.tsra      # checks the product's schema contract
-tessera tree   <out>/blake3_<id>.tsra      # human-readable hierarchy
-tessera inspect <out>/blake3_<id>.tsra     # one-line summary
+tessera verify <out>/blake3%3a<id>.tsra      # re-hashes every block
+tessera schema <out>/blake3%3a<id>.tsra      # checks the product's schema contract
+tessera tree   <out>/blake3%3a<id>.tsra      # human-readable hierarchy
+tessera inspect <out>/blake3%3a<id>.tsra     # one-line summary
 ```
 
 ---
@@ -156,11 +159,11 @@ cluster / cloud read path can scan it cohort-aware:
 ```bash
 # Per-product OCI push (with the `cloud` feature):
 cargo build -p tessera-cli --release --features cloud
-./target/release/tessera push <out>/blake3_<id>.tsra <registry>/<repo>:<tag>
+./target/release/tessera push <out>/blake3%3a<id>.tsra <registry>/<repo>:<tag>
 
-# Reading is symmetric (any feature-built tessera, on any host):
-./target/release/tessera inspect s3://<bucket>/<study>/<id>.tsra
-./target/release/tessera verify  https://<host>/<bucket>/<study>/<id>.tsra
+# Reading uses the same tessera_core::names::file_name stem (any feature-built tessera):
+./target/release/tessera inspect s3://<bucket>/<study>/blake3%3a<id>.tsra
+./target/release/tessera verify  https://<host>/<bucket>/<study>/blake3%3a<id>.tsra
 ```
 
 The cohort prune-before-fetch path lives in `tessera_io::cloud::ObjectStoreReader`

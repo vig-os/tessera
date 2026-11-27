@@ -2368,7 +2368,7 @@ fn run_ingest(src: IngestSrc) -> tessera_core::Result<()> {
         return Ok(());
     }
     // Move the single produced `.tsra` to the user's `out` path. The engine names files by the
-    // shared `member_filename` SSoT (`blake3_<hex>.tsra`); resolve that same name here (#323).
+    // shared `member_filename` SSoT (`blake3%3a<hex>.tsra`); resolve that same name here (#323).
     let member = coll.members.first().ok_or_else(|| {
         tessera_core::Error::Invalid("tessera ingest: engine produced no member".into())
     })?;

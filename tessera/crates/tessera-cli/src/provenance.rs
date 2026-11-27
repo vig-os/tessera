@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use tessera_core::collection::{member_filename, MemberKind};
+use tessera_core::collection::MemberKind;
 use tessera_core::provenance::{is_version_pointer, walk, EdgeOutcome, Resolver, Step, Visit};
 use tessera_core::{Error, Manifest, Result};
 use tessera_io::Reader;
@@ -216,7 +216,11 @@ pub fn discover(
         let base = cj.parent().unwrap_or(Path::new("."));
         for m in &c.members {
             if m.kind == MemberKind::Product {
-                r.add_path(&base.join(member_filename(&m.reference, m.kind)));
+                r.add_path(&tessera_io::collection::member_path(
+                    base,
+                    &m.reference,
+                    m.kind,
+                )?);
             }
         }
     }

@@ -158,7 +158,10 @@ modality = {{ _vocabulary = "DICOM", _code = "CT" }}
     // ── Every member: verify (re-hash blocks) + schema (validate the product contract) ─
     let mut by_id_path = std::collections::BTreeMap::<String, std::path::PathBuf>::new();
     for m in &coll.members {
-        let p = out.join(format!("{}.tsra", m.reference.replace([':', '/'], "_")));
+        let p = out.join(tessera_core::collection::member_filename(
+            &m.reference,
+            tessera_core::collection::MemberKind::Product,
+        ));
         assert!(p.exists(), "missing sealed product: {}", p.display());
         ok(tessera().args(["verify", p.to_str().unwrap()]));
         ok(tessera().args(["schema", p.to_str().unwrap()]));

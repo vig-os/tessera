@@ -20,6 +20,7 @@ pub(crate) mod field_path;
 pub mod hash;
 pub mod identity;
 pub mod manifest;
+pub mod names;
 pub mod object_kind;
 pub mod product;
 pub mod provenance;

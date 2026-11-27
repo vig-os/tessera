@@ -131,14 +131,7 @@ pub fn ref_file_name(namespace: RefNamespace, lineage: &str) -> Result<String> {
     if lineage.is_empty() {
         return Err(invalid("it is empty".into()));
     }
-    let mut name = String::with_capacity(lineage.len());
-    for &b in lineage.as_bytes() {
-        if b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_' {
-            name.push(char::from(b));
-        } else {
-            name.push_str(&format!("%{b:02x}"));
-        }
-    }
+    let name = crate::names::file_name(lineage);
     if name.len() > MAX_LINEAGE_FILE_NAME {
         return Err(invalid(format!(
             "its ref file name is {} bytes, more than the {MAX_LINEAGE_FILE_NAME} a ref and its \
@@ -1864,6 +1857,24 @@ mod tests {
         assert!(repo.forget("a:b").unwrap());
         assert_eq!(repo.read_ref("a:b").unwrap(), None);
         assert_eq!(repo.read_ref("a_b").unwrap().as_ref(), Some(&tips[1]));
+    }
+
+    #[test]
+    fn lineage_names_match_shared_encoder_and_original_outputs() {
+        for (input, expected) in [
+            ("a:b", "a%3ab"),
+            ("a_b", "a_b"),
+            ("Ab", "%41b"),
+            ("ab", "ab"),
+            ("blake3:abc", "blake3%3aabc"),
+            ("é/%", "%c3%a9%2f%25"),
+        ] {
+            assert_eq!(lineage_file_name(input).unwrap(), expected);
+            assert_eq!(
+                lineage_file_name(input).unwrap(),
+                crate::names::file_name(input)
+            );
+        }
     }
 
     #[test]

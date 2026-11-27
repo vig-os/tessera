@@ -140,8 +140,8 @@ mod tests {
     fn seal_names_follow_the_document_name() {
         assert_eq!(seal_name_for("manifest.json").unwrap(), "manifest.seal");
         assert_eq!(
-            seal_name_for("blake3_ab.collection.json").unwrap(),
-            "blake3_ab.collection.seal"
+            seal_name_for("blake3%3aab.collection.json").unwrap(),
+            "blake3%3aab.collection.seal"
         );
         assert_eq!(seal_name_for("manifest"), None);
     }
@@ -197,7 +197,7 @@ mod tests {
         let jcs = br#"{"tessera_version":"0.0.0"}"#;
         for (document, seal) in [
             (MANIFEST_MEMBER, "manifest.seal"),
-            ("blake3_ab.collection.json", "blake3_ab.collection.seal"),
+            ("blake3%3aab.collection.json", "blake3%3aab.collection.seal"),
         ] {
             let msg = require_seal(document, jcs, None).unwrap_err().to_string();
             assert!(msg.contains(&format!("there is no `{seal}`")), "{msg}");
@@ -207,9 +207,9 @@ mod tests {
                 assert!(!msg.contains(absent), "{absent:?} in: {msg}");
             }
         }
-        let e = require_seal("blake3_ab.collection.json", jcs, Some(b"x")).unwrap_err();
+        let e = require_seal("blake3%3aab.collection.json", jcs, Some(b"x")).unwrap_err();
         assert!(
-            matches!(&e, crate::Error::MalformedSeal { member, .. } if member == "blake3_ab.collection.seal"),
+            matches!(&e, crate::Error::MalformedSeal { member, .. } if member == "blake3%3aab.collection.seal"),
             "{e:?}"
         );
         assert!(matches!(

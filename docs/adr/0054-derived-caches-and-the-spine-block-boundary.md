@@ -116,7 +116,8 @@ table**, *not* as object tags.
   products(id, manifest_hash, schema, <schema-projected fields…>) -- rows, from aux/metadata.arrow
   ```
 
-- **S3 is just addressing**: `s3://bucket/<id>.tsra`, `s3://bucket/<id>.collection.json`. The RDM
+- **S3 is just addressing**: `s3://bucket/<file_name(id)>.tsra`, `s3://bucket/<file_name(id)>.collection.json`.
+  Stems use `tessera_core::names::file_name` (#994), e.g. `blake3:ab` → `blake3%3aab`. The RDM
   builds the catalog (a Decision-2 cache keyed on `content_hash`) by reading `collection.json` for
   edges and each `aux/metadata.arrow` for rows. The catalog is **fully rebuildable from the bucket
   alone** — no external DB is ever authoritative.

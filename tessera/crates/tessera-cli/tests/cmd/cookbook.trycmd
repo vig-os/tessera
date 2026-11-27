@@ -37,7 +37,7 @@ extracted data (117 bytes) -> roundtrip.txt
 ```
 $ tessera ingest --spec minimal-spec.toml --out ./study
 ingested collection blake3:2e49fbe123f6acd4e257b338c60c4763d383f83c4eb91282d3c3ef9e45a5c4c0 (1 members) -> ./study
-  - blake3:ae0d02568b647a1725f2fc7cb024265581a4f3c5d62c87f936a90a110140ae1a -> blake3_ae0d02568b647a1725f2fc7cb024265581a4f3c5d62c87f936a90a110140ae1a.tsra
+  - blake3:ae0d02568b647a1725f2fc7cb024265581a4f3c5d62c87f936a90a110140ae1a -> blake3%3aae0d02568b647a1725f2fc7cb024265581a4f3c5d62c87f936a90a110140ae1a.tsra
 
 ```
 
