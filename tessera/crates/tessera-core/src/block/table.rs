@@ -761,8 +761,8 @@ mod contract_difference_tests {
         assert_eq!(ContractValue::Scale(None).to_string(), "absent");
         let referenced = crate::referencing::Referenced::identity(Some("ns".into()));
         assert_eq!(
-            ContractValue::Referencing(Some(referenced.clone())).to_string(),
-            serde_json::to_string(&referenced).unwrap()
+            ContractValue::Referencing(Some(referenced)).to_string(),
+            r#"{"transform":{"kind":"identity"},"unit":"ns"}"#
         );
         assert_eq!(ContractValue::Referencing(None).to_string(), "absent");
         assert_eq!(ContractValue::Unit(Some(String::new())).to_string(), "\"\"");
