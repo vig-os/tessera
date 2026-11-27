@@ -94,6 +94,7 @@
           "/crates/tessera-py/tests/nullable_columns.py" = [ "tessera-py-import" "tessera-wheel-import" ];
           "/crates/tessera-ingest/tests/producer_equality.py" = [ "ingest-producer-equality" ];
           "/crates/tessera-wasm/tests/smoke.cjs" = [ "wasm-bindgen-smoke" ];
+          "/crates/tessera-wasm/tests/corpus_members.py" = [ "wasm-bindgen-smoke" ];
           "/corpus/reference_reader/run.py" = [ "reference-reader" ];
           "/corpus/reference_reader/make_seal_cases.py" = [ "reference-reader" ];
           "/corpus/reference_reader/make_refusal_fixtures.py" = [ "reference-reader" ];
@@ -1251,14 +1252,21 @@
             });
           in
           pkgs.runCommand "wasm-bindgen-smoke"
-            { nativeBuildInputs = [ pkgs.wasm-bindgen-cli pkgs.nodejs ]; } ''
+            { nativeBuildInputs = [ pkgs.wasm-bindgen-cli pkgs.nodejs pkgs.python3 ]; } ''
+            set -o pipefail
             wasm-bindgen --target nodejs --out-dir "$PWD/glue" ${wasmLib}/wasm/tessera_wasm.wasm
+            python3 ${./tessera/crates/tessera-wasm/tests/corpus_members.py} ${./tessera/corpus} corpus-members.json
             node ${./tessera/crates/tessera-wasm/tests/smoke.cjs} "$PWD/glue/tessera_wasm.js" \
-              ${./tessera/corpus/seal-cases.json} | tee out.txt
+              ${./tessera/corpus/seal-cases.json} corpus-members.json | tee out.txt
             # The same vacuous-pass guard as `reference-reader`: N/N with N the file's case count.
             cases=$(node -e 'console.log(require(process.argv[1]).cases.length)' ${./tessera/corpus/seal-cases.json})
             if [ "$cases" -lt 1 ] || ! grep -qx "$cases/$cases seal cases agreed (wasm)" out.txt; then
               echo "wasm-bindgen-smoke: expected '$cases/$cases seal cases agreed (wasm)'" >&2
+              exit 1
+            fi
+            products=$(node -e 'console.log(require(process.argv[1]).length)' ${./tessera/corpus/corpus.json})
+            if [ "$products" -lt 1 ] || ! grep -qx "$products/$products corpus products agreed (wasm)" out.txt; then
+              echo "wasm-bindgen-smoke: expected '$products/$products corpus products agreed (wasm)'" >&2
               exit 1
             fi
             touch $out
@@ -1543,6 +1551,7 @@
                 '';
             in
             pkgs.runCommand "reference-reader" { nativeBuildInputs = [ py ]; } ''
+              set -o pipefail
               cp -r ${./tessera/corpus} corpus
               chmod -R u+w corpus
               want=$(find corpus/files -name '*.tsra' | wc -l)

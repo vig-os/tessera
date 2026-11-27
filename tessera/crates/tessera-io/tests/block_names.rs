@@ -488,7 +488,7 @@ fn every_corpus_and_fixture_name_validates() {
         tessera_core::block::check_leaf_rule(r.manifest().blocks.iter().map(|b| &b.name)).unwrap();
         seen += 1;
     }
-    assert!(seen >= 8, "the corpus has 8 products, read {seen}");
+    assert_eq!(seen, 9, "the nine committed corpus products");
     for f in tessera_io::conformance::fixtures() {
         tessera_core::block::check_leaf_rule(f.manifest.blocks.iter().map(|b| &b.name)).unwrap();
     }

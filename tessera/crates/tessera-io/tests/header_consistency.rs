@@ -679,11 +679,11 @@ fn every_tessera_writer_and_corpus_file_satisfies_the_layout_rule() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 8, "the eight committed corpus vectors");
+    assert_eq!(checked, 9, "the nine committed corpus vectors");
 
     let dir = tempfile::tempdir().unwrap();
     let all = fixtures();
-    assert_eq!(all.len(), 8, "the eight conformance fixtures");
+    assert_eq!(all.len(), 9, "the nine conformance fixtures");
     for f in all {
         let d = dir.path().join(f.name);
         std::fs::create_dir_all(&d).unwrap();

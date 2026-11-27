@@ -17,6 +17,7 @@ from reader import (
     content_root,
     digest,
     jcs_bytes,
+    merkle_root,
     schema_verdict,
     stored_verdict,
     verify_tsra,
@@ -323,6 +324,36 @@ def check_derived_block(goldens: list[dict]) -> int:
     g = next(g for g in goldens if g["name"] == "recon_int16")
     src = os.path.join(FILES_DIR, "recon_int16.tsra")
     misses = 0
+    indexed = next(g for g in goldens if g["name"] == "recon_int16_indexed")
+    indexed_src = os.path.join(FILES_DIR, "recon_int16_indexed.tsra")
+    with zipfile.ZipFile(indexed_src) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        primary = [b for b in manifest["blocks"] if "class" not in b]
+        derived = [b for b in manifest["blocks"] if b.get("class") == "derived"]
+        assert len(primary) == len(derived) == 1
+        assert derived[0]["name"] == "volume.cidx"
+        root = merkle_root([b["digest"] for b in primary])
+        assert root == indexed["content_hash"] == g["content_hash"]
+        assert root != merkle_root([b["digest"] for b in manifest["blocks"]])
+        manifest["blocks"] = primary
+        stored = jcs_bytes(manifest)
+        with tempfile.TemporaryDirectory() as tmp:
+            without = os.path.join(tmp, "without-index.tsra")
+            with zipfile.ZipFile(without, "w", zipfile.ZIP_STORED) as out:
+                for name in archive.namelist():
+                    if name == "blocks/volume.cidx":
+                        continue
+                    value = archive.read(name)
+                    if name == "manifest.json":
+                        value = stored
+                    elif name == "manifest.seal":
+                        value = digest(stored).encode()
+                    out.writestr(name, value)
+            result = verify_tsra(without)
+            assert result.ok, result.notes
+            assert result.computed_content_hash == root
+            assert result.computed_manifest_hash != indexed["manifest_hash"]
+    print("derived: committed indexed archive without sidecar: held")
     with tempfile.TemporaryDirectory() as tmp:
         for case, stored, want_ok in [
             ("derived block added", b"index", True),

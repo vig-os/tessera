@@ -10,6 +10,7 @@ reproduced all 6 corpus goldens on the first attempt; the clarifications it surf
 into `SPEC.md`.
 
 ## What it depends on
+
 Only the container (§6) + canonical hashing (§2–§4): Python stdlib `zipfile` + `json`, plus `blake3`
 and an RFC 8785 `jcs` encoder. It does **not** decode array/table payloads — reproducing the identity
 triple needs only the stored bytes, not the pcodec/Vortex codecs.
@@ -17,9 +18,12 @@ triple needs only the stored bytes, not the pcodec/Vortex codecs.
 ## Run it
 
 ```sh
-uv run --no-project --with-requirements requirements.txt python -B run.py   # PASS/FAIL table over corpus/files
-uv run --no-project --with-requirements requirements.txt python -B make_seal_cases.py   # regenerate ../seal-cases.json
-uv run --no-project --with-requirements requirements.txt python -B make_refusal_fixtures.py   # regenerate ../refusals
+uv run --no-project --with-requirements requirements.txt \
+  python -B run.py
+uv run --no-project --with-requirements requirements.txt \
+  python -B make_seal_cases.py
+uv run --no-project --with-requirements requirements.txt \
+  python -B make_refusal_fixtures.py
 ```
 
 Exit code 0 ⇔ all fixtures reproduce their goldens, every stored pair in `corpus/seal-cases.json` reaches its
@@ -36,6 +40,13 @@ that resolves a name to its last entry or inflates a member verifies all four; t
 any member, as the Rust reader does over the same files (`tessera-io/tests/canonical_members.rs`). A seal case holds
 the manifest bytes as the UTF-8 string they spell, or as `manifest_hex` when they are not UTF-8; every reader takes
 the bytes.
+
+The corpus includes `recon_int16_indexed.tsra`, produced with the real indexed-array writer. Its
+`volume.cidx` is a derived block: `content_hash` equals the primary-only Merkle root and the
+unindexed `recon_int16` golden. `run.py` removes the sidecar and re-seals a second archive to prove
+the root stays unchanged while the seal changes. Rust checks the same archive; the wasm smoke gate
+extracts every corpus manifest and seal with `tests/corpus_members.py` and compares them with
+`corpus.json` in Node.
 
 ## What it checks
 
@@ -62,7 +73,8 @@ with two faults gets the verdict of the first:
    depth: each record is an object (never the array form), each declared field has its JSON type (string, boolean,
    an object for a map, an array for a list), a block `kind` is one of `array`/`table`/`chunk_index`/`blob`, a block
    `class`, when present, is exactly `"derived"` (`"primary"` and `null` are refused: a primary block has no
-   `class` key), a block `name` follows the ADR-0063 grammar, every `id_inputs` value is a string, `producer` is a Producer object or a
+   `class` key), a block `name` follows the ADR-0063 grammar, every `id_inputs` value is a string,
+   `producer` is a Producer object or a
    legacy string, and a required field is present. `null` stands for an absent value only where the Rust
    field is optional (`producer`, `generation`, `schema`, `study`, `content_hash`, a block's `digest`, a source's
    `content_hash`, Producer's `git_*`/`dirty`, `generation.config_ref`); the maps and lists refuse it. Opaque
@@ -98,6 +110,7 @@ Deliberate differences from the Rust reader, each outside what these verdicts co
   agree there is open in #886.
 
 ## Why it matters
+
 Until a second codebase reads Tessera correctly from the spec alone, "the spec" is really "whatever
 the Rust does." This reader closes that gap — and re-running it after any spec or corpus change keeps
 the spec honest.
