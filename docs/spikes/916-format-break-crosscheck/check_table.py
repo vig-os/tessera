@@ -35,7 +35,23 @@ table_path, alpha6, dev = sys.argv[1:]
 rows = json.load(open(table_path))["products"]
 indexed = {(row["corpus"], row["name"]): row for row in rows}
 assert len(indexed) == len(rows), "duplicate table keys"
+expected_fixtures = {
+    "tessera/corpus/files/blob_opaque.tsra",
+    "tessera/corpus/files/empty_no_blocks.tsra",
+    "tessera/corpus/files/listmode_events.tsra",
+    "tessera/corpus/files/multiblock_study.tsra",
+    "tessera/corpus/files/recon_float32_mumap.tsra",
+    "tessera/corpus/files/recon_int16.tsra",
+    "tessera/corpus/files/segmentation_uint8.tsra",
+    "tessera/corpus/files/spectrum_lifetime.tsra",
+    "tessera/crates/tessera-cli/tests/cmd/logical_tables.in/scan.tsra",
+    "tessera/crates/tessera-cli/tests/cmd/persona_signing.in/study.tsra",
+    "tessera/crates/tessera-cli/tests/cmd/versioning.in/study.tsra",
+    "tessera/crates/tessera-io/tests/fixtures/legacy_flat_events.tsra",
+    "tessera/crates/tessera-py/tests/fixtures/partitioned_pairs.tsra",
+}
 checked = 0
+checked_fixtures = set()
 for path in sorted(tracked(alpha6) & tracked(dev)):
     if not path.endswith(".tsra"):
         continue
@@ -63,5 +79,9 @@ for path in sorted(tracked(alpha6) & tracked(dev)):
         }
         assert row[side] == expected, f"{side} drift: {path}"
     checked += 1
-assert checked > 0, "no paired archives checked"
+    checked_fixtures.add(path)
+assert checked == 13, f"expected 13 paired archives, checked {checked}"
+assert checked_fixtures == expected_fixtures, (
+    f"paired fixture names drifted: {checked_fixtures ^ expected_fixtures}"
+)
 print(f"{checked}/{checked} shared sealed archives match exhaustive table")

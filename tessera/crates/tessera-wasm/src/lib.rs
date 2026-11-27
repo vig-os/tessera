@@ -109,6 +109,18 @@ pub fn product_id(manifest_json: &[u8]) -> String {
         .unwrap_or_default()
 }
 
+/// Recompute the primary-block Merkle root from a manifest's block digests, excluding derived blocks.
+/// This does not verify the stored `content_hash`, seal or payload bytes. Returns an empty string if
+/// the input is not UTF-8, cannot be parsed as a manifest, or a block digest is missing.
+#[wasm_bindgen]
+pub fn primary_content_root(manifest_json: &[u8]) -> String {
+    std::str::from_utf8(manifest_json)
+        .ok()
+        .and_then(|text| Manifest::from_json(text).ok())
+        .and_then(|m| m.recompute_content_hash().ok())
+        .unwrap_or_default()
+}
+
 /// The tessera-wasm crate version (for a JS app to report the verifier build).
 #[wasm_bindgen]
 pub fn version() -> String {
