@@ -385,7 +385,7 @@ fn deserialize_store(blob: &[u8]) -> Result<ReadableWritableListableStorage> {
 /// Build a Zarr array in `store` with the chosen codec and write `data` into it (the whole array).
 /// `pcodec` is plugged as the `array_to_bytes` codec (it produces bytes directly); `zstd` rides on
 /// top of zarrs' default `bytes` array_to_bytes codec as a `bytes_to_bytes` step.
-fn build_filled<T: Element, F: Into<ArrayBuilderFillValue>>(
+fn build_filled<T: Element + Sync, F: Into<ArrayBuilderFillValue>>(
     store: &ReadableWritableListableStorage,
     spec: &ArraySpec,
     dt: DataType,
@@ -406,20 +406,28 @@ fn build_filled<T: Element, F: Into<ArrayBuilderFillValue>>(
     }
     let array = builder.build(store.clone(), ARRAY_PATH).map_err(ze)?;
     array.store_metadata().map_err(ze)?;
-    array
-        .store_array_subset(&array.subset_all(), data)
-        .map_err(ze)?;
+    crate::parallel::install(|| {
+        array
+            .store_array_subset_opt(&array.subset_all(), data, &codec_options())
+            .map_err(ze)
+    })?;
     Ok(())
 }
 
-fn retrieve_all<T: ElementOwned>(store: ReadableWritableListableStorage) -> Result<Vec<T>> {
-    let array = Array::open(store, ARRAY_PATH).map_err(ze)?;
-    array
-        .retrieve_array_subset::<Vec<T>>(&array.subset_all())
-        .map_err(ze)
+fn codec_options() -> zarrs::array::CodecOptions {
+    zarrs::array::CodecOptions::default().with_concurrent_target(tessera_core::threads::budget())
 }
 
-fn retrieve_region<T: ElementOwned>(
+fn retrieve_all<T: ElementOwned + Send>(store: ReadableWritableListableStorage) -> Result<Vec<T>> {
+    let array = Array::open(store, ARRAY_PATH).map_err(ze)?;
+    crate::parallel::install(|| {
+        array
+            .retrieve_array_subset_opt::<Vec<T>>(&array.subset_all(), &codec_options())
+            .map_err(ze)
+    })
+}
+
+fn retrieve_region<T: ElementOwned + Send>(
     store: ReadableWritableListableStorage,
     start: &[u64],
     shape: &[u64],
@@ -430,9 +438,11 @@ fn retrieve_region<T: ElementOwned>(
         .zip(shape)
         .map(|(s, n)| *s..(*s + *n))
         .collect();
-    array
-        .retrieve_array_subset::<Vec<T>>(&ranges.as_slice())
-        .map_err(ze)
+    crate::parallel::install(|| {
+        array
+            .retrieve_array_subset_opt::<Vec<T>>(&ranges.as_slice(), &codec_options())
+            .map_err(ze)
+    })
 }
 
 /// Validate that `data` is encodable under `spec` (codec, dtype, and element count all agree).
@@ -1130,6 +1140,67 @@ pub fn warp_world(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn array_and_blob_work_respects_budget_with_host_global_pool() {
+        const CHILD: &str = "TESSERA_ARRAY_BUDGET_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "array::tests::array_and_blob_work_respects_budget_with_host_global_pool",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("TESSERA_MAX_THREADS", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // The embedding application owns a larger global pool. Tessera must neither
+        // use nor replace it, even if it was initialised before the library is called.
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build_global()
+            .unwrap();
+        assert_eq!(rayon::current_num_threads(), 4);
+        assert_eq!(codec_options().concurrent_target(), 1);
+        fn observed<T>(work: impl FnOnce() -> T) -> T {
+            use std::sync::atomic::Ordering;
+            crate::parallel::OBSERVED_POOL_SIZE.store(0, Ordering::SeqCst);
+            let result = work();
+            assert_eq!(
+                crate::parallel::OBSERVED_POOL_SIZE.load(Ordering::SeqCst),
+                1
+            );
+            result
+        }
+        let data = ArrayData::I16((0..4096).map(|n| n as i16).collect());
+        for codec in ["pcodec", "zstd"] {
+            let mut spec = spec_with(vec![16, 16, 16], "int16", codec);
+            spec.chunks = vec![4, 4, 4];
+            let blob = observed(|| encode(&spec, &data)).unwrap();
+            assert_eq!(observed(|| decode(&spec, &blob)).unwrap(), data);
+            let subset = observed(|| decode_subset(&spec, &blob, &[0, 0, 0], &[4, 4, 4])).unwrap();
+            assert_eq!(subset.len(), 64);
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![7u8; 1 << 20]).unwrap();
+        assert_eq!(
+            observed(|| crate::blob::digest_file_parallel(file.path())).unwrap(),
+            tessera_core::hash::digest(&vec![7u8; 1 << 20])
+        );
+        assert_eq!(
+            crate::parallel::OBSERVED_POOL_SIZE.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(rayon::current_num_threads(), 4);
+    }
 
     fn pcodec_spec(shape: Vec<u64>, dtype: &str) -> ArraySpec {
         // `ArraySpec::new` already defaults `codec` to "pcodec" (the volume-codec winner); spell

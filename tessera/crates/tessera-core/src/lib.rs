@@ -28,6 +28,7 @@ pub mod referencing;
 pub mod schema;
 pub mod signing;
 pub mod stored;
+pub mod threads;
 
 pub use collection::{Collection, CollectionBuilder, CollectionMember, Role};
 pub use error::{Error, Result};

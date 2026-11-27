@@ -1,5 +1,32 @@
 # Performance & the write engine
 
+## Budgets and performance ratchets
+
+Set `TESSERA_MAX_THREADS` before startup to a positive decimal integer to size automatic worker pools.
+It covers write defaults, balanced recommendations, read runtimes, grid decode and benchmark sweeps.
+Without it, system parallelism is used (one worker if unavailable). Invalid values, including zero,
+negative, overflowing and non-Unicode values, are logged to stderr and ignored. The first use caches the budget for the process; values above system parallelism are clamped
+to it with one stderr note. Each pool gets the budget independently; explicit worker settings remain caller-controlled.
+Array codecs and parallel blob hashing share a private Rayon pool capped by this budget. This library
+never reconfigures the application's global Rayon pool; zarrs also receives the codec concurrency target
+per operation. Failure to create the private pool returns an I/O error. Read runtimes retain a
+`max(budget - 1, 1)` worker pool to leave room for the calling thread when possible.
+Nix checks use `NIX_BUILD_CORES`; `scripts/ksb-test.sh` uses its `--threads` count.
+
+Both wall-clock ratchets (grid decode and chunked HDF5 reads) require exactly `TESSERA_PERF_RATCHET=1`.
+Otherwise they print `SKIPPED`; correctness and routing checks still run. Run timing assertions only on
+reserved CPUs. For example, from a checkout with access to a reserved builder:
+
+```bash
+TESSERA_PERF_RATCHET=1 scripts/ksb-test.sh --threads 8 HEAD tessera-io 'test(grid_decode_perf_ratchet)'
+```
+
+The wrapper carries the environment opt-in through Nix, but cannot yet reserve the builder's CPUs.
+Its fixed reporting-pod CPU request does not cover the test derivation, and reserving the pod with
+`--exclusive-cpus` does not fix that. Builder reservation is tracked in
+[#1030](https://github.com/vig-os/tessera/issues/1030); see CONTRIBUTING for both ratchet invocations.
+Shared-builder timings are not performance evidence.
+
 ## The write engine
 
 Vortex (and any columnar format) is footer-at-end: a writer that dies before close loses the *whole*

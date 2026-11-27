@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Automatic worker pools (including array codecs and parallel blob hashing) and benchmark sizing honour `TESSERA_MAX_THREADS`; Nix tests pass their CPU
+  budget through to Tessera. Budgets are cached and capped at system parallelism with one clamp note;
+  invalid budgets are logged and ignored. Wall-clock grid-decode and HDF5
+  ratchets require `TESSERA_PERF_RATCHET=1` on reserved CPUs instead of gating on reported core counts (#703).
+
 - **breaking**: `SchemaMismatch` now carries a typed `SchemaMismatchKind` instead of `detail` (#1021).
   Callers matching this error must handle column counts, names and typed contract-field values.
   Only the first difference is displayed. Malformed table specs now report `Error::MalformedTableSpec`.

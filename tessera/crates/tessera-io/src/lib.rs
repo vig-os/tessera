@@ -20,6 +20,7 @@ pub mod multiblock;
 /// Shared injective filesystem-name encoding, also used by core collection layouts.
 pub use tessera_core::names;
 pub mod oci;
+mod parallel;
 pub mod provenance;
 pub mod range;
 #[cfg(feature = "cloud")]

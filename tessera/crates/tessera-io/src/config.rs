@@ -51,12 +51,10 @@ pub struct WriteConfig {
 }
 
 impl WriteConfig {
-    /// Machine-derived defaults: `workers = std::thread::available_parallelism()` (fallback 4) and
+    /// Budget-derived defaults: `workers = tessera_core::threads::budget()` (fallback 1) and
     /// `ram_budget` = [`DEFAULT_RAM_BUDGET`] (1 GiB).
     pub fn for_system() -> Self {
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
+        let workers = tessera_core::threads::budget();
         WriteConfig {
             workers,
             ram_budget: DEFAULT_RAM_BUDGET,
@@ -69,7 +67,7 @@ impl WriteConfig {
     /// `min(read_rate, workers × per_core_encode_rate)`; past
     /// `workers = ceil(read_rate / per_core_encode_rate)`, extra workers just sit idle (and grow
     /// the in-flight ring's peak RAM) for zero gain. This computes that knee:
-    /// `workers = clamp(ceil(read / per_core).max(1), 1, available_parallelism())`. The
+    /// `workers = clamp(ceil(read / per_core).max(1), 1, thread budget)`. The
     /// `ram_budget` keeps the [`Self::for_system`] default.
     ///
     /// Storage tier shapes the answer. Slow read (e.g. cold HDD ~200 MB/s) → **read-bound** → few
@@ -293,23 +291,19 @@ mod tests {
         let read = 200.0 * 1e6;
         let per_core = 100.0 * 1e6;
         let cfg = WriteConfig::balanced(read, per_core);
-        let max = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
+        let max = tessera_core::threads::budget();
         let expected = 2usize.min(max).max(1);
         assert_eq!(cfg.worker_count(), expected);
         assert_eq!(cfg.ram_budget_bytes(), DEFAULT_RAM_BUDGET);
     }
 
     #[test]
-    fn balanced_fast_read_clamps_to_available_parallelism() {
+    fn balanced_fast_read_clamps_to_thread_budget() {
         // Fast/cached source (≫ all cores × per-core encode rate) → ratio ≫ cores → the
-        // recommendation must clamp to available_parallelism() (the box's encode ceiling). We
+        // recommendation must clamp to thread budget (the box's encode ceiling). We
         // pick `read = (max + 100) * per_core` so the unclamped ceil exceeds `max` by a wide
         // margin on any host the test runs on (laptop or 88-core dev box).
-        let max = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
+        let max = tessera_core::threads::budget();
         let per_core = 95.0 * 1e6;
         let read = (max as f64 + 100.0) * per_core;
         let cfg = WriteConfig::balanced(read, per_core);
@@ -354,9 +348,7 @@ mod tests {
 
     #[test]
     fn balanced_ceil_and_floor_at_boundary() {
-        let max = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
+        let max = tessera_core::threads::budget();
         // Tiny read rate (1 byte/s) vs huge encode (1 GB/s) → ratio ≪ 1, clamped to floor = 1.
         let cfg = WriteConfig::balanced(1.0, 1.0e9);
         assert_eq!(cfg.worker_count(), 1, "floor: workers always ≥ 1");

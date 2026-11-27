@@ -890,7 +890,7 @@ fn enable_table_edition(s: &VortexSession) {
 
 thread_local! {
     /// Per-thread **pooled** read runtime: a `CurrentThreadWorkerPool` sized to
-    /// available parallelism drives the scan's segment I/O + decode across all
+    /// the thread budget drives the scan's segment I/O + decode across all
     /// cores in the background while `block_on` awaits results. The bare
     /// `CurrentThreadRuntime` [`runtime_session`] uses is single-threaded — which
     /// is the actual read-throughput bottleneck, NOT the columnar decode. The
@@ -898,7 +898,7 @@ thread_local! {
     static READ_RT: (CurrentThreadRuntime, CurrentThreadWorkerPool, VortexSession) = {
         let rt = CurrentThreadRuntime::new();
         let pool = rt.new_pool();
-        pool.set_workers_to_available_parallelism();
+        pool.set_workers(tessera_core::threads::budget().saturating_sub(1).max(1));
         let s = new_session(&rt);
         (rt, pool, s)
     };
@@ -1462,9 +1462,7 @@ fn materialise(s: &VortexSession, chunks: &[StructArray], cols: &mut [ColumnData
     if values < PARALLEL_MATERIALISE_MIN_VALUES {
         return materialise_with(s, chunks, cols, 1);
     }
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let cores = tessera_core::threads::budget();
     // GRID path (#352): for numeric columns, parallelise the decompress over the (column ×
     // row-group) grid so the fan-out is NOT capped at the column count — a narrow (few-column)
     // table can still use every core by splitting each column's row-groups across workers. Each
@@ -1728,7 +1726,7 @@ pub fn decode(spec: &TableSpec, blob: &[u8]) -> Result<TableData> {
 
 /// [`decode`] with the materialise fan-out pinned to `workers` threads (`1` = fully serial).
 ///
-/// The point is composition. `decode` sizes itself to `available_parallelism()`, which is right
+/// The point is composition. `decode` sizes itself to `thread budget`, which is right
 /// for one decode on an idle machine and wrong inside a caller's own parallel loop — N concurrent
 /// `decode`s would each spawn N workers. Decoding a cohort of blocks across a thread pool should
 /// therefore pass `1` here and keep the parallelism at the outer level, where it already has
@@ -3946,19 +3944,67 @@ CascadingCompressor {
     }
 
     #[test]
+    fn thread_budget_caps_pools() {
+        const CHILD: &str = "TESSERA_BUDGET_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "table::tests::thread_budget_caps_pools",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("TESSERA_MAX_THREADS", "2")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let budget = tessera_core::threads::budget();
+        assert!(budget <= 2);
+        assert_eq!(
+            crate::config::WriteConfig::for_system().worker_count(),
+            budget
+        );
+        assert_eq!(
+            crate::config::WriteConfig::balanced(1e12, 1.0).worker_count(),
+            budget
+        );
+        READ_RT
+            .with(|(_, pool, _)| assert_eq!(pool.worker_count(), budget.saturating_sub(1).max(1)));
+    }
+
+    #[test]
+    fn wall_clock_ratchet_reports_skip_without_explicit_opt_in() {
+        for value in [None, Some("0"), Some("true"), Some("01")] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                "table::tests::grid_decode_perf_ratchet_narrow_table",
+                "--nocapture",
+            ]);
+            command.env_remove("TESSERA_PERF_RATCHET");
+            if let Some(value) = value {
+                command.env("TESSERA_PERF_RATCHET", value);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("SKIPPED: wall-clock ratchet"));
+        }
+    }
+
+    #[test]
     fn grid_decode_perf_ratchet_narrow_table() {
-        // Coarse performance drift floor (#352): the grid must actually parallelise a NARROW table —
-        // i.e. it must NOT collapse back to serial speed. Relative (machine-independent): the auto
-        // (grid) decode of a 2-column table must beat the 1-worker column-serial decode by a generous
-        // margin, best-of-N. Gated at >=8 cores on purpose: it runs on dev machines with headroom
-        // (a real perf guard) and is SKIPPED on the small, build-saturated CI runners where a timing
-        // assertion would be flaky. The non-flaky CI guard is the *routing* test
-        // (`grid_routing_is_gated_by_size_and_dtype`); absolute-throughput tracking belongs in a
-        // dedicated perf job, not a unit gate.
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        if cores < 8 {
+        // Opt-in wall-clock evidence on reserved CPUs only. The deterministic routing
+        // test remains the CI guard; this compares grid decode with a serial baseline.
+        if std::env::var("TESSERA_PERF_RATCHET").as_deref() != Ok("1") {
+            let skip =
+                "SKIPPED: wall-clock ratchet requires TESSERA_PERF_RATCHET=1 and reserved CPUs";
+            eprintln!("{skip}"); // guardrails-ok: visible skip is part of the opt-in contract.
             return;
         }
         let rows = 4_000_000usize;
