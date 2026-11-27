@@ -41,8 +41,8 @@
 //! workspace `Cargo.lock`, taken by the compiler in the library unit, which cargo keys on every linked
 //! crate. Until #979 they came from `build.rs`, whose output a target dir shared between two checkouts
 //! reused across them, so a binary could link one parquet and seal another. A hand-written
-//! `ingest_decoder` in an ingest spec is a hard error (see [`crate::engine`]) — a maintainer-typed claim inside an immutable record is the thing §6a rejected
-//! a profile id for.
+//! `ingest_decoder` in an ingest spec is a hard error (see [`crate::engine`]) — a maintainer-typed claim
+//! inside an immutable record is the thing §6a rejected a profile id for.
 //!
 //! # The residual, stated plainly
 //!

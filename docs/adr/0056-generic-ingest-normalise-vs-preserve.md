@@ -478,7 +478,7 @@ Reading the resolution in the library unit is the only option that covers every 
 own fingerprint keeps fresh. Parquet's `const` is kept as an independent check: the
 `linked_decoder_identity` test requires the sealed parquet version to equal the linked parquet's own.
 
-**Nothing sealed moved.** On a clean build the derivation is the same code over the same lockfile, so
+**Workspace seals did not move.** On a clean workspace build the derivation is the same code over the same lockfile, so
 every `version`, pre-image and digest is byte-identical and the ingest corpus goldens are unchanged. The
 `v2` pre-image version is therefore not bumped: the *composition* did not change, only where it is read.
 
@@ -486,9 +486,10 @@ every `version`, pre-image and digest is byte-identical and the ingest corpus go
 (another target's, or one behind a feature nothing in this build enables). Such a pin can go stale only
 between two checkouts that link identical graphs and differ in that unlinked crate alone. Built as a git or
 path dependency of another workspace, the lockfile read is tessera's own, not the consumer's; that predates
-#979 and is tracked in #989. The lockfile
-(~210 KiB) is embedded in every binary linking `tessera-ingest`. A packaged build has no workspace lockfile
-and records the decoder's name only, as before.
+#979 and is tracked in #989. The lockfile (~210 KiB) is embedded in every binary linking `tessera-ingest`.
+A packaged build has no workspace lockfile at `../../Cargo.lock` and now records the decoder's name only.
+Before #979 the build script walked up from the manifest and found the packaged crate's bundled `Cargo.lock`,
+so packaged builds sealed versions too. The crate is not published; packaged layout support is tracked in #989.
 
 
 ### Findings that survive from the earlier passes
