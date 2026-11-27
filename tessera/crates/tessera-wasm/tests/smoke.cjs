@@ -17,6 +17,8 @@ assert.strictEqual(t.verify_manifest(utf8("not a manifest"), undefined), false);
 assert.strictEqual(t.verify_signature(utf8("a"), undefined, "b", "c"), false);
 assert.strictEqual(t.product_id(utf8("not json")), "");
 assert.strictEqual(t.product_id(Uint8Array.of(0xff)), "");
+assert.strictEqual(t.primary_content_root(utf8("not json")), "");
+assert.strictEqual(t.primary_content_root(Uint8Array.of(0xff)), "");
 
 // every seal case, through the compiled wasm, as the member BYTES (a Uint8Array, never a string
 // decoded from them: the seal is over the stored bytes). A case holds them as the UTF-8 string they
@@ -49,7 +51,14 @@ for (const p of products) {
   const seal = Uint8Array.from(Buffer.from(p.seal_hex, "hex"));
   assert.strictEqual(t.seal_verdict(manifest, seal), "ok", p.golden.name);
   assert.strictEqual(t.product_id(manifest), p.golden.id, p.golden.name);
-  assert.strictEqual(JSON.parse(Buffer.from(manifest).toString()).content_hash, p.golden.content_hash);
+  assert.strictEqual(t.primary_content_root(manifest), p.golden.content_hash, p.golden.name);
+  // Recompute from primary digests even when the recorded field and a derived digest disagree.
+  const changed = JSON.parse(Buffer.from(manifest).toString());
+  changed.content_hash = "blake3:" + "0".repeat(64);
+  for (const block of changed.blocks || []) {
+    if (block.class === "derived") block.digest = "blake3:" + "1".repeat(64);
+  }
+  assert.strictEqual(t.primary_content_root(utf8(JSON.stringify(changed))), p.golden.content_hash, p.golden.name);
   assert.strictEqual(Buffer.from(seal).toString(), p.golden.manifest_hash);
 }
 console.log(`${products.length}/${products.length} corpus products agreed (wasm)`);

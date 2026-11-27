@@ -109,6 +109,18 @@ pub fn product_id(manifest_json: &[u8]) -> String {
         .unwrap_or_default()
 }
 
+/// Recompute the primary-block Merkle root from a manifest's block digests, excluding derived blocks.
+/// This does not verify the stored `content_hash`, seal or payload bytes. Returns an empty string if
+/// the input is not UTF-8, cannot be parsed as a manifest, or a block digest is missing.
+#[wasm_bindgen]
+pub fn primary_content_root(manifest_json: &[u8]) -> String {
+    std::str::from_utf8(manifest_json)
+        .ok()
+        .and_then(|text| Manifest::from_json(text).ok())
+        .and_then(|m| m.recompute_content_hash().ok())
+        .unwrap_or_default()
+}
+
 /// The tessera-wasm crate version (for a JS app to report the verifier build).
 #[wasm_bindgen]
 pub fn version() -> String {
@@ -131,6 +143,32 @@ mod tests {
         .unwrap();
         let (bytes, seal) = b.seal().unwrap().to_stored().unwrap();
         (bytes, seal.into_bytes())
+    }
+
+    #[test]
+    fn primary_root_uses_primary_digests_and_ignores_recorded_hash() {
+        let (json, _) = stored();
+        let original = primary_content_root(&json);
+        assert!(!original.is_empty());
+        let mut manifest: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(manifest["content_hash"], original);
+        manifest["content_hash"] = serde_json::json!(format!("blake3:{}", "0".repeat(64)));
+        let mut derived = manifest["blocks"][0].clone();
+        derived["name"] = serde_json::json!("cache");
+        derived["class"] = serde_json::json!("derived");
+        derived["digest"] = serde_json::json!(format!("blake3:{}", "1".repeat(64)));
+        manifest["blocks"].as_array_mut().unwrap().push(derived);
+        let encode = |m: &serde_json::Value| serde_json::to_vec(m).unwrap();
+        assert_eq!(primary_content_root(&encode(&manifest)), original);
+        manifest["blocks"][0]["digest"] = serde_json::json!(format!("blake3:{}", "2".repeat(64)));
+        assert_ne!(primary_content_root(&encode(&manifest)), original);
+        manifest["blocks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("digest");
+        assert_eq!(primary_content_root(&encode(&manifest)), "");
+        assert_eq!(primary_content_root(b"not json"), "");
+        assert_eq!(primary_content_root(&[0xff]), "");
     }
 
     #[test]

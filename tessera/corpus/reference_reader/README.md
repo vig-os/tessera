@@ -74,12 +74,13 @@ with two faults gets the verdict of the first:
    an object for a map, an array for a list), a block `kind` is one of `array`/`table`/`chunk_index`/`blob`, a block
    `class`, when present, is exactly `"derived"` (`"primary"` and `null` are refused: a primary block has no
    `class` key), a block `name` follows the ADR-0063 grammar, every `id_inputs` value is a string,
-   `producer` is a Producer object or a
-   legacy string, and a required field is present. `null` stands for an absent value only where the Rust
-   field is optional (`producer`, `generation`, `schema`, `study`, `content_hash`, a block's `digest`, a source's
-   `content_hash`, Producer's `git_*`/`dirty`, `generation.config_ref`); the maps and lists refuse it. Opaque
-   values hold any JSON: `schema`, `blocks[].spec`, and the values of `metadata`, `extra`, `generation.config` and
-   `ingest_transform[].params`. A key the table doesn't declare is a newer field: it is sealed, never type-checked.
+   `producer` is a Producer object or a legacy string, and a required field is present. `null` stands for an
+   absent value only where the Rust field is optional (`producer`, `generation`, `schema`, `study`,
+   `content_hash`, a block's `digest`, a source's `content_hash`, Producer's `git_*`/`dirty`,
+   `generation.config_ref`); the maps and lists refuse it. Opaque values hold any JSON: `schema`,
+   `blocks[].spec`, and the values of `metadata`, `extra`, `generation.config` and
+   `ingest_transform[].params`. A key the table doesn't declare is a newer field: it is sealed, never
+   type-checked.
    The check walks each record's **declared** keys only, so a newer key is never visited and nothing is exempted
    by a path string: a top-level key literally named `producer.agents` can't stand in for the nested field. This
    reader doesn't report newer-field paths (the `newer_fields` of `seal-cases.json` are the Rust view's, rendered
