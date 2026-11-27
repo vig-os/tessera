@@ -41,8 +41,8 @@ A Tessera **repository** is a directory or object-store prefix holding:
 ```
 objects/<alg>/<aa>/<rest-of-hex>   # write-once content-addressed objects (blocks AND manifests)
 layout                           # tessera-repository 2 LF
-refs/lineages/<enc>               # typed lineage tip: product <address> LF
-refs/pins/<enc>                   # typed pin: product <address> LF
+refs/lineages/<enc>               # typed lineage tip: <product|collection> <address> LF
+refs/pins/<enc>                   # typed pin: <product|collection> <address> LF
 log/lineages/<enc>.jsonl           # append-only audit log: one line per commit (manifest_hash, ts, op)
 ```
 
@@ -260,3 +260,26 @@ commit replaced the other lineages' tip, and since #946 a commit to one is refus
 - **Trade-off.** Windows' reserved device names (`con`, `nul`) are not encoded, since Windows builds are deferred.
   Builds from #990 onward refuse layout 2. Earlier builds do not check the marker: their `gc` sees no roots and
   can empty a layout-2 store. Never run those builds against a layout-2 repository.
+
+## Amendment (2026-11-27) — collection objects and member reachability (#999)
+
+ADR-0067 step 4 adds collection objects beside product manifests in the same content-addressed store.
+`put_collection` and `get_collection` use the collection seal (`manifest_hash`) and canonical stored bytes;
+collection writes hold the same fenced writer as every repository mutation. `set_ref` infers `product` or
+`collection` from the target bytes, refuses bare blocks and verifies the object before publishing the ref.
+Both ref namespaces accept either kind. Ref reads check the record against `ObjectKind::of` and verify the
+selected version; a disagreement is `RefKindMismatch` naming the ref file. Typed object accessors instead use
+`ObjectKindMismatch`, naming the requested object kind. Under the writer lock, every ref writer refuses a change
+to an existing lineage's recorded kind with `LineageKindMismatch`; product commits check before storing objects.
+
+The `gc` walk dispatches by object kind. Products mark blocks; collections push their member seals and declared
+kinds; both follow stored `sources` edges. Members are closed (ADR-0067 D3.1): missing, torn, unreadable or
+wrong-kind members abort with `GcAborted` naming the full path from the root ref through each member index.
+Nothing is swept after a partial mark. Missing edge targets remain open, and intact non-version edge targets
+are retained. A heap stack has no depth cutoff; shared versions are read once while every incoming kind claim
+is checked. Traversal provenance uses parent indices, with one local label per traversed edge; full member paths
+are rendered only on failure, and consecutive source edges are summarized by their version/object count. This
+avoids quadratic path copying in long histories. Sealed hash pins prevent cycles; edits invalidate the seal.
+Product payloads are marked without reading them, as before. Atomic collection commit and closure validation
+are ADR-0067 step 5; separate low-level storage and ref calls leave the object reclaimable until it becomes
+reachable.

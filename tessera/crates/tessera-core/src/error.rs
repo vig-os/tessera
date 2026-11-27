@@ -437,6 +437,40 @@ pub enum Error {
         reason: String,
     },
 
+    /// A lineage's recorded kind is fixed until the lineage is forgotten (ADR-0067 D1).
+    /// Rejected under the writer lock before storing any objects or changing the ref.
+    #[error("lineage '{lineage}' has kind {tip_kind:?}; a write cannot change its kind")]
+    LineageKindMismatch {
+        lineage: String,
+        tip_kind: crate::ObjectKind,
+    },
+
+    /// A typed object read or write requests a different kind from the stored bytes.
+    #[error("object kind mismatch at {}: expected {expected:?}, object {object:?}", path.display())]
+    ObjectKindMismatch {
+        path: std::path::PathBuf,
+        expected: crate::ObjectKind,
+        object: crate::ObjectKind,
+    },
+
+    /// A typed repository ref disagrees with the stored bytes
+    /// classified by ADR-0067 D1.1. The object remains the authority on its kind.
+    #[error("object kind mismatch at {}: record {record:?}, object {object:?}", path.display())]
+    RefKindMismatch {
+        path: std::path::PathBuf,
+        record: crate::ObjectKind,
+        object: crate::ObjectKind,
+    },
+
+    /// A collection member's declared kind disagrees with its stored object. The path
+    /// includes the root ref and each intervening member index (ADR-0067 D3).
+    #[error("member kind mismatch at {path}: expected {expected:?}, object {object:?}")]
+    MemberKindMismatch {
+        path: String,
+        expected: crate::ObjectKind,
+        object: crate::ObjectKind,
+    },
+
     /// A repository `gc` stopped before deleting anything, because it could not read `what` (a ref,
     /// or a manifest the walk reached, named with how it was reached) for the reason `source`
     /// (ADR-0036 §2, #946). A walk that skipped it would not mark what only it reaches, and the sweep

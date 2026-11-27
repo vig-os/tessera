@@ -1,12 +1,14 @@
 //! Layout-2 acceptance tests (ADR-0067 step 1).
 use std::path::Path;
-use tessera_core::{hash::digest, Error};
+use tessera_core::{Error, ProductBuilder};
 use tessera_io::repo::Repository;
 
 fn typed_tip(root: &Path, name: &str) -> (Repository, String) {
     let repo = Repository::init(root).unwrap();
-    let address = digest(b"stored object");
-    repo.write_object(&address, b"stored object").unwrap();
+    let m = ProductBuilder::new("listmode", "DP", "d", "2024-01-01T00:00:00Z")
+        .seal()
+        .unwrap();
+    let address = repo.put_manifest(&m).unwrap();
     repo.set_ref(name, None, &address).unwrap();
     assert_eq!(
         std::fs::read_to_string(root.join("refs/lineages").join(name)).unwrap(),
@@ -61,7 +63,7 @@ fn malformed_records_are_refused() {
 fn unknown_record_kind_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let (repo, address) = typed_tip(dir.path(), "x");
-    for kind in ["unknown", "collection"] {
+    for kind in ["unknown", "Collection"] {
         std::fs::write(
             dir.path().join("refs/lineages/x"),
             format!("{kind} {address}\n"),

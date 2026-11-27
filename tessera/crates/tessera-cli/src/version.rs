@@ -1610,15 +1610,17 @@ mod tests {
         let ref_file = repo
             .join("refs/lineages")
             .join(tessera_io::lineage_file_name(&lineage).unwrap());
-        std::fs::write(ref_file, format!("product {seal}\n")).unwrap();
+        std::fs::write(&ref_file, format!("product {seal}\n")).unwrap();
 
         let add = format!("ct={}:volume", plain.to_str().unwrap());
         let e = commit(&repo, &lineage, &[], &[add], &[], &mut Vec::new()).unwrap_err();
         assert!(is_dangling(&e), "{e}");
         let r = Repository::open(&repo).unwrap();
+        assert!(is_dangling(&r.read_ref(&lineage).unwrap_err()));
         assert_eq!(
-            r.read_ref(&lineage).unwrap().as_deref(),
-            Some(seal.as_str())
+            std::fs::read_to_string(&ref_file).unwrap(),
+            format!("product {seal}\n"),
+            "the rejected commit leaves the ref record unchanged"
         );
     }
 
