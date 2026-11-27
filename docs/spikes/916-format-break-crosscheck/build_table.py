@@ -23,3 +23,4 @@ for spec in sys.argv[3:]:
         )
 with open(sys.argv[1], "w") as f:
     json.dump({"about": sys.argv[2], "products": rows}, f, indent=1, sort_keys=True)
+    f.write("\n")

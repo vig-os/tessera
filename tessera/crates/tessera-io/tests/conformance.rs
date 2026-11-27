@@ -133,3 +133,62 @@ fn committed_corpus_files_reproduce_goldens() {
         }
     }
 }
+
+/// A real indexed archive pins the primary-only root, including after removing its sidecar.
+#[test]
+fn indexed_corpus_content_hash_covers_only_primary_blocks() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../corpus/files/recon_int16_indexed.tsra"
+    );
+    let mut reader = tessera_io::Reader::open(std::path::Path::new(path))
+        .expect("indexed corpus archive exists");
+    let mut manifest = reader.manifest().clone();
+    assert_eq!(manifest.blocks.len(), 2);
+    let index = manifest
+        .blocks
+        .iter()
+        .find(|b| !b.is_primary())
+        .expect("derived index");
+    assert_eq!(index.name, "volume.cidx");
+    reader.read_block(&index.name).unwrap();
+    let primary: Vec<_> = manifest
+        .blocks
+        .iter()
+        .filter(|b| b.is_primary())
+        .map(|b| b.digest.clone().unwrap())
+        .collect();
+    assert_eq!(primary.len(), 1);
+    let root = tessera_core::hash::merkle_root(&primary);
+    assert_eq!(manifest.content_hash.as_deref(), Some(root.as_str()));
+    assert_eq!(root, golden_index()["recon_int16"].content_hash);
+    let all: Vec<_> = manifest
+        .blocks
+        .iter()
+        .map(|b| b.digest.clone().unwrap())
+        .collect();
+    assert_ne!(root, tessera_core::hash::merkle_root(&all));
+    let original_seal = manifest.manifest_hash.clone();
+    manifest.blocks.retain(|b| b.is_primary());
+    assert_eq!(manifest.recompute_content_hash().unwrap(), root);
+    manifest.manifest_hash = Some(manifest.compute_manifest_hash().unwrap());
+    assert_ne!(manifest.manifest_hash, original_seal);
+    let fixture = fixtures()
+        .into_iter()
+        .find(|f| f.name == "recon_int16_indexed")
+        .unwrap();
+    let payloads: Vec<_> = fixture
+        .payloads
+        .into_iter()
+        .filter(|p| p.name == "volume")
+        .collect();
+    let dir = tempfile::tempdir().unwrap();
+    let without = dir.path().join("without-index.tsra");
+    tessera_io::pack(&manifest, &payloads, &without).unwrap();
+    let mut plain = tessera_io::Reader::open(&without).unwrap();
+    plain.read_block("volume").unwrap();
+    assert_eq!(
+        plain.manifest().content_hash.as_deref(),
+        Some(root.as_str())
+    );
+}

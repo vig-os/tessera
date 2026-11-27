@@ -370,6 +370,7 @@ fn every_tracked_tsra_stores_the_stored_pair() {
         "../corpus/files/multiblock_study.tsra",
         "../corpus/files/recon_float32_mumap.tsra",
         "../corpus/files/recon_int16.tsra",
+        "../corpus/files/recon_int16_indexed.tsra",
         "../corpus/files/segmentation_uint8.tsra",
         "../corpus/files/spectrum_lifetime.tsra",
         "tessera-cli/tests/cmd/logical_tables.in/scan.tsra",

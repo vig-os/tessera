@@ -328,6 +328,35 @@ pub fn fixtures() -> Vec<Fixture> {
         });
     }
 
+    // 9 — a whole sealed archive with the writer's real derived chunk-index sidecar.
+    // The primary bytes match recon_int16; the sidecar changes the seal, never content_hash.
+    {
+        let spec = ArraySpec::new(vec![64, 64, 64], "int16")
+            .with_rescale(1.0, -1024.0)
+            .with_unit("HU");
+        let ((primary, payload), sidecar) =
+            array::array_block_with_index("volume", &spec, &ramp_i16(64 * 64 * 64))
+                .expect("indexed fixture array encodes");
+        let (index, index_payload) = sidecar.expect("integer fixture has a chunk index");
+        let mut b = ProductBuilder::new(
+            "recon",
+            "recon-int16-indexed",
+            "indexed int16 CT volume",
+            TS,
+        );
+        b.add_block_ref(primary);
+        b.add_block_ref(index);
+        b.with_field(
+            "modality",
+            serde_json::json!({"_vocabulary": "DICOM", "_code": "CT"}),
+        );
+        out.push(Fixture {
+            name: "recon_int16_indexed",
+            manifest: b.seal().unwrap(),
+            payloads: vec![payload, index_payload],
+        });
+    }
+
     out
 }
 

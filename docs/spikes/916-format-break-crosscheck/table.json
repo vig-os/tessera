@@ -1,5 +1,5 @@
 {
- "about": "#916: every corpus product at v0.1.0-alpha.6 and at dev ca751291 (byte-identical at dccc60ab), paired by corpus name. blocks: name -> [digest, class]. alpha.6 manifest_hash is the in-band key, dev the manifest.seal member.",
+ "about": "#916: all 27 paired corpus products and test fixtures at v0.1.0-alpha.6 and dev ca751291; five test fixtures rechecked at 7adb4897 for #981. blocks: name -> [digest, class]. alpha.6 manifest_hash is the in-band key, dev the manifest.seal member.",
  "products": [
   {
    "alpha6": {
@@ -586,6 +586,200 @@
     "manifest_hash": "blake3:04450810a36942bba38101bb5558c88d7d65a36227fe920c69ab5bf0c894daee"
    },
    "name": "ingest_parquet_tiny_row_groups"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "markers": [
+      "blake3:3be9c304d532038e673d4f567af3cb4743f5650d54bbc5e6959928e995a0089b",
+      null
+     ],
+     "notes/readme": [
+      "blake3:b341ce5c2ef4c1e877a82853e17bc3e0d76320161d8eda1bb94b2cb8274eda27",
+      null
+     ],
+     "pairs/0000": [
+      "blake3:9c19b5825d0ec8676b4e2ca517331f680d78af804c52798b1076926934d11b13",
+      null
+     ],
+     "pairs/0001": [
+      "blake3:7a49834c2779ce444d4908305ade4c822852d1977c33dfdc09bfd728dfa8f574",
+      null
+     ],
+     "pairs/0002": [
+      "blake3:7e256ac1360be676dc1c6e78278618639d73992decde1212318c41e21d4f7c48",
+      null
+     ]
+    },
+    "content_hash": "blake3:d96cede011005523c086d02854a167a2c42e7978c96f5e71124a20a540bd9e1a",
+    "id": "blake3:e3952d066e6e8af5cb682796da1171e4220d9f0f2f22b2032a0df2f281d84362",
+    "manifest_hash": "blake3:ec9f37e80cd8228dc7578b97223946e9c49688319daf01ddde1f39203038dd2b"
+   },
+   "corpus": "test fixtures",
+   "dev": {
+    "blocks": {
+     "markers": [
+      "blake3:3be9c304d532038e673d4f567af3cb4743f5650d54bbc5e6959928e995a0089b",
+      null
+     ],
+     "notes/readme": [
+      "blake3:b341ce5c2ef4c1e877a82853e17bc3e0d76320161d8eda1bb94b2cb8274eda27",
+      null
+     ],
+     "pairs/0000": [
+      "blake3:9c19b5825d0ec8676b4e2ca517331f680d78af804c52798b1076926934d11b13",
+      null
+     ],
+     "pairs/0001": [
+      "blake3:7a49834c2779ce444d4908305ade4c822852d1977c33dfdc09bfd728dfa8f574",
+      null
+     ],
+     "pairs/0002": [
+      "blake3:7e256ac1360be676dc1c6e78278618639d73992decde1212318c41e21d4f7c48",
+      null
+     ]
+    },
+    "content_hash": "blake3:d96cede011005523c086d02854a167a2c42e7978c96f5e71124a20a540bd9e1a",
+    "id": "blake3:e3952d066e6e8af5cb682796da1171e4220d9f0f2f22b2032a0df2f281d84362",
+    "manifest_hash": "blake3:ec9f37e80cd8228dc7578b97223946e9c49688319daf01ddde1f39203038dd2b"
+   },
+   "name": "tessera/crates/tessera-cli/tests/cmd/logical_tables.in/scan"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "volume": [
+      "blake3:dcbc6f3b0a1922d0f7ecc3197fc45d383f7e47b1cb5373597d0b4a61eab7a26e",
+      null
+     ]
+    },
+    "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
+    "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
+    "manifest_hash": "blake3:7c9f7bd9feaff32279c0c5bc582d8913e52fd2a022c4a38f00c4f588f6066e57"
+   },
+   "corpus": "test fixtures",
+   "dev": {
+    "blocks": {
+     "volume": [
+      "blake3:dcbc6f3b0a1922d0f7ecc3197fc45d383f7e47b1cb5373597d0b4a61eab7a26e",
+      null
+     ]
+    },
+    "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
+    "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
+    "manifest_hash": "blake3:7c9f7bd9feaff32279c0c5bc582d8913e52fd2a022c4a38f00c4f588f6066e57"
+   },
+   "name": "tessera/crates/tessera-cli/tests/cmd/persona_signing.in/study"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "volume": [
+      "blake3:dcbc6f3b0a1922d0f7ecc3197fc45d383f7e47b1cb5373597d0b4a61eab7a26e",
+      null
+     ]
+    },
+    "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
+    "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
+    "manifest_hash": "blake3:7c9f7bd9feaff32279c0c5bc582d8913e52fd2a022c4a38f00c4f588f6066e57"
+   },
+   "corpus": "test fixtures",
+   "dev": {
+    "blocks": {
+     "volume": [
+      "blake3:dcbc6f3b0a1922d0f7ecc3197fc45d383f7e47b1cb5373597d0b4a61eab7a26e",
+      null
+     ]
+    },
+    "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
+    "id": "blake3:12643649d5f63407dc00017950f2f1c94568e981339141da75df37cd35df2187",
+    "manifest_hash": "blake3:7c9f7bd9feaff32279c0c5bc582d8913e52fd2a022c4a38f00c4f588f6066e57"
+   },
+   "name": "tessera/crates/tessera-cli/tests/cmd/versioning.in/study"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "events_0000": [
+      "blake3:c91ad96d46c18a12732f88b3681903f104627dc55012a8fe0512bbf2bb9cca1b",
+      null
+     ],
+     "events_0001": [
+      "blake3:a5aea5e700f46dc535c1d3636a456fe2068f50ae9220eeda67e6f21c8f8895f0",
+      null
+     ],
+     "events_0002": [
+      "blake3:d588a4cbf3a60e11c306cdc8c281609fb8f8559efb293e317a5421660b4f3109",
+      null
+     ]
+    },
+    "content_hash": "blake3:c1115417dcf7aba23ee3e9d50c6d193011b9d0201ffad7a528ff03ab572dd39a",
+    "id": "blake3:02f94990a581c874316b15c39771b1afffe5908c43e02cce3a4a885286de0b7e",
+    "manifest_hash": "blake3:498da59e89047908a03c79a49f155a90cfed3a7cacd9281f3f4472063d49aa31"
+   },
+   "corpus": "test fixtures",
+   "dev": {
+    "blocks": {
+     "events_0000": [
+      "blake3:c91ad96d46c18a12732f88b3681903f104627dc55012a8fe0512bbf2bb9cca1b",
+      null
+     ],
+     "events_0001": [
+      "blake3:a5aea5e700f46dc535c1d3636a456fe2068f50ae9220eeda67e6f21c8f8895f0",
+      null
+     ],
+     "events_0002": [
+      "blake3:d588a4cbf3a60e11c306cdc8c281609fb8f8559efb293e317a5421660b4f3109",
+      null
+     ]
+    },
+    "content_hash": "blake3:c1115417dcf7aba23ee3e9d50c6d193011b9d0201ffad7a528ff03ab572dd39a",
+    "id": "blake3:02f94990a581c874316b15c39771b1afffe5908c43e02cce3a4a885286de0b7e",
+    "manifest_hash": "blake3:498da59e89047908a03c79a49f155a90cfed3a7cacd9281f3f4472063d49aa31"
+   },
+   "name": "tessera/crates/tessera-io/tests/fixtures/legacy_flat_events"
+  },
+  {
+   "alpha6": {
+    "blocks": {
+     "pairs/0000": [
+      "blake3:0b7d89a38ee9277f83770cfe0b1ccbb98d0396012503d6ca0ff8f92f5216d45e",
+      null
+     ],
+     "pairs/0001": [
+      "blake3:90c114875d7c229c36f483536e0a7aab23944020ff48cc1f104d45fe80258691",
+      null
+     ],
+     "pairs/0002": [
+      "blake3:f605ac93a6d0195216ba8f7183dec63212a6ec163364799c86aa3ad514c1b93f",
+      null
+     ]
+    },
+    "content_hash": "blake3:61037cf5b48713d2d3bc6879ab7aafe5c38f7eedc7bcf1c38dc8021fce8b679a",
+    "id": "blake3:c8f568f08c250e47c32403aa93649e3d09f8e69bb5c6b902e5c4772760f8d9a5",
+    "manifest_hash": "blake3:73cd518c654279094e9dc47b497c52a5f75c16cbae03df811b3ab210ac1577ac"
+   },
+   "corpus": "test fixtures",
+   "dev": {
+    "blocks": {
+     "pairs/0000": [
+      "blake3:0b7d89a38ee9277f83770cfe0b1ccbb98d0396012503d6ca0ff8f92f5216d45e",
+      null
+     ],
+     "pairs/0001": [
+      "blake3:90c114875d7c229c36f483536e0a7aab23944020ff48cc1f104d45fe80258691",
+      null
+     ],
+     "pairs/0002": [
+      "blake3:f605ac93a6d0195216ba8f7183dec63212a6ec163364799c86aa3ad514c1b93f",
+      null
+     ]
+    },
+    "content_hash": "blake3:61037cf5b48713d2d3bc6879ab7aafe5c38f7eedc7bcf1c38dc8021fce8b679a",
+    "id": "blake3:c8f568f08c250e47c32403aa93649e3d09f8e69bb5c6b902e5c4772760f8d9a5",
+    "manifest_hash": "blake3:73cd518c654279094e9dc47b497c52a5f75c16cbae03df811b3ab210ac1577ac"
+   },
+   "name": "tessera/crates/tessera-py/tests/fixtures/partitioned_pairs"
   }
  ]
 }

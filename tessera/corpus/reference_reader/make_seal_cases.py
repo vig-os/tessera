@@ -691,7 +691,7 @@ def collection_cases(c: Cases, product: dict, product_seal: str) -> None:
 
 def main() -> None:
     products = corpus()
-    assert len(products) == 8, [p[0] for p in products]
+    assert len(products) == 9, [p[0] for p in products]
     c = Cases()
     for name, obj, raw, seal in products:
         per_product(c, name, obj, raw, seal)

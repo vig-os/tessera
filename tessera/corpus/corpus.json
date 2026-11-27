@@ -54,5 +54,12 @@
     "id": "blake3:70900b373daacb02d47855efbb1d01134881bab74603b3c34b47710d467974b6",
     "content_hash": "blake3:8e2d917e6f414710c4d845a9a09922fc782314b1d547c8c63b1ca5e39277986a",
     "manifest_hash": "blake3:458165b6587b7e7fd3e616e45df122264567f4b6fc76201cfa159c4a3f69d76a"
+  },
+  {
+    "name": "recon_int16_indexed",
+    "product": "recon",
+    "id": "blake3:165a756ec6c79f24e7b7fe5e2323d72494800f760ab0aa3b38e2582d7f90e17d",
+    "content_hash": "blake3:e9fe4244ee246e9402b9681258ffedf30faabbc81d1f249e632bae1375c68df9",
+    "manifest_hash": "blake3:523a5d99ca2454fed6d44bb7d5181dac4a241164dbd9df99c9106f14eeb10d42"
   }
 ]
