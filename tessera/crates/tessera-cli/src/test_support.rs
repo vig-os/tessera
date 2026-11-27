@@ -46,3 +46,35 @@ pub(crate) fn assert_tsra_stored_pair(what: &str, path: &Path) {
     let bytes = member("manifest.json");
     assert_stored_pair(what, &bytes, &seal);
 }
+
+/// Write a deliberately invalid product below the writer's validation gates, for reader tests.
+/// The archive layout and stored seal pair stay canonical; the caller supplies the invalid manifest.
+pub(crate) fn write_invalid_tsra(
+    path: &Path,
+    manifest: &tessera_core::Manifest,
+    payloads: &[tessera_io::BlockPayload],
+) {
+    use std::io::Write;
+    let (json, seal) = tessera_io::stored::manifest(manifest).unwrap();
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default())
+        .large_file(true)
+        .system(zip::System::Unix);
+    let mut archive = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    for (name, bytes) in [
+        ("mimetype", tessera_io::MIMETYPE.as_bytes()),
+        ("manifest.seal", seal.as_bytes()),
+        ("manifest.json", json.as_slice()),
+    ] {
+        archive.start_file(name, options).unwrap();
+        archive.write_all(bytes).unwrap();
+    }
+    for payload in payloads {
+        archive
+            .start_file(format!("blocks/{}", payload.name), options)
+            .unwrap();
+        archive.write_all(&payload.bytes).unwrap();
+    }
+    archive.finish().unwrap();
+}

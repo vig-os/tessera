@@ -3050,7 +3050,18 @@ mod tests {
         let payloads: Vec<BlockPayload> = blocks.into_iter().map(|(_, p)| p).collect();
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("gap.tsra");
-        pack(&m, &payloads, &p).unwrap();
+        assert!(matches!(
+            pack(&m, &payloads, &p),
+            Err(tessera_core::Error::LogicalTable {
+                reason: LogicalTableError::Gap { missing: 1 },
+                ..
+            })
+        ));
+        assert!(
+            !p.exists(),
+            "the writer must refuse before creating the archive"
+        );
+        crate::test_support::write_invalid_tsra(&p, &m, &payloads);
         let text = |f: &dyn Fn(&mut Vec<u8>) -> Result<()>| {
             let mut buf = Vec::new();
             f(&mut buf).map(|()| String::from_utf8(buf).unwrap())
