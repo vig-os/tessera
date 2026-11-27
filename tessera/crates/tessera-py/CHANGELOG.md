@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8](https://github.com/vig-os/tessera/compare/tessera-py-v0.1.0-alpha.7...tessera-py-v0.1.0-alpha.8) - 2026-11-27
+
+### Other
+
+- encoded member names everywhere; wording; Python mismatch fallback
+- *(core)* refine schema mismatch diagnostics
+
 ## [0.1.0-alpha.7](https://github.com/vig-os/tessera/compare/tessera-py-v0.1.0-alpha.6...tessera-py-v0.1.0-alpha.7) - 2026-11-25
 
 ### Added

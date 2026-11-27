@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8](https://github.com/vig-os/tessera/compare/tessera-cli-v0.1.0-alpha.7...tessera-cli-v0.1.0-alpha.8) - 2026-11-27
+
+### Added
+
+- *(cli)* collection commit/log/diff and pin commands
+- *(io)* pins (ADR-0067 step 6) ([#1033](https://github.com/vig-os/tessera/pull/1033))
+- *(io)* store collections and mark through members
+- *(io)* [**breaking**] repository layout 2 with typed, namespaced refs
+
+### Fixed
+
+- honour TESSERA_MAX_THREADS everywhere; the wall-clock perf ratchet is opt-in ([#1031](https://github.com/vig-os/tessera/pull/1031))
+- honour thread budgets and opt in to wall-clock ratchets
+- *(io)* preserve incomplete collection listings
+- *(io)* collection member file names are injective
+- *(io)* lineage names map to ref files injectively
+
+### Other
+
+- encoded member names everywhere; wording; Python mismatch fallback
+- *(cli)* construct invalid partition fixture below writer validation
+
 ## [0.1.0-alpha.7](https://github.com/vig-os/tessera/compare/tessera-cli-v0.1.0-alpha.6...tessera-cli-v0.1.0-alpha.7) - 2026-11-25
 
 ### Added
