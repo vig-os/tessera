@@ -440,8 +440,9 @@ impl Collection {
     /// # Errors
     /// [`crate::Error::NewerFormatFields`] for a parsed collection with
     /// [`newer_fields`](Self::newer_fields): bytes of this view would leave them out.
-    /// [`crate::Error::Invalid`] for a `forked_from` edge without a non-whitespace `fork` token, or
-    /// a `forked_from`/`supersedes` edge without a non-empty predecessor seal pin (`content_hash`).
+    /// [`crate::Error::MissingForkToken`] for a `forked_from` edge without a non-whitespace `fork` token;
+    /// [`crate::Error::Invalid`] for a `forked_from`/`supersedes` edge without a non-empty
+    /// predecessor seal pin (`content_hash`).
     pub fn canonical_bytes(&self) -> crate::Result<Vec<u8>> {
         refuse_newer(&self.newer_fields)?;
         self.validate_sources_for_write()?;
@@ -461,13 +462,7 @@ impl Collection {
                     .get("fork")
                     .is_none_or(|token| token.trim().is_empty())
             {
-                return Err(crate::Error::Invalid(
-                    concat!(
-                        "a forked_from collection requires a caller-supplied fork token in id_inputs; ",
-                        "missing, empty, or whitespace-only tokens are invalid"
-                    )
-                    .into(),
-                ));
+                return Err(crate::Error::MissingForkToken);
             }
             if source.content_hash.as_deref().is_none_or(str::is_empty) {
                 return Err(crate::Error::Invalid(format!(
@@ -515,7 +510,8 @@ impl Collection {
     /// # Errors
     /// As [`canonical_bytes`](Self::canonical_bytes): a re-seal of a view with
     /// [`newer_fields`](Self::newer_fields) is refused, since it would drop sealed content.
-    /// Missing/empty fork tokens or version pins are [`crate::Error::Invalid`].
+    /// Missing/empty fork tokens are [`crate::Error::MissingForkToken`]; missing version pins
+    /// are [`crate::Error::Invalid`].
     pub fn compute_manifest_hash(&self) -> crate::Result<String> {
         Ok(crate::hash::digest(&self.canonical_bytes()?))
     }
@@ -629,8 +625,9 @@ impl Collection {
     ///
     /// # Errors
     /// [`crate::Error::NewerFormatFields`] for a parsed collection with
-    /// [`newer_fields`](Self::newer_fields); [`crate::Error::Invalid`] without a `content_hash`,
-    /// a fork token or version-edge pin required by [`canonical_bytes`](Self::canonical_bytes);
+    /// [`newer_fields`](Self::newer_fields); [`crate::Error::Invalid`] without a `content_hash`
+    /// or a version-edge pin required by [`canonical_bytes`](Self::canonical_bytes);
+    /// [`crate::Error::MissingForkToken`] without a non-whitespace fork token;
     /// everything [`verify`](Self::verify) raises, including [`crate::Error::Integrity`] for a
     /// `manifest_hash` that is not `seal`; [`crate::Error::InexactInteger`] or
     /// [`crate::Error::NonFiniteNumber`] for a value no seal can hold.
@@ -655,7 +652,8 @@ impl Collection {
     /// [`crate::Error::Integrity`] naming the field. An unsealed collection verifies its `id` only; a
     /// sealed one verifies all three. Mirrors [`crate::manifest::Manifest::verify`].
     /// Writer rules also apply: a missing or whitespace-only fork token or missing version pin
-    /// raises [`crate::Error::Invalid`]. Reader paths must use [`from_stored`](Self::from_stored),
+    /// raises [`crate::Error::MissingForkToken`] or [`crate::Error::Invalid`], respectively.
+    /// Reader paths must use [`from_stored`](Self::from_stored),
     /// which checks received bytes without applying these writer rules.
     ///
     /// The seal is recomputed over this struct's JSON. For a collection read from bytes, verify the
@@ -938,7 +936,8 @@ impl CollectionBuilder {
     /// [`FORKED_FROM_ROLE`], reference the predecessor's `id` and pin its `manifest_hash` with
     /// [`Source::with_content_hash`]. Edges change the seal, independently of the member MMR.
     /// Both version roles require a non-empty predecessor seal pin. A `forked_from` edge also
-    /// requires a non-whitespace `fork` token in `id_inputs`. Missing values are [`crate::Error::Invalid`]
+    /// requires a non-whitespace `fork` token in `id_inputs`. Missing tokens raise
+    /// [`crate::Error::MissingForkToken`]; missing pins raise [`crate::Error::Invalid`]
     /// at seal and when emitting canonical or stored bytes.
     pub fn add_source(&mut self, source: Source) -> &mut Self {
         self.collection.sources.push(source);
@@ -999,7 +998,8 @@ impl CollectionBuilder {
     /// Seal: compute the MMR root over the members, then the canonical-JSON seal. Mirrors
     /// [`crate::ProductBuilder::seal`] — the same input always yields byte-identical bytes.
     /// Recomputes `id` from the declared inputs. A fork without a non-whitespace caller-supplied `fork`
-    /// token, or either version role without a predecessor seal pin, is [`crate::Error::Invalid`].
+    /// token raises [`crate::Error::MissingForkToken`]; either version role without a predecessor
+    /// seal pin raises [`crate::Error::Invalid`].
     /// Callers own token uniqueness (ADR-0067 D2/D5).
     pub fn seal(mut self) -> crate::Result<Collection> {
         self.collection.validate_sources_for_write()?;
@@ -1145,10 +1145,14 @@ mod tests {
 
     #[test]
     fn a_forked_version_without_a_fork_token_is_refused() {
-        assert!(matches!(
-            version_builder("forked_from", None).seal(),
-            Err(crate::Error::Invalid(_))
-        ));
+        for token in [None, Some(""), Some(" \t")] {
+            let error = version_builder("forked_from", token).seal().unwrap_err();
+            assert!(matches!(error, crate::Error::MissingForkToken));
+            assert_eq!(
+                error.failure_class(),
+                crate::error::FailureClass::RuleRefusal
+            );
+        }
     }
 
     #[test]

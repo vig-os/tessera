@@ -116,16 +116,16 @@ stderr. Codes 4–6 extend the existing 0–3 range without collisions:
 | 5 | Rule refusal | Correct kind, member closure, fork token, lineage id, supersedes edge, or ref name. |
 | 6 | Store damaged or unsupported | Repair corrupt refs/targets or aborted walks; use a supported layout. |
 
-Rule refusals cover requested lineage/object/member kind mismatches, unstored new pin targets, missing
+Rule refusals cover requested lineage/object/member kind mismatches, unstored new lineage or pin targets, missing
 product blocks or collection members, missing/empty fork tokens, lineage id or supersedes mismatches,
 and invalid ref names. Stored ref kind disagreements and absent/torn ref targets are damage (6), including
 when a write discovers them while reading the existing ref under its lock. Write-time pin kind checks use
 `ObjectKindMismatch` (5); read-time disagreements use `RefKindMismatch` (6). `RefTargetUnreadable` retains
-read context; `UnstoredPinTarget` and `MissingProductBlock` retain write context, without guessing from
+read context; `UnstoredLineageTarget`, `UnstoredPinTarget` and `MissingProductBlock` retain write context, without guessing from
 I/O messages or making a separate preflight read. The exhaustive classifier lives beside `Error` in
 `tessera-core`: a new error variant cannot compile until assigned a class. The CLI assigns numeric codes
-to that closed class set. The classifier recognizes the existing fork-token validator's exact `Invalid`
-message, tested for absent, empty and whitespace-only tokens. Other `Invalid` errors stay 1.
+to that closed class set. `MissingForkToken` classifies absent, empty and whitespace-only fork tokens
+as rule refusals without inspecting diagnostic text. `Invalid` errors stay 1.
 Classification is by the outer error: a torn member
 refuses a commit with 5, while damage aborting a GC or history walk returns 6. Never blindly retry a rule
 refusal or store damage. A lineage's kind and id cannot change; pin targets must be stored with the declared kind.

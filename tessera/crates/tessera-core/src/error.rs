@@ -410,6 +410,17 @@ pub enum Error {
     #[error("pin '{name}': {address} is not stored in this repository")]
     UnstoredPinTarget { name: String, address: String },
 
+    /// A requested lineage target is not stored. This is a write refusal, not a damaged existing ref.
+    #[error("ref '{name}': {address} is not stored in this repository")]
+    UnstoredLineageTarget { name: String, address: String },
+
+    /// A collection writer requires a nonempty, non-whitespace caller-supplied fork token.
+    #[error(
+        "a forked_from collection requires a caller-supplied fork token in id_inputs; \
+         missing, empty, or whitespace-only tokens are invalid"
+    )]
+    MissingForkToken,
+
     /// A product commit references a block neither supplied nor already stored.
     #[error("commit: block '{name}' ({digest}) is neither supplied nor already in the store")]
     MissingProductBlock { name: String, digest: String },
@@ -617,16 +628,9 @@ impl Error {
             | Self::SupersedesMismatch { .. }
             | Self::InvalidRefName { .. }
             | Self::UnstoredPinTarget { .. }
+            | Self::UnstoredLineageTarget { .. }
+            | Self::MissingForkToken
             | Self::MissingProductBlock { .. } => RuleRefusal,
-            Self::Invalid(detail)
-                if detail
-                    == concat!(
-                    "a forked_from collection requires a caller-supplied fork token in id_inputs; ",
-                    "missing, empty, or whitespace-only tokens are invalid"
-                ) =>
-            {
-                RuleRefusal
-            }
             Self::CorruptRef { .. }
             | Self::GcAborted { .. }
             | Self::HistoryAborted { .. }

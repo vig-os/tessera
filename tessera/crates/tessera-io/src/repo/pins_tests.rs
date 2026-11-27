@@ -144,7 +144,9 @@ fn concurrent_set_pin_and_gc_never_publish_a_dangling_pin() {
             assert_eq!(repo.read_pin("race").unwrap(), Some(target(ObjectKind::Product, &hash)));
             repo.get_manifest(&hash).unwrap();
         }
-        Err(Error::Invalid(_)) => {
+        Err(Error::UnstoredPinTarget { name, address }) => {
+            assert_eq!(name, "race");
+            assert_eq!(address, hash);
             assert_eq!(repo.read_pin("race").unwrap(), None);
             assert!(!repo.has_object(&hash));
         }
