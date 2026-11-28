@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-09-29T11:57:48Z
-updated: 2026-11-27T09:55:15Z
+updated: 2026-11-28T00:41:11Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/tessera/issues/515
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-27T10:31:10.991Z
+synced: 2026-11-28T09:48:17.758Z
 ---
 
 # [Issue 515]: [Dependency Dashboard](https://github.com/vig-os/tessera/issues/515)
@@ -25,7 +25,7 @@ This issue lists Renovate updates and detected dependencies. Read the [Dependenc
 The following updates are currently rate-limited. To force their creation now, click on a checkbox below.
 
  - [ ] <!-- unlimit-branch=renovate/actions-create-github-app-token-digest -->chore(deps): update actions/create-github-app-token digest to f418cff
- - [ ] <!-- unlimit-branch=renovate/tessera-core-digest -->fix(deps): update tessera-core digest to b49d6c0
+ - [ ] <!-- unlimit-branch=renovate/tessera-core-digest -->fix(deps): update tessera-core digest to e2db1c0
  - [ ] <!-- unlimit-branch=renovate/blake3-1.x-lockfile -->chore(deps): update rust crate blake3 to v1.8.8
  - [ ] <!-- unlimit-branch=renovate/bytes-1.x-lockfile -->chore(deps): update rust crate bytes to v1.12.2
  - [ ] <!-- unlimit-branch=renovate/clap-4.x-lockfile -->chore(deps): update rust crate clap to v4.6.10
@@ -43,6 +43,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/proptest-1.x-lockfile -->chore(deps): update rust crate proptest to v1.12.0
  - [ ] <!-- unlimit-branch=renovate/pyo3-0.x -->chore(deps): update rust crate pyo3 to 0.30
  - [ ] <!-- unlimit-branch=renovate/pyo3-build-config-0.x -->chore(deps): update rust crate pyo3-build-config to 0.30
+ - [ ] <!-- unlimit-branch=renovate/rayon-1.x-lockfile -->chore(deps): update rust crate rayon to v1.12.0
  - [ ] <!-- unlimit-branch=renovate/sha2-0.x -->chore(deps): update rust crate sha2 to 0.11
  - [ ] <!-- unlimit-branch=renovate/tokio-1.x-lockfile -->chore(deps): update rust crate tokio to v1.54.1
  - [ ] <!-- unlimit-branch=renovate/toml-0.x -->chore(deps): update rust crate toml to 0.9
@@ -55,7 +56,7 @@ The following updates are currently rate-limited. To force their creation now, c
  - [ ] <!-- unlimit-branch=renovate/vortex-layout-0.x -->chore(deps): update rust crate vortex-layout to 0.95
  - [ ] <!-- unlimit-branch=renovate/vortex-scan-0.x -->chore(deps): update rust crate vortex-scan to 0.95
  - [ ] <!-- unlimit-branch=renovate/vortex-session-0.x -->chore(deps): update rust crate vortex-session to 0.95
- - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.8.2
+ - [ ] <!-- unlimit-branch=renovate/zip-9.x-lockfile -->chore(deps): update rust crate zip to v9.9.0
  - [ ] <!-- unlimit-branch=renovate/github-actions-(minor-and-patch) -->ci(actions): update github-actions (minor and patch) to v1.28.0
  - [ ] <!-- unlimit-branch=renovate/getrandom-0.x -->fix(deps): update rust crate getrandom to 0.4
  - [ ] <!-- unlimit-branch=renovate/reqwest-0.x -->fix(deps): update rust crate reqwest to 0.13
@@ -98,7 +99,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `serde_json 1`
  - `serde_jcs 0.2.0` → [Updates: `0.4.0`]
  - `blake3 1` → [Updates: `lock file @ 1.8.8`]
- - `zip 9` → [Updates: `lock file @ 9.8.2`]
+ - `zip 9` → [Updates: `lock file @ 9.9.0`]
  - `minicbor 2.3.1`
  - `cbor4ii 1.2.5`
  - `serde 1`
@@ -119,7 +120,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `age 0.11` → [Updates: `0.12`]
  - `time 0.3` → [Updates: `lock file @ 0.3.55`]
  - `proptest 1` → [Updates: `lock file @ 1.12.0`]
- - `zip 9.0.5` → [Updates: `lock file @ 9.8.2`]
+ - `zip 9.0.5` → [Updates: `lock file @ 9.9.0`]
  - `zarrs 0.23` → [Updates: `lock file @ 0.23.14`]
  - `bytes 1` → [Updates: `lock file @ 1.12.2`]
  - `half 2`
@@ -175,8 +176,9 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 </details>
 
-<details><summary>tessera/crates/tessera-io/Cargo.toml (5)</summary>
+<details><summary>tessera/crates/tessera-io/Cargo.toml (6)</summary>
 
+ - `rayon 1` → [Updates: `lock file @ 1.12.0`]
  - `object_store 0.14` → [Updates: `lock file @ 0.14.2`]
  - `tokio 1` → [Updates: `lock file @ 1.54.1`]
  - `reqwest 0.12` → [Updates: `0.13`]

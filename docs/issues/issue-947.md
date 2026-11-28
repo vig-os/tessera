@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-11-21T20:38:54Z
-updated: 2026-11-26T20:41:18Z
+updated: 2026-11-27T20:11:12Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/tessera/issues/947
-comments: 2
+comments: 3
 labels: feature, area:core, area:io, adr
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-27T10:31:09.564Z
+synced: 2026-11-28T09:47:21.296Z
 ---
 
 # [Issue 947]: [feat(repo): refs to collections, a version edge on collections, and gc that marks through members — so a current collection pins its base and a second lineage can share it](https://github.com/vig-os/tessera/issues/947)
@@ -107,4 +107,22 @@ ADR-0067 is Accepted (owner, 2026-11-26; PR #988 merged as 4f569cf8). Each imple
 - #1003: ADR amendments
 
 Steps 1–3 can land in any order, 4 needs all of them, 5 and 6 need 4, 7 needs 5 and 6, and 8 comes last. #994 (collection member file names are not injective) should land before step 4. #947 stays open until step 8 lands.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 27, 2026 at 08:11 PM_
+
+ADR-0067 is fully implemented on dev. Every step landed through a merged, reviewed PR:
+1. layout 2, with typed refs in their own namespaces: #1005
+2. `sources` on Collection: #1004
+3. object-kind discriminator and member diff: #1012
+4. collections in the repository, with gc marking through members: #1022
+5. `commit_collection`, `log` and `history`: #1028
+6. pins: #1033
+7. CLI, with the exit-code contract (4/5/6): #1038
+8. pointers in ADR-0036 and ADR-0049: #1039
+
+Supporting fixes: #990 (#975, injective refs), #1006 (#994, shared encoder) and #1037 (#1007, init can be retried after a crash). Open follow-ups: #1032, #1036 (pin closure; needs an ADR amendment) and #1040.
 
