@@ -6,28 +6,31 @@ exclude: ^.github_data/|^docs/issues/|^docs/pull-requests/
 repos:
   # Branch-name gate — kept FIRST so it fails before anything slower runs.
   #
-  # This replaces a `no-commit-to-branch --pattern` that accepted `<type>/<slug>` with NO issue
-  # number. Its reasoning was that `.gitmessage` already forces `Refs: #<issue>`, so requiring the
-  # number in the branch name too "bought nothing" — reasonable in isolation, but CI does not agree:
-  # `.github/workflows/ci.yml`'s `Validate branch name` step REQUIRES `<type>/<issue>-<summary>` for
-  # every type except `chore`. So the local gate was strictly more permissive than the one that
-  # actually blocks merges, and a branch could pass everything here and fail only after a ~45-minute
-  # CI leg (#499 — which is exactly how it was found).
+  # Enforce topic branch naming with vig-utils' validate-branch-name — the one
+  # implementation of the rule, which CI's branch-name gate runs too (#1760):
+  # - <type>/<issue_number>-<short_summary> (--types: feature, bugfix, etc.)
+  # - chore/<short_summary> (no issue required; likewise every other
+  #   Refs-optional commit type from DEVKIT_REFS_OPTIONAL_TYPES, #1767)
+  # - worktree/<issue_number>, renovate/*, release/X.Y.Z
+  # - main, and dev under the gitflow workflow model (--workflow)
+  # The args are rendered from .vig-os on every devkit upgrade.
   #
-  # The script mirrors CI's `ALLOWED` clause for clause, and reads the TYPE LIST from `.vig-os`'s
-  # `DEVKIT_BRANCH_TYPES` — the same key CI's resolve-toolchain action reads — so the two gates cannot
-  # drift on which types exist. Only the shape rule is written twice, and the script says so.
-  #
-  # CI's copy is devkit-managed, so if the rule should change, change it upstream first: a local-only
-  # relaxation would be reverted by the next scaffold upgrade while CI kept rejecting.
+  # This is devkit's own hook block (#771). It replaces scripts/check-branch-name.sh, which copied
+  # CI's old inline `ALLOWED` regex clause for clause (#499): since devkit 1.18.0 CI calls this same
+  # validator, so a second copy of the rule could only drift from it.
   - repo: local
     hooks:
-      - id: branch-name
-        name: branch-name (mirrors CI's <type>/<issue>-<summary> gate)
-        entry: scripts/check-branch-name.sh
-        language: script
-        pass_filenames: false
+      - id: validate-branch-name
+        name: branch-name (enforce <type>/<issue>-<summary>)
+        entry: uv run validate-branch-name
+        language: system
         always_run: true
+        pass_filenames: false
+        stages: [pre-commit]
+        args:
+          - --types=chore,feat,feature,fix,bugfix,hotfix,release,perf,polish,spike,refactor,docs,test,build,ci,style,land
+          - --issueless-types=chore
+          - --workflow=gitflow
 
   # General Pre-commit Hooks (Fixes formatting issues)
   - repo: https://github.com/pre-commit/pre-commit-hooks
